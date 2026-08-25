@@ -32,20 +32,20 @@ pub(super) const fn cached_room_draw_order_mode() -> CachedRoomDrawOrderMode {
     }
 }
 
-// VRAM layout. Room materials and model atlases start from disjoint preferred
-// regions, but the unified allocator owns every physical page and can reuse
-// capacity left idle by either class.
+// VRAM layout. Room materials and model atlases live in
+// disjoint regions so a model atlas upload never overwrites a
+// room texture (and vice versa).
 //
 // Room materials: 4bpp pages starting at (640, 0), packed on an
 // 8-texel grid inside each tpage. Each material carries GP0(E2)
 // texture-window state so authored UV repetition samples only its
 // allocation instead of requiring physically repeated texels.
 //
-// Model atlases prefer pages starting at (384, 256). Four exact 128x128 4bpp
-// atlases share one page; larger or 8bpp atlases get independent pages. Tiny
-// shadow/particle pixels borrow unused space below the gameplay HUD font.
-// Every material carries its allocated tpage and optional texture window, so
-// placement is not hardcoded. One CLUT row per atlas starts at y=484.
+// Model atlases: 8bpp pages starting at (384, 256), packed
+// left-to-right on 64-halfword boundaries. Each atlas gets a
+// tpage word matching its own VRAM origin, so mesh UVs stay local
+// to the atlas. One CLUT row per atlas starts at y=484 (below the
+// material CLUT band so the two never collide).
 pub(super) const ROOM_TPAGE_BASE_X: u16 = 640;
 pub(super) const SHARED_TPAGE: Tpage = Tpage::new(ROOM_TPAGE_BASE_X, 0, TexDepth::Bit4);
 pub(super) const TPAGE_WORD: u16 = SHARED_TPAGE.uv_tpage_word(0);
