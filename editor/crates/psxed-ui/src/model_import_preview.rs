@@ -37,6 +37,23 @@ pub(crate) struct PreviewSocket {
     pub translation: [i32; 3],
     pub rotation_q12: [i16; 3],
     pub selected: bool,
+    pub gizmo_mode: PreviewSocketGizmoMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreviewSocketGizmoMode {
+    Translate,
+    Rotate,
+}
+
+/// Projected translation axes for the selected socket. The points use preview
+/// image coordinates and `local_axis_units` records how much bone-local
+/// translation each axis endpoint represents.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreviewSocketTranslationGizmo {
+    pub origin: [f32; 2],
+    pub axis_ends: [[f32; 2]; 3],
+    pub local_axis_units: f32,
 }
 
 /// Character material override for the preview: replaces the model's
@@ -73,6 +90,7 @@ pub struct PreviewEquippedWeapon<'a> {
 pub(crate) struct ImportPreviewRender {
     pub image: ColorImage,
     pub joint_screen_positions: Vec<Option<[f32; 2]>>,
+    pub selected_socket_translation_gizmo: Option<PreviewSocketTranslationGizmo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -456,6 +474,10 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
         draw_joint_combat_capsule(&mut image, camera, projection, joint, capsule);
     }
     let socket_axis_length = (visual_height / 6).max(96);
+    let socket_local_axis_units = ((i64::from(socket_axis_length) << 12)
+        / i64::from(local_to_world.q12().max(1)))
+    .clamp(64, 16_384) as i32;
+    let mut selected_socket_translation_gizmo = None;
     for socket in sockets {
         let Some(joint) = joint_transforms.get(socket.joint as usize).copied() else {
             continue;
@@ -470,11 +492,16 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             apply_root_motion_delta(&mut pose, delta);
         }
         apply_pose_offset(&mut pose, options.pose_offset);
-        let basis = compute_joint_world_basis(pose, instance_rotation).mul(&euler_rotation_q12([
+        let bone_basis = compute_joint_world_basis(pose, instance_rotation);
+        let socket_basis = bone_basis.mul(&euler_rotation_q12([
             socket.rotation_q12[0] as u16,
             socket.rotation_q12[1] as u16,
             socket.rotation_q12[2] as u16,
         ]));
+        let basis = match socket.gizmo_mode {
+            PreviewSocketGizmoMode::Translate => &bone_basis,
+            PreviewSocketGizmoMode::Rotate => &socket_basis,
+        };
         draw_socket_marker(
             &mut image,
             camera,
@@ -484,6 +511,15 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             socket,
             socket_axis_length,
         );
+        if socket.selected && socket.gizmo_mode == PreviewSocketGizmoMode::Translate {
+            selected_socket_translation_gizmo = project_socket_translation_gizmo(
+                camera,
+                projection,
+                joint,
+                socket,
+                socket_local_axis_units,
+            );
+        }
     }
     if let Some(joint) = selected_joint
         .and_then(|joint| joint_origins.get(joint as usize))
@@ -498,6 +534,7 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             .into_iter()
             .map(|point| point.map(|point| [point.sx as f32, point.sy as f32]))
             .collect(),
+        selected_socket_translation_gizmo,
     })
 }
 
@@ -1517,6 +1554,29 @@ fn draw_socket_marker(
     }
 }
 
+fn project_socket_translation_gizmo(
+    camera: WorldCamera,
+    projection: WorldProjection,
+    joint: JointWorldTransform,
+    socket: &PreviewSocket,
+    local_axis_units: i32,
+) -> Option<PreviewSocketTranslationGizmo> {
+    let origin_world = joint_local_point(joint, socket.translation);
+    let origin = project_preview_world(camera, projection, origin_world)?;
+    let mut axis_ends = [[0.0; 2]; 3];
+    for axis in 0..3 {
+        let mut local = socket.translation;
+        local[axis] = local[axis].saturating_add(local_axis_units);
+        let end = project_preview_world(camera, projection, joint_local_point(joint, local))?;
+        axis_ends[axis] = [end.sx as f32, end.sy as f32];
+    }
+    Some(PreviewSocketTranslationGizmo {
+        origin: [origin.sx as f32, origin.sy as f32],
+        axis_ends,
+        local_axis_units: local_axis_units as f32,
+    })
+}
+
 /// Offset a world point along an orthonormal Q12 basis.
 fn basis_offset_point(origin: WorldVertex, basis: &Mat3I16, local: [i32; 3]) -> WorldVertex {
     let rotate = |row: [i16; 3]| {
@@ -1801,6 +1861,7 @@ mod tests {
             translation: [0, 0, 0],
             rotation_q12: [0, 0, 0],
             selected: true,
+            gizmo_mode: PreviewSocketGizmoMode::Translate,
         }]);
         assert_ne!(
             plain.pixels, marked.pixels,

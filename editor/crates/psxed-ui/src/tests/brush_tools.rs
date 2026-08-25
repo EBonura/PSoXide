@@ -4776,9 +4776,20 @@ fn face_material_swap_survives_reopen_and_reaches_the_cooked_brush_world() {
     workspace.active_tool = ViewTool::Select;
     workspace.brush_edit_mode = BrushEditMode::Face;
 
-    // The starter courtyard carries two materials on purpose, so the swap is
-    // between two real textures rather than to or from "none".
-    let materials = workspace.project.material_options();
+    // The starter courtyard carries two surface materials on purpose. Built-in
+    // sky aperture materials are project-local test resources, not candidates
+    // for this ordinary face retexture check.
+    let materials = workspace
+        .project
+        .material_options()
+        .into_iter()
+        .filter(|(id, _)| {
+            matches!(
+                workspace.project.resource(*id).map(|resource| &resource.data),
+                Some(ResourceData::Material(material)) if !material.sky_aperture
+            )
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         materials.len(),
         2,
