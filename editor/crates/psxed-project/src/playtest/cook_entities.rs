@@ -1170,11 +1170,11 @@ pub(crate) fn register_model_for_instance(
         }
         let atlas_bank_count = (clut_entries / 16) as u8;
         let model_bank_count = parsed_model.palette_bank_count();
-        if model_bank_count > atlas_bank_count {
+        if atlas_bank_count != model_bank_count {
             report.error_at(
                 PlaytestValidationTarget::Resource(model_resource_id),
                 format!(
-                    "Model '{}' references {} palette bank(s), but its atlas contains only {}",
+                    "Model '{}' references {} palette bank(s), but its atlas contains {}",
                     resource.name, model_bank_count, atlas_bank_count,
                 ),
             );

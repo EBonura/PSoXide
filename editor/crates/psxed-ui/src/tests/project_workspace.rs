@@ -2936,7 +2936,8 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
     assert!(
         material_paths.starts_with(&[
             "assets/textures/courtyard_cobbles.psxt",
-            "assets/textures/courtyard_brick.psxt"
+            "assets/textures/courtyard_brick.psxt",
+            "assets/ui/health_bar_clean_slim.psxt"
         ]),
         "the courtyard's authored material ordering must remain stable"
     );
@@ -2950,6 +2951,7 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
     for relative in [
         "assets/textures/courtyard_cobbles.psxt",
         "assets/textures/courtyard_brick.psxt",
+        "assets/ui/health_bar_clean_slim.psxt",
     ] {
         assert_eq!(
             std::fs::read(target.join(relative)).unwrap(),

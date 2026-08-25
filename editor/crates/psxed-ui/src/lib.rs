@@ -420,9 +420,6 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/aletha_delivered",
     "assets/models/rust_mantis",
     "assets/models/tank_boss_animated_model",
-    // Sword, Mantis, and Tank reference this canonical atlas instead of
-    // retaining byte-identical copies in each model directory.
-    "assets/models/shared_enemy_01",
     "assets/animations/aletha_delivered",
     "assets/animations/gen",
     "assets/animations/rust_mantis_starter",

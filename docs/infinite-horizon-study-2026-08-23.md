@@ -93,83 +93,6 @@ preference. It's mandatory.
 
 ---
 
-## 3.2 "Is the sky a material?" Yes, and it's already in PSoXide
-
-Worth settling before anything else, because there are **two unrelated sky
-systems** in this codebase and it's easy to conclude the Quake one is missing.
-
-**System 1: world-level cyclorama.** `SkySettings` / `SkyMode` in
-`editor/crates/psxed-project/src/world_types/sky.rs`, with variants `Off` and
-`Gradient`. Configured per World in the inspector
-(`inspector_transform_node.rs:280`). Draws a cooked cyclorama before world
-geometry. This is PSoXide's own thing and is **not** how Quake works.
-
-**System 2: Quake's layered sky, and it is a material flag.** Fully ported:
-
-| Layer | Where |
-|---|---|
-| Per-material authoring bool | `scene_grid_types.rs:764`, `layered_sky: bool` |
-| Cook to a surface flag | `brush_world.rs:1997` sets `material_flags::LAYERED_SKY` |
-| Format flag | `psx-bsp/src/pxbsp.rs:214`, `LAYERED_SKY: u16 = 0x0004` |
-| Renderer dispatch | `psx-bsp/src/render.rs:1166-1167` |
-| Projection | `psx-bsp/src/sky.rs`, ported from quake-psx `e32f6f66` |
-| Packet budget | `playtest/budget.rs`, 172 reserved slots |
-
-The renderer's own comment states the model exactly:
-
-> Sky faces are apertures, not textured polygons. Append one bounded view-ray
-> lattice after the world stream; equal-slot OT prepending then executes it
-> first, behind every opaque world packet.
-
-So your instinct is right. In Quake a `sky*` texture name flips a brush face from
-"draw this polygon" to "this polygon is a hole through which sky is visible",
-and PSoXide reproduces that with a per-material boolean instead of a name
-convention.
-
-**Why you think it isn't implemented.** Because in practice it isn't reachable:
-
-- The editor UI has **no toggle** for `layered_sky`. The "Sky" section in the
-  inspector drives System 1, not this.
-- Every material in `editor/projects/default/project.ron` has
-  `layered_sky: false`. There are **zero** uses of `true` in the tree.
-
-The pipeline is complete and never switched on. Exposing the checkbox is
-plausibly a very small change, and it should be its own task, verified on its
-own, before the ground plane work starts. Don't bundle them.
-
-## 3.3 So should the infinite ground also be a material? No.
-
-This is the important distinction, and it's a property of the physics, not of
-the engine.
-
-**Sky can be an aperture material because it is at infinity.** The colour of a
-sky pixel depends only on the view *direction*. Move the camera a thousand units
-sideways and nothing changes. That's exactly why a view-ray lattice works: you
-project a direction per screen cell and never once consult camera position.
-
-**A ground plane has parallax.** What you see at a given screen pixel depends on
-where the camera *is*, not just where it looks. Walk forward and the texture
-flows past you. There is no direction-keyed lookup that can produce that, so an
-aperture material fundamentally cannot render it. It needs real geometry with
-real per-vertex projection, which is what section 5 describes.
-
-Quake itself draws exactly this line. Sky is an aperture material; water, slime
-and lava are ordinary brushes with warped surfaces. Same engine, same era, and
-the split falls in the same place, for the same reason.
-
-**Where a flag still helps.** Use a material or level flag as an *authoring
-marker*, not a rendering technique:
-
-- a level-level record saying "this world has an infinite plane at height Y,
-  using tile asset A, fading to colour C", or
-- a `sea_level` material flag on one brush face whose plane height the cook
-  reads to place the disc.
-
-The flag answers *where and whether*. The polar mesh answers *how*. Keep those
-two jobs apart and both stay simple.
-
----
-
 ## 4. The key insight: you don't need infinity
 
 This is the result that makes the feature tractable, and the implementing agent
@@ -389,11 +312,6 @@ Most of these are already-paid-for lessons in this codebase.
 
 Each one should be visually verified in motion before the next starts.
 
-0. **Turn the Quake sky on.** Expose `layered_sky` in the material inspector,
-   flag one brush face with it, and confirm the aperture renders. It's already
-   built (section 3.2); it just has no switch. Separate task, separate
-   verification, done before the ground work so you have a real horizon to match
-   against.
 1. **Flat grey disc.** Camera-locked polar mesh, screen-uniform rings, no
    texture, no fade, fixed OT slots. Prove the geometry and ordering are right.
 2. **Fade to sky colour.** Add the per-vertex horizon fade. The rim should become
@@ -422,11 +340,6 @@ These need your call before milestone 1.
   Since the reference is a Quake shot, say whether this targets Cortex,
   quake-psx, or a shared crate. It changes where the code goes and whether the
   neutrality constraint applies.
-- **Which sky system backs the horizon.** The two in section 3.2 are not
-  interchangeable here. The Quake layered sky projects by view direction, so its
-  horizon lands correctly on its own and the ground can simply match it. The
-  cyclorama needs its horizon band pinned to the plane height by hand. If you
-  want the reference look, milestone 0 (layered sky) is the better base.
 - **Sea or land.** Waves and UV scrolling are only worth building for water. A
   static desert or plain wants milestone 6 skipped entirely.
 - **Camera height range.** The disc radius scales with it (section 4). A

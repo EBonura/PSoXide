@@ -138,56 +138,6 @@ fn model_atlas_accepts_4bpp() {
 }
 
 #[test]
-fn model_may_use_a_subset_of_shared_atlas_palette_banks() {
-    let mut project = ProjectDocument::legacy_grid_starter();
-    let player_model = player_model_resource_id(&project);
-    let model = match &project.resource(player_model).unwrap().data {
-        ResourceData::Model(model) => model,
-        _ => panic!("player resource is not a model"),
-    };
-    let source_path = model.texture_path.as_deref().expect("starter model atlas");
-    let source_bytes = std::fs::read(starter_project_root().join(source_path)).unwrap();
-    let source = psx_asset::Texture::from_bytes(&source_bytes).unwrap();
-    let width = source.width();
-    let height = source.height();
-    let indices = vec![0; usize::from(width) * usize::from(height)];
-    let palette_rows = vec![vec![[32, 48, 64]; 16]; 4];
-    let shared_atlas = psxed_tex::encode_indexed_psxt_with_clut_rows(
-        width,
-        height,
-        psxed_format::texture::Depth::Bit4,
-        &indices,
-        &palette_rows,
-        true,
-    )
-    .expect("encode four-bank atlas");
-    let dir = unique_temp_dir("model-shared-palette-superset");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("shared.psxt");
-    std::fs::write(&path, shared_atlas).unwrap();
-    let ResourceData::Model(model) = &mut project.resource_mut(player_model).unwrap().data else {
-        unreachable!();
-    };
-    model.texture_path = Some(path.to_string_lossy().into_owned());
-
-    let (package, report) = build_package(&project, &starter_project_root());
-    assert!(report.is_ok(), "errors: {:?}", report.errors);
-    let package = package.expect("shared atlas cooks");
-    let model = package
-        .models
-        .iter()
-        .find(|model| model.source_resource == player_model)
-        .unwrap();
-    let atlas = &package.assets[model.texture_asset_index.unwrap()];
-    assert_eq!(
-        psx_asset::Texture::from_bytes(&atlas.bytes)
-            .unwrap()
-            .clut_entries(),
-        64
-    );
-}
-
-#[test]
 fn model_atlas_preserves_source_texture_flags() {
     let project = ProjectDocument::legacy_grid_starter();
     let root = starter_project_root();

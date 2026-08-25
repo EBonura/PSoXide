@@ -477,7 +477,7 @@ pub(crate) fn draw_material_settings(
         ui.separator();
         ui.heading("Surface");
         draw_material_sidedness(ui, material);
-        draw_sky_mode(ui, material);
+        draw_layered_sky_mode(ui, material);
     });
     *material != original
 }
@@ -1032,58 +1032,28 @@ fn draw_material_sidedness(ui: &mut egui::Ui, material: &mut MaterialResource) {
     material.sync_legacy_sidedness();
 }
 
-fn draw_sky_mode(ui: &mut egui::Ui, material: &mut MaterialResource) {
+fn draw_layered_sky_mode(ui: &mut egui::Ui, material: &mut MaterialResource) {
     ui.add_space(6.0);
     let has_image_source =
         material.texture_mode == MaterialTextureMode::SimpleImage && material.psxt_path.is_some();
-    let mut mode = if material.directional_sky {
-        2
-    } else if material.layered_sky {
-        1
+    let response = ui.add_enabled(
+        has_image_source || material.layered_sky,
+        egui::Checkbox::new(&mut material.layered_sky, "Layered sky aperture"),
+    );
+    if !has_image_source && !material.layered_sky {
+        response.on_disabled_hover_text(
+            "Choose a Simple Image source before enabling the layered sky.",
+        );
     } else {
-        0
-    };
-    let selected_text = match mode {
-        1 => "Quake layered sky",
-        2 => "Scenic infinite sky",
-        _ => "Disabled",
-    };
-    let response = ui.add_enabled_ui(has_image_source || mode != 0, |ui| {
-        egui::ComboBox::from_label("Sky mode")
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut mode, 0, "Disabled");
-                ui.selectable_value(&mut mode, 1, "Quake layered sky");
-                ui.selectable_value(&mut mode, 2, "Scenic infinite sky");
-            });
-    });
-    if !has_image_source && mode == 0 {
-        response
-            .response
-            .on_disabled_hover_text("Choose a Simple Image source before enabling a sky mode.");
+        response.on_hover_text(
+            "Brush faces keep their collision but reveal a camera-relative Quake-style sky.",
+        );
     }
-    material.layered_sky = mode == 1;
-    material.directional_sky = mode == 2;
 
-    if mode == 1 {
+    if material.layered_sky {
         ui.label(
             RichText::new(
                 "Requires a 4bpp atlas containing two equal square layers side by side (for example 256×128). Palette index 0 masks the foreground layer.",
-            )
-            .small()
-            .color(STUDIO_TEXT_WEAK),
-        );
-        if !has_image_source {
-            ui.label(
-                RichText::new("Select a Simple Image atlas before building this material.")
-                    .small()
-                    .color(STUDIO_TEXT_WEAK),
-            );
-        }
-    } else if mode == 2 {
-        ui.label(
-            RichText::new(
-                "Projects a camera-centred six-face panorama with no visible cube geometry. Requires a 768×256 4bpp atlas: three 256×128 columns, with +X/-X, +Y/-Y, and +Z/-Z stacked in each column.",
             )
             .small()
             .color(STUDIO_TEXT_WEAK),
@@ -1599,8 +1569,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            rendered_text.contains("Sky mode") && rendered_text.contains("Quake layered sky"),
-            "shared material editors must expose the sky mode picker"
+            rendered_text.contains("Layered sky aperture"),
+            "shared material editors must expose the Quake sky material flag"
         );
         assert!(
             rendered_text.contains("two equal square layers side by side"),
