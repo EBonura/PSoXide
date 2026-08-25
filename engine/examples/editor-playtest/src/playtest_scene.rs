@@ -171,19 +171,15 @@ impl Scene for Playtest {
         }
     }
 
-    /// Acquire the incoming scene's font resource set. Front-end scenes share
-    /// the complete cooked set; gameplay keeps only slot zero, the font used by
-    /// the HUD, prompts, and optional diagnostics. The runtime releases the old
-    /// pack before the combined replacement upload, so menu typography never
-    /// occupies gameplay VRAM.
+    /// Acquire the shared resource set. On first entry: reserve the static VRAM
+    /// regions, then pack every UI font into one combined atlas and upload it
+    /// in a single `GP0(A0h)` transfer. Uploading the fonts one-at-a-time
+    /// desyncs the GPU command stream and freezes the world render, so the
+    /// consolidated upload is the fix; routing it through the allocator keeps
+    /// the font VRAM tracked.
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
-        let scene_fonts = if state.has_gameplay() {
-            &UI_FONTS[..UI_FONTS.len().min(1)]
-        } else {
-            UI_FONTS
-        };
         assert!(
-            acquire_ui_fonts(scene_fonts, &mut self.ui_fonts),
+            acquire_shared_ui_fonts(&mut self.ui_fonts),
             "UI font VRAM pack failed"
         );
         // Streamed UI images live only in menu states. Menu entry uploads any
@@ -204,15 +200,14 @@ impl Scene for Playtest {
     }
 
     /// Release the menu's streamed UI images when leaving a menu state so the
-    /// gameplay room textures reclaim that VRAM. Font ownership is switched by
-    /// `on_enter_state`, which replaces the menu pack with the HUD-only pack.
+    /// gameplay room textures reclaim that VRAM. The shared UI font atlas is NOT
+    /// released here (it serves the gameplay HUD too).
     fn on_exit_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         if state.has_gameplay() {
             // Re-anchor the animation epoch on the next gameplay entry
             // (see `gameplay_epoch` in main.rs).
             self.gameplay_epoch_set = false;
             self.clear_actor_pose_snapshots();
-            release_gameplay_vram();
             #[cfg(feature = "cd-stream-bench")]
             {
                 self.unload_runtime_models();
@@ -222,7 +217,10 @@ impl Scene for Playtest {
                 retire_menu_ui_cache();
             }
         }
-        if !state.has_gameplay() {
+        #[cfg(feature = "cd-stream-bench")]
+        if state.has_gameplay() {
+            release_streamed_sky();
+        } else {
             release_ui_images();
         }
         let _ = state;

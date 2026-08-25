@@ -22,9 +22,9 @@ use psx_engine::{
     trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
     CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
     CharacterMotorState, CollisionQueryError, CollisionTrace, CollisionTraceQuery,
-    CollisionTraceShape, OtFrame, PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig,
-    ThirdPersonCameraFrame, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, WorldCamera,
+    CollisionTraceShape, OtFrame,
+    PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_level::{find_asset_of_kind, AssetId, AssetKind};
 
@@ -32,9 +32,8 @@ use crate::generated::{
     ASSETS, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS, PXBSP_WORLD,
 };
 use crate::{
-    ensure_directional_sky_texture_uploaded, ensure_layered_sky_texture_uploaded,
-    ensure_room_texture_uploaded, find_room_texture_vram_slot, pxbsp_frame_face_chain_arena,
-    pxbsp_visible_face_chain_arena, PROJECTION,
+    ensure_layered_sky_texture_uploaded, ensure_room_texture_uploaded, find_room_texture_vram_slot,
+    pxbsp_frame_face_chain_arena, pxbsp_visible_face_chain_arena, PROJECTION,
 };
 
 pub(super) const MAX_BSP_DOORS: usize = 16;
@@ -463,7 +462,6 @@ impl BspRuntime {
         for (index, material) in self.map.materials().iter().enumerate() {
             let asset_id = AssetId(material.texture_asset);
             let layered_sky = material.flags & material_flags::LAYERED_SKY != 0;
-            let directional_sky = material.flags & material_flags::DIRECTIONAL_SKY != 0;
             let slot = match find_room_texture_vram_slot(asset_id) {
                 Some(slot) => Some(slot),
                 None => {
@@ -479,9 +477,7 @@ impl BspRuntime {
                         "PXBSP texture asset {} has no baked bytes; streamed BSP textures are not implemented",
                         material.texture_asset
                     );
-                    if directional_sky {
-                        ensure_directional_sky_texture_uploaded(asset_id, asset.bytes)
-                    } else if layered_sky {
+                    if layered_sky {
                         ensure_layered_sky_texture_uploaded(asset_id, asset.bytes)
                     } else {
                         ensure_room_texture_uploaded(asset_id, asset.bytes)
@@ -498,14 +494,7 @@ impl BspRuntime {
                 ready = false;
                 continue;
             }
-            let width = if directional_sky {
-                assert_eq!(
-                    [slot.texture_width, slot.texture_height],
-                    psx_bsp::sky::CUBE_SKY_ATLAS_SIZE,
-                    "PXBSP directional sky must use the fixed six-face cube atlas"
-                );
-                u8::MAX
-            } else if layered_sky {
+            let width = if layered_sky {
                 assert_eq!(
                     slot.texture_width,
                     slot.texture_height.saturating_mul(2),
@@ -517,12 +506,8 @@ impl BspRuntime {
                 u8::try_from(slot.texture_width)
                     .expect("PXBSP texture width exceeds the packet UV contract")
             };
-            let height = if directional_sky {
-                psx_bsp::sky::CUBE_SKY_FACE_HEIGHT as u8
-            } else {
-                u8::try_from(slot.texture_height)
-                    .expect("PXBSP texture height exceeds the packet UV contract")
-            };
+            let height = u8::try_from(slot.texture_height)
+                .expect("PXBSP texture height exceeds the packet UV contract");
             self.materials[index] = Some(PxbspTextureBinding {
                 texture_page: slot.tpage_word,
                 clut: slot.clut_word,
