@@ -348,6 +348,28 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
     });
     assert!(workspace.open_animation_viewer_for_resource(weapon_id));
 
+    // Keep this UI fixture independent of the currently authored Light Attack
+    // timing. A finite disappearance frame adds a second "Use playhead"
+    // button and is exercised after the first edit below.
+    let ResourceData::AnimationSet(animation_set) = &mut workspace
+        .project
+        .resource_mut(animation_set_id)
+        .expect("animation set")
+        .data
+    else {
+        unreachable!()
+    };
+    animation_set
+        .weapon_appearance_tracks
+        .iter_mut()
+        .find(|track| {
+            track.action == CharacterAnimationAction::LightAttack
+                && track.weapon == weapon_id
+                && track.character_socket == "right_hand_grip"
+        })
+        .expect("light attack weapon beat")
+        .hidden_frame = psxed_project::ACTION_FRAME_END_FULL;
+
     let ResourceData::AnimationSet(animation_set) = &workspace
         .project()
         .resource(animation_set_id)

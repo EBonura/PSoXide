@@ -322,7 +322,9 @@ mod projects_dir_tests {
             material_paths,
             [
                 "assets/textures/courtyard_cobbles.psxt",
-                "assets/textures/courtyard_brick.psxt"
+                "assets/textures/courtyard_brick.psxt",
+                "assets/textures/sky/quake_layered_sunset_4bpp.psxt",
+                "assets/textures/sky/directional_sunset_cube_4bpp.psxt",
             ]
         );
         assert!(material_paths

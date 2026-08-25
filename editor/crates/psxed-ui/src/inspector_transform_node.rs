@@ -127,6 +127,50 @@ pub(crate) fn draw_world_settings(
     egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
         .default_open(true)
         .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Test sky").color(STUDIO_TEXT_WEAK));
+                if ui.small_button("Procedural").clicked() {
+                    sky.mode = SkyMode::Panorama;
+                    sky.visibility = SkyVisibility::Always;
+                    sky.texture = None;
+                    changed = true;
+                }
+                let quake = texture_options
+                    .iter()
+                    .find(|(_, name)| name == BUILTIN_QUAKE_SKY_NAME)
+                    .map(|(id, _)| *id);
+                if ui
+                    .add_enabled(quake.is_some(), egui::Button::new("Quake layered").small())
+                    .on_hover_text("Animated two-layer 4bpp sky. Test mode makes it visible everywhere.")
+                    .clicked()
+                {
+                    sky.mode = SkyMode::QuakeLayered;
+                    sky.visibility = SkyVisibility::Always;
+                    sky.texture = quake;
+                    changed = true;
+                }
+                let cube = texture_options
+                    .iter()
+                    .find(|(_, name)| name == BUILTIN_CUBE_SKY_NAME)
+                    .map(|(id, _)| *id);
+                if ui
+                    .add_enabled(cube.is_some(), egui::Button::new("Sunset cube").small())
+                    .on_hover_text("Six-face 4bpp directional sunset. Test mode makes it visible everywhere.")
+                    .clicked()
+                {
+                    sky.mode = SkyMode::Cube;
+                    sky.visibility = SkyVisibility::Always;
+                    sky.texture = cube;
+                    changed = true;
+                }
+            });
+            ui.label(
+                RichText::new(
+                    "Test presets use Always visible so every project can preview them before authoring sky-aperture faces.",
+                )
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+            );
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Mode").color(STUDIO_TEXT_WEAK));
                 egui::ComboBox::from_id_salt("world-sky-mode")
@@ -4482,6 +4526,10 @@ mod sky_ux_tests {
             collect_text(&clipped.shape, &mut text);
         }
         assert!(text.contains("Directional cube"), "{text}");
+        assert!(text.contains("Test sky"), "{text}");
+        assert!(text.contains("Procedural"), "{text}");
+        assert!(text.contains("Quake layered"), "{text}");
+        assert!(text.contains("Sunset cube"), "{text}");
         assert!(text.contains("Through sky surfaces"), "{text}");
         assert!(text.contains("Sky Texture"), "{text}");
         assert!(text.contains("1536×256"), "{text}");

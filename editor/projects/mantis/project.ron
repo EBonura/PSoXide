@@ -22,6 +22,7 @@
     ),
     editor_visibility: (
         show_grid: false,
+        show_brush_surface_grid: true,
         show_lights: true,
         preview_bounds: false,
         show_play_debug_overlays: false,
@@ -52,18 +53,18 @@
             root: (1),
             next_node_id: 109,
             nodes: [
-                /*[0]*/ (id: (1), name: "World", kind: World(sector_size: 1792, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, horizon_thickness_percent: 8, horizon_glow_percent: 68, horizon_glow_yaw_degrees: 72, sun_enabled: true, sun_color: (255, 218, 150), sun_border_color: (255, 128, 78), sun_yaw_degrees: 72, sun_pitch_degrees: 22, sun_size_percent: 18, sun_glow_percent: 72, sun_glow_size_percent: 64, mountain_height_percent: 55, mountain_top_color: (84, 96, 124), mountain_base_color: (24, 28, 42), mountain_gap_percent: 22, mountain_roughness_percent: 78, mountain_layer_count: 2, skybox_columns: 16, skybox_rows: 10, match_room_fog: true, cloud_layer: (enabled: false, color: (220, 220, 232), density: 128, altitude: 6144, extent: 24576, scroll_speed: (4, 0), tile_count: 4, noise_seed: 1518061853)), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2000, height: 1000, target_height: 850, lock_rise_percent: 25, min_floor_clearance: 64, orbit_speed_level: 5, position_lag_shift: 2, focus_lag_shift: 2, distance_lag_shift: 3), culling: (draw_distance: 25000, chunk_activation_radius_sectors: 64, visibility_radius: 32), streaming: (resident_chunk_limit: 10, visible_chunk_limit: 10), physics: (gravity_per_tick: 96)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: None, children: [(91), (92), (97), (105)]),
+                /*[0]*/ (id: (1), name: "World", kind: World(sector_size: 1792, sky: (mode: Panorama, visibility: Always, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, horizon_thickness_percent: 8, horizon_glow_percent: 68, horizon_glow_yaw_degrees: 72, sun_enabled: true, sun_color: (255, 218, 150), sun_border_color: (255, 128, 78), sun_yaw_degrees: 72, sun_pitch_degrees: 22, sun_size_percent: 18, sun_glow_percent: 72, sun_glow_size_percent: 64, mountain_height_percent: 55, mountain_top_color: (84, 96, 124), mountain_base_color: (24, 28, 42), mountain_gap_percent: 22, mountain_roughness_percent: 78, mountain_layer_count: 2, skybox_columns: 16, skybox_rows: 10, match_room_fog: true, cloud_layer: (enabled: false, color: (220, 220, 232), density: 128, altitude: 6144, extent: 24576, scroll_speed: (4, 0), tile_count: 4, noise_seed: 1518061853)), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2000, height: 1000, target_height: 850, lock_rise_percent: 25, min_floor_clearance: 64, orbit_speed_level: 5, position_lag_shift: 2, focus_lag_shift: 2, distance_lag_shift: 3), culling: (draw_distance: 25000, chunk_activation_radius_sectors: 64, visibility_radius: 32), streaming: (resident_chunk_limit: 10, visible_chunk_limit: 10), physics: (gravity_per_tick: 96)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: None, children: [(91), (92), (97), (105)]),
                 /*[1]*/ (id: (91), name: "Player Spawn", kind: SpawnPoint(player: false, character: None), transform: (translation: (2048.0, 65.0, 2048.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: []),
                 /*[2]*/ (id: (92), name: "Aletha", kind: Entity, transform: (translation: (2048.0, 65.0, 2048.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: [(93), (94), (95), (96)]),
                 /*[3]*/ (id: (93), name: "Model Renderer", kind: ModelRenderer(model: Some((1637)), material: None, visual_offset: (0, 1, 0), visual_scale_q8: 282), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
                 /*[4]*/ (id: (94), name: "Animator", kind: Animator(clip: Some(0), action_clips: [], autoplay: true, pose_frame: 0), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
                 /*[5]*/ (id: (95), name: "Character Controller", kind: CharacterController(character: Some((1656)), settings: (radius: 211, height: 1126, walk_speed: 28, run_speed: 96, turn_speed_degrees_per_second: 359, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 10, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 165, roll_active_frames: 17, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6, enemy: None), player: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
                 /*[6]*/ (id: (96), name: "Camera", kind: Camera(settings: (distance: 2600, height: 1400, target_height: 800, lock_rise_percent: 25, min_floor_clearance: 110, orbit_speed_level: 3, position_lag_shift: 6, focus_lag_shift: 2, distance_lag_shift: 3)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
-                (id: (105), name: "No Claw Variant", kind: Entity, transform: (translation: (3600.0, 65.0, 2048.0), rotation_degrees: (0.0, 200.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: [(106), (107), (108)]),
-                (id: (106), name: "Model Renderer", kind: ModelRenderer(model: Some((4090)), material: None, visual_offset: (0, 1, 0), visual_scale_q8: 307), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((105)), children: []),
-                (id: (107), name: "Animator", kind: Animator(clip: Some(0), action_clips: [], autoplay: true, pose_frame: 0), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((105)), children: []),
-                (id: (108), name: "Character Controller", kind: CharacterController(character: Some((4097)), settings: (radius: 230, height: 1229, walk_speed: 28, run_speed: 96, turn_speed_degrees_per_second: 180, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 10, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 96, roll_active_frames: 14, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6, enemy: None), player: false), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((105)), children: []),
-                /*[7]*/ (id: (97), name: "Arena Light", kind: PointLight(color: (255, 246, 224), intensity: 1.2, radius: 2.0), transform: (translation: (3584.0, 1600.0, 3072.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: []),
+                /*[7]*/ (id: (105), name: "No Claw Variant", kind: Entity, transform: (translation: (3600.0, 65.0, 2048.0), rotation_degrees: (0.0, 200.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: [(106), (107), (108)]),
+                /*[8]*/ (id: (106), name: "Model Renderer", kind: ModelRenderer(model: Some((4090)), material: None, visual_offset: (0, 1, 0), visual_scale_q8: 307), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((105)), children: []),
+                /*[9]*/ (id: (107), name: "Animator", kind: Animator(clip: Some(0), action_clips: [], autoplay: true, pose_frame: 0), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((105)), children: []),
+                /*[10]*/ (id: (108), name: "Character Controller", kind: CharacterController(character: Some((4097)), settings: (radius: 230, height: 1229, walk_speed: 28, run_speed: 96, turn_speed_degrees_per_second: 180, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 10, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 96, roll_active_frames: 14, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6, enemy: None), player: false), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((105)), children: []),
+                /*[11]*/ (id: (97), name: "Arena Light", kind: PointLight(color: (255, 246, 224), intensity: 1.2, radius: 2.0), transform: (translation: (3584.0, 1600.0, 3072.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: []),
             ],
             brushes: [
                 /*[0]*/ (faces: [(points: ((0, 0, 0), (0, 64, 0), (5376, 64, 0)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((5376, 0, 5312), (5376, 64, 5312), (0, 64, 5312)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((0, 0, 5312), (0, 64, 5312), (0, 64, 0)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((5376, 0, 0), (5376, 64, 0), (5376, 64, 5312)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((0, 0, 0), (5376, 0, 0), (5376, 0, 5312)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((0, 64, 5312), (5376, 64, 5312), (5376, 64, 0)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512)))]),
@@ -128,7 +129,7 @@
                 note: "Shared by the Aletha and Rust Mantis starter profiles",
             )),
         ),
-        (
+        /*[1]*/ (
             id: (4090),
             name: "Rust Mantis No Claw",
             data: Model((
@@ -143,7 +144,7 @@
                 attachments: [(name: "left_hand_grip", joint: 9, translation: (0, 0, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        (
+        /*[2]*/ (
             id: (4091),
             name: "No Claw / idle",
             data: AnimationClip((
@@ -157,7 +158,7 @@
                 tags: ["variant"],
             )),
         ),
-        (
+        /*[3]*/ (
             id: (4092),
             name: "No Claw / walk",
             data: AnimationClip((
@@ -171,7 +172,7 @@
                 tags: ["variant"],
             )),
         ),
-        (
+        /*[4]*/ (
             id: (4093),
             name: "No Claw / run",
             data: AnimationClip((
@@ -185,7 +186,7 @@
                 tags: ["variant"],
             )),
         ),
-        (
+        /*[5]*/ (
             id: (4094),
             name: "No Claw / strafe_left",
             data: AnimationClip((
@@ -199,7 +200,7 @@
                 tags: ["variant"],
             )),
         ),
-        (
+        /*[6]*/ (
             id: (4095),
             name: "No Claw / strafe_right",
             data: AnimationClip((
@@ -213,7 +214,7 @@
                 tags: ["variant"],
             )),
         ),
-        (
+        /*[7]*/ (
             id: (4096),
             name: "No Claw Animation Set",
             data: AnimationSet((
@@ -228,7 +229,7 @@
                 clips: [(4091), (4092), (4093), (4094), (4095)],
             )),
         ),
-        (
+        /*[8]*/ (
             id: (4097),
             name: "Rust Mantis No Claw Enemy",
             data: Character((
@@ -268,7 +269,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[1]*/ (
+        /*[9]*/ (
             id: (1637),
             name: "Rust Mantis",
             data: Model((
@@ -283,7 +284,7 @@
                 attachments: [(name: "right_hand_grip", joint: 13, translation: (0, 0, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[2]*/ (
+        /*[10]*/ (
             id: (1651),
             name: "Rust Mantis / Idle",
             data: AnimationClip((
@@ -297,7 +298,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[3]*/ (
+        /*[11]*/ (
             id: (1652),
             name: "Rust Mantis / Walk",
             data: AnimationClip((
@@ -311,7 +312,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[4]*/ (
+        /*[12]*/ (
             id: (1653),
             name: "Rust Mantis / Run",
             data: AnimationClip((
@@ -325,7 +326,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[strafe]*/ (
+        /*[13]*/ (
             id: (4088),
             name: "Rust Mantis / Strafe Left",
             data: AnimationClip((
@@ -339,7 +340,7 @@
                 tags: ["starter"],
             )),
         ),
-        (
+        /*[14]*/ (
             id: (4089),
             name: "Rust Mantis / Strafe Right",
             data: AnimationClip((
@@ -353,7 +354,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[5]*/ (
+        /*[15]*/ (
             id: (1654),
             name: "Rust Mantis Starter Animation Set",
             data: AnimationSet((
@@ -368,7 +369,7 @@
                 clips: [(1651), (1652), (1653), (4088), (4089)],
             )),
         ),
-        /*[6]*/ (
+        /*[16]*/ (
             id: (1655),
             name: "Aletha",
             data: Character((
@@ -408,7 +409,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[7]*/ (
+        /*[17]*/ (
             id: (1656),
             name: "Rust Mantis Enemy",
             data: Character((
@@ -448,7 +449,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[8]*/ (
+        /*[18]*/ (
             id: (1657),
             name: "Aletha Crystal",
             data: Material((
@@ -460,11 +461,11 @@
                 reflection: (strength: 255, roughness: 0),
                 animation: (mode: UvScroll, uv_scroll: (enabled: true, speed_u_q8: 2048, speed_v_q8: 2304, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[9]*/ (
+        /*[19]*/ (
             id: (1702),
             name: "Sword1 Light Skeleton",
             data: Skeleton((
@@ -475,7 +476,7 @@
                 joint_names: ["root"],
             )),
         ),
-        /*[10]*/ (
+        /*[20]*/ (
             id: (1703),
             name: "Sword1 Light",
             data: Model((
@@ -490,7 +491,7 @@
                 attachments: [],
             )),
         ),
-        /*[11]*/ (
+        /*[21]*/ (
             id: (1704),
             name: "Sword1 Heavy",
             data: Model((
@@ -505,7 +506,7 @@
                 attachments: [],
             )),
         ),
-        /*[12]*/ (
+        /*[22]*/ (
             id: (1705),
             name: "prop_bind_pose",
             data: AnimationClip((
@@ -518,7 +519,7 @@
                 tags: ["prop"],
             )),
         ),
-        /*[13]*/ (
+        /*[23]*/ (
             id: (1706),
             name: "Sword1 Light",
             data: Weapon((
@@ -532,7 +533,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[14]*/ (
+        /*[24]*/ (
             id: (1707),
             name: "Sword1 Heavy",
             data: Weapon((
@@ -546,7 +547,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[15]*/ (
+        /*[25]*/ (
             id: (1708),
             name: "Sanctum Masonry",
             data: Material((
@@ -559,11 +560,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[16]*/ (
+        /*[26]*/ (
             id: (1709),
             name: "Sanctum Slate",
             data: Material((
@@ -576,11 +577,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[17]*/ (
+        /*[27]*/ (
             id: (1710),
             name: "Sanctum Metal",
             data: Material((
@@ -593,11 +594,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[18]*/ (
+        /*[28]*/ (
             id: (1711),
             name: "Sanctum Trim",
             data: Material((
@@ -610,11 +611,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[19]*/ (
+        /*[29]*/ (
             id: (1712),
             name: "Sanctum Gate",
             data: Material((
@@ -627,11 +628,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[20]*/ (
+        /*[30]*/ (
             id: (1713),
             name: "Courtyard Brick",
             data: Material((
@@ -644,11 +645,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[21]*/ (
+        /*[31]*/ (
             id: (1714),
             name: "Courtyard Cobbles",
             data: Material((
@@ -661,11 +662,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[22]*/ (
+        /*[32]*/ (
             id: (4042),
             name: "Aletha Delivered Skeleton",
             data: Skeleton((
@@ -676,7 +677,7 @@
                 joint_names: ["Hips", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot", "Spine", "Chest", "Neck", "RightShoulder", "RightUpperArm", "RightLowerArm", "RightHand", "RightThumbMetacarpal", "RightThumbProximal", "RightIndexProximal", "RightIndexIntermediate", "LeftShoulder", "LeftUpperArm", "LeftLowerArm", "LeftHand", "LeftThumbMetacarpal", "LeftThumbProximal", "LeftIndexProximal", "LeftIndexIntermediate"],
             )),
         ),
-        /*[23]*/ (
+        /*[33]*/ (
             id: (4043),
             name: "Aletha Delivered",
             data: Model((
@@ -691,7 +692,7 @@
                 attachments: [(name: "right_hand_grip", joint: 13, translation: (-1280, -2032, 80), rotation_q12: (32, 0, 1696)), (name: "left_hand_grip", joint: 21, translation: (1280, -2032, 80), rotation_q12: (32, 0, -1696))],
             )),
         ),
-        /*[24]*/ (
+        /*[34]*/ (
             id: (4069),
             name: "Aletha Delivered Animation Set",
             data: AnimationSet((
@@ -706,7 +707,7 @@
                 clips: [(4044), (4045), (4046), (4047), (4048), (4049), (4050), (4051), (4052), (4053), (4054), (4055), (4056), (4057), (4058), (4059), (4060), (4061), (4062), (4063), (4064), (4065), (4066), (4067), (4068)],
             )),
         ),
-        /*[25]*/ (
+        /*[35]*/ (
             id: (4044),
             name: "aletha_dash_bwd",
             data: AnimationClip((
@@ -719,7 +720,7 @@
                 tags: [],
             )),
         ),
-        /*[26]*/ (
+        /*[36]*/ (
             id: (4045),
             name: "aletha_dash_fwd",
             data: AnimationClip((
@@ -732,7 +733,7 @@
                 tags: [],
             )),
         ),
-        /*[27]*/ (
+        /*[37]*/ (
             id: (4046),
             name: "aletha_dash_lft",
             data: AnimationClip((
@@ -745,7 +746,7 @@
                 tags: [],
             )),
         ),
-        /*[28]*/ (
+        /*[38]*/ (
             id: (4047),
             name: "aletha_dash_rgt",
             data: AnimationClip((
@@ -758,7 +759,7 @@
                 tags: [],
             )),
         ),
-        /*[29]*/ (
+        /*[39]*/ (
             id: (4048),
             name: "aletha_death",
             data: AnimationClip((
@@ -771,7 +772,7 @@
                 tags: [],
             )),
         ),
-        /*[30]*/ (
+        /*[40]*/ (
             id: (4049),
             name: "aletha_heavy_wpn_heavy_atk",
             data: AnimationClip((
@@ -784,7 +785,7 @@
                 tags: [],
             )),
         ),
-        /*[31]*/ (
+        /*[41]*/ (
             id: (4050),
             name: "aletha_heavy_wpn_light_atk_a",
             data: AnimationClip((
@@ -797,7 +798,7 @@
                 tags: [],
             )),
         ),
-        /*[32]*/ (
+        /*[42]*/ (
             id: (4051),
             name: "aletha_heavy_wpn_light_atk_b",
             data: AnimationClip((
@@ -810,7 +811,7 @@
                 tags: [],
             )),
         ),
-        /*[33]*/ (
+        /*[43]*/ (
             id: (4052),
             name: "aletha_hurt_a",
             data: AnimationClip((
@@ -823,7 +824,7 @@
                 tags: [],
             )),
         ),
-        /*[34]*/ (
+        /*[44]*/ (
             id: (4053),
             name: "aletha_hurt_b",
             data: AnimationClip((
@@ -836,7 +837,7 @@
                 tags: [],
             )),
         ),
-        /*[35]*/ (
+        /*[45]*/ (
             id: (4054),
             name: "aletha_idle",
             data: AnimationClip((
@@ -849,7 +850,7 @@
                 tags: [],
             )),
         ),
-        /*[36]*/ (
+        /*[46]*/ (
             id: (4055),
             name: "aletha_light_wpn_heavy_atk",
             data: AnimationClip((
@@ -862,7 +863,7 @@
                 tags: [],
             )),
         ),
-        /*[37]*/ (
+        /*[47]*/ (
             id: (4056),
             name: "aletha_light_wpn_light_atk_a",
             data: AnimationClip((
@@ -875,7 +876,7 @@
                 tags: [],
             )),
         ),
-        /*[38]*/ (
+        /*[48]*/ (
             id: (4057),
             name: "aletha_light_wpn_light_atk_b",
             data: AnimationClip((
@@ -888,7 +889,7 @@
                 tags: [],
             )),
         ),
-        /*[39]*/ (
+        /*[49]*/ (
             id: (4058),
             name: "aletha_rest_pose",
             data: AnimationClip((
@@ -901,7 +902,7 @@
                 tags: [],
             )),
         ),
-        /*[40]*/ (
+        /*[50]*/ (
             id: (4059),
             name: "aletha_run_bwd",
             data: AnimationClip((
@@ -914,7 +915,7 @@
                 tags: [],
             )),
         ),
-        /*[41]*/ (
+        /*[51]*/ (
             id: (4060),
             name: "aletha_run_fwd",
             data: AnimationClip((
@@ -927,7 +928,7 @@
                 tags: [],
             )),
         ),
-        /*[42]*/ (
+        /*[52]*/ (
             id: (4061),
             name: "aletha_run_lft",
             data: AnimationClip((
@@ -940,7 +941,7 @@
                 tags: [],
             )),
         ),
-        /*[43]*/ (
+        /*[53]*/ (
             id: (4062),
             name: "aletha_run_rgt",
             data: AnimationClip((
@@ -953,7 +954,7 @@
                 tags: [],
             )),
         ),
-        /*[44]*/ (
+        /*[54]*/ (
             id: (4063),
             name: "aletha_stun",
             data: AnimationClip((
@@ -966,7 +967,7 @@
                 tags: [],
             )),
         ),
-        /*[45]*/ (
+        /*[55]*/ (
             id: (4064),
             name: "aletha_stun_recovery",
             data: AnimationClip((
@@ -979,7 +980,7 @@
                 tags: [],
             )),
         ),
-        /*[46]*/ (
+        /*[56]*/ (
             id: (4065),
             name: "aletha_walk_bkw",
             data: AnimationClip((
@@ -992,7 +993,7 @@
                 tags: [],
             )),
         ),
-        /*[47]*/ (
+        /*[57]*/ (
             id: (4066),
             name: "aletha_walk_fwd",
             data: AnimationClip((
@@ -1005,7 +1006,7 @@
                 tags: [],
             )),
         ),
-        /*[48]*/ (
+        /*[58]*/ (
             id: (4067),
             name: "aletha_walk_lft",
             data: AnimationClip((
@@ -1018,7 +1019,7 @@
                 tags: [],
             )),
         ),
-        /*[49]*/ (
+        /*[59]*/ (
             id: (4068),
             name: "aletha_walk_rgt",
             data: AnimationClip((
@@ -1031,7 +1032,7 @@
                 tags: [],
             )),
         ),
-        /*[50]*/ (
+        /*[60]*/ (
             id: (4070),
             name: "gen_walk_fwd",
             data: AnimationClip((
@@ -1045,7 +1046,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[51]*/ (
+        /*[61]*/ (
             id: (4071),
             name: "gen_walk_fwd_windup",
             data: AnimationClip((
@@ -1059,7 +1060,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[52]*/ (
+        /*[62]*/ (
             id: (4072),
             name: "gen_walk_fwd_winddown",
             data: AnimationClip((
@@ -1073,7 +1074,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[53]*/ (
+        /*[63]*/ (
             id: (4073),
             name: "gen_walk_fwd_winddown_mirror",
             data: AnimationClip((
@@ -1087,7 +1088,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[54]*/ (
+        /*[64]*/ (
             id: (4074),
             name: "gen_run_fwd",
             data: AnimationClip((
@@ -1101,7 +1102,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[55]*/ (
+        /*[65]*/ (
             id: (4075),
             name: "gen_run_fwd_winddown_mirror",
             data: AnimationClip((
@@ -1115,7 +1116,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[56]*/ (
+        /*[66]*/ (
             id: (4076),
             name: "gen_run_fwd_windup",
             data: AnimationClip((
@@ -1129,7 +1130,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[57]*/ (
+        /*[67]*/ (
             id: (4077),
             name: "gen_run_fwd_winddown",
             data: AnimationClip((
@@ -1143,7 +1144,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[58]*/ (
+        /*[68]*/ (
             id: (4078),
             name: "gen_walk_bwd",
             data: AnimationClip((
@@ -1157,7 +1158,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[59]*/ (
+        /*[69]*/ (
             id: (4079),
             name: "gen_walk_lft",
             data: AnimationClip((
@@ -1171,7 +1172,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[60]*/ (
+        /*[70]*/ (
             id: (4080),
             name: "gen_walk_rgt",
             data: AnimationClip((
@@ -1185,7 +1186,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[61]*/ (
+        /*[71]*/ (
             id: (4081),
             name: "gen_light_attack",
             data: AnimationClip((
@@ -1199,7 +1200,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[62]*/ (
+        /*[72]*/ (
             id: (4082),
             name: "gen_heavy_attack",
             data: AnimationClip((
@@ -1213,7 +1214,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[63]*/ (
+        /*[73]*/ (
             id: (4083),
             name: "gen_combo_attack",
             data: AnimationClip((
@@ -1227,7 +1228,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[64]*/ (
+        /*[74]*/ (
             id: (4084),
             name: "gen_hit_react",
             data: AnimationClip((
@@ -1241,7 +1242,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[65]*/ (
+        /*[75]*/ (
             id: (4085),
             name: "gen_vert_light_attack",
             data: AnimationClip((
@@ -1255,7 +1256,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[66]*/ (
+        /*[76]*/ (
             id: (4086),
             name: "gen_vert_heavy_attack",
             data: AnimationClip((
@@ -1269,7 +1270,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[67]*/ (
+        /*[77]*/ (
             id: (4087),
             name: "gen_vert_combo_attack",
             data: AnimationClip((
@@ -1283,7 +1284,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[77]*/ (
+        /*[78]*/ (
             id: (5000),
             name: "BRICK_1A Material",
             data: Material((
@@ -1296,10 +1297,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[78]*/ (
+        /*[79]*/ (
             id: (5001),
             name: "BRICK_6B Material",
             data: Material((
@@ -1312,10 +1314,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[79]*/ (
+        /*[80]*/ (
             id: (5002),
             name: "BRICK_6C Material",
             data: Material((
@@ -1328,10 +1331,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[80]*/ (
+        /*[81]*/ (
             id: (5003),
             name: "FENCE_4B Material",
             data: Material((
@@ -1344,10 +1348,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[81]*/ (
+        /*[82]*/ (
             id: (5004),
             name: "FLOOR_1A Material",
             data: Material((
@@ -1360,10 +1365,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[82]*/ (
+        /*[83]*/ (
             id: (5005),
             name: "FLOOR_3A Material",
             data: Material((
@@ -1376,10 +1382,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[83]*/ (
+        /*[84]*/ (
             id: (5006),
             name: "FLOOR_3B Material",
             data: Material((
@@ -1392,10 +1399,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[84]*/ (
+        /*[85]*/ (
             id: (5007),
             name: "FLOOR_3C Material",
             data: Material((
@@ -1408,10 +1416,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[85]*/ (
+        /*[86]*/ (
             id: (5008),
             name: "LIGHT_3B Material",
             data: Material((
@@ -1424,10 +1433,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[86]*/ (
+        /*[87]*/ (
             id: (5009),
             name: "METAL_2A Material",
             data: Material((
@@ -1440,10 +1450,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[87]*/ (
+        /*[88]*/ (
             id: (5010),
             name: "TECHWALL_1A Material",
             data: Material((
@@ -1456,10 +1467,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[88]*/ (
+        /*[89]*/ (
             id: (5011),
             name: "TECH_2A Material",
             data: Material((
@@ -1472,10 +1484,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[89]*/ (
+        /*[90]*/ (
             id: (5012),
             name: "TECH_2F Material",
             data: Material((
@@ -1488,10 +1501,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[90]*/ (
+        /*[91]*/ (
             id: (5013),
             name: "TECH_4K Material",
             data: Material((
@@ -1504,10 +1518,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[91]*/ (
+        /*[92]*/ (
             id: (5014),
             name: "TECH_5F Material",
             data: Material((
@@ -1520,10 +1535,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[92]*/ (
+        /*[93]*/ (
             id: (5015),
             name: "WOOD_3B Material",
             data: Material((
@@ -1536,10 +1552,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[93]*/ (
+        /*[94]*/ (
             id: (5016),
             name: "CABLE_1A Material",
             data: Material((
@@ -1552,10 +1569,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[94]*/ (
+        /*[95]*/ (
             id: (5017),
             name: "MENU_MAIN_PIECE_FULL",
             data: Material((
@@ -1568,10 +1586,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[95]*/ (
+        /*[96]*/ (
             id: (5018),
             name: "MENU_FRAME_OVERLAY_FULL",
             data: Material((
@@ -1584,10 +1603,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[96]*/ (
+        /*[97]*/ (
             id: (5019),
             name: "MENU_GRID_FLOOR_FULL",
             data: Material((
@@ -1600,10 +1620,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[97]*/ (
+        /*[98]*/ (
             id: (5020),
             name: "BONNIE_STUDIOS_LOGO",
             data: Material((
@@ -1616,10 +1637,11 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
+                sky_aperture: false,
                 double_sided: false,
             )),
         ),
-        /*[26]*/ (
+        /*[99]*/ (
             id: (5021),
             name: "Default Health Gauge",
             data: Material((
@@ -1632,10 +1654,44 @@
                 reflection: (strength: 255, roughness: 8),
                 animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
                 face_sidedness: Front,
-                layered_sky: false,
+                sky_aperture: false,
+                double_sided: false,
+            )),
+        ),
+        /*[100]*/ (
+            id: (5022),
+            name: "Sky: Quake Layered Sunset",
+            data: Material((
+                texture_mode: SimpleImage,
+                psxt_path: Some("assets/textures/sky/quake_layered_sunset_4bpp.psxt"),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
+                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
+                reflection: (strength: 255, roughness: 8),
+                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
+                face_sidedness: Front,
+                sky_aperture: true,
+                double_sided: false,
+            )),
+        ),
+        /*[101]*/ (
+            id: (5023),
+            name: "Sky: Directional Sunset Cube",
+            data: Material((
+                texture_mode: SimpleImage,
+                psxt_path: Some("assets/textures/sky/directional_sunset_cube_4bpp.psxt"),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
+                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
+                reflection: (strength: 255, roughness: 8),
+                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
+                face_sidedness: Front,
+                sky_aperture: true,
                 double_sided: false,
             )),
         ),
     ],
-    next_resource_id: 5022,
+    next_resource_id: 5024,
 )
