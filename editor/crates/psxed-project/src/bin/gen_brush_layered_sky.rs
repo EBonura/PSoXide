@@ -7,7 +7,8 @@ use image::imageops::FilterType;
 use psxed_format::texture::Depth;
 use psxed_project::brush::Brush;
 use psxed_project::{
-    MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, SkyMode, Transform3,
+    MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, SkyMode, SkyVisibility,
+    Transform3,
 };
 
 const FLOOR_SOURCE: &str = "courtyard_cobbles.psxt";
@@ -63,7 +64,7 @@ fn generate(output_dir: &Path) {
         ResourceData::Material(MaterialResource::opaque(Some(WALL_RELATIVE.to_string()))),
     );
     let mut layered_sky = MaterialResource::opaque(Some(SKY_RELATIVE.to_string()));
-    layered_sky.layered_sky = true;
+    layered_sky.sky_aperture = true;
     let sky = project.add_resource("Layered Sky", ResourceData::Material(layered_sky));
 
     let scene = project.active_scene_mut();
@@ -72,9 +73,9 @@ fn generate(output_dir: &Path) {
     else {
         panic!("fixture root must be a world");
     };
-    // The fixture proves the aperture renderer, not the independent PSoXide
-    // cyclorama. A gradient behind it would conceal a missing layered sky.
-    world_sky.mode = SkyMode::Off;
+    world_sky.mode = SkyMode::QuakeLayered;
+    world_sky.visibility = SkyVisibility::ThroughSkySurfaces;
+    world_sky.texture = Some(sky);
 
     let outer = 8192;
     let wall = 128;

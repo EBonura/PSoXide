@@ -32,9 +32,8 @@ use psx_gpu_render::{VRAM_HEIGHT, VRAM_WIDTH};
 use psx_vram::TextureWindowAtlas;
 use psxed_project::streaming::collect_scene_resource_use;
 use psxed_project::{
-    generate_material_texture_psxt, generate_room_reflection_probe_psxt, MaterialResource,
-    MaterialTextureMode, NodeKind, ProjectDocument, ResourceData, ResourceId,
-    TransitionMaterialTexture,
+    generate_material_texture_psxt, MaterialResource, MaterialTextureMode, NodeKind,
+    ProjectDocument, ResourceData, ResourceId, SkyMode, TransitionMaterialTexture,
 };
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
@@ -45,6 +44,10 @@ const ROOM_LAST_TPAGE: u8 = 15;
 const ROOM_TPAGE_COUNT: usize = (ROOM_LAST_TPAGE - ROOM_FIRST_TPAGE + 1) as usize;
 const ROOM_CLUT_Y: u16 = 480;
 const ROOM_CLUT_HALFWORDS: u16 = 16;
+const SCENE_SKY_CLUT_X: u16 = 0;
+const SCENE_SKY_CLUT_Y: u16 = 479;
+const SCENE_SKY_LAYERED_PAGES: usize = 1;
+const SCENE_SKY_CUBE_PAGES: usize = 6;
 const SHADOW_TEXTURE_SIZE: usize = 64;
 const SHADOW_TPAGE_INDEX: u16 = 15;
 const SHADOW_TPAGE_X: u16 = SHADOW_TPAGE_INDEX * 64;
@@ -77,6 +80,21 @@ pub struct MaterialSlot {
     pub texture_height: u8,
 }
 
+/// Dedicated editor-preview placement for the World node's texture-backed
+/// sky. It deliberately mirrors the runtime contract: one base tpage, one
+/// contiguous CLUT run, and projection selected by the World rather than by a
+/// brush material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneSkySlot {
+    /// Projection owning this placement.
+    pub mode: SkyMode,
+    /// First 4bpp tpage (one page for layered sky, six adjacent pages for a
+    /// cube environment).
+    pub tpage_word: u16,
+    /// First 16-colour palette. Cube faces select `clut_word + face`.
+    pub clut_word: u16,
+}
+
 /// Cache row keeping the slot assigned to a material.
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -107,6 +125,8 @@ pub struct EditorTextures {
     model_cache: HashMap<ResourceId, ModelAtlasCacheEntry>,
     shadow_slot: MaterialSlot,
     particle_slot: MaterialSlot,
+    scene_sky_slot: Option<SceneSkySlot>,
+    scene_sky_signature: Option<SceneSkySignature>,
     /// Ordered material ids, texture paths, and fallback names used to
     /// populate the limited room-material VRAM band. Scene-used
     /// materials and active far-vista panels are prioritized ahead
@@ -149,6 +169,18 @@ struct PreviewTextureSignature {
     secondary_signature: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SceneSkySignature {
+    mode: SkyMode,
+    source: ResourceId,
+    cache_signature: String,
+}
+
+struct SceneSkyUpload {
+    signature: SceneSkySignature,
+    bytes: Option<Vec<u8>>,
+}
+
 impl EditorTextures {
     pub fn new() -> Self {
         let shadow_slot = MaterialSlot {
@@ -172,6 +204,8 @@ impl EditorTextures {
             model_cache: HashMap::new(),
             shadow_slot,
             particle_slot,
+            scene_sky_slot: None,
+            scene_sky_signature: None,
             room_signature: Vec::new(),
             room_allocator: TextureWindowAtlas::new(),
             next_clut_x: 0,
@@ -222,6 +256,12 @@ impl EditorTextures {
         self.particle_slot
     }
 
+    /// Exact texture-backed sky placement used by the host preview's shared
+    /// Quake/cube projection kernels.
+    pub fn scene_sky_slot(&self) -> Option<SceneSkySlot> {
+        self.scene_sky_slot
+    }
+
     /// Walk scene-used Materials first, then active far-vista panels,
     /// then unused library Materials, and ensure as many as fit have
     /// textures in VRAM.
@@ -241,6 +281,8 @@ impl EditorTextures {
     /// so authored scene materials and far-vista panels must get slots
     /// before unused resource-library entries.
     pub fn refresh(&mut self, project: &ProjectDocument, project_root: &Path) {
+        let scene_sky = scene_sky_upload(project, project_root);
+        let scene_sky_signature = scene_sky.as_ref().map(|sky| sky.signature.clone());
         let plan = preview_texture_upload_plan(project, project_root);
         let room_signature: Vec<PreviewTextureSignature> = plan
             .iter()
@@ -254,12 +296,19 @@ impl EditorTextures {
                 secondary_signature: item.secondary_signature.clone(),
             })
             .collect();
-        if self.room_signature == room_signature {
+        if self.room_signature == room_signature && self.scene_sky_signature == scene_sky_signature
+        {
             return;
         }
 
         self.clear_room_materials();
         self.room_signature = room_signature;
+        self.scene_sky_signature = scene_sky_signature;
+        self.scene_sky_slot = scene_sky.and_then(|sky| {
+            sky.bytes
+                .as_deref()
+                .and_then(|bytes| self.upload_scene_sky_psxt(sky.signature.mode, bytes))
+        });
 
         for item in plan {
             if !self.has_room_material_slot() {
@@ -343,6 +392,92 @@ impl EditorTextures {
 
         let clut_base = ROOM_CLUT_Y as usize * VRAM_WIDTH as usize;
         self.vram[clut_base..clut_base + VRAM_WIDTH as usize].fill(0);
+        let sky_clut_base =
+            SCENE_SKY_CLUT_Y as usize * VRAM_WIDTH as usize + SCENE_SKY_CLUT_X as usize;
+        self.vram[sky_clut_base..sky_clut_base + 16 * SCENE_SKY_CUBE_PAGES].fill(0);
+        self.scene_sky_slot = None;
+    }
+
+    fn upload_scene_sky_psxt(&mut self, mode: SkyMode, bytes: &[u8]) -> Option<SceneSkySlot> {
+        let texture = Texture::from_bytes(bytes).ok()?;
+        let page_count = match mode {
+            SkyMode::QuakeLayered
+                if texture.width() == 256
+                    && texture.height() == 128
+                    && texture.clut_entries() == 16 =>
+            {
+                SCENE_SKY_LAYERED_PAGES
+            }
+            SkyMode::Cube
+                if [texture.width(), texture.height()] == psx_bsp::sky::CUBE_SKY_ATLAS_SIZE
+                    && texture.clut_entries() == psx_bsp::sky::CUBE_SKY_CLUT_ENTRIES =>
+            {
+                SCENE_SKY_CUBE_PAGES
+            }
+            _ => return None,
+        };
+        if texture.halfwords_per_row() != (page_count as u16).saturating_mul(64) {
+            return None;
+        }
+        let expected_pixel_bytes = usize::from(texture.halfwords_per_row())
+            .saturating_mul(usize::from(texture.height()))
+            .saturating_mul(2);
+        if texture.pixel_bytes().len() != expected_pixel_bytes
+            || texture.clut_bytes().len() != usize::from(texture.clut_entries()) * 2
+        {
+            return None;
+        }
+
+        let first_page = self.room_allocator.reserve_empty_page()?;
+        if first_page != 0 {
+            self.room_allocator.release_page(first_page);
+            return None;
+        }
+        for expected in 1..page_count {
+            let Some(page) = self.room_allocator.reserve_empty_page() else {
+                return None;
+            };
+            if page != expected {
+                return None;
+            }
+        }
+
+        let tpage_index = u16::from(ROOM_FIRST_TPAGE);
+        let texture_x = usize::from(tpage_index) * ROOM_TPAGE_HALFWORDS;
+        let halfwords_per_row = usize::from(texture.halfwords_per_row());
+        for row in 0..usize::from(texture.height()) {
+            for halfword in 0..halfwords_per_row {
+                let source = (row * halfwords_per_row + halfword) * 2;
+                self.vram[row * VRAM_WIDTH as usize + texture_x + halfword] = u16::from_le_bytes([
+                    texture.pixel_bytes()[source],
+                    texture.pixel_bytes()[source + 1],
+                ]);
+            }
+        }
+
+        let transparent_zero = texture.index_zero_transparent();
+        for index in 0..usize::from(texture.clut_entries()) {
+            let source = index * 2;
+            let raw = u16::from_le_bytes([
+                texture.clut_bytes()[source],
+                texture.clut_bytes()[source + 1],
+            ]);
+            let palette_index = index % 16;
+            let entry = if mode == SkyMode::QuakeLayered {
+                preview_clut_entry(palette_index, raw, transparent_zero, false)
+            } else {
+                model_atlas_clut_entry(palette_index, raw, false)
+            };
+            self.vram[SCENE_SKY_CLUT_Y as usize * VRAM_WIDTH as usize
+                + SCENE_SKY_CLUT_X as usize
+                + index] = entry;
+        }
+
+        Some(SceneSkySlot {
+            mode,
+            tpage_word: pack_tpage_word(tpage_index, 0),
+            clut_word: pack_clut_word(SCENE_SKY_CLUT_X, SCENE_SKY_CLUT_Y),
+        })
     }
 
     /// Read `path` and upload the parsed PSXT into the next free
@@ -821,6 +956,58 @@ fn preview_texture_upload_plan(
     plan
 }
 
+fn scene_sky_upload(project: &ProjectDocument, project_root: &Path) -> Option<SceneSkyUpload> {
+    let scene = project.active_scene();
+    let sky = scene.world_sky_for_node(scene.root)?;
+    if !matches!(sky.mode, SkyMode::QuakeLayered | SkyMode::Cube) {
+        return None;
+    }
+    let source = sky.texture?;
+    let resource = project.resource(source)?;
+    let ResourceData::Material(material) = &resource.data else {
+        return None;
+    };
+    let (cache_signature, bytes) = match material.texture_mode {
+        MaterialTextureMode::Generated => {
+            let signature = format!("@generated:{:?}", material.generated);
+            (
+                signature,
+                Some(generate_material_texture_psxt(material.generated)),
+            )
+        }
+        MaterialTextureMode::Transition => (
+            transition_preview_signature(project, material.transition, project_root, Some(source)),
+            psxed_project::generate_transition_material_texture_psxt(
+                project,
+                material.transition,
+                project_root,
+                Some(source),
+            )
+            .ok(),
+        ),
+        MaterialTextureMode::SimpleImage => {
+            let path = material.psxt_path.as_deref().unwrap_or_default();
+            let signature = texture_cache_signature(project_root, path);
+            let absolute = Path::new(path);
+            let absolute = if absolute.is_absolute() {
+                absolute.to_path_buf()
+            } else {
+                project_root.join(absolute)
+            };
+            (signature, std::fs::read(absolute).ok())
+        }
+        MaterialTextureMode::ReflectiveProbe => ("@retired-reflective-probe".to_string(), None),
+    };
+    Some(SceneSkyUpload {
+        signature: SceneSkySignature {
+            mode: sky.mode,
+            source,
+            cache_signature,
+        },
+        bytes,
+    })
+}
+
 fn push_material_resource_upload(
     project: &ProjectDocument,
     id: ResourceId,
@@ -828,6 +1015,12 @@ fn push_material_resource_upload(
     project_root: &Path,
     plan: &mut Vec<PreviewTextureUploadPlan>,
 ) {
+    let scene = project.active_scene();
+    if scene.world_sky_for_node(scene.root).is_some_and(|sky| {
+        matches!(sky.mode, SkyMode::QuakeLayered | SkyMode::Cube) && sky.texture == Some(id)
+    }) {
+        return;
+    }
     if let Some(item) = plan.iter_mut().find(|item| item.id == id) {
         item.force_zero_opaque &= force_zero_opaque;
         return;
@@ -866,9 +1059,8 @@ fn push_material_resource_upload(
             (signature, cache_signature, None, None)
         }
         MaterialTextureMode::ReflectiveProbe => {
-            let bytes = preview_room_probe_bytes(project, project_root);
-            let signature = format!("@room-probe:{}", bytes_signature(bytes.as_deref()));
-            (signature.clone(), signature, bytes, None)
+            let signature = "@retired-reflective-probe".to_string();
+            (signature.clone(), signature, None, None)
         }
     };
     let secondary = material
@@ -887,8 +1079,7 @@ fn push_material_resource_upload(
                     recipe: layer.transition,
                 },
             )),
-            MaterialTextureMode::ReflectiveProbe => preview_room_probe_bytes(project, project_root)
-                .map(SecondaryPreviewSource::Generated),
+            MaterialTextureMode::ReflectiveProbe => None,
         });
     let secondary_signature = match secondary.as_ref() {
         Some(SecondaryPreviewSource::Texture(path)) => {
@@ -914,15 +1105,6 @@ fn push_material_resource_upload(
         secondary,
         secondary_signature,
     });
-}
-
-fn preview_room_probe_bytes(project: &ProjectDocument, project_root: &Path) -> Option<Vec<u8>> {
-    project.active_scene().nodes().iter().find_map(|node| {
-        let NodeKind::Section { grid } = &node.kind else {
-            return None;
-        };
-        generate_room_reflection_probe_psxt(project, grid, project_root).ok()
-    })
 }
 
 fn bytes_signature(bytes: Option<&[u8]>) -> u32 {
@@ -1555,14 +1737,14 @@ fn align_up_to(value: u16, boundary: u16) -> u16 {
 mod tests {
     use super::{
         align_up_to, model_atlas_clut_entry, opaque_room_clut_entry, preview_clut_entry,
-        preview_texture_upload_plan, EditorTextures, SHADOW_CLUT_X, SHADOW_CLUT_Y, SHADOW_TPAGE_X,
-        SHADOW_TPAGE_Y,
+        preview_texture_upload_plan, EditorTextures, SCENE_SKY_CLUT_Y, SHADOW_CLUT_X,
+        SHADOW_CLUT_Y, SHADOW_TPAGE_X, SHADOW_TPAGE_Y,
     };
     use psx_gpu::material::TextureWindow;
     use psx_gpu_render::VRAM_WIDTH;
     use psxed_project::{
-        FarVistaSettings, GeneratedMaterialTexture, GridDirection, MaterialResource,
-        MaterialTextureMode, ModelSecondaryLayer, NodeKind, ProjectDocument, ResourceData,
+        FarVistaSettings, GeneratedMaterialTexture, MaterialResource, MaterialTextureMode,
+        ModelSecondaryLayer, NodeKind, ProjectDocument, ResourceData, SkyMode,
         TransitionMaterialTexture, WorldGrid,
     };
     use std::path::{Path, PathBuf};
@@ -1575,90 +1757,31 @@ mod tests {
     }
 
     #[test]
-    fn stacked_floor_materials_receive_native_preview_slots() {
+    fn directional_world_sky_reserves_six_pages_ahead_of_room_materials() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .canonicalize()
             .expect("repo root");
-        // The committed miniaturised sample, not a local working project:
-        // `editor/projects/*` is gitignored, so a test keyed on one passes only
-        // on the machine that authored it and fails everywhere else, which is
-        // how these went red after cortex_ignition_v1 was renamed.
-        let project_root = repo_root.join("editor/samples/cortex_v1");
+        let project_root = repo_root.join("editor/archive/fixtures/brush-directional-sky");
         let project = ProjectDocument::load_from_path(project_root.join("project.ron"))
-            .expect("sample project loads");
-        let grid = project
-            .active_scene()
-            .nodes()
-            .iter()
-            .find_map(|node| match &node.kind {
-                NodeKind::Section { grid } => Some(grid),
-                _ => None,
-            })
-            .expect("sample project room");
-        let mut used = std::collections::HashMap::new();
-        for floor_index in 0..grid.floor_count() {
-            let floor = grid.floor(floor_index).expect("floor index is valid");
-            for sector in floor.sectors.iter().flatten() {
-                for face in [sector.floor.as_ref(), sector.ceiling.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    for id in [
-                        face.material,
-                        face.triangle_material(0),
-                        face.triangle_material(1),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        used.entry(id).or_insert(floor_index);
-                    }
-                }
-                for direction in GridDirection::ALL {
-                    for wall in sector.walls.get(direction) {
-                        if let Some(id) = wall.material {
-                            used.entry(id).or_insert(floor_index);
-                        }
-                    }
-                }
-            }
-        }
-        for node in project.active_scene().nodes() {
-            if let NodeKind::WaterVolume {
-                material: Some(material),
-                ..
-            } = &node.kind
-            {
-                used.entry(*material).or_insert(node.floor);
-            }
-        }
-
-        // The real assertion below is "nothing is missing", which is vacuously
-        // true against a project with no stacked-floor materials at all. Pin
-        // the premise so repointing this test at the wrong project fails loudly
-        // instead of passing while checking nothing.
-        assert!(
-            used.len() > 1,
-            "sample project has no stacked-floor materials to check"
-        );
-
+            .expect("directional sky fixture loads and migrates");
         let mut textures = EditorTextures::new();
         textures.refresh(&project, &project_root);
-        let missing = used
-            .into_iter()
-            .filter(|(id, _)| textures.slot(*id).is_none())
-            .map(|(id, floor_index)| {
-                let name = project
-                    .resource(id)
-                    .map(|resource| resource.name.clone())
-                    .unwrap_or_else(|| format!("missing #{}", id.raw()));
-                format!("L{} {name}", floor_index + 1)
-            })
-            .collect::<Vec<_>>();
+
+        let sky = textures.scene_sky_slot().expect("cube sky preview slot");
+        assert_eq!(sky.mode, SkyMode::Cube);
+        assert_eq!(sky.tpage_word & 0x0f, 5);
+        assert_eq!(sky.clut_word >> 6, SCENE_SKY_CLUT_Y);
+
+        let room_slot = project
+            .resources
+            .iter()
+            .filter_map(|resource| textures.slot(resource.id))
+            .next()
+            .expect("ordinary courtyard material remains previewable");
         assert!(
-            missing.is_empty(),
-            "stacked-floor materials missing preview slots: {missing:?}"
+            room_slot.tpage_word & 0x0f >= 11,
+            "ordinary room texture overlapped one of the six cube pages"
         );
     }
 
@@ -2077,21 +2200,21 @@ mod tests {
     /// showed it).
     #[test]
     fn tall_model_atlas_cannot_stomp_the_clut_rows() {
-        let legacy = ProjectDocument::legacy_grid_starter();
-        let root = psxed_project::legacy_grid_starter_dir();
+        let starter = ProjectDocument::starter();
+        let root = psxed_project::default_project_dir();
         let mut project = ProjectDocument::new("tall-atlas-guard");
         let floor_id = project.add_resource(
             "Floor",
             ResourceData::Material(MaterialResource::opaque(Some(
-                "assets/textures/floor_1a.psxt".to_string(),
+                "assets/textures/sanctum_slate.psxt".to_string(),
             ))),
         );
         let sword_id = {
-            let sword = legacy
+            let sword = starter
                 .resources
                 .iter()
                 .find(|r| r.name == "Sword1 Light" && matches!(r.data, ResourceData::Model(_)))
-                .expect("legacy sword model");
+                .expect("starter sword model");
             project.add_resource(sword.name.clone(), sword.data.clone())
         };
         let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 256, 512]);
@@ -2108,7 +2231,8 @@ mod tests {
             textures.model_atlas_slot(sword_id).is_none(),
             "a 256-tall atlas cannot fit above the CLUT rows"
         );
-        let bytes = std::fs::read(root.join("assets/textures/floor_1a.psxt")).expect("floor psxt");
+        let bytes =
+            std::fs::read(root.join("assets/textures/sanctum_slate.psxt")).expect("floor psxt");
         let texture = psx_asset::Texture::from_bytes(&bytes).expect("parse floor");
         let expected =
             u16::from_le_bytes([texture.clut_bytes()[0], texture.clut_bytes()[1]]) | 0x8000;

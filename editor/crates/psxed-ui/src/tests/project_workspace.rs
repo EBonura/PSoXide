@@ -1060,26 +1060,18 @@ fn editor_visibility_saves_with_project_and_restores_on_open() {
         EditorWorkspace::with_project(project_dir.clone(), ProjectDocument::new("visibility"));
     workspace.show_grid = false;
     workspace.show_brush_surface_grid = false;
-    workspace.show_portals = false;
     workspace.show_lights = false;
-    workspace.preview_fog = false;
-    workspace.preview_backface_wireframe = true;
     workspace.preview_bounds = false;
     workspace.show_play_debug_overlays = false;
-    workspace.show_play_debug_map = true;
 
     workspace.save().unwrap();
 
     let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
     assert!(!reopened.show_grid_enabled());
     assert!(!reopened.show_brush_surface_grid_enabled());
-    assert!(!reopened.show_portals_enabled());
     assert!(!reopened.show_lights_enabled());
-    assert!(!reopened.preview_fog_enabled());
-    assert!(reopened.preview_backface_wireframe_enabled());
     assert!(!reopened.preview_bounds_enabled());
     assert!(!reopened.show_play_debug_overlays);
-    assert!(reopened.show_play_debug_map);
 
     let _ = std::fs::remove_dir_all(project_dir);
 }
@@ -1524,75 +1516,6 @@ fn select_pick_passes_through_culled_ceiling_to_visible_floor() {
 }
 
 #[test]
-fn paint_ceiling_ignores_floor_face_hit_for_targeting() {
-    let mut project = ProjectDocument::new("ceiling-paint-face-filter");
-    let room = project.active_scene_mut().add_node(
-        NodeId::ROOT,
-        "Room",
-        NodeKind::Section {
-            grid: WorldGrid::empty(1, 1, 1024),
-        },
-    );
-    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
-    workspace.active_tool = ViewTool::PaintCeiling;
-
-    let floor_hit = Some((
-        FaceRef {
-            room,
-            sx: 0,
-            sz: 0,
-            kind: FaceKind::Floor,
-        },
-        [512.0, 0.0, 512.0],
-    ));
-    let ceiling_hit = Some((
-        FaceRef {
-            room,
-            sx: 0,
-            sz: 0,
-            kind: FaceKind::Ceiling,
-        },
-        [512.0, 2048.0, 512.0],
-    ));
-
-    assert_eq!(workspace.face_hit_for_paint_tool(floor_hit), None);
-    assert_eq!(workspace.face_hit_for_paint_tool(ceiling_hit), ceiling_hit);
-}
-
-#[test]
-fn paint_ceiling_fallback_pick_uses_ceiling_plane() {
-    let mut project = ProjectDocument::new("ceiling-paint-plane");
-    let room = project.active_scene_mut().add_node(
-        NodeId::ROOT,
-        "Room",
-        NodeKind::Section {
-            grid: WorldGrid::empty(8, 8, 1024),
-        },
-    );
-    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
-    workspace.replace_node_selection(room);
-    workspace.active_tool = ViewTool::PaintCeiling;
-    workspace.camera_rig.mode = ViewportCameraMode::Free;
-    workspace.camera_rig.free_initialized = true;
-    workspace.camera_rig.free_position = [2048, 4096, 4096];
-    workspace.camera_rig.free_yaw = 0;
-    workspace.camera_rig.free_pitch = signed_to_q12(-960);
-
-    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
-    let pointer = rect.center() + egui::vec2(80.0, 0.0);
-    let floor_pick = workspace
-        .pick_3d_world_on_room_plane(rect, pointer, room, 0.0)
-        .unwrap();
-    let ceiling_pick = workspace.pick_3d_paint_world(rect, pointer, room).unwrap();
-
-    let delta = (ceiling_pick[0] - floor_pick[0]).abs() + (ceiling_pick[1] - floor_pick[1]).abs();
-    assert!(
-            delta > 0.1,
-            "ceiling pick should resolve on a different plane than floor pick: ceiling={ceiling_pick:?}, floor={floor_pick:?}"
-        );
-}
-
-#[test]
 fn command_modifier_blocks_bare_shortcuts() {
     assert!(bare_shortcuts_available(false, egui::Modifiers::NONE));
     assert!(!bare_shortcuts_available(true, egui::Modifiers::NONE));
@@ -1666,7 +1589,7 @@ fn tool_group_cycle_follows_the_flat_bsp_mode_strip() {
 }
 
 #[test]
-fn place_kind_selection_updates_toolbar_label() {
+fn place_kind_selection_does_not_claim_a_bsp_toolbar_mode() {
     let mut workspace = EditorWorkspace::with_project(
         test_temp_dir("place-kind-toolbar"),
         ProjectDocument::new("place-kind-toolbar"),
@@ -1674,24 +1597,22 @@ fn place_kind_selection_updates_toolbar_label() {
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::ImageProp)));
 
     assert_eq!(workspace.place_kind, PlaceKind::ImageProp);
-    assert_eq!(workspace.active_tool_group_label(), "Image Prop");
-    assert_eq!(workspace.active_tool_group_icon(), icons::PALETTE);
+    assert_eq!(workspace.active_bsp_toolbar_mode(), None);
     assert_eq!(workspace.status, "Tool: Image Prop");
 }
 
 #[test]
-fn material_paint_is_a_separate_tool_with_an_explicit_blend_state() {
+fn material_paint_is_a_separate_bsp_tool() {
     let mut workspace = EditorWorkspace::with_project(
         test_temp_dir("terrain-mode-toolbar"),
         ProjectDocument::new("terrain-mode-toolbar"),
     );
     workspace.active_tool = ViewTool::PaintMaterial;
 
-    assert_eq!(workspace.active_tool_group_label(), "Paint");
-    workspace.material_paint_blend = true;
-    assert_eq!(workspace.active_tool_group_label(), "Paint");
-    workspace.active_tool = ViewTool::PaintFloor;
-    assert_eq!(workspace.active_tool_group_label(), "Floor");
+    assert_eq!(
+        workspace.active_bsp_toolbar_mode(),
+        Some(BspToolbarMode::Paint)
+    );
 }
 
 #[test]
@@ -1735,25 +1656,17 @@ fn visibility_cycle_only_changes_editor_view_items() {
     );
     workspace.show_grid = true;
     workspace.show_brush_surface_grid = true;
-    workspace.show_portals = true;
     workspace.show_lights = true;
-    workspace.preview_fog = true;
-    workspace.preview_backface_wireframe = true;
     workspace.preview_bounds = true;
     workspace.show_play_debug_overlays = false;
-    workspace.show_play_debug_map = true;
 
     workspace.cycle_visibility_group(false);
 
     assert!(workspace.show_grid);
     assert!(workspace.show_brush_surface_grid);
-    assert!(!workspace.show_portals);
     assert!(!workspace.show_lights);
-    assert!(!workspace.preview_fog);
-    assert!(!workspace.preview_backface_wireframe);
     assert!(!workspace.preview_bounds);
     assert!(!workspace.show_play_debug_overlays);
-    assert!(workspace.show_play_debug_map);
 }
 
 #[test]
@@ -1778,12 +1691,11 @@ fn grid_master_controls_both_overlays_while_their_settings_remain_independent() 
 }
 
 #[test]
-fn debug_snapshot_writes_portal_runtime_log() {
-    let (mut workspace, room) = workspace_with_populated_grid("debug-snapshot", 2, 1);
-    workspace.active_tool = ViewTool::Place;
-    workspace.place_kind = PlaceKind::Portal;
-    workspace.portal_place_direction = GridDirection::East;
-    workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+fn debug_snapshot_omits_retired_portal_runtime_log() {
+    let workspace = EditorWorkspace::with_project(
+        test_temp_dir("debug-snapshot"),
+        ProjectDocument::new("debug snapshot"),
+    );
 
     let metrics = EditorPlaytestMetrics {
         sample_serial: 0,
@@ -1880,8 +1792,8 @@ fn debug_snapshot_writes_portal_runtime_log() {
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("scheduler_tasks:"));
     assert!(content.contains("runtime_player: valid=true room_index=0"));
-    assert!(content.contains("connected_portals: count="));
-    assert!(content.contains("portal #0:"));
+    assert!(!content.contains("connected_portals:"));
+    assert!(!content.contains("portal #"));
 
     let _ = std::fs::remove_dir_all(workspace.project_dir);
 }
@@ -2023,134 +1935,6 @@ fn open_directory_saves_and_reloads_project() {
         loaded.project().resources.len(),
         workspace.project().resources.len()
     );
-
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn open_directory_syncs_legacy_starter_character_catalogue() {
-    let dir = std::env::temp_dir().join(format!(
-        "psxed-ui-test-character-sync-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let starter = ProjectDocument::legacy_grid_starter();
-    let mut legacy = ProjectDocument::new("legacy-starter");
-    let mut wraith_model = starter
-        .resources
-        .iter()
-        .find_map(|resource| match &resource.data {
-            ResourceData::Model(model) if resource.name == "Obsidian Wraith" => Some(model.clone()),
-            _ => None,
-        })
-        .expect("starter has wraith model");
-    wraith_model.skeleton = None;
-    let model = legacy.add_resource("Obsidian Wraith", ResourceData::Model(wraith_model));
-    let mut character = psxed_project::CharacterResource::defaults();
-    character.model = Some(model);
-    legacy.add_resource(
-        LEGACY_WRAITH_HERO_PROFILE_NAME,
-        ResourceData::Character(character),
-    );
-    legacy.save_to_path(dir.join("project.ron")).unwrap();
-
-    let workspace = EditorWorkspace::open_directory(&dir).unwrap();
-
-    assert!(!workspace.is_dirty());
-    for name in STARTER_CHARACTER_PROFILE_NAMES {
-        assert!(
-            project_has_resource_name(workspace.project(), name, |data| {
-                matches!(data, ResourceData::Character(_))
-            }),
-            "missing {name}"
-        );
-    }
-    assert!(!project_has_resource_name(
-        workspace.project(),
-        LEGACY_WRAITH_HERO_PROFILE_NAME,
-        |data| matches!(data, ResourceData::Character(_))
-    ));
-    assert!(project_has_resource_name(
-        workspace.project(),
-        "Aletha Delivered",
-        |data| { matches!(data, ResourceData::Model(_)) }
-    ));
-    assert!(dir
-        .join("assets/models/aletha_delivered/aletha_delivered.psxmdl")
-        .is_file());
-
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn open_directory_purges_legacy_obsidian_warden_catalogue() {
-    let dir = test_temp_dir("purge-obsidian-warden");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let mut project = ProjectDocument::legacy_grid_starter();
-    let skeleton = project
-        .resources
-        .iter()
-        .find_map(|resource| (resource.name == "Meshy Biped Skeleton").then_some(resource.id))
-        .expect("starter skeleton");
-    let legacy_model = project.add_resource(
-        "Obsidian Warden",
-        ResourceData::Model(psxed_project::ModelResource {
-            model_path: "assets/models/obsidian_warden/obsidian_warden.psxmdl".to_string(),
-            source_path: None,
-            texture_path: Some(
-                "assets/models/obsidian_warden/obsidian_warden_128x128_8bpp.psxt".to_string(),
-            ),
-            skeleton: Some(skeleton),
-            world_height: 1024,
-            collision_radius: default_model_collision_radius_for_height(1024),
-            scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
-            default_visual_yaw_q12: 0,
-            attachments: Vec::new(),
-        }),
-    );
-    let legacy_set = project.add_resource(
-        "Obsidian Warden Enemy Set",
-        ResourceData::AnimationSet(psxed_project::AnimationSetResource {
-            skeleton: Some(skeleton),
-            ..psxed_project::AnimationSetResource::default()
-        }),
-    );
-    let mut legacy_character = psxed_project::CharacterResource::defaults();
-    legacy_character.model = Some(legacy_model);
-    legacy_character.animation_set = Some(legacy_set);
-    project.add_resource(
-        "Obsidian Warden Enemy",
-        ResourceData::Character(legacy_character),
-    );
-
-    let legacy_asset_dir = dir.join(LEGACY_OBSIDIAN_WARDEN_ASSET_DIR);
-    std::fs::create_dir_all(&legacy_asset_dir).unwrap();
-    std::fs::write(legacy_asset_dir.join("obsidian_warden.psxmdl"), b"old").unwrap();
-    project.save_to_path(dir.join("project.ron")).unwrap();
-
-    let workspace = EditorWorkspace::open_directory(&dir).unwrap();
-
-    assert!(!workspace.is_dirty());
-    assert!(!workspace.project().resources.iter().any(|resource| {
-        resource.name.contains("Obsidian Warden") || legacy_obsidian_warden_resource(resource)
-    }));
-    assert!(project_has_resource_name(
-        workspace.project(),
-        "Rust Mantis Enemy",
-        |data| matches!(data, ResourceData::Character(_))
-    ));
-    assert!(!legacy_asset_dir.exists());
-    assert!(dir
-        .join("assets/animations/aletha_delivered/aletha_idle.psxanim")
-        .is_file());
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2344,7 +2128,7 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
         .faces
         .iter()
         .all(|face| face.material == Some(material)));
-    workspace.hollow_selected_brush(16);
+    assert!(workspace.csg_hollow_selected());
     assert_eq!(
         workspace.project().active_scene().brushes.len(),
         original_brushes + 6
@@ -2694,7 +2478,8 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     workspace.update_brush_drag_2d([2048.0, 2048.0]);
     workspace.commit_brush_drag();
     let solid = workspace.selected_brush.expect("new solid selected");
-    workspace.hollow_selected_brush(64);
+    workspace.snap_units = 64;
+    assert!(workspace.csg_hollow_selected());
     assert_eq!(workspace.bsp_authoring_root(), Some(root));
     assert_eq!(workspace.project().active_scene().brushes.len(), 6);
     assert!(workspace.project().active_scene().brushes[solid..]
@@ -2737,16 +2522,6 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
             .translation,
         [192.0, 257.0, 192.0]
     );
-    workspace.save().expect("save before rejected portal");
-    let before_nodes = workspace.project().active_scene().nodes().len();
-    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Portal)));
-    assert!(!workspace.place_bsp_from_top([1024.0, 1024.0]));
-    assert_eq!(
-        workspace.project().active_scene().nodes().len(),
-        before_nodes
-    );
-    assert!(!workspace.is_dirty(), "rejected BSP portal must not dirty");
-
     // Place the normal default Logic node, then perform the exact kind change
     // exposed by its inspector before binding one hollowed wall as its model.
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
@@ -2936,8 +2711,7 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
     assert!(
         material_paths.starts_with(&[
             "assets/textures/courtyard_cobbles.psxt",
-            "assets/textures/courtyard_brick.psxt",
-            "assets/ui/health_bar_clean_slim.psxt"
+            "assets/textures/courtyard_brick.psxt"
         ]),
         "the courtyard's authored material ordering must remain stable"
     );
@@ -2951,7 +2725,6 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
     for relative in [
         "assets/textures/courtyard_cobbles.psxt",
         "assets/textures/courtyard_brick.psxt",
-        "assets/ui/health_bar_clean_slim.psxt",
     ] {
         assert_eq!(
             std::fs::read(target.join(relative)).unwrap(),
@@ -3378,10 +3151,6 @@ fn viewport_hits_rectangles_and_circles() {
     let circle = ViewportHit::circle(NodeId::ROOT, "Circle", [2.0, 2.0], 0.5);
     assert!(circle.contains([2.25, 2.25]));
     assert!(!circle.contains([2.6, 2.0]));
-
-    let segment = ViewportHit::segment(NodeId::ROOT, "Segment", [0.0, 0.0], [2.0, 0.0], 0.25);
-    assert!(segment.contains([1.0, 0.2]));
-    assert!(!segment.contains([1.0, 0.3]));
 }
 
 #[test]
@@ -4431,7 +4200,8 @@ fn souls_slice_project_is_authored_through_production_commands() {
     // component and keeps a live sentinel permanently outside the player's
     // row, exercising the suppression counter deterministically.
     author_box(&mut workspace, brick, [6400, 256, 256], [7168, 1792, 1024]);
-    workspace.hollow_selected_brush(64);
+    workspace.snap_units = 64;
+    assert!(workspace.csg_hollow_selected());
     workspace.replace_brush_selection(lava_brush, None);
     workspace.set_selected_brush_contents(psxed_project::brush::BrushContents::Lava);
     assert_eq!(

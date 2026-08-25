@@ -38,7 +38,7 @@ here; the tape drives the menu). Template: the `profile-demo3-disc-stream`
 target in the `Makefile`, with the project swapped:
 
 ```sh
-make cook-playtest PROJECT=editor/samples/cortex_v1/project.ron  # regenerates engine/examples/editor-playtest/generated/
+make cook-playtest PROJECT=editor/projects/default/project.ron  # regenerates engine/examples/editor-playtest/generated/
 make build-editor-playtest                                  # MIPS guest exe (picks up uncommitted engine changes)
 cd tools/mkisopsx && cargo run --release -- \
   --exe ../../build/examples/mipsel-sony-psx/release/editor-playtest.exe \

@@ -240,9 +240,6 @@ impl EditorWorkspace {
                     &attachment_socket_names,
                 );
             }
-            ResourceData::Prefab { .. } => {
-                ui.weak("Legacy prefab resource; reopen the project to remove this row");
-            }
             ResourceData::Mesh { source_path }
             | ResourceData::Scene { source_path }
             | ResourceData::Script { source_path }
@@ -836,108 +833,6 @@ impl EditorWorkspace {
         self.texture_thumbs.get(&key)
     }
 
-    pub(crate) fn refresh_prefab_library(&mut self) -> std::io::Result<usize> {
-        let entries = load_prefab_library()?;
-        let count = entries.len();
-        if self
-            .selection
-            .selected_prefab
-            .as_ref()
-            .is_some_and(|selected| !entries.iter().any(|entry| entry.path == *selected))
-        {
-            self.selection.selected_prefab = None;
-        }
-        self.prefab_library = entries;
-        Ok(count)
-    }
-
-    pub(crate) fn draw_prefab_inspector(&mut self, ui: &mut egui::Ui, path: &Path) {
-        let Some(entry) = self
-            .prefab_library
-            .iter()
-            .find(|entry| entry.path == path)
-            .cloned()
-        else {
-            ui.weak("Prefab is no longer in the shared library");
-            if ui.button("Refresh Library").clicked() {
-                self.status = match self.refresh_prefab_library() {
-                    Ok(count) => format!("Refreshed shared prefab library - {count} pieces"),
-                    Err(error) => format!("Could not refresh prefab library: {error}"),
-                };
-            }
-            return;
-        };
-
-        inspector_identity_header(
-            ui,
-            icons::LAYERS,
-            Color32::from_rgb(122, 152, 198),
-            &entry.name,
-            "Shared Prefab",
-            "library",
-        );
-        ui.label(
-            RichText::new("Editor library - available to every project")
-                .small()
-                .color(STUDIO_TEXT_WEAK),
-        );
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    entry.prefab.is_some(),
-                    egui::Button::new(icons::label(icons::LAYERS, "Stamp into Section")),
-                )
-                .on_disabled_hover_text("Fix the prefab file before stamping it")
-                .clicked()
-            {
-                self.stamp_prefab(&entry.path);
-            }
-            if ui.button("Refresh").clicked() {
-                self.status = match self.refresh_prefab_library() {
-                    Ok(count) => format!("Refreshed shared prefab library - {count} pieces"),
-                    Err(error) => format!("Could not refresh prefab library: {error}"),
-                };
-            }
-        });
-        ui.separator();
-
-        if let Some(prefab) = &entry.prefab {
-            draw_prefab_plan(ui, prefab);
-            ui.label(format!(
-                "{}x{} cells - {} floor(s) - sector {}",
-                prefab.width,
-                prefab.height,
-                prefab.floors.len(),
-                prefab.sector_size
-            ));
-            ui.label(format!(
-                "{} cells - {} lights - {} materials",
-                prefab
-                    .floors
-                    .iter()
-                    .map(|floor| floor.cells.len())
-                    .sum::<usize>(),
-                prefab.lights.len(),
-                prefab.materials.len()
-            ));
-        } else if let Some(error) = &entry.load_error {
-            ui.colored_label(
-                Color32::from_rgb(210, 120, 110),
-                format!("Cannot read prefab: {error}"),
-            );
-        }
-        egui::CollapsingHeader::new(icons::label(icons::FILE, "Shared Source"))
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.monospace(entry.path.display().to_string());
-                ui.label(
-                    RichText::new("Rename or delete affects every project.")
-                        .small()
-                        .color(STUDIO_TEXT_WEAK),
-                );
-            });
-    }
-
     pub(crate) fn draw_resources_tab(&mut self, ui: &mut egui::Ui) {
         let tab_height = ui.available_height().max(1.0);
         ui.horizontal(|ui| {
@@ -951,10 +846,8 @@ impl EditorWorkspace {
                     ui.set_min_height((tab_height - 14.0).max(1.0));
                     panel_heading(ui, icons::SCAN, "Filter");
                     ui.add_space(2.0);
-                    // Ten fixed rows in a panel only as tall as the window:
-                    // on a short window the tail (Prefab, Mesh, Other) was
-                    // clipped away with no way to reach it. The heading stays
-                    // pinned above the scrolled region.
+                    // Keep the heading pinned while categories scroll on a
+                    // short editor window.
                     egui::ScrollArea::vertical()
                         .auto_shrink([false; 2])
                         .show(ui, |ui| {
@@ -963,9 +856,7 @@ impl EditorWorkspace {
                                 ResourceFilter::All,
                                 icons::label(ResourceFilter::All.icon(), "All"),
                             );
-                            for (filter, count) in
-                                resource_filter_counts(&self.project, self.prefab_library.len())
-                            {
+                            for (filter, count) in resource_filter_counts(&self.project) {
                                 ui.selectable_value(
                                     &mut self.resource_filter,
                                     filter,
@@ -990,64 +881,16 @@ impl EditorWorkspace {
                         .hint_text("Filter resources")
                         .desired_width(search_width),
                 );
-                #[derive(Clone, Copy)]
-                enum BrowserItem {
-                    Resource(ResourceId),
-                    Prefab(usize),
-                }
-
                 let mut clicked = None;
-                let mut clicked_prefab: Option<(PathBuf, bool)> = None;
                 let search = self.resource_search.to_ascii_lowercase();
-                let visible_resource_order: Vec<ResourceId> =
-                    if matches!(self.resource_filter, ResourceFilter::Prefab) {
-                        Vec::new()
-                    } else {
-                        self.project
-                            .resources
-                            .iter()
-                            .filter(|resource| {
-                                !matches!(resource.data, ResourceData::Prefab { .. })
-                                    && resource_matches_filter(
-                                        resource,
-                                        self.resource_filter,
-                                        search.as_str(),
-                                    )
-                            })
-                            .map(|resource| resource.id)
-                            .collect()
-                    };
-                let visible_prefab_order: Vec<usize> = if matches!(
-                    self.resource_filter,
-                    ResourceFilter::All | ResourceFilter::Prefab
-                ) {
-                    self.prefab_library
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, entry)| {
-                            search.is_empty()
-                                || entry.name.to_ascii_lowercase().contains(search.as_str())
-                                || entry
-                                    .path
-                                    .to_string_lossy()
-                                    .to_ascii_lowercase()
-                                    .contains(search.as_str())
-                        })
-                        .map(|(index, _)| index)
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let visible_items: Vec<BrowserItem> = visible_resource_order
+                let visible_items: Vec<ResourceId> = self
+                    .project
+                    .resources
                     .iter()
-                    .copied()
-                    .map(BrowserItem::Resource)
-                    .chain(
-                        visible_prefab_order
-                            .iter()
-                            .copied()
-                            .map(BrowserItem::Prefab),
-                    )
+                    .filter(|resource| {
+                        resource_matches_filter(resource, self.resource_filter, search.as_str())
+                    })
+                    .map(|resource| resource.id)
                     .collect();
                 let cards_height = ui.available_height().max(1.0);
                 let card_spacing = ui.spacing().item_spacing;
@@ -1067,7 +910,7 @@ impl EditorWorkspace {
                             section_frame().show(ui, |ui| {
                                 ui.set_width((pane_width - 20.0).max(1.0));
                                 ui.label(
-                                    RichText::new("No matching resources or prefabs")
+                                    RichText::new("No matching resources")
                                         .strong()
                                         .color(STUDIO_TEXT),
                                 );
@@ -1086,42 +929,23 @@ impl EditorWorkspace {
                             .spacing(card_spacing)
                             .show(ui, |ui| {
                                 let mut column = 0usize;
-                                for item in &visible_items {
-                                    match *item {
-                                        BrowserItem::Resource(id) => {
-                                            let Some(resource) = self.project.resource(id) else {
-                                                continue;
-                                            };
-                                            let thumb = self.texture_thumb_id(resource);
-                                            let response = draw_resource_card(
-                                                ui,
-                                                &self.project,
-                                                resource,
-                                                self.resource_is_selected(resource.id),
-                                                thumb,
-                                            );
-                                            if response.clicked() {
-                                                clicked = Some(ResourceClick {
-                                                    id: resource.id,
-                                                    modifiers: ui.input(|input| input.modifiers),
-                                                });
-                                            }
-                                        }
-                                        BrowserItem::Prefab(index) => {
-                                            let entry = &self.prefab_library[index];
-                                            let response = draw_prefab_library_card(
-                                                ui,
-                                                entry,
-                                                self.selection.selected_prefab.as_deref()
-                                                    == Some(entry.path.as_path()),
-                                            );
-                                            if response.clicked() {
-                                                clicked_prefab = Some((
-                                                    entry.path.clone(),
-                                                    response.double_clicked(),
-                                                ));
-                                            }
-                                        }
+                                for &id in &visible_items {
+                                    let Some(resource) = self.project.resource(id) else {
+                                        continue;
+                                    };
+                                    let thumb = self.texture_thumb_id(resource);
+                                    let response = draw_resource_card(
+                                        ui,
+                                        &self.project,
+                                        resource,
+                                        self.resource_is_selected(resource.id),
+                                        thumb,
+                                    );
+                                    if response.clicked() {
+                                        clicked = Some(ResourceClick {
+                                            id: resource.id,
+                                            modifiers: ui.input(|input| input.modifiers),
+                                        });
                                     }
                                     column += 1;
                                     if column == columns {
@@ -1131,12 +955,6 @@ impl EditorWorkspace {
                                 }
                             });
                     });
-                if let Some((path, stamp)) = clicked_prefab {
-                    self.replace_prefab_selection(path.clone());
-                    if stamp {
-                        self.stamp_prefab(&path);
-                    }
-                }
                 if let Some(click) = clicked {
                     // Sims-style: with a face selected, clicking a
                     // Material card retargets the selected face set's
@@ -1183,7 +1001,7 @@ impl EditorWorkspace {
                         self.apply_resource_selection_modifiers(
                             id,
                             click.modifiers,
-                            &visible_resource_order,
+                            &visible_items,
                         );
                     }
                 }
@@ -1268,15 +1086,4 @@ fn material_thumbnail_signature(project: &ProjectDocument, id: ResourceId) -> St
     let mut signature = String::new();
     append(project, id, &mut Vec::new(), &mut signature);
     signature
-}
-
-/// Paint a prefab's base floor as a small top-down plan: filled cells, walls on
-/// the edges that carry them, and sockets picked out in green. Enough to tell
-/// two pieces apart in the browser without opening either.
-fn draw_prefab_plan(ui: &mut egui::Ui, prefab: &psxed_project::Prefab) {
-    let size = ui.available_width().min(180.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(24, 24, 30));
-    paint_prefab_plan(&painter, rect, prefab);
 }

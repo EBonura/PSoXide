@@ -1,29 +1,22 @@
-//! Editor 3D viewport -- Phase 1 sector renderer.
+//! Editor 3D viewport for BSP-authored projects.
 //!
-//! Walks the editor's active Room and feeds the editor-owned
-//! [`HwRenderer`](psx_gpu_render::HwRenderer) the same way runtime
-//! PS1 code does:
-//!
-//! 1. Configure the GTE for the editor camera (RT / TR / OFX / OFY / H).
-//! 2. For every populated sector with a floor, project the four
-//!    corners through the host GTE shim ([`psx_gte::scene::project_vertex`]).
-//! 3. Emit two `TriFlat` packets per floor, coloured from the
-//!    sector's material base colour.
-//! 4. Insert each packet into an `OrderingTable` keyed on average
-//!    depth.
-//! 5. Walk the OT via `iter_packets`, build a `GpuCmdLogEntry` log,
-//!    hand it to `psx-gpu-render::HwRenderer::render_frame`.
+//! The preview compiles the authored CSG brushes, renders the resulting BSP
+//! surfaces through the PSX-style ordering-table path, and then draws the
+//! project's models, lights, particles, sky, and editor overlays. The camera,
+//! projection, packet limits, and material handling intentionally mirror the
+//! playtest renderer so the editor is a useful approximation of console output.
 //!
 //! Scene geometry stays on the PSX-style path. Editor-only
 //! affordances such as bounds, selection, and paint previews are
 //! returned as host-drawn overlay lines so they can use fractional UI
 //! strokes without PSX integer-pixel limitations.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use emulator_core::gpu::GpuCmdLogEntry;
+use psx_engine::{PrimitivePacketArena, PrimitivePacketScratch, PRIMITIVE_PACKET_SLOT_WORDS};
 use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::QuadFlat;
@@ -35,45 +28,43 @@ use psx_gpu::prim::TriTexturedGouraud;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene as gte_scene;
 
-use psxed_project::floor_view;
-use psxed_project::portal_rooms::{
-    plan_portal_rooms, portal_seam_edges_for_edge, portal_seam_edges_for_node, PortalEdge,
-    PortalRoomConfig,
-};
+use psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL;
 use psxed_project::{
-    spatial, Corner, GridDirection, GridSector, GridSplit, GridUvTransform, NodeId, NodeKind,
-    ProjectDocument, ResourceData, ResourceId, Scene, SceneNode, Transform3, WallCorner, WorldGrid,
+    NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, Scene, SceneNode, SkyMode,
+    SkyVisibility, Transform3,
 };
 
 use crate::editor_textures::{EditorTextures, MaterialSlot};
-use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
+use psxed_ui::ViewportCameraState;
 
 mod backdrop;
+mod bsp_support;
 mod camera;
 mod overlays;
 mod particles;
-mod portals;
 mod primitives;
-mod room_geometry;
-mod visible_rooms;
 
 use backdrop::*;
+use bsp_support::*;
 use camera::*;
 use overlays::*;
 use particles::*;
-use portals::*;
 use primitives::*;
-use room_geometry::*;
-use visible_rooms::*;
 
 /// Maximum sectors we'll attempt to render in one preview pass.
 /// 64×64 grid would already be enormous for PSX (~16 MiB cooked); a
 /// 4096-cap caps the per-frame primitive count at a comfortable
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
-const EDITOR_PREVIEW_PORTAL_DEPTH: usize = 3;
-const EDITOR_PREVIEW_MAX_ROOMS: usize = 16;
 const SKY_QUAD_CAP: usize = psxed_project::SKY_CYCLORAMA_QUAD_MAX;
+const PROJECTED_SKY_PACKET_WORDS: usize =
+    if psx_bsp::sky::VIEW_RAY_SKY_PACKET_WORDS > psx_bsp::sky::VIEW_RAY_CUBE_SKY_PACKET_WORDS {
+        psx_bsp::sky::VIEW_RAY_SKY_PACKET_WORDS
+    } else {
+        psx_bsp::sky::VIEW_RAY_CUBE_SKY_PACKET_WORDS
+    };
+const PROJECTED_SKY_PACKET_SLOTS: usize =
+    PROJECTED_SKY_PACKET_WORDS.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
 const FAR_VISTA_QUAD_CAP: usize = 16;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
 /// editor preview exercises the same overflow behavior.
@@ -128,44 +119,8 @@ const PSX_VERTEX_MAX: i16 = 1023;
 const PSX_TRI_MAX_DX: i32 = 1023;
 const PSX_TRI_MAX_DY: i32 = 511;
 const MAX_PREVIEW_HW_SPLIT_DEPTH: u8 = 5;
-const GRID_TILE_UV: u8 = 64;
-const PREVIEW_FLOOR_UVS: [(u8, u8); 4] = [
-    (0, 0),
-    (GRID_TILE_UV, 0),
-    (GRID_TILE_UV, GRID_TILE_UV),
-    (0, GRID_TILE_UV),
-];
-const PREVIEW_WALL_UVS: [(u8, u8); 4] = [
-    (0, GRID_TILE_UV),
-    (GRID_TILE_UV, GRID_TILE_UV),
-    (GRID_TILE_UV, 0),
-    (0, 0),
-];
-const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psxed_project::BOX_PROP_FACE_COUNT] = [
-    [4, 5, 1, 0],
-    [5, 6, 2, 1],
-    [6, 7, 3, 2],
-    [7, 4, 0, 3],
-    [7, 6, 5, 4],
-    [0, 1, 2, 3],
-];
-const BOX_PROP_EDGE_VERTEX_INDICES: [(usize, usize); 12] = [
-    (0, 1),
-    (1, 2),
-    (2, 3),
-    (3, 0),
-    (4, 5),
-    (5, 6),
-    (6, 7),
-    (7, 4),
-    (0, 4),
-    (1, 5),
-    (2, 6),
-    (3, 7),
-];
 const EDITOR_PREVIEW_HOVER_STROKE_WIDTH: f32 = 1.5;
 const EDITOR_PREVIEW_SELECTED_STROKE_WIDTH: f32 = 3.0;
-const EDITOR_PREVIEW_PAINT_STROKE_WIDTH: f32 = 2.0;
 
 /// Per-frame scratch -- primitives **and** OT must live in the same
 /// memory region. `OrderingTable` stores 24-bit chain pointers (the
@@ -184,6 +139,7 @@ const EDITOR_PREVIEW_PAINT_STROKE_WIDTH: f32 = 2.0;
 #[repr(C, align(16777216))]
 struct PreviewScratch {
     ot: OrderingTable<OT_DEPTH>,
+    projected_sky_packets: PrimitivePacketScratch<PROJECTED_SKY_PACKET_SLOTS>,
     sky_quads: [QuadGouraud; SKY_QUAD_CAP],
     far_vista_quads: [QuadFlat; FAR_VISTA_QUAD_CAP],
     tris: [TriGouraud; TRI_CAP],
@@ -267,6 +223,7 @@ fn new_preview_scratch() -> Box<PreviewScratch> {
     // 24-bit OT links from the OT's address window.
     unsafe {
         std::ptr::addr_of_mut!((*ptr).ot).write(OrderingTable::new());
+        std::ptr::addr_of_mut!((*ptr).projected_sky_packets).write(PrimitivePacketScratch::ZERO);
         std::ptr::addr_of_mut!((*ptr).sky_quads).write([EMPTY_SKY_QUAD; SKY_QUAD_CAP]);
         std::ptr::addr_of_mut!((*ptr).far_vista_quads)
             .write([EMPTY_FAR_VISTA_QUAD; FAR_VISTA_QUAD_CAP]);
@@ -289,6 +246,7 @@ fn new_preview_scratch() -> Box<PreviewScratch> {
         std::ptr::addr_of_mut!((*ptr).sky_used).write(0);
         std::ptr::addr_of_mut!((*ptr).far_vista_used).write(0);
         std::ptr::addr_of_mut!((*ptr).tex_used).write(0);
+        std::ptr::addr_of_mut!((*ptr).model_tex_used).write(0);
         std::ptr::addr_of_mut!((*ptr).particle_used).write(0);
         std::ptr::addr_of_mut!((*ptr).overlay_lines).write(Vec::new());
         std::ptr::addr_of_mut!((*ptr).clear_packet).write([0; 4]);
@@ -353,34 +311,20 @@ pub(crate) fn append_bsp_leak_path_overlay(
     );
 }
 
-/// Build a fresh preview frame rendering the active editor room window
-/// from `camera`'s orbit angles.
+/// Build a fresh BSP preview frame from `camera`'s orbit angles.
 ///
-/// BSP brushes are world-space geometry and do not require a legacy Room.
 /// Even an empty scene emits its clear/sky frame so a project switch cannot
 /// leave the persistent preview target showing pixels from the old scene.
 #[allow(clippy::too_many_arguments)]
 pub fn build_phase1_frame(
     project: &ProjectDocument,
     camera: ViewportCameraState,
-    preview_fog: bool,
-    preview_backface_wireframe: bool,
     preview_bounds: bool,
-    show_grid: bool,
-    show_portals: bool,
     show_lights: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
-    active_room: Option<psxed_project::NodeId>,
-    active_floor: usize,
     selected: psxed_project::NodeId,
     character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
-    hovered_primitive: Option<psxed_ui::Selection>,
-    selected_primitive: Option<psxed_ui::Selection>,
-    selected_primitives: &[psxed_ui::Selection],
-    validation_issue_primitives: &[psxed_ui::Selection],
     selected_bounds: Option<([f32; 3], [f32; 3])>,
-    selected_sector_faces: &[psxed_ui::FaceRef],
-    paint_target_preview: Option<psxed_ui::PaintTargetPreview>,
     entity_bounds: &[psxed_ui::EntityBounds],
     hovered_entity_node: Option<psxed_project::NodeId>,
     textures: &EditorTextures,
@@ -389,24 +333,12 @@ pub fn build_phase1_frame(
     build_phase1_frame_reusing(
         project,
         camera,
-        preview_fog,
-        preview_backface_wireframe,
         preview_bounds,
-        show_grid,
-        show_portals,
         show_lights,
         hidden_scene_nodes,
-        active_room,
-        active_floor,
         selected,
         character_motion,
-        hovered_primitive,
-        selected_primitive,
-        selected_primitives,
-        validation_issue_primitives,
         selected_bounds,
-        selected_sector_faces,
-        paint_target_preview,
         entity_bounds,
         hovered_entity_node,
         textures,
@@ -422,47 +354,19 @@ pub fn build_phase1_frame(
 pub fn build_phase1_frame_reusing(
     project: &ProjectDocument,
     camera: ViewportCameraState,
-    preview_fog: bool,
-    preview_backface_wireframe: bool,
     preview_bounds: bool,
-    show_grid: bool,
-    show_portals: bool,
     show_lights: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
-    active_room: Option<psxed_project::NodeId>,
-    active_floor: usize,
     selected: psxed_project::NodeId,
     character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
-    hovered_primitive: Option<psxed_ui::Selection>,
-    selected_primitive: Option<psxed_ui::Selection>,
-    selected_primitives: &[psxed_ui::Selection],
-    validation_issue_primitives: &[psxed_ui::Selection],
     selected_bounds: Option<([f32; 3], [f32; 3])>,
-    selected_sector_faces: &[psxed_ui::FaceRef],
-    paint_target_preview: Option<psxed_ui::PaintTargetPreview>,
     entity_bounds: &[psxed_ui::EntityBounds],
     hovered_entity_node: Option<psxed_project::NodeId>,
     textures: &EditorTextures,
     assets: &crate::editor_assets::EditorAssets,
     mut output: EditorPreviewFrame,
 ) -> EditorPreviewFrame {
-    let visible_rooms = preview_room_grids(
-        project,
-        hidden_scene_nodes,
-        active_room,
-        active_floor,
-        selected,
-        selected_primitive,
-        selected_primitives,
-        validation_issue_primitives,
-    );
-    let first_room = visible_rooms.first();
-    let preview_context_node = first_room
-        .map(|entry| entry.room)
-        .unwrap_or_else(|| project.active_scene().root);
-    let preview_context_fog = first_room
-        .map(|entry| (entry.grid.fog_enabled && preview_fog, entry.grid.fog_color))
-        .unwrap_or((false, [0; 3]));
+    let preview_context_node = project.active_scene().root;
 
     let mut scratch = preview_scratch()
         .lock()
@@ -481,14 +385,29 @@ pub fn build_phase1_frame_reusing(
         .active_scene()
         .world_sky_for_node(preview_context_node)
         .unwrap_or_default()
-        .resolved_for_room(preview_context_fog.0, preview_context_fog.1);
+        .resolved_for_room(false, [0; 3]);
+    let preview_tick = preview_elapsed_vblanks();
+    let visible_sky_aperture = visible_sky_aperture(project, world_camera, hidden_scene_nodes);
+    let sky_visible = resolved_sky.visibility == SkyVisibility::Always || visible_sky_aperture;
     push_clear(&mut scratch, resolved_sky.lower_color);
-    push_cyclorama(&mut scratch, resolved_sky, world_camera);
+    if sky_visible {
+        match resolved_sky.mode {
+            SkyMode::Panorama => push_cyclorama(&mut scratch, resolved_sky, world_camera),
+            SkyMode::QuakeLayered | SkyMode::Cube => push_projected_scene_sky(
+                &mut scratch,
+                resolved_sky.mode,
+                preview_view_rotation(camera),
+                preview_tick,
+                textures,
+            ),
+            SkyMode::Off => {}
+        }
+    }
     let resolved_far_vista = project
         .active_scene()
         .world_far_vista_for_node(preview_context_node)
         .unwrap_or_default()
-        .resolved_for_room(preview_context_fog.0, preview_context_fog.1);
+        .resolved_for_room(false, [0; 3]);
     push_far_vista_ring(
         &mut scratch,
         camera,
@@ -496,7 +415,6 @@ pub fn build_phase1_frame_reusing(
         resolved_far_vista,
         textures,
     );
-    let preview_tick = preview_elapsed_vblanks();
     // World-space brushes render once, against the camera GTE state
     // installed above (rooms and their local offsets do not apply).
     walk_brushes(
@@ -519,214 +437,13 @@ pub fn build_phase1_frame_reusing(
             &mut scratch,
         );
     }
-    for floor_entry in &visible_rooms {
-        if scratch.geometry_full() {
-            break;
-        }
-        let room_id = floor_entry.room;
-        let grid = floor_entry.grid;
-        let y_offset = floor_entry.y_offset;
-        let floor_index = floor_entry.floor_index;
-        let fog = PreviewFog::from_grid(grid, preview_fog);
-        walk_room(
-            project,
-            room_id,
-            grid,
-            y_offset,
-            textures,
-            world_camera,
-            fog,
-            preview_backface_wireframe,
-            hidden_scene_nodes,
-            &mut scratch,
-        );
-        walk_image_props(
-            project,
-            room_id,
-            grid,
-            floor_index,
-            y_offset,
-            textures,
-            world_camera,
-            hidden_scene_nodes,
-            selected,
-            hovered_entity_node,
-            preview_bounds,
-            &mut scratch,
-        );
-        walk_box_props(
-            project,
-            room_id,
-            grid,
-            floor_index,
-            y_offset,
-            textures,
-            world_camera,
-            fog,
-            hidden_scene_nodes,
-            selected,
-            hovered_entity_node,
-            preview_bounds,
-            &mut scratch,
-        );
-        walk_cylinder_props(
-            project,
-            room_id,
-            grid,
-            floor_index,
-            y_offset,
-            textures,
-            world_camera,
-            fog,
-            hidden_scene_nodes,
-            selected,
-            hovered_entity_node,
-            preview_bounds,
-            &mut scratch,
-        );
-        walk_arch_props(
-            project,
-            room_id,
-            grid,
-            floor_index,
-            y_offset,
-            textures,
-            world_camera,
-            fog,
-            hidden_scene_nodes,
-            selected,
-            hovered_entity_node,
-            preview_bounds,
-            &mut scratch,
-        );
-        walk_water_volumes(
-            project,
-            room_id,
-            grid,
-            floor_index,
-            y_offset,
-            textures,
-            world_camera,
-            fog,
-            hidden_scene_nodes,
-            selected,
-            preview_tick,
-            &mut scratch,
-        );
-        if show_grid {
-            push_streaming_chunk_boundaries(project, room_id, grid, &mut scratch);
-        }
-        walk_entities(
-            project,
-            room_id,
-            grid,
-            floor_index,
-            y_offset,
-            textures,
-            hidden_scene_nodes,
-            selected,
-            preview_tick,
-            &mut scratch,
-        );
-        if show_lights {
-            walk_light_gizmos(
-                project,
-                world_camera,
-                room_id,
-                grid,
-                floor_index,
-                y_offset,
-                hidden_scene_nodes,
-                selected,
-                hovered_entity_node,
-                &mut scratch,
-            );
-        }
-        if show_portals {
-            walk_portal_seams(
-                project,
-                room_id,
-                grid,
-                hidden_scene_nodes,
-                selected,
-                hovered_entity_node,
-                &mut scratch,
-            );
-        }
-
-        // Selection / hover / paint overlays drawn before models --
-        // they project through the camera GTE matrix that
-        // `setup_gte_for_camera` installed. Models render after,
-        // overwriting per-joint GTE state. We re-install the
-        // camera state after each room before drawing more editor
-        // geometry.
-        //
-        // Only the active floor draws edit overlays: selection / hover /
-        // paint all target the floor being authored, and the overlay
-        // helpers project against floor-local face heights, so drawing
-        // them on a stacked floor (offset in Y) would detach the outline
-        // from its geometry. For non-floored rooms `active` is false on
-        // the single base entry, so gate on "active OR no offset".
-        let edit_overlays = floor_entry.active || y_offset == 0;
-        if edit_overlays {
-            if selected_primitives.is_empty() {
-                if let Some(selection) =
-                    selected_primitive.filter(|selection| selection.room() == room_id)
-                {
-                    push_selection_outline(grid, selection, OutlineRole::Selected, &mut scratch);
-                }
-            } else {
-                for selection in selected_primitives {
-                    if selection.room() == room_id {
-                        push_selection_outline(
-                            grid,
-                            *selection,
-                            OutlineRole::Selected,
-                            &mut scratch,
-                        );
-                    }
-                }
-            }
-            for face in selected_sector_faces {
-                if face.room == room_id {
-                    push_face_outline(grid, *face, FACE_OUTLINE_SELECTED, &mut scratch);
-                }
-            }
-            if let Some(selection) = hovered_primitive {
-                if selection.room() == room_id
-                    && Some(selection) != selected_primitive
-                    && !selected_primitives.contains(&selection)
-                {
-                    push_selection_outline(grid, selection, OutlineRole::Hover, &mut scratch);
-                }
-            }
-            if room_id == preview_context_node {
-                if let Some(preview) = paint_target_preview {
-                    push_paint_preview(grid, preview, &mut scratch);
-                }
-            }
-        }
-
-        walk_model_instances(
-            project,
-            room_id,
-            grid,
-            floor_index,
-            y_offset,
-            textures,
-            assets,
-            selected,
-            &world_camera,
-            fog,
-            hidden_scene_nodes,
-            preview_tick,
-            character_motion,
-            &mut scratch,
-        );
-
-        let _ = setup_gte_for_camera(camera);
-    }
-
+    walk_bsp_particle_emitters(
+        project,
+        hidden_scene_nodes,
+        textures.particle_slot(),
+        preview_tick,
+        &mut scratch,
+    );
     // World-space (BSP) entity models: prime the camera GTE first (the
     // room loop leaves per-room state), draw, then fall through to the
     // shared re-prime below for the bounds pass.
@@ -755,20 +472,6 @@ pub fn build_phase1_frame_reusing(
             push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
         }
     }
-    for selection in validation_issue_primitives {
-        for floor_entry in &visible_rooms {
-            if selection.room() == floor_entry.room {
-                push_selection_outline(
-                    floor_entry.grid,
-                    *selection,
-                    OutlineRole::Error,
-                    &mut scratch,
-                );
-                break;
-            }
-        }
-    }
-
     // SAFETY: the mutex guard keeps the preview packet arenas alive
     // while the OT is walked. `PreviewScratch` is 16 MB-aligned so the
     // OT's 24-bit packet links reconstruct addresses inside the same
@@ -883,36 +586,6 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
     }
 }
 
-fn preview_static_model_reference(
-    scene: &Scene,
-    node: &SceneNode,
-) -> Option<PreviewModelReference> {
-    // Match the playtest cooker: a player-controlled Entity's
-    // ModelRenderer is consumed by the CharacterController path,
-    // not emitted as a second static model at the same transform.
-    if matches!(node.kind, NodeKind::Entity) && preview_player_reference(scene, node).is_some() {
-        return None;
-    }
-    preview_model_reference(scene, node)
-}
-
-#[derive(Clone, Copy)]
-struct PreviewPlayerReference {
-    character: Option<ResourceId>,
-    model_override: Option<ResourceId>,
-    material_override: Option<ResourceId>,
-    clip_override: Option<u16>,
-    controller_node: Option<NodeId>,
-    renderer_node: Option<NodeId>,
-    animator_node: Option<NodeId>,
-    autoplay: bool,
-    /// Frame the animator is parked on when `autoplay` is false.
-    pose_frame: u16,
-    visual_offset: [i16; 3],
-    visual_yaw_q12: u16,
-    visual_scale_q8: u16,
-}
-
 fn valid_preview_clip(requested: u16, clip_count: usize) -> Option<u16> {
     if clip_count == 0 {
         None
@@ -923,104 +596,6 @@ fn valid_preview_clip(requested: u16, clip_count: usize) -> Option<u16> {
         // saved local index stale. Keep the model visible on its first valid
         // clip instead of silently dropping the whole entity from the editor.
         Some(0)
-    }
-}
-
-fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPlayerReference> {
-    match &node.kind {
-        NodeKind::SpawnPoint {
-            player: true,
-            character,
-        } => Some(PreviewPlayerReference {
-            character: *character,
-            model_override: None,
-            material_override: None,
-            clip_override: None,
-            controller_node: None,
-            renderer_node: None,
-            animator_node: None,
-            autoplay: true,
-            pose_frame: 0,
-            visual_offset: [0; 3],
-            visual_yaw_q12: 0,
-            visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
-        }),
-        NodeKind::Entity => {
-            let mut controller = None;
-            let mut renderer = None;
-            let mut animator = None;
-            for child in component_children(scene, node) {
-                match &child.kind {
-                    NodeKind::CharacterController {
-                        character,
-                        player: true,
-                        ..
-                    } if controller.is_none() => {
-                        controller = Some((child.id, *character));
-                    }
-                    NodeKind::ModelRenderer {
-                        model,
-                        material,
-                        visual_offset,
-                        visual_scale_q8,
-                    } if renderer.is_none() => {
-                        renderer = Some((
-                            child.id,
-                            *model,
-                            *material,
-                            *visual_offset,
-                            yaw_to_q12(child.transform.rotation_degrees[1]),
-                            *visual_scale_q8,
-                        ));
-                    }
-                    NodeKind::Animator {
-                        clip,
-                        autoplay,
-                        pose_frame,
-                        ..
-                    } if animator.is_none() => {
-                        animator = Some((child.id, *clip, *autoplay, *pose_frame));
-                    }
-                    _ => {}
-                }
-            }
-            controller.map(|(controller_node, character)| {
-                let (
-                    renderer_node,
-                    model_override,
-                    material_override,
-                    visual_offset,
-                    visual_yaw_q12,
-                    visual_scale_q8,
-                ) = renderer
-                    .map(|(node, model, material, offset, yaw, scale)| {
-                        (Some(node), model, material, offset, yaw, scale)
-                    })
-                    .unwrap_or((
-                        None,
-                        None,
-                        None,
-                        [0; 3],
-                        0,
-                        psxed_project::MODEL_SCALE_ONE_Q8,
-                    ));
-                PreviewPlayerReference {
-                    character,
-                    model_override,
-                    material_override,
-                    clip_override: animator.and_then(|(_, clip, _, _)| clip),
-                    controller_node: Some(controller_node),
-                    renderer_node,
-                    animator_node: animator.map(|(node_id, _, _, _)| node_id),
-                    autoplay: animator.is_none_or(|(_, _, autoplay, _)| autoplay),
-                    pose_frame: animator.map_or(0, |(_, _, _, frame)| frame),
-                    visual_offset,
-                    visual_yaw_q12,
-                    visual_scale_q8,
-                }
-            })
-        }
-        _ => None,
     }
 }
 
@@ -1072,297 +647,6 @@ fn brush_group_hidden(
         .is_some_and(|group| scene_node_hidden(scene, hidden_scene_nodes, group))
 }
 
-fn host_renders_as_preview_model(
-    project: &ProjectDocument,
-    scene: &Scene,
-    node: &SceneNode,
-) -> bool {
-    if let Some(reference) = preview_static_model_reference(scene, node) {
-        return project
-            .resource(reference.model_id)
-            .is_some_and(|resource| matches!(&resource.data, ResourceData::Model(_)));
-    }
-    if let Some(reference) = preview_player_reference(scene, node) {
-        let Some(character_id) = resolve_player_spawn_character(project, reference.character)
-        else {
-            return false;
-        };
-        let Some(character_resource) = project.resource(character_id) else {
-            return false;
-        };
-        let ResourceData::Character(character) = &character_resource.data else {
-            return false;
-        };
-        let Some(model_id) = character.model else {
-            return false;
-        };
-        return project
-            .resource(model_id)
-            .is_some_and(|resource| matches!(&resource.data, ResourceData::Model(_)));
-    }
-    false
-}
-
-/// Walk parent links from `node_id` looking for `room_id`.
-/// `true` if `room_id` itself is on the chain. Used to confine
-/// per-room lights to the room they were authored under.
-/// Which floor a node belongs to, for the editor preview. A placed
-/// entity carries its floor on `SceneNode::floor`; child components
-/// (ModelRenderer, etc.) inherit it. Walk the ancestor chain up to the
-/// room and take the max `floor` seen (children default to 0). Mirrors
-/// how the cook binds a node to its floor, so the editor draws each
-/// entity once, on the floor it cooks to.
-fn node_enclosing_floor(scene: &psxed_project::Scene, node_id: psxed_project::NodeId) -> usize {
-    // Single source of truth lives in psxed-project so the render pass
-    // (here) and the selection/pick pass (psxed-ui) resolve a node's
-    // floor identically.
-    psxed_project::floor_view::node_floor(scene, node_id)
-}
-
-fn is_descendant_of_room(
-    scene: &psxed_project::Scene,
-    node_id: psxed_project::NodeId,
-    room_id: psxed_project::NodeId,
-) -> bool {
-    let mut current = Some(node_id);
-    while let Some(id) = current {
-        if id == room_id {
-            return true;
-        }
-        current = scene.node(id).and_then(|n| n.parent);
-    }
-    false
-}
-
-/// Walk every placeable child node and stamp a small screen-space
-/// marker so the user can see where they sit inside the room.
-///
-/// The room geometry uses the GTE-projected world coords; markers
-/// project the same way so they read as "here is this thing in the
-/// world", but the corners are drawn at fixed pixel offsets around
-/// the projected centre -- a billboarded square that doesn't shrink
-/// with distance, the way Godot's editor sprites work.
-fn walk_entities(
-    project: &ProjectDocument,
-    room_id: NodeId,
-    grid: &WorldGrid,
-    floor_index: usize,
-    y_offset: i32,
-    textures: &EditorTextures,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    selected: psxed_project::NodeId,
-    preview_tick: u32,
-    scratch: &mut PreviewScratch,
-) {
-    let scene = project.active_scene();
-    for node in scene.nodes() {
-        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
-            || !is_descendant_of_room(scene, node.id, room_id)
-        {
-            continue;
-        }
-        // One entity, one floor: draw it only on its own floor entry, so
-        // a stacked room doesn't draw every entity once per floor.
-        if node_enclosing_floor(scene, node.id) != floor_index {
-            continue;
-        }
-        // Skip nodes that the model-preview pass renders as real
-        // textured characters/models. Without this guard they'd get
-        // both a marker square and the real model on top of each other.
-        if host_renders_as_preview_model(project, scene, node) {
-            continue;
-        }
-        // Anchor the marker to the floor surface, matching how the real
-        // model renders (`walk_model_instances` uses the floor-anchored
-        // origin) and how the cook places the entity. The raw
-        // `translation.y` is a placement default (e.g. the 2.89-sector
-        // standing height) and would float the marker far above the
-        // floor, disagreeing with the model on top of it. `y_offset`
-        // lifts it to its floor's real elevation in the stacked render.
-        let mut entity_world = floor_anchored_node_room_local_origin(grid, &node.transform);
-        entity_world.y += y_offset;
-        if let NodeKind::ParticleEmitter { settings } = &node.kind {
-            push_particle_emitter_preview(
-                settings,
-                entity_world,
-                textures.particle_slot(),
-                preview_tick,
-                scratch,
-            );
-        }
-        let Some(kind_color) = entity_marker_color(&node.kind) else {
-            continue;
-        };
-        let projected = gte_scene::project_vertex(world_to_view([
-            entity_world.x,
-            entity_world.y,
-            entity_world.z,
-        ]));
-        if projected.sz == 0 {
-            continue;
-        }
-
-        let is_selected = node.id == selected;
-        let half = if is_selected { 9 } else { 6 };
-        let (mut r, mut g, mut b) = kind_color;
-        if is_selected {
-            // Brighten selected markers so they stand out on top of
-            // any colour scheme.
-            r = r.saturating_add(0x40);
-            g = g.saturating_add(0x40);
-            b = b.saturating_add(0x40);
-        }
-
-        let cx = projected.sx;
-        let cy = projected.sy;
-        let p_tl = synth(cx - half, cy - half, projected.sz);
-        let p_tr = synth(cx + half, cy - half, projected.sz);
-        let p_br = synth(cx + half, cy + half, projected.sz);
-        let p_bl = synth(cx - half, cy + half, projected.sz);
-        push_tri(scratch, [p_tl, p_bl, p_tr], (r, g, b));
-        push_tri(scratch, [p_tr, p_bl, p_br], (r, g, b));
-
-        if is_selected {
-            // Outline ring for selected entity: four thin tris
-            // forming an offset square one pixel beyond the marker.
-            let ring = half + 2;
-            let outline = (0xFF, 0xFF, 0xFF);
-            let r_tl = synth(cx - ring, cy - ring, projected.sz);
-            let r_tr = synth(cx + ring, cy - ring, projected.sz);
-            let r_br = synth(cx + ring, cy + ring, projected.sz);
-            let r_bl = synth(cx - ring, cy + ring, projected.sz);
-            push_tri(scratch, [r_tl, p_tl, r_tr], outline);
-            push_tri(scratch, [r_tr, p_tl, p_tr], outline);
-            push_tri(scratch, [r_tr, p_tr, r_br], outline);
-            push_tri(scratch, [r_br, p_tr, p_br], outline);
-            push_tri(scratch, [r_br, p_br, r_bl], outline);
-            push_tri(scratch, [r_bl, p_br, p_bl], outline);
-            push_tri(scratch, [r_bl, p_bl, r_tl], outline);
-            push_tri(scratch, [r_tl, p_bl, p_tl], outline);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_image_props(
-    project: &ProjectDocument,
-    room_id: psxed_project::NodeId,
-    grid: &WorldGrid,
-    floor_index: usize,
-    y_offset: i32,
-    textures: &EditorTextures,
-    camera: psx_engine::WorldCamera,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    selected: NodeId,
-    hovered: Option<NodeId>,
-    preview_bounds: bool,
-    scratch: &mut PreviewScratch,
-) {
-    let scene = project.active_scene();
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
-    for node in scene.nodes() {
-        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
-            || !is_descendant_of_room(scene, node.id, room_id)
-        {
-            continue;
-        }
-        if node_enclosing_floor(scene, node.id) != floor_index {
-            continue;
-        }
-        let NodeKind::ImageProp {
-            material,
-            width,
-            height,
-            cylindrical_billboard,
-            collision_enabled,
-            collision_size,
-        } = &node.kind
-        else {
-            continue;
-        };
-        let Some(material_id) = *material else {
-            continue;
-        };
-        let Some(slot) = textures.slot(material_id) else {
-            continue;
-        };
-        let tint = project
-            .resource(material_id)
-            .and_then(|resource| match &resource.data {
-                ResourceData::Material(material) => Some(material.tint),
-                _ => None,
-            })
-            .unwrap_or([0x80, 0x80, 0x80]);
-        let mut origin = node_room_local_origin(grid, &node.transform);
-        origin.y += y_offset;
-        let verts = image_prop_vertices(
-            origin,
-            *width,
-            *height,
-            node.transform.rotation_degrees,
-            *cylindrical_billboard,
-            camera,
-        );
-        let Some(projected) = camera.project_world_quad(verts) else {
-            continue;
-        };
-        let p = projected.map(preview_projected_from_engine);
-        let u_max = slot.texture_width.saturating_sub(1);
-        let v_max = slot.texture_height.saturating_sub(1);
-        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-        let lit_tint = preview_lit_image_prop_tint(tint, verts, &lights, grid.ambient_color);
-        let material = preview_texture_material(
-            slot,
-            lit_tint,
-            material_blend_mode(project, Some(material_id)),
-        );
-        let _ = push_textured_material_tri(
-            scratch,
-            [p[0], p[1], p[2]],
-            [uvs[0], uvs[1], uvs[2]],
-            [lit_tint; 3],
-            material,
-            room_depth_slot(projected_avg_sz([p[0], p[1], p[2]])),
-        );
-        let _ = push_textured_material_tri(
-            scratch,
-            [p[0], p[2], p[3]],
-            [uvs[0], uvs[2], uvs[3]],
-            [lit_tint; 3],
-            material,
-            room_depth_slot(projected_avg_sz([p[0], p[2], p[3]])),
-        );
-        let is_selected = node.id == selected;
-        let is_hovered = hovered == Some(node.id);
-        if preview_bounds {
-            push_world_quad_wireframe(
-                scratch,
-                verts,
-                entity_bound_style(
-                    psxed_ui::EntityBoundKind::ImageProp,
-                    is_selected,
-                    is_hovered,
-                ),
-            );
-            if *collision_enabled {
-                push_image_prop_collision_wireframe(
-                    scratch,
-                    origin,
-                    *height,
-                    *collision_size,
-                    node.transform.rotation_degrees,
-                    *cylindrical_billboard,
-                    IMAGE_PROP_COLLISION_BOX,
-                );
-            }
-        }
-    }
-}
-
-use psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL;
-
-/// Flat fallback tint for unmaterialed brush faces: neutral greys varied
-/// per face so adjacent faces stay distinguishable.
 fn brush_fallback_color(face: usize) -> (u8, u8, u8) {
     let shade = 0x6c + ((face as u8) % 3) * 0x14;
     (shade, shade, shade)
@@ -1372,29 +656,7 @@ fn brush_fallback_color(face: usize) -> (u8, u8, u8) {
 /// Release bake contract (`PXBSP_AMBIENT_RGB` in the cooked manifest).
 const PXBSP_PREVIEW_AMBIENT: [u8; 3] = [32; 3];
 
-/// Whether any ancestor of `id` is a Section room. World-space (BSP)
-/// passes use this to skip nodes the per-room walkers already own.
-pub(super) fn node_has_section_ancestor(scene: &Scene, id: NodeId) -> bool {
-    let mut current = scene.node(id).and_then(|node| node.parent);
-    while let Some(parent_id) = current {
-        let Some(parent) = scene.node(parent_id) else {
-            return false;
-        };
-        if matches!(parent.kind, NodeKind::Section { .. }) {
-            return true;
-        }
-        current = parent.parent;
-    }
-    false
-}
-
-/// World-space brush solids: each solved face polygon fans into
-/// triangles with paraxial world-aligned UVs. Unlit and fog-free in v1
-/// (brushes are not room-bound). Solved brush polygons retain their authored
-/// outward winding, so normal material sidedness must remain intact: forcing
-/// both sides makes the hidden exterior planes of hollow-room slabs occlude
-/// an interior editing camera.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct PreviewBrushBounds {
     min: [f64; 3],
     max: [f64; 3],
@@ -1638,6 +900,12 @@ fn lit_preview_key(
         for (face_index, face) in brush.faces.iter().enumerate() {
             face.points.hash(&mut hasher);
             face.material.map(|id| id.raw()).hash(&mut hasher);
+            face.material
+                .and_then(|id| project.resource(id))
+                .is_some_and(|resource| {
+                    matches!(&resource.data, ResourceData::Material(material) if material.sky_aperture)
+                })
+                .hash(&mut hasher);
             let shade = face_shade(
                 project,
                 face.material,
@@ -1686,6 +954,13 @@ fn rebuild_lit_surfaces(
                     let surface = &cached.surface;
                     let brush = brushes.get(surface.source_brush)?;
                     let face = brush.faces.get(surface.source_face)?;
+                    if face.material.is_some_and(|material| {
+                        project.resource(material).is_some_and(|resource| {
+                            matches!(&resource.data, ResourceData::Material(material) if material.sky_aperture)
+                        })
+                    }) {
+                        return None;
+                    }
                     let (normal, _) = psxed_project::brush_compile::normalized_plane(surface.plane);
                     let shade = face_shade(
                         project,
@@ -1846,6 +1121,81 @@ fn emit_brush_patch(
     }
 }
 
+fn visible_sky_aperture(
+    project: &ProjectDocument,
+    camera: psx_engine::WorldCamera,
+    hidden_scene_nodes: &HashSet<NodeId>,
+) -> bool {
+    let scene = project.active_scene();
+    with_cached_csg_surfaces(project, hidden_scene_nodes, |surfaces| {
+        surfaces.iter().any(|cached| {
+            if !preview_brush_bounds_visible(camera, cached.bounds) {
+                return false;
+            }
+            let surface = &cached.surface;
+            let Some(face) = scene
+                .brushes
+                .get(surface.source_brush)
+                .and_then(|brush| brush.faces.get(surface.source_face))
+            else {
+                return false;
+            };
+            let aperture = face.material.is_some_and(|material| {
+                project.resource(material).is_some_and(|resource| {
+                    matches!(&resource.data, ResourceData::Material(material) if material.sky_aperture)
+                })
+            });
+            aperture && preview_brush_polygon_visible(camera, &surface.vertices)
+        })
+    })
+}
+
+fn preview_brush_polygon_visible(camera: psx_engine::WorldCamera, vertices: &[[f64; 3]]) -> bool {
+    const PREVIEW_COORD_LIMIT: f64 = 500_000.0;
+    if vertices.len() < 3
+        || vertices.len() > PREVIEW_FACE_VERTEX_CAP
+        || vertices.iter().any(|vertex| {
+            vertex
+                .iter()
+                .any(|coordinate| !coordinate.is_finite() || coordinate.abs() > PREVIEW_COORD_LIMIT)
+        })
+    {
+        return false;
+    }
+    let mut clip_vertices = [EMPTY_PREVIEW_CLIP_VERTEX; PREVIEW_FACE_VERTEX_CAP];
+    for (slot, vertex) in clip_vertices.iter_mut().zip(vertices) {
+        *slot = PreviewClipVertex::new(
+            camera.view_vertex(psx_engine::WorldVertex::new(
+                vertex[0].round() as i32,
+                vertex[1].round() as i32,
+                vertex[2].round() as i32,
+            )),
+            [0.0; 2],
+            (0, 0, 0),
+        );
+    }
+    let clipped = clip_preview_brush_polygon(camera.projection, &clip_vertices[..vertices.len()]);
+    if clipped.as_slice().len() < 3 {
+        return false;
+    }
+    let mut min_x = i16::MAX;
+    let mut max_x = i16::MIN;
+    let mut min_y = i16::MAX;
+    let mut max_y = i16::MIN;
+    for vertex in clipped.as_slice() {
+        let Some((projected, _, _)) = vertex.projected(camera.projection) else {
+            return false;
+        };
+        let x = projected.sx;
+        let y = projected.sy;
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    max_x >= 0 && min_x < SCREEN_W as i16 && max_y >= 0 && min_y < SCREEN_H as i16
+}
+
 fn walk_brushes(
     project: &ProjectDocument,
     textures: &EditorTextures,
@@ -1887,6 +1237,13 @@ fn walk_brushes_with_culling(
                 let Some(face) = brush.faces.get(surface.source_face) else {
                     continue;
                 };
+                if face.material.is_some_and(|material| {
+                    project.resource(material).is_some_and(|resource| {
+                        matches!(&resource.data, ResourceData::Material(material) if material.sky_aperture)
+                    })
+                }) {
+                    continue;
+                }
                 let shade = face_shade(
                     project,
                     face.material,
@@ -1952,765 +1309,6 @@ fn walk_brushes_with_culling(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn walk_box_props(
-    project: &ProjectDocument,
-    room_id: psxed_project::NodeId,
-    grid: &WorldGrid,
-    floor_index: usize,
-    y_offset: i32,
-    textures: &EditorTextures,
-    camera: psx_engine::WorldCamera,
-    fog: PreviewFog,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    selected: NodeId,
-    hovered: Option<NodeId>,
-    preview_bounds: bool,
-    scratch: &mut PreviewScratch,
-) {
-    let scene = project.active_scene();
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
-    for node in scene.nodes() {
-        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
-            || !is_descendant_of_room(scene, node.id, room_id)
-        {
-            continue;
-        }
-        if node_enclosing_floor(scene, node.id) != floor_index {
-            continue;
-        }
-        let NodeKind::BoxProp {
-            materials,
-            uvs: face_uvs,
-            vertices,
-            collision_enabled: _,
-            break_flags: _,
-            erosion,
-        } = &node.kind
-        else {
-            continue;
-        };
-        let mut origin = node_room_local_origin(grid, &node.transform);
-        origin.y += y_offset;
-        let world_vertices = box_prop_vertices(origin, *vertices, node.transform.rotation_degrees);
-        let generated = psxed_project::generate_box_prop_erosion_quads(*vertices, *erosion);
-        let generated_quads: Vec<(usize, [psx_engine::WorldVertex; 4], [[u8; 2]; 4])> = generated
-            .iter()
-            .map(|quad| {
-                (
-                    usize::from(quad.source_face),
-                    box_prop_world_quad(origin, quad.vertices, node.transform.rotation_degrees),
-                    quad.uv_q8,
-                )
-            })
-            .collect();
-        let face_count = if generated_quads.is_empty() {
-            psxed_project::BOX_PROP_FACE_COUNT
-        } else {
-            generated_quads.len()
-        };
-        for rendered_face in 0..face_count {
-            let (face, face_vertices, generated_uvs) = if generated_quads.is_empty() {
-                (
-                    rendered_face,
-                    box_prop_face_vertices(world_vertices, rendered_face),
-                    None,
-                )
-            } else {
-                let (face, vertices, uv_q8) = generated_quads[rendered_face];
-                (face, vertices, Some(uv_q8))
-            };
-            let Some(material_id) = materials[face] else {
-                continue;
-            };
-            let Some(projected) = camera.project_world_quad(face_vertices) else {
-                continue;
-            };
-            let p = projected.map(preview_projected_from_engine);
-            let shade = face_shade(
-                project,
-                Some(material_id),
-                box_prop_fallback_color(face),
-                textures,
-            )
-            // Box props are standalone closed primitives. The
-            // runtime renders them uncullled, and the editor
-            // preview should match that rather than inheriting
-            // one-sided room-face material semantics.
-            .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
-            let face_center = average_world_quad(face_vertices);
-            let depth = face_depth(camera, face_center);
-            let shade = fog.apply_shade(
-                light_face(shade, face_center, &lights, grid.ambient_color),
-                depth,
-            );
-            let uvs = match shade {
-                FaceShade::Textured { slot, .. } => {
-                    let u_max = slot.texture_width.saturating_sub(1);
-                    let v_max = slot.texture_height.saturating_sub(1);
-                    let corners = face_uvs[face].apply_to_quad([
-                        (0, 0),
-                        (u_max, 0),
-                        (u_max, v_max),
-                        (0, v_max),
-                    ]);
-                    generated_uvs
-                        .map(|uvs| uvs.map(|uv| box_prop_face_uv_at(corners, uv)))
-                        .unwrap_or(corners)
-                }
-                FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
-            };
-            emit_box_prop_face(scratch, p, uvs, shade);
-        }
-
-        let is_selected = node.id == selected;
-        let is_hovered = hovered == Some(node.id);
-        if preview_bounds || is_selected || is_hovered {
-            push_box_prop_wireframe(
-                scratch,
-                world_vertices,
-                entity_bound_style(psxed_ui::EntityBoundKind::BoxProp, is_selected, is_hovered),
-            );
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_cylinder_props(
-    project: &ProjectDocument,
-    room_id: psxed_project::NodeId,
-    grid: &WorldGrid,
-    floor_index: usize,
-    y_offset: i32,
-    textures: &EditorTextures,
-    camera: psx_engine::WorldCamera,
-    fog: PreviewFog,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    selected: NodeId,
-    hovered: Option<NodeId>,
-    preview_bounds: bool,
-    scratch: &mut PreviewScratch,
-) {
-    let scene = project.active_scene();
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
-    for node in scene.nodes() {
-        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
-            || !is_descendant_of_room(scene, node.id, room_id)
-            || node_enclosing_floor(scene, node.id) != floor_index
-        {
-            continue;
-        }
-        let NodeKind::CylinderProp {
-            materials,
-            uvs,
-            geometry,
-            collision_enabled: _,
-        } = &node.kind
-        else {
-            continue;
-        };
-        let mut origin = node_room_local_origin(grid, &node.transform);
-        origin.y += y_offset;
-        let generated = psxed_project::generate_cylinder_prop_surfaces(*geometry);
-        let is_selected = node.id == selected;
-        let is_hovered = hovered == Some(node.id);
-        let outline = entity_bound_style(
-            psxed_ui::EntityBoundKind::CylinderProp,
-            is_selected,
-            is_hovered,
-        );
-        for surface in generated {
-            let slot_index = usize::from(surface.material_slot)
-                .min(psxed_project::CYLINDER_PROP_MATERIAL_COUNT - 1);
-            let world_vertices =
-                box_prop_world_quad(origin, surface.vertices, node.transform.rotation_degrees);
-            let Some(projected) = camera.project_world_quad(world_vertices) else {
-                continue;
-            };
-            let p = projected.map(preview_projected_from_engine);
-            if let Some(material_id) = materials[slot_index] {
-                let shade = face_shade(
-                    project,
-                    Some(material_id),
-                    cylinder_prop_fallback_color(slot_index),
-                    textures,
-                )
-                .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
-                let center = average_world_quad(world_vertices);
-                let depth = face_depth(camera, center);
-                let shade = fog.apply_shade(
-                    light_face(shade, center, &lights, grid.ambient_color),
-                    depth,
-                );
-                let surface_uvs = match shade {
-                    FaceShade::Textured { slot, .. } => {
-                        let u_max = slot.texture_width.saturating_sub(1);
-                        let v_max = slot.texture_height.saturating_sub(1);
-                        let corners = uvs[slot_index].apply_to_quad([
-                            (0, 0),
-                            (u_max, 0),
-                            (u_max, v_max),
-                            (0, v_max),
-                        ]);
-                        surface.uv_q8.map(|uv| box_prop_face_uv_at(corners, uv))
-                    }
-                    FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
-                };
-                if surface.vertex_count == 3 {
-                    let _ = emit_face_tri(
-                        scratch,
-                        [p[0], p[1], p[2]],
-                        [surface_uvs[0], surface_uvs[1], surface_uvs[2]],
-                        shade,
-                    );
-                } else {
-                    emit_box_prop_face(scratch, p, surface_uvs, shade);
-                }
-            }
-            if preview_bounds || is_selected || is_hovered {
-                let count = usize::from(surface.vertex_count.clamp(3, 4));
-                for index in 0..count {
-                    let next = (index + 1) % count;
-                    if p[index].sz != 0 && p[next].sz != 0 {
-                        push_screen_line(scratch, p[index], p[next], outline);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_arch_props(
-    project: &ProjectDocument,
-    room_id: psxed_project::NodeId,
-    grid: &WorldGrid,
-    floor_index: usize,
-    y_offset: i32,
-    textures: &EditorTextures,
-    camera: psx_engine::WorldCamera,
-    fog: PreviewFog,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    selected: NodeId,
-    hovered: Option<NodeId>,
-    preview_bounds: bool,
-    scratch: &mut PreviewScratch,
-) {
-    let scene = project.active_scene();
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
-    for node in scene.nodes() {
-        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
-            || !is_descendant_of_room(scene, node.id, room_id)
-            || node_enclosing_floor(scene, node.id) != floor_index
-        {
-            continue;
-        }
-        let NodeKind::ArchProp {
-            materials,
-            uvs,
-            geometry,
-            collision_enabled: _,
-        } = &node.kind
-        else {
-            continue;
-        };
-        let mut origin = node_room_local_origin(grid, &node.transform);
-        origin.y += y_offset;
-        let generated =
-            psxed_project::generate_arch_prop_surfaces(*geometry, grid.sector_size.max(1));
-        let is_selected = node.id == selected;
-        let is_hovered = hovered == Some(node.id);
-        let outline =
-            entity_bound_style(psxed_ui::EntityBoundKind::ArchProp, is_selected, is_hovered);
-        for surface in generated {
-            let slot_index =
-                usize::from(surface.material_slot).min(psxed_project::ARCH_PROP_MATERIAL_COUNT - 1);
-            let world_vertices =
-                box_prop_world_quad(origin, surface.vertices, node.transform.rotation_degrees);
-            let Some(projected) = camera.project_world_quad(world_vertices) else {
-                continue;
-            };
-            let p = projected.map(preview_projected_from_engine);
-            if let Some(material_id) = materials[slot_index] {
-                let shade = face_shade(
-                    project,
-                    Some(material_id),
-                    arch_prop_fallback_color(slot_index),
-                    textures,
-                )
-                .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
-                let center = average_world_quad(world_vertices);
-                let depth = face_depth(camera, center);
-                let shade = fog.apply_shade(
-                    light_face(shade, center, &lights, grid.ambient_color),
-                    depth,
-                );
-                let surface_uvs = match shade {
-                    FaceShade::Textured { slot, .. } => {
-                        let u_max = slot.texture_width.saturating_sub(1);
-                        let v_max = slot.texture_height.saturating_sub(1);
-                        let corners = uvs[slot_index].apply_to_quad([
-                            (0, 0),
-                            (u_max, 0),
-                            (u_max, v_max),
-                            (0, v_max),
-                        ]);
-                        surface.uv_q8.map(|uv| box_prop_face_uv_at(corners, uv))
-                    }
-                    FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
-                };
-                emit_box_prop_face(scratch, p, surface_uvs, shade);
-            }
-            if preview_bounds || is_selected || is_hovered {
-                for index in 0..4 {
-                    let next = (index + 1) % 4;
-                    if p[index].sz != 0 && p[next].sz != 0 {
-                        push_screen_line(scratch, p[index], p[next], outline);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn box_prop_face_uv_at(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> (u8, u8) {
-    let u = u32::from(uv_q8[0]);
-    let v = u32::from(uv_q8[1]);
-    let inv_u = 255 - u;
-    let inv_v = 255 - v;
-    let interpolate = |axis: usize| {
-        let values = if axis == 0 {
-            [
-                u32::from(corners[0].0),
-                u32::from(corners[1].0),
-                u32::from(corners[2].0),
-                u32::from(corners[3].0),
-            ]
-        } else {
-            [
-                u32::from(corners[0].1),
-                u32::from(corners[1].1),
-                u32::from(corners[2].1),
-                u32::from(corners[3].1),
-            ]
-        };
-        let top = values[0] * inv_u + values[1] * u;
-        let bottom = values[3] * inv_u + values[2] * u;
-        ((top * inv_v + bottom * v + 32_512) / 65_025).min(255) as u8
-    };
-    (interpolate(0), interpolate(1))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_water_volumes(
-    project: &ProjectDocument,
-    room_id: NodeId,
-    grid: &WorldGrid,
-    floor_index: usize,
-    y_offset: i32,
-    textures: &EditorTextures,
-    camera: psx_engine::WorldCamera,
-    fog: PreviewFog,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    selected: NodeId,
-    preview_tick: u32,
-    scratch: &mut PreviewScratch,
-) {
-    let scene = project.active_scene();
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
-    for node in scene.nodes() {
-        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
-            || !is_descendant_of_room(scene, node.id, room_id)
-            || node_enclosing_floor(scene, node.id) != floor_index
-        {
-            continue;
-        }
-        let NodeKind::WaterVolume {
-            material,
-            cells,
-            settings,
-        } = &node.kind
-        else {
-            continue;
-        };
-        let Some(material_id) = *material else {
-            continue;
-        };
-        let sector_size = grid.sector_size;
-        for cell in cells {
-            let Some((array_x, array_z)) = grid.world_cell_to_array(cell.x, cell.z) else {
-                continue;
-            };
-            let x0 = cell.x.saturating_mul(sector_size);
-            let z0 = cell.z.saturating_mul(sector_size);
-            let x1 = x0.saturating_add(sector_size);
-            let z1 = z0.saturating_add(sector_size);
-            let floor = grid
-                .sector(array_x, array_z)
-                .and_then(|sector| sector.floor.as_ref());
-            let floor_y = floor.map(|floor| floor.lowest_height()).unwrap_or(0);
-            let y = floor_y
-                .saturating_add(i32::from(settings.height_above_floor))
-                .saturating_add(y_offset);
-            // Match the top face winding used by BoxProp so editor and
-            // generated runtime surface packets share culling/orientation.
-            let verts = [
-                psx_engine::WorldVertex::new(x0, y, z1),
-                psx_engine::WorldVertex::new(x1, y, z1),
-                psx_engine::WorldVertex::new(x1, y, z0),
-                psx_engine::WorldVertex::new(x0, y, z0),
-            ];
-            let Some(projected) = camera.project_world_quad(verts) else {
-                continue;
-            };
-            let p = projected.map(preview_projected_from_engine);
-            let center = average_world_quad(verts);
-            let depth = face_depth(camera, center);
-            let shade = face_shade(project, Some(material_id), (52, 92, 112), textures)
-                .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
-            let shade = fog.apply_shade(
-                light_face(shade, center, &lights, grid.ambient_color),
-                depth,
-            );
-            let uvs = match shade {
-                FaceShade::Textured { slot, .. } => {
-                    animated_material_quad_uvs(project, material_id, slot, preview_tick)
-                }
-                FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
-            };
-            emit_box_prop_face(scratch, p, uvs, shade);
-            if node.id == selected {
-                let style = if settings.height_above_floor >= settings.lethal_depth {
-                    FACE_OUTLINE_ERROR
-                } else {
-                    FACE_OUTLINE_SELECTED
-                };
-                push_world_quad_wireframe(scratch, verts, style);
-                if let Some(floor) = floor {
-                    let bottom = [
-                        psx_engine::WorldVertex::new(
-                            x0,
-                            floor.heights[0].saturating_add(y_offset),
-                            z1,
-                        ),
-                        psx_engine::WorldVertex::new(
-                            x1,
-                            floor.heights[1].saturating_add(y_offset),
-                            z1,
-                        ),
-                        psx_engine::WorldVertex::new(
-                            x1,
-                            floor.heights[2].saturating_add(y_offset),
-                            z0,
-                        ),
-                        psx_engine::WorldVertex::new(
-                            x0,
-                            floor.heights[3].saturating_add(y_offset),
-                            z0,
-                        ),
-                    ];
-                    push_world_quad_wireframe(scratch, bottom, style);
-                    for index in 0..4 {
-                        let projected_top = gte_scene::project_vertex(world_to_view([
-                            verts[index].x,
-                            verts[index].y,
-                            verts[index].z,
-                        ]));
-                        let projected_bottom = gte_scene::project_vertex(world_to_view([
-                            bottom[index].x,
-                            bottom[index].y,
-                            bottom[index].z,
-                        ]));
-                        if projected_top.sz != 0 && projected_bottom.sz != 0 {
-                            push_screen_line(scratch, projected_top, projected_bottom, style);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn emit_box_prop_face(
-    scratch: &mut PreviewScratch,
-    p: [psx_gte::scene::Projected; 4],
-    uvs: [(u8, u8); 4],
-    shade: FaceShade,
-) {
-    let _ = emit_face_tri(scratch, [p[0], p[1], p[2]], [uvs[0], uvs[1], uvs[2]], shade);
-    let _ = emit_face_tri(scratch, [p[0], p[2], p[3]], [uvs[0], uvs[2], uvs[3]], shade);
-}
-
-fn box_prop_vertices(
-    origin: psx_engine::WorldVertex,
-    vertices: [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
-    rotation_degrees: [f32; 3],
-) -> [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT] {
-    let rotation = [
-        yaw_to_q12(rotation_degrees[0]),
-        yaw_to_q12(rotation_degrees[1]),
-        yaw_to_q12(rotation_degrees[2]),
-    ];
-    let mut out = [psx_engine::WorldVertex::new(0, 0, 0); psxed_project::BOX_PROP_VERTEX_COUNT];
-    for (i, local) in vertices.iter().enumerate() {
-        let rotated = rotate_image_prop_local(
-            [local[0] as i32, local[1] as i32, local[2] as i32],
-            rotation,
-        );
-        out[i] = psx_engine::WorldVertex::new(
-            origin.x.saturating_add(rotated[0]),
-            origin.y.saturating_add(rotated[1]),
-            origin.z.saturating_add(rotated[2]),
-        );
-    }
-    out
-}
-
-fn box_prop_world_quad(
-    origin: psx_engine::WorldVertex,
-    vertices: [[i16; 3]; 4],
-    rotation_degrees: [f32; 3],
-) -> [psx_engine::WorldVertex; 4] {
-    let rotation = [
-        yaw_to_q12(rotation_degrees[0]),
-        yaw_to_q12(rotation_degrees[1]),
-        yaw_to_q12(rotation_degrees[2]),
-    ];
-    vertices.map(|local| {
-        let rotated = rotate_image_prop_local(
-            [
-                i32::from(local[0]),
-                i32::from(local[1]),
-                i32::from(local[2]),
-            ],
-            rotation,
-        );
-        psx_engine::WorldVertex::new(
-            origin.x.saturating_add(rotated[0]),
-            origin.y.saturating_add(rotated[1]),
-            origin.z.saturating_add(rotated[2]),
-        )
-    })
-}
-
-fn box_prop_face_vertices(
-    vertices: [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT],
-    face: usize,
-) -> [psx_engine::WorldVertex; 4] {
-    let indices = BOX_PROP_FACE_VERTEX_INDICES[face];
-    [
-        vertices[indices[0]],
-        vertices[indices[1]],
-        vertices[indices[2]],
-        vertices[indices[3]],
-    ]
-}
-
-fn average_world_quad(verts: [psx_engine::WorldVertex; 4]) -> [i32; 3] {
-    [
-        average_i32_4(verts[0].x, verts[1].x, verts[2].x, verts[3].x),
-        average_i32_4(verts[0].y, verts[1].y, verts[2].y, verts[3].y),
-        average_i32_4(verts[0].z, verts[1].z, verts[2].z, verts[3].z),
-    ]
-}
-
-fn box_prop_fallback_color(face: usize) -> (u8, u8, u8) {
-    const COLORS: [(u8, u8, u8); psxed_project::BOX_PROP_FACE_COUNT] = [
-        (0x87, 0xB4, 0xDC),
-        (0x78, 0xC0, 0xA0),
-        (0xD0, 0xAA, 0x78),
-        (0xB0, 0x98, 0xD0),
-        (0xC0, 0xC8, 0xD0),
-        (0x90, 0x98, 0xA0),
-    ];
-    COLORS[face]
-}
-
-fn cylinder_prop_fallback_color(slot: usize) -> (u8, u8, u8) {
-    const COLORS: [(u8, u8, u8); psxed_project::CYLINDER_PROP_MATERIAL_COUNT] = [
-        (0x88, 0xA8, 0xB8),
-        (0xB8, 0xC0, 0xC8),
-        (0x70, 0x78, 0x80),
-        (0x90, 0x78, 0x68),
-    ];
-    COLORS[slot]
-}
-
-fn arch_prop_fallback_color(slot: usize) -> (u8, u8, u8) {
-    const COLORS: [(u8, u8, u8); psxed_project::ARCH_PROP_MATERIAL_COUNT] = [
-        (0xB0, 0x98, 0x78),
-        (0x88, 0x78, 0x68),
-        (0xC0, 0xAC, 0x88),
-        (0x78, 0x68, 0x58),
-    ];
-    COLORS[slot]
-}
-
-fn push_box_prop_wireframe(
-    scratch: &mut PreviewScratch,
-    vertices: [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT],
-    style: FaceOutlineStyle,
-) {
-    let projected = vertices.map(|v| gte_scene::project_vertex(world_to_view([v.x, v.y, v.z])));
-    for (a, b) in BOX_PROP_EDGE_VERTEX_INDICES {
-        if projected[a].sz == 0 || projected[b].sz == 0 {
-            continue;
-        }
-        push_screen_line(scratch, projected[a], projected[b], style);
-    }
-}
-
-fn preview_lit_image_prop_tint(
-    tint: [u8; 3],
-    verts: [psx_engine::WorldVertex; 4],
-    lights: &[psx_engine::PointLightSample],
-    ambient: [u8; 3],
-) -> (u8, u8, u8) {
-    let center = [
-        average_i32_4(verts[0].x, verts[1].x, verts[2].x, verts[3].x),
-        average_i32_4(verts[0].y, verts[1].y, verts[2].y, verts[3].y),
-        average_i32_4(verts[0].z, verts[1].z, verts[2].z, verts[3].z),
-    ];
-    psx_engine::shade_material_tint_with_lights(
-        psx_engine::MaterialTint::from_tuple((tint[0], tint[1], tint[2])),
-        center,
-        psx_engine::Rgb8::from_array(ambient),
-        lights.iter().copied(),
-    )
-    .to_tuple()
-}
-
-fn average_i32_4(a: i32, b: i32, c: i32, d: i32) -> i32 {
-    ((a as i64 + b as i64 + c as i64 + d as i64) / 4).clamp(i32::MIN as i64, i32::MAX as i64) as i32
-}
-
-fn image_prop_vertices(
-    origin: psx_engine::WorldVertex,
-    width: u16,
-    height: u16,
-    rotation_degrees: [f32; 3],
-    cylindrical_billboard: bool,
-    camera: psx_engine::WorldCamera,
-) -> [psx_engine::WorldVertex; 4] {
-    // Cylindrical billboarding overrides any authored rotation: the
-    // card always faces the camera and stays upright, so pitch / roll
-    // are ignored.
-    if cylindrical_billboard {
-        let sin_yaw = camera.sin_yaw.raw();
-        let cos_yaw = camera.cos_yaw.raw();
-        let half_width = (width as i32) / 2;
-        let right_x = mul_q12_i32(half_width, cos_yaw);
-        let right_z = -mul_q12_i32(half_width, sin_yaw);
-        let top_y = origin.y.saturating_add(height as i32);
-        return [
-            psx_engine::WorldVertex::new(origin.x - right_x, top_y, origin.z - right_z),
-            psx_engine::WorldVertex::new(origin.x + right_x, top_y, origin.z + right_z),
-            psx_engine::WorldVertex::new(origin.x + right_x, origin.y, origin.z + right_z),
-            psx_engine::WorldVertex::new(origin.x - right_x, origin.y, origin.z - right_z),
-        ];
-    }
-    let half_width = (width as i32) / 2;
-    let h = height as i32;
-    // Local quad anchored at bottom-center, lying in the X-Y plane,
-    // facing +Z before rotation. Top edge runs from (-w/2, h, 0) to
-    // (+w/2, h, 0); bottom edge runs along Y = 0.
-    let locals: [[i32; 3]; 4] = [
-        [-half_width, h, 0],
-        [half_width, h, 0],
-        [half_width, 0, 0],
-        [-half_width, 0, 0],
-    ];
-    let pitch_q12 = yaw_to_q12(rotation_degrees[0]);
-    let yaw_q12 = yaw_to_q12(rotation_degrees[1]);
-    let roll_q12 = yaw_to_q12(rotation_degrees[2]);
-    let mut out = [psx_engine::WorldVertex::new(0, 0, 0); 4];
-    for (i, local) in locals.iter().enumerate() {
-        let rotated = rotate_image_prop_local(*local, [pitch_q12, yaw_q12, roll_q12]);
-        out[i] = psx_engine::WorldVertex::new(
-            origin.x.saturating_add(rotated[0]),
-            origin.y.saturating_add(rotated[1]),
-            origin.z.saturating_add(rotated[2]),
-        );
-    }
-    out
-}
-
-fn rotate_image_prop_local(v: [i32; 3], rotation_q12: [u16; 3]) -> [i32; 3] {
-    // X (pitch) -> Y (yaw) -> Z (roll), shared with the cooker so the editor
-    // card, selection outline, cooked record, and runtime draw path agree.
-    psxed_project::spatial::rotate_euler_local_q12(
-        v,
-        rotation_q12[0],
-        rotation_q12[1],
-        rotation_q12[2],
-    )
-}
-
-fn push_world_quad_wireframe(
-    scratch: &mut PreviewScratch,
-    verts: [psx_engine::WorldVertex; 4],
-    style: FaceOutlineStyle,
-) {
-    let projected = verts.map(|v| gte_scene::project_vertex(world_to_view([v.x, v.y, v.z])));
-    if projected.iter().any(|p| p.sz == 0) {
-        return;
-    }
-    for (a, b) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
-        push_screen_line(scratch, projected[a], projected[b], style);
-    }
-}
-
-fn push_image_prop_collision_wireframe(
-    scratch: &mut PreviewScratch,
-    origin: psx_engine::WorldVertex,
-    visual_height: u16,
-    collision_size: [u16; 3],
-    rotation_degrees: [f32; 3],
-    cylindrical_billboard: bool,
-    style: FaceOutlineStyle,
-) {
-    let half = [
-        ((collision_size[0] as i32) / 2).max(1),
-        ((collision_size[1] as i32) / 2).max(1),
-        ((collision_size[2] as i32) / 2).max(1),
-    ];
-    let center_y = (visual_height as i32) / 2;
-    if cylindrical_billboard {
-        let center = [
-            origin.x as f32,
-            (origin.y + center_y) as f32,
-            origin.z as f32,
-        ];
-        push_aabb_wireframe(
-            scratch,
-            center,
-            [half[0] as f32, half[1] as f32, half[2] as f32],
-            style,
-        );
-        return;
-    }
-
-    let rotation = [
-        yaw_to_q12(rotation_degrees[0]),
-        yaw_to_q12(rotation_degrees[1]),
-        yaw_to_q12(rotation_degrees[2]),
-    ];
-    let mut verts = [[0, 0, 0]; 8];
-    let mut i = 0usize;
-    for z in [-half[2], half[2]] {
-        for y in [center_y - half[1], center_y + half[1]] {
-            for x in [-half[0], half[0]] {
-                let rotated = rotate_image_prop_local([x, y, z], rotation);
-                verts[i] = [
-                    origin.x.saturating_add(rotated[0]),
-                    origin.y.saturating_add(rotated[1]),
-                    origin.z.saturating_add(rotated[2]),
-                ];
-                i += 1;
-            }
-        }
-    }
-    push_world_box_wireframe(scratch, verts, style);
-}
 
 fn preview_projected_from_engine(
     projected: psx_engine::ProjectedVertex,
@@ -2753,7 +1351,7 @@ struct PreviewModelInstance<'a> {
     animation: psx_asset::Animation<'a>,
     /// Model atlas or replacement-material texture slot.
     texture: MaterialSlot,
-    /// Render origin (room-local engine units). Model placement
+    /// Render origin (world units). Model placement
     /// stays floor-anchored in `InstanceMeta`; this is lifted to
     /// the cooked model's centre before drawing.
     origin: psx_engine::WorldVertex,
@@ -2777,181 +1375,6 @@ struct PreviewModelInstance<'a> {
     pose_frame: u16,
 }
 
-/// Render every Model-backed legacy `MeshInstance` or component
-/// `Entity` in the scene as a real textured animated model.
-/// Mirrors the runtime path in `editor-playtest`: parse the
-/// `.psxmdl` + `.psxt` + `.psxanim` set, upload atlas (lazily, done by
-/// `EditorTextures::refresh_models`), then submit the model through
-/// `psx-engine`'s canonical model render pass.
-///
-/// Models with bad/missing data are skipped silently -- the
-/// editor inspector + cook validation surface those errors
-/// elsewhere; the preview just keeps drawing what it can.
-#[allow(clippy::too_many_arguments)]
-fn walk_model_instances(
-    project: &ProjectDocument,
-    room_id: psxed_project::NodeId,
-    grid: &WorldGrid,
-    floor_index: usize,
-    y_offset: i32,
-    textures: &EditorTextures,
-    assets: &crate::editor_assets::EditorAssets,
-    selected: psxed_project::NodeId,
-    camera: &psx_engine::WorldCamera,
-    fog: PreviewFog,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    tick: u32,
-    character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
-    scratch: &mut PreviewScratch,
-) {
-    // The persistent `EditorAssets` cache owns mesh + animation
-    // bytes. We only borrow into it here; nothing in this loop
-    // touches the filesystem. Per-instance state (which clip is
-    // active, where it lives in the world) lives in
-    // `instances_meta`.
-    let scene = project.active_scene();
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
-    let ambient = grid.ambient_color;
-    let mut instances_meta: Vec<InstanceMeta> = Vec::new();
-
-    for node in scene.nodes() {
-        if instances_meta.len() >= MAX_PREVIEW_MODEL_INSTANCES {
-            break;
-        }
-        if !is_descendant_of_room(scene, node.id, room_id) {
-            continue;
-        }
-        if node_enclosing_floor(scene, node.id) != floor_index {
-            continue;
-        }
-        let Some(reference) = preview_static_model_reference(scene, node) else {
-            continue;
-        };
-        if preview_reference_hidden(
-            scene,
-            hidden_scene_nodes,
-            node.id,
-            reference.renderer_node,
-            reference.animator_node,
-            None,
-        ) {
-            continue;
-        }
-        let Some(model_resource) = project.resource(reference.model_id) else {
-            continue;
-        };
-        let ResourceData::Model(model) = &model_resource.data else {
-            continue;
-        };
-        // Atlas required -- runtime contract.
-        if model.texture_path.is_none() {
-            continue;
-        }
-        // Atlas slot must already be uploaded (refresh_models
-        // ran earlier in the frame). Skip if not -- lets the
-        // user know visually that the atlas is broken.
-        let Some(atlas_slot) = textures.model_atlas_slot(reference.model_id) else {
-            continue;
-        };
-
-        // Geometry-only models: preview the instance's clip override,
-        // else the first skeleton-scoped clip.
-        let preview_transform = character_motion.filter(|preview| preview.entity == node.id);
-        let requested_clip = preview_transform
-            .map(|preview| preview.clip)
-            .or(reference.clip_override)
-            .unwrap_or(0);
-        let Some(clip_local) = valid_preview_clip(
-            requested_clip,
-            project
-                .resolved_model_animation_clips(reference.model_id)
-                .len(),
-        ) else {
-            continue;
-        };
-
-        // Model placements are floor anchors: X/Z follow the
-        // authored node, Y is sampled from the floor under it, then
-        // lifted to this floor's real elevation in the stacked render.
-        let mut origin = floor_anchored_node_room_local_origin(grid, &node.transform);
-        origin.y += y_offset;
-
-        let yaw_q12 = apply_character_motion_preview(
-            node.id,
-            &mut origin,
-            yaw_to_q12(node.transform.rotation_degrees[1]),
-            character_motion,
-        );
-        // Match the cooked record: entity pitch/roll plus the combined
-        // entity + renderer yaw, composed exactly as the runtime does.
-        let model_rotation = euler_rotation_q12(
-            yaw_to_q12(node.transform.rotation_degrees[0]),
-            yaw_q12.wrapping_add(reference.visual_yaw_q12),
-            yaw_to_q12(node.transform.rotation_degrees[2]),
-        );
-
-        instances_meta.push(InstanceMeta {
-            mesh_id: reference.model_id,
-            clip_local,
-            origin,
-            model_rotation,
-            atlas: atlas_slot,
-            material_override: reference.material_override,
-            is_selected: preview_reference_selected(
-                selected,
-                node.id,
-                reference.renderer_node,
-                reference.animator_node,
-                None,
-            ),
-            autoplay: preview_transform.is_some() || reference.autoplay,
-            pose_frame: reference.pose_frame,
-            yaw_q12,
-            collision_radius: model.collision_radius as i32,
-            world_height: model.world_height as i32,
-            visual_offset: reference.visual_offset,
-            visual_scale_q8: reference.visual_scale_q8,
-        });
-    }
-
-    // Player-spawn preview: render the player's character at
-    // the spawn so level designers see where the player starts
-    // *and* what they look like. Reuses the same model render
-    // path -- no separate player renderer.
-    walk_player_spawn_preview(
-        project,
-        room_id,
-        grid,
-        floor_index,
-        y_offset,
-        textures,
-        hidden_scene_nodes,
-        selected,
-        character_motion,
-        &mut instances_meta,
-    );
-
-    resolve_and_draw_model_instances(
-        project,
-        textures,
-        assets,
-        camera,
-        fog,
-        &lights,
-        ambient,
-        tick,
-        &instances_meta,
-        scratch,
-    );
-}
-
-/// BSP-scene counterpart of `walk_model_instances`: model-backed entities
-/// hang off the scene root in raw world units, so the render origin is the
-/// authored translation directly (no floor grid to anchor to). Uses
-/// `preview_model_reference`, not the static variant: there is no separate
-/// player-spawn preview pass here, so the player entity's model renders
-/// like everyone else's. Fog-free, matching `walk_brushes`.
-#[allow(clippy::too_many_arguments)]
 fn walk_bsp_model_instances(
     project: &ProjectDocument,
     textures: &EditorTextures,
@@ -2965,19 +1388,11 @@ fn walk_bsp_model_instances(
 ) {
     let scene = project.active_scene();
     let lights = collect_bsp_preview_lights(project, hidden_scene_nodes);
-    let fog = PreviewFog {
-        enabled: false,
-        rgb: (0, 0, 0),
-        near: 0,
-        far: 1,
-    };
+    let fog = PreviewFog;
     let mut instances_meta: Vec<InstanceMeta> = Vec::new();
     for node in scene.nodes() {
         if instances_meta.len() >= MAX_PREVIEW_MODEL_INSTANCES {
             break;
-        }
-        if node_has_section_ancestor(scene, node.id) {
-            continue;
         }
         let Some(reference) = preview_model_reference(scene, node) else {
             continue;
@@ -3188,161 +1603,6 @@ fn resolve_and_draw_model_instances(
 ///    auto-pick it.
 /// 3. Otherwise skip the preview (the cook step's validation
 ///    will surface the missing character).
-fn walk_player_spawn_preview(
-    project: &ProjectDocument,
-    room_id: psxed_project::NodeId,
-    grid: &WorldGrid,
-    floor_index: usize,
-    y_offset: i32,
-    textures: &EditorTextures,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    selected: psxed_project::NodeId,
-    character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
-    instances_meta: &mut Vec<InstanceMeta>,
-) {
-    let scene = project.active_scene();
-    for node in scene.nodes() {
-        if instances_meta.len() >= MAX_PREVIEW_MODEL_INSTANCES {
-            break;
-        }
-        if !is_descendant_of_room(scene, node.id, room_id) {
-            continue;
-        }
-        // Player model belongs to one floor like any other entity, draw
-        // it only on its own floor entry (this path is separate from
-        // `walk_model_instances`, which skips player-controlled entities).
-        if node_enclosing_floor(scene, node.id) != floor_index {
-            continue;
-        }
-        let Some(reference) = preview_player_reference(scene, node) else {
-            continue;
-        };
-        if preview_reference_hidden(
-            scene,
-            hidden_scene_nodes,
-            node.id,
-            reference.controller_node,
-            reference.renderer_node,
-            reference.animator_node,
-        ) {
-            continue;
-        }
-        let Some(character_id) = resolve_player_spawn_character(project, reference.character)
-        else {
-            continue;
-        };
-        let Some(character_resource) = project.resource(character_id) else {
-            continue;
-        };
-        let ResourceData::Character(char_resource) = &character_resource.data else {
-            continue;
-        };
-        let Some(model_id) = reference.model_override.or(char_resource.model) else {
-            continue;
-        };
-        let Some(model_resource) = project.resource(model_id) else {
-            continue;
-        };
-        let ResourceData::Model(model) = &model_resource.data else {
-            continue;
-        };
-        if model.texture_path.is_none() {
-            continue;
-        }
-        let Some(atlas_slot) = textures.model_atlas_slot(model_id) else {
-            continue;
-        };
-
-        // Animator clip drives the editor viewport when authored.
-        // Otherwise fall back to the player's idle action, then the
-        // model preview/default clip so partial characters still draw.
-        let preview_transform = character_motion.filter(|preview| preview.entity == node.id);
-        let requested_clip = preview_transform
-            .map(|preview| preview.clip)
-            .or(reference.clip_override)
-            .or_else(|| {
-                psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
-                    project,
-                    char_resource,
-                    model_id,
-                    model,
-                )
-            })
-            .unwrap_or(0);
-        let Some(clip_local) = valid_preview_clip(
-            requested_clip,
-            project.resolved_model_animation_clips(model_id).len(),
-        ) else {
-            continue;
-        };
-
-        let mut origin = floor_anchored_node_room_local_origin(grid, &node.transform);
-        origin.y += y_offset;
-        let yaw_q12 = apply_character_motion_preview(
-            node.id,
-            &mut origin,
-            yaw_to_q12(node.transform.rotation_degrees[1]),
-            character_motion,
-        );
-        let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
-
-        instances_meta.push(InstanceMeta {
-            mesh_id: model_id,
-            clip_local,
-            origin,
-            model_rotation,
-            atlas: atlas_slot,
-            material_override: reference.material_override,
-            // Host/controller node is selected, not the model --
-            // but the preview gizmo still helps designers see
-            // which spawn/controller they have selected.
-            is_selected: preview_reference_selected(
-                selected,
-                node.id,
-                reference.controller_node,
-                reference.renderer_node,
-                reference.animator_node,
-            ),
-            autoplay: preview_transform.is_some() || reference.autoplay,
-            pose_frame: reference.pose_frame,
-            yaw_q12,
-            collision_radius: model.collision_radius as i32,
-            world_height: model.world_height as i32,
-            visual_offset: reference.visual_offset,
-            visual_scale_q8: reference.visual_scale_q8,
-        });
-    }
-}
-
-/// Resolve a Player Spawn's character reference, applying the
-/// "auto-pick the only one" rule when no explicit character is
-/// set. `None` means the editor preview can't render a player
-/// model -- typically because the project has zero or multiple
-/// Characters and the spawn is mid-author.
-fn resolve_player_spawn_character(
-    project: &ProjectDocument,
-    explicit: Option<ResourceId>,
-) -> Option<ResourceId> {
-    psxed_project::resolve::resolve_spawn_character(project, explicit)
-        .ok()
-        .map(|resolved| resolved.id)
-}
-
-fn node_room_local_origin(
-    grid: &WorldGrid,
-    transform: &psxed_project::Transform3,
-) -> psx_engine::WorldVertex {
-    let [x, y, z] = spatial::node_preview_origin(grid, transform);
-    psx_engine::WorldVertex::new(x, y, z)
-}
-
-fn floor_anchored_node_room_local_origin(
-    grid: &WorldGrid,
-    transform: &psxed_project::Transform3,
-) -> psx_engine::WorldVertex {
-    let [x, y, z] = spatial::floor_anchored_node_preview_origin(grid, transform);
-    psx_engine::WorldVertex::new(x, y, z)
-}
 
 fn apply_character_motion_preview(
     entity: NodeId,
@@ -3891,12 +2151,12 @@ fn preview_model_material_override(
     };
     Some(PreviewModelMaterialOverride {
         texture: replacement_texture,
-        blend_mode: room_geometry::psx_blend_mode(material.blend_mode),
+        blend_mode: psx_blend_mode(material.blend_mode),
         tint: (material.tint[0], material.tint[1], material.tint[2]),
         secondary_layer: material.enabled_secondary_layer().and_then(|layer| {
             Some(PreviewModelSecondaryLayer {
                 texture: textures.secondary_slot(material_id)?,
-                blend_mode: room_geometry::psx_blend_mode(layer.blend_mode),
+                blend_mode: psx_blend_mode(layer.blend_mode),
                 tint: (layer.tint[0], layer.tint[1], layer.tint[2]),
                 motion: layer.motion,
             })
@@ -3904,47 +2164,3 @@ fn preview_model_material_override(
         face_sidedness: material.sidedness(),
     })
 }
-
-/// Marker colour per node kind, or `None` for nodes that aren't
-/// placeable in 3D space (the World macro, the Room itself, plain
-/// transform-only nodes).
-fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
-    match kind {
-        NodeKind::SpawnPoint { player: true, .. } => Some((0x60, 0xE0, 0x80)),
-        NodeKind::SpawnPoint { player: false, .. } => Some((0x60, 0xB8, 0xF0)),
-        NodeKind::MeshInstance { .. } => Some((0xC0, 0xC8, 0xD0)),
-        NodeKind::ImageProp { .. } => Some((0xD0, 0xAA, 0x78)),
-        // Box props render as real textured geometry in
-        // `walk_box_props`; don't cover them with a 2D marker.
-        NodeKind::BoxProp { .. }
-        | NodeKind::CylinderProp { .. }
-        | NodeKind::ArchProp { .. }
-        | NodeKind::WaterVolume { .. } => None,
-        NodeKind::Entity => Some((0xA0, 0xB0, 0xC0)),
-        // Lights draw their own bulb icon + radius ring in
-        // `walk_light_gizmos`; using the generic billboard square
-        // makes them read like ordinary markers.
-        NodeKind::PointLight { .. } => None,
-        NodeKind::ParticleEmitter { .. } => Some((0x98, 0xD6, 0xE6)),
-        NodeKind::Portal { .. } => None,
-        // Logic nodes read through their selection bound (the
-        // trigger-extent box); a billboard marker would double up.
-        NodeKind::Logic { .. } => Some((0xC8, 0x8C, 0xE8)),
-        NodeKind::ModelRenderer { .. }
-        | NodeKind::Animator { .. }
-        | NodeKind::Collider { .. }
-        | NodeKind::CharacterController { .. }
-        | NodeKind::Camera { .. }
-        | NodeKind::Equipment { .. }
-        | NodeKind::Interactable { .. }
-        | NodeKind::PhysicsBody { .. }
-        | NodeKind::Group
-        | NodeKind::Section { .. }
-        | NodeKind::World { .. }
-        | NodeKind::Node
-        | NodeKind::Node3D => None,
-    }
-}
-
-#[cfg(test)]
-mod tests;

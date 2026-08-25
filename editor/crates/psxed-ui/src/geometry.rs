@@ -202,26 +202,6 @@ pub(crate) fn push_unique_material_target(
     }
 }
 
-pub(crate) fn autotile_selection_status(
-    selected_tiles: usize,
-    visited_walls: usize,
-    updated_walls: usize,
-    clamped_walls: usize,
-) -> String {
-    if visited_walls == 0 {
-        return "No selected tiles have walls to autotile".to_string();
-    }
-    if updated_walls == 0 {
-        return format!("Selected walls already autotiled across {selected_tiles} tile(s)");
-    }
-    let mut status =
-        format!("Autotiled {updated_walls} wall(s) across {selected_tiles} selected tile(s)");
-    if clamped_walls > 0 {
-        status.push_str(&format!("; {clamped_walls} V span(s) clamped"));
-    }
-    status
-}
-
 pub(crate) fn face_edges(face: FaceRef) -> Vec<EdgeRef> {
     match face.kind {
         FaceKind::Floor => floor_edges(face.room, face.sx, face.sz, false),
@@ -618,94 +598,6 @@ pub(crate) fn direction_label(dir: GridDirection) -> &'static str {
     }
 }
 
-pub(crate) const fn next_cardinal_direction(dir: GridDirection) -> GridDirection {
-    match dir {
-        GridDirection::North => GridDirection::East,
-        GridDirection::East => GridDirection::South,
-        GridDirection::South => GridDirection::West,
-        GridDirection::West
-        | GridDirection::NorthWestSouthEast
-        | GridDirection::NorthEastSouthWest => GridDirection::North,
-    }
-}
-
-pub(crate) fn portal_edge_midpoint_editor(
-    grid: &WorldGrid,
-    sx: u16,
-    sz: u16,
-    dir: GridDirection,
-) -> [f32; 2] {
-    let wcx = grid.origin[0] + sx as i32;
-    let wcz = grid.origin[1] + sz as i32;
-    let world = match dir {
-        GridDirection::North => [wcx as f32 + 0.5, wcz as f32 + 1.0],
-        GridDirection::East => [wcx as f32 + 1.0, wcz as f32 + 0.5],
-        GridDirection::South => [wcx as f32 + 0.5, wcz as f32],
-        GridDirection::West => [wcx as f32, wcz as f32 + 0.5],
-        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => {
-            [wcx as f32 + 0.5, wcz as f32 + 0.5]
-        }
-    };
-    grid.world_cells_to_editor(world)
-}
-
-pub(crate) fn portal_edge_valid_for_world_cell(
-    grid: &WorldGrid,
-    wcx: i32,
-    wcz: i32,
-    dir: GridDirection,
-) -> bool {
-    let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
-        return false;
-    };
-    portal_edge_valid_for_array_cell(grid, sx, sz, dir)
-}
-
-pub(crate) fn portal_edge_valid_for_array_cell(
-    grid: &WorldGrid,
-    sx: u16,
-    sz: u16,
-    dir: GridDirection,
-) -> bool {
-    let Some((nx, nz)) = portal_edge_neighbour(sx, sz, dir) else {
-        return false;
-    };
-    nx < grid.width
-        && nz < grid.depth
-        && grid.sector(sx, sz).is_some_and(GridSector::has_geometry)
-        && grid.sector(nx, nz).is_some_and(GridSector::has_geometry)
-}
-
-pub(crate) fn canonical_portal_edge_for_array_cell(
-    sx: u16,
-    sz: u16,
-    dir: GridDirection,
-) -> Option<PortalEdge> {
-    match dir {
-        GridDirection::North => Some(PortalEdge {
-            x: sx,
-            z: sz,
-            direction: GridDirection::North,
-        }),
-        GridDirection::East => Some(PortalEdge {
-            x: sx,
-            z: sz,
-            direction: GridDirection::East,
-        }),
-        GridDirection::South => Some(PortalEdge {
-            x: sx,
-            z: sz.checked_sub(1)?,
-            direction: GridDirection::North,
-        }),
-        GridDirection::West => Some(PortalEdge {
-            x: sx.checked_sub(1)?,
-            z: sz,
-            direction: GridDirection::East,
-        }),
-        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
-    }
-}
-
 pub(crate) fn portal_edge_neighbour(sx: u16, sz: u16, dir: GridDirection) -> Option<(u16, u16)> {
     match dir {
         GridDirection::North => Some((sx, sz.checked_add(1)?)),
@@ -714,15 +606,6 @@ pub(crate) fn portal_edge_neighbour(sx: u16, sz: u16, dir: GridDirection) -> Opt
         GridDirection::West => Some((sx.checked_sub(1)?, sz)),
         GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
     }
-}
-
-/// Pick the cardinal `GridDirection` for a wall edge given the
-/// click offset from the cell's world-space centre. Mirrors the
-/// renderer's `WallEdge` mapping in `editor_preview`:
-/// `North = +Z`, `East = +X`, `South = -Z`, `West = -X`. The
-/// dominant axis decides; ties favour the X axis.
-pub(crate) fn edge_from_world_offset(dx: f32, dz: f32) -> GridDirection {
-    psxed_project::spatial::editor_wall_direction_from_offset(dx, dz)
 }
 
 /// World-space integer position of `corner` in the room
@@ -965,7 +848,6 @@ pub(crate) fn vertex_for_seed(
     }
     match connectivity {
         VertexConnectivity::Welded => physical_vertex(grid, seed),
-        VertexConnectivity::Detached => detached_vertex(grid, seed),
     }
 }
 
@@ -1916,40 +1798,6 @@ pub(crate) fn flip_uv_transform_u(mut uv: GridUvTransform) -> GridUvTransform {
 pub(crate) fn flip_uv_transform_v(mut uv: GridUvTransform) -> GridUvTransform {
     uv.flip_v = !uv.flip_v;
     uv
-}
-
-pub(crate) fn horizontal_triangle_index_at_local(
-    local_x: f32,
-    local_z: f32,
-    sector_size: i32,
-    split: GridSplit,
-) -> HorizontalTriangleIndex {
-    let size = sector_size.max(1) as f32;
-    match split {
-        GridSplit::NorthWestSouthEast => {
-            if local_x + local_z >= size {
-                HorizontalTriangleIndex::A
-            } else {
-                HorizontalTriangleIndex::B
-            }
-        }
-        GridSplit::NorthEastSouthWest => {
-            if local_z >= local_x {
-                HorizontalTriangleIndex::A
-            } else {
-                HorizontalTriangleIndex::B
-            }
-        }
-    }
-}
-
-pub(crate) const fn horizontal_triangle_other(
-    index: HorizontalTriangleIndex,
-) -> HorizontalTriangleIndex {
-    match index {
-        HorizontalTriangleIndex::A => HorizontalTriangleIndex::B,
-        HorizontalTriangleIndex::B => HorizontalTriangleIndex::A,
-    }
 }
 
 pub(crate) const fn horizontal_triangle_corners(

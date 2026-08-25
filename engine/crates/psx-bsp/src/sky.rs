@@ -12,7 +12,7 @@ use psx_math::int32::isqrt_i32;
 
 use psx_engine::ClassicAffineSubmit;
 use psx_gpu::material::TextureWindow;
-use psx_gpu::prim::QuadTextured;
+use psx_gpu::prim::{ClassicTriTextured, QuadTextured};
 use psx_gte::math::Mat3I16;
 
 const MATERIAL_TICKS_PER_SECOND: u32 = 60;
@@ -23,12 +23,62 @@ const SKY_ROWS: usize = 12;
 const SKY_CELLS: usize = SKY_COLUMNS * SKY_ROWS;
 const SKY_OT_SLOT: u32 = 2047;
 const SKY_QUAD_WORDS: usize = 10;
+const SKY_TRI_WORDS: usize = 8;
 const SKY_WINDOW_PACKET_WORDS: usize = 2;
 const SKY_WINDOW_PACKET_COUNT: usize = 3;
+const CUBE_SKY_WINDOW_PACKET_COUNT: usize = 1;
+const CUBE_SKY_COLUMNS: usize = 12;
+const CUBE_SKY_ROWS: usize = 9;
+const CUBE_SKY_PACKET_BUDGET_WORDS: usize = 2304;
+pub const CUBE_SKY_FACE_WIDTH: u16 = 256;
+pub const CUBE_SKY_FACE_HEIGHT: u16 = 256;
+pub const CUBE_SKY_ATLAS_SIZE: [u16; 2] = [CUBE_SKY_FACE_WIDTH * 6, CUBE_SKY_FACE_HEIGHT];
+pub const CUBE_SKY_FACE_COUNT: u16 = 6;
+pub const CUBE_SKY_CLUT_ENTRIES_PER_FACE: u16 = 16;
+pub const CUBE_SKY_CLUT_ENTRIES: u16 = CUBE_SKY_FACE_COUNT * CUBE_SKY_CLUT_ENTRIES_PER_FACE;
 
 /// Packet words required by the constant-cost two-layer screen lattice.
 pub const VIEW_RAY_SKY_PACKET_WORDS: usize =
     SKY_CELLS * 2 * SKY_QUAD_WORDS + SKY_WINDOW_PACKET_COUNT * SKY_WINDOW_PACKET_WORDS;
+
+/// Packet words required by the single-pass directional cube environment.
+pub const VIEW_RAY_CUBE_SKY_PACKET_WORDS: usize =
+    CUBE_SKY_PACKET_BUDGET_WORDS + CUBE_SKY_WINDOW_PACKET_COUNT * SKY_WINDOW_PACKET_WORDS;
+
+/// One face of a camera-relative cube environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CubeFace {
+    PositiveX = 0,
+    NegativeX = 1,
+    PositiveY = 2,
+    NegativeY = 3,
+    PositiveZ = 4,
+    NegativeZ = 5,
+}
+
+impl CubeFace {
+    const ALL: [Self; 6] = [
+        Self::PositiveX,
+        Self::NegativeX,
+        Self::PositiveY,
+        Self::NegativeY,
+        Self::PositiveZ,
+        Self::NegativeZ,
+    ];
+
+    /// One full 4bpp page per 256x256 face.
+    #[inline]
+    pub const fn texture_page_offset(self) -> u16 {
+        self as u16
+    }
+
+    /// Page-local vertical origin of this face.
+    #[inline]
+    pub const fn page_v_origin(self) -> u8 {
+        0
+    }
+}
 
 /// One staged GP0(E2) selector for a complete sky layer.
 #[repr(C, align(4))]
@@ -38,9 +88,9 @@ struct SkyWindowPacket {
 }
 
 impl SkyWindowPacket {
-    const fn new(command: u32) -> Self {
+    const fn new(command: u32, ot_slot: u16) -> Self {
         Self {
-            tag: (1 << 24) | SKY_OT_SLOT,
+            tag: (1 << 24) | ot_slot as u32,
             command,
         }
     }
@@ -101,18 +151,202 @@ pub fn screen_view_ray(
     world_to_view_q12: [[i16; 3]; 3],
 ) -> [i32; 3] {
     let camera = [
-        i64::from(screen[0] - center[0]),
-        i64::from(screen[1] - center[1]),
-        i64::from(projection),
+        (i32::from(screen[0]) - i32::from(center[0])).clamp(-2048, 2048),
+        (i32::from(screen[1]) - i32::from(center[1])).clamp(-2048, 2048),
+        i32::from(projection).clamp(1, 2048),
     ];
     let mut world = [0i32; 3];
     for axis in 0..3 {
-        let value = camera[0] * i64::from(world_to_view_q12[0][axis])
-            + camera[1] * i64::from(world_to_view_q12[1][axis])
-            + camera[2] * i64::from(world_to_view_q12[2][axis]);
-        world[axis] = (value >> 12) as i32;
+        let value = camera[0] * i32::from(world_to_view_q12[0][axis])
+            + camera[1] * i32::from(world_to_view_q12[1][axis])
+            + camera[2] * i32::from(world_to_view_q12[2][axis]);
+        world[axis] = value >> 12;
     }
     world
+}
+
+/// Select the cube face whose plane is most perpendicular to `direction`.
+pub fn cube_face(direction: [i32; 3]) -> CubeFace {
+    let ax = direction[0].unsigned_abs();
+    let ay = direction[1].unsigned_abs();
+    let az = direction[2].unsigned_abs();
+    if ax >= ay && ax >= az {
+        if direction[0] >= 0 {
+            CubeFace::PositiveX
+        } else {
+            CubeFace::NegativeX
+        }
+    } else if ay >= az {
+        if direction[1] >= 0 {
+            CubeFace::PositiveY
+        } else {
+            CubeFace::NegativeY
+        }
+    } else if direction[2] >= 0 {
+        CubeFace::PositiveZ
+    } else {
+        CubeFace::NegativeZ
+    }
+}
+
+/// Project a direction onto one selected cube face in signed Q12 UV space.
+///
+/// Cells select a face from their centre ray and project all four corners to
+/// that same plane. This keeps affine interpolation local at face boundaries.
+pub fn cube_face_uv_q12(direction: [i32; 3], face: CubeFace) -> [i32; 2] {
+    let (u, v, denominator) = match face {
+        CubeFace::PositiveX => (-direction[2], -direction[1], direction[0]),
+        CubeFace::NegativeX => (direction[2], -direction[1], -direction[0]),
+        CubeFace::PositiveY => (direction[0], direction[2], direction[1]),
+        CubeFace::NegativeY => (direction[0], -direction[2], -direction[1]),
+        CubeFace::PositiveZ => (direction[0], -direction[1], direction[2]),
+        CubeFace::NegativeZ => (-direction[0], -direction[1], -direction[2]),
+    };
+    let denominator = denominator.unsigned_abs().max(1) as i32;
+    [
+        u.saturating_mul(4096) / denominator,
+        v.saturating_mul(4096) / denominator,
+    ]
+}
+
+/// Convert signed face-local Q12 coordinates to the source atlas.
+///
+/// The source is 1536x256: six adjacent full 256x256 4bpp pages. Runtime
+/// packet UVs remain page-local and select the face's page separately.
+pub fn cube_atlas_uv(direction: [i32; 3], face: CubeFace) -> [u16; 2] {
+    let local = cube_face_uv_q12(direction, face);
+    let u = ((local[0].saturating_add(4096) * i32::from(CUBE_SKY_FACE_WIDTH - 1)) >> 13)
+        .clamp(0, i32::from(CUBE_SKY_FACE_WIDTH - 1)) as u16;
+    let v = ((local[1].saturating_add(4096) * i32::from(CUBE_SKY_FACE_HEIGHT - 1)) >> 13)
+        .clamp(0, i32::from(CUBE_SKY_FACE_HEIGHT - 1)) as u16;
+    [
+        face.texture_page_offset() * CUBE_SKY_FACE_WIDTH + u,
+        u16::from(face.page_v_origin()) + v,
+    ]
+}
+
+#[derive(Clone, Copy, Default)]
+struct CubeSkyVertex {
+    screen_q12: [i32; 2],
+    ray: [i32; 3],
+}
+
+#[inline]
+const fn cube_face_plane_distance(ray: [i32; 3], face: CubeFace, plane: usize) -> i32 {
+    let [x, y, z] = ray;
+    match (face, plane) {
+        (CubeFace::PositiveX, 0) => x - y,
+        (CubeFace::PositiveX, 1) => x + y,
+        (CubeFace::PositiveX, 2) => x - z,
+        (CubeFace::PositiveX, _) => x + z,
+        (CubeFace::NegativeX, 0) => -x - y,
+        (CubeFace::NegativeX, 1) => -x + y,
+        (CubeFace::NegativeX, 2) => -x - z,
+        (CubeFace::NegativeX, _) => -x + z,
+        (CubeFace::PositiveY, 0) => y - x,
+        (CubeFace::PositiveY, 1) => y + x,
+        (CubeFace::PositiveY, 2) => y - z,
+        (CubeFace::PositiveY, _) => y + z,
+        (CubeFace::NegativeY, 0) => -y - x,
+        (CubeFace::NegativeY, 1) => -y + x,
+        (CubeFace::NegativeY, 2) => -y - z,
+        (CubeFace::NegativeY, _) => -y + z,
+        (CubeFace::PositiveZ, 0) => z - x,
+        (CubeFace::PositiveZ, 1) => z + x,
+        (CubeFace::PositiveZ, 2) => z - y,
+        (CubeFace::PositiveZ, _) => z + y,
+        (CubeFace::NegativeZ, 0) => -z - x,
+        (CubeFace::NegativeZ, 1) => -z + x,
+        (CubeFace::NegativeZ, 2) => -z - y,
+        (CubeFace::NegativeZ, _) => -z + y,
+    }
+}
+
+#[inline]
+fn interpolate_cube_sky_vertex(
+    from: CubeSkyVertex,
+    to: CubeSkyVertex,
+    from_distance: i32,
+    to_distance: i32,
+) -> CubeSkyVertex {
+    let denominator = from_distance - to_distance;
+    let t_q12 = if denominator == 0 {
+        0
+    } else {
+        (from_distance << 12) / denominator
+    }
+    .clamp(0, 4096);
+    let interpolate = |from: i32, to: i32| from + ((to - from) * t_q12 >> 12);
+    CubeSkyVertex {
+        screen_q12: [
+            interpolate(from.screen_q12[0], to.screen_q12[0]),
+            interpolate(from.screen_q12[1], to.screen_q12[1]),
+        ],
+        ray: [
+            interpolate(from.ray[0], to.ray[0]),
+            interpolate(from.ray[1], to.ray[1]),
+            interpolate(from.ray[2], to.ray[2]),
+        ],
+    }
+}
+
+fn clip_cube_sky_cell(cell: [CubeSkyVertex; 4], face: CubeFace) -> ([CubeSkyVertex; 8], usize) {
+    let mut input = [CubeSkyVertex::default(); 8];
+    input[..4].copy_from_slice(&cell);
+    let mut input_count = 4usize;
+    let mut output = [CubeSkyVertex::default(); 8];
+    for plane in 0..4 {
+        if input_count == 0 {
+            break;
+        }
+        let mut output_count = 0usize;
+        let mut previous = input[input_count - 1];
+        let mut previous_distance = cube_face_plane_distance(previous.ray, face, plane);
+        let mut previous_inside = previous_distance >= 0;
+        for current in input[..input_count].iter().copied() {
+            let current_distance = cube_face_plane_distance(current.ray, face, plane);
+            let current_inside = current_distance >= 0;
+            if current_inside != previous_inside {
+                debug_assert!(output_count < output.len());
+                output[output_count] = interpolate_cube_sky_vertex(
+                    previous,
+                    current,
+                    previous_distance,
+                    current_distance,
+                );
+                output_count += 1;
+            }
+            if current_inside {
+                debug_assert!(output_count < output.len());
+                output[output_count] = current;
+                output_count += 1;
+            }
+            previous = current;
+            previous_distance = current_distance;
+            previous_inside = current_inside;
+        }
+        input[..output_count].copy_from_slice(&output[..output_count]);
+        input_count = output_count;
+    }
+    (input, input_count)
+}
+
+#[inline]
+fn cube_sky_packet_vertex(vertex: CubeSkyVertex, face: CubeFace) -> ((i16, i16), u16) {
+    let screen = (
+        ((vertex.screen_q12[0] + 2048) >> 12).clamp(0, i32::from(i16::MAX)) as i16,
+        ((vertex.screen_q12[1] + 2048) >> 12).clamp(0, i32::from(i16::MAX)) as i16,
+    );
+    let [atlas_u, atlas_v] = cube_atlas_uv(vertex.ray, face);
+    let u = (atlas_u % CUBE_SKY_FACE_WIDTH) as u8;
+    let v = (atlas_v % 256) as u8;
+    (screen, u16::from(u) | (u16::from(v) << 8))
+}
+
+/// Select the contiguous 16-colour CLUT allocated for one cube face.
+#[inline]
+pub const fn cube_face_clut(base_clut: u16, face: CubeFace) -> u16 {
+    base_clut.wrapping_add(face as u16)
 }
 
 /// Convert a PSoXide Y-up world vector back to Quake's Z-up sky basis.
@@ -221,6 +455,47 @@ pub unsafe fn submit_view_ray_layered_sky(
     material_tick: u32,
     output: *mut u32,
 ) -> ClassicAffineSubmit {
+    unsafe {
+        submit_view_ray_layered_sky_to_slot(
+            texture_page,
+            clut,
+            atlas_origin,
+            layer_size,
+            view_rotation,
+            screen_size,
+            screen_center,
+            projection,
+            material_tick,
+            SKY_OT_SLOT as u16,
+            output,
+        )
+    }
+}
+
+/// Draw Quake's layered sky into a caller-selected ordering-table slot.
+///
+/// This is the adapter used by host editor previews whose ordering table is
+/// deeper than the 2048-slot hardware/runtime table. The projection and packet
+/// stream are otherwise byte-for-byte identical to
+/// [`submit_view_ray_layered_sky`].
+///
+/// # Safety
+///
+/// Same output storage contract as [`submit_view_ray_layered_sky`].
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn submit_view_ray_layered_sky_to_slot(
+    texture_page: u16,
+    clut: u16,
+    atlas_origin: [u8; 2],
+    layer_size: [u8; 2],
+    view_rotation: Mat3I16,
+    screen_size: [i16; 2],
+    screen_center: [i16; 2],
+    projection: i16,
+    material_tick: u32,
+    ot_slot: u16,
+    output: *mut u32,
+) -> ClassicAffineSubmit {
     let width = layer_size[0].clamp(8, 128);
     let height = layer_size[1].clamp(8, 128);
     debug_assert!(width.is_power_of_two());
@@ -266,7 +541,7 @@ pub unsafe fn submit_view_ray_layered_sky(
     // so it executes after both sky layers and before ordinary world geometry.
     unsafe {
         next.cast::<SkyWindowPacket>()
-            .write(SkyWindowPacket::new(TextureWindow::NONE.word()));
+            .write(SkyWindowPacket::new(TextureWindow::NONE.word(), ot_slot));
         next = next.add(SKY_WINDOW_PACKET_WORDS);
     }
 
@@ -289,7 +564,7 @@ pub unsafe fn submit_view_ray_layered_sky(
                 unsafe {
                     let mut quad =
                         QuadTextured::new(vertices, uv, clut, texture_page, (0x80, 0x80, 0x80));
-                    quad.tag = ((QuadTextured::WORDS as u32) << 24) | SKY_OT_SLOT;
+                    quad.tag = ((QuadTextured::WORDS as u32) << 24) | u32::from(ot_slot);
                     next.cast::<QuadTextured>().write(quad);
                     next = next.add(SKY_QUAD_WORDS);
                 }
@@ -297,7 +572,7 @@ pub unsafe fn submit_view_ray_layered_sky(
         }
         unsafe {
             next.cast::<SkyWindowPacket>()
-                .write(SkyWindowPacket::new(window.word()));
+                .write(SkyWindowPacket::new(window.word(), ot_slot));
             next = next.add(SKY_WINDOW_PACKET_WORDS);
         }
     };
@@ -315,13 +590,187 @@ pub unsafe fn submit_view_ray_layered_sky(
     }
 }
 
+/// Draw a camera-centred six-face cube environment.
+///
+/// A screen lattice is clipped against the six exact cube-face dominance
+/// regions (`+X >= abs(Y), abs(Z)`, and so on). Each resulting polygon uses
+/// only one face and adjacent faces share the same clipped screen edge. This
+/// avoids both a visible geometric cube and the old centre-ray approximation,
+/// while keeping every emitted triangle inside a small affine screen cell.
+///
+/// # Safety
+///
+/// `output` must have room for [`VIEW_RAY_CUBE_SKY_PACKET_WORDS`] writable
+/// `u32` values and be aligned for the packet structs written here.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn submit_view_ray_cube_sky(
+    texture_page: u16,
+    clut: u16,
+    view_rotation: Mat3I16,
+    screen_size: [i16; 2],
+    screen_center: [i16; 2],
+    projection: i16,
+    output: *mut u32,
+) -> ClassicAffineSubmit {
+    unsafe {
+        submit_view_ray_cube_sky_to_slot(
+            texture_page,
+            clut,
+            view_rotation,
+            screen_size,
+            screen_center,
+            projection,
+            SKY_OT_SLOT as u16,
+            output,
+        )
+    }
+}
+
+/// Draw the directional cube environment into a caller-selected ordering-table
+/// slot. Host previews use this to keep the exact runtime projection behind a
+/// deeper editor geometry table.
+///
+/// # Safety
+///
+/// Same output storage contract as [`submit_view_ray_cube_sky`].
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn submit_view_ray_cube_sky_to_slot(
+    texture_page: u16,
+    clut: u16,
+    view_rotation: Mat3I16,
+    screen_size: [i16; 2],
+    screen_center: [i16; 2],
+    projection: i16,
+    ot_slot: u16,
+    output: *mut u32,
+) -> ClassicAffineSubmit {
+    let screen_width = screen_size[0].max(1);
+    let screen_height = screen_size[1].max(1);
+    let mut next = output;
+    let mut packets = 0u32;
+    let mut hardware_triangles = 0u32;
+    let mut packet_words = 0usize;
+    let vertex_at = |column: usize, row: usize| {
+        let screen = [
+            (column * screen_width as usize / CUBE_SKY_COLUMNS) as i16,
+            (row * screen_height as usize / CUBE_SKY_ROWS) as i16,
+        ];
+        CubeSkyVertex {
+            screen_q12: [i32::from(screen[0]) << 12, i32::from(screen[1]) << 12],
+            ray: screen_view_ray(screen, screen_center, projection.max(1), view_rotation.m),
+        }
+    };
+    let mut top = [CubeSkyVertex::default(); CUBE_SKY_COLUMNS + 1];
+    for (column, vertex) in top.iter_mut().enumerate() {
+        *vertex = vertex_at(column, 0);
+    }
+    'rows: for row in 0..CUBE_SKY_ROWS {
+        let mut bottom = [CubeSkyVertex::default(); CUBE_SKY_COLUMNS + 1];
+        for (column, vertex) in bottom.iter_mut().enumerate() {
+            *vertex = vertex_at(column, row + 1);
+        }
+        for column in 0..CUBE_SKY_COLUMNS {
+            let cell = [
+                top[column],
+                top[column + 1],
+                bottom[column + 1],
+                bottom[column],
+            ];
+            let corner_faces = cell.map(|vertex| cube_face(vertex.ray));
+            if corner_faces[1..]
+                .iter()
+                .all(|face| *face == corner_faces[0])
+            {
+                if packet_words + SKY_QUAD_WORDS > CUBE_SKY_PACKET_BUDGET_WORDS {
+                    debug_assert!(false, "directional sky packet envelope exhausted");
+                    break 'rows;
+                }
+                let face = corner_faces[0];
+                let samples = [cell[0], cell[1], cell[3], cell[2]]
+                    .map(|vertex| cube_sky_packet_vertex(vertex, face));
+                let vertices = [samples[0].0, samples[1].0, samples[2].0, samples[3].0];
+                let uv = samples.map(|sample| ((sample.1 & 0xff) as u8, (sample.1 >> 8) as u8));
+                unsafe {
+                    let mut quad = QuadTextured::new(
+                        vertices,
+                        uv,
+                        cube_face_clut(clut, face),
+                        texture_page.wrapping_add(face.texture_page_offset()),
+                        (0x80, 0x80, 0x80),
+                    );
+                    quad.tag = ((QuadTextured::WORDS as u32) << 24) | u32::from(ot_slot);
+                    next.cast::<QuadTextured>().write(quad);
+                    next = next.add(SKY_QUAD_WORDS);
+                }
+                packet_words += SKY_QUAD_WORDS;
+                packets = packets.wrapping_add(1);
+                hardware_triangles = hardware_triangles.wrapping_add(2);
+                continue;
+            }
+            for face in CubeFace::ALL {
+                let (polygon, count) = clip_cube_sky_cell(cell, face);
+                if count < 3 {
+                    continue;
+                }
+                let mut samples = [((0i16, 0i16), 0u16); 8];
+                for (sample, vertex) in samples[..count]
+                    .iter_mut()
+                    .zip(polygon[..count].iter().copied())
+                {
+                    *sample = cube_sky_packet_vertex(vertex, face);
+                }
+                for index in 1..count - 1 {
+                    if packet_words + SKY_TRI_WORDS > CUBE_SKY_PACKET_BUDGET_WORDS {
+                        debug_assert!(false, "directional sky packet envelope exhausted");
+                        break 'rows;
+                    }
+                    let vertices = [samples[0].0, samples[index].0, samples[index + 1].0];
+                    let uv_words = [samples[0].1, samples[index].1, samples[index + 1].1];
+                    unsafe {
+                        next.cast::<ClassicTriTextured>().write(
+                            ClassicTriTextured::with_staged_slot(
+                                vertices,
+                                uv_words,
+                                0x0080_8080,
+                                cube_face_clut(clut, face),
+                                texture_page.wrapping_add(face.texture_page_offset()),
+                                ot_slot,
+                            ),
+                        );
+                        next = next.add(SKY_TRI_WORDS);
+                    }
+                    packet_words += SKY_TRI_WORDS;
+                    packets = packets.wrapping_add(1);
+                    hardware_triangles = hardware_triangles.wrapping_add(1);
+                }
+            }
+        }
+        top = bottom;
+    }
+    // Linked packets are prepended to one OT slot, so the last staged packet
+    // executes first and clears any texture window inherited from a prior draw.
+    unsafe {
+        next.cast::<SkyWindowPacket>()
+            .write(SkyWindowPacket::new(TextureWindow::NONE.word(), ot_slot));
+        next = next.add(SKY_WINDOW_PACKET_WORDS);
+    }
+
+    ClassicAffineSubmit {
+        next_packet: next,
+        packets: packets + CUBE_SKY_WINDOW_PACKET_COUNT as u32,
+        hardware_triangles,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec;
 
     use super::{
-        directional_texel, directional_uv, packet_quad_uv, quake_direction_from_y_up,
-        screen_view_ray, submit_view_ray_layered_sky, VIEW_RAY_SKY_PACKET_WORDS,
+        cube_atlas_uv, cube_face, cube_face_clut, cube_face_uv_q12, directional_texel,
+        directional_uv, packet_quad_uv, quake_direction_from_y_up, screen_view_ray,
+        submit_view_ray_cube_sky, submit_view_ray_cube_sky_to_slot, submit_view_ray_layered_sky,
+        CubeFace, CUBE_SKY_ATLAS_SIZE, VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS,
     };
     use psx_gte::math::Mat3I16;
 
@@ -354,6 +803,92 @@ mod tests {
     #[test]
     fn y_up_vectors_convert_back_to_the_imported_quake_basis() {
         assert_eq!(quake_direction_from_y_up([5, 7, -11]), [5, 11, 7]);
+    }
+
+    #[test]
+    fn cube_projection_distinguishes_all_six_directions() {
+        assert_eq!(cube_face([1, 0, 0]), CubeFace::PositiveX);
+        assert_eq!(cube_face([-1, 0, 0]), CubeFace::NegativeX);
+        assert_eq!(cube_face([0, 1, 0]), CubeFace::PositiveY);
+        assert_eq!(cube_face([0, -1, 0]), CubeFace::NegativeY);
+        assert_eq!(cube_face([0, 0, 1]), CubeFace::PositiveZ);
+        assert_eq!(cube_face([0, 0, -1]), CubeFace::NegativeZ);
+        assert_ne!(
+            cube_atlas_uv([0, 1, 1], CubeFace::PositiveY),
+            cube_atlas_uv([0, -1, 1], CubeFace::NegativeY)
+        );
+    }
+
+    #[test]
+    fn cube_face_centres_map_inside_six_distinct_tiles() {
+        let samples = [
+            ([1, 0, 0], CubeFace::PositiveX),
+            ([-1, 0, 0], CubeFace::NegativeX),
+            ([0, 1, 0], CubeFace::PositiveY),
+            ([0, -1, 0], CubeFace::NegativeY),
+            ([0, 0, 1], CubeFace::PositiveZ),
+            ([0, 0, -1], CubeFace::NegativeZ),
+        ];
+        let mut centres = [[0u16; 2]; 6];
+        for (index, (direction, face)) in samples.into_iter().enumerate() {
+            assert_eq!(cube_face_uv_q12(direction, face), [0, 0]);
+            let uv = cube_atlas_uv(direction, face);
+            assert!(uv[0] < CUBE_SKY_ATLAS_SIZE[0]);
+            assert!(uv[1] < CUBE_SKY_ATLAS_SIZE[1]);
+            centres[index] = uv;
+        }
+        for left in 0..centres.len() {
+            for right in left + 1..centres.len() {
+                assert_ne!(centres[left], centres[right]);
+            }
+        }
+    }
+
+    #[test]
+    fn cube_faces_select_contiguous_palette_slots() {
+        let base = 0x7a40;
+        for (index, face) in [
+            CubeFace::PositiveX,
+            CubeFace::NegativeX,
+            CubeFace::PositiveY,
+            CubeFace::NegativeY,
+            CubeFace::PositiveZ,
+            CubeFace::NegativeZ,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(cube_face_clut(base, face), base + index as u16);
+        }
+    }
+
+    #[test]
+    fn pitched_view_basis_reaches_zenith_and_nadir_faces() {
+        let cases = [
+            (
+                [[0x1000, 0, 0], [0, 0, -0x1000], [0, 0x1000, 0]],
+                CubeFace::PositiveY,
+            ),
+            (
+                [[0x1000, 0, 0], [0, 0, 0x1000], [0, -0x1000, 0]],
+                CubeFace::NegativeY,
+            ),
+        ];
+        for (rotation, expected) in cases {
+            let ray = screen_view_ray([160, 120], [160, 120], 160, rotation);
+            assert_eq!(cube_face(ray), expected);
+            assert_eq!(
+                cube_atlas_uv(ray, expected),
+                cube_atlas_uv(
+                    match expected {
+                        CubeFace::PositiveY => [0, 1, 0],
+                        CubeFace::NegativeY => [0, -1, 0],
+                        _ => unreachable!(),
+                    },
+                    expected,
+                )
+            );
+        }
     }
 
     #[test]
@@ -425,5 +960,89 @@ mod tests {
         assert_eq!(packets[0] & 0x00ff_ffff, 2047);
         assert_eq!(packets[2] >> 24, 9);
         assert_eq!(packets[2] & 0x00ff_ffff, 2047);
+    }
+
+    #[test]
+    fn cube_background_stays_within_its_packet_envelope() {
+        let mut packets = vec![0u32; VIEW_RAY_CUBE_SKY_PACKET_WORDS];
+        let submitted = unsafe {
+            submit_view_ray_cube_sky(
+                0x0105,
+                0x1234,
+                Mat3I16 {
+                    m: [[0, 0, 0x1000], [0, -0x1000, 0], [0x1000, 0, 0]],
+                },
+                [320, 240],
+                [160, 120],
+                160,
+                packets.as_mut_ptr(),
+            )
+        };
+        let used = unsafe { submitted.next_packet.offset_from(packets.as_ptr()) as usize };
+        assert!(used <= VIEW_RAY_CUBE_SKY_PACKET_WORDS);
+        assert!(submitted.packets > 1);
+        assert!(submitted.hardware_triangles >= submitted.packets - 1);
+        assert!(submitted.hardware_triangles <= (submitted.packets - 1) * 2);
+        assert!(matches!(packets[0] >> 24, 7 | 9));
+        assert_eq!(packets[0] & 0x00ff_ffff, 2047);
+        assert_eq!(packets[used - super::SKY_WINDOW_PACKET_WORDS] >> 24, 1);
+    }
+
+    #[test]
+    fn host_adapter_tags_every_cube_packet_for_its_deeper_sky_slot() {
+        const HOST_SKY_SLOT: u16 = 4094;
+        let mut packets = vec![0u32; VIEW_RAY_CUBE_SKY_PACKET_WORDS];
+        let submitted = unsafe {
+            submit_view_ray_cube_sky_to_slot(
+                0x0105,
+                0x1234,
+                Mat3I16 {
+                    m: [[0, 0, 0x1000], [0, -0x1000, 0], [0x1000, 0, 0]],
+                },
+                [320, 240],
+                [160, 120],
+                160,
+                HOST_SKY_SLOT,
+                packets.as_mut_ptr(),
+            )
+        };
+        let used = unsafe { submitted.next_packet.offset_from(packets.as_ptr()) as usize };
+        let mut offset = 0usize;
+        while offset < used {
+            let tag = packets[offset];
+            assert_eq!(tag & 0x00ff_ffff, u32::from(HOST_SKY_SLOT));
+            offset += 1 + (tag >> 24) as usize;
+        }
+        assert_eq!(offset, used);
+    }
+
+    #[test]
+    fn cube_background_packet_envelope_covers_full_camera_rotation() {
+        let mut packets = vec![0u32; VIEW_RAY_CUBE_SKY_PACKET_WORDS];
+        let mut maximum_used = 0usize;
+        for roll in (0..256).step_by(32) {
+            for pitch in (0..256).step_by(16) {
+                for yaw in (0..256).step_by(8) {
+                    let submitted = unsafe {
+                        submit_view_ray_cube_sky(
+                            0x0105,
+                            0x1234,
+                            Mat3I16::rotate_xyz(pitch, yaw, roll),
+                            [320, 240],
+                            [160, 120],
+                            160,
+                            packets.as_mut_ptr(),
+                        )
+                    };
+                    let used =
+                        unsafe { submitted.next_packet.offset_from(packets.as_ptr()) as usize };
+                    maximum_used = maximum_used.max(used);
+                    assert!(used <= VIEW_RAY_CUBE_SKY_PACKET_WORDS);
+                    assert!(submitted.packets > 1);
+                    assert_eq!(packets[used - super::SKY_WINDOW_PACKET_WORDS] >> 24, 1);
+                }
+            }
+        }
+        assert!(maximum_used < super::CUBE_SKY_PACKET_BUDGET_WORDS);
     }
 }

@@ -80,6 +80,7 @@ psx-vram      = { path = "sdk/crates/psx-vram" }
 psx-gte       = { path = "sdk/crates/psx-gte" }
 psx-gte-core  = { path = "sdk/crates/psx-gte-core" }
 psx-telemetry = { path = "sdk/crates/psx-telemetry" }
+psx-bsp       = { path = "engine/crates/psx-bsp" }
 psx-engine    = { path = "engine/crates/psx-engine" }
 
 # ---- External deps ------------------------------------------------------

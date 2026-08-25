@@ -1810,9 +1810,6 @@ impl ApplicationHandler for Shell {
                     && state.editor.editor_3d_preview_visible()
                 {
                     let editor_camera = state.editor.viewport_3d_camera();
-                    let editor_preview_fog = state.editor.preview_fog_enabled();
-                    let editor_preview_backface_wireframe =
-                        state.editor.preview_backface_wireframe_enabled();
                     let editor_preview_bounds = state.editor.preview_bounds_enabled();
                     let editor_show_grid = state.editor.show_grid_enabled();
                     let editor_show_brush_surface_grid =
@@ -1820,50 +1817,29 @@ impl ApplicationHandler for Shell {
                     let editor_grid_units = state.editor.grid_snap_units();
                     let editor_bsp_leak_path = state.editor.visible_bsp_leak_path();
                     let editor_bsp_leak_opening = state.editor.visible_bsp_leak_opening();
-                    let editor_show_portals = state.editor.show_portals_enabled();
                     let editor_show_lights = state.editor.show_lights_enabled();
                     let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
                     let editor_selected = state.editor.selected_node_id();
                     let editor_character_motion = state.editor.character_motion_preview();
                     let editor_root = state.editor.project_root();
-                    let editor_hover = state.editor.hovered_primitive();
-                    let editor_selection = state.editor.selected_primitive();
-                    let editor_selected_primitives = state.editor.selected_primitives();
-                    let editor_validation_issues = state.editor.validation_issue_primitives();
                     let editor_selected_bounds = state.editor.selected_bounds_3d();
-                    let editor_selected_sector_faces = state.editor.selected_sector_faces();
-                    let editor_paint_preview = state.editor.paint_target_preview();
-                    let editor_active_room = state.editor.active_room_id();
-                    let editor_active_floor = state.editor.active_floor();
-                    let editor_entity_bounds =
-                        state.editor.collect_entity_bounds(editor_active_room);
+                    let editor_entity_bounds = state.editor.collect_entity_bounds(None);
                     let editor_hovered_entity = state.editor.hovered_entity_node();
                     gfx.render_editor_preview(
                         state.editor.project(),
                         editor_root,
                         editor_camera,
-                        editor_preview_fog,
-                        editor_preview_backface_wireframe,
                         editor_preview_bounds,
                         editor_show_grid,
                         editor_show_brush_surface_grid,
                         editor_grid_units,
                         editor_bsp_leak_path,
                         editor_bsp_leak_opening,
-                        editor_show_portals,
                         editor_show_lights,
                         editor_hidden_scene_nodes,
-                        editor_active_room,
-                        editor_active_floor,
                         editor_selected,
                         editor_character_motion,
-                        editor_hover,
-                        editor_selection,
-                        &editor_selected_primitives,
-                        &editor_validation_issues,
                         editor_selected_bounds,
-                        &editor_selected_sector_faces,
-                        editor_paint_preview,
                         &editor_entity_bounds,
                         editor_hovered_entity,
                     );
@@ -1876,14 +1852,12 @@ impl ApplicationHandler for Shell {
                 };
                 #[cfg(feature = "editor")]
                 if let Some(request) = editor_camera_preview {
-                    let editor_preview_fog = state.editor.preview_fog_enabled();
                     let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
                     let editor_root = state.editor.project_root();
                     gfx.render_editor_camera_preview(
                         state.editor.project(),
                         editor_root,
                         request,
-                        editor_preview_fog,
                         editor_hidden_scene_nodes,
                     );
                 }

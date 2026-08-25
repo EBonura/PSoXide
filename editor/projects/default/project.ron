@@ -23,13 +23,9 @@
     editor_visibility: (
         show_grid: false,
         show_brush_surface_grid: false,
-        show_portals: true,
         show_lights: true,
-        preview_fog: false,
-        preview_backface_wireframe: false,
         preview_bounds: false,
         show_play_debug_overlays: false,
-        show_play_debug_map: false,
         show_brush_wireframes: false,
     ),
     editor_workspace: (
@@ -46,7 +42,6 @@
         viewport_zoom: 0.08498321,
         snap_units: 128,
     ),
-    world_format: Bsp,
     bsp_cook_mode: Draft,
     animation_trim_still_percent: 8,
     runtime_depth_sort_mode: HybridWalls,
@@ -960,7 +955,7 @@
             data: Model((
                 model_path: "assets/models/rust_mantis/rust_mantis.psxmdl",
                 source_path: Some("source_assets/characters/rust_mantis.glb"),
-                texture_path: Some("assets/models/rust_mantis/rust_mantis.psxt"),
+                texture_path: Some("assets/models/shared_enemy_01/shared_enemy_01.psxt"),
                 skeleton: Some((1635)),
                 world_height: 1024,
                 collision_radius: 192,
@@ -1167,7 +1162,7 @@
             data: Model((
                 model_path: "assets/models/sword1_light/sword1_light.psxmdl",
                 source_path: Some("source_assets/props/sword1_light.glb"),
-                texture_path: Some("assets/models/sword1_light/sword1_light.psxt"),
+                texture_path: Some("assets/models/shared_enemy_01/shared_enemy_01.psxt"),
                 skeleton: Some((1702)),
                 world_height: 566,
                 collision_radius: 106,
@@ -1182,7 +1177,7 @@
             data: Model((
                 model_path: "assets/models/sword1_heavy/sword1_heavy.psxmdl",
                 source_path: Some("source_assets/props/sword1_heavy.glb"),
-                texture_path: Some("assets/models/sword1_light/sword1_light.psxt"),
+                texture_path: Some("assets/models/shared_enemy_01/shared_enemy_01.psxt"),
                 skeleton: Some((1702)),
                 world_height: 768,
                 collision_radius: 144,
@@ -2440,7 +2435,7 @@
             data: Model((
                 model_path: "assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl",
                 source_path: None,
-                texture_path: Some("assets/models/tank_boss_animated_model/tank_boss_animated_model.psxt"),
+                texture_path: Some("assets/models/shared_enemy_01/shared_enemy_01.psxt"),
                 skeleton: Some((5028)),
                 world_height: 1536,
                 collision_radius: 288,

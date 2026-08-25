@@ -45,6 +45,67 @@ pub(crate) fn push_cyclorama(
     }
 }
 
+pub(crate) fn push_projected_scene_sky(
+    scratch: &mut PreviewScratch,
+    mode: SkyMode,
+    view_rotation: Mat3I16,
+    material_tick: u32,
+    textures: &EditorTextures,
+) {
+    let Some(slot) = textures.scene_sky_slot().filter(|slot| slot.mode == mode) else {
+        return;
+    };
+    let word_capacity = match mode {
+        SkyMode::QuakeLayered => psx_bsp::sky::VIEW_RAY_SKY_PACKET_WORDS,
+        SkyMode::Cube => psx_bsp::sky::VIEW_RAY_CUBE_SKY_PACKET_WORDS,
+        SkyMode::Off | SkyMode::Panorama => return,
+    };
+    let stream = {
+        let mut arena = PrimitivePacketArena::new(&mut scratch.projected_sky_packets);
+        let Some(mut reservation) = arena.reserve_packet_words(word_capacity) else {
+            return;
+        };
+        let first = reservation.words_mut().as_mut_ptr();
+        let submitted = unsafe {
+            match mode {
+                SkyMode::QuakeLayered => psx_bsp::sky::submit_view_ray_layered_sky_to_slot(
+                    slot.tpage_word,
+                    slot.clut_word,
+                    [0, 0],
+                    [128, 128],
+                    view_rotation,
+                    [SCREEN_W as i16, SCREEN_H as i16],
+                    [SCREEN_CX as i16, SCREEN_CY as i16],
+                    PROJ_H as i16,
+                    material_tick,
+                    PREVIEW_SKY_SLOT as u16,
+                    first,
+                ),
+                SkyMode::Cube => psx_bsp::sky::submit_view_ray_cube_sky_to_slot(
+                    slot.tpage_word,
+                    slot.clut_word,
+                    view_rotation,
+                    [SCREEN_W as i16, SCREEN_H as i16],
+                    [SCREEN_CX as i16, SCREEN_CY as i16],
+                    PROJ_H as i16,
+                    PREVIEW_SKY_SLOT as u16,
+                    first,
+                ),
+                SkyMode::Off | SkyMode::Panorama => unreachable!(),
+            }
+        };
+        let words = unsafe { submitted.next_packet.offset_from(first) }.max(0) as usize;
+        let Some(stream) = reservation.commit(words, submitted.packets as usize) else {
+            return;
+        };
+        stream
+    };
+    let mut ot = psx_engine::OtFrame::resume(&mut scratch.ot);
+    unsafe {
+        ot.add_committed_tagged_packet_stream_unchecked(stream);
+    }
+}
+
 pub(crate) fn preview_project_cyclorama_quad(
     dirs: [[i16; 3]; 4],
     camera: psx_engine::WorldCamera,

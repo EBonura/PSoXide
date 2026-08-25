@@ -1,42 +1,6 @@
 use super::*;
 
 #[derive(Debug, Clone)]
-pub(crate) struct PrefabLibraryEntry {
-    pub(crate) path: PathBuf,
-    pub(crate) name: String,
-    pub(crate) prefab: Option<psxed_project::Prefab>,
-    pub(crate) load_error: Option<String>,
-}
-
-pub(crate) fn load_prefab_library() -> std::io::Result<Vec<PrefabLibraryEntry>> {
-    psxed_project::list_prefabs().map(|paths| {
-        paths
-            .into_iter()
-            .map(|path| {
-                let name = path
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                match psxed_project::Prefab::load_from_path(&path) {
-                    Ok(prefab) => PrefabLibraryEntry {
-                        path,
-                        name,
-                        prefab: Some(prefab),
-                        load_error: None,
-                    },
-                    Err(error) => PrefabLibraryEntry {
-                        path,
-                        name,
-                        prefab: None,
-                        load_error: Some(error.to_string()),
-                    },
-                }
-            })
-            .collect()
-    })
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct ProjectFileRow {
     pub(crate) depth: usize,
     pub(crate) name: String,
@@ -45,13 +9,9 @@ pub(crate) struct ProjectFileRow {
     pub(crate) ancestors: Vec<String>,
     pub(crate) icon: char,
     pub(crate) resource: Option<ResourceId>,
-    pub(crate) prefab: Option<PathBuf>,
 }
 
-pub(crate) fn project_filesystem_rows(
-    project: &ProjectDocument,
-    prefab_library: &[PrefabLibraryEntry],
-) -> Vec<ProjectFileRow> {
+pub(crate) fn project_filesystem_rows(project: &ProjectDocument) -> Vec<ProjectFileRow> {
     let mut rows = Vec::new();
     rows.push(ProjectFileRow {
         depth: 0,
@@ -61,7 +21,6 @@ pub(crate) fn project_filesystem_rows(
         ancestors: Vec::new(),
         icon: icons::FOLDER,
         resource: None,
-        prefab: None,
     });
     rows.push(ProjectFileRow {
         depth: 1,
@@ -71,7 +30,6 @@ pub(crate) fn project_filesystem_rows(
         ancestors: vec!["res://".to_string()],
         icon: icons::FOLDER,
         resource: None,
-        prefab: None,
     });
     rows.push(ProjectFileRow {
         depth: 2,
@@ -81,7 +39,6 @@ pub(crate) fn project_filesystem_rows(
         ancestors: vec!["res://".to_string(), "res://maps".to_string()],
         icon: icons::GRID,
         resource: None,
-        prefab: None,
     });
 
     push_resource_folder(project, &mut rows, "materials", ResourceFilter::Material);
@@ -89,9 +46,8 @@ pub(crate) fn project_filesystem_rows(
     push_resource_folder(project, &mut rows, "animations", ResourceFilter::Animation);
     push_resource_folder(project, &mut rows, "characters", ResourceFilter::Character);
     push_resource_folder(project, &mut rows, "weapons", ResourceFilter::Weapon);
-    push_prefab_library_folder(&mut rows, prefab_library);
     push_resource_folder(project, &mut rows, "meshes", ResourceFilter::Mesh);
-    push_resource_folder(project, &mut rows, "spawns", ResourceFilter::Other);
+    push_resource_folder(project, &mut rows, "other", ResourceFilter::Other);
     rows
 }
 
@@ -110,7 +66,6 @@ pub(crate) fn push_resource_folder(
         ancestors: vec!["res://".to_string()],
         icon: icons::FOLDER,
         resource: None,
-        prefab: None,
     });
     for resource in project
         .resources
@@ -125,36 +80,6 @@ pub(crate) fn push_resource_folder(
             ancestors: vec!["res://".to_string(), key.clone()],
             icon: resource_lucide_icon(&resource.data),
             resource: Some(resource.id),
-            prefab: None,
-        });
-    }
-}
-
-pub(crate) fn push_prefab_library_folder(
-    rows: &mut Vec<ProjectFileRow>,
-    prefab_library: &[PrefabLibraryEntry],
-) {
-    let key = "res://prefabs".to_string();
-    rows.push(ProjectFileRow {
-        depth: 1,
-        name: "prefabs".to_string(),
-        folder: true,
-        key: key.clone(),
-        ancestors: vec!["res://".to_string()],
-        icon: icons::FOLDER,
-        resource: None,
-        prefab: None,
-    });
-    for entry in prefab_library {
-        rows.push(ProjectFileRow {
-            depth: 2,
-            name: entry.name.clone(),
-            folder: false,
-            key: format!("{key}/{}", entry.name),
-            ancestors: vec!["res://".to_string(), key.clone()],
-            icon: icons::LAYERS,
-            resource: None,
-            prefab: Some(entry.path.clone()),
         });
     }
 }
@@ -183,7 +108,6 @@ pub(crate) fn draw_project_file_row(
     row: &ProjectFileRow,
     selected_resource: Option<ResourceId>,
     selected_resources: &HashSet<ResourceId>,
-    selected_prefab: Option<&Path>,
     filter: &str,
     collapsed_folders: &HashSet<String>,
 ) -> Option<ProjectFileRowAction> {
@@ -219,8 +143,7 @@ pub(crate) fn draw_project_file_row(
             let selected = row
                 .resource
                 .is_some_and(|id| selected_resources.contains(&id))
-                || (selected_resources.is_empty() && row.resource == selected_resource)
-                || row.prefab.as_deref() == selected_prefab;
+                || (selected_resources.is_empty() && row.resource == selected_resource);
             let response = ui.selectable_label(selected, label);
             if response.clicked() {
                 if let Some(id) = row.resource {
@@ -228,8 +151,6 @@ pub(crate) fn draw_project_file_row(
                         id,
                         modifiers: ui.input(|input| input.modifiers),
                     }));
-                } else if let Some(path) = &row.prefab {
-                    action = Some(ProjectFileRowAction::SelectPrefab(path.clone()));
                 }
             }
             if label_was_compacted {
@@ -260,7 +181,6 @@ pub(crate) fn resource_file_name(resource: &Resource) -> String {
         ResourceData::Character(_) => cooked_name(&resource.name, "", "profile"),
         ResourceData::Weapon(_) => cooked_name(&resource.name, "", "weapon"),
         ResourceData::Mesh { source_path } => cooked_name(&resource.name, source_path, "psxmesh"),
-        ResourceData::Prefab { source_path } => cooked_name(&resource.name, source_path, "ron"),
         ResourceData::Scene { source_path } => cooked_name(&resource.name, source_path, "room"),
         ResourceData::Script { source_path } => cooked_name(&resource.name, source_path, "script"),
         ResourceData::Audio { source_path } => cooked_name(&resource.name, source_path, "vag"),
@@ -291,17 +211,13 @@ pub(crate) fn snake_name(name: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-pub(crate) fn resource_filter_counts(
-    project: &ProjectDocument,
-    prefab_count: usize,
-) -> [(ResourceFilter, usize); 9] {
+pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFilter, usize); 7] {
     let mut material = 0;
     let mut model = 0;
     let mut animation = 0;
     let mut character = 0;
     let mut weapon = 0;
     let mut mesh = 0;
-    let mut room = 0;
     let mut other = 0;
     for resource in &project.resources {
         if resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX) {
@@ -319,11 +235,7 @@ pub(crate) fn resource_filter_counts(
             ResourceData::Character(_) => character += 1,
             ResourceData::Weapon(_) => weapon += 1,
             ResourceData::Mesh { .. } => mesh += 1,
-            // Prefab resources were a short-lived bridge from the shared
-            // library into project data. New projects never create them and
-            // loaded projects normalize them away.
-            ResourceData::Prefab { .. } => {}
-            ResourceData::Scene { .. } => room += 1,
+            ResourceData::Scene { .. } => {}
             ResourceData::Script { .. } | ResourceData::Audio { .. } => other += 1,
         }
     }
@@ -334,8 +246,6 @@ pub(crate) fn resource_filter_counts(
         (ResourceFilter::Character, character),
         (ResourceFilter::Weapon, weapon),
         (ResourceFilter::Mesh, mesh),
-        (ResourceFilter::Prefab, prefab_count),
-        (ResourceFilter::Room, room),
         (ResourceFilter::Other, other),
     ]
 }
@@ -345,6 +255,9 @@ pub(crate) fn resource_matches_filter(
     filter: ResourceFilter,
     search: &str,
 ) -> bool {
+    if matches!(&resource.data, ResourceData::Scene { .. }) {
+        return false;
+    }
     if resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX) {
         return filter.matches(&resource.data) && search.contains("paint blend");
     }
@@ -374,7 +287,6 @@ pub(crate) fn resource_source_path(resource: &Resource) -> Option<&str> {
         ResourceData::AnimationSource(source) => Some(source.source_path.as_str()),
         ResourceData::AnimationClip(clip) => Some(clip.psxanim_path.as_str()),
         ResourceData::Mesh { source_path }
-        | ResourceData::Prefab { source_path }
         | ResourceData::Scene { source_path }
         | ResourceData::Script { source_path }
         | ResourceData::Audio { source_path } => Some(source_path.as_str()),
@@ -397,7 +309,6 @@ pub(crate) fn resource_lucide_icon(data: &ResourceData) -> char {
         ResourceData::Character(_) => icons::MAP_PIN,
         ResourceData::Weapon(_) => icons::WAYPOINT,
         ResourceData::Mesh { .. } => icons::BOX,
-        ResourceData::Prefab { .. } => icons::LAYERS,
         ResourceData::Scene { .. } => icons::GRID,
         ResourceData::Script { .. } => icons::FILE,
         ResourceData::Audio { .. } => icons::AUDIO_LINES,
@@ -420,7 +331,6 @@ pub(crate) fn resource_lucide_color(data: &ResourceData, selected: bool) -> Colo
         ResourceData::Character(_) => Color32::from_rgb(120, 220, 148),
         ResourceData::Weapon(_) => Color32::from_rgb(222, 196, 112),
         ResourceData::Mesh { .. } => Color32::from_rgb(156, 174, 190),
-        ResourceData::Prefab { .. } => Color32::from_rgb(122, 152, 198),
         ResourceData::Scene { .. } => Color32::from_rgb(209, 118, 71),
         ResourceData::Script { .. } => Color32::from_rgb(188, 176, 104),
         ResourceData::Audio { .. } => Color32::from_rgb(104, 202, 188),
@@ -523,186 +433,6 @@ pub(crate) fn draw_resource_card(
         );
     }
     response
-}
-
-pub(crate) fn draw_prefab_library_card(
-    ui: &mut egui::Ui,
-    entry: &PrefabLibraryEntry,
-    selected: bool,
-) -> egui::Response {
-    let size = Vec2::new(RESOURCE_CARD_WIDTH, RESOURCE_CARD_HEIGHT);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    let painter = ui.painter_at(rect);
-    let fill = if selected {
-        if response.hovered() {
-            STUDIO_SELECTION_HOVER
-        } else {
-            STUDIO_SELECTION
-        }
-    } else if response.hovered() {
-        STUDIO_HOVER
-    } else {
-        STUDIO_PANEL_HEADER
-    };
-    painter.rect_filled(rect, 6.0, fill);
-    painter.rect_stroke(
-        rect,
-        6.0,
-        Stroke::new(
-            if selected { 1.5 } else { 1.0 },
-            if selected {
-                STUDIO_ACCENT
-            } else if response.hovered() {
-                STUDIO_BORDER
-            } else {
-                STUDIO_BORDER_DARK
-            },
-        ),
-        StrokeKind::Inside,
-    );
-
-    let preview = Rect::from_min_size(rect.min + Vec2::new(8.0, 8.0), Vec2::new(104.0, 72.0));
-    painter.rect_filled(preview, 2.0, Color32::from_rgb(24, 24, 30));
-    if let Some(prefab) = &entry.prefab {
-        paint_prefab_plan(&painter, preview, prefab);
-    } else {
-        painter.text(
-            preview.center(),
-            Align2::CENTER_CENTER,
-            "Unreadable",
-            FontId::monospace(11.0),
-            Color32::from_rgb(210, 120, 110),
-        );
-    }
-    painter.rect_stroke(
-        preview,
-        2.0,
-        Stroke::new(1.0, STUDIO_BORDER_DARK),
-        StrokeKind::Inside,
-    );
-    let badge = Rect::from_min_size(preview.left_top() + Vec2::new(4.0, 4.0), Vec2::splat(22.0));
-    painter.rect_filled(badge, 4.0, Color32::from_rgba_unmultiplied(8, 12, 16, 192));
-    painter.text(
-        badge.center(),
-        Align2::CENTER_CENTER,
-        icons::LAYERS.to_string(),
-        icons::font(14.0),
-        if selected {
-            Color32::WHITE
-        } else {
-            Color32::from_rgb(122, 152, 198)
-        },
-    );
-    painter.text(
-        rect.center_top() + Vec2::new(0.0, 88.0),
-        Align2::CENTER_TOP,
-        compact_middle(&entry.name, 16),
-        FontId::monospace(12.0),
-        Color32::from_rgb(225, 231, 240),
-    );
-    let detail = entry.prefab.as_ref().map_or_else(
-        || "Unreadable".to_string(),
-        |prefab| {
-            format!(
-                "{}x{} - {}F",
-                prefab.width,
-                prefab.height,
-                prefab.floors.len()
-            )
-        },
-    );
-    painter.text(
-        rect.center_top() + Vec2::new(0.0, 110.0),
-        Align2::CENTER_TOP,
-        detail,
-        FontId::monospace(10.0),
-        STUDIO_TEXT_WEAK,
-    );
-    if response.dragged() && entry.prefab.is_some() {
-        response.dnd_set_drag_payload::<PrefabDragPayload>(PrefabDragPayload {
-            path: entry.path.clone(),
-        });
-        let pointer_pos = ui
-            .ctx()
-            .input(|input| input.pointer.interact_pos())
-            .unwrap_or_else(|| rect.center());
-        ui.painter().text(
-            pointer_pos + Vec2::new(12.0, 0.0),
-            Align2::LEFT_CENTER,
-            format!("{} {}", icons::LAYERS, entry.name),
-            FontId::proportional(12.0),
-            STUDIO_ACCENT,
-        );
-    }
-    if let Some(error) = &entry.load_error {
-        response.on_hover_text(error)
-    } else {
-        response.on_hover_text("Shared editor prefab - drag into scene or double-click to stamp")
-    }
-}
-
-pub(crate) fn paint_prefab_plan(
-    painter: &egui::Painter,
-    rect: Rect,
-    prefab: &psxed_project::Prefab,
-) {
-    use psxed_project::{GridDirection, GridSector};
-    let Some(floor) = prefab.floors.first() else {
-        return;
-    };
-
-    let span = prefab.width.max(prefab.height).max(1) as f32;
-    let cell = (rect.width().min(rect.height()) / span).max(1.0);
-    let plan_width = prefab.width as f32 * cell;
-    let plan_height = prefab.height as f32 * cell;
-    let origin = Pos2::new(
-        rect.center().x - plan_width * 0.5,
-        rect.center().y - plan_height * 0.5,
-    );
-    let present: HashSet<(i32, i32)> = floor
-        .cells
-        .iter()
-        .filter(|cell| cell.sector.as_ref().is_some_and(GridSector::has_geometry))
-        .map(|cell| (cell.offset[0], cell.offset[1]))
-        .collect();
-
-    for entry in &floor.cells {
-        let Some(sector) = entry.sector.as_ref().filter(|sector| sector.has_geometry()) else {
-            continue;
-        };
-        let (cx, cz) = (entry.offset[0], entry.offset[1]);
-        let x0 = origin.x + cx as f32 * cell;
-        let y0 = origin.y + (prefab.height - 1 - cz) as f32 * cell;
-        let cell_rect = Rect::from_min_size(Pos2::new(x0, y0), Vec2::splat(cell));
-        painter.rect_filled(cell_rect, 0.0, Color32::from_rgb(150, 145, 138));
-
-        for direction in GridDirection::CARDINAL {
-            let neighbour = match direction {
-                GridDirection::North => (cx, cz + 1),
-                GridDirection::South => (cx, cz - 1),
-                GridDirection::East => (cx + 1, cz),
-                GridDirection::West => (cx - 1, cz),
-                _ => continue,
-            };
-            let walled = !sector.walls.get(direction).is_empty();
-            if present.contains(&neighbour) && !walled {
-                continue;
-            }
-            let colour = if walled {
-                Color32::from_rgb(58, 58, 70)
-            } else {
-                Color32::from_rgb(84, 217, 140)
-            };
-            let (a, b) = match direction {
-                GridDirection::North => (cell_rect.left_top(), cell_rect.right_top()),
-                GridDirection::South => (cell_rect.left_bottom(), cell_rect.right_bottom()),
-                GridDirection::West => (cell_rect.left_top(), cell_rect.left_bottom()),
-                GridDirection::East => (cell_rect.right_top(), cell_rect.right_bottom()),
-                _ => continue,
-            };
-            painter.line_segment([a, b], Stroke::new(2.0, colour));
-        }
-    }
 }
 
 pub(crate) fn draw_resource_preview(
@@ -1034,7 +764,6 @@ pub(crate) fn resource_preview_color(resource: &Resource) -> Color32 {
             ResourceData::Character(_) => Color32::from_rgb(96, 144, 110),
             ResourceData::Weapon(_) => Color32::from_rgb(150, 132, 76),
             ResourceData::Mesh { .. } => Color32::from_rgb(110, 120, 130),
-            ResourceData::Prefab { .. } => Color32::from_rgb(122, 152, 198),
             ResourceData::Scene { .. } => Color32::from_rgb(92, 130, 106),
             ResourceData::Script { .. } => Color32::from_rgb(128, 126, 80),
             ResourceData::Audio { .. } => Color32::from_rgb(80, 128, 128),
@@ -1059,7 +788,6 @@ pub(crate) fn resource_detail(resource: &Resource) -> &'static str {
         ResourceData::Character(_) => "Character Profile",
         ResourceData::Weapon(_) => "Weapon",
         ResourceData::Mesh { .. } => "Mesh",
-        ResourceData::Prefab { .. } => "Prefab",
         ResourceData::Scene { .. } => "Room",
         ResourceData::Script { .. } => "Script",
         ResourceData::Audio { .. } => "Audio",

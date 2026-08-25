@@ -2,7 +2,6 @@ use super::*;
 
 impl EditorWorkspace {
     pub(crate) fn replace_node_selection(&mut self, id: NodeId) {
-        self.selection.selected_prefab = None;
         self.selection.selected_node = id;
         self.selection.selected_nodes.clear();
         self.selection.selected_nodes.insert(id);
@@ -16,7 +15,6 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn replace_resource_selection(&mut self, id: ResourceId) {
-        self.selection.selected_prefab = None;
         self.selection.selected_resource = Some(id);
         self.selection.selected_resources.clear();
         self.selection.selected_resources.insert(id);
@@ -32,14 +30,12 @@ impl EditorWorkspace {
 
     pub(crate) fn clear_resource_selection_state(&mut self) {
         self.selection.selected_resource = None;
-        self.selection.selected_prefab = None;
         self.selection.selected_resources.clear();
         self.selection.resource_selection_anchor = None;
         self.resource_delete_confirm = None;
     }
 
     pub(crate) fn replace_primitive_selection(&mut self, selection: Selection) {
-        self.selection.selected_prefab = None;
         self.selection.selected_primitive = Some(selection);
         self.selection.selected_primitives.clear();
         self.selection.selected_primitives.push(selection);
@@ -47,17 +43,6 @@ impl EditorWorkspace {
 
     pub(crate) fn clear_primitive_selection_state(&mut self) {
         self.selection.clear_primitives();
-    }
-
-    pub(crate) fn replace_prefab_selection(&mut self, path: PathBuf) {
-        let name = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        self.clear_resource_selection_state();
-        self.clear_primitive_selection_state();
-        self.selection.selected_prefab = Some(path);
-        self.status = format!("Selected shared prefab '{name}'");
     }
 
     pub(crate) fn select_all_current_scope(&mut self) {
@@ -117,7 +102,6 @@ impl EditorWorkspace {
 
         self.selection.selected_resources = ids.iter().copied().collect();
         self.selection.selected_resource = Some(ids[0]);
-        self.selection.selected_prefab = None;
         self.selection.resource_selection_anchor = Some(ids[0]);
         self.resource_delete_confirm = None;
         self.clear_node_selection_state();
@@ -163,44 +147,16 @@ impl EditorWorkspace {
         for face in self.all_faces_in_room(room) {
             match mode {
                 SelectionMode::Face => {
-                    if matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle)
-                        && matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling)
-                    {
-                        for triangle in self.horizontal_triangle_refs_for_face(face) {
-                            push_unique_selection(&mut selections, Selection::Triangle(triangle));
-                        }
-                    } else {
-                        push_unique_selection(&mut selections, Selection::Face(face));
-                    }
+                    push_unique_selection(&mut selections, Selection::Face(face));
                 }
                 SelectionMode::Edge => {
-                    if matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle)
-                        && matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling)
-                    {
-                        for triangle in self.horizontal_triangle_refs_for_face(face) {
-                            for edge in triangle_edges(triangle) {
-                                push_unique_selection(&mut selections, Selection::Edge(edge));
-                            }
-                        }
-                    } else {
-                        for edge in face_edges(face) {
-                            push_unique_selection(&mut selections, Selection::Edge(edge));
-                        }
+                    for edge in face_edges(face) {
+                        push_unique_selection(&mut selections, Selection::Edge(edge));
                     }
                 }
                 SelectionMode::Vertex => {
-                    if matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle)
-                        && matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling)
-                    {
-                        for triangle in self.horizontal_triangle_refs_for_face(face) {
-                            for vertex in triangle_vertices(triangle) {
-                                push_unique_selection(&mut selections, Selection::Vertex(vertex));
-                            }
-                        }
-                    } else {
-                        for vertex in face_vertices(face) {
-                            push_unique_selection(&mut selections, Selection::Vertex(vertex));
-                        }
+                    for vertex in face_vertices(face) {
+                        push_unique_selection(&mut selections, Selection::Vertex(vertex));
                     }
                 }
             }
