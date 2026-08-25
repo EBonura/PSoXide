@@ -524,6 +524,22 @@ fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
             ..crate::WeaponResource::default()
         }),
     );
+    let ResourceData::AnimationSet(animation_set) =
+        &mut project.resource_mut(set).expect("animation set").data
+    else {
+        panic!("expected animation set");
+    };
+    animation_set.set_action_clip(crate::CharacterAnimationAction::LightAttack, Some(idle));
+    animation_set
+        .weapon_appearance_tracks
+        .push(crate::WeaponAppearanceTrack {
+            action: crate::CharacterAnimationAction::LightAttack,
+            weapon,
+            character_socket: "right_hand_grip".to_string(),
+            fully_visible_frame: 5,
+            hidden_frame: 14,
+            transition_frames: 3,
+        });
 
     let scene = project.active_scene_mut();
     let mut grid = crate::WorldGrid::empty(2, 2, 1024);
@@ -600,6 +616,16 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
     assert_eq!(package.weapons[0].damage, 25);
     assert_eq!(package.weapons[0].poise_damage, 25);
     assert_eq!(package.equipment[0].weapon, 0);
+    assert_eq!(package.weapon_appearances.len(), 1);
+    assert_eq!(package.weapon_appearances[0].character, 0);
+    assert_eq!(
+        package.weapon_appearances[0].action,
+        crate::CharacterAnimationAction::LightAttack
+    );
+    assert_eq!(package.weapon_appearances[0].weapon, 0);
+    assert_eq!(package.weapon_appearances[0].fully_visible_frame, 5);
+    assert_eq!(package.weapon_appearances[0].hidden_frame, 14);
+    assert_eq!(package.weapon_appearances[0].transition_frames, 3);
     assert_eq!(
         package.equipment[0].flags & psx_level::equipment_flags::PLAYER,
         psx_level::equipment_flags::PLAYER
@@ -610,6 +636,8 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
     assert!(src.contains("LevelModelSocketRecord"));
     assert!(src.contains("pub static WEAPONS"));
     assert!(src.contains("pub static EQUIPMENT"));
+    assert!(src.contains("pub static WEAPON_APPEARANCES"));
+    assert!(src.contains("CharacterAnimationAction::LightAttack"));
     assert!(src.contains("WeaponHitShapeRecord::Capsule"));
     assert!(src.contains("arc_reach: 640"));
     assert!(src.contains("arc_half_angle: 682"));

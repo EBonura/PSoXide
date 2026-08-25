@@ -46,7 +46,7 @@ pub(crate) struct PreviewSocket {
 /// Sampling tiles the override so byte-space model UVs repeat a
 /// smaller generated texture, the way the crystal/hologram skins read
 /// in Play.
-pub(crate) struct PreviewMaterialLayer<'a> {
+pub struct PreviewMaterialLayer<'a> {
     pub atlas: &'a ColorImage,
     pub motion: psx_level::LevelMaterialUvMotion,
 }
@@ -54,7 +54,7 @@ pub(crate) struct PreviewMaterialLayer<'a> {
 /// Equipped-weapon overlay: a second rigid model rendered riding a
 /// socket, placed with the runtime equipment composition (socket pose
 /// times grip inverse) so the preview equals what Play shows.
-pub(crate) struct PreviewEquippedWeapon<'a> {
+pub struct PreviewEquippedWeapon<'a> {
     pub model_bytes: &'a [u8],
     pub atlas: &'a ColorImage,
     pub socket_joint: u16,
@@ -62,6 +62,10 @@ pub(crate) struct PreviewEquippedWeapon<'a> {
     pub socket_rotation_q12: [i16; 3],
     pub grip_translation: [i32; 3],
     pub grip_rotation_q12: [i16; 3],
+    /// Fraction of the weapon that has materialised, where 4096 is complete.
+    pub materialization_q12: u16,
+    /// Draw the materialised faces as the runtime's green nanobot cage.
+    pub wireframe_materialization: bool,
 }
 
 /// Preview image plus projected body-part points used by Animation Studio's
@@ -177,6 +181,34 @@ pub fn render_import_model_preview_with_options(
         yaw_rotation_matrix(options.visual_yaw_q12),
         [PREVIEW_WIDTH, PREVIEW_HEIGHT],
     )
+}
+
+/// Render the standard 320x240 cooked-model preview with the material and
+/// equipped-weapon overlays used by Animation Studio. Reel/debug tooling uses
+/// this entry point to reproduce the in-engine character presentation without
+/// exposing the editor-only capsule and joint-picking machinery.
+pub fn render_import_model_preview_with_equipment(
+    model_bytes: &[u8],
+    clip_bytes: &[u8],
+    atlas: &ColorImage,
+    options: ImportPreviewOptions,
+    equipped_weapon: Option<&PreviewEquippedWeapon<'_>>,
+    character_material: Option<&PreviewMaterialLayer<'_>>,
+) -> Option<ColorImage> {
+    render_import_model_preview_with_combat_capsules_at_size(
+        model_bytes,
+        clip_bytes,
+        atlas,
+        options,
+        yaw_rotation_matrix(options.visual_yaw_q12),
+        [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+        &[],
+        &[],
+        equipped_weapon,
+        character_material,
+        None,
+    )
+    .map(|render| render.image)
 }
 
 /// Render a model preview with the exact presentation transform used by a
@@ -1307,6 +1339,10 @@ fn draw_equipped_weapon_overlay(
     joint_transforms: &[JointWorldTransform],
 ) -> Option<()> {
     let weapon_model = Model::from_bytes(weapon.model_bytes).ok()?;
+    let materialization_q12 = weapon.materialization_q12.min(4096);
+    if materialization_q12 == 0 {
+        return Some(());
+    }
     let joint = joint_transforms
         .get(weapon.socket_joint as usize)
         .copied()?;
@@ -1357,6 +1393,11 @@ fn draw_equipped_weapon_overlay(
         *slot = project_import_model_vertex(vertex, weapon_joint, &weapon_transforms, camera);
     }
     let double_sided = weapon_model.double_sided();
+    let visible_faces = (usize::from(weapon_model.face_count())
+        .saturating_mul(usize::from(materialization_q12))
+        .saturating_add(4095))
+        / 4096;
+    let mut visited_faces = 0usize;
     for part_index in 0..weapon_model.part_count() {
         let Some(part) = weapon_model.part(part_index) else {
             continue;
@@ -1364,6 +1405,10 @@ fn draw_equipped_weapon_overlay(
         let first_face = part.first_face();
         let last_face = first_face.saturating_add(part.face_count());
         for face_index in first_face..last_face {
+            if visited_faces >= visible_faces {
+                return Some(());
+            }
+            visited_faces = visited_faces.saturating_add(1);
             let Some(face) = weapon_model.face(face_index) else {
                 continue;
             };
@@ -1377,6 +1422,30 @@ fn draw_equipped_weapon_overlay(
             let Some(pc) = projected.get(c.vertex_index as usize).and_then(|v| *v) else {
                 continue;
             };
+            if weapon.wireframe_materialization {
+                let points = [pa, pb, pc];
+                let mut longest = (i64::MIN, 0usize, 1usize);
+                for edge in 0..3 {
+                    let next = (edge + 1) % 3;
+                    let dx = i64::from(points[edge].sx) - i64::from(points[next].sx);
+                    let dy = i64::from(points[edge].sy) - i64::from(points[next].sy);
+                    let length_sq = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
+                    if length_sq > longest.0 {
+                        longest = (length_sq, edge, next);
+                    }
+                }
+                let from = points[longest.1];
+                let to = points[longest.2];
+                draw_image_line(
+                    image,
+                    i32::from(from.sx),
+                    i32::from(from.sy),
+                    i32::from(to.sx),
+                    i32::from(to.sy),
+                    Color32::from_rgb(32, 255, 128),
+                );
+                continue;
+            }
             raster_textured_triangle(
                 image,
                 z_buffer,
@@ -1859,6 +1928,8 @@ mod tests {
             socket_rotation_q12: socket_rotation,
             grip_translation: [0, 0, 0],
             grip_rotation_q12: [0, 0, 0],
+            materialization_q12: 4096,
+            wireframe_materialization: false,
         }));
         assert_ne!(
             bare.pixels, with_weapon.pixels,
@@ -1876,6 +1947,8 @@ mod tests {
             socket_rotation_q12: socket_rotation,
             grip_translation: [0, 0, 0],
             grip_rotation_q12: [0, 0, 0],
+            materialization_q12: 4096,
+            wireframe_materialization: false,
         }));
         assert_ne!(
             with_weapon.pixels, moved.pixels,

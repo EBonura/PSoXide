@@ -150,19 +150,18 @@ pub(super) fn retire_menu_ui_cache() {
 /// Free every streamed UI image VRAM slot created by `load_ui_images_for_scene`.
 /// Called on gameplay entry so the room textures reclaim that VRAM. Fonts are
 /// shared and are NOT released here.
-#[cfg(feature = "cd-stream-bench")]
 pub(super) fn release_ui_images() {
     vram_arena().release_ui_images();
 }
 
-/// Acquire the shared UI fonts (reserving the static VRAM regions on
-/// first call); the packing/upload policy lives on
-/// `VramRuntime::acquire_shared_ui_fonts`.
+/// Acquire the active scene's UI fonts (reserving static VRAM regions on the
+/// first call). A different slice replaces and releases the previous pack.
 #[must_use = "false means the complete UI font set is unavailable"]
-pub(super) fn acquire_shared_ui_fonts(
+pub(super) fn acquire_ui_fonts(
+    fonts: &'static [&'static psx_font::BitmapFont],
     ui_fonts: &mut [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS],
 ) -> bool {
-    vram_arena().acquire_shared_ui_fonts(VRAM_LAYOUT, font_scratch_arena(), UI_FONTS, ui_fonts)
+    vram_arena().acquire_shared_ui_fonts(VRAM_LAYOUT, font_scratch_arena(), fonts, ui_fonts)
 }
 
 const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 768;
@@ -250,6 +249,14 @@ pub(super) fn ensure_layered_sky_texture_uploaded(
     asset_bytes: &[u8],
 ) -> Option<VramSlot> {
     vram_arena().ensure_layered_sky_texture_uploaded(VRAM_LAYOUT, asset_id, asset_bytes)
+}
+
+/// Upload a six-page, six-face 256x256 scenic cube atlas with opaque palette zero.
+pub(super) fn ensure_directional_sky_texture_uploaded(
+    asset_id: AssetId,
+    asset_bytes: &[u8],
+) -> Option<VramSlot> {
+    vram_arena().ensure_directional_sky_texture_uploaded(VRAM_LAYOUT, asset_id, asset_bytes)
 }
 
 /// Queue (or resolve) the room-owned reflection probe. The active-room window
@@ -357,10 +364,10 @@ pub(super) fn load_streamed_sky_from_cd() {
     );
 }
 
-/// Free the streamed sky panorama's VRAM on gameplay exit.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn release_streamed_sky() {
-    vram_arena().release_streamed_sky();
+/// Return every gameplay-owned texture page and CLUT before a front-end scene
+/// becomes active.
+pub(super) fn release_gameplay_vram() {
+    vram_arena().release_gameplay_vram();
 }
 
 /// Upload an 8bpp model atlas to the dedicated model VRAM region.

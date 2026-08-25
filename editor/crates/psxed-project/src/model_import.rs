@@ -1062,6 +1062,15 @@ fn merge_animation_set(target: &mut AnimationSetResource, source: &AnimationSetR
             target.clips.push(*clip);
         }
     }
+    for track in &source.weapon_appearance_tracks {
+        if !target.weapon_appearance_tracks.iter().any(|existing| {
+            existing.action == track.action
+                && existing.weapon == track.weapon
+                && existing.character_socket == track.character_socket
+        }) {
+            target.weapon_appearance_tracks.push(track.clone());
+        }
+    }
 }
 
 #[cfg(test)]

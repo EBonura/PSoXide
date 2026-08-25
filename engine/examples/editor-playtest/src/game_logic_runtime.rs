@@ -529,8 +529,7 @@ impl Playtest {
                 });
             }
         }
-        let mut projectile_impacts =
-            ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
+        let mut projectile_impacts = ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
         {
             let mut tracer = SceneProjectileWorldTracer {
                 bsp: self.bsp.as_mut(),

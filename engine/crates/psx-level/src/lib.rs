@@ -3164,6 +3164,33 @@ impl EquipmentRecord {
     pub const NO_INSTANCE: u16 = u16::MAX;
 }
 
+/// One authored weapon-visibility beat for a character animation action.
+///
+/// The equipment record owns the weapon/socket composition. This compact
+/// companion record only controls its sampled-frame visibility envelope, so
+/// the same equipped weapon can appear at different moments in different
+/// attacks without duplicating scene components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeaponAppearanceRecord {
+    /// Character whose action map owns this beat.
+    pub character: CharacterIndex,
+    /// Action clip during which the beat is active.
+    pub action: CharacterAnimationAction,
+    /// Equipped weapon to match.
+    pub weapon: WeaponIndex,
+    /// Equipped socket to match (distinguishes main/off hand copies).
+    pub character_socket: &'static str,
+    /// Sampled frame at which materialisation has completed.
+    pub fully_visible_frame: u16,
+    /// Sampled frame at which dematerialisation has completed.
+    /// [`CHARACTER_ACTION_FRAME_END_FULL`] means the clip's final frame.
+    pub hidden_frame: u16,
+    /// Sampled frames used by both visibility ramps; zero is an instant cut.
+    pub transition_frames: u16,
+    /// Reserved.
+    pub flags: u16,
+}
+
 /// One placed point light. Coordinates are room-local engine
 /// units (same convention as model instances and player spawn).
 /// Static room geometry is pre-baked into the `.psxw` room blob;

@@ -578,6 +578,37 @@ pub struct AnimationActionBinding {
     pub options: Option<CharacterActionOptions>,
 }
 
+/// One weapon's authored visibility beat during a character action.
+///
+/// Attachment placement remains split between the character model's named
+/// socket and the Weapon resource's grip. This track only decides *when* that
+/// already-composed weapon is visible. The transition grows into
+/// `fully_visible_frame` and retreats into `hidden_frame`; the full-clip
+/// sentinel means the weapon is gone at the end of the selected action clip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeaponAppearanceTrack {
+    pub action: CharacterAnimationAction,
+    pub weapon: ResourceId,
+    #[serde(default = "default_character_socket")]
+    pub character_socket: String,
+    /// Sampled frame at which materialisation has completed.
+    #[serde(default)]
+    pub fully_visible_frame: u16,
+    /// Sampled frame at which dematerialisation has completed.
+    #[serde(default = "default_action_frame_end")]
+    pub hidden_frame: u16,
+    /// Number of sampled frames used by both the appearing and disappearing
+    /// ramps. Zero is an instantaneous visibility switch.
+    #[serde(default = "default_weapon_transition_frames")]
+    pub transition_frames: u16,
+}
+
+pub const WEAPON_APPEARANCE_DEFAULT_TRANSITION_FRAMES: u16 = 8;
+
+const fn default_weapon_transition_frames() -> u16 {
+    WEAPON_APPEARANCE_DEFAULT_TRANSITION_FRAMES
+}
+
 /// Model-local fallback action binding used directly on Characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharacterActionClip {
@@ -903,6 +934,11 @@ pub struct AnimationSetResource {
     /// any gameplay action.
     #[serde(default)]
     pub action_clips: Vec<AnimationActionBinding>,
+    /// Weapon visibility beats authored against action clips. A single action
+    /// may contain several tracks (for example a weapon swap plus an off-hand
+    /// appearance) and each track matches one equipped weapon/socket pair.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weapon_appearance_tracks: Vec<WeaponAppearanceTrack>,
     /// Extra clips included with the set, such as attacks, hit
     /// reactions, death clips, emotes, and experiments.
     #[serde(default)]
@@ -920,6 +956,7 @@ impl AnimationSetResource {
             roll_clip: None,
             backstep_clip: None,
             action_clips: Vec::new(),
+            weapon_appearance_tracks: Vec::new(),
             clips: Vec::new(),
         }
     }

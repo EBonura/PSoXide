@@ -42,6 +42,15 @@ enum AnimationPreviewQuality {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnimationStudioMode {
+    Preview,
+    Moveset,
+    Pose,
+    Weapon,
+    Combat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapsuleEditTool {
     Move,
     Rotate,
@@ -83,8 +92,10 @@ pub(crate) struct ModelAnimationViewerState {
     show_combat_capsules: bool,
     show_pose_corrections: bool,
     show_attachment_sockets: bool,
+    show_moveset: bool,
     selected_combat_capsule: usize,
     selected_attachment_socket: usize,
+    selected_weapon_track: usize,
     preview_weapon: Option<ResourceId>,
     selected_pose_joint: u16,
     selected_action: CharacterAnimationAction,
@@ -120,8 +131,10 @@ impl Default for ModelAnimationViewerState {
             show_combat_capsules: false,
             show_pose_corrections: false,
             show_attachment_sockets: false,
+            show_moveset: false,
             selected_combat_capsule: 0,
             selected_attachment_socket: 0,
+            selected_weapon_track: 0,
             preview_weapon: None,
             selected_pose_joint: 0,
             selected_action: CharacterAnimationAction::Idle,
@@ -143,6 +156,10 @@ impl Default for ModelAnimationViewerState {
 impl ModelAnimationViewerState {
     pub(crate) const fn selected_model(&self) -> Option<ResourceId> {
         self.selected_model
+    }
+
+    pub(crate) const fn selected_weapon(&self) -> Option<ResourceId> {
+        self.preview_weapon
     }
 
     pub(crate) fn selected_clip_path(&self) -> Option<&str> {
@@ -168,25 +185,24 @@ impl ModelAnimationViewerState {
         match &resource.data {
             ResourceData::Character(character) => {
                 self.selected_character = Some(id);
-                self.show_combat_capsules = true;
-                self.show_pose_corrections = false;
-                self.show_attachment_sockets = false;
+                self.set_studio_mode(AnimationStudioMode::Preview);
+                self.selected_action = CharacterAnimationAction::Idle;
                 self.selected_model = character.model;
-                self.selected_clip_path = self.preferred_model_clip_path(project);
+                self.selected_clip_path =
+                    character_action_clip_path(project, id, self.selected_action)
+                        .or_else(|| self.preferred_model_clip_path(project));
                 self.reset_clip_clock();
             }
             ResourceData::Model(_) => {
                 self.selected_character = None;
-                self.show_combat_capsules = false;
-                self.show_pose_corrections = false;
+                self.set_studio_mode(AnimationStudioMode::Preview);
                 self.selected_model = Some(id);
                 self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
             }
             ResourceData::AnimationClip(clip) => {
                 self.selected_character = None;
-                self.show_combat_capsules = false;
-                self.show_pose_corrections = true;
+                self.set_studio_mode(AnimationStudioMode::Pose);
                 self.selected_model = clip
                     .target_model
                     .or_else(|| first_model_for_skeleton(project, clip.skeleton));
@@ -195,8 +211,7 @@ impl ModelAnimationViewerState {
             }
             ResourceData::AnimationSource(source) => {
                 self.selected_character = None;
-                self.show_combat_capsules = false;
-                self.show_pose_corrections = false;
+                self.set_studio_mode(AnimationStudioMode::Preview);
                 self.selected_model = source
                     .target_model
                     .or_else(|| first_model_for_skeleton(project, source.skeleton));
@@ -206,11 +221,74 @@ impl ModelAnimationViewerState {
                 self.reset_clip_clock();
             }
             ResourceData::AnimationSet(set) => {
-                self.selected_character = None;
-                self.show_combat_capsules = false;
-                self.show_pose_corrections = false;
-                self.selected_model = first_model_for_skeleton(project, set.skeleton);
-                self.selected_clip_path = self.preferred_model_clip_path(project);
+                self.selected_character = project.resources.iter().find_map(|resource| {
+                    let ResourceData::Character(character) = &resource.data else {
+                        return None;
+                    };
+                    (character.animation_set == Some(id)).then_some(resource.id)
+                });
+                self.set_studio_mode(AnimationStudioMode::Preview);
+                self.selected_action = CharacterAnimationAction::Idle;
+                self.selected_model = self
+                    .selected_character
+                    .and_then(|character_id| project.resource(character_id))
+                    .and_then(|resource| {
+                        let ResourceData::Character(character) = &resource.data else {
+                            return None;
+                        };
+                        character.model
+                    })
+                    .or_else(|| first_model_for_skeleton(project, set.skeleton));
+                self.selected_clip_path = self
+                    .selected_character
+                    .and_then(|character_id| {
+                        character_action_clip_path(project, character_id, self.selected_action)
+                    })
+                    .or_else(|| self.preferred_model_clip_path(project));
+                self.reset_clip_clock();
+            }
+            ResourceData::Weapon(weapon) => {
+                self.preview_weapon = Some(id);
+                self.selected_character = project.resources.iter().find_map(|resource| {
+                    let ResourceData::Character(character) = &resource.data else {
+                        return None;
+                    };
+                    let model_has_socket = character.model.is_some_and(|model_id| {
+                        project.resource(model_id).is_some_and(|resource| {
+                            let ResourceData::Model(model) = &resource.data else {
+                                return false;
+                            };
+                            model
+                                .attachments
+                                .iter()
+                                .any(|socket| socket.name == weapon.default_character_socket)
+                        })
+                    });
+                    model_has_socket.then_some(resource.id)
+                });
+                self.selected_model = self
+                    .selected_character
+                    .and_then(|character_id| project.resource(character_id))
+                    .and_then(|resource| {
+                        let ResourceData::Character(character) = &resource.data else {
+                            return None;
+                        };
+                        character.model
+                    });
+                if let Some(character_id) = self.selected_character {
+                    if let Some((action, _)) = character_weapon_tracks(project, character_id)
+                        .find(|(_, track)| track.weapon == id)
+                    {
+                        self.selected_action = action;
+                    }
+                }
+                self.set_studio_mode(AnimationStudioMode::Weapon);
+                self.selected_clip_path = self
+                    .selected_character
+                    .and_then(|character_id| {
+                        character_action_clip_path(project, character_id, self.selected_action)
+                    })
+                    .or_else(|| self.preferred_model_clip_path(project));
                 self.reset_clip_clock();
             }
             _ => {}
@@ -271,6 +349,27 @@ impl ModelAnimationViewerState {
     fn invalidate_clip_cache(&mut self) {
         self.cached_clip = None;
     }
+
+    fn studio_mode(&self) -> AnimationStudioMode {
+        if self.show_moveset {
+            AnimationStudioMode::Moveset
+        } else if self.show_pose_corrections {
+            AnimationStudioMode::Pose
+        } else if self.show_attachment_sockets {
+            AnimationStudioMode::Weapon
+        } else if self.show_combat_capsules {
+            AnimationStudioMode::Combat
+        } else {
+            AnimationStudioMode::Preview
+        }
+    }
+
+    fn set_studio_mode(&mut self, mode: AnimationStudioMode) {
+        self.show_moveset = mode == AnimationStudioMode::Moveset;
+        self.show_pose_corrections = mode == AnimationStudioMode::Pose;
+        self.show_attachment_sockets = mode == AnimationStudioMode::Weapon;
+        self.show_combat_capsules = mode == AnimationStudioMode::Combat;
+    }
 }
 
 fn first_model_for_skeleton(
@@ -284,6 +383,209 @@ fn first_model_for_skeleton(
         };
         (model.skeleton == Some(skeleton)).then_some(resource.id)
     })
+}
+
+fn character_action_clip_path(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+    action: CharacterAnimationAction,
+) -> Option<String> {
+    let set_id = project.resource(character_id).and_then(|resource| {
+        let ResourceData::Character(character) = &resource.data else {
+            return None;
+        };
+        character.animation_set
+    })?;
+    let clip_id = project.resource(set_id).and_then(|resource| {
+        let ResourceData::AnimationSet(set) = &resource.data else {
+            return None;
+        };
+        set.action_clip(action)
+    })?;
+    project.resource(clip_id).and_then(|resource| {
+        let ResourceData::AnimationClip(clip) = &resource.data else {
+            return None;
+        };
+        Some(clip.psxanim_path.clone())
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MovesetCapabilityStatus {
+    Ready,
+    Missing,
+    Disabled,
+    Broken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MovesetBindingSource {
+    Action,
+    LegacyRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MovesetCapabilityRow {
+    pub(crate) action: CharacterAnimationAction,
+    pub(crate) status: MovesetCapabilityStatus,
+    pub(crate) clip: Option<ResourceId>,
+    pub(crate) clip_name: Option<String>,
+    pub(crate) binding_source: Option<MovesetBindingSource>,
+    pub(crate) visual_fallback_action: Option<CharacterAnimationAction>,
+    pub(crate) visual_fallback_clip: Option<ResourceId>,
+    pub(crate) visual_fallback_name: Option<String>,
+}
+
+/// Ordered visual fallbacks used by `RuntimeCharacter::clip_for` when an
+/// action is forced without owning a clip. These do not enable gameplay: the
+/// capability remains disabled until the action itself resolves a clip.
+fn moveset_visual_fallbacks(
+    action: CharacterAnimationAction,
+) -> [Option<CharacterAnimationAction>; 4] {
+    use CharacterAnimationAction as A;
+    match action {
+        A::Idle => [None, None, None, None],
+        A::Walk => [Some(A::Idle), None, None, None],
+        A::Run => [Some(A::Walk), Some(A::Idle), None, None],
+        A::Turn => [Some(A::Idle), None, None, None],
+        A::Roll => [Some(A::Run), Some(A::Walk), Some(A::Idle), None],
+        A::Backstep => [Some(A::Roll), Some(A::Walk), Some(A::Idle), None],
+        A::LightAttack => [Some(A::ComboAttack), Some(A::Idle), None, None],
+        A::HeavyAttack => [Some(A::LightAttack), Some(A::Idle), None, None],
+        A::ComboAttack => [Some(A::LightAttack), Some(A::Idle), None, None],
+        A::Block | A::HitReact | A::Death | A::Intro => [Some(A::Idle), None, None, None],
+        A::WalkBackward | A::StrafeLeft | A::StrafeRight => {
+            [Some(A::Walk), Some(A::Idle), None, None]
+        }
+        A::DashLeft | A::DashRight => [Some(A::Roll), Some(A::Walk), Some(A::Idle), None],
+        A::Stun => [Some(A::HitReact), Some(A::Idle), None, None],
+        A::StunRecovery => [Some(A::Stun), Some(A::Idle), None, None],
+        A::HitReactAlt => [Some(A::HitReact), Some(A::Idle), None, None],
+        A::AltLightAttack => [Some(A::LightAttack), Some(A::Idle), None, None],
+        A::AltHeavyAttack => [Some(A::HeavyAttack), Some(A::Idle), None, None],
+        A::AltComboAttack => [Some(A::ComboAttack), Some(A::Idle), None, None],
+        A::WalkWindup | A::WalkWinddown => [Some(A::Walk), Some(A::Idle), None, None],
+        A::WalkWinddownAlt => [Some(A::WalkWinddown), Some(A::Walk), Some(A::Idle), None],
+        A::RunWindup | A::RunWinddown => [Some(A::Run), Some(A::Walk), Some(A::Idle), None],
+        A::RunWinddownAlt => [
+            Some(A::RunWinddown),
+            Some(A::Run),
+            Some(A::Walk),
+            Some(A::Idle),
+        ],
+        // Vertical attacks deliberately do not borrow another attack. Idle is
+        // only the renderer's safe pose if an external caller forces one.
+        A::VertLightAttack | A::VertHeavyAttack | A::VertComboAttack => {
+            [Some(A::Idle), None, None, None]
+        }
+    }
+}
+
+fn valid_animation_clip(
+    project: &ProjectDocument,
+    clip: Option<ResourceId>,
+) -> Option<(ResourceId, String)> {
+    let clip = clip?;
+    let resource = project.resource(clip)?;
+    matches!(resource.data, ResourceData::AnimationClip(_)).then(|| (clip, resource.name.clone()))
+}
+
+/// Build the read-only matrix from the same Animation Set action resolution
+/// used by the cooker. A missing optional row is disabled even when a visual
+/// fallback exists; that distinction is the point of the matrix.
+pub(crate) fn moveset_capability_rows(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+) -> Option<Vec<MovesetCapabilityRow>> {
+    let set_id = project.resource(character_id).and_then(|resource| {
+        let ResourceData::Character(character) = &resource.data else {
+            return None;
+        };
+        character.animation_set
+    })?;
+    let set = project.resource(set_id).and_then(|resource| {
+        let ResourceData::AnimationSet(set) = &resource.data else {
+            return None;
+        };
+        Some(set)
+    })?;
+
+    Some(
+        CharacterAnimationAction::ALL
+            .into_iter()
+            .map(|action| {
+                let resolved_clip = set.action_clip(action);
+                let valid_clip = valid_animation_clip(project, resolved_clip);
+                let binding_source = valid_clip.as_ref().map(|_| {
+                    if set.action_binding(action).is_some() {
+                        MovesetBindingSource::Action
+                    } else {
+                        MovesetBindingSource::LegacyRole
+                    }
+                });
+                let (visual_fallback_action, visual_fallback_clip, visual_fallback_name) =
+                    moveset_visual_fallbacks(action)
+                        .into_iter()
+                        .flatten()
+                        .find_map(|fallback| {
+                            valid_animation_clip(project, set.action_clip(fallback))
+                                .map(|(clip, name)| (Some(fallback), Some(clip), Some(name)))
+                        })
+                        .unwrap_or((None, None, None));
+                let status = if valid_clip.is_some() {
+                    MovesetCapabilityStatus::Ready
+                } else if resolved_clip.is_some() {
+                    MovesetCapabilityStatus::Broken
+                } else if action.required_for_player() {
+                    MovesetCapabilityStatus::Missing
+                } else {
+                    MovesetCapabilityStatus::Disabled
+                };
+                let (clip, clip_name) = valid_clip
+                    .map(|(clip, name)| (Some(clip), Some(name)))
+                    .unwrap_or((resolved_clip, None));
+                MovesetCapabilityRow {
+                    action,
+                    status,
+                    clip,
+                    clip_name,
+                    binding_source,
+                    visual_fallback_action,
+                    visual_fallback_clip,
+                    visual_fallback_name,
+                }
+            })
+            .collect(),
+    )
+}
+
+fn character_weapon_tracks(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+) -> impl Iterator<
+    Item = (
+        CharacterAnimationAction,
+        &psxed_project::WeaponAppearanceTrack,
+    ),
+> {
+    project
+        .resource(character_id)
+        .and_then(|resource| {
+            let ResourceData::Character(character) = &resource.data else {
+                return None;
+            };
+            character.animation_set
+        })
+        .and_then(|set_id| project.resource(set_id))
+        .and_then(|resource| {
+            let ResourceData::AnimationSet(set) = &resource.data else {
+                return None;
+            };
+            Some(set.weapon_appearance_tracks.as_slice())
+        })
+        .unwrap_or_default()
+        .iter()
+        .map(|track| (track.action, track))
 }
 
 fn baked_clip_path_for_source(
@@ -388,6 +690,8 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
 ) -> Option<AnimationViewerAction> {
     state.ensure_selection(project);
 
+    let character_options =
+        collect_resource_options(project, |data| matches!(data, ResourceData::Character(_)));
     let model_options =
         collect_resource_options(project, |data| matches!(data, ResourceData::Model(_)));
     let clip_options = state
@@ -413,39 +717,67 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
     }
     let selected_model = state.selected_model;
 
-    if resource_combo(
-        ui,
-        "Model",
-        "animation-viewer-model",
-        &mut state.selected_model,
-        &model_options,
-    ) {
-        state.selected_character = None;
-        state.selected_clip_path = None;
-        state.clip_filter.clear();
-        state.reset_clip_clock();
-        state.invalidate_model_cache();
-        state.invalidate_clip_cache();
-        state.ensure_selection(project);
-    }
-    clip_combo(ui, state, &clip_options);
-    ui.separator();
-    let mut action = draw_playback_controls(
-        ui,
-        state,
-        selected_model,
-        selected_clip.as_ref(),
-        clip_context.as_ref().and_then(|clip| clip.animation_stats),
-    );
-    ui.separator();
-    if draw_clip_calibration_menu(ui, project, selected_model, selected_clip.as_mut()) {
-        preview_texture.take();
-        if action.is_none() {
-            action = Some(AnimationViewerAction::ProjectChanged);
+    let mut action = None;
+    ui.horizontal_wrapped(|ui| {
+        if resource_combo(
+            ui,
+            "Character",
+            "animation-viewer-character",
+            &mut state.selected_character,
+            &character_options,
+        ) {
+            if let Some(character_id) = state.selected_character {
+                state.selected_action = CharacterAnimationAction::Idle;
+                state.selected_model = project.resource(character_id).and_then(|resource| {
+                    let ResourceData::Character(character) = &resource.data else {
+                        return None;
+                    };
+                    character.model
+                });
+                state.selected_clip_path =
+                    character_action_clip_path(project, character_id, state.selected_action);
+                state.clip_filter.clear();
+                state.reset_clip_clock();
+                state.invalidate_model_cache();
+                state.invalidate_clip_cache();
+                state.ensure_selection(project);
+            }
         }
-    }
-    ui.separator();
-    draw_preview_toolbar(ui, state, model_context.as_deref());
+        if state.selected_character.is_none() {
+            if resource_combo(
+                ui,
+                "Model",
+                "animation-viewer-model",
+                &mut state.selected_model,
+                &model_options,
+            ) {
+                state.selected_clip_path = None;
+                state.clip_filter.clear();
+                state.reset_clip_clock();
+                state.invalidate_model_cache();
+                state.invalidate_clip_cache();
+                state.ensure_selection(project);
+            }
+        }
+        clip_combo(ui, state, &clip_options);
+        ui.separator();
+        action = draw_playback_controls(
+            ui,
+            state,
+            selected_model,
+            selected_clip.as_ref(),
+            clip_context.as_ref().and_then(|clip| clip.animation_stats),
+        );
+        ui.separator();
+        if draw_clip_calibration_menu(ui, project, selected_model, selected_clip.as_mut()) {
+            preview_texture.take();
+            if action.is_none() {
+                action = Some(AnimationViewerAction::ProjectChanged);
+            }
+        }
+        ui.separator();
+        draw_preview_toolbar(ui, state, model_context.as_deref());
+    });
     let character_available = state.selected_character.is_some_and(|id| {
         project
             .resource(id)
@@ -458,45 +790,58 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
                 .is_some_and(|resource| matches!(resource.data, ResourceData::AnimationClip(_)))
         })
     });
-    ui.separator();
-    ui.add_enabled_ui(character_available, |ui| {
-        let response = ui.toggle_value(
-            &mut state.show_combat_capsules,
-            icons::label(icons::SCAN, "Combat Volumes"),
-        );
-        let clicked = response.clicked();
-        response
-            .on_hover_text("Visually attach hitboxes and hurtboxes to the selected Character rig");
-        if clicked && state.show_combat_capsules {
-            state.show_pose_corrections = false;
-            state.show_attachment_sockets = false;
-        }
+    let mut studio_mode = state.studio_mode();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Studio").color(STUDIO_TEXT_WEAK));
+        ui.selectable_value(
+            &mut studio_mode,
+            AnimationStudioMode::Preview,
+            icons::label(icons::PLAY, "Preview"),
+        )
+        .on_hover_text("Playback and scrub without authoring overlays");
+        ui.add_enabled_ui(character_available, |ui| {
+            ui.selectable_value(
+                &mut studio_mode,
+                AnimationStudioMode::Moveset,
+                icons::label(icons::LAYERS, "Moveset"),
+            )
+            .on_hover_text(
+                "Audit which gameplay actions are enabled, missing, or visually falling back",
+            );
+        });
+        ui.add_enabled_ui(pose_available, |ui| {
+            ui.selectable_value(
+                &mut studio_mode,
+                AnimationStudioMode::Pose,
+                icons::label(icons::WAYPOINT, "Pose"),
+            )
+            .on_hover_text("Add sparse joint corrections at sampled frames");
+        });
+        ui.add_enabled_ui(state.selected_model.is_some(), |ui| {
+            ui.selectable_value(
+                &mut studio_mode,
+                AnimationStudioMode::Weapon,
+                icons::label(icons::MAP_PIN, "Weapon"),
+            )
+            .on_hover_text("Place sockets and grips, then author weapon visibility beats");
+        });
+        ui.add_enabled_ui(character_available, |ui| {
+            ui.selectable_value(
+                &mut studio_mode,
+                AnimationStudioMode::Combat,
+                icons::label(icons::SCAN, "Combat"),
+            )
+            .on_hover_text("Place hurtboxes, hitboxes, and projectile emitters");
+        });
     });
-    ui.add_enabled_ui(pose_available, |ui| {
-        let response = ui.toggle_value(
-            &mut state.show_pose_corrections,
-            icons::label(icons::WAYPOINT, "Pose Keys"),
-        );
-        let clicked = response.clicked();
-        response.on_hover_text("Author sparse joint corrections on the selected cooked clip");
-        if clicked && state.show_pose_corrections {
-            state.show_combat_capsules = false;
-            state.show_attachment_sockets = false;
-        }
-    });
-    ui.add_enabled_ui(state.selected_model.is_some(), |ui| {
-        let response = ui.toggle_value(
-            &mut state.show_attachment_sockets,
-            icons::label(icons::MAP_PIN, "Sockets"),
-        );
-        let clicked = response.clicked();
-        response
-            .on_hover_text("Visually place weapon/attachment sockets on the selected model's rig");
-        if clicked && state.show_attachment_sockets {
-            state.show_combat_capsules = false;
-            state.show_pose_corrections = false;
-        }
-    });
+    if (studio_mode == AnimationStudioMode::Moveset && !character_available)
+        || (studio_mode == AnimationStudioMode::Pose && !pose_available)
+        || (studio_mode == AnimationStudioMode::Weapon && state.selected_model.is_none())
+        || (studio_mode == AnimationStudioMode::Combat && !character_available)
+    {
+        studio_mode = AnimationStudioMode::Preview;
+    }
+    state.set_studio_mode(studio_mode);
     action
 }
 
@@ -606,6 +951,19 @@ pub(crate) fn draw_model_animation_viewer(
     if state.selected_attachment_socket >= sockets.len() {
         state.selected_attachment_socket = sockets.len().saturating_sub(1);
     }
+    let selected_weapon_track = if socket_model_id.is_some() {
+        sync_weapon_studio_selection(project, state, character_id, &sockets)
+    } else {
+        None
+    };
+    let preview_socket_index = selected_weapon_track
+        .as_ref()
+        .and_then(|track| {
+            sockets
+                .iter()
+                .position(|socket| socket.name == track.character_socket)
+        })
+        .unwrap_or(state.selected_attachment_socket);
     let preview_sockets = if socket_model_id.is_some() {
         sockets
             .iter()
@@ -614,7 +972,7 @@ pub(crate) fn draw_model_animation_viewer(
                 joint: socket.joint,
                 translation: socket.translation,
                 rotation_q12: socket.rotation_q12,
-                selected: index == state.selected_attachment_socket,
+                selected: index == preview_socket_index,
             })
             .collect::<Vec<_>>()
     } else {
@@ -631,7 +989,7 @@ pub(crate) fn draw_model_animation_viewer(
                 .map(|model_id| (model_id, weapon.grip.translation, weapon.grip.rotation_q12)),
             _ => None,
         })
-        .zip(sockets.get(state.selected_attachment_socket).cloned());
+        .zip(sockets.get(preview_socket_index).cloned());
     let weapon_model_context = weapon_grip.as_ref().and_then(|((model_id, _, _), _)| {
         load_weapon_model_context(project, project_root, state, *model_id)
     });
@@ -639,6 +997,20 @@ pub(crate) fn draw_model_animation_viewer(
         size: [4, 4],
         pixels: vec![Color32::from_rgb(168, 168, 176); 16],
     };
+    let weapon_materialization_q12 = selected_weapon_track
+        .as_ref()
+        .map(|track| {
+            preview_weapon_materialization_q12(
+                track,
+                state.frame,
+                clip_context
+                    .as_ref()
+                    .and_then(|clip| clip.animation_stats)
+                    .map(|stats| stats.frame_count)
+                    .unwrap_or(1),
+            )
+        })
+        .unwrap_or(4096);
     let equipped_weapon = weapon_grip.as_ref().zip(weapon_model_context.as_ref()).map(
         |(((_, grip_translation, grip_rotation_q12), socket), context)| {
             model_import_preview::PreviewEquippedWeapon {
@@ -649,15 +1021,15 @@ pub(crate) fn draw_model_animation_viewer(
                 socket_rotation_q12: socket.rotation_q12,
                 grip_translation: *grip_translation,
                 grip_rotation_q12: *grip_rotation_q12,
+                materialization_q12: weapon_materialization_q12,
+                wireframe_materialization: selected_weapon_track.is_some(),
             }
         },
     );
     let selected_joint = if state.show_pose_corrections {
         Some(state.selected_pose_joint)
     } else if socket_model_id.is_some() {
-        sockets
-            .get(state.selected_attachment_socket)
-            .map(|socket| socket.joint)
+        sockets.get(preview_socket_index).map(|socket| socket.joint)
     } else {
         state
             .show_combat_capsules
@@ -671,7 +1043,8 @@ pub(crate) fn draw_model_animation_viewer(
     let joint_picking = (state.show_combat_capsules && character_id.is_some())
         || pose_clip_id.is_some()
         || socket_model_id.is_some();
-    let authoring_panel_open = joint_picking;
+    let moveset_open = state.show_moveset && character_id.is_some();
+    let authoring_panel_open = joint_picking || moveset_open;
     let assigned_action_clip = character_id.and_then(|character_id| {
         capsules
             .get(state.selected_combat_capsule)
@@ -708,8 +1081,19 @@ pub(crate) fn draw_model_animation_viewer(
             if authoring_panel_open {
                 ui.horizontal(|ui| {
                     ui.set_min_height(preview_height);
-                    let editor_width = 310.0f32.min((ui.available_width() * 0.38).max(260.0));
-                    let preview_width = (ui.available_width() - editor_width - 8.0).max(360.0);
+                    let editor_width = if moveset_open {
+                        500.0f32.min((ui.available_width() * 0.48).max(360.0))
+                    } else {
+                        310.0f32.min((ui.available_width() * 0.38).max(260.0))
+                    };
+                    // Reserve the separator plus both horizontal item gaps.
+                    // Subtracting only one gap placed the authoring panel a
+                    // few pixels beyond the CentralPanel clip rectangle: its
+                    // labels were painted, but controls near the right edge
+                    // could not receive pointer input.
+                    let split_gutter = ui.spacing().item_spacing.x * 2.0 + 8.0;
+                    let preview_width =
+                        (ui.available_width() - editor_width - split_gutter).max(360.0);
                     ui.allocate_ui_with_layout(
                         Vec2::new(preview_width, ui.available_height()),
                         egui::Layout::top_down(egui::Align::Min),
@@ -735,45 +1119,67 @@ pub(crate) fn draw_model_animation_viewer(
                         Vec2::new(editor_width, ui.available_height()),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            if let Some(clip_id) = pose_clip_id {
-                                let joint_count = model_context
-                                    .as_deref()
-                                    .and_then(|model| {
-                                        psx_asset::Model::from_bytes(&model.model_bytes).ok()
-                                    })
-                                    .map(|model| model.joint_count())
-                                    .unwrap_or(0);
-                                let max_frame = clip_context
-                                    .as_ref()
-                                    .and_then(|clip| clip.animation_stats)
-                                    .map(|stats| stats.frame_count.saturating_sub(1))
-                                    .unwrap_or(0);
-                                editor_changed |= draw_pose_correction_editor(
-                                    ui,
-                                    project,
-                                    clip_id,
-                                    state,
-                                    joint_count,
-                                    max_frame,
-                                );
-                            } else if let Some(model_id) = socket_model_id {
-                                editor_changed |= draw_attachment_socket_editor(
-                                    ui,
-                                    project,
-                                    model_id,
-                                    state,
-                                    model_context.as_deref(),
-                                );
-                            } else if let Some(character_id) = character_id {
-                                editor_changed |= draw_combat_capsule_editor(
-                                    ui,
-                                    project,
-                                    character_id,
-                                    state,
-                                    model_context.as_deref(),
-                                    assigned_action_clip.as_ref(),
-                                );
-                            }
+                            egui::ScrollArea::vertical()
+                                .id_salt("animation-studio-authoring-panel")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    if let Some(character_id) =
+                                        moveset_open.then_some(character_id).flatten()
+                                    {
+                                        draw_moveset_capability_matrix(
+                                            ui,
+                                            project,
+                                            character_id,
+                                            state,
+                                            &clip_options,
+                                        );
+                                    } else if let Some(clip_id) = pose_clip_id {
+                                        let joint_count = model_context
+                                            .as_deref()
+                                            .and_then(|model| {
+                                                psx_asset::Model::from_bytes(&model.model_bytes)
+                                                    .ok()
+                                            })
+                                            .map(|model| model.joint_count())
+                                            .unwrap_or(0);
+                                        let max_frame = clip_context
+                                            .as_ref()
+                                            .and_then(|clip| clip.animation_stats)
+                                            .map(|stats| stats.frame_count.saturating_sub(1))
+                                            .unwrap_or(0);
+                                        editor_changed |= draw_pose_correction_editor(
+                                            ui,
+                                            project,
+                                            clip_id,
+                                            state,
+                                            joint_count,
+                                            max_frame,
+                                        );
+                                    } else if let Some(model_id) = socket_model_id {
+                                        editor_changed |= draw_attachment_socket_editor(
+                                            ui,
+                                            project,
+                                            model_id,
+                                            character_id,
+                                            state,
+                                            model_context.as_deref(),
+                                            clip_context
+                                                .as_ref()
+                                                .and_then(|clip| clip.animation_stats)
+                                                .map(|stats| stats.frame_count.saturating_sub(1))
+                                                .unwrap_or(0),
+                                        );
+                                    } else if let Some(character_id) = character_id {
+                                        editor_changed |= draw_combat_capsule_editor(
+                                            ui,
+                                            project,
+                                            character_id,
+                                            state,
+                                            model_context.as_deref(),
+                                            assigned_action_clip.as_ref(),
+                                        );
+                                    }
+                                });
                         },
                     );
                 });
@@ -880,6 +1286,98 @@ struct TimelineHitbox {
     end: u16,
 }
 
+#[derive(Debug, Clone)]
+struct TimelineWeaponTrack {
+    index: usize,
+    name: String,
+    socket: String,
+    fully_visible_frame: u16,
+    hidden_frame: u16,
+    transition_frames: u16,
+}
+
+fn character_animation_set_id(
+    project: &ProjectDocument,
+    character_id: Option<ResourceId>,
+) -> Option<ResourceId> {
+    project.resource(character_id?).and_then(|resource| {
+        let ResourceData::Character(character) = &resource.data else {
+            return None;
+        };
+        character.animation_set
+    })
+}
+
+fn sync_weapon_studio_selection(
+    project: &ProjectDocument,
+    state: &mut ModelAnimationViewerState,
+    character_id: Option<ResourceId>,
+    sockets: &[psxed_project::AttachmentSocket],
+) -> Option<psxed_project::WeaponAppearanceTrack> {
+    let set_id = character_animation_set_id(project, character_id)?;
+    let set = project.resource(set_id).and_then(|resource| {
+        let ResourceData::AnimationSet(set) = &resource.data else {
+            return None;
+        };
+        Some(set)
+    })?;
+    let indices = set
+        .weapon_appearance_tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, track)| (track.action == state.selected_action).then_some(index))
+        .collect::<Vec<_>>();
+    if indices.is_empty() {
+        return None;
+    }
+    if !indices.contains(&state.selected_weapon_track) {
+        state.selected_weapon_track = indices[0];
+    }
+    let track = set
+        .weapon_appearance_tracks
+        .get(state.selected_weapon_track)?
+        .clone();
+    state.preview_weapon = Some(track.weapon);
+    if let Some(index) = sockets
+        .iter()
+        .position(|socket| socket.name == track.character_socket)
+    {
+        state.selected_attachment_socket = index;
+    }
+    Some(track)
+}
+
+fn preview_weapon_materialization_q12(
+    track: &psxed_project::WeaponAppearanceTrack,
+    frame: f32,
+    frame_count: u16,
+) -> u16 {
+    let phase_q12 = (frame.max(0.0) * 4096.0).round() as u32;
+    let last_frame = frame_count.saturating_sub(1);
+    let hidden = if track.hidden_frame == psxed_project::ACTION_FRAME_END_FULL {
+        last_frame
+    } else {
+        track.hidden_frame.min(last_frame)
+    };
+    let visible_q12 = u32::from(track.fully_visible_frame) << 12;
+    let hidden_q12 = u32::from(hidden) << 12;
+    if track.transition_frames == 0 {
+        return if phase_q12 >= visible_q12 && phase_q12 < hidden_q12 {
+            4096
+        } else {
+            0
+        };
+    }
+    let transition = u32::from(track.transition_frames);
+    let start_q12 = visible_q12.saturating_sub(transition << 12);
+    if phase_q12 < start_q12 || phase_q12 >= hidden_q12 {
+        return 0;
+    }
+    let rising = (phase_q12 - start_q12) / transition;
+    let falling = (hidden_q12 - phase_q12) / transition;
+    rising.min(falling).min(4096) as u16
+}
+
 fn draw_timeline_splitter(
     ui: &mut egui::Ui,
     state: &mut ModelAnimationViewerState,
@@ -939,12 +1437,15 @@ fn draw_animation_timeline(
         .show(ui, |ui| {
             ui.set_min_size(available);
 
-            if let (Some(character_id), Some(clip_resource)) =
-                (character_id, selected_clip.and_then(|clip| clip.resource))
-            {
-                if let Some(mapped) = timeline_action_for_clip(project, character_id, clip_resource)
+            if state.studio_mode() != AnimationStudioMode::Moveset {
+                if let (Some(character_id), Some(clip_resource)) =
+                    (character_id, selected_clip.and_then(|clip| clip.resource))
                 {
-                    state.selected_action = mapped;
+                    if let Some(mapped) =
+                        timeline_action_for_clip(project, character_id, clip_resource)
+                    {
+                        state.selected_action = mapped;
+                    }
                 }
             }
 
@@ -1045,6 +1546,9 @@ fn draw_animation_timeline(
             let hitboxes = character_id
                 .map(|id| timeline_hitboxes(project, id, state.selected_action))
                 .unwrap_or_default();
+            let weapon_tracks = character_id
+                .map(|id| timeline_weapon_tracks(project, id, state.selected_action))
+                .unwrap_or_default();
             let pose_track = state.show_pose_corrections
                 && selected_clip_resource.is_some_and(|id| {
                     project.resource(id).is_some_and(|resource| {
@@ -1073,6 +1577,7 @@ fn draw_animation_timeline(
             let track_count = 1
                 + usize::from(pose_track)
                 + usize::from(action_context.is_some()) * 2
+                + weapon_tracks.len()
                 + hitboxes.len();
             let content_height =
                 TIMELINE_RULER_HEIGHT + track_count.max(1) as f32 * TIMELINE_TRACK_HEIGHT;
@@ -1080,6 +1585,7 @@ fn draw_animation_timeline(
 
             let mut action_range_update = None;
             let mut push_range_update = None;
+            let mut weapon_updates = Vec::new();
             let mut hitbox_updates = Vec::new();
 
             ui.horizontal_top(|ui| {
@@ -1125,6 +1631,32 @@ fn draw_animation_timeline(
                                 false,
                             );
                         }
+                        for track in &weapon_tracks {
+                            let hidden =
+                                if track.hidden_frame == psxed_project::ACTION_FRAME_END_FULL {
+                                    "clip end".to_string()
+                                } else {
+                                    format!("frame {}", track.hidden_frame)
+                                };
+                            let response = timeline_track_label(
+                                ui,
+                                &track.name,
+                                &format!(
+                                    "{} · visible {} · gone {} · {}f transition",
+                                    track.socket,
+                                    track.fully_visible_frame,
+                                    hidden,
+                                    track.transition_frames,
+                                ),
+                                Color32::from_rgb(86, 224, 156),
+                                state.show_attachment_sockets
+                                    && state.selected_weapon_track == track.index,
+                            );
+                            if response.clicked() {
+                                state.selected_weapon_track = track.index;
+                                state.set_studio_mode(AnimationStudioMode::Weapon);
+                            }
+                        }
                         for hitbox in &hitboxes {
                             let response = timeline_track_label(
                                 ui,
@@ -1135,7 +1667,7 @@ fn draw_animation_timeline(
                             );
                             if response.clicked() {
                                 state.selected_combat_capsule = hitbox.index;
-                                state.show_combat_capsules = true;
+                                state.set_studio_mode(AnimationStudioMode::Combat);
                             }
                         }
                     },
@@ -1253,6 +1785,38 @@ fn draw_animation_timeline(
                                     }
                                 }
 
+                                for track in &weapon_tracks {
+                                    let hidden = if track.hidden_frame
+                                        == psxed_project::ACTION_FRAME_END_FULL
+                                    {
+                                        action_max_frame
+                                    } else {
+                                        track.hidden_frame.min(action_max_frame)
+                                    }
+                                    .max(track.fully_visible_frame.min(action_max_frame));
+                                    let response = draw_timeline_range_lane(
+                                        ui,
+                                        &format!("animation-timeline-weapon-{}", track.index),
+                                        content_width,
+                                        action_max_frame,
+                                        state.timeline_pixels_per_frame,
+                                        state.frame,
+                                        track.fully_visible_frame.min(action_max_frame),
+                                        hidden,
+                                        Color32::from_rgb(86, 224, 156),
+                                        true,
+                                    );
+                                    if let Some(frame) = response.seek_frame {
+                                        state.frame = frame as f32;
+                                        state.playing = false;
+                                        state.selected_weapon_track = track.index;
+                                    }
+                                    if let Some((start, end)) = response.range {
+                                        weapon_updates.push((track.index, start, end));
+                                        state.selected_weapon_track = track.index;
+                                    }
+                                }
+
                                 for hitbox in &hitboxes {
                                     let response = draw_timeline_range_lane(
                                         ui,
@@ -1305,6 +1869,20 @@ fn draw_animation_timeline(
                 };
                 changed |=
                     store_timeline_action_options(project, context, state.selected_action, options);
+            }
+            for (index, start, end) in weapon_updates {
+                changed |= store_timeline_weapon_range(
+                    project,
+                    character_id,
+                    index,
+                    state.selected_action,
+                    start,
+                    if end == action_max_frame {
+                        psxed_project::ACTION_FRAME_END_FULL
+                    } else {
+                        end
+                    },
+                );
             }
             for (index, start, end) in hitbox_updates {
                 changed |= store_timeline_hitbox_range(
@@ -1756,6 +2334,42 @@ fn timeline_hitboxes(
         .unwrap_or_default()
 }
 
+fn timeline_weapon_tracks(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+    action: CharacterAnimationAction,
+) -> Vec<TimelineWeaponTrack> {
+    let Some(set_id) = character_animation_set_id(project, Some(character_id)) else {
+        return Vec::new();
+    };
+    project
+        .resource(set_id)
+        .and_then(|resource| {
+            let ResourceData::AnimationSet(set) = &resource.data else {
+                return None;
+            };
+            Some(
+                set.weapon_appearance_tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| track.action == action)
+                    .map(|(index, track)| TimelineWeaponTrack {
+                        index,
+                        name: project
+                            .resource(track.weapon)
+                            .map(|resource| resource.name.clone())
+                            .unwrap_or_else(|| format!("Missing weapon #{}", track.weapon.raw())),
+                        socket: track.character_socket.clone(),
+                        fully_visible_frame: track.fully_visible_frame,
+                        hidden_frame: track.hidden_frame,
+                        transition_frames: track.transition_frames,
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
+}
+
 fn store_timeline_action_options(
     project: &mut ProjectDocument,
     context: TimelineActionContext,
@@ -1829,6 +2443,314 @@ fn store_timeline_hitbox_range(
     *active_start_frame = start;
     *active_end_frame = end.max(start);
     true
+}
+
+fn store_timeline_weapon_range(
+    project: &mut ProjectDocument,
+    character_id: Option<ResourceId>,
+    index: usize,
+    action: CharacterAnimationAction,
+    fully_visible_frame: u16,
+    hidden_frame: u16,
+) -> bool {
+    let Some(set_id) = character_animation_set_id(project, character_id) else {
+        return false;
+    };
+    let Some(resource) = project.resource_mut(set_id) else {
+        return false;
+    };
+    let ResourceData::AnimationSet(set) = &mut resource.data else {
+        return false;
+    };
+    let Some(track) = set.weapon_appearance_tracks.get_mut(index) else {
+        return false;
+    };
+    if track.action != action
+        || (track.fully_visible_frame == fully_visible_frame && track.hidden_frame == hidden_frame)
+    {
+        return false;
+    }
+    track.fully_visible_frame = fully_visible_frame;
+    track.hidden_frame = hidden_frame;
+    true
+}
+
+const MOVESET_ACTION_GROUPS: &[(&str, &[CharacterAnimationAction])] = &[
+    (
+        "Core locomotion",
+        &[
+            CharacterAnimationAction::Idle,
+            CharacterAnimationAction::Walk,
+            CharacterAnimationAction::Run,
+            CharacterAnimationAction::Turn,
+            CharacterAnimationAction::Intro,
+        ],
+    ),
+    (
+        "Directional movement",
+        &[
+            CharacterAnimationAction::WalkBackward,
+            CharacterAnimationAction::StrafeLeft,
+            CharacterAnimationAction::StrafeRight,
+            CharacterAnimationAction::Roll,
+            CharacterAnimationAction::Backstep,
+            CharacterAnimationAction::DashLeft,
+            CharacterAnimationAction::DashRight,
+        ],
+    ),
+    (
+        "Combat",
+        &[
+            CharacterAnimationAction::LightAttack,
+            CharacterAnimationAction::HeavyAttack,
+            CharacterAnimationAction::ComboAttack,
+            CharacterAnimationAction::Block,
+            CharacterAnimationAction::VertLightAttack,
+            CharacterAnimationAction::VertHeavyAttack,
+            CharacterAnimationAction::VertComboAttack,
+        ],
+    ),
+    (
+        "Damage and recovery",
+        &[
+            CharacterAnimationAction::HitReact,
+            CharacterAnimationAction::HitReactAlt,
+            CharacterAnimationAction::Stun,
+            CharacterAnimationAction::StunRecovery,
+            CharacterAnimationAction::Death,
+        ],
+    ),
+    (
+        "Alternate weapon",
+        &[
+            CharacterAnimationAction::AltLightAttack,
+            CharacterAnimationAction::AltHeavyAttack,
+            CharacterAnimationAction::AltComboAttack,
+        ],
+    ),
+    (
+        "Locomotion transitions",
+        &[
+            CharacterAnimationAction::WalkWindup,
+            CharacterAnimationAction::WalkWinddown,
+            CharacterAnimationAction::WalkWinddownAlt,
+            CharacterAnimationAction::RunWindup,
+            CharacterAnimationAction::RunWinddown,
+            CharacterAnimationAction::RunWinddownAlt,
+        ],
+    ),
+];
+
+fn moveset_status_label(status: MovesetCapabilityStatus) -> (&'static str, Color32) {
+    match status {
+        MovesetCapabilityStatus::Ready => ("Ready", Color32::from_rgb(86, 224, 156)),
+        MovesetCapabilityStatus::Missing => ("Missing", Color32::from_rgb(238, 102, 82)),
+        MovesetCapabilityStatus::Disabled => ("Disabled", STUDIO_TEXT_WEAK),
+        MovesetCapabilityStatus::Broken => ("Broken", Color32::from_rgb(245, 156, 76)),
+    }
+}
+
+fn draw_moveset_capability_matrix(
+    ui: &mut egui::Ui,
+    project: &ProjectDocument,
+    character_id: ResourceId,
+    state: &mut ModelAnimationViewerState,
+    clip_options: &[ViewerClipOption],
+) {
+    ui.heading("Moveset Matrix");
+    ui.label(
+        RichText::new("Ready means the action owns valid motion. A visual fallback only keeps a forced state renderable; it does not give a disabled action gameplay capability.")
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+    );
+    ui.add_space(8.0);
+
+    let Some(rows) = moveset_capability_rows(project, character_id) else {
+        ui.colored_label(
+            Color32::from_rgb(238, 102, 82),
+            "Assign a valid Animation Set to audit this character's moveset.",
+        );
+        return;
+    };
+    let ready = rows
+        .iter()
+        .filter(|row| row.status == MovesetCapabilityStatus::Ready)
+        .count();
+    let missing = rows
+        .iter()
+        .filter(|row| row.status == MovesetCapabilityStatus::Missing)
+        .count();
+    let disabled = rows
+        .iter()
+        .filter(|row| row.status == MovesetCapabilityStatus::Disabled)
+        .count();
+    let broken = rows
+        .iter()
+        .filter(|row| row.status == MovesetCapabilityStatus::Broken)
+        .count();
+
+    egui::Frame::new()
+        .fill(STUDIO_PANEL_HEADER)
+        .stroke(Stroke::new(1.0, STUDIO_BORDER))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(8, 7))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("{ready} ready"))
+                        .strong()
+                        .color(Color32::from_rgb(86, 224, 156)),
+                );
+                ui.label(RichText::new(format!("{disabled} disabled")).color(STUDIO_TEXT_WEAK));
+                if missing > 0 {
+                    ui.label(
+                        RichText::new(format!("{missing} required missing"))
+                            .strong()
+                            .color(Color32::from_rgb(238, 102, 82)),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("core requirements ready")
+                            .color(Color32::from_rgb(86, 224, 156)),
+                    );
+                }
+                if broken > 0 {
+                    ui.label(
+                        RichText::new(format!("{broken} broken"))
+                            .strong()
+                            .color(Color32::from_rgb(245, 156, 76)),
+                    );
+                }
+            });
+        });
+
+    ui.add_space(8.0);
+    let action_width = 122.0;
+    let status_width = 62.0;
+    let motion_width = (ui.available_width() - action_width - status_width - 42.0).max(120.0);
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [action_width, 18.0],
+            egui::Label::new(RichText::new("ACTION").small().color(STUDIO_TEXT_WEAK)),
+        );
+        ui.add_sized(
+            [status_width, 18.0],
+            egui::Label::new(RichText::new("STATUS").small().color(STUDIO_TEXT_WEAK)),
+        );
+        ui.add_sized(
+            [motion_width, 18.0],
+            egui::Label::new(
+                RichText::new("MOTION / VISUAL FALLBACK")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            ),
+        );
+    });
+    ui.separator();
+
+    for (group_index, (group, actions)) in MOVESET_ACTION_GROUPS.iter().enumerate() {
+        let default_open = group_index < 4;
+        egui::CollapsingHeader::new(*group)
+            .id_salt(("moveset-capability-group", group_index))
+            .default_open(default_open)
+            .show(ui, |ui| {
+                egui::Grid::new(("moveset-capability-grid", group_index))
+                    .num_columns(3)
+                    .striped(true)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        for action in *actions {
+                            let Some(row) = rows.iter().find(|row| row.action == *action) else {
+                                continue;
+                            };
+                            let action_response = ui.add_sized(
+                                [action_width, 20.0],
+                                egui::Button::new(row.action.label())
+                                    .selected(state.selected_action == row.action),
+                            );
+                            if action_response
+                                .on_hover_text("Select this action and preview its assigned motion or visual fallback")
+                                .clicked()
+                            {
+                                state.selected_action = row.action;
+                                let preview_clip = row.clip.or(row.visual_fallback_clip);
+                                if let Some(clip) = preview_clip.and_then(|clip| {
+                                    clip_options.iter().find(|option| {
+                                        option.resource == Some(clip) && option.previewable
+                                    })
+                                }) {
+                                    state.selected_clip_path = Some(clip.path.clone());
+                                    state.invalidate_clip_cache();
+                                    state.reset_clip_clock();
+                                }
+                            }
+
+                            let (status, color) = moveset_status_label(row.status);
+                            let status_hint = match row.status {
+                                MovesetCapabilityStatus::Ready => {
+                                    "This action owns a resolved clip and does not borrow motion."
+                                }
+                                MovesetCapabilityStatus::Missing => {
+                                    "This core action is required but has no resolved clip."
+                                }
+                                MovesetCapabilityStatus::Disabled => {
+                                    "No clip is assigned, so the gameplay action is disabled."
+                                }
+                                MovesetCapabilityStatus::Broken => {
+                                    "The action points to a missing or non-animation resource."
+                                }
+                            };
+                            ui.add_sized(
+                                [status_width, 20.0],
+                                egui::Label::new(RichText::new(status).small().color(color)),
+                            )
+                            .on_hover_text(status_hint);
+
+                            let clip_label = row.clip_name.as_deref().unwrap_or("—");
+                            let clip_hint = match row.binding_source {
+                                Some(MovesetBindingSource::Action) => {
+                                    format!("{clip_label}\nExplicit action binding")
+                                }
+                                Some(MovesetBindingSource::LegacyRole) => {
+                                    format!("{clip_label}\nResolved from a legacy role slot")
+                                }
+                                None if row.status == MovesetCapabilityStatus::Broken => {
+                                    "Assigned resource is missing or has the wrong type".to_string()
+                                }
+                                None => "No clip assigned".to_string(),
+                            };
+                            let (motion_label, motion_hint) = if row.status
+                                == MovesetCapabilityStatus::Ready
+                            {
+                                (clip_label.to_string(), clip_hint)
+                            } else if let (Some(fallback), Some(name)) =
+                                (row.visual_fallback_action, row.visual_fallback_name.as_deref())
+                            {
+                                (
+                                    format!("Visual: {} · {name}", fallback.label()),
+                                    format!(
+                                        "Renderer fallback only: {} does not become an enabled action.",
+                                        row.action.label()
+                                    ),
+                                )
+                            } else if row.status == MovesetCapabilityStatus::Broken {
+                                ("Invalid assigned resource".to_string(), clip_hint)
+                            } else {
+                                (
+                                    "—".to_string(),
+                                    "No motion or visual fallback resolves".to_string(),
+                                )
+                            };
+                            ui.add_sized(
+                                [motion_width, 20.0],
+                                egui::Label::new(motion_label).truncate(),
+                            )
+                            .on_hover_text(motion_hint);
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
 }
 
 fn draw_pose_correction_editor(
@@ -2520,12 +3442,426 @@ fn model_skeleton_joint_names(
     }
 }
 
+fn next_weapon_appearance_pair(
+    project: &ProjectDocument,
+    set_id: ResourceId,
+    action: CharacterAnimationAction,
+    preferred_weapon: Option<ResourceId>,
+    preferred_socket: &str,
+    weapon_options: &[(ResourceId, String)],
+    socket_names: &[String],
+) -> Option<(ResourceId, String)> {
+    let used = project
+        .resource(set_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationSet(set) => Some(
+                set.weapon_appearance_tracks
+                    .iter()
+                    .filter(|track| track.action == action)
+                    .map(|track| (track.weapon, track.character_socket.clone()))
+                    .collect::<HashSet<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |weapon: ResourceId, socket: String| {
+        let pair = (weapon, socket);
+        if seen.insert(pair.clone()) {
+            candidates.push(pair);
+        }
+    };
+
+    if let Some(weapon) = preferred_weapon {
+        push(weapon, preferred_socket.to_string());
+    }
+    // A weapon's declared default hand is the most useful automatic second
+    // beat (for example light sword -> heavy sword in the same hand).
+    for (weapon_id, _) in weapon_options {
+        let socket = project
+            .resource(*weapon_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Weapon(weapon) => Some(weapon.default_character_socket.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| preferred_socket.to_string());
+        push(*weapon_id, socket);
+    }
+    if let Some(weapon) = preferred_weapon {
+        for socket in socket_names {
+            push(weapon, socket.clone());
+        }
+    }
+    for (weapon_id, _) in weapon_options {
+        for socket in socket_names {
+            push(*weapon_id, socket.clone());
+        }
+    }
+
+    candidates.into_iter().find(|pair| !used.contains(pair))
+}
+
+fn draw_weapon_appearance_editor(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    model_id: ResourceId,
+    character_id: Option<ResourceId>,
+    state: &mut ModelAnimationViewerState,
+    max_frame: u16,
+) -> bool {
+    let weapon_options =
+        collect_resource_options(project, |data| matches!(data, ResourceData::Weapon(_)));
+    let socket_names = project
+        .resource(model_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Model(model) => Some(
+                model
+                    .attachments
+                    .iter()
+                    .map(|socket| socket.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let Some(set_id) = character_animation_set_id(project, character_id) else {
+        ui.label(RichText::new("Visibility beat").strong());
+        ui.colored_label(
+            Color32::from_rgb(220, 160, 80),
+            "Select a Character with an Animation Set to author appearance timing.",
+        );
+        return false;
+    };
+
+    let track_options = project
+        .resource(set_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationSet(set) => Some(
+                set.weapon_appearance_tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| track.action == state.selected_action)
+                    .map(|(index, track)| {
+                        let weapon_name = weapon_options
+                            .iter()
+                            .find(|(id, _)| *id == track.weapon)
+                            .map(|(_, name)| name.as_str())
+                            .unwrap_or("Missing weapon");
+                        (
+                            index,
+                            format!("{} · {}", weapon_name, track.character_socket),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if !track_options
+        .iter()
+        .any(|(index, _)| *index == state.selected_weapon_track)
+    {
+        if let Some((index, _)) = track_options.first() {
+            state.selected_weapon_track = *index;
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Visibility beat").strong());
+        ui.label(
+            RichText::new(state.selected_action.label())
+                .small()
+                .color(STUDIO_ACCENT),
+        );
+    });
+    let current_frame = (state.frame.round().max(0.0) as u16).min(max_frame);
+    let default_weapon = state
+        .preview_weapon
+        .or_else(|| weapon_options.first().map(|(id, _)| *id));
+    let default_socket = socket_names
+        .get(state.selected_attachment_socket)
+        .cloned()
+        .or_else(|| {
+            default_weapon.and_then(|weapon_id| {
+                project.resource(weapon_id).and_then(|resource| {
+                    let ResourceData::Weapon(weapon) = &resource.data else {
+                        return None;
+                    };
+                    Some(weapon.default_character_socket.clone())
+                })
+            })
+        })
+        .unwrap_or_else(|| "right_hand_grip".to_string());
+    let add_pair = next_weapon_appearance_pair(
+        project,
+        set_id,
+        state.selected_action,
+        default_weapon,
+        &default_socket,
+        &weapon_options,
+        &socket_names,
+    );
+    let add_help = add_pair.as_ref().map_or_else(
+        || "Every available weapon/socket pair already has a beat for this action".to_string(),
+        |(weapon, socket)| {
+            format!(
+                "Add a {} visibility beat on '{}' at the current frame",
+                project.resource_name(*weapon).unwrap_or("weapon"),
+                socket
+            )
+        },
+    );
+    let mut add_track = None;
+    let mut delete_track = false;
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                add_pair.is_some(),
+                egui::Button::new(icons::label(icons::PLUS, "Add beat")),
+            )
+            .on_hover_text(add_help)
+            .clicked()
+        {
+            add_track = add_pair.clone();
+        }
+        if ui
+            .add_enabled(
+                !track_options.is_empty(),
+                egui::Button::new(icons::label(icons::TRASH, "Delete")),
+            )
+            .clicked()
+        {
+            delete_track = true;
+        }
+    });
+    if let Some((weapon, character_socket)) = add_track {
+        let Some(resource) = project.resource_mut(set_id) else {
+            return false;
+        };
+        let ResourceData::AnimationSet(set) = &mut resource.data else {
+            return false;
+        };
+        set.weapon_appearance_tracks
+            .push(psxed_project::WeaponAppearanceTrack {
+                action: state.selected_action,
+                weapon,
+                character_socket,
+                fully_visible_frame: current_frame,
+                hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
+                transition_frames: psxed_project::WEAPON_APPEARANCE_DEFAULT_TRANSITION_FRAMES,
+            });
+        state.selected_weapon_track = set.weapon_appearance_tracks.len() - 1;
+        state.preview_weapon = Some(weapon);
+        return true;
+    }
+    if delete_track {
+        let Some(resource) = project.resource_mut(set_id) else {
+            return false;
+        };
+        let ResourceData::AnimationSet(set) = &mut resource.data else {
+            return false;
+        };
+        if state.selected_weapon_track < set.weapon_appearance_tracks.len() {
+            set.weapon_appearance_tracks
+                .remove(state.selected_weapon_track);
+            state.selected_weapon_track = state.selected_weapon_track.saturating_sub(1);
+            return true;
+        }
+    }
+
+    if track_options.is_empty() {
+        ui.label(
+            RichText::new("No weapon beat for this action. Add one at the playhead.")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+        return false;
+    }
+    let selected_label = track_options
+        .iter()
+        .find(|(index, _)| *index == state.selected_weapon_track)
+        .map(|(_, label)| label.as_str())
+        .unwrap_or("Select beat");
+    egui::ComboBox::from_id_salt("animation-weapon-appearance-track-select")
+        .selected_text(selected_label)
+        .width(250.0)
+        .show_ui(ui, |ui| {
+            for (index, label) in &track_options {
+                ui.selectable_value(&mut state.selected_weapon_track, *index, label);
+            }
+        });
+
+    let Some(resource) = project.resource_mut(set_id) else {
+        return false;
+    };
+    let ResourceData::AnimationSet(set) = &mut resource.data else {
+        return false;
+    };
+    let Some(track) = set
+        .weapon_appearance_tracks
+        .get_mut(state.selected_weapon_track)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    let mut selected_weapon = Some(track.weapon);
+    ui.horizontal(|ui| {
+        ui.label("Weapon");
+        if searchable_picker(
+            ui,
+            "animation-weapon-appearance-resource",
+            &mut selected_weapon,
+            weapon_options
+                .iter()
+                .find(|(id, _)| *id == track.weapon)
+                .map(|(_, name)| name.as_str())
+                .unwrap_or("Missing weapon"),
+            &weapon_options,
+            SearchablePickerConfig::required().with_width(180.0),
+        ) {
+            if let Some(weapon) = selected_weapon {
+                track.weapon = weapon;
+                state.preview_weapon = Some(weapon);
+                changed = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Hand socket");
+        egui::ComboBox::from_id_salt("animation-weapon-appearance-socket")
+            .selected_text(&track.character_socket)
+            .show_ui(ui, |ui| {
+                for name in &socket_names {
+                    changed |= ui
+                        .selectable_value(&mut track.character_socket, name.clone(), name)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Fully visible");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut track.fully_visible_frame)
+                    .range(0..=max_frame)
+                    .prefix("Frame "),
+            )
+            .changed();
+        if ui.small_button("Use playhead").clicked() {
+            track.fully_visible_frame = current_frame;
+            changed = true;
+        }
+    });
+    let mut hide_at_clip_end = track.hidden_frame == psxed_project::ACTION_FRAME_END_FULL;
+    if ui
+        .checkbox(&mut hide_at_clip_end, "Gone at clip end")
+        .changed()
+    {
+        track.hidden_frame = if hide_at_clip_end {
+            psxed_project::ACTION_FRAME_END_FULL
+        } else {
+            current_frame
+                .max(track.fully_visible_frame.saturating_add(1))
+                .min(max_frame)
+        };
+        changed = true;
+    }
+    if !hide_at_clip_end {
+        ui.horizontal(|ui| {
+            ui.label("Gone by");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut track.hidden_frame)
+                        .range(0..=max_frame)
+                        .prefix("Frame "),
+                )
+                .changed();
+            if ui.small_button("Use playhead").clicked() {
+                track.hidden_frame = current_frame;
+                changed = true;
+            }
+        });
+        let min_hidden = track.fully_visible_frame.saturating_add(1).min(max_frame);
+        if track.hidden_frame < min_hidden {
+            track.hidden_frame = min_hidden;
+            changed = true;
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.label("Transition");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut track.transition_frames)
+                    .range(0..=max_frame.max(64))
+                    .suffix(" frames"),
+            )
+            .changed();
+    });
+    let starts_at = track
+        .fully_visible_frame
+        .saturating_sub(track.transition_frames);
+    ui.label(
+        RichText::new(format!(
+            "Starts appearing at frame {starts_at}; scrub the timeline to preview the exact runtime materialisation."
+        ))
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+    changed
+}
+
+fn draw_weapon_grip_editor(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    weapon_id: ResourceId,
+) -> bool {
+    let Some(resource) = project.resource_mut(weapon_id) else {
+        return false;
+    };
+    let ResourceData::Weapon(weapon) = &mut resource.data else {
+        return false;
+    };
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Weapon grip"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(
+                    "Fine-tunes which point on the weapon is aligned to the hand socket.",
+                )
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                changed |= ui.text_edit_singleline(&mut weapon.grip.name).changed();
+            });
+            changed |= crate::inspector_character_ui::int_vec3_editor(
+                ui,
+                "Position",
+                &mut weapon.grip.translation,
+                -32768,
+                32767,
+                4.0,
+            );
+            changed |= crate::inspector_character_ui::q12_rotation_editor(
+                ui,
+                "Rotation",
+                &mut weapon.grip.rotation_q12,
+            );
+        });
+    changed
+}
+
 fn draw_attachment_socket_editor(
     ui: &mut egui::Ui,
     project: &mut ProjectDocument,
     model_id: ResourceId,
+    character_id: Option<ResourceId>,
     state: &mut ModelAnimationViewerState,
     model: Option<&LoadedModelContext>,
+    max_frame: u16,
 ) -> bool {
     let mut changed = false;
     // Sockets have no Resize concept; fall back before the tool row
@@ -2533,16 +3869,18 @@ fn draw_attachment_socket_editor(
     if state.capsule_edit_tool == CapsuleEditTool::Resize {
         state.capsule_edit_tool = CapsuleEditTool::Move;
     }
-    ui.heading("Attachment Sockets");
+    ui.heading("Weapon Studio");
     ui.label(
         RichText::new(
-            "Select a socket, then click a highlighted body joint to attach it. \
-             Drag in the viewport to place; the triad shows the frame a weapon inherits.",
+            "Choose a visibility beat, scrub to its timing, then align the character socket and weapon grip in the same preview.",
         )
         .small()
         .color(STUDIO_TEXT_WEAK),
     );
     ui.add_space(6.0);
+
+    changed |= draw_weapon_appearance_editor(ui, project, model_id, character_id, state, max_frame);
+    ui.separator();
 
     let joint_count = model
         .and_then(|model| psx_asset::Model::from_bytes(&model.model_bytes).ok())
@@ -2557,24 +3895,49 @@ fn draw_attachment_socket_editor(
             _ => None,
         })
         .collect();
-    ui.horizontal(|ui| {
-        ui.label("Preview weapon");
-        let selected_label = state
-            .preview_weapon
-            .and_then(|id| weapon_options.iter().find(|(option, _)| *option == id))
-            .map(|(_, name)| name.as_str())
-            .unwrap_or("None");
-        egui::ComboBox::from_id_salt("animation-socket-preview-weapon")
-            .selected_text(selected_label)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.preview_weapon, None, "None");
-                for (id, name) in &weapon_options {
-                    ui.selectable_value(&mut state.preview_weapon, Some(*id), name);
-                }
-            });
-    })
-    .response
-    .on_hover_text("Render this Weapon riding the selected socket, composed like Play");
+    let appearance_controls_weapon = character_animation_set_id(project, character_id)
+        .and_then(|set_id| project.resource(set_id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationSet(set) => set
+                .weapon_appearance_tracks
+                .get(state.selected_weapon_track),
+            _ => None,
+        })
+        .is_some_and(|track| track.action == state.selected_action);
+    if !appearance_controls_weapon {
+        ui.horizontal(|ui| {
+            ui.label("Preview weapon");
+            let selected_label = state
+                .preview_weapon
+                .and_then(|id| weapon_options.iter().find(|(option, _)| *option == id))
+                .map(|(_, name)| name.as_str())
+                .unwrap_or("None");
+            egui::ComboBox::from_id_salt("animation-socket-preview-weapon")
+                .selected_text(selected_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut state.preview_weapon, None, "None");
+                    for (id, name) in &weapon_options {
+                        ui.selectable_value(&mut state.preview_weapon, Some(*id), name);
+                    }
+                });
+        })
+        .response
+        .on_hover_text("Render this Weapon riding the selected socket, composed like Play");
+    }
+
+    if let Some(weapon_id) = state.preview_weapon {
+        changed |= draw_weapon_grip_editor(ui, project, weapon_id);
+    }
+
+    ui.separator();
+    ui.label(RichText::new("Character socket").strong());
+    ui.label(
+        RichText::new(
+            "Select a socket, then click a highlighted body joint to attach it. Drag in the viewport to place it.",
+        )
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
 
     let Some(resource) = project.resource_mut(model_id) else {
         ui.colored_label(Color32::from_rgb(220, 120, 100), "Model is missing");
@@ -4809,5 +6172,49 @@ mod focus_tests {
         ));
         // 1024 + 300 * 12 = 4624, wrapping one full turn to 528.
         assert_eq!(first_socket(&project, id).rotation_q12, [0, 528, 0]);
+    }
+
+    #[test]
+    fn weapon_appearance_preview_uses_authored_sampled_frame_ramps() {
+        let mut project = ProjectDocument::new("weapon-ramp-test");
+        let weapon = project.add_resource(
+            "Sword",
+            ResourceData::Weapon(psxed_project::WeaponResource::default()),
+        );
+        let track = psxed_project::WeaponAppearanceTrack {
+            action: CharacterAnimationAction::LightAttack,
+            weapon,
+            character_socket: "right_hand_grip".to_string(),
+            fully_visible_frame: 12,
+            hidden_frame: 24,
+            transition_frames: 4,
+        };
+        assert_eq!(preview_weapon_materialization_q12(&track, 7.0, 30), 0);
+        assert_eq!(preview_weapon_materialization_q12(&track, 8.0, 30), 0);
+        assert_eq!(preview_weapon_materialization_q12(&track, 10.0, 30), 2048);
+        assert_eq!(preview_weapon_materialization_q12(&track, 12.0, 30), 4096);
+        assert_eq!(preview_weapon_materialization_q12(&track, 22.0, 30), 2048);
+        assert_eq!(preview_weapon_materialization_q12(&track, 24.0, 30), 0);
+    }
+
+    #[test]
+    fn instant_weapon_appearance_preview_cuts_on_authored_frames() {
+        let mut project = ProjectDocument::new("weapon-cut-test");
+        let weapon = project.add_resource(
+            "Sword",
+            ResourceData::Weapon(psxed_project::WeaponResource::default()),
+        );
+        let track = psxed_project::WeaponAppearanceTrack {
+            action: CharacterAnimationAction::LightAttack,
+            weapon,
+            character_socket: "right_hand_grip".to_string(),
+            fully_visible_frame: 6,
+            hidden_frame: 9,
+            transition_frames: 0,
+        };
+        assert_eq!(preview_weapon_materialization_q12(&track, 5.99, 20), 0);
+        assert_eq!(preview_weapon_materialization_q12(&track, 6.0, 20), 4096);
+        assert_eq!(preview_weapon_materialization_q12(&track, 8.99, 20), 4096);
+        assert_eq!(preview_weapon_materialization_q12(&track, 9.0, 20), 0);
     }
 }

@@ -766,11 +766,25 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--texture", required=True, type=Path, help="8bpp reference PSXT")
     parser.add_argument("--model", required=True, type=Path, help="PSMD model using the atlas")
+    parser.add_argument(
+        "--additional-model",
+        action="append",
+        default=[],
+        type=Path,
+        help="another PSMD model that must share the same atlas and palette banks",
+    )
     parser.add_argument("--baseline", type=Path, help="existing 4bpp PSXT to score beside candidates")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--max-banks", type=int, default=4, choices=range(1, 5))
     parser.add_argument("--reuse-layout-model", type=Path)
     parser.add_argument("--output-model", type=Path)
+    parser.add_argument(
+        "--additional-output-model",
+        action="append",
+        default=[],
+        type=Path,
+        help="banked output matching each --additional-model, in the same order",
+    )
     parser.add_argument(
         "--unbalanced",
         action="store_true",
@@ -785,10 +799,39 @@ def main() -> None:
     args = parser.parse_args()
 
     texture = decode_psxt(args.texture)
-    model_width, model_height, faces = decode_model(args.model)
-    if (model_width, model_height) != (texture.width, texture.height):
-        raise ValueError("model and texture dimensions do not match")
+    if len(args.additional_output_model) not in (0, len(args.additional_model)):
+        raise ValueError(
+            "provide one --additional-output-model per --additional-model, or none"
+        )
+    model_paths = [args.model, *args.additional_model]
+    output_model_paths: list[Path | None] = [args.output_model]
+    if args.additional_output_model:
+        output_model_paths.extend(args.additional_output_model)
+    else:
+        output_model_paths.extend([None] * len(args.additional_model))
+
+    faces: list[Face] = []
+    face_ranges: list[tuple[int, int]] = []
+    vertex_offset = 0
+    for model_path in model_paths:
+        model_width, model_height, model_faces = decode_model(model_path)
+        if (model_width, model_height) != (texture.width, texture.height):
+            raise ValueError(f"{model_path}: model and texture dimensions do not match")
+        first_face = len(faces)
+        faces.extend(
+            Face(
+                tuple(vertex + vertex_offset for vertex in face.vertices),
+                face.uvs,
+            )
+            for face in model_faces
+        )
+        face_ranges.append((first_face, len(faces)))
+        vertex_offset += max(
+            (vertex for face in model_faces for vertex in face.vertices), default=-1
+        ) + 1
     if args.reuse_layout_model is not None:
+        if args.additional_model:
+            raise ValueError("--reuse-layout-model does not accept --additional-model")
         if args.output_model is None:
             raise ValueError("--reuse-layout-model requires --output-model")
         reuse_face_bank_layout(
@@ -864,12 +907,25 @@ def main() -> None:
             indices,
             palettes,
         )
+        primary_first, primary_end = face_ranges[0]
         write_banked_model(
             args.output_dir / f"mantis-{bank_count}-bank-candidate.psxmdl",
             args.model,
-            face_component,
+            face_component[primary_first:primary_end],
             assignments,
         )
+        if bank_count == args.max_banks:
+            for model_path, output_model_path, (first_face, end_face) in zip(
+                model_paths, output_model_paths, face_ranges, strict=True
+            ):
+                if output_model_path is None:
+                    continue
+                write_banked_model(
+                    output_model_path,
+                    model_path,
+                    face_component[first_face:end_face],
+                    assignments,
+                )
 
     save_comparison(
         args.output_dir / "mantis-palette-bank-comparison.png", texture, candidates, baseline
@@ -885,7 +941,10 @@ def main() -> None:
         writer = csv.DictWriter(file, fieldnames=list(output_rows[0].keys()))
         writer.writeheader()
         writer.writerows(output_rows)
-    print(f"faces={len(faces)} components={len(components)} covered={int(rows[0]['covered_texels'])}")
+    print(
+        f"models={len(model_paths)} faces={len(faces)} components={len(components)} "
+        f"covered={int(rows[0]['covered_texels'])}"
+    )
     for row in rows:
         print(
             f"banks={int(row['banks'])} bytes={int(row['estimated_psxt_bytes'])} "

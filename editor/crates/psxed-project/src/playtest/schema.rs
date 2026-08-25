@@ -685,6 +685,15 @@ pub struct PlaytestModelClip {
     /// Index into [`PlaytestPackage::assets`] of the cooked
     /// `.psxanim` blob.
     pub animation_asset_index: usize,
+    /// Standalone Animation Clip resource this model clip resolved from.
+    pub animation_resource: Option<ResourceId>,
+    /// First/last source frames retained by still-end trimming, before any
+    /// error-budget resampling. Animation Studio event frames are mapped from
+    /// this authored domain into the final cooked frame count.
+    pub source_frame_first: u16,
+    pub source_frame_last: u16,
+    pub source_frame_count: u16,
+    pub cooked_frame_count: u16,
 }
 
 /// Bounds-table slice for one global model clip.
@@ -1455,6 +1464,19 @@ pub struct PlaytestEquipment {
     pub flags: u16,
 }
 
+/// Cooked weapon-visibility beat matching one character action and one
+/// equipped weapon/socket pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestWeaponAppearance {
+    pub character: u16,
+    pub action: crate::CharacterAnimationAction,
+    pub weapon: u16,
+    pub character_socket: String,
+    pub fully_visible_frame: u16,
+    pub hidden_frame: u16,
+    pub transition_frames: u16,
+}
+
 /// One placed point light, room-local engine units. Mirrors
 /// [`psx_level::PointLightRecord`] one-for-one -- intensity is
 /// already quantised to Q8.8 so the cook output is a direct
@@ -1987,6 +2009,8 @@ pub struct PlaytestPackage {
     pub weapons: Vec<PlaytestWeapon>,
     /// Equipment components placed in rooms.
     pub equipment: Vec<PlaytestEquipment>,
+    /// Animation-authored visibility beats for equipped weapons.
+    pub weapon_appearances: Vec<PlaytestWeaponAppearance>,
     /// Placed point lights, room-local coordinates.
     pub lights: Vec<PlaytestLight>,
     /// Placed point-projected particle emitters.
