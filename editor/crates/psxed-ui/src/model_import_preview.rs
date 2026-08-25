@@ -37,20 +37,20 @@ pub(crate) struct PreviewSocket {
     pub translation: [i32; 3],
     pub rotation_q12: [i16; 3],
     pub selected: bool,
-    pub gizmo_mode: PreviewSocketGizmoMode,
+    pub gizmo_mode: PreviewGizmoMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PreviewSocketGizmoMode {
+pub(crate) enum PreviewGizmoMode {
     Translate,
     Rotate,
 }
 
-/// Projected translation axes for the selected socket. The points use preview
-/// image coordinates and `local_axis_units` records how much bone-local
-/// translation each axis endpoint represents.
+/// Projected axes for the selected socket. The points use preview image
+/// coordinates and `local_axis_units` records how much bone-local translation
+/// each endpoint represents when the gizmo is in translation mode.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PreviewSocketTranslationGizmo {
+pub(crate) struct PreviewAxisGizmo {
     pub origin: [f32; 2],
     pub axis_ends: [[f32; 2]; 3],
     pub local_axis_units: f32,
@@ -90,7 +90,8 @@ pub struct PreviewEquippedWeapon<'a> {
 pub(crate) struct ImportPreviewRender {
     pub image: ColorImage,
     pub joint_screen_positions: Vec<Option<[f32; 2]>>,
-    pub selected_socket_translation_gizmo: Option<PreviewSocketTranslationGizmo>,
+    pub selected_socket_gizmo: Option<PreviewAxisGizmo>,
+    pub selected_joint_gizmo: Option<PreviewAxisGizmo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +226,7 @@ pub fn render_import_model_preview_with_equipment(
         equipped_weapon,
         character_material,
         None,
+        None,
     )
     .map(|render| render.image)
 }
@@ -252,6 +254,7 @@ pub(crate) fn render_import_model_preview_with_orientation_at_size(
         None,
         None,
         None,
+        None,
     )
     .map(|render| render.image)
 }
@@ -271,6 +274,7 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     equipped_weapon: Option<&PreviewEquippedWeapon<'_>>,
     character_material: Option<&PreviewMaterialLayer<'_>>,
     selected_joint: Option<u16>,
+    selected_joint_gizmo_mode: Option<PreviewGizmoMode>,
 ) -> Option<ImportPreviewRender> {
     let model = Model::from_bytes(model_bytes).ok()?;
     let animation = Animation::from_bytes(clip_bytes).ok()?;
@@ -477,7 +481,7 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     let socket_local_axis_units = ((i64::from(socket_axis_length) << 12)
         / i64::from(local_to_world.q12().max(1)))
     .clamp(64, 16_384) as i32;
-    let mut selected_socket_translation_gizmo = None;
+    let mut selected_socket_gizmo = None;
     for socket in sockets {
         let Some(joint) = joint_transforms.get(socket.joint as usize).copied() else {
             continue;
@@ -499,24 +503,26 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             socket.rotation_q12[2] as u16,
         ]));
         let basis = match socket.gizmo_mode {
-            PreviewSocketGizmoMode::Translate => &bone_basis,
-            PreviewSocketGizmoMode::Rotate => &socket_basis,
+            PreviewGizmoMode::Translate => &bone_basis,
+            PreviewGizmoMode::Rotate => &socket_basis,
         };
         draw_socket_marker(
             &mut image,
             camera,
             projection,
             joint,
-            &basis,
+            basis,
             socket,
             socket_axis_length,
         );
-        if socket.selected && socket.gizmo_mode == PreviewSocketGizmoMode::Translate {
-            selected_socket_translation_gizmo = project_socket_translation_gizmo(
+        if socket.selected {
+            selected_socket_gizmo = project_socket_gizmo(
                 camera,
                 projection,
                 joint,
+                basis,
                 socket,
+                socket_axis_length,
                 socket_local_axis_units,
             );
         }
@@ -528,13 +534,27 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
         draw_selected_joint_dot(&mut image, joint.sx as i32, joint.sy as i32);
     }
 
+    let selected_joint_gizmo = selected_joint_gizmo_mode.and_then(|_| {
+        let joint = selected_joint?;
+        let origin_world = estimated_joint_world_point(&model, &joint_transforms, joint)?;
+        project_axis_gizmo(
+            camera,
+            projection,
+            origin_world,
+            &instance_rotation,
+            socket_axis_length,
+            socket_local_axis_units,
+        )
+    });
+
     Some(ImportPreviewRender {
         image,
         joint_screen_positions: joint_origins
             .into_iter()
             .map(|point| point.map(|point| [point.sx as f32, point.sy as f32]))
             .collect(),
-        selected_socket_translation_gizmo,
+        selected_socket_gizmo,
+        selected_joint_gizmo,
     })
 }
 
@@ -1123,6 +1143,45 @@ fn estimated_joint_points(
         .collect()
 }
 
+fn estimated_joint_world_point(
+    model: &Model<'_>,
+    joint_transforms: &[JointWorldTransform],
+    joint: u16,
+) -> Option<WorldVertex> {
+    let transform = joint_transforms.get(joint as usize)?;
+    let mut sum = [0i64; 3];
+    let mut count = 0i64;
+    for part_index in 0..model.part_count() {
+        let Some(part) = model.part(part_index) else {
+            continue;
+        };
+        if part.joint_index() != joint {
+            continue;
+        }
+        let start = part.first_vertex();
+        let end = start.saturating_add(part.vertex_count());
+        for vertex_index in start..end {
+            let Some(vertex) = model.vertex(vertex_index) else {
+                continue;
+            };
+            sum[0] += i64::from(vertex.position.x);
+            sum[1] += i64::from(vertex.position.y);
+            sum[2] += i64::from(vertex.position.z);
+            count += 1;
+        }
+    }
+    (count > 0).then(|| {
+        world_transform_model_vertex(
+            transform,
+            Vec3I16::new(
+                clamp_i16((sum[0] / count) as i32),
+                clamp_i16((sum[1] / count) as i32),
+                clamp_i16((sum[2] / count) as i32),
+            ),
+        )
+    })
+}
+
 fn raster_textured_triangle(
     image: &mut ColorImage,
     z_buffer: &mut [f32],
@@ -1512,10 +1571,10 @@ fn euler_rotation_q12_inverse(rotation_q12: [i16; 3]) -> Mat3I16 {
     rx.mul(&ry).mul(&rz)
 }
 
-/// Draw a socket as a bone-local axis triad: X red, Y green, Z blue
-/// whiskers from the socket origin, plus a short white origin cross on
-/// the selected socket. `basis` is the composed orthonormal socket
-/// orientation; the origin rides the SCALED joint matrix (same offset
+/// Draw a socket as an axis triad: X red, Y green, Z blue whiskers from the
+/// socket origin, plus a short white origin cross on the selected socket.
+/// `basis` is either the bone-local translation basis or the composed socket
+/// rotation basis. The origin rides the SCALED joint matrix (same offset
 /// convention as the runtime and the combat capsules).
 fn draw_socket_marker(
     image: &mut ColorImage,
@@ -1554,23 +1613,47 @@ fn draw_socket_marker(
     }
 }
 
-fn project_socket_translation_gizmo(
+fn project_socket_gizmo(
     camera: WorldCamera,
     projection: WorldProjection,
     joint: JointWorldTransform,
+    basis: &Mat3I16,
     socket: &PreviewSocket,
+    axis_length: i32,
     local_axis_units: i32,
-) -> Option<PreviewSocketTranslationGizmo> {
+) -> Option<PreviewAxisGizmo> {
     let origin_world = joint_local_point(joint, socket.translation);
+    project_axis_gizmo(
+        camera,
+        projection,
+        origin_world,
+        basis,
+        axis_length,
+        local_axis_units,
+    )
+}
+
+fn project_axis_gizmo(
+    camera: WorldCamera,
+    projection: WorldProjection,
+    origin_world: WorldVertex,
+    basis: &Mat3I16,
+    axis_length: i32,
+    local_axis_units: i32,
+) -> Option<PreviewAxisGizmo> {
     let origin = project_preview_world(camera, projection, origin_world)?;
     let mut axis_ends = [[0.0; 2]; 3];
     for axis in 0..3 {
-        let mut local = socket.translation;
-        local[axis] = local[axis].saturating_add(local_axis_units);
-        let end = project_preview_world(camera, projection, joint_local_point(joint, local))?;
+        let mut local = [0; 3];
+        local[axis] = axis_length;
+        let end = project_preview_world(
+            camera,
+            projection,
+            basis_offset_point(origin_world, basis, local),
+        )?;
         axis_ends[axis] = [end.sx as f32, end.sy as f32];
     }
-    Some(PreviewSocketTranslationGizmo {
+    Some(PreviewAxisGizmo {
         origin: [origin.sx as f32, origin.sy as f32],
         axis_ends,
         local_axis_units: local_axis_units as f32,
@@ -1847,25 +1930,38 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("preview renders")
-            .image
         };
         let socket_joint = std::env::var("DUMP_SOCKET_JOINT")
             .ok()
             .and_then(|joint| joint.parse().ok())
             .unwrap_or(0u16);
-        let plain = render(&[]);
-        let marked = render(&[PreviewSocket {
+        let plain = render(&[]).image;
+        let marked_render = render(&[PreviewSocket {
             joint: socket_joint,
             translation: [0, 0, 0],
             rotation_q12: [0, 0, 0],
             selected: true,
-            gizmo_mode: PreviewSocketGizmoMode::Translate,
+            gizmo_mode: PreviewGizmoMode::Translate,
         }]);
+        assert!(marked_render.selected_socket_gizmo.is_some());
+        let marked = marked_render.image;
         assert_ne!(
             plain.pixels, marked.pixels,
             "the socket triad must paint over the preview"
+        );
+        let rotated = render(&[PreviewSocket {
+            joint: socket_joint,
+            translation: [0, 0, 0],
+            rotation_q12: [0, 512, 0],
+            selected: true,
+            gizmo_mode: PreviewGizmoMode::Rotate,
+        }]);
+        assert!(
+            rotated.selected_socket_gizmo.is_some(),
+            "rotation mode must expose the same pickable projected axes"
         );
         // Optional visual-inspection dump, same convention as
         // dump_preview_for_inspection.
@@ -1966,6 +2062,7 @@ mod tests {
                 &[],
                 weapon,
                 material_layer.as_ref(),
+                None,
                 None,
             )
             .expect("preview renders")
@@ -2156,6 +2253,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("rig fixture should render");
         let wire_pixels = render
@@ -2169,6 +2267,51 @@ mod tests {
             wire_pixels > 24,
             "expected a visible selected capsule wireframe, got {wire_pixels} pixels"
         );
+    }
+
+    #[test]
+    fn selected_pose_joint_exposes_pickable_projected_axes() {
+        let model = two_joint_model_with_child_part();
+        let clip = two_joint_animation_with_child_x_offsets(&[0, 32]);
+        let atlas = ColorImage {
+            size: [64, 64],
+            pixels: vec![Color32::from_rgb(210, 90, 70); 64 * 64],
+        };
+        let render = render_import_model_preview_with_combat_capsules_at_size(
+            &model,
+            &clip,
+            &atlas,
+            ImportPreviewOptions {
+                world_height: 1024,
+                visual_scale_q8: MODEL_SCALE_ONE_Q8,
+                visual_yaw_q12: 0,
+                collision_radius: 192,
+                time_seconds: 0.0,
+                yaw_q12: 340,
+                pitch_q12: 350,
+                radius: 1536,
+                focus_on_animated_bounds: true,
+                preview_in_place: true,
+                pose_offset: [0, 0, 0],
+                show_animation_root: false,
+                show_collision_guides: false,
+                show_bones: true,
+            },
+            Mat3I16::IDENTITY,
+            [640, 480],
+            &[],
+            &[],
+            None,
+            None,
+            Some(1),
+            Some(PreviewGizmoMode::Translate),
+        )
+        .expect("pose fixture should render");
+        let gizmo = render
+            .selected_joint_gizmo
+            .expect("selected pose joint should expose a gizmo");
+        assert!(gizmo.axis_ends.iter().any(|end| *end != gizmo.origin));
+        assert!(render.selected_socket_gizmo.is_none());
     }
 
     #[test]
