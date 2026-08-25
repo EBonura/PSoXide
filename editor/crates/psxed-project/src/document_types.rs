@@ -1665,6 +1665,11 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
                     .iter()
                     .filter(|binding| binding.clip == id)
                     .count()
+                + set
+                    .weapon_appearance_tracks
+                    .iter()
+                    .filter(|track| track.weapon == id)
+                    .count()
                 + set.clips.iter().filter(|clip_id| **clip_id == id).count()
         }
         ResourceData::Character(character) => {
@@ -1713,6 +1718,10 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
             let before_actions = set.action_clips.len();
             set.action_clips.retain(|binding| binding.clip != id);
             cleared += before_actions - set.action_clips.len();
+            let before_weapon_tracks = set.weapon_appearance_tracks.len();
+            set.weapon_appearance_tracks
+                .retain(|track| track.weapon != id);
+            cleared += before_weapon_tracks - set.weapon_appearance_tracks.len();
             let before = set.clips.len();
             set.clips.retain(|clip_id| *clip_id != id);
             cleared += before - set.clips.len();

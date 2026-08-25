@@ -133,8 +133,8 @@ fn default_twin_ladder_cooks_without_a_ui_texture_asset() {
         .iter()
         .find(|scene| scene.name == "HUD")
         .expect("default HUD scene cooked");
-    let hud_nodes = &nodes[usize::from(hud.node_first)
-        ..usize::from(hud.node_first.saturating_add(hud.node_count))];
+    let hud_nodes = &nodes
+        [usize::from(hud.node_first)..usize::from(hud.node_first.saturating_add(hud.node_count))];
     let bars = hud_nodes
         .iter()
         .filter(|node| {

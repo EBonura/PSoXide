@@ -38,178 +38,64 @@ const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
     equipment_wireframe: false,
 };
 
-/// One weapon's appearance in a swing: which weapon, which hand, and the clip
-/// frames it materialises on and dissolves away at.
-struct WeaponBeat {
-    heavy: bool,
-    off_hand: bool,
-    /// Clip frame the arm is thrown to the side, where the blade is whole.
-    throw_frame: u16,
-    /// Clip frame it is gone by. `u16::MAX` means the end of the clip, which
-    /// is what the last weapon in a swing uses.
-    until_frame: u16,
-}
-
-const CLIP_END: u16 = u16::MAX;
-
-/// Which weapons appear when, per attack.
-///
-/// The structure is yours: level 1 throws the right arm once and the light
-/// sword rides it. Level 2 throws it twice, light on the first, heavy on the
-/// second, and the light one goes away as the heavy arrives. Level 3 is level 2
-/// plus the left arm's own throw, which brings the light sword to that hand.
-///
-/// The frames come from the cooked clips (peaks of the right and left hand's
-/// distance from the hips), but which peak counts as a throw is a judgement,
-/// not a measurement: the vertical clips show the two-beat structure cleanly
-/// while the horizontal ones have a wind-up bump of nearly the same size. Move
-/// a number here if a weapon lands on the wrong beat.
-fn weapon_beats(anim: PlayerAnim) -> &'static [WeaponBeat] {
-    const LIGHT_ATTACK: &[WeaponBeat] = &[WeaponBeat {
-        heavy: false,
-        off_hand: false,
-        throw_frame: 25,
-        until_frame: CLIP_END,
-    }];
-    const HEAVY_ATTACK: &[WeaponBeat] = &[
-        WeaponBeat {
-            heavy: false,
-            off_hand: false,
-            throw_frame: 23,
-            until_frame: 35,
-        },
-        WeaponBeat {
-            heavy: true,
-            off_hand: false,
-            throw_frame: 35,
-            until_frame: CLIP_END,
-        },
-    ];
-    const COMBO_ATTACK: &[WeaponBeat] = &[
-        WeaponBeat {
-            heavy: false,
-            off_hand: false,
-            throw_frame: 25,
-            until_frame: 44,
-        },
-        WeaponBeat {
-            heavy: true,
-            off_hand: false,
-            throw_frame: 44,
-            until_frame: CLIP_END,
-        },
-        WeaponBeat {
-            heavy: false,
-            off_hand: true,
-            throw_frame: 35,
-            until_frame: CLIP_END,
-        },
-    ];
-    const VERT_LIGHT_ATTACK: &[WeaponBeat] = &[WeaponBeat {
-        heavy: false,
-        off_hand: false,
-        throw_frame: 33,
-        until_frame: CLIP_END,
-    }];
-    const VERT_HEAVY_ATTACK: &[WeaponBeat] = &[
-        WeaponBeat {
-            heavy: false,
-            off_hand: false,
-            throw_frame: 20,
-            until_frame: 39,
-        },
-        WeaponBeat {
-            heavy: true,
-            off_hand: false,
-            throw_frame: 39,
-            until_frame: CLIP_END,
-        },
-    ];
-    const VERT_COMBO_ATTACK: &[WeaponBeat] = &[
-        WeaponBeat {
-            heavy: false,
-            off_hand: false,
-            throw_frame: 15,
-            until_frame: 40,
-        },
-        WeaponBeat {
-            heavy: true,
-            off_hand: false,
-            throw_frame: 40,
-            until_frame: CLIP_END,
-        },
-        WeaponBeat {
-            heavy: false,
-            off_hand: true,
-            throw_frame: 26,
-            until_frame: CLIP_END,
-        },
-    ];
-    match anim {
-        PlayerAnim::LightAttack => LIGHT_ATTACK,
-        PlayerAnim::HeavyAttack => HEAVY_ATTACK,
-        PlayerAnim::ComboAttack => COMBO_ATTACK,
-        PlayerAnim::VertLightAttack => VERT_LIGHT_ATTACK,
-        PlayerAnim::VertHeavyAttack => VERT_HEAVY_ATTACK,
-        PlayerAnim::VertComboAttack => VERT_COMBO_ATTACK,
-        _ => &[],
-    }
-}
-
-/// How long a weapon takes to grow up the blade, in CLIP FRAMES. Clips run at
-/// roughly a quarter of a frame per tick here, so 8 frames is about half a
-/// second. The same ramp runs backwards when it goes away.
-const MATERIALISE_FRAMES: u32 = 8;
-
-/// How far up the blade this beat's weapon has reached at `phase_q12`, Q12.
-///
-/// The ramp runs INTO the throw, so the blade is whole at the moment the arm is
-/// out, holds, then retreats into `until_frame` the way it came. Taking the
-/// smaller of the two ramps means a short window simply never reaches full
-/// rather than snapping.
-fn wire_for_beat(beat: &WeaponBeat, phase_q12: u32, frame_count: u16) -> u16 {
-    let ramp_q12 = MATERIALISE_FRAMES << 12;
-    let open_q12 = u32::from(beat.throw_frame)
-        .saturating_mul(4096)
-        .saturating_sub(ramp_q12);
-    let until = if beat.until_frame == CLIP_END {
+/// How far up a weapon this authored visibility beat has reached, Q12.
+/// The same sampled-frame transition runs into the fully-visible marker and
+/// backwards into the hidden marker. A zero transition is a deliberate cut.
+fn wire_for_appearance(
+    appearance: &psx_level::WeaponAppearanceRecord,
+    phase_q12: u32,
+    frame_count: u16,
+) -> u16 {
+    let until = if appearance.hidden_frame == psx_level::CHARACTER_ACTION_FRAME_END_FULL {
         frame_count.saturating_sub(1)
     } else {
-        beat.until_frame
+        appearance.hidden_frame.min(frame_count.saturating_sub(1))
     };
+    let visible_q12 = u32::from(appearance.fully_visible_frame) << 12;
     let until_q12 = u32::from(until).saturating_mul(4096);
+    if appearance.transition_frames == 0 {
+        return if phase_q12 >= visible_q12 && phase_q12 < until_q12 {
+            mr::ASSEMBLED_Q12
+        } else {
+            0
+        };
+    }
+    let transition = u32::from(appearance.transition_frames);
+    let ramp_q12 = transition << 12;
+    let open_q12 = visible_q12.saturating_sub(ramp_q12);
     if phase_q12 < open_q12 || phase_q12 >= until_q12 {
         return 0;
     }
-    let rising = (phase_q12 - open_q12) / MATERIALISE_FRAMES;
-    let falling = (until_q12 - phase_q12) / MATERIALISE_FRAMES;
-    rising.min(falling).min(4096) as u16
+    let rising = (phase_q12 - open_q12) / transition;
+    let falling = (until_q12 - phase_q12) / transition;
+    rising.min(falling).min(u32::from(mr::ASSEMBLED_Q12)) as u16
 }
 
 /// How far up the blade every player equipment record has grown this frame.
 ///
-/// Each cooked record is matched to a beat by the weapon's NAME and its socket,
-/// not by table order, so reordering the scene cannot arm the wrong hand.
+/// Each cooked record is matched to an Animation Studio track by character,
+/// action, weapon id, and socket. Scene/table reordering therefore cannot arm
+/// the wrong hand.
 pub(super) fn equipment_wire_q12(
     anim: PlayerAnim,
     phase_q12: u32,
     frame_count: u16,
 ) -> [u16; mr::MAX_PLAYER_EQUIPMENT] {
     let mut wire = [0u16; mr::MAX_PLAYER_EQUIPMENT];
-    let beats = weapon_beats(anim);
+    let Some(controller) = PLAYER_CONTROLLER else {
+        return wire;
+    };
+    let action = anim.action();
     for (index, record) in EQUIPMENT.iter().enumerate().take(mr::MAX_PLAYER_EQUIPMENT) {
-        let Some(weapon) = WEAPONS.get(record.weapon.to_usize()) else {
+        let Some(appearance) = WEAPON_APPEARANCES.iter().find(|appearance| {
+            appearance.character == controller.character
+                && appearance.action == action
+                && appearance.weapon == record.weapon
+                && appearance.character_socket == record.character_socket
+        }) else {
             continue;
         };
-        let heavy = weapon.name.ends_with("Heavy");
-        let off_hand = record.character_socket == "left_hand_grip";
-        let Some(beat) = beats
-            .iter()
-            .find(|beat| beat.heavy == heavy && beat.off_hand == off_hand)
-        else {
-            continue;
-        };
-        wire[index] = wire_for_beat(beat, phase_q12, frame_count);
+        wire[index] = wire_for_appearance(appearance, phase_q12, frame_count);
     }
     wire
 }
@@ -330,8 +216,7 @@ impl Playtest {
                 AssetKind::Texture,
                 |atlas_bytes| ensure_model_atlas_uploaded(texture_asset, atlas_bytes),
             )
-            .flatten()
-            else {
+            .flatten() else {
                 continue;
             };
             let decoded = with_transient_gameplay_asset_bytes(

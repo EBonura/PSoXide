@@ -172,6 +172,9 @@ fn main() {
                     for binding in &s.action_clips {
                         keep.insert(binding.clip.raw());
                     }
+                    for track in &s.weapon_appearance_tracks {
+                        keep.insert(track.weapon.raw());
+                    }
                 }
                 ResourceData::Character(c) => {
                     keep_id(&mut keep, c.model);

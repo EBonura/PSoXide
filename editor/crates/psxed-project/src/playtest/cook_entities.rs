@@ -1170,11 +1170,11 @@ pub(crate) fn register_model_for_instance(
         }
         let atlas_bank_count = (clut_entries / 16) as u8;
         let model_bank_count = parsed_model.palette_bank_count();
-        if atlas_bank_count != model_bank_count {
+        if model_bank_count > atlas_bank_count {
             report.error_at(
                 PlaytestValidationTarget::Resource(model_resource_id),
                 format!(
-                    "Model '{}' references {} palette bank(s), but its atlas contains {}",
+                    "Model '{}' references {} palette bank(s), but its atlas contains only {}",
                     resource.name, model_bank_count, atlas_bank_count,
                 ),
             );
@@ -1311,6 +1311,13 @@ pub(crate) fn register_model_for_instance(
         } else {
             crate::bake_animation_pose_corrections(&parsed_model, &parsed_anim, pose_corrections)
         };
+        let corrected_source = psx_asset::Animation::from_bytes(&animation_bytes)
+            .expect("host-generated corrected animation must parse");
+        let source_frame_count = corrected_source.frame_count();
+        let (source_frame_first, source_frame_last) = crate::animation_resample::live_frame_range(
+            &corrected_source,
+            project.animation_trim_still_percent,
+        );
         // Resample AFTER pose correction, so the budget is measured against the
         // poses that actually ship, and BEFORE frame bounds are baked, so the
         // bounds describe the frames the runtime will really read.
@@ -1329,6 +1336,7 @@ pub(crate) fn register_model_for_instance(
         );
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
+        let cooked_frame_count = corrected_anim.frame_count();
         let baked_bounds =
             bake_model_clip_frame_bounds(&parsed_model, &corrected_anim, frame_bounds_pad);
         let frame_count = match u16::try_from(baked_bounds.len()) {
@@ -1390,6 +1398,11 @@ pub(crate) fn register_model_for_instance(
             model: model_index,
             name: clip.name.clone(),
             animation_asset_index: asset_index,
+            animation_resource: clip.animation_resource,
+            source_frame_first,
+            source_frame_last,
+            source_frame_count,
+            cooked_frame_count,
         });
     }
     let clip_count = u16::try_from(model_clips.len() - clip_first as usize).unwrap_or(u16::MAX);
@@ -2575,6 +2588,231 @@ pub(crate) fn playtest_weapon_shape(shape: &crate::WeaponHitShape) -> PlaytestWe
     }
 }
 
+pub(crate) fn cook_weapon_appearances(
+    project: &ProjectDocument,
+    characters: &[PlaytestCharacter],
+    models: &[PlaytestModel],
+    model_clips: &[PlaytestModelClip],
+    weapon_for_resource: &HashMap<ResourceId, u16>,
+    equipment: &[PlaytestEquipment],
+    report: &mut PlaytestValidationReport,
+) -> Vec<PlaytestWeaponAppearance> {
+    let mut out = Vec::new();
+    for (character_index, cooked_character) in characters.iter().enumerate() {
+        let Some(character_resource) = project.resource(cooked_character.source_resource) else {
+            continue;
+        };
+        let ResourceData::Character(character) = &character_resource.data else {
+            continue;
+        };
+        let Some(set_id) = character.animation_set else {
+            continue;
+        };
+        let Some(set_resource) = project.resource(set_id) else {
+            continue;
+        };
+        let ResourceData::AnimationSet(set) = &set_resource.data else {
+            continue;
+        };
+        for track in &set.weapon_appearance_tracks {
+            // Appearance tracks belong to the reusable character asset, while
+            // the package contains only equipment instantiated in this scene.
+            // An unequipped authored weapon is therefore dormant, not a cook
+            // error; it becomes live automatically when matching Equipment is
+            // placed on the player.
+            let Some(&weapon) = weapon_for_resource.get(&track.weapon) else {
+                continue;
+            };
+            let equipped = equipment.iter().any(|record| {
+                record.flags & psx_level::equipment_flags::PLAYER != 0
+                    && record.weapon == weapon
+                    && record.character_socket == track.character_socket
+            });
+            if !equipped {
+                continue;
+            }
+            let action_clip = cooked_character.action_clips[track.action.to_index()];
+            let Some(model) = models.get(cooked_character.model as usize) else {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Animation Set '{}' {} weapon track cannot resolve its cooked character model",
+                        set_resource.name,
+                        track.action.label(),
+                    ),
+                );
+                continue;
+            };
+            let Some(global_clip) = (action_clip != CHARACTER_CLIP_NONE)
+                .then(|| model.clip_first.checked_add(action_clip))
+                .flatten()
+                .and_then(|index| model_clips.get(index as usize))
+            else {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Animation Set '{}' has a {} weapon track, but that action has no cooked clip",
+                        set_resource.name,
+                        track.action.label(),
+                    ),
+                );
+                continue;
+            };
+            let expected_animation = animation_set_action_clip(project, set, track.action);
+            if expected_animation.is_some() && global_clip.animation_resource != expected_animation
+            {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Animation Set '{}' {} weapon track resolved to a different cooked animation",
+                        set_resource.name,
+                        track.action.label(),
+                    ),
+                );
+                continue;
+            }
+            let source_last = global_clip.source_frame_count.saturating_sub(1);
+            if track.fully_visible_frame > source_last
+                || (track.hidden_frame != crate::ACTION_FRAME_END_FULL
+                    && track.hidden_frame > source_last)
+            {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Animation Set '{}' {} weapon track uses frame {}..{}, but its source clip ends at frame {}",
+                        set_resource.name,
+                        track.action.label(),
+                        track.fully_visible_frame,
+                        if track.hidden_frame == crate::ACTION_FRAME_END_FULL {
+                            "end".to_owned()
+                        } else {
+                            track.hidden_frame.to_string()
+                        },
+                        source_last,
+                    ),
+                );
+                continue;
+            }
+            if track.character_socket.trim().is_empty() {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Animation Set '{}' has a weapon appearance track with an empty character socket",
+                        set_resource.name,
+                    ),
+                );
+                continue;
+            }
+            if track.hidden_frame != crate::ACTION_FRAME_END_FULL
+                && track.hidden_frame <= track.fully_visible_frame
+            {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Animation Set '{}' {} weapon track hides at frame {} before it can be visible at frame {}",
+                        set_resource.name,
+                        track.action.label(),
+                        track.hidden_frame,
+                        track.fully_visible_frame,
+                    ),
+                );
+                continue;
+            }
+            if out.iter().any(|existing: &PlaytestWeaponAppearance| {
+                existing.character == character_index as u16
+                    && existing.action == track.action
+                    && existing.weapon == weapon
+                    && existing.character_socket == track.character_socket
+            }) {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!(
+                        "Animation Set '{}' contains duplicate {} visibility tracks for weapon #{} on '{}'",
+                        set_resource.name,
+                        track.action.label(),
+                        track.weapon.raw(),
+                        track.character_socket,
+                    ),
+                );
+                continue;
+            }
+            let fully_visible_frame = remap_authored_frame(
+                track.fully_visible_frame,
+                global_clip.source_frame_first,
+                global_clip.source_frame_last,
+                global_clip.cooked_frame_count,
+            );
+            let hidden_frame = if track.hidden_frame == crate::ACTION_FRAME_END_FULL {
+                crate::ACTION_FRAME_END_FULL
+            } else {
+                remap_authored_frame(
+                    track.hidden_frame,
+                    global_clip.source_frame_first,
+                    global_clip.source_frame_last,
+                    global_clip.cooked_frame_count,
+                )
+            };
+            let transition_frames = remap_authored_duration(
+                track.transition_frames,
+                global_clip.source_frame_first,
+                global_clip.source_frame_last,
+                global_clip.cooked_frame_count,
+            );
+            out.push(PlaytestWeaponAppearance {
+                character: u16::try_from(character_index).unwrap_or(u16::MAX),
+                action: track.action,
+                weapon,
+                character_socket: track.character_socket.clone(),
+                fully_visible_frame,
+                hidden_frame,
+                transition_frames,
+            });
+        }
+    }
+    out
+}
+
+/// Map an Animation Studio frame from the authored clip into the clip that
+/// actually ships. Still-end trimming changes the origin and error-budget
+/// resampling changes the density, but both preserve time linearly between the
+/// retained endpoints.
+fn remap_authored_frame(
+    frame: u16,
+    source_first: u16,
+    source_last: u16,
+    cooked_frame_count: u16,
+) -> u16 {
+    let cooked_last = cooked_frame_count.saturating_sub(1);
+    let source_span = source_last.saturating_sub(source_first);
+    if source_span == 0 || cooked_last == 0 {
+        return 0;
+    }
+    let source_frame = frame.clamp(source_first, source_last);
+    let source_offset = u32::from(source_frame - source_first);
+    let numerator = source_offset * u32::from(cooked_last) + u32::from(source_span) / 2;
+    (numerator / u32::from(source_span)) as u16
+}
+
+fn remap_authored_duration(
+    frames: u16,
+    source_first: u16,
+    source_last: u16,
+    cooked_frame_count: u16,
+) -> u16 {
+    if frames == 0 {
+        return 0;
+    }
+    let cooked_last = cooked_frame_count.saturating_sub(1);
+    let source_span = source_last.saturating_sub(source_first);
+    if source_span == 0 || cooked_last == 0 {
+        return 0;
+    }
+    let numerator = u32::from(frames) * u32::from(cooked_last) + u32::from(source_span) / 2;
+    (numerator / u32::from(source_span))
+        .max(1)
+        .min(u32::from(cooked_last)) as u16
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ModelRendererComponent {
     pub(crate) model: Option<ResourceId>,
@@ -2807,7 +3045,18 @@ fn joint_bind_anchor(model: &psx_asset::Model<'_>, joint: u16) -> [i32; 3] {
 
 #[cfg(test)]
 mod socket_anchor_tests {
-    use super::joint_bind_anchor;
+    use super::{joint_bind_anchor, remap_authored_duration, remap_authored_frame};
+
+    #[test]
+    fn studio_frames_follow_trim_and_resample() {
+        // Source 0..62 trims to 6..62, then cooks from 57 to 29 frames.
+        assert_eq!(remap_authored_frame(6, 6, 62, 29), 0);
+        assert_eq!(remap_authored_frame(34, 6, 62, 29), 14);
+        assert_eq!(remap_authored_frame(62, 6, 62, 29), 28);
+        assert_eq!(remap_authored_duration(8, 6, 62, 29), 4);
+        // Keys in a trimmed still head clamp to the first shipped frame.
+        assert_eq!(remap_authored_frame(2, 6, 62, 29), 0);
+    }
 
     /// Aletha's hand sockets must land on her hands. Before the anchor they
     /// were composed on the skinning-matrix translation, which put the right

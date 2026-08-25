@@ -2093,6 +2093,23 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Animation-authored equipped weapon visibility beats.\n");
+    out.push_str("pub static WEAPON_APPEARANCES: &[WeaponAppearanceRecord] = &[\n");
+    for appearance in &package.weapon_appearances {
+        let _ = writeln!(
+            out,
+            "    WeaponAppearanceRecord {{ character: CharacterIndex({}), action: CharacterAnimationAction::{:?}, weapon: WeaponIndex({}), character_socket: {:?}, fully_visible_frame: {}, hidden_frame: {}, transition_frames: {}, flags: 0 }},",
+            appearance.character,
+            appearance.action,
+            appearance.weapon,
+            appearance.character_socket,
+            appearance.fully_visible_frame,
+            appearance.hidden_frame,
+            appearance.transition_frames,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Cooked Character resources - gameplay metadata layered on top of MODELS.\n");
     out.push_str("pub static CHARACTERS: &[LevelCharacterRecord] = &[\n");
     for character in &package.characters {
@@ -4138,6 +4155,7 @@ use psx_level::{
     CHARACTER_CLIP_NONE,
     CharacterActionFrameRange,
     CharacterActionPush,
+    CharacterAnimationAction,
     CharacterIndex,
     CombatCapsuleIndex,
     CombatCapsuleRecord,
@@ -4230,6 +4248,7 @@ use psx_level::{
     VisibilityCellIndex,
     WeaponHitboxIndex,
     WeaponHitboxRecord,
+    WeaponAppearanceRecord,
     WeaponHitShapeRecord,
     WeaponIndex,
 };

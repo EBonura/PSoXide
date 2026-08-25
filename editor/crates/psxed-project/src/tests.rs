@@ -3665,6 +3665,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             roll_clip: None,
             backstep_clip: None,
             action_clips: Vec::new(),
+            weapon_appearance_tracks: Vec::new(),
             clips: Vec::new(),
         }),
     );

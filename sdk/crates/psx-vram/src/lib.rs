@@ -433,6 +433,15 @@ impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
             self.rows[page_index].fill(0);
         }
     }
+
+    /// Whether a logical atlas page contains no live window or full-page
+    /// reservation. Used by the physical allocator to return lazy backing at
+    /// scene boundaries.
+    pub fn page_is_empty(&self, page_index: usize) -> bool {
+        self.rows
+            .get(page_index)
+            .is_some_and(|rows| rows.iter().all(|row| *row == 0))
+    }
 }
 
 impl<const PAGE_COUNT: usize> Default for TextureWindowAtlas<PAGE_COUNT> {
@@ -803,6 +812,11 @@ pub struct VramAllocator<const ROOM_PAGES: usize, const CLUT_ROWS: usize> {
     grid: [u16; VRAM_ALLOC_ROWS],
     clut: ClutRowAllocator<CLUT_ROWS>,
     room: TextureWindowAtlas<ROOM_PAGES>,
+    /// Physical backing selected lazily for each logical room-atlas page.
+    /// Unused capacity therefore consumes no VRAM, and a page is returned when
+    /// its final window (or full-page image) is released at a scene boundary.
+    room_pages: [Option<Tpage>; ROOM_PAGES],
+    room_page_handles: [VramHandle; ROOM_PAGES],
     room_base_x: u16,
     room_base_y: u16,
 }
@@ -814,6 +828,8 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
             grid: [0; VRAM_ALLOC_ROWS],
             clut: ClutRowAllocator::new(clut_base_y),
             room: TextureWindowAtlas::new(),
+            room_pages: [None; ROOM_PAGES],
+            room_page_handles: [VramHandle::Empty; ROOM_PAGES],
             room_base_x: 0,
             room_base_y: 0,
         }
@@ -861,18 +877,56 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         VramHandle::Rect(rect)
     }
 
-    /// Reserve the room-material window band at `(base_x, base_y)` spanning
-    /// `ROOM_PAGES` pages. [`alloc_window`](Self::alloc_window) lands inside it.
+    /// Select the preferred room-material page band. Physical pages are
+    /// reserved lazily as the logical atlas first touches them, so a six-page
+    /// capacity no longer pins six pages for a scene that uses only one.
     pub fn reserve_room_band(&mut self, base_x: u16, base_y: u16) {
         self.room_base_x = base_x;
         self.room_base_y = base_y;
-        self.set_rect(
-            base_x,
-            base_y,
-            ROOM_PAGES as u16 * ALLOC_COL_W,
+    }
+
+    fn ensure_room_page(&mut self, page_index: usize) -> Option<Tpage> {
+        if let Some(tpage) = self.room_pages.get(page_index).copied().flatten() {
+            return Some(tpage);
+        }
+        if page_index >= ROOM_PAGES {
+            return None;
+        }
+        let preferred_x = self
+            .room_base_x
+            .checked_add((page_index as u16).checked_mul(ALLOC_COL_W)?)?;
+        let x = if preferred_x + ALLOC_COL_W <= VRAM_WIDTH
+            && self.rect_free(
+                preferred_x,
+                self.room_base_y,
+                ALLOC_COL_W,
+                TEXTURE_PAGE_TEXELS,
+            ) {
+            preferred_x
+        } else {
+            self.find_page_run(1, self.room_base_y)?
+        };
+        self.set_rect(x, self.room_base_y, ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
+        let tpage = Tpage::new(x, self.room_base_y, TexDepth::Bit4);
+        self.room_pages[page_index] = Some(tpage);
+        self.room_page_handles[page_index] = VramHandle::Rect(VramRect::new(
+            x,
+            self.room_base_y,
+            ALLOC_COL_W,
             TEXTURE_PAGE_TEXELS,
-            true,
-        );
+        ));
+        Some(tpage)
+    }
+
+    fn release_room_page_if_empty(&mut self, page_index: usize) {
+        if page_index >= ROOM_PAGES || !self.room.page_is_empty(page_index) {
+            return;
+        }
+        let handle = core::mem::replace(&mut self.room_page_handles[page_index], VramHandle::Empty);
+        if let VramHandle::Rect(rect) = handle {
+            self.set_rect(rect.x, rect.y, rect.w, rect.h, false);
+        }
+        self.room_pages[page_index] = None;
     }
 
     fn find_page_run(&self, count: u16, page_y: u16) -> Option<u16> {
@@ -901,8 +955,11 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         height_texels: u16,
     ) -> Option<(Tpage, TextureWindowPlacement, VramHandle)> {
         let placement = self.room.allocate(width_texels, height_texels)?;
-        let page_x = self.room_base_x + placement.page_index() * ALLOC_COL_W;
-        let tpage = Tpage::new(page_x, self.room_base_y, TexDepth::Bit4);
+        let page_index = placement.page_index() as usize;
+        let Some(tpage) = self.ensure_room_page(page_index) else {
+            self.room.release(placement);
+            return None;
+        };
         Some((tpage, placement, VramHandle::Window(placement)))
     }
 
@@ -911,11 +968,11 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
     /// first via [`reserve_room_band`](Self::reserve_room_band).
     pub fn alloc_room_page(&mut self) -> Option<(Tpage, VramHandle)> {
         let page_index = self.room.reserve_empty_page()?;
-        let page_x = self.room_base_x + (page_index as u16) * ALLOC_COL_W;
-        Some((
-            Tpage::new(page_x, self.room_base_y, TexDepth::Bit4),
-            VramHandle::RoomPage(page_index as u16),
-        ))
+        let Some(tpage) = self.ensure_room_page(page_index) else {
+            self.room.release_page(page_index);
+            return None;
+        };
+        Some((tpage, VramHandle::RoomPage(page_index as u16)))
     }
 
     /// Allocate an indexed model-atlas strip `halfwords_per_row` wide (rounded
@@ -951,8 +1008,16 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         match handle {
             VramHandle::Empty => {}
             VramHandle::Rect(rect) => self.set_rect(rect.x, rect.y, rect.w, rect.h, false),
-            VramHandle::Window(placement) => self.room.release(placement),
-            VramHandle::RoomPage(page) => self.room.release_page(page as usize),
+            VramHandle::Window(placement) => {
+                let page = placement.page_index() as usize;
+                self.room.release(placement);
+                self.release_room_page_if_empty(page);
+            }
+            VramHandle::RoomPage(page) => {
+                let page = page as usize;
+                self.room.release_page(page);
+                self.release_room_page_if_empty(page);
+            }
             VramHandle::Clut { x, y, entries } => self.clut.free(Clut::new(x, y), entries),
         }
     }
@@ -1410,6 +1475,23 @@ mod tests {
         let (tp, pl, _h) = a.alloc_window(32, 32).expect("window fits");
         assert_eq!(tp.x(), 640, "first window is at room band base");
         assert_eq!((pl.origin_u(), pl.origin_v()), (0, 0));
+    }
+
+    #[test]
+    fn lazy_room_page_returns_physical_backing_after_last_window() {
+        let mut a = VramAllocator::<6, 16>::new(480);
+        a.reserve_rect(VramRect::new(0, 0, 320, 480));
+        a.reserve_room_band(640, 0);
+        let (_, _, window) = a.alloc_window(64, 64).expect("room window");
+        assert!(
+            a.alloc_page_run(6, TexDepth::Bit4, 0).is_none(),
+            "live preferred room page interrupts the six-page top run"
+        );
+        a.free(window);
+        assert!(
+            a.alloc_page_run(6, TexDepth::Bit4, 0).is_some(),
+            "last-window release must return the physical room page"
+        );
     }
 
     #[test]
