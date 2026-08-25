@@ -14,7 +14,10 @@ mod play_mode;
 mod selection;
 pub use selection::*;
 mod starter_catalogue;
-pub use starter_catalogue::{sync_starter_character_catalogue, StarterCharacterSyncReport};
+pub use starter_catalogue::{
+    sync_builtin_sky_catalogue, sync_starter_character_catalogue, BuiltinSkySyncReport,
+    StarterCharacterSyncReport,
+};
 mod style;
 mod ui_preview;
 mod viewport2d;
@@ -396,6 +399,14 @@ const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
 const PSOXIDE_APP_ICON_PNG: &[u8] =
     include_bytes!("../../../../assets/branding/psoxide-app-icon.png");
+pub(crate) const BUILTIN_QUAKE_SKY_NAME: &str = "Sky: Quake Layered Sunset";
+pub(crate) const BUILTIN_CUBE_SKY_NAME: &str = "Sky: Directional Sunset Cube";
+const BUILTIN_QUAKE_SKY_PATH: &str = "assets/textures/sky/quake_layered_sunset_4bpp.psxt";
+const BUILTIN_CUBE_SKY_PATH: &str = "assets/textures/sky/directional_sunset_cube_4bpp.psxt";
+const BUILTIN_QUAKE_SKY_BYTES: &[u8] =
+    include_bytes!("../../../assets/sky/quake_layered_sunset_4bpp.psxt");
+const BUILTIN_CUBE_SKY_BYTES: &[u8] =
+    include_bytes!("../../../assets/sky/directional_sunset_cube_4bpp.psxt");
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/aletha_delivered",
     "assets/models/rust_mantis",

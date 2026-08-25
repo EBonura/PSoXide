@@ -27,6 +27,19 @@ pub struct StarterCharacterSyncReport {
     pub files_removed: usize,
 }
 
+#[derive(Debug, Default)]
+pub struct BuiltinSkySyncReport {
+    pub resources_added: usize,
+    pub resources_updated: usize,
+    pub files_written: usize,
+}
+
+impl BuiltinSkySyncReport {
+    pub const fn changed(&self) -> bool {
+        self.resources_added > 0 || self.resources_updated > 0 || self.files_written > 0
+    }
+}
+
 impl StarterCharacterSyncReport {
     pub const fn changed(&self) -> bool {
         self.resources_added > 0
@@ -55,42 +68,149 @@ pub(crate) fn load_project_with_starter_catalogue(
     let project_file = dir.join("project.ron");
     let mut project = ProjectDocument::load_from_path(&project_file)
         .map_err(|error| format!("{}: {error}", project_file.display()))?;
-    if !should_auto_sync_starter_character_catalogue(&project) {
-        return Ok((project, None, false));
+    let mut status_parts = Vec::new();
+    let sky_report = if should_auto_sync_builtin_sky_catalogue(dir) {
+        match sync_builtin_sky_catalogue(&mut project, dir) {
+            Ok(report) => report,
+            Err(error) => {
+                status_parts.push(format!("sky library sync failed: {error}"));
+                BuiltinSkySyncReport::default()
+            }
+        }
+    } else {
+        BuiltinSkySyncReport::default()
+    };
+    let character_report = if should_auto_sync_starter_character_catalogue(&project) {
+        match sync_starter_character_catalogue(&mut project, dir) {
+            Ok(report) => report,
+            Err(error) => {
+                status_parts.push(format!("starter content sync failed: {error}"));
+                StarterCharacterSyncReport::default()
+            }
+        }
+    } else {
+        StarterCharacterSyncReport::default()
+    };
+    if !sky_report.changed() && !character_report.changed() {
+        let status = (!status_parts.is_empty())
+            .then(|| format!("Loaded {}; {}", short_path(dir), status_parts.join("; ")));
+        return Ok((project, status, false));
     }
 
-    let report = match sync_starter_character_catalogue(&mut project, dir) {
-        Ok(report) => report,
-        Err(error) => {
-            let status = format!(
-                "Loaded {}; starter content sync failed: {error}",
-                short_path(dir)
-            );
-            return Ok((project, Some(status), false));
-        }
-    };
-    if !report.changed() {
+    if sky_report.changed() {
+        status_parts.push(format!(
+            "sky library: {} added, {} updated, {} file(s) written",
+            sky_report.resources_added, sky_report.resources_updated, sky_report.files_written
+        ));
+    }
+    if character_report.changed() {
+        status_parts.push(format!(
+            "starter content: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
+            character_report.resources_added,
+            character_report.resources_updated,
+            character_report.resources_removed,
+            character_report.files_copied,
+            character_report.files_removed
+        ));
+    }
+    if status_parts.is_empty() {
         return Ok((project, None, false));
     }
 
     project.normalize_loaded();
     match project.save_to_path(&project_file) {
         Ok(()) => {
-            let status = format!(
-                "Synced starter content: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
-                report.resources_added,
-                report.resources_updated,
-                report.resources_removed,
-                report.files_copied,
-                report.files_removed
-            );
+            let status = format!("Synced {}", status_parts.join("; "));
             Ok((project, Some(status), false))
         }
         Err(error) => {
-            let status = format!("Synced starter content but save failed: {error}; save manually");
+            let status = format!(
+                "Synced {} but save failed: {error}; save manually",
+                status_parts.join("; ")
+            );
             Ok((project, Some(status), true))
         }
     }
+}
+
+/// Install the two authored PS1 sky atlases and their Material resources.
+///
+/// The bytes are embedded in the editor so this works in packaged builds as
+/// well as a source checkout. Project-local copies keep cooking deterministic
+/// and let projects move between machines without depending on a global cache.
+pub fn sync_builtin_sky_catalogue(
+    project: &mut ProjectDocument,
+    project_root: &Path,
+) -> Result<BuiltinSkySyncReport, String> {
+    let mut report = BuiltinSkySyncReport::default();
+    for (name, relative_path, bytes) in [
+        (
+            BUILTIN_QUAKE_SKY_NAME,
+            BUILTIN_QUAKE_SKY_PATH,
+            BUILTIN_QUAKE_SKY_BYTES,
+        ),
+        (
+            BUILTIN_CUBE_SKY_NAME,
+            BUILTIN_CUBE_SKY_PATH,
+            BUILTIN_CUBE_SKY_BYTES,
+        ),
+    ] {
+        let destination = project_root.join(relative_path);
+        report.files_written += write_if_changed(&destination, bytes)
+            .map_err(|error| format!("write {}: {error}", destination.display()))?;
+
+        let canonical = {
+            let mut material = MaterialResource::opaque(Some(relative_path.to_string()));
+            material.sky_aperture = true;
+            ResourceData::Material(material)
+        };
+        let existing = project.resources.iter().position(|resource| {
+            resource.name == name
+                || matches!(
+                    &resource.data,
+                    ResourceData::Material(material)
+                        if material.psxt_path.as_deref() == Some(relative_path)
+                )
+        });
+        if let Some(index) = existing {
+            let resource = &mut project.resources[index];
+            if resource.name != name || resource.data != canonical {
+                resource.name = name.to_string();
+                resource.data = canonical;
+                report.resources_updated += 1;
+            }
+        } else {
+            project.add_resource(name, canonical);
+            report.resources_added += 1;
+        }
+    }
+    Ok(report)
+}
+
+fn should_auto_sync_builtin_sky_catalogue(project_root: &Path) -> bool {
+    let projects_root = psxed_project::projects_dir();
+    project_root
+        .parent()
+        .is_some_and(|parent| paths_resolve_equal(parent, &projects_root))
+        || paths_resolve_equal(project_root, &psxed_project::new_project_template_dir())
+}
+
+fn paths_resolve_equal(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn write_if_changed(path: &Path, bytes: &[u8]) -> std::io::Result<usize> {
+    if std::fs::read(path).is_ok_and(|existing| existing == bytes) {
+        return Ok(0);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)?;
+    Ok(1)
 }
 
 pub(crate) fn should_auto_sync_starter_character_catalogue(project: &ProjectDocument) -> bool {
@@ -444,4 +564,53 @@ pub(crate) fn count_files_recursive(path: &Path) -> std::io::Result<usize> {
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod builtin_sky_tests {
+    use super::*;
+
+    #[test]
+    fn sky_catalogue_is_project_local_and_idempotent() {
+        let root = std::env::temp_dir().join(format!(
+            "psoxide-sky-catalogue-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut project = ProjectDocument::new("sky catalogue");
+
+        let first = sync_builtin_sky_catalogue(&mut project, &root).expect("first sky sync");
+        assert_eq!(first.resources_added, 2);
+        assert_eq!(first.resources_updated, 0);
+        assert_eq!(first.files_written, 2);
+        for (name, path, bytes) in [
+            (
+                BUILTIN_QUAKE_SKY_NAME,
+                BUILTIN_QUAKE_SKY_PATH,
+                BUILTIN_QUAKE_SKY_BYTES,
+            ),
+            (
+                BUILTIN_CUBE_SKY_NAME,
+                BUILTIN_CUBE_SKY_PATH,
+                BUILTIN_CUBE_SKY_BYTES,
+            ),
+        ] {
+            let resource = project
+                .resources
+                .iter()
+                .find(|resource| resource.name == name)
+                .expect("built-in sky resource");
+            let ResourceData::Material(material) = &resource.data else {
+                panic!("built-in sky must be a Material");
+            };
+            assert_eq!(material.psxt_path.as_deref(), Some(path));
+            assert!(material.sky_aperture);
+            assert_eq!(std::fs::read(root.join(path)).unwrap(), bytes);
+        }
+
+        let second = sync_builtin_sky_catalogue(&mut project, &root).expect("repeat sky sync");
+        assert!(!second.changed(), "repeat sync must be a no-op: {second:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
