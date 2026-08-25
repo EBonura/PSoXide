@@ -17,7 +17,7 @@ use psx_level::{
     LevelUiSfxCueRecord, LevelUiSfxSampleRecord, LevelVisibilityCellRecord,
     LevelVisibilityPvsRecord, LevelWaterCellRecord, LevelWeaponRecord, LevelWorldPackEntryRecord,
     ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
-    RoomResidencyRecord, WeaponHitboxRecord,
+    RoomResidencyRecord, WeaponAppearanceRecord, WeaponHitboxRecord,
 };
 
 pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
@@ -106,6 +106,7 @@ pub static OPTIONS: &[LevelOptionDef] = &[];
 pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[];
 pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
+pub static WEAPON_APPEARANCES: &[WeaponAppearanceRecord] = &[];
 pub static LIGHTS: &[PointLightRecord] = &[];
 pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[];
 pub static INTERACTABLE_MESSAGES: &[InteractableMessageRecord] = &[];

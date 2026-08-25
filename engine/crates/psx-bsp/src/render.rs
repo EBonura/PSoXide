@@ -33,7 +33,10 @@ use crate::pxbsp::{
 };
 use crate::pxbsp_resident::PxbspResidentMap;
 use crate::resident::ResidentMap;
-use crate::sky::{submit_view_ray_layered_sky, VIEW_RAY_SKY_PACKET_WORDS};
+use crate::sky::{
+    submit_view_ray_cube_sky, submit_view_ray_layered_sky, VIEW_RAY_CUBE_SKY_PACKET_WORDS,
+    VIEW_RAY_SKY_PACKET_WORDS,
+};
 use crate::{
     CompactPlane, Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT,
     FACE_BAKED_UV, FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID,
@@ -1121,6 +1124,7 @@ impl Renderer {
         let mut batch_surface_count = 0usize;
         let mut batch_worst_words = 0usize;
         let mut layered_sky_binding = None;
+        let mut directional_sky_binding = None;
 
         let faces = map.faces();
         let map_materials = map.materials();
@@ -1163,13 +1167,27 @@ impl Renderer {
             let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
                 && material.blend_mode == material_blend::OPAQUE
                 && material.animation_kind == crate::pxbsp::material_animation::STATIC
-                && material.flags & crate::pxbsp::material_flags::LAYERED_SKY == 0;
+                && material.flags
+                    & (crate::pxbsp::material_flags::LAYERED_SKY
+                        | crate::pxbsp::material_flags::DIRECTIONAL_SKY)
+                    == 0;
             if material.flags & crate::pxbsp::material_flags::LAYERED_SKY != 0 {
                 if sky_view.is_some() {
                     if let Some(selected) = layered_sky_binding {
                         debug_assert_eq!(selected, binding);
                     } else {
                         layered_sky_binding = Some(binding);
+                    }
+                }
+                stats.visible_faces = stats.visible_faces.saturating_add(1);
+                continue;
+            }
+            if material.flags & crate::pxbsp::material_flags::DIRECTIONAL_SKY != 0 {
+                if sky_view.is_some() {
+                    if let Some(selected) = directional_sky_binding {
+                        debug_assert_eq!(selected, binding);
+                    } else {
+                        directional_sky_binding = Some(binding);
                     }
                 }
                 stats.visible_faces = stats.visible_faces.saturating_add(1);
@@ -1285,7 +1303,42 @@ impl Renderer {
         // Sky faces are apertures, not textured polygons. Append one bounded
         // view-ray lattice after the world stream; equal-slot OT prepending
         // then executes it first, behind every opaque world packet.
-        if let (Some(binding), Some(view)) = (layered_sky_binding, sky_view) {
+        if let (Some(binding), Some(view)) = (directional_sky_binding, sky_view) {
+            if packet_capacity(next, end, VIEW_RAY_CUBE_SKY_PACKET_WORDS) {
+                let half_width = self.view_projection.half_width.max(1);
+                let half_height = self.view_projection.half_height.max(1);
+                let screen_size = [
+                    half_width.saturating_mul(2).min(i32::from(i16::MAX)) as i16,
+                    half_height.saturating_mul(2).min(i32::from(i16::MAX)) as i16,
+                ];
+                let screen_center = [
+                    half_width.min(i32::from(i16::MAX)) as i16,
+                    half_height.min(i32::from(i16::MAX)) as i16,
+                ];
+                let projection = self
+                    .view_projection
+                    .focal_length
+                    .clamp(1, i32::from(i16::MAX)) as i16;
+                let submitted = unsafe {
+                    submit_view_ray_cube_sky(
+                        binding.texture_page,
+                        binding.clut,
+                        view.rotation,
+                        screen_size,
+                        screen_center,
+                        projection,
+                        next,
+                    )
+                };
+                next = submitted.next_packet;
+                stats.packets = stats.packets.wrapping_add(submitted.packets);
+                stats.hardware_triangles = stats
+                    .hardware_triangles
+                    .wrapping_add(submitted.hardware_triangles);
+            } else {
+                stats.packet_overflow_avoided = true;
+            }
+        } else if let (Some(binding), Some(view)) = (layered_sky_binding, sky_view) {
             if packet_capacity(next, end, VIEW_RAY_SKY_PACKET_WORDS) {
                 let half_width = self.view_projection.half_width.max(1);
                 let half_height = self.view_projection.half_height.max(1);
@@ -2733,6 +2786,75 @@ mod tests {
         assert_eq!(frame.packet_words, VIEW_RAY_SKY_PACKET_WORDS);
         assert_eq!(packets[0] >> 24, 1, "first packet is the window reset");
         assert_eq!(packets[2] >> 24, 9, "sky follows with a textured quad");
+    }
+
+    #[test]
+    fn directional_sky_face_selects_one_bounded_cube_background() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        for position in [[64i16, -16, -16], [64, 16, -16], [64, 0, 16]] {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        let mins = [64i16, -16, -16].map(crate::encode_node_bound_min);
+        let maxs = [64i16, 16, 16].map(crate::encode_node_bound_max);
+        lumps[PxbspLumpKind::Nodes as usize][6..9].copy_from_slice(&mins.map(|value| value as u8));
+        lumps[PxbspLumpKind::Nodes as usize][9..12].copy_from_slice(&maxs.map(|value| value as u8));
+        lumps[PxbspLumpKind::Materials as usize][2..4]
+            .copy_from_slice(&material_flags::DIRECTIONAL_SKY.to_le_bytes());
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(10, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
+            texture_size: [u8::MAX, 128],
+        };
+        let mut packets = [0u32; VIEW_RAY_CUBE_SKY_PACKET_WORDS];
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[Some(binding)],
+            0,
+            &mut packets,
+        );
+
+        assert_eq!(frame.stats.visible_faces, 1);
+        assert_eq!(frame.stats.unresolved_material_faces, 0);
+        assert!(!frame.stats.packet_overflow_avoided);
+        assert!(frame.stats.packets > 1);
+        assert!(frame.stats.hardware_triangles >= frame.stats.packets - 1);
+        assert!(frame.stats.hardware_triangles <= (frame.stats.packets - 1) * 2);
+        assert!(frame.packet_words <= VIEW_RAY_CUBE_SKY_PACKET_WORDS);
+        assert!(
+            matches!(packets[0] >> 24, 7 | 9),
+            "cube stream starts with a textured polygon"
+        );
+        assert_eq!(
+            packets[frame.packet_words - 2] >> 24,
+            1,
+            "window reset is staged last so it executes first"
+        );
     }
 
     #[test]

@@ -212,8 +212,12 @@ pub mod material_flags {
     /// foreground and solid background tile side by side. Marked faces select
     /// the camera-direction sky background and act only as apertures.
     pub const LAYERED_SKY: u16 = 0x0004;
+    /// Cube-mapped scenic sky: the material atlas contains six 256x256 faces,
+    /// one per 4bpp texture page. Marked faces are camera apertures and the
+    /// runtime projects a camera-centred cube behind the world.
+    pub const DIRECTIONAL_SKY: u16 = 0x0008;
     /// All flags understood by PXBSP version one.
-    pub const KNOWN: u16 = FACE_MASK | LAYERED_SKY;
+    pub const KNOWN: u16 = FACE_MASK | LAYERED_SKY | DIRECTIONAL_SKY;
 }
 
 /// PSoXide material blend codes stored in [`PxbspMaterial::blend_mode`].
