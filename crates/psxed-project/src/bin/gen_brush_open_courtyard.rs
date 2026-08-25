@@ -14,6 +14,10 @@ const FLOOR_SOURCE: &str = "courtyard_cobbles.psxt";
 const WALL_SOURCE: &str = "courtyard_brick.psxt";
 const FLOOR_RELATIVE: &str = "assets/textures/courtyard_cobbles.psxt";
 const WALL_RELATIVE: &str = "assets/textures/courtyard_brick.psxt";
+const QUAKE_SKY_SOURCE: &str = "quake_layered_sunset_4bpp.psxt";
+const CUBE_SKY_SOURCE: &str = "directional_sunset_cube_4bpp.psxt";
+const QUAKE_SKY_RELATIVE: &str = "assets/textures/sky/quake_layered_sunset_4bpp.psxt";
+const CUBE_SKY_RELATIVE: &str = "assets/textures/sky/directional_sunset_cube_4bpp.psxt";
 
 #[derive(Debug, PartialEq, Eq)]
 enum GeneratorAction {
@@ -44,6 +48,8 @@ fn generate(output_dir: &Path) {
     std::fs::create_dir_all(output_dir).expect("create open courtyard project directory");
     copy_texture(output_dir, FLOOR_SOURCE, FLOOR_RELATIVE);
     copy_texture(output_dir, WALL_SOURCE, WALL_RELATIVE);
+    copy_builtin_sky(output_dir, QUAKE_SKY_SOURCE, QUAKE_SKY_RELATIVE);
+    copy_builtin_sky(output_dir, CUBE_SKY_SOURCE, CUBE_SKY_RELATIVE);
 
     let mut project = ProjectDocument::new("Open Courtyard Starter");
     project.editor_camera.orbit_yaw_q12 = 3584;
@@ -62,6 +68,14 @@ fn generate(output_dir: &Path) {
         "Courtyard Brick",
         ResourceData::Material(MaterialResource::opaque(Some(WALL_RELATIVE.to_string()))),
     );
+    for (name, path) in [
+        ("Sky: Quake Layered Sunset", QUAKE_SKY_RELATIVE),
+        ("Sky: Directional Sunset Cube", CUBE_SKY_RELATIVE),
+    ] {
+        let mut material = MaterialResource::opaque(Some(path.to_string()));
+        material.sky_aperture = true;
+        project.add_resource(name, ResourceData::Material(material));
+    }
     // New projects inherit the exact texture-free Twin Ladder HUD maintained
     // by the default project. Keeping one authored source prevents the starter
     // template from silently drifting back to the legacy sprite gauge.
@@ -183,6 +197,25 @@ fn copy_texture(output_dir: &Path, source_name: &str, destination_relative: &str
     });
 }
 
+fn copy_builtin_sky(output_dir: &Path, source_name: &str, destination_relative: &str) {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join("sky")
+        .join(source_name);
+    let destination = output_dir.join(destination_relative);
+    std::fs::create_dir_all(destination.parent().expect("sky texture parent"))
+        .expect("create sky texture directory");
+    std::fs::copy(&source, &destination).unwrap_or_else(|error| {
+        panic!(
+            "copy built-in sky {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    });
+}
+
 fn paint(brush: &mut Brush, material: psxed_project::ResourceId) {
     for face in &mut brush.faces {
         face.material = Some(material);
@@ -227,7 +260,13 @@ mod tests {
             .join("archive")
             .join("fixtures")
             .join("brush-open-courtyard");
-        for relative in [FLOOR_RELATIVE, WALL_RELATIVE, "project.ron"] {
+        for relative in [
+            FLOOR_RELATIVE,
+            WALL_RELATIVE,
+            QUAKE_SKY_RELATIVE,
+            CUBE_SKY_RELATIVE,
+            "project.ron",
+        ] {
             assert_eq!(
                 std::fs::read(generated.join(relative)).unwrap(),
                 std::fs::read(tracked.join(relative)).unwrap(),
