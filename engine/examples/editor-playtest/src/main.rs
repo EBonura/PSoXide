@@ -79,7 +79,6 @@ use psx_engine::{
 ))]
 use psx_engine::{
     draw_indexed_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit_visible_cells,
-    GridVisibility,
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
@@ -278,9 +277,9 @@ struct Playtest {
     /// when the manifest had at least one room and its bytes
     /// parsed.
     room: Option<RuntimeRoom<'static>>,
-    /// Explicit resident BSP backend selected by the cooked manifest. `None`
-    /// means the project selected the legacy grid world; invalid BSP data
-    /// fails initialization and never reaches this fallback state.
+    /// Explicit resident BSP backend selected by the cooked manifest. Invalid
+    /// BSP data fails initialization instead of falling back to another world
+    /// representation.
     bsp: Option<BspRuntime>,
     /// Active collision room. Streamed builds use a compact
     /// collision-only payload here instead of a full `.psxw`.
