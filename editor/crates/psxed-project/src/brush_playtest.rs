@@ -16,13 +16,52 @@ mod tests {
     use psx_bsp::collision::{Trace, TraceScratch, Q12_ONE};
     use psx_bsp::collision_provider::{select_body_hull, CookedBodyHull, PxbspCollisionProvider};
     use psx_bsp::mover::BrushDoorSet;
-    use psx_bsp::pxbsp::{entity_class, entity_flags};
+    use psx_bsp::pxbsp::{entity_class, entity_flags, material_flags};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
     use psx_bsp::{SliceReader, Vec3I32};
     use psx_engine::{
         commit_body_step_with_trace_provider, trace_collision, CharacterBlockerTraceProvider,
         CharacterCollisionAabb, CollisionTraceQuery, CollisionTraceShape, RoomPoint,
     };
+    use psx_level::sky_flags;
+
+    #[test]
+    fn legacy_directional_fixture_cooks_one_scene_sky_and_textureless_apertures() {
+        let project = ProjectDocument::from_ron_str(include_str!(
+            "../../../archive/fixtures/brush-directional-sky/project.ron"
+        ))
+        .expect("directional sky fixture");
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../archive/fixtures/brush-directional-sky");
+        let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
+        assert!(report.is_ok(), "directional package: {:?}", report.errors);
+        let package = package.expect("directional package");
+        let sky = package.rooms[0].sky.clone();
+        assert_eq!(
+            sky.flags & (sky_flags::ENABLED | sky_flags::CUBE | sky_flags::THROUGH_SKY_SURFACES),
+            sky_flags::ENABLED | sky_flags::CUBE | sky_flags::THROUGH_SKY_SURFACES
+        );
+        let sky_asset = sky.texture_asset_index.expect("one scene sky texture");
+        let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
+            panic!("fixture did not cook PXBSP");
+        };
+        assert!(
+            !world.texture_asset_indices.contains(&sky_asset),
+            "scene sky must not be duplicated in the per-face texture table"
+        );
+        let mut map = PxbspResidentMap::with_capacity(world.bytes.len());
+        map.load(0, &mut SliceReader::new(&world.bytes))
+            .expect("resident directional map");
+        let apertures: Vec<_> = map
+            .materials()
+            .iter()
+            .filter(|material| material.flags & material_flags::SKY_APERTURE != 0)
+            .collect();
+        assert!(!apertures.is_empty());
+        assert!(apertures
+            .iter()
+            .all(|material| material.texture_asset == u16::MAX));
+    }
 
     #[test]
     fn first_playable_brush_world_uses_the_normal_gameplay_package() {
@@ -53,7 +92,10 @@ mod tests {
         assert_eq!(package.assets.len(), 2);
         assert_eq!(package.texture_asset_count(), 2);
         assert_eq!(world.texture_asset_indices, [0]);
-        assert_eq!(package.rooms[0].sky.flags, psx_level::sky_flags::ENABLED);
+        assert_eq!(
+            package.rooms[0].sky.flags,
+            psx_level::sky_flags::ENABLED | psx_level::sky_flags::PANORAMA
+        );
         let sky_asset_index = package.rooms[0]
             .sky
             .cloud_layer

@@ -1,6 +1,12 @@
-# Legacy grid boundary decision artifact
+# Retired grid-world boundary audit
 
-Status: the boundary is now enforced in code; the retire/freeze decision is
+> **RETIRED (2026-08-25).** The owner closed the compatibility window. New and
+> existing editor authoring is BSP-only; the grid starter, grid cooker, editor
+> tools, and preview path have been removed. The remainder of this file is a
+> historical audit of the old boundary and must not be treated as current
+> product behavior or implementation guidance.
+
+Historical status: the boundary was enforced in code; the retire/freeze decision was
 still NOT made here. The owner accepts (or amends) the classification after
 review, per `docs/quake-psoxide-convergence-handoff.md` section 15 ("remove
 fallback paths only after the owner accepts the migration boundary"). No grid

@@ -1,11 +1,14 @@
 use super::*;
 
-pub(crate) fn cook_sky_panorama_texture_asset(
+pub(crate) fn cook_scene_sky_texture_asset(
+    project: &ProjectDocument,
+    project_root: &Path,
     sky: crate::ResolvedSkySettings,
     sky_texture_assets: &mut Vec<(crate::ResolvedSkySettings, usize)>,
     assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
 ) -> Option<usize> {
-    if !sky.enabled {
+    if !sky.sky_enabled() {
         return None;
     }
     if let Some((_, existing)) = sky_texture_assets
@@ -14,14 +17,105 @@ pub(crate) fn cook_sky_panorama_texture_asset(
     {
         return Some(*existing);
     }
-    let bytes = crate::generate_sky_panorama_psxt(sky)?;
+    let (bytes, source_label) = match sky.mode {
+        crate::SkyMode::Off => return None,
+        crate::SkyMode::Panorama => (
+            crate::generate_sky_panorama_psxt(sky)?,
+            "Cooked Sky Panorama".to_string(),
+        ),
+        crate::SkyMode::QuakeLayered | crate::SkyMode::Cube => {
+            let Some(source) = sky.texture else {
+                report.error(format!(
+                    "{} sky requires a source Material on the World node",
+                    sky.mode.label()
+                ));
+                return None;
+            };
+            let Some(resource) = find_resource(project, source) else {
+                report.error(format!(
+                    "{} sky references missing Material #{}",
+                    sky.mode.label(),
+                    source.raw()
+                ));
+                return None;
+            };
+            let bytes = match material_texture_bytes(project, resource, project_root) {
+                Ok(Some((_, bytes))) => bytes,
+                Ok(None) => {
+                    report.error(format!(
+                        "{} sky source '{}' has no image",
+                        sky.mode.label(),
+                        resource.name
+                    ));
+                    return None;
+                }
+                Err(error) => {
+                    report.error(format!(
+                        "{} sky source '{}': {error}",
+                        sky.mode.label(),
+                        resource.name
+                    ));
+                    return None;
+                }
+            };
+            let texture = match psx_asset::Texture::from_bytes(&bytes) {
+                Ok(texture) => texture,
+                Err(error) => {
+                    report.error(format!(
+                        "{} sky source '{}' is not a valid PSXT: {error:?}",
+                        sky.mode.label(),
+                        resource.name
+                    ));
+                    return None;
+                }
+            };
+            let valid = match sky.mode {
+                crate::SkyMode::QuakeLayered => {
+                    texture.depth() == TextureDepth::Bit4
+                        && texture.width() == texture.height().saturating_mul(2)
+                        && (16..=256).contains(&texture.width())
+                        && (8..=128).contains(&texture.height())
+                        && texture.width().is_power_of_two()
+                        && texture.height().is_power_of_two()
+                        && texture.clut_entries() == 16
+                }
+                crate::SkyMode::Cube => {
+                    texture.depth() == TextureDepth::Bit4
+                        && [texture.width(), texture.height()] == psx_bsp::sky::CUBE_SKY_ATLAS_SIZE
+                        && texture.clut_entries() == psx_bsp::sky::CUBE_SKY_CLUT_ENTRIES
+                }
+                _ => false,
+            };
+            if !valid {
+                let expected = match sky.mode {
+                    crate::SkyMode::QuakeLayered => {
+                        "a 4bpp two-layer atlas such as 256x128 with one 16-colour palette"
+                    }
+                    crate::SkyMode::Cube => {
+                        "a 1536x256 4bpp six-face atlas with six 16-colour palettes"
+                    }
+                    _ => unreachable!(),
+                };
+                report.error(format!(
+                    "{} sky source '{}' must be {expected}; found {}x{} with {} palette entries",
+                    sky.mode.label(),
+                    resource.name,
+                    texture.width(),
+                    texture.height(),
+                    texture.clut_entries()
+                ));
+                return None;
+            }
+            (bytes, resource.name.clone())
+        }
+    };
     let sky_index = sky_texture_assets.len();
     let asset_index = assets.len();
     assets.push(PlaytestAsset {
         kind: PlaytestAssetKind::Texture,
         bytes,
         filename: format!("sky/sky_{sky_index:03}.psxt"),
-        source_label: format!("Cooked Sky Panorama {sky_index}"),
+        source_label: format!("{source_label} {sky_index}"),
         // The sky panorama is gameplay-scoped: CD-streamed off UI.PAK and
         // staged through the larger gameplay buffer, loaded on gameplay
         // entry and freed on gameplay exit so it stays out of `.data`.
@@ -29,58 +123,6 @@ pub(crate) fn cook_sky_panorama_texture_asset(
     });
     sky_texture_assets.push((sky, asset_index));
     Some(asset_index)
-}
-
-pub(crate) fn cook_far_vista_texture_asset(
-    project: &ProjectDocument,
-    project_root: &Path,
-    texture_id: ResourceId,
-    context: &str,
-    texture_asset_for_path: &mut HashMap<String, usize>,
-    assets: &mut Vec<PlaytestAsset>,
-    report: &mut PlaytestValidationReport,
-) -> Option<usize> {
-    let Some(texture_resource) = find_resource(project, texture_id) else {
-        report.warn(format!(
-            "{context}: texture resource #{} is missing; using placeholder",
-            texture_id.raw()
-        ));
-        return None;
-    };
-    let (texture_key, bytes) = match material_texture_bytes(project, texture_resource, project_root)
-    {
-        Ok(Some(source)) => source,
-        Ok(None) => {
-            report.warn(format!(
-                "{context}: material '{}' has no texture; using placeholder",
-                texture_resource.name
-            ));
-            return None;
-        }
-        Err(msg) => {
-            report.warn(format!("{context}: {msg}; using placeholder"));
-            return None;
-        }
-    };
-    if let Some(existing) = texture_asset_for_path.get(&texture_key).copied() {
-        return Some(existing);
-    }
-    if let Err(msg) = expect_room_material_depth(&texture_resource.name, &bytes) {
-        report.warn(format!("{context}: {msg}; using placeholder"));
-        return None;
-    }
-
-    let texture_index = texture_asset_for_path.len();
-    let new_index = assets.len();
-    assets.push(PlaytestAsset {
-        kind: PlaytestAssetKind::Texture,
-        bytes,
-        filename: format!("texture_{texture_index:03}.psxt"),
-        source_label: texture_resource.name.clone(),
-        streamed_class: StreamedClass::None,
-    });
-    texture_asset_for_path.insert(texture_key, new_index);
-    Some(new_index)
 }
 
 pub(crate) fn collect_runtime_model_clip_requirements(
@@ -593,14 +635,10 @@ pub(crate) fn cook_player_character(
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     let mut default_character = crate::CharacterResource::defaults();
-    if project.world_format() == crate::ProjectWorldFormat::Bsp {
-        // Real Character resources arrive pre-scaled on the cook's
-        // project clone; the built-in fallback is constructed here,
-        // after scaling, so it divides through the same path.
-        crate::units::scale_default_character_to_engine_units(&mut default_character);
-    } else {
-        crate::units::character_speeds_to_q8_unscaled(&mut default_character);
-    }
+    // Real Character resources arrive pre-scaled on the cook's project clone;
+    // the built-in fallback is constructed here, after scaling, so it divides
+    // through the same path.
+    crate::units::scale_default_character_to_engine_units(&mut default_character);
     let (character, character_name) = match character_id {
         Some(character_id) => {
             let resource = match project.resource(character_id) {
@@ -1060,19 +1098,11 @@ pub(crate) fn register_model_for_instance(
             return None;
         }
     };
-    let engine_units = project.world_format() == crate::ProjectWorldFormat::Bsp;
-    let frame_bounds_pad = if engine_units {
-        MODEL_FRAME_BOUNDS_PAD_UNITS / crate::units::WORLD_UNIT_DIVISOR
-    } else {
-        MODEL_FRAME_BOUNDS_PAD_UNITS
-    };
-    if engine_units {
-        // Engine-unit rescale of the model-local space (vertex table);
-        // local_to_world_q12 stays so the runtime's i16 pose-matrix
-        // fold keeps its precision. Clips, sockets, and capsules that
-        // live in the same local space scale alongside (see units.rs).
-        crate::units::scale_model_blob_to_engine_units(&mut mesh_bytes);
-    }
+    let frame_bounds_pad = MODEL_FRAME_BOUNDS_PAD_UNITS / crate::units::WORLD_UNIT_DIVISOR;
+    // Engine-unit rescale of the model-local space (vertex table);
+    // local_to_world_q12 stays so the runtime's i16 pose-matrix fold keeps its
+    // precision. Clips, sockets, and capsules in the same space scale too.
+    crate::units::scale_model_blob_to_engine_units(&mut mesh_bytes);
     let parsed_model = match psx_asset::Model::from_bytes(&mesh_bytes) {
         Ok(m) => m,
         Err(e) => {
@@ -1170,11 +1200,11 @@ pub(crate) fn register_model_for_instance(
         }
         let atlas_bank_count = (clut_entries / 16) as u8;
         let model_bank_count = parsed_model.palette_bank_count();
-        if atlas_bank_count != model_bank_count {
+        if model_bank_count > atlas_bank_count {
             report.error_at(
                 PlaytestValidationTarget::Resource(model_resource_id),
                 format!(
-                    "Model '{}' references {} palette bank(s), but its atlas contains {}",
+                    "Model '{}' references {} palette bank(s), but its atlas contains only {}",
                     resource.name, model_bank_count, atlas_bank_count,
                 ),
             );
@@ -1241,9 +1271,7 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
-        if engine_units {
-            crate::units::scale_animation_blob_to_engine_units(&mut bytes);
-        }
+        crate::units::scale_animation_blob_to_engine_units(&mut bytes);
         let parsed_anim = match psx_asset::Animation::from_bytes(&bytes) {
             Ok(a) => a,
             Err(e) => {

@@ -1,19 +1,6 @@
 use super::*;
 use crate::{UiShapeStyle, UiTransition, UiTransitionKind, UiVisibilityCondition};
 
-pub(crate) fn active_far_vista_panel_count(
-    texture_panels: &[Option<ResourceId>; FAR_VISTA_TEXTURE_PANEL_COUNT],
-    segments: u8,
-) -> usize {
-    texture_panels
-        .iter()
-        .rposition(Option::is_some)
-        .map(|index| index + 1)
-        .unwrap_or(0)
-        .min(segments as usize)
-        .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
-}
-
 /// Cook every authored UI scene into one shared node pool plus a
 /// parallel scene table, and derive the default game flow.
 ///

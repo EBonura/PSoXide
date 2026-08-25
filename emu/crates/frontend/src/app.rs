@@ -2622,7 +2622,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Select the BSP Room workspace's orthographic viewport for the native
+    /// Select the BSP workspace's orthographic viewport for the native
     /// `--editor-view top` startup route.
     pub fn show_editor_room_orthographic(&mut self) {
         self.editor.show_room_orthographic();

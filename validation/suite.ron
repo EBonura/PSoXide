@@ -4,7 +4,7 @@
             name: "cortex_ignition_v1",
             category: Project,
             artifact: Project(
-                project: "editor/samples/cortex_v1",
+                project: "editor/projects/default",
             ),
             checkpoints: [
                 (
@@ -20,8 +20,8 @@
                     hold_forward: false,
                     hold_run: false,
                     expected: (
-                        display: Some((hash: "0xc009f6733d377f66", width: 320, height: 240, byte_len: 153600)),
-                        vram: Some("0x5e7f7ca302f47c7c"),
+                        display: Some((hash: "0xafe5138b3ce2dcfa", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0x0e73c1c1ca0ce40d"),
                     ),
                 ),
                 (
@@ -37,17 +37,17 @@
                     hold_forward: true,
                     hold_run: false,
                     expected: (
-                        display: Some((hash: "0xc009f6733d377f66", width: 320, height: 240, byte_len: 153600)),
-                        vram: Some("0x5e7f7ca302f47c7c"),
+                        display: Some((hash: "0xafe5138b3ce2dcfa", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0x0e73c1c1ca0ce40d"),
                     ),
                 ),
             ],
         ),
         (
-            name: "runtime_gauntlet",
+            name: "brush_first_playable",
             category: Project,
             artifact: Project(
-                project: "editor/projects/runtime_gauntlet",
+                project: "editor/archive/fixtures/brush-first-playable",
             ),
             checkpoints: [
                 (
@@ -63,12 +63,12 @@
                     hold_forward: false,
                     hold_run: false,
                     expected: (
-                        display: Some((hash: "0x7d5eba329935db1e", width: 320, height: 240, byte_len: 153600)),
-                        vram: Some("0x3be09d0a6aa06a1c"),
+                        display: Some((hash: "0x78bc69892c219325", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0x11bb8822fa700fa2"),
                     ),
                 ),
                 (
-                    name: "gate_route_steps_400m",
+                    name: "gameplay_route_steps_400m",
                     runner: Psoxide,
                     stop: (
                         steps: 400000000,
@@ -80,8 +80,8 @@
                     hold_forward: false,
                     hold_run: false,
                     expected: (
-                        display: Some((hash: "0x6ec70cd52cee74e5", width: 320, height: 240, byte_len: 153600)),
-                        vram: Some("0x1b6b8842070be63b"),
+                        display: Some((hash: "0x78bc69892c219325", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0xcfc3e04b33d945a2"),
                     ),
                 ),
             ],

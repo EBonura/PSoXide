@@ -225,14 +225,11 @@ impl EditorWorkspace {
         let display_rows = scene_tree_display_rows(&rows, &filter, &self.collapsed_scene_nodes);
         let visible_node_order: Vec<NodeId> = display_rows.iter().map(|row| row.id).collect();
         let mut actions: Vec<TreeAction> = Vec::new();
-        let mut connection_select: Option<NodeId> = None;
-        let mut connection_repair: Option<NodeId> = None;
         let selected_node = self.selection.selected_node;
         let selected_nodes = self.selection.selected_nodes.clone();
         let collapsed_scene_nodes = self.collapsed_scene_nodes.clone();
         let hidden_scene_nodes = self.hidden_scene_nodes.clone();
         let scene = self.project.active_scene();
-        let connections = derive_room_connections(scene);
         let renaming = &mut self.renaming;
         let pending_focus = &mut self.pending_rename_focus;
         let tree_scroll_height = (ui.available_height() - 30.0).max(24.0);
@@ -255,34 +252,12 @@ impl EditorWorkspace {
                         &mut actions,
                     );
                 }
-                ui.add_space(4.0);
-                draw_room_connections_rows(
-                    ui,
-                    scene,
-                    &connections,
-                    &filter,
-                    selected_node,
-                    &selected_nodes,
-                    &mut connection_select,
-                    &mut connection_repair,
-                );
-                draw_room_floor_link_rows(ui, scene, &filter);
                 autoscroll_tree_drag::<NodeId>(ui);
             });
 
         for action in actions {
             self.apply_tree_action(action, &visible_node_order);
         }
-        if let Some(portal) = connection_select {
-            self.replace_node_selection(portal);
-            self.clear_resource_selection_state();
-            self.clear_primitive_selection_state();
-            self.clear_sector_selection();
-        }
-        if let Some(portal) = connection_repair {
-            self.create_reciprocal_portal(portal);
-        }
-
         ui.horizontal(|ui| {
             if ui.button(icons::label(icons::COPY, "Duplicate")).clicked() {
                 self.duplicate_selected();
@@ -978,7 +953,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_filesystem_panel_body(&mut self, ui: &mut egui::Ui) {
-        let rows = project_filesystem_rows(&self.project, &self.prefab_library);
+        let rows = project_filesystem_rows(&self.project);
         let filter = self.file_filter.to_ascii_lowercase();
         let visible_rows =
             project_filesystem_display_rows(&rows, &filter, &self.collapsed_file_folders);
@@ -987,7 +962,6 @@ impl EditorWorkspace {
         let mut clicked_resource = None;
         let mut toggled_folder = None;
         let selected_resource = self.selection.selected_resource;
-        let selected_prefab = self.selection.selected_prefab.clone();
         let selected_resources = self.selection.selected_resources.clone();
         let collapsed_folders = self.collapsed_file_folders.clone();
         let file_scroll_height = (ui.available_height() - 28.0).max(24.0);
@@ -1002,15 +976,11 @@ impl EditorWorkspace {
                         row,
                         selected_resource,
                         &selected_resources,
-                        selected_prefab.as_deref(),
                         &filter,
                         &collapsed_folders,
                     ) {
                         Some(ProjectFileRowAction::Select(click)) => {
                             clicked_resource = Some(click);
-                        }
-                        Some(ProjectFileRowAction::SelectPrefab(path)) => {
-                            self.replace_prefab_selection(path);
                         }
                         Some(ProjectFileRowAction::ToggleFolder(key)) => {
                             toggled_folder = Some(key);
@@ -1798,11 +1768,6 @@ impl EditorWorkspace {
                                     return;
                                 }
 
-                                if let Some(path) = self.selection.selected_prefab.clone() {
-                                    self.draw_prefab_inspector(ui, &path);
-                                    return;
-                                }
-
                                 if let Some(resource_id) = self.selection.selected_resource {
                                     self.draw_resource_inspector(ui, resource_id);
                                     return;
@@ -1853,15 +1818,10 @@ impl EditorWorkspace {
                                     selected,
                                     &self.project_dir,
                                 );
-                                let selected_sector = self.selection.selected_sector;
-                                let selected_sector_count = self.selection.selected_sectors.len();
-
                                 let mut changed = false;
                                 // Picker `→` jump-to requests bubble up here.
                                 // Applied after both phases release their borrows.
                                 let mut nav_target: Option<ResourceId> = None;
-                                let mut node_nav_target: Option<NodeId> = None;
-                                let mut world_sector_size_change: Option<i32> = None;
                                 let mut room_grid_resize: Option<(u16, u16)> = None;
                                 let mut character_preview_action = None;
                                 let inherited_sector_size =
@@ -1911,9 +1871,8 @@ impl EditorWorkspace {
                                             ui,
                                             node,
                                             inherited_sector_size,
-                                            &texture_options,
+                                            &material_options,
                                             &mut nav_target,
-                                            &mut world_sector_size_change,
                                         );
                                     } else if transform_kind != NodeTransformInspector::Hidden {
                                         inspector_section(
@@ -1929,7 +1888,6 @@ impl EditorWorkspace {
                                                     inherited_sector_size,
                                                     &texture_options,
                                                     &mut nav_target,
-                                                    &mut world_sector_size_change,
                                                 );
                                             },
                                         );
@@ -1982,14 +1940,6 @@ impl EditorWorkspace {
                                     );
                                 }
 
-                                if let Some(new_sector_size) = world_sector_size_change {
-                                    if let Some(applied) =
-                                        self.project.set_world_sector_size(selected, new_sector_size)
-                                    {
-                                        self.status = format!("World grid size set to {applied}");
-                                        changed = true;
-                                    }
-                                }
                                 if let Some((new_w, new_d)) = room_grid_resize {
                                     if resize_room_grid_preserving_child_positions(
                                         self.project.active_scene_mut(),
@@ -2069,21 +2019,6 @@ impl EditorWorkspace {
                                 if changed && self.selected_node_is_player_source() {
                                     self.demote_player_sources_except(Some(selected));
                                 }
-                                let selected_is_world = self
-                                    .project
-                                    .active_scene()
-                                    .node(selected)
-                                    .is_some_and(|node| matches!(node.kind, NodeKind::World { .. }));
-                                if selected_is_world {
-                                    changed |= draw_playtest_render_settings(
-                                        ui,
-                                        &mut self.project.runtime_depth_sort_mode,
-                                        &mut self.project.runtime_texture_split_mode,
-                                        &mut self.project.runtime_room_draw_order_mode,
-                                        &mut self.project.runtime_texture_split_max_edge,
-                                    );
-                                }
-
                                 // Phase 2: component host/member authoring. This uses
                                 // its own borrow so adding/selecting component nodes does
                                 // not fight the selected node's property editor above.
@@ -2099,71 +2034,13 @@ impl EditorWorkspace {
                                     changed |= self.preview_character_action(selected, action);
                                 }
 
-                                // Phase 3: per-sector authoring appears only when a sector is
-                                // actively selected. Do not attach room/sector diagnostics to
-                                // every node that happens to have an active room ancestor.
-                                if let Some((sx, sz)) = selected_sector {
-                                    let room_id = self
-                                        .selection
-                                        .selected_sectors
-                                        .iter()
-                                        .find_map(|(room, x, z)| {
-                                            (*x == sx && *z == sz).then_some(*room)
-                                        })
-                                        .or_else(|| self.active_room_id());
-                                    if selected_sector_count > 1 {
-                                        egui::CollapsingHeader::new(icons::label(
-                                            icons::GRID,
-                                            "Sector Selection",
-                                        ))
-                                        .default_open(true)
-                                        .show(ui, |ui| {
-                                            ui.label(format!(
-                                                "{selected_sector_count} sectors selected"
-                                            ));
-                                            if ui
-                                                .button("Autotile")
-                                                .on_hover_text(
-                                                    "Autotile every wall in the selected sector tiles.",
-                                                )
-                                                .clicked()
-                                            {
-                                                self.autotile_selected_sector_walls();
-                                            }
-                                            ui.weak("The detailed inspector edits the last selected sector for now.");
-                                        });
-                                    }
-                                    if let Some(room_id) = room_id {
-                                        if draw_sector_inspector(
-                                            ui,
-                                            &mut self.project,
-                                            room_id,
-                                            sx,
-                                            sz,
-                                            self.active_floor,
-                                            &material_options,
-                                            &mut nav_target,
-                                        ) {
-                                            changed = true;
-                                        }
-                                    }
-                                }
-
-                                // Phase 4: relationship panels that need a fresh scene borrow.
+                                // Relationship panels that need a fresh scene borrow.
                                 let scene = self.project.active_scene();
-                                let Some(node) = scene.node(selected) else {
+                                if scene.node(selected).is_none() {
                                     if changed {
                                         self.mark_dirty();
                                     }
                                     return;
-                                };
-
-                                if matches!(node.kind, NodeKind::Portal { .. }) {
-                                    if let Some(connection) = connection_for_portal(scene, selected)
-                                    {
-                                        node_nav_target =
-                                            draw_portal_connection_inspector(ui, scene, &connection);
-                                    }
                                 }
 
                                 if changed {
@@ -2183,12 +2060,6 @@ impl EditorWorkspace {
                                 if let Some(target) = nav_target {
                                     self.replace_resource_selection(target);
                                     self.clear_node_selection_state();
-                                    self.clear_primitive_selection_state();
-                                    self.clear_sector_selection();
-                                }
-                                if let Some(target) = node_nav_target {
-                                    self.replace_node_selection(target);
-                                    self.clear_resource_selection_state();
                                     self.clear_primitive_selection_state();
                                     self.clear_sector_selection();
                                 }

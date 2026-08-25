@@ -1,9 +1,8 @@
 # Floors in the editor: floor-awareness architecture
 
-> HISTORICAL (2026-08-11): this document describes the legacy grid world's
-> floor handling. BSP-first projects author vertical space directly as
-> brushes; grid floors remain compatibility-only per
-> `docs/legacy-grid-boundary.md`.
+> RETIRED (2026-08-25): this document describes the deleted grid-world floor
+> authoring system. BSP projects author vertical space directly as brushes.
+> This file is retained only as historical design context.
 
 Status: design proposal (no code yet). Written after a string of "the
 entity shows on the wrong floor / selection hits the floor below"

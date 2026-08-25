@@ -22,13 +22,9 @@
     ),
     editor_visibility: (
         show_grid: false,
-        show_portals: false,
         show_lights: false,
-        preview_fog: false,
-        preview_backface_wireframe: false,
         preview_bounds: false,
         show_play_debug_overlays: false,
-        show_play_debug_map: true,
     ),
     editor_workspace: (
         active: Room,
@@ -44,7 +40,6 @@
         viewport_zoom: 96.0,
         snap_units: 16,
     ),
-    world_format: Bsp,
     bsp_cook_mode: Draft,
     runtime_depth_sort_mode: HybridWalls,
     runtime_texture_split_mode: All,

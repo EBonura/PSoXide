@@ -1,6 +1,32 @@
-//! Particle-emitter preview submission for the editor 3D viewport.
+//! Particle-emitter preview submission for BSP editor scenes.
 
 use super::*;
+
+pub(crate) fn walk_bsp_particle_emitters(
+    project: &ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    particle_slot: MaterialSlot,
+    preview_tick: u32,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    for node in scene.nodes() {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id) {
+            continue;
+        }
+        let NodeKind::ParticleEmitter { settings } = &node.kind else {
+            continue;
+        };
+        let [x, y, z] = node.transform.translation;
+        push_particle_emitter_preview(
+            settings,
+            psx_engine::WorldVertex::new(x.round() as i32, y.round() as i32, z.round() as i32),
+            particle_slot,
+            preview_tick,
+            scratch,
+        );
+    }
+}
 
 pub(crate) fn push_particle_emitter_preview(
     settings: &psxed_project::ParticleEmitterSettings,
@@ -24,11 +50,7 @@ pub(crate) fn push_particle_emitter_preview(
     let count = (settings.max_particles as u32)
         .min(PREVIEW_PARTICLE_DRAW_CAP as u32)
         .min(steady_count.max(1));
-    if count == 0 {
-        return;
-    }
-    let mut i = 0u32;
-    while i < count {
+    for i in 0..count {
         let seed = preview_particle_seed(origin.x as u32, origin.z as u32, i);
         let age = (preview_tick + (i * lifetime / count)) % lifetime;
         push_particle_preview_sample(
@@ -40,11 +62,10 @@ pub(crate) fn push_particle_emitter_preview(
             lifetime as i32,
             scratch,
         );
-        i += 1;
     }
 }
 
-pub(crate) fn push_particle_preview_sample(
+fn push_particle_preview_sample(
     settings: &psxed_project::ParticleEmitterSettings,
     origin: psx_engine::WorldVertex,
     particle_slot: MaterialSlot,
@@ -114,7 +135,7 @@ pub(crate) fn push_particle_preview_sample(
     );
 }
 
-pub(crate) fn push_particle_preview_quad(
+fn push_particle_preview_quad(
     center: psx_gte::scene::Projected,
     half: i16,
     particle_slot: MaterialSlot,
@@ -158,7 +179,7 @@ pub(crate) fn push_particle_preview_quad(
     }
 }
 
-pub(crate) fn preview_particle_axis_position(
+fn preview_particle_axis_position(
     origin: i32,
     base_velocity_q4: i16,
     random_velocity_q4: u16,
@@ -178,7 +199,7 @@ pub(crate) fn preview_particle_axis_position(
         .saturating_add(acceleration_term)
 }
 
-pub(crate) fn preview_particle_seed(x: u32, z: u32, index: u32) -> u32 {
+fn preview_particle_seed(x: u32, z: u32, index: u32) -> u32 {
     let mut value = x
         .rotate_left(7)
         .wrapping_add(z.rotate_left(17))
@@ -190,7 +211,7 @@ pub(crate) fn preview_particle_seed(x: u32, z: u32, index: u32) -> u32 {
     value ^ (value >> 16)
 }
 
-pub(crate) fn preview_particle_signed_spread(seed: u32, spread: i32) -> i32 {
+fn preview_particle_signed_spread(seed: u32, spread: i32) -> i32 {
     if spread <= 0 {
         return 0;
     }
@@ -198,12 +219,12 @@ pub(crate) fn preview_particle_signed_spread(seed: u32, spread: i32) -> i32 {
     (seed % span) as i32 - spread
 }
 
-pub(crate) fn preview_particle_lerp_u16(a: u16, b: u16, t_q8: i32) -> u16 {
+fn preview_particle_lerp_u16(a: u16, b: u16, t_q8: i32) -> u16 {
     let inv = 255 - t_q8;
     (((i32::from(a) * inv) + (i32::from(b) * t_q8)) / 255).clamp(0, u16::MAX as i32) as u16
 }
 
-pub(crate) fn preview_particle_lerp_rgb(a: [u8; 3], b: [u8; 3], t_q8: i32) -> (u8, u8, u8) {
+fn preview_particle_lerp_rgb(a: [u8; 3], b: [u8; 3], t_q8: i32) -> (u8, u8, u8) {
     (
         preview_particle_lerp_u8(a[0], b[0], t_q8),
         preview_particle_lerp_u8(a[1], b[1], t_q8),
@@ -211,7 +232,7 @@ pub(crate) fn preview_particle_lerp_rgb(a: [u8; 3], b: [u8; 3], t_q8: i32) -> (u
     )
 }
 
-pub(crate) fn preview_particle_lerp_u8(a: u8, b: u8, t_q8: i32) -> u8 {
+fn preview_particle_lerp_u8(a: u8, b: u8, t_q8: i32) -> u8 {
     let inv = 255 - t_q8;
     (((i32::from(a) * inv) + (i32::from(b) * t_q8)) / 255).clamp(0, 255) as u8
 }

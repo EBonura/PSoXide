@@ -1477,6 +1477,7 @@ dependencies = [
  "psoxide-settings",
  "psoxide-validation",
  "psx-asset",
+ "psx-bsp",
  "psx-engine",
  "psx-gpu",
  "psx-gpu-render",

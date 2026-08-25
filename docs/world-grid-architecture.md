@@ -1,5 +1,9 @@
 # World Grid Architecture
 
+> **Retired:** this document describes the removed grid-world pipeline. The
+> editor, cooker and preview are BSP-only; keep this file as historical format
+> context, not as implementation guidance for new work.
+
 The world grid has four layers. Keeping them separate is the main guardrail
 that lets the editor stay pleasant while the PS1 runtime stays small.
 

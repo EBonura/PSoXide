@@ -78,195 +78,22 @@ impl EditorWorkspace {
         }
     }
 
-    pub(crate) fn record_first_playtest_world_cook_issue(&mut self, project: &ProjectDocument) {
-        let scene = project.active_scene();
-        let mut room_nodes: Vec<_> = scene
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
-            .collect();
-        room_nodes.sort_by_key(|node| node.id.raw());
-
-        for room_node in room_nodes {
-            let NodeKind::Section { grid } = &room_node.kind else {
-                continue;
-            };
-            if grid.populated_sector_count() == 0 {
-                continue;
-            }
-            let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
-            for portal_room in plan.rooms {
-                let chunk_grid = extract_portal_room_grid(grid, &portal_room);
-                match world_cook::cook_world_grid(project, &chunk_grid) {
-                    Ok(cooked) => {
-                        if let Err(error) = cooked.to_psxw_bytes() {
-                            self.record_world_cook_error(
-                                room_node.id,
-                                &error,
-                                portal_room.array_origin,
-                            );
-                            return;
-                        }
-                    }
-                    Err(error) => {
-                        self.record_world_cook_error(
-                            room_node.id,
-                            &error,
-                            portal_room.array_origin,
-                        );
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn record_world_cook_error(
-        &mut self,
-        room: NodeId,
-        error: &WorldGridCookError,
-        array_origin: [u16; 2],
-    ) {
-        let mapped = world_cook_error_primitives(room, error, array_origin);
-        if mapped.is_empty() {
-            self.validation_issue_rooms.insert(room);
-            self.replace_node_selection(room);
-            self.clear_sector_selection();
-            self.clear_primitive_selection_state();
-            self.frame_viewport();
-        } else {
-            for selection in &mapped {
-                if !self.validation_issue_primitives.contains(selection) {
-                    self.validation_issue_primitives.push(*selection);
-                }
-            }
-            self.select_and_frame_validation_issue_primitives(&mapped);
-        }
-    }
-
-    pub(crate) fn select_and_frame_validation_issue_primitives(
-        &mut self,
-        selections: &[Selection],
-    ) {
-        let mut selected = Vec::new();
-        for &selection in selections {
-            if !selected.contains(&selection) {
-                selected.push(selection);
-            }
-        }
-        let Some(first) = selected.first().copied() else {
-            return;
-        };
-
-        self.replace_node_selection(first.room());
-        self.clear_sector_selection();
-        self.selection.selected_primitives = selected;
-        self.selection.selected_primitive = Some(first);
-        self.update_primitive_resource_selection();
-        self.frame_viewport();
-    }
-
     /// Map a `(face, world-hit)` pair from `pick_face_with_hit`
     /// to a `Selection`, refining to an edge or vertex of the
     /// face when `selection_mode` demands one. Local-UV math
     /// happens here; the picker's heavy lifting (ray vs every
     /// face) was already paid above.
     pub(crate) fn pick_primitive_from_hit(&self, face: FaceRef, hit: [f32; 3]) -> Selection {
-        let triangle = if matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle) {
-            self.horizontal_triangle_ref_at_hit(face, hit)
-        } else {
-            None
-        };
         match self.selection_mode {
-            SelectionMode::Face => triangle
-                .map(Selection::Triangle)
-                .unwrap_or(Selection::Face(face)),
-            SelectionMode::Edge => triangle
-                .and_then(|triangle| self.triangle_edge_at_hit(triangle, hit))
-                .or_else(|| self.face_edge_at_hit(face, hit))
+            SelectionMode::Face => Selection::Face(face),
+            SelectionMode::Edge => self
+                .face_edge_at_hit(face, hit)
                 .map(Selection::Edge)
                 .unwrap_or(Selection::Face(face)),
-            SelectionMode::Vertex => triangle
-                .and_then(|triangle| self.triangle_vertex_at_hit(triangle, hit))
-                .or_else(|| self.face_vertex_at_hit(face, hit))
+            SelectionMode::Vertex => self
+                .face_vertex_at_hit(face, hit)
                 .map(Selection::Vertex)
                 .unwrap_or(Selection::Face(face)),
-        }
-    }
-
-    pub(crate) fn horizontal_triangle_ref_at_hit(
-        &self,
-        face: FaceRef,
-        hit: [f32; 3],
-    ) -> Option<HorizontalTriangleRef> {
-        let (split, dropped) = self.horizontal_face_split_and_drop(face)?;
-        let grid = self.room_grid_view(face.room)?;
-        let bounds = grid.cell_bounds_world(face.sx, face.sz);
-        let local_x = hit[0] - bounds.x0 as f32;
-        let local_z = hit[2] - bounds.z0 as f32;
-        let mut index =
-            horizontal_triangle_index_at_local(local_x, local_z, grid.sector_size, split);
-        let mut corners = horizontal_triangle_corners(split, index);
-        if dropped.is_some_and(|corner| corners.contains(&corner)) {
-            index = horizontal_triangle_other(index);
-            corners = horizontal_triangle_corners(split, index);
-        }
-        let surface = match face.kind {
-            FaceKind::Floor => HorizontalSurfaceKind::Floor,
-            FaceKind::Ceiling => HorizontalSurfaceKind::Ceiling,
-            FaceKind::Wall { .. } => return None,
-        };
-        Some(HorizontalTriangleRef {
-            room: face.room,
-            sx: face.sx,
-            sz: face.sz,
-            surface,
-            index,
-            corners,
-        })
-    }
-
-    pub(crate) fn horizontal_triangle_refs_for_face(
-        &self,
-        face: FaceRef,
-    ) -> Vec<HorizontalTriangleRef> {
-        let Some((split, dropped)) = self.horizontal_face_split_and_drop(face) else {
-            return Vec::new();
-        };
-        let surface = match face.kind {
-            FaceKind::Floor => HorizontalSurfaceKind::Floor,
-            FaceKind::Ceiling => HorizontalSurfaceKind::Ceiling,
-            FaceKind::Wall { .. } => return Vec::new(),
-        };
-        [HorizontalTriangleIndex::A, HorizontalTriangleIndex::B]
-            .into_iter()
-            .filter_map(|index| {
-                let corners = horizontal_triangle_corners(split, index);
-                if dropped.is_some_and(|corner| corners.contains(&corner)) {
-                    return None;
-                }
-                Some(HorizontalTriangleRef {
-                    room: face.room,
-                    sx: face.sx,
-                    sz: face.sz,
-                    surface,
-                    index,
-                    corners,
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) fn horizontal_face_split_and_drop(
-        &self,
-        face: FaceRef,
-    ) -> Option<(GridSplit, Option<Corner>)> {
-        let grid = self.room_grid_view(face.room)?;
-        let sector = grid.sector(face.sx, face.sz)?;
-        match face.kind {
-            FaceKind::Floor => sector.floor.as_ref().map(|f| (f.split, f.dropped_corner)),
-            FaceKind::Ceiling => sector.ceiling.as_ref().map(|c| (c.split, c.dropped_corner)),
-            FaceKind::Wall { .. } => None,
         }
     }
 
@@ -302,34 +129,6 @@ impl EditorWorkspace {
         })
     }
 
-    pub(crate) fn triangle_edge_at_hit(
-        &self,
-        triangle: HorizontalTriangleRef,
-        hit: [f32; 3],
-    ) -> Option<EdgeRef> {
-        let corners = self.triangle_world_corners(triangle)?;
-        let edge_idx = closest_edge_idx(&corners, hit);
-        let a = triangle.corners[edge_idx];
-        let b = triangle.corners[(edge_idx + 1) % 3];
-        let dir = horizontal_edge_dir_from_corners(a, b)?;
-        let anchor = match triangle.surface {
-            HorizontalSurfaceKind::Floor => EdgeAnchor::Floor {
-                sx: triangle.sx,
-                sz: triangle.sz,
-                dir,
-            },
-            HorizontalSurfaceKind::Ceiling => EdgeAnchor::Ceiling {
-                sx: triangle.sx,
-                sz: triangle.sz,
-                dir,
-            },
-        };
-        Some(EdgeRef {
-            room: triangle.room,
-            anchor,
-        })
-    }
-
     /// Closest corner of `face` to the world-space hit. Distance
     /// computed in world space against the four corner points.
     pub(crate) fn face_vertex_at_hit(&self, face: FaceRef, hit: [f32; 3]) -> Option<VertexRef> {
@@ -356,32 +155,6 @@ impl EditorWorkspace {
         };
         Some(VertexRef {
             room: face.room,
-            anchor,
-        })
-    }
-
-    pub(crate) fn triangle_vertex_at_hit(
-        &self,
-        triangle: HorizontalTriangleRef,
-        hit: [f32; 3],
-    ) -> Option<VertexRef> {
-        let corners = self.triangle_world_corners(triangle)?;
-        let corner_idx = closest_corner_idx(&corners, hit);
-        let corner = triangle.corners[corner_idx];
-        let anchor = match triangle.surface {
-            HorizontalSurfaceKind::Floor => VertexAnchor::Floor {
-                sx: triangle.sx,
-                sz: triangle.sz,
-                corner,
-            },
-            HorizontalSurfaceKind::Ceiling => VertexAnchor::Ceiling {
-                sx: triangle.sx,
-                sz: triangle.sz,
-                corner,
-            },
-        };
-        Some(VertexRef {
-            room: triangle.room,
             anchor,
         })
     }
@@ -580,45 +353,6 @@ impl EditorWorkspace {
         self.pick_3d_world_on_room_plane(rect, pointer, room.id, 0.0)
     }
 
-    pub(crate) fn pick_3d_paint_world(
-        &self,
-        rect: egui::Rect,
-        pointer: egui::Pos2,
-        room_id: NodeId,
-    ) -> Option<[f32; 2]> {
-        match self.active_tool {
-            ViewTool::PaintCeiling => self.pick_3d_ceiling_world(rect, pointer, room_id),
-            _ => self.pick_3d_world_on_room_plane(rect, pointer, room_id, 0.0),
-        }
-    }
-
-    pub(crate) fn pick_3d_ceiling_world(
-        &self,
-        rect: egui::Rect,
-        pointer: egui::Pos2,
-        room_id: NodeId,
-    ) -> Option<[f32; 2]> {
-        let grid = self.room_grid_view(room_id)?;
-        let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
-        let mut plane_y = grid.sector_size.saturating_mul(DEFAULT_WALL_HEIGHT_SECTORS) as f32;
-        let mut hit = ray_intersects_horizontal_plane(origin, dir, plane_y)?;
-
-        for _ in 0..3 {
-            let wcx = grid.world_x_to_cell(hit[0]);
-            let wcz = grid.world_z_to_cell(hit[2]);
-            let heights = grid.ceiling_heights_aligned_to_neighbors_for_world_cell(wcx, wcz);
-            let next_plane_y =
-                heights.iter().map(|height| *height as f32).sum::<f32>() / heights.len() as f32;
-            if (next_plane_y - plane_y).abs() < 1.0 {
-                break;
-            }
-            plane_y = next_plane_y;
-            hit = ray_intersects_horizontal_plane(origin, dir, plane_y)?;
-        }
-
-        Some(grid.room_local_to_editor(hit))
-    }
-
     pub(crate) fn pick_3d_world_on_room_plane(
         &self,
         rect: egui::Rect,
@@ -681,9 +415,7 @@ impl EditorWorkspace {
         } else {
             consume_command_shortcut(ctx, egui::Key::D)
         };
-        let bsp_brush_shortcuts = !focus_taken
-            && self.active_workspace == WorkspaceView::Room
-            && self.project.world_format().is_bsp();
+        let bsp_brush_shortcuts = !focus_taken && self.active_workspace == WorkspaceView::Room;
         let shift_down = ctx.input(|input| input.modifiers.shift);
         let consume_hollow =
             bsp_brush_shortcuts && shift_down && consume_command_shift_shortcut(ctx, egui::Key::K);
@@ -759,11 +491,7 @@ impl EditorWorkspace {
             }
             let rot = ctx.input_mut(|i| i.key_pressed(egui::Key::R));
             if rot && self.renaming.is_none() {
-                if self.portal_place_active() {
-                    self.rotate_portal_place_direction();
-                } else {
-                    self.rotate_current_selection_90();
-                }
+                self.rotate_current_selection_90();
             }
             let flip = ctx.input_mut(|i| i.key_pressed(egui::Key::F));
             if flip && self.floating_geometry.is_some() {
@@ -802,8 +530,7 @@ impl EditorWorkspace {
                 }
             }
             // Bare 1-7 select the same flat BSP modes as the visible strip.
-            if self.active_workspace == WorkspaceView::Room && self.project.world_format().is_bsp()
-            {
+            if self.active_workspace == WorkspaceView::Room {
                 const MODE_KEYS: [egui::Key; 7] = [
                     egui::Key::Num1,
                     egui::Key::Num2,
@@ -830,9 +557,7 @@ impl EditorWorkspace {
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
             });
             if del && self.renaming.is_none() {
-                if !self.selection.selected_sectors.is_empty() {
-                    self.delete_selected_sectors();
-                } else if !self.selected_primitive_targets().is_empty() {
+                if !self.selected_primitive_targets().is_empty() {
                     self.delete_selected_primitives();
                 } else if self.selection.selected_resource.is_some() {
                     self.begin_resource_delete_confirmation();
@@ -894,11 +619,8 @@ impl EditorWorkspace {
         if self.active_workspace != WorkspaceView::Room {
             return;
         }
-        let bsp_authoring = self.project.world_format().is_bsp();
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num2) {
-            if bsp_authoring {
-                self.cycle_tool_group(reverse);
-            }
+            self.cycle_tool_group(reverse);
         }
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num3) {
             self.cycle_transform_group(reverse);
@@ -927,9 +649,6 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn cycle_tool_group(&mut self, reverse: bool) {
-        if !self.project.world_format().is_bsp() {
-            return;
-        }
         let current = self
             .active_bsp_toolbar_mode()
             .unwrap_or(BspToolbarMode::Select);
@@ -957,12 +676,7 @@ impl EditorWorkspace {
         if let Some(place_kind) = place_kind {
             self.place_kind = place_kind;
         }
-        if self.place_kind == PlaceKind::Portal {
-            self.clear_sector_selection();
-            self.clear_primitive_selection_state();
-            self.selection.hovered_primitive = None;
-        }
-        if matches!(tool, ViewTool::PaintMaterial | ViewTool::Water) {
+        if tool == ViewTool::PaintMaterial {
             self.clear_sector_selection();
             self.clear_primitive_selection_state();
             self.selection.hovered_primitive = None;
@@ -1032,47 +746,10 @@ impl EditorWorkspace {
         self.mark_shortcut_group_changed(ShortcutGroup::Transform);
     }
 
-    #[allow(dead_code)] // LegacyGrid shortcut retained while its toolbar is retired.
-    pub(crate) fn cycle_selection_group(&mut self, reverse: bool) {
-        const VALUES: &[SelectionMode] = &[
-            SelectionMode::Face,
-            SelectionMode::Edge,
-            SelectionMode::Vertex,
-        ];
-        self.set_selection_mode(cycle_value(VALUES, self.selection_mode, reverse));
-    }
-
-    #[allow(dead_code)] // Superseded by the flat BSP mode strip.
-    pub(crate) fn cycle_brush_edit_mode_group(&mut self, reverse: bool) {
-        self.set_brush_edit_mode(cycle_value(
-            &BrushEditMode::ALL,
-            self.brush_edit_mode,
-            reverse,
-        ));
-        self.mark_shortcut_group_changed(ShortcutGroup::Selection);
-    }
-
-    #[allow(dead_code)] // LegacyGrid shortcut retained while its toolbar is retired.
-    pub(crate) fn cycle_horizontal_edit_group(&mut self, reverse: bool) {
-        const VALUES: &[HorizontalEditMode] =
-            &[HorizontalEditMode::Quad, HorizontalEditMode::Triangle];
-        self.set_horizontal_edit_mode(cycle_value(VALUES, self.horizontal_edit_mode, reverse));
-    }
-
-    #[allow(dead_code)] // LegacyGrid shortcut retained while its toolbar is retired.
-    pub(crate) fn cycle_vertex_connectivity_group(&mut self, reverse: bool) {
-        const VALUES: &[VertexConnectivity] =
-            &[VertexConnectivity::Welded, VertexConnectivity::Detached];
-        self.set_vertex_connectivity(cycle_value(VALUES, self.vertex_connectivity, reverse));
-    }
-
     pub(crate) fn cycle_visibility_group(&mut self, reverse: bool) {
         let all_visible = !self.editor_visibility_has_hidden_items();
         let show_all = reverse || !all_visible;
-        self.show_portals = show_all;
         self.show_lights = show_all;
-        self.preview_fog = show_all;
-        self.preview_backface_wireframe = show_all;
         self.preview_bounds = show_all;
         self.show_bsp_leak_path = show_all;
         self.persist_editor_visibility_state();
@@ -1173,65 +850,6 @@ impl EditorWorkspace {
         self.mark_shortcut_group_changed(ShortcutGroup::Selection);
     }
 
-    #[allow(dead_code)] // LegacyGrid command retained for project compatibility tests.
-    pub(crate) fn set_horizontal_edit_mode(&mut self, mode: HorizontalEditMode) {
-        if self.horizontal_edit_mode == mode {
-            return;
-        }
-        self.horizontal_edit_mode = mode;
-        let active = self
-            .selection
-            .selected_primitive
-            .and_then(|selection| self.selection_as_horizontal_mode(selection, mode));
-        let mut converted = Vec::new();
-        for selection in self.selected_primitive_targets() {
-            let Some(selection) = self.selection_as_horizontal_mode(selection, mode) else {
-                continue;
-            };
-            if !converted.contains(&selection) {
-                converted.push(selection);
-            }
-        }
-        self.selection.selected_primitives = converted;
-        self.selection.selected_primitive =
-            active.or_else(|| self.selection.selected_primitives.first().copied());
-        self.selection.hovered_primitive = None;
-        self.status = format!("Surface edit: {}", mode.label());
-        self.mark_shortcut_group_changed(ShortcutGroup::Surface);
-    }
-
-    #[allow(dead_code)] // LegacyGrid command retained for project compatibility tests.
-    pub(crate) fn set_vertex_connectivity(&mut self, mode: VertexConnectivity) {
-        if self.vertex_connectivity == mode {
-            return;
-        }
-        self.vertex_connectivity = mode;
-        self.status = format!("Vertex edits: {}", mode.label());
-        self.mark_shortcut_group_changed(ShortcutGroup::Vertex);
-    }
-
-    #[allow(dead_code)] // LegacyGrid command retained for project compatibility tests.
-    pub(crate) fn selection_as_horizontal_mode(
-        &self,
-        selection: Selection,
-        mode: HorizontalEditMode,
-    ) -> Option<Selection> {
-        match (selection, mode) {
-            (Selection::Triangle(triangle), HorizontalEditMode::Quad) => {
-                Some(Selection::Face(triangle.parent_face()))
-            }
-            (Selection::Face(face), HorizontalEditMode::Triangle)
-                if matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling) =>
-            {
-                self.horizontal_triangle_refs_for_face(face)
-                    .first()
-                    .copied()
-                    .map(Selection::Triangle)
-            }
-            (selection, _) => Some(selection),
-        }
-    }
-
     pub(crate) fn selection_as_mode(
         selection: Selection,
         mode: SelectionMode,
@@ -1320,9 +938,6 @@ impl EditorWorkspace {
             TreeAction::Select { id, modifiers } => {
                 self.apply_node_selection_modifiers(id, modifiers, visible_order);
                 self.renaming = None;
-                // No-op when `id` isn't a Room -- keeps the camera
-                // put while the user clicks through entity nodes.
-                self.frame_3d_on_room(self.selection.selected_node);
                 self.persist_editor_camera_state();
             }
             TreeAction::BeginRename(id) => {
@@ -1891,7 +1506,7 @@ impl EditorWorkspace {
                         "Paste Brush Geometry",
                         &command_shortcut_text("V"),
                     ))
-                    .on_hover_text("Paste the retained cross-project brush clipboard and open the Room workspace")
+                    .on_hover_text("Paste the retained cross-project brush clipboard and open the 3D workspace")
                     .clicked()
                 {
                     self.paste_current_geometry();
@@ -1929,7 +1544,7 @@ impl EditorWorkspace {
                 ui.close_menu();
             }
         });
-        if self.active_workspace == WorkspaceView::Room && self.project.world_format().is_bsp() {
+        if self.active_workspace == WorkspaceView::Room {
             ui.menu_button("Brush", |ui| {
                 let can_extrude = self.brush_edit_mode == BrushEditMode::Face
                     && self.selected_brush.is_some()
@@ -1990,7 +1605,7 @@ impl EditorWorkspace {
                 ui.close_menu();
             }
             ui.separator();
-            if ui.button("Room Workspace").clicked() {
+            if ui.button("3D Workspace").clicked() {
                 self.active_workspace = WorkspaceView::Room;
                 ui.close_menu();
             }
@@ -2248,7 +1863,7 @@ impl EditorWorkspace {
 
         if ui
             .button(icons::label(icons::FOCUS, "Debug"))
-            .on_hover_text("Append camera, player, room, and portal visibility diagnostics to logs/editor_debug.log.")
+            .on_hover_text("Append editor camera, runtime player, camera, and scheduler diagnostics to logs/editor_debug.log.")
             .clicked()
         {
             self.capture_debug_snapshot(play_metrics);
@@ -2388,303 +2003,5 @@ impl EditorWorkspace {
             metrics.visual_render_task_ms,
             metrics.visual_render_task_max_ms
         );
-        let _ = writeln!(
-            out,
-            "portal_counts: visible={} frontier={} missing_resident={} build_failed={} tests={} accepts={} bounds_fb={} rejects_b/f/t={:?} caps_r/f/d={:?}",
-            metrics.portal_visible_rooms,
-            metrics.portal_frontier_rooms,
-            metrics.portal_missing_resident,
-            metrics.portal_build_failed,
-            metrics.portal_tests,
-            metrics.portal_accepts,
-            metrics.portal_bounds_fallbacks,
-            metrics.portal_rejects,
-            metrics.portal_caps
-        );
-        let _ = writeln!(
-            out,
-            "stream_counts: visible_chunks={} loaded={} candidates={} built={} cache_skips={} priorities_c/v/f={:?} req={} miss={} prefetch={} evict={} slot_limit={} pending={} failed={} protected_full={}",
-            metrics.chunk_visible,
-            metrics.chunk_loaded,
-            metrics.chunk_candidates,
-            metrics.chunk_built,
-            metrics.chunk_cache_skips,
-            metrics.stream_priorities,
-            metrics.stream_requests,
-            metrics.stream_misses,
-            metrics.stream_prefetches,
-            metrics.stream_evictions,
-            metrics.stream_slot_limit,
-            metrics.stream_pending,
-            metrics.stream_failed,
-            metrics.stream_protected_full
-        );
-        let _ = writeln!(
-            out,
-            "masks: loaded={:#018x} loading={:#018x} active={:#018x} drawn={:#018x} visible={:#018x} frontier={:#018x} missing={:#018x} build_failed={:#018x}",
-            metrics.chunk_loaded_mask,
-            metrics.chunk_loading_mask,
-            metrics.chunk_active_mask,
-            metrics.chunk_drawn_mask,
-            metrics.portal_visible_mask,
-            metrics.portal_frontier_mask,
-            metrics.portal_missing_mask,
-            metrics.portal_build_failed_mask
-        );
-        let _ = writeln!(
-            out,
-            "portal_masks: room_tested={:#018x} room_accepted={:#018x} room_reject_frustum={:#018x} room_bounds_fb={:#018x} portal_tested={:#018x} portal_accepted={:#018x} portal_reject_frustum={:#018x} portal_bounds_fb={:#018x}",
-            metrics.portal_tested_mask,
-            metrics.portal_accepted_mask,
-            metrics.portal_reject_frustum_mask,
-            metrics.portal_bounds_fallback_mask,
-            metrics.portal_tested_portal_mask,
-            metrics.portal_accepted_portal_mask,
-            metrics.portal_reject_frustum_portal_mask,
-            metrics.portal_bounds_fallback_portal_mask
-        );
-        self.append_portal_map_debug_snapshot(out, metrics);
-    }
-
-    pub(crate) fn append_portal_map_debug_snapshot(
-        &self,
-        out: &mut String,
-        metrics: EditorPlaytestMetrics,
-    ) {
-        let map = collect_play_chunk_debug_map(&self.project);
-        let player_room = metrics
-            .player_map_valid
-            .then_some(metrics.player_room_index as usize);
-        let current_room = if metrics.camera_global_valid {
-            Some(metrics.portal_current_room_index as usize)
-        } else {
-            player_room
-        };
-        let trace = collect_portal_clip_trace(&map, metrics, current_room);
-        let _ = writeln!(
-            out,
-            "portal_map: runtime_rooms={} directed_portals={} player_runtime_room={:?} visibility_runtime_room={:?}",
-            map.runtime_room_count(),
-            map.portals.len(),
-            player_room,
-            current_room
-        );
-        if let Some(trace) = &trace {
-            let _ = writeln!(
-                out,
-                "portal_clip_trace: camera_global={:?} entries={} half_fov_q12=({}, {}) near={} far={} max_depth={} min_width={}",
-                trace.camera_global,
-                trace.entries.len(),
-                trace.camera.half_fov_x_tan_q12,
-                trace.camera.half_fov_y_tan_q12,
-                trace.camera.near_z,
-                trace.camera.far_z,
-                PLAY_PORTAL_DEBUG_MAX_DEPTH,
-                trace.camera.min_portal_width_q12
-            );
-        } else {
-            let _ = writeln!(out, "portal_clip_trace: unavailable");
-        }
-        if let Some(room_index) = current_room {
-            self.append_runtime_room_debug_snapshot(out, &map, metrics, room_index, "current_room");
-        }
-        if let Some(player_room) = player_room {
-            if Some(player_room) != current_room {
-                self.append_runtime_room_debug_snapshot(
-                    out,
-                    &map,
-                    metrics,
-                    player_room,
-                    "player_room",
-                );
-            }
-        }
-        let connected: Vec<_> = map
-            .portals
-            .iter()
-            .filter(|portal| {
-                current_room.is_none_or(|room| {
-                    portal.source_room_index == room || portal.destination_room_index == room
-                })
-            })
-            .collect();
-        let _ = writeln!(out, "connected_portals: count={}", connected.len());
-        let connected_indices: HashSet<usize> =
-            connected.iter().map(|portal| portal.portal_index).collect();
-        for portal in connected {
-            self.append_portal_debug_snapshot(out, &map, metrics, portal, trace.as_ref());
-        }
-        let traversal_portals: Vec<_> = map
-            .portals
-            .iter()
-            .filter(|portal| {
-                if connected_indices.contains(&portal.portal_index) {
-                    return false;
-                }
-                let source_bit = debug_chunk_bit(portal.source_room_index);
-                let portal_bit = debug_chunk_bit(portal.portal_index);
-                source_bit != 0
-                    && portal_bit != 0
-                    && metrics.portal_visible_mask & source_bit != 0
-                    && metrics.portal_tested_portal_mask & portal_bit != 0
-            })
-            .collect();
-        let _ = writeln!(
-            out,
-            "visible_source_traversal_portals: count={}",
-            traversal_portals.len()
-        );
-        for portal in traversal_portals {
-            self.append_portal_debug_snapshot(out, &map, metrics, portal, trace.as_ref());
-        }
-    }
-
-    pub(crate) fn append_runtime_room_debug_snapshot(
-        &self,
-        out: &mut String,
-        map: &PlayChunkDebugMap,
-        metrics: EditorPlaytestMetrics,
-        room_index: usize,
-        label: &str,
-    ) {
-        let cells: Vec<_> = map
-            .cells
-            .iter()
-            .filter(|cell| cell.runtime_room_index == room_index)
-            .collect();
-        let Some(first) = cells.first() else {
-            let _ = writeln!(out, "{label}: runtime_room={room_index} missing_from_map");
-            return;
-        };
-        let room_name = self
-            .project
-            .active_scene()
-            .node(first.project_room_id)
-            .map(|node| node.name.as_str())
-            .unwrap_or("<missing room node>");
-        let _ = writeln!(
-            out,
-            "{label}: runtime_room={} project_room=#{} '{}' portal_room={} flags=[{}] cell_count={}",
-            room_index,
-            first.project_room_id.raw(),
-            room_name,
-            first.portal_room_index,
-            debug_room_flags(metrics, room_index),
-            cells.len()
-        );
-        for cell in cells {
-            let _ = writeln!(
-                out,
-                "  cell: array={:?} center={:?} half={:?} map_origin={:?} runtime_origin={:?} sector_size={}",
-                cell.array_cell,
-                cell.center,
-                cell.half,
-                cell.room_origin,
-                cell.runtime_origin,
-                cell.sector_size
-            );
-        }
-    }
-
-    pub(crate) fn append_portal_debug_snapshot(
-        &self,
-        out: &mut String,
-        map: &PlayChunkDebugMap,
-        metrics: EditorPlaytestMetrics,
-        portal: &PlayChunkDebugMapPortal,
-        trace: Option<&PortalClipTrace>,
-    ) {
-        let portal_bit = debug_chunk_bit(portal.portal_index);
-        let tested = portal_bit != 0 && metrics.portal_tested_portal_mask & portal_bit != 0;
-        let accepted = portal_bit != 0 && metrics.portal_accepted_portal_mask & portal_bit != 0;
-        let rejected =
-            portal_bit != 0 && metrics.portal_reject_frustum_portal_mask & portal_bit != 0;
-        let bounds_fb =
-            portal_bit != 0 && metrics.portal_bounds_fallback_portal_mask & portal_bit != 0;
-        let _ = writeln!(
-            out,
-            "portal #{}: {} -> {} dir={:?} normal={:?} marker={:?} status tested={} accepted={} reject_frustum={} bounds_fb={} map_a={:?} map_b={:?} world={:?}",
-            portal.portal_index,
-            portal.source_room_index,
-            portal.destination_room_index,
-            portal.direction,
-            portal.normal_world,
-            portal.source_marker.map(NodeId::raw),
-            tested,
-            accepted,
-            rejected,
-            bounds_fb,
-            portal.a,
-            portal.b,
-            portal.vertices_world
-        );
-        self.append_portal_clip_debug_snapshot(out, portal, trace);
-        self.append_runtime_room_debug_snapshot(
-            out,
-            map,
-            metrics,
-            portal.source_room_index,
-            "  source",
-        );
-        self.append_runtime_room_debug_snapshot(
-            out,
-            map,
-            metrics,
-            portal.destination_room_index,
-            "  destination",
-        );
-    }
-
-    pub(crate) fn append_portal_clip_debug_snapshot(
-        &self,
-        out: &mut String,
-        portal: &PlayChunkDebugMapPortal,
-        trace: Option<&PortalClipTrace>,
-    ) {
-        let Some(trace) = trace else {
-            let _ = writeln!(out, "  clip: unavailable");
-            return;
-        };
-        let mut matches = 0usize;
-        for entry in trace
-            .entries
-            .iter()
-            .filter(|entry| entry.portal_index == portal.portal_index)
-        {
-            matches += 1;
-            let debug = entry.debug;
-            let _ = writeln!(
-                out,
-                "  clip[{}]: parent_room={} parent_portal={} depth={} skipped_return={} decision={:?} front={} first_empty={:?} counts_n/l/r/b/t={}/{}/{}/{}/{} tiny={} parent={} padded={} projected={} clipped={} fallback={} result={}",
-                matches - 1,
-                entry.parent.room.raw(),
-                debug_parent_portal_label(entry.parent.source_portal),
-                entry.parent.depth,
-                entry.skipped_return,
-                debug.decision,
-                debug.front_faces_camera,
-                debug.first_empty_plane,
-                debug.near_count,
-                debug.left_count,
-                debug.right_count,
-                debug.bottom_count,
-                debug.top_count,
-                debug.tiny,
-                portal_clip_debug_rect_text(Some(debug.parent)),
-                portal_clip_debug_rect_text(Some(debug.padded_parent)),
-                portal_clip_debug_rect_text(debug.projected_bounds),
-                portal_clip_debug_rect_text(debug.clipped_bounds),
-                portal_clip_debug_rect_text(debug.fallback_bounds),
-                portal_clip_debug_rect_text(debug.result_bounds),
-            );
-            let _ = writeln!(
-                out,
-                "    view_vertices: {}",
-                portal_clip_debug_vertices_text(debug.view_vertices)
-            );
-        }
-        if matches == 0 {
-            let _ = writeln!(out, "  clip: no traversal entry for this portal");
-        }
     }
 }

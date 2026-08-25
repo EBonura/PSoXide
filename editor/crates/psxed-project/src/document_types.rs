@@ -116,19 +116,11 @@ pub struct EditorVisibilityState {
     #[serde(default = "default_true")]
     pub show_brush_surface_grid: bool,
     #[serde(default = "default_true")]
-    pub show_portals: bool,
-    #[serde(default = "default_true")]
     pub show_lights: bool,
-    #[serde(default = "default_true")]
-    pub preview_fog: bool,
-    #[serde(default = "default_true")]
-    pub preview_backface_wireframe: bool,
     #[serde(default = "default_true")]
     pub preview_bounds: bool,
     #[serde(default = "default_true")]
     pub show_play_debug_overlays: bool,
-    #[serde(default = "default_true")]
-    pub show_play_debug_map: bool,
     /// Wireframe outlines for UNSELECTED brushes. Off by default: selected
     /// brushes always outline, the full cage is an opt-in alignment view.
     #[serde(default)]
@@ -140,13 +132,9 @@ impl Default for EditorVisibilityState {
         Self {
             show_grid: true,
             show_brush_surface_grid: true,
-            show_portals: true,
             show_lights: true,
-            preview_fog: true,
-            preview_backface_wireframe: true,
             preview_bounds: true,
             show_play_debug_overlays: true,
-            show_play_debug_map: true,
             show_brush_wireframes: false,
         }
     }
@@ -401,21 +389,6 @@ pub struct ProjectDocument {
     /// Editor-only 2D/orthographic viewport layout.
     #[serde(default)]
     pub editor_viewport: EditorViewportState,
-    /// Which spatial authority this project uses. `None` only for documents
-    /// saved before the field existed, or built in memory and never loaded;
-    /// [`ProjectDocument::world_format`] resolves those from geometry
-    /// presence. Read it through the accessor, never directly.
-    ///
-    /// The option is an internal "not resolved yet" marker, so it is written
-    /// and read as a bare `world_format: Bsp` rather than `Some(Bsp)`: the
-    /// project file states the format outright.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_world_format",
-        deserialize_with = "deserialize_world_format"
-    )]
-    world_format: Option<ProjectWorldFormat>,
     /// BSP compiler quality used by Build, Play, and Rebuild. Persisting this
     /// in the project keeps GUI and CLI cooks on one deterministic policy.
     #[serde(default)]
@@ -476,65 +449,6 @@ pub struct ProjectDocument {
     next_resource_id: u64,
 }
 
-/// Which world representation owns a project's space.
-///
-/// Before this field existed the choice was implicit: a project whose active
-/// scene held brushes cooked as PXBSP, everything else cooked as a grid
-/// world. That presence-based chain is enumerated in
-/// `docs/legacy-grid-boundary.md` section 1. Persisting the answer makes it
-/// authoritative, so a BSP project can never quietly fall back to grid
-/// spatial state and a legacy grid project can never quietly acquire brush
-/// geometry: either mismatch is a hard, named cook error instead.
-///
-/// Documents saved before the field existed carry no value. They resolve
-/// exactly once on load, from the same presence rule they were cooked with,
-/// and are persisted from then on ([`ProjectDocument::normalize_loaded`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ProjectWorldFormat {
-    /// Brush authoring compiled to PXBSP. `psx-bsp` is the only spatial
-    /// authority: geometry, collision, visibility, and activation all come
-    /// from the resident BSP. The default for every new project.
-    #[default]
-    Bsp,
-    /// Legacy [`crate::WorldGrid`] Sections streamed as rooms. Compatibility
-    /// only, frozen; see `docs/legacy-grid-boundary.md`.
-    LegacyGrid,
-}
-
-fn serialize_world_format<S: serde::Serializer>(
-    value: &Option<ProjectWorldFormat>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    // Never reached with `None`: the field carries `skip_serializing_if`.
-    value.unwrap_or_default().serialize(serializer)
-}
-
-fn deserialize_world_format<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<ProjectWorldFormat>, D::Error> {
-    ProjectWorldFormat::deserialize(deserializer).map(Some)
-}
-
-impl ProjectWorldFormat {
-    /// Human-readable name for diagnostics and the inspector.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Bsp => "BSP",
-            Self::LegacyGrid => "Legacy grid",
-        }
-    }
-
-    /// `true` when PXBSP owns the world.
-    pub const fn is_bsp(self) -> bool {
-        matches!(self, Self::Bsp)
-    }
-
-    /// `true` when the frozen grid pipeline owns the world.
-    pub const fn is_legacy_grid(self) -> bool {
-        matches!(self, Self::LegacyGrid)
-    }
-}
-
 /// Where a cooked project starts running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BootTarget {
@@ -564,10 +478,6 @@ impl ProjectDocument {
             editor_visibility: EditorVisibilityState::default(),
             editor_workspace: EditorWorkspaceState::default(),
             editor_viewport: EditorViewportState::default(),
-            // New projects are BSP-only. A fresh document has no brushes yet,
-            // so the geometry rule cannot answer this; state it outright
-            // instead of letting an empty scene read as "legacy grid".
-            world_format: Some(ProjectWorldFormat::Bsp),
             animation_error_budget_degrees: 0,
             animation_trim_still_percent: 0,
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
@@ -597,44 +507,6 @@ impl ProjectDocument {
     pub fn starter() -> Self {
         Self::from_ron_str(DEFAULT_PROJECT_RON)
             .expect("editor/projects/default/project.ron is malformed")
-    }
-
-    /// The pre-BSP grid mega-project: the historic default, retained
-    /// verbatim as the fixture behind the grid cook/playtest suites.
-    pub fn legacy_grid_starter() -> Self {
-        Self::from_ron_str(crate::LEGACY_GRID_STARTER_RON)
-            .expect("editor/archive/fixtures/legacy-grid-starter/project.ron is malformed")
-    }
-
-    /// Which spatial authority this project uses.
-    ///
-    /// Every document built through [`ProjectDocument::new`] or loaded
-    /// through [`ProjectDocument::from_ron_str`] carries a resolved value.
-    /// The geometry fallback covers only a hand-assembled struct that skipped
-    /// both, and answers with the presence rule the cook used before the
-    /// field existed, so nothing can change format by upgrading.
-    pub fn world_format(&self) -> ProjectWorldFormat {
-        self.world_format
-            .unwrap_or_else(|| self.world_format_from_geometry())
-    }
-
-    /// The pre-discriminator presence rule, kept in one place: brushes in the
-    /// active scene mean PXBSP, anything else means the grid pipeline. The
-    /// active scene is what [`crate::playtest::build_package`] cooks, so this
-    /// reproduces the historical selection exactly.
-    fn world_format_from_geometry(&self) -> ProjectWorldFormat {
-        if self.active_scene().brushes.is_empty() {
-            ProjectWorldFormat::LegacyGrid
-        } else {
-            ProjectWorldFormat::Bsp
-        }
-    }
-
-    /// Pin the project's spatial authority. Converting an authored project
-    /// between formats is not implemented; this exists so tools and tests can
-    /// state the format explicitly instead of relying on geometry presence.
-    pub fn set_world_format(&mut self, format: ProjectWorldFormat) {
-        self.world_format = Some(format);
     }
 
     /// Active scene.
@@ -1091,7 +963,6 @@ impl ProjectDocument {
                 | ResourceData::AnimationSource(_)
                 | ResourceData::AnimationSet(_)
                 | ResourceData::Mesh { .. }
-                | ResourceData::Prefab { .. }
                 | ResourceData::Character(_)
                 | ResourceData::Weapon(_) => {}
             }
@@ -1254,8 +1125,7 @@ impl ProjectDocument {
             ResourceData::Skeleton(_)
             | ResourceData::AnimationSet(_)
             | ResourceData::Character(_)
-            | ResourceData::Weapon(_)
-            | ResourceData::Prefab { .. } => {}
+            | ResourceData::Weapon(_) => {}
         }
 
         execute_resource_rename_plan(&plan)?;
@@ -1450,28 +1320,71 @@ impl ProjectDocument {
             .retain(|resource| !matches!(resource.data, ResourceData::Texture { .. }));
     }
 
-    /// Drop the short-lived project-resource bridge for the shared prefab
-    /// library. Prefabs are editor furniture and are discovered from
-    /// [`crate::prefabs_dir`]; keeping their paths here dirties every project
-    /// and makes global library state look project-owned. The enum variant
-    /// remains readable so projects saved while the bridge existed still load.
-    fn migrate_legacy_prefab_resources(&mut self) {
-        self.resources
-            .retain(|resource| !matches!(resource.data, ResourceData::Prefab { .. }));
+    /// Fold the former material-owned sky projection choices into the World
+    /// node. The material keeps only the aperture role; one World now owns the
+    /// projection, source texture and visibility policy.
+    fn migrate_legacy_material_skies(&mut self) {
+        let legacy_skies: Vec<(ResourceId, SkyMode)> = self
+            .resources
+            .iter()
+            .filter_map(|resource| {
+                let ResourceData::Material(material) = &resource.data else {
+                    return None;
+                };
+                if material.directional_sky {
+                    Some((resource.id, SkyMode::Cube))
+                } else if material.layered_sky {
+                    Some((resource.id, SkyMode::QuakeLayered))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for scene in &mut self.scenes {
+            let selected = legacy_skies
+                .iter()
+                .copied()
+                .filter(|(material, _)| {
+                    scene.brushes.iter().any(|brush| {
+                        brush
+                            .faces
+                            .iter()
+                            .any(|face| face.material == Some(*material))
+                    })
+                })
+                // The old renderer gave the cube pass priority if both were
+                // visible, so preserve that deterministic result.
+                .max_by_key(|(_, mode)| usize::from(*mode == SkyMode::Cube));
+            let Some((texture, mode)) = selected else {
+                continue;
+            };
+            let root = scene.root;
+            let Some(world) = scene.node_mut(root) else {
+                continue;
+            };
+            let NodeKind::World { sky, .. } = &mut world.kind else {
+                continue;
+            };
+            sky.mode = mode;
+            sky.visibility = SkyVisibility::ThroughSkySurfaces;
+            sky.texture = Some(texture);
+        }
+
+        for resource in &mut self.resources {
+            let ResourceData::Material(material) = &mut resource.data else {
+                continue;
+            };
+            material.sky_aperture |= material.layered_sky || material.directional_sky;
+            material.layered_sky = false;
+            material.directional_sky = false;
+        }
     }
 
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
-        // Resolve the world-format discriminator exactly once, from the
-        // presence rule the project was cooked with before the field
-        // existed. Never re-derive an already-stored value: a BSP project
-        // whose brushes were all deleted must stay BSP and report that, not
-        // silently reopen as a grid project.
-        if self.world_format.is_none() {
-            self.world_format = Some(self.world_format_from_geometry());
-        }
         self.migrate_legacy_texture_resources();
-        self.migrate_legacy_prefab_resources();
+        self.migrate_legacy_material_skies();
         for resource in &mut self.resources {
             if let ResourceData::Material(material) = &mut resource.data {
                 material.normalize_versions();
@@ -1681,7 +1594,6 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
         ResourceData::Texture { .. }
         | ResourceData::Skeleton(_)
         | ResourceData::Mesh { .. }
-        | ResourceData::Prefab { .. }
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. } => 0,
@@ -1736,7 +1648,6 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
         ResourceData::Texture { .. }
         | ResourceData::Skeleton(_)
         | ResourceData::Mesh { .. }
-        | ResourceData::Prefab { .. }
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. } => 0,
@@ -2042,8 +1953,7 @@ pub(crate) fn plan_resource_file_deletes(
         ResourceData::Skeleton(_)
         | ResourceData::AnimationSet(_)
         | ResourceData::Character(_)
-        | ResourceData::Weapon(_)
-        | ResourceData::Prefab { .. } => {}
+        | ResourceData::Weapon(_) => {}
     }
     plan
 }
@@ -2331,7 +2241,6 @@ pub(crate) const fn resource_default_stem(data: &ResourceData) -> &'static str {
         ResourceData::AnimationSet(_) => "animation_set",
         ResourceData::Weapon(_) => "weapon",
         ResourceData::Mesh { .. } => "mesh",
-        ResourceData::Prefab { .. } => "prefab",
         ResourceData::Scene { .. } => "room",
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "audio",
@@ -2350,7 +2259,6 @@ pub(crate) const fn resource_default_extension(data: &ResourceData) -> &'static 
         ResourceData::AnimationSet(_) => "animset",
         ResourceData::Weapon(_) => "weapon",
         ResourceData::Mesh { .. } => "psxmesh",
-        ResourceData::Prefab { .. } => "prefab",
         ResourceData::Scene { .. } => "room",
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "vag",

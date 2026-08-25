@@ -242,8 +242,18 @@ pub mod room_flags {
 
 /// Sky record flags.
 pub mod sky_flags {
-    /// A sky gradient should be drawn before room geometry.
+    /// A scene sky should be drawn before room geometry.
     pub const ENABLED: u16 = 1 << 0;
+    /// Cooker-generated panorama projection.
+    pub const PANORAMA: u16 = 1 << 1;
+    /// Masked two-layer Quake projection.
+    pub const QUAKE_LAYERED: u16 = 1 << 2;
+    /// Six-face directional cube projection.
+    pub const CUBE: u16 = 1 << 3;
+    /// Draw only if the BSP reported at least one visible sky aperture.
+    pub const THROUGH_SKY_SURFACES: u16 = 1 << 4;
+    /// Mutually exclusive projection bits.
+    pub const PROJECTION_MASK: u16 = PANORAMA | QUAKE_LAYERED | CUBE;
 }
 
 /// Cloud-layer record flags.
@@ -569,6 +579,10 @@ pub struct LevelSkyRecord {
     pub skybox_rows: u8,
     /// Sky flags.
     pub flags: u16,
+    /// Texture used by the selected projection, or `AssetId(u16::MAX)` when
+    /// the sky is disabled. Panorama, layered and cube skies share this one
+    /// residency handle.
+    pub texture_asset: AssetId,
     /// Cooked panorama/cyclorama backdrop geometry.
     pub cyclorama_quads: &'static [LevelCycloramaQuadRecord],
     /// Optional authored cloud layer used by the cooked cyclorama.
@@ -585,7 +599,8 @@ impl LevelSkyRecord {
         horizon_thickness_percent: 8,
         skybox_columns: 16,
         skybox_rows: 10,
-        flags: sky_flags::ENABLED,
+        flags: sky_flags::ENABLED | sky_flags::PANORAMA,
+        texture_asset: AssetId(u16::MAX),
         cyclorama_quads: &[],
         cloud_layer: LevelCloudLayerRecord::DEFAULT,
     };

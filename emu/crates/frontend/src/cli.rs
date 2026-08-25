@@ -132,7 +132,7 @@ pub enum EditorViewArg {
     ThreeD,
     #[value(name = "2d")]
     TwoD,
-    /// Room workspace in the Top orthographic BSP authoring view.
+    /// 3D workspace in the Top orthographic BSP authoring view.
     Top,
     Animation,
     Material,
@@ -544,12 +544,6 @@ pub struct DumpEditorPreviewArgs {
     /// Orbit target Z in editor/world units.
     #[arg(long, default_value_t = 2048)]
     pub target_z: i32,
-    /// Hide the streaming grid overlay.
-    #[arg(long)]
-    pub no_grid: bool,
-    /// Active floor to render (0 = ground). Diagnostic for stacked-floor rooms.
-    #[arg(long, default_value_t = 0)]
-    pub active_floor: usize,
 }
 
 /// Arguments for `dump-editor-ui`.
@@ -589,10 +583,6 @@ pub struct DumpEditorUiArgs {
     /// 60 Hz animation-frame distance between sequence images.
     #[arg(long, default_value_t = 1)]
     pub ui_frame_step: u16,
-    /// Render the embedded Play viewport with the named Room Topology debug
-    /// view. Accepted values: rooms, cells, portals, streaming.
-    #[arg(long, value_name = "VIEW")]
-    pub debug_map_view: Option<String>,
 }
 
 /// Arguments for `validate`.
@@ -3046,84 +3036,22 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
 
     let ctx = egui::Context::default();
     crate::theme::apply(&ctx);
-    let (viewport_image, viewport_overlay_lines) =
-        if matches!(args.view, EditorViewArg::ThreeD) && args.debug_map_view.is_none() {
-            headless_editor_viewport_image(&editor, &project_root)?
-        } else {
-            (
-                egui::ColorImage::new([640, 480], egui::Color32::from_rgb(8, 10, 14)),
-                Vec::new(),
-            )
-        };
+    let (viewport_image, viewport_overlay_lines) = if matches!(args.view, EditorViewArg::ThreeD) {
+        headless_editor_viewport_image(&editor, &project_root)?
+    } else {
+        (
+            egui::ColorImage::new([640, 480], egui::Color32::from_rgb(8, 10, 14)),
+            Vec::new(),
+        )
+    };
     let viewport_texture = ctx.load_texture(
         "headless-editor-viewport",
         viewport_image,
         egui::TextureOptions::NEAREST,
     );
-    let (viewport, play_status) = if let Some(view) = args.debug_map_view.as_deref() {
-        if !editor.set_play_debug_map_view(view) {
-            return Err(format!(
-                "unknown --debug-map-view {view:?}; expected rooms, cells, portals, or streaming"
-            ));
-        }
-        let topology = psxed_project::playtest::build_debug_topology(editor.project());
-        let room_count = topology
-            .cells
-            .iter()
-            .map(|cell| cell.runtime_room_index + 1)
-            .max()
-            .unwrap_or_default();
-        let room_mask = if room_count >= u64::BITS as usize {
-            u64::MAX
-        } else if room_count == 0 {
-            0
-        } else {
-            (1u64 << room_count) - 1
-        };
-        let portal_count = topology.portals.len().min(u64::BITS as usize);
-        let portal_mask = if portal_count == u64::BITS as usize {
-            u64::MAX
-        } else if portal_count == 0 {
-            0
-        } else {
-            (1u64 << portal_count) - 1
-        };
-        let metrics = psxed_ui::EditorPlaytestMetrics {
-            chunk_visible: room_count as u32,
-            chunk_loaded: room_count as u32,
-            stream_slot_limit: room_count.max(1) as u32,
-            portal_visible_rooms: room_count as u32,
-            chunk_loaded_mask: room_mask,
-            chunk_active_mask: room_mask,
-            chunk_drawn_mask: room_mask,
-            portal_visible_mask: room_mask,
-            portal_tested_mask: room_mask,
-            portal_accepted_mask: room_mask,
-            portal_tested_portal_mask: portal_mask,
-            portal_accepted_portal_mask: portal_mask,
-            player_map_valid: room_count > 0,
-            player_room_index: 0,
-            portal_current_room_index: 0,
-            ..Default::default()
-        };
-        (
-            EditorViewport3dPresentation::play(
-                viewport_texture.id(),
-                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                psxed_ui::EditorPlaytestTapeStatus::default(),
-                Some(metrics),
-                false,
-            ),
-            EditorPlaytestStatus::Running {
-                input_captured: false,
-            },
-        )
-    } else {
-        (
-            standalone_editor_preview_presentation(viewport_texture.id(), viewport_overlay_lines),
-            EditorPlaytestStatus::Idle,
-        )
-    };
+    let viewport =
+        standalone_editor_preview_presentation(viewport_texture.id(), viewport_overlay_lines);
+    let play_status = EditorPlaytestStatus::Idle;
 
     // Prime one complete frame before injecting input. This mirrors the native
     // app's first layout pass and ensures fonts/resource textures and widget
@@ -3223,23 +3151,11 @@ fn headless_editor_viewport_image(
     let mut frame = crate::editor_preview::build_phase1_frame(
         project,
         editor.viewport_3d_camera(),
-        visibility.preview_fog,
-        visibility.preview_backface_wireframe,
         visibility.preview_bounds,
-        visibility.show_grid,
-        visibility.show_portals,
         visibility.show_lights,
         &hidden,
-        editor.active_room_id(),
-        0,
         NodeId::ROOT,
         None,
-        None,
-        None,
-        &[],
-        &[],
-        None,
-        &[],
         None,
         &[],
         None,
@@ -3514,28 +3430,9 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         camera,
         true,
         true,
-        true,
-        !args.no_grid,
-        true,
-        true,
         &empty_hidden,
-        // Active room defaults to the first room; pass the requested
-        // active floor so stacked-floor rooms can be inspected per floor.
-        project
-            .active_scene()
-            .nodes()
-            .iter()
-            .find(|n| matches!(n.kind, psxed_project::NodeKind::Section { .. }))
-            .map(|n| n.id),
-        args.active_floor,
         NodeId::ROOT,
         None,
-        None,
-        None,
-        &[],
-        &[],
-        None,
-        &[],
         None,
         &[],
         None,

@@ -589,7 +589,7 @@ fn add_texture_material(
     source_name: &str,
     target_name: &str,
 ) -> ResourceId {
-    let source = psxed_project::legacy_grid_starter_dir()
+    let source = psxed_project::default_project_dir()
         .join("assets/textures")
         .join(source_name);
     assert!(
@@ -880,31 +880,31 @@ fn ashen_sanctum_project_is_authored_through_production_commands() {
     let slate = add_texture_material(
         &mut workspace,
         "Sanctum Slate",
-        "delven_02_slateflr1b_q2.psxt",
+        "sanctum_slate.psxt",
         "sanctum_slate.psxt",
     );
     let stone = add_texture_material(
         &mut workspace,
         "Sanctum Masonry",
-        "delven_07_stonebrk4a_q0.psxt",
+        "sanctum_masonry.psxt",
         "sanctum_masonry.psxt",
     );
     let trim = add_texture_material(
         &mut workspace,
         "Sanctum Trim",
-        "delven_23_stonetrm1b_q2.psxt",
+        "sanctum_trim.psxt",
         "sanctum_trim.psxt",
     );
     let door_material = add_texture_material(
         &mut workspace,
         "Sanctum Gate",
-        "bigdoor_1a.psxt",
+        "sanctum_gate.psxt",
         "sanctum_gate.psxt",
     );
     let metal = add_texture_material(
         &mut workspace,
         "Sanctum Metal",
-        "metal_1a.psxt",
+        "sanctum_metal.psxt",
         "sanctum_metal.psxt",
     );
 
@@ -1533,10 +1533,6 @@ fn ashen_sanctum_project_is_authored_through_production_commands() {
     workspace.save_if_dirty().expect("persist Ashen Sanctum");
     let reopened = EditorWorkspace::open_directory(&project_dir).expect("reopen Ashen Sanctum");
     assert!(reopened.has_player_source());
-    assert_eq!(
-        reopened.project().world_format(),
-        psxed_project::ProjectWorldFormat::Bsp
-    );
     let scene = reopened.project().active_scene();
     assert!(
         scene.brushes.len() >= 65,

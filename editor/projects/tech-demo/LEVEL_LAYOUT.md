@@ -133,8 +133,8 @@ without blocking completion.
   component of kind `Checkpoint`.
 - One authored Water contents volume in the Flooded Junction. There is no lava
   brush in this project.
-- BSP PVS and the project sky/panorama path; visibility is automatic, not
-  authored with legacy grid portals.
+- BSP PVS and the project sky/panorama path; visibility is generated
+  automatically by the BSP compiler.
 
 ### Current geometry and cook budget
 

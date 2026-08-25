@@ -354,7 +354,6 @@ pub(crate) fn remap_resource_data(
         ResourceData::Weapon(weapon) => remap_resource_id_option(&mut weapon.model, id_map),
         ResourceData::Texture { .. }
         | ResourceData::Mesh { .. }
-        | ResourceData::Prefab { .. }
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
@@ -369,18 +368,6 @@ pub(crate) fn remap_resource_id_option(
     if let Some(mapped) = id.and_then(|id| id_map.get(&id).copied()) {
         *id = Some(mapped);
     }
-}
-
-#[cfg(test)]
-pub(crate) fn project_has_resource_name(
-    project: &ProjectDocument,
-    name: &str,
-    predicate: impl Fn(&ResourceData) -> bool,
-) -> bool {
-    project
-        .resources
-        .iter()
-        .any(|resource| resource.name == name && predicate(&resource.data))
 }
 
 pub(crate) fn starter_character_asset_path(path: &str) -> bool {

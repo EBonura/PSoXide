@@ -7,7 +7,7 @@
 //! sequence of import dialogs.
 //!
 //! ```text
-//! import-locomotion archive/legacy-grid/archive/cortex/cortex_anim/project.ron "$HOME/Desktop/Bonnie Studios"
+//! import-locomotion editor/projects/default/project.ron "/path/to/animation/library"
 //! ```
 //!
 //! The pack is a fixed filename convention, matching the eight locomotion

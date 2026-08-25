@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn collect_entity_bounds_covers_starter_scene_entities() {
-    let workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+    let workspace = EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let bounds = workspace.collect_entity_bounds(workspace.active_room_id());
     assert!(
         !bounds.is_empty(),
@@ -30,7 +29,7 @@ fn collect_entity_bounds_covers_starter_scene_entities() {
 #[test]
 fn selecting_character_component_uses_parent_entity_bounds() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let scene = workspace.project.active_scene();
     let entity = starter_player_entity(scene);
     let controller = entity
@@ -55,8 +54,7 @@ fn selecting_character_component_uses_parent_entity_bounds() {
 #[test]
 fn dropping_model_resource_creates_component_entity() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
-    let room = workspace.active_room_id().expect("starter has a room");
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let model_id = workspace
         .project
         .resources
@@ -65,7 +63,7 @@ fn dropping_model_resource_creates_component_entity() {
         .expect("starter has a model")
         .id;
 
-    workspace.drop_resource_at_room_hit(model_id, room, [512.0, 0.0, 512.0], None);
+    workspace.drop_resource_at_room_hit(model_id, NodeId::ROOT, [512.0, 0.0, 512.0], None);
 
     let scene = workspace.project.active_scene();
     let entity = scene
@@ -94,8 +92,7 @@ fn dropping_model_resource_creates_component_entity() {
 #[test]
 fn dropping_character_resource_creates_entity_components() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
-    let room = workspace.active_room_id().expect("starter has a room");
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let character_id = workspace
         .project
         .resources
@@ -104,7 +101,7 @@ fn dropping_character_resource_creates_entity_components() {
         .expect("starter has a character")
         .id;
 
-    workspace.drop_resource_at_room_hit(character_id, room, [512.0, 0.0, 512.0], None);
+    workspace.drop_resource_at_room_hit(character_id, NodeId::ROOT, [512.0, 0.0, 512.0], None);
 
     let scene = workspace.project.active_scene();
     let entity = scene
@@ -117,7 +114,6 @@ fn dropping_character_resource_creates_entity_components() {
                 child.kind,
                 NodeKind::CharacterController {
                     character: Some(id),
-                    player: false,
                     ..
                 } if id == character_id
             )
@@ -643,12 +639,12 @@ fn entity_add_child_menu_includes_camera_component() {
 #[test]
 fn add_component_to_host_creates_child_and_selects_it() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
-    let room = workspace.active_room_id().expect("starter has room");
-    let entity = workspace
-        .project
-        .active_scene_mut()
-        .add_node(room, "Enemy", NodeKind::Entity);
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let entity =
+        workspace
+            .project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Enemy", NodeKind::Entity);
 
     let controller = workspace
         .add_component_to_host(
@@ -675,12 +671,12 @@ fn add_component_to_host_creates_child_and_selects_it() {
 #[test]
 fn add_camera_component_to_entity_selects_new_child() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
-    let room = workspace.active_room_id().expect("starter has room");
-    let entity = workspace
-        .project
-        .active_scene_mut()
-        .add_node(room, "Player", NodeKind::Entity);
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let entity =
+        workspace
+            .project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Player", NodeKind::Entity);
 
     let camera = workspace
         .add_component_to_host(
@@ -703,14 +699,10 @@ fn add_camera_component_to_entity_selects_new_child() {
 }
 
 #[test]
-fn camera_preview_request_targets_floor_anchored_player_origin() {
+fn camera_preview_request_targets_bsp_world_origin() {
     let mut project = ProjectDocument::new("camera-preview");
     let scene = project.active_scene_mut();
-    let mut grid = WorldGrid::empty(3, 3, 1024);
-    grid.origin = [-1, -2];
-    grid.set_floor(1, 2, 256, None);
-    let room = scene.add_node(scene.root, "Room", NodeKind::Section { grid });
-    let player = scene.add_node(room, "Player", NodeKind::Entity);
+    let player = scene.add_node(scene.root, "Player", NodeKind::Entity);
     scene
         .node_mut(player)
         .expect("player exists")
@@ -740,78 +732,7 @@ fn camera_preview_request_targets_floor_anchored_player_origin() {
     let request = workspace
         .selected_camera_preview_request()
         .expect("camera preview request");
-    let scene = workspace.project.active_scene();
-    let NodeKind::Section { grid } = &scene.node(room).expect("room exists").kind else {
-        panic!("expected room");
-    };
-    let expected_player = psxed_project::spatial::floor_anchored_node_preview_origin(
-        grid,
-        &scene.node(player).unwrap().transform,
-    );
-
-    assert_eq!(request.active_room, Some(room));
-    assert_eq!(request.active_floor, 0);
-    assert_eq!(
-        request.camera.target,
-        [
-            expected_player[0],
-            expected_player[1] + 512,
-            expected_player[2]
-        ]
-    );
-    assert_ne!(request.camera.target, [0, 7 + 512, 0]);
-}
-
-#[test]
-fn add_room_child_creates_three_by_three_floor_with_first_material() {
-    let mut project = ProjectDocument::new("new-room");
-    let material = project.add_resource(
-        "First Material",
-        ResourceData::Material(MaterialResource::opaque(None)),
-    );
-    project.add_resource(
-        "Second Material",
-        ResourceData::Material(MaterialResource::opaque(None)),
-    );
-    let world = project.active_scene_mut().add_node(
-        NodeId::ROOT,
-        "World",
-        NodeKind::World {
-            sector_size: 1536,
-            sky: SkySettings::default(),
-            far_vista: FarVistaSettings::default(),
-            camera: WorldCameraSettings::default(),
-            culling: WorldCullingSettings::default(),
-            streaming: WorldStreamingSettings::default(),
-            physics: WorldPhysicsSettings::default(),
-        },
-    );
-    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
-    workspace.replace_node_selection(world);
-
-    workspace.add_child(
-        NodeKind::Section {
-            grid: WorldGrid::empty(9, 9, 1024),
-        },
-        "Room",
-    );
-
-    let room = workspace.selection.selected_node;
-    let scene = workspace.project.active_scene();
-    let node = scene.node(room).expect("new room exists");
-    let NodeKind::Section { grid } = &node.kind else {
-        panic!("added node should be a room");
-    };
-    assert_eq!(node.parent, Some(world));
-    assert_eq!((grid.width, grid.depth), (3, 3));
-    assert_eq!(grid.sector_size, 1536);
-    assert_eq!(grid.sectors.iter().flatten().count(), 9);
-    for sector in grid.sectors.iter().flatten() {
-        let floor = sector.floor.as_ref().expect("starter sector has floor");
-        assert_eq!(floor.material, Some(material));
-        assert!(sector.ceiling.is_none());
-    }
-    assert!(workspace.is_dirty());
+    assert_eq!(request.camera.target, [0, 7 + 512, 0]);
 }
 
 #[test]
@@ -1179,8 +1100,7 @@ fn character_controller_player_toggle_demotes_existing_player_source() {
 
 #[test]
 fn pick_entity_bound_returns_node_when_ray_hits_centre() {
-    let workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+    let workspace = EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let bounds = workspace.collect_entity_bounds(workspace.active_room_id());
     let target = bounds
         .iter()
@@ -1246,9 +1166,8 @@ fn pick_entity_bound_includes_box_prop_bounds() {
 
 #[test]
 fn project_filesystem_rows_are_generated_from_resources() {
-    let project = ProjectDocument::legacy_grid_starter();
-    let prefab_library = load_prefab_library().expect("prefab library loads");
-    let rows = project_filesystem_rows(&project, &prefab_library);
+    let project = ProjectDocument::starter();
+    let rows = project_filesystem_rows(&project);
     let material_name = project
         .resources
         .iter()
@@ -1261,20 +1180,17 @@ fn project_filesystem_rows_are_generated_from_resources() {
     assert!(rows.iter().any(|row| row.name == "characters"));
     assert!(rows
         .iter()
-        .any(|row| row.name == "crimson_cross_knight_player.profile" && row.resource.is_some()));
+        .any(|row| row.name == "aletha.profile" && row.resource.is_some()));
     assert!(rows
         .iter()
         .any(|row| row.name == material_name && row.resource.is_some()));
-    assert!(rows.iter().any(|row| {
-        row.key.starts_with("res://prefabs/") && row.resource.is_none() && row.prefab.is_some()
-    }));
+    assert!(!rows.iter().any(|row| row.key.starts_with("res://prefabs/")));
 }
 
 #[test]
 fn collapsed_project_filesystem_folder_hides_children() {
-    let project = ProjectDocument::legacy_grid_starter();
-    let prefab_library = load_prefab_library().expect("prefab library loads");
-    let rows = project_filesystem_rows(&project, &prefab_library);
+    let project = ProjectDocument::starter();
+    let rows = project_filesystem_rows(&project);
     let material_name = project
         .resources
         .iter()
@@ -1303,7 +1219,7 @@ fn compact_middle_keeps_long_asset_names_dock_sized() {
 
 #[test]
 fn resource_filter_and_search_match_expected_resources() {
-    let project = ProjectDocument::legacy_grid_starter();
+    let project = ProjectDocument::starter();
     // Legacy Texture resources fold into materials at load.
     assert!(!project
         .resources

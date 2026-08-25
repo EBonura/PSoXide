@@ -21,7 +21,7 @@ mod upload_queue;
 use crate::cd_stream;
 use psx_asset::Texture;
 use psx_engine::telemetry;
-use psx_font::{upload_fonts, BitmapFont, FontAtlas};
+use psx_font::{font_pack_metrics, upload_fonts, BitmapFont, FontAtlas, FontSetVram};
 use psx_gpu::material::{BlendMode, TextureMaterial, TextureWindow};
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
@@ -54,6 +54,13 @@ pub const SKY_PANORAMA_WIDTH: u16 = 512;
 /// Cooked sky panorama height in texels.
 pub const SKY_PANORAMA_HEIGHT: u16 = 256;
 
+/// Six independently quantised 16-colour palettes for a cube environment.
+pub const DIRECTIONAL_SKY_CLUT_ENTRIES: u16 = 6 * 16;
+/// Width of the six-face source atlas: six adjacent 4bpp texture pages.
+pub const DIRECTIONAL_SKY_ATLAS_WIDTH: u16 = 1536;
+/// Height of each full-resolution cube face.
+pub const DIRECTIONAL_SKY_ATLAS_HEIGHT: u16 = 256;
+
 /// Shadow decal's texel U origin inside the shared shadow/particle 4bpp
 /// page. UVs are page-relative, so only the page base moves.
 pub const SHADOW_TEXEL_U: u8 = 64;
@@ -67,15 +74,15 @@ pub const PARTICLE_TEXTURE_HALFWORDS_PER_ROW: u16 = PARTICLE_TEXTURE_SIZE / 4;
 /// Streamed UI image VRAM slots created on menu entry, tracked so they
 /// can be released on gameplay entry. One entry per streamed Texture
 /// asset.
-#[cfg(feature = "cd-stream-bench")]
 const MAX_UI_IMAGE_SLOTS: usize = 16;
 
 const UI_TEXTURE_UPLOAD_MAX_STEPS: u8 = 8;
 
 /// VRAM placement contract the game passes into every [`VramRuntime`]
 /// method that reserves or allocates space (the PROJECTION-parameter
-/// pattern): the framebuffer, the room-material page band, the
-/// model-atlas region, and the managed CLUT band base row.
+/// pattern): the framebuffer, the preferred room-material page band, the
+/// preferred model-atlas region, and the managed CLUT band base row. Room and
+/// model pages are backed by the unified allocator only when actually used.
 #[derive(Copy, Clone)]
 pub struct VramLayout {
     /// Double-buffered framebuffer rect, reserved from the allocator.
@@ -439,8 +446,8 @@ pub struct VramSlot {
     /// Uploaded texture height in texels.
     pub texture_height: u16,
     /// Allocator handle for the texture window/page this slot owns. `Empty` when
-    /// the slot shares another slot's pixels (a clut-only variant) or is a
-    /// session-persistent resource (model/sky) freed elsewhere.
+    /// the slot shares another slot's pixels (a CLUT-only variant), occupies the
+    /// shared small-model page, or is a gameplay-scoped sky freed elsewhere.
     pub region: VramHandle,
     /// Allocator handle for this slot's CLUT. `Empty` if not separately owned.
     pub clut_region: VramHandle,
@@ -457,6 +464,19 @@ pub enum VramSlotClutMode {
     ModelAtlas,
     /// Streamed sky panorama band palettes.
     SkyPanorama,
+    /// Three-page, six-face scenic cube environment.
+    DirectionalSky,
+}
+
+/// Texture layout selected by the scene-level sky definition.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SkyTextureKind {
+    /// Cooker-generated 512x256 multi-palette panorama.
+    Panorama,
+    /// Masked foreground plus opaque background Quake pair.
+    QuakeLayered,
+    /// Six adjacent directional 256x256 faces.
+    Cube,
 }
 
 const VRAM_SLOT_EMPTY: Option<VramSlot> = None;
@@ -466,8 +486,25 @@ const VRAM_SLOT_EMPTY: Option<VramSlot> = None;
 /// menu UI-image loader and the gameplay sky loader tell their streamed
 /// (empty-bytes) Texture assets apart by this room-table lookup.
 pub fn is_sky_panorama_asset(rooms: &'static [LevelRoomRecord], asset_id: AssetId) -> bool {
-    rooms.iter().any(|room| {
-        room.sky.flags & sky_flags::ENABLED != 0 && room.sky.cloud_layer.texture_asset == asset_id
+    scene_sky_texture_kind(rooms, asset_id) == Some(SkyTextureKind::Panorama)
+}
+
+/// Return the scene-sky layout that owns `asset_id`, if any. Enabled-only
+/// legacy records are interpreted as panoramas.
+pub fn scene_sky_texture_kind(
+    rooms: &'static [LevelRoomRecord],
+    asset_id: AssetId,
+) -> Option<SkyTextureKind> {
+    rooms.iter().find_map(|room| {
+        if room.sky.flags & sky_flags::ENABLED == 0 || room.sky.texture_asset != asset_id {
+            return None;
+        }
+        match room.sky.flags & sky_flags::PROJECTION_MASK {
+            0 | sky_flags::PANORAMA => Some(SkyTextureKind::Panorama),
+            sky_flags::QUAKE_LAYERED => Some(SkyTextureKind::QuakeLayered),
+            sky_flags::CUBE => Some(SkyTextureKind::Cube),
+            _ => None,
+        }
     })
 }
 
@@ -562,6 +599,18 @@ pub struct VramRuntime<
     allocator: VramAllocator<TPAGES, CLUT_ROWS>,
     /// Set once the still-hardcoded VRAM regions are reserved in `allocator`.
     regions_reserved: bool,
+    /// Allocator ownership for the active scene's font pack. Menu and gameplay
+    /// use different packs; retaining these handles lets a transition return
+    /// the old pages instead of pinning every front-end font for the session.
+    font_set: Option<FontSetVram>,
+    /// Number of fonts in `font_set`. The current cooked flow has two resource
+    /// sets (all menu fonts versus the single gameplay HUD font), so count is a
+    /// sufficient and allocation-free identity key.
+    font_count: u8,
+    /// The lower-right 128x128 quadrant of a one-page font pack when its upload
+    /// stays in the upper half. Gameplay shadow and particle pixels borrow this
+    /// otherwise-unused space; the font pack remains the sole page owner.
+    font_effect_page: Option<Tpage>,
     /// Current room at the last eviction pass. Eviction only runs when the
     /// streamed residency set shifts (the player crosses into a new room),
     /// keeping it off the per-frame path.
@@ -577,15 +626,19 @@ pub struct VramRuntime<
     /// resident.
     sky_page_region: VramHandle,
     sky_clut_regions: [VramHandle; SKY_PANORAMA_PALETTE_BANDS],
-    /// Shadow and particle decals share one 4bpp page (shadow at U=64,
-    /// particle at U=0). Allocated once from the unified allocator on first
-    /// decal upload.
-    shadow_particle_page: Option<Tpage>,
+    /// Up to four 128x128 4bpp model atlases occupy the quadrants of one page.
+    /// Shadow and particle pixels normally borrow the gameplay font page; if a
+    /// future font pack fills that page, the fourth quadrant is reserved as a
+    /// safe fallback.
+    small_texture_page: Option<Tpage>,
+    small_texture_region: VramHandle,
+    small_model_quadrants: u8,
+    shadow_clut_region: VramHandle,
+    particle_clut_region: VramHandle,
     upload_queue: VramUploadQueue,
     /// Streamed UI image VRAM slots created on menu entry, tracked so they
     /// can be released on gameplay entry. One entry per streamed Texture
     /// asset.
-    #[cfg(feature = "cd-stream-bench")]
     ui_image_slots: [Option<AssetId>; MAX_UI_IMAGE_SLOTS],
 }
 
@@ -624,14 +677,20 @@ impl<
             slot_count: 0,
             allocator: VramAllocator::new(layout.clut_base_y),
             regions_reserved: false,
+            font_set: None,
+            font_count: 0,
+            font_effect_page: None,
             last_evict_room: INVALID_ROOM_INDEX,
             sky_page_tpage_words: [0; 2],
             sky_clut_words: [0; SKY_PANORAMA_PALETTE_BANDS],
             sky_page_region: VramHandle::Empty,
             sky_clut_regions: [VramHandle::Empty; SKY_PANORAMA_PALETTE_BANDS],
-            shadow_particle_page: None,
+            small_texture_page: None,
+            small_texture_region: VramHandle::Empty,
+            small_model_quadrants: 0,
+            shadow_clut_region: VramHandle::Empty,
+            particle_clut_region: VramHandle::Empty,
             upload_queue: VramUploadQueue::new(),
-            #[cfg(feature = "cd-stream-bench")]
             ui_image_slots: [None; MAX_UI_IMAGE_SLOTS],
         }
     }
@@ -678,7 +737,9 @@ impl<
                 if slot.asset == asset_id
                     && matches!(
                         slot.clut_mode,
-                        VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
+                        VramSlotClutMode::OpaqueZero
+                            | VramSlotClutMode::TransparentZero
+                            | VramSlotClutMode::DirectionalSky
                     )
                 {
                     self.free_vram_slot(i);
@@ -712,7 +773,9 @@ impl<
             };
             if !matches!(
                 slot.clut_mode,
-                VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
+                VramSlotClutMode::OpaqueZero
+                    | VramSlotClutMode::TransparentZero
+                    | VramSlotClutMode::DirectionalSky
             ) {
                 continue;
             }
@@ -730,25 +793,22 @@ impl<
     fn reserve_static_vram_regions(&mut self, layout: VramLayout) {
         // Double-buffered framebuffer.
         self.allocator.reserve_rect(layout.framebuffer);
-        // Room-material window band (allocated via the unified allocator).
+        // Room-material pages are backed lazily by the unified allocator; this
+        // call records their preferred range without reserving unused capacity.
         self.allocator
             .reserve_room_band(layout.room_tpage_base_x, 0);
-        // Column between the framebuffer and the model-atlas region. Model atlases,
-        // the sky panorama, and shadow/particle decals are all allocated dynamically
-        // (rows 256 and 0); reserving this gap keeps model atlases at their historical
-        // x=384 base.
-        self.allocator.reserve_rect(VramRect::new(
-            320,
-            layout.model_tpage.y(),
-            layout.model_tpage.x() - 320,
-            256,
-        ));
+        // The old x=320..384 lower-page gap existed only to preserve a
+        // historical model base. Every consumer now carries its allocated
+        // tpage, so the aligned page at x=320 is ordinary usable VRAM.
     }
 
-    /// Reserve the static VRAM regions on first call, then pack every UI
-    /// font into one combined atlas and upload it in a single `GP0(A0h)`
-    /// transfer. Returns `true` only when the complete requested set is
-    /// available; every `false` result leaves all output slots empty.
+    /// Reserve the static VRAM regions on first call, then make `fonts` the
+    /// active scene's complete font set. Changing resource sets releases the
+    /// previous page run and shared CLUT before uploading the replacement in a
+    /// single `GP0(A0h)` transfer.
+    ///
+    /// Returns `true` only when the complete requested set is available; every
+    /// `false` result leaves all output slots empty.
     #[must_use = "a false result means no complete font set is available"]
     pub fn acquire_shared_ui_fonts<const LEN: usize>(
         &mut self,
@@ -762,22 +822,57 @@ impl<
             self.regions_reserved = true;
         }
         if fonts.is_empty() {
+            self.release_ui_fonts(ui_fonts);
             return true;
         }
         if fonts.len() > ui_fonts.len() {
             ui_fonts.fill(None);
             return false;
         }
-        if ui_fonts[..fonts.len()].iter().all(Option::is_some) {
+        if usize::from(self.font_count) == fonts.len()
+            && self.font_set.is_some()
+            && ui_fonts[..fonts.len()].iter().all(Option::is_some)
+        {
             return true;
         }
 
-        // Fonts are uploaded once and never torn down (menu and gameplay HUD
-        // share them), so the returned VRAM handle is not retained. The SDK
-        // clears every output slot before planning, making any false result a
-        // complete, observable failure rather than a partial font set.
-        upload_fonts(fonts, &mut self.allocator, scratch.words_mut(), ui_fonts).is_some()
-            && ui_fonts[..fonts.len()].iter().all(Option::is_some)
+        self.release_ui_fonts(ui_fonts);
+        let metrics = font_pack_metrics(fonts);
+        let Some(font_set) =
+            upload_fonts(fonts, &mut self.allocator, scratch.words_mut(), ui_fonts)
+        else {
+            return false;
+        };
+        if !ui_fonts[..fonts.len()].iter().all(Option::is_some) {
+            self.allocator.free(font_set.pages);
+            self.allocator.free(font_set.clut);
+            ui_fonts.fill(None);
+            return false;
+        }
+        self.font_set = Some(font_set);
+        self.font_count = fonts.len().min(usize::from(u8::MAX)) as u8;
+        self.font_effect_page = match (metrics, font_set.pages) {
+            (Some(metrics), VramHandle::Rect(rect))
+                if metrics.pages == 1 && metrics.upload_rows <= 128 =>
+            {
+                Some(Tpage::new(rect.x, rect.y, TexDepth::Bit4))
+            }
+            _ => None,
+        };
+        true
+    }
+
+    /// Return the active font pack to the allocator and invalidate every
+    /// caller-visible atlas. VRAM bytes are deliberately not cleared: the next
+    /// owner overwrites them, while allocator ownership remains authoritative.
+    pub fn release_ui_fonts(&mut self, ui_fonts: &mut [Option<FontAtlas>]) {
+        if let Some(font_set) = self.font_set.take() {
+            self.allocator.free(font_set.pages);
+            self.allocator.free(font_set.clut);
+        }
+        self.font_count = 0;
+        self.font_effect_page = None;
+        ui_fonts.fill(None);
     }
 
     /// Advance the upload queue by up to `row_budget` texture rows,
@@ -832,12 +927,41 @@ impl<
         self.sky_clut_words[band.min(SKY_PANORAMA_PALETTE_BANDS - 1)]
     }
 
-    fn shadow_particle_page(&mut self) -> Option<Tpage> {
-        if self.shadow_particle_page.is_none() {
-            let (tpage, _region) = self.allocator.alloc_page_run(1, TexDepth::Bit4, 0)?;
-            self.shadow_particle_page = Some(tpage);
+    fn small_texture_page(&mut self) -> Option<Tpage> {
+        if self.small_texture_page.is_none() {
+            let (tpage, region) = self.allocator.alloc_page_run(1, TexDepth::Bit4, 256)?;
+            self.small_texture_page = Some(tpage);
+            self.small_texture_region = region;
         }
-        self.shadow_particle_page
+        self.small_texture_page
+    }
+
+    fn allocate_small_model_quadrant(&mut self) -> Option<(Tpage, u8, u8)> {
+        let page = self.small_texture_page()?;
+        for quadrant in 0..4u8 {
+            let bit = 1u8 << quadrant;
+            if self.small_model_quadrants & bit != 0 {
+                continue;
+            }
+            self.small_model_quadrants |= bit;
+            let origin_u = if quadrant & 1 == 0 { 0 } else { 128 };
+            let origin_v = if quadrant & 2 == 0 { 0 } else { 128 };
+            return Some((page, origin_u, origin_v));
+        }
+        None
+    }
+
+    /// Page whose lower-right quadrant holds generated gameplay effects.
+    /// Prefer unused pixels in the resident HUD-font page. If the active font
+    /// pack is too tall, reserve quadrant three of the small-model page and
+    /// retain the previous collision-free layout.
+    fn effect_texture_page(&mut self) -> Option<Tpage> {
+        if let Some(page) = self.font_effect_page {
+            return Some(page);
+        }
+        let page = self.small_texture_page()?;
+        self.small_model_quadrants |= 1 << 3;
+        Some(page)
     }
 
     /// Upload the subtract-blended circular floor shadow decal (a 64x64
@@ -848,12 +972,13 @@ impl<
             return None;
         }
 
-        let page = self.shadow_particle_page()?;
-        let (clut, _clut_region) = self.allocator.alloc_clut(texture.clut_entries())?;
+        let page = self.effect_texture_page()?;
+        let (clut, clut_region) = self.allocator.alloc_clut(texture.clut_entries())?;
+        self.shadow_clut_region = clut_region;
         upload_bytes(
             VramRect::new(
-                page.x() + u16::from(SHADOW_TEXEL_U) / 4,
-                page.y(),
+                page.x() + 128 / 4 + u16::from(SHADOW_TEXEL_U) / 4,
+                page.y() + 128,
                 texture.halfwords_per_row(),
                 texture.height(),
             ),
@@ -871,7 +996,8 @@ impl<
                 (0x80, 0x80, 0x80),
                 BlendMode::Average,
             )
-            .with_raw_texture(true),
+            .with_raw_texture(true)
+            .with_texture_window(TextureWindow::power_of_two_tile(128, 128, 128, 128)),
         )
     }
 
@@ -907,12 +1033,13 @@ impl<
         clut[2] = white[0];
         clut[3] = white[1];
 
-        let page = self.shadow_particle_page()?;
-        let (clut_pos, _clut_region) = self.allocator.alloc_clut(16)?;
+        let page = self.effect_texture_page()?;
+        let (clut_pos, clut_region) = self.allocator.alloc_clut(16)?;
+        self.particle_clut_region = clut_region;
         upload_bytes(
             VramRect::new(
-                page.x() + u16::from(PARTICLE_TEXEL_U) / 4,
-                page.y(),
+                page.x() + 128 / 4 + u16::from(PARTICLE_TEXEL_U) / 4,
+                page.y() + 128,
                 PARTICLE_TEXTURE_HALFWORDS_PER_ROW,
                 PARTICLE_TEXTURE_SIZE,
             ),
@@ -920,12 +1047,15 @@ impl<
         );
         upload_clut(VramRect::new(clut_pos.x(), clut_pos.y(), 16, 1), &clut);
 
-        Some(TextureMaterial::blended(
-            clut_pos.uv_clut_word(),
-            page.uv_tpage_word(0),
-            (0x80, 0x80, 0x80),
-            BlendMode::Average,
-        ))
+        Some(
+            TextureMaterial::blended(
+                clut_pos.uv_clut_word(),
+                page.uv_tpage_word(0),
+                (0x80, 0x80, 0x80),
+                BlendMode::Average,
+            )
+            .with_texture_window(TextureWindow::power_of_two_tile(128, 128, 128, 128)),
+        )
     }
 
     /// Look up the VRAM slot a previously-uploaded asset occupies.
@@ -946,6 +1076,20 @@ impl<
         self.find_vram_slot(asset_id, VramSlotClutMode::SkyPanorama)
     }
 
+    /// Resolve the single scene sky regardless of its specialized layout.
+    pub fn find_sky_texture_vram_slot(
+        &self,
+        kind: SkyTextureKind,
+        asset_id: AssetId,
+    ) -> Option<VramSlot> {
+        let mode = match kind {
+            SkyTextureKind::Panorama => VramSlotClutMode::SkyPanorama,
+            SkyTextureKind::QuakeLayered => VramSlotClutMode::TransparentZero,
+            SkyTextureKind::Cube => VramSlotClutMode::DirectionalSky,
+        };
+        self.find_vram_slot(asset_id, mode)
+    }
+
     /// Ready room-texture slot (either 4bpp CLUT mode) for `asset_id`.
     pub fn find_room_texture_vram_slot(&self, asset_id: AssetId) -> Option<VramSlot> {
         self.slots.iter().filter_map(|s| *s).find(|s| {
@@ -953,7 +1097,9 @@ impl<
                 && s.asset == asset_id
                 && matches!(
                     s.clut_mode,
-                    VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
+                    VramSlotClutMode::OpaqueZero
+                        | VramSlotClutMode::TransparentZero
+                        | VramSlotClutMode::DirectionalSky
                 )
         })
     }
@@ -973,7 +1119,9 @@ impl<
                 && s.asset == asset_id
                 && matches!(
                     s.clut_mode,
-                    VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
+                    VramSlotClutMode::OpaqueZero
+                        | VramSlotClutMode::TransparentZero
+                        | VramSlotClutMode::DirectionalSky
                 )
         })
     }
@@ -1012,6 +1160,26 @@ impl<
         )
     }
 
+    /// Upload the scene's one sky texture through its specialized inner
+    /// layout while keeping residency and lifetime under one owner.
+    pub fn ensure_sky_texture_uploaded(
+        &mut self,
+        layout: VramLayout,
+        kind: SkyTextureKind,
+        asset_id: AssetId,
+        asset_bytes: &[u8],
+    ) -> Option<VramSlot> {
+        match kind {
+            SkyTextureKind::Panorama => self.ensure_sky_panorama_uploaded(asset_id, asset_bytes),
+            SkyTextureKind::QuakeLayered => {
+                self.ensure_layered_sky_texture_uploaded(layout, asset_id, asset_bytes)
+            }
+            SkyTextureKind::Cube => {
+                self.ensure_directional_sky_texture_uploaded(layout, asset_id, asset_bytes)
+            }
+        }
+    }
+
     /// Upload one Quake layered-sky pair into a dedicated room texture page.
     ///
     /// The source is two square power-of-two layers side by side (normally
@@ -1045,6 +1213,86 @@ impl<
         )
     }
 
+    /// Upload the six-face scenic cube atlas into six adjacent 4bpp pages.
+    ///
+    /// Each page holds one 256x256 face. The source's 1536 texels become 384
+    /// packed VRAM halfwords, exactly six 64-halfword texture pages. Six
+    /// contiguous 16-colour palettes let packets select a face with
+    /// `base_clut + face`. Index zero remains opaque because this is the far
+    /// background, not Quake's masked foreground cloud layer.
+    pub fn ensure_directional_sky_texture_uploaded(
+        &mut self,
+        _layout: VramLayout,
+        asset_id: AssetId,
+        asset_bytes: &[u8],
+    ) -> Option<VramSlot> {
+        if let Some(slot) = self.find_vram_slot(asset_id, VramSlotClutMode::DirectionalSky) {
+            return Some(slot);
+        }
+        let texture = Texture::from_bytes(asset_bytes).ok()?;
+        if texture.clut_entries() != DIRECTIONAL_SKY_CLUT_ENTRIES
+            || texture.width() != DIRECTIONAL_SKY_ATLAS_WIDTH
+            || texture.height() != DIRECTIONAL_SKY_ATLAS_HEIGHT
+            || texture.halfwords_per_row() != DIRECTIONAL_SKY_ATLAS_WIDTH / 4
+        {
+            return None;
+        }
+        let expected_pixel_bytes = usize::from(texture.halfwords_per_row())
+            .saturating_mul(usize::from(texture.height()))
+            .saturating_mul(2);
+        if texture.pixel_bytes().len() != expected_pixel_bytes
+            || texture.clut_bytes().len() != usize::from(DIRECTIONAL_SKY_CLUT_ENTRIES) * 2
+        {
+            return None;
+        }
+
+        let idx = self.next_vram_slot()?;
+        let (left_tpage, page_region) = self.allocator.alloc_page_run(6, TexDepth::Bit4, 256)?;
+        let (clut, clut_region) = match self.allocator.alloc_clut(DIRECTIONAL_SKY_CLUT_ENTRIES) {
+            Some(allocation) => allocation,
+            None => {
+                self.allocator.free(page_region);
+                telemetry::counter(telemetry::counter::VRAM_CLUT_FULL, 1);
+                return None;
+            }
+        };
+
+        telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
+        telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
+        upload_bytes(
+            VramRect::new(
+                left_tpage.x(),
+                left_tpage.y(),
+                texture.halfwords_per_row(),
+                texture.height(),
+            ),
+            texture.pixel_bytes(),
+        );
+        upload_model_clut(
+            VramRect::new(clut.x(), clut.y(), DIRECTIONAL_SKY_CLUT_ENTRIES, 1),
+            texture.clut_bytes(),
+            false,
+        );
+        telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
+
+        let slot = VramSlot {
+            asset: asset_id,
+            clut_mode: VramSlotClutMode::DirectionalSky,
+            ready: true,
+            clut_word: clut.uv_clut_word(),
+            tpage_word: left_tpage.uv_tpage_word(0),
+            texture_window: TextureWindow::NONE,
+            texture_width: texture.width(),
+            texture_height: texture.height(),
+            region: page_region,
+            clut_region,
+        };
+        self.slots[idx] = Some(slot);
+        self.slot_count += 1;
+        let _ = self.residency.mark_vram_resident(asset_id);
+        Some(slot)
+    }
+
     /// Upload a UI texture, stepping the upload queue a bounded number of
     /// times (through `resolve`, see [`Self::step_uploads`]) so menu
     /// images resolve within the calling frame.
@@ -1062,6 +1310,7 @@ impl<
             VramSlotClutMode::OpaqueZero
         };
         if let Some(slot) = self.find_vram_slot(asset_id, clut_mode) {
+            self.track_ui_image_slot(asset_id);
             return Some(slot);
         }
 
@@ -1085,7 +1334,11 @@ impl<
             steps = steps.saturating_add(1);
         }
 
-        self.find_vram_slot(asset_id, clut_mode)
+        let slot = self.find_vram_slot(asset_id, clut_mode);
+        if slot.is_some() {
+            self.track_ui_image_slot(asset_id);
+        }
+        slot
     }
 
     fn ensure_large_ui_texture_uploaded_with_clut_mode(
@@ -1538,17 +1791,17 @@ impl<
     /// The sky is a gameplay-scoped streamed Texture (empty baked bytes under
     /// `cd-stream-bench`): its UI.PAK chunk is read into a transient staging
     /// buffer and handed to the normal sky upload path. The staging buffer is
-    /// the shared [`FontPackScratch`], which is free during gameplay -- the UI
-    /// fonts are packed once on first scene entry (`acquire_shared_ui_fonts`,
-    /// guarded by `ui_fonts[0].is_none()`) and are already in VRAM, never
-    /// re-packed and never released, so the scratch is unused after boot. The
-    /// sky (~64 KB) fits inside its 128 KB (the game const-asserts the fit).
+    /// the shared [`FontPackScratch`]; font packing is complete before this
+    /// gameplay-entry load starts, so the bytes may be reused even though the
+    /// gameplay HUD font remains resident. The sky chunk must fit inside the
+    /// scratch buffer (the game const-asserts the fit).
     ///
     /// A no-op for non-streamed (baked) builds: a non-empty sky asset is uploaded
     /// lazily by the render path's `ensure_sky_panorama_uploaded`.
     #[cfg(feature = "cd-stream-bench")]
     pub fn load_streamed_sky_from_cd<const LEN: usize>(
         &mut self,
+        layout: VramLayout,
         cd: &mut cd_stream::CdController,
         scratch: &mut FontPackScratch<LEN>,
         gameplay_pack_max_chunk_bytes: usize,
@@ -1561,14 +1814,11 @@ impl<
             if asset.kind != AssetKind::Texture || !asset.bytes.is_empty() {
                 continue;
             }
-            if !is_sky_panorama_asset(rooms, asset.id) {
+            let Some(kind) = scene_sky_texture_kind(rooms, asset.id) else {
                 continue;
-            }
+            };
             // Already resident (idempotent re-entry).
-            if self
-                .find_vram_slot(asset.id, VramSlotClutMode::SkyPanorama)
-                .is_some()
-            {
+            if self.find_sky_texture_vram_slot(kind, asset.id).is_some() {
                 continue;
             }
 
@@ -1596,7 +1846,7 @@ impl<
             let Some(bytes) = scratch.staged_bytes(res.bytes) else {
                 continue;
             };
-            let _ = self.ensure_sky_panorama_uploaded(asset.id, bytes);
+            let _ = self.ensure_sky_texture_uploaded(layout, kind, asset.id, bytes);
         }
     }
 
@@ -1604,7 +1854,6 @@ impl<
     /// run and per-band CLUTs to the unified allocator, drop its VRAM slot, and
     /// clear the cached placement words so the next gameplay entry re-streams it.
     /// A no-op when the sky is not resident.
-    #[cfg(feature = "cd-stream-bench")]
     pub fn release_streamed_sky(&mut self) {
         let mut freed = false;
         for i in 0..VRAM_ASSETS {
@@ -1631,6 +1880,36 @@ impl<
         self.sky_page_tpage_words = [0; 2];
         self.sky_clut_words = [0; SKY_PANORAMA_PALETTE_BANDS];
         telemetry::counter(telemetry::counter::VRAM_SLOTS_FREED, 1);
+    }
+
+    /// Release every gameplay-scoped texture before the front end becomes the
+    /// active resource set. Menu images and fonts are re-acquired separately;
+    /// no model, brush, sky, shadow, or particle allocation crosses this edge.
+    pub fn release_gameplay_vram(&mut self) {
+        self.release_streamed_sky();
+        // Scene transitions happen after the loader has drained uploads. Reset
+        // defensively so no queued writeback can target a returned window.
+        self.upload_queue = VramUploadQueue::new();
+        for index in 0..VRAM_ASSETS {
+            if self.slots[index].is_some() {
+                self.free_vram_slot(index);
+            }
+        }
+        self.allocator.free(core::mem::replace(
+            &mut self.small_texture_region,
+            VramHandle::Empty,
+        ));
+        self.allocator.free(core::mem::replace(
+            &mut self.shadow_clut_region,
+            VramHandle::Empty,
+        ));
+        self.allocator.free(core::mem::replace(
+            &mut self.particle_clut_region,
+            VramHandle::Empty,
+        ));
+        self.small_texture_page = None;
+        self.small_model_quadrants = 0;
+        self.last_evict_room = INVALID_ROOM_INDEX;
     }
 
     /// Upload a 4bpp or 8bpp model atlas to the dedicated model VRAM
@@ -1676,17 +1955,45 @@ impl<
             return None;
         }
 
-        // Placement comes only from the unified allocator: an indexed page run
-        // at row 256 plus a depth-sized CLUT in the managed band.
-        let (tpage, region) = self
-            .allocator
-            .alloc_model_slot(texture_halfwords_per_row, texture_depth)?;
-        let (clut, clut_region) = self.allocator.alloc_clut(texture.clut_entries())?;
+        // Three current 128-square 4bpp character atlases share one page via
+        // GP0(E2) quadrants. Larger or 8bpp atlases keep the general dedicated
+        // page-run path, so format support and visual quality are unchanged.
+        let packed_quadrant = texture_depth == TexDepth::Bit4
+            && texture_width == 128
+            && texture_height == 128
+            && texture_halfwords_per_row == 32;
+        let (tpage, region, origin_u, origin_v, texture_window) = if packed_quadrant {
+            let (tpage, origin_u, origin_v) = self.allocate_small_model_quadrant()?;
+            (
+                tpage,
+                VramHandle::Empty,
+                origin_u,
+                origin_v,
+                TextureWindow::power_of_two_tile(origin_u, origin_v, 128, 128),
+            )
+        } else {
+            let (tpage, region) = self
+                .allocator
+                .alloc_model_slot(texture_halfwords_per_row, texture_depth)?;
+            (tpage, region, 0, 0, TextureWindow::NONE)
+        };
+        let (clut, clut_region) = match self.allocator.alloc_clut(texture.clut_entries()) {
+            Some(allocation) => allocation,
+            None => {
+                if packed_quadrant {
+                    let quadrant = (origin_v / 128) * 2 + origin_u / 128;
+                    self.small_model_quadrants &= !(1u8 << quadrant);
+                } else {
+                    self.allocator.free(region);
+                }
+                return None;
+            }
+        };
         telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
         telemetry::counter(telemetry::counter::MODEL_ATLAS_UPLOADS, 1);
         let pix_rect = VramRect::new(
-            tpage.x(),
-            tpage.y(),
+            tpage.x() + u16::from(origin_u) / texture_depth.texels_per_halfword(),
+            tpage.y() + u16::from(origin_v),
             texture_halfwords_per_row,
             texture_height,
         );
@@ -1706,10 +2013,11 @@ impl<
             ready: true,
             clut_word: clut.uv_clut_word(),
             tpage_word: tpage.uv_tpage_word(0),
-            texture_window: TextureWindow::NONE,
+            texture_window,
             texture_width,
             texture_height,
-            // Model atlases are session-persistent; handles stored but not evicted.
+            // Dedicated model pages are owned by their slot. Shared-quadrant
+            // slots use `Empty`; `release_gameplay_vram` owns that page once.
             region,
             clut_region,
         };
@@ -1765,7 +2073,7 @@ impl<
             // The sky panorama is also a streamed (empty-bytes) Texture but is
             // gameplay-scoped: it is loaded by `load_streamed_sky_from_cd` into
             // a larger staging buffer, never through this small per-image one.
-            if is_sky_panorama_asset(rooms, asset.id) {
+            if scene_sky_texture_kind(rooms, asset.id).is_some() {
                 continue;
             }
             // Skip if already uploaded (idempotent re-entry).
@@ -1804,7 +2112,6 @@ impl<
         all_ready
     }
 
-    #[cfg(feature = "cd-stream-bench")]
     fn track_ui_image_slot(&mut self, asset_id: AssetId) {
         for entry in self.ui_image_slots.iter() {
             if *entry == Some(asset_id) {
@@ -1819,10 +2126,8 @@ impl<
         }
     }
 
-    /// Free every streamed UI image VRAM slot created by `load_ui_images_for_scene`.
-    /// Called on gameplay entry so the room textures reclaim that VRAM. Fonts are
-    /// shared and are NOT released here.
-    #[cfg(feature = "cd-stream-bench")]
+    /// Free every active-scene UI image slot. Streamed and baked builds use the
+    /// same ownership table, so both return menu pages at gameplay entry.
     pub fn release_ui_images(&mut self) {
         for i in 0..MAX_UI_IMAGE_SLOTS {
             if let Some(asset_id) = self.ui_image_slots[i].take() {
@@ -1918,8 +2223,6 @@ fn upload_clut_with_mode(rect: VramRect, bytes: &[u8], force_zero_opaque: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use psx_font::font_pack_metrics;
-
     const ARENA_FONTS: &[&BitmapFont] = &[
         &psx_font::fonts::ZEN_DOTS_DISPLAY,
         &psx_font::fonts::ZEN_DOTS,
@@ -1943,7 +2246,7 @@ mod tests {
     type TestVram = VramRuntime<1, 1, 6, 16>;
 
     #[test]
-    fn arena_static_layout_accepts_packed_six_fonts_but_not_six_pages() {
+    fn arena_static_layout_does_not_pin_unused_room_capacity() {
         let metrics = font_pack_metrics(ARENA_FONTS).unwrap();
         assert_eq!(metrics.pages, 2);
 
@@ -1952,9 +2255,12 @@ mod tests {
         assert!(
             vram.allocator
                 .alloc_page_run(6, TexDepth::Bit4, 0)
-                .is_none(),
-            "the historical one-page-per-font request reproduces the failure"
+                .is_some(),
+            "unused six-page room capacity must remain available"
         );
+
+        let mut vram = TestVram::new(ARENA_LAYOUT);
+        vram.reserve_static_vram_regions(ARENA_LAYOUT);
         assert!(
             vram.allocator
                 .alloc_page_run(metrics.pages, TexDepth::Bit4, 0)
@@ -1974,5 +2280,44 @@ mod tests {
         assert!(!ready, "a too-small staging arena must be reported");
         assert!(ui_fonts.iter().all(Option::is_none));
         assert!(ui_fonts[0].is_none());
+    }
+
+    #[test]
+    fn cortex_shared_enemy_atlas_plan_leaves_twelve_texture_pages_free() {
+        let mut vram = TestVram::new(ARENA_LAYOUT);
+        vram.reserve_static_vram_regions(ARENA_LAYOUT);
+
+        let hud = font_pack_metrics(&[&psx_font::fonts::SPLEEN_5X8_ITALIC]).unwrap();
+        assert_eq!(hud.pages, 1);
+        assert!(hud.upload_rows <= 128, "effects fit below the HUD font");
+
+        // Gameplay HUD/effects, one lazy world-material page, the shared
+        // 256-square Sword/Mantis/Tank atlas, one small-model page for Aletha,
+        // and six full cube faces.
+        vram.allocator
+            .alloc_page_run(1, TexDepth::Bit4, 0)
+            .expect("HUD page");
+        vram.allocator.alloc_window(64, 64).expect("room page");
+        vram.allocator
+            .alloc_page_run(1, TexDepth::Bit4, 256)
+            .expect("shared 256-square enemy atlas");
+        vram.allocator
+            .alloc_page_run(1, TexDepth::Bit4, 256)
+            .expect("small-model page");
+        vram.allocator
+            .alloc_page_run(6, TexDepth::Bit4, 256)
+            .expect("six cube faces");
+
+        let mut free_pages = 0;
+        for row in [0, 256] {
+            while vram
+                .allocator
+                .alloc_page_run(1, TexDepth::Bit4, row)
+                .is_some()
+            {
+                free_pages += 1;
+            }
+        }
+        assert_eq!(free_pages, 12, "384 KiB of page capacity remains");
     }
 }

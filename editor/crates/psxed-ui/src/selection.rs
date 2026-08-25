@@ -2,48 +2,6 @@ use super::*;
 
 pub(crate) type SectorSelection = (NodeId, u16, u16);
 
-/// What the next paint click would target. Carries world-cell
-/// coordinates (which can be negative -- outside the current grid)
-/// so the renderer can preview cells the next click would auto-
-/// create. Stays populated for any paint tool, mirroring the
-/// dispatch so what you preview is what you'll paint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaintTargetPreview {
-    /// Floor / ceiling / erase / place -- outlines the cell.
-    Cell {
-        world_cell_x: i32,
-        world_cell_z: i32,
-        kind: PaintCellPreviewKind,
-    },
-    /// PaintWall -- outlines the wall that would be added on the
-    /// targeted edge. `stack` is the next-free wall slot index for
-    /// that edge, used by the renderer to position the ghost above
-    /// any existing walls.
-    Wall {
-        world_cell_x: i32,
-        world_cell_z: i32,
-        dir: GridDirection,
-        stack: u8,
-    },
-    /// Portal placement -- highlights the cardinal edge that will
-    /// become an open seam. `valid` is false when either side of the
-    /// edge is missing authored geometry, so the click will be
-    /// rejected instead of creating a marker the cooker ignores.
-    PortalEdge {
-        world_cell_x: i32,
-        world_cell_z: i32,
-        dir: GridDirection,
-        valid: bool,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaintCellPreviewKind {
-    Ground,
-    Floor,
-    Ceiling,
-}
-
 /// One pickable surface on the active Room's grid. Floors and
 /// ceilings are addressed by sector; walls add a cardinal direction
 /// plus a stack index (a single edge can hold multiple stacked walls
@@ -323,64 +281,6 @@ pub(crate) struct BoxPropMaterialAssignment {
     pub(crate) material: ResourceId,
     pub(crate) targets: usize,
     pub(crate) updated: usize,
-}
-
-pub(crate) fn world_cook_error_primitives(
-    room: NodeId,
-    error: &WorldGridCookError,
-    array_origin: [u16; 2],
-) -> Vec<Selection> {
-    let face = |x: u16, z: u16, kind: WorldGridFaceKind| {
-        world_cook_face_selection(
-            room,
-            x.saturating_add(array_origin[0]),
-            z.saturating_add(array_origin[1]),
-            kind,
-        )
-    };
-
-    match *error {
-        WorldGridCookError::UnassignedMaterial { x, z, face: kind } => vec![face(x, z, kind)],
-        WorldGridCookError::InvalidWallHeights {
-            x, z, direction, ..
-        }
-        | WorldGridCookError::UnsupportedDiagonalWall { x, z, direction }
-        | WorldGridCookError::WallStackExceeded {
-            x, z, direction, ..
-        } => vec![face(x, z, WorldGridFaceKind::Wall(direction))],
-        WorldGridCookError::DuplicatePhysicalWall {
-            x,
-            z,
-            direction,
-            other_x,
-            other_z,
-            other_direction,
-        } => vec![
-            face(x, z, WorldGridFaceKind::Wall(direction)),
-            face(other_x, other_z, WorldGridFaceKind::Wall(other_direction)),
-        ],
-        WorldGridCookError::HeightNotQuantized {
-            x, z, face: kind, ..
-        }
-        | WorldGridCookError::TriangleFaceNotSupported { x, z, face: kind } => {
-            vec![face(x, z, kind)]
-        }
-        _ => Vec::new(),
-    }
-}
-
-pub(crate) fn world_cook_face_selection(
-    room: NodeId,
-    sx: u16,
-    sz: u16,
-    kind: WorldGridFaceKind,
-) -> Selection {
-    let kind = match kind {
-        WorldGridFaceKind::Floor => FaceKind::Floor,
-        WorldGridFaceKind::Ceiling => FaceKind::Ceiling,
-        WorldGridFaceKind::Wall(dir) => FaceKind::Wall { dir, stack: 0 },
-    };
-    Selection::Face(FaceRef { room, sx, sz, kind })
 }
 
 /// Kind label for an [`EntityBounds`]. Drives picking

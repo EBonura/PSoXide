@@ -27,18 +27,6 @@ name = "cook-playtest"
 path = "src/bin/cook_playtest.rs"
 
 [[bin]]
-name = "gen-prefab-gallery"
-path = "src/bin/gen_prefab_gallery.rs"
-
-[[bin]]
-name = "prefab-sheet"
-path = "src/bin/prefab_sheet.rs"
-
-[[bin]]
-name = "gen-prefab-kit"
-path = "src/bin/gen_prefab_kit.rs"
-
-[[bin]]
 name = "gen-stress-map"
 path = "src/bin/gen_stress_map.rs"
 

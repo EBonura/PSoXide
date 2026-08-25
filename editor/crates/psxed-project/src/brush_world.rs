@@ -775,9 +775,6 @@ impl BrushWorldLeakDiagnostic {
 pub fn diagnose_brush_world_leak(
     mut project: ProjectDocument,
 ) -> Result<BrushWorldLeakDiagnostic, BrushWorldCookError> {
-    if project.world_format() != crate::ProjectWorldFormat::Bsp {
-        return Ok(BrushWorldLeakDiagnostic::default());
-    }
     crate::units::scale_project_to_engine_units(&mut project);
     let scene = project.active_scene();
     let mut static_brushes = Vec::new();
@@ -1626,7 +1623,7 @@ fn page_local_texture_dims(
         };
         if material_data.blend_mode != PsxBlendMode::Opaque
             || material_data.animation.mode != MaterialAnimationMode::Static
-            || material_data.layered_sky
+            || material_data.sky_aperture
         {
             continue;
         }
@@ -1790,7 +1787,7 @@ fn resolve_materials(
     let mut textures = Vec::new();
     let mut materials = Vec::with_capacity(slots.len());
     for &slot in slots {
-        let (mut key, mut bytes, tint, blend, sidedness, animation, layered_sky) = match slot {
+        let (mut key, mut bytes, tint, blend, sidedness, animation, sky_aperture) = match slot {
             None => (
                 "@brush-flat-white".to_string(),
                 flat_white_psxt(),
@@ -1807,13 +1804,19 @@ fn resolve_materials(
                 let ResourceData::Material(material) = &resource.data else {
                     return Err(BrushWorldCookError::ResourceIsNotMaterial(id));
                 };
-                let texture = resolve_material_texture_psxt(project, id, options.project_root)
-                    .map_err(|error| BrushWorldCookError::MaterialTexture {
-                        material: id,
-                        error,
-                    })?;
-                let (key, bytes) =
-                    texture.unwrap_or_else(|| ("@brush-flat-white".to_string(), flat_white_psxt()));
+                let (key, bytes) = if material.sky_aperture {
+                    // Apertures never submit their authored polygons. The
+                    // World cooks its one sky source independently, so no
+                    // per-face texture belongs in PXBSP or VRAM.
+                    ("@sky-aperture".to_string(), Vec::new())
+                } else {
+                    let texture = resolve_material_texture_psxt(project, id, options.project_root)
+                        .map_err(|error| BrushWorldCookError::MaterialTexture {
+                            material: id,
+                            error,
+                        })?;
+                    texture.unwrap_or_else(|| ("@brush-flat-white".to_string(), flat_white_psxt()))
+                };
                 (
                     key,
                     bytes,
@@ -1821,10 +1824,23 @@ fn resolve_materials(
                     material.blend_mode,
                     material.sidedness(),
                     material.animation,
-                    material.layered_sky,
+                    material.sky_aperture,
                 )
             }
         };
+        if sky_aperture {
+            materials.push(pack_material(
+                u16::MAX,
+                [1, 1],
+                tint,
+                blend,
+                sidedness,
+                animation,
+                true,
+                slot,
+            )?);
+            continue;
+        }
         if let Some(&target) = page_texture_dims.get(&slot) {
             let parsed = psx_asset::Texture::from_bytes(&bytes).map_err(|error| {
                 BrushWorldCookError::InvalidTexture {
@@ -1843,14 +1859,8 @@ fn resolve_materials(
                 key = format!("{key}#page{}x{}", target[0], target[1]);
             }
         }
-        let (texture_asset, texture_size) = intern_texture(
-            &mut textures,
-            options.texture_asset_base,
-            slot,
-            key,
-            bytes,
-            layered_sky,
-        )?;
+        let (texture_asset, texture_size) =
+            intern_texture(&mut textures, options.texture_asset_base, slot, key, bytes)?;
         materials.push(pack_material(
             texture_asset,
             texture_size,
@@ -1858,7 +1868,7 @@ fn resolve_materials(
             blend,
             sidedness,
             animation,
-            layered_sky,
+            false,
             slot,
         )?);
     }
@@ -1922,7 +1932,6 @@ fn intern_texture(
     material: Option<ResourceId>,
     key: String,
     bytes: Vec<u8>,
-    layered_sky: bool,
 ) -> Result<(u16, [u16; 2]), BrushWorldCookError> {
     let parsed = psx_asset::Texture::from_bytes(&bytes).map_err(|error| {
         BrushWorldCookError::InvalidTexture {
@@ -1932,27 +1941,14 @@ fn intern_texture(
     })?;
     let width = parsed.width();
     let height = parsed.height();
-    let valid_size = if layered_sky {
-        width == height.saturating_mul(2)
-            && (16..=256).contains(&width)
-            && (8..=128).contains(&height)
-            && width.is_power_of_two()
-            && height.is_power_of_two()
-    } else {
-        (8..=128).contains(&width)
-            && (8..=128).contains(&height)
-            && width.is_power_of_two()
-            && height.is_power_of_two()
-    };
+    let valid_size = (8..=128).contains(&width)
+        && (8..=128).contains(&height)
+        && width.is_power_of_two()
+        && height.is_power_of_two();
     if parsed.depth() != Depth::Bit4 || !valid_size {
-        let expected = if layered_sky {
-            "two square 4bpp layers side by side (16x8..256x128)"
-        } else {
-            "4bpp power-of-two 8..128"
-        };
         return Err(BrushWorldCookError::InvalidTexture {
             material,
-            error: format!("brush texture must be {expected}, got {width}x{height}"),
+            error: format!("brush texture must be 4bpp power-of-two 8..128, got {width}x{height}"),
         });
     }
     if let Some(existing) = textures.iter().find(|texture| texture.key == key) {
@@ -1986,15 +1982,15 @@ fn pack_material(
     blend: PsxBlendMode,
     sidedness: MaterialFaceSidedness,
     animation: crate::MaterialAnimation,
-    layered_sky: bool,
+    sky_aperture: bool,
     material: Option<ResourceId>,
 ) -> Result<PxbspMaterial, BrushWorldCookError> {
     let flags = match sidedness {
         MaterialFaceSidedness::Front => material_flags::FACE_FRONT,
         MaterialFaceSidedness::Back => material_flags::FACE_BACK,
         MaterialFaceSidedness::Both => material_flags::FACE_BOTH,
-    } | if layered_sky {
-        material_flags::LAYERED_SKY
+    } | if sky_aperture {
+        material_flags::SKY_APERTURE
     } else {
         0
     };
@@ -2142,7 +2138,7 @@ mod tests {
     }
 
     #[test]
-    fn layered_sky_accepts_full_quake_pair_but_ordinary_material_does_not() {
+    fn layered_sky_atlas_is_not_interned_as_a_brush_face_texture() {
         let pixels = vec![1; 256 * 128];
         let bytes = psxed_tex::encode_indexed_psxt(
             256,
@@ -2153,29 +2149,43 @@ mod tests {
             true,
         )
         .expect("Quake sky pair");
-        let mut textures = Vec::new();
-        let (asset, size) = intern_texture(
-            &mut textures,
-            70,
-            Some(ResourceId(9)),
-            "sky-pair".to_string(),
-            bytes.clone(),
-            true,
-        )
-        .expect("layered sky texture");
-        assert_eq!(asset, 70);
-        assert_eq!(size, [256, 128]);
-        assert_eq!(textures[0].size, [256, 128]);
-
         let error = intern_texture(
             &mut Vec::new(),
             70,
             Some(ResourceId(9)),
-            "ordinary".to_string(),
+            "sky-pair".to_string(),
             bytes,
+        )
+        .expect_err("scene sky atlas must not enter the brush texture table");
+        assert!(error.to_string().contains("4bpp power-of-two 8..128"));
+    }
+
+    #[test]
+    fn cube_sky_atlas_is_not_interned_as_a_brush_face_texture() {
+        let palette_rows = (0..6)
+            .map(|face| {
+                (0..16)
+                    .map(|entry| [face * 24, entry * 12, 96])
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let bytes = psxed_tex::encode_indexed_psxt_with_clut_rows(
+            1536,
+            256,
+            Depth::Bit4,
+            &vec![1; 1536 * 256],
+            &palette_rows,
             false,
         )
-        .expect_err("ordinary brush texture exceeds its packet UV window");
+        .expect("directional cube atlas");
+        let error = intern_texture(
+            &mut Vec::new(),
+            71,
+            Some(ResourceId(10)),
+            "directional-sky".to_string(),
+            bytes,
+        )
+        .expect_err("scene cube atlas must not enter the brush texture table");
         assert!(error.to_string().contains("4bpp power-of-two 8..128"));
     }
 

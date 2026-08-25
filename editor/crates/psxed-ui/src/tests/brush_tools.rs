@@ -2676,7 +2676,7 @@ fn hollow_selected_brush_makes_room_walls() {
     harness.workspace.commit_brush_drag();
     assert_eq!(harness.workspace.selected_brush, Some(0));
 
-    harness.workspace.hollow_selected_brush(16);
+    assert!(harness.workspace.csg_hollow_selected());
     assert_eq!(
         harness.workspace.project.active_scene().brushes.len(),
         6,
@@ -3898,7 +3898,8 @@ fn brush_edits_mark_the_project_dirty_for_save_and_cook() {
         }),
         ("hollow", |ws| {
             ws.selected_brush = Some(0);
-            ws.hollow_selected_brush(16);
+            ws.snap_units = 16;
+            assert!(ws.csg_hollow_selected());
         }),
         ("delete", |ws| {
             ws.selected_brush = Some(0);
