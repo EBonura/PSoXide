@@ -4,6 +4,8 @@
 //! join once the GPU subsystem lands) and drives the per-frame UI build.
 
 use std::collections::{BTreeSet, VecDeque};
+#[cfg(feature = "editor")]
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 
@@ -409,6 +411,13 @@ pub struct AppState {
     /// Deferred action attached to the currently running editor build.
     #[cfg(feature = "editor")]
     editor_build_completion: Option<EditorBuildCompletion>,
+    /// Byte position already mirrored from the active compiler log into the
+    /// editor's bottom Console.
+    #[cfg(feature = "editor")]
+    editor_build_log_offset: u64,
+    /// Incomplete final compiler line retained until its newline arrives.
+    #[cfg(feature = "editor")]
+    editor_build_log_pending: Vec<u8>,
     /// Background `make examples` job launched from the Examples menu.
     examples_build_child: Option<Child>,
     /// CD burning submenu state and burner hotplug watcher.
@@ -650,6 +659,10 @@ impl AppState {
             editor_project_dir_seen,
             #[cfg(feature = "editor")]
             editor_build_completion: None,
+            #[cfg(feature = "editor")]
+            editor_build_log_offset: 0,
+            #[cfg(feature = "editor")]
+            editor_build_log_pending: Vec::new(),
             examples_build_child: None,
             burn: BurnState::default(),
             panels: PanelVisibility::startup(),
@@ -2707,9 +2720,13 @@ impl AppState {
     pub fn start_embedded_playtest(&mut self) {
         self.stop_embedded_playtest();
         self.editor.set_status("Play: cooking assets...");
+        self.editor
+            .append_console_lines(["[cook] Play: cooking assets..."]);
         if let Err(error) = self.save_editor_project() {
             let message = format!("Embedded Play failed: {error}");
-            self.editor.set_status(message.clone());
+            self.editor.append_console_lines([message]);
+            self.editor
+                .set_status("Embedded Play failed while saving — see Console");
             self.embedded_playtest.fail();
             return;
         }
@@ -2717,20 +2734,25 @@ impl AppState {
             Ok(status) => status,
             Err(error) => {
                 let message = format!("Embedded Play failed while cooking assets: {error}");
-                self.editor.set_status(message.clone());
+                self.editor.append_console_lines([message]);
+                self.editor
+                    .set_status("Embedded Play cook failed — see Console");
                 self.embedded_playtest.fail();
                 return;
             }
         };
         self.editor
-            .set_status(format!("{cook_status}; compiling runtime..."));
+            .append_console_lines([format!("[cook] {cook_status}")]);
+        self.editor.set_status("Play: compiling PS1 runtime...");
 
         let volume_id = project_disc_volume_id(&self.editor.project().name);
         if let Err(error) =
             self.spawn_editor_playtest_build(EditorBuildCompletion::RunEmbedded { volume_id })
         {
             let message = format!("Embedded Play build failed: {error}");
-            self.editor.set_status(message.clone());
+            self.editor.append_console_lines([message]);
+            self.editor
+                .set_status("Embedded Play build failed — see Console");
             self.embedded_playtest.fail();
         }
     }
@@ -2742,9 +2764,13 @@ impl AppState {
         self.stop_embedded_playtest();
         self.editor
             .set_status("Building project: cooking assets...");
+        self.editor
+            .append_console_lines(["[cook] Project build: cooking assets..."]);
         if let Err(error) = self.save_editor_project() {
             let message = format!("Project build failed: {error}");
-            self.editor.set_status(message.clone());
+            self.editor.append_console_lines([message]);
+            self.editor
+                .set_status("Project build failed while saving — see Console");
             self.embedded_playtest.fail();
             return;
         }
@@ -2755,23 +2781,90 @@ impl AppState {
             Ok(status) => status,
             Err(error) => {
                 let message = format!("Project build failed while cooking assets: {error}");
-                self.editor.set_status(message.clone());
+                self.editor.append_console_lines([message]);
+                self.editor
+                    .set_status("Project build cook failed — see Console");
                 self.embedded_playtest.fail();
                 return;
             }
         };
-        self.editor.set_status(format!(
-            "{cook_status}; compiling project disc for {}...",
-            dest_path.display()
-        ));
+        self.editor
+            .append_console_lines([format!("[cook] {cook_status}")]);
+        self.editor.set_status("Building project PS1 runtime...");
 
         if let Err(error) = self.spawn_editor_playtest_build(EditorBuildCompletion::ExportProject {
             dest_path,
             volume_id,
         }) {
             let message = format!("Project build failed: {error}");
-            self.editor.set_status(message.clone());
+            self.editor.append_console_lines([message]);
+            self.editor.set_status("Project build failed — see Console");
             self.embedded_playtest.fail();
+        }
+    }
+
+    fn begin_editor_build_log(&mut self, label: &str, log_path: &Path) {
+        self.editor_build_log_offset = 0;
+        self.editor_build_log_pending.clear();
+        self.editor
+            .append_console_lines([format!("[build] {label} started · {}", log_path.display())]);
+    }
+
+    fn poll_editor_build_log(&mut self, flush_partial: bool) {
+        if self.editor_build_completion.is_none() {
+            return;
+        }
+        let log_path = editor_playtest_build_log_path();
+        let Ok(mut file) = std::fs::File::open(&log_path) else {
+            return;
+        };
+        let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+            return;
+        };
+        if length < self.editor_build_log_offset {
+            self.editor_build_log_offset = 0;
+            self.editor_build_log_pending.clear();
+        }
+        if file
+            .seek(SeekFrom::Start(self.editor_build_log_offset))
+            .is_err()
+        {
+            return;
+        }
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
+            return;
+        }
+        self.editor_build_log_offset = self
+            .editor_build_log_offset
+            .saturating_add(bytes.len() as u64);
+        self.editor_build_log_pending.extend_from_slice(&bytes);
+
+        let complete_len = if flush_partial {
+            self.editor_build_log_pending.len()
+        } else {
+            self.editor_build_log_pending
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |newline| newline + 1)
+        };
+        if complete_len == 0 {
+            return;
+        }
+        let complete: Vec<u8> = self
+            .editor_build_log_pending
+            .drain(..complete_len)
+            .collect();
+        let mut lines = Vec::new();
+        for bytes in complete.split(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(bytes);
+            let line = line.trim_end_matches('\r');
+            if !line.is_empty() {
+                lines.push(line.to_string());
+            }
+        }
+        if !lines.is_empty() {
+            self.editor.append_console_lines(lines);
         }
     }
 
@@ -2793,6 +2886,11 @@ impl AppState {
         let log_stderr = log_file
             .try_clone()
             .map_err(|error| format!("clone build log handle: {error}"))?;
+        let build_label = match &completion {
+            EditorBuildCompletion::ExportProject { .. } => "Project build",
+            EditorBuildCompletion::RunEmbedded { .. } => "Embedded Play build",
+        };
+        self.begin_editor_build_log(build_label, &log_path);
         let mut command = Command::new("make");
         command
             .arg("build-editor-playtest")
@@ -2826,20 +2924,27 @@ impl AppState {
     /// Poll the background build child, then either launch the wrapped
     /// CUE/BIN playtest disc or export that disc as a project build.
     pub fn poll_embedded_playtest_build(&mut self) {
-        let Some(child) = self.embedded_playtest.building_child_mut() else {
-            return;
+        self.poll_editor_build_log(false);
+        let wait_result = {
+            let Some(child) = self.embedded_playtest.building_child_mut() else {
+                return;
+            };
+            child.try_wait()
         };
-        let status = match child.try_wait() {
+        let status = match wait_result {
             Ok(Some(status)) => status,
             Ok(None) => return,
             Err(error) => {
                 let message = format!("{} poll failed: {error}", self.editor_build_label());
-                self.editor.set_status(message.clone());
+                self.poll_editor_build_log(true);
+                self.editor.append_console_lines([message]);
+                self.editor.set_status("Build process failed — see Console");
                 self.editor_build_completion = None;
                 self.embedded_playtest.fail();
                 return;
             }
         };
+        self.poll_editor_build_log(true);
 
         if !status.success() {
             // Surface the real compiler error from the captured build log,
@@ -2848,11 +2953,15 @@ impl AppState {
             let log_path = editor_playtest_build_log_path();
             let detail = build_log_failure_detail(&log_path);
             let message = format!("{label} failed ({status}). {detail}");
-            self.editor.set_status(message.clone());
+            self.editor.append_console_lines([message]);
+            self.editor
+                .set_status(format!("{label} failed — see Console"));
             self.editor_build_completion = None;
             self.embedded_playtest.fail();
             return;
         }
+        self.editor
+            .append_console_lines(["[build] PS1 runtime compilation complete"]);
 
         let completion = self.editor_build_completion.take().unwrap_or_else(|| {
             EditorBuildCompletion::RunEmbedded {
@@ -2875,7 +2984,9 @@ impl AppState {
                     }
                     Err(error) => {
                         let message = format!("Embedded Play load failed: {error}");
-                        self.editor.set_status(message.clone());
+                        self.editor.append_console_lines([message]);
+                        self.editor
+                            .set_status("Embedded Play load failed — see Console");
                         self.embedded_playtest.fail();
                     }
                 }
@@ -2886,12 +2997,15 @@ impl AppState {
             } => match self.export_project_build(dest_path, &volume_id) {
                 Ok(message) => {
                     self.embedded_playtest.stop();
-                    self.editor.set_status(message.clone());
+                    self.editor.append_console_lines([message.clone()]);
+                    self.editor.set_status("Project build complete");
                     self.status_message_set(message);
                 }
                 Err(error) => {
                     let message = format!("Project build export failed: {error}");
-                    self.editor.set_status(message.clone());
+                    self.editor.append_console_lines([message]);
+                    self.editor
+                        .set_status("Project build export failed — see Console");
                     self.embedded_playtest.fail();
                 }
             },

@@ -1330,6 +1330,9 @@ fn run_headless_launch(
     let pc_sample_interval = args.pc_sample_instructions.max(1);
     let pc_sample_window_ticks = args.pc_sample_window_ticks.max(1);
     let mut next_pc_sample = 0u64;
+    let trace_exception = std::env::var_os("PSOXIDE_TRACE_EXCEPTION").is_some();
+    let mut recent_pcs = [0u32; 64];
+    let mut recent_pc_cursor = 0usize;
 
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
@@ -1337,6 +1340,10 @@ fn run_headless_launch(
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
+        if trace_exception {
+            recent_pcs[recent_pc_cursor] = cpu.pc();
+            recent_pc_cursor = (recent_pc_cursor + 1) % recent_pcs.len();
+        }
         if route_ticks >= args.pc_line_start_route_tick {
             if let Some(histogram) = pc_line_histogram.as_mut() {
                 histogram.record(cpu.pc());
@@ -1411,6 +1418,31 @@ fn run_headless_launch(
                 cpu.gpr(4), cpu.gpr(5), cpu.gpr(2), cpu.gpr(3), cpu.gpr(25)
             );
             stopped_at = Some(i);
+            break;
+        }
+        if trace_exception && cpu.cop0()[13] & 0x7c != 0 {
+            eprintln!(
+                "[cli] guest exception at step {i}: cause=0x{:08x} epc=0x{:08x} badvaddr=0x{:08x}",
+                cpu.cop0()[13],
+                cpu.cop0()[14],
+                cpu.cop0()[8]
+            );
+            eprintln!(
+                "[cli] regs: ra=0x{:08x} sp=0x{:08x} gp=0x{:08x} fp=0x{:08x} a0=0x{:08x} a1=0x{:08x} a2=0x{:08x} a3=0x{:08x} v0=0x{:08x} v1=0x{:08x} t0=0x{:08x} t1=0x{:08x} t2=0x{:08x} t3=0x{:08x} t4=0x{:08x} t5=0x{:08x} t6=0x{:08x} t7=0x{:08x} t8=0x{:08x} t9=0x{:08x}",
+                cpu.gpr(31), cpu.gpr(29), cpu.gpr(28), cpu.gpr(30),
+                cpu.gpr(4), cpu.gpr(5), cpu.gpr(6), cpu.gpr(7),
+                cpu.gpr(2), cpu.gpr(3), cpu.gpr(8), cpu.gpr(9),
+                cpu.gpr(10), cpu.gpr(11), cpu.gpr(12), cpu.gpr(13),
+                cpu.gpr(14), cpu.gpr(15), cpu.gpr(24), cpu.gpr(25)
+            );
+            eprintln!("[cli] recent PCs (oldest to newest):");
+            for offset in 0..recent_pcs.len() {
+                let pc = recent_pcs[(recent_pc_cursor + offset) % recent_pcs.len()];
+                if pc != 0 {
+                    eprintln!("  0x{pc:08x}");
+                }
+            }
+            stopped_at = Some(i + 1);
             break;
         }
         if let (Some(lines), Some(pc)) = (mmio_stall_lines.as_mut(), mmio_attribution_pc) {
@@ -1887,8 +1919,11 @@ fn run_headless_launch(
         }
         if std::env::var_os("PSOXIDE_TRACE_HLE_BIOS").is_some() {
             eprintln!(
-                "[hle-bios] sr={:08x} istat={:03x} imask={:03x} irq-high-steps={} irq-taken={}",
+                "[hle-bios] sr={:08x} cause={:08x} epc={:08x} badvaddr={:08x} istat={:03x} imask={:03x} irq-high-steps={} irq-taken={}",
                 cpu.cop0()[12],
+                cpu.cop0()[13],
+                cpu.cop0()[14],
+                cpu.cop0()[8],
                 bus.irq().stat(),
                 bus.irq().mask(),
                 cpu.irq_line_high_steps(),
