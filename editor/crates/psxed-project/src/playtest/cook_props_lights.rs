@@ -1458,6 +1458,8 @@ pub(crate) fn push_game_entity(
         targetname: names.intern(node_name),
         model_instance: model_instance.unwrap_or(psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE),
         idle_clip: state_clips.idle,
+        alert_clip: state_clips.alert,
+        turn_clip: state_clips.turn,
         walk_clip: state_clips.walk,
         walk_backward_clip: state_clips.walk_backward,
         strafe_left_clip: state_clips.strafe_left,

@@ -251,7 +251,7 @@ pub enum CharacterAnimationAction {
     AltLightAttack,
     AltHeavyAttack,
     AltComboAttack,
-    /// First-spawn intro, played once with control locked out.
+    /// First activation one-shot: player spawn intro or enemy acquisition alert.
     Intro,
     /// Idle-to-walk transition (one shot); the walk cruise starts where it ends.
     WalkWindup,
