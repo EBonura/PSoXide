@@ -1518,6 +1518,8 @@ pub enum PlaytestInteractableKind {
     Message,
     /// Update the in-memory checkpoint.
     Checkpoint,
+    /// Persistent, beacon-backed point of interest.
+    PointOfInterest,
 }
 
 /// Text payload used by an interactable.
@@ -1527,6 +1529,10 @@ pub struct PlaytestInteractableMessage {
     pub title: String,
     /// Body text.
     pub body: String,
+    /// First page in [`PlaytestPackage::interactable_message_pages`].
+    pub page_first: u16,
+    /// Number of consecutive entries in the flat page table.
+    pub page_count: u16,
 }
 
 /// One placed gameplay interaction, room-local engine units.
@@ -1546,6 +1552,8 @@ pub struct PlaytestInteractable {
     pub yaw: i16,
     /// Interaction radius in XZ engine units.
     pub radius: u16,
+    /// Vertical offset from the floor anchor to the archive beacon centre.
+    pub marker_height: u16,
     /// Prompt shown while in range.
     pub prompt: String,
     /// Index into [`PlaytestPackage::interactable_messages`], or
@@ -1556,6 +1564,14 @@ pub struct PlaytestInteractable {
     pub logic: u16,
     /// Stable authored checkpoint id. Empty for message-only records.
     pub checkpoint_id: String,
+    /// Persistent read flag, or [`psx_level::POI_FLAG_NONE`].
+    pub read_flag: u16,
+    /// Persistent one-time reward flag, or [`psx_level::POI_FLAG_NONE`].
+    pub reward_flag: u16,
+    /// Cooker-resolved boost module selector, or [`psx_level::POI_REWARD_NONE`].
+    pub reward_resource: u16,
+    /// Number of module copies granted by this POI.
+    pub reward_quantity: u8,
     /// Runtime flags from [`psx_level::interactable_flags`].
     pub flags: u16,
 }
@@ -1859,6 +1875,10 @@ pub struct PlaytestEntity {
 /// instances, and residency.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestPackage {
+    /// Stable project-specific PS1 memory-card filename.
+    pub save_name: String,
+    /// Human-readable ASCII memory-card title.
+    pub save_title: String,
     /// Project-authoritative BSP compiler quality used for this package.
     pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
     /// Static-world provider used by the normal Play lifecycle.
@@ -1991,6 +2011,12 @@ pub struct PlaytestPackage {
     pub particle_emitters: Vec<PlaytestParticleEmitter>,
     /// Text payloads referenced by placed interactables.
     pub interactable_messages: Vec<PlaytestInteractableMessage>,
+    /// Flat body-page table sliced by [`Self::interactable_messages`].
+    pub interactable_message_pages: Vec<String>,
+    /// Optional per-scene message shown once when gameplay first becomes active.
+    pub world_message: Option<PlaytestInteractableMessage>,
+    /// Number of persistent flag bits assigned by this cook.
+    pub persistent_flag_count: u16,
     /// Placed gameplay interactables.
     pub interactables: Vec<PlaytestInteractable>,
     /// Cooked logic entities (phase-3 event graph). Interactables
