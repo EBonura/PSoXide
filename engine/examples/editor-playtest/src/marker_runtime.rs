@@ -13,13 +13,13 @@ const MARKER_HALF: i32 = 6;
 const MARKER_LIFT: i32 = MARKER_HALF;
 const MARKER_TINT: (u8, u8, u8) = (0xff, 0xa8, 0x40);
 
-/// Recommended world-space height for a compact Archive Beacon. The helper
-/// accepts an override so authored POIs remain free to scale the glyph.
-pub(super) const ARCHIVE_BEACON_DEFAULT_HEIGHT: i32 = 24;
 const ARCHIVE_BEACON_MIN_HEIGHT: i32 = 8;
 const ARCHIVE_BEACON_MAX_HEIGHT: i32 = 48;
+const ARCHIVE_BEACON_COOKED_SCALE_MULTIPLIER: i32 = 2;
 const ARCHIVE_BEACON_ACTIVE_ROTATION_FRAMES: u32 = 180;
 const ARCHIVE_BEACON_INTERACTABLE_ROTATION_FRAMES: u32 = 120;
+const ARCHIVE_BEACON_FALLBACK_X: i16 = 160;
+const ARCHIVE_BEACON_FALLBACK_Y: i16 = 190;
 /// Rendering-only state for the Archive Beacon glyph. Gameplay persistence,
 /// reward state, and range selection stay outside the marker renderer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -34,10 +34,10 @@ pub(super) enum ArchiveBeaconVisualState {
 
 /// Draw a PS1-native high-tech Archive Beacon with no dedicated texture.
 ///
-/// Two crossed, chamfered vertical panels are projected from the world anchor
+/// Two crossed, chamfered panels are projected from the floor anchor
 /// and submitted in the overlay pass. This keeps the interaction glyph legible
 /// in packet-heavy BSP scenes without allocating a texture or CLUT. `position`
-/// is the glyph centre; `height` is the glyph's full world-space height.
+/// is the authored ground point; `height` is the glyph's screen-space scale.
 pub(super) fn draw_archive_beacon_overlay(
     position: RoomPoint,
     yaw: Angle,
@@ -80,6 +80,22 @@ pub(super) fn draw_archive_beacon_overlay(
     );
 }
 
+/// Convert the cooked marker scale into a compact PS1-screen glyph. Cooking
+/// maps the default authored value of 192 to 12 world units; runtime maps that
+/// cooked 12 to the intended 24-pixel floor glyph.
+pub(super) const fn archive_beacon_screen_height(cooked_scale: u16) -> i32 {
+    let scaled = cooked_scale as i32 * ARCHIVE_BEACON_COOKED_SCALE_MULTIPLIER;
+    if scaled < ARCHIVE_BEACON_MIN_HEIGHT {
+        ARCHIVE_BEACON_MIN_HEIGHT
+    } else if scaled > ARCHIVE_BEACON_MAX_HEIGHT {
+        ARCHIVE_BEACON_MAX_HEIGHT
+    } else {
+        scaled
+    }
+}
+
+const _: () = assert!(archive_beacon_screen_height(12) == 24);
+
 fn draw_archive_beacon_panel_overlay(
     position: RoomPoint,
     yaw: Angle,
@@ -97,13 +113,13 @@ fn draw_archive_beacon_panel_overlay(
             projected
         }
         None if fallback_to_interaction_anchor => ProjectedVertex {
-            sx: 160,
-            sy: 76,
+            sx: ARCHIVE_BEACON_FALLBACK_X,
+            sy: ARCHIVE_BEACON_FALLBACK_Y,
             sz: 1,
         },
         Some(_) if fallback_to_interaction_anchor => ProjectedVertex {
-            sx: 160,
-            sy: 76,
+            sx: ARCHIVE_BEACON_FALLBACK_X,
+            sy: ARCHIVE_BEACON_FALLBACK_Y,
             sz: 1,
         },
         _ => return,
@@ -140,7 +156,7 @@ fn archive_beacon_screen_vertices(
 ) -> [(i16, i16); 6] {
     let height = height.clamp(ARCHIVE_BEACON_MIN_HEIGHT, ARCHIVE_BEACON_MAX_HEIGHT);
     let half_height = (height / 2).clamp(6, 24);
-    let half_width = (height / 3).clamp(4, 16);
+    let half_width = (height / 2).clamp(6, 24);
     let cut = (height / 6).clamp(2, 8);
     let local = [
         (-half_width + cut, half_height),
@@ -157,7 +173,10 @@ fn archive_beacon_screen_vertices(
     while index < local.len() {
         let (x, y) = local[index];
         let rx = (x.saturating_mul(cos).saturating_sub(y.saturating_mul(sin))) >> 12;
-        let ry = (x.saturating_mul(sin).saturating_add(y.saturating_mul(cos))) >> 12;
+        // Compress the rotated panel vertically after rotation so it reads as
+        // a holographic plate lying on the floor, rather than a badge floating
+        // upright in screen space.
+        let ry = ((x.saturating_mul(sin).saturating_add(y.saturating_mul(cos))) >> 12) / 3;
         vertices[index] = (
             clamp_i16(i32::from(center.sx).saturating_add(rx)),
             clamp_i16(i32::from(center.sy).saturating_add(ry)),

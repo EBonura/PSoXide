@@ -5,7 +5,9 @@
 //! still draws directly.
 
 use super::*;
-use psx_engine::ui::{draw_interaction_prompt_panel, draw_message_panel};
+use psx_engine::ui::{
+    draw_expanding_message_panel, draw_interaction_prompt_panel, draw_message_panel,
+};
 pub(crate) use psx_engine::ui::{MessagePageMeta, MessagePanelVariant};
 use psx_gpu::draw_quad_flat;
 
@@ -102,6 +104,28 @@ pub(crate) fn draw_message_page(
     frame: u16,
 ) {
     draw_message_panel(font, page_text, variant, page, frame);
+}
+
+/// POI-only presentation bridge that visibly morphs the active interaction
+/// prompt into the first message page.
+pub(crate) fn draw_expanding_poi_message(
+    font: &FontAtlas,
+    action: &str,
+    page_text: &str,
+    page: MessagePageMeta,
+    frame: u16,
+    transition_frame: u16,
+    typewriter_frame: u16,
+) {
+    draw_expanding_message_panel(
+        font,
+        action,
+        page_text,
+        page,
+        frame,
+        transition_frame,
+        typewriter_frame,
+    );
 }
 
 pub(crate) fn draw_centered_text(font: &FontAtlas, y: i16, text: &str, tint: (u8, u8, u8)) {

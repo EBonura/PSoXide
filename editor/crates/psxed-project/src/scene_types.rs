@@ -344,7 +344,8 @@ pub enum NodeKind {
         /// parent Entity origin.
         #[serde(default = "default_point_of_interest_radius")]
         radius: u16,
-        /// Height of the procedural marker above the parent Entity origin.
+        /// Authored visual scale of the procedural marker grounded at the
+        /// parent Entity origin. The runtime converts this to a compact glyph.
         #[serde(default = "default_point_of_interest_marker_height")]
         marker_height: u16,
         /// Whether the message can be opened again after being read.
