@@ -2302,12 +2302,14 @@ pub(crate) fn character_idle_clip_for_model_instance(
 
 /// Per-state model-local clip indices for one cooked game entity,
 /// resolved from the entity Character's AnimationSet roles. Missing
-/// roles fall back at cook time (walk -> idle, directional walks/run
-/// -> walk, attack/stagger/death -> idle) so the runtime record always
-/// carries a playable clip per state.
+/// roles fall back at cook time (alert/turn/walk -> idle, directional
+/// walks/run -> walk, attack/stagger/death -> idle) so the runtime record
+/// always carries a playable clip per state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GameEntityStateClips {
     pub idle: u16,
+    pub alert: u16,
+    pub turn: u16,
     pub walk: u16,
     pub walk_backward: u16,
     pub strafe_left: u16,
@@ -2325,6 +2327,8 @@ impl GameEntityStateClips {
     pub(crate) const fn all(clip: u16) -> Self {
         Self {
             idle: clip,
+            alert: clip,
+            turn: clip,
             walk: clip,
             walk_backward: clip,
             strafe_left: clip,
@@ -2405,6 +2409,10 @@ pub(crate) fn game_entity_state_clips(
     let run = optional(CharacterAnimationAction::Run);
     Some(GameEntityStateClips {
         idle,
+        // Intro is the first-activation role for non-player Characters; for
+        // enemies that is the one-shot played on initial player acquisition.
+        alert: optional(CharacterAnimationAction::Intro).unwrap_or(idle),
+        turn: optional(CharacterAnimationAction::Turn).unwrap_or(idle),
         walk,
         walk_backward: optional(CharacterAnimationAction::WalkBackward).unwrap_or(walk),
         strafe_left: optional(CharacterAnimationAction::StrafeLeft).unwrap_or(walk),

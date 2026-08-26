@@ -1671,6 +1671,12 @@ pub struct LevelGameEntityRecord {
     /// stagger/death to idle, directional walks/run to walk), so
     /// runtime never re-resolves.
     pub idle_clip: u16,
+    /// One-shot played during initial player acquisition. Falls back to
+    /// `idle_clip` when the Character has no Intro/activation role.
+    pub alert_clip: u16,
+    /// Looping in-place tracking turn. Falls back to `idle_clip` when the
+    /// Character has no Turn role.
+    pub turn_clip: u16,
     /// Clip while Patrol (walk role).
     pub walk_clip: u16,
     /// Clip while retreating from the player. Falls back to `walk_clip`.
