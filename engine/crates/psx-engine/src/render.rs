@@ -805,12 +805,14 @@ impl PrimitivePacketWordReservation<'_, '_> {
     /// the reservation or if only one of `used_words` and `packet_count` is
     /// zero.
     pub fn commit(self, used_words: usize, packet_count: usize) -> Option<PrimitivePacketStream> {
-        if used_words > self.capacity_words || (used_words == 0) != (packet_count == 0) {
+        if crate::r3000_usize_gt(used_words, self.capacity_words)
+            || (used_words == 0) != (packet_count == 0)
+        {
             return None;
         }
         let used_slots = used_words.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
         let next_used_slots = self.arena.used_slots.checked_add(used_slots)?;
-        if next_used_slots > self.arena.storage.len() {
+        if crate::r3000_usize_gt(next_used_slots, self.arena.storage.len()) {
             return None;
         }
         let next_packet_count = self.arena.packet_count.checked_add(packet_count)?;

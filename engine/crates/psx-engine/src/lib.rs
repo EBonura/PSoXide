@@ -84,6 +84,39 @@ pub mod ui;
 pub mod world;
 pub mod world_render;
 
+/// Compare two `usize` values without exposing an R3000A load-delay hazard.
+///
+/// LLVM can place an operand reload in a taken branch's delay slot and consume
+/// the stale register in the target block. Keeping the delay instruction and
+/// comparison in one asm block forces both operands to be loaded before the
+/// `nop`, so the following `sltu` sees their current values. Host builds use
+/// the ordinary comparison.
+#[inline(always)]
+pub(crate) fn r3000_usize_gt(left: usize, right: usize) -> bool {
+    #[cfg(target_arch = "mips")]
+    {
+        let result: usize;
+        unsafe {
+            core::arch::asm!(
+                ".set push",
+                ".set noat",
+                "nop",
+                "sltu {result}, {right}, {left}",
+                ".set pop",
+                left = in(reg) left,
+                right = in(reg) right,
+                result = lateout(reg) result,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        result != 0
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        left > right
+    }
+}
+
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
