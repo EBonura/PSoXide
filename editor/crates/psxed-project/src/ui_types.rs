@@ -789,6 +789,55 @@ impl UiFontChoice {
         Self::Spleen5x8Italic,
     ];
 
+    /// Bitmap metrics used by the PS1 runtime for this built-in face.
+    ///
+    /// Keeping authoring validation on the same descriptors as the renderer
+    /// prevents text that fits a narrow preview font from being silently
+    /// clipped when a wider project font occupies runtime UI slot zero.
+    pub(crate) const fn bitmap_font(self) -> &'static psx_font::BitmapFont {
+        match self {
+            Self::Basic => &psx_font::fonts::BASIC,
+            Self::Basic8x16 => &psx_font::fonts::BASIC_8X16,
+            Self::KenneyBlocks => &psx_font::fonts::KENNEY_BLOCKS,
+            Self::KenneyFuture => &psx_font::fonts::KENNEY_FUTURE,
+            Self::KenneyFutureNarrow => &psx_font::fonts::KENNEY_FUTURE_NARROW,
+            Self::KenneyHigh => &psx_font::fonts::KENNEY_HIGH,
+            Self::KenneyHighSquare => &psx_font::fonts::KENNEY_HIGH_SQUARE,
+            Self::KenneyMini => &psx_font::fonts::KENNEY_MINI,
+            Self::KenneyMiniSquare => &psx_font::fonts::KENNEY_MINI_SQUARE,
+            Self::KenneyMiniSquareMono => &psx_font::fonts::KENNEY_MINI_SQUARE_MONO,
+            Self::KenneyPixel => &psx_font::fonts::KENNEY_PIXEL,
+            Self::KenneyPixelSquare => &psx_font::fonts::KENNEY_PIXEL_SQUARE,
+            Self::KenneyRocket => &psx_font::fonts::KENNEY_ROCKET,
+            Self::KenneyRocketSquare => &psx_font::fonts::KENNEY_ROCKET_SQUARE,
+            Self::PressStart2P => &psx_font::fonts::PRESS_START_2P,
+            Self::Silkscreen => &psx_font::fonts::SILKSCREEN,
+            Self::PixelifySans => &psx_font::fonts::PIXELIFY_SANS,
+            Self::Orbitron => &psx_font::fonts::ORBITRON,
+            Self::Audiowide => &psx_font::fonts::AUDIOWIDE,
+            Self::Michroma => &psx_font::fonts::MICHROMA,
+            Self::Electrolize => &psx_font::fonts::ELECTROLIZE,
+            Self::Oxanium => &psx_font::fonts::OXANIUM,
+            Self::Rajdhani => &psx_font::fonts::RAJDHANI,
+            Self::ChakraPetch => &psx_font::fonts::CHAKRA_PETCH,
+            Self::Tektur => &psx_font::fonts::TEKTUR,
+            Self::Tomorrow => &psx_font::fonts::TOMORROW,
+            Self::ZenDots => &psx_font::fonts::ZEN_DOTS,
+            Self::TurretRoad => &psx_font::fonts::TURRET_ROAD,
+            Self::Tiny5 => &psx_font::fonts::TINY5,
+            Self::Jersey10 => &psx_font::fonts::JERSEY_10,
+            Self::SpaceMono => &psx_font::fonts::SPACE_MONO,
+            Self::BrunoAce => &psx_font::fonts::BRUNO_ACE,
+            Self::Aldrich => &psx_font::fonts::ALDRICH,
+            Self::Syncopate => &psx_font::fonts::SYNCOPATE,
+            Self::ShareTechMono => &psx_font::fonts::SHARE_TECH_MONO,
+            Self::Jura => &psx_font::fonts::JURA,
+            Self::ZenDotsDisplay => &psx_font::fonts::ZEN_DOTS_DISPLAY,
+            Self::Spleen5x8 => &psx_font::fonts::SPLEEN_5X8,
+            Self::Spleen5x8Italic => &psx_font::fonts::SPLEEN_5X8_ITALIC,
+        }
+    }
+
     /// Editor-facing label for this font.
     pub const fn label(self) -> &'static str {
         match self {

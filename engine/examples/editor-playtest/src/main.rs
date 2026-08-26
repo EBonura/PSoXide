@@ -182,14 +182,15 @@ use generated::{
     BOX_PROP_SURFACES, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS,
     COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, ENTITIES, EQUIPMENT, GAME_ENTITIES,
-    IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, INTERACTABLE_MESSAGE_PAGES, LIGHTS, LOGIC, MATERIALS, MODELS,
-    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS,
-    PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY,
-    PXBSP_AMBIENT_RGB, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
-    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES,
-    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
-    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES,
-    WEAPON_HITBOXES, PERSISTENT_FLAG_COUNT, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, WORLD_MESSAGE,
+    IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, INTERACTABLE_MESSAGE_PAGES, LIGHTS, LOGIC,
+    MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
+    MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
+    PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS,
+    ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
+    ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES, ROOM_RESIDENCY,
+    ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES,
+    UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES,
+    WORLD_MESSAGE,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -518,6 +519,14 @@ struct Playtest {
     /// Paged POI/world-message controller. Unlike legacy checkpoint overlays,
     /// it never pauses gameplay and only Cross can advance it.
     poi_messages: MessageController,
+    /// Presented-frame progress for the active POI panel and page type-on.
+    /// Prepared/overlay copies keep deferred UI matched to its world frame.
+    poi_panel_frame: u16,
+    poi_page_type_frame: u16,
+    prepared_poi_panel_frame: u16,
+    prepared_poi_page_type_frame: u16,
+    overlay_poi_panel_frame: u16,
+    overlay_poi_page_type_frame: u16,
     /// Save-persistent point-of-interest read/reward state.
     poi_save: SaveBlock,
     /// Lazy card-load gate. Memory-card I/O begins only after gameplay starts.
@@ -678,6 +687,12 @@ impl Playtest {
         self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
         self.poi_save_loaded = false;
         self.poi_save_dirty = false;
+        self.poi_panel_frame = 0;
+        self.poi_page_type_frame = 0;
+        self.prepared_poi_panel_frame = 0;
+        self.prepared_poi_page_type_frame = 0;
+        self.overlay_poi_panel_frame = 0;
+        self.overlay_poi_page_type_frame = 0;
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
         self.selected_power_up_item = BoostProtocol::Rupture;
         // Zero bytes already decode as `Idle`; stamped for self-documentation.

@@ -3508,6 +3508,7 @@ dependencies = [
  "psx-asset",
  "psx-bsp",
  "psx-engine",
+ "psx-font",
  "psx-iso",
  "psx-level",
  "psx-render-contract",
