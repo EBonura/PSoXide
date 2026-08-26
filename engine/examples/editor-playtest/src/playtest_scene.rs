@@ -1452,6 +1452,36 @@ impl Scene for Playtest {
             draw_lock_target_indicator(target, camera, overlay_tick);
         }
 
+        for (index, interactable) in INTERACTABLES.iter().enumerate() {
+            if interactable.kind != InteractableKind::PointOfInterest
+                || interactable.room != self.room_index
+                || !interactable_is_active(interactable)
+            {
+                continue;
+            }
+            let state = if self.point_of_interest_depleted(interactable) {
+                ArchiveBeaconVisualState::Depleted
+            } else if self.active_interactable == Some(index) {
+                ArchiveBeaconVisualState::Interactable
+            } else {
+                ArchiveBeaconVisualState::Active
+            };
+            draw_archive_beacon_overlay(
+                RoomPoint::new(
+                    interactable.x,
+                    interactable
+                        .y
+                        .saturating_sub(i32::from(interactable.marker_height)),
+                    interactable.z,
+                ),
+                Angle::from_q12(interactable.yaw as u16),
+                ARCHIVE_BEACON_DEFAULT_HEIGHT,
+                state,
+                overlay_tick,
+                camera,
+            );
+        }
+
         #[cfg(feature = "fps-overlay")]
         if let Some(font) = self.ui_fonts[0].as_ref() {
             draw_fps_overlay(font, self.fps_display, self.fps_display_worst);
@@ -1468,11 +1498,34 @@ impl Scene for Playtest {
         }
 
         if let Some(font) = self.ui_fonts[0].as_ref() {
-            if let Some(message) = self.message_overlay {
+            if let Some(message) = self.poi_messages.active() {
+                if let Some(page_text) = INTERACTABLE_MESSAGE_PAGES.get(message.page() as usize) {
+                    let variant = match message.source() {
+                        psx_game_runtime::poi::MessageSource::PointOfInterest(_) => {
+                            MessagePanelVariant::PointOfInterest
+                        }
+                        psx_game_runtime::poi::MessageSource::World => MessagePanelVariant::World,
+                    };
+                    draw_message_page(
+                        font,
+                        page_text,
+                        variant,
+                        MessagePageMeta::new(
+                            message.page_offset().min(u8::MAX as u16) as u8,
+                            message.page_count().min(u8::MAX as u16) as u8,
+                        ),
+                        overlay_tick.as_u32() as u16,
+                    );
+                }
+            } else if let Some(message) = self.message_overlay {
                 draw_interactable_message(font, message.title, message.body);
             } else if let Some(index) = self.active_interactable {
                 if let Some(interactable) = INTERACTABLES.get(index) {
-                    draw_interaction_prompt(font, interactable.prompt);
+                    draw_interaction_prompt_animated(
+                        font,
+                        interactable.prompt,
+                        overlay_tick.as_u32() as u16,
+                    );
                 }
             }
         }

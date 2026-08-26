@@ -27,6 +27,7 @@ pub mod image_props;
 pub mod logic;
 pub mod model_rendering;
 pub mod particles;
+pub mod poi;
 pub mod projectiles;
 pub mod room_cache;
 pub mod room_lighting;

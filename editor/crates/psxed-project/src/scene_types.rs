@@ -46,6 +46,9 @@ pub enum NodeKind {
         /// Runtime physics controls inherited by descendant rooms.
         #[serde(default)]
         physics: WorldPhysicsSettings,
+        /// Optional message shown once per game launch when this scene starts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        world_message: Option<WorldMessage>,
     },
     /// One authored level section: a sector grid plus its child
     /// entities and portal links.
@@ -327,6 +330,38 @@ pub enum NodeKind {
         #[serde(default = "default_true")]
         enabled: bool,
     },
+    /// Authored readable beacon component. The parent Entity supplies the
+    /// world transform; the runtime draws the procedural marker and handles
+    /// interaction, paging, persistence, and an optional one-time reward.
+    PointOfInterest {
+        /// Body-only message pages. Empty pages are retained while authoring.
+        #[serde(default = "default_message_pages")]
+        pages: Vec<String>,
+        /// Short prompt shown while the player is inside the radius.
+        #[serde(default = "default_point_of_interest_prompt")]
+        prompt: String,
+        /// Interaction radius in engine/editor units, measured in XZ from the
+        /// parent Entity origin.
+        #[serde(default = "default_point_of_interest_radius")]
+        radius: u16,
+        /// Height of the procedural marker above the parent Entity origin.
+        #[serde(default = "default_point_of_interest_marker_height")]
+        marker_height: u16,
+        /// Whether the message can be opened again after being read.
+        #[serde(default = "default_true")]
+        repeatable: bool,
+        /// Stable save-state key. An empty id lets the cooker derive one from
+        /// the authored node identity.
+        #[serde(default)]
+        persistence_id: String,
+        /// Optional one-time module grant, tracked independently from message
+        /// repeatability.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reward: Option<PointOfInterestReward>,
+        /// Disabled points remain authored but are not active at runtime.
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
     /// Static point light.
     PointLight {
         /// RGB light colour.
@@ -412,6 +447,7 @@ impl NodeKind {
             culling: WorldCullingSettings::default(),
             streaming: WorldStreamingSettings::default(),
             physics: WorldPhysicsSettings::default(),
+            world_message: None,
         }
     }
 
@@ -438,6 +474,7 @@ impl NodeKind {
             Self::Equipment { .. } => "Equipment",
             Self::PhysicsBody { .. } => "Physics Body",
             Self::Interactable { .. } => "Interactable",
+            Self::PointOfInterest { .. } => "Point of Interest",
             Self::Logic { .. } => "Logic",
             Self::PointLight { .. } => "Point Light",
             Self::ParticleEmitter { .. } => "Particle Emitter",
@@ -460,8 +497,66 @@ impl NodeKind {
                 | Self::Equipment { .. }
                 | Self::PhysicsBody { .. }
                 | Self::Interactable { .. }
+                | Self::PointOfInterest { .. }
         )
     }
+}
+
+/// Per-scene body-only launch message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldMessage {
+    /// Pages shown in authored order. The world presentation supports three
+    /// lines per page; line wrapping is a runtime concern.
+    #[serde(default = "default_message_pages")]
+    pub pages: Vec<String>,
+}
+
+impl Default for WorldMessage {
+    fn default() -> Self {
+        Self {
+            pages: default_message_pages(),
+        }
+    }
+}
+
+/// Optional one-time reward attached to a point of interest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointOfInterestReward {
+    /// Boost module resource to grant.
+    #[serde(default)]
+    pub module: Option<ResourceId>,
+    /// Number of copies to grant.
+    #[serde(default = "default_point_of_interest_reward_quantity")]
+    pub quantity: u8,
+}
+
+impl Default for PointOfInterestReward {
+    fn default() -> Self {
+        Self {
+            module: None,
+            quantity: default_point_of_interest_reward_quantity(),
+        }
+    }
+}
+
+pub fn default_message_pages() -> Vec<String> {
+    vec![String::new()]
+}
+
+pub fn default_point_of_interest_prompt() -> String {
+    "READ".to_string()
+}
+
+pub const fn default_point_of_interest_radius() -> u16 {
+    576
+}
+
+pub const fn default_point_of_interest_marker_height() -> u16 {
+    192
+}
+
+pub const fn default_point_of_interest_reward_quantity() -> u8 {
+    1
 }
 
 /// Authored interaction payload for an [`NodeKind::Interactable`]

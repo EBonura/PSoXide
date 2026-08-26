@@ -1077,6 +1077,7 @@ pub(crate) fn push_interactable(
     component: InteractableComponent<'_>,
     names: &mut NameInterner,
     messages: &mut Vec<PlaytestInteractableMessage>,
+    message_pages: &mut Vec<String>,
     interactables: &mut Vec<PlaytestInteractable>,
     logic: &mut Vec<PlaytestLogic>,
     report: &mut PlaytestValidationReport,
@@ -1113,7 +1114,14 @@ pub(crate) fn push_interactable(
         ),
     };
     let message = messages.len().min(u16::MAX as usize) as u16;
-    messages.push(PlaytestInteractableMessage { title, body });
+    let page_first = message_pages.len().min(u16::MAX as usize) as u16;
+    message_pages.push(body.clone());
+    messages.push(PlaytestInteractableMessage {
+        title,
+        body,
+        page_first,
+        page_count: 1,
+    });
     let flags = if component.enabled {
         psx_level::interactable_flags::ENABLED
     } else {
@@ -1131,10 +1139,15 @@ pub(crate) fn push_interactable(
         z: pos[2],
         yaw,
         radius: component.radius,
+        marker_height: 0,
         prompt: prompt.to_string(),
         message,
         logic: paired_logic,
         checkpoint_id,
+        read_flag: psx_level::POI_FLAG_NONE,
+        reward_flag: psx_level::POI_FLAG_NONE,
+        reward_resource: psx_level::POI_REWARD_NONE,
+        reward_quantity: 0,
         flags,
     });
     // The paired event-graph record: same authored source, interned
@@ -1169,6 +1182,174 @@ pub(crate) fn push_interactable(
             0
         },
     });
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_point_of_interest(
+    project: &ProjectDocument,
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    yaw: i16,
+    component: PointOfInterestComponent<'_>,
+    read_flag: u16,
+    reward_flag: u16,
+    messages: &mut Vec<PlaytestInteractableMessage>,
+    message_pages: &mut Vec<String>,
+    interactables: &mut Vec<PlaytestInteractable>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    if component.radius == 0 {
+        report.error(format!(
+            "Point of Interest on '{node_name}' has radius 0 (must be > 0)"
+        ));
+        return false;
+    }
+    if component.marker_height == 0 {
+        report.error(format!(
+            "Point of Interest on '{node_name}' has marker height 0 (must be > 0)"
+        ));
+        return false;
+    }
+    if !validate_message_pages(
+        &format!("Point of Interest on '{node_name}'"),
+        component.pages,
+        2,
+        report,
+    ) {
+        return false;
+    }
+    if message_pages.len().saturating_add(component.pages.len()) > u16::MAX as usize {
+        report.error("Point-of-interest message page table exceeds 65535 entries");
+        return false;
+    }
+
+    let (reward_resource, reward_quantity) = match component.reward {
+        None => (psx_level::POI_REWARD_NONE, 0),
+        Some(reward) => {
+            if reward.quantity == 0 {
+                report.error(format!(
+                    "Point of Interest on '{node_name}' has a reward quantity of 0"
+                ));
+                return false;
+            }
+            let Some(module_id) = reward.module else {
+                report.error(format!(
+                    "Point of Interest on '{node_name}' has a reward but no Boost Module resource"
+                ));
+                return false;
+            };
+            let Some(resource) = project.resource(module_id) else {
+                report.error(format!(
+                    "Point of Interest on '{node_name}' references missing reward resource #{}",
+                    module_id.raw()
+                ));
+                return false;
+            };
+            let ResourceData::BoostModule(module) = &resource.data else {
+                report.error(format!(
+                    "Point of Interest on '{node_name}' reward '{}' is not a Boost Module",
+                    resource.name
+                ));
+                return false;
+            };
+            let selector = match module.kind {
+                crate::BoostModuleKind::Rupture => 1,
+                crate::BoostModuleKind::Shell => 2,
+                crate::BoostModuleKind::Surge => 3,
+            };
+            (selector, reward.quantity)
+        }
+    };
+
+    let message = messages.len().min(u16::MAX as usize) as u16;
+    let page_first = message_pages.len() as u16;
+    message_pages.extend(component.pages.iter().cloned());
+    let page_count = component.pages.len() as u16;
+    messages.push(PlaytestInteractableMessage {
+        title: String::new(),
+        body: component.pages[0].clone(),
+        page_first,
+        page_count,
+    });
+    let mut flags = if component.enabled {
+        psx_level::interactable_flags::ENABLED
+    } else {
+        0
+    };
+    if component.repeatable {
+        flags |= psx_level::interactable_flags::REPEATABLE;
+    }
+    interactables.push(PlaytestInteractable {
+        room: room_index,
+        kind: PlaytestInteractableKind::PointOfInterest,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        yaw,
+        radius: component.radius,
+        marker_height: component.marker_height,
+        prompt: non_empty_or(component.prompt, "READ").to_string(),
+        message,
+        logic: psx_level::INTERACTABLE_LOGIC_NONE,
+        checkpoint_id: component.persistence_id.to_string(),
+        read_flag,
+        reward_flag: if reward_resource == psx_level::POI_REWARD_NONE {
+            psx_level::POI_FLAG_NONE
+        } else {
+            reward_flag
+        },
+        reward_resource,
+        reward_quantity,
+        flags,
+    });
+    true
+}
+
+/// Validate authored pagination against the native 320x240 Archive panel.
+/// Pages are explicit so no copy can disappear behind the runtime's bounded
+/// two/three-line renderer. The shared runtime font is a compact pixel face;
+/// 38 characters is its conservative 244-pixel inner-line envelope.
+pub(crate) fn validate_message_pages(
+    label: &str,
+    pages: &[String],
+    max_lines: usize,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    const MAX_LINE_CHARS: usize = 38;
+    if pages.is_empty() {
+        report.error(format!("{label} needs at least one message page"));
+        return false;
+    }
+    for (page_index, page) in pages.iter().enumerate() {
+        if page.trim().is_empty() {
+            report.error(format!("{label} page {} is blank", page_index + 1));
+            return false;
+        }
+        let mut visible_lines = 0usize;
+        for line in page.split('\n') {
+            let line = line.trim_end_matches('\r');
+            if line.trim().is_empty() {
+                continue;
+            }
+            visible_lines += 1;
+            if line.chars().count() > MAX_LINE_CHARS {
+                report.error(format!(
+                    "{label} page {} has a line longer than {MAX_LINE_CHARS} characters; split it explicitly",
+                    page_index + 1
+                ));
+                return false;
+            }
+        }
+        if visible_lines > max_lines {
+            report.error(format!(
+                "{label} page {} has {visible_lines} lines; this panel supports {max_lines}",
+                page_index + 1
+            ));
+            return false;
+        }
+    }
     true
 }
 
@@ -1634,5 +1815,45 @@ mod prop_uv_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod message_page_tests {
+    use super::*;
+
+    #[test]
+    fn archive_pages_reject_blank_overlong_and_overflowing_copy() {
+        let mut report = PlaytestValidationReport::default();
+        assert!(!validate_message_pages(
+            "POI",
+            &["OK".to_string(), "   ".to_string()],
+            2,
+            &mut report,
+        ));
+
+        let mut report = PlaytestValidationReport::default();
+        assert!(!validate_message_pages(
+            "POI",
+            &["123456789012345678901234567890123456789".to_string()],
+            2,
+            &mut report,
+        ));
+
+        let mut report = PlaytestValidationReport::default();
+        assert!(!validate_message_pages(
+            "POI",
+            &["ONE\nTWO\nTHREE".to_string()],
+            2,
+            &mut report,
+        ));
+
+        let mut report = PlaytestValidationReport::default();
+        assert!(validate_message_pages(
+            "World",
+            &["ONE\nTWO\nTHREE".to_string()],
+            3,
+            &mut report,
+        ));
     }
 }

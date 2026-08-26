@@ -240,6 +240,35 @@ impl EditorWorkspace {
                     &attachment_socket_names,
                 );
             }
+            ResourceData::BoostModule(module) => {
+                egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Boost Module"))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Protocol").color(STUDIO_TEXT_WEAK));
+                            egui::ComboBox::from_id_salt("boost-module-kind")
+                                .selected_text(module.kind.label())
+                                .show_ui(ui, |ui| {
+                                    for kind in psxed_project::BoostModuleKind::ALL {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut module.kind,
+                                                kind,
+                                                kind.label(),
+                                            )
+                                            .changed();
+                                    }
+                                });
+                        });
+                        ui.label(
+                            RichText::new(
+                                "Collectable module granted by a Point of Interest and assigned in the Player menu.",
+                            )
+                            .small()
+                            .color(STUDIO_TEXT_WEAK),
+                        );
+                    });
+            }
             ResourceData::Mesh { source_path }
             | ResourceData::Scene { source_path }
             | ResourceData::Script { source_path }
@@ -376,6 +405,23 @@ impl EditorWorkspace {
         ui.menu_button(icons::text(icons::PLUS, 14.0), |ui| {
             ui.set_min_width(220.0);
 
+            if ui
+                .button(icons::label(icons::FOCUS, "Boost Module"))
+                .on_hover_text("Add a collectable vitality boost module.")
+                .clicked()
+            {
+                let id = self.project.add_resource(
+                    "New Boost Module",
+                    ResourceData::BoostModule(psxed_project::BoostModuleResource::default()),
+                );
+                self.replace_resource_selection(id);
+                self.clear_node_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = "Added boost module".to_string();
+                self.mark_dirty();
+                ui.close_menu();
+            }
             if ui
                 .button(icons::label(icons::WAYPOINT, "Weapon"))
                 .on_hover_text("Add a Weapon resource with a grip and hitbox.")

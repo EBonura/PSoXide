@@ -74,6 +74,70 @@ use assets::{
     resolve_path, sanitise_model_dirname,
 };
 
+/// Map a normalized authored POI identity to one fixed read/reward bit pair.
+/// The full save bitmap is always declared, so reordering or inserting scene
+/// nodes cannot invalidate the card or shift another POI's state. Hash-pair
+/// collisions are rejected during cook with an actionable ID change.
+fn stable_poi_flag_pair(persistence_id: &str) -> (u16, u16) {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    const PAIR_CAPACITY: usize = psx_level::POI_PERSISTENT_FLAG_CAPACITY / 2;
+    let mut hash = FNV_OFFSET;
+    for byte in persistence_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    let read = ((hash as usize % PAIR_CAPACITY) * 2) as u16;
+    (read, read + 1)
+}
+
+fn project_save_identity(project_name: &str) -> (String, String) {
+    const FNV_OFFSET: u32 = 0x811c9dc5;
+    const FNV_PRIME: u32 = 0x01000193;
+    let mut hash = FNV_OFFSET;
+    for byte in project_name.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    let save_name = format!("BESLES-{hash:08X}");
+    let mut save_title: String = project_name
+        .chars()
+        .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
+        .map(|ch| ch.to_ascii_uppercase())
+        .take(32)
+        .collect();
+    if save_title.trim().is_empty() {
+        save_title = "PSOXIDE PROJECT".to_string();
+    }
+    (save_name, save_title)
+}
+
+#[cfg(test)]
+mod poi_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn persistent_flag_pair_depends_only_on_normalized_id() {
+        let alpha = stable_poi_flag_pair("archive-alpha");
+        assert_eq!(alpha, stable_poi_flag_pair("archive-alpha"));
+        assert_ne!(alpha, stable_poi_flag_pair("archive-beta"));
+        assert_eq!(alpha.0 % 2, 0);
+        assert_eq!(alpha.1, alpha.0 + 1);
+        assert!(usize::from(alpha.1) < psx_level::POI_PERSISTENT_FLAG_CAPACITY);
+    }
+
+    #[test]
+    fn memory_card_identity_is_stable_project_specific_and_bounded() {
+        let first = project_save_identity("Cortex Ignition");
+        assert_eq!(first, project_save_identity("Cortex Ignition"));
+        assert_ne!(first.0, project_save_identity("Quake PSX").0);
+        assert!(first.0.len() <= 20);
+        assert!(!first.1.is_empty());
+        assert!(first.1.len() <= 32);
+        assert!(first.0.is_ascii() && first.1.is_ascii());
+    }
+}
+
 pub use manifest::{
     cook_to_dir, default_generated_dir, render_manifest_source, streamed_room_chunk_memory_report,
     write_cook_result, write_package,
@@ -634,7 +698,11 @@ pub fn build_package(
     let mut lights: Vec<PlaytestLight> = Vec::new();
     let mut particle_emitters: Vec<PlaytestParticleEmitter> = Vec::new();
     let mut interactable_messages: Vec<PlaytestInteractableMessage> = Vec::new();
+    let mut interactable_message_pages: Vec<String> = Vec::new();
     let mut interactables: Vec<PlaytestInteractable> = Vec::new();
+    let mut poi_persistence_ids: HashSet<String> = HashSet::new();
+    let mut poi_persistence_slots: HashMap<u16, String> = HashMap::new();
+    let persistent_flag_count = psx_level::POI_PERSISTENT_FLAG_CAPACITY as u16;
     // Phase-3 gameplay records: interned names, the logic event graph,
     // and placed souls-like game entities. Door links resolve against
     // the box-prop name table after the walk (a door may name a box
@@ -650,6 +718,30 @@ pub fn build_package(
     let mut model_clip_remaps: HashMap<ResourceId, Vec<Option<u16>>> = HashMap::new();
     let mut weapon_for_resource: HashMap<ResourceId, u16> = HashMap::new();
     let mut warned_unsupported: HashSet<&'static str> = HashSet::new();
+
+    let world_message = match scene.node(scene.root).map(|node| &node.kind) {
+        Some(NodeKind::World {
+            world_message: Some(message),
+            ..
+        }) => {
+            if !validate_message_pages("World message", &message.pages, 3, &mut report) {
+                return (None, report);
+            }
+            if message.pages.len() > u16::MAX as usize {
+                report.error("World message page table exceeds 65535 entries");
+                return (None, report);
+            }
+            let page_first = interactable_message_pages.len() as u16;
+            interactable_message_pages.extend(message.pages.iter().cloned());
+            Some(PlaytestInteractableMessage {
+                title: String::new(),
+                body: message.pages[0].clone(),
+                page_first,
+                page_count: message.pages.len() as u16,
+            })
+        }
+        _ => None,
+    };
 
     // Water is authored as BSP liquid brushes and is compiled with the world geometry.
 
@@ -987,6 +1079,19 @@ pub fn build_package(
                     }
                 }
 
+                let has_legacy_interaction = component_interactable(scene, node).is_some();
+                let has_point_of_interest = component_point_of_interest(scene, node).is_some();
+                if has_legacy_interaction && has_point_of_interest {
+                    report.error_at(
+                        PlaytestValidationTarget::Node(node.id),
+                        format!(
+                            "Entity '{}' cannot have both Interactable and Point of Interest components",
+                            node.name
+                        ),
+                    );
+                    return (None, report);
+                }
+
                 if let Some(interactable) = component_interactable(scene, node) {
                     let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                         push_interactable(
@@ -997,8 +1102,56 @@ pub fn build_package(
                             interactable,
                             &mut names,
                             &mut interactable_messages,
+                            &mut interactable_message_pages,
                             &mut interactables,
                             &mut logic,
+                            report,
+                        )
+                    });
+                    if !ok {
+                        return (None, report);
+                    }
+                }
+
+                if let Some(point) = component_point_of_interest(scene, node) {
+                    let persistence_id = if point.persistence_id.trim().is_empty() {
+                        format!("poi_{}", node.id.raw())
+                    } else {
+                        point.persistence_id.trim().to_string()
+                    };
+                    if !poi_persistence_ids.insert(persistence_id.clone()) {
+                        report.error(format!(
+                            "Point of Interest on '{}' reuses persistence id '{}'",
+                            node.name, persistence_id
+                        ));
+                        return (None, report);
+                    }
+                    let (read_flag, reward_flag) = stable_poi_flag_pair(&persistence_id);
+                    if let Some(existing) = poi_persistence_slots.get(&read_flag) {
+                        report.error(format!(
+                            "Point-of-interest persistence ids '{}' and '{}' map to the same save slot; rename one id",
+                            existing, persistence_id
+                        ));
+                        return (None, report);
+                    }
+                    poi_persistence_slots.insert(read_flag, persistence_id.clone());
+                    let point = PointOfInterestComponent {
+                        persistence_id: &persistence_id,
+                        ..point
+                    };
+                    let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                        push_point_of_interest(
+                            project,
+                            node.name.as_str(),
+                            room_index,
+                            pos,
+                            yaw,
+                            point,
+                            read_flag,
+                            reward_flag,
+                            &mut interactable_messages,
+                            &mut interactable_message_pages,
+                            &mut interactables,
                             report,
                         )
                     });
@@ -1355,7 +1508,8 @@ pub fn build_package(
             | NodeKind::Camera { .. }
             | NodeKind::Equipment { .. }
             | NodeKind::PhysicsBody { .. }
-            | NodeKind::Interactable { .. } => {}
+            | NodeKind::Interactable { .. }
+            | NodeKind::PointOfInterest { .. } => {}
         }
     }
 
@@ -1740,8 +1894,11 @@ pub fn build_package(
         return (None, report);
     }
 
+    let (save_name, save_title) = project_save_identity(&project.name);
     (
         Some(PlaytestPackage {
+            save_name,
+            save_title,
             bsp_cook_mode: project.bsp_cook_mode,
             world_geometry,
             // Same map the cook uses to dedupe texture references, so the
@@ -1841,6 +1998,9 @@ pub fn build_package(
             lights,
             particle_emitters,
             interactable_messages,
+            interactable_message_pages,
+            world_message,
+            persistent_flag_count,
             interactables,
             logic,
             game_entities,

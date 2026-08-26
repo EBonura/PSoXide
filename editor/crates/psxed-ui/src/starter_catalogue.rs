@@ -477,7 +477,8 @@ pub(crate) fn remap_resource_data(
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
-        | ResourceData::Skeleton(_) => {}
+        | ResourceData::Skeleton(_)
+        | ResourceData::BoostModule(_) => {}
     }
 }
 

@@ -1613,3 +1613,117 @@ fn four_quarter_turns_return_an_asymmetric_sector_unchanged() {
     }
     assert_eq!(rotated, sector, "four quarter turns must round trip");
 }
+
+#[test]
+fn snap_entity_to_floor_moves_the_complete_entity_and_is_undoable() {
+    let mut project = ProjectDocument::new("snap-entity-floor");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, -64, 0],
+            [512, 0, 512],
+        ));
+    let entity = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Enemy", NodeKind::Entity);
+    project
+        .active_scene_mut()
+        .node_mut(entity)
+        .unwrap()
+        .transform
+        .translation = [128.0, 240.0, 128.0];
+    let renderer = project.active_scene_mut().add_node(
+        entity,
+        "Model Renderer",
+        NodeKind::ModelRenderer {
+            model: None,
+            material: None,
+            visual_offset: [0; 3],
+            visual_scale_q8: MODEL_SCALE_ONE_Q8,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_node_selection(renderer);
+
+    assert!(workspace.snap_selected_entities_to_floor());
+    assert_eq!(
+        workspace
+            .project
+            .active_scene()
+            .node(entity)
+            .unwrap()
+            .transform
+            .translation,
+        [128.0, 0.0, 128.0]
+    );
+    assert_eq!(
+        workspace
+            .project
+            .active_scene()
+            .node(renderer)
+            .unwrap()
+            .transform
+            .translation,
+        [0.0; 3],
+        "the component stays local while its complete Entity moves"
+    );
+    assert_eq!(workspace.status, "Snapped Entity to floor");
+
+    workspace.do_undo();
+    assert_eq!(
+        workspace
+            .project
+            .active_scene()
+            .node(entity)
+            .unwrap()
+            .transform
+            .translation,
+        [128.0, 240.0, 128.0]
+    );
+}
+
+#[test]
+fn snap_entities_to_floor_preserves_exact_ramp_height_and_deduplicates_components() {
+    let mut project = ProjectDocument::new("snap-entities-ramp");
+    let ramp = psxed_project::brush::Brush::convex_prism(
+        &[[0, -64], [256, -64], [256, 128], [0, 0]],
+        [0, 1],
+        2,
+        [0, 256],
+    )
+    .expect("convex ramp");
+    project.active_scene_mut().brushes.push(ramp);
+    let entity = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Enemy", NodeKind::Entity);
+    project
+        .active_scene_mut()
+        .node_mut(entity)
+        .unwrap()
+        .transform
+        .translation = [128.0, 240.0, 128.0];
+    let controller = project.active_scene_mut().add_node(
+        entity,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: None,
+            settings: None,
+            player: false,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.selection.selected_node = controller;
+    workspace.selection.selected_nodes = [entity, controller].into_iter().collect();
+
+    assert!(workspace.snap_selected_entities_to_floor());
+    let y = workspace
+        .project
+        .active_scene()
+        .node(entity)
+        .unwrap()
+        .transform
+        .translation[1];
+    assert!((y - 64.0).abs() < 0.001, "ramp height stays exact: {y}");
+    assert_eq!(workspace.status, "Snapped Entity to floor");
+}

@@ -945,6 +945,12 @@ impl Playtest {
     /// the same text table + fallbacks the legacy interactable path
     /// used (the cook shares the message index between both records).
     fn open_logic_message(&mut self, index: usize, record: &psx_level::LevelLogicRecord) {
+        if self.poi_messages.active().is_some() {
+            // POI/world messages are deliberately non-modal. Refuse a hidden
+            // legacy overlay rather than letting it freeze gameplay behind the
+            // visible Archive panel or consume the same Cross press.
+            return;
+        }
         let (title, body) = match interactable_for_logic(index) {
             Some(interactable) => interactable_message_text(interactable),
             None => match INTERACTABLE_MESSAGES.get(record.message as usize) {

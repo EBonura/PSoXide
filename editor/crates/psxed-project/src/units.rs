@@ -273,6 +273,14 @@ fn scale_node(node: &mut SceneNode) {
             settings.target_height = div_i32(settings.target_height);
             settings.min_floor_clearance = div_i32(settings.min_floor_clearance);
         }
+        NodeKind::PointOfInterest {
+            radius,
+            marker_height,
+            ..
+        } => {
+            *radius = div_u16_min1(*radius);
+            *marker_height = div_u16_min1(*marker_height);
+        }
         _ => {}
     }
 }

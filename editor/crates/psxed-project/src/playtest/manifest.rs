@@ -1926,11 +1926,47 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for message in &package.interactable_messages {
         let _ = writeln!(
             out,
-            "    InteractableMessageRecord {{ title: {:?}, body: {:?} }},",
-            message.title, message.body,
+            "    InteractableMessageRecord {{ title: {:?}, body: {:?}, page_first: {}, page_count: {} }},",
+            message.title, message.body, message.page_first, message.page_count,
         );
     }
     out.push_str("];\n\n");
+
+    out.push_str("/// Flat body-page table shared by POI and world messages.\n");
+    out.push_str("pub static INTERACTABLE_MESSAGE_PAGES: &[&str] = &[\n");
+    for page in &package.interactable_message_pages {
+        let _ = writeln!(out, "    {:?},", page);
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Optional per-scene message shown once per game launch.\n");
+    match &package.world_message {
+        Some(message) => {
+            let _ = writeln!(
+                out,
+                "pub static WORLD_MESSAGE: Option<InteractableMessageRecord> = Some(InteractableMessageRecord {{ title: {:?}, body: {:?}, page_first: {}, page_count: {} }});",
+                message.title, message.body, message.page_first, message.page_count,
+            );
+        }
+        None => {
+            out.push_str("pub static WORLD_MESSAGE: Option<InteractableMessageRecord> = None;\n")
+        }
+    }
+    let _ = writeln!(
+        out,
+        "pub const PERSISTENT_FLAG_COUNT: u16 = {};\n",
+        package.persistent_flag_count,
+    );
+    let _ = writeln!(
+        out,
+        "pub const PROJECT_SAVE_NAME: &str = {:?};",
+        package.save_name,
+    );
+    let _ = writeln!(
+        out,
+        "pub const PROJECT_SAVE_TITLE: &str = {:?};\n",
+        package.save_title,
+    );
 
     out.push_str("/// Placed gameplay interactables, room-local coordinates.\n");
     out.push_str("pub static INTERACTABLES: &[InteractableRecord] = &[\n");
@@ -1938,6 +1974,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let kind = match interactable.kind {
             PlaytestInteractableKind::Message => "InteractableKind::Message",
             PlaytestInteractableKind::Checkpoint => "InteractableKind::Checkpoint",
+            PlaytestInteractableKind::PointOfInterest => "InteractableKind::PointOfInterest",
         };
         let message = if interactable.message == psx_level::INTERACTABLE_MESSAGE_NONE {
             "psx_level::INTERACTABLE_MESSAGE_NONE".to_string()
@@ -1951,15 +1988,20 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    InteractableRecord {{ room: RoomIndex({}), kind: {kind}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, prompt: {:?}, message: {message}, logic: {logic}, checkpoint_id: {:?}, flags: {} }},",
+            "    InteractableRecord {{ room: RoomIndex({}), kind: {kind}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, marker_height: {}, prompt: {:?}, message: {message}, logic: {logic}, checkpoint_id: {:?}, read_flag: {}, reward_flag: {}, reward_resource: {}, reward_quantity: {}, flags: {} }},",
             interactable.room,
             interactable.x,
             interactable.y,
             interactable.z,
             interactable.yaw,
             interactable.radius,
+            interactable.marker_height,
             interactable.prompt,
             interactable.checkpoint_id,
+            interactable.read_flag,
+            interactable.reward_flag,
+            interactable.reward_resource,
+            interactable.reward_quantity,
             interactable.flags,
         );
     }

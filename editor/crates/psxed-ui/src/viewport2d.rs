@@ -489,6 +489,24 @@ pub(crate) fn draw_scene_viewport(
             continue;
         }
         match &node.kind {
+            NodeKind::Entity
+                if node.children.iter().any(|child| {
+                    scene
+                        .node(*child)
+                        .is_some_and(|child| matches!(child.kind, NodeKind::PointOfInterest { .. }))
+                }) =>
+            {
+                draw_simple_marker(
+                    painter,
+                    transform,
+                    node,
+                    selected_nodes.contains(&node.id)
+                        || (selected_nodes.is_empty() && selected == node.id),
+                    "X",
+                    Color32::from_rgb(224, 72, 56),
+                    &mut hits,
+                );
+            }
             NodeKind::MeshInstance { .. } => {
                 draw_mesh_marker(
                     painter,
