@@ -19,7 +19,7 @@
 //!   y = 0      ▶ tpages 5..15  -- 4bpp room material atlas pages,
 //!                packed on the GP0(E2) 8-texel texture-window grid
 //!                starting at x = 320
-//!   y = 480    ▶ CLUT row, 16 halfwords per palette
+//!   y = 240..255 ▶ CLUT rows in the framebuffer's undisplayed tail
 //! ```
 
 use std::collections::HashMap;
@@ -42,10 +42,12 @@ const ROOM_TILE_TEXELS: u16 = 128;
 const ROOM_FIRST_TPAGE: u8 = 5;
 const ROOM_LAST_TPAGE: u8 = 15;
 const ROOM_TPAGE_COUNT: usize = (ROOM_LAST_TPAGE - ROOM_FIRST_TPAGE + 1) as usize;
-const ROOM_CLUT_Y: u16 = 480;
 const ROOM_CLUT_HALFWORDS: u16 = 16;
+const PREVIEW_CLUT_X_LIMIT: u16 = 320;
+const ROOM_CLUT_FIRST_Y: u16 = 240;
+const ROOM_CLUT_LAST_Y: u16 = 243;
 const SCENE_SKY_CLUT_X: u16 = 0;
-const SCENE_SKY_CLUT_Y: u16 = 479;
+const SCENE_SKY_CLUT_Y: u16 = 244;
 const SCENE_SKY_LAYERED_PAGES: usize = 1;
 const SCENE_SKY_CUBE_PAGES: usize = 6;
 const SHADOW_TEXTURE_SIZE: usize = 64;
@@ -53,14 +55,16 @@ const SHADOW_TPAGE_INDEX: u16 = 15;
 const SHADOW_TPAGE_X: u16 = SHADOW_TPAGE_INDEX * 64;
 const SHADOW_TPAGE_Y_BLOCK: u16 = 1;
 const SHADOW_TPAGE_Y: u16 = 256;
-const SHADOW_CLUT_X: u16 = 1008;
-const SHADOW_CLUT_Y: u16 = 479;
+const SHADOW_CLUT_X: u16 = 288;
+const SHADOW_CLUT_Y: u16 = 244;
 const PARTICLE_TEXTURE_SIZE: usize = 16;
 const PARTICLE_TEXEL_U: u8 = 64;
 const PARTICLE_TEXTURE_X: u16 = SHADOW_TPAGE_X + ((PARTICLE_TEXEL_U as u16) / 4);
 const PARTICLE_TEXTURE_Y: u16 = SHADOW_TPAGE_Y;
-const PARTICLE_CLUT_X: u16 = 992;
-const PARTICLE_CLUT_Y: u16 = 479;
+const PARTICLE_CLUT_X: u16 = 304;
+const PARTICLE_CLUT_Y: u16 = 244;
+const MODEL_CLUT_FIRST_Y: u16 = 245;
+const MODEL_CLUT_LAST_Y: u16 = 255;
 
 /// Cached tpage/CLUT for one Material resource.
 #[derive(Debug, Clone, Copy)]
@@ -111,8 +115,9 @@ struct CacheEntry {
 ///   packed on an 8-texel texture-window grid.
 /// * `y = 256`, tpage row 1   -- 4bpp/8bpp model atlases, packed
 ///   left-to-right by halfwords. Disjoint from the room region.
-/// * `y = 480`                -- 4bpp CLUTs, 16 halfwords each.
-/// * `y = 481..`              -- 8bpp CLUTs, 256 halfwords each.
+/// * `x = 0..319, y = 240..255` -- CLUTs in the framebuffer's
+///   undisplayed 16-line tail. Room, sky, utility, and model palettes use
+///   separate rows so refreshing one class cannot invalidate another.
 ///
 /// Each Model resource maps to one cache entry keyed by its
 /// `ResourceId`; same for Material resources. The two halves of
@@ -137,12 +142,15 @@ pub struct EditorTextures {
     /// Halfword X-coord of the next free 4bpp CLUT slot. Each
     /// 4bpp CLUT is 16 halfwords wide.
     next_clut_x: u16,
+    /// Y-coord of the next room-material CLUT row in the framebuffer tail.
+    next_clut_y: u16,
     /// Halfword X-coord cursor inside the indexed model-atlas tpage
     /// row at y=256. Each atlas advances this by its halfword
     /// stride.
     next_model_tpage_x: u16,
-    /// Y-coord of the next free model CLUT row. Steps down by 1
-    /// per uploaded atlas; 4bpp palettes intentionally get their own row too.
+    /// Halfword X-coord of the next free model CLUT slot.
+    next_model_clut_x: u16,
+    /// Y-coord of the next free model CLUT row in the framebuffer tail.
     next_model_clut_y: u16,
 }
 
@@ -209,11 +217,12 @@ impl EditorTextures {
             room_signature: Vec::new(),
             room_allocator: TextureWindowAtlas::new(),
             next_clut_x: 0,
+            next_clut_y: ROOM_CLUT_FIRST_Y,
             // Model atlases live at the tpage row at y=256.
             // Cursor advances by halfword stride per atlas.
             next_model_tpage_x: 0,
-            // Model CLUTs sit just below the room-material CLUT band.
-            next_model_clut_y: 481,
+            next_model_clut_x: 0,
+            next_model_clut_y: MODEL_CLUT_FIRST_Y,
         };
         textures.upload_shadow_texture();
         textures.upload_particle_texture();
@@ -374,7 +383,9 @@ impl EditorTextures {
     }
 
     fn has_room_material_slot(&self) -> bool {
-        self.next_clut_x + ROOM_CLUT_HALFWORDS <= VRAM_WIDTH as u16
+        self.next_clut_y <= ROOM_CLUT_LAST_Y
+            && (self.next_clut_x + ROOM_CLUT_HALFWORDS <= PREVIEW_CLUT_X_LIMIT
+                || self.next_clut_y < ROOM_CLUT_LAST_Y)
     }
 
     fn clear_room_materials(&mut self) {
@@ -382,6 +393,7 @@ impl EditorTextures {
         self.secondary_cache.clear();
         self.room_allocator.clear();
         self.next_clut_x = 0;
+        self.next_clut_y = ROOM_CLUT_FIRST_Y;
 
         let x0 = ROOM_FIRST_TPAGE as usize * ROOM_TPAGE_HALFWORDS;
         let x1 = (ROOM_LAST_TPAGE as usize + 1) * ROOM_TPAGE_HALFWORDS;
@@ -390,8 +402,10 @@ impl EditorTextures {
             self.vram[base + x0..base + x1].fill(0);
         }
 
-        let clut_base = ROOM_CLUT_Y as usize * VRAM_WIDTH as usize;
-        self.vram[clut_base..clut_base + VRAM_WIDTH as usize].fill(0);
+        for clut_y in ROOM_CLUT_FIRST_Y..=ROOM_CLUT_LAST_Y {
+            let clut_base = clut_y as usize * VRAM_WIDTH as usize;
+            self.vram[clut_base..clut_base + PREVIEW_CLUT_X_LIMIT as usize].fill(0);
+        }
         let sky_clut_base =
             SCENE_SKY_CLUT_Y as usize * VRAM_WIDTH as usize + SCENE_SKY_CLUT_X as usize;
         self.vram[sky_clut_base..sky_clut_base + 16 * SCENE_SKY_CUBE_PAGES].fill(0);
@@ -534,11 +548,7 @@ impl EditorTextures {
         if pixel_bytes.len() != pixel_len {
             return None;
         }
-        let clut_x = self.next_clut_x;
-        let clut_y = ROOM_CLUT_Y;
-        if clut_x + ROOM_CLUT_HALFWORDS > VRAM_WIDTH as u16 {
-            return None;
-        }
+        let (clut_x, clut_y) = self.allocate_room_clut()?;
 
         let placement = self
             .room_allocator
@@ -591,7 +601,6 @@ impl EditorTextures {
             texture_width,
             texture_height,
         };
-        self.next_clut_x += ROOM_CLUT_HALFWORDS;
         Some(slot)
     }
 
@@ -636,11 +645,7 @@ impl EditorTextures {
     /// Returns `None` only when the preview room texture band is full.
     fn upload_procedural(&mut self, material_name: &str) -> Option<MaterialSlot> {
         let pattern = pattern_for_name(material_name);
-        let clut_x = self.next_clut_x;
-        let clut_y = ROOM_CLUT_Y;
-        if clut_x + ROOM_CLUT_HALFWORDS > VRAM_WIDTH as u16 {
-            return None;
-        }
+        let (clut_x, clut_y) = self.allocate_room_clut()?;
         let placement = self.room_allocator.allocate(64, 64)?;
         let tpage_index = u16::from(ROOM_FIRST_TPAGE).checked_add(placement.page_index())?;
         let tpage_x = tpage_index.checked_mul(64)?;
@@ -662,7 +667,35 @@ impl EditorTextures {
             texture_width: 64,
             texture_height: 64,
         };
-        self.next_clut_x += ROOM_CLUT_HALFWORDS;
+        Some(slot)
+    }
+
+    fn allocate_room_clut(&mut self) -> Option<(u16, u16)> {
+        if self.next_clut_x + ROOM_CLUT_HALFWORDS > PREVIEW_CLUT_X_LIMIT {
+            self.next_clut_x = 0;
+            self.next_clut_y = self.next_clut_y.saturating_add(1);
+        }
+        if self.next_clut_y > ROOM_CLUT_LAST_Y {
+            return None;
+        }
+        let slot = (self.next_clut_x, self.next_clut_y);
+        self.next_clut_x = self.next_clut_x.saturating_add(ROOM_CLUT_HALFWORDS);
+        Some(slot)
+    }
+
+    fn allocate_model_clut(&mut self, entries: u16) -> Option<(u16, u16)> {
+        if entries == 0 || entries > PREVIEW_CLUT_X_LIMIT || !entries.is_multiple_of(16) {
+            return None;
+        }
+        if self.next_model_clut_x + entries > PREVIEW_CLUT_X_LIMIT {
+            self.next_model_clut_x = 0;
+            self.next_model_clut_y = self.next_model_clut_y.saturating_add(1);
+        }
+        if self.next_model_clut_y > MODEL_CLUT_LAST_Y {
+            return None;
+        }
+        let slot = (self.next_model_clut_x, self.next_model_clut_y);
+        self.next_model_clut_x = self.next_model_clut_x.saturating_add(entries);
         Some(slot)
     }
 
@@ -766,6 +799,16 @@ impl EditorTextures {
                 self.model_cache.remove(&resource.id);
                 continue;
             }
+            if let Some(slot) = self
+                .model_cache
+                .values()
+                .find(|entry| entry.signature == signature)
+                .map(|entry| entry.slot)
+            {
+                self.model_cache
+                    .insert(resource.id, ModelAtlasCacheEntry { slot, signature });
+                continue;
+            }
             let abs = if Path::new(&signature).is_absolute() {
                 PathBuf::from(&signature)
             } else {
@@ -835,24 +878,12 @@ impl EditorTextures {
         if aligned_tpage_x as u32 + slot_halfwords as u32 > VRAM_WIDTH {
             return None;
         }
-        if self.next_model_clut_y as usize >= VRAM_HEIGHT as usize {
-            return None;
-        }
         let tpage_x = aligned_tpage_x;
         let tpage_y: u16 = 256;
-        // The atlas band ends where the CLUT bands begin (shadow and
-        // room CLUTs at rows 479/480, model CLUTs from 481): a taller
-        // atlas writes its bottom rows straight through every palette.
-        // A 256-tall sword atlas did exactly that, and because the
-        // column depends on upload order it corrupted room materials
-        // only in SOME projects. Reject it; the model renders
-        // atlas-less rather than poisoning VRAM.
-        // ponytail: a dedicated tall-atlas column with capped room-CLUT
-        // growth is the upgrade if tall atlases must preview textured.
-        if u32::from(tpage_y) + u32::from(height_px) > u32::from(SHADOW_CLUT_Y) {
+        if u32::from(tpage_y) + u32::from(height_px) > VRAM_HEIGHT {
             return None;
         }
-        let clut_y = self.next_model_clut_y;
+        let (clut_x, clut_y) = self.allocate_model_clut(texture.clut_entries())?;
 
         // Pixels.
         if pixel_bytes.len() < (halfwords_per_row as usize) * (height_px as usize) * 2 {
@@ -883,7 +914,7 @@ impl EditorTextures {
             let off = i * 2;
             let raw = u16::from_le_bytes([clut_bytes[off], clut_bytes[off + 1]]);
             let marked = model_atlas_clut_entry(i, raw, transparent_index_zero);
-            let vram_idx = (clut_y as usize) * VRAM_WIDTH as usize + i;
+            let vram_idx = (clut_y as usize) * VRAM_WIDTH as usize + clut_x as usize + i;
             self.vram[vram_idx] = marked;
         }
 
@@ -893,7 +924,7 @@ impl EditorTextures {
         let tpage_index = tpage_x / MODEL_TPAGE_ALIGNMENT_HALFWORDS;
         let slot = MaterialSlot {
             tpage_word: pack_indexed_tpage_word(tpage_index, 1, depth_bits),
-            clut_word: pack_clut_word(0, clut_y),
+            clut_word: pack_clut_word(clut_x, clut_y),
             texture_window: TextureWindow::NONE,
             texture_width: texture.width().min(u16::from(u8::MAX)) as u8,
             texture_height: texture.height().min(u16::from(u8::MAX)) as u8,
@@ -902,7 +933,6 @@ impl EditorTextures {
         // Advance to the next aligned slot. Physical halfword width decides
         // whether the atlas consumes one or two base columns.
         self.next_model_tpage_x = aligned_tpage_x.saturating_add(slot_halfwords);
-        self.next_model_clut_y = self.next_model_clut_y.saturating_add(1);
         Some(slot)
     }
 }
@@ -1737,8 +1767,8 @@ fn align_up_to(value: u16, boundary: u16) -> u16 {
 mod tests {
     use super::{
         align_up_to, model_atlas_clut_entry, opaque_room_clut_entry, preview_clut_entry,
-        preview_texture_upload_plan, EditorTextures, SCENE_SKY_CLUT_Y, SHADOW_CLUT_X,
-        SHADOW_CLUT_Y, SHADOW_TPAGE_X, SHADOW_TPAGE_Y,
+        preview_texture_upload_plan, EditorTextures, MODEL_CLUT_FIRST_Y, SCENE_SKY_CLUT_Y,
+        SHADOW_CLUT_X, SHADOW_CLUT_Y, SHADOW_TPAGE_X, SHADOW_TPAGE_Y,
     };
     use psx_gpu::material::TextureWindow;
     use psx_gpu_render::VRAM_WIDTH;
@@ -2041,10 +2071,14 @@ mod tests {
         assert_eq!(slot.texture_width, 128);
         assert_eq!(slot.texture_height, 128);
         assert_eq!(textures.next_model_tpage_x, 64);
-        assert_eq!(textures.next_model_clut_y, 482);
+        assert_eq!(textures.next_model_clut_x, 16);
+        assert_eq!(textures.next_model_clut_y, MODEL_CLUT_FIRST_Y);
         let last_uploaded_word = (256usize + 127) * VRAM_WIDTH as usize + 31;
         assert_eq!(textures.vram[last_uploaded_word], 0x3412);
-        assert_eq!(textures.vram[481 * VRAM_WIDTH as usize + 15], 0x800F);
+        assert_eq!(
+            textures.vram[MODEL_CLUT_FIRST_Y as usize * VRAM_WIDTH as usize + 15],
+            0x800F
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -2061,6 +2095,26 @@ mod tests {
             .upload_model_atlas_psxt(&path)
             .expect("four-bank 4bpp model atlas should upload");
         assert_eq!((slot.tpage_word >> 7) & 0x3, 0, "tpage must stay 4bpp");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn model_atlas_upload_accepts_full_height_four_bank_4bpp() {
+        let path = write_test_indexed_psxt_with_clut_entries(256, 256, 4, 64);
+        let mut textures = EditorTextures::new();
+
+        let slot = textures
+            .upload_model_atlas_psxt(&path)
+            .expect("256x256 four-bank enemy atlas should fit the editor layout");
+
+        assert_eq!((slot.tpage_word >> 7) & 0x3, 0);
+        assert_eq!(slot.clut_word >> 6, MODEL_CLUT_FIRST_Y);
+        assert_eq!(textures.vram[511 * VRAM_WIDTH as usize + 63], 0x3412);
+        assert_eq!(
+            textures.vram[MODEL_CLUT_FIRST_Y as usize * VRAM_WIDTH as usize + 63],
+            0x803F
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -2103,7 +2157,8 @@ mod tests {
         textures.refresh(&project, Path::new("."));
 
         assert!(textures.slot(used).is_some());
-        assert!(textures.slot(unused[70]).is_none());
+        assert!(textures.slot(unused[70]).is_some());
+        assert!(textures.slot(unused[79]).is_none());
     }
 
     #[test]
@@ -2192,14 +2247,11 @@ mod tests {
         assert!(panel_index < first_unused_index);
     }
 
-    /// A model atlas taller than the space above the CLUT rows must be
-    /// rejected, not uploaded: the 256-tall sword atlas used to write
-    /// its bottom rows through the room-CLUT band at y 480, replacing
-    /// texture palettes with pixel data whenever its column happened to
-    /// overlap them (upload-order dependent, so only some projects
-    /// showed it).
+    /// Full-height model atlases and room palettes occupy disjoint regions.
+    /// This keeps a 256-tall atlas visible without letting its bottom rows
+    /// replace room palette data.
     #[test]
-    fn tall_model_atlas_cannot_stomp_the_clut_rows() {
+    fn tall_model_atlas_and_room_clut_coexist() {
         let starter = ProjectDocument::starter();
         let root = psxed_project::default_project_dir();
         let mut project = ProjectDocument::new("tall-atlas-guard");
@@ -2209,13 +2261,16 @@ mod tests {
                 "assets/textures/sanctum_slate.psxt".to_string(),
             ))),
         );
-        let sword_id = {
+        let (sword_id, sword_copy_id) = {
             let sword = starter
                 .resources
                 .iter()
                 .find(|r| r.name == "Sword1 Light" && matches!(r.data, ResourceData::Model(_)))
                 .expect("starter sword model");
-            project.add_resource(sword.name.clone(), sword.data.clone())
+            (
+                project.add_resource(sword.name.clone(), sword.data.clone()),
+                project.add_resource("Sword1 Light Copy", sword.data.clone()),
+            )
         };
         let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 256, 512]);
         for face in &mut brush.faces {
@@ -2227,9 +2282,17 @@ mod tests {
         textures.refresh(&project, &root);
         textures.refresh_models(&project, &root);
 
-        assert!(
-            textures.model_atlas_slot(sword_id).is_none(),
-            "a 256-tall atlas cannot fit above the CLUT rows"
+        let sword_slot = textures
+            .model_atlas_slot(sword_id)
+            .expect("the relocated CLUT band leaves room for a 256-tall atlas");
+        let sword_copy_slot = textures
+            .model_atlas_slot(sword_copy_id)
+            .expect("models sharing an atlas both receive a preview slot");
+        assert_eq!(sword_copy_slot.tpage_word, sword_slot.tpage_word);
+        assert_eq!(sword_copy_slot.clut_word, sword_slot.clut_word);
+        assert_eq!(
+            textures.next_model_tpage_x, 64,
+            "models sharing one atlas should upload it only once"
         );
         let bytes =
             std::fs::read(root.join("assets/textures/sanctum_slate.psxt")).expect("floor psxt");
