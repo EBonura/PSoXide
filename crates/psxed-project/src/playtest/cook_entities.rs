@@ -1638,6 +1638,7 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
     let sample_rate_hz = animation.sample_rate_hz();
     let mut translations_max_abs = 0i32;
     let mut rotation_max_abs = 0i16;
+    let mut fits_v4 = true;
     let mut frame = 0u16;
     while frame < frame_count {
         let mut joint = 0u16;
@@ -1654,6 +1655,16 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
                         rotation_max_abs = rotation_max_abs.max(value.saturating_abs());
                     }
                 }
+                let mut flat = [0i16; 9];
+                let mut index = 0usize;
+                for column in pose.matrix {
+                    for value in column {
+                        flat[index] = value;
+                        index += 1;
+                    }
+                }
+                let mut block = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4];
+                fits_v4 &= psxed_format::animation::encode_rotation_q11_cross(&flat, &mut block);
             }
             joint += 1;
         }
@@ -1662,6 +1673,7 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
     // Q11-packed rotations (version 3) hold |q12| <= 4096; larger values
     // (animated scale) fall back to the flat i16 records of version 2.
     let fits_v3 = rotation_max_abs <= 4096;
+    fits_v4 &= fits_v3;
 
     let mut translation_shift = 0u16;
     while translations_max_abs > i16::MAX as i32 && translation_shift < 15 {
@@ -1670,7 +1682,12 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
     }
 
     let pose_count = frame_count as usize * joint_count as usize;
-    let (version, record_size) = if fits_v3 {
+    let (version, record_size) = if fits_v4 {
+        (
+            psxed_format::animation::VERSION_V4,
+            psxed_format::animation::POSE_RECORD_SIZE_V4,
+        )
+    } else if fits_v3 {
         (
             psxed_format::animation::VERSION_V3,
             psxed_format::animation::POSE_RECORD_SIZE_V3,
@@ -1700,7 +1717,20 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
             let pose = animation
                 .pose(frame, joint)
                 .expect("validated animation frame/joint indices");
-            if fits_v3 {
+            if fits_v4 {
+                let mut flat = [0i16; 9];
+                let mut i = 0;
+                for column in pose.matrix {
+                    for value in column {
+                        flat[i] = value;
+                        i += 1;
+                    }
+                }
+                let mut block = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4];
+                let encoded = psxed_format::animation::encode_rotation_q11_cross(&flat, &mut block);
+                debug_assert!(encoded, "v4 preflight accepted every record");
+                out.extend_from_slice(&block);
+            } else if fits_v3 {
                 let mut flat = [0i16; 9];
                 let mut i = 0;
                 for column in pose.matrix {
@@ -3081,7 +3111,68 @@ fn joint_bind_anchor(model: &psx_asset::Model<'_>, joint: u16) -> [i32; 3] {
 
 #[cfg(test)]
 mod socket_anchor_tests {
-    use super::{joint_bind_anchor, remap_authored_duration, remap_authored_frame};
+    use super::{
+        compact_animation_bytes, joint_bind_anchor, remap_authored_duration, remap_authored_frame,
+    };
+
+    fn one_pose_animation(matrix: [i16; 9]) -> Vec<u8> {
+        use psxed_format::animation;
+
+        let payload_len = animation::AnimationHeader::SIZE + animation::POSE_RECORD_SIZE;
+        let mut bytes = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
+        bytes.extend_from_slice(&animation::MAGIC);
+        bytes.extend_from_slice(&animation::VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&(payload_len as u32).to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&15u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        for value in matrix {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&11i16.to_le_bytes());
+        bytes.extend_from_slice(&(-22i16).to_le_bytes());
+        bytes.extend_from_slice(&33i16.to_le_bytes());
+        bytes
+    }
+
+    fn compacted_version(matrix: [i16; 9]) -> (u16, psx_asset::JointPose) {
+        let source_bytes = one_pose_animation(matrix);
+        let source = psx_asset::Animation::from_bytes(&source_bytes).expect("source animation");
+        let compacted_bytes = compact_animation_bytes(&source);
+        let version = u16::from_le_bytes([compacted_bytes[4], compacted_bytes[5]]);
+        let compacted =
+            psx_asset::Animation::from_bytes(&compacted_bytes).expect("compacted animation");
+        (version, compacted.pose(0, 0).expect("compacted pose"))
+    }
+
+    #[test]
+    fn rigid_pose_uses_dense_v4_and_keeps_translation_exact() {
+        let matrix = [4096, 0, 0, 0, 4096, 0, 0, 0, 4096];
+        let (version, pose) = compacted_version(matrix);
+        assert_eq!(version, psxed_format::animation::VERSION_V4);
+        assert_eq!(pose.matrix, [[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]]);
+        assert_eq!(
+            (pose.translation.x, pose.translation.y, pose.translation.z),
+            (11, -22, 33)
+        );
+    }
+
+    #[test]
+    fn dense_preflight_falls_back_for_non_orthonormal_or_scaled_poses() {
+        let non_orthonormal = [4096, 0, 0, 0, 4096, 0, 0, 0, 0];
+        assert_eq!(
+            compacted_version(non_orthonormal).0,
+            psxed_format::animation::VERSION_V3
+        );
+
+        let animated_scale = [8192, 0, 0, 0, 4096, 0, 0, 0, 4096];
+        assert_eq!(
+            compacted_version(animated_scale).0,
+            psxed_format::animation::VERSION
+        );
+    }
 
     #[test]
     fn studio_frames_follow_trim_and_resample() {
