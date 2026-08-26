@@ -964,9 +964,10 @@ mod tests {
     use super::{
         bar_frame_index, bar_frame_v_range, diamond_quad, focus_chrome_sweep_paint,
         focus_sweep_rect, font_index, font_tint, image_effect_vertex_colors, image_effect_verts,
-        message_panel_layout, node_absolute_rect, scale_u16_q8, selected_label_text, shape_config,
-        shape_edge_point, shape_perimeter, shape_polygon, MessagePageMeta, MessagePanelVariant,
-        UiPaint, UiShapeConfig,
+        message_panel_layout, message_panel_transition_layout, node_absolute_rect, scale_u16_q8,
+        selected_label_text, shape_config, shape_edge_point, shape_perimeter, shape_polygon,
+        text_prefix_chars, MessagePageMeta, MessagePanelLayout, MessagePanelVariant, UiPaint,
+        UiShapeConfig, MESSAGE_PANEL_EXPAND_FRAMES,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiGradientDirection, LevelUiImageEffect,
@@ -1092,6 +1093,40 @@ mod tests {
             (28, 92, 264, 56, 3)
         );
         assert_eq!(i32::from(world.y) * 2 + i32::from(world.height), 240);
+    }
+
+    #[test]
+    fn archive_prompt_morph_preserves_its_centre_and_bottom_edge() {
+        let prompt = MessagePanelLayout {
+            x: 122,
+            y: 209,
+            width: 76,
+            height: 17,
+            max_lines: 1,
+        };
+        let message = message_panel_layout(MessagePanelVariant::PointOfInterest);
+        assert_eq!(message_panel_transition_layout(prompt, message, 0), prompt);
+        assert_eq!(
+            message_panel_transition_layout(prompt, message, MESSAGE_PANEL_EXPAND_FRAMES),
+            message
+        );
+
+        let halfway =
+            message_panel_transition_layout(prompt, message, MESSAGE_PANEL_EXPAND_FRAMES / 2);
+        assert_eq!(i32::from(halfway.x) * 2 + i32::from(halfway.width), 320);
+        assert_eq!(i32::from(halfway.y) + i32::from(halfway.height), 226);
+        assert!(halfway.width > prompt.width && halfway.width < message.width);
+        assert!(halfway.height > prompt.height && halfway.height < message.height);
+    }
+
+    #[test]
+    fn archive_typewriter_never_slices_inside_a_utf8_character() {
+        let text = "A·Ω";
+        assert_eq!(text_prefix_chars(text, 0), "");
+        assert_eq!(text_prefix_chars(text, 1), "A");
+        assert_eq!(text_prefix_chars(text, 2), "A·");
+        assert_eq!(text_prefix_chars(text, 3), text);
+        assert_eq!(text_prefix_chars(text, 99), text);
     }
 
     #[test]
@@ -2515,6 +2550,15 @@ struct MessagePanelLayout {
     max_lines: u8,
 }
 
+/// Number of presented frames used to morph the compact interaction prompt
+/// into the full two-line Archive panel.
+pub const MESSAGE_PANEL_EXPAND_FRAMES: u16 = 6;
+/// Presented frames elapsed between newly revealed characters.
+pub const MESSAGE_PANEL_TYPE_TICKS_PER_CHAR: u16 = 1;
+const ARCHIVE_PROMPT_Y: i16 = 209;
+const ARCHIVE_PROMPT_HEIGHT: u16 = 17;
+const ARCHIVE_PROMPT_PAD_X: i16 = 10;
+
 const fn message_panel_layout(variant: MessagePanelVariant) -> MessagePanelLayout {
     match variant {
         MessagePanelVariant::PointOfInterest => MessagePanelLayout {
@@ -2563,10 +2607,82 @@ pub fn draw_message_panel(
     page: MessagePageMeta,
     frame: u16,
 ) {
-    const TEXT_INSET_X: u16 = 10;
     let layout = message_panel_layout(variant);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
     draw_archive_panel_chrome(resolved, frame);
+    draw_message_panel_body(
+        font,
+        page_text,
+        page_text,
+        layout,
+        page,
+        UiPaint::Solid((114, 96, 92)),
+        true,
+    );
+}
+
+/// Morph the compact `X - action` prompt into the full bottom Archive panel.
+///
+/// The prompt and message share their centre and bottom edge, so the chrome,
+/// clipped corners, translucent fill, and scanner are visibly the same object
+/// throughout the transition. Copy is deliberately absent while the frame is
+/// moving; the message types on only after the full two-line panel settles.
+pub fn draw_expanding_message_panel(
+    font: &FontAtlas,
+    action: &str,
+    page_text: &str,
+    page: MessagePageMeta,
+    frame: u16,
+    transition_frame: u16,
+    typewriter_frame: u16,
+) {
+    let prompt = interaction_prompt_layout(font, action);
+    let target = message_panel_layout(MessagePanelVariant::PointOfInterest);
+    let layout = message_panel_transition_layout(prompt, target, transition_frame);
+    let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
+    draw_archive_panel_chrome(resolved, frame);
+
+    // Activation clears the compact prompt immediately. Let the panel itself
+    // be the only thing on screen until its geometry has completely settled;
+    // the body then types on without competing with a moving frame.
+    if transition_frame < MESSAGE_PANEL_EXPAND_FRAMES {
+        return;
+    }
+    let visible_characters = typewriter_frame / MESSAGE_PANEL_TYPE_TICKS_PER_CHAR;
+    let visible_text = text_prefix_chars(page_text, usize::from(visible_characters));
+    draw_message_panel_body(
+        font,
+        page_text,
+        visible_text,
+        layout,
+        page,
+        UiPaint::Solid((114, 96, 92)),
+        visible_text.len() == page_text.len(),
+    );
+}
+
+fn text_prefix_chars(text: &str, character_count: usize) -> &str {
+    if character_count == 0 {
+        return "";
+    }
+    let end = text
+        .char_indices()
+        .nth(character_count)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    &text[..end]
+}
+
+fn draw_message_panel_body(
+    font: &FontAtlas,
+    page_text: &str,
+    visible_text: &str,
+    layout: MessagePanelLayout,
+    page: MessagePageMeta,
+    text_paint: UiPaint,
+    show_page_pips: bool,
+) {
+    const TEXT_INSET_X: u16 = 10;
 
     let text_width = layout.width.saturating_sub(TEXT_INSET_X * 2).max(1);
     let line_height = scaled_line_height(font, UI_FONT_SCALE_ONE_Q8).max(1);
@@ -2595,21 +2711,28 @@ pub fn draw_message_panel(
         if end <= start {
             break;
         }
+        let visible_end = end.min(visible_text.len());
+        if visible_end <= start {
+            break;
+        }
         draw_scaled_text_paint(
             font,
             layout.x.saturating_add(TEXT_INSET_X as i16),
             line_y,
-            &page_text[start..end],
+            &page_text[start..visible_end],
             UI_FONT_SCALE_ONE_Q8,
             0,
-            UiPaint::Solid((114, 96, 92)),
+            text_paint,
         );
         line_y = line_y.saturating_add(line_height);
         drawn += 1;
         start = end;
     }
 
-    draw_message_page_pips(resolved, MessagePageMeta::new(page.index, page.count));
+    if show_page_pips {
+        let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
+        draw_message_page_pips(resolved, MessagePageMeta::new(page.index, page.count));
+    }
 }
 
 /// Draw the compact proximity prompt used beneath an Archive Beacon.
@@ -2617,24 +2740,42 @@ pub fn draw_message_panel(
 /// `action` is the verb only (normally `"READ"`); the control prefix is kept
 /// in the shared visual so every POI consistently presents `X - action`.
 pub fn draw_interaction_prompt_panel(font: &FontAtlas, action: &str, frame: u16) {
+    let layout = interaction_prompt_layout(font, action);
+    let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
+    draw_archive_panel_chrome(resolved, frame);
+    draw_interaction_prompt_text(font, action, layout);
+}
+
+fn interaction_prompt_layout(font: &FontAtlas, action: &str) -> MessagePanelLayout {
     const PREFIX: &str = "X - ";
-    const PAD_X: i16 = 10;
-    const BOX_Y: i16 = 209;
-    const BOX_H: u16 = 17;
     let prefix_width = font.text_width(PREFIX) as i16;
     let action_width = font.text_width(action) as i16;
     let text_width = prefix_width.saturating_add(action_width);
     let box_width = text_width
-        .saturating_add(PAD_X * 2)
+        .saturating_add(ARCHIVE_PROMPT_PAD_X * 2)
         .clamp(76, UI_CANVAS_W as i16 - 32);
     let box_x = (UI_CANVAS_W as i16 - box_width) / 2;
-    let resolved = screen_resolved_node(box_x, BOX_Y, box_width as u16, BOX_H);
-    draw_archive_panel_chrome(resolved, frame);
+    MessagePanelLayout {
+        x: box_x,
+        y: ARCHIVE_PROMPT_Y,
+        width: box_width as u16,
+        height: ARCHIVE_PROMPT_HEIGHT,
+        max_lines: 1,
+    }
+}
 
-    let text_x = box_x.saturating_add((box_width - text_width) / 2);
-    let text_y = BOX_Y.saturating_add(
-        ((i32::from(BOX_H) - i32::from(scaled_line_height(font, UI_FONT_SCALE_ONE_Q8))).max(0) / 2)
-            as i16,
+fn draw_interaction_prompt_text(font: &FontAtlas, action: &str, layout: MessagePanelLayout) {
+    const PREFIX: &str = "X - ";
+    let prefix_width = font.text_width(PREFIX) as i16;
+    let action_width = font.text_width(action) as i16;
+    let text_width = prefix_width.saturating_add(action_width);
+    let text_x = layout
+        .x
+        .saturating_add((layout.width as i16 - text_width) / 2);
+    let text_y = layout.y.saturating_add(
+        ((i32::from(layout.height) - i32::from(scaled_line_height(font, UI_FONT_SCALE_ONE_Q8)))
+            .max(0)
+            / 2) as i16,
     );
     draw_scaled_text_paint(
         font,
@@ -2654,6 +2795,56 @@ pub fn draw_interaction_prompt_panel(font: &FontAtlas, action: &str, frame: u16)
         0,
         UiPaint::Solid((114, 96, 92)),
     );
+}
+
+fn message_panel_transition_layout(
+    prompt: MessagePanelLayout,
+    message: MessagePanelLayout,
+    frame: u16,
+) -> MessagePanelLayout {
+    let progress = message_panel_transition_progress_q8(frame);
+    let width = lerp_u16_q8(prompt.width, message.width, progress);
+    let height = lerp_u16_q8(prompt.height, message.height, progress);
+    let prompt_centre_twice = i32::from(prompt.x) * 2 + i32::from(prompt.width);
+    let message_centre_twice = i32::from(message.x) * 2 + i32::from(message.width);
+    let centre_twice = lerp_i32_q8(prompt_centre_twice, message_centre_twice, progress);
+    let bottom = lerp_i32_q8(
+        i32::from(prompt.y) + i32::from(prompt.height),
+        i32::from(message.y) + i32::from(message.height),
+        progress,
+    );
+    MessagePanelLayout {
+        x: ((centre_twice - i32::from(width)) / 2).clamp(i32::from(i16::MIN), i32::from(i16::MAX))
+            as i16,
+        y: bottom
+            .saturating_sub(i32::from(height))
+            .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+        width,
+        height,
+        max_lines: if progress == 0 {
+            prompt.max_lines
+        } else {
+            message.max_lines
+        },
+    }
+}
+
+fn message_panel_transition_progress_q8(frame: u16) -> u16 {
+    let linear = ((u32::from(frame.min(MESSAGE_PANEL_EXPAND_FRAMES)) * 256)
+        / u32::from(MESSAGE_PANEL_EXPAND_FRAMES)) as u16;
+    let squared = u32::from(linear).saturating_mul(u32::from(linear)) >> 8;
+    ((squared.saturating_mul(768u32.saturating_sub(u32::from(linear) * 2))) >> 8).min(256) as u16
+}
+
+fn lerp_i32_q8(from: i32, to: i32, progress: u16) -> i32 {
+    from.saturating_add(to.saturating_sub(from).saturating_mul(i32::from(progress)) >> 8)
+}
+
+fn lerp_u16_q8(from: u16, to: u16, progress: u16) -> u16 {
+    let delta = i32::from(to).saturating_sub(i32::from(from));
+    i32::from(from)
+        .saturating_add(delta.saturating_mul(i32::from(progress)) >> 8)
+        .clamp(0, i32::from(u16::MAX)) as u16
 }
 
 fn draw_archive_panel_chrome(resolved: UiResolvedNode, frame: u16) {

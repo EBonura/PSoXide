@@ -724,7 +724,13 @@ pub fn build_package(
             world_message: Some(message),
             ..
         }) => {
-            if !validate_message_pages("World message", &message.pages, 3, &mut report) {
+            if !validate_message_pages(
+                "World message",
+                &message.pages,
+                3,
+                runtime_message_font(project),
+                &mut report,
+            ) {
                 return (None, report);
             }
             if message.pages.len() > u16::MAX as usize {

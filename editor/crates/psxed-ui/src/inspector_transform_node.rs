@@ -3683,9 +3683,14 @@ pub(crate) fn draw_node_kind_editor(
             changed |= ui.checkbox(enabled, "Enabled").changed();
             changed |= ui.checkbox(repeatable, "Repeatable message").changed();
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Prompt").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Action verb").color(STUDIO_TEXT_WEAK));
                 changed |= ui.text_edit_singleline(prompt).changed();
             });
+            ui.label(
+                RichText::new("The runtime adds the CROSS control prefix (for example: X - READ).")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            );
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Persistence ID").color(STUDIO_TEXT_WEAK));
                 changed |= ui.text_edit_singleline(persistence_id).changed();
@@ -3708,7 +3713,7 @@ pub(crate) fn draw_node_kind_editor(
                 ui.label(RichText::new("units").small().color(STUDIO_TEXT_WEAK));
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Marker Height").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Beacon Scale").color(STUDIO_TEXT_WEAK));
                 let mut value = i32::from(*marker_height);
                 if ui
                     .add(egui::DragValue::new(&mut value).speed(4.0).range(1..=4096))

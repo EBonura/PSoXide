@@ -141,6 +141,30 @@ impl PoiCandidate {
     }
 }
 
+/// Squared XZ distance when `target` is inside `radius` of `player`.
+///
+/// The axis precheck both avoids unnecessary multiplies and bounds each delta
+/// to `u16::MAX`, so the exact squared sum fits in `u64` without saturation.
+/// Keeping this primitive shared prevents game integrations from accidentally
+/// reintroducing the saturated-`i32` range bug while adapting cooked records.
+pub fn xz_distance_squared_within_radius(
+    player: [i32; 2],
+    target: [i32; 2],
+    radius: u16,
+) -> Option<u64> {
+    let radius = u32::from(radius);
+    let dx = player[0].abs_diff(target[0]);
+    let dz = player[1].abs_diff(target[1]);
+    if dx > radius || dz > radius {
+        return None;
+    }
+    let dx = u64::from(dx);
+    let dz = u64::from(dz);
+    let radius_squared = u64::from(radius) * u64::from(radius);
+    let distance = dx * dx + dz * dz;
+    (distance <= radius_squared).then_some(distance)
+}
+
 /// Return the nearest available point of interest whose XZ radius contains
 /// `player`. Equal-distance ties retain the earlier cooked record.
 pub fn nearest_available_poi(
@@ -150,20 +174,19 @@ pub fn nearest_available_poi(
     save: &SaveBlock,
 ) -> Option<usize> {
     let mut best = None;
-    let mut best_distance = u32::MAX;
+    let mut best_distance = u64::MAX;
     for (index, candidate) in candidates.iter().copied().enumerate() {
         if candidate.room != room || !candidate.is_available(save) {
             continue;
         }
-        let radius = u32::from(candidate.radius);
-        let dx = player[0].abs_diff(candidate.x);
-        let dz = player[2].abs_diff(candidate.z);
-        if dx > radius || dz > radius {
+        let Some(distance) = xz_distance_squared_within_radius(
+            [player[0], player[2]],
+            [candidate.x, candidate.z],
+            candidate.radius,
+        ) else {
             continue;
-        }
-        let distance = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
-        let radius_squared = radius.saturating_mul(radius);
-        if distance <= radius_squared && distance < best_distance {
+        };
+        if distance < best_distance {
             best = Some(index);
             best_distance = distance;
         }
@@ -494,6 +517,29 @@ mod tests {
         assert_eq!(
             nearest_available_poi(&records, 3, [0, 0, 0], &save),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn shared_radius_distance_is_exact_and_rejects_extreme_deltas() {
+        assert_eq!(
+            xz_distance_squared_within_radius([0, 0], [3, 4], 5),
+            Some(25)
+        );
+        assert_eq!(xz_distance_squared_within_radius([0, 0], [3, 4], 4), None);
+        let extreme_player = [i32::MIN, i32::MIN];
+        let extreme_target = [i32::MAX, i32::MAX];
+        assert_eq!(
+            xz_distance_squared_within_radius(extreme_player, extreme_target, u16::MAX),
+            None
+        );
+        assert_eq!(
+            xz_distance_squared_within_radius(
+                [0, 0],
+                [i32::from(u16::MAX), i32::from(u16::MAX)],
+                u16::MAX,
+            ),
+            None
         );
     }
 

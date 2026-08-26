@@ -1511,7 +1511,7 @@ pub struct InteractableRecord {
     pub yaw: i16,
     /// Activation radius in XZ engine units.
     pub radius: u16,
-    /// Vertical offset from the floor anchor to the archive beacon centre.
+    /// Authored visual scale for the ground-anchored archive beacon.
     pub marker_height: u16,
     /// Short prompt shown near the object.
     pub prompt: &'static str,

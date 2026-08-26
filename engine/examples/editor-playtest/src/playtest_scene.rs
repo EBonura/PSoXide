@@ -366,8 +366,11 @@ impl Scene for Playtest {
 
     fn render(&mut self, ctx: &mut Ctx) {
         let camera = self.render_camera;
+        self.advance_poi_presentation_frame();
         self.prepared_overlay_camera = camera;
         self.prepared_overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
+        self.prepared_poi_panel_frame = self.poi_panel_frame;
+        self.prepared_poi_page_type_frame = self.poi_page_type_frame;
         self.prepared_overlay_analog = ctx.pad.is_analog();
         if !ctx.pad.is_analog() {
             // Keep a valid empty list queued; the prompt is an immediate
@@ -1423,6 +1426,8 @@ impl Scene for Playtest {
     fn submit_render(&mut self, _ctx: &mut Ctx) {
         self.overlay_camera = self.prepared_overlay_camera;
         self.overlay_sim_tick = self.prepared_overlay_sim_tick;
+        self.overlay_poi_panel_frame = self.prepared_poi_panel_frame;
+        self.overlay_poi_page_type_frame = self.prepared_poi_page_type_frame;
         self.overlay_analog = self.prepared_overlay_analog;
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         let ot_in_flight = unsafe { OtFrame::resume(&mut OT) }.submit_async();
@@ -1467,15 +1472,9 @@ impl Scene for Playtest {
                 ArchiveBeaconVisualState::Active
             };
             draw_archive_beacon_overlay(
-                RoomPoint::new(
-                    interactable.x,
-                    interactable
-                        .y
-                        .saturating_sub(i32::from(interactable.marker_height)),
-                    interactable.z,
-                ),
+                RoomPoint::new(interactable.x, interactable.y, interactable.z),
                 Angle::from_q12(interactable.yaw as u16),
-                ARCHIVE_BEACON_DEFAULT_HEIGHT,
+                archive_beacon_screen_height(interactable.marker_height),
                 state,
                 overlay_tick,
                 camera,
@@ -1506,16 +1505,34 @@ impl Scene for Playtest {
                         }
                         psx_game_runtime::poi::MessageSource::World => MessagePanelVariant::World,
                     };
-                    draw_message_page(
-                        font,
-                        page_text,
-                        variant,
-                        MessagePageMeta::new(
-                            message.page_offset().min(u8::MAX as u16) as u8,
-                            message.page_count().min(u8::MAX as u16) as u8,
-                        ),
-                        overlay_tick.as_u32() as u16,
+                    let page = MessagePageMeta::new(
+                        message.page_offset().min(u8::MAX as u16) as u8,
+                        message.page_count().min(u8::MAX as u16) as u8,
                     );
+                    match message.source() {
+                        psx_game_runtime::poi::MessageSource::PointOfInterest(index) => {
+                            let action = INTERACTABLES
+                                .get(usize::from(index))
+                                .map(|interactable| interactable.prompt)
+                                .unwrap_or("READ");
+                            draw_expanding_poi_message(
+                                font,
+                                action,
+                                page_text,
+                                page,
+                                overlay_tick.as_u32() as u16,
+                                self.overlay_poi_panel_frame,
+                                self.overlay_poi_page_type_frame,
+                            );
+                        }
+                        psx_game_runtime::poi::MessageSource::World => draw_message_page(
+                            font,
+                            page_text,
+                            variant,
+                            page,
+                            overlay_tick.as_u32() as u16,
+                        ),
+                    }
                 }
             } else if let Some(message) = self.message_overlay {
                 draw_interactable_message(font, message.title, message.body);

@@ -162,10 +162,7 @@ impl Playtest {
         }
     }
 
-    pub(super) fn point_of_interest_available(
-        &self,
-        interactable: &InteractableRecord,
-    ) -> bool {
+    pub(super) fn point_of_interest_available(&self, interactable: &InteractableRecord) -> bool {
         if interactable.kind != InteractableKind::PointOfInterest {
             return interactable_is_active(interactable);
         }
@@ -188,10 +185,7 @@ impl Playtest {
         candidate.is_available(&self.poi_save)
     }
 
-    pub(super) fn point_of_interest_depleted(
-        &self,
-        interactable: &InteractableRecord,
-    ) -> bool {
+    pub(super) fn point_of_interest_depleted(&self, interactable: &InteractableRecord) -> bool {
         if interactable.kind != InteractableKind::PointOfInterest {
             return false;
         }
@@ -250,15 +244,70 @@ impl Playtest {
 
     pub(super) fn advance_poi_message(&mut self) {
         use psx_game_runtime::poi::{MessageAdvance, MessageSource};
-        if let MessageAdvance::Closed(MessageSource::PointOfInterest(index)) =
-            self.poi_messages.advance()
-        {
-            if let Some(interactable) = INTERACTABLES.get(usize::from(index)) {
-                if poi_persistent_flags(interactable).mark_read(&mut self.poi_save) {
-                    self.poi_save_dirty = true;
-                    self.persist_poi_save();
+        if self.complete_active_poi_reveal() {
+            return;
+        }
+        match self.poi_messages.advance() {
+            MessageAdvance::Advanced(_) => {
+                self.poi_page_type_frame = 0;
+            }
+            MessageAdvance::Closed(MessageSource::PointOfInterest(index)) => {
+                if let Some(interactable) = INTERACTABLES.get(usize::from(index)) {
+                    if poi_persistent_flags(interactable).mark_read(&mut self.poi_save) {
+                        self.poi_save_dirty = true;
+                        self.persist_poi_save();
+                    }
                 }
             }
+            MessageAdvance::Closed(MessageSource::World) | MessageAdvance::Inactive => {}
+        }
+    }
+
+    /// The first Cross press during panel motion or type-on completes the
+    /// current presentation instead of skipping unread copy. A later press is
+    /// then free to advance/close through `MessageController`.
+    fn complete_active_poi_reveal(&mut self) -> bool {
+        use psx_game_runtime::poi::MessageSource;
+
+        let Some(message) = self.poi_messages.active() else {
+            return false;
+        };
+        if !matches!(message.source(), MessageSource::PointOfInterest(_)) {
+            return false;
+        }
+        let Some(page_text) = INTERACTABLE_MESSAGE_PAGES.get(message.page() as usize) else {
+            return false;
+        };
+        let required_panel = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
+        let required_type = u16::try_from(page_text.chars().count())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(psx_engine::ui::MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
+        if self.poi_panel_frame >= required_panel && self.poi_page_type_frame >= required_type {
+            return false;
+        }
+
+        self.poi_panel_frame = required_panel;
+        self.poi_page_type_frame = required_type;
+        true
+    }
+
+    /// Advance Archive presentation only when a new frame is actually being
+    /// prepared. This preserves visible intermediate geometry when the fixed
+    /// simulation gets several ticks ahead of displayed PS1 frames.
+    pub(super) fn advance_poi_presentation_frame(&mut self) {
+        let Some(message) = self.poi_messages.active() else {
+            return;
+        };
+        if !matches!(
+            message.source(),
+            psx_game_runtime::poi::MessageSource::PointOfInterest(_)
+        ) {
+            return;
+        }
+        if self.poi_panel_frame < psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+            self.poi_panel_frame = self.poi_panel_frame.saturating_add(1);
+        } else {
+            self.poi_page_type_frame = self.poi_page_type_frame.saturating_add(1);
         }
     }
 
@@ -1268,17 +1317,14 @@ impl Playtest {
             {
                 continue;
             }
-            let radius = u32::from(interactable.radius);
-            let dx = player.x.abs_diff(interactable.x);
-            let dz = player.z.abs_diff(interactable.z);
-            if dx > radius || dz > radius {
+            let Some(distance) = psx_game_runtime::poi::xz_distance_squared_within_radius(
+                [player.x, player.z],
+                [interactable.x, interactable.z],
+                interactable.radius,
+            ) else {
                 continue;
-            }
-            let distance = u64::from(dx)
-                .saturating_mul(u64::from(dx))
-                .saturating_add(u64::from(dz).saturating_mul(u64::from(dz)));
-            let radius_sq = u64::from(radius).saturating_mul(u64::from(radius));
-            if distance <= radius_sq && distance < best_distance {
+            };
+            if distance < best_distance {
                 best = Some(index);
                 best_distance = distance;
             }
@@ -1343,6 +1389,8 @@ impl Playtest {
                     ),
                 );
                 if opened {
+                    self.poi_panel_frame = 0;
+                    self.poi_page_type_frame = 0;
                     self.grant_point_of_interest_reward(index);
                 }
                 opened
