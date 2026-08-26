@@ -465,7 +465,7 @@ pub fn scale_model_blob_to_engine_units(bytes: &mut [u8]) {
 pub fn scale_animation_blob_to_engine_units(bytes: &mut [u8]) {
     use psxed_format::animation::{
         AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
-        VERSION, VERSION_V1, VERSION_V3,
+        POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4,
     };
     let payload = psxed_format::AssetHeader::SIZE;
     if bytes.len() < payload + AnimationHeader::SIZE || bytes[..4] != MAGIC {
@@ -476,6 +476,7 @@ pub fn scale_animation_blob_to_engine_units(bytes: &mut [u8]) {
         VERSION_V1 => (POSE_RECORD_SIZE_V1, 18),
         VERSION => (POSE_RECORD_SIZE, 18),
         VERSION_V3 => (POSE_RECORD_SIZE_V3, 14),
+        VERSION_V4 => (POSE_RECORD_SIZE_V4, 10),
         _ => return,
     };
     let pose_count = read_u16(bytes, payload) as usize * read_u16(bytes, payload + 2) as usize;
@@ -569,7 +570,9 @@ mod tests {
     }
 
     fn animation_poses(version: u16, shift: u16, translations: &[[i32; 3]]) -> Vec<u8> {
-        use psxed_format::animation::{POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3};
+        use psxed_format::animation::{
+            POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3, POSE_RECORD_SIZE_V4,
+        };
         let mut payload = Vec::new();
         for value in [translations.len() as u16, 1, 30, shift] {
             payload.extend_from_slice(&value.to_le_bytes());
@@ -582,11 +585,13 @@ mod tests {
                         payload.extend_from_slice(&axis.to_le_bytes());
                     }
                 }
-                2 | 3 => {
+                2 | 3 | 4 => {
                     let rotation = if version == 2 {
                         POSE_RECORD_SIZE - 6
-                    } else {
+                    } else if version == 3 {
                         POSE_RECORD_SIZE_V3 - 6
+                    } else {
+                        POSE_RECORD_SIZE_V4 - 6
                     };
                     payload.extend_from_slice(&vec![0; rotation]);
                     for axis in translation {

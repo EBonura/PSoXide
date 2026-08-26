@@ -459,6 +459,66 @@ fn animation_v3_aligned_and_unaligned_public_paths_are_identical() {
 }
 
 #[test]
+fn animation_v4_aligned_and_unaligned_public_paths_are_identical() {
+    use psxed_format::animation;
+
+    const FRAMES: usize = 3;
+    const BYTES: usize = psxed_format::AssetHeader::SIZE
+        + animation::AnimationHeader::SIZE
+        + FRAMES * animation::POSE_RECORD_SIZE_V4;
+    #[repr(C, align(4))]
+    struct WordAlignedBlob([u8; BYTES]);
+
+    let mut blob = WordAlignedBlob([0; BYTES]);
+    blob.0[0..4].copy_from_slice(&animation::MAGIC);
+    blob.0[4..6].copy_from_slice(&animation::VERSION_V4.to_le_bytes());
+    let payload_len = BYTES - psxed_format::AssetHeader::SIZE;
+    blob.0[8..12].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    blob.0[12..14].copy_from_slice(&1u16.to_le_bytes());
+    blob.0[14..16].copy_from_slice(&(FRAMES as u16).to_le_bytes());
+    blob.0[16..18].copy_from_slice(&15u16.to_le_bytes());
+    blob.0[18..20].copy_from_slice(&2u16.to_le_bytes());
+
+    let matrices = [
+        [4096, 0, 0, 0, 4096, 0, 0, 0, 4096],
+        [3850, 1212, 704, -1294, 3862, 432, -536, -628, 4012],
+        [4096, 0, 0, 0, 4096, 0, 0, 0, 4096],
+    ];
+    for (frame, matrix) in matrices.into_iter().enumerate() {
+        let base = 20 + frame * animation::POSE_RECORD_SIZE_V4;
+        let mut block = [0u8; animation::POSE_ROTATION_BLOCK_SIZE_V4];
+        assert!(animation::encode_rotation_q11_cross(&matrix, &mut block));
+        blob.0[base..base + animation::POSE_ROTATION_BLOCK_SIZE_V4].copy_from_slice(&block);
+        for (axis, value) in [frame as i16 * 10, frame as i16 * -20, frame as i16 * 30]
+            .into_iter()
+            .enumerate()
+        {
+            let offset = base + animation::POSE_ROTATION_BLOCK_SIZE_V4 + axis * 2;
+            blob.0[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    let aligned = Animation::from_bytes(&blob.0).expect("aligned v4 animation parses");
+    assert_eq!(aligned.poses.as_ptr() as usize & 3, 0);
+
+    for desired_alignment in [1usize, 2, 3] {
+        let mut storage = std::vec![0u8; BYTES + 3];
+        let base_alignment = storage.as_ptr() as usize & 3;
+        let prefix = (desired_alignment + 4 - base_alignment) & 3;
+        storage[prefix..prefix + BYTES].copy_from_slice(&blob.0);
+        let bytes = &storage[prefix..prefix + BYTES];
+        assert_eq!(bytes.as_ptr() as usize & 3, desired_alignment);
+        let unaligned = Animation::from_bytes(bytes).expect("unaligned v4 animation parses");
+        for phase in [0, 0x400, 0x800, 0x1000, 0x1800] {
+            let aligned_sample = aligned.looped_pose_sample_q12(phase).unwrap();
+            let unaligned_sample = unaligned.looped_pose_sample_q12(phase).unwrap();
+            assert_eq!(aligned_sample.pose(0), unaligned_sample.pose(0));
+            assert_eq!(aligned_sample.gte_pose(0), unaligned_sample.gte_pose(0));
+        }
+    }
+}
+
+#[test]
 fn animation_looped_pose_interpolates_q12_phase() {
     use psxed_format::animation;
 

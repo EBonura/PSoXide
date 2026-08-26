@@ -1,4 +1,4 @@
-# Animation RAM: where we are and what hl-psx does differently
+# Animation RAM: resident banks and the dense pose format
 
 Measured, both sides, before proposing anything.
 
@@ -6,24 +6,31 @@ Measured, both sides, before proposing anything.
 
 | | |
 | --- | --- |
-| resident animation, default project | **483.1 KB** (Aletha 30 clips 438.3, mantis 3 clips 44.7) |
-| measured ceiling | **~599 KB** |
-| headroom | **~116 KB** |
+| old v3 resident payloads | **725,460 B**, 355 pages, 11 pages over the guarded ceiling |
+| dense v4 resident payloads | **587,640 B**, 287 pages |
+| guarded ceiling | **704,512 B**, 344 pages |
+| headroom with Aletha, Mantis and Tank Boss | **116,872 B**, 57 pages |
 
-The ceiling is not an estimate: 438 KB of Aletha plus 198 KB of mantis
-overflowed guest `.bss` by exactly 33,136 bytes, which pins it.
+All animation clips still use `StreamedClass::PersistentGameplay`. No action
+waits for a CD read, and adding the dense format did not introduce a
+current-clip cache. The intended future scope is an active area or model bank:
+when a character is present, every clip that character can use is resident and
+immediately sampleable. The current single-area Cortex project keeps all 50
+animation payloads resident at once.
 
-Format is **already v3: 20 bytes** per bone per frame, nine 12-bit Q11 rotation
-codes in fourteen bytes plus a shifted `i16` translation. That is the same
-packed encoding hl-psx ships on silicon, and the cook selects it automatically
-whenever a clip's matrix elements fit, which every rigid clip does. Aletha's 26
-joints cost 520 bytes a frame, the mantis's 22 cost 440. Every cooked clip is
-`StreamedClass::PersistentGameplay`, so **every clip of every character is
-resident for the entire game**.
+Rigid clips now cook as **v4: 16 bytes** per bone per frame. Six Q11 rotation
+codes store the first two basis vectors, a fixed-point cross product rebuilds
+the third, one correction byte bounds the extra reconstruction error, and
+three shifted `i16` values preserve translation. The cook falls back to the
+20-byte v3 record if any pose exceeds the strict 3-Q12-unit error gate, then to
+v2 for animated scale.
 
-Finishing the mantis alone (strafe pair, two claw attacks, two weapon attacks)
-costs about 113 KB against the 116 available. There is no room for a second
-variant, let alone a boss.
+The current Cortex animation library was audited across 63 source clips and
+49,820 pose records. Every clip qualified for v4, translation remained exact,
+and the worst matrix-element difference from v3 was 3/4096. The files were
+19.97% smaller. A MIPS decoder probe using the same 170-frame, 26-joint Aletha
+idle clip measured 2,145,378 cycles for v3 and 1,659,706 for v4 across 1,664
+interpolated joint samples, a 22.64% reduction.
 
 ## Where hl-psx is
 
@@ -36,11 +43,13 @@ Half our animation budget, for an entire game rather than two characters. Three
 things get it there, and they are not equally important.
 
 **Map-local clip residency.** "Map-local variants retain only clips reachable
-by that map." This is the structural difference and it dwarfs the rest. We hold
-every clip forever; it holds what the current map can actually play.
+by that map." This remains the structural difference for a multi-area game.
+The PSoXide equivalent must retain all clips for every character in the active
+area, not stream individual actions when they begin.
 
-**A tighter affine, which we already match.** `HMD8_AFFINE_BYTES = 20`, and our
-v3 record is also 20 with the same Q11 packing. No gap here.
+**A tighter affine.** `HMD8_AFFINE_BYTES = 20`, matching PSoXide v3. PSoXide
+v4 is now 16 bytes for rigid transforms while keeping v3 readable as the safe
+fallback.
 
 **One bone-local mesh.** Vertices are stored once, grouped into contiguous
 bone ranges so each range pays one matrix load, rather than duplicating skinned
@@ -53,14 +62,12 @@ error, which is the same information arriving too late and less precisely.
 
 ## The plan, ranked by payoff
 
-**1. Residency (structural, biggest win, but read the split below).** Stop
-marking model clips `PersistentGameplay` so a scene holds only what its
-characters can reach. Correcting an earlier claim in this doc: this is NOT
-merely reclassification. `StreamedClass` has four values, `None`, `UiImage`,
-`Gameplay` and `PersistentGameplay`
-(`editor/crates/psxed-project/src/playtest/schema.rs:158`), and the finest
-model-facing scope is the whole gameplay session. Per-scene residency is new
-mechanism whichever format wins.
+**1. Residency (structural, biggest multi-area win).** Keep animation clips
+resident, but make the residency owner the active area and its character model
+banks instead of the whole gameplay session. `StreamedClass` currently has no
+model-bank scope, so this requires a real lifecycle mechanism rather than a
+classification change. The invariant is that every clip of a present actor is
+ready before gameplay resumes.
 
 **2. Dedupe cooked animations by content. DONE, and measured.** Textures
 dedupe on `asset.bytes == bytes`; the animation push had no such check. With
@@ -81,11 +88,10 @@ recipe that DOES reproduce it is a variant with its own `Model`, its own clip
 resources targeting that model, its own `AnimationSet`, and its own
 `Character`; clone fewer of those and the variant silently cooks no clips.
 
-**3. Trim the affine further, 20 to about 16 bytes.** The Q11 packing is
-already in; the remaining lossless win is that the third row of an orthonormal
-matrix is the cross product of the other two, so six of the nine codes suffice.
-That is roughly 20% more for a cross product at decode. Smaller than it looked
-before, because the easy 17% was already taken.
+**3. Trim the affine from 20 to 16 bytes. DONE.** Version 4 stores two basis
+vectors plus a bounded correction for the reconstructed third basis vector.
+The current library saves 19.97% and the aligned PS1 decoder is 22.64% faster
+in the direct interpolation probe. Version 3 remains the automatic fallback.
 
 **4. Audit the peak at build time. DONE.** `audit_resident_assets` in
 `editor/crates/psxed-project/src/playtest/budget.rs` sums every
