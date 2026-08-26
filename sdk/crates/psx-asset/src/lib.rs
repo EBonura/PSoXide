@@ -836,7 +836,7 @@ impl<'a> Animation<'a> {
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::animation::{
             AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
-            VERSION, VERSION_V1, VERSION_V3,
+            POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4,
         };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
@@ -851,6 +851,7 @@ impl<'a> Animation<'a> {
             VERSION => POSE_RECORD_SIZE,
             VERSION_V1 => POSE_RECORD_SIZE_V1,
             VERSION_V3 => POSE_RECORD_SIZE_V3,
+            VERSION_V4 => POSE_RECORD_SIZE_V4,
             _ => {
                 return Err(ParseError::UnsupportedVersion(version));
             }
@@ -872,15 +873,16 @@ impl<'a> Animation<'a> {
         let joint_count = read_u16(ah, 0);
         let frame_count = read_u16(ah, 2);
         let sample_rate_hz = read_u16(ah, 4);
-        let translation_shift = if version == VERSION || version == VERSION_V3 {
-            let shift = read_u16(ah, 6);
-            if shift > 15 {
-                return Err(ParseError::InvalidAnimationLayout);
-            }
-            shift as u8
-        } else {
-            0
-        };
+        let translation_shift =
+            if version == VERSION || version == VERSION_V3 || version == VERSION_V4 {
+                let shift = read_u16(ah, 6);
+                if shift > 15 {
+                    return Err(ParseError::InvalidAnimationLayout);
+                }
+                shift as u8
+            } else {
+                0
+            };
         if joint_count == 0 || frame_count == 0 || sample_rate_hz == 0 {
             return Err(ParseError::InvalidAnimationLayout);
         }
@@ -995,6 +997,9 @@ impl<'a> Animation<'a> {
         if self.poses.as_ptr() as usize & 1 != 0 {
             return unsafe { self.pose_at_byte_offset_unaligned(base) };
         }
+        if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V4 {
+            return unsafe { self.pose_v4_unchecked(base) };
+        }
         if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V3 {
             return unsafe { self.pose_v3_unchecked(base) };
         }
@@ -1063,8 +1068,40 @@ impl<'a> Animation<'a> {
         }
     }
 
+    /// Decode one v4 record: two packed basis vectors plus correction at +0,
+    /// followed by shifted `i16` translations at +10.
+    ///
+    /// # Safety
+    /// `base + 16` must be in bounds.
+    unsafe fn pose_v4_unchecked(&self, base: usize) -> JointPose {
+        let record = unsafe { self.poses.as_ptr().add(base) };
+        let (matrix, packed_translation) = if record as usize & 3 == 0 {
+            unsafe { read_pose_v4_word_aligned_unchecked(self.poses, base) }
+        } else {
+            let matrix = unsafe { read_pose_matrix_q11_cross_unchecked(self.poses, base) };
+            let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4;
+            let translation = Vec3I16::new(
+                unsafe { read_i16_unchecked(self.poses, base + off) },
+                unsafe { read_i16_unchecked(self.poses, base + off + 2) },
+                unsafe { read_i16_unchecked(self.poses, base + off + 4) },
+            );
+            (matrix, translation)
+        };
+        JointPose {
+            matrix,
+            translation: Vec3I32::new(
+                decode_packed_translation(packed_translation.x, self.translation_shift),
+                decode_packed_translation(packed_translation.y, self.translation_shift),
+                decode_packed_translation(packed_translation.z, self.translation_shift),
+            ),
+        }
+    }
+
     #[inline(never)]
     unsafe fn pose_at_byte_offset_unaligned(&self, base: usize) -> JointPose {
+        if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V4 {
+            return unsafe { self.pose_v4_unchecked(base) };
+        }
         if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V3 {
             return unsafe { self.pose_v3_unchecked(base) };
         }
@@ -1105,13 +1142,33 @@ impl<'a> Animation<'a> {
         joint_index: u16,
     ) -> Option<GteJointPose> {
         let v3 = self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V3;
+        let v4 = self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V4;
         if joint_index >= self.joint_count
-            || !(v3 || self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE)
+            || !(v3 || v4 || self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE)
         {
             return None;
         }
         let base = frame_offset.checked_add(joint_index as usize * self.pose_record_size)?;
         let bytes = self.poses.get(base..base + self.pose_record_size)?;
+        if v4 {
+            let (matrix, translation) = if bytes.as_ptr() as usize & 3 == 0 {
+                unsafe { read_pose_v4_word_aligned_unchecked(bytes, 0) }
+            } else {
+                let matrix = unsafe { read_pose_matrix_q11_cross_unchecked(bytes, 0) };
+                let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4;
+                let translation = Vec3I16::new(
+                    read_i16(bytes, off),
+                    read_i16(bytes, off + 2),
+                    read_i16(bytes, off + 4),
+                );
+                (matrix, translation)
+            };
+            return Some(GteJointPose {
+                matrix,
+                translation,
+                translation_shift: self.translation_shift,
+            });
+        }
         if v3 {
             // SAFETY: the slice covers the whole 20-byte record. Shipping
             // storage is word-aligned; retain the byte decoder for arbitrary
@@ -1551,6 +1608,108 @@ unsafe fn read_pose_matrix_q11_unchecked(bytes: &[u8], offset: usize) -> [[i16; 
         [flat[3], flat[4], flat[5]],
         [flat[6], flat[7], flat[8]],
     ]
+}
+
+#[inline(always)]
+fn cross_component_q12(a: i16, b: i16, c: i16, d: i16) -> i16 {
+    let value = a as i32 * b as i32 - c as i32 * d as i32;
+    let rounded = if value >= 0 {
+        value.saturating_add(1 << 11) >> 12
+    } else {
+        -((value.saturating_neg().saturating_add(1 << 11)) >> 12)
+    };
+    rounded.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+#[inline(always)]
+fn reconstruct_third_basis_q12(first: [i16; 3], second: [i16; 3]) -> [i16; 3] {
+    [
+        cross_component_q12(first[1], second[2], first[2], second[1]),
+        cross_component_q12(first[2], second[0], first[0], second[2]),
+        cross_component_q12(first[0], second[1], first[1], second[0]),
+    ]
+}
+
+#[inline(always)]
+fn apply_v4_basis_correction(mut third: [i16; 3], correction_byte: u8) -> [i16; 3] {
+    let axis = usize::from(correction_byte & 0x03);
+    if axis < 3 {
+        let correction = (((correction_byte >> 2) << 2) as i8 >> 2) as i16;
+        third[axis] = third[axis].saturating_add(correction);
+    }
+    for component in &mut third {
+        *component = (*component).clamp(-4096, 4096);
+    }
+    third
+}
+
+/// Decode a v4 packed rotation block. Its first nine bytes contain six Q11
+/// codes and byte nine corrects the cross-product reconstruction.
+///
+/// # Safety
+/// `offset + 10` must be in bounds.
+#[inline]
+unsafe fn read_pose_matrix_q11_cross_unchecked(bytes: &[u8], offset: usize) -> [[i16; 3]; 3] {
+    let mut flat = [0i16; 6];
+    let mut pair = 0usize;
+    while pair < 3 {
+        let o = offset + pair * 3;
+        let packed = unsafe {
+            (bytes.as_ptr().add(o).read() as u32)
+                | ((bytes.as_ptr().add(o + 1).read() as u32) << 8)
+                | ((bytes.as_ptr().add(o + 2).read() as u32) << 16)
+        };
+        flat[pair * 2] = decode_q11_element((packed & 0x0fff) as u16);
+        flat[pair * 2 + 1] = decode_q11_element(((packed >> 12) & 0x0fff) as u16);
+        pair += 1;
+    }
+    let first = [flat[0], flat[1], flat[2]];
+    let second = [flat[3], flat[4], flat[5]];
+    let correction = unsafe { bytes.as_ptr().add(offset + 9).read() };
+    let third = apply_v4_basis_correction(reconstruct_third_basis_q12(first, second), correction);
+    [first, second, third]
+}
+
+/// Decode one word-aligned v4 record with four aligned loads.
+///
+/// # Safety
+/// `offset + 16` must be in bounds and the record must be word aligned.
+#[inline]
+unsafe fn read_pose_v4_word_aligned_unchecked(
+    bytes: &[u8],
+    offset: usize,
+) -> ([[i16; 3]; 3], Vec3I16) {
+    let record = unsafe { bytes.as_ptr().add(offset) };
+    debug_assert_eq!(record as usize & 3, 0);
+    let words = record.cast::<u32>();
+    let w0 = u32::from_le(unsafe { words.add(0).read() });
+    let w1 = u32::from_le(unsafe { words.add(1).read() });
+    let w2 = u32::from_le(unsafe { words.add(2).read() });
+    let w3 = u32::from_le(unsafe { words.add(3).read() });
+
+    let p0 = w0 & 0x00ff_ffff;
+    let p1 = (w0 >> 24) | ((w1 & 0x0000_ffff) << 8);
+    let p2 = (w1 >> 16) | ((w2 & 0x0000_00ff) << 16);
+    let first = [
+        decode_q11_element((p0 & 0x0fff) as u16),
+        decode_q11_element(((p0 >> 12) & 0x0fff) as u16),
+        decode_q11_element((p1 & 0x0fff) as u16),
+    ];
+    let second = [
+        decode_q11_element(((p1 >> 12) & 0x0fff) as u16),
+        decode_q11_element((p2 & 0x0fff) as u16),
+        decode_q11_element(((p2 >> 12) & 0x0fff) as u16),
+    ];
+    let third = apply_v4_basis_correction(
+        reconstruct_third_basis_q12(first, second),
+        ((w2 >> 8) & 0xff) as u8,
+    );
+    let translation = Vec3I16::new(
+        (w2 >> 16) as u16 as i16,
+        w3 as u16 as i16,
+        (w3 >> 16) as u16 as i16,
+    );
+    ([first, second, third], translation)
 }
 
 /// Decode one word-aligned v3 pose record with exactly five aligned loads.
