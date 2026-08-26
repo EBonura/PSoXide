@@ -500,7 +500,17 @@ pub(crate) fn finish_animation_bytes(
     let fits_v3 = records
         .iter()
         .all(|record| record.matrix.iter().all(|&v| v.abs() <= 4096));
-    let (version, record_size) = if fits_v3 {
+    let fits_v4 = fits_v3
+        && records.iter().all(|record| {
+            let mut block = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4];
+            psxed_format::animation::encode_rotation_q11_cross(&record.matrix, &mut block)
+        });
+    let (version, record_size) = if fits_v4 {
+        (
+            psxed_format::animation::VERSION_V4,
+            psxed_format::animation::POSE_RECORD_SIZE_V4,
+        )
+    } else if fits_v3 {
         (
             psxed_format::animation::VERSION_V3,
             psxed_format::animation::POSE_RECORD_SIZE_V3,
@@ -527,7 +537,9 @@ pub(crate) fn finish_animation_bytes(
     append_u16(&mut out, translation_shift);
 
     for record in records {
-        if fits_v3 {
+        if fits_v4 {
+            append_pose_record_v4(&mut out, record, translation_shift as u8);
+        } else if fits_v3 {
             append_pose_record(&mut out, record, translation_shift as u8);
         } else {
             append_pose_record_v2(&mut out, record, translation_shift as u8);
@@ -535,6 +547,16 @@ pub(crate) fn finish_animation_bytes(
     }
 
     Ok(out)
+}
+
+pub(crate) fn append_pose_record_v4(out: &mut Vec<u8>, record: &PoseRecord, translation_shift: u8) {
+    let mut rotation = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4];
+    let encoded = psxed_format::animation::encode_rotation_q11_cross(&record.matrix, &mut rotation);
+    debug_assert!(encoded, "v4 preflight accepted every record");
+    out.extend_from_slice(&rotation);
+    for value in record.translation {
+        append_i16(out, quantize_translation_i16(value, translation_shift));
+    }
 }
 
 pub(crate) fn pose_record(skin_matrix: &[[f32; 4]; 4], bounds: &ModelBounds) -> PoseRecord {
