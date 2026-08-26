@@ -1624,6 +1624,10 @@ pub struct PlaytestGameEntity {
     /// from the Character's AnimationSet roles (like all state
     /// clips; missing roles already fell back at cook).
     pub idle_clip: u16,
+    /// Initial acquisition one-shot (Intro/activation action).
+    pub alert_clip: u16,
+    /// In-place player-tracking turn loop.
+    pub turn_clip: u16,
     /// Patrol (walk role) clip.
     pub walk_clip: u16,
     /// Retreat (walk-backward action) clip.
