@@ -1552,7 +1552,7 @@ pub struct PlaytestInteractable {
     pub yaw: i16,
     /// Interaction radius in XZ engine units.
     pub radius: u16,
-    /// Vertical offset from the floor anchor to the archive beacon centre.
+    /// Authored visual scale for the ground-anchored archive beacon.
     pub marker_height: u16,
     /// Prompt shown while in range.
     pub prompt: String,

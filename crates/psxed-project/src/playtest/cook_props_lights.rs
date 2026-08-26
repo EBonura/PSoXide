@@ -1,5 +1,5 @@
 use super::*;
-use crate::generate_material_texture_psxt;
+use crate::{generate_material_texture_psxt, UiFontChoice};
 
 pub(crate) fn resolve_material_texture_asset(
     project: &ProjectDocument,
@@ -1208,7 +1208,7 @@ pub(crate) fn push_point_of_interest(
     }
     if component.marker_height == 0 {
         report.error(format!(
-            "Point of Interest on '{node_name}' has marker height 0 (must be > 0)"
+            "Point of Interest on '{node_name}' has beacon scale 0 (must be > 0)"
         ));
         return false;
     }
@@ -1216,6 +1216,7 @@ pub(crate) fn push_point_of_interest(
         &format!("Point of Interest on '{node_name}'"),
         component.pages,
         2,
+        runtime_message_font(project),
         report,
     ) {
         return false;
@@ -1290,7 +1291,7 @@ pub(crate) fn push_point_of_interest(
         yaw,
         radius: component.radius,
         marker_height: component.marker_height,
-        prompt: non_empty_or(component.prompt, "READ").to_string(),
+        prompt: point_of_interest_action_verb(component.prompt).to_string(),
         message,
         logic: psx_level::INTERACTABLE_LOGIC_NONE,
         checkpoint_id: component.persistence_id.to_string(),
@@ -1307,17 +1308,50 @@ pub(crate) fn push_point_of_interest(
     true
 }
 
+/// Font occupying runtime UI slot zero, which also draws Archive messages.
+/// This mirrors `collect_ui_fonts`: UI scenes and their hierarchy rows retain
+/// authored order, while projects without text fall back to Basic.
+pub(crate) fn runtime_message_font(project: &ProjectDocument) -> UiFontChoice {
+    project
+        .ui_scenes
+        .iter()
+        .flat_map(|scene| {
+            scene
+                .hierarchy_node_ids()
+                .into_iter()
+                .map(move |id| (scene, id))
+        })
+        .find_map(|(scene, id)| match &scene.node(id)?.kind {
+            UiNodeKind::Label { font, .. } | UiNodeKind::Button { font, .. } => Some(*font),
+            _ => None,
+        })
+        .unwrap_or(UiFontChoice::Basic)
+}
+
+/// Canonicalize old POI prompt copy into the action verb expected by the
+/// shared prompt panel. The panel owns the `X - ` control prefix; stripping
+/// the exact legacy spelling preserves old scenes without producing
+/// `X - X - READ` at runtime.
+fn point_of_interest_action_verb(prompt: &str) -> &str {
+    let prompt = non_empty_or(prompt, "READ").trim();
+    prompt
+        .strip_prefix("X - ")
+        .map(str::trim)
+        .filter(|verb| !verb.is_empty())
+        .unwrap_or("READ")
+}
+
 /// Validate authored pagination against the native 320x240 Archive panel.
 /// Pages are explicit so no copy can disappear behind the runtime's bounded
-/// two/three-line renderer. The shared runtime font is a compact pixel face;
-/// 38 characters is its conservative 244-pixel inner-line envelope.
+/// two/three-line renderer. Wrapping uses the exact bitmap advances of the
+/// same font slot and 244-pixel inner width as the runtime presentation.
 pub(crate) fn validate_message_pages(
     label: &str,
     pages: &[String],
     max_lines: usize,
+    font: UiFontChoice,
     report: &mut PlaytestValidationReport,
 ) -> bool {
-    const MAX_LINE_CHARS: usize = 38;
     if pages.is_empty() {
         report.error(format!("{label} needs at least one message page"));
         return false;
@@ -1327,30 +1361,65 @@ pub(crate) fn validate_message_pages(
             report.error(format!("{label} page {} is blank", page_index + 1));
             return false;
         }
-        let mut visible_lines = 0usize;
-        for line in page.split('\n') {
-            let line = line.trim_end_matches('\r');
-            if line.trim().is_empty() {
-                continue;
-            }
-            visible_lines += 1;
-            if line.chars().count() > MAX_LINE_CHARS {
-                report.error(format!(
-                    "{label} page {} has a line longer than {MAX_LINE_CHARS} characters; split it explicitly",
-                    page_index + 1
-                ));
-                return false;
-            }
-        }
+        let visible_lines = wrapped_message_line_count(font.bitmap_font(), page, 244);
         if visible_lines > max_lines {
             report.error(format!(
-                "{label} page {} has {visible_lines} lines; this panel supports {max_lines}",
-                page_index + 1
+                "{label} page {} wraps to {visible_lines} lines in {}; this panel supports {max_lines}. Split the copy into another page",
+                page_index + 1,
+                font.label(),
             ));
             return false;
         }
     }
     true
+}
+
+fn wrapped_message_line_count(font: &psx_font::BitmapFont, text: &str, width: u16) -> usize {
+    let mut start = 0usize;
+    let mut lines = 0usize;
+    while start < text.len() {
+        while matches!(text.as_bytes().get(start), Some(b' ' | b'\n' | b'\r')) {
+            start += 1;
+        }
+        if start >= text.len() {
+            break;
+        }
+        let end = wrapped_message_line_end(font, text, start, width);
+        if end <= start {
+            break;
+        }
+        lines += 1;
+        start = end;
+    }
+    lines.max(1)
+}
+
+fn wrapped_message_line_end(
+    font: &psx_font::BitmapFont,
+    text: &str,
+    start: usize,
+    width: u16,
+) -> usize {
+    if start >= text.len() || !text.is_char_boundary(start) {
+        return start;
+    }
+    let mut last_space = None;
+    for (offset, ch) in text[start..].char_indices() {
+        let end = start + offset;
+        if ch == '\n' {
+            return end;
+        }
+        let next = end + ch.len_utf8();
+        if ch == ' ' {
+            last_space = Some(end);
+        }
+        if next > start && font.text_width(&text[start..next]) > width {
+            return last_space
+                .filter(|space| *space > start)
+                .unwrap_or(if end > start { end } else { next });
+        }
+    }
+    text.len()
 }
 
 /// Door link waiting on the box-prop table: cooked while walking the
@@ -1829,14 +1898,16 @@ mod message_page_tests {
             "POI",
             &["OK".to_string(), "   ".to_string()],
             2,
+            UiFontChoice::Basic,
             &mut report,
         ));
 
         let mut report = PlaytestValidationReport::default();
         assert!(!validate_message_pages(
             "POI",
-            &["123456789012345678901234567890123456789".to_string()],
+            &["1234567890123456789012345678901234567890123456789012345678901".to_string()],
             2,
+            UiFontChoice::Basic,
             &mut report,
         ));
 
@@ -1845,6 +1916,7 @@ mod message_page_tests {
             "POI",
             &["ONE\nTWO\nTHREE".to_string()],
             2,
+            UiFontChoice::Basic,
             &mut report,
         ));
 
@@ -1853,7 +1925,39 @@ mod message_page_tests {
             "World",
             &["ONE\nTWO\nTHREE".to_string()],
             3,
+            UiFontChoice::Basic,
             &mut report,
         ));
+    }
+
+    #[test]
+    fn archive_page_validation_uses_the_runtime_font_width() {
+        let page = vec!["123456789012345678901234567890123456789".to_string()];
+
+        let mut narrow_report = PlaytestValidationReport::default();
+        assert!(validate_message_pages(
+            "POI",
+            &page,
+            1,
+            UiFontChoice::Spleen5x8,
+            &mut narrow_report,
+        ));
+
+        let mut wide_report = PlaytestValidationReport::default();
+        assert!(!validate_message_pages(
+            "POI",
+            &page,
+            1,
+            UiFontChoice::Basic,
+            &mut wide_report,
+        ));
+    }
+
+    #[test]
+    fn point_of_interest_prompt_is_always_a_verb() {
+        assert_eq!(point_of_interest_action_verb("READ"), "READ");
+        assert_eq!(point_of_interest_action_verb(" X - READ "), "READ");
+        assert_eq!(point_of_interest_action_verb("X - "), "READ");
+        assert_eq!(point_of_interest_action_verb("  "), "READ");
     }
 }
