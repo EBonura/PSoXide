@@ -149,6 +149,14 @@ const GAME_ENTITY_DIRECTION_STEP: u16 = 512;
 /// Mask for the engine's 4096-unit yaw representation.
 const GAME_ENTITY_YAW_MASK: u16 = 4095;
 
+/// Ignore sub-pixel facing jitter when deciding whether to present the
+/// in-place turn animation (roughly 0.7 degrees in Q12 yaw).
+const GAME_ENTITY_TURN_PRESENTATION_THRESHOLD: u16 = 8;
+
+/// Keep the turn pose visible briefly after a snapped facing correction so a
+/// single simulation-tick yaw change still reads as a planted pivot.
+const GAME_ENTITY_TURN_PRESENTATION_TICKS: u8 = 48;
+
 /// Quake's close-enough tolerance when choosing the direct chase axes.
 const GAME_ENTITY_CHASE_AXIS_EPSILON: i32 = 10;
 
@@ -462,6 +470,10 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     state: [u8; MAX_ENTITIES],
     /// Ticks spent in the current state.
     state_ticks: [u16; MAX_ENTITIES],
+    /// Remaining ticks for the in-place tracking-turn presentation.
+    turn_ticks: [u8; MAX_ENTITIES],
+    /// Phase local to the current continuous tracking turn.
+    turn_phase_ticks: [u16; MAX_ENTITIES],
     /// Remaining health.
     health: [u16; MAX_ENTITIES],
     /// Accumulated poise damage (staggers past the record's pool).
@@ -537,6 +549,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         yaw: [0; MAX_ENTITIES],
         state: [0; MAX_ENTITIES],
         state_ticks: [0; MAX_ENTITIES],
+        turn_ticks: [0; MAX_ENTITIES],
+        turn_phase_ticks: [0; MAX_ENTITIES],
         health: [0; MAX_ENTITIES],
         poise_damage: [0; MAX_ENTITIES],
         patrol_leg: [0; MAX_ENTITIES],
@@ -578,6 +592,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             self.move_yaw_valid[index] = 0;
             self.move_tried[index] = 0;
             self.state_ticks[index] = 0;
+            self.turn_ticks[index] = 0;
+            self.turn_phase_ticks[index] = 0;
             self.intent[index] = GameEntityIntent::Hold as u8;
             self.attack_cooldown[index] = 0;
             self.attack_wait_ticks[index] = 0;
@@ -707,11 +723,19 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         match self.state(index) {
             GameEntityState::Idle => looping(record.idle_clip),
             GameEntityState::Patrol => looping(record.walk_clip),
+            GameEntityState::Aggro if ticks < u16::from(record.reaction_ticks) => {
+                one_shot(record.alert_clip, ticks)
+            }
             GameEntityState::Aggro => match self.intent(index) {
                 GameEntityIntent::Approach => looping(Self::approach_clip(record)),
                 GameEntityIntent::CircleLeft => looping(record.strafe_left_clip),
                 GameEntityIntent::CircleRight => looping(record.strafe_right_clip),
                 GameEntityIntent::Retreat => looping(record.walk_backward_clip),
+                GameEntityIntent::Hold if self.turn_ticks[index] != 0 => GameEntityClip {
+                    clip: record.turn_clip,
+                    phase_ticks: self.turn_phase_ticks[index],
+                    one_shot: false,
+                },
                 GameEntityIntent::Hold => looping(record.idle_clip),
             },
             GameEntityState::Windup => one_shot(record.attack_clip, ticks),
@@ -936,6 +960,14 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 continue;
             }
             stats.thought += 1;
+            if self.turn_ticks[index] == 0 {
+                self.turn_phase_ticks[index] = 0;
+            } else {
+                self.turn_ticks[index] = self.turn_ticks[index]
+                    .saturating_sub(delta_ticks.min(u16::from(u8::MAX)) as u8);
+                self.turn_phase_ticks[index] =
+                    self.turn_phase_ticks[index].saturating_add(delta_ticks);
+            }
             self.state_ticks[index] = self.state_ticks[index].saturating_add(delta_ticks);
             match state {
                 GameEntityState::Idle => self.tick_idle(record, index, input, &mut stats),
@@ -1176,6 +1208,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         self.move_tried[index] = 0;
         if state != GameEntityState::Aggro {
             self.set_intent(index, GameEntityIntent::Hold);
+            self.turn_ticks[index] = 0;
+            self.turn_phase_ticks[index] = 0;
         }
         if matches!(state, GameEntityState::Idle | GameEntityState::Dead) {
             self.attack_wait_ticks[index] = 0;
@@ -1342,6 +1376,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if self.state_ticks[index] < u16::from(record.reaction_ticks) {
             self.set_intent(index, GameEntityIntent::Hold);
             self.face_toward(index, input.player);
+            // The acquisition one-shot owns this window. A facing snap here
+            // must not leak a stale turn phase into the first combat hold.
+            self.turn_ticks[index] = 0;
+            self.turn_phase_ticks[index] = 0;
             stats.holding = stats.holding.saturating_add(1);
             return;
         }
@@ -1817,7 +1855,17 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if dx == 0 && dz == 0 {
             return;
         }
-        self.yaw[index] = atan2_q12(dx, dz) as i16;
+        let current = self.yaw[index] as u16 & GAME_ENTITY_YAW_MASK;
+        let target = atan2_q12(dx, dz) & GAME_ENTITY_YAW_MASK;
+        let clockwise = target.wrapping_sub(current) & GAME_ENTITY_YAW_MASK;
+        let turn_distance = clockwise.min(4096u16.saturating_sub(clockwise));
+        if turn_distance >= GAME_ENTITY_TURN_PRESENTATION_THRESHOLD {
+            if self.turn_ticks[index] == 0 {
+                self.turn_phase_ticks[index] = 0;
+            }
+            self.turn_ticks[index] = GAME_ENTITY_TURN_PRESENTATION_TICKS;
+        }
+        self.yaw[index] = target as i16;
     }
 }
 
@@ -1868,6 +1916,8 @@ mod tests {
             targetname: 0,
             model_instance: psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE,
             idle_clip: 0,
+            alert_clip: 9,
+            turn_clip: 10,
             walk_clip: 1,
             walk_backward_clip: 6,
             strafe_left_clip: 7,
@@ -2229,6 +2279,84 @@ mod tests {
         assert_eq!(stats.attack_grants, 1);
         assert_eq!(entities.attack_owner(), Some(0));
         assert_eq!(entities.state(0), GameEntityState::Windup);
+    }
+
+    #[test]
+    fn acquisition_reaction_plays_the_alert_one_shot() {
+        static REACTIVE: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
+            reaction_ticks: 3,
+            ..test_record(
+                1000,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            )
+        }];
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&REACTIVE);
+
+        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        assert_eq!(
+            entities.clip_for_state(&REACTIVE, 0),
+            GameEntityClip {
+                clip: 9,
+                phase_ticks: 0,
+                one_shot: true,
+            }
+        );
+
+        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(entities.clip_for_state(&REACTIVE, 0).phase_ticks, 1);
+        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&REACTIVE, near_input(&ACTIVE), &mut NoClipMover);
+        assert_ne!(entities.clip_for_state(&REACTIVE, 0).clip, 9);
+    }
+
+    #[test]
+    fn tracking_yaw_change_plays_turn_then_settles_to_idle() {
+        static TRACKING: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
+            aggro_radius: 1024,
+            preferred_distance: 512,
+            spacing_tolerance: 128,
+            decision_interval_ticks: 1,
+            circle_chance: 0,
+            ..test_record(
+                1000,
+                1000,
+                0,
+                1024,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            )
+        }];
+        let input = GameEntityTickInput {
+            player: [1600, 0, 1000],
+            player_room: RoomIndex(0),
+            player_radius: 192,
+            player_invulnerable: false,
+            active_rooms: &ACTIVE,
+        };
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&TRACKING);
+        entities.tick(&TRACKING, input, &mut NoClipMover);
+        entities.director_delay_ticks = 100;
+
+        entities.tick(&TRACKING, input, &mut NoClipMover);
+        assert_eq!(entities.intent(0), GameEntityIntent::Hold);
+        assert_eq!(
+            entities.clip_for_state(&TRACKING, 0),
+            GameEntityClip {
+                clip: 10,
+                phase_ticks: 0,
+                one_shot: false,
+            }
+        );
+
+        for _ in 0..GAME_ENTITY_TURN_PRESENTATION_TICKS {
+            entities.tick(&TRACKING, input, &mut NoClipMover);
+        }
+        assert_eq!(entities.clip_for_state(&TRACKING, 0).clip, 0);
     }
 
     #[test]
