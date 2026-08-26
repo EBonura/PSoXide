@@ -52,6 +52,41 @@ pub const UI_CANVAS_W: u16 = 320;
 /// Canvas height counterpart to [`UI_CANVAS_W`].
 pub const UI_CANVAS_H: u16 = 240;
 
+/// Placement preset for the shared Archive-message chrome.
+///
+/// Point-of-interest copy stays close to the bottom edge and is limited to
+/// two lines. The world-introduction variant is centred and has room for
+/// three. Both use the same PS1-native chamfer, translucent fill, and scanner
+/// treatment as authored UI shapes, without allocating an image or VRAM slot.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MessagePanelVariant {
+    /// Bottom-centred, two-line point-of-interest message.
+    PointOfInterest,
+    /// Screen-centred, three-line scene/world introduction.
+    World,
+}
+
+/// Zero-based page position presented by [`draw_message_panel`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MessagePageMeta {
+    /// Current zero-based page index.
+    pub index: u8,
+    /// Total page count. Zero is treated as one page.
+    pub count: u8,
+}
+
+impl MessagePageMeta {
+    /// Build page metadata, clamping an empty page set to one page and the
+    /// current index to the final available page.
+    pub const fn new(index: u8, count: u8) -> Self {
+        let count = if count == 0 { 1 } else { count };
+        Self {
+            index: if index < count { index } else { count - 1 },
+            count,
+        }
+    }
+}
+
 /// Everything [`draw_scene`] needs to turn an image node into a
 /// textured quad, mirroring the fields the example's per-asset VRAM
 /// slot record exposes.
@@ -929,8 +964,9 @@ mod tests {
     use super::{
         bar_frame_index, bar_frame_v_range, diamond_quad, focus_chrome_sweep_paint,
         focus_sweep_rect, font_index, font_tint, image_effect_vertex_colors, image_effect_verts,
-        node_absolute_rect, scale_u16_q8, selected_label_text, shape_config, shape_edge_point,
-        shape_perimeter, shape_polygon, UiPaint, UiShapeConfig,
+        message_panel_layout, node_absolute_rect, scale_u16_q8, selected_label_text, shape_config,
+        shape_edge_point, shape_perimeter, shape_polygon, MessagePageMeta, MessagePanelVariant,
+        UiPaint, UiShapeConfig,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiGradientDirection, LevelUiImageEffect,
@@ -1038,6 +1074,39 @@ mod tests {
         assert_eq!(
             focus_sweep_rect(126, 16, config, 50, 100),
             Some((97, 1, 25, 14))
+        );
+    }
+
+    #[test]
+    fn archive_message_variants_fit_the_ps1_safe_area_and_line_budgets() {
+        let poi = message_panel_layout(MessagePanelVariant::PointOfInterest);
+        assert_eq!(
+            (poi.x, poi.y, poi.width, poi.height, poi.max_lines),
+            (28, 184, 264, 42, 2)
+        );
+        assert!(i32::from(poi.y) + i32::from(poi.height) <= 240);
+
+        let world = message_panel_layout(MessagePanelVariant::World);
+        assert_eq!(
+            (world.x, world.y, world.width, world.height, world.max_lines),
+            (28, 92, 264, 56, 3)
+        );
+        assert_eq!(i32::from(world.y) * 2 + i32::from(world.height), 240);
+    }
+
+    #[test]
+    fn archive_page_metadata_never_addresses_outside_the_page_set() {
+        assert_eq!(
+            MessagePageMeta::new(0, 0),
+            MessagePageMeta { index: 0, count: 1 }
+        );
+        assert_eq!(
+            MessagePageMeta::new(9, 3),
+            MessagePageMeta { index: 2, count: 3 }
+        );
+        assert_eq!(
+            MessagePageMeta::new(1, 3),
+            MessagePageMeta { index: 1, count: 3 }
         );
     }
 
@@ -1557,15 +1626,17 @@ fn wrapped_line_end(
     scale: u16,
     letter_spacing: i8,
 ) -> usize {
-    let bytes = text.as_bytes();
-    let mut end = start;
+    if start >= text.len() || !text.is_char_boundary(start) {
+        return start;
+    }
     let mut last_space = None;
-    while end < bytes.len() {
-        if bytes[end] == b'\n' {
+    for (offset, ch) in text[start..].char_indices() {
+        let end = start + offset;
+        if ch == '\n' {
             return end;
         }
-        let next = end + 1;
-        if bytes[end] == b' ' {
+        let next = end + ch.len_utf8();
+        if ch == ' ' {
             last_space = Some(end);
         }
         if next > start
@@ -1573,11 +1644,10 @@ fn wrapped_line_end(
         {
             return last_space
                 .filter(|space| *space > start)
-                .unwrap_or(end.max(start + 1));
+                .unwrap_or(if end > start { end } else { next });
         }
-        end = next;
     }
-    end
+    text.len()
 }
 
 fn aligned_text_x(
@@ -2433,6 +2503,260 @@ impl UiPaint {
         match self {
             Self::Solid(color) | Self::Gradient { from: color, .. } => color,
         }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct MessagePanelLayout {
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+    max_lines: u8,
+}
+
+const fn message_panel_layout(variant: MessagePanelVariant) -> MessagePanelLayout {
+    match variant {
+        MessagePanelVariant::PointOfInterest => MessagePanelLayout {
+            x: 28,
+            y: 184,
+            width: 264,
+            height: 42,
+            max_lines: 2,
+        },
+        MessagePanelVariant::World => MessagePanelLayout {
+            x: 28,
+            y: 92,
+            width: 264,
+            height: 56,
+            max_lines: 3,
+        },
+    }
+}
+
+fn screen_resolved_node(x: i16, y: i16, width: u16, height: u16) -> UiResolvedNode {
+    let transform = UiAffine {
+        tx: i32::from(x) << 12,
+        ty: i32::from(y) << 12,
+        ..UiAffine::IDENTITY
+    };
+    UiResolvedNode {
+        width,
+        height,
+        transform,
+        verts: transform.subrect(0, 0, width as i16, height as i16),
+    }
+}
+
+/// Draw one page of the shared Archive message presentation.
+///
+/// This is deliberately a direct-mode helper rather than a transient cooked
+/// UI scene: POIs can display authored copy without allocating nodes, loading
+/// a texture, or perturbing project VRAM residency. `frame` drives the red
+/// scanner band and should normally be the current visible/simulation frame.
+/// Long text is word-wrapped and hard-capped to the variant's line budget;
+/// page splitting remains the caller's responsibility.
+pub fn draw_message_panel(
+    font: &FontAtlas,
+    page_text: &str,
+    variant: MessagePanelVariant,
+    page: MessagePageMeta,
+    frame: u16,
+) {
+    const TEXT_INSET_X: u16 = 10;
+    let layout = message_panel_layout(variant);
+    let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
+    draw_archive_panel_chrome(resolved, frame);
+
+    let text_width = layout.width.saturating_sub(TEXT_INSET_X * 2).max(1);
+    let line_height = scaled_line_height(font, UI_FONT_SCALE_ONE_Q8).max(1);
+    let line_count = wrapped_line_count(
+        font,
+        page_text,
+        text_width,
+        UI_FONT_SCALE_ONE_Q8,
+        0,
+        layout.max_lines,
+    );
+    let text_height = i32::from(line_height).saturating_mul(i32::from(line_count));
+    let mut line_y = layout
+        .y
+        .saturating_add(((i32::from(layout.height) - text_height).max(0) / 2) as i16);
+    let mut start = 0usize;
+    let mut drawn = 0u8;
+    while start < page_text.len() && drawn < layout.max_lines {
+        while matches!(page_text.as_bytes().get(start), Some(b' ' | b'\n' | b'\r')) {
+            start += 1;
+        }
+        if start >= page_text.len() {
+            break;
+        }
+        let end = wrapped_line_end(font, page_text, start, text_width, UI_FONT_SCALE_ONE_Q8, 0);
+        if end <= start {
+            break;
+        }
+        draw_scaled_text_paint(
+            font,
+            layout.x.saturating_add(TEXT_INSET_X as i16),
+            line_y,
+            &page_text[start..end],
+            UI_FONT_SCALE_ONE_Q8,
+            0,
+            UiPaint::Solid((114, 96, 92)),
+        );
+        line_y = line_y.saturating_add(line_height);
+        drawn += 1;
+        start = end;
+    }
+
+    draw_message_page_pips(resolved, MessagePageMeta::new(page.index, page.count));
+}
+
+/// Draw the compact proximity prompt used beneath an Archive Beacon.
+///
+/// `action` is the verb only (normally `"READ"`); the control prefix is kept
+/// in the shared visual so every POI consistently presents `X - action`.
+pub fn draw_interaction_prompt_panel(font: &FontAtlas, action: &str, frame: u16) {
+    const PREFIX: &str = "X - ";
+    const PAD_X: i16 = 10;
+    const BOX_Y: i16 = 209;
+    const BOX_H: u16 = 17;
+    let prefix_width = font.text_width(PREFIX) as i16;
+    let action_width = font.text_width(action) as i16;
+    let text_width = prefix_width.saturating_add(action_width);
+    let box_width = text_width
+        .saturating_add(PAD_X * 2)
+        .clamp(76, UI_CANVAS_W as i16 - 32);
+    let box_x = (UI_CANVAS_W as i16 - box_width) / 2;
+    let resolved = screen_resolved_node(box_x, BOX_Y, box_width as u16, BOX_H);
+    draw_archive_panel_chrome(resolved, frame);
+
+    let text_x = box_x.saturating_add((box_width - text_width) / 2);
+    let text_y = BOX_Y.saturating_add(
+        ((i32::from(BOX_H) - i32::from(scaled_line_height(font, UI_FONT_SCALE_ONE_Q8))).max(0) / 2)
+            as i16,
+    );
+    draw_scaled_text_paint(
+        font,
+        text_x,
+        text_y,
+        PREFIX,
+        UI_FONT_SCALE_ONE_Q8,
+        0,
+        UiPaint::Solid((124, 64, 54)),
+    );
+    draw_scaled_text_paint(
+        font,
+        text_x.saturating_add(prefix_width),
+        text_y,
+        action,
+        UI_FONT_SCALE_ONE_Q8,
+        0,
+        UiPaint::Solid((114, 96, 92)),
+    );
+}
+
+fn draw_archive_panel_chrome(resolved: UiResolvedNode, frame: u16) {
+    let config = UiShapeConfig {
+        corners: ui_shape::TOP_LEFT | ui_shape::BOTTOM_RIGHT,
+        cut: 5,
+        border: 1,
+        transparent: false,
+        semi_transparent_fill: true,
+    };
+    let outer = shape_polygon(resolved, config.corners, config.cut, 0);
+    // Two Average passes leave 25% of the world visible. The black under-pass
+    // keeps pale copy readable over bright characters/geometry; the red pass
+    // above it retains the established translucent Archive language.
+    draw_shape_polygon(
+        &outer,
+        UiPaint::Solid((2, 1, 2)),
+        resolved.width,
+        resolved.height,
+        true,
+    );
+    draw_shape_polygon(
+        &outer,
+        UiPaint::Gradient {
+            from: (70, 18, 18),
+            to: (10, 5, 8),
+            direction: LevelUiGradientDirection::Horizontal,
+        },
+        resolved.width,
+        resolved.height,
+        true,
+    );
+    draw_focus_sweep(
+        resolved,
+        config,
+        UiShapeSweep {
+            frame,
+            period: 120,
+            color: (210, 58, 40),
+        },
+    );
+    draw_shape_border(
+        resolved,
+        outer,
+        config,
+        UiPaint::Gradient {
+            from: (92, 20, 16),
+            to: (220, 92, 58),
+            direction: LevelUiGradientDirection::Horizontal,
+        },
+    );
+}
+
+fn wrapped_line_count(
+    font: &FontAtlas,
+    text: &str,
+    width: u16,
+    scale: u16,
+    letter_spacing: i8,
+    max_lines: u8,
+) -> u8 {
+    let mut start = 0usize;
+    let mut lines = 0u8;
+    while start < text.len() && lines < max_lines {
+        while matches!(text.as_bytes().get(start), Some(b' ' | b'\n' | b'\r')) {
+            start += 1;
+        }
+        if start >= text.len() {
+            break;
+        }
+        let end = wrapped_line_end(font, text, start, width, scale, letter_spacing);
+        if end <= start {
+            break;
+        }
+        lines += 1;
+        start = end;
+    }
+    lines.max(1)
+}
+
+fn draw_message_page_pips(resolved: UiResolvedNode, page: MessagePageMeta) {
+    if page.count <= 1 {
+        return;
+    }
+    let visible = page.count.min(8);
+    let width = i16::from(visible).saturating_mul(3).saturating_sub(1);
+    let start_x = resolved.width as i16 - 7 - width;
+    let y = resolved.height as i16 - 5;
+    let selected = page.index.min(visible - 1);
+    let mut index = 0u8;
+    while index < visible {
+        let color = if index == selected {
+            (220, 92, 58)
+        } else {
+            (64, 26, 24)
+        };
+        draw_quad_flat(
+            resolved.subrect(start_x + i16::from(index) * 3, y, 2, 1),
+            color.0,
+            color.1,
+            color.2,
+        );
+        index += 1;
     }
 }
 

@@ -2239,6 +2239,146 @@ impl EditorWorkspace {
             count => format!("Selected {count} primitives"),
         };
     }
+
+    fn selected_floor_snap_entities(&self) -> Vec<NodeId> {
+        let scene = self.project.active_scene();
+        let mut entities = Vec::new();
+        for selected in self.selected_node_ids_in_hierarchy() {
+            let Some(entity) = owning_entity_id(scene, selected) else {
+                continue;
+            };
+            if !entities.contains(&entity) {
+                entities.push(entity);
+            }
+        }
+        entities
+    }
+
+    pub(crate) fn can_snap_selected_entities_to_floor(&self) -> bool {
+        !self.selected_floor_snap_entities().is_empty()
+    }
+
+    /// Exact supporting surface beneath an Entity floor anchor.
+    ///
+    /// Authored Entity transforms are raw world units and already represent
+    /// the character/controller foot point. A short upward probe allowance
+    /// also recovers an entity that is intersecting its floor by less than one
+    /// height quantum, while remaining below any usable character ceiling.
+    fn entity_floor_height(&self, entity: NodeId) -> Option<f32> {
+        let scene = self.project.active_scene();
+        let node = scene.node(entity)?;
+        let [x, y, z] = node.transform.translation;
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+            return None;
+        }
+
+        let probe_y = f64::from(y) + f64::from(HEIGHT_QUANTUM);
+        let origin = [f64::from(x), probe_y, f64::from(z)];
+        let mut best: Option<f64> = None;
+        for brush in &scene.brushes {
+            if !brush.contents.is_solid() || brush.mover == Some(entity) {
+                continue;
+            }
+            let Some((distance, face_index)) = brush.raycast(origin, [0.0, -1.0, 0.0]) else {
+                continue;
+            };
+            let Some(face) = brush.faces.get(face_index) else {
+                continue;
+            };
+            let Some(plane) = psxed_project::brush::Plane::from_points(face.points) else {
+                continue;
+            };
+            // A downward ray can only use an outward-upward face as a floor.
+            // This rejects vertical walls and the underside of solid ceilings.
+            if plane.normal[1] <= 0 {
+                continue;
+            }
+            let floor_y = probe_y - distance;
+            if floor_y.is_finite() && best.is_none_or(|current| floor_y > current) {
+                best = Some(floor_y);
+            }
+        }
+
+        // Legacy grid rooms share the same floor-anchor contract. Prefer the
+        // highest candidate when a project mixes room cells with BSP brushes.
+        if let Some(room) = enclosing_room_id(scene, entity) {
+            if let Some(grid) = self.room_grid_view(room) {
+                if let Some(floor_y) =
+                    grid.floor_height_at_room_local(x.round() as i32, z.round() as i32)
+                {
+                    let floor_y = f64::from(floor_y);
+                    if floor_y <= probe_y && best.is_none_or(|current| floor_y > current) {
+                        best = Some(floor_y);
+                    }
+                }
+            }
+        }
+
+        best.map(|height| height as f32)
+    }
+
+    /// Move every selected Entity root to the exact supporting surface below.
+    /// Child-component selections are promoted to their owning Entity; each
+    /// Entity is moved once and the whole operation is one undo step.
+    pub(crate) fn snap_selected_entities_to_floor(&mut self) -> bool {
+        let entities = self.selected_floor_snap_entities();
+        if entities.is_empty() {
+            self.status = "Select an Entity or one of its components to snap to floor".to_string();
+            return false;
+        }
+
+        let mut placements = Vec::new();
+        let mut missing = 0usize;
+        let mut already_grounded = 0usize;
+        for entity in entities {
+            let Some(floor_y) = self.entity_floor_height(entity) else {
+                missing += 1;
+                continue;
+            };
+            let Some(node) = self.project.active_scene().node(entity) else {
+                missing += 1;
+                continue;
+            };
+            if (node.transform.translation[1] - floor_y).abs() <= 0.001 {
+                already_grounded += 1;
+                continue;
+            }
+            placements.push((entity, floor_y));
+        }
+
+        if placements.is_empty() {
+            self.status = if already_grounded > 0 && missing == 0 {
+                if already_grounded == 1 {
+                    "Entity is already on the floor".to_string()
+                } else {
+                    format!("All {already_grounded} entities are already on the floor")
+                }
+            } else {
+                "No floor found beneath the selected entity".to_string()
+            };
+            return false;
+        }
+
+        self.push_undo();
+        let moved = placements.len();
+        for (entity, floor_y) in placements {
+            if let Some(node) = self.project.active_scene_mut().node_mut(entity) {
+                node.transform.translation[1] = floor_y;
+            }
+        }
+        self.status = match (moved, missing) {
+            (1, 0) => "Snapped Entity to floor".to_string(),
+            (1, missing) => {
+                format!("Snapped Entity to floor; {missing} had no floor beneath it")
+            }
+            (moved, 0) => format!("Snapped {moved} entities to floor"),
+            (moved, missing) => {
+                format!("Snapped {moved} entities to floor; {missing} had no floor beneath them")
+            }
+        };
+        self.mark_dirty();
+        true
+    }
 }
 
 /// World direction of basis column `index` (the gizmo handle axis).

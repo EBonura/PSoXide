@@ -6,7 +6,9 @@ pub(crate) fn draw_transform_policy_editor(
     inherited_sector_size: i32,
     texture_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
+    snap_to_floor_requested: &mut bool,
 ) -> bool {
+    let show_snap_to_floor = matches!(node.kind, NodeKind::Entity);
     match &mut node.kind {
         NodeKind::World {
             sector_size: _,
@@ -16,12 +18,14 @@ pub(crate) fn draw_transform_policy_editor(
             culling,
             streaming: _,
             physics,
+            world_message,
         } => draw_world_settings(
             ui,
             sky,
             far_vista,
             culling,
             physics,
+            world_message,
             texture_options,
             nav_target,
         ),
@@ -33,12 +37,22 @@ pub(crate) fn draw_transform_policy_editor(
             NodeTransformInspector::PositionOnly => {
                 light_transform_editor(ui, &mut node.transform, inherited_sector_size)
             }
-            NodeTransformInspector::PositionYaw => {
-                entity_transform_editor(ui, &mut node.transform, inherited_sector_size, false)
-            }
-            NodeTransformInspector::PositionFullRotation => {
-                entity_transform_editor(ui, &mut node.transform, inherited_sector_size, true)
-            }
+            NodeTransformInspector::PositionYaw => entity_transform_editor(
+                ui,
+                &mut node.transform,
+                inherited_sector_size,
+                false,
+                show_snap_to_floor,
+                snap_to_floor_requested,
+            ),
+            NodeTransformInspector::PositionFullRotation => entity_transform_editor(
+                ui,
+                &mut node.transform,
+                inherited_sector_size,
+                true,
+                show_snap_to_floor,
+                snap_to_floor_requested,
+            ),
             NodeTransformInspector::FullTransform => {
                 let mut changed = false;
                 changed |= transform_editor(ui, "Position", &mut node.transform.translation, 1.0);
@@ -78,7 +92,8 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         | NodeKind::Camera { .. }
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. }
-        | NodeKind::Interactable { .. } => NodeTransformInspector::Hidden,
+        | NodeKind::Interactable { .. }
+        | NodeKind::PointOfInterest { .. } => NodeTransformInspector::Hidden,
         NodeKind::MeshInstance { .. } | NodeKind::SpawnPoint { .. } => {
             NodeTransformInspector::PositionYaw
         }
@@ -100,10 +115,28 @@ pub(crate) fn draw_world_settings(
     far_vista: &mut FarVistaSettings,
     culling: &mut WorldCullingSettings,
     physics: &mut WorldPhysicsSettings,
+    world_message: &mut Option<psxed_project::WorldMessage>,
     texture_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
 ) -> bool {
     let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::FILE, "World Message"))
+        .default_open(world_message.is_some())
+        .show(ui, |ui| {
+            let mut enabled = world_message.is_some();
+            if ui.checkbox(&mut enabled, "Show on scene start").changed() {
+                *world_message = enabled.then(psxed_project::WorldMessage::default);
+                changed = true;
+            }
+            if let Some(message) = world_message {
+                ui.label(
+                    RichText::new("Shown once per game launch. CROSS advances pages.")
+                        .small()
+                        .color(STUDIO_TEXT_WEAK),
+                );
+                changed |= draw_message_pages_editor(ui, "world-message", &mut message.pages, 3);
+            }
+        });
     egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Physics"))
         .default_open(true)
         .show(ui, |ui| {
@@ -597,6 +630,60 @@ pub(crate) fn draw_world_settings(
     changed
 }
 
+fn draw_message_pages_editor(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    pages: &mut Vec<String>,
+    desired_rows: usize,
+) -> bool {
+    let mut changed = false;
+    if pages.is_empty() {
+        pages.push(String::new());
+        changed = true;
+    }
+    let mut remove = None;
+    let can_remove = pages.len() > 1;
+    for (index, page) in pages.iter_mut().enumerate() {
+        ui.push_id((id_salt, index), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("Page {}", index + 1))
+                        .small()
+                        .color(STUDIO_TEXT_WEAK),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            can_remove,
+                            egui::Button::new(icons::text(icons::TRASH, 12.0)).small(),
+                        )
+                        .on_hover_text("Remove this page")
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                });
+            });
+            changed |= ui
+                .add(
+                    egui::TextEdit::multiline(page)
+                        .desired_rows(desired_rows)
+                        .desired_width(f32::INFINITY),
+                )
+                .changed();
+        });
+    }
+    if let Some(index) = remove {
+        pages.remove(index);
+        changed = true;
+    }
+    if ui.button(icons::label(icons::PLUS, "Add Page")).clicked() {
+        pages.push(String::new());
+        changed = true;
+    }
+    changed
+}
+
 pub(crate) fn draw_gameplay_camera_settings(
     ui: &mut egui::Ui,
     camera: &mut WorldCameraSettings,
@@ -946,6 +1033,8 @@ pub(crate) fn entity_transform_editor(
     transform: &mut psxed_project::Transform3,
     sector_size: i32,
     allow_full_rotation: bool,
+    show_snap_to_floor: bool,
+    snap_to_floor_requested: &mut bool,
 ) -> bool {
     let mut changed = false;
     let sector_size = sector_size.max(1);
@@ -989,6 +1078,16 @@ pub(crate) fn entity_transform_editor(
                     ]
                 };
                 changed = true;
+            }
+            if show_snap_to_floor
+                && ui
+                    .button(icons::label(icons::CHEVRON_DOWN, "Snap to Floor"))
+                    .on_hover_text(
+                        "Move the complete Entity to the exact brush/BSP floor beneath it (End)",
+                    )
+                    .clicked()
+            {
+                *snap_to_floor_requested = true;
             }
         });
     });
@@ -1967,6 +2066,7 @@ pub(crate) struct NodeKindEditorContext<'a> {
     /// per-placement override.
     pub(crate) character_defaults: &'a [(ResourceId, psxed_project::CharacterControllerSettings)],
     pub(crate) weapon_options: &'a [(ResourceId, String)],
+    pub(crate) boost_module_options: &'a [(ResourceId, String)],
     pub(crate) animator_clip_context: Option<&'a AnimatorClipContext>,
     pub(crate) inherited_sector_size: i32,
     pub(crate) room_grid_resize: &'a mut Option<(u16, u16)>,
@@ -1999,6 +2099,7 @@ pub(crate) fn draw_node_kind_editor(
         character_options,
         character_defaults,
         weapon_options,
+        boost_module_options,
         animator_clip_context,
         inherited_sector_size,
         room_grid_resize,
@@ -3568,6 +3669,107 @@ pub(crate) fn draw_node_kind_editor(
                 }
             }
         }
+        NodeKind::PointOfInterest {
+            pages,
+            prompt,
+            radius,
+            marker_height,
+            repeatable,
+            persistence_id,
+            reward,
+            enabled,
+        } => {
+            ui.weak("Component: procedural readable beacon. The parent Entity supplies its world position.");
+            changed |= ui.checkbox(enabled, "Enabled").changed();
+            changed |= ui.checkbox(repeatable, "Repeatable message").changed();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Prompt").color(STUDIO_TEXT_WEAK));
+                changed |= ui.text_edit_singleline(prompt).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Persistence ID").color(STUDIO_TEXT_WEAK));
+                changed |= ui.text_edit_singleline(persistence_id).changed();
+            });
+            ui.label(
+                RichText::new("Leave empty to derive a stable id from the authored node.")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Radius").color(STUDIO_TEXT_WEAK));
+                let mut value = i32::from(*radius);
+                if ui
+                    .add(egui::DragValue::new(&mut value).speed(8.0).range(1..=8192))
+                    .changed()
+                {
+                    *radius = value.clamp(1, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+                ui.label(RichText::new("units").small().color(STUDIO_TEXT_WEAK));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Marker Height").color(STUDIO_TEXT_WEAK));
+                let mut value = i32::from(*marker_height);
+                if ui
+                    .add(egui::DragValue::new(&mut value).speed(4.0).range(1..=4096))
+                    .changed()
+                {
+                    *marker_height = value.clamp(1, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+                ui.label(RichText::new("units").small().color(STUDIO_TEXT_WEAK));
+            });
+            ui.separator();
+            ui.label(RichText::new("Message").color(STUDIO_TEXT_WEAK));
+            changed |= draw_message_pages_editor(ui, "point-of-interest", pages, 2);
+            ui.separator();
+            let mut has_reward = reward.is_some();
+            if ui.checkbox(&mut has_reward, "Grant item").changed() {
+                *reward = has_reward.then(psxed_project::PointOfInterestReward::default);
+                changed = true;
+            }
+            if let Some(reward) = reward {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Module").color(STUDIO_TEXT_WEAK));
+                    let preview = reward
+                        .module
+                        .and_then(|id| {
+                            boost_module_options
+                                .iter()
+                                .find(|(candidate, _)| *candidate == id)
+                                .map(|(_, name)| name.as_str())
+                        })
+                        .unwrap_or("(none)");
+                    changed |= searchable_picker(
+                        ui,
+                        "point_of_interest_reward_module",
+                        &mut reward.module,
+                        preview,
+                        boost_module_options,
+                        SearchablePickerConfig::optional("(none)")
+                            .with_search_hint("Search boost modules…"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Quantity").color(STUDIO_TEXT_WEAK));
+                    let mut quantity = i32::from(reward.quantity);
+                    if ui
+                        .add(egui::DragValue::new(&mut quantity).range(1..=99))
+                        .changed()
+                    {
+                        reward.quantity = quantity.clamp(1, 99) as u8;
+                        changed = true;
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        "The reward is granted once even when the message is repeatable.",
+                    )
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+                );
+            }
+        }
         NodeKind::Logic {
             kind: logic_kind,
             target,
@@ -4247,6 +4449,7 @@ pub(crate) fn node_lucide_icon(kind: &str, root: bool) -> char {
         "Light" => icons::SUN,
         "Point Light" | "PointLight" => icons::SUN,
         "Particle Emitter" | "ParticleEmitter" => icons::FOCUS,
+        "Point of Interest" | "PointOfInterest" => icons::FOCUS,
         "Spawn Point" | "SpawnPoint" => icons::MAP_PIN,
         "Portal" => icons::WAYPOINT,
         _ => icons::CIRCLE_DOT,
@@ -4276,6 +4479,7 @@ pub(crate) fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color
         "Light" => Color32::from_rgb(238, 203, 116),
         "Point Light" | "PointLight" => Color32::from_rgb(238, 203, 116),
         "Particle Emitter" | "ParticleEmitter" => Color32::from_rgb(152, 214, 230),
+        "Point of Interest" | "PointOfInterest" => Color32::from_rgb(224, 72, 56),
         "Spawn Point" | "SpawnPoint" => Color32::from_rgb(236, 188, 104),
         "Portal" => PORTAL_PINK,
         _ => Color32::from_rgb(141, 160, 180),
@@ -4496,6 +4700,7 @@ mod sky_ux_tests {
         let mut far_vista = FarVistaSettings::default();
         let mut culling = WorldCullingSettings::default();
         let mut physics = WorldPhysicsSettings::default();
+        let mut world_message = None;
         let mut nav_target = None;
         let mut project = ProjectDocument::new("sky ux");
         let atlas = project.add_resource(
@@ -4515,6 +4720,7 @@ mod sky_ux_tests {
                         &mut far_vista,
                         &mut culling,
                         &mut physics,
+                        &mut world_message,
                         &[(atlas, "Sunset Atlas".to_string())],
                         &mut nav_target,
                     );

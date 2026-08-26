@@ -659,7 +659,25 @@ impl EditorWorkspace {
     fn draw_bsp_context_controls(&mut self, ui: &mut egui::Ui) {
         match self.active_tool {
             ViewTool::Select => match self.brush_edit_mode {
-                BrushEditMode::Move | BrushEditMode::Edge | BrushEditMode::Vertex => {
+                BrushEditMode::Move => {
+                    ui.separator();
+                    self.draw_transform_gizmo_toolbar_controls(ui);
+                    let can_snap = self.can_snap_selected_entities_to_floor();
+                    if ui
+                        .add_enabled(
+                            can_snap,
+                            egui::Button::new(RichText::new("↓▔").monospace().size(12.0))
+                                .min_size(Vec2::new(30.0, 23.0)),
+                        )
+                        .on_hover_text(
+                            "Snap the selected Entity and its complete component hierarchy to the exact floor beneath it (End)",
+                        )
+                        .clicked()
+                    {
+                        self.snap_selected_entities_to_floor();
+                    }
+                }
+                BrushEditMode::Edge | BrushEditMode::Vertex => {
                     ui.separator();
                     self.draw_transform_gizmo_toolbar_controls(ui);
                 }

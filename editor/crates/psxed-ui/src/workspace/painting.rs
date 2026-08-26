@@ -953,6 +953,39 @@ impl EditorWorkspace {
                         .to_string();
             return;
         }
+        if matches!(kind, PlaceKind::PointOfInterest) {
+            self.push_undo();
+            let active_floor = self.active_floor;
+            let scene = self.project.active_scene_mut();
+            let entity = scene.add_node(room_id, "Point of Interest", NodeKind::Entity);
+            if let Some(node) = scene.node_mut(entity) {
+                node.transform.translation = translation;
+                node.floor = active_floor;
+            }
+            let component = scene.add_node(
+                entity,
+                "Point of Interest",
+                NodeKind::PointOfInterest {
+                    pages: psxed_project::default_message_pages(),
+                    prompt: psxed_project::default_point_of_interest_prompt(),
+                    radius: psxed_project::default_point_of_interest_radius(),
+                    marker_height: psxed_project::default_point_of_interest_marker_height(),
+                    repeatable: true,
+                    persistence_id: String::new(),
+                    reward: None,
+                    enabled: true,
+                },
+            );
+            // The authored payload is the useful first inspector. Viewport
+            // picking subsequently selects the Entity host for movement.
+            self.replace_node_selection(component);
+            self.clear_resource_selection_state();
+            self.clear_primitive_selection_state();
+            self.status = "Placed Point of Interest".to_string();
+            self.mark_dirty();
+            self.return_to_select_after_place();
+            return;
+        }
         let (default_name, node_kind): (String, NodeKind) = match kind {
             PlaceKind::PlayerSpawn => (
                 "Player Spawn".to_string(),
@@ -1203,6 +1236,7 @@ impl EditorWorkspace {
                     enabled: true,
                 },
             ),
+            PlaceKind::PointOfInterest => unreachable!("handled above"),
         };
         self.push_undo();
         let active_floor = self.active_floor;

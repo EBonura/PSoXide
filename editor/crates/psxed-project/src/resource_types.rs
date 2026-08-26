@@ -2125,6 +2125,35 @@ impl Default for ParticleEmitterSettings {
     }
 }
 
+/// Gameplay protocol carried by a collectable boost module.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoostModuleKind {
+    #[default]
+    Rupture,
+    Shell,
+    Surge,
+}
+
+impl BoostModuleKind {
+    pub const ALL: [Self; 3] = [Self::Rupture, Self::Shell, Self::Surge];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rupture => "Rupture",
+            Self::Shell => "Shell",
+            Self::Surge => "Surge",
+        }
+    }
+}
+
+/// Resource-backed inventory module that can be granted by a point of
+/// interest and assigned to a vitality slot.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoostModuleResource {
+    #[serde(default)]
+    pub kind: BoostModuleKind,
+}
+
 /// Resource payloads available to editor scenes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceData {
@@ -2189,6 +2218,8 @@ pub enum ResourceData {
     /// Equipment/weapon authoring resource. A Weapon references a
     /// Model for visuals and owns grip + hitbox data for combat.
     Weapon(WeaponResource),
+    /// Collectable vitality boost module.
+    BoostModule(BoostModuleResource),
 }
 
 impl ResourceData {
@@ -2208,6 +2239,7 @@ impl ResourceData {
             Self::Audio { .. } => "Audio",
             Self::Character(_) => "Character Profile",
             Self::Weapon(_) => "Weapon",
+            Self::BoostModule(_) => "Boost Module",
         }
     }
 }

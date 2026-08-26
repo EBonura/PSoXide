@@ -13,7 +13,8 @@ use psx_engine::PRIMITIVE_PACKET_SLOT_WORDS;
 
 use super::{
     playtest_performance_envelope, streamed_room_chunk_memory_report, PlaytestAssetKind,
-    PlaytestPackage, PlaytestValidationTarget, PlaytestWorldGeometry, StreamedClass,
+    PlaytestInteractableKind, PlaytestPackage, PlaytestValidationTarget, PlaytestWorldGeometry,
+    StreamedClass,
 };
 use crate::brush_world::BrushWorldCookMode;
 use crate::{NodeKind, ProjectDocument, ResourceData};
@@ -532,13 +533,23 @@ fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
 
 fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
     let envelope = playtest_performance_envelope(package).unwrap_or_default();
-    if bsp_packets == 0 {
+    // Each Archive Beacon submits two six-point panels, four triangles each.
+    // Count every cooked POI conservatively because a streamed/portal frame may
+    // draw several active rooms into the same arena.
+    let poi_marker_packets = package
+        .interactables
+        .iter()
+        .filter(|record| record.kind == PlaytestInteractableKind::PointOfInterest)
+        .count()
+        .saturating_mul(8);
+    let world_packets = if bsp_packets == 0 {
         envelope
             .tr_packets_before_hw_split
             .saturating_add(envelope.prop_surfaces)
     } else {
         bsp_packets.saturating_add(envelope.prop_surfaces)
-    }
+    };
+    world_packets.saturating_add(poi_marker_packets)
 }
 
 /// Per-project primitive arena capacity the generated manifest publishes for

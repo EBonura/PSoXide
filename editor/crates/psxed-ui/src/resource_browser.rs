@@ -180,6 +180,7 @@ pub(crate) fn resource_file_name(resource: &Resource) -> String {
         ResourceData::AnimationSet(_) => cooked_name(&resource.name, "", "animset"),
         ResourceData::Character(_) => cooked_name(&resource.name, "", "profile"),
         ResourceData::Weapon(_) => cooked_name(&resource.name, "", "weapon"),
+        ResourceData::BoostModule(_) => cooked_name(&resource.name, "", "module"),
         ResourceData::Mesh { source_path } => cooked_name(&resource.name, source_path, "psxmesh"),
         ResourceData::Scene { source_path } => cooked_name(&resource.name, source_path, "room"),
         ResourceData::Script { source_path } => cooked_name(&resource.name, source_path, "script"),
@@ -234,6 +235,7 @@ pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFil
             | ResourceData::AnimationSet(_) => animation += 1,
             ResourceData::Character(_) => character += 1,
             ResourceData::Weapon(_) => weapon += 1,
+            ResourceData::BoostModule(_) => other += 1,
             ResourceData::Mesh { .. } => mesh += 1,
             ResourceData::Scene { .. } => {}
             ResourceData::Script { .. } | ResourceData::Audio { .. } => other += 1,
@@ -293,7 +295,8 @@ pub(crate) fn resource_source_path(resource: &Resource) -> Option<&str> {
         ResourceData::Skeleton(_)
         | ResourceData::AnimationSet(_)
         | ResourceData::Character(_)
-        | ResourceData::Weapon(_) => None,
+        | ResourceData::Weapon(_)
+        | ResourceData::BoostModule(_) => None,
     }
 }
 
@@ -308,6 +311,7 @@ pub(crate) fn resource_lucide_icon(data: &ResourceData) -> char {
         ResourceData::AnimationSet(_) => icons::LAYERS,
         ResourceData::Character(_) => icons::MAP_PIN,
         ResourceData::Weapon(_) => icons::WAYPOINT,
+        ResourceData::BoostModule(_) => icons::FOCUS,
         ResourceData::Mesh { .. } => icons::BOX,
         ResourceData::Scene { .. } => icons::GRID,
         ResourceData::Script { .. } => icons::FILE,
@@ -330,6 +334,7 @@ pub(crate) fn resource_lucide_color(data: &ResourceData, selected: bool) -> Colo
         ResourceData::AnimationSet(_) => Color32::from_rgb(142, 190, 154),
         ResourceData::Character(_) => Color32::from_rgb(120, 220, 148),
         ResourceData::Weapon(_) => Color32::from_rgb(222, 196, 112),
+        ResourceData::BoostModule(_) => Color32::from_rgb(224, 92, 72),
         ResourceData::Mesh { .. } => Color32::from_rgb(156, 174, 190),
         ResourceData::Scene { .. } => Color32::from_rgb(209, 118, 71),
         ResourceData::Script { .. } => Color32::from_rgb(188, 176, 104),
@@ -763,6 +768,7 @@ pub(crate) fn resource_preview_color(resource: &Resource) -> Color32 {
             ResourceData::AnimationSet(_) => Color32::from_rgb(82, 136, 100),
             ResourceData::Character(_) => Color32::from_rgb(96, 144, 110),
             ResourceData::Weapon(_) => Color32::from_rgb(150, 132, 76),
+            ResourceData::BoostModule(_) => Color32::from_rgb(142, 62, 50),
             ResourceData::Mesh { .. } => Color32::from_rgb(110, 120, 130),
             ResourceData::Scene { .. } => Color32::from_rgb(92, 130, 106),
             ResourceData::Script { .. } => Color32::from_rgb(128, 126, 80),
@@ -787,6 +793,7 @@ pub(crate) fn resource_detail(resource: &Resource) -> &'static str {
         ResourceData::AnimationSet(_) => "Clip Role Map",
         ResourceData::Character(_) => "Character Profile",
         ResourceData::Weapon(_) => "Weapon",
+        ResourceData::BoostModule(_) => "Boost Module",
         ResourceData::Mesh { .. } => "Mesh",
         ResourceData::Scene { .. } => "Room",
         ResourceData::Script { .. } => "Script",
