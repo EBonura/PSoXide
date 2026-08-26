@@ -1448,13 +1448,27 @@ pub enum InteractableKind {
     Message,
     /// Update the in-memory checkpoint/sync point.
     Checkpoint,
+    /// Player-authored point of interest with a visible archive beacon,
+    /// paged body text, optional one-time reward, and persistent read state.
+    PointOfInterest,
 }
 
 /// Runtime flags for [`InteractableRecord`].
 pub mod interactable_flags {
     /// Record is active in gameplay.
     pub const ENABLED: u16 = 1 << 0;
+    /// A completed point-of-interest message can be opened again.
+    pub const REPEATABLE: u16 = 1 << 1;
 }
+
+/// Sentinel for a point-of-interest persistent read/reward flag.
+pub const POI_FLAG_NONE: u16 = u16::MAX;
+
+/// Number of persistent POI state bits available in the one-frame save block.
+pub const POI_PERSISTENT_FLAG_CAPACITY: usize = 832;
+
+/// Sentinel for a point-of-interest reward resource.
+pub const POI_REWARD_NONE: u16 = u16::MAX;
 
 /// Sentinel for [`InteractableRecord::message`] when no message is
 /// associated with the interaction.
@@ -1472,6 +1486,11 @@ pub struct InteractableMessageRecord {
     pub title: &'static str,
     /// Body text. Newlines are preserved by the simple runtime overlay.
     pub body: &'static str,
+    /// First entry in the generated flat message-page table.
+    pub page_first: u16,
+    /// Number of consecutive pages in the generated flat message-page table.
+    /// Legacy message/checkpoint records use one page containing `body`.
+    pub page_count: u16,
 }
 
 /// One placed gameplay interaction. Coordinates are room-local engine
@@ -1492,6 +1511,8 @@ pub struct InteractableRecord {
     pub yaw: i16,
     /// Activation radius in XZ engine units.
     pub radius: u16,
+    /// Vertical offset from the floor anchor to the archive beacon centre.
+    pub marker_height: u16,
     /// Short prompt shown near the object.
     pub prompt: &'static str,
     /// Index into the generated interactable message table, or
@@ -1504,6 +1525,14 @@ pub struct InteractableRecord {
     pub logic: u16,
     /// Stable checkpoint id for [`InteractableKind::Checkpoint`].
     pub checkpoint_id: &'static str,
+    /// Persistent read flag, or [`POI_FLAG_NONE`] for legacy interactions.
+    pub read_flag: u16,
+    /// Persistent one-time reward flag, or [`POI_FLAG_NONE`].
+    pub reward_flag: u16,
+    /// Cooked boost-module resource selector, or [`POI_REWARD_NONE`].
+    pub reward_resource: u16,
+    /// Reward quantity. Zero means no reward.
+    pub reward_quantity: u8,
     /// Runtime flags from [`interactable_flags`].
     pub flags: u16,
 }

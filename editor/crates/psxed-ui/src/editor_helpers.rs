@@ -695,6 +695,23 @@ pub(crate) fn enclosing_room_id(scene: &psxed_project::Scene, node_id: NodeId) -
     None
 }
 
+/// Resolve a scene node to the Entity whose authored transform owns it.
+///
+/// Component rows intentionally have no independent placement transform. UI
+/// actions such as floor snapping therefore walk through any selected
+/// component and operate on the complete Entity hierarchy instead.
+pub(crate) fn owning_entity_id(scene: &psxed_project::Scene, node_id: NodeId) -> Option<NodeId> {
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        let node = scene.node(id)?;
+        if matches!(node.kind, NodeKind::Entity) {
+            return Some(id);
+        }
+        current = node.parent;
+    }
+    None
+}
+
 /// Sector size a node's TRANSLATION is expressed in, the single source of
 /// truth for editor-unit <-> world-unit conversion. BSP scenes author node
 /// transforms in raw world units (1 editor unit = 1 world unit); grid scenes
@@ -838,13 +855,29 @@ pub(crate) fn entity_bound_kind_and_size(
         | NodeKind::Camera { .. }
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. }
-        | NodeKind::Interactable { .. } => None,
+        | NodeKind::Interactable { .. }
+        | NodeKind::PointOfInterest { .. } => None,
         NodeKind::Entity => {
             if let Some(model) = entity_model_resource(workspace, node) {
                 let h = (model.world_height as f32).max(256.0);
                 let half_h = h * 0.5;
                 let half_xz = (h / 3.0).max(192.0);
                 return Some((EntityBoundKind::Model, [half_xz, half_h, half_xz]));
+            }
+            if let Some(marker_height) = node.children.iter().find_map(|id| {
+                workspace
+                    .project
+                    .active_scene()
+                    .node(*id)
+                    .and_then(|child| match &child.kind {
+                        NodeKind::PointOfInterest { marker_height, .. } => Some(*marker_height),
+                        _ => None,
+                    })
+            }) {
+                return Some((
+                    EntityBoundKind::PointOfInterest,
+                    [128.0, f32::from(marker_height).max(64.0) * 0.5, 128.0],
+                ));
             }
             Some((EntityBoundKind::MeshFallback, [256.0, 256.0, 256.0]))
         }

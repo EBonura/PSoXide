@@ -1889,6 +1889,102 @@ fn project_roundtrips_through_ron_string() {
 }
 
 #[test]
+fn point_of_interest_world_message_and_boost_module_roundtrip() {
+    let mut project = ProjectDocument::new("messages");
+    let module = project.add_resource(
+        "Rupture Coil",
+        ResourceData::BoostModule(BoostModuleResource {
+            kind: BoostModuleKind::Rupture,
+        }),
+    );
+    let scene = project.active_scene_mut();
+    let root = scene.root;
+    let NodeKind::World { world_message, .. } = &mut scene.node_mut(root).expect("world root").kind
+    else {
+        panic!("root must be a world");
+    };
+    *world_message = Some(WorldMessage {
+        pages: vec![
+            "The cortex stirs.".to_string(),
+            "Ignition follows.".to_string(),
+        ],
+    });
+    let host = scene.add_node(root, "Archive Beacon", NodeKind::Entity);
+    scene.add_node(
+        host,
+        "Archive Beacon",
+        NodeKind::PointOfInterest {
+            pages: vec!["Recovered protocol.".to_string()],
+            prompt: "READ".to_string(),
+            radius: 576,
+            marker_height: 192,
+            repeatable: false,
+            persistence_id: "archive-beacon-01".to_string(),
+            reward: Some(PointOfInterestReward {
+                module: Some(module),
+                quantity: 2,
+            }),
+            enabled: true,
+        },
+    );
+
+    let ron = project.to_ron_string().expect("serializes");
+    let restored = ProjectDocument::from_ron_str(&ron).expect("deserializes");
+    assert_eq!(restored, project);
+}
+
+#[test]
+fn legacy_world_without_message_keeps_world_message_disabled() {
+    let world: NodeKind = ron::from_str("World()")
+        .expect("all World fields, including world_message, have compatible defaults");
+    assert!(matches!(
+        world,
+        NodeKind::World {
+            world_message: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn deleting_boost_module_clears_point_of_interest_reward_reference() {
+    let mut project = ProjectDocument::new("poi-reward-delete");
+    let module = project.add_resource(
+        "Surge Drive",
+        ResourceData::BoostModule(BoostModuleResource {
+            kind: BoostModuleKind::Surge,
+        }),
+    );
+    let scene = project.active_scene_mut();
+    let host = scene.add_node(scene.root, "Beacon", NodeKind::Entity);
+    let poi = scene.add_node(
+        host,
+        "Beacon",
+        NodeKind::PointOfInterest {
+            pages: default_message_pages(),
+            prompt: default_point_of_interest_prompt(),
+            radius: default_point_of_interest_radius(),
+            marker_height: default_point_of_interest_marker_height(),
+            repeatable: true,
+            persistence_id: String::new(),
+            reward: Some(PointOfInterestReward {
+                module: Some(module),
+                quantity: 1,
+            }),
+            enabled: true,
+        },
+    );
+
+    project.delete_resource(module).expect("module exists");
+    let NodeKind::PointOfInterest { reward, .. } =
+        &project.active_scene().node(poi).expect("poi remains").kind
+    else {
+        panic!("poi remains authored");
+    };
+    assert_eq!(*reward, None);
+}
+
+#[test]
 fn new_project_seeds_hud_ui_scene() {
     let project = ProjectDocument::new("ui");
     let ui_scene = project.active_ui_scene().expect("default UI scene");

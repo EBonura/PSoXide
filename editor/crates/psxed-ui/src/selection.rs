@@ -307,6 +307,8 @@ pub enum EntityBoundKind {
     PointLight,
     /// `ParticleEmitter`.
     ParticleEmitter,
+    /// Entity hosting a procedural Point of Interest beacon.
+    PointOfInterest,
     /// `Portal`.
     Portal,
     /// Placed `Logic` graph node (trigger volume / relay /

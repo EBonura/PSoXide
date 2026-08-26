@@ -498,6 +498,7 @@ enum TreeAction {
     CancelRename,
     Delete(NodeId),
     Duplicate(NodeId),
+    SnapEntityToFloor(NodeId),
     AddChild {
         parent: NodeId,
         kind: NodeKind,
@@ -2788,10 +2789,12 @@ enum PlaceKind {
     /// Placed `Logic` graph node (trigger volume by default; switch
     /// the kind to relay/multisource/door in the inspector).
     Logic,
+    /// Entity host with a procedural readable Point of Interest component.
+    PointOfInterest,
 }
 
 impl PlaceKind {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::PlayerSpawn,
         Self::SpawnMarker,
         Self::ModelInstance,
@@ -2803,6 +2806,7 @@ impl PlaceKind {
         Self::PointLightMarker,
         Self::ParticleEmitter,
         Self::Logic,
+        Self::PointOfInterest,
     ];
 
     const fn label(self) -> &'static str {
@@ -2818,6 +2822,7 @@ impl PlaceKind {
             Self::PointLightMarker => "Point Light",
             Self::ParticleEmitter => "Particle Emitter",
             Self::Logic => "Logic",
+            Self::PointOfInterest => "Point of Interest",
         }
     }
 
@@ -2833,6 +2838,7 @@ impl PlaceKind {
             Self::PointLightMarker => icons::SUN,
             Self::ParticleEmitter => icons::FOCUS,
             Self::Logic => icons::BLEND,
+            Self::PointOfInterest => icons::FOCUS,
         }
     }
 }
@@ -2956,7 +2962,9 @@ impl ResourceFilter {
             Self::Mesh => matches!(data, ResourceData::Mesh { .. }),
             Self::Other => matches!(
                 data,
-                ResourceData::Script { .. } | ResourceData::Audio { .. }
+                ResourceData::Script { .. }
+                    | ResourceData::Audio { .. }
+                    | ResourceData::BoostModule(_)
             ),
         }
     }

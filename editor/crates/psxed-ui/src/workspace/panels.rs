@@ -247,6 +247,7 @@ impl EditorWorkspace {
                         collapsed_scene_nodes.contains(&row.id),
                         hidden_scene_nodes.contains(&row.id),
                         scene_node_hidden(scene, &hidden_scene_nodes, row.id),
+                        owning_entity_id(scene, row.id).is_some(),
                         renaming,
                         pending_focus,
                         &mut actions,
@@ -1812,6 +1813,17 @@ impl EditorWorkspace {
                                     })
                                     .collect();
                                 let weapon_options = collect_weapon_options(&self.project);
+                                let boost_module_options: Vec<(ResourceId, String)> = self
+                                    .project
+                                    .resources
+                                    .iter()
+                                    .filter_map(|resource| match &resource.data {
+                                        ResourceData::BoostModule(_) => {
+                                            Some((resource.id, resource.name.clone()))
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect();
                                 let selected = self.selection.selected_node;
                                 let animator_clip_context = selected_animator_clip_context(
                                     &self.project,
@@ -1824,6 +1836,7 @@ impl EditorWorkspace {
                                 let mut nav_target: Option<ResourceId> = None;
                                 let mut room_grid_resize: Option<(u16, u16)> = None;
                                 let mut character_preview_action = None;
+                                let mut snap_to_floor_requested = false;
                                 let inherited_sector_size =
                                     node_translation_sector_size(&self.project, selected);
                                 let selected_kind_before = self
@@ -1873,6 +1886,7 @@ impl EditorWorkspace {
                                             inherited_sector_size,
                                             &material_options,
                                             &mut nav_target,
+                                            &mut snap_to_floor_requested,
                                         );
                                     } else if transform_kind != NodeTransformInspector::Hidden {
                                         inspector_section(
@@ -1888,6 +1902,7 @@ impl EditorWorkspace {
                                                     inherited_sector_size,
                                                     &texture_options,
                                                     &mut nav_target,
+                                                    &mut snap_to_floor_requested,
                                                 );
                                             },
                                         );
@@ -1918,6 +1933,7 @@ impl EditorWorkspace {
                                                 model_options: &model_options,
                                                 character_options: &character_options,
                                                 weapon_options: &weapon_options,
+                                                boost_module_options: &boost_module_options,
                                                 animator_clip_context: animator_clip_context
                                                     .as_ref(),
                                                 inherited_sector_size,
@@ -1931,6 +1947,10 @@ impl EditorWorkspace {
                                             },
                                         );
                                     }
+                                }
+
+                                if snap_to_floor_requested {
+                                    self.snap_selected_entities_to_floor();
                                 }
 
                                 if let Some(before) = selected_kind_before.as_ref() {

@@ -366,6 +366,9 @@ impl Playtest {
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::STARTER;
+        if self.poi_save_loaded {
+            self.restore_claimed_poi_rewards();
+        }
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
         self.selected_power_up_item = BoostProtocol::Rupture;
         self.hazard_death_ticks_remaining = 0;
@@ -408,6 +411,8 @@ impl Playtest {
             // the loading burst is re-queued into the freed space.
             release_ui_images();
             self.room_materials_unresolved = true;
+            self.ensure_poi_save_loaded();
+            self.open_world_message_once();
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
             // First spawn plays the intro with control locked out for the
@@ -419,6 +424,7 @@ impl Playtest {
             // starts in Idle exactly as before.
             self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz);
         }
+        self.retry_poi_card_io(ctx.sim_tick.as_u32());
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
         self.tick_gameplay_layer(ctx);
@@ -459,6 +465,11 @@ impl Playtest {
         }
         if ctx.just_pressed(COLLISION_DEBUG_BUTTON) {
             self.show_collision_debug = !self.show_collision_debug;
+        }
+
+        let poi_interaction_consumed = self.poi_messages.active().is_some();
+        if poi_interaction_consumed && ctx.just_pressed(INTERACT_BUTTON) {
+            self.advance_poi_message();
         }
 
         if self.message_overlay.is_some() {
@@ -539,7 +550,7 @@ impl Playtest {
         let action_locked =
             self.anim_lock_until_tick > now || self.hazard_death_ticks_remaining > 0;
         self.refresh_active_interactable();
-        if !action_locked {
+        if !action_locked && !poi_interaction_consumed {
             if let Some(index) = self.active_interactable {
                 if ctx.just_pressed(INTERACT_BUTTON)
                     && self.activate_interactable(index, now.as_u32())

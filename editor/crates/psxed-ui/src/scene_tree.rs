@@ -451,6 +451,7 @@ pub(crate) fn draw_scene_node_row(
     collapsed: bool,
     directly_hidden: bool,
     effectively_hidden: bool,
+    can_snap_entity_to_floor: bool,
     renaming: &mut Option<(NodeId, String)>,
     pending_focus: &mut bool,
     actions: &mut Vec<TreeAction>,
@@ -769,6 +770,17 @@ pub(crate) fn draw_scene_node_row(
             }
             if ui.button(icons::label(icons::COPY, "Duplicate")).clicked() {
                 actions.push(TreeAction::Duplicate(row.id));
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(
+                    can_snap_entity_to_floor,
+                    egui::Button::new(icons::label(icons::CHEVRON_DOWN, "Snap Entity to Floor")),
+                )
+                .on_hover_text("Move the complete owning Entity to the floor beneath it (End)")
+                .clicked()
+            {
+                actions.push(TreeAction::SnapEntityToFloor(row.id));
                 ui.close_menu();
             }
             if row.kind == NodeKind::Group.label() {
@@ -1266,6 +1278,19 @@ pub(crate) fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'stati
                 enabled: true,
             },
         ),
+        (
+            "Point of Interest",
+            NodeKind::PointOfInterest {
+                pages: psxed_project::default_message_pages(),
+                prompt: psxed_project::default_point_of_interest_prompt(),
+                radius: psxed_project::default_point_of_interest_radius(),
+                marker_height: psxed_project::default_point_of_interest_marker_height(),
+                repeatable: true,
+                persistence_id: String::new(),
+                reward: None,
+                enabled: true,
+            },
+        ),
     ]
 }
 
@@ -1323,7 +1348,7 @@ pub(crate) const fn component_slot(kind: &NodeKind) -> Option<&'static str> {
         NodeKind::Camera { .. } => Some("Camera"),
         NodeKind::Equipment { .. } => Some("Equipment"),
         NodeKind::PhysicsBody { .. } => Some("PhysicsBody"),
-        NodeKind::Interactable { .. } => Some("Interactable"),
+        NodeKind::Interactable { .. } | NodeKind::PointOfInterest { .. } => Some("Interaction"),
         _ => None,
     }
 }

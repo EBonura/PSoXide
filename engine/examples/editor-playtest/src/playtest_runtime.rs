@@ -1,5 +1,70 @@
 use super::*;
 
+enum PoiSaveLoad {
+    Loaded(SaveBlock),
+    NewGame,
+    Retry,
+}
+
+fn load_poi_save_from_card() -> PoiSaveLoad {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
+    let mut bytes = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
+    let len = match card.read(PROJECT_SAVE_NAME, &mut bytes) {
+        Ok(len) => len,
+        Err(psx_mc::Error::NotFound) => return PoiSaveLoad::NewGame,
+        Err(_) => return PoiSaveLoad::Retry,
+    };
+    if len != bytes.len() {
+        return PoiSaveLoad::Retry;
+    }
+    match SaveBlock::decode(&bytes, PERSISTENT_FLAG_COUNT) {
+        Some(save) => PoiSaveLoad::Loaded(save),
+        None => PoiSaveLoad::Retry,
+    }
+}
+
+fn save_poi_state_to_card(save: &SaveBlock) -> bool {
+    let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
+    if card.is_formatted() != Ok(true) {
+        // Formatting is destructive and belongs behind an explicit System UI
+        // confirmation, never inside a POI interaction.
+        return false;
+    }
+    let mut bytes = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
+    save.encode(&mut bytes);
+    if card
+        .write(PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, &bytes)
+        .is_err()
+    {
+        return false;
+    }
+    let mut verify = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
+    matches!(
+        card.read(PROJECT_SAVE_NAME, &mut verify),
+        Ok(len)
+            if len == verify.len()
+                && SaveBlock::decode(&verify, PERSISTENT_FLAG_COUNT) == Some(*save)
+    )
+}
+
+fn boost_protocol_for_reward(resource: u16) -> Option<BoostProtocol> {
+    match resource {
+        1 => Some(BoostProtocol::Rupture),
+        2 => Some(BoostProtocol::Shell),
+        3 => Some(BoostProtocol::Surge),
+        _ => None,
+    }
+}
+
+fn poi_persistent_flags(
+    interactable: &InteractableRecord,
+) -> psx_game_runtime::poi::PoiPersistentFlags {
+    psx_game_runtime::poi::PoiPersistentFlags {
+        read: interactable.read_flag,
+        reward: interactable.reward_flag,
+    }
+}
+
 fn apply_bsp_debug_body_fallback(
     config: &mut CharacterMotorConfig,
     uses_bsp: bool,
@@ -51,6 +116,162 @@ fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
 }
 
 impl Playtest {
+    pub(super) fn ensure_poi_save_loaded(&mut self) {
+        if self.poi_save_loaded {
+            return;
+        }
+        match load_poi_save_from_card() {
+            PoiSaveLoad::Loaded(saved) => self.poi_save = saved,
+            PoiSaveLoad::NewGame => {}
+            PoiSaveLoad::Retry => return,
+        }
+        self.poi_save_loaded = true;
+        self.restore_claimed_poi_rewards();
+    }
+
+    pub(super) fn restore_claimed_poi_rewards(&mut self) {
+        self.power_up_loadout = PowerUpLoadout::DEFAULT;
+        self.power_up_inventory = BoostInventory::STARTER;
+        for interactable in INTERACTABLES {
+            if interactable.kind != InteractableKind::PointOfInterest
+                || !poi_persistent_flags(interactable).reward_claimed(&self.poi_save)
+            {
+                continue;
+            }
+            if let Some(protocol) = boost_protocol_for_reward(interactable.reward_resource) {
+                let _ = self
+                    .power_up_inventory
+                    .add(protocol, interactable.reward_quantity);
+            }
+        }
+    }
+
+    fn persist_poi_save(&mut self) {
+        self.poi_save_dirty = !save_poi_state_to_card(&self.poi_save);
+    }
+
+    pub(super) fn retry_poi_card_io(&mut self, tick: u32) {
+        const RETRY_TICKS: u32 = 300;
+        if tick % RETRY_TICKS != 0 {
+            return;
+        }
+        if !self.poi_save_loaded {
+            self.ensure_poi_save_loaded();
+        } else if self.poi_save_dirty {
+            self.persist_poi_save();
+        }
+    }
+
+    pub(super) fn point_of_interest_available(
+        &self,
+        interactable: &InteractableRecord,
+    ) -> bool {
+        if interactable.kind != InteractableKind::PointOfInterest {
+            return interactable_is_active(interactable);
+        }
+        if !self.poi_save_loaded {
+            return false;
+        }
+        let candidate = psx_game_runtime::poi::PoiCandidate {
+            room: interactable.room.0,
+            x: interactable.x,
+            z: interactable.z,
+            radius: interactable.radius,
+            enabled: interactable_is_active(interactable),
+            repeatable: interactable.flags & psx_level::interactable_flags::REPEATABLE != 0,
+            persistence: poi_persistent_flags(interactable),
+            reward: psx_game_runtime::poi::PoiReward {
+                resource: interactable.reward_resource,
+                quantity: interactable.reward_quantity,
+            },
+        };
+        candidate.is_available(&self.poi_save)
+    }
+
+    pub(super) fn point_of_interest_depleted(
+        &self,
+        interactable: &InteractableRecord,
+    ) -> bool {
+        if interactable.kind != InteractableKind::PointOfInterest {
+            return false;
+        }
+        let candidate = psx_game_runtime::poi::PoiCandidate {
+            room: interactable.room.0,
+            x: interactable.x,
+            z: interactable.z,
+            radius: interactable.radius,
+            enabled: interactable_is_active(interactable),
+            repeatable: interactable.flags & psx_level::interactable_flags::REPEATABLE != 0,
+            persistence: poi_persistent_flags(interactable),
+            reward: psx_game_runtime::poi::PoiReward {
+                resource: interactable.reward_resource,
+                quantity: interactable.reward_quantity,
+            },
+        };
+        candidate.is_depleted(&self.poi_save)
+    }
+
+    fn grant_point_of_interest_reward(&mut self, index: usize) {
+        let Some(interactable) = INTERACTABLES.get(index) else {
+            return;
+        };
+        let persistence = poi_persistent_flags(interactable);
+        if persistence.reward_claimed(&self.poi_save) || interactable.reward_quantity == 0 {
+            return;
+        }
+        let Some(protocol) = boost_protocol_for_reward(interactable.reward_resource) else {
+            return;
+        };
+        let equipped = BoostSlotId::ALL
+            .iter()
+            .filter(|slot| self.power_up_loadout.protocol(**slot) == protocol)
+            .count()
+            .min(u8::MAX as usize) as u8;
+        let owned = self
+            .power_up_inventory
+            .count(protocol)
+            .saturating_add(equipped);
+        let room = BoostInventory::MAX_STACK.saturating_sub(owned);
+        if room < interactable.reward_quantity {
+            return;
+        }
+        if self
+            .power_up_inventory
+            .add(protocol, interactable.reward_quantity)
+            != interactable.reward_quantity
+        {
+            return;
+        }
+        if persistence.mark_reward_claimed(&mut self.poi_save) {
+            self.poi_save_dirty = true;
+            self.persist_poi_save();
+        }
+    }
+
+    pub(super) fn advance_poi_message(&mut self) {
+        use psx_game_runtime::poi::{MessageAdvance, MessageSource};
+        if let MessageAdvance::Closed(MessageSource::PointOfInterest(index)) =
+            self.poi_messages.advance()
+        {
+            if let Some(interactable) = INTERACTABLES.get(usize::from(index)) {
+                if poi_persistent_flags(interactable).mark_read(&mut self.poi_save) {
+                    self.poi_save_dirty = true;
+                    self.persist_poi_save();
+                }
+            }
+        }
+    }
+
+    pub(super) fn open_world_message_once(&mut self) {
+        let Some(message) = WORLD_MESSAGE else {
+            return;
+        };
+        let _ = self.poi_messages.open_world(
+            0,
+            psx_game_runtime::poi::MessagePageSpan::new(message.page_first, message.page_count),
+        );
+    }
+
     /// Fixed-point stat multipliers from the four endpoint sockets at the
     /// current Horizon/Zenith health positions.
     pub(super) fn vitality_modifiers(&self) -> VitalityModifiers {
@@ -1040,14 +1261,23 @@ impl Playtest {
     pub(super) fn find_best_interactable(&self) -> Option<usize> {
         let player = self.motor.position();
         let mut best = None;
-        let mut best_distance = i32::MAX;
+        let mut best_distance = u64::MAX;
         for (index, interactable) in INTERACTABLES.iter().enumerate() {
-            if !interactable_is_active(interactable) || interactable.room != self.room_index {
+            if !self.point_of_interest_available(interactable)
+                || interactable.room != self.room_index
+            {
                 continue;
             }
-            let target = RoomPoint::new(interactable.x, interactable.y, interactable.z);
-            let distance = distance_xz_sq(player, target);
-            let radius_sq = square_i32_saturating(interactable.radius as i32);
+            let radius = u32::from(interactable.radius);
+            let dx = player.x.abs_diff(interactable.x);
+            let dz = player.z.abs_diff(interactable.z);
+            if dx > radius || dz > radius {
+                continue;
+            }
+            let distance = u64::from(dx)
+                .saturating_mul(u64::from(dx))
+                .saturating_add(u64::from(dz).saturating_mul(u64::from(dz)));
+            let radius_sq = u64::from(radius).saturating_mul(u64::from(radius));
             if distance <= radius_sq && distance < best_distance {
                 best = Some(index);
                 best_distance = distance;
@@ -1071,7 +1301,7 @@ impl Playtest {
         let Some(interactable) = INTERACTABLES.get(index) else {
             return false;
         };
-        if !interactable_is_active(interactable) {
+        if !self.point_of_interest_available(interactable) {
             return false;
         }
         if interactable.logic != psx_level::INTERACTABLE_LOGIC_NONE {
@@ -1101,6 +1331,22 @@ impl Playtest {
                 self.open_interactable_message(interactable);
                 true
             }
+            InteractableKind::PointOfInterest => {
+                let Some(message) = INTERACTABLE_MESSAGES.get(interactable.message as usize) else {
+                    return false;
+                };
+                let opened = self.poi_messages.open_poi(
+                    index.min(u16::MAX as usize) as u16,
+                    psx_game_runtime::poi::MessagePageSpan::new(
+                        message.page_first,
+                        message.page_count,
+                    ),
+                );
+                if opened {
+                    self.grant_point_of_interest_reward(index);
+                }
+                opened
+            }
         }
     }
 
@@ -1120,6 +1366,9 @@ impl Playtest {
     }
 
     pub(super) fn open_interactable_message(&mut self, interactable: &InteractableRecord) {
+        if self.poi_messages.active().is_some() {
+            return;
+        }
         let (title, body) = interactable_message_text(interactable);
         self.message_overlay = Some(RuntimeMessageOverlay { title, body });
     }

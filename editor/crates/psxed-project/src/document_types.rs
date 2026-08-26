@@ -964,7 +964,8 @@ impl ProjectDocument {
                 | ResourceData::AnimationSet(_)
                 | ResourceData::Mesh { .. }
                 | ResourceData::Character(_)
-                | ResourceData::Weapon(_) => {}
+                | ResourceData::Weapon(_)
+                | ResourceData::BoostModule(_) => {}
             }
         }
         paths.sort();
@@ -1125,7 +1126,8 @@ impl ProjectDocument {
             ResourceData::Skeleton(_)
             | ResourceData::AnimationSet(_)
             | ResourceData::Character(_)
-            | ResourceData::Weapon(_) => {}
+            | ResourceData::Weapon(_)
+            | ResourceData::BoostModule(_) => {}
         }
 
         execute_resource_rename_plan(&plan)?;
@@ -1447,6 +1449,7 @@ impl ProjectDocument {
                         culling,
                         streaming,
                         physics,
+                        world_message,
                     } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
@@ -1478,6 +1481,23 @@ impl ProjectDocument {
                         *culling = culling.normalized();
                         *streaming = streaming.normalized();
                         *physics = physics.normalized();
+                        if let Some(message) = world_message {
+                            normalize_message_pages(&mut message.pages);
+                        }
+                    }
+                    NodeKind::PointOfInterest {
+                        pages,
+                        radius,
+                        marker_height,
+                        reward,
+                        ..
+                    } => {
+                        normalize_message_pages(pages);
+                        *radius = (*radius).max(1);
+                        *marker_height = (*marker_height).max(1);
+                        if let Some(reward) = reward {
+                            reward.quantity = reward.quantity.max(1);
+                        }
                     }
                     NodeKind::PhysicsBody { settings } => {
                         *settings = settings.normalized();
@@ -1552,6 +1572,12 @@ impl ProjectDocument {
     }
 }
 
+fn normalize_message_pages(pages: &mut Vec<String>) {
+    if pages.is_empty() {
+        pages.push(String::new());
+    }
+}
+
 pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId) -> usize {
     match data {
         ResourceData::Material(material) => material.version_resource_reference_count(id),
@@ -1596,7 +1622,8 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
         | ResourceData::Mesh { .. }
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
-        | ResourceData::Audio { .. } => 0,
+        | ResourceData::Audio { .. }
+        | ResourceData::BoostModule(_) => 0,
     }
 }
 
@@ -1650,7 +1677,8 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
         | ResourceData::Mesh { .. }
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
-        | ResourceData::Audio { .. } => 0,
+        | ResourceData::Audio { .. }
+        | ResourceData::BoostModule(_) => 0,
     }
 }
 
@@ -1690,6 +1718,9 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
         }
         NodeKind::SpawnPoint { character, .. } => option_resource_reference_count(*character, id),
         NodeKind::World { far_vista, .. } => far_vista_resource_reference_count(far_vista, id),
+        NodeKind::PointOfInterest { reward, .. } => reward.as_ref().map_or(0, |reward| {
+            option_resource_reference_count(reward.module, id)
+        }),
         NodeKind::Node
         | NodeKind::Group
         | NodeKind::Node3D
@@ -1765,6 +1796,17 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         NodeKind::ParticleEmitter { settings } => clear_option_resource(&mut settings.texture, id),
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
         NodeKind::World { far_vista, .. } => clear_far_vista_resource_references(far_vista, id),
+        NodeKind::PointOfInterest { reward, .. } => {
+            if reward
+                .as_ref()
+                .is_some_and(|reward| reward.module == Some(id))
+            {
+                *reward = None;
+                1
+            } else {
+                0
+            }
+        }
         NodeKind::Node
         | NodeKind::Group
         | NodeKind::Node3D
@@ -1953,7 +1995,8 @@ pub(crate) fn plan_resource_file_deletes(
         ResourceData::Skeleton(_)
         | ResourceData::AnimationSet(_)
         | ResourceData::Character(_)
-        | ResourceData::Weapon(_) => {}
+        | ResourceData::Weapon(_)
+        | ResourceData::BoostModule(_) => {}
     }
     plan
 }
@@ -2245,6 +2288,7 @@ pub(crate) const fn resource_default_stem(data: &ResourceData) -> &'static str {
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "audio",
         ResourceData::Character(_) => "character",
+        ResourceData::BoostModule(_) => "boost_module",
     }
 }
 
@@ -2263,6 +2307,7 @@ pub(crate) const fn resource_default_extension(data: &ResourceData) -> &'static 
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "vag",
         ResourceData::Character(_) => "char",
+        ResourceData::BoostModule(_) => "module",
     }
 }
 

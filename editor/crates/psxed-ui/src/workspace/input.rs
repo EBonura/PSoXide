@@ -549,6 +549,11 @@ impl EditorWorkspace {
             if self.floating_geometry.is_some() {
                 return;
             }
+            let snap_to_floor = self.active_workspace == WorkspaceView::Room
+                && ctx.input_mut(|input| input.key_pressed(egui::Key::End));
+            if snap_to_floor && self.can_snap_selected_entities_to_floor() {
+                self.snap_selected_entities_to_floor();
+            }
             let f2 = ctx.input_mut(|i| i.key_pressed(egui::Key::F2));
             if f2 && self.selection.selected_node != NodeId::ROOT {
                 self.apply_tree_action(TreeAction::BeginRename(self.selection.selected_node), &[]);
@@ -1007,6 +1012,13 @@ impl EditorWorkspace {
                     self.replace_node_selection(id);
                 }
                 self.duplicate_current_selection();
+                self.renaming = None;
+            }
+            TreeAction::SnapEntityToFloor(id) => {
+                if !self.node_is_selected(id) {
+                    self.replace_node_selection(id);
+                }
+                self.snap_selected_entities_to_floor();
                 self.renaming = None;
             }
             TreeAction::AddChild { parent, kind, name } => {

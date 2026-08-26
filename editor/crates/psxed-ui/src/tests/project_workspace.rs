@@ -1,5 +1,75 @@
 use super::*;
 
+#[test]
+fn point_of_interest_place_tool_creates_entity_host_and_component() {
+    let mut project = ProjectDocument::new("poi placement");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, -64, 0],
+            [2048, 0, 2048],
+        ));
+    let root = project.active_scene().root;
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("poi-placement"), project);
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PointOfInterest)));
+
+    assert!(workspace.place_bsp_from_top([512.0, 768.0]));
+    let component_id = workspace.selected_node_id();
+    let scene = workspace.project().active_scene();
+    let component = scene.node(component_id).expect("poi component");
+    let host = component.parent.expect("component has an entity host");
+    let host_node = scene.node(host).expect("placed entity host");
+    assert!(matches!(host_node.kind, NodeKind::Entity));
+    assert_eq!(host_node.parent, Some(root));
+    assert_eq!(host_node.transform.translation, [512.0, 1.0, 768.0]);
+    assert_eq!(host_node.children.len(), 1);
+    assert_eq!(host_node.children, vec![component_id]);
+    let NodeKind::PointOfInterest {
+        pages,
+        prompt,
+        radius,
+        marker_height,
+        repeatable,
+        reward,
+        enabled,
+        ..
+    } = &component.kind
+    else {
+        panic!("expected point of interest component");
+    };
+    assert_eq!(pages, &[String::new()]);
+    assert_eq!(prompt, "READ");
+    assert_eq!(*radius, 576);
+    assert_eq!(*marker_height, 192);
+    assert!(*repeatable);
+    assert!(reward.is_none());
+    assert!(*enabled);
+}
+
+#[test]
+fn legacy_and_archive_interactions_share_one_component_slot() {
+    let templates = crate::scene_tree::component_templates_for_host(&NodeKind::Entity);
+    let legacy = templates
+        .iter()
+        .find(|(name, _)| *name == "Interactable")
+        .map(|(_, kind)| kind)
+        .expect("legacy template");
+    let archive = templates
+        .iter()
+        .find(|(name, _)| *name == "Point of Interest")
+        .map(|(_, kind)| kind)
+        .expect("POI template");
+    assert!(!crate::scene_tree::component_can_be_added(
+        archive,
+        &[legacy]
+    ));
+    assert!(!crate::scene_tree::component_can_be_added(
+        legacy,
+        &[archive]
+    ));
+}
+
 fn save_watch_project(dir: &Path, project: &ProjectDocument) {
     std::fs::create_dir_all(dir).unwrap();
     project.save_to_path(dir.join("project.ron")).unwrap();

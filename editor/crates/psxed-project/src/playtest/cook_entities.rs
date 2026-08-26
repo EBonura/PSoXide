@@ -2928,6 +2928,18 @@ pub(crate) struct InteractableComponent<'a> {
     pub(crate) enabled: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PointOfInterestComponent<'a> {
+    pub(crate) pages: &'a [String],
+    pub(crate) prompt: &'a str,
+    pub(crate) radius: u16,
+    pub(crate) marker_height: u16,
+    pub(crate) repeatable: bool,
+    pub(crate) persistence_id: &'a str,
+    pub(crate) reward: Option<&'a crate::PointOfInterestReward>,
+    pub(crate) enabled: bool,
+}
+
 pub(crate) fn component_model_renderer(
     scene: &crate::Scene,
     host: &SceneNode,
@@ -3049,6 +3061,34 @@ pub(crate) fn component_interactable<'a>(
             kind,
             prompt,
             radius: *radius,
+            enabled: *enabled,
+        }),
+        _ => None,
+    })
+}
+
+pub(crate) fn component_point_of_interest<'a>(
+    scene: &'a crate::Scene,
+    host: &'a SceneNode,
+) -> Option<PointOfInterestComponent<'a>> {
+    component_children(scene, host).find_map(|node| match &node.kind {
+        NodeKind::PointOfInterest {
+            pages,
+            prompt,
+            radius,
+            marker_height,
+            repeatable,
+            persistence_id,
+            reward,
+            enabled,
+        } => Some(PointOfInterestComponent {
+            pages,
+            prompt,
+            radius: *radius,
+            marker_height: *marker_height,
+            repeatable: *repeatable,
+            persistence_id,
+            reward: reward.as_ref(),
             enabled: *enabled,
         }),
         _ => None,
