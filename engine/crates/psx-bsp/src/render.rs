@@ -366,6 +366,36 @@ impl FrustumPlanes {
         Self::distance(plane, position) < 0
     }
 
+    /// Bit mask of frustum planes for which `position` is outside.
+    ///
+    /// This is algebraically identical to evaluating [`Self::distance`] for
+    /// each plane, but reuses the three view-space dot products. A face can
+    /// intersect the frustum only when the AND of its vertex masks is zero.
+    #[inline(always)]
+    fn vertex_outside_mask(&self, position: [i16; 3]) -> u8 {
+        let view_q12 = |row: [i16; 3], translation: i32| -> i64 {
+            i64::from(
+                i32::from(row[0]) * i32::from(position[0])
+                    + i32::from(row[1]) * i32::from(position[1])
+                    + i32::from(row[2]) * i32::from(position[2]),
+            ) + (i64::from(translation) << 12)
+        };
+        let view_x = view_q12(self.view_rows[0], self.view_translation[0]);
+        let view_y = view_q12(self.view_rows[1], self.view_translation[1]);
+        let view_z = view_q12(self.view_rows[2], self.view_translation[2]);
+        let near = view_z - (i64::from(self.near_view) << 12);
+        let x_depth = i64::from(self.side_scale[0]) * view_z;
+        let y_depth = i64::from(self.side_scale[1]) * view_z;
+        let screen_x = i64::from(self.focal_length) * view_x;
+        let screen_y = i64::from(self.focal_length) * view_y;
+
+        u8::from(near < 0)
+            | (u8::from(x_depth - screen_x < 0) << 1)
+            | (u8::from(x_depth + screen_x < 0) << 2)
+            | (u8::from(y_depth - screen_y < 0) << 3)
+            | (u8::from(y_depth + screen_y < 0) << 4)
+    }
+
     /// True when the whole axis-aligned box lies outside any clip plane.
     /// Testing the vertex farthest along each plane normal makes this a
     /// conservative hierarchical reject; intersecting nodes still reach the
@@ -1163,10 +1193,13 @@ impl Renderer {
                 stats.packet_overflow_avoided = true;
                 break;
             }
-            if self.pxbsp_face_wholly_outside(map, face, frustum) {
+            // Classify all five planes in one vertex pass. The historical
+            // path rescanned the polygon once per plane and then a sixth time
+            // for near clipping; reusing each vertex's view-space dot products
+            // preserves the exact clip result without that repeated work.
+            let Some(needs_near_clip) = self.pxbsp_face_clip(map, face, frustum) else {
                 continue;
-            }
-            let needs_near_clip = self.pxbsp_face_needs_near_clip(map, face, frustum);
+            };
             let state = pxbsp_material_state(material, binding, material_tick);
             let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
                 && material.blend_mode == material_blend::OPAQUE
@@ -1379,12 +1412,14 @@ impl Renderer {
         }
     }
 
-    fn pxbsp_face_wholly_outside(
+    /// Return `None` when every face vertex is outside any one frustum plane;
+    /// otherwise return whether the face crosses the near plane.
+    fn pxbsp_face_clip(
         &self,
         map: &PxbspResidentMap,
         face: Face,
         frustum: &FrustumPlanes,
-    ) -> bool {
+    ) -> Option<bool> {
         let first = face.first_vertex as usize;
         let count = face.vertex_count as usize;
         let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
@@ -1394,46 +1429,19 @@ impl Renderer {
                 .add(source_offset)
                 .cast::<ClassicAffineWordSourceVertex>()
         };
-        for plane in &frustum.planes {
-            let mut index = 0usize;
-            while index < count {
-                let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
-                if !FrustumPlanes::distance_negative(plane, position) {
-                    break;
-                }
-                index += 1;
-            }
-            if index == count {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn pxbsp_face_needs_near_clip(
-        &self,
-        map: &PxbspResidentMap,
-        face: Face,
-        frustum: &FrustumPlanes,
-    ) -> bool {
-        let first = face.first_vertex as usize;
-        let count = face.vertex_count as usize;
-        let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
-        let source = unsafe {
-            map.vertex_data()
-                .as_ptr()
-                .add(source_offset)
-                .cast::<ClassicAffineWordSourceVertex>()
-        };
+        // A set bit means every vertex seen so far is outside that plane.
+        // Clear it as soon as one vertex is on the drawable side.
+        let mut wholly_outside = 0x1fu8;
+        let mut needs_near_clip = false;
         let mut index = 0usize;
         while index < count {
             let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
-            if FrustumPlanes::distance_negative(&frustum.planes[0], position) {
-                return true;
-            }
+            let outside = frustum.vertex_outside_mask(position);
+            wholly_outside &= outside;
+            needs_near_clip |= outside & 0x01 != 0;
             index += 1;
         }
-        false
+        (wholly_outside == 0).then_some(needs_near_clip)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2256,7 +2264,14 @@ unsafe fn flush_pxbsp_batch(
             surfaces.as_ptr(),
             surface_count,
             output,
-            ClassicAffineProfile::PXBSP_THIRD_PERSON,
+            // The extended third-person profile keeps subdivision active at
+            // twice Quake's distance for every brush surface. On dense PXBSP
+            // scenes that multiplies both transform work and packet pressure,
+            // including for walls that do not benefit from the extra splits.
+            // Keep the proven Quake depth bands as the global baseline; a
+            // future quality pass can selectively extend them for nearby
+            // floor surfaces under a bounded per-frame packet budget.
+            ClassicAffineProfile::QUAKE_REFERENCE,
         )
     }
 }
@@ -3147,6 +3162,37 @@ mod frustum_tests {
             }
         }
         assert!(accepted > 100, "sample did not exercise the fast path");
+    }
+
+    #[test]
+    fn one_pass_vertex_masks_match_all_exact_plane_signs() {
+        for origin in [[0, 0, 0], [37, 70, 273], [-96, 24, 128]] {
+            for yaw in [0, 257, 1024, 2051, 3072] {
+                for pitch in [-320, 0, 100, 512] {
+                    let (planes, _) = planes_for(origin, yaw, pitch);
+                    for x in (-320i16..=320).step_by(64) {
+                        for y in (-192i16..=256).step_by(64) {
+                            for z in (-320i16..=320).step_by(64) {
+                                let position = [x, y, z];
+                                let exact = planes.planes.iter().enumerate().fold(
+                                    0u8,
+                                    |mask, (index, plane)| {
+                                        mask | (u8::from(FrustumPlanes::distance_negative(
+                                            plane, position,
+                                        )) << index)
+                                    },
+                                );
+                                assert_eq!(
+                                    planes.vertex_outside_mask(position),
+                                    exact,
+                                    "origin={origin:?} yaw={yaw} pitch={pitch} point={position:?}",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

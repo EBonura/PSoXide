@@ -1372,7 +1372,7 @@ pub(crate) fn draw_animation_set_resource_editor(
                 &mut set.skeleton,
                 skeleton_options,
             );
-            for action in psxed_project::CharacterAnimationAction::ALL {
+            for action in psxed_project::CharacterAnimationAction::AUTHORABLE {
                 let mut current = set.action_clip(action);
                 changed |= animation_resource_picker(
                     ui,

@@ -139,7 +139,7 @@ fn closest_edge_idx_picks_nearest_edge() {
 }
 
 #[test]
-fn action_bar_height_expands_for_wrapped_status() {
+fn action_bar_height_stays_compact_for_build_output() {
     assert_eq!(
         action_bar_height_for_status("Ready"),
         ACTION_BAR_COMPACT_HEIGHT
@@ -148,12 +148,55 @@ fn action_bar_height_expands_for_wrapped_status() {
             action_bar_height_for_status(
                 "Embedded Play failed while cooking assets: playtest validation failed: No player source. Place one Player Spawn, or select a Character Controller and enable Player controlled."
             ),
-            ACTION_BAR_EXPANDED_HEIGHT
+            ACTION_BAR_COMPACT_HEIGHT
         );
     assert_eq!(
         action_bar_height_for_status("First line\nSecond line"),
-        ACTION_BAR_EXPANDED_HEIGHT
+        ACTION_BAR_COMPACT_HEIGHT
     );
+}
+
+#[test]
+fn long_build_output_does_not_take_space_from_the_editor_viewport() {
+    fn viewport_top(status: &str) -> f32 {
+        let mut workspace = EditorWorkspace::with_project(
+            test_temp_dir("fixed-action-bar"),
+            ProjectDocument::new("fixed action bar"),
+        );
+        workspace.status = status.to_string();
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .expect("default proportional font family");
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("lucide".into()), proportional);
+        ctx.set_fonts(fonts);
+        let mut top = 0.0;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0))),
+                ..egui::RawInput::default()
+            },
+            |ctx| {
+                workspace.draw_action_bar(ctx, EditorPlaytestStatus::Building, None);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    top = ui.max_rect().top();
+                });
+            },
+        );
+        top
+    }
+
+    let ready_top = viewport_top("Ready");
+    let build_top = viewport_top(
+        "Embedded Play failed while cooking assets:\nthis deliberately long build diagnostic belongs in the bottom Console and must never resize the top action bar or the editor viewport.",
+    );
+    assert_eq!(build_top, ready_top);
+    assert!(build_top <= ACTION_BAR_COMPACT_HEIGHT + 10.0);
 }
 
 /// End-to-end of the multi-scene UX on the editor side: create a

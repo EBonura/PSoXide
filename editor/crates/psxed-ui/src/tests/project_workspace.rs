@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn project_build_request_opens_the_bottom_console() {
+    let mut workspace = EditorWorkspace::with_project(
+        test_temp_dir("project-build-console"),
+        ProjectDocument::new("project build console"),
+    );
+    workspace.resources_open = false;
+    workspace.content_browser_view = ContentBrowserView::Resources;
+
+    workspace.request_project_build();
+
+    assert!(workspace.resources_open);
+    assert_eq!(workspace.content_browser_view, ContentBrowserView::Debug);
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::BuildProject)
+    );
+}
+
+#[test]
 fn point_of_interest_place_tool_creates_entity_host_and_component() {
     let mut project = ProjectDocument::new("poi placement");
     project
@@ -38,13 +57,14 @@ fn point_of_interest_place_tool_creates_entity_host_and_component() {
     else {
         panic!("expected point of interest component");
     };
-    assert_eq!(pages, &[String::new()]);
+    assert_eq!(pages, &["ARCHIVE SIGNAL DETECTED."]);
     assert_eq!(prompt, "READ");
     assert_eq!(*radius, 576);
     assert_eq!(*marker_height, 192);
     assert!(*repeatable);
     assert!(reward.is_none());
     assert!(*enabled);
+    assert!(workspace.status.contains("replace the default message"));
 }
 
 #[test]
@@ -636,7 +656,7 @@ fn e1m1_real_platform_copy_and_paste_duplicates_the_selected_brush() {
 }
 
 #[test]
-fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
+fn external_project_change_never_replaces_open_document_and_play_save_wins() {
     let dir = test_temp_dir("project-watch-conflict");
     let project = ProjectDocument::new("watch baseline");
     save_watch_project(&dir, &project);
@@ -646,41 +666,63 @@ fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
     external.name = "clean external change with different length".to_string();
     external.save_to_path(dir.join("project.ron")).unwrap();
     workspace.poll_project_watch(true);
-    assert_eq!(workspace.project().name, external.name);
+    assert_eq!(workspace.project().name, project.name);
+    assert!(workspace.is_dirty());
+    assert!(workspace.has_external_project_conflict());
+    assert!(workspace.save_if_dirty().unwrap());
+    assert_eq!(
+        ProjectDocument::load_from_path(dir.join("project.ron"))
+            .unwrap()
+            .name,
+        project.name
+    );
     assert!(!workspace.is_dirty());
     assert!(!workspace.has_external_project_conflict());
 
-    workspace.project.name = "unsaved local name".to_string();
+    workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]));
     workspace.mark_dirty();
-    let mut second_external = external.clone();
-    second_external.name = "second external edit with another length".to_string();
+    let mut second_external = project.clone();
+    second_external
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [512, 512, 512],
+        ));
+    second_external
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [1024, 1024, 1024],
+        ));
     second_external
         .save_to_path(dir.join("project.ron"))
         .unwrap();
-    assert!(workspace.save().unwrap_err().contains("changed outside"));
-    assert_eq!(workspace.project().name, "unsaved local name");
-    assert!(workspace.has_external_project_conflict());
-
-    workspace.reload();
-    assert_eq!(workspace.project().name, second_external.name);
+    assert!(workspace.save_if_dirty().unwrap());
+    assert_eq!(workspace.project().active_scene().brushes.len(), 1);
+    assert_eq!(
+        ProjectDocument::load_from_path(dir.join("project.ron"))
+            .unwrap()
+            .active_scene()
+            .brushes
+            .len(),
+        1
+    );
+    assert!(!workspace.is_dirty());
     assert!(!workspace.has_external_project_conflict());
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// The conflict latch and the watch baseline have to survive being used over
-/// and over, not just once.
-///
-/// Each round: dirty a local edit, change project.ron externally, watch the
-/// Save get blocked, Reload to accept the disk version, edit again, and Save
-/// cleanly. That last Save only works if `reload` recaptured the watch
-/// baseline; if it did not, round two would latch on a phantom conflict and
-/// the project would become unsaveable. Three rounds, because a latch that
-/// only sticks on the second use would pass a single-cycle test.
-///
-/// The edits add brushes rather than renaming: a name change makes `save`
-/// rename the project DIRECTORY, which is a different flow entirely.
+/// Repeated external writes must never make the locally authored document
+/// unsaveable. Every explicit Save overwrites the disk version and recaptures
+/// the watcher baseline for the next edit.
 #[test]
-fn repeated_conflict_reload_save_cycles_keep_the_latch_and_baseline_honest() {
+fn repeated_external_conflicts_are_resolved_by_explicit_save() {
     let dir = test_temp_dir("project-watch-cycles");
     let project = ProjectDocument::new("cycle baseline");
     save_watch_project(&dir, &project);
@@ -704,9 +746,9 @@ fn repeated_conflict_reload_save_cycles_keep_the_latch_and_baseline_honest() {
             "round {round} started latched"
         );
 
-        // Something outside the editor rewrites project.ron. Each round writes
-        // a different number of brushes, so neither size nor hash can go stale.
-        let mut external = project.clone();
+        // Something outside the editor rewrites project.ron. Start from the
+        // last saved document, not the in-memory local edit.
+        let mut external = ProjectDocument::load_from_path(&path).unwrap();
         for extra in 0..round {
             external
                 .active_scene_mut()
@@ -715,53 +757,27 @@ fn repeated_conflict_reload_save_cycles_keep_the_latch_and_baseline_honest() {
         }
         external.save_to_path(&path).unwrap();
 
-        // Save must refuse and must not touch the local document.
-        let refusal = workspace.save().unwrap_err();
-        assert!(
-            refusal.contains("changed outside"),
-            "round {round} refusal: {refusal}"
-        );
+        // Explicit Save keeps the local document and overwrites the external
+        // disk version.
+        workspace
+            .save()
+            .unwrap_or_else(|error| panic!("round {round} Save: {error}"));
         assert_eq!(
             brush_count(workspace.project()),
             local_before + 1,
             "round {round} lost the unsaved edit"
         );
         assert!(
-            workspace.has_external_project_conflict(),
-            "round {round} did not latch"
-        );
-        assert!(workspace.is_dirty());
-
-        // Reload accepts the disk version and clears the latch.
-        workspace.reload();
-        assert_eq!(
-            brush_count(workspace.project()),
-            round,
-            "round {round} did not adopt the external document"
-        );
-        assert!(
             !workspace.has_external_project_conflict(),
-            "round {round} stayed latched after Reload"
+            "round {round} stayed latched after Save"
         );
-
-        // And the recaptured baseline lets the very next Save through.
-        workspace
-            .project
-            .active_scene_mut()
-            .brushes
-            .push(cuboid(1024));
-        workspace.mark_dirty();
-        workspace
-            .save()
-            .unwrap_or_else(|error| panic!("round {round} Save after Reload: {error}"));
         assert!(!workspace.is_dirty());
-        assert!(!workspace.has_external_project_conflict());
 
-        // The saved bytes are on disk, and polling the freshly captured
+        // The local bytes are on disk, and polling the freshly captured
         // baseline sees no phantom change.
         assert_eq!(
             brush_count(&ProjectDocument::load_from_path(&path).unwrap()),
-            round + 1,
+            local_before + 1,
             "round {round} did not reach disk"
         );
         workspace.poll_project_watch(true);
@@ -769,7 +785,7 @@ fn repeated_conflict_reload_save_cycles_keep_the_latch_and_baseline_honest() {
             !workspace.has_external_project_conflict(),
             "round {round} polled a phantom conflict after Save"
         );
-        assert_eq!(brush_count(workspace.project()), round + 1);
+        assert_eq!(brush_count(workspace.project()), local_before + 1);
     }
 
     let _ = std::fs::remove_dir_all(dir);
@@ -795,24 +811,33 @@ fn same_length_atomic_project_replace_is_detected_even_when_metadata_looks_uncha
     // that the atomic replacement contains different bytes.
     workspace.project_watch.project.metadata = watched_file_metadata(&path);
     workspace.poll_project_watch(true);
+    assert_eq!(workspace.project().name, project.name);
+    assert!(workspace.is_dirty());
+    assert!(workspace.has_external_project_conflict());
+
+    // Reload is the only operation that accepts the external document.
+    workspace.reload();
     assert_eq!(workspace.project().name, external.name);
+    assert!(!workspace.is_dirty());
     assert!(!workspace.has_external_project_conflict());
 
-    workspace.project.name = "local-dirty!".to_string();
+    workspace.project.active_scene_mut().name = "mine".to_string();
     workspace.mark_dirty();
     let mut second_external = external.clone();
-    second_external.name = "disk-changed!".to_string();
+    second_external.active_scene_mut().name = "disk".to_string();
     second_external.save_to_path(&replacement).unwrap();
     assert_eq!(std::fs::metadata(&replacement).unwrap().len(), baseline_len);
     std::fs::rename(&replacement, &path).unwrap();
     workspace.project_watch.project.metadata = watched_file_metadata(&path);
-    let error = workspace.save().unwrap_err();
-    assert!(error.contains("changed outside"), "{error}");
-    assert_eq!(workspace.project().name, "local-dirty!");
-    assert!(workspace.has_external_project_conflict());
+    workspace.save().unwrap();
+    assert_eq!(workspace.project().active_scene().name, "mine");
+    assert!(!workspace.has_external_project_conflict());
     assert_eq!(
-        ProjectDocument::load_from_path(&path).unwrap().name,
-        second_external.name
+        ProjectDocument::load_from_path(&path)
+            .unwrap()
+            .active_scene()
+            .name,
+        "mine"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1455,6 +1480,44 @@ fn failing_cook_auto_focuses_the_offending_node_and_keeps_every_target() {
 
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(cook);
+}
+
+#[test]
+fn blank_point_of_interest_cook_error_focuses_its_message_component() {
+    use psxed_project::playtest::PlaytestValidationTarget;
+
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("blank-poi-focus");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PointOfInterest)));
+    assert!(workspace.place_bsp_from_top([1024.0, 1024.0]));
+    let message_component = workspace.selected_node_id();
+    let NodeKind::PointOfInterest { pages, .. } = &mut workspace
+        .project
+        .active_scene_mut()
+        .node_mut(message_component)
+        .expect("placed POI component")
+        .kind
+    else {
+        panic!("placed node must be a POI component");
+    };
+    pages[0].clear();
+
+    let (package, report) = psxed_project::playtest::build_package(workspace.project(), &dir);
+    assert!(package.is_none(), "a blank POI message must fail the cook");
+    let error = report
+        .errors
+        .iter()
+        .find(|error| error.contains("page 1 is blank"))
+        .expect("blank POI validation error");
+    assert_eq!(
+        error.target,
+        Some(PlaytestValidationTarget::Node(message_component)),
+        "Play should select the message component whose page needs editing"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -3307,6 +3370,60 @@ fn global_ctrl_or_cmd_z_reverts_an_inspector_change() {
 }
 
 #[test]
+fn physical_ctrl_s_saves_without_moving_the_free_camera() {
+    let dir = test_temp_dir("physical-ctrl-save");
+    let project = ProjectDocument::new("physical ctrl save");
+    save_watch_project(&dir, &project);
+    let mut workspace = EditorWorkspace::with_project(dir.clone(), project);
+    let root = workspace.project.active_scene().root;
+    workspace
+        .project
+        .active_scene_mut()
+        .node_mut(root)
+        .unwrap()
+        .name = "Saved with physical Ctrl+S".to_string();
+    workspace.mark_dirty();
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [320, 640, 960];
+    let camera_before = workspace.camera_rig.free_position;
+
+    let ctx = egui::Context::default();
+    let _ = ctx.run(
+        egui::RawInput {
+            modifiers: egui::Modifiers::CTRL,
+            events: vec![egui::Event::Key {
+                key: egui::Key::S,
+                physical_key: Some(egui::Key::S),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+            }],
+            ..egui::RawInput::default()
+        },
+        |ctx| {
+            workspace.handle_global_shortcuts(ctx, EditorPlaytestStatus::Idle);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                workspace.update_free_camera_keyboard(ui);
+            });
+        },
+    );
+
+    assert!(!workspace.is_dirty());
+    assert_eq!(workspace.camera_rig.free_position, camera_before);
+    assert_eq!(
+        ProjectDocument::load_from_path(dir.join("project.ron"))
+            .unwrap()
+            .active_scene()
+            .node(root)
+            .unwrap()
+            .name,
+        "Saved with physical Ctrl+S"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn inspector_pointer_drag_coalesces_to_one_undo_step() {
     let mut workspace = EditorWorkspace::with_project(
         std::env::temp_dir(),
@@ -3533,14 +3650,14 @@ fn new_project_starts_with_verified_character_and_material_content() {
         (
             1,
             psxed_project::CharacterAnimationAction::LightAttack,
-            (3, 6),
+            (23, 35),
             25,
             25,
         ),
         (
             2,
             psxed_project::CharacterAnimationAction::HeavyAttack,
-            (6, 10),
+            (35, 51),
             38,
             50,
         ),

@@ -1719,7 +1719,8 @@ pub struct LevelGameEntityRecord {
     pub run_clip: u16,
     /// One-shot clip spanning Windup + Attack + Recover.
     pub attack_clip: u16,
-    /// One-shot clip while Staggered (hit-react role).
+    /// Complete one-shot while Staggered: impact, disabled beat, and recovery.
+    /// Cooked from the Stun action, with HitReact as the legacy fallback.
     pub stagger_clip: u16,
     /// One-shot clip on death; holds its final frame as the corpse
     /// pose.

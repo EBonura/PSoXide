@@ -376,7 +376,7 @@ impl EditorWorkspace {
         ctx: &egui::Context,
         playtest_status: EditorPlaytestStatus,
     ) {
-        let consume_save = consume_command_shortcut(ctx, egui::Key::S);
+        let consume_save = consume_save_shortcut(ctx);
         let consume_new = consume_command_shortcut(ctx, egui::Key::N);
         let consume_build = consume_command_shortcut(ctx, egui::Key::B);
         let consume_play = consume_command_shortcut(ctx, egui::Key::Enter);
@@ -428,7 +428,7 @@ impl EditorWorkspace {
             self.open_new_project_dialog();
         }
         if consume_build {
-            self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
+            self.request_project_build();
         }
         if consume_play {
             self.request_play_or_rebuild(playtest_status);
@@ -1222,6 +1222,12 @@ impl EditorWorkspace {
         });
     }
 
+    pub(crate) fn request_project_build(&mut self) {
+        self.resources_open = true;
+        self.content_browser_view = ContentBrowserView::Debug;
+        self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
+    }
+
     pub(crate) fn draw_action_bar(
         &mut self,
         ctx: &egui::Context,
@@ -1636,7 +1642,7 @@ impl EditorWorkspace {
         });
         ui.menu_button("Tools", |ui| {
             if ui.button("Build Project").clicked() {
-                self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
+                self.request_project_build();
                 ui.close_menu();
             }
             let play_label = if playtest_status.is_active() {
@@ -1677,7 +1683,7 @@ impl EditorWorkspace {
             ))
             .clicked()
         {
-            self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
+            self.request_project_build();
         }
 
         let playtest_active = playtest_status.is_active();

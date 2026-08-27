@@ -341,8 +341,18 @@ impl Playtest {
         self.rebuild_box_prop_runtime();
         self.spawn = RoomPoint::new(spawn.x, spawn.y, spawn.z);
         self.character = character;
-        self.motor
-            .snap_to(self.spawn, Angle::from_q12(spawn.yaw as u16));
+        let spawn_camera_yaw = Angle::from_q12(spawn.yaw as u16);
+        // A characterless BSP project has no model-authored forward-axis
+        // correction. Its lightweight debug motor should therefore face the
+        // camera's view direction, not the orbit direction from player to
+        // camera; otherwise the first forward input performs a 180-degree
+        // walking arc and narrow starter corridors are effectively unusable.
+        let spawn_motor_yaw = if character.is_none() {
+            spawn_camera_yaw.add(Angle::HALF)
+        } else {
+            spawn_camera_yaw
+        };
+        self.motor.snap_to(self.spawn, spawn_motor_yaw);
         self.room_index = spawn.room;
         self.anim_state = PlayerAnim::Idle;
         self.anim_start_tick = SimTick::ZERO;
@@ -383,7 +393,7 @@ impl Playtest {
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
-            Angle::from_q12(spawn.yaw as u16),
+            spawn_camera_yaw,
         );
         self.render_camera = world_camera_from_position_focus(
             PROJECTION,
@@ -411,7 +421,6 @@ impl Playtest {
             // the loading burst is re-queued into the freed space.
             release_ui_images();
             self.room_materials_unresolved = true;
-            self.ensure_poi_save_loaded();
             self.open_world_message_once();
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
@@ -424,7 +433,7 @@ impl Playtest {
             // starts in Idle exactly as before.
             self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz);
         }
-        self.retry_poi_card_io(ctx.sim_tick.as_u32());
+        self.retry_poi_card_load(ctx.sim_tick.as_u32());
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
         self.tick_gameplay_layer(ctx);
@@ -566,6 +575,29 @@ impl Playtest {
                 lock_facing_yaw,
             )
         };
+        // Route-capture instrumentation for a model-less BSP debug body:
+        // Square+D-pad supplies exact world-cardinal intent. Ordinary editor
+        // play remains camera-relative, while a deterministic tape can cover
+        // narrow multi-turn levels without accumulating camera-yaw drift. The
+        // input still goes through the real motor and BSP collision backend.
+        if self.character.is_none() && ctx.is_held(button::SQUARE) {
+            let x = i32::from(ctx.is_held(button::RIGHT)) - i32::from(ctx.is_held(button::LEFT));
+            let z = i32::from(ctx.is_held(button::UP)) - i32::from(ctx.is_held(button::DOWN));
+            input.move_x = Q12::from_raw(x * Q12::SCALE);
+            input.move_z = Q12::from_raw(z * Q12::SCALE);
+            input.walk = z.signum() as i8;
+        }
+        // A model-less BSP debug body has no foot-turn animation to preserve.
+        // Bind its facing to the requested world vector so the motor uses the
+        // vector directly instead of drawing a large animation-style turn arc;
+        // this keeps camera-relative cardinal input viable in narrow brush
+        // corridors while authored Characters retain their normal locomotion.
+        if self.character.is_none() && (input.move_x.raw() != 0 || input.move_z.raw() != 0) {
+            input.facing_yaw = psx_engine::yaw_to_point(
+                RoomPoint::ZERO,
+                RoomPoint::new(input.move_x.raw(), 0, input.move_z.raw()),
+            );
+        }
         // R1/R2/R1+R2 horizontal, L1/L2/L1+L2 vertical. See `update_attack_input`.
         if self.update_attack_input(ctx, now, action_locked) {
             input = CharacterMotorInput::default();

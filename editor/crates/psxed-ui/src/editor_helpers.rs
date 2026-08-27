@@ -289,6 +289,15 @@ pub(crate) fn consume_command_shortcut(ctx: &egui::Context, key: egui::Key) -> b
     ctx.input_mut(|input| consume_shortcut_once(input, &shortcut))
 }
 
+/// Save accepts both the platform command chord and physical Ctrl so Ctrl+S
+/// remains a save shortcut on macOS as well as on Ctrl-command platforms.
+pub(crate) fn consume_save_shortcut(ctx: &egui::Context) -> bool {
+    consume_command_shortcut(ctx, egui::Key::S) || {
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::S);
+        ctx.input_mut(|input| consume_shortcut_once(input, &shortcut))
+    }
+}
+
 /// Consume Copy through either a synthetic key event or the platform event
 /// emitted by egui-winit. Native integrations translate Cmd/Ctrl+C into
 /// `Event::Copy` before editor code sees it, so listening for `Key::C` alone

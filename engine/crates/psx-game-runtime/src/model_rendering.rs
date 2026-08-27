@@ -1156,7 +1156,15 @@ pub fn draw_player_from_pose<
             bounds_culled: 0,
         };
     };
-    let material = lighting.shade_model_material(origin, base_material);
+    let material = shade_model_material_at_bounds(
+        lighting,
+        origin,
+        bounds_origin,
+        model_rotation,
+        bounds,
+        character.visual_scale_q8,
+        base_material,
+    );
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(cull_mode)
@@ -1180,7 +1188,15 @@ pub fn draw_player_from_pose<
             )
         })
         .map(|mut layer| {
-            layer.material = lighting.shade_model_material(origin, layer.material);
+            layer.material = shade_model_material_at_bounds(
+                lighting,
+                origin,
+                bounds_origin,
+                model_rotation,
+                bounds,
+                character.visual_scale_q8,
+                layer.material,
+            );
             layer
         });
     let stats = submit_runtime_model_predecoded(
@@ -2006,24 +2022,58 @@ fn model_bounds_visible(
     bounds: LevelModelFrameBoundsRecord,
     visual_scale_q8: u16,
 ) -> bool {
-    let center = rotate_bounds_center(
-        rotation,
-        scaled_bounds_center(bounds.center, visual_scale_q8),
-    );
-    let radius = scale_model_bounds_radius(bounds.radius, visual_scale_q8);
+    let (center, radius) = model_world_bounds(origin, rotation, bounds, visual_scale_q8);
     sphere_visible_to_camera(
         camera,
         options,
-        WorldVertex::new(
-            origin.x.saturating_add(center[0]),
-            origin.y.saturating_add(center[1]),
-            origin.z.saturating_add(center[2]),
-        ),
+        center,
         radius
             .max(0)
             .saturating_add(MODEL_BOUNDS_RUNTIME_RADIUS_PAD),
         MODEL_BOUNDS_SCREEN_MARGIN,
     )
+}
+
+#[inline]
+fn model_world_bounds(
+    origin: WorldVertex,
+    rotation: Mat3I16,
+    bounds: LevelModelFrameBoundsRecord,
+    visual_scale_q8: u16,
+) -> (WorldVertex, i32) {
+    let center = rotate_bounds_center(
+        rotation,
+        scaled_bounds_center(bounds.center, visual_scale_q8),
+    );
+    let radius = scale_model_bounds_radius(bounds.radius, visual_scale_q8);
+    (
+        WorldVertex::new(
+            origin.x.saturating_add(center[0]),
+            origin.y.saturating_add(center[1]),
+            origin.z.saturating_add(center[2]),
+        ),
+        radius.max(0),
+    )
+}
+
+#[inline]
+fn shade_model_material_at_bounds(
+    lighting: &RuntimeRoomLighting,
+    fallback_point: WorldVertex,
+    bounds_origin: WorldVertex,
+    rotation: Mat3I16,
+    bounds: Option<LevelModelFrameBoundsRecord>,
+    visual_scale_q8: u16,
+    material: TextureMaterial,
+) -> TextureMaterial {
+    match bounds {
+        Some(bounds) => {
+            let (center, radius) =
+                model_world_bounds(bounds_origin, rotation, bounds, visual_scale_q8);
+            lighting.shade_model_material_sphere(center, radius, material)
+        }
+        None => lighting.shade_model_material(fallback_point, material),
+    }
 }
 
 fn scaled_bounds_center(center: [i32; 3], visual_scale_q8: u16) -> [i32; 3] {

@@ -334,8 +334,10 @@ pub enum NodeKind {
     /// world transform; the runtime draws the procedural marker and handles
     /// interaction, paging, persistence, and an optional one-time reward.
     PointOfInterest {
-        /// Body-only message pages. Empty pages are retained while authoring.
-        #[serde(default = "default_message_pages")]
+        /// Body-only message pages. New POIs start with valid placeholder
+        /// copy so they can be played immediately, while authors can replace
+        /// it with the final message in the inspector.
+        #[serde(default = "default_point_of_interest_pages")]
         pages: Vec<String>,
         /// Short prompt shown while the player is inside the radius.
         #[serde(default = "default_point_of_interest_prompt")]
@@ -542,6 +544,10 @@ impl Default for PointOfInterestReward {
 
 pub fn default_message_pages() -> Vec<String> {
     vec![String::new()]
+}
+
+pub fn default_point_of_interest_pages() -> Vec<String> {
+    vec!["ARCHIVE SIGNAL DETECTED.".to_string()]
 }
 
 pub fn default_point_of_interest_prompt() -> String {

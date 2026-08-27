@@ -614,7 +614,7 @@ pub(crate) fn draw_character_effective_roles(
         .num_columns(2)
         .spacing([8.0, 3.0])
         .show(ui, |ui| {
-            for action in psxed_project::CharacterAnimationAction::ALL {
+            for action in psxed_project::CharacterAnimationAction::AUTHORABLE {
                 let set_clip = set.and_then(|set| set.action_clips[action.to_index()]);
                 ui.label(action.label());
                 if let Some(clip) = set_clip {
@@ -680,12 +680,12 @@ pub(crate) fn draw_animator_action_clip_table(
         .memory_mut(|memory| memory.data.get_persisted::<usize>(selected_action_id))
         .unwrap_or(psxed_project::CharacterAnimationAction::Idle.to_index())
         .min(
-            psxed_project::CharacterAnimationAction::ALL
+            psxed_project::CharacterAnimationAction::AUTHORABLE
                 .len()
                 .saturating_sub(1),
         );
     let before_selected_index = selected_index;
-    let selected_action = psxed_project::CharacterAnimationAction::ALL[selected_index];
+    let selected_action = psxed_project::CharacterAnimationAction::AUTHORABLE[selected_index];
 
     ui.horizontal(|ui| {
         ui.label(RichText::new("Action").color(STUDIO_TEXT_WEAK));
@@ -693,7 +693,7 @@ pub(crate) fn draw_animator_action_clip_table(
             .selected_text(selected_action.label())
             .width(180.0)
             .show_ui(ui, |ui| {
-                for (index, action) in psxed_project::CharacterAnimationAction::ALL
+                for (index, action) in psxed_project::CharacterAnimationAction::AUTHORABLE
                     .iter()
                     .copied()
                     .enumerate()
@@ -714,7 +714,7 @@ pub(crate) fn draw_animator_action_clip_table(
                 .insert_persisted(selected_action_id, selected_index)
         });
     }
-    let action = psxed_project::CharacterAnimationAction::ALL[selected_index];
+    let action = psxed_project::CharacterAnimationAction::AUTHORABLE[selected_index];
     let binding_index = action_clips
         .iter()
         .position(|binding| binding.action == action);
@@ -2619,7 +2619,7 @@ pub(crate) fn attachment_socket_list_editor(
                 ui.label(RichText::new(format!("#{index}")).color(STUDIO_TEXT_WEAK));
                 changed |= ui.text_edit_singleline(&mut socket.name).changed();
                 if ui
-                    .small_button(icons::label(icons::TRASH, ""))
+                    .small_button(icons::label(icons::TRASH, "Remove"))
                     .on_hover_text("Remove socket")
                     .clicked()
                 {
@@ -2656,9 +2656,49 @@ pub(crate) fn attachment_socket_list_editor(
         sockets.remove(index);
         changed = true;
     }
+    let has_right_hand = sockets
+        .iter()
+        .any(|socket| socket.name == "right_hand_grip");
+    let has_left_hand = sockets.iter().any(|socket| socket.name == "left_hand_grip");
     ui.horizontal(|ui| {
-        if ui.button(icons::label(icons::PLUS, "Socket")).clicked() {
+        if ui
+            .add_enabled(
+                !has_right_hand,
+                egui::Button::new(icons::label(icons::PLUS, "Right hand")),
+            )
+            .clicked()
+        {
             sockets.push(psxed_project::AttachmentSocket::right_hand_grip());
+            changed = true;
+        }
+        if ui
+            .add_enabled(
+                !has_left_hand,
+                egui::Button::new(icons::label(icons::PLUS, "Left hand")),
+            )
+            .clicked()
+        {
+            sockets.push(psxed_project::AttachmentSocket::left_hand_grip());
+            changed = true;
+        }
+        if ui
+            .button(icons::label(icons::PLUS, "Custom point"))
+            .clicked()
+        {
+            let mut suffix = sockets.len() + 1;
+            let name = loop {
+                let candidate = format!("attachment_{suffix}");
+                if sockets.iter().all(|socket| socket.name != candidate) {
+                    break candidate;
+                }
+                suffix += 1;
+            };
+            sockets.push(psxed_project::AttachmentSocket {
+                name,
+                joint: 0,
+                translation: [0, 0, 0],
+                rotation_q12: [0, 0, 0],
+            });
             changed = true;
         }
     });

@@ -2391,7 +2391,7 @@ pub(crate) fn character_idle_clip_for_model_instance(
 /// Per-state model-local clip indices for one cooked game entity,
 /// resolved from the entity Character's AnimationSet roles. Missing
 /// roles fall back at cook time (alert/turn/walk -> idle, directional
-/// walks/run -> walk, attack/stagger/death -> idle) so the runtime record
+/// walks/run -> walk, attack/stun/death -> idle) so the runtime record
 /// always carries a playable clip per state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GameEntityStateClips {
@@ -2508,7 +2508,12 @@ pub(crate) fn game_entity_state_clips(
         run: run.unwrap_or(walk),
         run_supported: run.is_some(),
         attack: optional(CharacterAnimationAction::LightAttack).unwrap_or(idle),
-        stagger: optional(CharacterAnimationAction::HitReact).unwrap_or(idle),
+        // A poise break is one complete authored Stun clip, including its
+        // recovery. Older characters without that action keep their existing
+        // HitReact behavior rather than becoming animationless.
+        stagger: optional(CharacterAnimationAction::Stun)
+            .or_else(|| optional(CharacterAnimationAction::HitReact))
+            .unwrap_or(idle),
         death: optional(CharacterAnimationAction::Death).unwrap_or(idle),
     })
 }

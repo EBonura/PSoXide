@@ -2282,6 +2282,12 @@ impl EditorWorkspace {
                     Ok(clip_id) => {
                         self.animation_viewer.focus_resource(&self.project, clip_id);
                         self.animation_viewer_preview_texture = None;
+                        // Baking writes cooked files as well as mutating the
+                        // document. A document-only undo could not restore the
+                        // matching filesystem state, so start a fresh history
+                        // epoch instead of recording a misleading transaction.
+                        self.history.clear();
+                        self.inspector_undo_transaction = None;
                         self.mark_dirty();
                         self.status = format!("Baked animation clip #{}", clip_id.raw());
                     }

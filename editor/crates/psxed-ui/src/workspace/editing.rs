@@ -964,6 +964,18 @@ impl EditorWorkspace {
                     );
                 }
             }
+            if let Some(drag) = self
+                .interaction
+                .node_gizmo_drag()
+                .filter(|drag| drag.mode == TransformGizmoMode::Rotate)
+            {
+                let snap = if drag.group_brushes.is_empty() {
+                    1
+                } else {
+                    BRUSH_ROTATION_SNAP_DEGREES
+                };
+                paint_rotation_readout(painter, rings[0].center, drag.current_steps, snap);
+            }
             return;
         }
         if self.transform_gizmo_mode == TransformGizmoMode::Scale {
@@ -1431,6 +1443,13 @@ impl EditorWorkspace {
                     .is_some_and(|node| matches!(node.kind, NodeKind::Group))
             })
             .collect();
+        let group_pivot = (!group_roots.is_empty())
+            .then(|| {
+                self.node_gizmo_bounds_3d(&ids)
+                    .map(|(pivot, _)| pivot.map(f64::from))
+            })
+            .flatten();
+        let group_count = group_roots.len();
         let mut target_ids = ids;
         if mode == TransformGizmoMode::Move {
             for node in scene.nodes() {
@@ -1510,6 +1529,8 @@ impl EditorWorkspace {
             rotate: rotate_state,
             targets,
             group_brushes,
+            group_pivot,
+            group_count,
             current_steps: 0,
             snapshot_pushed: false,
             free: false,
@@ -1557,6 +1578,7 @@ impl EditorWorkspace {
             // around the projected pivot. Unwrapping per update lets a
             // drag wind through multiple revolutions.
             let current_steps = drag.current_steps;
+            let rotates_brush_group = !drag.group_brushes.is_empty();
             let offset = pointer - rotate.center;
             if offset.length_sq() < 16.0 {
                 return;
@@ -1569,7 +1591,12 @@ impl EditorWorkspace {
                     rotate.accumulated = accumulated;
                 }
             }
-            let steps = (rotate.winding * accumulated.to_degrees()).round() as i32;
+            let raw_degrees = f64::from(rotate.winding * accumulated.to_degrees());
+            let steps = if rotates_brush_group {
+                snap_brush_rotation_degrees(raw_degrees)
+            } else {
+                raw_degrees.round() as i32
+            };
             if steps == current_steps {
                 return;
             }
@@ -1610,22 +1637,14 @@ impl EditorWorkspace {
         if !node_gizmo_drag_has_motion(drag) && !drag.snapshot_pushed {
             return;
         }
-        if !drag.snapshot_pushed {
-            if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
-                drag.snapshot_pushed = true;
-            }
-            self.push_undo();
-        }
-
-        let Some(drag) = self.interaction.node_gizmo_drag() else {
-            return;
-        };
+        let snapshot_pushed = drag.snapshot_pushed;
         let handle = drag.handle;
         let steps = drag.current_steps;
         let plane_delta_world = drag.current_plane_delta_world;
         // World-unit nodes (sector_size == 1, i.e. BSP scenes) move on the
         // brush grid; Shift (free) drops to single-unit precision.
-        let world_quantum = if drag.free {
+        let free = drag.free;
+        let world_quantum = if free {
             1
         } else {
             i32::from(self.snap_units.max(1))
@@ -1638,6 +1657,8 @@ impl EditorWorkspace {
         let mode = drag.mode;
         let targets = drag.targets.clone();
         let group_brushes = drag.group_brushes.clone();
+        let group_has_brushes = !group_brushes.is_empty();
+        let group_pivot = drag.group_pivot;
         let brush_delta = if mode == TransformGizmoMode::Move {
             match handle {
                 NodeGizmoHandle::Axis(_) => std::array::from_fn(|axis| {
@@ -1658,6 +1679,62 @@ impl EditorWorkspace {
         } else {
             [0; 3]
         };
+        let group_brush_previews = if mode == TransformGizmoMode::Move {
+            None
+        } else if let (Some(pivot), NodeGizmoHandle::Axis(axis)) = (group_pivot, handle) {
+            if mode == TransformGizmoMode::Rotate
+                && steps.rem_euclid(BRUSH_ROTATION_SNAP_DEGREES) != 0
+            {
+                self.status = format!(
+                    "Rotate {steps}° rejected: brush groups snap every {}°",
+                    BRUSH_ROTATION_SNAP_DEGREES
+                );
+                return;
+            }
+            let map = group_brush_transform_map(mode, axis, steps);
+            let snap_step = i32::from(self.snap_units.max(1));
+            if mode == TransformGizmoMode::Rotate
+                && group_brushes
+                    .iter()
+                    .any(|target| !target.start.solved_vertices_on_grid(snap_step, 0.01))
+            {
+                self.status = format!(
+                    "Rotate rejected: group contains geometry outside Grid {} (lower the grid first)",
+                    self.snap_units
+                );
+                return;
+            }
+            let mut previews = Vec::with_capacity(group_brushes.len());
+            for target in &group_brushes {
+                let mut brush = target.start.clone();
+                let faces: Vec<usize> = (0..brush.faces.len()).collect();
+                if brush.transform_selected_snapped(&faces, &[], pivot, map, 0.5, snap_step) == 0
+                    || !brush.is_pickable()
+                    || (mode == TransformGizmoMode::Rotate
+                        && !brush.solved_vertices_on_grid(snap_step, 0.01))
+                {
+                    self.status = if mode == TransformGizmoMode::Rotate {
+                        format!(
+                            "Rotate {steps}° rejected: result would leave Grid {}",
+                            self.snap_units
+                        )
+                    } else {
+                        format!("Scale rejected on Grid {}", self.snap_units)
+                    };
+                    return;
+                }
+                previews.push((target.index, brush));
+            }
+            Some(previews)
+        } else {
+            None
+        };
+        if !snapshot_pushed {
+            if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
+                drag.snapshot_pushed = true;
+            }
+            self.push_undo();
+        }
         let texture_lock = self.brush_texture_lock;
         let scene = self.project.active_scene_mut();
         for target in targets {
@@ -1739,8 +1816,22 @@ impl EditorWorkspace {
                     *destination = brush;
                 }
             }
+        } else if let Some(previews) = group_brush_previews {
+            for (index, brush) in previews {
+                if let Some(destination) = scene.brushes.get_mut(index) {
+                    *destination = brush;
+                }
+            }
         }
         self.mark_dirty();
+        if mode == TransformGizmoMode::Rotate {
+            let snap = if group_has_brushes {
+                BRUSH_ROTATION_SNAP_DEGREES
+            } else {
+                1
+            };
+            self.status = format!("Rotate {steps:+}° on {} (snap {snap}°)", handle.label());
+        }
     }
 
     pub(crate) fn end_node_gizmo_drag(&mut self) {
@@ -1751,16 +1842,26 @@ impl EditorWorkspace {
             return;
         }
         let handle = drag.handle.label();
-        let moved = drag.targets.len();
+        let moved = drag.targets.len() + drag.group_count;
         let action = match drag.mode {
             TransformGizmoMode::Move => "Moved",
             TransformGizmoMode::Rotate => "Rotated",
             TransformGizmoMode::Scale => "Scaled",
         };
-        self.status = if moved == 1 {
-            format!("{action} 1 node on {handle}")
+        let amount = if drag.mode == TransformGizmoMode::Rotate {
+            let snap = if drag.group_brushes.is_empty() {
+                1
+            } else {
+                BRUSH_ROTATION_SNAP_DEGREES
+            };
+            format!(" {}° (snap {snap}°)", drag.current_steps)
         } else {
-            format!("{action} {moved} nodes on {handle}")
+            String::new()
+        };
+        self.status = if moved == 1 {
+            format!("{action} 1 node{amount} on {handle}")
+        } else {
+            format!("{action} {moved} nodes{amount} on {handle}")
         };
     }
 
@@ -2379,6 +2480,40 @@ impl EditorWorkspace {
         self.mark_dirty();
         true
     }
+}
+
+/// Total transform applied to every brush in a selected Group. Rebuilding
+/// from each drag-start brush prevents incremental rounding drift.
+fn group_brush_transform_map(
+    mode: TransformGizmoMode,
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+) -> [[f64; 3]; 3] {
+    let mut map = [[0.0; 3]; 3];
+    match mode {
+        TransformGizmoMode::Rotate => {
+            let (sin, cos) = f64::from(steps).to_radians().sin_cos();
+            let a = axis.index();
+            let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+            map[a][a] = 1.0;
+            map[u][u] = cos;
+            map[u][v] = -sin;
+            map[v][u] = sin;
+            map[v][v] = cos;
+        }
+        TransformGizmoMode::Scale => {
+            let factor = (1.0 + f64::from(steps) * 0.05).clamp(0.05, 16.0);
+            for (index, row) in map.iter_mut().enumerate() {
+                row[index] = if index == axis.index() { factor } else { 1.0 };
+            }
+        }
+        TransformGizmoMode::Move => {
+            for (index, row) in map.iter_mut().enumerate() {
+                row[index] = 1.0;
+            }
+        }
+    }
+    map
 }
 
 /// World direction of basis column `index` (the gizmo handle axis).

@@ -146,20 +146,22 @@ impl Playtest {
         }
     }
 
-    fn persist_poi_save(&mut self) {
+    /// Flush pending POI state at an intentional save boundary. Memory-card
+    /// filesystem writes take many video periods on real hardware, so they
+    /// must never run inside a live interaction or an arbitrary gameplay tick.
+    pub(super) fn flush_poi_save(&mut self) {
+        if !self.poi_save_loaded || !self.poi_save_dirty {
+            return;
+        }
         self.poi_save_dirty = !save_poi_state_to_card(&self.poi_save);
     }
 
-    pub(super) fn retry_poi_card_io(&mut self, tick: u32) {
+    pub(super) fn retry_poi_card_load(&mut self, tick: u32) {
         const RETRY_TICKS: u32 = 300;
-        if tick % RETRY_TICKS != 0 {
+        if self.poi_save_loaded || tick % RETRY_TICKS != 0 {
             return;
         }
-        if !self.poi_save_loaded {
-            self.ensure_poi_save_loaded();
-        } else if self.poi_save_dirty {
-            self.persist_poi_save();
-        }
+        self.ensure_poi_save_loaded();
     }
 
     pub(super) fn point_of_interest_available(&self, interactable: &InteractableRecord) -> bool {
@@ -238,7 +240,6 @@ impl Playtest {
         }
         if persistence.mark_reward_claimed(&mut self.poi_save) {
             self.poi_save_dirty = true;
-            self.persist_poi_save();
         }
     }
 
@@ -255,7 +256,6 @@ impl Playtest {
                 if let Some(interactable) = INTERACTABLES.get(usize::from(index)) {
                     if poi_persistent_flags(interactable).mark_read(&mut self.poi_save) {
                         self.poi_save_dirty = true;
-                        self.persist_poi_save();
                     }
                 }
             }
@@ -387,6 +387,7 @@ impl Playtest {
     /// (including fired-once triggers), door states, and box props are
     /// TRANSIENT and re-arm 1:1 from their cooked tables below.
     pub(super) fn respawn_after_death(&mut self) {
+        let respawning_at_checkpoint = self.checkpoint.is_some();
         let (room, position, yaw) = if let Some(checkpoint) = self.checkpoint {
             (checkpoint.room, checkpoint.position, checkpoint.yaw)
         } else {
@@ -401,7 +402,12 @@ impl Playtest {
             return;
         }
         self.room_index = room;
-        self.motor.snap_to(position, yaw);
+        let motor_yaw = if !respawning_at_checkpoint && self.character.is_none() {
+            yaw.add(Angle::HALF)
+        } else {
+            yaw
+        };
+        self.motor.snap_to(position, motor_yaw);
         self.player_vitality.refill();
         self.hazard_death_ticks_remaining = 0;
         self.anim_state = PlayerAnim::Idle;
@@ -427,7 +433,11 @@ impl Playtest {
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
-            yaw,
+            if respawning_at_checkpoint && self.character.is_none() {
+                yaw.add(Angle::HALF)
+            } else {
+                yaw
+            },
         );
         self.render_camera = world_camera_from_position_focus(
             PROJECTION,
@@ -579,7 +589,8 @@ impl Playtest {
                 scaled_player_speed(FALLBACK_PLAYER_SPEED),
                 FALLBACK_PLAYER_YAW_STEP,
             ),
-        };
+        }
+        .without_stamina_limit();
         if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
             config.gravity_per_tick = room.gravity_per_tick;
         }
@@ -1068,6 +1079,11 @@ impl Playtest {
             );
             config.min_floor_clearance = BSP_FALLBACK_CAMERA_CLEARANCE;
             config.collision_margin = BSP_FALLBACK_CAMERA_MARGIN;
+            // The debug body has no visible turn animation to protect. Follow
+            // its cardinal route promptly so a 90-degree doorway turn shows
+            // the next room instead of holding a side wall in frame.
+            config.auto_align_when_moving = true;
+            config.auto_align_step = Angle::from_q12(64);
             config.collision_solve_interval = CAMERA_COLLISION_SOLVE_INTERVAL;
             return config;
         }
@@ -1408,6 +1424,9 @@ impl Playtest {
             telemetry::counter(telemetry::counter::PLAYER_CHECKPOINT_ACTIVATIONS, 1);
         }
         self.checkpoint = Some(checkpoint);
+        // Checkpoints are the genre-visible save boundary. POI interaction
+        // stays smooth; its read/reward state reaches the card here instead.
+        self.flush_poi_save();
     }
 
     pub(super) fn open_interactable_message(&mut self, interactable: &InteractableRecord) {
@@ -1455,6 +1474,14 @@ impl Playtest {
         let range_sq = square_i32_saturating(range);
         let mut best: Option<(usize, i32)> = None;
         for (index, _) in MODEL_INSTANCES.iter().enumerate() {
+            // Use the same cooked BSP visibility set that gates instance
+            // rendering. A longer lock range must not make actors behind a
+            // wall targetable merely because they share the active room.
+            if index >= u16::BITS as usize
+                || self.bsp_instance_visible_mask & (1u16 << index) == 0
+            {
+                continue;
+            }
             let Some(point) = self.target_position(index) else {
                 continue;
             };
@@ -1543,6 +1570,11 @@ impl Playtest {
         let mut best: Option<(usize, i32)> = None;
         for (index, _) in MODEL_INSTANCES.iter().enumerate() {
             if index == current_index {
+                continue;
+            }
+            if index >= u16::BITS as usize
+                || self.bsp_instance_visible_mask & (1u16 << index) == 0
+            {
                 continue;
             }
             let Some(target) = self.target_position(index) else {

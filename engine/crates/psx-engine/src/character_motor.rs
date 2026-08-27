@@ -554,6 +554,19 @@ impl CharacterMotorConfig {
             backstep_invulnerable_frames: 6,
         }
     }
+
+    /// Disable every stamina gate and cost while preserving the authored
+    /// maximum for compatibility with UI bindings and saved character data.
+    ///
+    /// A motor using this profile can sprint and evade indefinitely because
+    /// its stamina value never decreases.
+    pub const fn without_stamina_limit(mut self) -> Self {
+        self.sprint_min_q12 = 0;
+        self.sprint_drain_q12 = 0;
+        self.roll_cost_q12 = 0;
+        self.backstep_cost_q12 = 0;
+        self
+    }
 }
 
 /// Per-display-frame abstract movement intent.
@@ -5045,6 +5058,26 @@ mod tests {
         assert_eq!(frame.anim, CharacterMotorAnim::Run);
         assert!(frame.sprinting);
         assert!(frame.stamina_q12 < DEFAULT_STAMINA_MAX_Q12);
+    }
+
+    #[test]
+    fn unlimited_stamina_profile_never_drains_or_gates_sprint() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let cfg = config().without_stamina_limit();
+        let input = CharacterMotorInput {
+            walk: 1,
+            sprint: true,
+            ..CharacterMotorInput::default()
+        };
+
+        for _ in 0..2_000 {
+            let frame = motor.update(None, input, cfg);
+            assert!(frame.sprinting);
+            assert_eq!(frame.stamina_q12, cfg.stamina_max_q12);
+        }
+        assert_eq!(cfg.sprint_min_q12, 0);
+        assert_eq!(cfg.roll_cost_q12, 0);
+        assert_eq!(cfg.backstep_cost_q12, 0);
     }
 
     #[test]

@@ -2733,6 +2733,44 @@ fn draw_message_panel_body(
         let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
         draw_message_page_pips(resolved, MessagePageMeta::new(page.index, page.count));
     }
+    draw_message_dismiss_hint(font, layout);
+}
+
+/// Keep the close control visible for the entire readable phase. Cross may
+/// first complete the typewriter or advance a paged message, but it is always
+/// the control that ultimately dismisses the open panel.
+fn draw_message_dismiss_hint(font: &FontAtlas, layout: MessagePanelLayout) {
+    const PREFIX: &str = "X - ";
+    const ACTION: &str = "DISMISS";
+    const INSET_X: i16 = 10;
+    const INSET_BOTTOM: u16 = 3;
+
+    let line_height = scaled_line_height(font, UI_FONT_SCALE_ONE_Q8).max(0) as u16;
+    let text_y = layout.y.saturating_add(
+        layout
+            .height
+            .saturating_sub(line_height)
+            .saturating_sub(INSET_BOTTOM) as i16,
+    );
+    let text_x = layout.x.saturating_add(INSET_X);
+    draw_scaled_text_paint(
+        font,
+        text_x,
+        text_y,
+        PREFIX,
+        UI_FONT_SCALE_ONE_Q8,
+        0,
+        UiPaint::Solid((124, 64, 54)),
+    );
+    draw_scaled_text_paint(
+        font,
+        text_x.saturating_add(font.text_width(PREFIX) as i16),
+        text_y,
+        ACTION,
+        UI_FONT_SCALE_ONE_Q8,
+        0,
+        UiPaint::Solid((114, 96, 92)),
+    );
 }
 
 /// Draw the compact proximity prompt used beneath an Archive Beacon.

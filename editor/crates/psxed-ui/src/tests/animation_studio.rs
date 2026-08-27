@@ -126,6 +126,16 @@ fn click_label(
     real_egui_workspace_frame(ctx, workspace, viewport, *time, Vec::new())
 }
 
+fn key_event(key: egui::Key, pressed: bool) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: Some(key),
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
 #[test]
 fn animation_studio_modes_are_reachable_and_navigation_is_non_destructive() {
     let mut workspace = default_workspace();
@@ -212,6 +222,220 @@ fn animation_studio_modes_are_reachable_and_navigation_is_non_destructive() {
     assert_eq!(
         workspace.project().resource(idle_clip_id).unwrap().data,
         idle_before
+    );
+}
+
+#[test]
+fn banked_enemy_atlases_render_in_animation_studio() {
+    for character_name in ["Rust Mantis Enemy", "Tank Boss"] {
+        let mut workspace = default_workspace();
+        let character = resource_id(&workspace, character_name, |data| {
+            matches!(data, ResourceData::Character(_))
+        });
+        assert!(workspace.open_animation_viewer_for_resource(character));
+
+        let (ctx, viewport) =
+            real_egui_workspace_ctx(&format!("animation-studio-{character_name}"));
+        let frame = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 0.0, Vec::new());
+        assert!(
+            text_shape_centers(&frame.shapes, "Model atlas is missing").is_empty(),
+            "{character_name} must decode its multi-bank 4bpp atlas"
+        );
+    }
+}
+
+#[test]
+fn space_toggles_animation_playback_without_editing_the_project() {
+    let mut workspace = default_workspace();
+    let (_, _, _, idle_clip_id) = character_context(&workspace);
+    assert!(workspace.open_animation_viewer_for_resource(idle_clip_id));
+    let resources_before = workspace.project().resources.clone();
+    let dirty_before = workspace.is_dirty();
+    let playing_before = workspace.animation_viewer.preview_is_playing();
+
+    let (ctx, viewport) = real_egui_workspace_ctx("animation-studio-space-playback");
+    let mut time = 0.0;
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, time, Vec::new());
+    time += 1.0 / 60.0;
+    let _ = real_egui_workspace_frame(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        time,
+        vec![key_event(egui::Key::Space, true)],
+    );
+    assert_eq!(
+        workspace.animation_viewer.preview_is_playing(),
+        !playing_before
+    );
+
+    time += 1.0 / 60.0;
+    let _ = real_egui_workspace_frame(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        time,
+        vec![key_event(egui::Key::Space, false)],
+    );
+    time += 1.0 / 60.0;
+    let _ = real_egui_workspace_frame(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        time,
+        vec![key_event(egui::Key::Space, true)],
+    );
+    assert_eq!(
+        workspace.animation_viewer.preview_is_playing(),
+        playing_before
+    );
+
+    assert_eq!(workspace.project().resources, resources_before);
+    assert_eq!(workspace.is_dirty(), dirty_before);
+}
+
+#[test]
+fn preview_mode_loads_authored_action_weapons_without_authoring_overlays() {
+    let mut workspace = default_workspace();
+    let light_weapon = resource_id(&workspace, "Sword1 Light", |data| {
+        matches!(data, ResourceData::Weapon(_))
+    });
+    assert!(workspace.open_animation_viewer_for_resource(light_weapon));
+    let resources_before = workspace.project().resources.clone();
+    let dirty_before = workspace.is_dirty();
+
+    let (ctx, viewport) = real_egui_workspace_ctx("animation-studio-preview-action-weapons");
+    let mut time = 0.0;
+    let _ = click_label(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        &mut time,
+        &icons::label(icons::PLAY, "Preview"),
+    );
+    assert!(!workspace
+        .animation_viewer
+        .weapon_authoring_overlays_are_visible());
+
+    workspace.animation_viewer.clear_preview_weapon_cache();
+    time += 1.0 / 60.0;
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, time, Vec::new());
+    assert!(
+        workspace.animation_viewer.preview_weapon_model_count() > 0,
+        "Preview mode must load the weapon assigned to the selected action"
+    );
+
+    assert_eq!(workspace.project().resources, resources_before);
+    assert_eq!(workspace.is_dirty(), dirty_before);
+}
+
+#[test]
+fn combat_capsules_can_be_hidden_and_shown_without_editing_gameplay_data() {
+    let mut workspace = default_workspace();
+    let (character_id, _, _, _) = character_context(&workspace);
+    assert!(workspace.open_animation_viewer_for_resource(character_id));
+    let resources_before = workspace.project().resources.clone();
+    let dirty_before = workspace.is_dirty();
+
+    let (ctx, viewport) = real_egui_workspace_ctx("animation-studio-combat-capsule-visibility");
+    let mut time = 0.0;
+    let combat = click_label(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        &mut time,
+        &icons::label(icons::SCAN, "Combat"),
+    );
+    locate_unique_label(&combat, &icons::label(icons::EYE_OFF, "Hide capsules"));
+
+    let hidden = click_label(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        &mut time,
+        &icons::label(icons::EYE_OFF, "Hide capsules"),
+    );
+    locate_unique_label(&hidden, &icons::label(icons::EYE, "Show capsules"));
+
+    let visible = click_label(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        &mut time,
+        &icons::label(icons::EYE, "Show capsules"),
+    );
+    locate_unique_label(&visible, &icons::label(icons::EYE_OFF, "Hide capsules"));
+
+    assert_eq!(workspace.project().resources, resources_before);
+    assert_eq!(workspace.is_dirty(), dirty_before);
+}
+
+#[test]
+fn combat_mode_loads_the_weapon_for_its_attack_preview() {
+    let mut workspace = default_workspace();
+    let (character_id, _, _, _) = character_context(&workspace);
+    assert!(workspace.open_animation_viewer_for_resource(character_id));
+    let resources_before = workspace.project().resources.clone();
+    let dirty_before = workspace.is_dirty();
+
+    let (ctx, viewport) = real_egui_workspace_ctx("animation-studio-combat-weapon");
+    let mut time = 0.0;
+    let _ = click_label(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        &mut time,
+        &icons::label(icons::SCAN, "Combat"),
+    );
+    workspace.animation_viewer.clear_preview_weapon_cache();
+    time += 1.0 / 60.0;
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, time, Vec::new());
+
+    assert!(
+        workspace.animation_viewer.preview_weapon_model_count() > 0,
+        "Combat must compose the weapon assigned to the active attack"
+    );
+    assert_eq!(workspace.project().resources, resources_before);
+    assert_eq!(workspace.is_dirty(), dirty_before);
+}
+
+#[test]
+fn root_calibration_toolbar_edits_are_undoable() {
+    let mut workspace = default_workspace();
+    let (_, _, _, idle_clip_id) = character_context(&workspace);
+    assert!(workspace.open_animation_viewer_for_resource(idle_clip_id));
+    let before = workspace
+        .project()
+        .resource(idle_clip_id)
+        .expect("idle clip")
+        .data
+        .clone();
+
+    let (ctx, viewport) = real_egui_workspace_ctx("animation-root-calibration-undo");
+    let mut time = 0.0;
+    let move_label = icons::MOVE.to_string();
+    let opened = click_label(&ctx, &mut workspace, &viewport, &mut time, &move_label);
+    locate_unique_label(&opened, "In-place");
+    let _ = click_label(&ctx, &mut workspace, &viewport, &mut time, "In-place");
+    assert_ne!(
+        workspace
+            .project()
+            .resource(idle_clip_id)
+            .expect("idle clip")
+            .data,
+        before,
+        "the toolbar checkbox must author the selected clip"
+    );
+
+    workspace.do_undo();
+    assert_eq!(
+        workspace
+            .project()
+            .resource(idle_clip_id)
+            .expect("idle clip")
+            .data,
+        before,
+        "Undo must include Animation toolbar calibration changes"
     );
 }
 
@@ -378,17 +602,16 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
     else {
         unreachable!()
     };
-    let mut expected_tracks = animation_set.weapon_appearance_tracks.clone();
-    let target = expected_tracks
-        .iter_mut()
+    let tracks_before = animation_set.weapon_appearance_tracks.clone();
+    let target_frame_before = tracks_before
+        .iter()
         .find(|track| {
             track.action == CharacterAnimationAction::LightAttack
                 && track.weapon == weapon_id
                 && track.character_socket == "right_hand_grip"
         })
-        .expect("light attack weapon beat");
-    assert_ne!(target.fully_visible_frame, 0, "fixture must prove a change");
-    target.fully_visible_frame = 0;
+        .expect("light attack weapon beat")
+        .fully_visible_frame;
 
     let weapon_before = workspace
         .project()
@@ -408,8 +631,25 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
     let mut time = 0.0;
     let initial = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, time, Vec::new());
     locate_unique_label(&initial, "Weapon Studio");
-    let edited = click_label(&ctx, &mut workspace, &viewport, &mut time, "Use playhead");
-    locate_unique_label(&edited, "Weapon Studio");
+    time += 1.0 / 60.0;
+    let _ = real_egui_workspace_frame(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        time,
+        vec![
+            egui::Event::PointerMoved(Pos2::new(1300.0, 420.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -480.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    time += 1.0 / 60.0;
+    let after_scroll = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, time, Vec::new());
+    locate_unique_label(&after_scroll, "Use playhead");
+    let _ = click_label(&ctx, &mut workspace, &viewport, &mut time, "Use playhead");
 
     let ResourceData::AnimationSet(animation_set) = &workspace
         .project()
@@ -419,7 +659,31 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
     else {
         unreachable!()
     };
-    assert_eq!(animation_set.weapon_appearance_tracks, expected_tracks);
+    let edited_track = animation_set
+        .weapon_appearance_tracks
+        .iter()
+        .find(|track| {
+            track.action == CharacterAnimationAction::LightAttack
+                && track.weapon == weapon_id
+                && track.character_socket == "right_hand_grip"
+        })
+        .expect("edited light attack weapon beat");
+    assert_ne!(
+        edited_track.fully_visible_frame, target_frame_before,
+        "Use playhead must author the current frame"
+    );
+    for (before, after) in tracks_before
+        .iter()
+        .zip(&animation_set.weapon_appearance_tracks)
+        .filter(|(track, _)| {
+            !(track.action == CharacterAnimationAction::LightAttack
+                && track.weapon == weapon_id
+                && track.character_socket == "right_hand_grip")
+        })
+    {
+        assert_eq!(after, before, "visibility timing touched another beat");
+    }
+    let expected_tracks = animation_set.weapon_appearance_tracks.clone();
 
     let disappeared = click_label(
         &ctx,
@@ -482,13 +746,10 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
 }
 
 #[test]
-fn add_weapon_beat_uses_the_next_cooker_safe_weapon_socket_pair() {
+fn assign_sword_to_left_hand_uses_the_explicit_hand_control() {
     let mut workspace = default_workspace();
     let (_, _, animation_set_id, _) = character_context(&workspace);
     let light_weapon = resource_id(&workspace, "Sword1 Light", |data| {
-        matches!(data, ResourceData::Weapon(_))
-    });
-    let heavy_weapon = resource_id(&workspace, "Sword1 Heavy", |data| {
         matches!(data, ResourceData::Weapon(_))
     });
     assert!(workspace.open_animation_viewer_for_resource(light_weapon));
@@ -503,16 +764,16 @@ fn add_weapon_beat_uses_the_next_cooker_safe_weapon_socket_pair() {
     };
     let tracks_before = animation_set.weapon_appearance_tracks.clone();
 
-    let (ctx, viewport) = real_egui_workspace_ctx("animation-studio-add-weapon-beat");
+    let (ctx, viewport) = real_egui_workspace_ctx("animation-studio-assign-sword-to-left-hand");
     let mut time = 0.0;
     let initial = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, time, Vec::new());
     locate_unique_label(&initial, "Weapon Studio");
-    let _ = click_label(
+    let assigned = click_label(
         &ctx,
         &mut workspace,
         &viewport,
         &mut time,
-        &icons::label(icons::PLUS, "Add beat"),
+        &icons::label(icons::PLUS, "Left hand"),
     );
 
     let ResourceData::AnimationSet(animation_set) = &workspace
@@ -530,12 +791,12 @@ fn add_weapon_beat_uses_the_next_cooker_safe_weapon_socket_pair() {
     assert_eq!(
         &animation_set.weapon_appearance_tracks[..tracks_before.len()],
         tracks_before.as_slice(),
-        "Add beat must append without rewriting existing timing"
+        "assigning a sword must append without rewriting existing timing"
     );
     let added = animation_set.weapon_appearance_tracks.last().unwrap();
     assert_eq!(added.action, CharacterAnimationAction::LightAttack);
-    assert_eq!(added.weapon, heavy_weapon);
-    assert_eq!(added.character_socket, "right_hand_grip");
+    assert_eq!(added.weapon, light_weapon);
+    assert_eq!(added.character_socket, "left_hand_grip");
 
     let mut pairs = std::collections::HashSet::new();
     for track in animation_set
@@ -545,9 +806,36 @@ fn add_weapon_beat_uses_the_next_cooker_safe_weapon_socket_pair() {
     {
         assert!(
             pairs.insert((track.weapon, track.character_socket.as_str())),
-            "Add beat created the duplicate pair rejected by the cooker"
+            "hand assignment created the duplicate pair rejected by the cooker"
         );
     }
+
+    let remove_buttons =
+        text_shape_centers(&assigned.shapes, &icons::label(icons::TRASH, "Remove"));
+    assert_eq!(
+        remove_buttons.len(),
+        2,
+        "each visible hand assignment needs its own Remove button"
+    );
+    let left_hand_remove = remove_buttons
+        .into_iter()
+        .max_by(|left, right| left.y.total_cmp(&right.y))
+        .expect("new left-hand assignment is the lower row");
+    let (press, release) = press_release(left_hand_remove);
+    time += 1.0 / 60.0;
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, time, press);
+    time += 1.0 / 60.0;
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, time, release);
+
+    let ResourceData::AnimationSet(animation_set) = &workspace
+        .project()
+        .resource(animation_set_id)
+        .expect("animation set")
+        .data
+    else {
+        unreachable!()
+    };
+    assert_eq!(animation_set.weapon_appearance_tracks, tracks_before);
     assert!(workspace.is_dirty());
 }
 

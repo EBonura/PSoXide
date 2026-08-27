@@ -12,7 +12,7 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean clean-guest-stage run run-release editor-ui-screenshot pgo web web-bundle web-stage-disc itch-web validate validate-repeat validate-bless \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean clean-guest-stage run run-fast run-release editor-ui-screenshot pgo web web-bundle web-stage-disc itch-web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -54,7 +54,8 @@ help:
 	@echo "    make runtime-numeric-guard"
 	@echo "                      - reject floats/wide ints in PS1 runtime code"
 	@echo "    make clean        - cargo clean all workspaces"
-	@echo "    make run          - launch the desktop frontend with fast incremental builds"
+	@echo "    make run          - launch the desktop frontend with an optimised editor"
+	@echo "    make run-fast     - launch with faster editor rebuilds and a slower viewport"
 	@echo "    make run-release  - launch the fully optimised desktop frontend"
 	@echo "    make editor-ui-screenshot"
 	@echo "                      - render the exact editor view to PNG without opening a window"
@@ -159,6 +160,9 @@ help:
 
 run:
 	cd emu && cargo run -p frontend
+
+run-fast:
+	cd emu && cargo run -p frontend --profile run-fast
 
 EDITOR_UI_PROJECT ?= editor/projects/default
 EDITOR_UI_VIEW ?= animation

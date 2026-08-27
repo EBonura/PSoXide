@@ -568,7 +568,15 @@ pub fn draw_model_instance_from_pose<
     ) else {
         return out;
     };
-    let material = lighting.shade_model_material(origin, base_material);
+    let material = shade_model_material_at_bounds(
+        lighting,
+        origin,
+        bounds_origin,
+        model_rotation,
+        bounds,
+        inst.visual_scale_q8,
+        base_material,
+    );
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(cull_mode)
@@ -592,7 +600,15 @@ pub fn draw_model_instance_from_pose<
             )
         })
         .map(|mut layer| {
-            layer.material = lighting.shade_model_material(origin, layer.material);
+            layer.material = shade_model_material_at_bounds(
+                lighting,
+                origin,
+                bounds_origin,
+                model_rotation,
+                bounds,
+                inst.visual_scale_q8,
+                layer.material,
+            );
             layer
         });
     let stats = submit_runtime_model_predecoded(

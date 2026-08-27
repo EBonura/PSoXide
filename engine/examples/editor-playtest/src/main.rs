@@ -522,10 +522,13 @@ struct Playtest {
     overlay_poi_page_type_frame: u16,
     /// Save-persistent point-of-interest read/reward state.
     poi_save: SaveBlock,
-    /// Lazy card-load gate. Memory-card I/O begins only after gameplay starts.
+    /// Card-load gate populated during the authored loading screen.
     poi_save_loaded: bool,
-    /// In-memory POI state changed while the card was unavailable or a write
-    /// could not be verified. Retried cooperatively during gameplay.
+    /// Prevent an unavailable card from being rescanned on every loading
+    /// frame. Gameplay retries remain deliberately sparse.
+    poi_save_load_attempted: bool,
+    /// In-memory POI state changed since the last checkpoint/title handoff, or
+    /// the previous boundary write could not be verified.
     poi_save_dirty: bool,
     /// Spawn position retained for orbit-mode targeting.
     spawn: RoomPoint,
@@ -678,6 +681,7 @@ impl Playtest {
         self.power_up_inventory = BoostInventory::STARTER;
         self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
         self.poi_save_loaded = false;
+        self.poi_save_load_attempted = false;
         self.poi_save_dirty = false;
         self.poi_panel_frame = 0;
         self.poi_page_type_frame = 0;

@@ -794,6 +794,70 @@ fn node_gizmo_rotates_image_prop_around_y() {
 }
 
 #[test]
+fn cortex_bridge_group_rotates_around_every_gizmo_axis() {
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../projects/cortex-ignition-tech-demo-0.2");
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+
+    for axis in [
+        PrimitiveGizmoAxis::X,
+        PrimitiveGizmoAxis::Y,
+        PrimitiveGizmoAxis::Z,
+    ] {
+        let mut workspace = EditorWorkspace::open_directory(&project_dir).unwrap();
+        workspace.snap_units = 64;
+        let bridge = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|node| node.name == "bridge")
+            .expect("v0.2 bridge group")
+            .id;
+        workspace.replace_node_selection(bridge);
+        workspace.transform_gizmo_mode = TransformGizmoMode::Rotate;
+        workspace.frame_viewport();
+        let before: Vec<_> = workspace
+            .project
+            .active_scene()
+            .brushes
+            .iter()
+            .filter(|brush| brush.group == Some(bridge))
+            .cloned()
+            .collect();
+        let ring = workspace
+            .node_rotation_gizmo_screen_ring_for_axis(viewport, axis)
+            .unwrap_or_else(|| panic!("{axis:?} ring projects"));
+        assert!(
+            workspace.begin_node_gizmo_drag(axis, viewport, ring.points[0]),
+            "{axis:?} ring begins a drag"
+        );
+        workspace
+            .interaction
+            .node_gizmo_drag_mut()
+            .expect("active bridge drag")
+            .current_steps = 90;
+        workspace.apply_node_gizmo_drag();
+        workspace.end_node_gizmo_drag();
+        let after: Vec<_> = workspace
+            .project
+            .active_scene()
+            .brushes
+            .iter()
+            .filter(|brush| brush.group == Some(bridge))
+            .cloned()
+            .collect();
+        assert_ne!(after, before, "{axis:?} rotation changes bridge brushes");
+        assert!(
+            after
+                .iter()
+                .all(|brush| brush.solved_vertices_on_grid(64, 0.01)),
+            "{axis:?} rotation keeps every bridge corner on Grid 64"
+        );
+    }
+}
+
+#[test]
 fn node_gizmo_local_space_rotates_about_node_axis() {
     let mut project = ProjectDocument::new("image-prop-gizmo-local");
     let room = project.active_scene_mut().add_node(

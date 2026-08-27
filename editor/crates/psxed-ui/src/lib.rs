@@ -392,8 +392,6 @@ const RESOURCE_CARD_HEIGHT: f32 = 128.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
 const ACTION_BAR_COMPACT_HEIGHT: f32 = 50.0;
-const ACTION_BAR_EXPANDED_HEIGHT: f32 = 74.0;
-const ACTION_BAR_WRAP_STATUS_CHARS: usize = 96;
 const PLAY_FRAME_HISTORY_CAP: usize = 150;
 const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
@@ -438,12 +436,8 @@ const STARTER_CHARACTER_SOURCE_ASSET_PATHS: &[&str] = &[
     "source_assets/characters/tank_boss/animations/heavy_walk_pack",
 ];
 
-fn action_bar_height_for_status(status: &str) -> f32 {
-    if status.contains('\n') || status.chars().count() > ACTION_BAR_WRAP_STATUS_CHARS {
-        ACTION_BAR_EXPANDED_HEIGHT
-    } else {
-        ACTION_BAR_COMPACT_HEIGHT
-    }
+fn action_bar_height_for_status(_status: &str) -> f32 {
+    ACTION_BAR_COMPACT_HEIGHT
 }
 const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Aletha Delivered",
@@ -884,8 +878,9 @@ pub struct EditorWorkspace {
     import_retired_textures: Vec<(u8, egui::TextureHandle)>,
     dirty: bool,
     /// Polling watcher for the project document and project-owned resource
-    /// files. A dirty conflict is latched until explicit Reload succeeds, so
-    /// an ordinary Save can never overwrite an external project.ron edit.
+    /// files. A dirty conflict is latched so the editor can warn that the disk
+    /// changed, but an explicit Save always makes the in-memory document
+    /// authoritative again.
     project_watch: ProjectWatchState,
     status: String,
     /// Most recent host-side PSX envelope. Before a successful cook this is
@@ -1329,6 +1324,44 @@ enum TransformGizmoMode {
     Scale,
 }
 
+/// Arbitrary-angle rotations cannot preserve an absolute Cartesian lattice
+/// for every convex BSP brush without distorting the solid. Quarter turns are
+/// the complete shape-independent set that maps the world grid back onto
+/// itself, so brush and brush-owning group gizmos use this snap.
+const BRUSH_ROTATION_SNAP_DEGREES: i32 = 90;
+
+fn snap_brush_rotation_degrees(degrees: f64) -> i32 {
+    ((degrees / f64::from(BRUSH_ROTATION_SNAP_DEGREES)).round() as i32)
+        * BRUSH_ROTATION_SNAP_DEGREES
+}
+
+fn paint_rotation_readout(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    degrees: i32,
+    snap_degrees: i32,
+) {
+    let label = format!("{degrees:+}°   SNAP {snap_degrees}°");
+    let panel = egui::Rect::from_center_size(
+        center + egui::Vec2::new(0.0, -34.0),
+        egui::Vec2::new(136.0, 24.0),
+    );
+    painter.rect_filled(panel, 4.0, egui::Color32::from_black_alpha(220));
+    painter.rect_stroke(
+        panel,
+        4.0,
+        egui::Stroke::new(1.0, STUDIO_ACCENT),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        panel.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::monospace(12.0),
+        egui::Color32::WHITE,
+    );
+}
+
 impl TransformGizmoMode {
     const fn label(self) -> &'static str {
         match self {
@@ -1557,6 +1590,12 @@ struct NodeGizmoDrag {
     /// BSP brushes recursively owned by selected Group roots, captured from
     /// the drag start so every preview applies the total delta once.
     group_brushes: Vec<GroupBrushGizmoTarget>,
+    /// Shared world-space pivot of selected Group roots. Group-owned brushes
+    /// rotate and scale around this point instead of their individual centres.
+    group_pivot: Option<[f64; 3]>,
+    /// Number of selected Group roots, used for accurate gesture feedback even
+    /// though folder nodes themselves are not authored transform targets.
+    group_count: usize,
     current_steps: i32,
     snapshot_pushed: bool,
     /// Shift held: world-unit nodes skip the brush-grid snap and move at
@@ -2734,8 +2773,12 @@ pub(crate) struct BrushElementTransformDrag {
     pub(crate) targets: Vec<[f64; 3]>,
     pub(crate) center: [f64; 3],
     pub(crate) axis: usize,
-    /// true = rotate (5 degree steps, Shift 1), false = scale (5% steps).
+    /// true = rotate, false = scale (5% steps).
     pub(crate) rotate: bool,
+    /// Rigid whole-brush transforms must preserve the active Cartesian
+    /// lattice. Face/edge reshaping may intentionally author slanted planes.
+    pub(crate) grid_safe_rotation: bool,
+    pub(crate) rotation_snap_degrees: i32,
     /// Selected Face elements: whole authored planes transform rigidly.
     pub(crate) faces: Vec<usize>,
     pub(crate) start_pointer: Pos2,
@@ -3742,15 +3785,9 @@ impl EditorWorkspace {
     /// directory when the user-facing project name changes.
     pub fn save(&mut self) -> Result<(), String> {
         // The periodic watcher keeps the UI current, but Save itself is the
-        // safety boundary. Force one last signature check so an external edit
-        // inside the polling interval can never be overwritten.
+        // authority boundary. Check once more so the status can report an
+        // external edit before this explicit Save replaces it.
         self.poll_project_watch(true);
-        if self.project_watch.dirty_conflict {
-            return Err(
-                "project.ron changed outside PSoXide while this project has unsaved edits; Reload to accept the disk version before saving"
-                    .to_string(),
-            );
-        }
         self.persist_editor_camera_state();
         self.persist_editor_visibility_state();
         self.persist_editor_workspace_state();
@@ -3818,6 +3855,10 @@ impl EditorWorkspace {
         self.persist_editor_visibility_state();
         self.persist_editor_workspace_state();
         self.persist_editor_viewport_state();
+        // Play and Build use this path. Detect disk divergence even when the
+        // document was clean at the start of the frame so cooking can never
+        // consume an externally replaced project.ron behind the editor's back.
+        self.poll_project_watch(true);
         if !self.dirty {
             return Ok(false);
         }
@@ -3914,13 +3955,13 @@ impl EditorWorkspace {
 
         if project_changed {
             self.project_watch.resources = resource_signatures;
-            if self.dirty {
-                self.project_watch.dirty_conflict = true;
-                self.status = "External project.ron change detected; local edits preserved and Save blocked until Reload"
-                    .to_string();
-            } else {
-                self.reload();
-            }
+            self.project_watch.dirty_conflict = true;
+            // The open document remains authoritative until the author
+            // explicitly chooses Reload. Mark it dirty relative to disk so
+            // Build/Play's save-if-dirty path restores these exact bytes.
+            self.dirty = true;
+            self.status = "External project.ron change detected; open project preserved. Save overwrites the disk version; Reload accepts it"
+                .to_string();
             return;
         }
 
@@ -3938,8 +3979,8 @@ impl EditorWorkspace {
         }
     }
 
-    /// Whether an external project.ron edit is protected from an ordinary
-    /// Save by the dirty-document conflict latch.
+    /// Whether project.ron changed externally while this document was open.
+    /// A successful Save or Reload clears the warning.
     pub const fn has_external_project_conflict(&self) -> bool {
         self.project_watch.dirty_conflict
     }
@@ -4486,8 +4527,8 @@ impl EditorWorkspace {
         self.status = status.into();
     }
 
-    /// Append guest-runtime debug lines to the bottom debug terminal.
-    pub fn append_play_debug_terminal_lines<I, S>(&mut self, lines: I)
+    /// Append host-build or guest-runtime lines to the bottom console.
+    pub fn append_console_lines<I, S>(&mut self, lines: I)
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -4498,6 +4539,15 @@ impl EditorWorkspace {
             }
             self.play_debug_terminal_lines.push_back(line.into());
         }
+    }
+
+    /// Append guest-runtime debug lines to the shared bottom console.
+    pub fn append_play_debug_terminal_lines<I, S>(&mut self, lines: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.append_console_lines(lines);
     }
 }
 

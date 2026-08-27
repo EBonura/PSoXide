@@ -31,7 +31,7 @@ use crate::style::{
 
 const TIMELINE_DEFAULT_HEIGHT: f32 = 206.0;
 const TIMELINE_MIN_HEIGHT: f32 = 132.0;
-const TIMELINE_MIN_PREVIEW_HEIGHT: f32 = 250.0;
+const TIMELINE_MIN_PREVIEW_HEIGHT: f32 = 120.0;
 const TIMELINE_TRACK_LABEL_WIDTH: f32 = 172.0;
 const TIMELINE_RULER_HEIGHT: f32 = 28.0;
 const TIMELINE_TRACK_HEIGHT: f32 = 28.0;
@@ -63,6 +63,49 @@ enum CapsuleEditAxis {
     X,
     Y,
     Z,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnimationGizmoHandle {
+    Axis(CapsuleEditAxis),
+    Center,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WeaponTransformTarget {
+    CharacterSocket,
+    WeaponGrip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharacterHand {
+    Right,
+    Left,
+}
+
+impl CharacterHand {
+    const ALL: [Self; 2] = [Self::Right, Self::Left];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Right => "Right hand",
+            Self::Left => "Left hand",
+        }
+    }
+
+    const fn socket_name(self) -> &'static str {
+        match self {
+            Self::Right => "right_hand_grip",
+            Self::Left => "left_hand_grip",
+        }
+    }
+
+    fn attachment(self) -> psxed_project::AttachmentSocket {
+        match self {
+            Self::Right => psxed_project::AttachmentSocket::right_hand_grip(),
+            Self::Left => psxed_project::AttachmentSocket::left_hand_grip(),
+        }
+    }
 }
 
 impl CapsuleEditAxis {
@@ -109,6 +152,7 @@ pub(crate) struct ModelAnimationViewerState {
     show_animation_root: bool,
     show_bones: bool,
     show_combat_capsules: bool,
+    combat_capsules_visible: bool,
     show_pose_corrections: bool,
     show_attachment_sockets: bool,
     show_moveset: bool,
@@ -116,18 +160,24 @@ pub(crate) struct ModelAnimationViewerState {
     selected_attachment_socket: usize,
     selected_weapon_track: usize,
     preview_weapon: Option<ResourceId>,
+    assignment_weapon: Option<ResourceId>,
     selected_pose_joint: u16,
+    selected_pose_joints: Vec<u16>,
+    pose_marquee_origin: Option<Pos2>,
     selected_action: CharacterAnimationAction,
+    combat_preview_selection: Option<(ResourceId, usize, CharacterAnimationAction)>,
     capsule_edit_tool: CapsuleEditTool,
     capsule_edit_axis: CapsuleEditAxis,
-    gizmo_drag_axis: Option<CapsuleEditAxis>,
+    gizmo_drag_handle: Option<AnimationGizmoHandle>,
+    gizmo_drag_pose_frame: Option<u16>,
     gizmo_drag_fractional_units: f32,
+    weapon_transform_target: WeaponTransformTarget,
     timeline_height: f32,
     timeline_resize_origin: Option<f32>,
     timeline_pixels_per_frame: f32,
     preview_quality: AnimationPreviewQuality,
     cached_model: Option<CachedModelContext>,
-    cached_weapon_model: Option<CachedModelContext>,
+    cached_weapon_models: Vec<CachedModelContext>,
     cached_material: Option<CachedMaterialLayer>,
     cached_clip: Option<CachedClipContext>,
     last_time_seconds: f64,
@@ -150,6 +200,7 @@ impl Default for ModelAnimationViewerState {
             show_animation_root: false,
             show_bones: false,
             show_combat_capsules: false,
+            combat_capsules_visible: true,
             show_pose_corrections: false,
             show_attachment_sockets: false,
             show_moveset: false,
@@ -157,18 +208,24 @@ impl Default for ModelAnimationViewerState {
             selected_attachment_socket: 0,
             selected_weapon_track: 0,
             preview_weapon: None,
+            assignment_weapon: None,
             selected_pose_joint: 0,
+            selected_pose_joints: vec![0],
+            pose_marquee_origin: None,
             selected_action: CharacterAnimationAction::Idle,
+            combat_preview_selection: None,
             capsule_edit_tool: CapsuleEditTool::Move,
             capsule_edit_axis: CapsuleEditAxis::X,
-            gizmo_drag_axis: None,
+            gizmo_drag_handle: None,
+            gizmo_drag_pose_frame: None,
             gizmo_drag_fractional_units: 0.0,
+            weapon_transform_target: WeaponTransformTarget::CharacterSocket,
             timeline_height: TIMELINE_DEFAULT_HEIGHT,
             timeline_resize_origin: None,
             timeline_pixels_per_frame: 12.0,
             preview_quality: AnimationPreviewQuality::Authoring,
             cached_model: None,
-            cached_weapon_model: None,
+            cached_weapon_models: Vec::new(),
             cached_material: None,
             cached_clip: None,
             last_time_seconds: 0.0,
@@ -177,6 +234,26 @@ impl Default for ModelAnimationViewerState {
 }
 
 impl ModelAnimationViewerState {
+    #[cfg(test)]
+    pub(crate) fn preview_is_playing(&self) -> bool {
+        self.playing
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_preview_weapon_cache(&mut self) {
+        self.cached_weapon_models.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preview_weapon_model_count(&self) -> usize {
+        self.cached_weapon_models.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn weapon_authoring_overlays_are_visible(&self) -> bool {
+        self.show_attachment_sockets
+    }
+
     pub(crate) const fn selected_model(&self) -> Option<ResourceId> {
         self.selected_model
     }
@@ -219,6 +296,7 @@ impl ModelAnimationViewerState {
             ResourceData::Model(_) => {
                 self.selected_character = None;
                 self.set_studio_mode(AnimationStudioMode::Preview);
+                self.weapon_transform_target = WeaponTransformTarget::CharacterSocket;
                 self.selected_model = Some(id);
                 self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
@@ -272,6 +350,8 @@ impl ModelAnimationViewerState {
             }
             ResourceData::Weapon(weapon) => {
                 self.preview_weapon = Some(id);
+                self.assignment_weapon = Some(id);
+                self.weapon_transform_target = WeaponTransformTarget::WeaponGrip;
                 self.selected_character = project.resources.iter().find_map(|resource| {
                     let ResourceData::Character(character) = &resource.data else {
                         return None;
@@ -365,7 +445,7 @@ impl ModelAnimationViewerState {
 
     fn invalidate_model_cache(&mut self) {
         self.cached_model = None;
-        self.cached_weapon_model = None;
+        self.cached_weapon_models.clear();
         self.cached_material = None;
     }
 
@@ -388,10 +468,67 @@ impl ModelAnimationViewerState {
     }
 
     fn set_studio_mode(&mut self, mode: AnimationStudioMode) {
+        let entering_pose =
+            mode == AnimationStudioMode::Pose && self.studio_mode() != AnimationStudioMode::Pose;
+        let entering_combat = mode == AnimationStudioMode::Combat
+            && self.studio_mode() != AnimationStudioMode::Combat;
         self.show_moveset = mode == AnimationStudioMode::Moveset;
         self.show_pose_corrections = mode == AnimationStudioMode::Pose;
         self.show_attachment_sockets = mode == AnimationStudioMode::Weapon;
         self.show_combat_capsules = mode == AnimationStudioMode::Combat;
+        if entering_pose {
+            self.playing = false;
+        }
+        if entering_combat {
+            self.combat_preview_selection = None;
+        }
+        if mode != AnimationStudioMode::Pose {
+            self.pose_marquee_origin = None;
+        }
+    }
+
+    fn select_pose_joint(&mut self, joint: u16, additive: bool) {
+        if !additive {
+            self.selected_pose_joints.clear();
+        }
+        if !self.selected_pose_joints.contains(&joint) {
+            self.selected_pose_joints.push(joint);
+        }
+        self.selected_pose_joint = joint;
+    }
+
+    fn select_pose_joints(&mut self, joints: &[u16], additive: bool) {
+        if joints.is_empty() {
+            return;
+        }
+        if !additive {
+            self.selected_pose_joints.clear();
+        }
+        for &joint in joints {
+            if !self.selected_pose_joints.contains(&joint) {
+                self.selected_pose_joints.push(joint);
+            }
+        }
+        if let Some(&joint) = joints.last() {
+            self.selected_pose_joint = joint;
+        }
+    }
+
+    fn constrain_pose_selection(&mut self, joint_count: u16) {
+        if joint_count == 0 {
+            self.selected_pose_joint = 0;
+            self.selected_pose_joints.clear();
+            return;
+        }
+        self.selected_pose_joint = self.selected_pose_joint.min(joint_count - 1);
+        self.selected_pose_joints
+            .retain(|joint| *joint < joint_count);
+        if !self
+            .selected_pose_joints
+            .contains(&self.selected_pose_joint)
+        {
+            self.selected_pose_joints.push(self.selected_pose_joint);
+        }
     }
 }
 
@@ -534,7 +671,7 @@ pub(crate) fn moveset_capability_rows(
     })?;
 
     Some(
-        CharacterAnimationAction::ALL
+        CharacterAnimationAction::AUTHORABLE
             .into_iter()
             .map(|action| {
                 let resolved_clip = set.action_clip(action);
@@ -846,7 +983,7 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
                 AnimationStudioMode::Weapon,
                 icons::label(icons::MAP_PIN, "Weapon"),
             )
-            .on_hover_text("Place sockets and grips, then author weapon visibility beats");
+            .on_hover_text("Define the character's hands and assign swords to them");
         });
         ui.add_enabled_ui(character_available, |ui| {
             ui.selectable_value(
@@ -868,6 +1005,69 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
     action
 }
 
+fn preview_combat_capsules(
+    capsules: &[psxed_project::CharacterCombatCapsule],
+    selected: usize,
+    visible: bool,
+) -> Vec<model_import_preview::PreviewCombatCapsule> {
+    if !visible {
+        return Vec::new();
+    }
+    capsules
+        .iter()
+        .enumerate()
+        .map(
+            |(index, capsule)| model_import_preview::PreviewCombatCapsule {
+                joint: capsule.joint,
+                start: capsule.capsule.start,
+                end: capsule.capsule.end,
+                radius: capsule.capsule.radius,
+                color: match capsule.role {
+                    psxed_project::CombatCapsuleRole::Hurtbox => Color32::from_rgb(76, 196, 224),
+                    psxed_project::CombatCapsuleRole::Hitbox { .. } => {
+                        Color32::from_rgb(238, 102, 82)
+                    }
+                    psxed_project::CombatCapsuleRole::ProjectileEmitter { .. } => {
+                        Color32::from_rgb(214, 118, 255)
+                    }
+                },
+                selected: index == selected,
+            },
+        )
+        .collect()
+}
+
+fn combat_preview_action_window(
+    capsules: &[psxed_project::CharacterCombatCapsule],
+    selected: usize,
+    current_action: CharacterAnimationAction,
+) -> Option<(CharacterAnimationAction, u16)> {
+    let action_window = |capsule: &psxed_project::CharacterCombatCapsule| match capsule.role {
+        psxed_project::CombatCapsuleRole::Hitbox {
+            action,
+            active_start_frame,
+            ..
+        }
+        | psxed_project::CombatCapsuleRole::ProjectileEmitter {
+            action,
+            active_start_frame,
+            ..
+        } => Some((action, active_start_frame)),
+        psxed_project::CombatCapsuleRole::Hurtbox => None,
+    };
+
+    capsules
+        .get(selected)
+        .and_then(action_window)
+        .or_else(|| {
+            capsules
+                .iter()
+                .filter_map(action_window)
+                .find(|(action, _)| *action == current_action)
+        })
+        .or_else(|| capsules.iter().find_map(action_window))
+}
+
 pub(crate) fn draw_model_animation_viewer(
     ui: &mut egui::Ui,
     project: &mut ProjectDocument,
@@ -876,6 +1076,45 @@ pub(crate) fn draw_model_animation_viewer(
     preview_texture: &mut Option<egui::TextureHandle>,
 ) -> bool {
     state.ensure_selection(project);
+    let character_id = state.selected_character.filter(|id| {
+        project
+            .resource(*id)
+            .is_some_and(|resource| matches!(resource.data, ResourceData::Character(_)))
+    });
+    let capsules = character_id
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character.combat_capsules.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if state.selected_combat_capsule >= capsules.len() {
+        state.selected_combat_capsule = capsules.len().saturating_sub(1);
+    }
+    let combat_studio_open = state.show_combat_capsules && character_id.is_some();
+    if let Some(character_id) = combat_studio_open.then_some(character_id).flatten() {
+        if let Some((action, active_start_frame)) = combat_preview_action_window(
+            &capsules,
+            state.selected_combat_capsule,
+            state.selected_action,
+        ) {
+            let selection = (character_id, state.selected_combat_capsule, action);
+            if state.combat_preview_selection != Some(selection) {
+                state.selected_action = action;
+                if let Some(path) = character_action_clip_path(project, character_id, action) {
+                    if state.selected_clip_path.as_deref() != Some(path.as_str()) {
+                        state.selected_clip_path = Some(path);
+                        state.invalidate_clip_cache();
+                        state.last_clip_path = state.selected_clip_path.clone();
+                        state.last_time_seconds = ui.input(|input| input.time);
+                    }
+                }
+                state.frame = active_start_frame as f32;
+                state.playing = false;
+                state.combat_preview_selection = Some(selection);
+            }
+        }
+    }
     let clip_options = state
         .selected_model
         .map(|id| build_clip_options(project, id))
@@ -900,49 +1139,12 @@ pub(crate) fn draw_model_animation_viewer(
                 motion: *motion,
             },
         );
-    let character_id = state.selected_character.filter(|id| {
-        project
-            .resource(*id)
-            .is_some_and(|resource| matches!(resource.data, ResourceData::Character(_)))
-    });
-    let capsules = character_id
-        .and_then(|id| project.resource(id))
-        .and_then(|resource| match &resource.data {
-            ResourceData::Character(character) => Some(character.combat_capsules.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    if state.selected_combat_capsule >= capsules.len() {
-        state.selected_combat_capsule = capsules.len().saturating_sub(1);
-    }
-    let preview_capsules = if state.show_combat_capsules {
-        capsules
-            .iter()
-            .enumerate()
-            .map(
-                |(index, capsule)| model_import_preview::PreviewCombatCapsule {
-                    joint: capsule.joint,
-                    start: capsule.capsule.start,
-                    end: capsule.capsule.end,
-                    radius: capsule.capsule.radius,
-                    color: match capsule.role {
-                        psxed_project::CombatCapsuleRole::Hurtbox => {
-                            Color32::from_rgb(76, 196, 224)
-                        }
-                        psxed_project::CombatCapsuleRole::Hitbox { .. } => {
-                            Color32::from_rgb(238, 102, 82)
-                        }
-                        psxed_project::CombatCapsuleRole::ProjectileEmitter { .. } => {
-                            Color32::from_rgb(214, 118, 255)
-                        }
-                    },
-                    selected: index == state.selected_combat_capsule,
-                },
-            )
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let combat_overlays_visible = combat_studio_open && state.combat_capsules_visible;
+    let preview_capsules = preview_combat_capsules(
+        &capsules,
+        state.selected_combat_capsule,
+        combat_overlays_visible,
+    );
     let pose_clip_id = state
         .show_pose_corrections
         .then(|| {
@@ -964,7 +1166,12 @@ pub(crate) fn draw_model_animation_viewer(
                 .resource(*id)
                 .is_some_and(|resource| matches!(resource.data, ResourceData::Model(_)))
         });
-    let sockets = socket_model_id
+    let attachment_model_id = state.selected_model.filter(|id| {
+        project
+            .resource(*id)
+            .is_some_and(|resource| matches!(resource.data, ResourceData::Model(_)))
+    });
+    let sockets = attachment_model_id
         .and_then(|id| project.resource(id))
         .and_then(|resource| match &resource.data {
             ResourceData::Model(model) => Some(model.attachments.clone()),
@@ -1006,61 +1213,121 @@ pub(crate) fn draw_model_animation_viewer(
     } else {
         Vec::new()
     };
-    // The equipped-weapon overlay rides the SELECTED socket, the same
-    // authoring loop the runtime resolves by name at cook time.
-    let weapon_grip = socket_model_id
-        .and(state.preview_weapon)
-        .and_then(|weapon_id| project.resource(weapon_id))
-        .and_then(|resource| match &resource.data {
-            ResourceData::Weapon(weapon) => weapon
-                .model
-                .map(|model_id| (model_id, weapon.grip.translation, weapon.grip.rotation_q12)),
-            _ => None,
-        })
-        .zip(sockets.get(preview_socket_index).cloned());
-    let weapon_model_context = weapon_grip.as_ref().and_then(|((model_id, _, _), _)| {
-        load_weapon_model_context(project, project_root, state, *model_id)
-    });
+    struct LoadedPreviewWeapon {
+        track_index: Option<usize>,
+        context: Arc<LoadedModelContext>,
+        socket: psxed_project::AttachmentSocket,
+        grip_translation: [i32; 3],
+        grip_rotation_q12: [i16; 3],
+        materialization_q12: u16,
+    }
+
     let weapon_fallback_atlas = ColorImage {
         size: [4, 4],
         pixels: vec![Color32::from_rgb(168, 168, 176); 16],
     };
-    let weapon_materialization_q12 = selected_weapon_track
+    let frame_count = clip_context
         .as_ref()
-        .map(|track| {
-            preview_weapon_materialization_q12(
-                track,
-                state.frame,
-                clip_context
-                    .as_ref()
-                    .and_then(|clip| clip.animation_stats)
-                    .map(|stats| stats.frame_count)
-                    .unwrap_or(1),
-            )
-        })
-        .unwrap_or(4096);
-    let equipped_weapon = weapon_grip.as_ref().zip(weapon_model_context.as_ref()).map(
-        |(((_, grip_translation, grip_rotation_q12), socket), context)| {
-            model_import_preview::PreviewEquippedWeapon {
-                model_bytes: &context.model_bytes,
-                atlas: context.atlas.as_ref().unwrap_or(&weapon_fallback_atlas),
-                socket_joint: socket.joint,
-                socket_translation: socket.translation,
-                socket_rotation_q12: socket.rotation_q12,
-                grip_translation: *grip_translation,
-                grip_rotation_q12: *grip_rotation_q12,
-                materialization_q12: weapon_materialization_q12,
-                wireframe_materialization: selected_weapon_track.is_some(),
+        .and_then(|clip| clip.animation_stats)
+        .map(|stats| stats.frame_count)
+        .unwrap_or(1);
+    let action_weapon_tracks = attachment_model_id
+        .map(|_| character_action_weapon_tracks(project, character_id, state.selected_action))
+        .unwrap_or_default();
+    let mut loaded_preview_weapons = Vec::new();
+    for (track_index, track) in &action_weapon_tracks {
+        let Some((model_id, grip_translation, grip_rotation_q12)) = project
+            .resource(track.weapon)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Weapon(weapon) => weapon
+                    .model
+                    .map(|model_id| (model_id, weapon.grip.translation, weapon.grip.rotation_q12)),
+                _ => None,
+            })
+        else {
+            continue;
+        };
+        let Some(socket) = sockets
+            .iter()
+            .find(|socket| socket.name == track.character_socket)
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(context) = load_weapon_model_context(project, project_root, state, model_id)
+        else {
+            continue;
+        };
+        loaded_preview_weapons.push(LoadedPreviewWeapon {
+            track_index: Some(*track_index),
+            context,
+            socket,
+            grip_translation,
+            grip_rotation_q12,
+            materialization_q12: if combat_studio_open {
+                4096
+            } else {
+                preview_weapon_materialization_q12(track, state.frame, frame_count)
+            },
+        });
+    }
+    if loaded_preview_weapons.is_empty() && socket_model_id.is_some() {
+        let fallback_weapon = state.preview_weapon.and_then(|weapon_id| {
+            project.resource(weapon_id).and_then(|resource| {
+                let ResourceData::Weapon(weapon) = &resource.data else {
+                    return None;
+                };
+                weapon
+                    .model
+                    .map(|model_id| (model_id, weapon.grip.translation, weapon.grip.rotation_q12))
+            })
+        });
+        if let (Some((model_id, grip_translation, grip_rotation_q12)), Some(socket)) =
+            (fallback_weapon, sockets.get(preview_socket_index).cloned())
+        {
+            if let Some(context) = load_weapon_model_context(project, project_root, state, model_id)
+            {
+                loaded_preview_weapons.push(LoadedPreviewWeapon {
+                    track_index: None,
+                    context,
+                    socket,
+                    grip_translation,
+                    grip_rotation_q12,
+                    materialization_q12: 4096,
+                });
             }
-        },
-    );
+        }
+    }
+    let equipped_weapons = loaded_preview_weapons
+        .iter()
+        .map(|weapon| model_import_preview::PreviewEquippedWeapon {
+            model_bytes: &weapon.context.model_bytes,
+            atlas_banks: weapon
+                .context
+                .atlas
+                .as_deref()
+                .unwrap_or_else(|| std::slice::from_ref(&weapon_fallback_atlas)),
+            socket_joint: weapon.socket.joint,
+            socket_translation: weapon.socket.translation,
+            socket_rotation_q12: weapon.socket.rotation_q12,
+            grip_translation: weapon.grip_translation,
+            grip_rotation_q12: weapon.grip_rotation_q12,
+            materialization_q12: weapon.materialization_q12,
+            wireframe_materialization: preview_weapon_uses_materialization_wireframe(
+                weapon.track_index,
+                weapon.materialization_q12,
+            ),
+            show_grip_gizmo: socket_model_id.is_some()
+                && state.weapon_transform_target == WeaponTransformTarget::WeaponGrip
+                && weapon.track_index == Some(state.selected_weapon_track),
+        })
+        .collect::<Vec<_>>();
     let selected_joint = if state.show_pose_corrections {
         Some(state.selected_pose_joint)
     } else if socket_model_id.is_some() {
         sockets.get(preview_socket_index).map(|socket| socket.joint)
     } else {
-        state
-            .show_combat_capsules
+        combat_overlays_visible
             .then(|| {
                 capsules
                     .get(state.selected_combat_capsule)
@@ -1068,11 +1335,10 @@ pub(crate) fn draw_model_animation_viewer(
             })
             .flatten()
     };
-    let joint_picking = (state.show_combat_capsules && character_id.is_some())
-        || pose_clip_id.is_some()
-        || socket_model_id.is_some();
+    let joint_picking =
+        combat_overlays_visible || pose_clip_id.is_some() || socket_model_id.is_some();
     let moveset_open = state.show_moveset && character_id.is_some();
-    let authoring_panel_open = joint_picking || moveset_open;
+    let authoring_panel_open = combat_studio_open || joint_picking || moveset_open;
     let assigned_action_clip = character_id.and_then(|character_id| {
         capsules
             .get(state.selected_combat_capsule)
@@ -1087,8 +1353,7 @@ pub(crate) fn draw_model_animation_viewer(
     });
 
     let total_height = ui.available_height();
-    let max_timeline_height = (total_height - TIMELINE_MIN_PREVIEW_HEIGHT - 7.0)
-        .max(TIMELINE_MIN_HEIGHT.min(total_height * 0.45));
+    let max_timeline_height = animation_timeline_height_limit(total_height);
     state.timeline_height = state.timeline_height.clamp(
         TIMELINE_MIN_HEIGHT.min(max_timeline_height),
         max_timeline_height,
@@ -1097,14 +1362,11 @@ pub(crate) fn draw_model_animation_viewer(
 
     let mut preview_interaction = PreviewInteraction::default();
     let mut editor_changed = false;
-    ui.allocate_ui_with_layout(
-        Vec2::new(ui.available_width(), preview_height),
-        egui::Layout::top_down(egui::Align::Min),
+    fixed_height_studio_region(
+        ui,
+        "animation-studio-preview-region",
+        preview_height,
         |ui| {
-            // `allocate_ui_with_layout` constrains the child, but advances the
-            // parent by the child's used height. Reserve the full preview slot
-            // so the bottom timeline stays docked instead of leaving dead space
-            // beneath it when the rendered image preserves a smaller aspect ratio.
             ui.set_min_height(preview_height);
             if authoring_panel_open {
                 ui.horizontal(|ui| {
@@ -1135,7 +1397,7 @@ pub(crate) fn draw_model_animation_viewer(
                                 preview_texture,
                                 &preview_capsules,
                                 &preview_sockets,
-                                equipped_weapon.as_ref(),
+                                &equipped_weapons,
                                 character_material.as_ref(),
                                 selected_joint,
                                 joint_picking,
@@ -1154,7 +1416,7 @@ pub(crate) fn draw_model_animation_viewer(
                                     if let Some(character_id) =
                                         moveset_open.then_some(character_id).flatten()
                                     {
-                                        draw_moveset_capability_matrix(
+                                        editor_changed |= draw_moveset_capability_matrix(
                                             ui,
                                             project,
                                             character_id,
@@ -1221,7 +1483,7 @@ pub(crate) fn draw_model_animation_viewer(
                     preview_texture,
                     &[],
                     &[],
-                    None,
+                    &equipped_weapons,
                     character_material.as_ref(),
                     None,
                     false,
@@ -1231,9 +1493,10 @@ pub(crate) fn draw_model_animation_viewer(
     );
 
     draw_timeline_splitter(ui, state, max_timeline_height);
-    ui.allocate_ui_with_layout(
-        Vec2::new(ui.available_width(), state.timeline_height),
-        egui::Layout::top_down(egui::Align::Min),
+    fixed_height_studio_region(
+        ui,
+        "animation-studio-timeline-region",
+        state.timeline_height,
         |ui| {
             ui.set_min_height(state.timeline_height);
             editor_changed |= draw_animation_timeline(
@@ -1249,9 +1512,13 @@ pub(crate) fn draw_model_animation_viewer(
     );
 
     let mut changed = false;
-    if let Some(joint) = preview_interaction.clicked_joint {
+    if let Some(joints) = preview_interaction.marquee_joints.as_deref() {
         if state.show_pose_corrections {
-            state.selected_pose_joint = joint;
+            state.select_pose_joints(joints, preview_interaction.joint_selection_additive);
+        }
+    } else if let Some(joint) = preview_interaction.clicked_joint {
+        if state.show_pose_corrections {
+            state.select_pose_joint(joint, preview_interaction.joint_selection_additive);
         } else if let Some(model_id) = socket_model_id {
             changed |= attach_selected_socket_to_joint(
                 project,
@@ -1276,15 +1543,20 @@ pub(crate) fn draw_model_animation_viewer(
             CapsuleEditTool::Move => preview_interaction
                 .gizmo_move_units
                 .map(AxisEditDelta::Translate),
-            CapsuleEditTool::Rotate => preview_interaction.edit_delta.map(AxisEditDelta::Rotate),
+            CapsuleEditTool::Rotate => preview_interaction
+                .gizmo_rotate_q12
+                .map(AxisEditDelta::Rotate),
             CapsuleEditTool::Resize => None,
         };
         if let Some(delta) = pose_delta {
-            let frame = state.frame.round().max(0.0) as u16;
-            changed |= manipulate_pose_correction(
+            let frame = state
+                .gizmo_drag_pose_frame
+                .unwrap_or_else(|| state.frame.round().max(0.0) as u16);
+            let selected_joints = state.selected_pose_joints.clone();
+            changed |= manipulate_pose_corrections(
                 project,
                 clip_id,
-                state.selected_pose_joint,
+                &selected_joints,
                 frame,
                 state.capsule_edit_axis,
                 delta,
@@ -1296,30 +1568,59 @@ pub(crate) fn draw_model_animation_viewer(
             CapsuleEditTool::Move => preview_interaction
                 .gizmo_move_units
                 .map(AxisEditDelta::Translate),
-            CapsuleEditTool::Rotate => preview_interaction.edit_delta.map(AxisEditDelta::Rotate),
+            CapsuleEditTool::Rotate => preview_interaction
+                .gizmo_rotate_q12
+                .map(AxisEditDelta::Rotate),
             CapsuleEditTool::Resize => None,
         };
         if let Some(delta) = socket_delta {
-            changed |= manipulate_selected_socket(
+            changed |= if state.weapon_transform_target == WeaponTransformTarget::WeaponGrip {
+                state.preview_weapon.is_some_and(|weapon_id| {
+                    manipulate_selected_weapon_grip(
+                        project,
+                        weapon_id,
+                        state.capsule_edit_axis,
+                        delta,
+                    )
+                })
+            } else {
+                manipulate_selected_socket(
+                    project,
+                    model_id,
+                    state.selected_attachment_socket,
+                    state.capsule_edit_axis,
+                    delta,
+                )
+            };
+            preview_texture.take();
+        }
+    } else if let Some(character_id) = character_id {
+        let capsule_delta = match state.capsule_edit_tool {
+            CapsuleEditTool::Move => preview_interaction
+                .gizmo_move_units
+                .map(CapsuleGizmoDelta::Move),
+            CapsuleEditTool::Rotate => preview_interaction
+                .gizmo_rotate_q12
+                .map(CapsuleGizmoDelta::Rotate),
+            CapsuleEditTool::Resize => preview_interaction
+                .gizmo_resize_units
+                .map(CapsuleGizmoDelta::ResizeAxis)
+                .or_else(|| {
+                    preview_interaction
+                        .gizmo_radius_units
+                        .map(CapsuleGizmoDelta::ResizeRadius)
+                }),
+        };
+        if let Some(delta) = capsule_delta {
+            changed |= manipulate_selected_capsule(
                 project,
-                model_id,
-                state.selected_attachment_socket,
+                character_id,
+                state.selected_combat_capsule,
                 state.capsule_edit_axis,
                 delta,
             );
             preview_texture.take();
         }
-    } else if let (Some(character_id), Some(delta)) = (character_id, preview_interaction.edit_delta)
-    {
-        changed |= manipulate_selected_capsule(
-            project,
-            character_id,
-            state.selected_combat_capsule,
-            state.capsule_edit_tool,
-            state.capsule_edit_axis,
-            delta,
-        );
-        preview_texture.take();
     }
     // The editor mutates the project in place and reports whether persistence
     // state must be updated by the workspace.
@@ -1369,29 +1670,17 @@ fn sync_weapon_studio_selection(
     character_id: Option<ResourceId>,
     sockets: &[psxed_project::AttachmentSocket],
 ) -> Option<psxed_project::WeaponAppearanceTrack> {
-    let set_id = character_animation_set_id(project, character_id)?;
-    let set = project.resource(set_id).and_then(|resource| {
-        let ResourceData::AnimationSet(set) = &resource.data else {
-            return None;
-        };
-        Some(set)
-    })?;
-    let indices = set
-        .weapon_appearance_tracks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, track)| (track.action == state.selected_action).then_some(index))
-        .collect::<Vec<_>>();
+    let tracks = character_action_weapon_tracks(project, character_id, state.selected_action);
+    let indices = tracks.iter().map(|(index, _)| *index).collect::<Vec<_>>();
     if indices.is_empty() {
         return None;
     }
     if !indices.contains(&state.selected_weapon_track) {
         state.selected_weapon_track = indices[0];
     }
-    let track = set
-        .weapon_appearance_tracks
-        .get(state.selected_weapon_track)?
-        .clone();
+    let track = tracks
+        .into_iter()
+        .find_map(|(index, track)| (index == state.selected_weapon_track).then_some(track))?;
     state.preview_weapon = Some(track.weapon);
     if let Some(index) = sockets
         .iter()
@@ -1400,6 +1689,32 @@ fn sync_weapon_studio_selection(
         state.selected_attachment_socket = index;
     }
     Some(track)
+}
+
+fn character_action_weapon_tracks(
+    project: &ProjectDocument,
+    character_id: Option<ResourceId>,
+    action: CharacterAnimationAction,
+) -> Vec<(usize, psxed_project::WeaponAppearanceTrack)> {
+    let Some(set_id) = character_animation_set_id(project, character_id) else {
+        return Vec::new();
+    };
+    project
+        .resource(set_id)
+        .and_then(|resource| {
+            let ResourceData::AnimationSet(set) = &resource.data else {
+                return None;
+            };
+            Some(
+                set.weapon_appearance_tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| track.action == action)
+                    .map(|(index, track)| (index, track.clone()))
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
 }
 
 fn preview_weapon_materialization_q12(
@@ -1431,6 +1746,13 @@ fn preview_weapon_materialization_q12(
     let rising = (phase_q12 - start_q12) / transition;
     let falling = (hidden_q12 - phase_q12) / transition;
     rising.min(falling).min(4096) as u16
+}
+
+fn preview_weapon_uses_materialization_wireframe(
+    authored_track: Option<usize>,
+    materialization_q12: u16,
+) -> bool {
+    authored_track.is_some() && (1..4096).contains(&materialization_q12)
 }
 
 fn draw_timeline_splitter(
@@ -1472,6 +1794,31 @@ fn draw_timeline_splitter(
     if response.drag_stopped() {
         state.timeline_resize_origin = None;
     }
+}
+
+fn animation_timeline_height_limit(total_height: f32) -> f32 {
+    (total_height - TIMELINE_MIN_PREVIEW_HEIGHT - 7.0)
+        .max(TIMELINE_MIN_HEIGHT.min(total_height * 0.45))
+}
+
+fn fixed_height_studio_region<R>(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    height: f32,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let size = Vec2::new(ui.available_width().max(0.0), height.max(0.0));
+    let parent_clip = ui.clip_rect();
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.expand_to_include_rect(rect);
+    child.set_clip_rect(rect.intersect(parent_clip));
+    add_contents(&mut child)
 }
 
 fn draw_animation_timeline(
@@ -1523,7 +1870,7 @@ fn draw_animation_timeline(
                                 .selected_text(state.selected_action.label())
                                 .width(126.0)
                                 .show_ui(ui, |ui| {
-                                    for action in CharacterAnimationAction::ALL {
+                                    for action in CharacterAnimationAction::AUTHORABLE {
                                         action_changed |= ui
                                             .selectable_value(
                                                 &mut state.selected_action,
@@ -1617,7 +1964,10 @@ fn draw_animation_timeline(
                         clip.pose_corrections
                             .iter()
                             .filter_map(|key| {
-                                (key.joint == state.selected_pose_joint).then_some(key.frame)
+                                state
+                                    .selected_pose_joints
+                                    .contains(&key.joint)
+                                    .then_some(key.frame)
                             })
                             .collect::<Vec<_>>(),
                     ),
@@ -1636,272 +1986,297 @@ fn draw_animation_timeline(
                 + hitboxes.len();
             let content_height =
                 TIMELINE_RULER_HEIGHT + track_count.max(1) as f32 * TIMELINE_TRACK_HEIGHT;
-            let pose_key_detail = format!("{} baked pose keys", animation.frame_count);
+            let pose_key_detail = format!("{} sampled frames", animation.frame_count);
 
             let mut action_range_update = None;
             let mut push_range_update = None;
             let mut weapon_updates = Vec::new();
             let mut hitbox_updates = Vec::new();
 
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.allocate_ui_with_layout(
-                    Vec2::new(TIMELINE_TRACK_LABEL_WIDTH, content_height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        timeline_track_label(ui, "TRACKS", "", STUDIO_TEXT_WEAK, false);
-                        timeline_track_label(
-                            ui,
-                            "Imported motion",
-                            &pose_key_detail,
-                            STUDIO_ACCENT,
-                            false,
-                        );
-                        if pose_track {
-                            timeline_track_label(
-                                ui,
-                                "Pose correction",
-                                &format!(
-                                    "Joint {} · {} keys",
-                                    state.selected_pose_joint,
-                                    pose_key_frames.len()
-                                ),
-                                Color32::from_rgb(174, 116, 232),
-                                true,
-                            );
-                        }
-                        if action_context.is_some() {
-                            timeline_track_label(
-                                ui,
-                                "Action range",
-                                state.selected_action.label(),
-                                STUDIO_ACCENT,
-                                false,
-                            );
-                            timeline_track_label(
-                                ui,
-                                "Root push",
-                                "authored movement",
-                                Color32::from_rgb(220, 171, 78),
-                                false,
-                            );
-                        }
-                        for track in &weapon_tracks {
-                            let hidden =
-                                if track.hidden_frame == psxed_project::ACTION_FRAME_END_FULL {
-                                    "clip end".to_string()
-                                } else {
-                                    format!("frame {}", track.hidden_frame)
-                                };
-                            let response = timeline_track_label(
-                                ui,
-                                &track.name,
-                                &format!(
-                                    "{} · visible {} · gone {} · {}f transition",
-                                    track.socket,
-                                    track.fully_visible_frame,
-                                    hidden,
-                                    track.transition_frames,
-                                ),
-                                Color32::from_rgb(86, 224, 156),
-                                state.show_attachment_sockets
-                                    && state.selected_weapon_track == track.index,
-                            );
-                            if response.clicked() {
-                                state.selected_weapon_track = track.index;
-                                state.set_studio_mode(AnimationStudioMode::Weapon);
-                            }
-                        }
-                        for hitbox in &hitboxes {
-                            let response = timeline_track_label(
-                                ui,
-                                &hitbox.name,
-                                "damage window",
-                                Color32::from_rgb(238, 102, 82),
-                                state.selected_combat_capsule == hitbox.index,
-                            );
-                            if response.clicked() {
-                                state.selected_combat_capsule = hitbox.index;
-                                state.set_studio_mode(AnimationStudioMode::Combat);
-                            }
-                        }
-                    },
-                );
-                ui.separator();
-                ui.allocate_ui_with_layout(
-                    Vec2::new(canvas_available, content_height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        egui::ScrollArea::horizontal()
-                            .id_salt("animation-timeline-scroll")
-                            .max_height(content_height)
-                            .min_scrolled_height(content_height)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_min_width(content_width);
-                                if let Some(frame) = draw_timeline_ruler(
+            egui::ScrollArea::vertical()
+                .id_salt("animation-timeline-lanes-scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(TIMELINE_TRACK_LABEL_WIDTH, content_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                timeline_track_label(ui, "TRACKS", "", STUDIO_TEXT_WEAK, false);
+                                timeline_track_label(
                                     ui,
-                                    content_width,
-                                    max_frame,
-                                    state.timeline_pixels_per_frame,
-                                    state.frame,
-                                ) {
-                                    state.frame = frame as f32;
-                                    state.playing = false;
-                                }
-                                if let Some(frame) = draw_timeline_pose_keys_lane(
-                                    ui,
-                                    content_width,
-                                    max_frame,
-                                    state.timeline_pixels_per_frame,
-                                    state.frame,
-                                ) {
-                                    state.frame = frame as f32;
-                                    state.playing = false;
-                                }
-
+                                    "Imported motion",
+                                    &pose_key_detail,
+                                    STUDIO_ACCENT,
+                                    false,
+                                );
                                 if pose_track {
-                                    if let Some(frame) = draw_timeline_sparse_keys_lane(
+                                    timeline_track_label(
                                         ui,
-                                        content_width,
-                                        max_frame,
-                                        state.timeline_pixels_per_frame,
-                                        state.frame,
-                                        &pose_key_frames,
+                                        "Pose correction",
+                                        &if state.selected_pose_joints.len() > 1 {
+                                            format!(
+                                                "{} joints · {} keys",
+                                                state.selected_pose_joints.len(),
+                                                pose_key_frames.len()
+                                            )
+                                        } else {
+                                            format!(
+                                                "Joint {} · {} keys",
+                                                state.selected_pose_joint,
+                                                pose_key_frames.len()
+                                            )
+                                        },
                                         Color32::from_rgb(174, 116, 232),
-                                    ) {
-                                        state.frame = frame as f32;
-                                        state.playing = false;
-                                    }
+                                        true,
+                                    );
                                 }
-
-                                if let Some(context) = action_context {
-                                    let mut action_start =
-                                        context.options.frame_start.min(action_max_frame);
-                                    let mut action_end = if context.options.frame_end
-                                        == psxed_project::ACTION_FRAME_END_FULL
-                                    {
-                                        action_max_frame
-                                    } else {
-                                        context.options.frame_end.min(action_max_frame)
-                                    }
-                                    .max(action_start);
-                                    let action_response = draw_timeline_range_lane(
+                                if action_context.is_some() {
+                                    timeline_track_label(
                                         ui,
-                                        "animation-timeline-action-range",
-                                        content_width,
-                                        action_max_frame,
-                                        state.timeline_pixels_per_frame,
-                                        state.frame,
-                                        action_start,
-                                        action_end,
+                                        "Action range",
+                                        state.selected_action.label(),
                                         STUDIO_ACCENT,
-                                        true,
+                                        false,
                                     );
-                                    if let Some(frame) = action_response.seek_frame {
-                                        state.frame = frame as f32;
-                                        state.playing = false;
-                                    }
-                                    if let Some((start, end)) = action_response.range {
-                                        action_start = start;
-                                        action_end = end;
-                                        action_range_update =
-                                            Some((context, action_start, action_end));
-                                    }
-
-                                    let push_start =
-                                        context.options.push_frame_start.min(action_max_frame);
-                                    let push_end = if context.options.push_frame_end
-                                        == psxed_project::ACTION_FRAME_END_FULL
-                                    {
-                                        action_max_frame
-                                    } else {
-                                        context.options.push_frame_end.min(action_max_frame)
-                                    }
-                                    .max(push_start);
-                                    let push_response = draw_timeline_range_lane(
+                                    timeline_track_label(
                                         ui,
-                                        "animation-timeline-push-range",
-                                        content_width,
-                                        action_max_frame,
-                                        state.timeline_pixels_per_frame,
-                                        state.frame,
-                                        push_start,
-                                        push_end,
+                                        "Root push",
+                                        "authored movement",
                                         Color32::from_rgb(220, 171, 78),
-                                        true,
+                                        false,
                                     );
-                                    if let Some(frame) = push_response.seek_frame {
-                                        state.frame = frame as f32;
-                                        state.playing = false;
-                                    }
-                                    if let Some((start, end)) = push_response.range {
-                                        push_range_update = Some((context, start, end));
-                                    }
                                 }
-
                                 for track in &weapon_tracks {
+                                    let hand = character_hand_for_socket(&track.socket)
+                                        .map(CharacterHand::label)
+                                        .unwrap_or(track.socket.as_str());
                                     let hidden = if track.hidden_frame
                                         == psxed_project::ACTION_FRAME_END_FULL
                                     {
-                                        action_max_frame
+                                        "clip end".to_string()
                                     } else {
-                                        track.hidden_frame.min(action_max_frame)
-                                    }
-                                    .max(track.fully_visible_frame.min(action_max_frame));
-                                    let response = draw_timeline_range_lane(
+                                        format!("frame {}", track.hidden_frame)
+                                    };
+                                    let response = timeline_track_label(
                                         ui,
-                                        &format!("animation-timeline-weapon-{}", track.index),
-                                        content_width,
-                                        action_max_frame,
-                                        state.timeline_pixels_per_frame,
-                                        state.frame,
-                                        track.fully_visible_frame.min(action_max_frame),
-                                        hidden,
+                                        &track.name,
+                                        &format!(
+                                            "{} · visible {} · gone {} · {}f transition",
+                                            hand,
+                                            track.fully_visible_frame,
+                                            hidden,
+                                            track.transition_frames,
+                                        ),
                                         Color32::from_rgb(86, 224, 156),
-                                        true,
+                                        state.show_attachment_sockets
+                                            && state.selected_weapon_track == track.index,
                                     );
-                                    if let Some(frame) = response.seek_frame {
-                                        state.frame = frame as f32;
-                                        state.playing = false;
+                                    if response.clicked() {
                                         state.selected_weapon_track = track.index;
-                                    }
-                                    if let Some((start, end)) = response.range {
-                                        weapon_updates.push((track.index, start, end));
-                                        state.selected_weapon_track = track.index;
+                                        state.set_studio_mode(AnimationStudioMode::Weapon);
                                     }
                                 }
-
                                 for hitbox in &hitboxes {
-                                    let response = draw_timeline_range_lane(
+                                    let response = timeline_track_label(
                                         ui,
-                                        &format!("animation-timeline-hitbox-{}", hitbox.index),
-                                        content_width,
-                                        action_max_frame,
-                                        state.timeline_pixels_per_frame,
-                                        state.frame,
-                                        hitbox.start.min(action_max_frame),
-                                        hitbox
-                                            .end
-                                            .min(action_max_frame)
-                                            .max(hitbox.start.min(action_max_frame)),
+                                        &hitbox.name,
+                                        "damage window",
                                         Color32::from_rgb(238, 102, 82),
-                                        true,
+                                        state.selected_combat_capsule == hitbox.index,
                                     );
-                                    if let Some(frame) = response.seek_frame {
-                                        state.frame = frame as f32;
-                                        state.playing = false;
+                                    if response.clicked() {
                                         state.selected_combat_capsule = hitbox.index;
-                                    }
-                                    if let Some((start, end)) = response.range {
-                                        hitbox_updates.push((hitbox.index, start, end));
-                                        state.selected_combat_capsule = hitbox.index;
+                                        state.set_studio_mode(AnimationStudioMode::Combat);
                                     }
                                 }
-                            });
-                    },
-                );
-            });
+                            },
+                        );
+                        ui.separator();
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(canvas_available, content_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                egui::ScrollArea::horizontal()
+                                    .id_salt("animation-timeline-scroll")
+                                    .max_height(content_height)
+                                    .min_scrolled_height(content_height)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(content_width);
+                                        if let Some(frame) = draw_timeline_ruler(
+                                            ui,
+                                            content_width,
+                                            max_frame,
+                                            state.timeline_pixels_per_frame,
+                                            state.frame,
+                                        ) {
+                                            state.frame = frame as f32;
+                                            state.playing = false;
+                                        }
+                                        if let Some(frame) = draw_timeline_pose_keys_lane(
+                                            ui,
+                                            content_width,
+                                            max_frame,
+                                            state.timeline_pixels_per_frame,
+                                            state.frame,
+                                        ) {
+                                            state.frame = frame as f32;
+                                            state.playing = false;
+                                        }
+
+                                        if pose_track {
+                                            if let Some(frame) = draw_timeline_sparse_keys_lane(
+                                                ui,
+                                                content_width,
+                                                max_frame,
+                                                state.timeline_pixels_per_frame,
+                                                state.frame,
+                                                &pose_key_frames,
+                                                Color32::from_rgb(174, 116, 232),
+                                            ) {
+                                                state.frame = frame as f32;
+                                                state.playing = false;
+                                            }
+                                        }
+
+                                        if let Some(context) = action_context {
+                                            let mut action_start =
+                                                context.options.frame_start.min(action_max_frame);
+                                            let mut action_end = if context.options.frame_end
+                                                == psxed_project::ACTION_FRAME_END_FULL
+                                            {
+                                                action_max_frame
+                                            } else {
+                                                context.options.frame_end.min(action_max_frame)
+                                            }
+                                            .max(action_start);
+                                            let action_response = draw_timeline_range_lane(
+                                                ui,
+                                                "animation-timeline-action-range",
+                                                content_width,
+                                                action_max_frame,
+                                                state.timeline_pixels_per_frame,
+                                                state.frame,
+                                                action_start,
+                                                action_end,
+                                                STUDIO_ACCENT,
+                                                true,
+                                            );
+                                            if let Some(frame) = action_response.seek_frame {
+                                                state.frame = frame as f32;
+                                                state.playing = false;
+                                            }
+                                            if let Some((start, end)) = action_response.range {
+                                                action_start = start;
+                                                action_end = end;
+                                                action_range_update =
+                                                    Some((context, action_start, action_end));
+                                            }
+
+                                            let push_start = context
+                                                .options
+                                                .push_frame_start
+                                                .min(action_max_frame);
+                                            let push_end = if context.options.push_frame_end
+                                                == psxed_project::ACTION_FRAME_END_FULL
+                                            {
+                                                action_max_frame
+                                            } else {
+                                                context.options.push_frame_end.min(action_max_frame)
+                                            }
+                                            .max(push_start);
+                                            let push_response = draw_timeline_range_lane(
+                                                ui,
+                                                "animation-timeline-push-range",
+                                                content_width,
+                                                action_max_frame,
+                                                state.timeline_pixels_per_frame,
+                                                state.frame,
+                                                push_start,
+                                                push_end,
+                                                Color32::from_rgb(220, 171, 78),
+                                                true,
+                                            );
+                                            if let Some(frame) = push_response.seek_frame {
+                                                state.frame = frame as f32;
+                                                state.playing = false;
+                                            }
+                                            if let Some((start, end)) = push_response.range {
+                                                push_range_update = Some((context, start, end));
+                                            }
+                                        }
+
+                                        for track in &weapon_tracks {
+                                            let hidden = if track.hidden_frame
+                                                == psxed_project::ACTION_FRAME_END_FULL
+                                            {
+                                                action_max_frame
+                                            } else {
+                                                track.hidden_frame.min(action_max_frame)
+                                            }
+                                            .max(track.fully_visible_frame.min(action_max_frame));
+                                            let response = draw_timeline_range_lane(
+                                                ui,
+                                                &format!(
+                                                    "animation-timeline-weapon-{}",
+                                                    track.index
+                                                ),
+                                                content_width,
+                                                action_max_frame,
+                                                state.timeline_pixels_per_frame,
+                                                state.frame,
+                                                track.fully_visible_frame.min(action_max_frame),
+                                                hidden,
+                                                Color32::from_rgb(86, 224, 156),
+                                                true,
+                                            );
+                                            if let Some(frame) = response.seek_frame {
+                                                state.frame = frame as f32;
+                                                state.playing = false;
+                                                state.selected_weapon_track = track.index;
+                                            }
+                                            if let Some((start, end)) = response.range {
+                                                weapon_updates.push((track.index, start, end));
+                                                state.selected_weapon_track = track.index;
+                                            }
+                                        }
+
+                                        for hitbox in &hitboxes {
+                                            let response = draw_timeline_range_lane(
+                                                ui,
+                                                &format!(
+                                                    "animation-timeline-hitbox-{}",
+                                                    hitbox.index
+                                                ),
+                                                content_width,
+                                                action_max_frame,
+                                                state.timeline_pixels_per_frame,
+                                                state.frame,
+                                                hitbox.start.min(action_max_frame),
+                                                hitbox
+                                                    .end
+                                                    .min(action_max_frame)
+                                                    .max(hitbox.start.min(action_max_frame)),
+                                                Color32::from_rgb(238, 102, 82),
+                                                true,
+                                            );
+                                            if let Some(frame) = response.seek_frame {
+                                                state.frame = frame as f32;
+                                                state.playing = false;
+                                                state.selected_combat_capsule = hitbox.index;
+                                            }
+                                            if let Some((start, end)) = response.range {
+                                                hitbox_updates.push((hitbox.index, start, end));
+                                                state.selected_combat_capsule = hitbox.index;
+                                            }
+                                        }
+                                    });
+                            },
+                        );
+                    });
+                });
 
             if let Some((context, start, end)) = action_range_update {
                 let mut options = context.options;
@@ -2337,10 +2712,12 @@ fn timeline_action_for_clip(
     character_id: ResourceId,
     clip: ResourceId,
 ) -> Option<CharacterAnimationAction> {
-    CharacterAnimationAction::ALL.into_iter().find(|action| {
-        timeline_action_context(project, character_id, *action)
-            .is_some_and(|context| context.clip == clip)
-    })
+    CharacterAnimationAction::AUTHORABLE
+        .into_iter()
+        .find(|action| {
+            timeline_action_context(project, character_id, *action)
+                .is_some_and(|context| context.clip == clip)
+        })
 }
 
 fn timeline_hitboxes(
@@ -2571,7 +2948,6 @@ const MOVESET_ACTION_GROUPS: &[(&str, &[CharacterAnimationAction])] = &[
             CharacterAnimationAction::HitReact,
             CharacterAnimationAction::HitReactAlt,
             CharacterAnimationAction::Stun,
-            CharacterAnimationAction::StunRecovery,
             CharacterAnimationAction::Death,
         ],
     ),
@@ -2607,11 +2983,12 @@ fn moveset_status_label(status: MovesetCapabilityStatus) -> (&'static str, Color
 
 fn draw_moveset_capability_matrix(
     ui: &mut egui::Ui,
-    project: &ProjectDocument,
+    project: &mut ProjectDocument,
     character_id: ResourceId,
     state: &mut ModelAnimationViewerState,
     clip_options: &[ViewerClipOption],
-) {
+) -> bool {
+    let mut changed = false;
     ui.heading("Moveset Matrix");
     ui.label(
         RichText::new("Ready means the action owns valid motion. A visual fallback only keeps a forced state renderable; it does not give a disabled action gameplay capability.")
@@ -2625,8 +3002,9 @@ fn draw_moveset_capability_matrix(
             Color32::from_rgb(238, 102, 82),
             "Assign a valid Animation Set to audit this character's moveset.",
         );
-        return;
+        return false;
     };
+    let binding_options = compatible_moveset_clip_options(project, character_id);
     let ready = rows
         .iter()
         .filter(|row| row.status == MovesetCapabilityStatus::Ready)
@@ -2796,16 +3174,110 @@ fn draw_moveset_capability_matrix(
                                     "No motion or visual fallback resolves".to_string(),
                                 )
                             };
-                            ui.add_sized(
-                                [motion_width, 20.0],
-                                egui::Label::new(motion_label).truncate(),
-                            )
-                            .on_hover_text(motion_hint);
+                            ui.vertical(|ui| {
+                                let mut selected = row.clip;
+                                if searchable_picker(
+                                    ui,
+                                    ("moveset-action-binding", row.action.to_index()),
+                                    &mut selected,
+                                    &motion_label,
+                                    &binding_options,
+                                    SearchablePickerConfig::optional("Disabled")
+                                        .with_width(motion_width)
+                                        .with_popup_min_width(motion_width.max(280.0))
+                                        .with_search_hint("Search compatible clips…"),
+                                ) && store_moveset_action_clip(
+                                    project,
+                                    character_id,
+                                    row.action,
+                                    selected,
+                                ) {
+                                    changed = true;
+                                    state.selected_action = row.action;
+                                    if let Some(clip) = selected.and_then(|clip| {
+                                        clip_options.iter().find(|option| {
+                                            option.resource == Some(clip) && option.previewable
+                                        })
+                                    }) {
+                                        state.selected_clip_path = Some(clip.path.clone());
+                                        state.invalidate_clip_cache();
+                                        state.reset_clip_clock();
+                                    }
+                                }
+                                ui.label(RichText::new(motion_hint).small().color(STUDIO_TEXT_WEAK));
+                            });
                             ui.end_row();
                         }
                     });
             });
     }
+    changed
+}
+
+fn compatible_moveset_clip_options(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+) -> Vec<(ResourceId, String)> {
+    let Some((model_id, set_id)) = project.resource(character_id).and_then(|resource| {
+        let ResourceData::Character(character) = &resource.data else {
+            return None;
+        };
+        Some((character.model, character.animation_set?))
+    }) else {
+        return Vec::new();
+    };
+    let set_skeleton = project.resource(set_id).and_then(|resource| {
+        let ResourceData::AnimationSet(set) = &resource.data else {
+            return None;
+        };
+        set.skeleton
+    });
+    let mut options = project
+        .resources
+        .iter()
+        .filter_map(|resource| {
+            let ResourceData::AnimationClip(clip) = &resource.data else {
+                return None;
+            };
+            let model_matches = clip
+                .target_model
+                .is_none_or(|target| Some(target) == model_id);
+            let skeleton_matches =
+                set_skeleton.is_none_or(|skeleton| clip.skeleton == Some(skeleton));
+            (model_matches && skeleton_matches).then(|| (resource.id, resource.name.clone()))
+        })
+        .collect::<Vec<_>>();
+    options.sort_by_key(|(_, label)| label.to_lowercase());
+    options
+}
+
+fn store_moveset_action_clip(
+    project: &mut ProjectDocument,
+    character_id: ResourceId,
+    action: CharacterAnimationAction,
+    clip_id: Option<ResourceId>,
+) -> bool {
+    if clip_id.is_some_and(|clip| {
+        !compatible_moveset_clip_options(project, character_id)
+            .iter()
+            .any(|(candidate, _)| *candidate == clip)
+    }) {
+        return false;
+    }
+    let Some(set_id) = character_animation_set_id(project, Some(character_id)) else {
+        return false;
+    };
+    let Some(resource) = project.resource_mut(set_id) else {
+        return false;
+    };
+    let ResourceData::AnimationSet(set) = &mut resource.data else {
+        return false;
+    };
+    if set.action_clip(action) == clip_id {
+        return false;
+    }
+    set.set_action_clip(action, clip_id);
+    true
 }
 
 fn draw_pose_correction_editor(
@@ -2818,7 +3290,9 @@ fn draw_pose_correction_editor(
 ) -> bool {
     ui.heading("Pose Keys");
     ui.label(
-        RichText::new("Select a highlighted joint, then add sparse visual corrections.")
+        RichText::new(
+            "Click a highlighted joint or drag a box around several, then author sparse corrections.",
+        )
             .small()
             .color(STUDIO_TEXT_WEAK),
     );
@@ -2828,7 +3302,7 @@ fn draw_pose_correction_editor(
         ui.weak("The selected model has no cooked joints.");
         return false;
     }
-    state.selected_pose_joint = state.selected_pose_joint.min(joint_count.saturating_sub(1));
+    state.constrain_pose_selection(joint_count);
     let mut changed = false;
     let joint_names = state
         .selected_model
@@ -2857,9 +3331,19 @@ fn draw_pose_correction_editor(
                 .with_width(132.0)
                 .with_search_hint("Search joints…"),
         ) {
-            state.selected_pose_joint = selected.unwrap_or(state.selected_pose_joint);
+            state.select_pose_joint(selected.unwrap_or(state.selected_pose_joint), false);
         }
     });
+    if state.selected_pose_joints.len() > 1 {
+        ui.label(
+            RichText::new(format!(
+                "{} joints selected · the viewport gizmo edits all of them",
+                state.selected_pose_joints.len()
+            ))
+            .small()
+            .color(Color32::from_rgb(174, 116, 232)),
+        );
+    }
     draw_axis_gizmo_controls(ui, state, true);
 
     let frame = (state.frame.round().max(0.0) as u16).min(max_frame);
@@ -3046,7 +3530,21 @@ fn draw_combat_capsule_editor(
             _ => None,
         })
         .and_then(|model_id| model_skeleton_joint_names(project, model_id));
-    ui.heading("Combat Volumes");
+    ui.horizontal(|ui| {
+        ui.heading("Combat Volumes");
+        let (icon, label) = if state.combat_capsules_visible {
+            (icons::EYE_OFF, "Hide capsules")
+        } else {
+            (icons::EYE, "Show capsules")
+        };
+        if ui
+            .button(icons::label(icon, label))
+            .on_hover_text("Show or hide combat capsules in the animation preview")
+            .clicked()
+        {
+            state.combat_capsules_visible = !state.combat_capsules_visible;
+        }
+    });
     ui.label(
         RichText::new(
             "Select a capsule, then click a highlighted body joint to attach and fit it.",
@@ -3201,9 +3699,15 @@ fn draw_combat_capsule_editor(
     });
     ui.label(
         RichText::new(match state.capsule_edit_tool {
-            CapsuleEditTool::Move => "Left-drag moves along the selected bone-local axis.",
-            CapsuleEditTool::Rotate => "Left-drag rotates around the selected bone-local axis.",
-            CapsuleEditTool::Resize => "Left/right changes radius; up/down changes segment length.",
+            CapsuleEditTool::Move => {
+                "Drag a coloured handle to move along that bone-local axis."
+            }
+            CapsuleEditTool::Rotate => {
+                "Drag a coloured handle to rotate around that bone-local axis."
+            }
+            CapsuleEditTool::Resize => {
+                "Drag a coloured handle to resize along that local axis, or drag the white centre to change radius."
+            }
         })
         .small()
         .color(STUDIO_TEXT_WEAK),
@@ -3361,7 +3865,7 @@ fn draw_combat_capsule_editor(
         egui::ComboBox::from_label("Action")
             .selected_text(action.label())
             .show_ui(ui, |ui| {
-                for candidate in psxed_project::CharacterAnimationAction::ALL {
+                for candidate in psxed_project::CharacterAnimationAction::AUTHORABLE {
                     changed |= ui
                         .selectable_value(action, candidate, candidate.label())
                         .changed();
@@ -3414,7 +3918,7 @@ fn draw_combat_capsule_editor(
         egui::ComboBox::from_label("Action")
             .selected_text(action.label())
             .show_ui(ui, |ui| {
-                for candidate in psxed_project::CharacterAnimationAction::ALL {
+                for candidate in psxed_project::CharacterAnimationAction::AUTHORABLE {
                     changed |= ui
                         .selectable_value(action, candidate, candidate.label())
                         .changed();
@@ -3536,64 +4040,37 @@ fn model_skeleton_joint_names(
     }
 }
 
-fn next_weapon_appearance_pair(
-    project: &ProjectDocument,
-    set_id: ResourceId,
+fn character_hand_for_socket(socket_name: &str) -> Option<CharacterHand> {
+    CharacterHand::ALL
+        .into_iter()
+        .find(|hand| socket_name == hand.socket_name())
+}
+
+fn weapon_appearance_pair_is_used(
+    tracks: &[psxed_project::WeaponAppearanceTrack],
     action: CharacterAnimationAction,
-    preferred_weapon: Option<ResourceId>,
-    preferred_socket: &str,
-    weapon_options: &[(ResourceId, String)],
-    socket_names: &[String],
-) -> Option<(ResourceId, String)> {
-    let used = project
-        .resource(set_id)
-        .and_then(|resource| match &resource.data {
-            ResourceData::AnimationSet(set) => Some(
-                set.weapon_appearance_tracks
-                    .iter()
-                    .filter(|track| track.action == action)
-                    .map(|track| (track.weapon, track.character_socket.clone()))
-                    .collect::<HashSet<_>>(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-    let mut push = |weapon: ResourceId, socket: String| {
-        let pair = (weapon, socket);
-        if seen.insert(pair.clone()) {
-            candidates.push(pair);
-        }
+    weapon: ResourceId,
+    socket_name: &str,
+    except_index: Option<usize>,
+) -> bool {
+    tracks.iter().enumerate().any(|(index, track)| {
+        Some(index) != except_index
+            && track.action == action
+            && track.weapon == weapon
+            && track.character_socket == socket_name
+    })
+}
+
+fn weapon_assignment_timing_label(
+    track: &psxed_project::WeaponAppearanceTrack,
+    max_frame: u16,
+) -> String {
+    let hidden = if track.hidden_frame == psxed_project::ACTION_FRAME_END_FULL {
+        "clip end".to_string()
+    } else {
+        format!("frame {}", track.hidden_frame.min(max_frame))
     };
-
-    if let Some(weapon) = preferred_weapon {
-        push(weapon, preferred_socket.to_string());
-    }
-    // A weapon's declared default hand is the most useful automatic second
-    // beat (for example light sword -> heavy sword in the same hand).
-    for (weapon_id, _) in weapon_options {
-        let socket = project
-            .resource(*weapon_id)
-            .and_then(|resource| match &resource.data {
-                ResourceData::Weapon(weapon) => Some(weapon.default_character_socket.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| preferred_socket.to_string());
-        push(*weapon_id, socket);
-    }
-    if let Some(weapon) = preferred_weapon {
-        for socket in socket_names {
-            push(weapon, socket.clone());
-        }
-    }
-    for (weapon_id, _) in weapon_options {
-        for socket in socket_names {
-            push(*weapon_id, socket.clone());
-        }
-    }
-
-    candidates.into_iter().find(|pair| !used.contains(pair))
+    format!("visible frame {} to {hidden}", track.fully_visible_frame)
 }
 
 fn draw_weapon_appearance_editor(
@@ -3620,38 +4097,27 @@ fn draw_weapon_appearance_editor(
         })
         .unwrap_or_default();
     let Some(set_id) = character_animation_set_id(project, character_id) else {
-        ui.label(RichText::new("Visibility beat").strong());
+        ui.label(RichText::new("Sword assignments").strong());
         ui.colored_label(
             Color32::from_rgb(220, 160, 80),
-            "Select a Character with an Animation Set to author appearance timing.",
+            "Select a Character with an Animation Set to assign swords to its hands.",
         );
         return false;
     };
 
-    let track_options = project
+    let all_tracks = project
         .resource(set_id)
         .and_then(|resource| match &resource.data {
-            ResourceData::AnimationSet(set) => Some(
-                set.weapon_appearance_tracks
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, track)| track.action == state.selected_action)
-                    .map(|(index, track)| {
-                        let weapon_name = weapon_options
-                            .iter()
-                            .find(|(id, _)| *id == track.weapon)
-                            .map(|(_, name)| name.as_str())
-                            .unwrap_or("Missing weapon");
-                        (
-                            index,
-                            format!("{} · {}", weapon_name, track.character_socket),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            ),
+            ResourceData::AnimationSet(set) => Some(set.weapon_appearance_tracks.clone()),
             _ => None,
         })
         .unwrap_or_default();
+    let track_options = all_tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, track)| track.action == state.selected_action)
+        .map(|(index, track)| (index, track.clone()))
+        .collect::<Vec<_>>();
     if !track_options
         .iter()
         .any(|(index, _)| *index == state.selected_weapon_track)
@@ -3662,71 +4128,89 @@ fn draw_weapon_appearance_editor(
     }
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Visibility beat").strong());
+        ui.label(RichText::new("Sword assignments").strong());
         ui.label(
             RichText::new(state.selected_action.label())
                 .small()
                 .color(STUDIO_ACCENT),
         );
     });
+    ui.label(
+        RichText::new(
+            "Choose a sword, then assign it to either hand. Use both buttons to equip both hands.",
+        )
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
     let current_frame = (state.frame.round().max(0.0) as u16).min(max_frame);
-    let default_weapon = state
-        .preview_weapon
-        .or_else(|| weapon_options.first().map(|(id, _)| *id));
-    let default_socket = socket_names
-        .get(state.selected_attachment_socket)
-        .cloned()
-        .or_else(|| {
-            default_weapon.and_then(|weapon_id| {
-                project.resource(weapon_id).and_then(|resource| {
-                    let ResourceData::Weapon(weapon) = &resource.data else {
-                        return None;
-                    };
-                    Some(weapon.default_character_socket.clone())
-                })
-            })
+
+    if !weapon_options
+        .iter()
+        .any(|(weapon, _)| Some(*weapon) == state.assignment_weapon)
+    {
+        state.assignment_weapon = state
+            .preview_weapon
+            .filter(|weapon| weapon_options.iter().any(|(id, _)| id == weapon))
+            .or_else(|| weapon_options.first().map(|(weapon, _)| *weapon));
+    }
+    let mut assignment_weapon = state.assignment_weapon;
+    let assignment_weapon_label = assignment_weapon
+        .and_then(|weapon| {
+            weapon_options
+                .iter()
+                .find(|(id, _)| *id == weapon)
+                .map(|(_, name)| name.as_str())
         })
-        .unwrap_or_else(|| "right_hand_grip".to_string());
-    let add_pair = next_weapon_appearance_pair(
-        project,
-        set_id,
-        state.selected_action,
-        default_weapon,
-        &default_socket,
-        &weapon_options,
-        &socket_names,
-    );
-    let add_help = add_pair.as_ref().map_or_else(
-        || "Every available weapon/socket pair already has a beat for this action".to_string(),
-        |(weapon, socket)| {
-            format!(
-                "Add a {} visibility beat on '{}' at the current frame",
-                project.resource_name(*weapon).unwrap_or("weapon"),
-                socket
-            )
-        },
-    );
-    let mut add_track = None;
-    let mut delete_track = false;
+        .unwrap_or("Choose sword");
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(
-                add_pair.is_some(),
-                egui::Button::new(icons::label(icons::PLUS, "Add beat")),
-            )
-            .on_hover_text(add_help)
-            .clicked()
-        {
-            add_track = add_pair.clone();
+        ui.label("Sword");
+        if searchable_picker(
+            ui,
+            "animation-new-weapon-assignment-resource",
+            &mut assignment_weapon,
+            assignment_weapon_label,
+            &weapon_options,
+            SearchablePickerConfig::required().with_width(180.0),
+        ) {
+            state.assignment_weapon = assignment_weapon;
         }
-        if ui
-            .add_enabled(
-                !track_options.is_empty(),
-                egui::Button::new(icons::label(icons::TRASH, "Delete")),
-            )
-            .clicked()
-        {
-            delete_track = true;
+    });
+
+    let mut add_track = None;
+    ui.horizontal(|ui| {
+        for hand in CharacterHand::ALL {
+            let hand_defined = socket_names.iter().any(|name| name == hand.socket_name());
+            let already_assigned = assignment_weapon.is_some_and(|weapon| {
+                weapon_appearance_pair_is_used(
+                    &all_tracks,
+                    state.selected_action,
+                    weapon,
+                    hand.socket_name(),
+                    None,
+                )
+            });
+            let enabled = assignment_weapon.is_some() && hand_defined && !already_assigned;
+            let help = if !hand_defined {
+                format!("Define the {} below before assigning a sword", hand.label())
+            } else if already_assigned {
+                format!("This sword is already assigned to the {}", hand.label())
+            } else {
+                format!(
+                    "Assign this sword to the {} at the current frame",
+                    hand.label()
+                )
+            };
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(icons::label(icons::PLUS, hand.label())),
+                )
+                .on_hover_text(help)
+                .clicked()
+            {
+                add_track =
+                    assignment_weapon.map(|weapon| (weapon, hand.socket_name().to_string()));
+            }
         }
     });
     if let Some((weapon, character_socket)) = add_track {
@@ -3740,51 +4224,123 @@ fn draw_weapon_appearance_editor(
             .push(psxed_project::WeaponAppearanceTrack {
                 action: state.selected_action,
                 weapon,
-                character_socket,
+                character_socket: character_socket.clone(),
                 fully_visible_frame: current_frame,
                 hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
                 transition_frames: psxed_project::WEAPON_APPEARANCE_DEFAULT_TRANSITION_FRAMES,
             });
         state.selected_weapon_track = set.weapon_appearance_tracks.len() - 1;
         state.preview_weapon = Some(weapon);
+        if let Some(index) = socket_names
+            .iter()
+            .position(|name| name == &character_socket)
+        {
+            state.selected_attachment_socket = index;
+        }
         return true;
     }
-    if delete_track {
+
+    if track_options.is_empty() {
+        ui.label(
+            RichText::new("No swords are assigned to this action yet.")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+        return false;
+    }
+
+    ui.add_space(4.0);
+    ui.label(RichText::new("Current assignments").strong());
+    let mut remove_track = None;
+    for (index, track) in &track_options {
+        let weapon_name = weapon_options
+            .iter()
+            .find(|(weapon, _)| *weapon == track.weapon)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("Missing sword");
+        let hand_name = character_hand_for_socket(&track.character_socket)
+            .map(CharacterHand::label)
+            .unwrap_or(track.character_socket.as_str());
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .small_button(icons::label(icons::TRASH, "Remove"))
+                    .on_hover_text(format!("Remove {weapon_name} from the {hand_name}"))
+                    .clicked()
+                {
+                    remove_track = Some(*index);
+                }
+                if ui
+                    .selectable_label(
+                        state.selected_weapon_track == *index,
+                        format!("{hand_name}: {weapon_name}"),
+                    )
+                    .clicked()
+                {
+                    state.selected_weapon_track = *index;
+                    state.preview_weapon = Some(track.weapon);
+                    if let Some(socket_index) = socket_names
+                        .iter()
+                        .position(|name| name == &track.character_socket)
+                    {
+                        state.selected_attachment_socket = socket_index;
+                    }
+                }
+            });
+            ui.label(
+                RichText::new(weapon_assignment_timing_label(track, max_frame))
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            );
+        });
+        ui.add_space(3.0);
+    }
+    if let Some(index) = remove_track {
         let Some(resource) = project.resource_mut(set_id) else {
             return false;
         };
         let ResourceData::AnimationSet(set) = &mut resource.data else {
             return false;
         };
-        if state.selected_weapon_track < set.weapon_appearance_tracks.len() {
-            set.weapon_appearance_tracks
-                .remove(state.selected_weapon_track);
-            state.selected_weapon_track = state.selected_weapon_track.saturating_sub(1);
+        if index < set.weapon_appearance_tracks.len() {
+            set.weapon_appearance_tracks.remove(index);
+            if let Some((next_index, next)) = set
+                .weapon_appearance_tracks
+                .iter()
+                .enumerate()
+                .find(|(_, track)| track.action == state.selected_action)
+            {
+                state.selected_weapon_track = next_index;
+                state.preview_weapon = Some(next.weapon);
+            } else {
+                state.selected_weapon_track = 0;
+                state.preview_weapon = None;
+            }
             return true;
         }
     }
 
-    if track_options.is_empty() {
-        ui.label(
-            RichText::new("No weapon beat for this action. Add one at the playhead.")
-                .small()
-                .color(STUDIO_TEXT_WEAK),
-        );
-        return false;
-    }
-    let selected_label = track_options
+    ui.separator();
+    ui.label(RichText::new("Edit selected assignment").strong());
+    let Some((_, selected_snapshot)) = track_options
         .iter()
         .find(|(index, _)| *index == state.selected_weapon_track)
-        .map(|(_, label)| label.as_str())
-        .unwrap_or("Select beat");
-    egui::ComboBox::from_id_salt("animation-weapon-appearance-track-select")
-        .selected_text(selected_label)
-        .width(250.0)
-        .show_ui(ui, |ui| {
-            for (index, label) in &track_options {
-                ui.selectable_value(&mut state.selected_weapon_track, *index, label);
-            }
-        });
+    else {
+        return false;
+    };
+    let safe_weapon_options = weapon_options
+        .iter()
+        .filter(|(weapon, _)| {
+            !weapon_appearance_pair_is_used(
+                &all_tracks,
+                state.selected_action,
+                *weapon,
+                &selected_snapshot.character_socket,
+                Some(state.selected_weapon_track),
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
 
     let Some(resource) = project.resource_mut(set_id) else {
         return false;
@@ -3801,7 +4357,7 @@ fn draw_weapon_appearance_editor(
     let mut changed = false;
     let mut selected_weapon = Some(track.weapon);
     ui.horizontal(|ui| {
-        ui.label("Weapon");
+        ui.label("Sword");
         if searchable_picker(
             ui,
             "animation-weapon-appearance-resource",
@@ -3810,28 +4366,55 @@ fn draw_weapon_appearance_editor(
                 .iter()
                 .find(|(id, _)| *id == track.weapon)
                 .map(|(_, name)| name.as_str())
-                .unwrap_or("Missing weapon"),
-            &weapon_options,
+                .unwrap_or("Missing sword"),
+            &safe_weapon_options,
             SearchablePickerConfig::required().with_width(180.0),
         ) {
             if let Some(weapon) = selected_weapon {
                 track.weapon = weapon;
                 state.preview_weapon = Some(weapon);
+                state.assignment_weapon = Some(weapon);
                 changed = true;
             }
         }
     });
     ui.horizontal(|ui| {
-        ui.label("Hand socket");
-        egui::ComboBox::from_id_salt("animation-weapon-appearance-socket")
-            .selected_text(&track.character_socket)
-            .show_ui(ui, |ui| {
-                for name in &socket_names {
-                    changed |= ui
-                        .selectable_value(&mut track.character_socket, name.clone(), name)
-                        .changed();
+        ui.label("Hand");
+        for hand in CharacterHand::ALL {
+            let hand_defined = socket_names.iter().any(|name| name == hand.socket_name());
+            let pair_used = weapon_appearance_pair_is_used(
+                &all_tracks,
+                state.selected_action,
+                track.weapon,
+                hand.socket_name(),
+                Some(state.selected_weapon_track),
+            );
+            let enabled = hand_defined && !pair_used;
+            ui.add_enabled_ui(enabled, |ui| {
+                if ui
+                    .selectable_value(
+                        &mut track.character_socket,
+                        hand.socket_name().to_string(),
+                        hand.label(),
+                    )
+                    .changed()
+                {
+                    if let Some(index) = socket_names
+                        .iter()
+                        .position(|name| name == hand.socket_name())
+                    {
+                        state.selected_attachment_socket = index;
+                    }
+                    changed = true;
                 }
+            })
+            .response
+            .on_disabled_hover_text(if !hand_defined {
+                format!("Define the {} below first", hand.label())
+            } else {
+                format!("This sword is already assigned to the {}", hand.label())
             });
+        }
     });
     ui.horizontal(|ui| {
         ui.label("Fully visible");
@@ -3948,13 +4531,218 @@ fn draw_weapon_grip_editor(
     changed
 }
 
+fn suggested_hand_joint(joint_names: Option<&[String]>, hand: CharacterHand) -> Option<u16> {
+    let suffix = match hand {
+        CharacterHand::Right => "righthand",
+        CharacterHand::Left => "lefthand",
+    };
+    joint_names?.iter().enumerate().find_map(|(index, name)| {
+        let normalized = name
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        normalized
+            .ends_with(suffix)
+            .then_some(index.try_into().unwrap_or(u16::MAX))
+    })
+}
+
+fn hand_assignment_count(
+    project: &ProjectDocument,
+    model_id: ResourceId,
+    hand: CharacterHand,
+) -> usize {
+    let animation_sets = project
+        .resources
+        .iter()
+        .filter_map(|resource| {
+            let ResourceData::Character(character) = &resource.data else {
+                return None;
+            };
+            (character.model == Some(model_id))
+                .then_some(character.animation_set)
+                .flatten()
+        })
+        .collect::<HashSet<_>>();
+    animation_sets
+        .into_iter()
+        .filter_map(|set_id| project.resource(set_id))
+        .filter_map(|resource| match &resource.data {
+            ResourceData::AnimationSet(set) => Some(set),
+            _ => None,
+        })
+        .map(|set| {
+            set.weapon_appearance_tracks
+                .iter()
+                .filter(|track| track.character_socket == hand.socket_name())
+                .count()
+        })
+        .sum()
+}
+
+fn draw_character_hand_editor(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    model_id: ResourceId,
+    state: &mut ModelAnimationViewerState,
+    joint_names: Option<&[String]>,
+) -> bool {
+    let sockets = project
+        .resource(model_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Model(model) => Some(model.attachments.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let hand_is_defined = |hand: CharacterHand| {
+        sockets
+            .iter()
+            .any(|attachment| attachment.name == hand.socket_name())
+    };
+    let any_hand_missing = CharacterHand::ALL
+        .into_iter()
+        .any(|hand| !hand_is_defined(hand));
+    let hand_status = CharacterHand::ALL
+        .into_iter()
+        .map(|hand| {
+            format!(
+                "{} {}",
+                match hand {
+                    CharacterHand::Right => "Right",
+                    CharacterHand::Left => "Left",
+                },
+                if hand_is_defined(hand) {
+                    "ready"
+                } else {
+                    "missing"
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let mut define_hand = None;
+    let mut remove_hand = None;
+    egui::CollapsingHeader::new(format!("Hands · {hand_status}"))
+        .default_open(any_hand_missing)
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(
+                    "Define each hand once on the rig. Select it here, then click the matching hand joint in the preview or use the gizmo to fine-tune it.",
+                )
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+            );
+            for hand in CharacterHand::ALL {
+                let socket_index = sockets
+                    .iter()
+                    .position(|attachment| attachment.name == hand.socket_name());
+                let assignment_count = hand_assignment_count(project, model_id, hand);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(hand.label()).strong());
+                        if let Some(index) = socket_index {
+                            let attachment = &sockets[index];
+                            ui.label(
+                                RichText::new(crate::inspector_character_ui::joint_label(
+                                    attachment.joint,
+                                    joint_names,
+                                ))
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                            );
+                            if ui
+                                .selectable_label(
+                                    state.selected_attachment_socket == index,
+                                    "Select",
+                                )
+                                .clicked()
+                            {
+                                state.selected_attachment_socket = index;
+                                state.weapon_transform_target =
+                                    WeaponTransformTarget::CharacterSocket;
+                            }
+                            let response = ui
+                                .add_enabled(
+                                    assignment_count == 0,
+                                    egui::Button::new(icons::label(
+                                        icons::TRASH,
+                                        "Remove hand",
+                                    )),
+                                )
+                                .on_hover_text(if assignment_count == 0 {
+                                    format!("Remove the {} definition", hand.label())
+                                } else {
+                                    format!(
+                                        "Remove its {assignment_count} sword assignment(s) first"
+                                    )
+                                });
+                            if response.clicked() {
+                                remove_hand = Some(index);
+                            }
+                        } else if ui
+                            .button(icons::label(
+                                icons::PLUS,
+                                &format!("Define {}", hand.label()),
+                            ))
+                            .clicked()
+                        {
+                            define_hand = Some(hand);
+                        }
+                    });
+                    if socket_index.is_none() {
+                        ui.label(
+                            RichText::new("Not defined")
+                                .small()
+                                .color(Color32::from_rgb(220, 160, 80)),
+                        );
+                    }
+                });
+                ui.add_space(3.0);
+            }
+        });
+
+    if let Some(index) = remove_hand {
+        let Some(resource) = project.resource_mut(model_id) else {
+            return false;
+        };
+        let ResourceData::Model(model) = &mut resource.data else {
+            return false;
+        };
+        if index < model.attachments.len() {
+            model.attachments.remove(index);
+            state.selected_attachment_socket = state
+                .selected_attachment_socket
+                .min(model.attachments.len().saturating_sub(1));
+            return true;
+        }
+    }
+    if let Some(hand) = define_hand {
+        let joint = suggested_hand_joint(joint_names, hand).unwrap_or(0);
+        let Some(resource) = project.resource_mut(model_id) else {
+            return false;
+        };
+        let ResourceData::Model(model) = &mut resource.data else {
+            return false;
+        };
+        let mut attachment = hand.attachment();
+        attachment.joint = joint;
+        model.attachments.push(attachment);
+        state.selected_attachment_socket = model.attachments.len() - 1;
+        state.weapon_transform_target = WeaponTransformTarget::CharacterSocket;
+        return true;
+    }
+
+    false
+}
+
 fn draw_attachment_socket_editor(
     ui: &mut egui::Ui,
     project: &mut ProjectDocument,
     model_id: ResourceId,
     character_id: Option<ResourceId>,
     state: &mut ModelAnimationViewerState,
-    model: Option<&LoadedModelContext>,
+    _model: Option<&LoadedModelContext>,
     max_frame: u16,
 ) -> bool {
     let mut changed = false;
@@ -3966,20 +4754,19 @@ fn draw_attachment_socket_editor(
     ui.heading("Weapon Studio");
     ui.label(
         RichText::new(
-            "Choose a visibility beat, scrub to its timing, then align the character socket and weapon grip in the same preview.",
+            "Define hands, assign swords for this action, then align them in the preview.",
         )
         .small()
         .color(STUDIO_TEXT_WEAK),
     );
     ui.add_space(6.0);
 
-    changed |= draw_weapon_appearance_editor(ui, project, model_id, character_id, state, max_frame);
+    let joint_names = model_skeleton_joint_names(project, model_id);
+    changed |= draw_character_hand_editor(ui, project, model_id, state, joint_names.as_deref());
     ui.separator();
 
-    let joint_count = model
-        .and_then(|model| psx_asset::Model::from_bytes(&model.model_bytes).ok())
-        .map(|model| model.joint_count());
-    let joint_names = model_skeleton_joint_names(project, model_id);
+    changed |= draw_weapon_appearance_editor(ui, project, model_id, character_id, state, max_frame);
+    ui.separator();
 
     let weapon_options: Vec<(ResourceId, String)> = project
         .resources
@@ -4000,7 +4787,7 @@ fn draw_attachment_socket_editor(
         .is_some_and(|track| track.action == state.selected_action);
     if !appearance_controls_weapon {
         ui.horizontal(|ui| {
-            ui.label("Preview weapon");
+            ui.label("Preview sword");
             let selected_label = state
                 .preview_weapon
                 .and_then(|id| weapon_options.iter().find(|(option, _)| *option == id))
@@ -4016,82 +4803,33 @@ fn draw_attachment_socket_editor(
                 });
         })
         .response
-        .on_hover_text("Render this Weapon riding the selected socket, composed like Play");
+        .on_hover_text("Preview this sword in the currently selected hand");
     }
+
+    if state.preview_weapon.is_none() {
+        state.weapon_transform_target = WeaponTransformTarget::CharacterSocket;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Viewport gizmo");
+        ui.selectable_value(
+            &mut state.weapon_transform_target,
+            WeaponTransformTarget::CharacterSocket,
+            "Hand point",
+        )
+        .on_hover_text("Move the selected hand point on the character");
+        ui.add_enabled_ui(state.preview_weapon.is_some(), |ui| {
+            ui.selectable_value(
+                &mut state.weapon_transform_target,
+                WeaponTransformTarget::WeaponGrip,
+                "Sword grip",
+            )
+            .on_hover_text("Move the alignment point authored on the selected sword");
+        });
+    });
+    draw_axis_gizmo_controls(ui, state, false);
 
     if let Some(weapon_id) = state.preview_weapon {
         changed |= draw_weapon_grip_editor(ui, project, weapon_id);
-    }
-
-    ui.separator();
-    ui.label(RichText::new("Character socket").strong());
-    ui.label(
-        RichText::new(
-            "Select a socket, then click a highlighted body joint to attach it. Drag in the viewport to place it.",
-        )
-        .small()
-        .color(STUDIO_TEXT_WEAK),
-    );
-
-    let Some(resource) = project.resource_mut(model_id) else {
-        ui.colored_label(Color32::from_rgb(220, 120, 100), "Model is missing");
-        return false;
-    };
-    let ResourceData::Model(model_resource) = &mut resource.data else {
-        return false;
-    };
-    let sockets = &mut model_resource.attachments;
-
-    let socket_options = sockets
-        .iter()
-        .enumerate()
-        .map(|(index, socket)| {
-            (
-                index,
-                format!(
-                    "{} · {}",
-                    socket.name,
-                    crate::inspector_character_ui::joint_label(
-                        socket.joint,
-                        joint_names.as_deref()
-                    )
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    ui.horizontal(|ui| {
-        let selected_label = sockets
-            .get(state.selected_attachment_socket)
-            .map(|socket| socket.name.as_str())
-            .unwrap_or("No socket");
-        let mut selected = sockets
-            .get(state.selected_attachment_socket)
-            .map(|_| state.selected_attachment_socket);
-        if searchable_picker(
-            ui,
-            "animation-attachment-socket",
-            &mut selected,
-            selected_label,
-            &socket_options,
-            SearchablePickerConfig::required()
-                .with_width(176.0)
-                .with_search_hint("Search sockets…"),
-        ) {
-            state.selected_attachment_socket = selected.unwrap_or(state.selected_attachment_socket);
-        }
-    });
-
-    draw_axis_gizmo_controls(ui, state, false);
-    ui.separator();
-
-    changed |= crate::inspector_character_ui::attachment_socket_list_editor(
-        ui,
-        sockets,
-        joint_count,
-        joint_names.as_deref(),
-    );
-    if state.selected_attachment_socket >= sockets.len() {
-        state.selected_attachment_socket = sockets.len().saturating_sub(1);
     }
     changed
 }
@@ -4123,7 +4861,15 @@ fn attach_selected_socket_to_joint(
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum AxisEditDelta {
     Translate(i32),
-    Rotate(Vec2),
+    Rotate(i32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CapsuleGizmoDelta {
+    Move(i32),
+    Rotate(i32),
+    ResizeAxis(i32),
+    ResizeRadius(i32),
 }
 
 fn manipulate_pose_correction(
@@ -4136,7 +4882,7 @@ fn manipulate_pose_correction(
 ) -> bool {
     let edit_amount = match delta {
         AxisEditDelta::Translate(amount) => amount,
-        AxisEditDelta::Rotate(delta) => (delta.x * 12.0).round() as i32,
+        AxisEditDelta::Rotate(amount) => amount,
     };
     if edit_amount == 0 {
         return false;
@@ -4180,6 +4926,21 @@ fn manipulate_pose_correction(
     true
 }
 
+fn manipulate_pose_corrections(
+    project: &mut ProjectDocument,
+    clip_id: ResourceId,
+    joints: &[u16],
+    frame: u16,
+    axis: CapsuleEditAxis,
+    delta: AxisEditDelta,
+) -> bool {
+    let mut changed = false;
+    for &joint in joints {
+        changed |= manipulate_pose_correction(project, clip_id, joint, frame, axis, delta);
+    }
+    changed
+}
+
 fn manipulate_selected_socket(
     project: &mut ProjectDocument,
     model_id: ResourceId,
@@ -4197,10 +4958,7 @@ fn manipulate_selected_socket(
         return false;
     };
     match delta {
-        AxisEditDelta::Rotate(delta) => {
-            // 12 q12 turn-units per pixel is the capsule editor's 0.018
-            // radians per pixel expressed in turns.
-            let amount = (delta.x * 12.0).round() as i32;
+        AxisEditDelta::Rotate(amount) => {
             if amount == 0 {
                 return false;
             }
@@ -4216,6 +4974,42 @@ fn manipulate_selected_socket(
             socket.translation[index] = socket.translation[index]
                 .saturating_add(amount)
                 .clamp(i16::MIN as i32, i16::MAX as i32);
+        }
+    }
+    true
+}
+
+fn manipulate_selected_weapon_grip(
+    project: &mut ProjectDocument,
+    weapon_id: ResourceId,
+    axis: CapsuleEditAxis,
+    delta: AxisEditDelta,
+) -> bool {
+    let Some(resource) = project.resource_mut(weapon_id) else {
+        return false;
+    };
+    let ResourceData::Weapon(weapon) = &mut resource.data else {
+        return false;
+    };
+    let index = axis.index();
+    match delta {
+        AxisEditDelta::Translate(amount) => {
+            if amount == 0 {
+                return false;
+            }
+            // The grip is subtracted from the socket transform at runtime, so
+            // invert the authored delta to make the viewport handle follow the
+            // pointer in the same direction as the character-socket handle.
+            weapon.grip.translation[index] = weapon.grip.translation[index]
+                .saturating_sub(amount)
+                .clamp(i16::MIN as i32, i16::MAX as i32);
+        }
+        AxisEditDelta::Rotate(amount) => {
+            if amount == 0 {
+                return false;
+            }
+            let turned = i32::from(weapon.grip.rotation_q12[index]).saturating_sub(amount);
+            weapon.grip.rotation_q12[index] = ((turned + 2048).rem_euclid(4096) - 2048) as i16;
         }
     }
     true
@@ -4256,9 +5050,8 @@ fn manipulate_selected_capsule(
     project: &mut ProjectDocument,
     character_id: ResourceId,
     capsule_index: usize,
-    tool: CapsuleEditTool,
     axis: CapsuleEditAxis,
-    delta: Vec2,
+    delta: CapsuleGizmoDelta,
 ) -> bool {
     let Some(resource) = project.resource_mut(character_id) else {
         return false;
@@ -4270,9 +5063,8 @@ fn manipulate_selected_capsule(
         return false;
     };
     let capsule = &mut volume.capsule;
-    match tool {
-        CapsuleEditTool::Move => {
-            let amount = ((delta.x - delta.y) * 2.0).round() as i32;
+    match delta {
+        CapsuleGizmoDelta::Move(amount) => {
             if amount == 0 {
                 return false;
             }
@@ -4281,8 +5073,8 @@ fn manipulate_selected_capsule(
                 compact_capsule_coord(capsule.start[index].saturating_add(amount));
             capsule.end[index] = compact_capsule_coord(capsule.end[index].saturating_add(amount));
         }
-        CapsuleEditTool::Rotate => {
-            let angle = delta.x * 0.018;
+        CapsuleGizmoDelta::Rotate(turn_q12) => {
+            let angle = turn_q12 as f32 * std::f32::consts::TAU / 4096.0;
             if angle.abs() < f32::EPSILON {
                 return false;
             }
@@ -4315,46 +5107,26 @@ fn manipulate_selected_capsule(
                 }
             }
         }
-        CapsuleEditTool::Resize => {
-            let radius_delta = (delta.x * 2.0).round() as i32;
+        CapsuleGizmoDelta::ResizeRadius(radius_delta) => {
+            if radius_delta == 0 {
+                return false;
+            }
             let radius = i32::from(capsule.radius)
                 .saturating_add(radius_delta)
                 .clamp(1, 8192);
             capsule.radius = radius as u16;
-
-            let length_delta = (-delta.y * 2.0).round();
-            if length_delta != 0.0 {
-                let mut direction = [
-                    (capsule.end[0] - capsule.start[0]) as f32,
-                    (capsule.end[1] - capsule.start[1]) as f32,
-                    (capsule.end[2] - capsule.start[2]) as f32,
-                ];
-                let length = (direction[0] * direction[0]
-                    + direction[1] * direction[1]
-                    + direction[2] * direction[2])
-                    .sqrt();
-                if length <= f32::EPSILON {
-                    direction[axis.index()] = 1.0;
-                } else {
-                    for component in &mut direction {
-                        *component /= length;
-                    }
-                }
-                // `component` indexes direction plus both capsule ends.
-                #[allow(clippy::needless_range_loop)]
-                for component in 0..3 {
-                    let half = direction[component] * length_delta * 0.5;
-                    capsule.start[component] = compact_capsule_coord(
-                        (capsule.start[component] as f32 - half).round() as i32,
-                    );
-                    capsule.end[component] = compact_capsule_coord(
-                        (capsule.end[component] as f32 + half).round() as i32,
-                    );
-                }
-            }
-            if radius_delta == 0 && length_delta == 0.0 {
+        }
+        CapsuleGizmoDelta::ResizeAxis(amount) => {
+            if amount == 0 {
                 return false;
             }
+            let index = axis.index();
+            let start_amount = amount / 2;
+            let end_amount = amount - start_amount;
+            capsule.start[index] =
+                compact_capsule_coord(capsule.start[index].saturating_sub(start_amount));
+            capsule.end[index] =
+                compact_capsule_coord(capsule.end[index].saturating_add(end_amount));
         }
     }
     true
@@ -4364,11 +5136,15 @@ fn compact_capsule_coord(value: i32) -> i32 {
     value.clamp(i16::MIN as i32, i16::MAX as i32)
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct PreviewInteraction {
     clicked_joint: Option<u16>,
-    edit_delta: Option<Vec2>,
+    joint_selection_additive: bool,
+    marquee_joints: Option<Vec<u16>>,
     gizmo_move_units: Option<i32>,
+    gizmo_rotate_q12: Option<i32>,
+    gizmo_resize_units: Option<i32>,
+    gizmo_radius_units: Option<i32>,
 }
 
 fn draw_playback_controls(
@@ -4387,11 +5163,16 @@ fn draw_playback_controls(
         let frame_count = animation.frame_count.max(1);
         if state.playing {
             let delta = (now - state.last_time_seconds).max(0.0) as f32;
-            state.frame += delta * animation.sample_rate_hz as f32 * state.playback_speed.max(0.0);
-            let cycle = frame_count.saturating_sub(1).max(1) as f32;
-            while state.frame >= cycle {
-                state.frame -= cycle;
-            }
+            let delta_frames =
+                delta * animation.sample_rate_hz as f32 * state.playback_speed.max(0.0);
+            let (frame, playing) = advance_animation_playback(
+                state.frame,
+                delta_frames,
+                frame_count,
+                clip.is_none_or(|clip| clip.looping),
+            );
+            state.frame = frame;
+            state.playing = playing;
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));
         }
@@ -4419,6 +5200,12 @@ fn draw_playback_controls(
         }
         return action;
     };
+    if !crate::editor_helpers::widget_owns_keyboard_shortcuts(ui.ctx())
+        && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+    {
+        state.playing = !state.playing;
+        state.last_time_seconds = now;
+    }
     let max_frame = animation.frame_count.saturating_sub(1).max(1);
     let frame = state.frame.round() as u16;
     if ui
@@ -4435,7 +5222,11 @@ fn draw_playback_controls(
         } else {
             icons::text(icons::PLAY, 14.0)
         })
-        .on_hover_text(if state.playing { "Pause" } else { "Play" })
+        .on_hover_text(if state.playing {
+            "Pause (Space)"
+        } else {
+            "Play (Space)"
+        })
         .clicked()
     {
         state.playing = !state.playing;
@@ -4480,6 +5271,21 @@ fn draw_playback_controls(
     )
     .on_hover_text("Playback speed");
     action
+}
+
+fn advance_animation_playback(
+    frame: f32,
+    delta_frames: f32,
+    frame_count: u16,
+    looping: bool,
+) -> (f32, bool) {
+    let last_frame = frame_count.saturating_sub(1) as f32;
+    if !looping {
+        let next = (frame + delta_frames.max(0.0)).min(last_frame);
+        return (next, next < last_frame);
+    }
+    let cycle = last_frame.max(1.0);
+    ((frame + delta_frames.max(0.0)).rem_euclid(cycle), true)
 }
 
 fn draw_clip_calibration_menu(
@@ -4691,18 +5497,24 @@ fn draw_preview(
     preview_texture: &mut Option<egui::TextureHandle>,
     combat_capsules: &[model_import_preview::PreviewCombatCapsule],
     sockets: &[model_import_preview::PreviewSocket],
-    equipped_weapon: Option<&model_import_preview::PreviewEquippedWeapon<'_>>,
+    equipped_weapons: &[model_import_preview::PreviewEquippedWeapon<'_>],
     character_material: Option<&model_import_preview::PreviewMaterialLayer<'_>>,
     selected_joint: Option<u16>,
     joint_picking: bool,
 ) -> PreviewInteraction {
     let size = ui.available_size();
-    let size = Vec2::new(size.x.max(360.0), size.y.max(260.0));
+    let size = Vec2::new(size.x.max(360.0), size.y.max(TIMELINE_MIN_PREVIEW_HEIGHT));
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let pointer_delta = ui.input(|input| input.pointer.delta());
+    let primary_edits_content = state.show_pose_corrections
+        || !combat_capsules.is_empty()
+        || !sockets.is_empty()
+        || equipped_weapons.iter().any(|weapon| weapon.show_grip_gizmo);
     let orbiting = response.dragged_by(egui::PointerButton::Middle)
         || response.dragged_by(egui::PointerButton::Secondary)
-        || (!joint_picking && response.dragged_by(egui::PointerButton::Primary));
+        || (!joint_picking
+            && !primary_edits_content
+            && response.dragged_by(egui::PointerButton::Primary));
     if orbiting {
         let delta = pointer_delta;
         state.yaw_q12 = (state.yaw_q12 - (delta.x * 6.0) as i32).rem_euclid(4096);
@@ -4711,13 +5523,10 @@ fn draw_preview(
     let primary_drag_delta = (response.dragged_by(egui::PointerButton::Primary)
         && pointer_delta != Vec2::ZERO)
         .then_some(pointer_delta);
-    let mut edit_delta = (!combat_capsules.is_empty()
-        && response.dragged_by(egui::PointerButton::Primary)
-        && pointer_delta != Vec2::ZERO)
-        .then_some(pointer_delta);
     let primary_down = ui.input(|input| input.pointer.primary_down());
     if !primary_down {
-        state.gizmo_drag_axis = None;
+        state.gizmo_drag_handle = None;
+        state.gizmo_drag_pose_frame = None;
         state.gizmo_drag_fractional_units = 0.0;
     }
     if response.hovered() {
@@ -4839,7 +5648,7 @@ fn draw_preview(
         AnimationPreviewQuality::Authoring => egui::TextureOptions::LINEAR,
         AnimationPreviewQuality::PsxOutput => egui::TextureOptions::NEAREST,
     };
-    let render = model_import_preview::render_import_model_preview_with_combat_capsules_at_size(
+    let render = model_import_preview::render_import_model_preview_with_equipment_set_at_size(
         &model.model_bytes,
         &clip.bytes,
         atlas,
@@ -4863,7 +5672,7 @@ fn draw_preview(
         render_size,
         combat_capsules,
         sockets,
-        equipped_weapon,
+        equipped_weapons,
         character_material,
         selected_joint,
         state.show_pose_corrections.then_some(
@@ -4876,10 +5685,25 @@ fn draw_preview(
     );
 
     let mut clicked_joint = None;
+    let mut joint_selection_additive = false;
+    let mut marquee_joints = None;
     let mut gizmo_move_units = None;
+    let mut gizmo_rotate_q12 = None;
+    let mut gizmo_resize_units = None;
+    let mut gizmo_radius_units = None;
     match render {
         Some(render) => {
-            let viewport_gizmo = render.selected_socket_gizmo.or(render.selected_joint_gizmo);
+            let viewport_gizmo = if state.show_pose_corrections {
+                render.selected_joint_gizmo
+            } else if !combat_capsules.is_empty() {
+                render.selected_combat_gizmo
+            } else if equipped_weapons.iter().any(|weapon| weapon.show_grip_gizmo) {
+                render.selected_weapon_grip_gizmo
+            } else {
+                render.selected_socket_gizmo
+            };
+            let center_handle_enabled =
+                !combat_capsules.is_empty() && state.capsule_edit_tool == CapsuleEditTool::Resize;
             let image = render.image;
             let texture_id = match preview_texture {
                 Some(handle) => {
@@ -4907,30 +5731,83 @@ fn draw_preview(
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
-            let hovered_socket_axis = response
+            if state.show_pose_corrections {
+                for &joint in &state.selected_pose_joints {
+                    let Some(point) = render
+                        .joint_screen_positions
+                        .get(joint as usize)
+                        .and_then(|point| *point)
+                    else {
+                        continue;
+                    };
+                    let screen = preview_image_to_screen(point, preview_rect, render_size);
+                    painter.circle_stroke(
+                        screen,
+                        if joint == state.selected_pose_joint {
+                            8.0
+                        } else {
+                            6.0
+                        },
+                        Stroke::new(
+                            if joint == state.selected_pose_joint {
+                                2.0
+                            } else {
+                                1.5
+                            },
+                            Color32::from_rgb(198, 132, 255),
+                        ),
+                    );
+                }
+            }
+            let hovered_handle = response
                 .hovered()
                 .then(|| response.interact_pointer_pos())
                 .flatten()
                 .and_then(|pointer| {
                     viewport_gizmo.and_then(|gizmo| {
-                        pick_axis_gizmo(pointer, preview_rect, render_size, gizmo)
+                        pick_animation_gizmo_handle(
+                            pointer,
+                            preview_rect,
+                            render_size,
+                            gizmo,
+                            center_handle_enabled,
+                        )
                     })
                 });
             if response.drag_started_by(egui::PointerButton::Primary) {
-                let pressed_axis = viewport_gizmo.and_then(|gizmo| {
+                let pressed_handle = viewport_gizmo.and_then(|gizmo| {
                     ui.input(|input| input.pointer.press_origin())
                         .and_then(|pointer| {
-                            pick_axis_gizmo(pointer, preview_rect, render_size, gizmo)
+                            pick_animation_gizmo_handle(
+                                pointer,
+                                preview_rect,
+                                render_size,
+                                gizmo,
+                                center_handle_enabled,
+                            )
                         })
                 });
-                state.gizmo_drag_axis = pressed_axis;
-                if let Some(axis) = pressed_axis {
+                state.gizmo_drag_handle = pressed_handle;
+                state.pose_marquee_origin =
+                    if state.show_pose_corrections && pressed_handle.is_none() {
+                        ui.input(|input| input.pointer.press_origin())
+                            .filter(|origin| preview_rect.contains(*origin))
+                    } else {
+                        None
+                    };
+                if let Some(AnimationGizmoHandle::Axis(axis)) = pressed_handle {
                     state.capsule_edit_axis = axis;
+                }
+                if pressed_handle.is_some() {
+                    state.playing = false;
+                    state.gizmo_drag_pose_frame = state
+                        .show_pose_corrections
+                        .then_some(state.frame.round().max(0.0) as u16);
                     state.gizmo_drag_fractional_units = 0.0;
                 }
             }
             if response.clicked() {
-                if let Some(axis) = hovered_socket_axis {
+                if let Some(AnimationGizmoHandle::Axis(axis)) = hovered_handle {
                     state.capsule_edit_axis = axis;
                 }
             }
@@ -4940,15 +5817,15 @@ fn draw_preview(
                     preview_rect,
                     render_size,
                     gizmo,
-                    hovered_socket_axis,
-                    state.gizmo_drag_axis,
+                    hovered_handle,
+                    state.gizmo_drag_handle,
                 );
             }
             if response.hovered() {
                 ui.ctx()
-                    .set_cursor_icon(if state.gizmo_drag_axis.is_some() {
+                    .set_cursor_icon(if state.gizmo_drag_handle.is_some() {
                         egui::CursorIcon::Grabbing
-                    } else if hovered_socket_axis.is_some() {
+                    } else if hovered_handle.is_some() {
                         egui::CursorIcon::PointingHand
                     } else if joint_picking {
                         egui::CursorIcon::Crosshair
@@ -4956,34 +5833,71 @@ fn draw_preview(
                         egui::CursorIcon::Grab
                     });
             }
-            if let (Some(delta), Some(axis), Some(gizmo)) =
-                (primary_drag_delta, state.gizmo_drag_axis, viewport_gizmo)
+            if let (Some(delta), Some(handle), Some(gizmo)) =
+                (primary_drag_delta, state.gizmo_drag_handle, viewport_gizmo)
             {
-                state.capsule_edit_axis = axis;
-                match state.capsule_edit_tool {
-                    CapsuleEditTool::Move => {
-                        let modifiers = ui.input(|input| input.modifiers);
-                        let speed = if modifiers.shift {
-                            0.25
-                        } else if modifiers.command || modifiers.ctrl {
-                            4.0
-                        } else {
-                            1.0
-                        };
-                        if let Some(units) =
-                            axis_gizmo_drag_units(delta, preview_rect, render_size, gizmo, axis)
-                        {
-                            let accumulated = units * speed + state.gizmo_drag_fractional_units;
-                            let rounded = accumulated.round() as i32;
-                            state.gizmo_drag_fractional_units = accumulated - rounded as f32;
-                            gizmo_move_units = (rounded != 0).then_some(rounded);
+                let modifiers = ui.input(|input| input.modifiers);
+                let speed = if modifiers.shift {
+                    0.25
+                } else if modifiers.command || modifiers.ctrl {
+                    4.0
+                } else {
+                    1.0
+                };
+                match handle {
+                    AnimationGizmoHandle::Axis(axis) => {
+                        state.capsule_edit_axis = axis;
+                        match state.capsule_edit_tool {
+                            CapsuleEditTool::Move | CapsuleEditTool::Resize => {
+                                if let Some(units) = axis_gizmo_drag_units(
+                                    delta,
+                                    preview_rect,
+                                    render_size,
+                                    gizmo,
+                                    axis,
+                                ) {
+                                    let accumulated =
+                                        units * speed + state.gizmo_drag_fractional_units;
+                                    let rounded = accumulated.round() as i32;
+                                    state.gizmo_drag_fractional_units =
+                                        accumulated - rounded as f32;
+                                    if rounded != 0 {
+                                        if state.capsule_edit_tool == CapsuleEditTool::Resize {
+                                            gizmo_resize_units = Some(rounded);
+                                        } else {
+                                            gizmo_move_units = Some(rounded);
+                                        }
+                                    }
+                                }
+                            }
+                            CapsuleEditTool::Rotate => {
+                                if let Some(pixels) = axis_gizmo_drag_pixels(
+                                    delta,
+                                    preview_rect,
+                                    render_size,
+                                    gizmo,
+                                    axis,
+                                ) {
+                                    let accumulated =
+                                        pixels * 12.0 * speed + state.gizmo_drag_fractional_units;
+                                    let rounded = accumulated.round() as i32;
+                                    state.gizmo_drag_fractional_units =
+                                        accumulated - rounded as f32;
+                                    gizmo_rotate_q12 = (rounded != 0).then_some(rounded);
+                                }
+                            }
                         }
                     }
-                    CapsuleEditTool::Rotate => edit_delta = Some(delta),
-                    CapsuleEditTool::Resize => {}
+                    AnimationGizmoHandle::Center => {
+                        let accumulated =
+                            (delta.x - delta.y) * 2.0 * speed + state.gizmo_drag_fractional_units;
+                        let rounded = accumulated.round() as i32;
+                        state.gizmo_drag_fractional_units = accumulated - rounded as f32;
+                        gizmo_radius_units = (rounded != 0).then_some(rounded);
+                    }
                 }
             }
-            if response.clicked() && joint_picking && hovered_socket_axis.is_none() {
+            if response.clicked() && joint_picking && hovered_handle.is_none() {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     clicked_joint = nearest_preview_joint(
                         pointer,
@@ -4991,6 +5905,52 @@ fn draw_preview(
                         render_size,
                         &render.joint_screen_positions,
                     );
+                    joint_selection_additive = ui.input(|input| {
+                        input.modifiers.shift || input.modifiers.command || input.modifiers.ctrl
+                    });
+                }
+            }
+            if state.show_pose_corrections {
+                if let Some(origin) = state.pose_marquee_origin {
+                    let current = response
+                        .interact_pointer_pos()
+                        .or_else(|| ui.input(|input| input.pointer.latest_pos()))
+                        .unwrap_or(origin);
+                    let selection_rect =
+                        Rect::from_two_pos(origin, current).intersect(preview_rect);
+                    if selection_rect.is_positive() {
+                        painter.rect_filled(
+                            selection_rect,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(174, 116, 232, 28),
+                        );
+                        painter.rect_stroke(
+                            selection_rect,
+                            0.0,
+                            Stroke::new(1.0, Color32::from_rgb(198, 132, 255)),
+                            StrokeKind::Inside,
+                        );
+                    }
+                    if response.drag_stopped_by(egui::PointerButton::Primary) {
+                        let selected = preview_joints_in_rect(
+                            selection_rect,
+                            preview_rect,
+                            render_size,
+                            &render.joint_screen_positions,
+                        );
+                        if !selected.is_empty() {
+                            marquee_joints = Some(selected);
+                            joint_selection_additive = ui.input(|input| {
+                                input.modifiers.shift
+                                    || input.modifiers.command
+                                    || input.modifiers.ctrl
+                            });
+                        }
+                        state.pose_marquee_origin = None;
+                    }
+                }
+                if !primary_down && !response.drag_stopped_by(egui::PointerButton::Primary) {
+                    state.pose_marquee_origin = None;
                 }
             }
         }
@@ -5012,8 +5972,12 @@ fn draw_preview(
     );
     PreviewInteraction {
         clicked_joint,
-        edit_delta,
+        joint_selection_additive,
+        marquee_joints,
         gizmo_move_units,
+        gizmo_rotate_q12,
+        gizmo_resize_units,
+        gizmo_radius_units,
     }
 }
 
@@ -5064,22 +6028,46 @@ fn pick_axis_gizmo(
         .map(|(_, axis)| axis)
 }
 
+fn pick_animation_gizmo_handle(
+    pointer: Pos2,
+    preview_rect: Rect,
+    render_size: [usize; 2],
+    gizmo: model_import_preview::PreviewAxisGizmo,
+    center_handle_enabled: bool,
+) -> Option<AnimationGizmoHandle> {
+    let origin = preview_image_to_screen(gizmo.origin, preview_rect, render_size);
+    if center_handle_enabled && pointer.distance(origin) <= crate::GIZMO_AXIS_PICK_RADIUS {
+        return Some(AnimationGizmoHandle::Center);
+    }
+    pick_axis_gizmo(pointer, preview_rect, render_size, gizmo).map(AnimationGizmoHandle::Axis)
+}
+
 fn draw_axis_gizmo_overlay(
     painter: &egui::Painter,
     preview_rect: Rect,
     render_size: [usize; 2],
     gizmo: model_import_preview::PreviewAxisGizmo,
-    hovered_axis: Option<CapsuleEditAxis>,
-    active_axis: Option<CapsuleEditAxis>,
+    hovered_handle: Option<AnimationGizmoHandle>,
+    active_handle: Option<AnimationGizmoHandle>,
 ) {
     let axes = axis_gizmo_screen_axes(preview_rect, render_size, gizmo);
     let Some(origin) = axes.first().map(|axis| axis.start) else {
         return;
     };
-    painter.circle_filled(origin, 4.0, Color32::from_rgb(235, 242, 248));
+    let center_highlighted = hovered_handle == Some(AnimationGizmoHandle::Center)
+        || active_handle == Some(AnimationGizmoHandle::Center);
+    painter.circle_filled(
+        origin,
+        if center_highlighted { 7.0 } else { 4.0 },
+        if center_highlighted {
+            STUDIO_ACCENT
+        } else {
+            Color32::from_rgb(235, 242, 248)
+        },
+    );
     for screen_axis in axes {
-        let highlighted =
-            hovered_axis == Some(screen_axis.axis) || active_axis == Some(screen_axis.axis);
+        let handle = AnimationGizmoHandle::Axis(screen_axis.axis);
+        let highlighted = hovered_handle == Some(handle) || active_handle == Some(handle);
         let color = crate::gizmo::gizmo_highlight_color(screen_axis.axis.color(), highlighted);
         painter.line_segment(
             [screen_axis.start, screen_axis.end],
@@ -5099,6 +6087,21 @@ fn draw_axis_gizmo_overlay(
             color,
         );
     }
+}
+
+fn axis_gizmo_drag_pixels(
+    pointer_delta: Vec2,
+    preview_rect: Rect,
+    render_size: [usize; 2],
+    gizmo: model_import_preview::PreviewAxisGizmo,
+    axis: CapsuleEditAxis,
+) -> Option<f32> {
+    let screen_axis = axis_gizmo_screen_axes(preview_rect, render_size, gizmo)
+        .into_iter()
+        .find(|candidate| candidate.axis == axis)?;
+    let direction = screen_axis.end - screen_axis.start;
+    let length = direction.length();
+    (length >= 4.0).then(|| pointer_delta.dot(direction / length))
 }
 
 fn axis_gizmo_drag_units(
@@ -5145,6 +6148,24 @@ fn nearest_preview_joint(
         }
     }
     best.map(|(joint, _)| joint)
+}
+
+fn preview_joints_in_rect(
+    selection: Rect,
+    preview_rect: Rect,
+    render_size: [usize; 2],
+    joints: &[Option<[f32; 2]>],
+) -> Vec<u16> {
+    joints
+        .iter()
+        .enumerate()
+        .filter_map(|(index, point)| {
+            let point = preview_image_to_screen((*point)?, preview_rect, render_size);
+            selection
+                .contains(point)
+                .then_some(index.min(u16::MAX as usize) as u16)
+        })
+        .collect()
 }
 
 fn preview_render_size(ui: &egui::Ui, rect: Rect, quality: AnimationPreviewQuality) -> [usize; 2] {
@@ -5442,7 +6463,7 @@ struct CachedMaterialLayer {
 struct LoadedModelContext {
     model_bytes: Vec<u8>,
     model_stamp: FileStamp,
-    atlas: Option<ColorImage>,
+    atlas: Option<Vec<ColorImage>>,
     world_height: u16,
     collision_radius: u16,
     visual_scale_q8: u16,
@@ -5546,15 +6567,27 @@ fn preview_material_layer_cached(
     Some((atlas, motion))
 }
 
-/// The weapon-preview overlay keeps its own cache slot so switching
-/// between weapon and character never thrashes either decode.
+/// Weapon previews keep a small resource-keyed cache so dual-wield actions
+/// do not decode the same two models again on every editor frame.
 fn load_weapon_model_context(
     project: &ProjectDocument,
     project_root: &Path,
     state: &mut ModelAnimationViewerState,
     id: ResourceId,
 ) -> Option<Arc<LoadedModelContext>> {
-    load_model_context_into(project, project_root, &mut state.cached_weapon_model, id)
+    let mut cached = state
+        .cached_weapon_models
+        .iter()
+        .position(|entry| entry.resource == id)
+        .map(|index| state.cached_weapon_models.remove(index));
+    let context = load_model_context_into(project, project_root, &mut cached, id)?;
+    if let Some(cached) = cached {
+        if state.cached_weapon_models.len() >= 8 {
+            state.cached_weapon_models.remove(0);
+        }
+        state.cached_weapon_models.push(cached);
+    }
+    Some(context)
 }
 
 fn load_model_context_into(
@@ -5603,7 +6636,7 @@ fn load_model_context_into(
     let model_bytes = std::fs::read(model_path).ok()?;
     let atlas = atlas_path
         .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| decode_psxt_image(&bytes));
+        .and_then(|bytes| decode_psxt_palette_banks(&bytes));
     let context = Arc::new(LoadedModelContext {
         model_bytes,
         model_stamp: model_stamp.clone(),
@@ -5759,6 +6792,10 @@ fn is_cooked_animation_path(path: &str) -> bool {
 }
 
 pub(crate) fn decode_psxt_image(bytes: &[u8]) -> Option<ColorImage> {
+    decode_psxt_palette_banks(bytes)?.into_iter().next()
+}
+
+pub(crate) fn decode_psxt_palette_banks(bytes: &[u8]) -> Option<Vec<ColorImage>> {
     let texture = Texture::from_bytes(bytes).ok()?;
     let width = texture.width() as usize;
     let height = texture.height() as usize;
@@ -5786,8 +6823,8 @@ pub(crate) fn decode_psxt_image(bytes: &[u8]) -> Option<ColorImage> {
         })
         .collect();
 
-    let mut pixels = Vec::with_capacity(pixel_count);
     if clut_entries == 0 {
+        let mut pixels = Vec::with_capacity(pixel_count);
         for i in 0..pixel_count {
             let off = i * 2;
             if off + 1 >= pixel_bytes.len() {
@@ -5803,48 +6840,69 @@ pub(crate) fn decode_psxt_image(bytes: &[u8]) -> Option<ColorImage> {
                 (b5 << 3) | (b5 >> 2),
             ));
         }
-    } else if clut_entries == 16 {
-        let halfwords_per_row = width.div_ceil(4);
-        for row in 0..height {
-            for hw in 0..halfwords_per_row {
-                let off = (row * halfwords_per_row + hw) * 2;
-                if off + 1 >= pixel_bytes.len() {
-                    break;
+        return Some(vec![ColorImage {
+            size: [width, height],
+            pixels,
+        }]);
+    }
+
+    let entries_per_bank = if clut_entries == 256 {
+        256
+    } else if (16..=64).contains(&clut_entries) && clut_entries.is_multiple_of(16) {
+        16
+    } else {
+        return None;
+    };
+    let bank_count = clut_entries / entries_per_bank;
+    let mut banks = Vec::with_capacity(bank_count);
+    for bank in 0..bank_count {
+        let palette = &palette[bank * entries_per_bank..(bank + 1) * entries_per_bank];
+        let mut pixels = Vec::with_capacity(pixel_count);
+        if entries_per_bank == 16 {
+            let halfwords_per_row = width.div_ceil(4);
+            for row in 0..height {
+                for hw in 0..halfwords_per_row {
+                    let off = (row * halfwords_per_row + hw) * 2;
+                    if off + 1 >= pixel_bytes.len() {
+                        break;
+                    }
+                    let word = u16::from_le_bytes([pixel_bytes[off], pixel_bytes[off + 1]]);
+                    for nibble in 0..4 {
+                        let texel = (word >> (nibble * 4)) & 0xF;
+                        if hw * 4 + nibble < width {
+                            pixels.push(palette[texel as usize]);
+                        }
+                    }
                 }
-                let word = u16::from_le_bytes([pixel_bytes[off], pixel_bytes[off + 1]]);
-                for nibble in 0..4 {
-                    let texel = (word >> (nibble * 4)) & 0xF;
-                    if hw * 4 + nibble < width {
-                        pixels.push(palette[texel as usize]);
+            }
+        } else {
+            let halfwords_per_row = width.div_ceil(2);
+            for row in 0..height {
+                for hw in 0..halfwords_per_row {
+                    let off = (row * halfwords_per_row + hw) * 2;
+                    if off + 1 >= pixel_bytes.len() {
+                        break;
+                    }
+                    let lo = pixel_bytes[off] as usize;
+                    let hi = pixel_bytes[off + 1] as usize;
+                    if hw * 2 < width {
+                        pixels.push(palette[lo]);
+                    }
+                    if hw * 2 + 1 < width {
+                        pixels.push(palette[hi]);
                     }
                 }
             }
         }
-    } else if clut_entries == 256 {
-        let halfwords_per_row = width.div_ceil(2);
-        for row in 0..height {
-            for hw in 0..halfwords_per_row {
-                let off = (row * halfwords_per_row + hw) * 2;
-                if off + 1 >= pixel_bytes.len() {
-                    break;
-                }
-                let lo = pixel_bytes[off] as usize;
-                let hi = pixel_bytes[off + 1] as usize;
-                if hw * 2 < width {
-                    pixels.push(palette[lo]);
-                }
-                if hw * 2 + 1 < width {
-                    pixels.push(palette[hi]);
-                }
-            }
+        if pixels.len() != pixel_count {
+            return None;
         }
-    } else {
-        return None;
+        banks.push(ColorImage {
+            size: [width, height],
+            pixels,
+        });
     }
-    (pixels.len() == pixel_count).then_some(ColorImage {
-        size: [width, height],
-        pixels,
-    })
+    Some(banks)
 }
 
 fn effective_radius(state: &ModelAnimationViewerState, model: Option<&LoadedModelContext>) -> i32 {
@@ -5957,6 +7015,203 @@ mod focus_tests {
                 .and_then(|binding| binding.options),
             Some(options)
         );
+    }
+
+    #[test]
+    fn moveset_binding_authoring_assigns_and_disables_compatible_clips() {
+        let (mut project, character, animation_set, clip) = timeline_fixture();
+        assert!(compatible_moveset_clip_options(&project, character)
+            .iter()
+            .any(|(candidate, _)| *candidate == clip));
+
+        assert!(store_moveset_action_clip(
+            &mut project,
+            character,
+            CharacterAnimationAction::LightAttack,
+            Some(clip),
+        ));
+        let ResourceData::AnimationSet(set) = &project.resource(animation_set).unwrap().data else {
+            panic!("animation set expected");
+        };
+        assert_eq!(
+            set.action_clip(CharacterAnimationAction::LightAttack),
+            Some(clip)
+        );
+
+        assert!(store_moveset_action_clip(
+            &mut project,
+            character,
+            CharacterAnimationAction::LightAttack,
+            None,
+        ));
+        let ResourceData::AnimationSet(set) = &project.resource(animation_set).unwrap().data else {
+            panic!("animation set expected");
+        };
+        assert_eq!(set.action_clip(CharacterAnimationAction::LightAttack), None);
+    }
+
+    #[test]
+    fn playback_stops_one_shots_and_wraps_looping_clips() {
+        assert_eq!(
+            advance_animation_playback(8.0, 4.0, 10, false),
+            (9.0, false)
+        );
+        assert_eq!(advance_animation_playback(8.0, 4.0, 10, true), (3.0, true));
+        assert_eq!(advance_animation_playback(0.0, 2.0, 1, false), (0.0, false));
+    }
+
+    #[test]
+    fn combo_weapon_preview_collects_every_authored_lane() {
+        let (mut project, character, animation_set, _) = timeline_fixture();
+        let light = project.add_resource(
+            "Sword1 Light",
+            ResourceData::Weapon(psxed_project::WeaponResource::default()),
+        );
+        let heavy = project.add_resource(
+            "Sword1 Heavy",
+            ResourceData::Weapon(psxed_project::WeaponResource::default()),
+        );
+        let ResourceData::AnimationSet(set) =
+            &mut project.resource_mut(animation_set).unwrap().data
+        else {
+            panic!("animation set expected");
+        };
+        set.weapon_appearance_tracks = vec![
+            psxed_project::WeaponAppearanceTrack {
+                action: CharacterAnimationAction::ComboAttack,
+                weapon: light,
+                character_socket: "right_hand_grip".to_string(),
+                fully_visible_frame: 25,
+                hidden_frame: 44,
+                transition_frames: 8,
+            },
+            psxed_project::WeaponAppearanceTrack {
+                action: CharacterAnimationAction::ComboAttack,
+                weapon: heavy,
+                character_socket: "right_hand_grip".to_string(),
+                fully_visible_frame: 44,
+                hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
+                transition_frames: 8,
+            },
+            psxed_project::WeaponAppearanceTrack {
+                action: CharacterAnimationAction::ComboAttack,
+                weapon: light,
+                character_socket: "left_hand_grip".to_string(),
+                fully_visible_frame: 35,
+                hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
+                transition_frames: 8,
+            },
+        ];
+
+        let tracks = character_action_weapon_tracks(
+            &project,
+            Some(character),
+            CharacterAnimationAction::ComboAttack,
+        );
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[1].1.weapon, heavy);
+        assert_eq!(tracks[2].1.character_socket, "left_hand_grip");
+    }
+
+    #[test]
+    fn hand_authoring_finds_named_left_and_right_hand_joints() {
+        let joints = vec![
+            "mixamorig:Hips".to_string(),
+            "mixamorig:RightHand".to_string(),
+            "Armature_LeftHand".to_string(),
+        ];
+        assert_eq!(
+            suggested_hand_joint(Some(&joints), CharacterHand::Right),
+            Some(1)
+        );
+        assert_eq!(
+            suggested_hand_joint(Some(&joints), CharacterHand::Left),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn sword_assignments_allow_both_hands_but_reject_the_same_pair_twice() {
+        let mut project = ProjectDocument::new("two-hand-assignments");
+        let sword = project.add_resource(
+            "Sword",
+            ResourceData::Weapon(psxed_project::WeaponResource::default()),
+        );
+        let tracks = vec![psxed_project::WeaponAppearanceTrack {
+            action: CharacterAnimationAction::ComboAttack,
+            weapon: sword,
+            character_socket: CharacterHand::Right.socket_name().to_string(),
+            fully_visible_frame: 0,
+            hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
+            transition_frames: 0,
+        }];
+
+        assert!(weapon_appearance_pair_is_used(
+            &tracks,
+            CharacterAnimationAction::ComboAttack,
+            sword,
+            CharacterHand::Right.socket_name(),
+            None,
+        ));
+        assert!(!weapon_appearance_pair_is_used(
+            &tracks,
+            CharacterAnimationAction::ComboAttack,
+            sword,
+            CharacterHand::Left.socket_name(),
+            None,
+        ));
+    }
+
+    #[test]
+    fn timeline_can_expand_past_all_combo_lanes_and_scroll_when_shorter() {
+        let combo_lane_content = TIMELINE_RULER_HEIGHT + 7.0 * TIMELINE_TRACK_HEIGHT;
+        assert!(
+            animation_timeline_height_limit(400.0) >= combo_lane_content + 32.0,
+            "a 400px workspace should resize far enough for the timeline header and seven lanes"
+        );
+        assert_eq!(TIMELINE_MIN_PREVIEW_HEIGHT, 120.0);
+    }
+
+    #[test]
+    fn overflowing_authoring_controls_cannot_push_the_timeline_out_of_its_slot() {
+        let reserved_for = |content_height| {
+            let context = egui::Context::default();
+            let mut reserved_height = None;
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    ..egui::RawInput::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let before = ui.cursor().top();
+                        fixed_height_studio_region(ui, "fixed-height-test", 120.0, |ui| {
+                            ui.allocate_space(egui::vec2(100.0, content_height));
+                        });
+                        reserved_height = Some(ui.cursor().top() - before);
+                    });
+                },
+            );
+            reserved_height.expect("studio region should be drawn")
+        };
+
+        let compact = reserved_for(20.0);
+        let overflowing = reserved_for(500.0);
+        assert!(
+            (overflowing - compact).abs() < 0.01,
+            "overflowing controls grew the parent from {compact}px to {overflowing}px"
+        );
+    }
+
+    #[test]
+    fn entering_pose_authoring_pauses_playback() {
+        let mut viewer = ModelAnimationViewerState::default();
+        assert!(viewer.playing);
+        viewer.set_studio_mode(AnimationStudioMode::Pose);
+        assert!(!viewer.playing);
     }
 
     #[test]
@@ -6091,6 +7346,74 @@ mod focus_tests {
     }
 
     #[test]
+    fn shared_enemy_atlas_decodes_all_four_model_palette_banks() {
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/default");
+        let atlas_bytes =
+            std::fs::read(project_root.join("assets/models/shared_enemy_01/shared_enemy_01.psxt"))
+                .expect("shared enemy atlas");
+        let banks = decode_psxt_palette_banks(&atlas_bytes).expect("decode palette banks");
+        assert_eq!(banks.len(), 4);
+        assert!(banks.iter().all(|bank| bank.size == [256, 256]));
+
+        for (model_path, clip_path, world_height) in [
+            (
+                "assets/models/rust_mantis/rust_mantis.psxmdl",
+                "assets/animations/rust_mantis_starter/idle.psxanim",
+                1024,
+            ),
+            (
+                "assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl",
+                "assets/animations/tank_boss_ai/idle.psxanim",
+                1536,
+            ),
+        ] {
+            let model_bytes = std::fs::read(project_root.join(model_path)).expect("enemy model");
+            let model = psx_asset::Model::from_bytes(&model_bytes).expect("parse enemy model");
+            assert_eq!(model.palette_bank_count(), 4, "{model_path}");
+            let clip_bytes = std::fs::read(project_root.join(clip_path)).expect("enemy idle clip");
+            let render = |atlases: &[ColorImage]| {
+                model_import_preview::render_import_model_preview_with_equipment_set_at_size(
+                    &model_bytes,
+                    &clip_bytes,
+                    atlases,
+                    ImportPreviewOptions {
+                        world_height,
+                        visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
+                        visual_yaw_q12: 0,
+                        collision_radius: 192,
+                        time_seconds: 0.0,
+                        yaw_q12: 340,
+                        pitch_q12: 350,
+                        radius: 0,
+                        focus_on_animated_bounds: true,
+                        preview_in_place: true,
+                        pose_offset: [0, 0, 0],
+                        show_animation_root: false,
+                        show_collision_guides: false,
+                        show_bones: false,
+                    },
+                    model_import_preview::euler_rotation_q12([0; 3]),
+                    [320, 240],
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    None,
+                )
+                .expect("banked enemy preview")
+                .image
+            };
+            let banked = render(&banks);
+            let bank_zero_only = render(std::slice::from_ref(&banks[0]));
+            assert_ne!(
+                banked.pixels, bank_zero_only.pixels,
+                "{model_path} must select its authored palette bank per face"
+            );
+        }
+    }
+
+    #[test]
     fn nearest_preview_joint_uses_visible_pick_radius_and_nearest_point() {
         let rect = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(640.0, 480.0));
         let joints = vec![Some([100.0, 100.0]), Some([108.0, 100.0]), None];
@@ -6104,6 +7427,61 @@ mod focus_tests {
             nearest_preview_joint(Pos2::new(700.0, 500.0), rect, [320, 240], &joints),
             None
         );
+    }
+
+    #[test]
+    fn pose_marquee_selects_every_visible_joint_inside_the_box() {
+        let preview = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(640.0, 480.0));
+        let joints = vec![
+            Some([100.0, 100.0]),
+            Some([108.0, 100.0]),
+            Some([200.0, 180.0]),
+            None,
+        ];
+        let selection = Rect::from_min_max(Pos2::new(290.0, 240.0), Pos2::new(325.0, 260.0));
+
+        assert_eq!(
+            preview_joints_in_rect(selection, preview, [320, 240], &joints),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn combat_preview_uses_the_selected_attack_or_first_authored_attack() {
+        let hurtbox = psxed_project::CharacterCombatCapsule::default();
+        let hitbox = psxed_project::CharacterCombatCapsule {
+            role: psxed_project::CombatCapsuleRole::Hitbox {
+                action: CharacterAnimationAction::HeavyAttack,
+                active_start_frame: 17,
+                active_end_frame: 23,
+                damage: 20,
+                poise_damage: 10,
+            },
+            ..Default::default()
+        };
+        let light_hitbox = psxed_project::CharacterCombatCapsule {
+            role: psxed_project::CombatCapsuleRole::Hitbox {
+                action: CharacterAnimationAction::LightAttack,
+                active_start_frame: 8,
+                active_end_frame: 12,
+                damage: 10,
+                poise_damage: 5,
+            },
+            ..Default::default()
+        };
+        let capsules = [hurtbox, hitbox, light_hitbox];
+
+        assert_eq!(
+            combat_preview_action_window(&capsules, 1, CharacterAnimationAction::Idle),
+            Some((CharacterAnimationAction::HeavyAttack, 17))
+        );
+        assert_eq!(
+            combat_preview_action_window(&capsules, 0, CharacterAnimationAction::LightAttack),
+            Some((CharacterAnimationAction::LightAttack, 8))
+        );
+        let preview = preview_combat_capsules(&capsules, 1, true);
+        assert_eq!(preview.len(), 3);
+        assert!(preview[1].selected);
     }
 
     #[test]
@@ -6162,17 +7540,22 @@ mod focus_tests {
             &mut project,
             character,
             0,
-            CapsuleEditTool::Move,
             CapsuleEditAxis::Y,
-            Vec2::new(5.0, 0.0),
+            CapsuleGizmoDelta::Move(10),
         ));
         assert!(manipulate_selected_capsule(
             &mut project,
             character,
             0,
-            CapsuleEditTool::Resize,
             CapsuleEditAxis::X,
-            Vec2::new(4.0, -10.0),
+            CapsuleGizmoDelta::ResizeAxis(20),
+        ));
+        assert!(manipulate_selected_capsule(
+            &mut project,
+            character,
+            0,
+            CapsuleEditAxis::X,
+            CapsuleGizmoDelta::ResizeRadius(8),
         ));
 
         let ResourceData::Character(profile) = &project.resource(character).unwrap().data else {
@@ -6421,7 +7804,7 @@ mod focus_tests {
                 4,
                 7,
                 axis,
-                AxisEditDelta::Rotate(Vec2::new(10.0, 0.0)),
+                AxisEditDelta::Rotate(120),
             ));
         }
         let ResourceData::AnimationClip(animation) = &project.resource(clip).unwrap().data else {
@@ -6432,6 +7815,32 @@ mod focus_tests {
         assert_eq!((key.joint, key.frame), (4, 7));
         assert_eq!(key.translation, [12, -6, 3]);
         assert_eq!(key.rotation_q12, [120, 120, 120]);
+    }
+
+    #[test]
+    fn pose_gizmo_applies_the_same_edit_to_every_marquee_selected_joint() {
+        let (mut project, clip) = project_with_pose_clip();
+        assert!(manipulate_pose_corrections(
+            &mut project,
+            clip,
+            &[2, 4, 7],
+            9,
+            CapsuleEditAxis::Y,
+            AxisEditDelta::Translate(14),
+        ));
+
+        let ResourceData::AnimationClip(animation) = &project.resource(clip).unwrap().data else {
+            panic!("animation clip expected");
+        };
+        assert_eq!(animation.pose_corrections.len(), 3);
+        assert_eq!(
+            animation
+                .pose_corrections
+                .iter()
+                .map(|key| (key.joint, key.frame, key.translation))
+                .collect::<Vec<_>>(),
+            vec![(2, 9, [0, 14, 0]), (4, 9, [0, 14, 0]), (7, 9, [0, 14, 0]),]
+        );
     }
 
     #[test]
@@ -6518,24 +7927,50 @@ mod focus_tests {
             id,
             0,
             CapsuleEditAxis::X,
-            AxisEditDelta::Rotate(Vec2::new(10.0, 0.0)),
+            AxisEditDelta::Rotate(120),
         ));
         assert!(manipulate_selected_socket(
             &mut project,
             id,
             0,
             CapsuleEditAxis::Y,
-            AxisEditDelta::Rotate(Vec2::new(300.0, 0.0)),
+            AxisEditDelta::Rotate(3600),
         ));
         assert!(manipulate_selected_socket(
             &mut project,
             id,
             0,
             CapsuleEditAxis::Z,
-            AxisEditDelta::Rotate(Vec2::new(-20.0, 0.0)),
+            AxisEditDelta::Rotate(-240),
         ));
         // 1024 + 300 * 12 = 4624, wrapping one full turn to 528.
         assert_eq!(first_socket(&project, id).rotation_q12, [120, 528, 3856]);
+    }
+
+    #[test]
+    fn weapon_grip_gizmo_edits_the_weapon_alignment_target() {
+        let mut project = ProjectDocument::new("weapon-grip-gizmo");
+        let weapon = project.add_resource(
+            "Sword",
+            ResourceData::Weapon(psxed_project::WeaponResource::default()),
+        );
+        assert!(manipulate_selected_weapon_grip(
+            &mut project,
+            weapon,
+            CapsuleEditAxis::X,
+            AxisEditDelta::Translate(24),
+        ));
+        assert!(manipulate_selected_weapon_grip(
+            &mut project,
+            weapon,
+            CapsuleEditAxis::Z,
+            AxisEditDelta::Rotate(128),
+        ));
+        let ResourceData::Weapon(weapon) = &project.resource(weapon).unwrap().data else {
+            panic!("weapon resource expected");
+        };
+        assert_eq!(weapon.grip.translation[0], -24);
+        assert_eq!(weapon.grip.rotation_q12[2], -128);
     }
 
     #[test]
@@ -6622,6 +8057,83 @@ mod focus_tests {
     }
 
     #[test]
+    fn combat_resize_center_handle_wins_over_axes_at_the_origin() {
+        let preview = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 480.0));
+        let gizmo = model_import_preview::PreviewAxisGizmo {
+            origin: [100.0, 100.0],
+            axis_ends: [[150.0, 100.0], [100.0, 125.0], [75.0, 75.0]],
+            local_axis_units: 200.0,
+        };
+        assert_eq!(
+            pick_animation_gizmo_handle(Pos2::new(201.0, 199.0), preview, [320, 240], gizmo, true,),
+            Some(AnimationGizmoHandle::Center)
+        );
+        assert_eq!(
+            pick_animation_gizmo_handle(Pos2::new(250.0, 201.0), preview, [320, 240], gizmo, true,),
+            Some(AnimationGizmoHandle::Axis(CapsuleEditAxis::X))
+        );
+    }
+
+    #[test]
+    fn hidden_combat_capsules_are_removed_from_the_preview_only() {
+        let capsules = vec![
+            psxed_project::CharacterCombatCapsule::default(),
+            psxed_project::CharacterCombatCapsule {
+                name: "Attack Hitbox".to_string(),
+                role: psxed_project::CombatCapsuleRole::Hitbox {
+                    action: CharacterAnimationAction::LightAttack,
+                    active_start_frame: 3,
+                    active_end_frame: 6,
+                    damage: 25,
+                    poise_damage: 25,
+                },
+                ..psxed_project::CharacterCombatCapsule::default()
+            },
+        ];
+
+        let visible = preview_combat_capsules(&capsules, 1, true);
+        assert_eq!(visible.len(), 2);
+        assert!(!visible[0].selected);
+        assert!(visible[1].selected);
+        assert!(preview_combat_capsules(&capsules, 1, false).is_empty());
+        assert_eq!(capsules.len(), 2, "preview visibility must not delete data");
+    }
+
+    #[test]
+    fn rotation_drag_uses_the_selected_axis_screen_direction() {
+        let preview = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 480.0));
+        let gizmo = model_import_preview::PreviewAxisGizmo {
+            origin: [100.0, 100.0],
+            axis_ends: [[150.0, 100.0], [100.0, 125.0], [75.0, 75.0]],
+            local_axis_units: 200.0,
+        };
+        assert_eq!(
+            axis_gizmo_drag_pixels(
+                Vec2::new(0.0, 10.0),
+                preview,
+                [320, 240],
+                gizmo,
+                CapsuleEditAxis::X,
+            )
+            .unwrap()
+            .round() as i32,
+            0
+        );
+        assert_eq!(
+            axis_gizmo_drag_pixels(
+                Vec2::new(0.0, 10.0),
+                preview,
+                [320, 240],
+                gizmo,
+                CapsuleEditAxis::Y,
+            )
+            .unwrap()
+            .round() as i32,
+            10
+        );
+    }
+
+    #[test]
     fn weapon_appearance_preview_uses_authored_sampled_frame_ramps() {
         let mut project = ProjectDocument::new("weapon-ramp-test");
         let weapon = project.add_resource(
@@ -6642,6 +8154,17 @@ mod focus_tests {
         assert_eq!(preview_weapon_materialization_q12(&track, 12.0, 30), 4096);
         assert_eq!(preview_weapon_materialization_q12(&track, 22.0, 30), 2048);
         assert_eq!(preview_weapon_materialization_q12(&track, 24.0, 30), 0);
+    }
+
+    #[test]
+    fn fully_materialized_weapon_uses_its_texture_instead_of_the_transition_cage() {
+        assert!(!preview_weapon_uses_materialization_wireframe(Some(0), 0));
+        assert!(preview_weapon_uses_materialization_wireframe(Some(0), 2048));
+        assert!(!preview_weapon_uses_materialization_wireframe(
+            Some(0),
+            4096
+        ));
+        assert!(!preview_weapon_uses_materialization_wireframe(None, 2048));
     }
 
     #[test]
