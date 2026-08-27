@@ -30,6 +30,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use psx_bsp::collision_provider::select_body_hull;
 use psx_level::{
@@ -73,6 +74,69 @@ use assets::{
     expect_room_material_depth, find_resource, load_psxt_bytes, material_texture_bytes,
     resolve_path, sanitise_model_dirname,
 };
+
+type CookOutputSink = Arc<dyn Fn(String) + Send + Sync>;
+
+static COOK_OUTPUT_CAPTURE: OnceLock<Mutex<()>> = OnceLock::new();
+static COOK_OUTPUT_SINK: OnceLock<Mutex<Option<CookOutputSink>>> = OnceLock::new();
+
+struct CookOutputCaptureGuard;
+
+impl Drop for CookOutputCaptureGuard {
+    fn drop(&mut self) {
+        *COOK_OUTPUT_SINK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+/// Run one cook operation while mirroring its terminal progress lines.
+///
+/// Brush compilation uses worker threads, so the temporary sink is
+/// process-wide rather than thread-local. Captures are serialized and the
+/// sink is removed by an RAII guard even if the cook unwinds.
+pub fn capture_cook_output<T>(work: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let _capture = COOK_OUTPUT_CAPTURE
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let captured_lines = Arc::clone(&lines);
+    let sink: CookOutputSink = Arc::new(move |line| {
+        captured_lines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(line);
+    });
+    *COOK_OUTPUT_SINK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
+    let guard = CookOutputCaptureGuard;
+    let result = work();
+    drop(guard);
+    let output = lines
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    (result, output)
+}
+
+/// Preserve a cooker diagnostic on stderr and forward it to the active host
+/// capture, when the editor launched the cook in-process.
+pub(crate) fn emit_cook_output(arguments: std::fmt::Arguments<'_>) {
+    let line = arguments.to_string();
+    eprintln!("{line}");
+    let sink = COOK_OUTPUT_SINK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(sink) = sink {
+        sink(line);
+    }
+}
 
 /// Map a normalized authored POI identity to one fixed read/reward bit pair.
 /// The full save bitmap is always declared, so reordering or inserting scene
