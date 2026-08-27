@@ -19,6 +19,14 @@ does not change its geometry, skeleton, UVs, or animation compatibility.
 
 ## Selected animations
 
+`Idle` uses `idle_look_v2/idle_look_01`, an authored sentry scan layered over
+the planted `idle_v1/idle_01` body motion. The Rust Mantis slowly checks left
+and right with long readable holds across the spine, neck, and head. It remains
+locked against horizontal root drift, closes into a seamless eight-second
+loop, and is cooked at 12 Hz to
+`assets/animations/rust_mantis_starter/idle.psxanim` (97 frames). The first and
+last cooked poses are identical.
+
 `WalkBackward` uses locally selected MoMask candidate 2. It is cooked at 12 Hz
 to `assets/animations/rust_mantis_starter/walk_bwd.psxanim` and bound in the
 Rust Mantis Starter Animation Set. Generated candidates and review media are

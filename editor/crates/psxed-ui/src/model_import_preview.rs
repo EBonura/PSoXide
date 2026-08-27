@@ -73,7 +73,7 @@ pub struct PreviewMaterialLayer<'a> {
 /// times grip inverse) so the preview equals what Play shows.
 pub struct PreviewEquippedWeapon<'a> {
     pub model_bytes: &'a [u8],
-    pub atlas: &'a ColorImage,
+    pub atlas_banks: &'a [ColorImage],
     pub socket_joint: u16,
     pub socket_translation: [i32; 3],
     pub socket_rotation_q12: [i16; 3],
@@ -83,6 +83,8 @@ pub struct PreviewEquippedWeapon<'a> {
     pub materialization_q12: u16,
     /// Draw the materialised faces as the runtime's green nanobot cage.
     pub wireframe_materialization: bool,
+    /// Expose a projected gizmo at the aligned grip point.
+    pub show_grip_gizmo: bool,
 }
 
 /// Preview image plus projected body-part points used by Animation Studio's
@@ -92,6 +94,8 @@ pub(crate) struct ImportPreviewRender {
     pub joint_screen_positions: Vec<Option<[f32; 2]>>,
     pub selected_socket_gizmo: Option<PreviewAxisGizmo>,
     pub selected_joint_gizmo: Option<PreviewAxisGizmo>,
+    pub selected_combat_gizmo: Option<PreviewAxisGizmo>,
+    pub selected_weapon_grip_gizmo: Option<PreviewAxisGizmo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +206,33 @@ pub fn render_import_model_preview_with_options(
     )
 }
 
+/// Render the standard preview while preserving a model's authored per-face
+/// palette-bank selection. Standalone capture tools use this entry point for
+/// four-bank 4bpp atlases, matching Animation Studio and Play rather than
+/// painting every face with palette bank zero.
+pub fn render_import_model_preview_with_palette_banks(
+    model_bytes: &[u8],
+    clip_bytes: &[u8],
+    atlas_banks: &[ColorImage],
+    options: ImportPreviewOptions,
+) -> Option<ColorImage> {
+    render_import_model_preview_with_equipment_set_at_size(
+        model_bytes,
+        clip_bytes,
+        atlas_banks,
+        options,
+        yaw_rotation_matrix(options.visual_yaw_q12),
+        [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        None,
+    )
+    .map(|render| render.image)
+}
+
 /// Render the standard 320x240 cooked-model preview with the material and
 /// equipped-weapon overlays used by Animation Studio. Reel/debug tooling uses
 /// this entry point to reproduce the in-engine character presentation without
@@ -276,9 +307,47 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     selected_joint: Option<u16>,
     selected_joint_gizmo_mode: Option<PreviewGizmoMode>,
 ) -> Option<ImportPreviewRender> {
+    render_import_model_preview_with_equipment_set_at_size(
+        model_bytes,
+        clip_bytes,
+        std::slice::from_ref(atlas),
+        options,
+        instance_rotation,
+        render_size,
+        combat_capsules,
+        sockets,
+        equipped_weapon.map(std::slice::from_ref).unwrap_or(&[]),
+        character_material,
+        selected_joint,
+        selected_joint_gizmo_mode,
+    )
+}
+
+/// Render every authored equipment beat that participates in the current
+/// action. Exactly one entry may expose its grip gizmo; all entries still
+/// share the same depth buffer so overlapping weapons sort like the final
+/// character presentation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_import_model_preview_with_equipment_set_at_size(
+    model_bytes: &[u8],
+    clip_bytes: &[u8],
+    atlas_banks: &[ColorImage],
+    options: ImportPreviewOptions,
+    instance_rotation: Mat3I16,
+    render_size: [usize; 2],
+    combat_capsules: &[PreviewCombatCapsule],
+    sockets: &[PreviewSocket],
+    equipped_weapons: &[PreviewEquippedWeapon<'_>],
+    character_material: Option<&PreviewMaterialLayer<'_>>,
+    selected_joint: Option<u16>,
+    selected_joint_gizmo_mode: Option<PreviewGizmoMode>,
+) -> Option<ImportPreviewRender> {
     let model = Model::from_bytes(model_bytes).ok()?;
     let animation = Animation::from_bytes(clip_bytes).ok()?;
-    if atlas.size[0] == 0 || atlas.size[1] == 0 {
+    if atlas_banks
+        .first()
+        .is_none_or(|atlas| atlas.size[0] == 0 || atlas.size[1] == 0)
+    {
         return None;
     }
 
@@ -388,18 +457,14 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     }
 
     let double_sided = model.double_sided();
-    let (character_atlas, character_uv_offset, character_wrap_uv) = match character_material {
+    let (character_uv_offset, character_wrap_uv) = match character_material {
         Some(layer) => {
             // Same tick source as `frame_q12` above, so scrubbing the
             // clip advances the material scroll in lockstep with Play.
             let tick = (options.time_seconds.max(0.0) * PREVIEW_PLAYBACK_HZ as f64) as u32;
-            (
-                layer.atlas,
-                layer.motion.offset_at_tick(tick, PREVIEW_PLAYBACK_HZ),
-                true,
-            )
+            (layer.motion.offset_at_tick(tick, PREVIEW_PLAYBACK_HZ), true)
         }
-        None => (atlas, [0, 0], false),
+        None => ([0, 0], false),
     };
     for part_index in 0..model.part_count() {
         let Some(part) = model.part(part_index) else {
@@ -421,6 +486,14 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             let Some(pc) = projected.get(c.vertex_index as usize).and_then(|v| *v) else {
                 continue;
             };
+            let character_atlas = if let Some(layer) = character_material {
+                layer.atlas
+            } else {
+                let palette_bank = model.face_palette_bank(face_index).unwrap_or(0) as usize;
+                atlas_banks
+                    .get(palette_bank)
+                    .or_else(|| atlas_banks.first())?
+            };
             raster_textured_triangle(
                 &mut image,
                 &mut z_buffer,
@@ -436,11 +509,17 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
         }
     }
 
-    if let Some(weapon) = equipped_weapon {
-        draw_equipped_weapon_overlay(
+    let gizmo_axis_length = (visual_height / 6).max(96);
+    let gizmo_local_axis_units = ((i64::from(gizmo_axis_length) << 12)
+        / i64::from(local_to_world.q12().max(1)))
+    .clamp(64, 16_384) as i32;
+    let mut selected_weapon_grip_gizmo = None;
+    for weapon in equipped_weapons {
+        let grip_gizmo = draw_equipped_weapon_overlay(
             &mut image,
             &mut z_buffer,
             camera,
+            projection,
             weapon,
             &animation,
             frame_q12,
@@ -448,7 +527,11 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             options.pose_offset,
             instance_rotation,
             &joint_transforms,
+            gizmo_axis_length,
         );
+        if weapon.show_grip_gizmo {
+            selected_weapon_grip_gizmo = grip_gizmo;
+        }
     }
 
     if options.show_animation_root {
@@ -471,16 +554,27 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
         draw_bone_overlay(&mut image, &model, &joint_origins);
     }
 
+    let mut selected_combat_gizmo = None;
     for capsule in combat_capsules {
         let Some(joint) = joint_transforms.get(capsule.joint as usize).copied() else {
             continue;
         };
         draw_joint_combat_capsule(&mut image, camera, projection, joint, capsule);
+        if capsule.selected {
+            let center = [
+                capsule.start[0].saturating_add(capsule.end[0]) / 2,
+                capsule.start[1].saturating_add(capsule.end[1]) / 2,
+                capsule.start[2].saturating_add(capsule.end[2]) / 2,
+            ];
+            selected_combat_gizmo = project_joint_local_axis_gizmo(
+                camera,
+                projection,
+                joint,
+                center,
+                gizmo_local_axis_units,
+            );
+        }
     }
-    let socket_axis_length = (visual_height / 6).max(96);
-    let socket_local_axis_units = ((i64::from(socket_axis_length) << 12)
-        / i64::from(local_to_world.q12().max(1)))
-    .clamp(64, 16_384) as i32;
     let mut selected_socket_gizmo = None;
     for socket in sockets {
         let Some(joint) = joint_transforms.get(socket.joint as usize).copied() else {
@@ -513,7 +607,7 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             joint,
             basis,
             socket,
-            socket_axis_length,
+            gizmo_axis_length,
         );
         if socket.selected {
             selected_socket_gizmo = project_socket_gizmo(
@@ -522,8 +616,8 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
                 joint,
                 basis,
                 socket,
-                socket_axis_length,
-                socket_local_axis_units,
+                gizmo_axis_length,
+                gizmo_local_axis_units,
             );
         }
     }
@@ -542,8 +636,8 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             projection,
             origin_world,
             &instance_rotation,
-            socket_axis_length,
-            socket_local_axis_units,
+            gizmo_axis_length,
+            gizmo_local_axis_units,
         )
     });
 
@@ -555,6 +649,8 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             .collect(),
         selected_socket_gizmo,
         selected_joint_gizmo,
+        selected_combat_gizmo,
+        selected_weapon_grip_gizmo,
     })
 }
 
@@ -1426,6 +1522,7 @@ fn draw_equipped_weapon_overlay(
     image: &mut ColorImage,
     z_buffer: &mut [f32],
     camera: WorldCamera,
+    projection: WorldProjection,
     weapon: &PreviewEquippedWeapon<'_>,
     animation: &Animation<'_>,
     frame_q12: u32,
@@ -1433,12 +1530,10 @@ fn draw_equipped_weapon_overlay(
     pose_offset: [i32; 3],
     instance_rotation: Mat3I16,
     joint_transforms: &[JointWorldTransform],
-) -> Option<()> {
+    gizmo_axis_length: i32,
+) -> Option<PreviewAxisGizmo> {
     let weapon_model = Model::from_bytes(weapon.model_bytes).ok()?;
     let materialization_q12 = weapon.materialization_q12.min(4096);
-    if materialization_q12 == 0 {
-        return Some(());
-    }
     let joint = joint_transforms
         .get(weapon.socket_joint as usize)
         .copied()?;
@@ -1469,6 +1564,25 @@ fn draw_equipped_weapon_overlay(
         socket_origin.y.saturating_sub(grip_world.y),
         socket_origin.z.saturating_sub(grip_world.z),
     );
+    let grip_gizmo = weapon
+        .show_grip_gizmo
+        .then(|| {
+            let local_axis_units = ((i64::from(gizmo_axis_length) << 12)
+                / i64::from(weapon_local_to_world.q12().max(1)))
+            .clamp(32, 16_384) as i32;
+            project_axis_gizmo(
+                camera,
+                projection,
+                socket_origin,
+                &weapon_rotation,
+                gizmo_axis_length,
+                local_axis_units,
+            )
+        })
+        .flatten();
+    if materialization_q12 == 0 {
+        return grip_gizmo;
+    }
     let identity_pose = JointPose {
         matrix: [[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]],
         translation: Vec3I32::new(0, 0, 0),
@@ -1502,7 +1616,7 @@ fn draw_equipped_weapon_overlay(
         let last_face = first_face.saturating_add(part.face_count());
         for face_index in first_face..last_face {
             if visited_faces >= visible_faces {
-                return Some(());
+                return grip_gizmo;
             }
             visited_faces = visited_faces.saturating_add(1);
             let Some(face) = weapon_model.face(face_index) else {
@@ -1542,10 +1656,15 @@ fn draw_equipped_weapon_overlay(
                 );
                 continue;
             }
+            let palette_bank = weapon_model.face_palette_bank(face_index).unwrap_or(0) as usize;
+            let atlas = weapon
+                .atlas_banks
+                .get(palette_bank)
+                .or_else(|| weapon.atlas_banks.first())?;
             raster_textured_triangle(
                 image,
                 z_buffer,
-                weapon.atlas,
+                atlas,
                 [
                     PreviewVertex::from_projected(pa, a.uv),
                     PreviewVertex::from_projected(pb, b.uv),
@@ -1556,7 +1675,7 @@ fn draw_equipped_weapon_overlay(
             );
         }
     }
-    Some(())
+    grip_gizmo
 }
 
 /// Inverse of [`euler_rotation_q12`]: negate each angle and compose in
@@ -1651,6 +1770,28 @@ fn project_axis_gizmo(
             projection,
             basis_offset_point(origin_world, basis, local),
         )?;
+        axis_ends[axis] = [end.sx as f32, end.sy as f32];
+    }
+    Some(PreviewAxisGizmo {
+        origin: [origin.sx as f32, origin.sy as f32],
+        axis_ends,
+        local_axis_units: local_axis_units as f32,
+    })
+}
+
+fn project_joint_local_axis_gizmo(
+    camera: WorldCamera,
+    projection: WorldProjection,
+    joint: JointWorldTransform,
+    origin_local: [i32; 3],
+    local_axis_units: i32,
+) -> Option<PreviewAxisGizmo> {
+    let origin = project_preview_world(camera, projection, joint_local_point(joint, origin_local))?;
+    let mut axis_ends = [[0.0; 2]; 3];
+    for axis in 0..3 {
+        let mut end_local = origin_local;
+        end_local[axis] = end_local[axis].saturating_add(local_axis_units);
+        let end = project_preview_world(camera, projection, joint_local_point(joint, end_local))?;
         axis_ends[axis] = [end.sx as f32, end.sy as f32];
     }
     Some(PreviewAxisGizmo {
@@ -2080,7 +2221,7 @@ mod tests {
         let bare = render(None);
         let with_weapon = render(Some(&PreviewEquippedWeapon {
             model_bytes: weapon_model,
-            atlas: &weapon_atlas,
+            atlas_banks: std::slice::from_ref(&weapon_atlas),
             socket_joint,
             socket_translation,
             socket_rotation_q12: socket_rotation,
@@ -2088,6 +2229,7 @@ mod tests {
             grip_rotation_q12: [0, 0, 0],
             materialization_q12: 4096,
             wireframe_materialization: false,
+            show_grip_gizmo: false,
         }));
         assert_ne!(
             bare.pixels, with_weapon.pixels,
@@ -2095,7 +2237,7 @@ mod tests {
         );
         let moved = render(Some(&PreviewEquippedWeapon {
             model_bytes: weapon_model,
-            atlas: &weapon_atlas,
+            atlas_banks: std::slice::from_ref(&weapon_atlas),
             socket_joint,
             socket_translation: [
                 socket_translation[0].saturating_add(12_000),
@@ -2107,10 +2249,94 @@ mod tests {
             grip_rotation_q12: [0, 0, 0],
             materialization_q12: 4096,
             wireframe_materialization: false,
+            show_grip_gizmo: false,
         }));
         assert_ne!(
             with_weapon.pixels, moved.pixels,
             "the weapon must track the socket offset"
+        );
+        let grip_render = render_import_model_preview_with_combat_capsules_at_size(
+            &model,
+            &clip,
+            &atlas,
+            options,
+            yaw_rotation_matrix(0),
+            [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+            &[],
+            &[],
+            Some(&PreviewEquippedWeapon {
+                model_bytes: weapon_model,
+                atlas_banks: std::slice::from_ref(&weapon_atlas),
+                socket_joint,
+                socket_translation,
+                socket_rotation_q12: socket_rotation,
+                grip_translation: [0, 0, 0],
+                grip_rotation_q12: [0, 0, 0],
+                materialization_q12: 0,
+                wireframe_materialization: false,
+                show_grip_gizmo: true,
+            }),
+            material_layer.as_ref(),
+            None,
+            None,
+        )
+        .expect("weapon grip fixture renders");
+        assert!(
+            grip_render.selected_weapon_grip_gizmo.is_some(),
+            "a selected weapon grip should expose projected viewport axes even before its visibility beat"
+        );
+        let paired_weapons = [
+            PreviewEquippedWeapon {
+                model_bytes: weapon_model,
+                atlas_banks: std::slice::from_ref(&weapon_atlas),
+                socket_joint,
+                socket_translation,
+                socket_rotation_q12: socket_rotation,
+                grip_translation: [0, 0, 0],
+                grip_rotation_q12: [0, 0, 0],
+                materialization_q12: 4096,
+                wireframe_materialization: false,
+                show_grip_gizmo: false,
+            },
+            PreviewEquippedWeapon {
+                model_bytes: weapon_model,
+                atlas_banks: std::slice::from_ref(&weapon_atlas),
+                socket_joint,
+                socket_translation: [
+                    socket_translation[0].saturating_add(420),
+                    socket_translation[1],
+                    socket_translation[2],
+                ],
+                socket_rotation_q12: socket_rotation,
+                grip_translation: [0, 0, 0],
+                grip_rotation_q12: [0, 0, 0],
+                materialization_q12: 4096,
+                wireframe_materialization: false,
+                show_grip_gizmo: true,
+            },
+        ];
+        let paired = render_import_model_preview_with_equipment_set_at_size(
+            &model,
+            &clip,
+            std::slice::from_ref(&atlas),
+            options,
+            yaw_rotation_matrix(0),
+            [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+            &[],
+            &[],
+            &paired_weapons,
+            material_layer.as_ref(),
+            None,
+            None,
+        )
+        .expect("dual-weapon fixture renders");
+        assert_ne!(
+            with_weapon.pixels, paired.image.pixels,
+            "the equipment-set renderer must draw the second active weapon"
+        );
+        assert!(
+            paired.selected_weapon_grip_gizmo.is_some(),
+            "the selected weapon in a dual-wield set keeps its own grip gizmo"
         );
         if let Ok(path) = std::env::var("DUMP_WEAPON_PREVIEW") {
             let mut out =
@@ -2266,6 +2492,10 @@ mod tests {
         assert!(
             wire_pixels > 24,
             "expected a visible selected capsule wireframe, got {wire_pixels} pixels"
+        );
+        assert!(
+            render.selected_combat_gizmo.is_some(),
+            "a selected combat capsule should expose projected joint-local axes"
         );
     }
 

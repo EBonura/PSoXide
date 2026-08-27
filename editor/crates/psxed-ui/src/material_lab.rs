@@ -295,6 +295,11 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_material_lab(&mut self, ui: &mut egui::Ui) {
+        // Material Lab must remain visually useful even when the bottom dock
+        // is closed or showing Console. Keep card thumbnails warm here too;
+        // previously Simple Image materials appeared as flat grey until the
+        // Resources tab happened to be opened once.
+        self.refresh_texture_thumbs(ui.ctx());
         let material_options = self.material_lab_options();
         self.sync_material_lab_focus(&material_options);
         let Some(material_id) = self.material_lab.focused_material else {
@@ -1072,11 +1077,9 @@ fn draw_material_lab_preview(
                 }
             }
         }
-        MaterialTextureMode::SimpleImage => workspace
-            .project
-            .resource(material_id)
-            .and_then(|resource| workspace.texture_thumb_entry(resource))
-            .map(|entry| entry.image.clone()),
+        MaterialTextureMode::SimpleImage => {
+            decode_material_image_path(workspace.project_root(), material.psxt_path.as_deref())
+        }
         MaterialTextureMode::ReflectiveProbe => None,
     };
     let overlay_image =
@@ -1103,12 +1106,9 @@ fn draw_material_lab_preview(
                         }
                     }
                 }
-                MaterialTextureMode::SimpleImage => layer.psxt_path.as_deref().and_then(|path| {
-                    let path = workspace.project_root().join(path);
-                    std::fs::read(path)
-                        .ok()
-                        .and_then(|bytes| decode_psxt_thumbnail(&bytes).map(|(image, _)| image))
-                }),
+                MaterialTextureMode::SimpleImage => {
+                    decode_material_image_path(workspace.project_root(), layer.psxt_path.as_deref())
+                }
                 MaterialTextureMode::ReflectiveProbe => None,
             });
 
@@ -1192,6 +1192,24 @@ fn draw_material_lab_preview(
         };
         ui.label(RichText::new(pass_note).color(STUDIO_TEXT_WEAK));
     });
+}
+
+fn decode_material_image_path(
+    project_root: &std::path::Path,
+    stored: Option<&str>,
+) -> Option<ColorImage> {
+    let stored = stored?.trim();
+    if stored.is_empty() {
+        return None;
+    }
+    let path = if std::path::Path::new(stored).is_absolute() {
+        std::path::PathBuf::from(stored)
+    } else {
+        project_root.join(stored)
+    };
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| decode_psxt_thumbnail(&bytes).map(|(image, _)| image))
 }
 
 fn model_stack_base_preview_animation(material: &MaterialResource) -> MaterialAnimationMode {
@@ -1433,6 +1451,29 @@ mod tests {
         assert_eq!(unique_material_version_name(&material), "Version 2");
         material.create_version("LLM Pass");
         assert_eq!(unique_material_version_name(&material), "Version 3");
+    }
+
+    #[test]
+    fn simple_image_preview_decodes_without_thumbnail_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "psoxide-material-preview-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create preview root");
+        let bytes = psxed_project::generate_material_texture_psxt(
+            psxed_project::GeneratedMaterialTexture::default(),
+        );
+        std::fs::write(root.join("visible.psxt"), bytes).expect("write PSXT");
+
+        let image = decode_material_image_path(&root, Some("visible.psxt"))
+            .expect("valid material preview");
+
+        assert!(image.size[0] > 0 && image.size[1] > 0);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

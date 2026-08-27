@@ -158,6 +158,22 @@ impl RuntimeRoomLighting {
         material.with_tint(self.shade_tint_at(point, material.tint()))
     }
 
+    /// Shade one rigid model using its current world-space bounding sphere.
+    ///
+    /// Model rendering uses one PSX material tint for the complete mesh. Treat
+    /// the receiver as a sphere rather than a dimensionless point so a light
+    /// begins affecting a visible limb or edge when it enters the light volume,
+    /// instead of waiting for the actor's root to cross the cutoff.
+    #[inline]
+    pub fn shade_model_material_sphere(
+        &self,
+        center: WorldVertex,
+        radius: i32,
+        material: TextureMaterial,
+    ) -> TextureMaterial {
+        material.with_tint(self.shade_tint_at_sphere(center, radius, material.tint()))
+    }
+
     /// Shade `base` at `point` with ambient + point lights, then fog by
     /// the camera-view depth of `point`.
     #[inline]
@@ -173,6 +189,28 @@ impl RuntimeRoomLighting {
             return tint;
         }
         let depth = self.camera.view_vertex(point).z;
+        self.apply_fog_at_depth(tint, depth)
+    }
+
+    /// Shade a rigid receiver represented by a world-space bounding sphere.
+    #[inline]
+    pub fn shade_tint_at_sphere(
+        &self,
+        center: RoomPoint,
+        radius: i32,
+        base: (u8, u8, u8),
+    ) -> (u8, u8, u8) {
+        let tint = psx_engine::shade_material_tint_with_lights(
+            MaterialTint::from_tuple(base),
+            center.to_array(),
+            self.ambient,
+            self.point_lights_for_receiver_radius(radius),
+        )
+        .to_tuple();
+        if !self.fog_enabled || self.fog_far <= self.fog_near {
+            return tint;
+        }
+        let depth = self.camera.view_vertex(center).z;
         self.apply_fog_at_depth(tint, depth)
     }
 
@@ -213,11 +251,20 @@ impl RuntimeRoomLighting {
 
     #[inline]
     fn point_lights(&self) -> impl Iterator<Item = PointLightSample> + '_ {
-        self.lights.iter().map(|light| {
+        self.point_lights_for_receiver_radius(0)
+    }
+
+    #[inline]
+    fn point_lights_for_receiver_radius(
+        &self,
+        receiver_radius: i32,
+    ) -> impl Iterator<Item = PointLightSample> + '_ {
+        let receiver_radius = receiver_radius.max(0);
+        self.lights.iter().map(move |light| {
             debug_assert_eq!(light.room, self.room_index);
             PointLightSample::from_rgb_intensity(
                 [light.x, light.y, light.z],
-                light.radius as i32,
+                (light.radius as i32).saturating_add(receiver_radius),
                 Rgb8::from_array(light.color),
                 Q8::from_raw_u16(light.intensity_q8),
             )
@@ -488,6 +535,17 @@ mod tests {
         },
     ];
 
+    const RECEIVER_LIGHTS: &[PointLightRecord] = &[PointLightRecord {
+        room: RoomIndex(0),
+        x: 0,
+        y: 0,
+        z: 0,
+        radius: 100,
+        intensity_q8: 256,
+        color: [255; 3],
+        flags: 0,
+    }];
+
     #[test]
     fn room_light_slice_returns_exact_contiguous_range() {
         assert!(room_light_slice(TEST_LIGHTS, RoomIndex(1)).is_empty());
@@ -495,5 +553,34 @@ mod tests {
         assert_eq!(room_two.len(), 2);
         assert_eq!(room_two[0].x, 1);
         assert_eq!(room_two[1].x, 2);
+    }
+
+    #[test]
+    fn model_sphere_is_lit_when_its_visible_edge_enters_light_radius() {
+        let projection = psx_engine::WorldProjection::new(160, 120, 200, 40);
+        let lighting = RuntimeRoomLighting {
+            room_index: RoomIndex(0),
+            ambient: Rgb8::new(16, 16, 16),
+            camera: WorldCamera::orbit_yaw(
+                projection,
+                WorldVertex::ZERO,
+                0,
+                200,
+                psx_engine::Angle::ZERO,
+            ),
+            fog_enabled: false,
+            fog_rgb: Rgb8::BLACK,
+            fog_near: 0,
+            fog_far: 0,
+            lights: RECEIVER_LIGHTS,
+        };
+        let center = WorldVertex::new(110, 0, 0);
+        let point_tint = lighting.shade_tint_at(center, (128, 128, 128));
+        let sphere_tint = lighting.shade_tint_at_sphere(center, 20, (128, 128, 128));
+
+        assert_eq!(point_tint, (16, 16, 16));
+        assert!(sphere_tint.0 > point_tint.0, "got {sphere_tint:?}");
+        assert_eq!(sphere_tint.0, sphere_tint.1);
+        assert_eq!(sphere_tint.1, sphere_tint.2);
     }
 }

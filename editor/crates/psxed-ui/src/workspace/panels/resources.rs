@@ -369,7 +369,7 @@ impl EditorWorkspace {
                     ui.selectable_value(
                         &mut self.content_browser_view,
                         ContentBrowserView::Debug,
-                        "Debug Viz",
+                        "Console",
                     );
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
@@ -385,19 +385,19 @@ impl EditorWorkspace {
     pub(crate) fn draw_debug_terminal_actions(&mut self, ui: &mut egui::Ui) {
         if ui
             .add(egui::Button::new(icons::text(icons::COPY, 14.0)).min_size(Vec2::new(28.0, 24.0)))
-            .on_hover_text("Copy all guest debug terminal lines")
+            .on_hover_text("Copy all build and guest console lines")
             .clicked()
         {
             ui.ctx().copy_text(self.play_debug_terminal_text());
-            self.status = "Copied guest debug terminal".to_string();
+            self.status = "Copied console output".to_string();
         }
         if ui
             .add(egui::Button::new(icons::text(icons::TRASH, 14.0)).min_size(Vec2::new(28.0, 24.0)))
-            .on_hover_text("Clear the guest debug terminal")
+            .on_hover_text("Clear the build and guest console")
             .clicked()
         {
             self.play_debug_terminal_lines.clear();
-            self.status = "Cleared guest debug terminal".to_string();
+            self.status = "Cleared console output".to_string();
         }
     }
 
@@ -646,7 +646,7 @@ impl EditorWorkspace {
                 ui.set_min_width((terminal_width - 16.0).max(1.0));
                 ui.set_min_height((terminal_height - 14.0).max(1.0));
                 if self.play_debug_terminal_lines.is_empty() {
-                    ui.weak("Guest debug terminal is waiting for PSX log output.");
+                    ui.weak("Build and guest output will appear here.");
                     return;
                 }
                 egui::ScrollArea::vertical()
@@ -681,7 +681,7 @@ impl EditorWorkspace {
         // Snapshot resource id + path first so cache mutation below
         // cannot fight the immutable project-resource walk.
         let project_root = self.project_dir.clone();
-        let sources: Vec<(ResourceId, String, Option<String>)> = self
+        let sources: Vec<(ResourceId, String, Option<String>, Option<[u8; 3]>)> = self
             .project
             .resources
             .iter()
@@ -691,35 +691,33 @@ impl EditorWorkspace {
                 // share the same on-disk format and decoder, so the
                 // thumbnail cache treats them uniformly.
                 match &resource.data {
-                    ResourceData::Texture { psxt_path } => {
-                        Some((resource.id, psxt_path.clone(), Some(psxt_path.clone())))
-                    }
-                    ResourceData::Material(material)
-                        if matches!(
-                            material.texture_mode,
-                            MaterialTextureMode::Generated | MaterialTextureMode::Transition
-                        ) =>
-                    {
-                        Some((
-                            resource.id,
-                            material_thumbnail_signature(&self.project, resource.id),
-                            None,
-                        ))
-                    }
-                    ResourceData::Material(material) => {
-                        let psxt_path = material.psxt_path.as_ref()?;
-                        Some((resource.id, psxt_path.clone(), Some(psxt_path.clone())))
-                    }
+                    ResourceData::Texture { psxt_path } => Some((
+                        resource.id,
+                        psxt_path.clone(),
+                        Some(psxt_path.clone()),
+                        None,
+                    )),
+                    ResourceData::Material(material) => Some((
+                        resource.id,
+                        material_thumbnail_signature(&self.project, resource.id),
+                        None,
+                        Some(material.tint),
+                    )),
                     ResourceData::Model(model) => {
                         let psxt_path = model.texture_path.as_ref()?;
-                        Some((resource.id, psxt_path.clone(), Some(psxt_path.clone())))
+                        Some((
+                            resource.id,
+                            psxt_path.clone(),
+                            Some(psxt_path.clone()),
+                            None,
+                        ))
                     }
                     _ => None,
                 }
             })
             .collect();
-        let alive: HashSet<ResourceId> = sources.iter().map(|(id, _, _)| *id).collect();
-        for (id, signature, psxt_path) in sources {
+        let alive: HashSet<ResourceId> = sources.iter().map(|(id, _, _, _)| *id).collect();
+        for (id, signature, psxt_path, material_tint) in sources {
             if let Some(entry) = self.texture_thumbs.get(&id) {
                 if entry.signature == signature {
                     continue;
@@ -742,10 +740,13 @@ impl EditorWorkspace {
                     .flatten()
                     .map(|(_, bytes)| bytes)
             };
-            let Some((image, stats)) = bytes.as_deref().and_then(decode_psxt_thumbnail) else {
+            let Some((mut image, stats)) = bytes.as_deref().and_then(decode_psxt_thumbnail) else {
                 self.remove_texture_thumb(id);
                 continue;
             };
+            if let Some(tint) = material_tint {
+                modulate_ps1_thumbnail(&mut image, tint);
+            }
             self.set_texture_thumb(ctx, id, signature, image, stats);
         }
         // Drop entries for Texture / Model resources that no longer

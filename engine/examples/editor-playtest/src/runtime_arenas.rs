@@ -104,18 +104,29 @@ pub(super) union FrameWorldBackendOverlay {
 // chains, so either assertion failing means this carve no longer has the
 // promised zero-static-RAM cost and must be reviewed at cook/runtime together.
 const PXBSP_FACE_CHAIN_BYTES: usize = core::mem::size_of::<[u16; PXBSP_FACE_CHAIN_CAPACITY]>();
-const PERSISTENT_WORLD_OVERLAY_BYTES: usize =
+const PERSISTENT_WORLD_OVERLAY_PAYLOAD_BYTES: usize =
     if core::mem::size_of::<GridWorldArenas>() > PXBSP_FACE_CHAIN_BYTES {
         core::mem::size_of::<GridWorldArenas>()
     } else {
         PXBSP_FACE_CHAIN_BYTES
     };
-const FRAME_WORLD_OVERLAY_BYTES: usize =
+const FRAME_WORLD_OVERLAY_PAYLOAD_BYTES: usize =
     if core::mem::size_of::<RuntimeModelDrawScratch>() > PXBSP_FACE_CHAIN_BYTES {
         core::mem::size_of::<RuntimeModelDrawScratch>()
     } else {
         PXBSP_FACE_CHAIN_BYTES
     };
+const fn aligned_union_bytes(payload: usize, alignment: usize) -> usize {
+    ((payload + alignment - 1) / alignment) * alignment
+}
+const PERSISTENT_WORLD_OVERLAY_BYTES: usize = aligned_union_bytes(
+    PERSISTENT_WORLD_OVERLAY_PAYLOAD_BYTES,
+    core::mem::align_of::<PersistentWorldBackendOverlay>(),
+);
+const FRAME_WORLD_OVERLAY_BYTES: usize = aligned_union_bytes(
+    FRAME_WORLD_OVERLAY_PAYLOAD_BYTES,
+    core::mem::align_of::<FrameWorldBackendOverlay>(),
+);
 const _: () = assert!(
     core::mem::size_of::<PersistentWorldBackendOverlay>() == PERSISTENT_WORLD_OVERLAY_BYTES
 );

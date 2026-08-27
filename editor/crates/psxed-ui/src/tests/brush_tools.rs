@@ -1958,6 +1958,12 @@ fn element_gizmo_rotation_and_scale_snap_every_vertex_to_active_grid() {
             center: [128.0, 96.0, 64.0],
             axis: if rotate { 1 } else { 0 },
             rotate,
+            grid_safe_rotation: rotate,
+            rotation_snap_degrees: if rotate {
+                BRUSH_ROTATION_SNAP_DEGREES
+            } else {
+                5
+            },
             faces: (0..base.faces.len()).collect(),
             start_pointer,
             screen_axis: Vec2::RIGHT,
@@ -1967,7 +1973,9 @@ fn element_gizmo_rotation_and_scale_snap_every_vertex_to_active_grid() {
         });
 
         let pointer = if rotate {
-            let angle = 35.0_f32.to_radians();
+            // BSP brush rotation is deliberately lattice-safe: once the
+            // pointer crosses the half-turn threshold it snaps to 90°.
+            let angle = 70.0_f32.to_radians();
             Pos2::new(angle.cos() * 100.0, angle.sin() * 100.0)
         } else {
             // 2.56 px per percent: this is a deliberately off-grid 15%
@@ -1977,8 +1985,15 @@ fn element_gizmo_rotation_and_scale_snap_every_vertex_to_active_grid() {
         workspace.update_brush_element_transform(pointer, false);
         assert_eq!(
             workspace.brush_element_transform.as_ref().unwrap().applied,
-            if rotate { 35 } else { 15 }
+            if rotate { 90 } else { 15 }
         );
+        if rotate {
+            assert!(
+                workspace.status.contains("90°"),
+                "live rotation feedback includes the snapped angle: {}",
+                workspace.status
+            );
+        }
         assert!(workspace.commit_brush_element_transform());
 
         let transformed = workspace.project.active_scene().brushes[0].clone();
@@ -3833,6 +3848,11 @@ fn vertex_drag_refuses_invalid_shapes_and_escape_cancels() {
     harness
         .workspace
         .update_brush_vertex_drag_2d([-130.0, 32.0]);
+    assert!(
+        harness.workspace.status.contains("Move rejected"),
+        "invalid geometry explains why the position was refused: {}",
+        harness.workspace.status
+    );
     harness.workspace.commit_brush_gesture_2d();
     assert_eq!(
         harness.workspace.project.active_scene().brushes[0],

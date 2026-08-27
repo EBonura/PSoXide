@@ -34,6 +34,7 @@ pub mod portal_rooms;
 pub mod quake_map_import;
 pub mod resolve;
 pub mod room_connections;
+pub mod sky_texture;
 pub mod spatial;
 pub mod streaming;
 pub mod texture_import;

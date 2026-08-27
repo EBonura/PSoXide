@@ -140,8 +140,13 @@ pub(super) const MAX_CAMERA_ORBIT_SPEED_LEVEL: u8 = 7;
 pub(super) const CAMERA_SOFT_LOCK_BREAK_STICK: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_THRESHOLD: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_RELEASE: i16 = 36;
-pub(super) const LOCK_RANGE: i32 = 256;
-pub(super) const LOCK_BREAK_RANGE: i32 = 320;
+/// Hard-lock acquisition distance. Runtime BSP units are 1/16 of authored
+/// scene units, so 1024 is roughly sixteen standing character heights: far
+/// enough to acquire an enemy when it first reads clearly down a corridor.
+pub(super) const LOCK_RANGE: i32 = 1024;
+/// A locked target gets extra distance headroom so sprinting or knockback does
+/// not immediately tear down a valid lock at the acquisition boundary.
+pub(super) const LOCK_BREAK_RANGE: i32 = 1280;
 /// Horizontal acquisition cone in signed Q8 screen-space (`256 = 45°`).
 pub(super) const LOCK_ACQUIRE_HALF_CONE_Q8: i32 = 288;
 /// Frames a still-live target may remain beyond break range before unlock.
@@ -151,10 +156,11 @@ pub(super) const SOFT_LOCK_BREAK_RANGE: i32 = 240;
 pub(super) const CAMERA_COLLISION_ENABLED: bool = true;
 pub(super) const SOFT_LOCK_ENABLED: bool = false;
 
-/// Quanta-per-frame turn rate when the runtime can't resolve a
-/// Character (no PLAYER_CONTROLLER). Mirrors the pre-character
-/// debug value.
-pub(super) const FALLBACK_PLAYER_YAW_STEP: Angle = Angle::from_q12(32);
+/// Quanta-per-frame turn rate when the runtime can't resolve a Character.
+/// The debug body has no turn animation to preserve, so it turns promptly;
+/// the old 32-Q12 step drew a 128-unit U-turn and made otherwise-valid narrow
+/// BSP corridors impossible to enter with camera-relative controls.
+pub(super) const FALLBACK_PLAYER_YAW_STEP: Angle = Angle::from_q12(256);
 pub(super) const FALLBACK_PLAYER_SPEED: i32 = 2 << 8;
 pub(super) const PLAYER_SPEED_SCALE_NUM: i32 = 3;
 pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
@@ -489,15 +495,15 @@ pub(super) use psx_game_runtime::room_cache::INVALID_ROOM_INDEX;
 /// over this cap drop their over-budget triangles graceful.
 pub(super) const MODEL_VERTEX_CAP: usize = 1024;
 /// Predecoded face records shared by runtime model assets. The pool must hold
-/// every simultaneously loaded model, not merely the largest one: Cortex's
-/// 530-face enemy plus 529-face player already require 1,059 records. Keep
-/// enough headroom for equipment or another compact NPC without silently
-/// dropping a later model during boot-time decoding.
-pub(super) const MAX_RUNTIME_MODEL_FACES: usize = 1536;
+/// every simultaneously loaded model, not merely the largest one. Cortex 0.1
+/// currently needs 1,947 records for both enemies, Aletha, and both swords.
+/// Keep a power-of-two ceiling above that complete scene requirement.
+pub(super) const MAX_RUNTIME_MODEL_FACES: usize = 2048;
 /// Predecoded part records shared by runtime model assets.
 pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = 128;
-/// Predecoded vertex records shared by runtime model assets.
-pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = 1024;
+/// Predecoded vertices shared by every runtime model. Cortex 0.1 needs 1,433
+/// records when both enemies, Aletha, and both swords are resident.
+pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = 1536;
 /// Projected edge threshold used to subdivide close model triangles.
 pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Joint-transform scratch -- all biped rigs we currently cook

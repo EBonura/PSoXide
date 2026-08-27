@@ -6,7 +6,8 @@
 //!
 //! Usage:
 //!   cargo run -p psxed-ui --example character_animation_reel -- \
-//!     editor/projects/default/project.ron /tmp/psoxide-character-reel
+//!     editor/projects/default/project.ron /tmp/psoxide-character-reel \
+//!     [character-name [clip-name ...]]
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -47,9 +48,12 @@ struct WeaponPreview {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let usage = "usage: character_animation_reel <project.ron> <frame-output-dir>";
+    let usage = "usage: character_animation_reel <project.ron> <frame-output-dir> \
+                 [character-name [clip-name ...]]";
     let project_path = PathBuf::from(args.next().expect(usage));
     let out_root = PathBuf::from(args.next().expect(usage));
+    let character_filter = args.next();
+    let clip_filters: Vec<String> = args.collect();
     let project_root = project_path.parent().expect("project path has a parent");
     let project = ProjectDocument::load_from_path(&project_path).expect("load project");
     std::fs::create_dir_all(&out_root).expect("create frame output directory");
@@ -60,6 +64,12 @@ fn main() {
     let mut segment_index = 0usize;
 
     for character_name in ["Aletha", "Rust Mantis Enemy", "Tank Boss"] {
+        if character_filter
+            .as_deref()
+            .is_some_and(|filter| !character_name.eq_ignore_ascii_case(filter))
+        {
+            continue;
+        }
         let preview = load_character_preview(&project, project_root, character_name);
         let weapon = (character_name == "Aletha")
             .then(|| load_light_weapon_preview(&project, project_root, &preview))
@@ -77,6 +87,13 @@ fn main() {
                 _ => false,
             })
             .collect();
+        if !clip_filters.is_empty() {
+            clips.retain(|resource| {
+                clip_filters
+                    .iter()
+                    .any(|filter| resource.name.eq_ignore_ascii_case(filter))
+            });
+        }
         clips.sort_by(|a, b| a.name.cmp(&b.name));
 
         for resource in clips {
@@ -174,7 +191,7 @@ fn render_clip(
             runtime_light_weapon_materialization(clip_name, animation, sample_time).map(
                 |materialization_q12| PreviewEquippedWeapon {
                     model_bytes: &weapon.model_bytes,
-                    atlas: &weapon.atlas,
+                    atlas_banks: std::slice::from_ref(&weapon.atlas),
                     socket_joint: weapon.socket_joint,
                     socket_translation: weapon.socket_translation,
                     socket_rotation_q12: weapon.socket_rotation_q12,
@@ -182,6 +199,7 @@ fn render_clip(
                     grip_rotation_q12: weapon.grip_rotation_q12,
                     materialization_q12,
                     wireframe_materialization: true,
+                    show_grip_gizmo: false,
                 },
             )
         });

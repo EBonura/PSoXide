@@ -224,13 +224,20 @@ impl EditorWorkspace {
         self.place_node_at_world_hit(root, hit);
         let placed = self.project.active_scene().nodes().len() > before;
         if placed {
-            self.status = format!(
-                "Placed {} at {:.0},{:.0},{:.0}",
-                self.place_kind.label(),
-                hit[0],
-                hit[1],
-                hit[2]
-            );
+            self.status = if matches!(self.place_kind, PlaceKind::PointOfInterest) {
+                format!(
+                    "Placed Point of Interest at {:.0},{:.0},{:.0} — edit Page 1 to replace the default message",
+                    hit[0], hit[1], hit[2]
+                )
+            } else {
+                format!(
+                    "Placed {} at {:.0},{:.0},{:.0}",
+                    self.place_kind.label(),
+                    hit[0],
+                    hit[1],
+                    hit[2]
+                )
+            };
         }
         placed
     }
@@ -966,7 +973,7 @@ impl EditorWorkspace {
                 entity,
                 "Point of Interest",
                 NodeKind::PointOfInterest {
-                    pages: psxed_project::default_message_pages(),
+                    pages: psxed_project::default_point_of_interest_pages(),
                     prompt: psxed_project::default_point_of_interest_prompt(),
                     radius: psxed_project::default_point_of_interest_radius(),
                     marker_height: psxed_project::default_point_of_interest_marker_height(),
@@ -981,7 +988,8 @@ impl EditorWorkspace {
             self.replace_node_selection(component);
             self.clear_resource_selection_state();
             self.clear_primitive_selection_state();
-            self.status = "Placed Point of Interest".to_string();
+            self.status =
+                "Placed Point of Interest — edit Page 1 to replace the default message".to_string();
             self.mark_dirty();
             self.return_to_select_after_place();
             return;

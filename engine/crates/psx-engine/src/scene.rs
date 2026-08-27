@@ -35,6 +35,7 @@ pub enum RenderSubmission {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RuntimeRequests {
     timing_realign: bool,
+    visual_checkpoint: bool,
 }
 
 /// Per-frame context passed to [`Scene::update`] and
@@ -222,6 +223,23 @@ impl Ctx {
     pub(crate) fn take_timing_realign_request(&mut self) -> bool {
         let requested = self.runtime_requests.timing_realign;
         self.runtime_requests.timing_realign = false;
+        requested
+    }
+
+    /// Ask the app runner to discard clock debt accumulated by a blocking
+    /// loading slice and yield to the next eligible visual frame before
+    /// another fixed update. This is distinct from normal gameplay overload:
+    /// loading has no simulation state to catch up, but its progress UI must
+    /// still be presented between synchronous CD drains.
+    #[inline]
+    pub fn request_visual_checkpoint(&mut self) {
+        self.runtime_requests.visual_checkpoint = true;
+    }
+
+    #[inline]
+    pub(crate) fn take_visual_checkpoint_request(&mut self) -> bool {
+        let requested = self.runtime_requests.visual_checkpoint;
+        self.runtime_requests.visual_checkpoint = false;
         requested
     }
 }

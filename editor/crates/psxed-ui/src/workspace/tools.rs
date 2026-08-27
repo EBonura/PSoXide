@@ -1413,6 +1413,12 @@ impl EditorWorkspace {
                     center: anchor,
                     axis,
                     rotate: mode == TransformGizmoMode::Rotate,
+                    grid_safe_rotation: self.brush_edit_mode == BrushEditMode::Move,
+                    rotation_snap_degrees: if self.brush_edit_mode == BrushEditMode::Move {
+                        BRUSH_ROTATION_SNAP_DEGREES
+                    } else {
+                        5
+                    },
                     start_pointer: pointer,
                     screen_axis,
                     center_screen,
@@ -1424,13 +1430,23 @@ impl EditorWorkspace {
         }
     }
 
-    /// Advance the rotate/scale gesture: horizontal pointer travel maps
-    /// to snapped degrees (5, Shift 1) or percent steps (5). Previews
-    /// rebuild from base and must stay bounded and valid.
+    /// Advance the rotate/scale gesture. Rigid BSP rotation uses lattice-safe
+    /// quarter turns; deliberate face/edge reshaping retains 5° (or fine 1°)
+    /// angular steps. Previews rebuild from base and must stay bounded/valid.
     pub(crate) fn update_brush_element_transform(&mut self, pointer: egui::Pos2, fine: bool) {
         let Some(drag) = self.brush_element_transform.clone() else {
             return;
         };
+        let rotation_snap_degrees = if drag.grid_safe_rotation {
+            BRUSH_ROTATION_SNAP_DEGREES
+        } else if fine {
+            1
+        } else {
+            5
+        };
+        if let Some(state) = self.brush_element_transform.as_mut() {
+            state.rotation_snap_degrees = rotation_snap_degrees;
+        }
         let applied = if drag.rotate {
             // Angular tracking around the projected centroid: the pointer
             // sweeps the ring, whatever the screen direction.
@@ -1442,8 +1458,12 @@ impl EditorWorkspace {
                 offset.y.atan2(offset.x) - drag.start_angle,
             );
             let degrees = f64::from(sweep).to_degrees();
-            let step = if fine { 1.0 } else { 5.0 };
-            ((degrees / step).round() * step) as i32
+            if drag.grid_safe_rotation {
+                snap_brush_rotation_degrees(degrees)
+            } else {
+                let step = f64::from(rotation_snap_degrees);
+                ((degrees / step).round() * step) as i32
+            }
         } else {
             // Pointer travel projected onto the grabbed axis's screen
             // direction: along the arrow grows, against it shrinks.
@@ -1475,6 +1495,19 @@ impl EditorWorkspace {
             map
         };
         let snap_step = i32::from(self.snap_units.max(1));
+        if drag.grid_safe_rotation
+            && (!drag.base.solved_vertices_on_grid(snap_step, 0.01)
+                || drag
+                    .others
+                    .iter()
+                    .any(|(_, brush)| !brush.solved_vertices_on_grid(snap_step, 0.01)))
+        {
+            self.status = format!(
+                "Rotate rejected: selection is not aligned to Grid {} (lower the grid first)",
+                self.snap_units
+            );
+            return;
+        }
         let mut previews = Vec::with_capacity(drag.others.len() + 1);
         let mut primary = drag.base.clone();
         if primary.transform_selected_snapped(
@@ -1486,7 +1519,16 @@ impl EditorWorkspace {
             snap_step,
         ) == 0
             || !brush_preview_ok(&primary)
+            || (drag.grid_safe_rotation && !primary.solved_vertices_on_grid(snap_step, 0.01))
         {
+            self.status = if drag.rotate {
+                format!(
+                    "Rotate {applied}° rejected: result would leave Grid {}",
+                    self.snap_units
+                )
+            } else {
+                format!("Scale rejected on Grid {}", self.snap_units)
+            };
             return;
         }
         previews.push((drag.index, primary));
@@ -1496,7 +1538,16 @@ impl EditorWorkspace {
             if preview.transform_selected_snapped(&faces, &[], drag.center, map, 0.5, snap_step)
                 == 0
                 || !brush_preview_ok(&preview)
+                || (drag.grid_safe_rotation && !preview.solved_vertices_on_grid(snap_step, 0.01))
             {
+                self.status = if drag.rotate {
+                    format!(
+                        "Rotate {applied}° rejected: result would leave Grid {}",
+                        self.snap_units
+                    )
+                } else {
+                    format!("Scale rejected on Grid {}", self.snap_units)
+                };
                 return;
             }
             previews.push((*index, preview));
@@ -1511,9 +1562,10 @@ impl EditorWorkspace {
             }
             self.status = if drag.rotate {
                 format!(
-                    "Rotate {} deg about {}",
+                    "Rotate {}° about {} (snap {}°)",
                     applied,
-                    ["X", "Y", "Z"][drag.axis]
+                    ["X", "Y", "Z"][drag.axis],
+                    rotation_snap_degrees
                 )
             } else {
                 format!(
@@ -4529,6 +4581,12 @@ impl EditorWorkspace {
             if let Some(state) = self.brush_extrude.as_mut() {
                 state.applied = delta;
             }
+            self.status = format!(
+                "Moved face on Grid {} ({:+}, {:+}, {:+})",
+                self.snap_units, delta[0], delta[1], delta[2]
+            );
+        } else if let Some(rejection) = brush_preview_rejection(&preview) {
+            self.status = rejection.message(self.snap_units);
         }
     }
 
@@ -4706,14 +4764,21 @@ impl EditorWorkspace {
         if applied == drag.applied {
             return;
         }
-        if let Some(previews) = self.brush_vertex_drag_previews(&drag, applied) {
-            let scene = self.project.active_scene_mut();
-            for (index, preview) in previews {
-                scene.brushes[index] = preview;
+        match self.brush_vertex_drag_previews(&drag, applied) {
+            Ok(previews) => {
+                let scene = self.project.active_scene_mut();
+                for (index, preview) in previews {
+                    scene.brushes[index] = preview;
+                }
+                if let Some(state) = self.brush_vertex_drag.as_mut() {
+                    state.applied = applied;
+                }
+                self.status = format!(
+                    "Moved brush element to Grid {} ({:+}, {:+}, {:+})",
+                    self.snap_units, applied[0], applied[1], applied[2]
+                );
             }
-            if let Some(state) = self.brush_vertex_drag.as_mut() {
-                state.applied = applied;
-            }
+            Err(rejection) => self.status = rejection.message(self.snap_units),
         }
     }
 
@@ -4725,13 +4790,28 @@ impl EditorWorkspace {
         &self,
         drag: &BrushVertexDrag,
         applied: [i32; 3],
-    ) -> Option<Vec<(usize, psxed_project::brush::Brush)>> {
+    ) -> Result<Vec<(usize, psxed_project::brush::Brush)>, BrushPreviewRejection> {
+        // Returning the pointer to its press point must restore the base
+        // preview. Besides making drag cancellation intuitive, this lets a
+        // slightly wiggled click cross egui's drag threshold and still land
+        // as selection without leaving one snapped edit behind.
+        if applied == [0; 3] {
+            return Ok(std::iter::once((drag.index, drag.base.clone()))
+                .chain(drag.others.iter().cloned())
+                .collect());
+        }
         let uv_lock = self.brush_texture_lock;
         let mut primary = drag.base.clone();
-        if primary.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock) == 0
-            || !brush_preview_ok(&primary)
-        {
-            return None;
+        let moved = if drag.faces.is_empty() {
+            primary.translate_solved_vertices(&drag.targets, applied, 0.5, uv_lock)
+        } else {
+            primary.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock)
+        };
+        if moved == 0 {
+            return Err(BrushPreviewRejection::NoEditablePlane);
+        }
+        if let Some(rejection) = brush_preview_rejection(&primary) {
+            return Err(rejection);
         }
         let mut previews = Vec::with_capacity(drag.others.len() + 1);
         previews.push((drag.index, primary));
@@ -4745,12 +4825,12 @@ impl EditorWorkspace {
             } else {
                 preview.translate(applied);
             }
-            if !brush_preview_ok(&preview) {
-                return None;
+            if let Some(rejection) = brush_preview_rejection(&preview) {
+                return Err(rejection);
             }
             previews.push((*index, preview));
         }
-        Some(previews)
+        Ok(previews)
     }
 
     fn commit_brush_vertex_drag_preview(&mut self) -> bool {
@@ -5465,6 +5545,18 @@ impl EditorWorkspace {
                     }
                 }
             }
+            if let Some(drag) = self
+                .brush_element_transform
+                .as_ref()
+                .filter(|drag| drag.rotate)
+            {
+                paint_rotation_readout(
+                    painter,
+                    drag.center_screen,
+                    drag.applied,
+                    drag.rotation_snap_degrees,
+                );
+            }
         }
         // Godot 4.7-style vertex-snap feedback: source is yellow, acquired
         // target is green, both with a dark outline so they stay legible over
@@ -5562,8 +5654,41 @@ fn translate_face_locked(
 /// dragged parallel) whose solved vertices sit at the base-winding
 /// extent and overflow the preview renderer's i32 camera math.
 fn brush_preview_ok(brush: &psxed_project::brush::Brush) -> bool {
+    brush_preview_rejection(brush).is_none()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrushPreviewRejection {
+    NoEditablePlane,
+    NoVolume,
+    Unbounded,
+}
+
+impl BrushPreviewRejection {
+    fn message(self, grid: u16) -> String {
+        match self {
+            Self::NoEditablePlane => {
+                "Move rejected: the selected corner has no editable incident plane".to_string()
+            }
+            Self::NoVolume => {
+                format!("Move rejected on Grid {grid}: the brush would collapse or invert")
+            }
+            Self::Unbounded => {
+                format!("Move rejected on Grid {grid}: the brush would become unbounded")
+            }
+        }
+    }
+}
+
+fn brush_preview_rejection(brush: &psxed_project::brush::Brush) -> Option<BrushPreviewRejection> {
     let solved = brush.solve();
-    solved.is_valid() && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT)
+    if !solved.is_valid() {
+        Some(BrushPreviewRejection::NoVolume)
+    } else if !solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT) {
+        Some(BrushPreviewRejection::Unbounded)
+    } else {
+        None
+    }
 }
 
 /// Dropped-side tint in the clip preview.
@@ -6027,7 +6152,9 @@ impl EditorWorkspace {
             others: Vec::new(),
             targets,
             snap_anchor,
-            press_ground: [pointer.x, 0.0, 0.0],
+            // In 3D this otherwise-2D field keeps the press pixel so a drag
+            // that settles back inside click slop can reset to zero.
+            press_ground: [pointer.x, pointer.y, 0.0],
             plane_3d: Some(plane),
             applied: [0; 3],
             axis_mask: [true; 3],
@@ -6049,7 +6176,13 @@ impl EditorWorkspace {
             return;
         };
         let mut snap_target = None;
-        let applied = if let Some(source) = drag.snap_source {
+        const CLICK_SLOP_PX: f32 = 4.0;
+        let settled_back_to_click = pointer
+            .distance(egui::Pos2::new(drag.press_ground[0], drag.press_ground[1]))
+            <= CLICK_SLOP_PX;
+        let applied = if settled_back_to_click {
+            [0; 3]
+        } else if let Some(source) = drag.snap_source {
             let moving: Vec<_> = std::iter::once(drag.index)
                 .chain(drag.others.iter().map(|(index, _)| *index))
                 .collect();
@@ -6096,17 +6229,29 @@ impl EditorWorkspace {
             }
             return;
         }
-        if let Some(previews) = self.brush_vertex_drag_previews(&drag, applied) {
-            let scene = self.project.active_scene_mut();
-            for (index, preview) in previews {
-                scene.brushes[index] = preview;
+        match self.brush_vertex_drag_previews(&drag, applied) {
+            Ok(previews) => {
+                let scene = self.project.active_scene_mut();
+                for (index, preview) in previews {
+                    scene.brushes[index] = preview;
+                }
+                if let Some(state) = self.brush_vertex_drag.as_mut() {
+                    state.applied = applied;
+                    state.snap_target = snap_target;
+                }
+                if drag.snap_source.is_none() {
+                    self.status = format!(
+                        "Moved brush element to Grid {} ({:+}, {:+}, {:+})",
+                        self.snap_units, applied[0], applied[1], applied[2]
+                    );
+                }
             }
-            if let Some(state) = self.brush_vertex_drag.as_mut() {
-                state.applied = applied;
-                state.snap_target = snap_target;
+            Err(rejection) => {
+                if let Some(state) = self.brush_vertex_drag.as_mut() {
+                    state.snap_target = None;
+                }
+                self.status = rejection.message(self.snap_units);
             }
-        } else if let Some(state) = self.brush_vertex_drag.as_mut() {
-            state.snap_target = None;
         }
     }
 
@@ -6352,6 +6497,12 @@ impl ViewportTool3d for BrushTool {
                     if let Some(state) = ws.brush_extrude.as_mut() {
                         state.applied = applied;
                     }
+                    ws.status = format!(
+                        "Moved face on Grid {} ({:+}, {:+}, {:+})",
+                        ws.snap_units, applied[0], applied[1], applied[2]
+                    );
+                } else if let Some(rejection) = brush_preview_rejection(&preview) {
+                    ws.status = rejection.message(ws.snap_units);
                 }
                 return;
             }
@@ -6382,6 +6533,12 @@ impl ViewportTool3d for BrushTool {
                 if let Some(state) = ws.brush_extrude.as_mut() {
                     state.applied = delta;
                 }
+                ws.status = format!(
+                    "Moved face on Grid {} ({:+}, {:+}, {:+})",
+                    ws.snap_units, delta[0], delta[1], delta[2]
+                );
+            } else if let Some(rejection) = brush_preview_rejection(&preview) {
+                ws.status = rejection.message(ws.snap_units);
             }
         } else if let Some(drag) = ws.brush_drag {
             if drag.stage == BrushCreateStage::Height && drag.height_dragging {

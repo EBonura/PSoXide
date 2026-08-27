@@ -246,6 +246,8 @@ pub enum CharacterAnimationAction {
     DashLeft,
     DashRight,
     Stun,
+    /// Legacy serialized slot. New authoring stores the complete reaction and
+    /// return-to-control motion in `Stun`.
     StunRecovery,
     HitReactAlt,
     AltLightAttack,
@@ -305,6 +307,43 @@ impl CharacterAnimationAction {
         Self::VertComboAttack,
     ];
 
+    /// Actions exposed by current editor authoring. `StunRecovery` remains in
+    /// `ALL` solely to preserve project/package indices written by older builds.
+    pub const AUTHORABLE: [Self; CHARACTER_ANIMATION_ACTION_COUNT - 1] = [
+        Self::Idle,
+        Self::Walk,
+        Self::Run,
+        Self::Turn,
+        Self::Roll,
+        Self::Backstep,
+        Self::LightAttack,
+        Self::HeavyAttack,
+        Self::ComboAttack,
+        Self::Block,
+        Self::HitReact,
+        Self::Death,
+        Self::WalkBackward,
+        Self::StrafeLeft,
+        Self::StrafeRight,
+        Self::DashLeft,
+        Self::DashRight,
+        Self::Stun,
+        Self::HitReactAlt,
+        Self::AltLightAttack,
+        Self::AltHeavyAttack,
+        Self::AltComboAttack,
+        Self::Intro,
+        Self::WalkWindup,
+        Self::WalkWinddown,
+        Self::WalkWinddownAlt,
+        Self::RunWindup,
+        Self::RunWinddown,
+        Self::RunWinddownAlt,
+        Self::VertLightAttack,
+        Self::VertHeavyAttack,
+        Self::VertComboAttack,
+    ];
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Idle => "Idle",
@@ -326,8 +365,8 @@ impl CharacterAnimationAction {
             Self::StrafeRight => "Strafe Right",
             Self::DashLeft => "Dash Left",
             Self::DashRight => "Dash Right",
-            Self::Stun => "Stun",
-            Self::StunRecovery => "Stun Recovery",
+            Self::Stun => "Stun + Recovery",
+            Self::StunRecovery => "Legacy Stun Recovery",
             Self::HitReactAlt => "Hit React Alt",
             Self::AltLightAttack => "Alt Light Attack",
             Self::AltHeavyAttack => "Alt Heavy Attack",
@@ -441,9 +480,6 @@ impl CharacterAnimationAction {
         let left = name.contains("left") || name.contains("_lft");
         let right = name.contains("right") || name.contains("_rgt");
         let backward = name.contains("_bwd") || name.contains("_bkw") || name.contains("back");
-        if name.contains("stun") && name.contains("recover") {
-            return Some(Self::StunRecovery);
-        }
         if name.contains("stun") {
             return Some(Self::Stun);
         }
@@ -1066,6 +1102,16 @@ impl AttachmentSocket {
     pub fn right_hand_grip() -> Self {
         Self {
             name: default_character_socket(),
+            joint: 0,
+            translation: [0, 0, 0],
+            rotation_q12: [0, 0, 0],
+        }
+    }
+
+    /// Common left-hand default for humanoid rigs.
+    pub fn left_hand_grip() -> Self {
+        Self {
+            name: "left_hand_grip".to_string(),
             joint: 0,
             translation: [0, 0, 0],
             rotation_q12: [0, 0, 0],

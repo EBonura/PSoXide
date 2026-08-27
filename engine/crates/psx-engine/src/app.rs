@@ -632,7 +632,18 @@ impl App {
                     }
 
                     let outcome = scheduler.complete_fixed_update();
-                    if ctx.take_timing_realign_request() {
+                    let visual_checkpoint = ctx.take_visual_checkpoint_request();
+                    let timing_realign = ctx.take_timing_realign_request();
+                    if visual_checkpoint {
+                        // Keep the just-completed fixed tick authoritative but
+                        // make the next one not-yet-due. If this tick opened a
+                        // visual interval, `next_action` must therefore render
+                        // it instead of catching up clock debt accumulated by
+                        // the synchronous loading slice.
+                        clock.align_origin_to_sim_tick(
+                            scheduler.next_fixed_tick().as_u32().wrapping_sub(1),
+                        );
+                    } else if timing_realign {
                         clock.align_origin_to_sim_tick(scheduler.next_fixed_tick().as_u32());
                     }
                     if outcome.visual_intervals_due == 0 {

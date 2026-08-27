@@ -770,6 +770,26 @@ pub struct GameApp<'a, S: Scene> {
 /// scene are unaffected.
 const MIN_LOADING_HOLD_VBLANKS: u32 = 100;
 
+/// Keep an authored loading bar legible when a load phase completes in one
+/// coarse step. The value is still capped by real reported progress; this only
+/// prevents a 0 -> 100% jump from being presented in a single UI update.
+const LOADING_PROGRESS_MIN_STEP_Q12: i32 = 32;
+const LOADING_PROGRESS_MAX_STEP_Q12: i32 = 128;
+
+#[inline]
+fn advance_loading_progress_q12(current: i32, target: i32) -> i32 {
+    let current = current.clamp(0, 4096);
+    let target = target.clamp(current, 4096);
+    let delta = target - current;
+    if delta == 0 {
+        return current;
+    }
+    let step = (delta / 8)
+        .clamp(LOADING_PROGRESS_MIN_STEP_Q12, LOADING_PROGRESS_MAX_STEP_Q12)
+        .min(delta);
+    current + step
+}
+
 /// PS1-cheap two-sided handoff: deterministic blocks cover the loading card,
 /// gameplay replaces it at full coverage, then the same blocks peel away.
 const LOADING_EXIT_DISSOLVE: LevelTransition = LevelTransition {
@@ -1240,13 +1260,24 @@ impl<'a, S: Scene> GameApp<'a, S> {
             // cache that supplied an authored loading screen.
             self.gameplay.prepare_loading_assets(self.loading_scene);
             let world_ready = self.gameplay.loading_update(ctx);
-            // Feed the authored loading scene's bound progress bar.
-            // Once the world is ready the bar pins full while the
-            // minimum-hold (authored scenes only) plays out.
-            self.loading_progress_q12 = if world_ready {
+            // Feed the authored loading scene's bound progress bar. Keep the
+            // displayed value behind (never ahead of) actual load progress so
+            // coarse phases remain visible instead of jumping 0 -> READY.
+            let target_progress_q12 = if world_ready {
                 4096
             } else {
                 self.gameplay.loading_progress_q12().clamp(0, 4096)
+            };
+            if self.loading_scene_active() && target_progress_q12 > self.loading_progress_q12 {
+                // A productive CD burst has explicitly paused at its next LBA.
+                // Discard only the clock debt accumulated by that synchronous
+                // slice and present its new progress before resuming the read.
+                ctx.request_visual_checkpoint();
+            }
+            self.loading_progress_q12 = if self.loading_scene_active() {
+                advance_loading_progress_q12(self.loading_progress_q12, target_progress_q12)
+            } else {
+                target_progress_q12
             };
             let hold_done = !self.loading_scene_active()
                 || ctx
@@ -1254,7 +1285,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
                     .as_u32()
                     .wrapping_sub(self.loading_hold_start_tick)
                     >= MIN_LOADING_HOLD_VBLANKS;
-            self.loading_confirm_ready = world_ready && hold_done;
+            self.loading_confirm_ready =
+                world_ready && hold_done && self.loading_progress_q12 == 4096;
             // Authored loading scenes double as readable lore cards: once the
             // world and minimum hold are complete, wait for a fresh confirm
             // instead of tearing the card away. The built-in fallback keeps
@@ -2151,6 +2183,26 @@ mod tests {
     use psx_pad::ButtonState;
 
     #[test]
+    fn authored_loading_progress_is_monotonic_and_visibly_catches_up() {
+        assert_eq!(advance_loading_progress_q12(1000, 900), 1000);
+        assert_eq!(advance_loading_progress_q12(0, 64), 32);
+
+        let mut displayed = 0;
+        let mut updates = 0;
+        while displayed < 4096 {
+            let next = advance_loading_progress_q12(displayed, 4096);
+            assert!(next > displayed);
+            assert!(next <= 4096);
+            displayed = next;
+            updates += 1;
+        }
+        assert!(
+            updates > 1 && updates <= 64,
+            "a coarse load phase should animate to full in a bounded number of updates"
+        );
+    }
+
+    #[test]
     fn ui_font_table_requests_every_cooked_slot() {
         let mut requested = [false; MAX_UI_FONT_SLOTS];
         let table = collect_ui_font_table(|index| {
@@ -2964,11 +3016,27 @@ mod tests {
         ctx.pad_prev = ctx.pad;
         app.update(&mut ctx);
         assert!(app.loading_pending());
+        assert!(
+            ctx.take_visual_checkpoint_request(),
+            "each authored loading slice must yield to a visible frame"
+        );
+        assert!(
+            !app.loading_confirm_ready && app.loading_progress_q12 < 4096,
+            "READY must wait for the visibly animated progress bar"
+        );
 
         ctx.pad = PadState::NONE;
         ctx.pad_prev = PadState::NONE;
-        app.update(&mut ctx);
-        assert!(app.loading_pending());
+        for _ in 0..64 {
+            app.update(&mut ctx);
+            assert!(ctx.take_visual_checkpoint_request());
+            if app.loading_confirm_ready {
+                break;
+            }
+        }
+        assert_eq!(app.loading_progress_q12, 4096);
+        assert!(app.loading_confirm_ready);
+        assert!(app.loading_pending(), "READY still waits for fresh confirm");
 
         // A fresh confirm begins the authored block dissolve. Loading remains
         // visible through the cover half, then gameplay is swapped in only at
