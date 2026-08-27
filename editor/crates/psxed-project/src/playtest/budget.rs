@@ -533,15 +533,16 @@ fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
 
 fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
     let envelope = playtest_performance_envelope(package).unwrap_or_default();
-    // Each Archive Beacon submits two six-point panels, four triangles each.
-    // Count every cooked POI conservatively because a streamed/portal frame may
-    // draw several active rooms into the same arena.
+    // Each physical Archive Beacon submits 36 Gouraud triangles (outer shell,
+    // inset front/back faces, six extrusion sides, and four pivot sides) plus
+    // 12 perimeter lines. Count every cooked POI conservatively because a
+    // streamed/portal frame may draw several active rooms into the same arena.
     let poi_marker_packets = package
         .interactables
         .iter()
         .filter(|record| record.kind == PlaytestInteractableKind::PointOfInterest)
         .count()
-        .saturating_mul(8);
+        .saturating_mul(48);
     let world_packets = if bsp_packets == 0 {
         envelope
             .tr_packets_before_hw_split
