@@ -256,6 +256,13 @@ impl EditorWorkspace {
                                     | BrushEditMode::Clip => egui::CursorIcon::Crosshair,
                                 });
                             }
+                            if response.hovered()
+                                && self
+                                    .brush_drag
+                                    .is_some_and(|drag| drag.stage == BrushCreateStage::Height)
+                            {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                            }
                             if response.hovered() {
                                 self.brush_tool_keyboard(ui);
                             }
@@ -268,36 +275,39 @@ impl EditorWorkspace {
                                         .input(|input| input.pointer.press_origin())
                                         .or_else(|| response.interact_pointer_pos())
                                     {
-                                        let world = transform.screen_to_world(pos);
-                                        let tolerance = 8.0 / self.viewport_zoom;
-                                        // Brush keeps its legacy Shift group
-                                        // move; Select reserves modifiers for
-                                        // additive selection and marquee.
-                                        let grabbed = if modifiers.shift
-                                            || self.brush_edit_mode == BrushEditMode::Move
-                                        {
-                                            self.begin_brush_move_2d(world)
-                                        } else {
-                                            match self.brush_edit_mode {
-                                                BrushEditMode::Move => unreachable!(),
-                                                // Clip is click-driven; a drag
-                                                // starts nothing.
-                                                BrushEditMode::Clip => false,
-                                                BrushEditMode::Face => {
-                                                    self.begin_brush_resize_2d(world, tolerance)
+                                        if !self.begin_brush_height_drag(pos.y) {
+                                            let world = transform.screen_to_world(pos);
+                                            let tolerance = 8.0 / self.viewport_zoom;
+                                            // Brush keeps its legacy Shift group
+                                            // move; Select reserves modifiers for
+                                            // additive selection and marquee.
+                                            let grabbed = if modifiers.shift
+                                                || self.brush_edit_mode == BrushEditMode::Move
+                                            {
+                                                self.begin_brush_move_2d(world)
+                                            } else {
+                                                match self.brush_edit_mode {
+                                                    BrushEditMode::Move => unreachable!(),
+                                                    // Clip is click-driven; a drag
+                                                    // starts nothing.
+                                                    BrushEditMode::Clip => false,
+                                                    BrushEditMode::Face => {
+                                                        self.begin_brush_resize_2d(world, tolerance)
+                                                    }
+                                                    BrushEditMode::Edge => self
+                                                        .begin_brush_edge_drag_2d(world, tolerance),
+                                                    BrushEditMode::Vertex => self
+                                                        .begin_brush_vertex_drag_2d(
+                                                            world, tolerance,
+                                                        ),
                                                 }
-                                                BrushEditMode::Edge => {
-                                                    self.begin_brush_edge_drag_2d(world, tolerance)
-                                                }
-                                                BrushEditMode::Vertex => self
-                                                    .begin_brush_vertex_drag_2d(world, tolerance),
+                                            };
+                                            if !grabbed
+                                                && matches!(self.active_tool, ViewTool::Brush)
+                                                && self.pick_brush_face_at_2d(world).is_none()
+                                            {
+                                                self.begin_brush_drag_2d(world);
                                             }
-                                        };
-                                        if !grabbed
-                                            && matches!(self.active_tool, ViewTool::Brush)
-                                            && self.pick_brush_face_at_2d(world).is_none()
-                                        {
-                                            self.begin_brush_drag_2d(world);
                                         }
                                     }
                                 }
@@ -306,15 +316,22 @@ impl EditorWorkspace {
                                 if let Some(pos) =
                                     response.interact_pointer_pos().or(response.hover_pos())
                                 {
-                                    let world = transform.screen_to_world(pos);
-                                    if self.brush_move.is_some() {
-                                        self.update_brush_move_2d(world);
-                                    } else if self.brush_vertex_drag.is_some() {
-                                        self.update_brush_vertex_drag_2d(world);
-                                    } else if self.brush_extrude.is_some() {
-                                        self.update_brush_resize_2d(world);
+                                    if self.brush_drag.is_some_and(|drag| {
+                                        drag.stage == BrushCreateStage::Height
+                                            && drag.height_dragging
+                                    }) {
+                                        self.update_brush_height_drag(pos.y);
                                     } else {
-                                        self.update_brush_drag_2d(world);
+                                        let world = transform.screen_to_world(pos);
+                                        if self.brush_move.is_some() {
+                                            self.update_brush_move_2d(world);
+                                        } else if self.brush_vertex_drag.is_some() {
+                                            self.update_brush_vertex_drag_2d(world);
+                                        } else if self.brush_extrude.is_some() {
+                                            self.update_brush_resize_2d(world);
+                                        } else {
+                                            self.update_brush_drag_2d(world);
+                                        }
                                     }
                                 }
                             }
@@ -357,13 +374,19 @@ impl EditorWorkspace {
                             && self.brush_move.is_none()
                             && self.brush_vertex_drag.is_none()
                             && self.brush_extrude.is_none()
+                            && self.brush_drag.is_none()
                             && response.dragged_by(egui::PointerButton::Primary)
                         {
                             self.drag_selected_node(ui.input(|input| input.pointer.delta()));
                         }
 
                         if !dnd_active && response.clicked_by(egui::PointerButton::Primary) {
-                            if let Some(pos) = response.interact_pointer_pos() {
+                            if self
+                                .brush_drag
+                                .is_some_and(|drag| drag.stage == BrushCreateStage::Height)
+                            {
+                                self.commit_brush_drag();
+                            } else if let Some(pos) = response.interact_pointer_pos() {
                                 let world = transform.screen_to_world(pos);
                                 let modifiers = ui.input(|input| input.modifiers);
                                 let group_double_click = response

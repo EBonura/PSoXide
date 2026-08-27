@@ -334,6 +334,68 @@ fn stair_draw_creates_quantised_world_up_steps_as_one_group() {
 }
 
 #[test]
+fn staged_stair_draw_uses_the_authored_height_instead_of_a_fixed_rise() {
+    let mut workspace = brush_workspace("primitive_stairs_authored_height");
+    workspace.snap_units = 16;
+    workspace.brush_draw_settings.shape = BrushDrawShape::Stairs;
+    workspace.brush_draw_settings.direction = BrushCardinalDirection::East;
+    workspace.brush_draw_settings.stair_steps = 4;
+    workspace.set_orthographic_view(OrthographicView::Top);
+
+    workspace.begin_brush_drag_2d([0.0, 0.0]);
+    workspace.update_brush_drag_2d([512.0, 512.0]);
+    workspace.commit_brush_gesture_2d();
+    assert!(workspace
+        .brush_drag
+        .is_some_and(|drag| { drag.stage == BrushCreateStage::Height && !drag.height_dragging }));
+    assert!(workspace.begin_brush_height_drag(400.0));
+    workspace.update_brush_height_drag(384.0);
+    workspace.commit_brush_gesture_2d();
+
+    let tops: Vec<_> = workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .map(|brush| brush.solve().max[1])
+        .collect();
+    assert_eq!(tops, vec![96.0, 192.0, 288.0, 384.0]);
+}
+
+#[test]
+fn staged_height_authors_every_brush_generator() {
+    for shape in [
+        BrushDrawShape::Box,
+        BrushDrawShape::Ramp,
+        BrushDrawShape::Cylinder,
+        BrushDrawShape::DoorwayArch,
+        BrushDrawShape::CurvedWall,
+        BrushDrawShape::Stairs,
+    ] {
+        let mut workspace = brush_workspace("primitive_authored_height");
+        workspace.snap_units = 16;
+        workspace.brush_draw_settings.shape = shape;
+        workspace.brush_draw_settings.arch_segments = 4;
+        workspace.brush_draw_settings.stair_steps = 4;
+        workspace.set_orthographic_view(OrthographicView::Top);
+        workspace.begin_brush_drag_2d([0.0, 0.0]);
+        workspace.update_brush_drag_2d([512.0, 512.0]);
+        workspace.commit_brush_gesture_2d();
+        assert!(workspace.begin_brush_height_drag(400.0), "{shape:?}");
+        workspace.update_brush_height_drag(384.0);
+        assert_eq!(workspace.brush_drag.unwrap().height_end, 384, "{shape:?}");
+        workspace.commit_brush_gesture_2d();
+
+        let brushes = &workspace.project.active_scene().brushes;
+        assert!(!brushes.is_empty(), "{shape:?}");
+        assert!(
+            brushes.iter().any(|brush| brush.solve().max[1] == 384.0),
+            "{shape:?}"
+        );
+    }
+}
+
+#[test]
 fn front_view_move_changes_only_its_two_visible_axes_and_is_undoable() {
     let mut workspace = brush_workspace("orthographic_move");
     workspace

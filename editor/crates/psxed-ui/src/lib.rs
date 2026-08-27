@@ -2461,14 +2461,30 @@ enum ViewTool {
     Brush,
 }
 
-/// In-flight brush-create drag: press anchor and current corner on one
-/// orthographic plane, snapped in world units.
+/// Stage of the two-gesture brush creation flow. The first gesture authors
+/// the active-plane footprint; the second authors its hidden-axis extent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrushCreateStage {
+    Footprint,
+    Height,
+}
+
+/// In-flight brush creation, snapped in world units. `current` is the second
+/// footprint corner and `height_end` is the independently authored endpoint
+/// on the active view's hidden axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BrushDrag {
     pub(crate) anchor: [i32; 3],
     pub(crate) current: [i32; 3],
     pub(crate) view: OrthographicView,
     pub(crate) grid_step: i32,
+    pub(crate) height_end: i32,
+    pub(crate) stage: BrushCreateStage,
+    /// Screen-space origin and world-space endpoint captured when the height
+    /// gesture starts. Keeping both makes the preview stable while snapping.
+    pub(crate) height_press_y: i32,
+    pub(crate) height_press_end: i32,
+    pub(crate) height_dragging: bool,
     /// Snapshot the generator at press time so changing toolbar options can
     /// never mutate an in-flight preview.
     pub(crate) settings: BrushDrawSettings,
