@@ -1,4 +1,7 @@
 use super::*;
+use psx_engine::{CullMode, WorldRenderLayer};
+use psx_gpu::prim::{LineMono, TriGouraud};
+use psx_gte::lighting::ProjectedLit;
 
 const TARGET_LOCK_OUTER: i32 = 25;
 const TARGET_LOCK_INNER: i32 = 13;
@@ -13,14 +16,14 @@ const MARKER_HALF: i32 = 6;
 const MARKER_LIFT: i32 = MARKER_HALF;
 const MARKER_TINT: (u8, u8, u8) = (0xff, 0xa8, 0x40);
 
-const ARCHIVE_BEACON_MIN_HEIGHT: i32 = 8;
-const ARCHIVE_BEACON_MAX_HEIGHT: i32 = 48;
-const ARCHIVE_BEACON_COOKED_SCALE_MULTIPLIER: i32 = 2;
+const ARCHIVE_BEACON_MIN_HEIGHT: i32 = 6;
+const ARCHIVE_BEACON_MAX_HEIGHT: i32 = 32;
 const ARCHIVE_BEACON_ACTIVE_ROTATION_FRAMES: u32 = 180;
 const ARCHIVE_BEACON_INTERACTABLE_ROTATION_FRAMES: u32 = 120;
-const ARCHIVE_BEACON_FALLBACK_X: i16 = 160;
-const ARCHIVE_BEACON_FALLBACK_Y: i16 = 190;
-/// Rendering-only state for the Archive Beacon glyph. Gameplay persistence,
+const ARCHIVE_BEACON_FACE_VERTICES: usize = 6;
+const ARCHIVE_BEACON_FACE_TRIANGLES: [[usize; 3]; 4] = [[0, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 5]];
+
+/// Rendering-only state for the Archive Beacon prop. Gameplay persistence,
 /// reward state, and range selection stay outside the marker renderer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum ArchiveBeaconVisualState {
@@ -32,20 +35,86 @@ pub(super) enum ArchiveBeaconVisualState {
     Depleted,
 }
 
-/// Draw a PS1-native high-tech Archive Beacon with no dedicated texture.
+impl Playtest {
+    /// Submit every visible Archive Beacon in the current room into the same
+    /// world ordering table as BSP/grid surfaces and actors. Unlike the former
+    /// overlay marker, walls and props can now correctly occlude the beacon.
+    pub(super) fn draw_archive_beacons_world<T>(
+        &self,
+        camera: WorldCamera,
+        elapsed_tick: SimTick,
+        packets: &mut T,
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) -> usize
+    where
+        T: PrimitiveSink<TriGouraud> + PrimitiveSink<LineMono>,
+    {
+        let Some(room_record) = ROOMS.get(self.room_index.to_usize()) else {
+            return 0;
+        };
+        let options = room_surface_options(room_record);
+        let open_poi = self
+            .poi_messages
+            .active()
+            .and_then(|message| match message.source() {
+                psx_game_runtime::poi::MessageSource::PointOfInterest(index) => {
+                    Some(usize::from(index))
+                }
+                psx_game_runtime::poi::MessageSource::World => None,
+            });
+        let mut submitted = 0usize;
+        for (index, interactable) in INTERACTABLES.iter().enumerate() {
+            if interactable.kind != InteractableKind::PointOfInterest
+                || interactable.room != self.room_index
+                || !interactable_is_active(interactable)
+                || open_poi == Some(index)
+            {
+                continue;
+            }
+            let state = if self.point_of_interest_depleted(interactable) {
+                ArchiveBeaconVisualState::Depleted
+            } else if self.active_interactable == Some(index) {
+                ArchiveBeaconVisualState::Interactable
+            } else {
+                ArchiveBeaconVisualState::Active
+            };
+            submitted += draw_archive_beacon_world(
+                RoomPoint::new(interactable.x, interactable.y, interactable.z),
+                Angle::from_q12(interactable.yaw as u16),
+                interactable.marker_height,
+                state,
+                elapsed_tick,
+                camera,
+                options,
+                packets,
+                world,
+            );
+        }
+        submitted
+    }
+}
+
+/// Draw one compact, PS1-native Archive Beacon as real world geometry.
 ///
-/// Two crossed, chamfered panels are projected from the floor anchor
-/// and submitted in the overlay pass. This keeps the interaction glyph legible
-/// in packet-heavy BSP scenes without allocating a texture or CLUT. `position`
-/// is the authored ground point; `height` is the glyph's screen-space scale.
-pub(super) fn draw_archive_beacon_overlay(
+/// The authored floor point owns a short central spindle. Above it sits a
+/// shallow square extrusion with the same opposing TL/BR cuts as the Archive
+/// message panel. Front and back receive an inset ember face and a continuous
+/// one-pixel perimeter, so the slow Y-axis rotation remains readable without a
+/// model asset or dedicated VRAM allocation.
+pub(super) fn draw_archive_beacon_world<T>(
     position: RoomPoint,
     yaw: Angle,
-    height: i32,
+    cooked_scale: u16,
     state: ArchiveBeaconVisualState,
     elapsed_tick: SimTick,
     camera: WorldCamera,
-) {
+    options: WorldSurfaceOptions,
+    packets: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> usize
+where
+    T: PrimitiveSink<TriGouraud> + PrimitiveSink<LineMono>,
+{
     let rotation = match state {
         ArchiveBeaconVisualState::Active => {
             Angle::per_frames(ARCHIVE_BEACON_ACTIVE_ROTATION_FRAMES).mul_tick(elapsed_tick)
@@ -57,34 +126,93 @@ pub(super) fn draw_archive_beacon_overlay(
     };
     let panel_yaw = yaw.add(rotation);
     let pulse = archive_beacon_pulse(rotation, state);
-    let (bright_tint, dark_tint, blend) = archive_beacon_palette(state, pulse);
-    draw_archive_beacon_panel_overlay(
+    let height = archive_beacon_world_height(cooked_scale);
+    let half = (height / 2).max(3);
+    let cut = (height / 4).clamp(2, 8);
+    let inset = (height / 10).clamp(1, 3);
+    let inner_half = (half - inset).max(2);
+    let inner_cut = (cut - inset / 2).max(1);
+    let half_depth = (height / 12).clamp(1, 3);
+    let pivot_height = (height / 6).clamp(1, 4);
+    let pivot_half = (height / 10).clamp(1, 3);
+    let center_y = -pivot_height - half;
+
+    let outer_local = archive_beacon_face_points(half, cut);
+    let inner_local = archive_beacon_face_points(inner_half, inner_cut);
+    let outer_front_world =
+        archive_beacon_face_world_points(position, panel_yaw, center_y, -half_depth, outer_local);
+    let outer_back_world =
+        archive_beacon_face_world_points(position, panel_yaw, center_y, half_depth, outer_local);
+    // The inset faces sit one unit proud of the dark extrusion, making the
+    // physical depth visible even at the native 320x240 presentation.
+    let inner_front_world = archive_beacon_face_world_points(
         position,
         panel_yaw,
-        height,
-        bright_tint,
-        dark_tint,
-        blend,
-        matches!(state, ArchiveBeaconVisualState::Interactable),
-        camera,
+        center_y,
+        -half_depth - 1,
+        inner_local,
     );
-    draw_archive_beacon_panel_overlay(
+    let inner_back_world = archive_beacon_face_world_points(
         position,
-        panel_yaw.add(Angle::QUARTER),
-        height,
-        bright_tint,
-        dark_tint,
-        blend,
-        matches!(state, ArchiveBeaconVisualState::Interactable),
-        camera,
+        panel_yaw,
+        center_y,
+        half_depth + 1,
+        inner_local,
     );
+
+    let Some(outer_front) = project_archive_beacon_points(camera, outer_front_world) else {
+        return 0;
+    };
+    let Some(outer_back) = project_archive_beacon_points(camera, outer_back_world) else {
+        return 0;
+    };
+    if archive_beacon_offscreen(&outer_front) && archive_beacon_offscreen(&outer_back) {
+        return 0;
+    }
+    let Some(inner_front) = project_archive_beacon_points(camera, inner_front_world) else {
+        return 0;
+    };
+    let Some(inner_back) = project_archive_beacon_points(camera, inner_back_world) else {
+        return 0;
+    };
+
+    let body_options = options
+        .with_cull_mode(CullMode::None)
+        .with_render_layer(WorldRenderLayer::Opaque);
+    let face_options = body_options.with_depth_bias(-1);
+    let line_options = body_options.with_depth_bias(-2);
+    let body_colors = archive_beacon_body_colors();
+    let face_colors = archive_beacon_face_colors(state, pulse, inner_local, inner_half);
+    let frame_color = archive_beacon_frame_color(state, pulse);
+    let mut submitted = 0usize;
+
+    submitted += submit_archive_beacon_face(outer_front, body_colors, body_options, packets, world);
+    submitted += submit_archive_beacon_face(outer_back, body_colors, body_options, packets, world);
+    submitted += submit_archive_beacon_sides(outer_front, outer_back, body_options, packets, world);
+    submitted += submit_archive_beacon_face(inner_front, face_colors, face_options, packets, world);
+    submitted += submit_archive_beacon_face(inner_back, face_colors, face_options, packets, world);
+    submitted +=
+        submit_archive_beacon_perimeter(inner_front, frame_color, line_options, packets, world);
+    submitted +=
+        submit_archive_beacon_perimeter(inner_back, frame_color, line_options, packets, world);
+    submitted += submit_archive_beacon_pivot(
+        position,
+        panel_yaw,
+        pivot_height,
+        pivot_half,
+        camera,
+        body_options,
+        packets,
+        world,
+    );
+    submitted
 }
 
-/// Convert the cooked marker scale into a compact PS1-screen glyph. Cooking
-/// maps the default authored value of 192 to 12 world units; runtime maps that
-/// cooked 12 to the intended 24-pixel floor glyph.
-pub(super) const fn archive_beacon_screen_height(cooked_scale: u16) -> i32 {
-    let scaled = cooked_scale as i32 * ARCHIVE_BEACON_COOKED_SCALE_MULTIPLIER;
+/// Cooking maps the default authored scale of 192 to 12 engine units. Keep
+/// that value literal in world space: it produces the approved shin-height
+/// square rather than inflating it into the former 24-pixel overlay glyph.
+pub(super) const fn archive_beacon_world_height(cooked_scale: u16) -> i32 {
+    let scaled = cooked_scale as i32;
     if scaled < ARCHIVE_BEACON_MIN_HEIGHT {
         ARCHIVE_BEACON_MIN_HEIGHT
     } else if scaled > ARCHIVE_BEACON_MAX_HEIGHT {
@@ -94,96 +222,83 @@ pub(super) const fn archive_beacon_screen_height(cooked_scale: u16) -> i32 {
     }
 }
 
-const _: () = assert!(archive_beacon_screen_height(12) == 24);
+const _: () = assert!(archive_beacon_world_height(12) == 12);
 
-fn draw_archive_beacon_panel_overlay(
-    position: RoomPoint,
-    yaw: Angle,
-    height: i32,
-    bright_tint: (u8, u8, u8),
-    dark_tint: (u8, u8, u8),
-    blend: BlendMode,
-    fallback_to_interaction_anchor: bool,
-    camera: WorldCamera,
-) {
-    let center = match camera.project_world(position) {
-        Some(projected)
-            if (-16..=336).contains(&projected.sx) && (-16..=256).contains(&projected.sy) =>
-        {
-            projected
-        }
-        None if fallback_to_interaction_anchor => ProjectedVertex {
-            sx: ARCHIVE_BEACON_FALLBACK_X,
-            sy: ARCHIVE_BEACON_FALLBACK_Y,
-            sz: 1,
-        },
-        Some(_) if fallback_to_interaction_anchor => ProjectedVertex {
-            sx: ARCHIVE_BEACON_FALLBACK_X,
-            sy: ARCHIVE_BEACON_FALLBACK_Y,
-            sz: 1,
-        },
-        _ => return,
-    };
-    let projected = archive_beacon_screen_vertices(center, yaw, height);
-
-    // Four triangles preserve the six-point TL/BR chamfer silhouette. The
-    // brighter upper pair and darker lower pair provide a tiny vertical red
-    // gradient without spending a Gouraud arena or a new texture.
-    const FACES: [[usize; 3]; 4] = [[0, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 5]];
-    let mut face = 0usize;
-    while face < FACES.len() {
-        let indices = FACES[face];
-        let tint = if face < 2 { bright_tint } else { dark_tint };
-        draw_tri_flat_blended(
-            [
-                projected[indices[0]],
-                projected[indices[1]],
-                projected[indices[2]],
-            ],
-            tint.0,
-            tint.1,
-            tint.2,
-            blend,
-        );
-        face += 1;
-    }
+const fn archive_beacon_face_points(half: i32, cut: i32) -> [(i32, i32); 6] {
+    [
+        (-half + cut, -half),
+        (half, -half),
+        (half, half - cut),
+        (half - cut, half),
+        (-half, half),
+        (-half, -half + cut),
+    ]
 }
 
-fn archive_beacon_screen_vertices(
-    center: ProjectedVertex,
+fn archive_beacon_face_world_points(
+    position: RoomPoint,
     yaw: Angle,
-    height: i32,
-) -> [(i16, i16); 6] {
-    let height = height.clamp(ARCHIVE_BEACON_MIN_HEIGHT, ARCHIVE_BEACON_MAX_HEIGHT);
-    let half_height = (height / 2).clamp(6, 24);
-    let half_width = (height / 2).clamp(6, 24);
-    let cut = (height / 6).clamp(2, 8);
-    let local = [
-        (-half_width + cut, half_height),
-        (half_width, half_height),
-        (half_width, -half_height + cut),
-        (half_width - cut, -half_height),
-        (-half_width, -half_height),
-        (-half_width, half_height - cut),
-    ];
-    let sin = yaw.sin_q12();
-    let cos = yaw.cos_q12();
-    let mut vertices = [(0i16, 0i16); 6];
+    center_y: i32,
+    local_z: i32,
+    local: [(i32, i32); ARCHIVE_BEACON_FACE_VERTICES],
+) -> [WorldVertex; ARCHIVE_BEACON_FACE_VERTICES] {
+    let mut out = [WorldVertex::new(0, 0, 0); ARCHIVE_BEACON_FACE_VERTICES];
     let mut index = 0usize;
-    while index < local.len() {
-        let (x, y) = local[index];
-        let rx = (x.saturating_mul(cos).saturating_sub(y.saturating_mul(sin))) >> 12;
-        // Compress the rotated panel vertically after rotation so it reads as
-        // a holographic plate lying on the floor, rather than a badge floating
-        // upright in screen space.
-        let ry = ((x.saturating_mul(sin).saturating_add(y.saturating_mul(cos))) >> 12) / 3;
-        vertices[index] = (
-            clamp_i16(i32::from(center.sx).saturating_add(rx)),
-            clamp_i16(i32::from(center.sy).saturating_add(ry)),
+    while index < ARCHIVE_BEACON_FACE_VERTICES {
+        out[index] = archive_beacon_world_point(
+            position,
+            yaw,
+            local[index].0,
+            center_y.saturating_add(local[index].1),
+            local_z,
         );
         index += 1;
     }
-    vertices
+    out
+}
+
+fn archive_beacon_world_point(
+    position: RoomPoint,
+    yaw: Angle,
+    local_x: i32,
+    local_y: i32,
+    local_z: i32,
+) -> WorldVertex {
+    let sin = yaw.sin_q12();
+    let cos = yaw.cos_q12();
+    let world_x = position.x.saturating_add(
+        (local_x
+            .saturating_mul(cos)
+            .saturating_add(local_z.saturating_mul(sin)))
+            >> 12,
+    );
+    let world_z = position.z.saturating_add(
+        (local_z
+            .saturating_mul(cos)
+            .saturating_sub(local_x.saturating_mul(sin)))
+            >> 12,
+    );
+    WorldVertex::new(world_x, position.y.saturating_add(local_y), world_z)
+}
+
+fn project_archive_beacon_points<const N: usize>(
+    camera: WorldCamera,
+    points: [WorldVertex; N],
+) -> Option<[ProjectedVertex; N]> {
+    let mut out = [ProjectedVertex::INVALID; N];
+    let mut index = 0usize;
+    while index < N {
+        out[index] = camera.project_world(points[index])?;
+        index += 1;
+    }
+    Some(out)
+}
+
+fn archive_beacon_offscreen(points: &[ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES]) -> bool {
+    points.iter().all(|point| point.sx < -16)
+        || points.iter().all(|point| point.sx > 336)
+        || points.iter().all(|point| point.sy < -16)
+        || points.iter().all(|point| point.sy > 256)
 }
 
 fn archive_beacon_pulse(rotation: Angle, state: ArchiveBeaconVisualState) -> u8 {
@@ -193,33 +308,231 @@ fn archive_beacon_pulse(rotation: Angle, state: ArchiveBeaconVisualState) -> u8 
     (((rotation.sin_q12().saturating_add(4096)) * 255) / 8192).clamp(0, 255) as u8
 }
 
-fn archive_beacon_palette(
+const fn archive_beacon_body_colors() -> [(u8, u8, u8); ARCHIVE_BEACON_FACE_VERTICES] {
+    [
+        (25, 16, 14),
+        (28, 17, 15),
+        (18, 11, 10),
+        (12, 8, 8),
+        (10, 7, 7),
+        (19, 12, 11),
+    ]
+}
+
+fn archive_beacon_face_colors(
     state: ArchiveBeaconVisualState,
     pulse: u8,
-) -> ((u8, u8, u8), (u8, u8, u8), BlendMode) {
+    local: [(i32, i32); ARCHIVE_BEACON_FACE_VERTICES],
+    half: i32,
+) -> [(u8, u8, u8); ARCHIVE_BEACON_FACE_VERTICES] {
+    let mut colors = [(0u8, 0u8, 0u8); ARCHIVE_BEACON_FACE_VERTICES];
+    let band_x = (i32::from(pulse).saturating_sub(128)).saturating_mul(half) / 128;
+    let (base, strength) = match state {
+        ArchiveBeaconVisualState::Active => (34i32, 52i32),
+        ArchiveBeaconVisualState::Interactable => (58, 116),
+        ArchiveBeaconVisualState::Depleted => (15, 0),
+    };
+    let span = half.saturating_mul(2).max(1);
+    let mut index = 0usize;
+    while index < ARCHIVE_BEACON_FACE_VERTICES {
+        let distance = local[index].0.saturating_sub(band_x).abs().min(span);
+        let glow = strength.saturating_mul(span.saturating_sub(distance)) / span;
+        let red = base.saturating_add(glow).clamp(0, 255) as u8;
+        colors[index] = (red, (red / 10).max(3), (red / 14).max(3));
+        index += 1;
+    }
+    colors
+}
+
+fn archive_beacon_frame_color(state: ArchiveBeaconVisualState, pulse: u8) -> (u8, u8, u8) {
     match state {
         ArchiveBeaconVisualState::Active => (
-            (
-                86u8.saturating_add(pulse / 6),
-                14u8.saturating_add(pulse / 16),
-                10u8.saturating_add(pulse / 22),
-            ),
-            (54, 8, 7),
-            BlendMode::AddQuarter,
+            132u8.saturating_add(pulse / 4),
+            15u8.saturating_add(pulse / 24),
+            10,
         ),
-        ArchiveBeaconVisualState::Interactable => (
-            (
-                188u8.saturating_add(pulse / 4),
-                18u8.saturating_add(pulse / 12),
-                14u8.saturating_add(pulse / 16),
-            ),
-            (126, 8, 7),
-            // Average remains legible over both black floors and bright
-            // player/enemy silhouettes; additive red disappears on white.
-            BlendMode::Average,
-        ),
-        ArchiveBeaconVisualState::Depleted => ((36, 7, 6), (22, 4, 4), BlendMode::Average),
+        ArchiveBeaconVisualState::Interactable => (238, 38, 22),
+        ArchiveBeaconVisualState::Depleted => (52, 11, 8),
     }
+}
+
+fn projected_lit(projected: ProjectedVertex, color: (u8, u8, u8)) -> ProjectedLit {
+    ProjectedLit {
+        sx: projected.sx,
+        sy: projected.sy,
+        sz: projected.sz.clamp(1, u16::MAX as i32) as u16,
+        r: color.0,
+        g: color.1,
+        b: color.2,
+    }
+}
+
+fn submit_archive_beacon_face<T>(
+    projected: [ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES],
+    colors: [(u8, u8, u8); ARCHIVE_BEACON_FACE_VERTICES],
+    options: WorldSurfaceOptions,
+    packets: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> usize
+where
+    T: PrimitiveSink<TriGouraud>,
+{
+    let mut submitted = 0u16;
+    let mut index = 0usize;
+    while index < ARCHIVE_BEACON_FACE_TRIANGLES.len() {
+        let face = ARCHIVE_BEACON_FACE_TRIANGLES[index];
+        submitted += world
+            .submit_gouraud_triangle(
+                packets,
+                [
+                    projected_lit(projected[face[0]], colors[face[0]]),
+                    projected_lit(projected[face[1]], colors[face[1]]),
+                    projected_lit(projected[face[2]], colors[face[2]]),
+                ],
+                options,
+            )
+            .submitted_triangles;
+        index += 1;
+    }
+    usize::from(submitted)
+}
+
+fn submit_archive_beacon_sides<T>(
+    front: [ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES],
+    back: [ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES],
+    options: WorldSurfaceOptions,
+    packets: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> usize
+where
+    T: PrimitiveSink<TriGouraud>,
+{
+    let mut submitted = 0u16;
+    let mut edge = 0usize;
+    while edge < ARCHIVE_BEACON_FACE_VERTICES {
+        let next = (edge + 1) % ARCHIVE_BEACON_FACE_VERTICES;
+        let color = if edge < 2 { (24, 15, 13) } else { (11, 8, 8) };
+        submitted += world
+            .submit_gouraud_triangle(
+                packets,
+                [
+                    projected_lit(front[edge], color),
+                    projected_lit(front[next], color),
+                    projected_lit(back[next], color),
+                ],
+                options,
+            )
+            .submitted_triangles;
+        submitted += world
+            .submit_gouraud_triangle(
+                packets,
+                [
+                    projected_lit(front[edge], color),
+                    projected_lit(back[next], color),
+                    projected_lit(back[edge], color),
+                ],
+                options,
+            )
+            .submitted_triangles;
+        edge += 1;
+    }
+    usize::from(submitted)
+}
+
+fn submit_archive_beacon_perimeter<T>(
+    projected: [ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES],
+    color: (u8, u8, u8),
+    options: WorldSurfaceOptions,
+    packets: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> usize
+where
+    T: PrimitiveSink<LineMono>,
+{
+    let mut submitted = 0u16;
+    let mut edge = 0usize;
+    while edge < ARCHIVE_BEACON_FACE_VERTICES {
+        let next = (edge + 1) % ARCHIVE_BEACON_FACE_VERTICES;
+        submitted += world
+            .submit_projected_line(packets, [projected[edge], projected[next]], color, options)
+            .submitted_triangles;
+        edge += 1;
+    }
+    usize::from(submitted)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_archive_beacon_pivot<T>(
+    position: RoomPoint,
+    yaw: Angle,
+    height: i32,
+    half: i32,
+    camera: WorldCamera,
+    options: WorldSurfaceOptions,
+    packets: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> usize
+where
+    T: PrimitiveSink<TriGouraud>,
+{
+    let local = [
+        (-half, -height, -half),
+        (half, -height, -half),
+        (half, -height, half),
+        (-half, -height, half),
+        (-half, 0, -half),
+        (half, 0, -half),
+        (half, 0, half),
+        (-half, 0, half),
+    ];
+    let mut projected = [ProjectedVertex::INVALID; 8];
+    let mut index = 0usize;
+    while index < local.len() {
+        let world_point = archive_beacon_world_point(
+            position,
+            yaw,
+            local[index].0,
+            local[index].1,
+            local[index].2,
+        );
+        let Some(point) = camera.project_world(world_point) else {
+            return 0;
+        };
+        projected[index] = point;
+        index += 1;
+    }
+    const SIDES: [[usize; 4]; 4] = [[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+    let colors = [(25, 16, 14), (14, 10, 9), (8, 7, 7), (18, 12, 10)];
+    let mut submitted = 0u16;
+    let mut side = 0usize;
+    while side < SIDES.len() {
+        let quad = SIDES[side];
+        let color = colors[side];
+        submitted += world
+            .submit_gouraud_triangle(
+                packets,
+                [
+                    projected_lit(projected[quad[0]], color),
+                    projected_lit(projected[quad[1]], color),
+                    projected_lit(projected[quad[2]], color),
+                ],
+                options,
+            )
+            .submitted_triangles;
+        submitted += world
+            .submit_gouraud_triangle(
+                packets,
+                [
+                    projected_lit(projected[quad[0]], color),
+                    projected_lit(projected[quad[2]], color),
+                    projected_lit(projected[quad[3]], color),
+                ],
+                options,
+            )
+            .submitted_triangles;
+        side += 1;
+    }
+    usize::from(submitted)
 }
 
 /// Draw one tinted cube per generated entity record. Cubes
