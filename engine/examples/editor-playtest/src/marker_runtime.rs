@@ -98,9 +98,9 @@ impl Playtest {
 ///
 /// The authored floor point owns a short central spindle. Above it sits a
 /// shallow square extrusion with the same opposing TL/BR cuts as the Archive
-/// message panel. Front and back receive an inset ember face and a continuous
-/// one-pixel perimeter, so the slow Y-axis rotation remains readable without a
-/// model asset or dedicated VRAM allocation.
+/// message panel. The whole shell is ember red, including its edge-on faces.
+/// Only the nearer face receives a perimeter so rear line packets cannot sort
+/// across the front face while the prop rotates on PS1's painter renderer.
 pub(super) fn draw_archive_beacon_world<T>(
     position: RoomPoint,
     yaw: Angle,
@@ -129,36 +129,16 @@ where
     let height = archive_beacon_world_height(cooked_scale);
     let half = (height / 2).max(3);
     let cut = (height / 4).clamp(2, 8);
-    let inset = (height / 10).clamp(1, 3);
-    let inner_half = (half - inset).max(2);
-    let inner_cut = (cut - inset / 2).max(1);
     let half_depth = (height / 12).clamp(1, 3);
     let pivot_height = (height / 6).clamp(1, 4);
     let pivot_half = (height / 10).clamp(1, 3);
     let center_y = -pivot_height - half;
 
     let outer_local = archive_beacon_face_points(half, cut);
-    let inner_local = archive_beacon_face_points(inner_half, inner_cut);
     let outer_front_world =
         archive_beacon_face_world_points(position, panel_yaw, center_y, -half_depth, outer_local);
     let outer_back_world =
         archive_beacon_face_world_points(position, panel_yaw, center_y, half_depth, outer_local);
-    // The inset faces sit one unit proud of the dark extrusion, making the
-    // physical depth visible even at the native 320x240 presentation.
-    let inner_front_world = archive_beacon_face_world_points(
-        position,
-        panel_yaw,
-        center_y,
-        -half_depth - 1,
-        inner_local,
-    );
-    let inner_back_world = archive_beacon_face_world_points(
-        position,
-        panel_yaw,
-        center_y,
-        half_depth + 1,
-        inner_local,
-    );
 
     let Some(outer_front) = project_archive_beacon_points(camera, outer_front_world) else {
         return 0;
@@ -169,32 +149,34 @@ where
     if archive_beacon_offscreen(&outer_front) && archive_beacon_offscreen(&outer_back) {
         return 0;
     }
-    let Some(inner_front) = project_archive_beacon_points(camera, inner_front_world) else {
-        return 0;
-    };
-    let Some(inner_back) = project_archive_beacon_points(camera, inner_back_world) else {
-        return 0;
-    };
 
     let body_options = options
         .with_cull_mode(CullMode::None)
         .with_render_layer(WorldRenderLayer::Opaque);
-    let face_options = body_options.with_depth_bias(-1);
     let line_options = body_options.with_depth_bias(-2);
-    let body_colors = archive_beacon_body_colors();
-    let face_colors = archive_beacon_face_colors(state, pulse, inner_local, inner_half);
+    let face_colors = archive_beacon_face_colors(state, pulse, outer_local, half);
     let frame_color = archive_beacon_frame_color(state, pulse);
+    let visible_face =
+        if archive_beacon_face_depth(&outer_front) <= archive_beacon_face_depth(&outer_back) {
+            outer_front
+        } else {
+            outer_back
+        };
     let mut submitted = 0usize;
 
-    submitted += submit_archive_beacon_face(outer_front, body_colors, body_options, packets, world);
-    submitted += submit_archive_beacon_face(outer_back, body_colors, body_options, packets, world);
-    submitted += submit_archive_beacon_sides(outer_front, outer_back, body_options, packets, world);
-    submitted += submit_archive_beacon_face(inner_front, face_colors, face_options, packets, world);
-    submitted += submit_archive_beacon_face(inner_back, face_colors, face_options, packets, world);
     submitted +=
-        submit_archive_beacon_perimeter(inner_front, frame_color, line_options, packets, world);
+        submit_archive_beacon_face(visible_face, face_colors, body_options, packets, world);
+    submitted += submit_archive_beacon_sides(
+        outer_front,
+        outer_back,
+        state,
+        pulse,
+        body_options,
+        packets,
+        world,
+    );
     submitted +=
-        submit_archive_beacon_perimeter(inner_back, frame_color, line_options, packets, world);
+        submit_archive_beacon_perimeter(visible_face, frame_color, line_options, packets, world);
     submitted += submit_archive_beacon_pivot(
         position,
         panel_yaw,
@@ -301,22 +283,21 @@ fn archive_beacon_offscreen(points: &[ProjectedVertex; ARCHIVE_BEACON_FACE_VERTI
         || points.iter().all(|point| point.sy > 256)
 }
 
+fn archive_beacon_face_depth(points: &[ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES]) -> i32 {
+    let mut sum = 0i32;
+    let mut index = 0usize;
+    while index < points.len() {
+        sum = sum.saturating_add(points[index].sz);
+        index += 1;
+    }
+    sum / ARCHIVE_BEACON_FACE_VERTICES as i32
+}
+
 fn archive_beacon_pulse(rotation: Angle, state: ArchiveBeaconVisualState) -> u8 {
     if matches!(state, ArchiveBeaconVisualState::Depleted) {
         return 0;
     }
     (((rotation.sin_q12().saturating_add(4096)) * 255) / 8192).clamp(0, 255) as u8
-}
-
-const fn archive_beacon_body_colors() -> [(u8, u8, u8); ARCHIVE_BEACON_FACE_VERTICES] {
-    [
-        (25, 16, 14),
-        (28, 17, 15),
-        (18, 11, 10),
-        (12, 8, 8),
-        (10, 7, 7),
-        (19, 12, 11),
-    ]
 }
 
 fn archive_beacon_face_colors(
@@ -400,6 +381,8 @@ where
 fn submit_archive_beacon_sides<T>(
     front: [ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES],
     back: [ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES],
+    state: ArchiveBeaconVisualState,
+    pulse: u8,
     options: WorldSurfaceOptions,
     packets: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -411,7 +394,7 @@ where
     let mut edge = 0usize;
     while edge < ARCHIVE_BEACON_FACE_VERTICES {
         let next = (edge + 1) % ARCHIVE_BEACON_FACE_VERTICES;
-        let color = if edge < 2 { (24, 15, 13) } else { (11, 8, 8) };
+        let color = archive_beacon_side_color(state, pulse, edge);
         submitted += world
             .submit_gouraud_triangle(
                 packets,
@@ -437,6 +420,26 @@ where
         edge += 1;
     }
     usize::from(submitted)
+}
+
+fn archive_beacon_side_color(
+    state: ArchiveBeaconVisualState,
+    pulse: u8,
+    edge: usize,
+) -> (u8, u8, u8) {
+    let base = match state {
+        ArchiveBeaconVisualState::Active => 38u8.saturating_add(pulse / 12),
+        ArchiveBeaconVisualState::Interactable => 72u8.saturating_add(pulse / 8),
+        ArchiveBeaconVisualState::Depleted => 18,
+    };
+    let red = if edge < 2 {
+        base.saturating_add(18)
+    } else if edge < 4 {
+        base
+    } else {
+        base.saturating_sub(10)
+    };
+    (red, (red / 11).max(3), (red / 16).max(2))
 }
 
 fn submit_archive_beacon_perimeter<T>(
