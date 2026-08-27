@@ -690,6 +690,7 @@ pub(crate) fn cook_player_character(
         project,
         project_root,
         model_resource_id,
+        ModelAnimationPolicy::AuthoredRequired,
         assets,
         models,
         model_clips,
@@ -1009,11 +1010,21 @@ pub(crate) fn cook_player_character(
 /// Failures (missing files, invalid blobs, joint-count
 /// mismatches) push to `report.errors` and return `None`; the
 /// caller turns that into a hard cook failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModelAnimationPolicy {
+    /// Character models must resolve authored gameplay clips.
+    AuthoredRequired,
+    /// Rigid props and equipment receive a cooker-generated identity pose
+    /// when they have no authored animation resources.
+    StaticBindPose,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn register_model_for_instance(
     project: &ProjectDocument,
     project_root: &Path,
     model_resource_id: ResourceId,
+    animation_policy: ModelAnimationPolicy,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
@@ -1025,9 +1036,6 @@ pub(crate) fn register_model_for_instance(
     model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
-    if let Some(&existing) = model_for_resource.get(&model_resource_id) {
-        return Some(existing);
-    }
     let resource = project.resource(model_resource_id)?;
     let ResourceData::Model(model) = &resource.data else {
         report.error_at(
@@ -1039,29 +1047,33 @@ pub(crate) fn register_model_for_instance(
         );
         return None;
     };
-
-    // Runtime contract: a placed model must carry an atlas
-    // (the runtime renders textured) and at least one clip
-    // (the runtime renders animated). Bind-pose / untextured
-    // rendering would need engine-side work the current pass
-    // doesn't ship -- fail loud at cook so the editor surfaces
-    // it rather than silently dropping the instance at runtime.
-    if model.texture_path.is_none() {
+    let resolved_clips = project.resolved_model_animation_clips(model_resource_id);
+    if resolved_clips.is_empty() && animation_policy == ModelAnimationPolicy::AuthoredRequired {
         report.error_at(
             PlaytestValidationTarget::Resource(model_resource_id),
             format!(
-                "Model '{}' has no atlas; the runtime can't render untextured models in this pass",
+                "Model '{}' has no animation clips; animated characters require at least one clip",
                 resource.name
             ),
         );
         return None;
     }
-    let resolved_clips = project.resolved_model_animation_clips(model_resource_id);
-    if resolved_clips.is_empty() {
+    // Validate the requested usage even if a static sighting registered this
+    // model first. A model used as both equipment and a character must still
+    // satisfy the character contract.
+    if let Some(&existing) = model_for_resource.get(&model_resource_id) {
+        return Some(existing);
+    }
+
+    // Runtime contract: a placed model must carry an atlas. Animated models
+    // resolve authored clips above; static models receive an internal bind
+    // pose after the mesh has been parsed, so static resources stay static in
+    // the editor while the runtime keeps one uniform skeletal draw path.
+    if model.texture_path.is_none() {
         report.error_at(
             PlaytestValidationTarget::Resource(model_resource_id),
             format!(
-                "Model '{}' has no animation clips; the runtime requires at least one clip",
+                "Model '{}' has no atlas; the runtime can't render untextured models in this pass",
                 resource.name
             ),
         );
@@ -1114,6 +1126,23 @@ pub(crate) fn register_model_for_instance(
         }
     };
     let model_joint_count = parsed_model.joint_count();
+    let generated_bind_pose = if resolved_clips.is_empty() {
+        match psxed_gltf::generate_bind_pose_clip(model_joint_count, 15) {
+            Ok(clip) => Some(clip),
+            Err(error) => {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!(
+                        "Model '{}' could not generate its static bind pose: {error}",
+                        resource.name
+                    ),
+                );
+                return None;
+            }
+        }
+    } else {
+        None
+    };
     let mesh_asset_index = assets.len();
     assets.push(PlaytestAsset {
         kind: PlaytestAssetKind::ModelMesh,
@@ -1239,8 +1268,13 @@ pub(crate) fn register_model_for_instance(
     // A Model carries no clips of its own, so the runtime default is
     // simply the first resolved (skeleton-scoped) clip.
     let authored_default_clip = 0u16;
+    let runtime_clip_count = if generated_bind_pose.is_some() {
+        1
+    } else {
+        resolved_clips.len()
+    };
     let selected_clip_indices = runtime_model_clip_indices(
-        resolved_clips.len(),
+        runtime_clip_count,
         runtime_model_clips.get(&model_resource_id),
         authored_default_clip,
     );
@@ -1250,27 +1284,46 @@ pub(crate) fn register_model_for_instance(
     // the PS1 package only needs defaults, placed overrides, and
     // character role clips.
     let clip_first = u16::try_from(model_clips.len()).unwrap_or(u16::MAX);
-    let mut clip_remap = vec![None; resolved_clips.len()];
+    let mut clip_remap = vec![None; runtime_clip_count];
     for (local_i, resolved_i) in selected_clip_indices.iter().copied().enumerate() {
-        let Some(clip) = resolved_clips.get(resolved_i as usize) else {
-            continue;
-        };
-        let abs = resolve_path(&clip.psxanim_path, project_root);
-        let mut bytes = match std::fs::read(&abs) {
-            Ok(b) => b,
-            Err(e) => {
-                report.error_at(
-                    PlaytestValidationTarget::Resource(model_resource_id),
-                    format!(
-                        "Model '{}' clip '{}' {}: {e}",
-                        resource.name,
-                        clip.name,
-                        abs.display()
-                    ),
-                );
-                return None;
-            }
-        };
+        let (clip_name, animation_resource, calibration, mut bytes) =
+            if let Some(generated) = generated_bind_pose.as_ref() {
+                if resolved_i != 0 {
+                    continue;
+                }
+                (
+                    "Bind Pose".to_string(),
+                    None,
+                    crate::AnimationClipCalibration::DEFAULT,
+                    generated.bytes.clone(),
+                )
+            } else {
+                let Some(clip) = resolved_clips.get(resolved_i as usize) else {
+                    continue;
+                };
+                let abs = resolve_path(&clip.psxanim_path, project_root);
+                let bytes = match std::fs::read(&abs) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        report.error_at(
+                            PlaytestValidationTarget::Resource(model_resource_id),
+                            format!(
+                                "Model '{}' clip '{}' {}: {error}",
+                                resource.name,
+                                clip.name,
+                                abs.display()
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                (
+                    clip.name.clone(),
+                    clip.animation_resource,
+                    clip.calibration,
+                    bytes,
+                )
+            };
         crate::units::scale_animation_blob_to_engine_units(&mut bytes);
         let parsed_anim = match psx_asset::Animation::from_bytes(&bytes) {
             Ok(a) => a,
@@ -1279,7 +1332,7 @@ pub(crate) fn register_model_for_instance(
                     PlaytestValidationTarget::Resource(model_resource_id),
                     format!(
                         "Model '{}' clip '{}' parse failed: {e:?}",
-                        resource.name, clip.name
+                        resource.name, clip_name
                     ),
                 );
                 return None;
@@ -1291,7 +1344,7 @@ pub(crate) fn register_model_for_instance(
                 format!(
                     "Model '{}' clip '{}': animation has {} joints, model has {}",
                     resource.name,
-                    clip.name,
+                    clip_name,
                     parsed_anim.joint_count(),
                     model_joint_count
                 ),
@@ -1305,7 +1358,7 @@ pub(crate) fn register_model_for_instance(
                     PlaytestValidationTarget::Resource(model_resource_id),
                     format!(
                         "Model '{}' clip '{}': too many baked model-bound frames",
-                        resource.name, clip.name
+                        resource.name, clip_name
                     ),
                 );
                 return None;
@@ -1324,8 +1377,7 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
-        let pose_corrections = clip
-            .animation_resource
+        let pose_corrections = animation_resource
             .and_then(|id| project.resource(id))
             .and_then(|resource| match &resource.data {
                 ResourceData::AnimationClip(animation) => {
@@ -1349,7 +1401,7 @@ pub(crate) fn register_model_for_instance(
         // Resample AFTER pose correction, so the budget is measured against the
         // poses that actually ship, and BEFORE frame bounds are baked, so the
         // bounds describe the frames the runtime will really read.
-        let label = format!("{} / {}", resource.name, clip.name);
+        let label = format!("{} / {}", resource.name, clip_name);
         // Trim BEFORE resampling so the rate is chosen against real motion
         // rather than against a stretch of stillness that is about to go.
         let animation_bytes = trim_still_ends(
@@ -1374,7 +1426,7 @@ pub(crate) fn register_model_for_instance(
                     PlaytestValidationTarget::Resource(model_resource_id),
                     format!(
                         "Model '{}' clip '{}': too many baked model-bound frames",
-                        resource.name, clip.name
+                        resource.name, clip_name
                     ),
                 );
                 return None;
@@ -1391,8 +1443,8 @@ pub(crate) fn register_model_for_instance(
             first_frame: frame_first,
             frame_count,
             floor_y,
-            pose_offset: clip.calibration.offset,
-            flags: if clip.calibration.in_place {
+            pose_offset: calibration.offset,
+            flags: if calibration.in_place {
                 model_clip_flags::IN_PLACE
             } else {
                 0
@@ -1403,7 +1455,7 @@ pub(crate) fn register_model_for_instance(
         // share a rig and therefore share byte-identical clips, and animation
         // is the largest resident asset class there is, so a duplicate payload
         // costs far more than a texture's would.
-        let safe_clip = sanitise_model_dirname(&clip.name);
+        let safe_clip = sanitise_model_dirname(&clip_name);
         let asset_index = if let Some(existing) = assets.iter().position(|asset| {
             asset.kind == PlaytestAssetKind::ModelAnimation
                 && asset.streamed_class == StreamedClass::PersistentGameplay
@@ -1416,7 +1468,7 @@ pub(crate) fn register_model_for_instance(
                 kind: PlaytestAssetKind::ModelAnimation,
                 bytes: animation_bytes,
                 filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
-                source_label: format!("{} / {}", resource.name, clip.name),
+                source_label: format!("{} / {}", resource.name, clip_name),
                 streamed_class: StreamedClass::PersistentGameplay,
             });
             idx
@@ -1424,9 +1476,9 @@ pub(crate) fn register_model_for_instance(
         clip_remap[resolved_i as usize] = u16::try_from(local_i).ok();
         model_clips.push(PlaytestModelClip {
             model: model_index,
-            name: clip.name.clone(),
+            name: clip_name,
             animation_asset_index: asset_index,
-            animation_resource: clip.animation_resource,
+            animation_resource,
             source_frame_first,
             source_frame_last,
             source_frame_count,
@@ -2109,6 +2161,11 @@ pub(crate) fn push_model_instance_for_resource(
         project,
         project_root,
         model_resource_id,
+        if clip_override.is_some() {
+            ModelAnimationPolicy::AuthoredRequired
+        } else {
+            ModelAnimationPolicy::StaticBindPose
+        },
         assets,
         models,
         model_clips,
@@ -2217,6 +2274,7 @@ pub(crate) fn push_character_controller_idle_instance(
         project,
         project_root,
         model_resource_id,
+        ModelAnimationPolicy::AuthoredRequired,
         assets,
         models,
         model_clips,
@@ -2568,6 +2626,7 @@ pub(crate) fn register_weapon_for_equipment(
             project,
             project_root,
             model_resource_id,
+            ModelAnimationPolicy::StaticBindPose,
             assets,
             models,
             model_clips,
