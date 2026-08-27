@@ -41,7 +41,7 @@ use psx_level::{
     GameFlow, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene,
     LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-use psx_pad::poll_port1;
+use psx_pad::{enable_analog_port1, poll_port1};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
 use crate::scene::{Ctx, RenderSubmission, Scene};
@@ -484,6 +484,11 @@ impl App {
         boot_visual_checkpoint(&mut fb, (160, 0, 0), "01 FRAMEBUFFER READY");
         boot_trace("psx-engine: framebuffer ok");
 
+        // Ask a DualShock-compatible controller to enter and lock analog
+        // mode. Original digital controllers safely ignore the request and
+        // continue through the same button-input path.
+        let _ = enable_analog_port1();
+
         // Seed pad + pad_prev from a real poll so a button already held at
         // boot does NOT register as `just_pressed` on the first frame. This
         // matters when booting into a UI scene with captured input (editor
@@ -541,6 +546,7 @@ impl App {
         let mut traced_update = false;
         let mut traced_render = false;
         let mut traced_present = false;
+        let mut pad_was_connected = ctx.pad.is_connected();
         // A built visual frame whose flip has not happened yet. The scene's
         // ordering-table DMA may still be walking; fixed updates run in the
         // gap so the GPU draw overlaps CPU work. Holds the frame's missed
@@ -603,6 +609,14 @@ impl App {
                         boot_visual_checkpoint(&mut ctx.fb, (220, 100, 0), "22 PAD POLL BEGIN");
                     }
                     ctx.pad = poll_port1();
+                    if ctx.pad.is_connected() && !pad_was_connected {
+                        // A newly attached DualShock starts in digital mode.
+                        // Negotiate again on the connection edge so hot-plug
+                        // behaves the same as a controller present at boot.
+                        let _ = enable_analog_port1();
+                        ctx.pad = poll_port1();
+                    }
+                    pad_was_connected = ctx.pad.is_connected();
                     if !traced_update {
                         boot_trace("psx-engine: pad poll ok");
                         boot_visual_checkpoint(&mut ctx.fb, (220, 220, 0), "23 PAD POLL OK");

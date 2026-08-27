@@ -458,8 +458,6 @@ struct Playtest {
     /// previous queued frame has used its own snapshot.
     prepared_overlay_camera: WorldCamera,
     prepared_overlay_sim_tick: SimTick,
-    prepared_overlay_analog: bool,
-    overlay_analog: bool,
     /// Tick of the first gameplay update after loading completed. The
     /// engine clock origin is set at app init, BEFORE CD loading, so
     /// raw `ctx.sim_tick` VALUES carry the build- and disc-dependent
