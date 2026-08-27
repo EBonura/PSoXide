@@ -12,14 +12,16 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 tool_panel_frame().show(ui, |ui| {
                     ui.expand_to_include_rect(ui.max_rect());
-                    let material_undo_candidate =
-                        if self.active_workspace == WorkspaceView::Material {
-                            self.prepare_inspector_undo_frame(ctx);
-                            inspector_has_edit_input(ctx)
-                                .then(|| (self.project.clone(), self.history.epoch()))
-                        } else {
-                            None
-                        };
+                    let workspace_undo_candidate = if matches!(
+                        self.active_workspace,
+                        WorkspaceView::Material | WorkspaceView::Animation
+                    ) {
+                        self.prepare_inspector_undo_frame(ctx);
+                        inspector_has_edit_input(ctx)
+                            .then(|| (self.project.clone(), self.history.epoch()))
+                    } else {
+                        None
+                    };
                     self.draw_viewport_header_toolbar(ui);
                     tool_panel_body(ui, |ui| {
                         if viewport_3d.mode == EditorViewport3dMode::Play {
@@ -30,7 +32,7 @@ impl EditorWorkspace {
                         if self.active_workspace == WorkspaceView::Material {
                             self.draw_material_lab(ui);
                             if let Some((project_before, history_epoch_before)) =
-                                material_undo_candidate
+                                workspace_undo_candidate
                             {
                                 self.finish_inspector_undo_frame(
                                     project_before,
@@ -42,9 +44,6 @@ impl EditorWorkspace {
                         }
 
                         if self.active_workspace == WorkspaceView::Animation {
-                            self.prepare_inspector_undo_frame(ctx);
-                            let undo_candidate = inspector_has_edit_input(ctx)
-                                .then(|| (self.project.clone(), self.history.epoch()));
                             let changed = model_animation_viewer::draw_model_animation_viewer(
                                 ui,
                                 &mut self.project,
@@ -55,7 +54,9 @@ impl EditorWorkspace {
                             if changed {
                                 self.mark_dirty();
                             }
-                            if let Some((project_before, history_epoch_before)) = undo_candidate {
+                            if let Some((project_before, history_epoch_before)) =
+                                workspace_undo_candidate
+                            {
                                 self.finish_inspector_undo_frame(
                                     project_before,
                                     history_epoch_before,

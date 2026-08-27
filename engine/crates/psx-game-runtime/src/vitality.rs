@@ -472,20 +472,14 @@ pub struct PowerUpLoadout {
 }
 
 impl PowerUpLoadout {
-    /// Starter loadout used by the default project.
-    pub const DEFAULT: Self = Self {
-        slots: [
-            BoostProtocol::Rupture,
-            BoostProtocol::Shell,
-            BoostProtocol::Surge,
-            BoostProtocol::Rupture,
-        ],
-    };
-
     /// Empty loadout; also the all-zero boot representation.
     pub const EMPTY: Self = Self {
         slots: [BoostProtocol::None; 4],
     };
+
+    /// Default player loadout. Collected protocols begin in the inventory and
+    /// must be deliberately assigned to one of these four empty sockets.
+    pub const DEFAULT: Self = Self::EMPTY;
 
     /// Protocol assigned to one socket.
     pub const fn protocol(self, slot: BoostSlotId) -> BoostProtocol {
@@ -570,9 +564,9 @@ impl BoostInventory {
     /// Empty stockpile; also the all-zero boot representation.
     pub const EMPTY: Self = Self { counts: [0; 3] };
 
-    /// Demonstration stock supplied by the default project until authored
-    /// world pickups seed the inventory.
-    pub const STARTER: Self = Self { counts: [2, 2, 2] };
+    /// Minimal stock supplied by the default project until authored world
+    /// pickups seed the inventory: one unassigned Rupture protocol.
+    pub const STARTER: Self = Self { counts: [1, 0, 0] };
 
     /// Unequipped copies of one collectible protocol.
     pub const fn count(self, protocol: BoostProtocol) -> u8 {
@@ -785,7 +779,14 @@ mod tests {
 
     #[test]
     fn power_ups_fade_to_identity_at_the_midpoint() {
-        let loadout = PowerUpLoadout::DEFAULT;
+        let loadout = PowerUpLoadout {
+            slots: [
+                BoostProtocol::Rupture,
+                BoostProtocol::Shell,
+                BoostProtocol::Surge,
+                BoostProtocol::Rupture,
+            ],
+        };
         let mut vitality = DualVitality::equal(100);
         let full = loadout.modifiers(&vitality);
         assert!(full.outgoing_damage_q12 > VITALITY_Q12_ONE);
@@ -823,24 +824,34 @@ mod tests {
     }
 
     #[test]
-    fn inventory_assignment_exchanges_exactly_one_copy() {
+    fn starter_inventory_assigns_its_only_copy_to_one_empty_socket() {
         let mut inventory = BoostInventory::STARTER;
         let mut loadout = PowerUpLoadout::DEFAULT;
 
-        assert_eq!(inventory.count(BoostProtocol::Surge), 2);
-        assert_eq!(inventory.count(BoostProtocol::Rupture), 2);
+        assert_eq!(inventory.count(BoostProtocol::Rupture), 1);
+        assert_eq!(inventory.count(BoostProtocol::Shell), 0);
+        assert_eq!(inventory.count(BoostProtocol::Surge), 0);
+        for slot in BoostSlotId::ALL {
+            assert_eq!(loadout.protocol(slot), BoostProtocol::None);
+        }
         assert!(inventory.assign(
             &mut loadout,
-            BoostSlotId::HorizonEmpty,
-            BoostProtocol::Surge,
+            BoostSlotId::ZenithFull,
+            BoostProtocol::Rupture,
         ));
 
         assert_eq!(
-            loadout.protocol(BoostSlotId::HorizonEmpty),
-            BoostProtocol::Surge
+            loadout.protocol(BoostSlotId::ZenithFull),
+            BoostProtocol::Rupture
         );
-        assert_eq!(inventory.count(BoostProtocol::Surge), 1);
-        assert_eq!(inventory.count(BoostProtocol::Rupture), 3);
+        assert_eq!(inventory.count(BoostProtocol::Rupture), 0);
+        for slot in [
+            BoostSlotId::HorizonEmpty,
+            BoostSlotId::HorizonFull,
+            BoostSlotId::ZenithEmpty,
+        ] {
+            assert_eq!(loadout.protocol(slot), BoostProtocol::None);
+        }
     }
 
     #[test]

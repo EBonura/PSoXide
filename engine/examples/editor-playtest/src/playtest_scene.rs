@@ -208,6 +208,10 @@ impl Scene for Playtest {
     /// `on_enter_state`, which replaces the menu pack with the HUD-only pack.
     fn on_exit_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         if state.has_gameplay() {
+            // A gameplay-to-front-end handoff is the other safe save boundary.
+            // Gameplay overlays share the gameplay resource key, so opening the
+            // pause/inventory menu does not trigger a card write here.
+            self.flush_poi_save();
             // Re-anchor the animation epoch on the next gameplay entry
             // (see `gameplay_epoch` in main.rs).
             self.gameplay_epoch_set = false;
@@ -264,6 +268,12 @@ impl Scene for Playtest {
     }
 
     fn loading_update(&mut self, ctx: &mut Ctx) -> bool {
+        // Hide the blocking initial directory scan behind the authored loading
+        // screen rather than spending the first live gameplay update on it.
+        if !self.poi_save_load_attempted {
+            self.poi_save_load_attempted = true;
+            self.ensure_poi_save_loaded();
+        }
         self.step_streaming_jobs(ctx);
         self.initial_world_ready()
     }

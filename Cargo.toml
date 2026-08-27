@@ -171,3 +171,17 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.psxed-project]
 opt-level = 2
+
+# Fast edit-and-run profile for host editor development. This keeps the tuned
+# dev settings for third-party dependencies and emulator hot paths, but avoids
+# optimising the large crates that change during normal editor work. Artifacts
+# live separately from `dev`, so switching profiles does not evict either cache.
+[profile.run-fast]
+inherits = "dev"
+
+[profile.run-fast.package.frontend]
+opt-level = 0
+[profile.run-fast.package.psxed-ui]
+opt-level = 0
+[profile.run-fast.package.psxed-project]
+opt-level = 0

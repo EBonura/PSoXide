@@ -684,6 +684,8 @@ mod tests {
                 index: 1,
                 start: workspace.project.active_scene().brushes[1].clone(),
             }],
+            group_pivot: Some([320.0, 64.0, 64.0]),
+            group_count: 1,
             current_steps: 2,
             snapshot_pushed: false,
             free: false,
@@ -719,5 +721,114 @@ mod tests {
             workspace.project.active_scene().brushes[1].solve().min,
             [256.0, 0.0, 0.0]
         );
+    }
+
+    #[test]
+    fn group_rotate_uses_one_shared_pivot_for_owned_brushes() {
+        let (mut workspace, _, inner, _) = grouped_workspace();
+        workspace.project.active_scene_mut().brushes[1] =
+            Brush::cuboid([256, 0, 0], [384, 128, 64]);
+        workspace.replace_node_selection(inner);
+        assert!(workspace.node_supports_transform_gizmo(inner, TransformGizmoMode::Rotate));
+        let start = workspace.project.active_scene().brushes[1].clone();
+        workspace.interaction = Interaction::NodeGizmo(NodeGizmoDrag {
+            mode: TransformGizmoMode::Rotate,
+            handle: NodeGizmoHandle::Axis(PrimitiveGizmoAxis::Y),
+            start_pointer: Pos2::ZERO,
+            screen_axis: Vec2::X,
+            start_plane_hit: None,
+            current_plane_delta_world: [0.0; 3],
+            move_axis_world: [0.0; 3],
+            rotate: None,
+            targets: Vec::new(),
+            group_brushes: vec![GroupBrushGizmoTarget { index: 1, start }],
+            group_pivot: Some([320.0, 64.0, 32.0]),
+            group_count: 1,
+            current_steps: 90,
+            snapshot_pushed: false,
+            free: false,
+        });
+
+        workspace.apply_node_gizmo_drag();
+
+        let solved = workspace.project.active_scene().brushes[1].solve();
+        assert_eq!(solved.min, [288.0, 0.0, -32.0]);
+        assert_eq!(solved.max, [352.0, 128.0, 96.0]);
+    }
+
+    #[test]
+    fn group_rotate_never_silently_lowers_the_active_grid() {
+        let (mut workspace, _, inner, _) = grouped_workspace();
+        workspace.snap_units = 128;
+        workspace.project.active_scene_mut().brushes[1] =
+            Brush::cuboid([256, 0, 0], [384, 128, 64]);
+        workspace.replace_node_selection(inner);
+        let start = workspace.project.active_scene().brushes[1].clone();
+        workspace.interaction = Interaction::NodeGizmo(NodeGizmoDrag {
+            mode: TransformGizmoMode::Rotate,
+            handle: NodeGizmoHandle::Axis(PrimitiveGizmoAxis::Y),
+            start_pointer: Pos2::ZERO,
+            screen_axis: Vec2::X,
+            start_plane_hit: None,
+            current_plane_delta_world: [0.0; 3],
+            move_axis_world: [0.0; 3],
+            rotate: None,
+            targets: Vec::new(),
+            group_brushes: vec![GroupBrushGizmoTarget {
+                index: 1,
+                start: start.clone(),
+            }],
+            group_pivot: Some([320.0, 64.0, 32.0]),
+            group_count: 1,
+            current_steps: 90,
+            snapshot_pushed: false,
+            free: false,
+        });
+
+        workspace.apply_node_gizmo_drag();
+
+        assert_eq!(workspace.project.active_scene().brushes[1], start);
+        assert!(workspace.status.contains("outside Grid 128"));
+        assert!(
+            !workspace
+                .interaction
+                .node_gizmo_drag()
+                .expect("drag remains active")
+                .snapshot_pushed,
+            "a refused preview must not create an empty undo step"
+        );
+    }
+
+    #[test]
+    fn group_scale_uses_one_shared_pivot_for_owned_brushes() {
+        let (mut workspace, _, inner, _) = grouped_workspace();
+        workspace.project.active_scene_mut().brushes[1] =
+            Brush::cuboid([256, 0, 0], [384, 128, 64]);
+        workspace.replace_node_selection(inner);
+        assert!(workspace.node_supports_transform_gizmo(inner, TransformGizmoMode::Scale));
+        let start = workspace.project.active_scene().brushes[1].clone();
+        workspace.interaction = Interaction::NodeGizmo(NodeGizmoDrag {
+            mode: TransformGizmoMode::Scale,
+            handle: NodeGizmoHandle::Axis(PrimitiveGizmoAxis::X),
+            start_pointer: Pos2::ZERO,
+            screen_axis: Vec2::X,
+            start_plane_hit: None,
+            current_plane_delta_world: [0.0; 3],
+            move_axis_world: [0.0; 3],
+            rotate: None,
+            targets: Vec::new(),
+            group_brushes: vec![GroupBrushGizmoTarget { index: 1, start }],
+            group_pivot: Some([320.0, 64.0, 32.0]),
+            group_count: 1,
+            current_steps: 10,
+            snapshot_pushed: false,
+            free: false,
+        });
+
+        workspace.apply_node_gizmo_drag();
+
+        let solved = workspace.project.active_scene().brushes[1].solve();
+        assert_eq!(solved.min, [224.0, 0.0, 0.0]);
+        assert_eq!(solved.max, [416.0, 128.0, 64.0]);
     }
 }

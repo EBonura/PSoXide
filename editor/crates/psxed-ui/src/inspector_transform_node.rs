@@ -671,6 +671,16 @@ fn draw_message_pages_editor(
                         .desired_width(f32::INFINITY),
                 )
                 .changed();
+            if page.trim().is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "Page {} is blank. Enter message text before Play.",
+                        index + 1
+                    ))
+                    .small()
+                    .color(STUDIO_ERROR),
+                );
+            }
         });
     }
     if let Some(index) = remove {
@@ -1554,13 +1564,14 @@ pub(crate) fn node_gizmo_rotation(
     result
 }
 
-/// Rotation axes supported by `kind`'s transform gizmo. Entities,
+/// Rotation axes supported by `kind`'s transform gizmo. Groups, entities,
 /// ImageProps, and BoxProps rotate freely around all three world
 /// axes; every other gizmo target keeps the legacy yaw-only behavior
 /// so spawn / trigger transforms stay flat without stray pitch / roll.
 pub(crate) fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
     match kind {
-        NodeKind::Entity
+        NodeKind::Group
+        | NodeKind::Entity
         | NodeKind::ImageProp { .. }
         | NodeKind::BoxProp { .. }
         | NodeKind::CylinderProp { .. } => &[
@@ -1748,7 +1759,8 @@ pub(crate) fn node_kind_supports_transform_gizmo(
         ),
         TransformGizmoMode::Rotate => matches!(
             kind,
-            NodeKind::Entity
+            NodeKind::Group
+                | NodeKind::Entity
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
                 | NodeKind::CylinderProp { .. }
@@ -1760,7 +1772,8 @@ pub(crate) fn node_kind_supports_transform_gizmo(
         TransformGizmoMode::Scale => {
             matches!(
                 kind,
-                NodeKind::ImageProp { .. }
+                NodeKind::Group
+                    | NodeKind::ImageProp { .. }
                     | NodeKind::BoxProp { .. }
                     | NodeKind::CylinderProp { .. }
                     | NodeKind::ArchProp { .. }

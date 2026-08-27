@@ -47,13 +47,16 @@ pub(super) const BSP_PLAYER_HEIGHT: i32 = 4;
 pub(super) const BSP_FALLBACK_PLAYER_SPEED: i32 = 4 << 8;
 /// Compact third-person rig for the characterless BSP debug controller. The
 /// ordinary authored camera remains authoritative once a Character is bound.
-pub(super) const BSP_FALLBACK_CAMERA_DISTANCE: i32 = 192;
-pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 128;
-pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 64;
-pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 16;
+/// Keep the boom close to the invisible debug body while it turns; this reads
+/// as a player-height exploration camera and prevents annex columns from
+/// filling the frame while the collision-driven route rounds a doorway.
+pub(super) const BSP_FALLBACK_CAMERA_DISTANCE: i32 = 24;
+pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 40;
+pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 32;
+pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 8;
 /// Boom-to-wall margin for the point-traced follow camera in brush worlds.
 pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 12;
-pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 16;
+pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 4;
 pub(super) const BSP_USE_DISTANCE: i32 = 256;
 const BSP_BOUNDS_VISIBILITY_CACHE_SIZE: usize = 16;
 

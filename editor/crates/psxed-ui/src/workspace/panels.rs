@@ -35,8 +35,9 @@ impl EditorWorkspace {
                                     .small()
                                     .color(STUDIO_TEXT_WEAK),
                             )
-                            .wrap(),
-                        );
+                            .truncate(),
+                        )
+                        .on_hover_text(status.message);
                     }
                 });
             });

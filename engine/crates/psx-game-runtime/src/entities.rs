@@ -130,8 +130,11 @@ pub const GAME_ENTITY_ATTACK_ACTIVE_TICKS: u16 = 6;
 /// leaves this arc and the attack whiffs -- the souls punish loop.
 pub const GAME_ENTITY_ATTACK_HALF_ANGLE: u16 = 683;
 
-/// Ticks a poise break keeps the entity staggered.
-pub const GAME_ENTITY_STAGGER_TICKS: u16 = 45;
+/// Ticks a poise break keeps the entity committed to its single authored stun
+/// one-shot. The current longest enemy clip is 19 frames at 12 Hz; 96 NTSC
+/// ticks plays it to completion and leaves one tenth of a second on its final
+/// recovered pose before AI control resumes.
+pub const GAME_ENTITY_STAGGER_TICKS: u16 = 96;
 
 /// De-aggro leash: the player escaping `aggro_radius` times this
 /// factor drops the entity back to its idle/patrol loop.

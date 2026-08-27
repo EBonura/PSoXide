@@ -448,22 +448,16 @@ pub(crate) fn draw_resource_preview(
     thumb: Option<egui::TextureId>,
 ) {
     match &resource.data {
-        ResourceData::Material(material) => {
+        ResourceData::Material(_) => {
             // Material: blit its decoded image thumbnail when
-            // available, fall back to a procedural pattern.
+            // available, fall back to a procedural pattern. Material
+            // modulation is baked into the cached thumbnail so it follows
+            // the PS1 multiply rule without washing dark texels toward a
+            // flat overlay colour.
             if let Some(id) = thumb {
                 blit_thumb(painter, preview, id);
             } else {
                 draw_texture_like_preview(painter, preview, resource);
-            }
-            if material.tint != [0x80, 0x80, 0x80] {
-                let tint = Color32::from_rgba_unmultiplied(
-                    material.tint[0].saturating_mul(2),
-                    material.tint[1].saturating_mul(2),
-                    material.tint[2].saturating_mul(2),
-                    48,
-                );
-                painter.rect_filled(preview, 2.0, tint);
             }
         }
         ResourceData::Texture { .. } => {
@@ -713,6 +707,32 @@ pub(crate) fn decode_psxt_thumbnail(bytes: &[u8]) -> Option<(ColorImage, PsxtSta
     ))
 }
 
+/// Apply the PS1 GPU's neutral-at-128 texture modulation to a decoded
+/// thumbnail. This is deliberately multiplicative: drawing a translucent
+/// tint rectangle over the card lifts black texels and makes every material
+/// look grey and low-contrast.
+pub(crate) fn modulate_ps1_thumbnail(image: &mut ColorImage, tint: [u8; 3]) {
+    if tint == [0x80; 3] {
+        return;
+    }
+    for pixel in &mut image.pixels {
+        let [r, g, b, a] = pixel.to_array();
+        if a == 0 {
+            continue;
+        }
+        *pixel = Color32::from_rgba_unmultiplied(
+            ps1_modulate_thumbnail_channel(r, tint[0]),
+            ps1_modulate_thumbnail_channel(g, tint[1]),
+            ps1_modulate_thumbnail_channel(b, tint[2]),
+            a,
+        );
+    }
+}
+
+fn ps1_modulate_thumbnail_channel(texel: u8, tint: u8) -> u8 {
+    ((u16::from(texel) * u16::from(tint) + 64) / 128).min(255) as u8
+}
+
 pub(crate) fn draw_palette_strip(painter: &egui::Painter, preview: Rect, swatches: [Color32; 5]) {
     let width = preview.width() / swatches.len() as f32;
     for (idx, color) in swatches.iter().enumerate() {
@@ -798,5 +818,38 @@ pub(crate) fn resource_detail(resource: &Resource) -> &'static str {
         ResourceData::Scene { .. } => "Room",
         ResourceData::Script { .. } => "Script",
         ResourceData::Audio { .. } => "Audio",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_thumbnail_tint_uses_ps1_modulation_without_grey_lift() {
+        let transparent = Color32::from_rgba_unmultiplied(90, 70, 50, 0);
+        let mut image = ColorImage {
+            size: [3, 1],
+            pixels: vec![Color32::BLACK, Color32::from_rgb(24, 64, 160), transparent],
+        };
+
+        modulate_ps1_thumbnail(&mut image, [152, 160, 168]);
+
+        assert_eq!(image.pixels[0], Color32::BLACK);
+        assert_eq!(image.pixels[1], Color32::from_rgb(29, 80, 210));
+        assert_eq!(image.pixels[2], transparent);
+    }
+
+    #[test]
+    fn neutral_material_thumbnail_tint_is_identity() {
+        let mut image = ColorImage {
+            size: [2, 1],
+            pixels: vec![Color32::from_rgb(17, 83, 149), Color32::WHITE],
+        };
+        let original = image.clone();
+
+        modulate_ps1_thumbnail(&mut image, [0x80; 3]);
+
+        assert_eq!(image, original);
     }
 }

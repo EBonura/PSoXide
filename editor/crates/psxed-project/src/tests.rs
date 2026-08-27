@@ -1552,8 +1552,8 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
     };
     assert_eq!(
         animation_set.clips.len(),
-        8,
-        "idle, four-direction locomotion, attack, hit and death ship"
+        9,
+        "idle, four-direction locomotion, attack, hit, stun and death ship"
     );
     for action in [
         CharacterAnimationAction::Idle,
@@ -1563,6 +1563,7 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
         CharacterAnimationAction::StrafeRight,
         CharacterAnimationAction::LightAttack,
         CharacterAnimationAction::HitReact,
+        CharacterAnimationAction::Stun,
         CharacterAnimationAction::Death,
     ] {
         let binding = animation_set
@@ -1626,8 +1627,8 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
     );
     let package = package.expect("default project produces a playtest package");
     assert!(
-        package.models.iter().any(|cooked| cooked.clip_count == 8),
-        "the cooked Tank Boss model carries all eight selected clips"
+        package.models.iter().any(|cooked| cooked.clip_count == 9),
+        "the cooked Tank Boss model carries all nine selected clips"
     );
     assert!(
         package.game_entities.iter().any(|entity| {
@@ -1637,6 +1638,92 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
         }),
         "the placed Tank Boss cooks its projectile-driven AI attack band"
     );
+}
+
+#[test]
+fn default_project_uses_one_complete_stun_clip_per_character() {
+    assert_eq!(
+        CharacterAnimationAction::guess_from_name("stun recovery"),
+        Some(CharacterAnimationAction::Stun),
+        "new imports should author the complete motion as one action"
+    );
+    assert!(
+        !CharacterAnimationAction::AUTHORABLE.contains(&CharacterAnimationAction::StunRecovery),
+        "the legacy split recovery slot must not appear in current authoring"
+    );
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    for character_name in ["Aletha", "Rust Mantis Enemy", "Tank Boss"] {
+        let character = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::Character(character) if resource.name == character_name => {
+                    Some(character)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {character_name} Character"));
+        let set = character
+            .animation_set
+            .and_then(|id| project.resource(id))
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationSet(set) => Some(set),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {character_name} Animation Set"));
+        let stun = set
+            .action_clip(CharacterAnimationAction::Stun)
+            .unwrap_or_else(|| panic!("missing {character_name} Stun"));
+        assert!(
+            set.action_clip(CharacterAnimationAction::StunRecovery)
+                .is_none(),
+            "{character_name} must author its recovery inside Stun"
+        );
+        assert_ne!(
+            Some(stun),
+            set.action_clip(CharacterAnimationAction::HitReact),
+            "{character_name} uses a dedicated complete stun/recovery one-shot"
+        );
+    }
+
+    let bytes = std::fs::read(
+        default_project_dir().join("assets/animations/aletha_delivered/aletha_stun.psxanim"),
+    )
+    .expect("read unified Aletha stun");
+    let stun = psx_asset::Animation::from_bytes(&bytes).expect("parse unified Aletha stun");
+    assert_eq!(
+        (
+            stun.joint_count(),
+            stun.frame_count(),
+            stun.sample_rate_hz()
+        ),
+        (26, 25, 12)
+    );
+
+    for (path, expected) in [
+        (
+            "assets/animations/rust_mantis_starter/stun_recovery.psxanim",
+            (22, 12, 12),
+        ),
+        (
+            "assets/animations/tank_boss_ai/stun_recovery.psxanim",
+            (27, 24, 12),
+        ),
+    ] {
+        let bytes = std::fs::read(default_project_dir().join(path))
+            .unwrap_or_else(|error| panic!("read {path}: {error}"));
+        let stun = psx_asset::Animation::from_bytes(&bytes)
+            .unwrap_or_else(|error| panic!("parse {path}: {error:?}"));
+        assert_eq!(
+            (
+                stun.joint_count(),
+                stun.frame_count(),
+                stun.sample_rate_hz(),
+            ),
+            expected,
+            "{path} is the selected no-pause stun/recovery cook"
+        );
+    }
 }
 
 #[test]
@@ -1660,9 +1747,126 @@ fn starter_model_files_present_on_disk() {
     assert!(root
         .join("assets/animations/tank_boss_ai/idle.psxanim")
         .is_file());
-    assert!(root
-        .join("assets/animations/rust_mantis_starter/idle.psxanim")
-        .is_file());
+    let mantis_idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
+    assert!(mantis_idle_path.is_file());
+    let mantis_idle_bytes = std::fs::read(&mantis_idle_path).expect("read Rust Mantis idle");
+    let mantis_idle =
+        psx_asset::Animation::from_bytes(&mantis_idle_bytes).expect("parse Rust Mantis idle");
+    assert_eq!(mantis_idle.joint_count(), 22);
+    assert_eq!(mantis_idle.frame_count(), 97);
+    assert_eq!(mantis_idle.sample_rate_hz(), 12);
+    for joint in 0..mantis_idle.joint_count() {
+        assert_eq!(
+            mantis_idle.pose(0, joint),
+            mantis_idle.pose(mantis_idle.frame_count() - 1, joint),
+            "Rust Mantis idle must close exactly at joint {joint}"
+        );
+    }
+}
+
+#[test]
+fn rust_mantis_look_idle_is_installed_in_every_mantis_project() {
+    let expected = std::fs::read(
+        default_project_dir().join("assets/animations/rust_mantis_starter/idle.psxanim"),
+    )
+    .expect("read selected Rust Mantis idle");
+
+    for project_name in ["default", "mantis", "quake-e1m1-geometry", "tech-demo"] {
+        let root = projects_dir().join(project_name);
+        let idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
+        assert_eq!(
+            std::fs::read(&idle_path).expect("read project Rust Mantis idle"),
+            expected,
+            "{project_name} must carry the selected look-around idle"
+        );
+
+        let project = ProjectDocument::load_from_path(root.join("project.ron"))
+            .unwrap_or_else(|error| panic!("load {project_name}: {error}"));
+        let clip = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::AnimationClip(clip) if resource.name == "Rust Mantis / Idle" => {
+                    Some(clip)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{project_name} has no Rust Mantis idle resource"));
+        assert!(clip.looping, "{project_name} idle must loop");
+        assert_eq!(
+            clip.tags,
+            ["rust_mantis_idle_look_v2", "selected_idle_look_01"],
+            "{project_name} must identify the selected look-around take"
+        );
+    }
+}
+
+#[test]
+fn rust_mantis_turn_and_alert_are_installed_in_every_mantis_project() {
+    let default_root = default_project_dir();
+    let expected_turn =
+        std::fs::read(default_root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
+            .expect("read selected Rust Mantis turn");
+    let expected_alert =
+        std::fs::read(default_root.join("assets/animations/rust_mantis_starter/alert.psxanim"))
+            .expect("read selected Rust Mantis alert");
+    let turn = psx_asset::Animation::from_bytes(&expected_turn).expect("parse Rust Mantis turn");
+    let alert = psx_asset::Animation::from_bytes(&expected_alert).expect("parse Rust Mantis alert");
+    assert_eq!(
+        (
+            turn.joint_count(),
+            turn.frame_count(),
+            turn.sample_rate_hz()
+        ),
+        (22, 11, 12)
+    );
+    assert_eq!(
+        (
+            alert.joint_count(),
+            alert.frame_count(),
+            alert.sample_rate_hz()
+        ),
+        (22, 9, 12)
+    );
+
+    for project_name in ["default", "mantis", "quake-e1m1-geometry", "tech-demo"] {
+        let root = projects_dir().join(project_name);
+        assert_eq!(
+            std::fs::read(root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
+                .expect("read project Rust Mantis turn"),
+            expected_turn,
+            "{project_name} must carry the selected turn take"
+        );
+        assert_eq!(
+            std::fs::read(root.join("assets/animations/rust_mantis_starter/alert.psxanim"))
+                .expect("read project Rust Mantis alert"),
+            expected_alert,
+            "{project_name} must carry the selected alert take"
+        );
+
+        let project = ProjectDocument::load_from_path(root.join("project.ron"))
+            .unwrap_or_else(|error| panic!("load {project_name}: {error}"));
+        let set = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::AnimationSet(set)
+                    if resource.name == "Rust Mantis Starter Animation Set" =>
+                {
+                    Some(set)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{project_name} has no Rust Mantis animation set"));
+        assert!(
+            set.action_clip(CharacterAnimationAction::Turn).is_some(),
+            "{project_name} must bind the tracking turn"
+        );
+        assert!(
+            set.action_clip(CharacterAnimationAction::Intro).is_some(),
+            "{project_name} must bind the first-acquisition alert"
+        );
+    }
 }
 
 #[test]
@@ -1751,7 +1955,27 @@ fn starter_project_has_scene_tree_and_resources() {
     let enemy = mantis.enemy_behavior.expect("Mantis enemy behavior preset");
     assert_eq!(enemy.aggro_radius, 2335);
     assert_eq!(enemy.patrol_offset, [0, 0, -6000]);
-    assert_eq!(enemy.reaction_ticks, 22);
+    assert_eq!(enemy.reaction_ticks, 42);
+
+    let mantis_idle = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationClip(clip) if resource.name == "Rust Mantis / Idle" => {
+                Some(clip)
+            }
+            _ => None,
+        })
+        .expect("starter includes the selected Rust Mantis idle");
+    assert_eq!(
+        mantis_idle.psxanim_path,
+        "assets/animations/rust_mantis_starter/idle.psxanim"
+    );
+    assert!(mantis_idle.looping);
+    assert_eq!(
+        mantis_idle.tags,
+        ["rust_mantis_idle_look_v2", "selected_idle_look_01"]
+    );
 }
 
 #[test]
@@ -2166,6 +2390,27 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
             .unwrap_or_else(|| panic!("missing {name}"));
         assert_eq!(authored_action, &UiAction::Game(action));
         assert_eq!(authored_tag, tag);
+    }
+
+    for (name, expected_label) in [
+        ("Horizon Empty Boost", "E // NONE"),
+        ("Horizon Full Boost", "F // NONE"),
+        ("Zenith Empty Boost", "E // NONE"),
+        ("Zenith Full Boost", "F // NONE"),
+        ("Rupture Inventory Item", "RUPTURE // 01"),
+        ("Shell Inventory Item", "SHELL   // 00"),
+        ("Surge Inventory Item", "SURGE   // 00"),
+    ] {
+        let label = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Button { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(label, expected_label, "{name} must match starter state");
     }
 
     for (name, value, flip_x) in [

@@ -188,6 +188,10 @@ impl Playtest {
         );
         #[cfg(feature = "cd-stream-bench")]
         self.load_streamed_runtime_models();
+        assert!(
+            self.models.iter().take(MODELS.len()).all(Option::is_some),
+            "runtime model load dropped a cooked model"
+        );
         self.sort_weapon_faces_hilt_first();
     }
 

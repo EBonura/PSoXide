@@ -408,7 +408,12 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
                                     (solved_base.min[other] - solved.min[other]).abs() <= 0.5
                                         && (solved_base.max[other] - solved.max[other]).abs()
                                             <= 0.5,
-                                    "{label}: axis {other} must stay masked"
+                                    "{label}: axis {other} must stay masked; elements {:?}, before {:?}..{:?}, after {:?}..{:?}",
+                                    rig.workspace.selected_brush_elements,
+                                    solved_base.min,
+                                    solved_base.max,
+                                    solved.min,
+                                    solved.max,
                                 );
                             }
                         }

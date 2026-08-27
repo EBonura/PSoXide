@@ -1150,7 +1150,10 @@ pub fn build_package(
                 }
 
                 let has_legacy_interaction = component_interactable(scene, node).is_some();
-                let has_point_of_interest = component_point_of_interest(scene, node).is_some();
+                let point_of_interest_node = component_children(scene, node)
+                    .find(|child| matches!(child.kind, NodeKind::PointOfInterest { .. }))
+                    .map(|child| child.id);
+                let has_point_of_interest = point_of_interest_node.is_some();
                 if has_legacy_interaction && has_point_of_interest {
                     report.error_at(
                         PlaytestValidationTarget::Node(node.id),
@@ -1184,24 +1187,32 @@ pub fn build_package(
                 }
 
                 if let Some(point) = component_point_of_interest(scene, node) {
+                    let validation_target =
+                        PlaytestValidationTarget::Node(point_of_interest_node.unwrap_or(node.id));
                     let persistence_id = if point.persistence_id.trim().is_empty() {
                         format!("poi_{}", node.id.raw())
                     } else {
                         point.persistence_id.trim().to_string()
                     };
                     if !poi_persistence_ids.insert(persistence_id.clone()) {
-                        report.error(format!(
-                            "Point of Interest on '{}' reuses persistence id '{}'",
-                            node.name, persistence_id
-                        ));
+                        report.error_at(
+                            validation_target,
+                            format!(
+                                "Point of Interest on '{}' reuses persistence id '{}'",
+                                node.name, persistence_id
+                            ),
+                        );
                         return (None, report);
                     }
                     let (read_flag, reward_flag) = stable_poi_flag_pair(&persistence_id);
                     if let Some(existing) = poi_persistence_slots.get(&read_flag) {
-                        report.error(format!(
-                            "Point-of-interest persistence ids '{}' and '{}' map to the same save slot; rename one id",
-                            existing, persistence_id
-                        ));
+                        report.error_at(
+                            validation_target,
+                            format!(
+                                "Point-of-interest persistence ids '{}' and '{}' map to the same save slot; rename one id",
+                                existing, persistence_id
+                            ),
+                        );
                         return (None, report);
                     }
                     poi_persistence_slots.insert(read_flag, persistence_id.clone());
@@ -1209,7 +1220,7 @@ pub fn build_package(
                         persistence_id: &persistence_id,
                         ..point
                     };
-                    let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                    let ok = report.blaming(validation_target, |report| {
                         push_point_of_interest(
                             project,
                             node.name.as_str(),

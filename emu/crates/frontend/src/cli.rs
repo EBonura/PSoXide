@@ -526,6 +526,9 @@ pub struct DumpEditorPreviewArgs {
     /// Output PPM path.
     #[arg(long)]
     pub out: PathBuf,
+    /// Hide brush bounds and point-light widgets for clean presentation captures.
+    #[arg(long)]
+    pub hide_editor_overlays: bool,
     /// Orbit camera yaw in editor 4096-units-per-turn convention.
     #[arg(long, default_value_t = 320)]
     pub yaw: u16,
@@ -3463,8 +3466,8 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
     let frame = crate::editor_preview::build_phase1_frame(
         &project,
         camera,
-        true,
-        true,
+        !args.hide_editor_overlays,
+        !args.hide_editor_overlays,
         &empty_hidden,
         NodeId::ROOT,
         None,

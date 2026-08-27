@@ -272,6 +272,10 @@ pub struct WorldRoomSlotsReadJob<const N: usize> {
     /// Whether this read may stay with the drive between sectors. See
     /// [`WorldRoomSlotsRead::set_wait_for_sectors`].
     wait_for_sectors: bool,
+    /// End an in-flight read after a productive budget slice so other work
+    /// may run without the drive advancing past uncollected sectors. The next
+    /// poll resumes at `sector_offset`, not at the beginning of the group.
+    pause_at_poll_boundary: bool,
     world_pack_lba: u32,
     result: RoomChunkLoadResult,
     state: WorldRoomSlotsReadState,
@@ -305,6 +309,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             sector_offset: 0,
             empty_pumps: 0,
             wait_for_sectors: false,
+            pause_at_poll_boundary: false,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
                 status: STATUS_OK,
@@ -333,6 +338,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             sector_offset: 0,
             empty_pumps: 0,
             wait_for_sectors: false,
+            pause_at_poll_boundary: false,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
                 status: STATUS_OK,
@@ -428,6 +434,15 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
     /// whole.
     pub fn set_wait_for_sectors(&mut self, wait: bool) {
         self.wait_for_sectors = wait;
+    }
+
+    /// Pause a productive read at the poll budget boundary. Use this when a
+    /// visual frame must run between synchronous CD slices: leaving ReadN open
+    /// while rendering lets the one-sector controller advance underneath the
+    /// collector and corrupts the payload. A zero-sector poll remains armed so
+    /// the initial command can be collected immediately by the next call.
+    pub fn set_pause_at_poll_boundary(&mut self, pause: bool) {
+        self.pause_at_poll_boundary = pause;
     }
 
     /// Advance the in-flight read, moving any completed sectors into `dst`.
@@ -556,6 +571,13 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
                     }
                 }
             }
+            if self.pause_at_poll_boundary
+                && sectors_this_poll > 0
+                && self.state == WorldRoomSlotsReadState::Reading
+            {
+                cleanup_read_stream(cd, &mut polls);
+                self.state = WorldRoomSlotsReadState::Ready;
+            }
             let sector_delta = self.result.sectors.saturating_sub(before_sectors);
             if sector_delta > 0 {
                 telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_SECTORS, sector_delta);
@@ -638,14 +660,20 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
 
     #[cfg(target_arch = "mips")]
     fn begin_next_group(&mut self, cd: &mut CdController, polls: &mut u32) -> bool {
-        let Some((group_start, group_end, group_entries)) = next_world_pack_info_read_group(
-            &self.entries,
-            &self.statuses,
-            &self.processed,
-            self.count,
-        ) else {
-            self.finish();
-            return false;
+        let resuming = self.sector_offset < self.group_end;
+        let (read_start, group_end, group_entries) = if resuming {
+            (self.sector_offset, self.group_end, self.group_entries)
+        } else {
+            let Some((group_start, group_end, group_entries)) = next_world_pack_info_read_group(
+                &self.entries,
+                &self.statuses,
+                &self.processed,
+                self.count,
+            ) else {
+                self.finish();
+                return false;
+            };
+            (group_start, group_end, group_entries)
         };
         if let Err(status) = prepare_cd_read(cd, polls) {
             self.fail_all(status);
@@ -653,16 +681,18 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             return false;
         }
         if let Err(status) =
-            start_cd_read_at_lba(cd, self.world_pack_lba.saturating_add(group_start), polls)
+            start_cd_read_at_lba(cd, self.world_pack_lba.saturating_add(read_start), polls)
         {
             self.fail_all(status);
             self.state = WorldRoomSlotsReadState::Done;
             return false;
         }
-        self.group_start = group_start;
+        if !resuming {
+            self.group_start = read_start;
+            self.empty_pumps = 0;
+        }
         self.group_end = group_end;
-        self.sector_offset = group_start;
-        self.empty_pumps = 0;
+        self.sector_offset = read_start;
         self.group_entries = group_entries;
         self.state = WorldRoomSlotsReadState::Reading;
         true

@@ -1363,7 +1363,7 @@
                 bake: Retargeted,
                 role: Idle,
                 looping: true,
-                tags: ["starter"],
+                tags: ["rust_mantis_idle_look_v2", "selected_idle_look_01"],
             )),
         ),
         /*[3]*/ (
