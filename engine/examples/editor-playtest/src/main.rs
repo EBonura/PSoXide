@@ -493,11 +493,6 @@ struct Playtest {
     /// Only live gameplay entities participate; scenery model instances
     /// never enter the combat target set.
     lock_target: Option<usize>,
-    /// Virtual lock: a fixed world point the player faces as if it were a
-    /// target. Set by the lock button when no target is in range (this is
-    /// how the four-direction locked locomotion set gets exercised in a
-    /// room without enemies); released by the lock button again.
-    lock_anchor: Option<RoomPoint>,
     lock_switch_stick_held: bool,
     /// Consecutive ticks where the hard-lock target is outside break range.
     /// Dead/despawned targets still release immediately.
@@ -621,7 +616,6 @@ impl Playtest {
         addr_of_mut!((*scene).character).write(None);
         addr_of_mut!((*scene).player_actor_pose).write(None);
         addr_of_mut!((*scene).lock_target).write(None);
-        addr_of_mut!((*scene).lock_anchor).write(None);
         addr_of_mut!((*scene).attack_press).write(None);
         addr_of_mut!((*scene).soft_lock_target).write(None);
         addr_of_mut!((*scene).active_interactable).write(None);

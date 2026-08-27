@@ -449,13 +449,17 @@ pub(super) fn instance_actor_pose_from_components(
     } else {
         euler_q12_rotation([inst.pitch, combined_yaw.as_q12() as i16, inst.roll])
     };
-    // Authored instance positions are floor anchors; the model's origin
-    // sits its bind-pose floor lift above them.
+    // Authored instance positions are floor anchors. Ground the reference
+    // (default) clip from its cooked posed floor, then reconcile every live
+    // clip to that reference through `pose_translation`. Using only the mesh
+    // bind-pose lift here leaves animated entities a few world units below
+    // the BSP floor; painter ordering then clips their feet and makes them
+    // appear to hover even though their gameplay anchor is correct.
     let origin = visual_model_origin(
         x,
         y,
         z,
-        runtime_model.floor_lift,
+        clip_floor_lift(reference_anchor, runtime_model),
         visual_model_local_to_world(runtime_model, inst.visual_scale_q8),
         inst.visual_offset,
         &rotation,
@@ -989,6 +993,48 @@ mod tests {
         };
         assert_eq!(resolve(&looping).pose().phase_q12(), 0);
         assert_eq!(resolve(&one_shot).pose().phase_q12(), 1 << 12);
+    }
+
+    #[test]
+    fn instance_origin_uses_the_default_clips_posed_floor() {
+        let mut inst = instance(psx_level::MODEL_INSTANCE_POSE_ANIMATE);
+        inst.visual_offset = [0; 3];
+        inst.visual_scale_q8 = 256;
+        let tables = ModelTables {
+            model_clip_bounds: Box::leak(Box::new([LevelModelClipBoundsRecord {
+                model: ModelIndex::new(0),
+                clip: ModelClipTableIndex::new(0),
+                first_frame: ModelFrameBoundsIndex::new(0),
+                frame_count: 3,
+                floor_y: -100,
+                pose_offset: [0; 3],
+                flags: 0,
+            }])),
+            model_frame_bounds: &[],
+            model_sockets: &[],
+            model_instances: Box::leak(Box::new([inst])),
+            equipment: &[],
+            weapons: &[],
+            weapon_hitboxes: &[],
+            entities: &[],
+        };
+        let mut model = runtime_model();
+        // The bind floor intentionally disagrees with the posed default clip.
+        // Regressing to the old bind-only path would produce Y=40, clipping
+        // the animated feet through the authored floor.
+        model.floor_lift = 20;
+        let snapshot = resolve_instance_actor_pose(
+            tables,
+            &[Some(model)],
+            &[Some(one_joint_animation(&[10, 20, 30])), None],
+            &[],
+            0,
+            SimTick::ZERO,
+            VideoHz::NTSC,
+        )
+        .expect("instance pose");
+
+        assert_eq!(snapshot.pose().origin(), WorldVertex::new(10, 120, 30));
     }
 
     #[test]
