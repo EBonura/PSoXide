@@ -519,6 +519,11 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         // with the drive: sectors that land between frames are stepped over,
         // and the only evidence is a checksum failure later.
         self.job.set_wait_for_sectors(true);
+        // The authored loading screen renders between productive bursts. End
+        // ReadN at that boundary and resume from the next LBA on the following
+        // pump, otherwise the one-sector controller advances while UI packets
+        // are being prepared and silently drops payload data.
+        self.job.set_pause_at_poll_boundary(true);
         self.job.poll_into(cd, &mut self.storage, max_sectors);
         self.finish_if_done()
     }
@@ -595,14 +600,13 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         if !self.started || self.asset_count == 0 {
             return 0;
         }
-        let completed = self.job.completed_entries();
-        let mut count = 0usize;
-        let mut index = 0usize;
-        while index < self.asset_count {
-            count += completed[index] as usize;
-            index += 1;
-        }
-        (count as i32).saturating_mul(4096) / self.asset_count as i32
+        // Report bytes delivered, not only checksum-complete assets. A single
+        // large model atlas can dominate the complete load; counting assets
+        // leaves an authored progress bar motionless until that chunk ends and
+        // then makes it jump straight to READY. `byte_counts` advances once per
+        // landed CD sector, so this remains honest while giving the loading
+        // screen visible progress throughout the read.
+        progress_q12_from_bytes(self.job.byte_counts(), &self.capacities, self.asset_count)
     }
 
     /// Stable bytes for one persistent asset after the full load completes.
@@ -613,6 +617,27 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         self.storage
             .bytes_for(asset.id.0 as usize, asset.ram_bytes as usize)
     }
+}
+
+fn progress_q12_from_bytes(loaded: &[usize], capacities: &[usize], count: usize) -> i32 {
+    let count = count.min(loaded.len()).min(capacities.len());
+    let mut loaded_bytes = 0usize;
+    let mut total_bytes = 0usize;
+    let mut index = 0usize;
+    while index < count {
+        let capacity = capacities[index];
+        loaded_bytes = loaded_bytes.saturating_add(loaded[index].min(capacity));
+        total_bytes = total_bytes.saturating_add(capacity);
+        index += 1;
+    }
+    if total_bytes == 0 {
+        return 0;
+    }
+    loaded_bytes
+        .saturating_mul(4096)
+        .checked_div(total_bytes)
+        .unwrap_or(0)
+        .min(4096) as i32
 }
 
 impl<const PAGES: usize, const ASSETS: usize> Default for PersistentAssetStreamer<PAGES, ASSETS> {
@@ -944,5 +969,22 @@ mod tests {
         streamer.begin(99, &[], &[]);
         assert!(streamer.ready());
         assert!(!streamer.failed());
+    }
+
+    #[test]
+    fn loading_progress_moves_with_bytes_inside_a_large_asset() {
+        let capacities = [8192, 2048];
+        assert_eq!(progress_q12_from_bytes(&[0, 0], &capacities, 2), 0);
+        assert_eq!(
+            progress_q12_from_bytes(&[4096, 0], &capacities, 2),
+            1638,
+            "half of the dominant asset must visibly advance the bar"
+        );
+        assert_eq!(progress_q12_from_bytes(&[8192, 2048], &capacities, 2), 4096);
+        assert_eq!(
+            progress_q12_from_bytes(&[usize::MAX, usize::MAX], &capacities, 2),
+            4096,
+            "delivered byte counters are clamped to authored capacities"
+        );
     }
 }
