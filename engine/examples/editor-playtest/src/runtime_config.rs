@@ -141,11 +141,6 @@ pub(super) const CAMERA_SOFT_LOCK_BREAK_STICK: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_THRESHOLD: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_RELEASE: i16 = 36;
 pub(super) const LOCK_RANGE: i32 = 256;
-/// Height above the player's feet of the virtual lock anchor (chest-ish).
-pub(super) const LOCK_ANCHOR_HEIGHT: i32 = 32;
-/// Distance ahead of the player the virtual lock anchor is placed: melee
-/// range, so the locked camera frames the player like a real duel would.
-pub(super) const LOCK_ANCHOR_DISTANCE: i32 = 96;
 pub(super) const LOCK_BREAK_RANGE: i32 = 320;
 /// Horizontal acquisition cone in signed Q8 screen-space (`256 = 45°`).
 pub(super) const LOCK_ACQUIRE_HALF_CONE_Q8: i32 = 288;
