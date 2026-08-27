@@ -1242,6 +1242,13 @@ impl Scene for Playtest {
                 }
             }
 
+            let _ = self.draw_archive_beacons_world(
+                camera,
+                self.gameplay_tick(ctx.sim_tick),
+                &mut primitive_packets,
+                &mut world,
+            );
+
             telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_active_chunks);
             emit_room_chunk_mask(
                 telemetry::counter::ROOM_ACTIVE_CHUNK_MASK_LO,
@@ -1455,30 +1462,6 @@ impl Scene for Playtest {
 
         if let Some(target) = self.lock_target_indicator_position() {
             draw_lock_target_indicator(target, camera, overlay_tick);
-        }
-
-        for (index, interactable) in INTERACTABLES.iter().enumerate() {
-            if interactable.kind != InteractableKind::PointOfInterest
-                || interactable.room != self.room_index
-                || !interactable_is_active(interactable)
-            {
-                continue;
-            }
-            let state = if self.point_of_interest_depleted(interactable) {
-                ArchiveBeaconVisualState::Depleted
-            } else if self.active_interactable == Some(index) {
-                ArchiveBeaconVisualState::Interactable
-            } else {
-                ArchiveBeaconVisualState::Active
-            };
-            draw_archive_beacon_overlay(
-                RoomPoint::new(interactable.x, interactable.y, interactable.z),
-                Angle::from_q12(interactable.yaw as u16),
-                archive_beacon_screen_height(interactable.marker_height),
-                state,
-                overlay_tick,
-                camera,
-            );
         }
 
         #[cfg(feature = "fps-overlay")]
