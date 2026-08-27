@@ -380,6 +380,24 @@ fn native_model_imports_static_glb_triangle_with_bind_pose_and_atlas() {
 }
 
 #[test]
+fn generated_bind_pose_clip_is_identity_for_every_joint() {
+    let clip = generate_bind_pose_clip(3, 15).expect("generate bind pose");
+    let animation = psx_asset::Animation::from_bytes(&clip.bytes).expect("parse bind pose");
+    assert_eq!(clip.sanitized_name, "bind_pose");
+    assert_eq!(animation.joint_count(), 3);
+    assert_eq!(animation.frame_count(), 1);
+    assert_eq!(animation.sample_rate_hz(), 15);
+    for joint in 0..3 {
+        let pose = animation.pose(0, joint).expect("joint pose");
+        assert_eq!(pose.matrix, [[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]]);
+        assert_eq!(
+            (pose.translation.x, pose.translation.y, pose.translation.z),
+            (0, 0, 0)
+        );
+    }
+}
+
+#[test]
 fn triangle_strip_gets_triangulated() {
     let faces = triangulate_indices(&[0, 1, 2, 3], Mode::TriangleStrip).unwrap();
     assert_eq!(faces, vec![[0, 1, 2], [2, 1, 3]]);
