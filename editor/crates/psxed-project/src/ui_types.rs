@@ -1641,8 +1641,9 @@ impl UiScene {
         &self.nodes
     }
 
-    /// Mutable node slice for project-wide reference maintenance.
-    pub(crate) fn nodes_mut(&mut self) -> &mut [UiNode] {
+    /// Mutable node slice for project-wide reference maintenance and
+    /// non-destructive project migration tools.
+    pub fn nodes_mut(&mut self) -> &mut [UiNode] {
         &mut self.nodes
     }
 
