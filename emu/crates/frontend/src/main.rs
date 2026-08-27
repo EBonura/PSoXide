@@ -369,20 +369,22 @@ impl Shell {
             Err(error) => eprintln!("[projects] could not seed sample project: {error}"),
         }
         let audio = audio::AudioOut::open();
-        if let Some(a) = audio.as_ref() {
-            eprintln!("[audio] opened host stream @ {} Hz", a.host_sample_rate());
+        let audio_status = if let Some(a) = audio.as_ref() {
+            format!("[audio] opened host stream @ {} Hz", a.host_sample_rate())
         } else {
-            eprintln!("[audio] no host output device available - running silent");
-        }
+            "[audio] no host output device available - running silent".to_string()
+        };
+        eprintln!("{audio_status}");
         let input = input::InputRouter::new();
-        if input.is_connected() {
-            eprintln!(
+        let input_status = if input.is_connected() {
+            format!(
                 "[input] already-connected pads: {}",
                 input.connected_names()
-            );
+            )
         } else {
-            eprintln!("[input] no pads connected at startup - watching for hot-plug");
-        }
+            "[input] no pads connected at startup - watching for hot-plug".to_string()
+        };
+        eprintln!("{input_status}");
         // The compute backend gets its own headless wgpu device.
         // We *could* share the main `Graphics` device for zero-copy
         // VRAM-to-display, but that needs `Arc<Device>` plumbing
@@ -396,9 +398,18 @@ impl Shell {
         } else {
             None
         };
+        let state = AppState::with_config_dir(config_dir);
+        #[cfg(feature = "editor")]
+        let state = {
+            let mut state = state;
+            state
+                .editor
+                .append_console_lines([audio_status, input_status]);
+            state
+        };
         Self {
             graphics: None,
-            state: AppState::with_config_dir(config_dir),
+            state,
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
             host_input: HostKeyboardInput::default(),
