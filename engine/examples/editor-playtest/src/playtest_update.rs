@@ -480,11 +480,6 @@ impl Playtest {
             return;
         }
 
-        if !ctx.pad.is_analog() {
-            self.camera_turning_last_tick = false;
-            return;
-        }
-
         if ctx.just_pressed(button::SELECT) {
             self.free_orbit = !self.free_orbit;
         }

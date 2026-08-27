@@ -356,7 +356,7 @@ impl Scene for Playtest {
 
     fn update(&mut self, ctx: &mut Ctx) {
         self.update_gameplay(ctx);
-        // This tail runs after every intentional input-mode early return in
+        // This tail runs after every intentional early return in
         // `update_gameplay`: freeze final actor state once, then run combat
         // from the same snapshots the next body/equipment render consumes.
         self.refresh_actor_pose_snapshots(ctx);
@@ -371,13 +371,6 @@ impl Scene for Playtest {
         self.prepared_overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
         self.prepared_poi_panel_frame = self.poi_panel_frame;
         self.prepared_poi_page_type_frame = self.poi_page_type_frame;
-        self.prepared_overlay_analog = ctx.pad.is_analog();
-        if !ctx.pad.is_analog() {
-            // Keep a valid empty list queued; the prompt is an immediate
-            // overlay draw after this list has drained.
-            let _ = unsafe { OtFrame::begin(&mut OT) };
-            return;
-        }
 
         #[cfg(feature = "fps-overlay")]
         {
@@ -1435,7 +1428,6 @@ impl Scene for Playtest {
         self.overlay_sim_tick = self.prepared_overlay_sim_tick;
         self.overlay_poi_panel_frame = self.prepared_poi_panel_frame;
         self.overlay_poi_page_type_frame = self.prepared_poi_page_type_frame;
-        self.overlay_analog = self.prepared_overlay_analog;
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         let ot_in_flight = unsafe { OtFrame::resume(&mut OT) }.submit_async();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
@@ -1443,12 +1435,6 @@ impl Scene for Playtest {
     }
 
     fn render_overlay(&mut self, _ctx: &mut Ctx) {
-        if !self.overlay_analog {
-            if let Some(font) = self.ui_fonts[0].as_ref() {
-                draw_analog_required_prompt(font);
-            }
-            return;
-        }
         let camera = self.overlay_camera;
         let overlay_tick = self.overlay_sim_tick;
 
