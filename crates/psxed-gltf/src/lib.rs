@@ -599,6 +599,20 @@ pub struct CookedClip {
     pub frames: usize,
 }
 
+/// Generate the one-frame identity clip used to render a static model through
+/// the skeletal model path. Static props and equipment should not need an
+/// authored animation resource merely because the runtime samples joint poses.
+pub fn generate_bind_pose_clip(joint_count: u16, fps: u16) -> Result<CookedClip, Error> {
+    if joint_count == 0 {
+        return Err(Error::BadSkin("a bind-pose clip needs at least one joint"));
+    }
+    let neutral_bounds = ModelBounds {
+        center: [0.0; 3],
+        extent: 1.0,
+    };
+    bind_pose_clip(usize::from(joint_count), &neutral_bounds, fps.max(1))
+}
+
 /// Summary of a native model import.
 #[derive(Debug, Clone)]
 pub struct RigidModelReport {
