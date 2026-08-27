@@ -2,11 +2,20 @@
 fn main() {
     let src = std::env::args().nth(1).expect("source glb");
     let out = std::env::args().nth(2).expect("out dir");
+    let animation_fps = std::env::var("PSX_ANIMATION_FPS")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(15);
+    let world_height = std::env::var("PSX_MODEL_WORLD_HEIGHT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(1024);
     std::fs::create_dir_all(&out).unwrap();
     let cfg = psxed_gltf::RigidModelConfig {
         // PRE-DIVIDE units, matching the project's Model record: the cook
         // divides by 16, so 64 here renders the model 16x too small
-        world_height: 1024,
+        world_height,
+        animation_fps,
         // the .psxanim carries no bounds of its own and the runtime decodes
         // joint translations using the MODEL's, so a clip that inflates its own
         // bounds desyncs the two and distorts the pose

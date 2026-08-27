@@ -1656,7 +1656,7 @@ pub struct PlaytestGameEntity {
     pub run_clip: u16,
     /// Windup/Attack/Recover one-shot clip.
     pub attack_clip: u16,
-    /// Staggered (hit-react role) one-shot clip.
+    /// Complete Stun one-shot, including recovery (HitReact fallback).
     pub stagger_clip: u16,
     /// Death one-shot clip.
     pub death_clip: u16,

@@ -1185,6 +1185,159 @@ impl Brush {
         moved
     }
 
+    /// Move visible solved corners by rebuilding every incident face plane
+    /// from the solved topology instead of hoping that a raw authored plane
+    /// point happens to coincide with the handle. Clips and arbitrary plane
+    /// intersections routinely create corners that have no such raw point.
+    ///
+    /// Every affected face is re-authored from three of its solved polygon
+    /// vertices after the selected vertices receive `delta`. Candidate
+    /// triples prefer the greatest number of selected vertices, then edges
+    /// incident to those vertices in the solved polygon, then the widest
+    /// non-degenerate triangle. The topology preference prevents a moved
+    /// corner from pivoting a quad around an unrelated diagonal. This makes
+    /// each incident plane pass through the requested destination while
+    /// retaining the face's winding, material, and UV mapping. The caller
+    /// remains responsible for rejecting candidates that no longer enclose a
+    /// bounded convex solid.
+    pub fn translate_solved_vertices(
+        &mut self,
+        targets: &[[f64; 3]],
+        delta: [i32; 3],
+        epsilon: f64,
+        uv_lock: bool,
+    ) -> usize {
+        if targets.is_empty() || delta == [0; 3] {
+            return 0;
+        }
+        let solved = self.solve();
+        if !solved.is_valid() {
+            return 0;
+        }
+        let delta_f = delta.map(f64::from);
+        let mut affected = 0;
+        for face_index in 0..self.faces.len() {
+            let Some(polygon) = solved.polygons.get(face_index).and_then(Option::as_ref) else {
+                continue;
+            };
+            let vertices: Vec<([f64; 3], bool)> = polygon
+                .verts
+                .iter()
+                .map(|vertex| {
+                    let selected = targets.iter().any(|target| {
+                        (0..3).all(|axis| (vertex[axis] - target[axis]).abs() <= epsilon)
+                    });
+                    let moved = if selected {
+                        std::array::from_fn(|axis| vertex[axis] + delta_f[axis])
+                    } else {
+                        *vertex
+                    };
+                    (moved, selected)
+                })
+                .collect();
+            let selected_count = vertices.iter().filter(|(_, selected)| *selected).count();
+            if selected_count == 0 || vertices.len() < 3 {
+                continue;
+            }
+
+            let mut best: Option<(usize, usize, f64, [[i32; 3]; 3])> = None;
+            for a in 0..vertices.len() - 2 {
+                for b in (a + 1)..vertices.len() - 1 {
+                    for c in (b + 1)..vertices.len() {
+                        let points = [vertices[a].0, vertices[b].0, vertices[c].0]
+                            .map(|point| point.map(|coordinate| coordinate.round() as i32));
+                        let Some(plane) = Plane::from_points(points) else {
+                            continue;
+                        };
+                        let selected_in_triangle = usize::from(vertices[a].1)
+                            + usize::from(vertices[b].1)
+                            + usize::from(vertices[c].1);
+                        let triangle = [a, b, c];
+                        let selected_incident_edges = (0..vertices.len())
+                            .filter(|edge| {
+                                let next = (*edge + 1) % vertices.len();
+                                triangle.contains(edge)
+                                    && triangle.contains(&next)
+                                    && (vertices[*edge].1 || vertices[next].1)
+                            })
+                            .count();
+                        let area_sq = plane
+                            .normal
+                            .iter()
+                            .map(|component| (*component as f64).powi(2))
+                            .sum::<f64>();
+                        if best.as_ref().is_none_or(
+                            |(best_selected, best_incident_edges, best_area, _)| {
+                                selected_in_triangle > *best_selected
+                                    || (selected_in_triangle == *best_selected
+                                        && (selected_incident_edges > *best_incident_edges
+                                            || (selected_incident_edges == *best_incident_edges
+                                                && area_sq > *best_area)))
+                            },
+                        ) {
+                            best = Some((
+                                selected_in_triangle,
+                                selected_incident_edges,
+                                area_sq,
+                                points,
+                            ));
+                        }
+                    }
+                }
+            }
+            let Some((selected_in_triangle, _, _, mut points)) = best else {
+                continue;
+            };
+            if selected_in_triangle == 0 {
+                continue;
+            }
+            let Some(source_plane) = Plane::from_points(self.faces[face_index].points) else {
+                continue;
+            };
+            let Some(candidate_plane) = Plane::from_points(points) else {
+                continue;
+            };
+            let orientation = (0..3)
+                .map(|axis| source_plane.normal[axis] as f64 * candidate_plane.normal[axis] as f64)
+                .sum::<f64>();
+            if orientation < 0.0 {
+                points.swap(1, 2);
+            }
+            let face = &mut self.faces[face_index];
+            face.points = points;
+            if uv_lock && selected_count == vertices.len() {
+                if let Some(plane) = Plane::from_points(face.points) {
+                    let raw = paraxial_uv(&plane, delta_f);
+                    face.uv.compensate_shift([
+                        raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                        raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                    ]);
+                }
+            }
+            affected += 1;
+        }
+        affected
+    }
+
+    /// Whether every visible solved corner lies on `step`'s absolute world
+    /// lattice. Checking only authored plane points is insufficient because
+    /// their intersections are rational in general.
+    pub fn solved_vertices_on_grid(&self, step: i32, epsilon: f64) -> bool {
+        let solved = self.solve();
+        if !solved.is_valid() {
+            return false;
+        }
+        let step = f64::from(step.max(1));
+        solved.polygons.iter().flatten().all(|polygon| {
+            polygon.verts.iter().all(|vertex| {
+                vertex.iter().all(|coordinate| {
+                    let snapped = (*coordinate / step).round() * step;
+                    (*coordinate - snapped).abs() <= epsilon
+                })
+            })
+        })
+    }
+
     /// [`Self::translate_face`] with the texture riding along: the plane
     /// translates rigidly, so the paraxial shift is compensated out of
     /// the face's UV offset (extrude with texture lock).
@@ -1659,6 +1812,64 @@ mod tests {
         assert_eq!(front.solve().min, [32.0, 0.0, 0.0]);
         assert_eq!(back.faces.len(), 6);
         assert_eq!(front.faces.len(), 6);
+    }
+
+    #[test]
+    fn solved_vertex_translation_reauthors_a_clip_created_corner() {
+        let source = Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        // x + z = 96 cuts four new corners. The cap is authored from only
+        // three of them, so at least one visible corner has no matching raw
+        // plane point and exercises the solved-topology edit path.
+        let clipped = source.clip([[0, 0, 96], [0, 128, 96], [96, 128, 0]]);
+        let mut brush = clipped
+            .back
+            .into_iter()
+            .chain(clipped.front)
+            .find(|candidate| {
+                unique_verts(&candidate.solve()).iter().any(|vertex| {
+                    !candidate
+                        .faces
+                        .iter()
+                        .flat_map(|face| face.points)
+                        .any(|point| {
+                            (0..3).all(|axis| {
+                                (vertex[axis] as f64 - f64::from(point[axis])).abs() <= 0.5
+                            })
+                        })
+                })
+            })
+            .expect("one clipped half has an intersection-only corner");
+        let target = unique_verts(&brush.solve())
+            .into_iter()
+            .map(|vertex| vertex.map(|coordinate| coordinate as f64))
+            .find(|vertex| {
+                !brush
+                    .faces
+                    .iter()
+                    .flat_map(|face| face.points)
+                    .any(|point| {
+                        (0..3).all(|axis| (vertex[axis] - f64::from(point[axis])).abs() <= 0.5)
+                    })
+            })
+            .expect("intersection-only target");
+        let delta = [16, 0, 0];
+
+        assert!(
+            brush.translate_solved_vertices(&[target], delta, 0.5, false) > 0,
+            "the visible corner must map to its incident planes"
+        );
+        assert!(brush.is_pickable());
+        let expected: [f64; 3] = std::array::from_fn(|axis| target[axis] + f64::from(delta[axis]));
+        assert!(
+            brush
+                .solve()
+                .polygons
+                .iter()
+                .flatten()
+                .flat_map(|polygon| &polygon.verts)
+                .any(|vertex| (0..3).all(|axis| (vertex[axis] - expected[axis]).abs() <= 0.01)),
+            "the requested solved corner lands at {expected:?}"
+        );
     }
 
     #[test]
