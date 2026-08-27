@@ -2,6 +2,23 @@ use super::*;
 use crate::{NodeId, ProjectDocument};
 
 #[test]
+fn cook_output_capture_mirrors_main_and_worker_diagnostics() {
+    let (value, lines) = capture_cook_output(|| {
+        emit_cook_output(format_args!("[cook-capture-test] main"));
+        std::thread::scope(|scope| {
+            scope.spawn(|| emit_cook_output(format_args!("[cook-capture-test] worker")));
+        });
+        42
+    });
+
+    assert_eq!(value, 42);
+    assert!(lines.iter().any(|line| line == "[cook-capture-test] main"));
+    assert!(lines
+        .iter()
+        .any(|line| line == "[cook-capture-test] worker"));
+}
+
+#[test]
 fn brush_cook_diagnostics_keep_a_typed_editor_focus_target() {
     let target =
         brush_world_validation_target(&crate::brush_world::BrushWorldCookError::InvalidBrush {

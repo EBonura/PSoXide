@@ -2712,6 +2712,15 @@ impl AppState {
         self.embedded_playtest.input_captured()
     }
 
+    /// Cook the active project while preserving the cooker's stderr output
+    /// and mirroring the same progress lines into the editor Console.
+    fn cook_editor_playtest_to_disk(&mut self) -> Result<String, String> {
+        let (result, lines) =
+            psxed_project::playtest::capture_cook_output(|| self.editor.cook_playtest_to_disk());
+        self.editor.append_console_lines(lines);
+        result
+    }
+
     /// Build and run the active editor project: cook assets, spawn
     /// the existing MIPS build target, wrap the EXE into a bootable
     /// disc image, then launch that disc. The build is asynchronous;
@@ -2730,7 +2739,7 @@ impl AppState {
             self.embedded_playtest.fail();
             return;
         }
-        let cook_status = match self.editor.cook_playtest_to_disk() {
+        let cook_status = match self.cook_editor_playtest_to_disk() {
             Ok(status) => status,
             Err(error) => {
                 let message = format!("Embedded Play failed while cooking assets: {error}");
@@ -2777,7 +2786,7 @@ impl AppState {
         let dest_path =
             project_baked_disc_path(self.editor.project_dir(), &self.editor.project().name);
         let volume_id = project_disc_volume_id(&self.editor.project().name);
-        let cook_status = match self.editor.cook_playtest_to_disk() {
+        let cook_status = match self.cook_editor_playtest_to_disk() {
             Ok(status) => status,
             Err(error) => {
                 let message = format!("Project build failed while cooking assets: {error}");

@@ -985,7 +985,9 @@ fn compile_model_topology(
     match fill_outside_bsp_leaves(&mut bsp, &portals, occupant_points) {
         OutsideFillResult::Filled(filled) => {
             if log_result && filled > 0 {
-                eprintln!("[brush-qbsp] filled {filled} unreachable exterior leaves");
+                crate::playtest::emit_cook_output(format_args!(
+                    "[brush-qbsp] filled {filled} unreachable exterior leaves"
+                ));
             }
         }
         OutsideFillResult::Leaked(leak) => {
@@ -1042,11 +1044,11 @@ fn compile_model_topology(
                 leak_diagnostic.likely_opening_path_index = Some(path_portal_index + 1);
             }
             if log_result {
-                eprintln!(
+                crate::playtest::emit_cook_output(format_args!(
                     "[brush-qbsp] leak from {:?}: occupied leaf reaches the exterior through {} pointfile points; retaining portal PVS through the opening",
                     leak_diagnostic.path.first().copied().unwrap_or([0; 3]),
                     leak_diagnostic.path.len(),
-                );
+                ));
             }
         }
         OutsideFillResult::NoOccupants => {}
