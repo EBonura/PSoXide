@@ -171,6 +171,11 @@ impl EditorWorkspace {
             .is_some_and(|drag| drag.snap_source.is_some())
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if self
+            .brush_drag
+            .is_some_and(|drag| drag.stage == BrushCreateStage::Height)
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         } else if self.brush_vertex_snap_hover.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }

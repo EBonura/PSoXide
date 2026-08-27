@@ -100,8 +100,7 @@ pub(crate) fn tool_impl_3d(tool: ViewTool) -> &'static dyn ViewportTool3d {
     }
 }
 
-/// Height of a freshly dragged-out brush, world units. Face drags resize
-/// it afterwards.
+/// Initial preview height before the second brush-create gesture authors it.
 pub(crate) const BRUSH_CREATE_HEIGHT: i32 = 256;
 
 fn brush_contents_outline(contents: psxed_project::brush::BrushContents) -> egui::Color32 {
@@ -3443,7 +3442,7 @@ impl EditorWorkspace {
     fn brush_drag_bounds(drag: BrushDrag) -> Option<([i32; 3], [i32; 3])> {
         let mut opposite = drag.current;
         let depth_axis = drag.view.depth_axis();
-        opposite[depth_axis] = drag.anchor[depth_axis].saturating_add(BRUSH_CREATE_HEIGHT);
+        opposite[depth_axis] = drag.height_end;
         let min = std::array::from_fn(|axis| drag.anchor[axis].min(opposite[axis]));
         let max = std::array::from_fn(|axis| drag.anchor[axis].max(opposite[axis]));
         (0..3)
@@ -3726,22 +3725,111 @@ impl EditorWorkspace {
     /// Start a brush-create drag at a snapped point (2D view entry).
     pub(crate) fn begin_brush_drag_2d(&mut self, world: [f32; 2]) {
         let point = self.brush_snap_2d(world);
+        let depth_axis = self.orthographic_view.depth_axis();
         self.brush_drag = Some(BrushDrag {
             anchor: point,
             current: point,
             view: self.orthographic_view,
             grid_step: i32::from(self.snap_units.max(1)),
+            height_end: point[depth_axis].saturating_add(BRUSH_CREATE_HEIGHT),
+            stage: BrushCreateStage::Footprint,
+            height_press_y: 0,
+            height_press_end: 0,
+            height_dragging: false,
             settings: self.brush_draw_settings,
         });
     }
 
     /// Update the in-flight brush-create drag (2D view entry).
     pub(crate) fn update_brush_drag_2d(&mut self, world: [f32; 2]) {
-        if let Some(drag) = self.brush_drag {
+        if let Some(drag) = self
+            .brush_drag
+            .filter(|drag| drag.stage == BrushCreateStage::Footprint)
+        {
             self.brush_drag = Some(BrushDrag {
                 current: self.brush_snap_2d(world),
                 ..drag
             });
+        }
+    }
+
+    /// Begin the second brush-create gesture. Vertical pointer travel authors
+    /// the hidden-axis endpoint, which is world Y for the Top view used by the
+    /// 3D editor.
+    pub(crate) fn begin_brush_height_drag(&mut self, pointer_y: f32) -> bool {
+        let Some(mut drag) = self.brush_drag else {
+            return false;
+        };
+        if drag.stage != BrushCreateStage::Height || drag.height_dragging {
+            return false;
+        }
+        drag.height_press_y = pointer_y.round() as i32;
+        drag.height_press_end = drag.height_end;
+        drag.height_dragging = true;
+        self.brush_drag = Some(drag);
+        self.status = format!(
+            "Draw {}: drag vertically to set height, then release",
+            drag.settings.shape.label()
+        );
+        true
+    }
+
+    /// Update the snapped endpoint during the second brush-create gesture.
+    pub(crate) fn update_brush_height_drag(&mut self, pointer_y: f32) {
+        let Some(mut drag) = self
+            .brush_drag
+            .filter(|drag| drag.stage == BrushCreateStage::Height && drag.height_dragging)
+        else {
+            return;
+        };
+        let raw_delta = f64::from(drag.height_press_y) - f64::from(pointer_y);
+        let world_delta = raw_delta * f64::from(EXTRUDE_UNITS_PER_PIXEL);
+        let snapped_delta = absolute_grid_translation_delta(
+            f64::from(drag.height_press_end),
+            world_delta,
+            self.snap_units,
+        );
+        drag.height_end = drag.height_press_end.saturating_add(snapped_delta);
+        let depth_axis = drag.view.depth_axis();
+        let extent = drag.height_end.saturating_sub(drag.anchor[depth_axis]);
+        self.brush_drag = Some(drag);
+        self.status = format!(
+            "Draw {}: extent {extent:+} on Grid {}",
+            drag.settings.shape.label(),
+            self.snap_units
+        );
+    }
+
+    /// Finish one of the two brush-create gestures. A valid footprint advances
+    /// to height authoring; releasing the height gesture commits the brushes.
+    fn finish_brush_creation_gesture(&mut self) -> bool {
+        let Some(mut drag) = self.brush_drag else {
+            return false;
+        };
+        match drag.stage {
+            BrushCreateStage::Footprint => {
+                if Self::brush_drag_bounds(drag).is_none() {
+                    self.brush_drag = None;
+                    self.status = format!(
+                        "Draw {}: drag a larger footprint",
+                        drag.settings.shape.label()
+                    );
+                    return true;
+                }
+                drag.stage = BrushCreateStage::Height;
+                drag.height_dragging = false;
+                self.brush_drag = Some(drag);
+                self.status = format!(
+                    "Draw {}: footprint set; drag vertically to set height",
+                    drag.settings.shape.label()
+                );
+                true
+            }
+            BrushCreateStage::Height if drag.height_dragging => {
+                self.commit_brush_drag();
+                true
+            }
+            BrushCreateStage::Height => false,
         }
     }
 
@@ -4774,7 +4862,7 @@ impl EditorWorkspace {
         {
             return;
         }
-        self.commit_brush_drag();
+        self.finish_brush_creation_gesture();
     }
 
     /// Project exact solved brush polygons into the active orthographic
@@ -6099,6 +6187,9 @@ impl ViewportTool3d for BrushTool {
             ws.begin_brush_vertex_snap_3d(frame.rect, pointer);
             return;
         }
+        if ws.begin_brush_height_drag(pointer.y) {
+            return;
+        }
         // Whole brushes use the transform gizmo exclusively. In the Brush
         // authoring tool, dragging empty space still creates a new brush.
         if ws.brush_edit_mode == BrushEditMode::Move {
@@ -6113,6 +6204,11 @@ impl ViewportTool3d for BrushTool {
                         current: point,
                         view: OrthographicView::Top,
                         grid_step: i32::from(ws.snap_units.max(1)),
+                        height_end: point[1].saturating_add(BRUSH_CREATE_HEIGHT),
+                        stage: BrushCreateStage::Footprint,
+                        height_press_y: 0,
+                        height_press_end: 0,
+                        height_dragging: false,
                         settings: ws.brush_draw_settings,
                     });
                 }
@@ -6174,6 +6270,11 @@ impl ViewportTool3d for BrushTool {
                 current: point,
                 view: OrthographicView::Top,
                 grid_step: i32::from(ws.snap_units.max(1)),
+                height_end: point[1].saturating_add(BRUSH_CREATE_HEIGHT),
+                stage: BrushCreateStage::Footprint,
+                height_press_y: 0,
+                height_press_end: 0,
+                height_dragging: false,
                 settings: ws.brush_draw_settings,
             });
         }
@@ -6282,13 +6383,17 @@ impl ViewportTool3d for BrushTool {
                     state.applied = delta;
                 }
             }
-        } else if let (Some(drag), Some(point)) =
-            (ws.brush_drag, ws.brush_ground_point(frame.rect, pointer))
-        {
-            ws.brush_drag = Some(BrushDrag {
-                current: point,
-                ..drag
-            });
+        } else if let Some(drag) = ws.brush_drag {
+            if drag.stage == BrushCreateStage::Height && drag.height_dragging {
+                ws.update_brush_height_drag(pointer.y);
+            } else if drag.stage == BrushCreateStage::Footprint {
+                if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
+                    ws.brush_drag = Some(BrushDrag {
+                        current: point,
+                        ..drag
+                    });
+                }
+            }
         }
     }
 
@@ -6300,7 +6405,7 @@ impl ViewportTool3d for BrushTool {
             || ws.commit_brush_vertex_drag_preview()
             || ws.commit_brush_extrude_preview();
         if !committed {
-            ws.commit_brush_drag();
+            ws.finish_brush_creation_gesture();
         }
         if synthesize_click {
             self.primary_clicked(ws, _frame);
@@ -6309,6 +6414,13 @@ impl ViewportTool3d for BrushTool {
 
     fn primary_clicked(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
         if ws.brush_vertex_snap_key_down {
+            return;
+        }
+        if ws
+            .brush_drag
+            .is_some_and(|drag| drag.stage == BrushCreateStage::Height)
+        {
+            ws.commit_brush_drag();
             return;
         }
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
