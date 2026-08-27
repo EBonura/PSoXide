@@ -84,10 +84,10 @@ pub(crate) fn quake_portal_flow_rows(
     let flow_started = std::time::Instant::now();
     let report_progress = directed.len() >= 1024;
     if report_progress {
-        eprintln!(
+        crate::playtest::emit_cook_output(format_args!(
             "[brush-vis] Quake portal flow: {visible_leaves} visible leaves, {} directed portals, {worker_count} workers",
             directed.len()
-        );
+        ));
     }
     let next_portal = AtomicUsize::new(0);
     let completed_portals = AtomicUsize::new(0);
@@ -133,20 +133,20 @@ pub(crate) fn quake_portal_flow_rows(
                 status[portal_index].store(2, Ordering::Release);
                 let completed = completed_portals.fetch_add(1, Ordering::Relaxed) + 1;
                 if report_progress && (completed.is_multiple_of(1024) || completed == order.len()) {
-                    eprintln!(
+                    crate::playtest::emit_cook_output(format_args!(
                         "[brush-vis] portal flow {completed}/{} ({:.1}s)",
                         order.len(),
                         flow_started.elapsed().as_secs_f32()
-                    );
+                    ));
                 }
             });
         }
     });
     if report_progress {
-        eprintln!(
+        crate::playtest::emit_cook_output(format_args!(
             "[brush-vis] portal flow complete in {:.1}s",
             flow_started.elapsed().as_secs_f32()
-        );
+        ));
     }
     let portal_visibility: Vec<Vec<u64>> = portal_visibility
         .into_iter()
