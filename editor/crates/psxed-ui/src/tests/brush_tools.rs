@@ -23,6 +23,27 @@ fn brush_frame(harness: &ViewportHarness, pointer: Pos2) -> ToolFrame3d {
     }
 }
 
+fn draw_brush_3d(
+    harness: &mut ViewportHarness,
+    footprint_start: Pos2,
+    footprint_end: Pos2,
+    height_pixels: f32,
+) {
+    let tool = tool_impl_3d(ViewTool::Brush);
+    let press = brush_frame(harness, footprint_start);
+    let footprint = brush_frame(harness, footprint_end);
+    tool.primary_pressed(&mut harness.workspace, &press);
+    tool.primary_dragged(&mut harness.workspace, &footprint);
+    tool.primary_released(&mut harness.workspace, &footprint);
+
+    let height_end = Pos2::new(footprint_end.x, footprint_end.y - height_pixels);
+    let height_press = brush_frame(harness, footprint_end);
+    let height_drag = brush_frame(harness, height_end);
+    tool.primary_pressed(&mut harness.workspace, &height_press);
+    tool.primary_dragged(&mut harness.workspace, &height_drag);
+    tool.primary_released(&mut harness.workspace, &height_drag);
+}
+
 #[test]
 #[ignore = "developer performance benchmark over local editable E1M1"]
 fn benchmark_e1m1_viewport_pointer_resolution() {
@@ -2298,12 +2319,30 @@ fn brush_tool_drag_creates_selectable_undoable_brush() {
     tool.primary_dragged(&mut harness.workspace, &drag);
     tool.primary_released(&mut harness.workspace, &drag);
 
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes.len(),
+        0,
+        "the first release only locks the footprint"
+    );
+    assert!(harness
+        .workspace
+        .brush_drag
+        .is_some_and(|drag| { drag.stage == BrushCreateStage::Height && !drag.height_dragging }));
+
+    // A second vertical gesture authors Y and commits. Dragging upward by
+    // 32 px adds 256 world units to the initial 256-unit preview.
+    let height_press = brush_frame(&harness, Pos2::new(500.0, 400.0));
+    let height_drag = brush_frame(&harness, Pos2::new(500.0, 368.0));
+    tool.primary_pressed(&mut harness.workspace, &height_press);
+    tool.primary_dragged(&mut harness.workspace, &height_drag);
+    tool.primary_released(&mut harness.workspace, &height_drag);
+
     let scene = harness.workspace.project.active_scene();
-    assert_eq!(scene.brushes.len(), 1, "release commits the brush");
+    assert_eq!(scene.brushes.len(), 1, "height release commits the brush");
     let solved = scene.brushes[0].solve();
     assert!(solved.is_valid());
     assert_eq!(solved.min[1], 0.0);
-    assert_eq!(solved.max[1], BRUSH_CREATE_HEIGHT as f64);
+    assert_eq!(solved.max[1], 512.0);
     assert!(solved.max[0] > solved.min[0]);
     assert!(solved.max[2] > solved.min[2]);
     assert_eq!(
@@ -2341,14 +2380,14 @@ fn brush_tool_face_drag_extrudes_top_face() {
     let mut harness = ViewportHarness::floored_room("brush_tool_extrude", 4);
     harness.frame(harness.room_center(), 3000.0);
     harness.workspace.active_tool = ViewTool::Brush;
-    let tool = tool_impl_3d(ViewTool::Brush);
-
     // Create a brush.
-    let press_create = brush_frame(&harness, Pos2::new(300.0, 300.0));
-    let commit = brush_frame(&harness, Pos2::new(500.0, 400.0));
-    tool.primary_pressed(&mut harness.workspace, &press_create);
-    tool.primary_dragged(&mut harness.workspace, &commit);
-    tool.primary_released(&mut harness.workspace, &commit);
+    draw_brush_3d(
+        &mut harness,
+        Pos2::new(300.0, 300.0),
+        Pos2::new(500.0, 400.0),
+        0.0,
+    );
+    let tool = tool_impl_3d(ViewTool::Brush);
     harness.workspace.brush_edit_mode = BrushEditMode::Face;
     harness.workspace.selection_mode = SelectionMode::Face;
     let solved = harness.workspace.project.active_scene().brushes[0].solve();
@@ -2401,11 +2440,12 @@ fn brush_tool_modifier_clicks_clip_selected_brush() {
     let tool = tool_impl_3d(ViewTool::Brush);
 
     // Create and keep selected.
-    let press = brush_frame(&harness, Pos2::new(280.0, 300.0));
-    let commit = brush_frame(&harness, Pos2::new(520.0, 400.0));
-    tool.primary_pressed(&mut harness.workspace, &press);
-    tool.primary_dragged(&mut harness.workspace, &commit);
-    tool.primary_released(&mut harness.workspace, &commit);
+    draw_brush_3d(
+        &mut harness,
+        Pos2::new(280.0, 300.0),
+        Pos2::new(520.0, 400.0),
+        0.0,
+    );
     assert_eq!(harness.workspace.selected_brush, Some(0));
     let whole = harness.workspace.project.active_scene().brushes[0].solve();
 
@@ -2447,11 +2487,12 @@ fn brush_tool_clip_keep_back_replaces_in_place() {
     harness.workspace.active_tool = ViewTool::Brush;
     let tool = tool_impl_3d(ViewTool::Brush);
 
-    let press = brush_frame(&harness, Pos2::new(280.0, 300.0));
-    let commit = brush_frame(&harness, Pos2::new(520.0, 400.0));
-    tool.primary_pressed(&mut harness.workspace, &press);
-    tool.primary_dragged(&mut harness.workspace, &commit);
-    tool.primary_released(&mut harness.workspace, &commit);
+    draw_brush_3d(
+        &mut harness,
+        Pos2::new(280.0, 300.0),
+        Pos2::new(520.0, 400.0),
+        0.0,
+    );
     let whole = harness.workspace.project.active_scene().brushes[0].solve();
 
     harness.workspace.brush_clip_keep = BrushClipKeep::Back;
@@ -2480,11 +2521,12 @@ fn brush_tool_shift_drag_does_not_bypass_the_whole_brush_gizmo() {
     harness.workspace.active_tool = ViewTool::Brush;
     let tool = tool_impl_3d(ViewTool::Brush);
 
-    let press = brush_frame(&harness, Pos2::new(300.0, 300.0));
-    let commit = brush_frame(&harness, Pos2::new(500.0, 400.0));
-    tool.primary_pressed(&mut harness.workspace, &press);
-    tool.primary_dragged(&mut harness.workspace, &commit);
-    tool.primary_released(&mut harness.workspace, &commit);
+    draw_brush_3d(
+        &mut harness,
+        Pos2::new(300.0, 300.0),
+        Pos2::new(500.0, 400.0),
+        0.0,
+    );
     let before = harness.workspace.project.active_scene().brushes[0].clone();
 
     // Shift-press over the projected top-face centre, then drag right.
@@ -2539,6 +2581,32 @@ fn brush_2d_drag_creates_and_click_selects() {
     assert_eq!(harness.workspace.selected_brush, Some(0));
     assert!(!harness.workspace.select_brush_at_2d([-500.0, -500.0]));
     assert_eq!(harness.workspace.selected_brush, None);
+}
+
+#[test]
+fn orthographic_brush_creation_uses_two_real_pointer_gestures() {
+    let mut workspace = ViewportHarness::floored_room("brush_2d_staged_create", 4).workspace;
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Brush;
+    workspace.view_2d = true;
+    workspace.orthographic_view = OrthographicView::Top;
+    workspace.orthographic_focus = [256.0, 0.0, 256.0];
+    workspace.viewport_zoom = 1.0;
+    workspace.snap_units = 16;
+
+    run_real_egui_orthographic_brush_drag(&mut workspace, [96.0, 96.0], [416.0, 416.0]);
+    assert!(workspace.project.active_scene().brushes.is_empty());
+    assert!(workspace
+        .brush_drag
+        .is_some_and(|drag| drag.stage == BrushCreateStage::Height));
+
+    run_real_egui_orthographic_brush_drag(&mut workspace, [416.0, 416.0], [416.0, 400.0]);
+    let scene = workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 1);
+    let height = scene.brushes[0].solve().max[1] - scene.brushes[0].solve().min[1];
+    assert_ne!(height, f64::from(BRUSH_CREATE_HEIGHT));
+    assert!(height > 0.0);
+    assert!(workspace.brush_drag.is_none());
 }
 
 #[test]
@@ -3616,11 +3684,7 @@ fn shift_click_in_3d_toggles_multi_selection() {
         (Pos2::new(280.0, 300.0), Pos2::new(380.0, 360.0)),
         (Pos2::new(430.0, 300.0), Pos2::new(530.0, 360.0)),
     ] {
-        let press = brush_frame(&harness, from);
-        let drag = brush_frame(&harness, to);
-        tool.primary_pressed(&mut harness.workspace, &press);
-        tool.primary_dragged(&mut harness.workspace, &drag);
-        tool.primary_released(&mut harness.workspace, &drag);
+        draw_brush_3d(&mut harness, from, to, 0.0);
     }
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 2);
 
