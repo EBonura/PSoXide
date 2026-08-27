@@ -6,6 +6,8 @@
 !tech-demo/**
 !mantis/
 !mantis/**
+!null-choir-texture-kit/
+!null-choir-texture-kit/**
 
 # Animation-generation auditions and review renders are local working inputs.
 # Cooked runtime clips under assets/animations remain tracked.
