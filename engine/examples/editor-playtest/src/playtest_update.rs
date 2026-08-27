@@ -435,24 +435,8 @@ impl Playtest {
         if ctx.just_pressed(button::R3) {
             if self.is_locked() {
                 self.lock_target = None;
-                self.lock_anchor = None;
             } else {
                 self.lock_target = self.find_best_lock_target(LOCK_RANGE);
-                if self.lock_target.is_none() {
-                    // Nothing to lock onto: bind facing to a point ahead, so
-                    // the locked locomotion set can be exercised anywhere.
-                    let position = self.motor.position();
-                    let yaw = self.motor.yaw();
-                    self.lock_anchor = Some(RoomPoint::new(
-                        position
-                            .x
-                            .saturating_add(yaw.sin().mul_i32(LOCK_ANCHOR_DISTANCE)),
-                        position.y.saturating_add(LOCK_ANCHOR_HEIGHT),
-                        position
-                            .z
-                            .saturating_add(yaw.cos().mul_i32(LOCK_ANCHOR_DISTANCE)),
-                    ));
-                }
             }
             if self.is_locked() {
                 telemetry::debug_log("player lock:on");

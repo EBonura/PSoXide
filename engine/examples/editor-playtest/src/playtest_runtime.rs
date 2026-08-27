@@ -374,7 +374,6 @@ impl Playtest {
         self.switch_player_anim(PlayerAnim::Death, now, video_hz);
         self.anim_lock_until_tick = now.saturating_add(u32::from(delay_ticks));
         self.lock_target = None;
-        self.lock_anchor = None;
         self.soft_lock_target = None;
         self.active_interactable = None;
         telemetry::counter(telemetry::counter::PLAYER_DEATHS, 1);
@@ -409,7 +408,6 @@ impl Playtest {
         self.anim_blend_from = None;
         self.anim_lock_until_tick = SimTick::ZERO;
         self.lock_target = None;
-        self.lock_anchor = None;
         self.soft_lock_target = None;
         self.active_interactable = None;
         self.evade_run_hold_ticks = 0;
@@ -1275,12 +1273,11 @@ impl Playtest {
     pub(super) fn lock_target_position(&self) -> Option<RoomPoint> {
         self.lock_target
             .and_then(|index| self.target_position(index))
-            .or(self.lock_anchor)
     }
 
-    /// True while facing is bound to a target or to a virtual anchor.
+    /// True while facing is bound to a live combat target.
     pub(super) fn is_locked(&self) -> bool {
-        self.lock_target.is_some() || self.lock_anchor.is_some()
+        self.lock_target.is_some()
     }
 
     pub(super) fn soft_lock_target_position(&self) -> Option<RoomPoint> {
@@ -1424,7 +1421,6 @@ impl Playtest {
     pub(super) fn lock_target_indicator_position(&self) -> Option<RoomPoint> {
         self.lock_target
             .and_then(|index| self.target_indicator_position(index))
-            .or(self.lock_anchor)
     }
 
     pub(super) fn target_indicator_position(&self, index: usize) -> Option<RoomPoint> {
