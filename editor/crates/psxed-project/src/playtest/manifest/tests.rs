@@ -226,7 +226,7 @@ fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
             "LevelSceneState { id: 0, name: \"Gameplay\", world: LevelWorldLayer::Gameplay, ui_scene: 65535, flags: 0, start_state: 65535 },"
         ));
     assert!(src.contains(
-            "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::SceneState { state: 0 },\n    ],\n    scene_states: SCENE_STATES,\n    entry: 0,\n};"
+            "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::SceneState { state: 0 },\n    ],\n    scene_states: SCENE_STATES,\n    entry: 0,\n    transition: LevelTransition { kind: LevelTransitionKind::None, frames: 0, color: [0, 0, 0], seed: 0 },\n};"
         ));
 }
 
@@ -289,6 +289,7 @@ fn ui_scene_table_and_flow_emit_addressable_scenes() {
                 },
             ],
             entry: 0,
+            transition: PlaytestTransition::NONE,
         },
         ..Default::default()
     };

@@ -444,6 +444,11 @@ pub struct ProjectDocument {
     /// projects boot exactly as before.
     #[serde(default)]
     pub boot: BootTarget,
+    /// Default full-screen transition used by ordinary state changes such as
+    /// START, Back, `GotoScene`, and `StartGameplay`. Explicit transition
+    /// actions override this value. `None` preserves legacy instant handoffs.
+    #[serde(default)]
+    pub screen_transition: crate::UiTransition,
     /// Project resources.
     pub resources: Vec<Resource>,
     next_resource_id: u64,
@@ -490,6 +495,7 @@ impl ProjectDocument {
             scene_states,
             options: Vec::new(),
             boot: BootTarget::default(),
+            screen_transition: crate::UiTransition::default(),
             resources: Vec::new(),
             next_resource_id: 1,
         }

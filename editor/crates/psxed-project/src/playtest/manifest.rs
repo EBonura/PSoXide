@@ -1791,6 +1791,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("    ],\n");
     out.push_str("    scene_states: SCENE_STATES,\n");
     let _ = writeln!(out, "    entry: {},", package.game_flow.entry);
+    let _ = writeln!(
+        out,
+        "    transition: {},",
+        render_transition(package.game_flow.transition)
+    );
     out.push_str("};\n\n");
 
     out.push_str("/// Cooked project options sliders and SetOption actions bind to.\n");

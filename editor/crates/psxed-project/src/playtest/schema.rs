@@ -1308,6 +1308,8 @@ pub struct PlaytestGameFlow {
     pub scene_states: Vec<PlaytestSceneState>,
     /// Index into `states` of the starting state.
     pub entry: u16,
+    /// Project-wide transition for ordinary state changes.
+    pub transition: PlaytestTransition,
 }
 
 impl Default for PlaytestGameFlow {
@@ -1318,6 +1320,7 @@ impl Default for PlaytestGameFlow {
             states: vec![PlaytestFlowState::SceneState { state: 0 }],
             scene_states: vec![PlaytestSceneState::gameplay()],
             entry: 0,
+            transition: PlaytestTransition::NONE,
         }
     }
 }
