@@ -494,6 +494,14 @@ fn normalize_loaded_removes_only_legacy_character_capsule_colliders() {
 #[test]
 fn dynamic_material_recipe_round_trips_through_project_ron() {
     let mut project = ProjectDocument::new("dynamic material persistence");
+    let source_a = project.add_resource(
+        "Frame A",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let source_b = project.add_resource(
+        "Frame B",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     let mut material = MaterialResource::opaque(None);
     let layer = ModelSecondaryLayer {
         motion: MaterialUvMotion {
@@ -515,6 +523,8 @@ fn dynamic_material_recipe_round_trips_through_project_ron() {
             frame_count: 7,
             ticks_per_frame: 3,
             phase: 2,
+            source_a: Some(source_a),
+            source_b: Some(source_b),
         },
         ..MaterialAnimation::default()
     };
@@ -2843,12 +2853,7 @@ fn default_project_ui_controls_ship_with_cortex_sound_palette() {
                     buttons += 1;
                     assert!(!sfx.focus.is_empty(), "{} needs focus SFX", node.name);
                     assert!(!sfx.activate.is_empty(), "{} needs press SFX", node.name);
-                    [
-                        sfx.focus.as_slice(),
-                        sfx.activate.as_slice(),
-                        &[],
-                        &[],
-                    ]
+                    [sfx.focus.as_slice(), sfx.activate.as_slice(), &[], &[]]
                 }
                 UiNodeKind::Slider { sfx, .. } => {
                     sliders += 1;
@@ -4323,6 +4328,29 @@ fn delete_material_source_clears_transition_recipes() {
         .expect("layer is preserved");
     assert_eq!(layer.transition.source_a, None);
     assert_eq!(layer.transition.source_b, None);
+}
+
+#[test]
+fn delete_material_source_clears_cycle_recipe() {
+    let mut project = ProjectDocument::new("delete-cycle-source");
+    let source = project.add_resource(
+        "Source",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut cycle = MaterialResource::opaque(None);
+    cycle.animation.mode = MaterialAnimationMode::Flipbook;
+    cycle.animation.flipbook.source_a = Some(source);
+    cycle.animation.flipbook.source_b = Some(source);
+    let cycle = project.add_resource("Cycle", ResourceData::Material(cycle));
+
+    assert_eq!(project.resource_reference_count(source), 2);
+    let report = project.delete_resource(source).expect("source exists");
+    assert_eq!(report.cleared_references, 2);
+    let ResourceData::Material(material) = &project.resource(cycle).unwrap().data else {
+        panic!("cycle remains a material");
+    };
+    assert_eq!(material.animation.flipbook.source_a, None);
+    assert_eq!(material.animation.flipbook.source_b, None);
 }
 
 #[test]

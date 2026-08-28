@@ -362,34 +362,43 @@ fn resolve_material_texture_psxt_inner(
             load_material_psxt(&resource.name, psxt_path, project_root)
                 .map(|bytes| Some((psxt_path.clone(), bytes)))
         }
-        ResourceData::Material(material) => match material.texture_mode {
-            MaterialTextureMode::SimpleImage => match material.psxt_path.as_deref() {
-                Some(path) if !path.trim().is_empty() => {
-                    load_material_psxt(&resource.name, path, project_root)
-                        .map(|bytes| Some((path.to_string(), bytes)))
+        ResourceData::Material(material) => {
+            let flipbook = material.animation.flipbook.normalized();
+            if material.animation.mode == crate::MaterialAnimationMode::Flipbook
+                && (flipbook.source_a.is_some() || flipbook.source_b.is_some())
+            {
+                bake_two_material_flipbook(project, flipbook, project_root, stack).map(Some)
+            } else {
+                match material.texture_mode {
+                    MaterialTextureMode::SimpleImage => match material.psxt_path.as_deref() {
+                        Some(path) if !path.trim().is_empty() => {
+                            load_material_psxt(&resource.name, path, project_root)
+                                .map(|bytes| Some((path.to_string(), bytes)))
+                        }
+                        _ => Ok(None),
+                    },
+                    MaterialTextureMode::Generated => Ok(Some((
+                        format!("@material-generated:{:?}", material.generated),
+                        generate_material_texture_psxt(material.generated),
+                    ))),
+                    MaterialTextureMode::Transition => {
+                        bake_transition_material(project, material.transition, project_root, stack)
+                            .map(Some)
+                    }
+                    // Room/model rendering replaces this with the room-specific probe
+                    // where that context exists. Keep resolving the authored image as
+                    // a fallback for generic texture consumers and for the base room
+                    // material path, matching the pre-transition behaviour.
+                    MaterialTextureMode::ReflectiveProbe => match material.psxt_path.as_deref() {
+                        Some(path) if !path.trim().is_empty() => {
+                            load_material_psxt(&resource.name, path, project_root)
+                                .map(|bytes| Some((path.to_string(), bytes)))
+                        }
+                        _ => Ok(None),
+                    },
                 }
-                _ => Ok(None),
-            },
-            MaterialTextureMode::Generated => Ok(Some((
-                format!("@material-generated:{:?}", material.generated),
-                generate_material_texture_psxt(material.generated),
-            ))),
-            MaterialTextureMode::Transition => {
-                bake_transition_material(project, material.transition, project_root, stack)
-                    .map(Some)
             }
-            // Room/model rendering replaces this with the room-specific probe
-            // where that context exists. Keep resolving the authored image as
-            // a fallback for generic texture consumers and for the base room
-            // material path, matching the pre-transition behaviour.
-            MaterialTextureMode::ReflectiveProbe => match material.psxt_path.as_deref() {
-                Some(path) if !path.trim().is_empty() => {
-                    load_material_psxt(&resource.name, path, project_root)
-                        .map(|bytes| Some((path.to_string(), bytes)))
-                }
-                _ => Ok(None),
-            },
-        },
+        }
         _ => Err(format!(
             "'{}' is not a texture-bearing resource",
             resource.name
@@ -409,6 +418,73 @@ pub fn generate_transition_material_texture_psxt(
 ) -> Result<Vec<u8>, String> {
     let mut stack = owner.into_iter().collect::<Vec<_>>();
     bake_transition_material(project, recipe, project_root, &mut stack).map(|(_, bytes)| bytes)
+}
+
+/// Bake an edited two-material cycle without first mutating its owning
+/// project resource. Material Lab uses this for immediate, accurate preview.
+pub fn generate_two_material_flipbook_psxt(
+    project: &ProjectDocument,
+    recipe: crate::MaterialFlipbook,
+    project_root: &Path,
+    owner: Option<ResourceId>,
+) -> Result<Vec<u8>, String> {
+    let mut stack = owner.into_iter().collect::<Vec<_>>();
+    bake_two_material_flipbook(project, recipe.normalized(), project_root, &mut stack)
+        .map(|(_, bytes)| bytes)
+}
+
+fn bake_two_material_flipbook(
+    project: &ProjectDocument,
+    recipe: crate::MaterialFlipbook,
+    project_root: &Path,
+    stack: &mut Vec<ResourceId>,
+) -> Result<(String, Vec<u8>), String> {
+    let source_a =
+        resolve_flipbook_source(project, recipe.source_a, "Material A", project_root, stack)?;
+    let source_b =
+        resolve_flipbook_source(project, recipe.source_b, "Material B", project_root, stack)?;
+    let bytes = compose_two_material_flipbook_psxt(&source_a.bytes, &source_b.bytes)?;
+    let key = format!("@material-cycle:a={}:b={}", source_a.key, source_b.key);
+    Ok((key, bytes))
+}
+
+struct FlipbookSource {
+    key: String,
+    bytes: Vec<u8>,
+}
+
+fn resolve_flipbook_source(
+    project: &ProjectDocument,
+    source: Option<ResourceId>,
+    label: &str,
+    project_root: &Path,
+    stack: &mut Vec<ResourceId>,
+) -> Result<FlipbookSource, String> {
+    let source = source.ok_or_else(|| format!("cycle {label} is not assigned"))?;
+    let resource = project.resource(source).ok_or_else(|| {
+        format!(
+            "cycle {label} references missing material #{}",
+            source.raw()
+        )
+    })?;
+    if !matches!(
+        &resource.data,
+        ResourceData::Material(_) | ResourceData::Texture { .. }
+    ) {
+        return Err(format!(
+            "cycle {label} '{}' is not a Material or Texture",
+            resource.name
+        ));
+    }
+    let Some((key, bytes)) =
+        resolve_material_texture_psxt_inner(project, source, project_root, stack)?
+    else {
+        return Err(format!(
+            "cycle {label} '{}' has no static image",
+            resource.name
+        ));
+    };
+    Ok(FlipbookSource { key, bytes })
 }
 
 fn bake_transition_material(
@@ -546,6 +622,186 @@ pub fn compose_transition_psxt(
         has_transparency,
     )
     .map_err(|error| format!("could not encode transition material: {error}"))
+}
+
+/// Pack two equally-sized single-CLUT 4bpp material images into one horizontal
+/// runtime atlas and jointly quantise them to one shared 16-colour CLUT.
+///
+/// The separate materials remain the authoring model. Only the cooker and PS1
+/// runtime see this atlas, avoiding a second texture upload or draw pass while
+/// preserving identical UVs for both frames. Palette correspondence is learned
+/// from same-position texels before the joint quantisation. Texels whose source
+/// indices form a confident, visually compatible correspondence are then locked
+/// to frame A's exact output index, so independently quantised source palettes
+/// cannot make an unchanged casing or background shimmer between frames.
+pub fn compose_two_material_flipbook_psxt(
+    source_a_bytes: &[u8],
+    source_b_bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    let source_a = psx_asset::Texture::from_bytes(source_a_bytes)
+        .map_err(|error| format!("cycle Material A is not a valid PSXT: {error:?}"))?;
+    let source_b = psx_asset::Texture::from_bytes(source_b_bytes)
+        .map_err(|error| format!("cycle Material B is not a valid PSXT: {error:?}"))?;
+    validate_fusion_texture("cycle Material A", source_a)?;
+    validate_fusion_texture("cycle Material B", source_b)?;
+    if source_a.width() != source_b.width() || source_a.height() != source_b.height() {
+        return Err(format!(
+            "cycled materials must have matching texture dimensions to preserve UVs; found {}x{} and {}x{}",
+            source_a.width(),
+            source_a.height(),
+            source_b.width(),
+            source_b.height(),
+        ));
+    }
+    let atlas_width = source_a
+        .width()
+        .checked_mul(2)
+        .ok_or_else(|| "cycled material width overflows the runtime texture window".to_string())?;
+    if atlas_width > 128 || source_a.height() > 128 {
+        return Err(format!(
+            "two-frame material cook needs each frame to fit a horizontal 128-texel atlas; found {}x{} frames",
+            source_a.width(),
+            source_a.height(),
+        ));
+    }
+
+    let atlas_height = source_a.height();
+    let frame_texels = usize::from(source_a.width()) * usize::from(atlas_height);
+    let mut frame_a_rgba = Vec::with_capacity(frame_texels);
+    let mut frame_b_rgba = Vec::with_capacity(frame_texels);
+    let mut frame_a_indices = Vec::with_capacity(frame_texels);
+    let mut frame_b_indices = Vec::with_capacity(frame_texels);
+    for y in 0..atlas_height {
+        for x in 0..source_a.width() {
+            let index_a = texture_4bpp_index(source_a, x, y);
+            let index_b = texture_4bpp_index(source_b, x, y);
+            frame_a_indices.push(index_a);
+            frame_b_indices.push(index_b);
+            frame_a_rgba.push(cycle_source_rgba(source_a, index_a));
+            frame_b_rgba.push(cycle_source_rgba(source_b, index_b));
+        }
+    }
+
+    let stable_texels = stable_cycle_texels(
+        source_a,
+        source_b,
+        &frame_a_indices,
+        &frame_b_indices,
+        &frame_a_rgba,
+        &frame_b_rgba,
+    );
+    for (offset, stable) in stable_texels.iter().copied().enumerate() {
+        if stable {
+            frame_b_rgba[offset] = frame_a_rgba[offset];
+        }
+    }
+    let frame_width = usize::from(source_a.width());
+    let atlas_width_usize = usize::from(atlas_width);
+    let mut rgba = Vec::with_capacity(frame_texels * 2);
+    for y in 0..usize::from(atlas_height) {
+        let row_start = y * frame_width;
+        let row_end = row_start + frame_width;
+        rgba.extend_from_slice(&frame_a_rgba[row_start..row_end]);
+        rgba.extend_from_slice(&frame_b_rgba[row_start..row_end]);
+    }
+
+    let has_transparency = rgba.iter().any(|pixel| pixel[3] == 0);
+    let (palette, mut indices) = if has_transparency {
+        psxed_tex::quantize_rgba_with_transparent_zero(&rgba, 16)
+            .map_err(|error| format!("could not quantise cycled materials: {error}"))?
+    } else {
+        let rgb = rgba
+            .iter()
+            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect::<Vec<_>>();
+        psxed_tex::quantize_rgb(&rgb, 16)
+            .map_err(|error| format!("could not quantise cycled materials: {error}"))?
+    };
+    for y in 0..usize::from(atlas_height) {
+        for x in 0..frame_width {
+            let source_offset = y * frame_width + x;
+            if stable_texels[source_offset] {
+                let atlas_a = y * atlas_width_usize + x;
+                let atlas_b = atlas_a + frame_width;
+                indices[atlas_b] = indices[atlas_a];
+            }
+        }
+    }
+    psxed_tex::encode_indexed_psxt(
+        atlas_width,
+        atlas_height,
+        psxed_tex::PsxtDepth::Bit4,
+        &indices,
+        &palette,
+        has_transparency,
+    )
+    .map_err(|error| format!("could not encode cycled materials: {error}"))
+}
+
+fn cycle_source_rgba(texture: psx_asset::Texture<'_>, index: u8) -> [u8; 4] {
+    let transparent = texture.index_zero_transparent() && index == 0;
+    let rgb = tinted_clut_rgb(texture, index, [MATERIAL_NEUTRAL_TINT; 3]);
+    [rgb[0], rgb[1], rgb[2], if transparent { 0 } else { 255 }]
+}
+
+/// Infer which texels describe the same authored surface despite the two input
+/// PSXTs having been quantised separately. For every palette entry in B, the
+/// dominant same-position entry in A is its candidate correspondence. Requiring
+/// both a clear majority and nearby RGB values prevents real animation changes
+/// from being mistaken for palette noise.
+fn stable_cycle_texels(
+    source_a: psx_asset::Texture<'_>,
+    source_b: psx_asset::Texture<'_>,
+    indices_a: &[u8],
+    indices_b: &[u8],
+    rgba_a: &[[u8; 4]],
+    rgba_b: &[[u8; 4]],
+) -> Vec<bool> {
+    debug_assert_eq!(indices_a.len(), indices_b.len());
+    debug_assert_eq!(indices_a.len(), rgba_a.len());
+    debug_assert_eq!(indices_a.len(), rgba_b.len());
+
+    let mut co_occurrence = [[0u32; 16]; 16];
+    let mut b_totals = [0u32; 16];
+    for (&index_a, &index_b) in indices_a.iter().zip(indices_b) {
+        co_occurrence[usize::from(index_b)][usize::from(index_a)] += 1;
+        b_totals[usize::from(index_b)] += 1;
+    }
+
+    let mut correspondence = [None; 16];
+    for index_b in 0..16 {
+        let (index_a, matches) = co_occurrence[index_b]
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by_key(|&(index_a, count)| (count, core::cmp::Reverse(index_a)))
+            .unwrap_or((0, 0));
+        let total = b_totals[index_b];
+        if total == 0 || matches.saturating_mul(2) < total {
+            continue;
+        }
+
+        let rgb_a = tinted_clut_rgb(source_a, index_a as u8, [MATERIAL_NEUTRAL_TINT; 3]);
+        let rgb_b = tinted_clut_rgb(source_b, index_b as u8, [MATERIAL_NEUTRAL_TINT; 3]);
+        if rgb_max_channel_delta(rgb_a, rgb_b) <= 64 {
+            correspondence[index_b] = Some(index_a as u8);
+        }
+    }
+
+    indices_a
+        .iter()
+        .zip(indices_b)
+        .zip(rgba_a.iter().zip(rgba_b))
+        .map(|((&index_a, &index_b), (pixel_a, pixel_b))| {
+            pixel_a[3] == pixel_b[3] && correspondence[usize::from(index_b)] == Some(index_a)
+        })
+        .collect()
+}
+
+fn rgb_max_channel_delta(a: [u8; 3], b: [u8; 3]) -> u8 {
+    a[0].abs_diff(b[0])
+        .max(a[1].abs_diff(b[1]))
+        .max(a[2].abs_diff(b[2]))
 }
 
 fn transition_uses_source_b(x: u16, y: u16, size: u16, recipe: TransitionMaterialTexture) -> bool {
@@ -885,15 +1141,31 @@ mod tests {
     use super::*;
 
     fn solid_4bpp(rgb: [u8; 3]) -> Vec<u8> {
+        solid_4bpp_size(rgb, 8, 8)
+    }
+
+    fn solid_4bpp_size(rgb: [u8; 3], width: u16, height: u16) -> Vec<u8> {
         psxed_tex::encode_indexed_psxt(
-            8,
-            8,
+            width,
+            height,
             psxed_tex::PsxtDepth::Bit4,
-            &[0; 64],
+            &vec![0; usize::from(width) * usize::from(height)],
             &[rgb; 16],
             false,
         )
         .expect("solid test texture encodes")
+    }
+
+    fn indexed_4bpp(width: u16, height: u16, indices: &[u8], palette: &[[u8; 3]]) -> Vec<u8> {
+        psxed_tex::encode_indexed_psxt(
+            width,
+            height,
+            psxed_tex::PsxtDepth::Bit4,
+            indices,
+            palette,
+            false,
+        )
+        .expect("indexed test texture encodes")
     }
 
     fn sampled_rgb(bytes: &[u8], x: u16, y: u16) -> [u8; 3] {
@@ -929,6 +1201,93 @@ mod tests {
         .expect("B endpoint bakes");
         let b = sampled_rgb(&all_b, 4, 4);
         assert!(b[2] > 240 && b[0] < 16);
+    }
+
+    #[test]
+    fn two_material_cycle_is_jointly_cooked_into_a_hidden_runtime_atlas() {
+        let red = solid_4bpp([255, 0, 0]);
+        let blue = solid_4bpp([0, 0, 255]);
+        let atlas =
+            compose_two_material_flipbook_psxt(&red, &blue).expect("matching material images cook");
+        let texture = psx_asset::Texture::from_bytes(&atlas).expect("atlas parses");
+        assert_eq!((texture.width(), texture.height()), (16, 8));
+        let a = sampled_rgb(&atlas, 4, 4);
+        let b = sampled_rgb(&atlas, 12, 4);
+        assert!(a[0] > 240 && a[2] < 16);
+        assert!(b[2] > 240 && b[0] < 16);
+    }
+
+    #[test]
+    fn two_material_cycle_locks_independently_quantised_stable_texels() {
+        let mut indices_a = vec![1; 64];
+        let mut indices_b = vec![7; 64];
+        indices_a[27] = 2;
+        indices_b[27] = 9;
+
+        let mut palette_a = vec![[0, 0, 0]; 16];
+        palette_a[1] = [48, 56, 64];
+        palette_a[2] = [8, 16, 24];
+        let mut palette_b = vec![[0, 0, 0]; 16];
+        palette_b[7] = [64, 48, 40];
+        palette_b[9] = [0, 224, 255];
+
+        let source_a = indexed_4bpp(8, 8, &indices_a, &palette_a);
+        let source_b = indexed_4bpp(8, 8, &indices_b, &palette_b);
+        let atlas = compose_two_material_flipbook_psxt(&source_a, &source_b)
+            .expect("independently quantised materials cook");
+        let texture = psx_asset::Texture::from_bytes(&atlas).expect("atlas parses");
+
+        assert_eq!(
+            texture_4bpp_index(texture, 2, 2),
+            texture_4bpp_index(texture, 10, 2),
+            "unchanged casing must reuse the exact frame-A texel index"
+        );
+        assert_ne!(
+            texture_4bpp_index(texture, 3, 3),
+            texture_4bpp_index(texture, 11, 3),
+            "the changed monitor texel must remain animated"
+        );
+    }
+
+    #[test]
+    fn two_material_cycle_rejects_uv_incompatible_dimensions() {
+        let small = solid_4bpp_size([255, 0, 0], 8, 8);
+        let wide = solid_4bpp_size([0, 0, 255], 16, 8);
+        let error = compose_two_material_flipbook_psxt(&small, &wide)
+            .expect_err("mismatched material images must fail");
+        assert!(error.contains("matching texture dimensions"));
+        assert!(error.contains("8x8 and 16x8"));
+    }
+
+    #[test]
+    fn material_resolver_cooks_selected_cycle_sources_without_authored_atlas() {
+        let mut project = ProjectDocument::new("cycle-resolve");
+        let generated = |color| {
+            ResourceData::Material(crate::MaterialResource {
+                texture_mode: MaterialTextureMode::Generated,
+                generated: GeneratedMaterialTexture {
+                    size: 32,
+                    base_color: color,
+                    noise_enabled: false,
+                    ..GeneratedMaterialTexture::default()
+                },
+                ..crate::MaterialResource::opaque(None)
+            })
+        };
+        let source_a = project.add_resource("Frame A", generated([224, 32, 24]));
+        let source_b = project.add_resource("Frame B", generated([24, 64, 224]));
+        let mut cycle = crate::MaterialResource::opaque(None);
+        cycle.animation.mode = crate::MaterialAnimationMode::Flipbook;
+        cycle.animation.flipbook.source_a = Some(source_a);
+        cycle.animation.flipbook.source_b = Some(source_b);
+        let cycle = project.add_resource("Cycle", ResourceData::Material(cycle));
+
+        let (key, bytes) = resolve_material_texture_psxt(&project, cycle, Path::new("."))
+            .expect("cycle resolves")
+            .expect("cycle has a cooked image");
+        let texture = psx_asset::Texture::from_bytes(&bytes).expect("cooked atlas parses");
+        assert_eq!((texture.width(), texture.height()), (64, 32));
+        assert!(key.starts_with("@material-cycle:"));
     }
 
     #[test]

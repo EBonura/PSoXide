@@ -41,6 +41,14 @@ deck, rib, service-panel, and wall-plinth surfaces. Their masters and cooked
 textures live beside the original set; no original material or texture was
 removed.
 
+`Future Gothic / Exterior Rock` extends the same set for outdoor brushwork. A
+six-face `Future Gothic / Computer Terminal` kit provides front, left, right,
+back, top, and bottom materials for brush-built environment props. The front
+cycles between two independently selectable CRT readout materials while
+preserving the same casing and face UVs. The cooker creates the shared 4bpp
+runtime atlas automatically. These resources are registered in the material
+browser and intentionally start unassigned.
+
 This 0.3 snapshot is now an independent authored project. Save further level
 changes directly into this directory; the original 0.2 generator does not own
 or regenerate it.
