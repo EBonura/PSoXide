@@ -22,6 +22,7 @@
 
 use super::*;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
+use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
 use psx_game_runtime::entities::MeleeArcStats;
 use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileImpactKind, ProjectileImpacts, ProjectileSpawn, ProjectileTarget,
@@ -32,6 +33,7 @@ const PLAYER_PROJECTILE_TARGET: u16 = u16::MAX - 1;
 
 struct SceneProjectileWorldTracer<'a> {
     bsp: Option<&'a mut BspRuntime>,
+    destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     prop_blockers: &'a [CharacterCollisionAabb],
     valid: bool,
 }
@@ -57,6 +59,7 @@ impl ProjectileWorldTracer for SceneProjectileWorldTracer<'_> {
             RoomPoint::new(start[0], start[1], start[2]),
             RoomPoint::new(end[0], end[1], end[2]),
             self.prop_blockers,
+            self.destructibles,
         ) {
             Ok(trace) if trace.hit() => ProjectileWorldTrace::Hit {
                 end: [trace.end.x, trace.end.y, trace.end.z],
@@ -127,6 +130,7 @@ impl ActivePlayerCapsule {
 /// transformed brush movers.
 pub(super) struct SceneEntityMover<'a> {
     pub(super) bsp: Option<&'a mut BspRuntime>,
+    pub(super) destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     pub(super) window: &'a RuntimeRoomWindow,
     pub(super) box_props: &'a RuntimeBoxProps,
     pub(super) models: &'a [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -248,10 +252,18 @@ impl SceneEntityMover<'_> {
                 return position;
             };
             let Some(_) =
-                psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into(
+                psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into_filtered(
                     IMAGE_PROPS,
                     room,
                     &mut aabbs,
+                    |index| {
+                        typed_world_object_active(
+                            WORLD_OBJECTS,
+                            self.destructibles,
+                            psx_level::world_object_kind::IMAGE_PROP,
+                            index,
+                        )
+                    },
                 )
             else {
                 return position;
@@ -263,6 +275,7 @@ impl SceneEntityMover<'_> {
                     dz,
                     radius,
                     height,
+                    self.destructibles,
                     cylinders.as_slice(),
                     aabbs.as_slice(),
                 )
@@ -273,6 +286,7 @@ impl SceneEntityMover<'_> {
                     dz,
                     radius,
                     height,
+                    self.destructibles,
                     cylinders.as_slice(),
                     aabbs.as_slice(),
                 )
@@ -501,6 +515,7 @@ impl Playtest {
                     melee_eye_point(attacker),
                     melee_eye_point(player_position),
                     prop_blockers.as_slice(),
+                    &self.destructibles,
                 ) {
                     continue;
                 }
@@ -557,6 +572,7 @@ impl Playtest {
         {
             let mut tracer = SceneProjectileWorldTracer {
                 bsp: self.bsp.as_mut(),
+                destructibles: &self.destructibles,
                 prop_blockers: prop_blockers.as_slice(),
                 valid: prop_blockers_valid,
             };
@@ -689,10 +705,9 @@ impl Playtest {
         // has no blade geometry, so a closed door inside its reach must
         // still block the connection on BSP worlds.
         let player_eye = melee_eye_point([player.x, player.y, player.z]);
-        let outgoing_damage = self.vitality_modifiers().outgoing_damage(
-            Self::player_attack_channel(self.anim_state),
-            spec.damage,
-        );
+        let outgoing_damage = self
+            .vitality_modifiers()
+            .outgoing_damage(Self::player_attack_channel(self.anim_state), spec.damage);
         let entities = &mut self.game_entities;
         let mut bsp = self.bsp.as_mut();
         let stats = entities.apply_melee_arc_occluded(
@@ -706,11 +721,72 @@ impl Playtest {
                     player_eye,
                     melee_eye_point(target),
                     prop_blockers.as_slice(),
+                    &self.destructibles,
                 ),
                 None => false,
             },
         );
         self.report_player_melee_stats(stats);
+    }
+
+    /// Damage every brush/card target through the one backend-independent
+    /// shared-state owner.
+    fn damage_world_destructibles_with_capsule(
+        &mut self,
+        start: [i32; 3],
+        end: [i32; 3],
+        radius: u16,
+        channel: DamageChannel,
+        damage: u16,
+    ) -> DamageOutcome {
+        let mut result = DamageOutcome::default();
+        if let Some(bsp) = self.bsp.as_ref() {
+            result = bsp.damage_brush_destructibles_with_capsule(
+                start,
+                end,
+                radius,
+                channel,
+                damage,
+                &mut self.destructibles,
+            );
+        }
+        let radius = i32::from(radius);
+        let capsule_min = core::array::from_fn::<_, 3, _>(|axis| {
+            start[axis].min(end[axis]).saturating_sub(radius)
+        });
+        let capsule_max = core::array::from_fn::<_, 3, _>(|axis| {
+            start[axis].max(end[axis]).saturating_add(radius)
+        });
+        // Image cards use their cooked visual/collision AABB and the exact
+        // same state owner as brush submodels. This path is world-backend
+        // agnostic, so legacy grid scenes do not silently lose breakability.
+        for object in WORLD_OBJECTS {
+            if object.kind != psx_level::world_object_kind::IMAGE_PROP
+                || object.destructible == psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
+                || self
+                    .destructibles
+                    .hit_this_swing(usize::from(object.destructible))
+            {
+                continue;
+            }
+            let overlaps = (0..3).all(|axis| {
+                capsule_min[axis] <= object.bounds_max[axis]
+                    && capsule_max[axis] >= object.bounds_min[axis]
+            });
+            if !overlaps {
+                continue;
+            }
+            let outcome = self.destructibles.apply_damage(
+                usize::from(object.destructible),
+                channel,
+                damage,
+            );
+            if outcome.connected {
+                result.connected = true;
+                result.broke |= outcome.broke;
+            }
+        }
+        result
     }
 
     /// Resolve authored rig volumes when the selected action has any hitbox.
@@ -778,10 +854,9 @@ impl Playtest {
             active[active_count] = ActivePlayerCapsule {
                 capsule,
                 previous_capsule,
-                damage: self.vitality_modifiers().outgoing_damage(
-                    Self::player_attack_channel(self.anim_state),
-                    record.damage,
-                ),
+                damage: self
+                    .vitality_modifiers()
+                    .outgoing_damage(Self::player_attack_channel(self.anim_state), record.damage),
                 poise_damage: record.poise_damage,
             };
             active_count += 1;
@@ -791,6 +866,20 @@ impl Playtest {
         }
         if active_count == 0 {
             return Some(MeleeArcStats::default());
+        }
+
+        let channel = match Self::player_attack_channel(self.anim_state) {
+            VitalityChannelId::One => DamageChannel::Horizon,
+            VitalityChannelId::Two => DamageChannel::Zenith,
+        };
+        for hit in &active[..active_count] {
+            self.damage_world_destructibles_with_capsule(
+                hit.capsule.start,
+                hit.capsule.end,
+                hit.capsule.radius,
+                channel,
+                hit.damage,
+            );
         }
 
         let mut stats = MeleeArcStats::default();
@@ -847,6 +936,7 @@ impl Playtest {
                         melee_eye_point([player.x, player.y, player.z]),
                         melee_eye_point(position),
                         prop_blockers,
+                        &self.destructibles,
                     ) {
                         entity += 1;
                         continue;

@@ -200,6 +200,7 @@ fn node_transform_inspector_hides_unused_transform_fields() {
             cylindrical_billboard: false,
             collision_enabled: false,
             collision_size: [256; 3],
+            destructible: None,
         }),
         NodeTransformInspector::PositionFullRotation
     );

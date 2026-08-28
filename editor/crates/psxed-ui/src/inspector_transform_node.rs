@@ -82,9 +82,10 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         | NodeKind::Section { .. }
         | NodeKind::WaterVolume { .. }
         | NodeKind::Portal { .. } => NodeTransformInspector::Hidden,
-        NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } | NodeKind::Logic { .. } => {
-            NodeTransformInspector::PositionOnly
-        }
+        NodeKind::PointLight { .. }
+        | NodeKind::ParticleEmitter { .. }
+        | NodeKind::Logic { .. }
+        | NodeKind::Destructible { .. } => NodeTransformInspector::PositionOnly,
         NodeKind::ModelRenderer { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
@@ -2073,6 +2074,7 @@ pub(crate) struct NodeKindEditorContext<'a> {
     pub(crate) material_texture_dimensions: &'a [(ResourceId, [u16; 2])],
     pub(crate) texture_options: &'a [(ResourceId, String)],
     pub(crate) room_options: &'a [(NodeId, String)],
+    pub(crate) destructible_options: &'a [(NodeId, String)],
     pub(crate) model_options: &'a [(ResourceId, String, Vec<String>)],
     pub(crate) character_options: &'a [(ResourceId, String)],
     /// Each Character's own tuning, used as the shown value and the seed for a
@@ -2108,6 +2110,7 @@ pub(crate) fn draw_node_kind_editor(
         material_texture_dimensions,
         texture_options,
         room_options,
+        destructible_options,
         model_options,
         character_options,
         character_defaults,
@@ -2469,6 +2472,7 @@ pub(crate) fn draw_node_kind_editor(
             cylindrical_billboard,
             collision_enabled,
             collision_size,
+            destructible,
         } => {
             ui.weak(
                 "Flat material-backed image plane. Transform position is the bottom-center anchor.",
@@ -2543,6 +2547,26 @@ pub(crate) fn draw_node_kind_editor(
                     }
                 });
             });
+            ui.separator();
+            let selected = destructible
+                .and_then(|id| {
+                    destructible_options
+                        .iter()
+                        .find(|(candidate, _)| *candidate == id)
+                        .map(|(_, name)| name.as_str())
+                })
+                .unwrap_or("None");
+            egui::ComboBox::from_id_salt("image-prop-destructible")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    changed |= ui.selectable_value(destructible, None, "None").changed();
+                    for (id, name) in destructible_options {
+                        changed |= ui.selectable_value(destructible, Some(*id), name).changed();
+                    }
+                });
+            ui.weak(
+                "Optional shared Destructible state. Breaking it removes this card from rendering and collision.",
+            );
         }
         NodeKind::BoxProp {
             materials,
@@ -3815,13 +3839,66 @@ pub(crate) fn draw_node_kind_editor(
                     }
                 }
                 ui.label(
-                    RichText::new(
-                        "Unique item: granted once even when the message is repeatable.",
-                    )
-                    .small()
-                    .color(STUDIO_TEXT_WEAK),
+                    RichText::new("Unique item: granted once even when the message is repeatable.")
+                        .small()
+                        .color(STUDIO_TEXT_WEAK),
                 );
             }
+        }
+        NodeKind::Destructible {
+            max_health,
+            damage_affinity,
+            enabled,
+        } => {
+            ui.weak(
+                "Brush module. Assign one or more solid BSP brushes through their Model owner; all assigned brushes break as one object.",
+            );
+            changed |= ui.checkbox(enabled, "Enabled").changed();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Health").color(STUDIO_TEXT_WEAK));
+                let mut value = i32::from(*max_health);
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut value)
+                            .speed(1.0)
+                            .range(1..=u16::MAX as i32),
+                    )
+                    .changed()
+                {
+                    *max_health = value.clamp(1, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Breakable by").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("destructible-damage-affinity")
+                    .selected_text(damage_affinity.label())
+                    .show_ui(ui, |ui| {
+                        for option in psxed_project::DestructibleDamageAffinity::ALL {
+                            if ui
+                                .selectable_value(damage_affinity, option, option.label())
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.label(
+                RichText::new(match damage_affinity {
+                    psxed_project::DestructibleDamageAffinity::Horizon => {
+                        "Only R1/R2 Horizon attacks can damage this object."
+                    }
+                    psxed_project::DestructibleDamageAffinity::Zenith => {
+                        "Only L1/L2 Zenith attacks can damage this object."
+                    }
+                    psxed_project::DestructibleDamageAffinity::Both => {
+                        "Horizon and Zenith attacks can both damage this object."
+                    }
+                })
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+            );
         }
         NodeKind::Logic {
             kind: logic_kind,

@@ -22,6 +22,7 @@ pub mod cd_stream;
 pub mod character;
 pub mod combat;
 pub mod cylinder_props;
+pub mod destructibles;
 pub mod entities;
 pub mod image_props;
 pub mod logic;

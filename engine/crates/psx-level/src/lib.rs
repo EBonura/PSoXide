@@ -2140,6 +2140,105 @@ pub const MODEL_CLIP_INHERIT: OptionalModelClipIndex = OptionalModelClipIndex::I
 /// "advance the clip normally" (no static freeze).
 pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
 
+/// Maximum number of non-BSP world objects in one cooked level.
+///
+/// Structural brush geometry remains in PXBSP, but every typed world payload
+/// (flat cards, generated props, and interaction beacons) is registered here
+/// so room ownership, conservative bounds, occlusion, collision policy, and
+/// future destructible state share one cook/runtime contract.
+pub const MAX_WORLD_OBJECTS: usize = 128;
+
+/// Maximum authored shared destructible-state records in one level.
+pub const MAX_DESTRUCTIBLES: usize = 32;
+
+/// Attack-channel selectors stored in [`LevelDestructibleRecord::damage_affinity`].
+pub mod destructible_affinity {
+    /// Only Horizon attacks connect.
+    pub const HORIZON: u8 = 0;
+    /// Only Zenith attacks connect.
+    pub const ZENITH: u8 = 1;
+    /// Either attack channel connects.
+    pub const BOTH: u8 = 2;
+}
+
+/// Runtime bits stored in [`LevelDestructibleRecord::flags`].
+pub mod destructible_flags {
+    /// The object begins active and at full health.
+    pub const ENABLED: u8 = 1 << 0;
+}
+
+/// Shared health/configuration for any number of cooked world-object targets.
+/// A brush submodel and an image card can therefore use the exact same damage
+/// state instead of maintaining renderer-specific breakable implementations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelDestructibleRecord {
+    /// Damage required to break the object.
+    pub max_health: u16,
+    /// Selector from [`destructible_affinity`].
+    pub damage_affinity: u8,
+    /// Runtime bits from [`destructible_flags`].
+    pub flags: u8,
+}
+
+/// Typed payload selectors for [`LevelWorldObjectRecord::kind`].
+pub mod world_object_kind {
+    /// Flat material-backed card or cylindrical billboard.
+    pub const IMAGE_PROP: u8 = 0;
+    /// Editable generated box payload.
+    pub const BOX_PROP: u8 = 1;
+    /// Procedural radial prop payload.
+    pub const CYLINDER_PROP: u8 = 2;
+    /// Tile-native arch payload.
+    pub const ARCH_PROP: u8 = 3;
+    /// Rotating marker owned by a point-of-interest interactable.
+    pub const POINT_OF_INTEREST_BEACON: u8 = 4;
+}
+
+/// Runtime policy bits stored in [`LevelWorldObjectRecord::flags`].
+pub mod world_object_flags {
+    /// The typed payload submits world geometry.
+    pub const RENDERED: u8 = 1 << 0;
+    /// The typed payload contributes gameplay collision.
+    pub const COLLIDABLE: u8 = 1 << 1;
+    /// PXBSP worlds must confirm direct brush line-of-sight after the cheap
+    /// leaf-PVS bounds test. This closes the painter-ordering hole where a
+    /// card or marker could sort in front of a wall despite living behind it.
+    pub const DIRECT_BRUSH_OCCLUSION: u8 = 1 << 2;
+    /// The object can move or change presentation state at runtime, so its
+    /// authored bounds are a conservative spatial envelope rather than an
+    /// immutable geometry promise.
+    pub const DYNAMIC: u8 = 1 << 3;
+}
+
+/// Sentinel for [`LevelWorldObjectRecord::destructible`].
+pub const WORLD_OBJECT_DESTRUCTIBLE_NONE: u16 = u16::MAX;
+
+/// Shared spatial registration for one non-structural world object.
+///
+/// `source_index` selects a record in the typed table named by `kind`; the
+/// specialized table still owns compact render/gameplay data, while this
+/// record is the single spatial authority used before rendering or collision.
+/// Bounds are conservative room-local engine-unit AABBs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelWorldObjectRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Typed table selector from [`world_object_kind`].
+    pub kind: u8,
+    /// Spatial/runtime policy bits from [`world_object_flags`].
+    pub flags: u8,
+    /// Index in the typed table selected by [`Self::kind`].
+    pub source_index: u16,
+    /// Optional shared destructible-state index. Image props and brush
+    /// submodels can point at the same record; non-destructible objects use
+    /// [`WORLD_OBJECT_DESTRUCTIBLE_NONE`].
+    pub destructible: u16,
+    /// Conservative room-local AABB minimum.
+    pub bounds_min: [i32; 3],
+    /// Conservative room-local AABB maximum.
+    pub bounds_max: [i32; 3],
+}
+
 /// One placed flat image prop. Coordinates are room-local engine
 /// units and `x/y/z` names the bottom-center anchor of the quad.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

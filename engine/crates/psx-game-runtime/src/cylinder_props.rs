@@ -32,6 +32,7 @@ pub fn draw_cylinder_props<T, const OT_DEPTH: usize, const USE_STATIC_PROP_QUAD_
     props: &[LevelCylinderPropRecord],
     surfaces: &[LevelCylinderPropSurfaceRecord],
     current_room: RoomIndex,
+    mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -45,8 +46,9 @@ pub fn draw_cylinder_props<T, const OT_DEPTH: usize, const USE_STATIC_PROP_QUAD_
 {
     let mut projector = None;
     let mut texture_cache: Option<CylinderTextureRuntime> = None;
-    for prop in props {
+    for (index, prop) in props.iter().enumerate() {
         if prop.room != current_room
+            || !object_visible(index)
             || !sphere_visible_to_camera(
                 camera,
                 options,

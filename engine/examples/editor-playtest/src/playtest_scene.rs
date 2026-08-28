@@ -175,7 +175,8 @@ impl Scene for Playtest {
         let detail = boost_module(detail_item);
         let modifiers = self.vitality_modifiers();
         let module_bonus = |stat| {
-            detail.map(|module| module_stat_bonus_q12(&self.player_vitality, selected, module, stat))
+            detail
+                .map(|module| module_stat_bonus_q12(&self.player_vitality, selected, module, stat))
         };
         match tag {
             "boost.horizon.empty" => Some(boost_module_name(
@@ -199,9 +200,7 @@ impl Scene for Playtest {
             "boost.inventory.selected.name" => {
                 Some(detail.map_or("SELECT A MODULE", |module| module.name))
             }
-            "boost.inventory.selected.stat" => {
-                Some(detail.map_or("", |module| module.description))
-            }
+            "boost.inventory.selected.stat" => Some(detail.map_or("", |module| module.description)),
             "boost.inventory.selected.count" => {
                 if assigning {
                     Some("COLLECTED")
@@ -212,9 +211,7 @@ impl Scene for Playtest {
                 }
             }
             "boost.selected.name" => Some(detail.map_or("NONE", |module| module.name)),
-            "boost.selected.effect" => {
-                Some(detail.map_or("", |module| module.effect_summary))
-            }
+            "boost.selected.effect" => Some(detail.map_or("", |module| module.effect_summary)),
             "boost.selected.base" => {
                 let mut out = UiScratch::new(scratch);
                 if let Some(module) = detail {
@@ -601,10 +598,21 @@ impl Scene for Playtest {
         // ordinary actor, equipment, effect, and overlay passes continue.
         let bsp_material_tick = self.gameplay_tick(ctx.sim_tick).as_u32();
         let mut visible_sky_aperture = false;
+        let mut world_object_visibility = WorldObjectVisibility::ALL;
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
-            visible_sky_aperture =
-                bsp.draw(camera, bsp_material_tick, &mut primitive_packets, &mut ot);
+            world_object_visibility = bsp.visible_world_objects(
+                RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
+                WORLD_OBJECTS,
+                &self.destructibles,
+            );
+            visible_sky_aperture = bsp.draw(
+                camera,
+                bsp_material_tick,
+                &self.destructibles,
+                &mut primitive_packets,
+                &mut ot,
+            );
             telemetry::stage_end(telemetry::stage::ROOM);
         }
 
@@ -717,6 +725,7 @@ impl Scene for Playtest {
                         &lighting,
                         ModelInstanceDepthPass::All,
                         entity_poses,
+                        world_object_visibility,
                         ctx,
                         &mut primitive_packets,
                         &mut world,
@@ -1181,6 +1190,7 @@ impl Scene for Playtest {
                     &lighting,
                     instance_depth_pass,
                     entity_poses,
+                    world_object_visibility,
                     ctx,
                     &mut primitive_packets,
                     &mut world,
@@ -1424,6 +1434,7 @@ impl Scene for Playtest {
             let _ = self.draw_archive_beacons_world(
                 camera,
                 self.gameplay_tick(ctx.sim_tick),
+                world_object_visibility,
                 &mut primitive_packets,
                 &mut world,
             );
@@ -1728,6 +1739,7 @@ impl Playtest {
         lighting: &RuntimeRoomLighting,
         instance_depth_pass: ModelInstanceDepthPass,
         entity_poses: &[ModelInstancePoseOverride],
+        world_object_visibility: WorldObjectVisibility,
         ctx: &Ctx,
         primitive_packets: &mut PrimitivePacketArena<'_>,
         world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -1758,6 +1770,13 @@ impl Playtest {
             BOX_PROP_SURFACES,
             &self.box_props,
             room,
+            |index| {
+                world_object_visibility.typed_visible(
+                    WORLD_OBJECTS,
+                    psx_level::world_object_kind::BOX_PROP,
+                    index,
+                )
+            },
             camera,
             actor_options,
             lighting,
@@ -1773,6 +1792,13 @@ impl Playtest {
             CYLINDER_PROPS,
             CYLINDER_PROP_SURFACES,
             room,
+            |index| {
+                world_object_visibility.typed_visible(
+                    WORLD_OBJECTS,
+                    psx_level::world_object_kind::CYLINDER_PROP,
+                    index,
+                )
+            },
             camera,
             actor_options,
             lighting,
@@ -1784,6 +1810,13 @@ impl Playtest {
             ARCH_PROPS,
             ARCH_PROP_SURFACES,
             room,
+            |index| {
+                world_object_visibility.typed_visible(
+                    WORLD_OBJECTS,
+                    psx_level::world_object_kind::ARCH_PROP,
+                    index,
+                )
+            },
             camera,
             actor_options,
             lighting,
@@ -1796,6 +1829,13 @@ impl Playtest {
             BOX_PROPS,
             &self.box_props,
             room,
+            |index| {
+                world_object_visibility.typed_visible(
+                    WORLD_OBJECTS,
+                    psx_level::world_object_kind::BOX_PROP,
+                    index,
+                )
+            },
             camera,
             actor_options,
             lighting,
@@ -1808,6 +1848,13 @@ impl Playtest {
             BOX_PROPS,
             &self.box_props,
             room,
+            |index| {
+                world_object_visibility.typed_visible(
+                    WORLD_OBJECTS,
+                    psx_level::world_object_kind::BOX_PROP,
+                    index,
+                )
+            },
             camera,
             actor_options,
             lighting,
@@ -1819,6 +1866,13 @@ impl Playtest {
         draw_image_props(
             IMAGE_PROPS,
             room,
+            |index| {
+                world_object_visibility.typed_visible(
+                    WORLD_OBJECTS,
+                    psx_level::world_object_kind::IMAGE_PROP,
+                    index,
+                )
+            },
             camera,
             actor_options,
             lighting,

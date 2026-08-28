@@ -2443,7 +2443,7 @@ impl EditorWorkspace {
             );
         }
 
-        let movers: Vec<_> = self
+        let owners: Vec<_> = self
             .project
             .active_scene()
             .nodes()
@@ -2454,21 +2454,21 @@ impl EditorWorkspace {
                     psxed_project::NodeKind::Logic {
                         kind: psxed_project::LogicNodeKind::Door { .. },
                         ..
-                    }
+                    } | psxed_project::NodeKind::Destructible { .. }
                 )
             })
-            .map(|node| (node.id, node.name.clone()))
+            .map(|node| (node.id, format!("{} ({})", node.name, node.kind.label())))
             .collect();
         let mut mover = brush.mover;
         let mover_label = mover
             .and_then(|id| {
-                movers
+                owners
                     .iter()
                     .find(|(candidate, _)| *candidate == id)
                     .map(|(_, name)| name.as_str())
             })
             .unwrap_or(if mover.is_some() {
-                "Missing mover"
+                "Missing owner"
             } else {
                 "World (static)"
             });
@@ -2479,7 +2479,7 @@ impl EditorWorkspace {
                     .selected_text(mover_label)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut mover, None, "World (static)");
-                        for (node, name) in &movers {
+                        for (node, name) in &owners {
                             ui.selectable_value(&mut mover, Some(*node), name);
                         }
                     });
@@ -2488,10 +2488,10 @@ impl EditorWorkspace {
         if mover != brush.mover {
             self.set_selected_brush_mover(mover);
         }
-        if brush.mover.is_some() && mover_label == "Missing mover" {
+        if brush.mover.is_some() && mover_label == "Missing owner" {
             ui.colored_label(
                 egui::Color32::from_rgb(220, 120, 100),
-                "The bound mover no longer exists. Rebind this brush before cooking.",
+                "The bound brush-model owner no longer exists. Rebind this brush before cooking.",
             );
         }
 
@@ -2761,21 +2761,24 @@ impl EditorWorkspace {
         };
     }
 
-    /// Bind the selected brush to one Door logic node, or return it to model 0.
+    /// Bind the selected brush to one Door or Destructible node, or return it
+    /// to static world model zero.
     pub(crate) fn set_selected_brush_mover(&mut self, mover: Option<NodeId>) {
-        let Some(index) = self.selected_brush else {
+        let targets = self.selected_brush_set();
+        if targets.is_empty() {
             return;
-        };
+        }
         if mover.is_some()
-            && self
-                .project
-                .active_scene()
-                .brushes
-                .get(index)
-                .is_some_and(|brush| !brush.contents.is_solid())
+            && targets.iter().any(|&index| {
+                self.project
+                    .active_scene()
+                    .brushes
+                    .get(index)
+                    .is_some_and(|brush| !brush.contents.is_solid())
+            })
         {
             self.status =
-                "Liquid brushes are static BSP contents and cannot be bound to a Door".to_string();
+                "Liquid brushes are static BSP contents and cannot be assigned to a brush-model owner".to_string();
             return;
         }
         if let Some(mover) = mover {
@@ -2785,27 +2788,41 @@ impl EditorWorkspace {
                     psxed_project::NodeKind::Logic {
                         kind: psxed_project::LogicNodeKind::Door { .. },
                         ..
-                    }
+                    } | psxed_project::NodeKind::Destructible { .. }
                 )
             });
             if !valid {
                 return;
             }
         }
-        let current = self
-            .project
-            .active_scene()
-            .brushes
-            .get(index)
-            .and_then(|brush| brush.mover);
-        if current == mover {
+        if targets.iter().all(|&index| {
+            self.project
+                .active_scene()
+                .brushes
+                .get(index)
+                .is_some_and(|brush| brush.mover == mover)
+        }) {
             return;
         }
         self.push_undo();
-        if let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) {
-            brush.mover = mover;
+        let mut changed = 0usize;
+        for index in targets {
+            if let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) {
+                brush.mover = mover;
+                changed += 1;
+            }
         }
         self.mark_dirty();
+        self.status = match mover {
+            Some(_) => format!(
+                "Assigned {changed} brush{} to model owner",
+                if changed == 1 { "" } else { "es" }
+            ),
+            None => format!(
+                "Returned {changed} brush{} to the static world",
+                if changed == 1 { "" } else { "es" }
+            ),
+        };
     }
 
     /// Duplicate every selected brush in place and select the copies. One

@@ -225,7 +225,9 @@ pub struct Brush {
     /// Omitted for solid brushes so existing project files remain byte-stable.
     #[serde(default, skip_serializing_if = "BrushContents::is_solid")]
     pub contents: BrushContents,
-    /// Logic mover that owns this brush, or `None` for static world geometry.
+    /// Dynamic brush-model node (Door or Destructible) that owns this brush,
+    /// or `None` for static world geometry. The serialized field keeps its
+    /// original `mover` name so existing projects remain compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mover: Option<crate::NodeId>,
     /// Editor-only authoring group. Group nodes are flattened away by the

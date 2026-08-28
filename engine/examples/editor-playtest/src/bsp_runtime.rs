@@ -12,6 +12,7 @@ use psx_bsp::collision::{BrushTransform, LiquidContentsSample, TraceScratch};
 use psx_bsp::collision_provider::{
     select_body_hull, valid_pxbsp_body_hulls, PxbspCollisionModel, PxbspCollisionProvider,
 };
+use psx_bsp::destructible::{BrushDestructibleSet, BrushDestructibleSetError};
 use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
 use psx_bsp::pxbsp::{material_flags, PXBSP_MAX_VISIBILITY_BYTES};
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
@@ -26,17 +27,26 @@ use psx_engine::{
     ThirdPersonCameraFrame, ThirdPersonCameraInput, ThirdPersonCameraState,
     ThirdPersonCameraTarget, WorldCamera,
 };
-use psx_level::{find_asset_of_kind, AssetId, AssetKind};
+use psx_game_runtime::destructibles::{
+    DamageChannel, DamageOutcome, RuntimeDestructibles,
+};
+use psx_level::{
+    find_asset_of_kind, world_object_flags, AssetId, AssetKind, LevelWorldObjectRecord,
+};
 
 use crate::generated::{
-    ASSETS, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS, PXBSP_WORLD,
+    ASSETS, DESTRUCTIBLES, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS,
+    PXBSP_WORLD, WORLD_OBJECTS,
 };
+use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{
     ensure_room_texture_uploaded, find_room_texture_vram_slot, pxbsp_frame_face_chain_arena,
     pxbsp_visible_face_chain_arena, PROJECTION,
 };
 
 pub(super) const MAX_BSP_DOORS: usize = 16;
+pub(super) const MAX_BSP_DESTRUCTIBLES: usize = psx_level::MAX_DESTRUCTIBLES;
+pub(super) const MAX_BSP_DYNAMIC_MODELS: usize = MAX_BSP_DOORS + MAX_BSP_DESTRUCTIBLES;
 pub(super) const BSP_POINT_HULL_INDEX: usize = 0;
 /// Body baked by `compile_brush_world` into hull one.
 pub(super) const BSP_PLAYER_RADIUS: i32 = 1;
@@ -91,6 +101,10 @@ impl BspVisibilityBounds {
             ],
         }
     }
+
+    pub(super) const fn aabb(min: [i32; 3], max: [i32; 3]) -> Self {
+        Self { min, max }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -118,12 +132,27 @@ fn bounds_visibility_cache_slot(bounds: BspVisibilityBounds, observer_leaf: usiz
     hash as usize & (BSP_BOUNDS_VISIBILITY_CACHE_SIZE - 1)
 }
 
+const fn inset_toward(value: i32, observer: i32) -> i32 {
+    if observer < value {
+        value.saturating_sub(1)
+    } else if observer > value {
+        value.saturating_add(1)
+    } else {
+        value
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum BspRuntimeInitError {
     EmptyWorld,
     NoMaterials,
     Map(PxbspMapLoadError<SliceReadError>),
     Doors(BrushDoorSetError),
+    Destructibles(BrushDestructibleSetError),
+    InvalidDestructibleTarget {
+        target: usize,
+        state: usize,
+    },
     MoverMappingLength,
     MoverCount {
         cooked: usize,
@@ -152,6 +181,13 @@ impl fmt::Display for BspRuntimeInitError {
             Self::NoMaterials => formatter.write_str("PXBSP world contains no materials"),
             Self::Map(error) => write!(formatter, "PXBSP map load failed: {error:?}"),
             Self::Doors(error) => write!(formatter, "PXBSP mover load failed: {error:?}"),
+            Self::Destructibles(error) => {
+                write!(formatter, "PXBSP destructible load failed: {error:?}")
+            }
+            Self::InvalidDestructibleTarget { target, state } => write!(
+                formatter,
+                "PXBSP destructible target {target} references missing shared state {state}"
+            ),
             Self::MoverMappingLength => {
                 formatter.write_str("PXBSP mover node/model mapping arrays have different lengths")
             }
@@ -194,6 +230,7 @@ pub(super) struct BspRuntime {
     map: PxbspResidentMap,
     renderer: Renderer,
     doors: BrushDoorSet<MAX_BSP_DOORS>,
+    destructible_targets: BrushDestructibleSet<MAX_BSP_DESTRUCTIBLES>,
     materials: Vec<Option<PxbspTextureBinding>>,
     trace_scratch: TraceScratch,
     activation_visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
@@ -225,6 +262,19 @@ impl BspRuntime {
             .init_from_map(&map)
             .map_err(BspRuntimeInitError::Doors)?;
         crate::game_trace("editor-playtest: bsp doors ok");
+        let mut destructible_targets = BrushDestructibleSet::EMPTY;
+        destructible_targets
+            .init_from_map(&map)
+            .map_err(BspRuntimeInitError::Destructibles)?;
+        for (target, destructible) in destructible_targets.iter().enumerate() {
+            if destructible.destructible_index() >= DESTRUCTIBLES.len() {
+                return Err(BspRuntimeInitError::InvalidDestructibleTarget {
+                    target,
+                    state: destructible.destructible_index(),
+                });
+            }
+        }
+        crate::game_trace("editor-playtest: bsp destructibles ok");
         if doors.len() != PXBSP_MOVER_MODEL_INDICES.len() {
             return Err(BspRuntimeInitError::MoverCount {
                 cooked: PXBSP_MOVER_MODEL_INDICES.len(),
@@ -261,6 +311,17 @@ impl BspRuntime {
                 });
             }
         }
+        for (index, destructible) in destructible_targets.iter().enumerate() {
+            if map
+                .model_collision_hull(destructible.model_index(), BSP_POINT_HULL_INDEX)
+                .is_none()
+            {
+                return Err(BspRuntimeInitError::MissingMoverHull {
+                    mover: doors.len().saturating_add(index),
+                    hull: BSP_POINT_HULL_INDEX,
+                });
+            }
+        }
         for body_hull in PXBSP_BODY_HULLS {
             let hull = body_hull.hull_index;
             if map.model_collision_hull(0, hull).is_none() {
@@ -269,6 +330,17 @@ impl BspRuntime {
             for (mover, door) in doors.iter().enumerate() {
                 if map.model_collision_hull(door.model_index(), hull).is_none() {
                     return Err(BspRuntimeInitError::MissingMoverHull { mover, hull });
+                }
+            }
+            for (index, destructible) in destructible_targets.iter().enumerate() {
+                if map
+                    .model_collision_hull(destructible.model_index(), hull)
+                    .is_none()
+                {
+                    return Err(BspRuntimeInitError::MissingMoverHull {
+                        mover: doors.len().saturating_add(index),
+                        hull,
+                    });
                 }
             }
         }
@@ -298,6 +370,7 @@ impl BspRuntime {
             map,
             renderer,
             doors,
+            destructible_targets,
             materials: vec![None; material_count],
             trace_scratch: TraceScratch::new(),
             activation_visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
@@ -434,6 +507,131 @@ impl BspRuntime {
         mask
     }
 
+    /// Resolve the cooker's shared non-BSP world-object registry against this
+    /// resident brush world. Bounds first use Quake-style multi-leaf PVS; the
+    /// objects that request strict occlusion then need at least one clear
+    /// camera-to-bounds sample through the exact point collision hull.
+    pub(super) fn visible_world_objects(
+        &mut self,
+        observer: RoomPoint,
+        objects: &[LevelWorldObjectRecord],
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
+    ) -> WorldObjectVisibility {
+        let mut visibility = WorldObjectVisibility::NONE;
+        let count = objects.len().min(psx_level::MAX_WORLD_OBJECTS);
+        let mut first = 0usize;
+        while first < count {
+            let chunk_count = (count - first).min(u64::BITS as usize);
+            let mut bounds = [BspVisibilityBounds::EMPTY; u64::BITS as usize];
+            for local in 0..chunk_count {
+                let object = &objects[first + local];
+                bounds[local] = BspVisibilityBounds::aabb(object.bounds_min, object.bounds_max);
+            }
+            let pvs = self.visible_bounds_mask(observer, &bounds[..chunk_count]);
+            for local in 0..chunk_count {
+                if pvs & (1u64 << local) == 0 {
+                    continue;
+                }
+                let object = &objects[first + local];
+                if object.destructible != psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
+                    && !destructibles.alive(usize::from(object.destructible))
+                {
+                    continue;
+                }
+                if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
+                    && !self.world_object_directly_visible(
+                        observer,
+                        object.bounds_min,
+                        object.bounds_max,
+                        destructibles,
+                    )
+                {
+                    continue;
+                }
+                visibility.set(first + local);
+            }
+            first += chunk_count;
+        }
+        visibility
+    }
+
+    /// Direct brush visibility for gameplay queries such as interaction
+    /// prompts. Rendering adds the broader leaf-PVS pass; a nearby prompt only
+    /// needs to prove that the player and marker are not separated by a wall.
+    pub(super) fn typed_world_object_directly_visible(
+        &mut self,
+        observer: RoomPoint,
+        kind: u8,
+        source_index: usize,
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
+    ) -> bool {
+        let Ok(source_index) = u16::try_from(source_index) else {
+            return false;
+        };
+        let Ok(index) = WORLD_OBJECTS.binary_search_by_key(&(kind, source_index), |object| {
+            (object.kind, object.source_index)
+        }) else {
+            return false;
+        };
+        let object = &WORLD_OBJECTS[index];
+        if object.destructible != psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
+            && !destructibles.alive(usize::from(object.destructible))
+        {
+            return false;
+        }
+        self.world_object_directly_visible(
+            observer,
+            object.bounds_min,
+            object.bounds_max,
+            destructibles,
+        )
+    }
+
+    fn world_object_directly_visible(
+        &mut self,
+        observer: RoomPoint,
+        min: [i32; 3],
+        max: [i32; 3],
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
+    ) -> bool {
+        let observer_array = [observer.x, observer.y, observer.z];
+        if (0..3).all(|axis| observer_array[axis] >= min[axis] && observer_array[axis] <= max[axis])
+        {
+            return true;
+        }
+        let center = core::array::from_fn::<_, 3, _>(|axis| {
+            min[axis].saturating_add(max[axis].saturating_sub(min[axis]) / 2)
+        });
+        // Center plus the six face centers catches thin cards, compact
+        // beacons, and a prop peeking around one side of a brush without the
+        // cost of tracing all eight corners. Pull endpoints one unit toward
+        // the eye so a card mounted flush on a wall is not rejected by contact
+        // exactly at its authored support plane.
+        let samples = [
+            center,
+            [min[0], center[1], center[2]],
+            [max[0], center[1], center[2]],
+            [center[0], min[1], center[2]],
+            [center[0], max[1], center[2]],
+            [center[0], center[1], min[2]],
+            [center[0], center[1], max[2]],
+        ];
+        for sample in samples {
+            let endpoint = RoomPoint::new(
+                inset_toward(sample[0], observer.x),
+                inset_toward(sample[1], observer.y),
+                inset_toward(sample[2], observer.z),
+            );
+            if self
+                .trace_point_segment(observer, endpoint, &[], destructibles)
+                .is_ok_and(|trace| !trace.hit())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Sample the static world's point hull at the player's feet, torso, and
     /// head. Liquid movers are rejected by the cooker, so model zero is the
     /// complete contents authority. A malformed query fails safely to no
@@ -533,6 +731,79 @@ impl BspRuntime {
         self.doors.tick();
     }
 
+    /// Apply one authored melee capsule to every compatible destructible it
+    /// touches. A bit per destructible prevents multiple active frames or
+    /// multiple weapon capsules from damaging the same object twice during a
+    /// single swing.
+    pub(super) fn damage_brush_destructibles_with_capsule(
+        &self,
+        start: [i32; 3],
+        end: [i32; 3],
+        radius: u16,
+        channel: DamageChannel,
+        damage: u16,
+        destructibles: &mut RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
+    ) -> DamageOutcome {
+        let radius = i32::from(radius);
+        let capsule_min = core::array::from_fn::<_, 3, _>(|axis| {
+            start[axis].min(end[axis]).saturating_sub(radius)
+        });
+        let capsule_max = core::array::from_fn::<_, 3, _>(|axis| {
+            start[axis].max(end[axis]).saturating_add(radius)
+        });
+        let mut result = DamageOutcome::default();
+        let count = self.destructible_targets.len();
+        for index in 0..count {
+            let Some((bounds_min, bounds_max)) = self.destructible_bounds(index, destructibles)
+            else {
+                continue;
+            };
+            let overlaps = (0..3).all(|axis| {
+                capsule_min[axis] <= bounds_max[axis] && capsule_max[axis] >= bounds_min[axis]
+            });
+            if !overlaps {
+                continue;
+            }
+            let Some(target) = self.destructible_targets.get(index) else {
+                continue;
+            };
+            let outcome =
+                destructibles.apply_damage(target.destructible_index(), channel, damage);
+            if outcome.connected {
+                result.connected = true;
+                result.broke |= outcome.broke;
+            }
+        }
+
+        result
+    }
+
+    fn destructible_bounds(
+        &self,
+        index: usize,
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
+    ) -> Option<([i32; 3], [i32; 3])> {
+        let destructible = self.destructible_targets.get(index)?;
+        if !destructibles.alive(destructible.destructible_index()) {
+            return None;
+        }
+        let model = self.map.brush_models().get(destructible.model_index())?;
+        let origin = destructible.transform().origin;
+        let origin = [origin.x >> 12, origin.y >> 12, origin.z >> 12];
+        Some((
+            [
+                origin[0].saturating_add(i32::from(model.mins.x)),
+                origin[1].saturating_add(i32::from(model.mins.y)),
+                origin[2].saturating_add(i32::from(model.mins.z)),
+            ],
+            [
+                origin[0].saturating_add(i32::from(model.maxs.x)),
+                origin[1].saturating_add(i32::from(model.maxs.y)),
+                origin[2].saturating_add(i32::from(model.maxs.z)),
+            ],
+        ))
+    }
+
     pub(super) fn set_door_open(&mut self, mover: usize, open: bool) {
         self.doors
             .get_mut(mover)
@@ -596,11 +867,13 @@ impl BspRuntime {
         input: CharacterMotorInput,
         config: CharacterMotorConfig,
         delta_vblanks: u16,
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
-        let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
-        let count = self.collision_models(&mut models);
+        let mut models =
+            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
+        let count = self.collision_models(&mut models, destructibles);
         let shape = CollisionTraceShape::Body {
             radius: config.radius,
             height: config.height,
@@ -630,11 +903,13 @@ impl BspRuntime {
         dz: i32,
         radius: i32,
         height: i32,
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<BodyStep, CollisionQueryError> {
-        let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
-        let count = self.collision_models(&mut models);
+        let mut models =
+            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
+        let count = self.collision_models(&mut models, destructibles);
         let radius = radius.max(0);
         let height = height.max(1);
         let shape = CollisionTraceShape::Body { radius, height };
@@ -662,11 +937,13 @@ impl BspRuntime {
         dz: i32,
         radius: i32,
         height: i32,
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<BodyStep, CollisionQueryError> {
-        let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
-        let count = self.collision_models(&mut models);
+        let mut models =
+            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
+        let count = self.collision_models(&mut models, destructibles);
         let radius = radius.max(0);
         let height = height.max(1);
         let shape = CollisionTraceShape::Body { radius, height };
@@ -695,8 +972,9 @@ impl BspRuntime {
         from: RoomPoint,
         to: RoomPoint,
         aabb_blockers: &[CharacterCollisionAabb],
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> bool {
-        self.trace_point_segment(from, to, aabb_blockers)
+        self.trace_point_segment(from, to, aabb_blockers, destructibles)
             .is_ok_and(|trace| !trace.hit())
     }
 
@@ -709,9 +987,11 @@ impl BspRuntime {
         from: RoomPoint,
         to: RoomPoint,
         aabb_blockers: &[CharacterCollisionAabb],
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> Result<CollisionTrace, CollisionQueryError> {
-        let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
-        let count = self.collision_models(&mut models);
+        let mut models =
+            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
+        let count = self.collision_models(&mut models, destructibles);
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
             BSP_POINT_HULL_INDEX,
@@ -733,9 +1013,11 @@ impl BspRuntime {
         config: ThirdPersonCameraConfig,
         delta_vblanks: u16,
         aabb_blockers: &[CharacterCollisionAabb],
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
-        let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
-        let count = self.collision_models(&mut models);
+        let mut models =
+            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
+        let count = self.collision_models(&mut models, destructibles);
         // The camera is a point and the renderer now clips world polygons at
         // the near plane, so use Quake's balanced render BSP (hull 0) for the
         // spring-arm trace. The authored collision margin still stops the eye
@@ -765,6 +1047,7 @@ impl BspRuntime {
         &mut self,
         camera: WorldCamera,
         material_tick: u32,
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
         primitive_packets: &mut PrimitivePacketArena<'_>,
         ot: &mut OtFrame<'_, DEPTH>,
     ) -> bool {
@@ -826,6 +1109,32 @@ impl BspRuntime {
                 visible_sky_apertures =
                     visible_sky_apertures.saturating_add(frame.stats.visible_sky_apertures);
             }
+            for destructible in self
+                .destructible_targets
+                .iter()
+                .filter(|target| destructibles.alive(target.destructible_index()))
+            {
+                let Some(frame) = self.renderer.draw_pxbsp_model(
+                    &self.map,
+                    destructible.model_index(),
+                    destructible.transform(),
+                    camera,
+                    view,
+                    &self.materials,
+                    material_tick,
+                    &mut packets[used_words..],
+                ) else {
+                    panic!("validated PXBSP destructible model disappeared");
+                };
+                used_words = used_words
+                    .checked_add(frame.packet_words)
+                    .expect("PXBSP packet word count overflow");
+                packet_count = packet_count
+                    .checked_add(frame.stats.packets as usize)
+                    .expect("PXBSP packet count overflow");
+                visible_sky_apertures =
+                    visible_sky_apertures.saturating_add(frame.stats.visible_sky_apertures);
+            }
             (used_words, packet_count, visible_sky_apertures)
         };
         let stream = reservation
@@ -837,14 +1146,33 @@ impl BspRuntime {
         visible_sky_apertures != 0
     }
 
-    fn collision_models(&self, output: &mut [PxbspCollisionModel; MAX_BSP_DOORS]) -> usize {
-        for (index, door) in self.doors.iter().enumerate() {
+    fn collision_models(
+        &self,
+        output: &mut [PxbspCollisionModel; MAX_BSP_DYNAMIC_MODELS],
+        destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
+    ) -> usize {
+        let mut count = 0usize;
+        for door in self.doors.iter() {
+            let index = count;
             output[index] = PxbspCollisionModel::new(
                 u16::try_from(door.model_index()).expect("validated PXBSP mover index"),
                 door.transform(),
             );
+            count += 1;
         }
-        self.doors.len()
+        for destructible in self
+            .destructible_targets
+            .iter()
+            .filter(|target| destructibles.alive(target.destructible_index()))
+        {
+            output[count] = PxbspCollisionModel::new(
+                u16::try_from(destructible.model_index())
+                    .expect("validated PXBSP destructible model index"),
+                destructible.transform(),
+            );
+            count += 1;
+        }
+        count
     }
 }
 

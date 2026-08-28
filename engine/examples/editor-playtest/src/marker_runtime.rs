@@ -43,6 +43,7 @@ impl Playtest {
         &self,
         camera: WorldCamera,
         elapsed_tick: SimTick,
+        world_object_visibility: WorldObjectVisibility,
         packets: &mut T,
         world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     ) -> usize
@@ -68,6 +69,11 @@ impl Playtest {
                 || interactable.room != self.room_index
                 || !interactable_is_active(interactable)
                 || open_poi == Some(index)
+                || !world_object_visibility.typed_visible(
+                    WORLD_OBJECTS,
+                    psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
+                    index,
+                )
             {
                 continue;
             }

@@ -82,10 +82,12 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
-    BoostInventory, BoostModuleId, BoostSlotId, DualVitality, PowerUpLoadout, VitalityChannelId,
-    VitalityModifiers, module_stat_bonus_q12,
+    module_stat_bonus_q12, BoostInventory, BoostModuleId, BoostSlotId, DualVitality,
+    PowerUpLoadout, VitalityChannelId, VitalityModifiers,
 };
-use psx_game_runtime::{poi::MessageController, save::SaveBlock};
+use psx_game_runtime::{
+    destructibles::RuntimeDestructibles, poi::MessageController, save::SaveBlock,
+};
 use psx_gpu::{
     draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial},
@@ -137,6 +139,7 @@ mod visibility_runtime;
 mod visible_cell_runtime;
 mod vram_runtime;
 mod water_runtime;
+mod world_objects_runtime;
 
 use active_room_cache::*;
 use active_room_streaming::*;
@@ -160,6 +163,7 @@ use visibility_runtime::*;
 use visible_cell_runtime::*;
 use vram_runtime::*;
 use water_runtime::*;
+use world_objects_runtime::*;
 
 // Placeholder manifests reference unused statics; populated
 // manifests reference all of them. Quiet either side here.
@@ -178,19 +182,19 @@ mod generated {
 pub(crate) const USES_PXBSP: bool = generated::PLAYTEST_USES_PXBSP;
 
 use generated::{
-    ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOX_PROPS, BOX_PROP_STATE_COUNT,
-    BOX_PROP_SURFACES, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
+    ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOOST_MODULES, BOX_PROPS,
+    BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS,
-    COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, ENTITIES, EQUIPMENT, GAME_ENTITIES,
-    BOOST_MODULES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, INTERACTABLE_MESSAGE_PAGES, LIGHTS, LOGIC,
-    MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
+    COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT,
+    GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, INTERACTABLE_MESSAGE_PAGES,
+    LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
     MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
     PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS,
     ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
     ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES, ROOM_RESIDENCY,
     ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES,
     UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES,
-    WORLD_MESSAGE,
+    WORLD_MESSAGE, WORLD_OBJECTS,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -365,6 +369,9 @@ struct Playtest {
     /// break bursts), owned by `psx_game_runtime::box_props` since the
     /// phase-2 carve.
     box_props: RuntimeBoxProps,
+    /// One health/affinity owner shared by brush submodels and typed world
+    /// objects in either BSP or legacy-grid scenes.
+    destructibles: RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     /// Souls-like game-entity SoA state over the cooked
     /// `GAME_ENTITIES` records (phase 3; empty for record-free
     /// projects and then inert).
@@ -663,6 +670,7 @@ impl Playtest {
     /// all-zero bytes, which IS its old initializer value.
     fn init_boot_state(&mut self) {
         self.current_ambient_rgb = [0x80; 3];
+        self.destructibles = RuntimeDestructibles::EMPTY;
         self.visibility.init();
         #[cfg(all(
             feature = "world-grid-visible",

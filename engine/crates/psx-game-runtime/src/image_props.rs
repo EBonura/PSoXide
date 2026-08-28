@@ -43,9 +43,25 @@ pub fn collect_image_prop_collision_blockers_into<S: BoundedSink<CharacterCollis
     room: RoomIndex,
     out: &mut S,
 ) -> usize {
+    collect_image_prop_collision_blockers_into_filtered(props, room, out, |_| true)
+}
+
+/// Append active collidable ImageProps, allowing shared destructible state to
+/// remove a broken card from collision without mutating cooked records.
+pub fn collect_image_prop_collision_blockers_into_filtered<
+    S: BoundedSink<CharacterCollisionAabb>,
+>(
+    props: &[LevelImagePropRecord],
+    room: RoomIndex,
+    out: &mut S,
+    mut active: impl FnMut(usize) -> bool,
+) -> usize {
     let mut count = 0usize;
-    for prop in props {
-        if prop.room != room || prop.flags & image_prop_flags::COLLISION_ENABLED == 0 {
+    for (index, prop) in props.iter().enumerate() {
+        if prop.room != room
+            || prop.flags & image_prop_flags::COLLISION_ENABLED == 0
+            || !active(index)
+        {
             continue;
         }
         let min = RoomPoint::new(
@@ -87,9 +103,24 @@ pub fn collect_image_prop_collision_blockers_checked_into<
     room: RoomIndex,
     out: &mut S,
 ) -> Option<usize> {
+    collect_image_prop_collision_blockers_checked_into_filtered(props, room, out, |_| true)
+}
+
+/// Checked active-card append used by the unified world-object runtime.
+pub fn collect_image_prop_collision_blockers_checked_into_filtered<
+    S: BoundedSink<CharacterCollisionAabb>,
+>(
+    props: &[LevelImagePropRecord],
+    room: RoomIndex,
+    out: &mut S,
+    mut active: impl FnMut(usize) -> bool,
+) -> Option<usize> {
     let mut count = 0usize;
-    for prop in props {
-        if prop.room != room || prop.flags & image_prop_flags::COLLISION_ENABLED == 0 {
+    for (index, prop) in props.iter().enumerate() {
+        if prop.room != room
+            || prop.flags & image_prop_flags::COLLISION_ENABLED == 0
+            || !active(index)
+        {
             continue;
         }
         let blocker = CharacterCollisionAabb::new(
@@ -123,6 +154,7 @@ pub fn collect_image_prop_collision_blockers_checked_into<
 pub fn draw_image_props<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     props: &[LevelImagePropRecord],
     current_room: RoomIndex,
+    mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -133,8 +165,8 @@ pub fn draw_image_props<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
 {
     let mut projector = None;
-    for prop in props {
-        if prop.room != current_room {
+    for (index, prop) in props.iter().enumerate() {
+        if prop.room != current_room || !object_visible(index) {
             continue;
         }
         let origin = WorldVertex::new(prop.x, prop.y, prop.z);
@@ -505,5 +537,25 @@ mod tests {
             ),
             Some(0)
         );
+    }
+
+    #[test]
+    fn filtered_image_prop_collision_uses_shared_world_object_liveness() {
+        let enabled = image_prop_flags::COLLISION_ENABLED;
+        let props = [
+            prop(0, [1, 2, 3], [4, 5, 6], enabled),
+            prop(0, [10, 20, 30], [40, 50, 60], enabled),
+        ];
+        let mut out = [CharacterCollisionAabb::EMPTY; 2];
+        let mut sink = SliceSink::new(&mut out);
+        let count = collect_image_prop_collision_blockers_into_filtered(
+            &props,
+            RoomIndex(0),
+            &mut sink,
+            |index| index == 1,
+        );
+        assert_eq!(count, 1);
+        assert_eq!(out[0].min, RoomPoint::new(10, 20, 30));
+        assert_eq!(out[0].max, RoomPoint::new(40, 50, 60));
     }
 }

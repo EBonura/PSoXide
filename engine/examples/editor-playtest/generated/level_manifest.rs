@@ -3,20 +3,20 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    AssetId, BoostModuleRecord, CombatCapsuleRecord, EntityRecord, EquipmentRecord, FlowState, GameFlow,
-    InteractableMessageRecord, InteractableRecord, LevelArchPropCollisionRecord,
+    AssetId, BoostModuleRecord, CombatCapsuleRecord, EntityRecord, EquipmentRecord, FlowState,
+    GameFlow, InteractableMessageRecord, InteractableRecord, LevelArchPropCollisionRecord,
     LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelAssetRecord, LevelBoxPropRecord,
     LevelBoxPropSurfaceRecord, LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord,
     LevelCachedRoomVertexRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
-    LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelFarVistaRecord,
-    LevelGameEntityRecord, LevelImagePropRecord, LevelLogicRecord, LevelMaterialRecord,
-    LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
-    LevelModelInstanceRecord, LevelModelRecord, LevelModelSocketRecord, LevelOptionDef,
-    LevelRoomPortalRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord, LevelRoomVisibilityRecord,
-    LevelSceneState, LevelSkyRecord, LevelTransition, LevelUiNodeRecord, LevelUiPaintRecord,
-    LevelUiScene,
-    LevelUiSfxCueRecord, LevelUiSfxSampleRecord, LevelVisibilityCellRecord,
-    LevelVisibilityPvsRecord, LevelWaterCellRecord, LevelWeaponRecord, LevelWorldPackEntryRecord,
+    LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelDestructibleRecord,
+    LevelFarVistaRecord, LevelGameEntityRecord, LevelImagePropRecord, LevelLogicRecord,
+    LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
+    LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelOptionDef, LevelRoomPortalRecord, LevelRoomRecord,
+    LevelRoomSurfaceCacheRecord, LevelRoomVisibilityRecord, LevelSceneState, LevelSkyRecord,
+    LevelTransition, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene, LevelUiSfxCueRecord,
+    LevelUiSfxSampleRecord, LevelVisibilityCellRecord, LevelVisibilityPvsRecord,
+    LevelWaterCellRecord, LevelWeaponRecord, LevelWorldObjectRecord, LevelWorldPackEntryRecord,
     ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
     RoomResidencyRecord, WeaponAppearanceRecord, WeaponHitboxRecord,
 };
@@ -83,6 +83,8 @@ pub static MODEL_FRAME_BOUNDS: &[LevelModelFrameBoundsRecord] = &[];
 pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];
 pub static MODELS: &[LevelModelRecord] = &[];
 pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
+pub static DESTRUCTIBLES: &[LevelDestructibleRecord] = &[];
+pub static WORLD_OBJECTS: &[LevelWorldObjectRecord] = &[];
 pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
 pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
 pub static BOX_PROP_SURFACES: &[LevelBoxPropSurfaceRecord] = &[];

@@ -1448,6 +1448,34 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Shared health/configuration for every destructible target.\n");
+    out.push_str("pub static DESTRUCTIBLES: &[LevelDestructibleRecord] = &[\n");
+    for destructible in &package.destructibles {
+        let _ = writeln!(
+            out,
+            "    LevelDestructibleRecord {{ max_health: {}, damage_affinity: {}, flags: {} }},",
+            destructible.max_health, destructible.damage_affinity, destructible.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Shared spatial registry for specialized world payloads.\n");
+    out.push_str("pub static WORLD_OBJECTS: &[LevelWorldObjectRecord] = &[\n");
+    for object in &package.world_objects {
+        let _ = writeln!(
+            out,
+            "    LevelWorldObjectRecord {{ room: RoomIndex({}), kind: {}, flags: {}, source_index: {}, destructible: {}, bounds_min: {:?}, bounds_max: {:?} }},",
+            object.room,
+            object.kind,
+            object.flags,
+            object.source_index,
+            object.destructible,
+            object.bounds_min,
+            object.bounds_max,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Placed flat image props, room-local coordinates.\n");
     out.push_str("pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[\n");
     for prop in &package.image_props {
@@ -4292,6 +4320,8 @@ use psx_level::{
     LevelCycloramaQuadRecord,
     LevelFarVistaRecord,
     LevelImagePropRecord,
+    LevelDestructibleRecord,
+    LevelWorldObjectRecord,
     LevelMaterialAnimation,
     LevelMaterialFlipbook,
     LevelMaterialRecord,

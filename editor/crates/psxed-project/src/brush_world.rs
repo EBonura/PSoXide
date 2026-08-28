@@ -35,8 +35,8 @@ use crate::{
 use psx_bsp::collision::{CollisionHull, CONTENTS_SOLID};
 use psx_bsp::collision_provider::{select_body_hull, CookedBodyHull};
 use psx_bsp::pxbsp::{
-    entity_class, entity_flags, material_animation, material_blend, material_flags, PxbspBrushDoor,
-    PxbspBrushDoorError, PxbspEntity, PxbspMaterial,
+    entity_class, entity_flags, material_animation, material_blend, material_flags,
+    PxbspBrushDestructible, PxbspBrushDoor, PxbspBrushDoorError, PxbspEntity, PxbspMaterial,
 };
 use psx_bsp::{ClipNode, Node, Plane, RecordSlice, Vec3I32};
 use psxed_format::texture::Depth;
@@ -154,6 +154,7 @@ pub enum BrushWorldCookError {
         node: NodeId,
         error: PxbspBrushDoorError,
     },
+    InvalidDestructibleHealth(NodeId),
     InvalidWorldTree,
     MissingMaterial(ResourceId),
     ResourceIsNotMaterial(ResourceId),
@@ -199,7 +200,7 @@ impl fmt::Display for BrushWorldCookError {
             }
             Self::BrushOwnerIsNotDoor { brush, node } => write!(
                 formatter,
-                "brush {brush} is bound to node {node:?}, which is not a Door"
+                "brush {brush} is bound to node {node:?}, which is neither a Door nor a Destructible"
             ),
             Self::LiquidMover {
                 brush,
@@ -207,23 +208,23 @@ impl fmt::Display for BrushWorldCookError {
                 contents,
             } => write!(
                 formatter,
-                "brush {brush} uses {} contents but is bound to Door node {node:?}; liquid movers are unsupported",
+                "brush {brush} uses {} contents but is bound to brush-model node {node:?}; liquid submodels are unsupported",
                 contents.label()
             ),
             Self::UnsupportedMoverTransform(node) => write!(
                 formatter,
-                "Door node {node:?} uses rotation or scale unsupported by brush movers"
+                "brush-model node {node:?} uses rotation or scale unsupported by brush submodels"
             ),
             Self::MoverOriginOutOfRange(node) => {
                 write!(
                     formatter,
-                    "Door node {node:?} origin is outside the PXBSP range"
+                    "brush-model node {node:?} origin is outside the PXBSP range"
                 )
             }
             Self::MoverOriginInSolid(node) => {
                 write!(
                     formatter,
-                    "Door node {node:?} origin is inside solid world geometry"
+                    "brush-model node {node:?} origin is inside solid world geometry"
                 )
             }
             Self::InvalidPlayerSpawnTransform(node) => write!(
@@ -242,6 +243,10 @@ impl fmt::Display for BrushWorldCookError {
                     "Door node {node:?} has invalid motion: {error:?}"
                 )
             }
+            Self::InvalidDestructibleHealth(node) => write!(
+                formatter,
+                "Destructible node {node:?} must have at least one health point"
+            ),
             Self::InvalidWorldTree => formatter.write_str("compiled BSP world tree is invalid"),
             Self::MissingMaterial(material) => {
                 write!(formatter, "brush references missing material {material:?}")
@@ -464,7 +469,7 @@ pub fn compile_brush_world(
                     NodeKind::Logic {
                         kind: LogicNodeKind::Door { .. },
                         ..
-                    }
+                    } | NodeKind::Destructible { .. }
                 ) {
                     return Err(BrushWorldCookError::BrushOwnerIsNotDoor {
                         brush: brush_index,
@@ -518,20 +523,53 @@ pub fn compile_brush_world(
     let mut submodels = Vec::new();
     let mut movers = Vec::new();
     let mut entities = Vec::new();
+    let destructible_nodes: Vec<NodeId> = scene
+        .nodes()
+        .iter()
+        .filter_map(|node| matches!(node.kind, NodeKind::Destructible { .. }).then_some(node.id))
+        .collect();
     for node in scene.nodes() {
-        let NodeKind::Logic {
-            kind:
-                LogicNodeKind::Door {
-                    start_open,
-                    open_offset,
-                    travel_ticks,
-                    ..
-                },
-            enabled,
-            ..
-        } = &node.kind
-        else {
-            continue;
+        enum OwnerKind {
+            Door {
+                start_open: bool,
+                open_offset: [i16; 3],
+                travel_ticks: u16,
+                enabled: bool,
+            },
+            Destructible {
+                max_health: u16,
+                runtime_index: u16,
+            },
+        }
+        let owner_kind = match &node.kind {
+            NodeKind::Logic {
+                kind:
+                    LogicNodeKind::Door {
+                        start_open,
+                        open_offset,
+                        travel_ticks,
+                        ..
+                    },
+                enabled,
+                ..
+            } => OwnerKind::Door {
+                start_open: *start_open,
+                open_offset: *open_offset,
+                travel_ticks: *travel_ticks,
+                enabled: *enabled,
+            },
+            NodeKind::Destructible { max_health, .. } => {
+                let runtime_index = destructible_nodes
+                    .iter()
+                    .position(|id| *id == node.id)
+                    .and_then(|index| u16::try_from(index).ok())
+                    .ok_or(BrushWorldCookError::ModelIndexOverflow(node.id))?;
+                OwnerKind::Destructible {
+                    max_health: *max_health,
+                    runtime_index,
+                }
+            }
+            _ => continue,
         };
         let bound: Vec<_> = scene
             .brushes
@@ -572,55 +610,87 @@ pub fn compile_brush_world(
         if leaf == 0 {
             return Err(BrushWorldCookError::MoverOriginInSolid(node.id));
         }
-        let motion = PxbspBrushDoor::new(
-            Vec3I32 {
-                x: i32::from(open_offset[0]) * 4096,
-                y: i32::from(open_offset[1]) * 4096,
-                z: i32::from(open_offset[2]) * 4096,
-            },
-            *travel_ticks,
-        );
-        motion
-            .validate()
-            .map_err(|error| BrushWorldCookError::InvalidDoorMotion {
-                node: node.id,
-                error,
-            })?;
-        let mut flags = 0;
-        if *enabled {
-            flags |= entity_flags::ENABLED;
+        let entity_origin = Vec3I32 {
+            x: origin[0] * 4096,
+            y: origin[1] * 4096,
+            z: origin[2] * 4096,
+        };
+        match owner_kind {
+            OwnerKind::Door {
+                start_open,
+                open_offset,
+                travel_ticks,
+                enabled,
+            } => {
+                let motion = PxbspBrushDoor::new(
+                    Vec3I32 {
+                        x: i32::from(open_offset[0]) * 4096,
+                        y: i32::from(open_offset[1]) * 4096,
+                        z: i32::from(open_offset[2]) * 4096,
+                    },
+                    travel_ticks,
+                );
+                motion
+                    .validate()
+                    .map_err(|error| BrushWorldCookError::InvalidDoorMotion {
+                        node: node.id,
+                        error,
+                    })?;
+                let mut flags = 0;
+                if enabled {
+                    flags |= entity_flags::ENABLED;
+                }
+                if start_open {
+                    flags |= entity_flags::START_OPEN;
+                }
+                entities.push(PxbspEntityInput {
+                    entity: PxbspEntity {
+                        class_id: entity_class::BRUSH_DOOR,
+                        flags,
+                        model: model_index,
+                        leaf,
+                        origin: entity_origin,
+                        ..PxbspEntity::default()
+                    },
+                    payload: motion.to_le_bytes().to_vec(),
+                });
+                movers.push(CompiledBrushMover {
+                    node: node.id,
+                    model_index,
+                    origin,
+                    open_offset: open_offset.map(i32::from),
+                    travel_ticks,
+                    start_open,
+                    enabled,
+                });
+            }
+            OwnerKind::Destructible {
+                max_health,
+                runtime_index,
+            } => {
+                if max_health == 0 {
+                    return Err(BrushWorldCookError::InvalidDestructibleHealth(node.id));
+                }
+                let payload = PxbspBrushDestructible::new(runtime_index);
+                entities.push(PxbspEntityInput {
+                    entity: PxbspEntity {
+                        class_id: entity_class::BRUSH_DESTRUCTIBLE,
+                        // Visibility/collision enabled state is authoritative in
+                        // the shared manifest record, not duplicated in PXBSP.
+                        flags: 0,
+                        model: model_index,
+                        leaf,
+                        origin: entity_origin,
+                        ..PxbspEntity::default()
+                    },
+                    payload: payload.to_le_bytes().to_vec(),
+                });
+            }
         }
-        if *start_open {
-            flags |= entity_flags::START_OPEN;
-        }
-        entities.push(PxbspEntityInput {
-            entity: PxbspEntity {
-                class_id: entity_class::BRUSH_DOOR,
-                flags,
-                model: model_index,
-                leaf,
-                origin: Vec3I32 {
-                    x: origin[0] * 4096,
-                    y: origin[1] * 4096,
-                    z: origin[2] * 4096,
-                },
-                ..PxbspEntity::default()
-            },
-            payload: motion.to_le_bytes().to_vec(),
-        });
         submodels.push(PxbspSubmodel {
             geometry,
             collision,
             origin: origin.map(|value| value as i16),
-        });
-        movers.push(CompiledBrushMover {
-            node: node.id,
-            model_index,
-            origin,
-            open_offset: open_offset.map(i32::from),
-            travel_ticks: *travel_ticks,
-            start_open: *start_open,
-            enabled: *enabled,
         });
     }
 
@@ -805,7 +875,7 @@ pub fn diagnose_brush_world_leak(
                     NodeKind::Logic {
                         kind: LogicNodeKind::Door { .. },
                         ..
-                    }
+                    } | NodeKind::Destructible { .. }
                 ) {
                     return Err(BrushWorldCookError::BrushOwnerIsNotDoor {
                         brush: brush_index,
@@ -2065,6 +2135,7 @@ fn flat_white_psxt() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DestructibleDamageAffinity;
     use crate::{brush::BrushContents, MaterialResource, Transform3};
 
     #[test]
@@ -2109,8 +2180,9 @@ mod tests {
         assert_eq!(gain, 40);
         assert_eq!(extra_bytes, (64 * 64 - 32 * 32) / 2);
     }
+    use psx_bsp::destructible::BrushDestructibleSet;
     use psx_bsp::mover::BrushDoorSet;
-    use psx_bsp::pxbsp::{entity_class, entity_flags, PxbspBrushDoor};
+    use psx_bsp::pxbsp::{entity_class, entity_flags, PxbspBrushDestructible, PxbspBrushDoor};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
     use psx_bsp::SliceReader;
 
@@ -2549,6 +2621,77 @@ mod tests {
             }),
             Some(psx_bsp::collision::CONTENTS_EMPTY)
         );
+    }
+
+    #[test]
+    fn scene_cook_emits_channel_filtered_destructible_brush_model() {
+        let mut project = authored_project();
+        let material = project.active_scene().brushes[0].faces[0].material;
+        let scene = project.active_scene_mut();
+        let node = scene.add_node(
+            NodeId::ROOT,
+            "Zenith Crate",
+            NodeKind::Destructible {
+                max_health: 45,
+                damage_affinity: DestructibleDamageAffinity::Zenith,
+                enabled: true,
+            },
+        );
+        scene
+            .node_mut(node)
+            .expect("destructible")
+            .transform
+            .translation = [256.0, 64.0, 256.0];
+        let mut brush = Brush::cuboid([224, 64, 224], [288, 128, 288]);
+        brush.mover = Some(node);
+        for face in &mut brush.faces {
+            face.material = material;
+        }
+        scene.brushes.push(brush);
+
+        let compiled = compile_brush_world(
+            &project,
+            BrushWorldCookOptions {
+                project_root: Path::new("."),
+                mode: BrushWorldCookMode::Draft,
+                ambient: [24; 3],
+                texture_asset_base: 40,
+            },
+        )
+        .expect("destructible brush world");
+        assert_eq!(
+            compiled.movers.len(),
+            1,
+            "destructibles are not door movers"
+        );
+
+        let mut map = PxbspResidentMap::with_capacity(compiled.pxbsp.bytes.len());
+        map.load(10, &mut SliceReader::new(&compiled.pxbsp.bytes))
+            .expect("resident PXBSP");
+        assert_eq!(map.brush_models().len(), 3);
+        let entities = map.entities();
+        let entity_index = (0..entities.len())
+            .find(|&index| {
+                entities
+                    .get(index)
+                    .is_some_and(|entity| entity.class_id == entity_class::BRUSH_DESTRUCTIBLE)
+            })
+            .expect("destructible entity");
+        let entity = entities.get(entity_index).expect("destructible entity");
+        assert_eq!(entity.flags, 0);
+        assert_eq!(entity.model, 2);
+        let payload = entities
+            .payload_record::<PxbspBrushDestructible>(entity_index)
+            .expect("destructible payload");
+        assert_eq!(payload.destructible_index, 0);
+
+        let mut destructibles = BrushDestructibleSet::<4>::default();
+        destructibles
+            .init_from_map(&map)
+            .expect("runtime destructibles");
+        assert_eq!(destructibles.len(), 1);
+        let item = destructibles.get(0).expect("runtime destructible target");
+        assert_eq!(item.destructible_index(), 0);
     }
 
     /// Hull 0 is served from the render BSP at runtime (Quake's hull 0), so
