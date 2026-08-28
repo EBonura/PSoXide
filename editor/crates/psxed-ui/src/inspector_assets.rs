@@ -1387,6 +1387,53 @@ pub(crate) fn draw_animation_set_resource_editor(
                     set.set_action_clip(action, current);
                     changed = true;
                 }
+
+                let Some(clip) = set.action_clip(action) else {
+                    continue;
+                };
+                let defaults = psxed_project::CharacterActionOptions::for_action(action);
+                let mut options = set
+                    .action_binding(action)
+                    .and_then(|binding| binding.options)
+                    .unwrap_or(defaults);
+                let mut speed = f32::from(options.speed_q8) / 256.0;
+                let speed_changed = ui
+                    .horizontal(|ui| {
+                        ui.add_space(18.0);
+                        ui.label(RichText::new("Runtime speed").small().color(STUDIO_TEXT_WEAK));
+                        ui.add(
+                            egui::DragValue::new(&mut speed)
+                                .speed(0.01)
+                                .range(0.25..=4.0)
+                                .fixed_decimals(2)
+                                .suffix("x"),
+                        )
+                        .on_hover_text(
+                            "Saved playback speed for this action; Animation Studio and the game use the same value",
+                        )
+                        .changed()
+                    })
+                    .inner;
+                if speed_changed {
+                    options.speed_q8 = (speed * 256.0).round().clamp(
+                        psxed_project::ACTION_SPEED_MIN_Q8 as f32,
+                        psxed_project::ACTION_SPEED_MAX_Q8 as f32,
+                    ) as u16;
+                    if let Some(binding) = set
+                        .action_clips
+                        .iter_mut()
+                        .find(|binding| binding.action == action)
+                    {
+                        binding.options = (options != defaults).then_some(options);
+                    } else {
+                        set.action_clips.push(psxed_project::AnimationActionBinding {
+                            action,
+                            clip,
+                            options: Some(options),
+                        });
+                    }
+                    changed = true;
+                }
             }
         });
 

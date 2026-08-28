@@ -869,6 +869,12 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
     let clip_context = selected_clip.as_ref().and_then(|clip| {
         load_clip_context_cached(project, project_root, state, clip, model_context.as_deref())
     });
+    let playback_action_context = state
+        .selected_character
+        .and_then(|character| timeline_action_context(project, character, state.selected_action))
+        .filter(|context| {
+            selected_clip.as_ref().and_then(|clip| clip.resource) == Some(context.clip)
+        });
 
     if state.last_clip_path.as_deref() != state.selected_clip_path.as_deref() {
         state.frame = 0.0;
@@ -878,6 +884,7 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
     let selected_model = state.selected_model;
 
     let mut action = None;
+    let mut authored_speed_update = None;
     ui.horizontal_wrapped(|ui| {
         if resource_combo(
             ui,
@@ -921,13 +928,16 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
         }
         clip_combo(ui, state, &clip_options);
         ui.separator();
-        action = draw_playback_controls(
+        let playback = draw_playback_controls(
             ui,
             state,
             selected_model,
             selected_clip.as_ref(),
             clip_context.as_ref().and_then(|clip| clip.animation_stats),
+            playback_action_context.map(|context| context.options),
         );
+        action = playback.action;
+        authored_speed_update = playback.authored_speed_q8;
         ui.separator();
         if draw_clip_calibration_menu(ui, project, selected_model, selected_clip.as_mut()) {
             preview_texture.take();
@@ -938,6 +948,13 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
         ui.separator();
         draw_preview_toolbar(ui, state, model_context.as_deref());
     });
+    if let (Some(context), Some(speed_q8)) = (playback_action_context, authored_speed_update) {
+        let mut options = context.options;
+        options.speed_q8 = speed_q8;
+        if store_timeline_action_options(project, context, state.selected_action, options) {
+            action = Some(AnimationViewerAction::ProjectChanged);
+        }
+    }
     let character_available = state.selected_character.is_some_and(|id| {
         project
             .resource(id)
@@ -1650,6 +1667,7 @@ struct TimelineWeaponTrack {
     fully_visible_frame: u16,
     hidden_frame: u16,
     transition_frames: u16,
+    trail: Option<psxed_project::WeaponTrailConfig>,
 }
 
 fn character_animation_set_id(
@@ -1979,10 +1997,15 @@ fn draw_animation_timeline(
                 (ui.available_width() - TIMELINE_TRACK_LABEL_WIDTH - 2.0).max(180.0);
             let content_width = canvas_available
                 .max(24.0 + max_frame.max(1) as f32 * state.timeline_pixels_per_frame);
+            let trail_track_count = weapon_tracks
+                .iter()
+                .filter(|track| track.trail.is_some())
+                .count();
             let track_count = 1
                 + usize::from(pose_track)
                 + usize::from(action_context.is_some()) * 2
                 + weapon_tracks.len()
+                + trail_track_count
                 + hitboxes.len();
             let content_height =
                 TIMELINE_RULER_HEIGHT + track_count.max(1) as f32 * TIMELINE_TRACK_HEIGHT;
@@ -1991,6 +2014,7 @@ fn draw_animation_timeline(
             let mut action_range_update = None;
             let mut push_range_update = None;
             let mut weapon_updates = Vec::new();
+            let mut weapon_trail_updates = Vec::new();
             let mut hitbox_updates = Vec::new();
 
             egui::ScrollArea::vertical()
@@ -2076,6 +2100,32 @@ fn draw_animation_timeline(
                                     if response.clicked() {
                                         state.selected_weapon_track = track.index;
                                         state.set_studio_mode(AnimationStudioMode::Weapon);
+                                    }
+                                    if let Some(trail) = &track.trail {
+                                        let trail_end = if trail.end_frame
+                                            == psxed_project::ACTION_FRAME_END_FULL
+                                        {
+                                            "clip end".to_string()
+                                        } else {
+                                            format!("frame {}", trail.end_frame)
+                                        };
+                                        let response = timeline_track_label(
+                                            ui,
+                                            "Blade trail",
+                                            &format!(
+                                                "frame {} to {} · {}f history · {} segments",
+                                                trail.start_frame,
+                                                trail_end,
+                                                trail.history_frames,
+                                                trail.segments,
+                                            ),
+                                            Color32::from_rgb(255, 132, 62),
+                                            state.selected_weapon_track == track.index,
+                                        );
+                                        if response.clicked() {
+                                            state.selected_weapon_track = track.index;
+                                            state.set_studio_mode(AnimationStudioMode::Weapon);
+                                        }
                                     }
                                 }
                                 for hitbox in &hitboxes {
@@ -2241,6 +2291,44 @@ fn draw_animation_timeline(
                                                 weapon_updates.push((track.index, start, end));
                                                 state.selected_weapon_track = track.index;
                                             }
+                                            if let Some(trail) = &track.trail {
+                                                let trail_end = if trail.end_frame
+                                                    == psxed_project::ACTION_FRAME_END_FULL
+                                                {
+                                                    action_max_frame
+                                                } else {
+                                                    trail.end_frame.min(action_max_frame)
+                                                }
+                                                .max(trail.start_frame.min(action_max_frame));
+                                                let response = draw_timeline_range_lane(
+                                                    ui,
+                                                    &format!(
+                                                        "animation-timeline-weapon-trail-{}",
+                                                        track.index
+                                                    ),
+                                                    content_width,
+                                                    action_max_frame,
+                                                    state.timeline_pixels_per_frame,
+                                                    state.frame,
+                                                    trail.start_frame.min(action_max_frame),
+                                                    trail_end,
+                                                    Color32::from_rgb(255, 132, 62),
+                                                    true,
+                                                );
+                                                if let Some(frame) = response.seek_frame {
+                                                    state.frame = frame as f32;
+                                                    state.playing = false;
+                                                    state.selected_weapon_track = track.index;
+                                                }
+                                                if let Some((start, end)) = response.range {
+                                                    weapon_trail_updates.push((
+                                                        track.index,
+                                                        start,
+                                                        end,
+                                                    ));
+                                                    state.selected_weapon_track = track.index;
+                                                }
+                                            }
                                         }
 
                                         for hitbox in &hitboxes {
@@ -2302,6 +2390,20 @@ fn draw_animation_timeline(
             }
             for (index, start, end) in weapon_updates {
                 changed |= store_timeline_weapon_range(
+                    project,
+                    character_id,
+                    index,
+                    state.selected_action,
+                    start,
+                    if end == action_max_frame {
+                        psxed_project::ACTION_FRAME_END_FULL
+                    } else {
+                        end
+                    },
+                );
+            }
+            for (index, start, end) in weapon_trail_updates {
+                changed |= store_timeline_weapon_trail_range(
                     project,
                     character_id,
                     index,
@@ -2795,6 +2897,7 @@ fn timeline_weapon_tracks(
                         fully_visible_frame: track.fully_visible_frame,
                         hidden_frame: track.hidden_frame,
                         transition_frames: track.transition_frames,
+                        trail: track.trail.clone(),
                     })
                     .collect(),
             )
@@ -2904,6 +3007,38 @@ fn store_timeline_weapon_range(
     }
     track.fully_visible_frame = fully_visible_frame;
     track.hidden_frame = hidden_frame;
+    true
+}
+
+fn store_timeline_weapon_trail_range(
+    project: &mut ProjectDocument,
+    character_id: Option<ResourceId>,
+    index: usize,
+    action: CharacterAnimationAction,
+    start_frame: u16,
+    end_frame: u16,
+) -> bool {
+    let Some(set_id) = character_animation_set_id(project, character_id) else {
+        return false;
+    };
+    let Some(resource) = project.resource_mut(set_id) else {
+        return false;
+    };
+    let ResourceData::AnimationSet(set) = &mut resource.data else {
+        return false;
+    };
+    let Some(track) = set.weapon_appearance_tracks.get_mut(index) else {
+        return false;
+    };
+    let Some(trail) = track.trail.as_mut() else {
+        return false;
+    };
+    if track.action != action || (trail.start_frame == start_frame && trail.end_frame == end_frame)
+    {
+        return false;
+    }
+    trail.start_frame = start_frame;
+    trail.end_frame = end_frame;
     true
 }
 
@@ -4228,6 +4363,7 @@ fn draw_weapon_appearance_editor(
                 fully_visible_frame: current_frame,
                 hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
                 transition_frames: psxed_project::WEAPON_APPEARANCE_DEFAULT_TRANSITION_FRAMES,
+                trail: None,
             });
         state.selected_weapon_track = set.weapon_appearance_tracks.len() - 1;
         state.preview_weapon = Some(weapon);
@@ -4485,6 +4621,140 @@ fn draw_weapon_appearance_editor(
         .small()
         .color(STUDIO_TEXT_WEAK),
     );
+
+    ui.separator();
+    ui.label(RichText::new("Blade trail").strong());
+    let mut trail_enabled = track.trail.is_some();
+    if ui
+        .checkbox(&mut trail_enabled, "Emit a PS1 Gouraud ribbon")
+        .changed()
+    {
+        track.trail = trail_enabled.then(|| {
+            let mut trail = psxed_project::WeaponTrailConfig::default();
+            trail.start_frame = current_frame;
+            trail.end_frame = current_frame.saturating_add(8).min(max_frame);
+            trail
+        });
+        changed = true;
+    }
+    if let Some(trail) = track.trail.as_mut() {
+        ui.label(
+            RichText::new(
+                "The orange lane controls emission. History reaches backward through real sampled hand poses, so the ribbon follows the authored swing.",
+            )
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Starts");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut trail.start_frame)
+                        .range(0..=max_frame)
+                        .prefix("Frame "),
+                )
+                .changed();
+            if ui.small_button("Start at playhead").clicked() {
+                trail.start_frame = current_frame;
+                changed = true;
+            }
+        });
+        let mut trail_to_clip_end = trail.end_frame == psxed_project::ACTION_FRAME_END_FULL;
+        if ui
+            .checkbox(&mut trail_to_clip_end, "Emit until clip end")
+            .changed()
+        {
+            trail.end_frame = if trail_to_clip_end {
+                psxed_project::ACTION_FRAME_END_FULL
+            } else {
+                current_frame.max(trail.start_frame).min(max_frame)
+            };
+            changed = true;
+        }
+        if !trail_to_clip_end {
+            ui.horizontal(|ui| {
+                ui.label("Stops");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut trail.end_frame)
+                            .range(trail.start_frame..=max_frame)
+                            .prefix("Frame "),
+                    )
+                    .changed();
+                if ui.small_button("End at playhead").clicked() {
+                    trail.end_frame = current_frame.max(trail.start_frame);
+                    changed = true;
+                }
+            });
+            if trail.end_frame < trail.start_frame {
+                trail.end_frame = trail.start_frame;
+                changed = true;
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("Arc history");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut trail.history_frames)
+                        .range(1..=32)
+                        .suffix(" frames"),
+                )
+                .changed();
+            ui.label("Segments");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut trail.segments)
+                        .range(1..=psxed_project::WEAPON_TRAIL_MAX_SEGMENTS),
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Blend");
+            egui::ComboBox::from_id_salt("animation-weapon-trail-blend")
+                .selected_text(match trail.blend_mode {
+                    psxed_project::WeaponTrailBlendMode::Average => "Average",
+                    psxed_project::WeaponTrailBlendMode::Add => "Add",
+                    psxed_project::WeaponTrailBlendMode::Subtract => "Subtract",
+                    psxed_project::WeaponTrailBlendMode::AddQuarter => "Add quarter",
+                })
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(
+                            &mut trail.blend_mode,
+                            psxed_project::WeaponTrailBlendMode::Average,
+                            "Average",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut trail.blend_mode,
+                            psxed_project::WeaponTrailBlendMode::Add,
+                            "Add",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut trail.blend_mode,
+                            psxed_project::WeaponTrailBlendMode::Subtract,
+                            "Subtract",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut trail.blend_mode,
+                            psxed_project::WeaponTrailBlendMode::AddQuarter,
+                            "Add quarter",
+                        )
+                        .changed();
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Hilt");
+            changed |= ui.color_edit_button_srgb(&mut trail.root_color).changed();
+            ui.label("Tip");
+            changed |= ui.color_edit_button_srgb(&mut trail.tip_color).changed();
+        });
+    }
     changed
 }
 
@@ -5147,14 +5417,30 @@ struct PreviewInteraction {
     gizmo_radius_units: Option<i32>,
 }
 
+#[derive(Default)]
+struct PlaybackControlsResponse {
+    action: Option<AnimationViewerAction>,
+    authored_speed_q8: Option<u16>,
+}
+
 fn draw_playback_controls(
     ui: &mut egui::Ui,
     state: &mut ModelAnimationViewerState,
     selected_model: Option<ResourceId>,
     clip: Option<&ViewerClipOption>,
     animation: Option<LoadedAnimationStats>,
-) -> Option<AnimationViewerAction> {
+    action_options: Option<CharacterActionOptions>,
+) -> PlaybackControlsResponse {
     let mut action = None;
+    let authored_speed_q8 = action_options.map(|options| {
+        options.speed_q8.clamp(
+            psxed_project::ACTION_SPEED_MIN_Q8,
+            psxed_project::ACTION_SPEED_MAX_Q8,
+        )
+    });
+    let playback_speed = authored_speed_q8
+        .map(|speed| f32::from(speed) / 256.0)
+        .unwrap_or_else(|| state.playback_speed.max(0.0));
     let now = ui.input(|input| input.time);
     if state.last_time_seconds <= 0.0 {
         state.last_time_seconds = now;
@@ -5163,13 +5449,14 @@ fn draw_playback_controls(
         let frame_count = animation.frame_count.max(1);
         if state.playing {
             let delta = (now - state.last_time_seconds).max(0.0) as f32;
-            let delta_frames =
-                delta * animation.sample_rate_hz as f32 * state.playback_speed.max(0.0);
+            let delta_frames = delta * animation.sample_rate_hz as f32 * playback_speed;
             let (frame, playing) = advance_animation_playback(
                 state.frame,
                 delta_frames,
                 frame_count,
-                clip.is_none_or(|clip| clip.looping),
+                action_options
+                    .map(|options| options.looping)
+                    .unwrap_or_else(|| clip.is_none_or(|clip| clip.looping)),
             );
             state.frame = frame;
             state.playing = playing;
@@ -5198,7 +5485,10 @@ fn draw_playback_controls(
         } else {
             ui.weak("No cooked animation loaded");
         }
-        return action;
+        return PlaybackControlsResponse {
+            action,
+            authored_speed_q8: None,
+        };
     };
     if !crate::editor_helpers::widget_owns_keyboard_shortcuts(ui.ctx())
         && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Space))
@@ -5262,15 +5552,84 @@ fn draw_playback_controls(
         "Frame {frame} of {max_frame} · {} Hz",
         animation.sample_rate_hz
     ));
-    ui.add(
-        egui::DragValue::new(&mut state.playback_speed)
-            .speed(0.05)
-            .range(0.1..=2.0)
-            .fixed_decimals(1)
-            .suffix("×"),
-    )
-    .on_hover_text("Playback speed");
-    action
+    let mut authored_speed_update = None;
+    if let Some(options) = action_options {
+        ui.label(
+            RichText::new("Action speed")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+        let mut speed = f32::from(authored_speed_q8.unwrap_or(256)) / 256.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut speed)
+                    .speed(0.01)
+                    .range(0.25..=4.0)
+                    .fixed_decimals(2)
+                    .suffix("×"),
+            )
+            .on_hover_text(
+                "Saved speed for this action. Preview, attack duration, hit windows, and in-game playback use this value.",
+            )
+            .changed()
+        {
+            authored_speed_update = Some((speed * 256.0).round().clamp(
+                psxed_project::ACTION_SPEED_MIN_Q8 as f32,
+                psxed_project::ACTION_SPEED_MAX_Q8 as f32,
+            ) as u16);
+        }
+        let metrics_speed = authored_speed_update.unwrap_or(options.speed_q8).clamp(
+            psxed_project::ACTION_SPEED_MIN_Q8,
+            psxed_project::ACTION_SPEED_MAX_Q8,
+        );
+        let effective_fps = f32::from(animation.sample_rate_hz) * f32::from(metrics_speed) / 256.0;
+        let duration = action_duration_seconds(animation, options, metrics_speed);
+        ui.label(
+            RichText::new(format!("{effective_fps:.1} fps · {duration:.2} s"))
+                .monospace()
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        )
+        .on_hover_text("Effective sampled rate and duration of the selected action range");
+    } else {
+        ui.label(
+            RichText::new("Preview speed")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+        ui.add(
+            egui::DragValue::new(&mut state.playback_speed)
+                .speed(0.05)
+                .range(0.25..=4.0)
+                .fixed_decimals(2)
+                .suffix("×"),
+        )
+        .on_hover_text(
+            "Temporary preview-only speed; select a character action to author runtime speed",
+        );
+    }
+    PlaybackControlsResponse {
+        action,
+        authored_speed_q8: authored_speed_update,
+    }
+}
+
+fn action_duration_seconds(
+    animation: LoadedAnimationStats,
+    options: CharacterActionOptions,
+    speed_q8: u16,
+) -> f32 {
+    let last = animation.frame_count.saturating_sub(2);
+    let start = options.frame_start.min(last);
+    let end = if options.frame_end == psxed_project::ACTION_FRAME_END_FULL {
+        last
+    } else {
+        options.frame_end.min(last)
+    }
+    .max(start);
+    let frames = end.saturating_sub(start).saturating_add(1);
+    let speed = f32::from(speed_q8.max(1)) / 256.0;
+    f32::from(frames) / (f32::from(animation.sample_rate_hz.max(1)) * speed)
 }
 
 fn advance_animation_playback(
@@ -6997,6 +7356,7 @@ mod focus_tests {
         );
 
         let mut options = context.options;
+        options.speed_q8 = 384;
         options.frame_start = 4;
         options.frame_end = 12;
         assert!(store_timeline_action_options(
@@ -7061,6 +7421,21 @@ mod focus_tests {
     }
 
     #[test]
+    fn action_duration_reports_saved_speed_and_selected_frame_range() {
+        let animation = LoadedAnimationStats {
+            frame_count: 11,
+            sample_rate_hz: 10,
+        };
+        let mut options = CharacterActionOptions::for_action(CharacterAnimationAction::LightAttack);
+        assert!((action_duration_seconds(animation, options, 256) - 1.0).abs() < 0.001);
+        assert!((action_duration_seconds(animation, options, 512) - 0.5).abs() < 0.001);
+
+        options.frame_start = 2;
+        options.frame_end = 5;
+        assert!((action_duration_seconds(animation, options, 256) - 0.4).abs() < 0.001);
+    }
+
+    #[test]
     fn combo_weapon_preview_collects_every_authored_lane() {
         let (mut project, character, animation_set, _) = timeline_fixture();
         let light = project.add_resource(
@@ -7084,6 +7459,7 @@ mod focus_tests {
                 fully_visible_frame: 25,
                 hidden_frame: 44,
                 transition_frames: 8,
+                trail: None,
             },
             psxed_project::WeaponAppearanceTrack {
                 action: CharacterAnimationAction::ComboAttack,
@@ -7092,6 +7468,7 @@ mod focus_tests {
                 fully_visible_frame: 44,
                 hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
                 transition_frames: 8,
+                trail: None,
             },
             psxed_project::WeaponAppearanceTrack {
                 action: CharacterAnimationAction::ComboAttack,
@@ -7100,6 +7477,7 @@ mod focus_tests {
                 fully_visible_frame: 35,
                 hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
                 transition_frames: 8,
+                trail: None,
             },
         ];
 
@@ -7144,6 +7522,7 @@ mod focus_tests {
             fully_visible_frame: 0,
             hidden_frame: psxed_project::ACTION_FRAME_END_FULL,
             transition_frames: 0,
+            trail: None,
         }];
 
         assert!(weapon_appearance_pair_is_used(
@@ -8147,6 +8526,7 @@ mod focus_tests {
             fully_visible_frame: 12,
             hidden_frame: 24,
             transition_frames: 4,
+            trail: None,
         };
         assert_eq!(preview_weapon_materialization_q12(&track, 7.0, 30), 0);
         assert_eq!(preview_weapon_materialization_q12(&track, 8.0, 30), 0);
@@ -8181,6 +8561,7 @@ mod focus_tests {
             fully_visible_frame: 6,
             hidden_frame: 9,
             transition_frames: 0,
+            trail: None,
         };
         assert_eq!(preview_weapon_materialization_q12(&track, 5.99, 20), 0);
         assert_eq!(preview_weapon_materialization_q12(&track, 6.0, 20), 4096);

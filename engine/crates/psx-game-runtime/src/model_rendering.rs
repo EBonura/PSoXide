@@ -12,13 +12,13 @@ use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
 use psx_engine::{
     telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping, ModelUvOffset,
-    PredecodedModelInfo, PrimitiveSink, ProjectedVertex, RoomPoint, SimTick, TexturedModelGeometry,
-    TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats, VideoHz, WorldCamera,
-    WorldRenderPass, WorldSurfaceOptions, WorldVertex,
+    PredecodedModelInfo, PrimitiveSink, ProjectedLit, ProjectedVertex, RoomPoint, SimTick,
+    TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats,
+    VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
-    prim::{LineMono, TriTextured},
+    prim::{LineMono, QuadGouraudBlended, TriTextured},
 };
 use psx_level::{
     model_clip_flags, model_override_blend, AssetId, AssetKind, CharacterAnimationAction,
@@ -26,7 +26,7 @@ use psx_level::{
     LevelModelClipRecord, LevelModelFrameBoundsRecord, LevelModelInstanceRecord,
     LevelModelMaterialOverride, LevelModelRecord, LevelModelSecondaryLayer, LevelModelSocketRecord,
     LevelWeaponRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
-    RoomIndex, WeaponHitboxRecord,
+    RoomIndex, WeaponAppearanceRecord, WeaponHitShapeRecord, WeaponHitboxRecord,
 };
 use psx_math::int32::{clamp_i16, square_i32_saturating};
 
@@ -1605,6 +1605,46 @@ pub fn draw_player_equipment_from_pose<
         options,
         lighting,
         triangles,
+        world,
+    )
+}
+
+/// Draw action-authored PS1 Gouraud weapon ribbons from a retained player
+/// pose. Trail timing belongs to the character Animation Set, so the cooked
+/// appearance table is supplied separately from the model tables.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn draw_player_weapon_trails_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const OT_DEPTH: usize,
+>(
+    tables: ModelTables,
+    appearances: &'static [WeaponAppearanceRecord],
+    character: psx_level::CharacterIndex,
+    action: CharacterAnimationAction,
+    wire_q12: [u16; MAX_PLAYER_EQUIPMENT],
+    player_pose: PlayerActorPoseSnapshot,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    quads: &mut impl PrimitiveSink<QuadGouraudBlended>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> psx_engine::WorldRenderStats {
+    equipment::draw_player_weapon_trails_from_pose(
+        tables,
+        appearances,
+        character,
+        action,
+        wire_q12,
+        player_pose,
+        models,
+        model_parts,
+        model_vertices,
+        camera,
+        options,
+        quads,
         world,
     )
 }

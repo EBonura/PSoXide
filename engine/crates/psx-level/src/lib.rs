@@ -3238,8 +3238,40 @@ pub struct WeaponAppearanceRecord {
     pub hidden_frame: u16,
     /// Sampled frames used by both visibility ramps; zero is an instant cut.
     pub transition_frames: u16,
-    /// Reserved.
+    /// First sampled frame that emits a blade ribbon.
+    pub trail_start_frame: u16,
+    /// Last sampled frame that emits a blade ribbon.
+    pub trail_end_frame: u16,
+    /// Authored sampled-frame history reconstructed behind the current pose.
+    pub trail_history_frames: u16,
+    /// Number of ribbon quads, bounded by the runtime's fixed scratch.
+    pub trail_segments: u8,
+    /// Native PS1 semi-transparency equation; see [`weapon_trail_blend_mode`].
+    pub trail_blend_mode: u8,
+    /// Hilt-side ribbon colour.
+    pub trail_root_color: [u8; 3],
+    /// Tip-side ribbon colour.
+    pub trail_tip_color: [u8; 3],
+    /// [`weapon_appearance_flags`] bits.
     pub flags: u16,
+}
+
+/// [`WeaponAppearanceRecord::flags`] bits.
+pub mod weapon_appearance_flags {
+    /// This action/weapon/socket tuple emits a blade trail.
+    pub const TRAIL: u16 = 1 << 0;
+}
+
+/// Compact native blend-mode values stored in [`WeaponAppearanceRecord`].
+pub mod weapon_trail_blend_mode {
+    /// `(background + ribbon) / 2`.
+    pub const AVERAGE: u8 = 0;
+    /// `background + ribbon`, clamped.
+    pub const ADD: u8 = 1;
+    /// `background - ribbon`, clamped.
+    pub const SUBTRACT: u8 = 2;
+    /// `background + ribbon / 4`, clamped.
+    pub const ADD_QUARTER: u8 = 3;
 }
 
 /// One placed point light. Coordinates are room-local engine

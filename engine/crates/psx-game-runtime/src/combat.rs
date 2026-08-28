@@ -296,6 +296,164 @@ pub fn combat_capsules_overlap(a: &WorldCombatCapsule, b: &WorldCombatCapsule) -
     distance_sq <= radii.saturating_mul(radii)
 }
 
+/// Clip one consecutive pose interval to an inclusive active-frame window.
+///
+/// When `previous_phase_q12` is absent, only the current pose can participate.
+/// With a consecutive pose, this also catches a fast action which enters and
+/// leaves the entire active window between two simulation ticks.
+pub fn active_frame_sweep_phase_range(
+    previous_phase_q12: Option<u32>,
+    current_phase_q12: u32,
+    active_start_frame: u16,
+    active_end_frame: u16,
+) -> Option<(u32, u32)> {
+    let active_start_q12 = u32::from(active_start_frame) << 12;
+    let active_end_q12 = (u32::from(active_end_frame.max(active_start_frame)).saturating_add(1)
+        << 12)
+        .saturating_sub(1);
+    let Some(previous_phase_q12) = previous_phase_q12 else {
+        return (current_phase_q12 >= active_start_q12 && current_phase_q12 <= active_end_q12)
+            .then_some((current_phase_q12, current_phase_q12));
+    };
+    if current_phase_q12 < previous_phase_q12 {
+        return None;
+    }
+    let start = previous_phase_q12.max(active_start_q12);
+    let end = current_phase_q12.min(active_end_q12);
+    (start <= end).then_some((start, end))
+}
+
+/// Number of temporal intervals used by the retained-pose melee sweep.
+///
+/// Nine complete blade samples are still cheap after the swept AABB rejection.
+/// The conservative radius between samples is at most one sixteenth of the
+/// greatest endpoint displacement over the tick.
+const COMBAT_CAPSULE_MOTION_INTERVALS: i32 = 8;
+
+/// Broad phase for a capsule moving from `previous` to `current` in one tick.
+///
+/// The endpoint paths are linear over the retained-pose interval. The extra
+/// radius covers the unsampled time between the nine complete blade poses, so
+/// this AABB encloses the whole swept blade rather than only its endpoints.
+pub fn combat_capsule_motion_aabbs_overlap(
+    previous: &WorldCombatCapsule,
+    current: &WorldCombatCapsule,
+    target: &WorldCombatCapsule,
+) -> bool {
+    let radius = i32::from(combat_capsule_motion_radius(previous, current));
+    let target_radius = i32::from(target.radius);
+    let mut axis = 0usize;
+    while axis < 3 {
+        let moving_min = previous.start[axis]
+            .min(previous.end[axis])
+            .min(current.start[axis])
+            .min(current.end[axis])
+            .saturating_sub(radius);
+        let moving_max = previous.start[axis]
+            .max(previous.end[axis])
+            .max(current.start[axis])
+            .max(current.end[axis])
+            .saturating_add(radius);
+        let target_min = target.start[axis]
+            .min(target.end[axis])
+            .saturating_sub(target_radius);
+        let target_max = target.start[axis]
+            .max(target.end[axis])
+            .saturating_add(target_radius);
+        if moving_max < target_min || target_max < moving_min {
+            return false;
+        }
+        axis += 1;
+    }
+    true
+}
+
+/// Test a capsule's complete retained-pose motion against a target capsule.
+///
+/// Discrete overlap alone can tunnel when an attack advances far enough that
+/// the sword is clear on both simulation ticks but crosses a hurtbox between
+/// them. Nine complete interpolated blade capsules sample the interval. Each is
+/// expanded by half the greatest endpoint travel between adjacent samples, so
+/// every unsampled blade pose is contained by its nearest sample. This covers
+/// the full linearly swept blade, including its interior, with only bounded
+/// 32-bit integer work.
+pub fn combat_capsule_motion_overlaps(
+    previous: &WorldCombatCapsule,
+    current: &WorldCombatCapsule,
+    target: &WorldCombatCapsule,
+) -> bool {
+    if !combat_capsule_motion_aabbs_overlap(previous, current, target) {
+        return false;
+    }
+    if combat_capsules_overlap(previous, target) || combat_capsules_overlap(current, target) {
+        return true;
+    }
+
+    let radius = combat_capsule_motion_radius(previous, current);
+    let mut sample = 0i32;
+    while sample <= COMBAT_CAPSULE_MOTION_INTERVALS {
+        let sampled = sample_capsule_motion(previous, current, sample, radius);
+        if combat_capsules_overlap(&sampled, target) {
+            return true;
+        }
+        sample += 1;
+    }
+    false
+}
+
+fn combat_capsule_motion_radius(
+    previous: &WorldCombatCapsule,
+    current: &WorldCombatCapsule,
+) -> u16 {
+    // L1 distance is a conservative, square-root-free upper bound on endpoint
+    // travel. Any point along the blade moves no faster than the faster of its
+    // two endpoints under linear interpolation. Half one temporal interval is
+    // therefore the furthest an unsampled pose can sit from its nearest sample.
+    let longest = point_l1_distance(previous.start, current.start)
+        .max(point_l1_distance(previous.end, current.end));
+    let diameter_intervals = (COMBAT_CAPSULE_MOTION_INTERVALS as u32).saturating_mul(2);
+    let coverage = longest.div_ceil(diameter_intervals.max(1));
+    previous
+        .radius
+        .max(current.radius)
+        .saturating_add(coverage.min(u32::from(u16::MAX)) as u16)
+}
+
+fn point_l1_distance(a: [i32; 3], b: [i32; 3]) -> u32 {
+    a[0].abs_diff(b[0])
+        .saturating_add(a[1].abs_diff(b[1]))
+        .saturating_add(a[2].abs_diff(b[2]))
+}
+
+fn sample_capsule_motion(
+    previous: &WorldCombatCapsule,
+    current: &WorldCombatCapsule,
+    sample: i32,
+    radius: u16,
+) -> WorldCombatCapsule {
+    let interpolate = |from: [i32; 3], to: [i32; 3], axis: usize| {
+        let delta = to[axis].saturating_sub(from[axis]);
+        let whole = delta / COMBAT_CAPSULE_MOTION_INTERVALS;
+        let remainder = delta % COMBAT_CAPSULE_MOTION_INTERVALS;
+        from[axis]
+            .saturating_add(whole.saturating_mul(sample))
+            .saturating_add(remainder.saturating_mul(sample) / COMBAT_CAPSULE_MOTION_INTERVALS)
+    };
+    WorldCombatCapsule {
+        start: [
+            interpolate(previous.start, current.start, 0),
+            interpolate(previous.start, current.start, 1),
+            interpolate(previous.start, current.start, 2),
+        ],
+        end: [
+            interpolate(previous.end, current.end, 0),
+            interpolate(previous.end, current.end, 1),
+            interpolate(previous.end, current.end, 2),
+        ],
+        radius,
+    }
+}
+
 /// Return the earliest Q12 phase at which a swept capsule reaches `target`.
 ///
 /// `sweep.start` is the moving sphere's position before a simulation tick and
@@ -672,6 +830,62 @@ mod tests {
         let b = capsule([100, 0, 0], [110, 0, 0], 4);
         assert!(!combat_capsule_aabbs_overlap(&a, &b));
         assert!(!combat_capsules_overlap(&a, &b));
+    }
+
+    #[test]
+    fn capsule_motion_catches_a_blade_crossing_between_clear_poses() {
+        let previous = capsule([-600, -400, 0], [-600, 400, 0], 12);
+        let current = capsule([600, -400, 0], [600, 400, 0], 12);
+        let target = capsule([0, -40, 0], [0, 40, 0], 32);
+
+        assert!(!combat_capsules_overlap(&previous, &target));
+        assert!(!combat_capsules_overlap(&current, &target));
+        assert!(combat_capsule_motion_aabbs_overlap(
+            &previous, &current, &target
+        ));
+        assert!(combat_capsule_motion_overlaps(&previous, &current, &target));
+    }
+
+    #[test]
+    fn active_frame_sweep_clips_entry_exit_and_a_fully_skipped_window() {
+        assert_eq!(
+            active_frame_sweep_phase_range(Some(9 << 12), 12 << 12, 10, 20),
+            Some((10 << 12, 12 << 12))
+        );
+        assert_eq!(
+            active_frame_sweep_phase_range(Some(19 << 12), 22 << 12, 10, 20),
+            Some((19 << 12, (21 << 12) - 1))
+        );
+        assert_eq!(
+            active_frame_sweep_phase_range(Some(9 << 12), 22 << 12, 10, 20),
+            Some((10 << 12, (21 << 12) - 1))
+        );
+        assert_eq!(
+            active_frame_sweep_phase_range(Some(2 << 12), 8 << 12, 10, 20),
+            None
+        );
+        assert_eq!(
+            active_frame_sweep_phase_range(None, 12 << 12, 10, 20),
+            Some((12 << 12, 12 << 12))
+        );
+    }
+
+    #[test]
+    fn capsule_motion_covers_the_blade_interior_and_rejects_separation() {
+        // The target is midway along a long blade. Sweeping only the two blade
+        // endpoints would miss it; each temporal sample retains the full blade.
+        let previous = capsule([-400, -800, 0], [-400, 800, 0], 8);
+        let current = capsule([400, -800, 0], [400, 800, 0], 8);
+        let middle = capsule([0, 0, 0], [0, 0, 0], 24);
+        assert!(combat_capsule_motion_overlaps(&previous, &current, &middle));
+
+        let separated = capsule([0, 0, 500], [0, 0, 500], 24);
+        assert!(!combat_capsule_motion_aabbs_overlap(
+            &previous, &current, &separated
+        ));
+        assert!(!combat_capsule_motion_overlaps(
+            &previous, &current, &separated
+        ));
     }
 
     #[test]

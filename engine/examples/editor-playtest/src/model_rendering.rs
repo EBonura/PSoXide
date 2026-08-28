@@ -367,6 +367,7 @@ impl Playtest {
     /// equipment sockets, and combat consume these values until the next tick.
     pub(super) fn refresh_actor_pose_snapshots(&mut self, ctx: &Ctx) {
         let player = self.motor.position();
+        self.previous_player_actor_pose = self.player_actor_pose;
         self.player_actor_pose = self.character.and_then(|character| {
             mr::resolve_player_actor_pose(
                 model_tables(),
@@ -432,6 +433,7 @@ impl Playtest {
 
     pub(super) fn clear_actor_pose_snapshots(&mut self) {
         self.player_actor_pose = None;
+        self.previous_player_actor_pose = None;
         for pose in self.instance_actor_poses.iter_mut() {
             *pose = None;
         }
@@ -546,6 +548,7 @@ pub(super) fn draw_instance_equipment(
 
 /// Draw the player's attached equipment through the crate policy.
 pub(super) fn draw_player_equipment(
+    anim: PlayerAnim,
     wire_q12: [u16; mr::MAX_PLAYER_EQUIPMENT],
     player_pose: PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -558,13 +561,15 @@ pub(super) fn draw_player_equipment(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
+    triangles: &mut (impl PrimitiveSink<TriTextured>
+              + PrimitiveSink<psx_gpu::prim::LineMono>
+              + PrimitiveSink<psx_gpu::prim::QuadGouraudBlended>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     let mut knobs = MODEL_DRAW_KNOBS;
     knobs.equipment_wire_q12 = wire_q12;
     knobs.equipment_wireframe = true;
-    mr::draw_player_equipment_from_pose::<
+    let mut out = mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,
         MAX_RUNTIME_MODEL_CLIPS,
         MODEL_VERTEX_CAP,
@@ -588,7 +593,39 @@ pub(super) fn draw_player_equipment(
         lighting,
         triangles,
         world,
-    )
+    );
+    if let Some(controller) = PLAYER_CONTROLLER {
+        let trail = mr::draw_player_weapon_trails_from_pose::<MAX_RUNTIME_MODELS, OT_DEPTH>(
+            model_tables(),
+            WEAPON_APPEARANCES,
+            controller.character,
+            anim.action(),
+            wire_q12,
+            player_pose,
+            models,
+            model_parts,
+            model_vertices,
+            camera,
+            options,
+            triangles,
+            world,
+        );
+        out.stats.submitted_triangles = out
+            .stats
+            .submitted_triangles
+            .saturating_add(trail.submitted_triangles);
+        out.stats.culled_triangles = out
+            .stats
+            .culled_triangles
+            .saturating_add(trail.culled_triangles);
+        out.stats.dropped_triangles = out
+            .stats
+            .dropped_triangles
+            .saturating_add(trail.dropped_triangles);
+        out.stats.primitive_overflow |= trail.primitive_overflow;
+        out.stats.command_overflow |= trail.command_overflow;
+    }
+    out
 }
 
 /// Animate + draw the placed model instances of `current_room` through
