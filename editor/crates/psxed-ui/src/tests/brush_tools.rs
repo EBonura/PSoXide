@@ -2464,18 +2464,20 @@ fn brush_tool_drag_creates_selectable_undoable_brush() {
     );
     assert!(harness.workspace.brush_drag.is_none(), "drag state cleared");
 
-    // Clicking over the middle of the dragged footprint re-picks it and
-    // selects the face the ray entered.
+    // Selection is deliberately separate from Draw mode. Switching to
+    // Select lets a click re-pick the brush and the face the ray entered.
     harness.workspace.selected_brush = None;
     harness.workspace.selected_brush_face = None;
+    harness.workspace.active_tool = ViewTool::Select;
+    let select_tool = tool_impl_3d(ViewTool::Select);
     let click = brush_frame(&harness, Pos2::new(400.0, 350.0));
-    tool.primary_clicked(&mut harness.workspace, &click);
+    select_tool.primary_clicked(&mut harness.workspace, &click);
     assert_eq!(harness.workspace.selected_brush, Some(0));
     assert!(harness.workspace.selected_brush_face.is_some());
 
     // Clicking empty sky clears the selection.
     let sky = brush_frame(&harness, Pos2::new(400.0, 10.0));
-    tool.primary_clicked(&mut harness.workspace, &sky);
+    select_tool.primary_clicked(&mut harness.workspace, &sky);
     assert_eq!(harness.workspace.selected_brush, None);
 
     // The create is one undo step.
@@ -2485,6 +2487,25 @@ fn brush_tool_drag_creates_selectable_undoable_brush() {
         0,
         "undo removes the brush"
     );
+}
+
+#[test]
+fn brush_tool_starts_creation_over_existing_selected_geometry() {
+    let mut harness = ViewportHarness::floored_room("brush_tool_draw_over_existing", 4);
+    harness.frame(harness.room_center(), 3000.0);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.replace_brush_selection(0, Some(0));
+    let tool = tool_impl_3d(ViewTool::Brush);
+    let press = brush_frame(&harness, Pos2::new(400.0, 350.0));
+
+    tool.primary_pressed(&mut harness.workspace, &press);
+
+    assert!(
+        harness.workspace.brush_drag.is_some(),
+        "existing geometry must not intercept a Draw gesture"
+    );
+    assert_eq!(harness.workspace.selected_brush, None);
+    assert_eq!(harness.workspace.selected_brush_face, None);
 }
 
 #[test]

@@ -1722,6 +1722,28 @@ fn tool_group_cycle_follows_the_flat_bsp_mode_strip() {
 }
 
 #[test]
+fn draw_mode_clears_existing_brush_and_element_selection() {
+    let mut workspace = EditorWorkspace::with_project(
+        test_temp_dir("draw-clears-brush-selection"),
+        ProjectDocument::new("draw-clears-brush-selection"),
+    );
+    workspace.selected_brush = Some(2);
+    workspace.selected_brushes = vec![1, 2];
+    workspace.selected_brush_face = Some(4);
+    workspace.selected_brush_faces = vec![(2, 4)];
+    workspace.selected_brush_elements = vec![BrushElement::Vertex([16, 32, 48])];
+
+    workspace.set_bsp_toolbar_mode(BspToolbarMode::Draw);
+
+    assert_eq!(workspace.active_tool, ViewTool::Brush);
+    assert_eq!(workspace.selected_brush, None);
+    assert!(workspace.selected_brushes.is_empty());
+    assert_eq!(workspace.selected_brush_face, None);
+    assert!(workspace.selected_brush_faces.is_empty());
+    assert!(workspace.selected_brush_elements.is_empty());
+}
+
+#[test]
 fn place_kind_selection_does_not_claim_a_bsp_toolbar_mode() {
     let mut workspace = EditorWorkspace::with_project(
         test_temp_dir("place-kind-toolbar"),
