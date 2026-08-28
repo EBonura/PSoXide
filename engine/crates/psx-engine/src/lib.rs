@@ -127,21 +127,38 @@ pub use character_motor::{
     CharacterMotorInput, CharacterMotorState,
 };
 pub use classic_affine::{
-    compose_classic_alias_transform, materialize_classic_affine_baked_light_vertices,
+    census_classic_affine_projected_batch_topology,
+    collect_classic_affine_indexed_projection_slots,
+    collect_classic_affine_projected_subdivision_requests, compose_classic_alias_transform,
+    materialize_classic_affine_baked_light_vertices,
     materialize_classic_affine_indexed_baked_vertices,
+    materialize_classic_affine_indexed_baked_vertices_with_projection_slots,
     materialize_classic_affine_indexed_projected_vertices,
     materialize_classic_affine_indexed_vertices, materialize_classic_affine_word_vertices,
-    project_classic_affine_indexed_vertices, submit_classic_affine_batch,
-    submit_classic_affine_fan, submit_classic_affine_mixed_batch, submit_classic_affine_packed_fan,
+    materialize_project_classic_affine_indexed_baked_vertices,
+    materialize_project_classic_affine_indexed_batch, project_classic_affine_indexed_vertices,
+    project_classic_affine_indexed_vertices_dense, project_classic_affine_vertices,
+    submit_classic_affine_batch, submit_classic_affine_fan, submit_classic_affine_mixed_batch,
+    submit_classic_affine_packed_fan, submit_classic_affine_planned_resident_batch,
     submit_classic_affine_projected_batch, submit_classic_affine_projected_fan,
-    submit_classic_affine_scoped_windowed_batch, submit_classic_affine_scoped_windowed_fan,
-    submit_classic_affine_windowed_batch, submit_classic_affine_windowed_fan,
-    submit_classic_alias_model, submit_classic_alias_view_model, ClassicAffineBatchSurface,
-    ClassicAffineIndexedCorner, ClassicAffineMixedBatchSurface, ClassicAffinePosition,
-    ClassicAffineProfile, ClassicAffineProjectedVertex, ClassicAffineSourceVertex,
-    ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWindowedBatchSurface,
-    ClassicAffineWordSourceVertex, ClassicAliasFace, ClassicAliasProjectedVertex,
-    ClassicAliasVertex,
+    submit_classic_affine_resident_batch, submit_classic_affine_scoped_windowed_batch,
+    submit_classic_affine_scoped_windowed_fan, submit_classic_affine_windowed_batch,
+    submit_classic_affine_windowed_fan, submit_classic_alias_model,
+    submit_classic_alias_view_model, ClassicAffineBatchSurface, ClassicAffineIndexedBatchSource,
+    ClassicAffineIndexedCorner, ClassicAffineMixedBatchSurface, ClassicAffinePacketPlan,
+    ClassicAffinePlannedSubmit, ClassicAffinePosition, ClassicAffineProfile,
+    ClassicAffineProjectedVertex, ClassicAffineResidentBatchSurface, ClassicAffineResidentSubmit,
+    ClassicAffineSourceVertex, ClassicAffineSubdivisionRequest, ClassicAffineSubmit,
+    ClassicAffineTopologyCensus, ClassicAffineTopologyKey, ClassicAffineVertex,
+    ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
+    ClassicAliasProjectedVertex, ClassicAliasVertex,
+};
+#[cfg(feature = "classic-affine-quake-specialized-kernel")]
+pub use classic_affine::submit_quake_classic_affine_batch;
+#[cfg(feature = "classic-affine-subdivision-cache")]
+pub use classic_affine::{
+    submit_classic_affine_cached_subdivision_batch, ClassicAffineSubdivisionCacheSink,
+    ClassicAffineSubdivisionRootSlot,
 };
 pub use collision_query::{
     trace_collision, CollisionQueryError, CollisionTrace, CollisionTraceProvider,
