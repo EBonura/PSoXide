@@ -147,6 +147,7 @@ pub const GAMEPLAY_ONLY: GameFlow = GameFlow {
     states: &[FlowState::Gameplay],
     scene_states: &[],
     entry: 0,
+    transition: LevelTransition::NONE,
 };
 
 /// `Copy` reduction of the resolved [`FlowState`] for the current cursor
@@ -275,6 +276,25 @@ pub(crate) struct FlowTransition {
     pub(crate) spec: LevelTransition,
     pub(crate) elapsed: u16,
     switched: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum UiActivationAction {
+    Ui(LevelUiAction),
+    LoadingConfirm,
+}
+
+/// One CROSS-triggered confirmation beat. The source scene and node remain
+/// active until `elapsed` reaches [`ui::ACTIVATION_ECHO_FRAMES`], at which
+/// point the stored action is dispatched. Keeping this in the flow driver
+/// makes loading prompts and ordinary menu buttons share exactly one timing
+/// path instead of relying on scene-specific timers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct UiActivation {
+    scene: u16,
+    node: u16,
+    elapsed: u16,
+    action: UiActivationAction,
 }
 
 impl FlowTransition {
@@ -731,7 +751,10 @@ pub struct GameApp<'a, S: Scene> {
     /// Active full-screen transition, if a button-triggered flow change is
     /// delaying the cursor switch.
     transition: Option<FlowTransition>,
-    /// Loading-to-gameplay block dissolve. This is separate from authored
+    /// Active local confirmation echo. Its action is intentionally deferred
+    /// until the source control has remained visible for the whole beat.
+    ui_activation: Option<UiActivation>,
+    /// Loading-to-gameplay fade dissolve. This is separate from authored
     /// flow transitions because the gameplay state is already initialized
     /// behind the loading card; its midpoint only changes which side renders.
     loading_exit_transition: Option<FlowTransition>,
@@ -790,16 +813,26 @@ fn advance_loading_progress_q12(current: i32, target: i32) -> i32 {
     current + step
 }
 
-/// PS1-cheap two-sided handoff: deterministic blocks cover the loading card,
-/// gameplay replaces it at full coverage, then the same blocks peel away.
-const LOADING_EXIT_DISSOLVE: LevelTransition = LevelTransition {
-    kind: LevelTransitionKind::BlockDissolve,
+/// Compatibility fallback for projects that have not authored a global screen
+/// transition. Projects with one configured use that exact transition for the
+/// loading-to-gameplay handoff as well as their ordinary menu navigation.
+const LOADING_EXIT_FADE_FALLBACK: LevelTransition = LevelTransition {
+    kind: LevelTransitionKind::Fade,
     frames: 36,
     color: [4, 2, 4],
     seed: 0x71d5,
 };
 
 impl<'a, S: Scene> GameApp<'a, S> {
+    #[inline]
+    fn loading_exit_transition_spec(&self) -> LevelTransition {
+        if self.flow.transition.is_active() {
+            self.flow.transition
+        } else {
+            LOADING_EXIT_FADE_FALLBACK
+        }
+    }
+
     /// Build a driver over `flow`, borrowing `gameplay`. The cursor is
     /// positioned at `flow.entry`; nothing runs until [`Scene::init`].
     /// The option value store is seeded from each [`LevelOptionDef::default`]
@@ -839,6 +872,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             ui_sfx_runtime_len: 0,
             ui_sfx_cursor: 0,
             transition: None,
+            ui_activation: None,
             loading_exit_transition: None,
             loading_scene,
             loading_progress_q12: 0,
@@ -1135,6 +1169,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // Acquire/release scene resources before the cursor moves and before
         // any gameplay init below reads them.
         self.switch_resources(state_index, ctx);
+        self.ui_text_seed = (ctx.sim_tick.as_u32() as u16)
+            .wrapping_mul(109)
+            .wrapping_add(state_index.wrapping_mul(257))
+            .wrapping_add(1);
         self.cursor.current = state_index;
         self.cursor.return_to = return_to;
         self.cursor.menu_focus = MENU_FOCUS_NONE;
@@ -1184,7 +1222,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn request_flow_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
-        self.enter_or_load_flow_state(state_index, return_to, ctx);
+        self.request_flow_state_transition(state_index, return_to, self.flow.transition, ctx);
     }
 
     fn request_flow_state_transition(
@@ -1295,14 +1333,26 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 || ctx.just_pressed(button::CROSS)
                 || ctx.just_pressed(button::START);
             if self.loading_confirm_ready && confirmed {
-                flow_trace("psx-engine: loading ready");
-                self.cursor.mark_loading_ready();
                 if self.loading_scene_active() {
-                    self.loading_exit_transition = Some(FlowTransition::new(
-                        self.cursor.current,
-                        self.cursor.return_to,
-                        LOADING_EXIT_DISSOLVE,
-                    ));
+                    if let Some(node_index) = self.loading_activation_node() {
+                        self.begin_ui_activation(
+                            self.loading_scene,
+                            node_index,
+                            UiActivationAction::LoadingConfirm,
+                        );
+                    } else {
+                        flow_trace("psx-engine: loading ready");
+                        self.cursor.mark_loading_ready();
+                        let transition = self.loading_exit_transition_spec();
+                        self.loading_exit_transition = Some(FlowTransition::new(
+                            self.cursor.current,
+                            self.cursor.return_to,
+                            transition,
+                        ));
+                    }
+                } else {
+                    flow_trace("psx-engine: loading ready");
+                    self.cursor.mark_loading_ready();
                 }
             }
             return;
@@ -1376,21 +1426,6 @@ impl<'a, S: Scene> GameApp<'a, S> {
                     .find(|(index, _)| self.tag_at(*index as u16).ui_scene() == Some(scene_id))
                     .map(|(index, _)| index as u16)
             })
-    }
-
-    /// Switch the cursor onto UI-scene flow `state_index`, remembering
-    /// `return_to` for a later `Back`, and clear the resolved focus so
-    /// the new scene re-seeds from [`first_focus`] on its first update.
-    fn enter_ui_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
-        self.ui_text_seed = (ctx.sim_tick.as_u32() as u16)
-            .wrapping_mul(109)
-            .wrapping_add(state_index.wrapping_mul(257))
-            .wrapping_add(1);
-        self.switch_resources(state_index, ctx);
-        self.cursor.current = state_index;
-        self.cursor.return_to = return_to;
-        self.cursor.menu_focus = MENU_FOCUS_NONE;
-        self.cursor.intro_timer = 0;
     }
 
     /// Resolve, and lazily seed, the focused *pool* index for the scene
@@ -1594,10 +1629,74 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .unwrap_or(0)
     }
 
+    fn begin_ui_activation(&mut self, scene: u16, node_index: usize, action: UiActivationAction) {
+        if self.ui_activation.is_some() || node_index > usize::from(u16::MAX) {
+            return;
+        }
+        self.ui_activation = Some(UiActivation {
+            scene,
+            node: node_index as u16,
+            elapsed: 0,
+            action,
+        });
+    }
+
+    /// Advance a pending confirmation and dispatch its action only after the
+    /// source control has shown every echo frame. Returns `true` while a beat
+    /// was active, including the dispatching tick, so the caller cannot also
+    /// process a second input edge against the old scene.
+    fn update_ui_activation(&mut self, ctx: &mut Ctx) -> bool {
+        let Some(mut activation) = self.ui_activation else {
+            return false;
+        };
+        // This is presentation-critical feedback, not a timer that may be
+        // skipped during simulation catch-up. Yield each contour step to a
+        // visible frame before allowing the action to leave this screen.
+        ctx.request_visual_checkpoint();
+        activation.elapsed = activation.elapsed.saturating_add(1);
+        if activation.elapsed < ui::ACTIVATION_ECHO_FRAMES {
+            self.ui_activation = Some(activation);
+            return true;
+        }
+
+        self.ui_activation = None;
+        match activation.action {
+            UiActivationAction::Ui(action) => self.perform_action(action, ctx),
+            UiActivationAction::LoadingConfirm => {
+                flow_trace("psx-engine: loading ready");
+                self.cursor.mark_loading_ready();
+                let transition = self.loading_exit_transition_spec();
+                self.loading_exit_transition = Some(FlowTransition::new(
+                    self.cursor.current,
+                    self.cursor.return_to,
+                    transition,
+                ));
+            }
+        }
+        true
+    }
+
+    /// First completion-only panel-like node in the authored loading scene.
+    /// Its encoded slanted shape becomes the echo geometry. A label-only
+    /// legacy loading screen simply skips the local echo and proceeds through
+    /// the normal dissolve.
+    fn loading_activation_node(&self) -> Option<usize> {
+        let (first, count) = self.scene_node_range(self.loading_scene);
+        let end = first.saturating_add(count).min(self.nodes.len());
+        (first..end).find(|&index| {
+            let node = &self.nodes[index];
+            node.flags & ui_node_flags::LOADING_COMPLETE_ONLY != 0
+                && matches!(
+                    node.kind,
+                    LevelUiNodeKind::Button | LevelUiNodeKind::Rect | LevelUiNodeKind::Image
+                )
+        })
+    }
+
     /// Fire the focused control's action. `GotoScene` / `StartGameplay`
     /// / `Back` drive the flow cursor; `SetOption` nudges the bound option
     /// in the value store; `Game` dispatches its opaque id to the scene.
-    fn activate_focus(&mut self, first: usize, count: usize, ctx: &mut Ctx) {
+    fn activate_focus(&mut self, scene: u16, first: usize, count: usize) {
         let Some(node_index) = self.resolved_focus(first, count) else {
             return;
         };
@@ -1605,7 +1704,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             return;
         };
         self.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
-        self.perform_action(node.action, ctx);
+        self.begin_ui_activation(scene, node_index, UiActivationAction::Ui(node.action));
     }
 
     /// Execute one cooked UI action. Shared by focused-control
@@ -1709,7 +1808,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // back/cancel even when the focused control is not a Back button.
         if ctx.just_pressed(button::CROSS) {
             flow_trace("psx-engine: ui cross");
-            self.activate_focus(first, count, ctx);
+            self.activate_focus(scene, first, count);
         } else if ctx.just_pressed(button::CIRCLE) {
             self.go_back(ctx);
         } else if ctx.just_pressed(button::START) {
@@ -1853,6 +1952,14 @@ impl<'a, S: Scene> GameApp<'a, S> {
             &visible,
             &text,
         );
+        if let Some(activation) = self.ui_activation.filter(|active| active.scene == scene) {
+            ui::draw_activation_echo(
+                nodes,
+                usize::from(activation.node),
+                &focus_style,
+                activation.elapsed,
+            );
+        }
         crate::app::boot_visual_checkpoint(&mut ctx.fb, (80, 220, 220), "37 UI DRAW OK");
     }
 
@@ -1862,7 +1969,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// re-enters it as a UI scene and clears the one-deep return slot.
     fn go_back(&mut self, ctx: &mut Ctx) {
         if let Some(return_to) = self.cursor.return_to {
-            self.enter_ui_state(return_to, None, ctx);
+            self.request_flow_state(return_to, None, ctx);
         }
     }
 
@@ -2039,6 +2146,19 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             }
         }
         if self.loading_pending() {
+            if self.update_ui_activation(ctx) {
+                return;
+            }
+            // A project-wide transition into gameplay switches to the loading
+            // state at full coverage, then must keep advancing so the fade
+            // reveals the authored loading card. Do not freeze its reveal half
+            // merely because world streaming has begun.
+            if self
+                .transition
+                .is_some_and(|transition| transition.switched)
+            {
+                let _ = self.update_transition(ctx);
+            }
             self.finish_loading_transition(ctx);
             return;
         }
@@ -2050,7 +2170,7 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // open a paused gameplay+menu state even though its HUD does not capture
         // input. States without a binding retain the title-screen START shortcut
         // in `update_ui_scene` below.
-        if ctx.just_pressed(button::START) {
+        if self.ui_activation.is_none() && ctx.just_pressed(button::START) {
             if let Some(target) = self.current_start_state_index() {
                 let return_to = Some(self.cursor.current);
                 self.request_flow_state(target, return_to, ctx);
@@ -2078,6 +2198,12 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         if let Some(scene) = tag.ui_scene() {
             let state = self.state_ref_at(self.cursor.current);
             self.gameplay.update_ui_resources(state, ctx);
+            if self.update_ui_activation(ctx) {
+                if let Some(active_scene) = self.current_tag().ui_scene() {
+                    self.update_ui_music(active_scene, ctx);
+                }
+                return;
+            }
             if tag.ui_accepts_input() {
                 self.update_ui_scene(scene, ctx);
                 if self.loading_pending() {
@@ -2105,6 +2231,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             }
             self.render_loading_screen(ctx);
             self.gameplay.render_post_process(ctx);
+            if let Some(transition) = self.transition {
+                render_transition_overlay(transition);
+            }
             if let Some(transition) = self.loading_exit_transition {
                 render_transition_overlay(transition);
             } else {
@@ -2456,6 +2585,7 @@ mod tests {
             states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
             scene_states: &[],
             entry: 0,
+            transition: LevelTransition::NONE,
         };
         let mut scene = CountingScene {
             shared_resource_key: Some(42),
@@ -2505,6 +2635,7 @@ mod tests {
             states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
             scene_states: &[],
             entry: 0,
+            transition: LevelTransition::NONE,
         };
         // No shared key: each state is its own set, so UI->gameplay exits the
         // UI set and enters the gameplay set.
@@ -2580,6 +2711,7 @@ mod tests {
             states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
             scene_states: &[],
             entry: 0,
+            transition: LevelTransition::NONE,
         };
 
         let mut scene = CountingScene::default();
@@ -2768,6 +2900,47 @@ mod tests {
             focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         },
     ];
+    // The authored loading fixture extends the normal front-end pool with a
+    // completion-only panel. This is the geometry the local confirmation echo
+    // traces before the loading exit fade begins.
+    static AUTHORED_LOADING_NODES: &[LevelUiNodeRecord] = &[
+        CANVAS,
+        button(120, 80, LevelUiAction::StartGameplay),
+        button(120, 120, LevelUiAction::GotoScene { scene: 2 }),
+        CANVAS,
+        button(120, 100, LevelUiAction::Back),
+        CANVAS,
+        LevelUiNodeRecord {
+            parent: Some(psx_level::UiNodeIndex::new(5)),
+            width: 128,
+            height: 18,
+            flags: ui_node_flags::LOADING_COMPLETE_ONLY,
+            ..button(96, 179, LevelUiAction::Back)
+        },
+    ];
+    static AUTHORED_LOADING_SCENES: &[LevelUiScene] = &[
+        LevelUiScene {
+            id: 1,
+            name: "title",
+            node_first: 0,
+            node_count: 3,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+        },
+        LevelUiScene {
+            id: 2,
+            name: "options",
+            node_first: 3,
+            node_count: 2,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+        },
+        LevelUiScene {
+            id: 6,
+            name: "loading",
+            node_first: 5,
+            node_count: 2,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+        },
+    ];
     static MENU_FLOW: GameFlow = GameFlow {
         states: &[
             FlowState::UiScene { scene: 1 },
@@ -2776,6 +2949,23 @@ mod tests {
         ],
         scene_states: &[],
         entry: 0,
+        transition: LevelTransition::NONE,
+    };
+    const TEST_MENU_FADE: LevelTransition = LevelTransition {
+        kind: LevelTransitionKind::Fade,
+        frames: 8,
+        color: [4, 2, 4],
+        seed: 0x71d5,
+    };
+    static FADE_MENU_FLOW: GameFlow = GameFlow {
+        states: &[
+            FlowState::UiScene { scene: 1 },
+            FlowState::UiScene { scene: 2 },
+            FlowState::Gameplay,
+        ],
+        scene_states: &[],
+        entry: 0,
+        transition: TEST_MENU_FADE,
     };
 
     static HORIZONTAL_MENU_NODES: &[LevelUiNodeRecord] = &[
@@ -2794,6 +2984,7 @@ mod tests {
         states: &[FlowState::UiScene { scene: 3 }],
         scene_states: &[],
         entry: 0,
+        transition: LevelTransition::NONE,
     };
 
     static TAGGED_TAB_NODES: &[LevelUiNodeRecord] = &[
@@ -2819,6 +3010,7 @@ mod tests {
         states: &[FlowState::UiScene { scene: 4 }],
         scene_states: &[],
         entry: 0,
+        transition: LevelTransition::NONE,
     };
 
     static COMPOSED_STATES: &[LevelSceneState] = &[LevelSceneState {
@@ -2833,6 +3025,7 @@ mod tests {
         states: &[FlowState::SceneState { state: 42 }],
         scene_states: COMPOSED_STATES,
         entry: 0,
+        transition: LevelTransition::NONE,
     };
 
     static PAUSE_COMPOSED_STATES: &[LevelSceneState] = &[
@@ -2860,6 +3053,88 @@ mod tests {
         ],
         scene_states: PAUSE_COMPOSED_STATES,
         entry: 0,
+        transition: LevelTransition::NONE,
+    };
+    static FADE_PAUSE_COMPOSED_FLOW: GameFlow = GameFlow {
+        states: &[
+            FlowState::SceneState { state: 42 },
+            FlowState::SceneState { state: 43 },
+        ],
+        scene_states: PAUSE_COMPOSED_STATES,
+        entry: 0,
+        transition: TEST_MENU_FADE,
+    };
+
+    static FADE_TAB_NODES: &[LevelUiNodeRecord] = &[
+        CANVAS,
+        tagged_button(
+            200,
+            20,
+            "tab.player.selected",
+            LevelUiAction::Game { id: 10 },
+        ),
+        tagged_button(
+            260,
+            20,
+            "tab.system",
+            LevelUiAction::GotoState { state: 52 },
+        ),
+        CANVAS,
+        tagged_button(
+            200,
+            20,
+            "tab.player",
+            LevelUiAction::GotoState { state: 51 },
+        ),
+        tagged_button(
+            260,
+            20,
+            "tab.system.selected",
+            LevelUiAction::Game { id: 12 },
+        ),
+    ];
+    static FADE_TAB_SCENES: &[LevelUiScene] = &[
+        LevelUiScene {
+            id: 14,
+            name: "player-tab",
+            node_first: 0,
+            node_count: 3,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+        },
+        LevelUiScene {
+            id: 15,
+            name: "system-tab",
+            node_first: 3,
+            node_count: 3,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+        },
+    ];
+    static FADE_TAB_STATES: &[LevelSceneState] = &[
+        LevelSceneState {
+            id: 51,
+            name: "player-tab",
+            world: LevelWorldLayer::None,
+            ui_scene: 14,
+            flags: scene_state_flags::UI_INPUT,
+            start_state: SCENE_STATE_NONE,
+        },
+        LevelSceneState {
+            id: 52,
+            name: "system-tab",
+            world: LevelWorldLayer::None,
+            ui_scene: 15,
+            flags: scene_state_flags::UI_INPUT,
+            start_state: SCENE_STATE_NONE,
+        },
+    ];
+    static FADE_TAB_FLOW: GameFlow = GameFlow {
+        states: &[
+            FlowState::SceneState { state: 51 },
+            FlowState::SceneState { state: 52 },
+        ],
+        scene_states: FADE_TAB_STATES,
+        entry: 0,
+        transition: TEST_MENU_FADE,
     };
 
     #[test]
@@ -2956,6 +3231,42 @@ mod tests {
         app.update(ctx);
     }
 
+    /// Let the complete confirmation echo remain visible before its deferred
+    /// action is allowed to mutate the current flow state.
+    fn complete_activation(app: &mut GameApp<'_, CountingScene>, ctx: &mut Ctx) {
+        ctx.pad_prev = PadState::NONE;
+        ctx.pad = PadState::NONE;
+        let mut frames = 0;
+        while app.ui_activation.is_some() {
+            app.update(ctx);
+            assert!(
+                ctx.take_visual_checkpoint_request(),
+                "each echo step must be yielded to a visible frame"
+            );
+            frames += 1;
+            assert!(
+                frames <= usize::from(ui::ACTIVATION_ECHO_FRAMES),
+                "confirmation echo must complete within its authored duration"
+            );
+        }
+        assert_eq!(
+            frames,
+            usize::from(ui::ACTIVATION_ECHO_FRAMES),
+            "the action must wait until every echo frame has been presented"
+        );
+    }
+
+    fn complete_flow_transition(app: &mut GameApp<'_, CountingScene>, ctx: &mut Ctx) {
+        ctx.pad_prev = PadState::NONE;
+        ctx.pad = PadState::NONE;
+        let mut frames = 0;
+        while app.transition.is_some() {
+            app.update(ctx);
+            frames += 1;
+            assert!(frames <= 600, "authored screen transition did not complete");
+        }
+    }
+
     fn complete_loading(app: &mut GameApp<'_, CountingScene>, ctx: &mut Ctx) {
         assert!(
             app.loading_pending(),
@@ -2989,13 +3300,13 @@ mod tests {
         let mut scene = CountingScene::default();
         let mut app = GameApp::new(
             &MENU_FLOW,
-            MENU_SCENES,
-            MENU_NODES,
+            AUTHORED_LOADING_SCENES,
+            AUTHORED_LOADING_NODES,
             &[],
             &[],
             &[],
             &[],
-            1,
+            6,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -3003,6 +3314,12 @@ mod tests {
 
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        assert!(app.ui_activation.is_some());
+        assert!(
+            !app.loading_pending(),
+            "Play remains on the title screen throughout its confirmation echo"
+        );
+        complete_activation(&mut app, &mut ctx);
         assert!(app.loading_pending());
 
         // First loading render permits deferred gameplay init.
@@ -3038,16 +3355,21 @@ mod tests {
         assert!(app.loading_confirm_ready);
         assert!(app.loading_pending(), "READY still waits for fresh confirm");
 
-        // A fresh confirm begins the authored block dissolve. Loading remains
+        // A fresh confirm begins the authored fade dissolve. Loading remains
         // visible through the cover half, then gameplay is swapped in only at
         // full coverage and revealed through the second half.
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
         assert!(app.loading_pending());
+        assert!(
+            app.loading_exit_transition.is_none(),
+            "the loading screen must remain unobscured while the echo plays"
+        );
+        complete_activation(&mut app, &mut ctx);
         let transition = app
             .loading_exit_transition
-            .expect("confirm starts loading exit dissolve");
-        assert_eq!(transition.spec.kind, LevelTransitionKind::BlockDissolve);
+            .expect("confirm starts loading exit fade");
+        assert_eq!(transition.spec.kind, LevelTransitionKind::Fade);
 
         ctx.pad = PadState::NONE;
         ctx.pad_prev = PadState::NONE;
@@ -3062,6 +3384,23 @@ mod tests {
         while app.loading_exit_transition.is_some() {
             app.update(&mut ctx);
         }
+    }
+
+    #[test]
+    fn loading_exit_reuses_the_project_wide_menu_fade() {
+        let mut scene = CountingScene::default();
+        let app = GameApp::new(
+            &FADE_MENU_FLOW,
+            AUTHORED_LOADING_SCENES,
+            AUTHORED_LOADING_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            6,
+            &mut scene,
+        );
+        assert_eq!(app.loading_exit_transition_spec(), TEST_MENU_FADE);
     }
 
     #[test]
@@ -3236,6 +3575,45 @@ mod tests {
     }
 
     #[test]
+    fn project_fade_wraps_l1_r1_tab_state_changes() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &FADE_TAB_FLOW,
+            FADE_TAB_SCENES,
+            FADE_TAB_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        idle_tick(&mut app, &mut ctx);
+
+        press(&mut ctx, button::R1);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 0, "R1 waits for full fade cover");
+        assert_eq!(
+            app.transition.map(|transition| transition.spec.kind),
+            Some(LevelTransitionKind::Fade)
+        );
+        complete_flow_transition(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 1);
+
+        press(&mut ctx, button::L1);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 1, "L1 waits for full fade cover");
+        assert_eq!(
+            app.transition.map(|transition| transition.spec.kind),
+            Some(LevelTransitionKind::Fade)
+        );
+        complete_flow_transition(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 0);
+    }
+
+    #[test]
     fn cross_held_from_boot_does_not_auto_enter_gameplay() {
         // Regression: editor embedded Play captures input from frame 1, so a
         // button still held as Play starts must NOT count as a fresh press on
@@ -3273,6 +3651,9 @@ mod tests {
         assert_eq!(app.gameplay.inits, 0, "release alone does nothing");
         press(&mut ctx, button::CROSS); // fresh press
         app.update(&mut ctx);
+        assert!(app.ui_activation.is_some());
+        assert!(!app.loading_pending());
+        complete_activation(&mut app, &mut ctx);
         assert!(app.loading_pending());
         assert_eq!(
             app.gameplay.inits, 0,
@@ -3307,6 +3688,9 @@ mod tests {
         // (StartGameplay) button and activates it in the same tick.
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        assert!(app.ui_activation.is_some());
+        assert!(!app.loading_pending(), "echo completes before leaving Play");
+        complete_activation(&mut app, &mut ctx);
         assert!(app.loading_pending(), "CROSS on Play enters loading");
         assert_eq!(app.gameplay.inits, 0, "loading defers gameplay init");
 
@@ -3341,6 +3725,7 @@ mod tests {
         app.option_values[0] = 6;
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        complete_activation(&mut app, &mut ctx);
         assert!(app.loading_pending(), "Play shows loading before init");
         assert_eq!(app.gameplay.inits, 0);
 
@@ -3378,6 +3763,11 @@ mod tests {
         assert_eq!(app.cursor.menu_focus, 2);
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        assert_eq!(
+            app.cursor.current, 0,
+            "Options cannot open before its confirmation echo completes"
+        );
+        complete_activation(&mut app, &mut ctx);
         // Cursor now sits on the options UI state (flow index 1) with the
         // title state remembered for Back, and focus reset.
         assert_eq!(app.cursor.current, 1);
@@ -3398,6 +3788,86 @@ mod tests {
 
         // Gameplay was never entered along the way.
         assert_eq!(app.gameplay.inits, 0);
+    }
+
+    #[test]
+    fn project_fade_wraps_circle_back_navigation() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &FADE_MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        idle_tick(&mut app, &mut ctx);
+
+        press(&mut ctx, button::DOWN);
+        app.update(&mut ctx);
+        press(&mut ctx, button::CROSS);
+        app.update(&mut ctx);
+        complete_activation(&mut app, &mut ctx);
+        complete_flow_transition(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 1);
+
+        press(&mut ctx, button::CIRCLE);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 1, "Circle waits for full fade cover");
+        assert_eq!(
+            app.transition.map(|transition| transition.spec.kind),
+            Some(LevelTransitionKind::Fade)
+        );
+        complete_flow_transition(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 0);
+        assert_eq!(app.cursor.return_to, None);
+    }
+
+    #[test]
+    fn project_fade_waits_for_echo_then_switches_at_full_cover() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &FADE_MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        idle_tick(&mut app, &mut ctx);
+
+        press(&mut ctx, button::DOWN);
+        app.update(&mut ctx);
+        press(&mut ctx, button::CROSS);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 0);
+        assert!(app.transition.is_none());
+
+        complete_activation(&mut app, &mut ctx);
+        let transition = app
+            .transition
+            .expect("project fade begins only after the echo");
+        assert_eq!(transition.spec.kind, LevelTransitionKind::Fade);
+        assert_eq!(app.cursor.current, 0);
+
+        for _ in 1..transition.switch_frame() {
+            app.update(&mut ctx);
+            assert_eq!(app.cursor.current, 0);
+        }
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 1);
+        assert_eq!(app.cursor.return_to, Some(0));
+        assert!(app.transition.is_some(), "new scene reveals under the fade");
     }
 
     #[test]
@@ -3423,6 +3893,7 @@ mod tests {
         app.update(&mut ctx);
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        complete_activation(&mut app, &mut ctx);
         assert_eq!(app.cursor.current, 1);
 
         // The options scene's focused control is a Back button: CROSS on
@@ -3430,6 +3901,7 @@ mod tests {
         // first, so a single press is enough.
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        complete_activation(&mut app, &mut ctx);
         assert_eq!(app.cursor.current, 0);
         assert_eq!(app.cursor.return_to, None);
     }
@@ -3547,11 +4019,13 @@ mod tests {
         states: &[FlowState::UiScene { scene: 1 }],
         scene_states: &[],
         entry: 0,
+        transition: LevelTransition::NONE,
     };
     static OPT_FLOW_BUTTON: GameFlow = GameFlow {
         states: &[FlowState::UiScene { scene: 2 }],
         scene_states: &[],
         entry: 0,
+        transition: LevelTransition::NONE,
     };
 
     const VOL_ID: u16 = 9;
@@ -3606,6 +4080,7 @@ mod tests {
         states: &[FlowState::UiScene { scene: 9 }],
         scene_states: &[],
         entry: 0,
+        transition: LevelTransition::NONE,
     };
 
     #[test]
@@ -3791,11 +4266,18 @@ mod tests {
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
         assert_eq!(app.cursor.menu_focus, 3, "focus seeded onto the button");
+        assert_eq!(
+            value_of(&app, OPT_ID),
+            4,
+            "option value remains unchanged while the echo is visible"
+        );
+        complete_activation(&mut app, &mut ctx);
         assert_eq!(value_of(&app, OPT_ID), 9);
 
         // Again: 9 + 5 = 14, clamped to max (10).
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        complete_activation(&mut app, &mut ctx);
         assert_eq!(value_of(&app, OPT_ID), 10);
     }
 

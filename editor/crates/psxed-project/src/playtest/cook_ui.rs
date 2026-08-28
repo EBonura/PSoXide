@@ -175,6 +175,7 @@ pub(crate) fn cook_game_flow(
         states,
         scene_states,
         entry,
+        transition: cook_ui_transition(project.screen_transition),
     }
 }
 
