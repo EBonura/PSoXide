@@ -9,6 +9,7 @@ use super::*;
 pub(super) fn draw_image_props<T>(
     props: &[LevelImagePropRecord],
     current_room: RoomIndex,
+    object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -20,6 +21,7 @@ pub(super) fn draw_image_props<T>(
     psx_game_runtime::image_props::draw_image_props::<T, PROP_PARTICLE_GTE_PROJECT_ENABLED, OT_DEPTH>(
         props,
         current_room,
+        object_visible,
         camera,
         options,
         lighting,

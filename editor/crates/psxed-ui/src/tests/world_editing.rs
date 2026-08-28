@@ -742,6 +742,7 @@ fn node_gizmo_rotates_image_prop_around_y() {
             cylindrical_billboard: false,
             collision_enabled: false,
             collision_size: [1024, 1024, 1024],
+            destructible: None,
         },
     );
     let mut workspace =
@@ -877,6 +878,7 @@ fn node_gizmo_local_space_rotates_about_node_axis() {
             cylindrical_billboard: false,
             collision_enabled: false,
             collision_size: [1024, 1024, 1024],
+            destructible: None,
         },
     );
     let start_rotation = [90.0f32, 0.0, 0.0];
@@ -1027,6 +1029,7 @@ fn node_gizmo_scales_image_prop_width() {
             cylindrical_billboard: false,
             collision_enabled: false,
             collision_size: [1024, 1024, 1024],
+            destructible: None,
         },
     );
     let mut workspace =

@@ -68,10 +68,18 @@ impl Playtest {
             self.room_index,
             out,
         );
-        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_into(
+        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_into_filtered(
             IMAGE_PROPS,
             self.room_index,
             out,
+            |index| {
+                typed_world_object_active(
+                    WORLD_OBJECTS,
+                    &self.destructibles,
+                    psx_level::world_object_kind::IMAGE_PROP,
+                    index,
+                )
+            },
         );
         count
     }
@@ -94,10 +102,18 @@ impl Playtest {
             self.room_index,
             out,
         )?;
-        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into(
+        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into_filtered(
             IMAGE_PROPS,
             self.room_index,
             out,
+            |index| {
+                typed_world_object_active(
+                    WORLD_OBJECTS,
+                    &self.destructibles,
+                    psx_level::world_object_kind::IMAGE_PROP,
+                    index,
+                )
+            },
         )?;
         Some(count)
     }
@@ -124,6 +140,7 @@ pub(super) fn draw_box_props<T>(
     generated_surfaces: &[psx_level::LevelBoxPropSurfaceRecord],
     state: &RuntimeBoxProps,
     current_room: RoomIndex,
+    object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -139,6 +156,7 @@ pub(super) fn draw_box_props<T>(
         generated_surfaces,
         state,
         current_room,
+        object_visible,
         camera,
         options,
         lighting,
@@ -154,6 +172,7 @@ pub(super) fn draw_box_prop_floor_debris<T>(
     props: &[LevelBoxPropRecord],
     state: &RuntimeBoxProps,
     current_room: RoomIndex,
+    object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -176,6 +195,7 @@ pub(super) fn draw_box_prop_floor_debris<T>(
         state,
         debris_cache_arena(),
         current_room,
+        object_visible,
         camera,
         options,
         lighting,
@@ -191,6 +211,7 @@ pub(super) fn draw_box_prop_break_events<T>(
     props: &[LevelBoxPropRecord],
     state: &RuntimeBoxProps,
     current_room: RoomIndex,
+    object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -212,6 +233,7 @@ pub(super) fn draw_box_prop_break_events<T>(
         props,
         state,
         current_room,
+        object_visible,
         camera,
         options,
         lighting,

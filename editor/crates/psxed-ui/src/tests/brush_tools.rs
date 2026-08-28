@@ -4189,6 +4189,47 @@ fn brush_mover_binding_accepts_doors_and_is_undoable() {
 }
 
 #[test]
+fn brush_model_owner_assigns_multiselection_to_destructible() {
+    let mut harness = ViewportHarness::floored_room("brush_destructible_binding", 4);
+    harness.workspace.project.active_scene_mut().brushes = vec![
+        psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]),
+        psxed_project::brush::Brush::cuboid([160, 0, 0], [288, 128, 128]),
+    ];
+    harness.workspace.selected_brush = Some(0);
+    harness.workspace.selected_brushes = vec![0, 1];
+    let destructible = harness.workspace.project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Cargo Stack",
+        NodeKind::Destructible {
+            max_health: 30,
+            damage_affinity: psxed_project::DestructibleDamageAffinity::Both,
+            enabled: true,
+        },
+    );
+
+    harness
+        .workspace
+        .set_selected_brush_mover(Some(destructible));
+    assert!(harness
+        .workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .all(|brush| brush.mover == Some(destructible)));
+    assert!(harness.workspace.status.contains("Assigned 2 brushes"));
+
+    harness.workspace.do_undo();
+    assert!(harness
+        .workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .all(|brush| brush.mover.is_none()));
+}
+
+#[test]
 fn brush_contents_apply_to_multiselection_clear_movers_and_are_undoable() {
     use psxed_project::brush::BrushContents;
 

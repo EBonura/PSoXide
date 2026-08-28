@@ -643,6 +643,7 @@ impl Playtest {
         if player_anim_is_attack(anim) {
             // A fresh swing gets a fresh one-hit-per-enemy mask.
             self.swing_hit_mask = 0;
+            self.destructibles.begin_swing();
         }
         true
     }
@@ -1429,6 +1430,7 @@ impl Playtest {
                     config,
                     1,
                     prop_blockers.as_slice(),
+                    &self.destructibles,
                 )
                 .expect("PXBSP camera trace failed")
                 .camera;
@@ -1531,7 +1533,7 @@ impl Playtest {
         self.active_interactable = self.find_best_interactable();
     }
 
-    pub(super) fn find_best_interactable(&self) -> Option<usize> {
+    pub(super) fn find_best_interactable(&mut self) -> Option<usize> {
         let player = self.motor.position();
         let mut best = None;
         let mut best_distance = u64::MAX;
@@ -1548,6 +1550,16 @@ impl Playtest {
             ) else {
                 continue;
             };
+            if let Some(bsp) = self.bsp.as_mut() {
+                if !bsp.typed_world_object_directly_visible(
+                    player,
+                    psx_level::world_object_kind::POINT_OF_INTEREST_BEACON,
+                    index,
+                    &self.destructibles,
+                ) {
+                    continue;
+                }
+            }
             if distance < best_distance {
                 best = Some(index);
                 best_distance = distance;

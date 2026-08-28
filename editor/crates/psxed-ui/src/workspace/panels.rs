@@ -1795,6 +1795,8 @@ impl EditorWorkspace {
                                     })
                                     .collect();
                                 let room_options = collect_room_options(&self.project);
+                                let destructible_options =
+                                    collect_destructible_options(&self.project);
                                 let model_options = collect_model_options(&self.project);
                                 let character_options = collect_character_options(&self.project);
                                 // Each Character's own tuning, so a placement
@@ -1931,6 +1933,7 @@ impl EditorWorkspace {
                                                     &material_texture_dimensions,
                                                 texture_options: &texture_options,
                                                 room_options: &room_options,
+                                                destructible_options: &destructible_options,
                                                 model_options: &model_options,
                                                 character_options: &character_options,
                                                 weapon_options: &weapon_options,

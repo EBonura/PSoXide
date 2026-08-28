@@ -1115,6 +1115,7 @@ impl EditorWorkspace {
                             cylindrical_billboard: false,
                             collision_enabled: false,
                             collision_size: [size, size, size],
+                            destructible: None,
                         },
                     )
                 }
@@ -1241,6 +1242,14 @@ impl EditorWorkspace {
                     // inside it, which soft-locks any overlay it opens.
                     // Authored projects keep whatever they already store.
                     wait_ticks: -1,
+                    enabled: true,
+                },
+            ),
+            PlaceKind::Destructible => (
+                "Destructible".to_string(),
+                NodeKind::Destructible {
+                    max_health: psxed_project::default_destructible_max_health(),
+                    damage_affinity: psxed_project::DestructibleDamageAffinity::Both,
                     enabled: true,
                 },
             ),

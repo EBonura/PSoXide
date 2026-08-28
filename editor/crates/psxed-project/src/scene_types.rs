@@ -138,6 +138,10 @@ pub enum NodeKind {
         /// the user's last size instead of snapping to a default.
         #[serde(default = "default_image_prop_collision_size")]
         collision_size: [u16; 3],
+        /// Optional shared Destructible node controlling this card's health,
+        /// damage affinity, render state, and collision state.
+        #[serde(default)]
+        destructible: Option<NodeId>,
     },
     /// Material-backed editable hexahedron. The transform is a
     /// bottom-center anchor, `vertices` are local engine units from
@@ -415,6 +419,22 @@ pub enum NodeKind {
         #[serde(default = "default_true")]
         enabled: bool,
     },
+    /// Runtime-breakable brush submodel. Solid brushes assigned to this node
+    /// are excluded from the static BSP and cooked together as one damageable
+    /// object. The node transform supplies the submodel origin; authored brush
+    /// points remain world-space in the editor just like brush doors.
+    Destructible {
+        /// Damage required before the complete brush submodel breaks.
+        #[serde(default = "default_destructible_max_health")]
+        max_health: u16,
+        /// Which of the player's two attack channels can damage this object.
+        #[serde(default)]
+        damage_affinity: DestructibleDamageAffinity,
+        /// Disabled destructibles remain authored but do not render, collide,
+        /// or accept damage at runtime.
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
     /// Spawn marker.
     SpawnPoint {
         /// Whether this is the player spawn.
@@ -484,6 +504,7 @@ impl NodeKind {
             Self::Interactable { .. } => "Interactable",
             Self::PointOfInterest { .. } => "Point of Interest",
             Self::Logic { .. } => "Logic",
+            Self::Destructible { .. } => "Destructible",
             Self::PointLight { .. } => "Point Light",
             Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
@@ -640,6 +661,31 @@ pub(crate) fn default_interactable_checkpoint_title() -> String {
 
 pub(crate) fn default_interactable_checkpoint_body() -> String {
     "Relay synchronized.".to_string()
+}
+
+/// Attack channels accepted by one authored destructible brush module.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DestructibleDamageAffinity {
+    Horizon,
+    Zenith,
+    #[default]
+    Both,
+}
+
+impl DestructibleDamageAffinity {
+    pub const ALL: [Self; 3] = [Self::Horizon, Self::Zenith, Self::Both];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Horizon => "Horizon",
+            Self::Zenith => "Zenith",
+            Self::Both => "Both",
+        }
+    }
+}
+
+pub const fn default_destructible_max_health() -> u16 {
+    30
 }
 
 /// Kind payload for a placed [`NodeKind::Logic`] node. Mirrors the

@@ -210,6 +210,7 @@ impl Playtest {
             let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
             let mut mover = SceneEntityMover {
                 bsp: self.bsp.as_mut(),
+                destructibles: &self.destructibles,
                 window: &self.window,
                 box_props: &self.box_props,
                 models: &self.models,
@@ -294,6 +295,9 @@ impl Playtest {
         crate::game_trace("editor-playtest: gameplay init begin");
         self.shadow_material = upload_shadow_texture();
         self.particle_material = upload_particle_texture();
+        self.destructibles
+            .init(DESTRUCTIBLES)
+            .unwrap_or_else(|error| panic!("cooked destructible initialization failed: {error:?}"));
         self.bsp = if generated::PLAYTEST_USES_PXBSP {
             let mut bsp = BspRuntime::load_manifest()
                 .unwrap_or_else(|error| panic!("cooked PXBSP initialization failed: {error}"));
@@ -387,6 +391,7 @@ impl Playtest {
         self.death_by_combat = false;
         self.weapon_attach_reported = false;
         self.swing_hit_mask = 0;
+        self.destructibles.reset();
         self.clear_actor_pose_snapshots();
         self.sync_door_box_props();
         // Start the camera behind the AUTHORED spawn facing so the
@@ -695,6 +700,7 @@ impl Playtest {
                     input,
                     config,
                     delta_vblanks,
+                    &self.destructibles,
                     blockers.as_slice(),
                     aabb_blockers.as_slice(),
                 )
