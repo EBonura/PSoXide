@@ -169,6 +169,7 @@ pub fn draw_box_props<
     generated_surfaces: &[LevelBoxPropSurfaceRecord],
     state: &BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>,
     current_room: RoomIndex,
+    mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -187,6 +188,7 @@ pub fn draw_box_props<
     let mut projector = None;
     for (index, prop) in props.iter().enumerate() {
         if prop.room != current_room
+            || !object_visible(index)
             || box_prop_broken_in_words::<MAX_BOX_PROP_STATE>(&state.broken, index)
             || box_prop_broken_in_words::<MAX_BOX_PROP_STATE>(&state.door_open, index)
         {
@@ -367,6 +369,7 @@ pub fn draw_box_prop_floor_debris<
     state: &BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>,
     debris: &mut DebrisCache,
     current_room: RoomIndex,
+    mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -381,6 +384,7 @@ pub fn draw_box_prop_floor_debris<
     let mut projector = None;
     for (index, prop) in props.iter().enumerate() {
         if prop.room != current_room
+            || !object_visible(index)
             || !box_prop_broken_in_words::<MAX_BOX_PROP_STATE>(&state.broken, index)
         {
             continue;
@@ -536,6 +540,7 @@ pub fn draw_box_prop_break_events<
     props: &[LevelBoxPropRecord],
     state: &BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>,
     current_room: RoomIndex,
+    mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -555,7 +560,7 @@ pub fn draw_box_prop_break_events<
         let Some(prop) = props.get(event.prop_index as usize) else {
             continue;
         };
-        if prop.room != current_room {
+        if prop.room != current_room || !object_visible(event.prop_index as usize) {
             continue;
         }
         let Some(box_runtime) = state.runtime.get(event.prop_index as usize) else {
