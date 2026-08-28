@@ -371,16 +371,18 @@ impl Playtest {
         self.game_entities.spawn_from_records(GAME_ENTITIES);
         self.deferred_enemy_attacks.clear();
         self.combat_projectiles.clear();
+        self.combat_projectile_impacts.clear();
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
-        self.power_up_inventory = BoostInventory::STARTER;
+        self.power_up_inventory = BoostInventory::EMPTY;
         if self.poi_save_loaded {
             self.restore_claimed_poi_rewards();
         }
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
-        self.selected_power_up_item = BoostProtocol::Rupture;
+        self.selected_power_up_item = BoostModuleId::NONE;
+        self.acquired_module = BoostModuleId::NONE;
         self.hazard_death_ticks_remaining = 0;
         self.death_by_combat = false;
         self.weapon_attach_reported = false;
@@ -460,7 +462,8 @@ impl Playtest {
             self.show_collision_debug = !self.show_collision_debug;
         }
 
-        let poi_interaction_consumed = self.poi_messages.active().is_some();
+        let poi_interaction_consumed =
+            self.poi_messages.active().is_some() || !self.acquired_module.is_none();
         if poi_interaction_consumed && ctx.just_pressed(INTERACT_BUTTON) {
             self.advance_poi_message();
         }
@@ -598,7 +601,8 @@ impl Playtest {
                 RoomPoint::new(input.move_x.raw(), 0, input.move_z.raw()),
             );
         }
-        // R1/R2/R1+R2 horizontal, L1/L2/L1+L2 vertical. See `update_attack_input`.
+        // Each shoulder button addresses one attack directly. See
+        // `update_attack_input` for the Horizon/Zenith mapping.
         if self.update_attack_input(ctx, now, action_locked) {
             input = CharacterMotorInput::default();
         }
@@ -633,6 +637,7 @@ impl Playtest {
         }
         if action_locked && player_anim_is_attack(self.anim_state) {
             if let Some(character) = self.character {
+                let character = self.player_character_for_anim(character, self.anim_state);
                 let local_tick = now.saturating_sub(self.anim_start_tick);
                 if let Some(push_speed) = self.player_action_push_speed(
                     character,
@@ -938,7 +943,7 @@ impl Playtest {
                 character,
                 clip,
                 video_hz,
-                character.action_speed(anim.action()),
+                self.player_action_speed_q8(character, anim),
                 character.action_frame_range(anim.action()),
             )
             .unwrap_or(30)
@@ -1130,73 +1135,35 @@ impl Playtest {
         }
     }
 
-    /// Attacks. Two axes, three levels each: R1/R2/R1+R2 swing horizontally,
-    /// L1/L2/L1+L2 strike vertically. Every level plays its clip whole, which
-    /// is what these single recorded performances were made for.
-    ///
-    /// The pair window is why this is not a plain `just_pressed` chain: two
-    /// buttons meant as one press arrive on different ticks, so the first
-    /// press waits [`ATTACK_PAIR_WINDOW_TICKS`] to see whether its partner
-    /// follows. A level whose clip is not bound is skipped, so an axis can
-    /// ship one clip at a time.
+    /// Direct four-button attack layout: R1/R2 are light/heavy Horizon swings;
+    /// L1/L2 are light/heavy Zenith strikes. A missing clip leaves only that
+    /// one input unavailable. Heavy bindings are checked first so pressing
+    /// both buttons on one shoulder in the same tick resolves predictably.
     ///
     /// Returns true while an attack owns the player's input.
     fn update_attack_input(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
-        /// (level 1 button, level 2 button, the three level animations)
-        const AXES: [(u16, u16, [PlayerAnim; 3]); 2] = [
-            (
-                LIGHT_ATTACK_BUTTON,
-                HEAVY_ATTACK_BUTTON,
-                [
-                    PlayerAnim::LightAttack,
-                    PlayerAnim::HeavyAttack,
-                    PlayerAnim::ComboAttack,
-                ],
-            ),
-            (
-                VERT_LIGHT_ATTACK_BUTTON,
-                VERT_HEAVY_ATTACK_BUTTON,
-                [
-                    PlayerAnim::VertLightAttack,
-                    PlayerAnim::VertHeavyAttack,
-                    PlayerAnim::VertComboAttack,
-                ],
-            ),
+        const ATTACKS: [(u16, PlayerAnim); 4] = [
+            (HORIZON_HEAVY_ATTACK_BUTTON, PlayerAnim::HeavyAttack),
+            (HORIZON_LIGHT_ATTACK_BUTTON, PlayerAnim::LightAttack),
+            (ZENITH_HEAVY_ATTACK_BUTTON, PlayerAnim::VertHeavyAttack),
+            (ZENITH_LIGHT_ATTACK_BUTTON, PlayerAnim::VertLightAttack),
         ];
-        let Some((pressed_at, axis)) = self.attack_press else {
-            if action_locked || !self.motor.action().is_idle() {
-                return false;
-            }
-            for (index, (first, second, _)) in AXES.iter().enumerate() {
-                if ctx.just_pressed(*first) || ctx.just_pressed(*second) {
-                    self.attack_press = Some((now, index as u8));
-                    return true;
-                }
-            }
+        if action_locked || !self.motor.action().is_idle() {
             return false;
-        };
-        let (first, second, anims) = AXES[axis as usize];
-        let (low, high) = (ctx.is_held(first), ctx.is_held(second));
-        // Both down resolves the window early; there is nothing left to wait for.
-        let waited = now.as_u32().saturating_sub(pressed_at.as_u32());
-        if !(low && high) && waited < ATTACK_PAIR_WINDOW_TICKS {
+        }
+        for (button, anim) in ATTACKS {
+            if !ctx.just_pressed(button) {
+                continue;
+            }
+            let bound = self
+                .character
+                .is_some_and(|character| character.action_clip(anim.action()).is_some());
+            if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
+                telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
+            }
             return true;
         }
-        self.attack_press = None;
-        let anim = match (low, high) {
-            (true, true) => anims[2],
-            (false, true) => anims[1],
-            // A press already released by the end of the window is still a
-            // level 1: these buttons are taps, not holds.
-            _ => anims[0],
-        };
-        let bound = self
-            .character
-            .is_some_and(|character| character.action_clip(anim.action()).is_some());
-        if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
-            telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
-        }
-        true
+        false
     }
 
     fn begin_winddown(&mut self, anim: PlayerAnim, now: SimTick) -> PlayerAnim {

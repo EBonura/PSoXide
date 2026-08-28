@@ -441,26 +441,28 @@ fn action_bar_height_for_status(_status: &str) -> f32 {
 }
 const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Aletha Delivered",
-    "Rust Mantis",
-    "Tank Boss Animated Model",
+    "Light Enemy Model",
+    "Heavy Enemy Model",
     "Sword1 Light",
     "Sword1 Heavy",
 ];
 const STARTER_CHARACTER_SKELETON_NAMES: &[&str] = &[
-    "Cortex Humanoid 22-Bone Skeleton",
+    "Light Enemy Skeleton",
     "Aletha Delivered Skeleton",
     "Sword1 Light Skeleton",
-    "Tank Boss Animated Model Skeleton",
+    "Heavy Enemy Skeleton",
 ];
 const STARTER_CHARACTER_MATERIAL_NAMES: &[&str] = &["Aletha Crystal"];
 /// Verified combat loadout weapons synced beside the character profiles.
 const STARTER_WEAPON_NAMES: &[&str] = &["Sword1 Light", "Sword1 Heavy"];
+/// Projectile profiles referenced by the verified starter enemies.
+const STARTER_PROJECTILE_NAMES: &[&str] = &["Choir Needle"];
 const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Aletha Delivered Animation Set",
-    "Rust Mantis Starter Animation Set",
-    "tank_boss_ai_set",
+    "Light Enemy Animation Set",
+    "Heavy Enemy Animation Set",
 ];
-const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &["Aletha", "Rust Mantis Enemy", "Tank Boss"];
+const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &["Aletha", "Light Enemy", "Heavy Enemy"];
 const LEGACY_WRAITH_HERO_PROFILE_NAME: &str = "Wraith Hero";
 const LEGACY_OBSIDIAN_WARDEN_ASSET_DIR: &str = "assets/models/obsidian_warden";
 const LEGACY_OBSIDIAN_WARDEN_RESOURCE_NAMES: &[&str] = &[
@@ -2732,6 +2734,10 @@ pub(crate) struct BrushVertexDrag {
     /// drag. Element edits leave this empty and continue to affect only the
     /// primary brush.
     pub(crate) others: Vec<(usize, psxed_project::brush::Brush)>,
+    /// Component selections on other brushes. Face mode can select exact
+    /// faces document-wide, so those faces must ride the same gizmo delta
+    /// without translating either owning brush wholesale.
+    pub(crate) element_others: Vec<BrushElementDragMember>,
     /// Solved base-brush vertices being dragged, world f64.
     pub(crate) targets: Vec<[f64; 3]>,
     /// Deterministic selected corner used as the absolute-grid reference for
@@ -2770,6 +2776,10 @@ pub(crate) struct BrushElementTransformDrag {
     /// Other whole brushes transformed about the same selection pivot.
     /// Face/edge/vertex transforms leave this empty.
     pub(crate) others: Vec<(usize, psxed_project::brush::Brush)>,
+    /// Component selections on other brushes transformed about the same
+    /// shared pivot. Kept separate from `others`, whose members are whole
+    /// brushes in Move mode.
+    pub(crate) element_others: Vec<BrushElementDragMember>,
     pub(crate) targets: Vec<[f64; 3]>,
     pub(crate) center: [f64; 3],
     pub(crate) axis: usize,
@@ -2795,6 +2805,17 @@ pub(crate) struct BrushElementTransformDrag {
     /// Last applied snapped amount: degrees for rotate, percent-delta
     /// steps for scale. Zero means the base brush is still in place.
     pub(crate) applied: i32,
+}
+
+/// One non-primary brush's exact component subset participating in a shared
+/// gizmo gesture. The base is immutable for the gesture; every preview is
+/// rebuilt from it so one invalid member rejects the whole transaction.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushElementDragMember {
+    pub(crate) index: usize,
+    pub(crate) base: psxed_project::brush::Brush,
+    pub(crate) targets: Vec<[f64; 3]>,
+    pub(crate) faces: Vec<usize>,
 }
 
 /// In-flight face extrusion: Cmd+drag on a face handle grows a NEW
@@ -3023,6 +3044,7 @@ impl ResourceFilter {
                 data,
                 ResourceData::Script { .. }
                     | ResourceData::Audio { .. }
+                    | ResourceData::Projectile(_)
                     | ResourceData::BoostModule(_)
             ),
         }

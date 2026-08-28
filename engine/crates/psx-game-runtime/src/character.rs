@@ -28,11 +28,9 @@ pub enum PlayerAnim {
     DashRight,
     LightAttack,
     HeavyAttack,
-    ComboAttack,
-    /// Vertical axis: overhead strikes, cooked as the Alt* actions.
+    /// Zenith axis: overhead strikes.
     VertLightAttack,
     VertHeavyAttack,
-    VertComboAttack,
     /// First-spawn intro, played once with control locked out.
     Intro,
     Death,
@@ -67,10 +65,8 @@ impl PlayerAnim {
             Self::DashRight => CharacterAnimationAction::DashRight,
             Self::LightAttack => CharacterAnimationAction::LightAttack,
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
-            Self::ComboAttack => CharacterAnimationAction::ComboAttack,
             Self::VertLightAttack => CharacterAnimationAction::VertLightAttack,
             Self::VertHeavyAttack => CharacterAnimationAction::VertHeavyAttack,
-            Self::VertComboAttack => CharacterAnimationAction::VertComboAttack,
             Self::Intro => CharacterAnimationAction::Intro,
             Self::Death => CharacterAnimationAction::Death,
             Self::WalkWindup => CharacterAnimationAction::WalkWindup,
@@ -107,10 +103,8 @@ pub const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
         anim,
         PlayerAnim::LightAttack
             | PlayerAnim::HeavyAttack
-            | PlayerAnim::ComboAttack
             | PlayerAnim::VertLightAttack
             | PlayerAnim::VertHeavyAttack
-            | PlayerAnim::VertComboAttack
     )
 }
 

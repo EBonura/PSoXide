@@ -82,7 +82,9 @@ pub(crate) fn camera_input(
             0,
         ),
         pitch_delta_q12: stick_to_pitch_delta(InputAxis::new(right_y), orbit_speed_level, 0),
-        recenter: ctx.is_held(button::L1),
+        // All four shoulder buttons belong to combat. Manual right-stick
+        // orbit remains available; camera recenter has no dedicated binding.
+        recenter: false,
     }
 }
 

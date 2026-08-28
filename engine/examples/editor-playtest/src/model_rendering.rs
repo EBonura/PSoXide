@@ -369,6 +369,7 @@ impl Playtest {
         let player = self.motor.position();
         self.previous_player_actor_pose = self.player_actor_pose;
         self.player_actor_pose = self.character.and_then(|character| {
+            let character = self.player_character_for_anim(character, self.anim_state);
             mr::resolve_player_actor_pose(
                 model_tables(),
                 character,

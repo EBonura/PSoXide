@@ -126,6 +126,8 @@ pub use character_motor::{
     CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
     CharacterMotorInput, CharacterMotorState,
 };
+#[cfg(feature = "classic-affine-quake-specialized-kernel")]
+pub use classic_affine::submit_quake_classic_affine_batch;
 pub use classic_affine::{
     census_classic_affine_projected_batch_topology,
     collect_classic_affine_indexed_projection_slots,
@@ -153,8 +155,6 @@ pub use classic_affine::{
     ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
     ClassicAliasProjectedVertex, ClassicAliasVertex,
 };
-#[cfg(feature = "classic-affine-quake-specialized-kernel")]
-pub use classic_affine::submit_quake_classic_affine_batch;
 #[cfg(feature = "classic-affine-subdivision-cache")]
 pub use classic_affine::{
     submit_classic_affine_cached_subdivision_batch, ClassicAffineSubdivisionCacheSink,

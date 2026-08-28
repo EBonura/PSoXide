@@ -3,7 +3,7 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    AssetId, CombatCapsuleRecord, EntityRecord, EquipmentRecord, FlowState, GameFlow,
+    AssetId, BoostModuleRecord, CombatCapsuleRecord, EntityRecord, EquipmentRecord, FlowState, GameFlow,
     InteractableMessageRecord, InteractableRecord, LevelArchPropCollisionRecord,
     LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelAssetRecord, LevelBoxPropRecord,
     LevelBoxPropSurfaceRecord, LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord,
@@ -113,6 +113,7 @@ pub static LIGHTS: &[PointLightRecord] = &[];
 pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[];
 pub static INTERACTABLE_MESSAGES: &[InteractableMessageRecord] = &[];
 pub static INTERACTABLES: &[InteractableRecord] = &[];
+pub static BOOST_MODULES: &[BoostModuleRecord] = &[];
 pub static LOGIC: &[LevelLogicRecord] = &[];
 pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[];
 pub static CHARACTERS: &[LevelCharacterRecord] = &[];

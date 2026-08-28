@@ -44,7 +44,7 @@ fn main() {
         std::fs::read_to_string(donor_dir.join("project.ron")).expect("read default project donor");
     let mut project = ProjectDocument::from_ron_str(&donor_source).expect("parse default donor");
     let mut player_components = scaled_components(clone_components(&project, "Aletha"));
-    let mut enemy_components = scaled_components(clone_components(&project, "Rust Mantis"));
+    let mut enemy_components = scaled_components(clone_components(&project, "Light Enemy Model"));
     retain_locomotion_resources(&mut project);
     repair_preview_animator_clip(&project, &mut player_components);
     repair_preview_animator_clip(&project, &mut enemy_components);
@@ -135,7 +135,7 @@ fn main() {
     );
     add_host(
         scene,
-        "Rust Mantis",
+        "Light Enemy Model",
         enemy_start.map(|value| value as f32),
         0.0,
         &enemy_components,

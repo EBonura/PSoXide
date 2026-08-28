@@ -867,7 +867,7 @@ fn ashen_sanctum_project_is_authored_through_production_commands() {
     let aletha = resource_id(&workspace, "Aletha", |data| {
         matches!(data, ResourceData::Character(_))
     });
-    let mantis = resource_id(&workspace, "Rust Mantis Enemy", |data| {
+    let mantis = resource_id(&workspace, "Light Enemy", |data| {
         matches!(data, ResourceData::Character(_))
     });
     let sword_light = resource_id(&workspace, "Sword1 Light", |data| {

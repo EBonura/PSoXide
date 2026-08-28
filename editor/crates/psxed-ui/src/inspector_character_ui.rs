@@ -481,6 +481,39 @@ pub(crate) fn draw_character_controller_settings(
             );
         });
 
+    if player_controlled {
+        egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Player Attacks"))
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("Direct shoulder layout · no chord delay")
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
+                );
+                egui::Grid::new("player-attack-layout")
+                    .num_columns(3)
+                    .spacing([10.0, 3.0])
+                    .show(ui, |ui| {
+                        for (button, axis, strength) in [
+                            ("R1", "Horizon", "Light"),
+                            ("R2", "Horizon", "Heavy"),
+                            ("L1", "Zenith", "Light"),
+                            ("L2", "Zenith", "Heavy"),
+                        ] {
+                            ui.strong(button);
+                            ui.label(axis);
+                            ui.label(strength);
+                            ui.end_row();
+                        }
+                    });
+                draw_action_preview_buttons(
+                    ui,
+                    preview_action,
+                    &psxed_project::CharacterAnimationAction::PLAYER_ATTACKS,
+                );
+            });
+    }
+
     egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Enemy AI"))
         .default_open(!player_controlled && settings.enemy.is_some())
         .show(ui, |ui| {
@@ -2647,7 +2680,33 @@ pub(crate) fn attachment_socket_list_editor(
                     );
                 }
             }
-            changed |= int_vec3_editor(ui, "Offset", &mut socket.translation, -32768, 32767, 8.0);
+            ui.horizontal(|ui| {
+                ui.label("Translation space");
+                changed |= ui
+                    .selectable_value(
+                        &mut socket.translation_space,
+                        psxed_project::AttachmentSocketTranslationSpace::JointOffset,
+                        "Joint offset",
+                    )
+                    .on_hover_text("Offset from the mesh-bearing joint anchor")
+                    .changed();
+                changed |= ui
+                    .selectable_value(
+                        &mut socket.translation_space,
+                        psxed_project::AttachmentSocketTranslationSpace::BindSpace,
+                        "Bind-space",
+                    )
+                    .on_hover_text("Absolute model bind-space point for legacy placements")
+                    .changed();
+            });
+            changed |= int_vec3_editor(
+                ui,
+                "Offset",
+                &mut socket.translation,
+                i32::MIN,
+                i32::MAX,
+                8.0,
+            );
             changed |= q12_rotation_editor(ui, "Rotation", &mut socket.rotation_q12);
         });
         ui.add_space(4.0);
@@ -2697,6 +2756,7 @@ pub(crate) fn attachment_socket_list_editor(
                 name,
                 joint: 0,
                 translation: [0, 0, 0],
+                translation_space: psxed_project::AttachmentSocketTranslationSpace::JointOffset,
                 rotation_q12: [0, 0, 0],
             });
             changed = true;

@@ -1,5 +1,5 @@
 //! Headless "Starter Characters" sync: bring one project's starter catalogue
-//! (Aletha, Rust Mantis, weapons, clips, sets) up to date with the embedded
+//! (Aletha, Light Enemy, Heavy Enemy, weapons, clips, sets) up to date with the embedded
 //! default project, exactly as the resources-panel button does.
 //!   cargo run -p psxed-ui --example sync_starter -- <project_dir>
 

@@ -749,7 +749,11 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             GameEntityState::Recover => one_shot(
                 record.attack_clip,
                 u16::from(record.windup_ticks)
-                    .saturating_add(GAME_ENTITY_ATTACK_ACTIVE_TICKS)
+                    .saturating_add(
+                        record
+                            .attack_active_ticks
+                            .max(GAME_ENTITY_ATTACK_ACTIVE_TICKS),
+                    )
                     .saturating_add(ticks),
             ),
             GameEntityState::Staggered => one_shot(record.stagger_clip, ticks),
@@ -991,7 +995,11 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                         Some(attacks) => attacks.push(self.deferred_attack(record, index)),
                         None => self.resolve_attack_contact(record, index, input, &mut stats),
                     }
-                    if self.state_ticks[index] >= GAME_ENTITY_ATTACK_ACTIVE_TICKS {
+                    if self.state_ticks[index]
+                        >= record
+                            .attack_active_ticks
+                            .max(GAME_ENTITY_ATTACK_ACTIVE_TICKS)
+                    {
                         self.enter_state(index, GameEntityState::Recover, &mut stats);
                     }
                 }
@@ -1953,6 +1961,7 @@ mod tests {
             attack_cooldown_ticks: 0,
             group_attack_delay_ticks: 0,
             windup_ticks: 3,
+            attack_active_ticks: GAME_ENTITY_ATTACK_ACTIVE_TICKS,
             recovery_ticks: 4,
             attack_min_range: 0,
             attack_max_range: 0,

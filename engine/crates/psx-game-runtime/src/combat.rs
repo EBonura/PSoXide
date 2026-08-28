@@ -30,6 +30,7 @@ use psx_level::{
 use psx_math::atan2_q12;
 
 use crate::actor_pose::ActorPoseSnapshot;
+use crate::projectiles::{ProjectileDamageChannel, ProjectileVisualStyle};
 
 /// One animated combat capsule in room-local world space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,14 +102,47 @@ pub struct AuthoredProjectileRelease {
     pub poise_damage: u16,
     /// Additive render tint.
     pub tint_rgb: [u8; 3],
+    /// Typed destination in the dual-vitality system.
+    pub damage_channel: ProjectileDamageChannel,
+    /// Bounded bolt/trail/impact presentation profile.
+    pub visual: ProjectileVisualStyle,
+}
+
+/// Readable pre-release charge sampled from the same retained actor pose as
+/// the eventual projectile. Rendering this query cannot desynchronise the
+/// muzzle from animation because it performs no independent phase advance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthoredProjectileCharge {
+    /// Room-local animated muzzle center.
+    pub position: [i32; 3],
+    /// Collision radius used to size the charge flare.
+    pub radius: u16,
+    /// Charge completion in Q8 (`0..=256`).
+    pub progress_q8: u16,
+    /// Bounded projectile presentation profile.
+    pub visual: ProjectileVisualStyle,
+}
+
+fn projectile_visual(record: &CombatCapsuleRecord) -> ProjectileVisualStyle {
+    ProjectileVisualStyle {
+        core_rgb: record.projectile_core_rgb,
+        glow_rgb: record.projectile_glow_rgb,
+        impact_rgb: record.projectile_impact_rgb,
+        glow_scale_q8: record.projectile_glow_scale_q8.max(256),
+        length_ticks: record.projectile_length_ticks.max(1),
+        trail_segments: record.projectile_trail_segments.min(6),
+        trail_spacing_ticks: record.projectile_trail_spacing_ticks.max(1),
+        impact_lifetime_ticks: record.projectile_impact_lifetime_ticks.max(1),
+    }
 }
 
 /// Resolve the first projectile emitter active on an actor's retained pose.
 ///
-/// Release windows are deliberately inclusive and may span several frames so
-/// a 30 Hz NPC tick cannot skip over a high-rate source animation. The attack
-/// state owns the one-shot latch; this function is a pure pose query and can be
-/// retried if the fixed projectile pool is temporarily full.
+/// Release windows are inclusive. A one-frame event also stays eligible after
+/// its exact marker: low-rate NPC updates may jump from frame 17 to 19, and the
+/// attack state's one-shot latch makes the first retained pose at/after frame
+/// 18 the deterministic crossing of that event. The query remains retryable if
+/// the fixed projectile pool is temporarily full.
 pub fn authored_projectile_release(
     capsules: &[CombatCapsuleRecord],
     action: CharacterAnimationAction,
@@ -121,10 +155,13 @@ pub fn authored_projectile_release(
         .iter()
         .take(MAX_CHARACTER_COMBAT_CAPSULES)
         .find_map(|record| {
+            let exact_event_crossed = record.active_start_frame == record.active_end_frame
+                && frame >= record.active_start_frame;
+            let inside_window =
+                frame >= record.active_start_frame && frame <= record.active_end_frame;
             if record.flags & combat_capsule_flags::PROJECTILE_EMITTER == 0
                 || record.action != action
-                || frame < record.active_start_frame
-                || frame > record.active_end_frame
+                || (!inside_window && !exact_event_crossed)
             {
                 return None;
             }
@@ -139,6 +176,44 @@ pub fn authored_projectile_release(
                 damage: record.damage,
                 poise_damage: record.poise_damage,
                 tint_rgb: record.projectile_tint_rgb,
+                damage_channel: ProjectileDamageChannel::from_raw(record.projectile_damage_channel),
+                visual: projectile_visual(record),
+            })
+        })
+}
+
+/// Resolve the first projectile emitter currently inside its authored charge
+/// window. The release frame itself belongs to the bolt/muzzle-flash path.
+pub fn authored_projectile_charge(
+    capsules: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    pose: Option<ActorPoseSnapshot>,
+) -> Option<AuthoredProjectileCharge> {
+    let pose = pose?;
+    let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+    let action = action.to_index() as u8;
+    capsules
+        .iter()
+        .take(MAX_CHARACTER_COMBAT_CAPSULES)
+        .find_map(|record| {
+            if record.flags & combat_capsule_flags::PROJECTILE_EMITTER == 0
+                || record.action != action
+                || frame < record.projectile_charge_start_frame
+                || frame >= record.active_start_frame
+            {
+                return None;
+            }
+            let muzzle = transform_actor_combat_capsule(record, pose)?;
+            let duration = record
+                .active_start_frame
+                .saturating_sub(record.projectile_charge_start_frame)
+                .max(1);
+            let elapsed = frame.saturating_sub(record.projectile_charge_start_frame);
+            Some(AuthoredProjectileCharge {
+                position: muzzle.start,
+                radius: muzzle.radius,
+                progress_q8: ((u32::from(elapsed) * 256) / u32::from(duration)).min(256) as u16,
+                visual: projectile_visual(record),
             })
         })
 }
@@ -1148,6 +1223,16 @@ mod tests {
                 projectile_min_range: 0,
                 projectile_max_range: 0,
                 projectile_tint_rgb: [0; 3],
+                projectile_damage_channel: psx_level::projectile_damage_channel::ZENITH,
+                projectile_core_rgb: [0; 3],
+                projectile_trail_segments: 0,
+                projectile_glow_rgb: [0; 3],
+                projectile_length_ticks: 0,
+                projectile_impact_rgb: [0; 3],
+                projectile_trail_spacing_ticks: 0,
+                projectile_charge_start_frame: 0,
+                projectile_glow_scale_q8: 0,
+                projectile_impact_lifetime_ticks: 0,
                 projectile_reserved: 0,
             }
         }
@@ -1166,7 +1251,7 @@ mod tests {
         const INACTIVE_PHASE: u32 = 1 << 12;
 
         #[test]
-        fn projectile_release_uses_the_retained_pose_and_inclusive_window() {
+        fn projectile_charge_and_exact_release_use_the_retained_pose() {
             const EMITTERS: [CombatCapsuleRecord; 1] = [CombatCapsuleRecord {
                 flags: combat_capsule_flags::PROJECTILE_EMITTER,
                 start: [20, 30, 40],
@@ -1179,6 +1264,18 @@ mod tests {
                 projectile_min_range: 512,
                 projectile_max_range: 4096,
                 projectile_tint_rgb: [80, 180, 255],
+                active_start_frame: 3,
+                active_end_frame: 3,
+                projectile_charge_start_frame: 1,
+                projectile_damage_channel: psx_level::projectile_damage_channel::ZENITH,
+                projectile_core_rgb: [220, 255, 248],
+                projectile_glow_rgb: [80, 180, 255],
+                projectile_impact_rgb: [120, 220, 255],
+                projectile_trail_segments: 3,
+                projectile_length_ticks: 2,
+                projectile_trail_spacing_ticks: 1,
+                projectile_glow_scale_q8: 448,
+                projectile_impact_lifetime_ticks: 10,
                 ..capsule_record(0, combat_capsule_flags::PROJECTILE_EMITTER, ATTACK)
             }];
             let release = authored_projectile_release(
@@ -1194,6 +1291,25 @@ mod tests {
             assert_eq!((release.min_range, release.max_range), (512, 4096));
             assert_eq!((release.damage, release.poise_damage), (24, 12));
             assert_eq!(release.tint_rgb, [80, 180, 255]);
+            assert_eq!(release.damage_channel, ProjectileDamageChannel::Zenith);
+            assert_eq!(release.visual.trail_segments, 3);
+            assert!(
+                authored_projectile_release(
+                    &EMITTERS,
+                    ATTACK,
+                    Some(pose_at([1000, 2000, 3000], 4 << 12)),
+                )
+                .is_some(),
+                "a skipped exact frame releases on the first retained pose after it"
+            );
+            let charge = authored_projectile_charge(
+                &EMITTERS,
+                ATTACK,
+                Some(pose_at([1000, 2000, 3000], 2 << 12)),
+            )
+            .expect("charge window is visible before release");
+            assert_eq!(charge.position, [1020, 2030, 3040]);
+            assert_eq!(charge.progress_q8, 128);
             assert_eq!(
                 authored_projectile_release(
                     &EMITTERS,

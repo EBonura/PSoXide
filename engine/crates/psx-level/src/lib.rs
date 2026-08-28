@@ -1470,6 +1470,47 @@ pub const POI_PERSISTENT_FLAG_CAPACITY: usize = 832;
 /// Sentinel for a point-of-interest reward resource.
 pub const POI_REWARD_NONE: u16 = u16::MAX;
 
+/// Fixed player-stat lanes stored by [`BoostModuleRecord`]. The table layout
+/// is part of the cook/runtime contract, so editor-authored percentage effects
+/// stay allocation-free on the console.
+pub mod boost_stat {
+    /// Damage dealt by R1/R2 Horizon attacks.
+    pub const HORIZON_ATTACK: usize = 0;
+    /// Damage dealt by L1/L2 Zenith attacks.
+    pub const ZENITH_ATTACK: usize = 1;
+    /// Direct incoming-damage reduction.
+    pub const DEFENCE: usize = 2;
+    /// Walk and run speed.
+    pub const MOVEMENT_SPEED: usize = 3;
+    /// Complete attack timeline speed.
+    pub const ATTACK_SPEED: usize = 4;
+    /// Number of stat lanes in one cooked module.
+    pub const COUNT: usize = 5;
+}
+
+/// Maximum unique boost modules addressable by the fixed runtime inventory.
+pub const MAX_BOOST_MODULES: usize = 32;
+
+/// One unique collectible module authored by a point of interest.
+///
+/// Percentages are signed whole values. Their live contribution is multiplied
+/// by the assigned vitality endpoint's continuous influence at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoostModuleRecord {
+    /// Inventory and acquisition-panel name.
+    pub name: &'static str,
+    /// Short item description shown in the inventory detail rail.
+    pub description: &'static str,
+    /// Preformatted compact stat summary for the 320x240 inventory.
+    pub effect_summary: &'static str,
+    /// Preformatted assignment prompt naming this exact item.
+    pub assignment_label: &'static str,
+    /// Preformatted explicit unequip action.
+    pub remove_label: &'static str,
+    /// Base percentage modifiers in [`boost_stat`] order.
+    pub percentages: [i16; boost_stat::COUNT],
+}
+
 /// Sentinel for [`InteractableRecord::message`] when no message is
 /// associated with the interaction.
 pub const INTERACTABLE_MESSAGE_NONE: u16 = u16::MAX;
@@ -1776,6 +1817,9 @@ pub struct LevelGameEntityRecord {
     pub group_attack_delay_ticks: u8,
     /// 60 Hz ticks of attack windup (the souls-like telegraph).
     pub windup_ticks: u8,
+    /// 60 Hz ticks in the committed attack state. The cooker extends the
+    /// legacy six ticks when an authored hit or projectile event lands later.
+    pub attack_active_ticks: u16,
     /// 60 Hz ticks of post-attack recovery (the punish window).
     pub recovery_ticks: u8,
     /// Closest XZ distance at which a ranged attack may begin. Zero for melee.
@@ -3053,6 +3097,14 @@ pub mod combat_capsule_flags {
     pub const PROJECTILE_EMITTER: u8 = 1 << 2;
 }
 
+/// Typed destination for coloured projectile damage.
+pub mod projectile_damage_channel {
+    /// Damage is routed to the Horizon vitality pool.
+    pub const HORIZON: u8 = 0;
+    /// Damage is routed to the Zenith vitality pool.
+    pub const ZENITH: u8 = 1;
+}
+
 /// Compact rig-attached combat capsule. Endpoints are signed 16-bit because
 /// they remain in one joint's local model space; the cook rejects values that
 /// do not fit instead of charging the runtime for six 32-bit coordinates.
@@ -3090,6 +3142,26 @@ pub struct CombatCapsuleRecord {
     pub projectile_max_range: u16,
     /// Additive projectile tint. Black for non-emitters.
     pub projectile_tint_rgb: [u8; 3],
+    /// Horizon/Zenith destination; see [`projectile_damage_channel`].
+    pub projectile_damage_channel: u8,
+    /// Bright velocity-aligned needle core.
+    pub projectile_core_rgb: [u8; 3],
+    /// Number of tapered trail ghosts.
+    pub projectile_trail_segments: u8,
+    /// Wider additive halo and charge colour.
+    pub projectile_glow_rgb: [u8; 3],
+    /// Visual needle length in velocity ticks.
+    pub projectile_length_ticks: u8,
+    /// Expanding impact-shard colour.
+    pub projectile_impact_rgb: [u8; 3],
+    /// Velocity ticks between trail ghosts.
+    pub projectile_trail_spacing_ticks: u8,
+    /// First animation frame of the readable charge-up.
+    pub projectile_charge_start_frame: u16,
+    /// Halo width relative to collision radius (`256 = 1x`).
+    pub projectile_glow_scale_q8: u16,
+    /// Impact presentation lifetime in 60 Hz ticks.
+    pub projectile_impact_lifetime_ticks: u8,
     /// Reserved/alignment byte.
     pub projectile_reserved: u8,
 }
@@ -3388,11 +3460,11 @@ pub enum CharacterAnimationAction {
     Roll = 4,
     /// Backward evade.
     Backstep = 5,
-    /// Primary attack.
+    /// Horizon light attack (R1 for the current player layout).
     LightAttack = 6,
-    /// Secondary attack.
+    /// Horizon heavy attack (R2 for the current player layout).
     HeavyAttack = 7,
-    /// Follow-up / combo attack.
+    /// Legacy third Horizon slot; retained for package compatibility and NPCs.
     ComboAttack = 8,
     /// Guard / block pose.
     Block = 9,
@@ -3439,11 +3511,11 @@ pub enum CharacterAnimationAction {
     /// [`Self::RunWinddown`] from the other foot (mirrored), for the
     /// half-stride phase.
     RunWinddownAlt = 29,
-    /// Vertical axis level 1: an overhead strike, the second attack axis.
+    /// Zenith light attack (L1 for the current player layout).
     VertLightAttack = 30,
-    /// Vertical axis level 2.
+    /// Zenith heavy attack (L2 for the current player layout).
     VertHeavyAttack = 31,
-    /// Vertical axis level 3.
+    /// Legacy third Zenith slot; retained for package compatibility and NPCs.
     VertComboAttack = 32,
 }
 

@@ -47,13 +47,11 @@ fn save_poi_state_to_card(save: &SaveBlock) -> bool {
     )
 }
 
-fn boost_protocol_for_reward(resource: u16) -> Option<BoostProtocol> {
-    match resource {
-        1 => Some(BoostProtocol::Rupture),
-        2 => Some(BoostProtocol::Shell),
-        3 => Some(BoostProtocol::Surge),
-        _ => None,
-    }
+fn boost_module_for_reward(resource: u16) -> Option<BoostModuleId> {
+    let id = BoostModuleId(resource);
+    id.index()
+        .filter(|index| BOOST_MODULES.get(*index).is_some())
+        .map(|_| id)
 }
 
 fn poi_persistent_flags(
@@ -131,17 +129,15 @@ impl Playtest {
 
     pub(super) fn restore_claimed_poi_rewards(&mut self) {
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
-        self.power_up_inventory = BoostInventory::STARTER;
+        self.power_up_inventory = BoostInventory::EMPTY;
         for interactable in INTERACTABLES {
             if interactable.kind != InteractableKind::PointOfInterest
                 || !poi_persistent_flags(interactable).reward_claimed(&self.poi_save)
             {
                 continue;
             }
-            if let Some(protocol) = boost_protocol_for_reward(interactable.reward_resource) {
-                let _ = self
-                    .power_up_inventory
-                    .add(protocol, interactable.reward_quantity);
+            if let Some(module) = boost_module_for_reward(interactable.reward_resource) {
+                let _ = self.power_up_inventory.add(module);
             }
         }
     }
@@ -207,44 +203,41 @@ impl Playtest {
         candidate.is_depleted(&self.poi_save)
     }
 
-    fn grant_point_of_interest_reward(&mut self, index: usize) {
+    fn grant_point_of_interest_reward(&mut self, index: usize) -> Option<BoostModuleId> {
         let Some(interactable) = INTERACTABLES.get(index) else {
-            return;
+            return None;
         };
         let persistence = poi_persistent_flags(interactable);
         if persistence.reward_claimed(&self.poi_save) || interactable.reward_quantity == 0 {
-            return;
+            return None;
         }
-        let Some(protocol) = boost_protocol_for_reward(interactable.reward_resource) else {
-            return;
+        let Some(module) = boost_module_for_reward(interactable.reward_resource) else {
+            return None;
         };
-        let equipped = BoostSlotId::ALL
-            .iter()
-            .filter(|slot| self.power_up_loadout.protocol(**slot) == protocol)
-            .count()
-            .min(u8::MAX as usize) as u8;
-        let owned = self
-            .power_up_inventory
-            .count(protocol)
-            .saturating_add(equipped);
-        let room = BoostInventory::MAX_STACK.saturating_sub(owned);
-        if room < interactable.reward_quantity {
-            return;
-        }
-        if self
-            .power_up_inventory
-            .add(protocol, interactable.reward_quantity)
-            != interactable.reward_quantity
-        {
-            return;
+        let already_owned = self.power_up_inventory.contains(module)
+            || BoostSlotId::ALL
+                .iter()
+                .any(|slot| self.power_up_loadout.module(*slot) == module);
+        if already_owned || !self.power_up_inventory.add(module) {
+            return None;
         }
         if persistence.mark_reward_claimed(&mut self.poi_save) {
             self.poi_save_dirty = true;
         }
+        Some(module)
     }
 
     pub(super) fn advance_poi_message(&mut self) {
         use psx_game_runtime::poi::{MessageAdvance, MessageSource};
+        if !self.acquired_module.is_none() {
+            if self.complete_acquired_item_reveal() {
+                return;
+            }
+            self.acquired_module = BoostModuleId::NONE;
+            self.poi_panel_frame = 0;
+            self.poi_page_type_frame = 0;
+            return;
+        }
         if self.complete_active_poi_reveal() {
             return;
         }
@@ -258,9 +251,35 @@ impl Playtest {
                         self.poi_save_dirty = true;
                     }
                 }
+                if let Some(module) = self.grant_point_of_interest_reward(usize::from(index)) {
+                    self.acquired_module = module;
+                    self.poi_panel_frame = 0;
+                    self.poi_page_type_frame = 0;
+                }
             }
             MessageAdvance::Closed(MessageSource::World) | MessageAdvance::Inactive => {}
         }
+    }
+
+    fn complete_acquired_item_reveal(&mut self) -> bool {
+        const PREFIX: &str = "ITEM ACQUIRED - ";
+        let Some(module) = self
+            .acquired_module
+            .index()
+            .and_then(|index| BOOST_MODULES.get(index))
+        else {
+            return false;
+        };
+        let required_panel = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
+        let required_type = u16::try_from(PREFIX.chars().count() + module.name.chars().count())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(psx_engine::ui::MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
+        if self.poi_panel_frame >= required_panel && self.poi_page_type_frame >= required_type {
+            return false;
+        }
+        self.poi_panel_frame = required_panel;
+        self.poi_page_type_frame = required_type;
+        true
     }
 
     /// The first Cross press during panel motion or type-on completes the
@@ -295,6 +314,14 @@ impl Playtest {
     /// prepared. This preserves visible intermediate geometry when the fixed
     /// simulation gets several ticks ahead of displayed PS1 frames.
     pub(super) fn advance_poi_presentation_frame(&mut self) {
+        if !self.acquired_module.is_none() {
+            if self.poi_panel_frame < psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+                self.poi_panel_frame = self.poi_panel_frame.saturating_add(1);
+            } else {
+                self.poi_page_type_frame = self.poi_page_type_frame.saturating_add(1);
+            }
+            return;
+        }
         let Some(message) = self.poi_messages.active() else {
             return;
         };
@@ -324,7 +351,50 @@ impl Playtest {
     /// Fixed-point stat multipliers from the four endpoint sockets at the
     /// current Horizon/Zenith health positions.
     pub(super) fn vitality_modifiers(&self) -> VitalityModifiers {
-        self.power_up_loadout.modifiers(&self.player_vitality)
+        self.power_up_loadout
+            .modifiers(&self.player_vitality, BOOST_MODULES)
+    }
+
+    /// Live authored playback rate for an animation. Only the four attack
+    /// actions use the module Attack Speed lane; locomotion and defensive
+    /// actions retain their authored cadence.
+    pub(super) fn player_action_speed_q8(
+        &self,
+        character: RuntimeCharacter,
+        anim: PlayerAnim,
+    ) -> u16 {
+        let authored = character.action_speed(anim.action());
+        if player_anim_is_attack(anim) {
+            self.vitality_modifiers().attack_speed_q8(authored)
+        } else {
+            authored
+        }
+    }
+
+    pub(super) fn player_character_for_anim(
+        &self,
+        mut character: RuntimeCharacter,
+        _anim: PlayerAnim,
+    ) -> RuntimeCharacter {
+        let modifiers = self.vitality_modifiers();
+        for anim in [
+            PlayerAnim::LightAttack,
+            PlayerAnim::HeavyAttack,
+            PlayerAnim::VertLightAttack,
+            PlayerAnim::VertHeavyAttack,
+        ] {
+            let action = anim.action();
+            let authored = character.action_speed(action);
+            character.action_speeds[action.to_index()] = modifiers.attack_speed_q8(authored);
+        }
+        character
+    }
+
+    pub(super) const fn player_attack_channel(anim: PlayerAnim) -> VitalityChannelId {
+        match anim {
+            PlayerAnim::VertLightAttack | PlayerAnim::VertHeavyAttack => VitalityChannelId::Two,
+            _ => VitalityChannelId::One,
+        }
     }
 
     /// Apply a legacy, untyped incoming hit. Horizon is the migration/default
@@ -335,6 +405,28 @@ impl Playtest {
         let damage = self.vitality_modifiers().incoming_damage(damage);
         self.player_vitality
             .apply_spill(VitalityChannelId::One, damage)
+            .actor_defeated
+    }
+
+    /// Route an authored coloured projectile into exactly one vitality pool.
+    /// Typed attacks deliberately never spill: reading the attack colour is
+    /// the player's opportunity to protect the correct half.
+    pub(super) fn apply_typed_player_damage(
+        &mut self,
+        channel: psx_game_runtime::projectiles::ProjectileDamageChannel,
+        damage: u16,
+    ) -> bool {
+        let damage = self.vitality_modifiers().incoming_damage(damage);
+        let channel = match channel {
+            psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
+                VitalityChannelId::One
+            }
+            psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
+                VitalityChannelId::Two
+            }
+        };
+        self.player_vitality
+            .apply_damage(channel, damage)
             .actor_defeated
     }
 
@@ -492,7 +584,7 @@ impl Playtest {
                 character,
                 character.clip_for(anim),
                 video_hz,
-                character.action_speed(anim.action()),
+                self.player_action_speed_q8(character, anim),
                 character.action_frame_range(anim.action()),
             )
             .filter(|ticks| *ticks > 0)
@@ -571,7 +663,7 @@ impl Playtest {
                 character,
                 clip,
                 video_hz,
-                character.action_speed(anim.action()),
+                self.player_action_speed_q8(character, anim),
                 character.action_frame_range(anim.action()),
             )
             .unwrap_or(24)
@@ -960,6 +1052,72 @@ impl Playtest {
             return 0;
         };
         let mut submitted = 0usize;
+        // Charge flares are sampled from the same retained pose token as the
+        // eventual release, so the animated muzzle and presentation cannot
+        // drift apart even when NPC simulation runs below source clip rate.
+        let mut attack_index = 0usize;
+        while attack_index < self.deferred_enemy_attacks.len() {
+            let Some(attack) = self.deferred_enemy_attacks.get(attack_index) else {
+                break;
+            };
+            attack_index += 1;
+            let Some(entity) = GAME_ENTITIES.get(attack.entity()) else {
+                continue;
+            };
+            if entity.flags & psx_level::game_entity_flags::RANGED_ATTACK == 0 {
+                continue;
+            }
+            let first = entity.combat_capsule_first.to_usize();
+            let end = first.saturating_add(usize::from(entity.combat_capsule_count));
+            let capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
+            let pose = self
+                .instance_actor_poses
+                .get(entity.model_instance as usize)
+                .copied()
+                .flatten()
+                .map(|snapshot| snapshot.pose());
+            let Some(charge) = psx_game_runtime::combat::authored_projectile_charge(
+                capsules,
+                CharacterAnimationAction::LightAttack,
+                pose,
+            ) else {
+                continue;
+            };
+            if attack.room() != self.room_index && self.bsp.is_some() {
+                continue;
+            }
+            let room_camera = if self.bsp.is_some() {
+                camera
+            } else {
+                let Some(active) = self
+                    .window
+                    .rooms
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .find(|active| active.index == attack.room())
+                else {
+                    continue;
+                };
+                if !self.portal_visibility_draws_room(attack.room()) {
+                    continue;
+                }
+                camera_for_room(camera, active)
+            };
+            let depth_range = ROOMS
+                .get(attack.room().to_usize())
+                .map(room_depth_range)
+                .unwrap_or(WORLD_DEPTH_RANGE);
+            submitted += draw_projectile_charge(
+                charge,
+                room_camera,
+                None,
+                depth_range,
+                particle_material,
+                ot,
+                primitive_packets,
+            );
+        }
         let mut index = 0usize;
         while index < MAX_COMBAT_PROJECTILES {
             let Some(projectile) = self.combat_projectiles.get(index) else {
@@ -1003,9 +1161,7 @@ impl Playtest {
                 )
             };
             submitted += draw_projectile_bolt(
-                projectile.position,
-                projectile.radius,
-                projectile.tint_rgb,
+                projectile,
                 room_camera,
                 None,
                 depth_range,
@@ -1014,6 +1170,59 @@ impl Playtest {
                 primitive_packets,
             );
             index += 1;
+        }
+        let mut impact_index = 0usize;
+        while impact_index < MAX_PROJECTILE_IMPACTS {
+            let Some(impact) = self.combat_projectile_impacts.get(impact_index) else {
+                impact_index += 1;
+                continue;
+            };
+            let (room_camera, depth_range) = if self.bsp.is_some() {
+                if impact.room != self.room_index {
+                    impact_index += 1;
+                    continue;
+                }
+                (
+                    camera,
+                    ROOMS
+                        .get(impact.room.to_usize())
+                        .map(room_depth_range)
+                        .unwrap_or(WORLD_DEPTH_RANGE),
+                )
+            } else {
+                let Some(active) = self
+                    .window
+                    .rooms
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .find(|active| active.index == impact.room)
+                else {
+                    impact_index += 1;
+                    continue;
+                };
+                if !self.portal_visibility_draws_room(impact.room) {
+                    impact_index += 1;
+                    continue;
+                }
+                (
+                    camera_for_room(camera, active),
+                    ROOMS
+                        .get(impact.room.to_usize())
+                        .map(room_depth_range)
+                        .unwrap_or(WORLD_DEPTH_RANGE),
+                )
+            };
+            submitted += draw_projectile_impact(
+                impact,
+                room_camera,
+                None,
+                depth_range,
+                particle_material,
+                ot,
+                primitive_packets,
+            );
+            impact_index += 1;
         }
         submitted
     }
@@ -1183,7 +1392,9 @@ impl Playtest {
             ThirdPersonCameraInput {
                 yaw_delta_q12: 0,
                 pitch_delta_q12: 0,
-                recenter: ctx.is_held(button::L1),
+                // Shoulder inputs remain exclusively owned by combat even
+                // while hard locked.
+                recenter: false,
             }
         } else {
             camera_input(ctx, self.camera_orbit_speed_level(), self.analog_deadzone)
@@ -1404,7 +1615,6 @@ impl Playtest {
                 if opened {
                     self.poi_panel_frame = 0;
                     self.poi_page_type_frame = 0;
-                    self.grant_point_of_interest_reward(index);
                 }
                 opened
             }
@@ -1477,8 +1687,7 @@ impl Playtest {
             // Use the same cooked BSP visibility set that gates instance
             // rendering. A longer lock range must not make actors behind a
             // wall targetable merely because they share the active room.
-            if index >= u16::BITS as usize
-                || self.bsp_instance_visible_mask & (1u16 << index) == 0
+            if index >= u16::BITS as usize || self.bsp_instance_visible_mask & (1u16 << index) == 0
             {
                 continue;
             }
@@ -1572,8 +1781,7 @@ impl Playtest {
             if index == current_index {
                 continue;
             }
-            if index >= u16::BITS as usize
-                || self.bsp_instance_visible_mask & (1u16 << index) == 0
+            if index >= u16::BITS as usize || self.bsp_instance_visible_mask & (1u16 << index) == 0
             {
                 continue;
             }

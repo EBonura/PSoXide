@@ -3748,40 +3748,75 @@ pub(crate) fn draw_node_kind_editor(
             }
             if let Some(reward) = reward {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Module").color(STUDIO_TEXT_WEAK));
-                    let preview = reward
-                        .module
-                        .and_then(|id| {
-                            boost_module_options
-                                .iter()
-                                .find(|(candidate, _)| *candidate == id)
-                                .map(|(_, name)| name.as_str())
-                        })
-                        .unwrap_or("(none)");
-                    changed |= searchable_picker(
-                        ui,
-                        "point_of_interest_reward_module",
-                        &mut reward.module,
-                        preview,
-                        boost_module_options,
-                        SearchablePickerConfig::optional("(none)")
-                            .with_search_hint("Search boost modules…"),
-                    );
+                    ui.label(RichText::new("Item name").color(STUDIO_TEXT_WEAK));
+                    changed |= ui.text_edit_singleline(&mut reward.item_name).changed();
                 });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Quantity").color(STUDIO_TEXT_WEAK));
-                    let mut quantity = i32::from(reward.quantity);
-                    if ui
-                        .add(egui::DragValue::new(&mut quantity).range(1..=99))
-                        .changed()
-                    {
-                        reward.quantity = quantity.clamp(1, 99) as u8;
-                        changed = true;
+                ui.label(RichText::new("Description").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::TextEdit::multiline(&mut reward.description)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .changed();
+                ui.label(RichText::new("Percentage effects").color(STUDIO_TEXT_WEAK));
+                let mut remove_effect = None;
+                for (index, modifier) in reward.modifiers.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("poi-reward-stat", index))
+                            .selected_text(modifier.stat.label())
+                            .show_ui(ui, |ui| {
+                                for stat in psxed_project::BoostStatKind::ALL {
+                                    changed |= ui
+                                        .selectable_value(&mut modifier.stat, stat, stat.label())
+                                        .changed();
+                                }
+                            });
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut modifier.percent)
+                                    .suffix("%")
+                                    .range(-100..=500),
+                            )
+                            .changed();
+                        if ui
+                            .small_button(icons::text(icons::TRASH, 13.0))
+                            .on_hover_text("Remove effect")
+                            .clicked()
+                        {
+                            remove_effect = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = remove_effect {
+                    reward.modifiers.remove(index);
+                    changed = true;
+                }
+                if reward.modifiers.len() < psx_level::boost_stat::COUNT
+                    && ui.button(icons::label(icons::PLUS, "Add effect")).clicked()
+                {
+                    reward
+                        .modifiers
+                        .push(psxed_project::BoostStatModifier::default());
+                    changed = true;
+                }
+                if reward.item_name.trim().is_empty() {
+                    if let Some(module_id) = reward.module {
+                        let legacy_name = boost_module_options
+                            .iter()
+                            .find(|(candidate, _)| *candidate == module_id)
+                            .map(|(_, name)| name.as_str())
+                            .unwrap_or("missing resource");
+                        ui.label(
+                            RichText::new(format!("Legacy module: {legacy_name}"))
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                        );
                     }
-                });
+                }
                 ui.label(
                     RichText::new(
-                        "The reward is granted once even when the message is repeatable.",
+                        "Unique item: granted once even when the message is repeatable.",
                     )
                     .small()
                     .color(STUDIO_TEXT_WEAK),

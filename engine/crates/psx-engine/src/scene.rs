@@ -445,12 +445,21 @@ pub trait Scene {
     }
 
     /// Resolve a tagged UI node's live text. Untagged nodes and unknown tags
-    /// keep their authored copy. Returning static strings preserves the
-    /// runtime's allocation-free UI contract while still allowing compact
-    /// inventory controls to reflect gameplay-owned state.
+    /// keep their authored copy. The caller lends a fixed scratch buffer so
+    /// gameplay can compose numeric labels without allocation; implementations
+    /// may also return static strings directly.
     #[inline]
-    fn ui_text(&self, _tag: &str) -> Option<&'static str> {
+    fn ui_text<'a>(&self, _tag: &str, _scratch: &'a mut [u8]) -> Option<&'a str> {
         None
+    }
+
+    /// Resolve whether a tagged UI node participates in drawing and focus
+    /// navigation. Untagged and unknown nodes remain visible by default.
+    /// This keeps fixed-capacity PS1 menus able to present genuinely dynamic
+    /// lists without leaving invisible controls in the navigation graph.
+    #[inline]
+    fn ui_node_visible(&self, _tag: &str) -> bool {
+        true
     }
 
     /// Handle an authored game-specific UI action. The flow driver owns
@@ -459,6 +468,15 @@ pub trait Scene {
     /// other domain controls without teaching the engine their semantics.
     #[allow(unused_variables)]
     fn game_ui_action(&mut self, id: u16, ctx: &mut Ctx) {}
+
+    /// Handle Circle while an authored gameplay overlay owns UI input.
+    /// Returning `true` consumes the press. Gameplay overlays never fall back
+    /// to the front-end return stack: their category changes belong to
+    /// explicit tabs, while Start owns resume.
+    #[allow(unused_variables)]
+    fn game_ui_cancel(&mut self, ctx: &mut Ctx) -> bool {
+        false
+    }
 
     /// Receive the current project-option values. The flow driver calls this
     /// when a UI entry applies defaults, after front-end option edits, and each

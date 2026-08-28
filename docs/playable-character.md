@@ -147,7 +147,10 @@ Per-frame update:
   analog mode.
 - Keyboard defaults: arrow keys emulate left stick; I/J/K/L emulate
   right stick.
-- L1: recenter the third-person camera behind the player.
+- R1 / R2: Horizon light / heavy attack.
+- L1 / L2: Zenith light / heavy attack.
+- Shoulder buttons trigger directly; there are no two-button combo inputs or
+  camera-recenter overlap.
 - R3: hard-lock / unlock the most central entity target in range.
 - Right-stick flick: switch hard-lock target in screen-space order.
 - Lock acquisition considers only live gameplay entities inside the camera

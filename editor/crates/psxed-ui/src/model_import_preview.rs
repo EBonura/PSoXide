@@ -25,6 +25,19 @@ pub(crate) struct PreviewCombatCapsule {
     pub radius: u16,
     pub color: Color32,
     pub selected: bool,
+    /// Optional Animation Studio-only projectile cue. The model renderer does
+    /// not interpret it; the caller overlays charge/release presentation at
+    /// the projected selected-combat gizmo.
+    pub projectile: Option<PreviewProjectileCue>,
+}
+
+/// Compact editor preview of an authored projectile event.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreviewProjectileCue {
+    pub charge_start_frame: u16,
+    pub release_frame: u16,
+    pub core_color: Color32,
+    pub glow_color: Color32,
 }
 
 /// One attachment socket drawn over an animated model preview as a
@@ -2474,6 +2487,7 @@ mod tests {
                 radius: 96,
                 color: Color32::CYAN,
                 selected: true,
+                projectile: None,
             }],
             &[],
             None,

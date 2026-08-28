@@ -3515,7 +3515,7 @@ fn inspector_respects_explicit_history_and_deliberate_clears() {
 }
 
 /// A genuinely fresh New Project must already carry the production content
-/// catalogue: Aletha, the Rust Mantis light enemy, the Tank heavy enemy, the
+/// catalogue: Aletha, the Light Enemy, the Heavy Enemy, the
 /// saved material library and every file/reference they need. The manual
 /// "Starter Characters" action remains idempotent for older projects.
 #[test]
@@ -3703,7 +3703,7 @@ fn new_project_starts_with_verified_character_and_material_content() {
 
     // The verified Mantis enemy: torso hurtbox plus an animation-timed palm
     // projectile emitter, armed model socket for equipment.
-    let mantis = resource_by_name("Rust Mantis Enemy", |data| {
+    let mantis = resource_by_name("Light Enemy", |data| {
         matches!(data, ResourceData::Character(_))
     });
     let ResourceData::Character(mantis) = &mantis.data else {
@@ -3717,25 +3717,35 @@ fn new_project_starts_with_verified_character_and_material_content() {
         mantis.combat_capsules[0].role,
         psxed_project::CombatCapsuleRole::Hurtbox
     );
-    assert_eq!(mantis.combat_capsules[1].name, "Right Palm Bolt");
+    assert_eq!(mantis.combat_capsules[1].name, "Choir Needle Muzzle");
     assert_eq!(mantis.combat_capsules[1].joint, 13);
     assert_eq!(mantis.combat_capsules[1].capsule.start, [0; 3]);
     assert_eq!(mantis.combat_capsules[1].capsule.end, [0; 3]);
     assert_eq!(mantis.combat_capsules[1].capsule.radius, 48);
-    assert!(matches!(
-        mantis.combat_capsules[1].role,
+    let mantis_projectile = match mantis.combat_capsules[1].role {
         psxed_project::CombatCapsuleRole::ProjectileEmitter {
             action: psxed_project::CharacterAnimationAction::LightAttack,
-            active_start_frame: 4,
-            active_end_frame: 6,
+            charge_start_frame: 10,
+            active_start_frame: 18,
+            active_end_frame: 18,
+            projectile: Some(projectile),
             speed: 112,
             lifetime_ticks: 180,
             min_range: 512,
             max_range: 4096,
             damage: 18,
             poise_damage: 8,
-            tint_rgb: [96, 214, 255],
-        }
+            tint_rgb: [62, 214, 198],
+        } => projectile,
+        ref role => panic!("unexpected Mantis projectile emitter: {role:?}"),
+    };
+    let mantis_projectile = project
+        .resource(mantis_projectile)
+        .expect("Mantis projectile profile is synced and remapped");
+    assert_eq!(mantis_projectile.name, "Choir Needle");
+    assert!(matches!(
+        mantis_projectile.data,
+        ResourceData::Projectile(_)
     ));
     assert_eq!(mantis.spawn_role, psxed_project::CharacterSpawnRole::Enemy);
     let behavior = mantis.enemy_behavior.expect("mantis enemy behavior");
@@ -3753,7 +3763,7 @@ fn new_project_starts_with_verified_character_and_material_content() {
 
     // The heavy enemy has one canonical native animated model. Its missing
     // Run binding is deliberate capability data, not a dangling resource.
-    let tank = resource_by_name("Tank Boss", |data| {
+    let tank = resource_by_name("Heavy Enemy", |data| {
         matches!(data, ResourceData::Character(_))
     });
     let ResourceData::Character(tank) = &tank.data else {
@@ -3771,11 +3781,11 @@ fn new_project_starts_with_verified_character_and_material_content() {
         }
     ));
     let tank_model = project.resource(tank.model.unwrap()).unwrap();
-    assert_eq!(tank_model.name, "Tank Boss Animated Model");
+    assert_eq!(tank_model.name, "Heavy Enemy Model");
     let tank_set = project.resource(tank.animation_set.unwrap()).unwrap();
-    assert_eq!(tank_set.name, "tank_boss_ai_set");
+    assert_eq!(tank_set.name, "Heavy Enemy Animation Set");
     let ResourceData::AnimationSet(tank_set) = &tank_set.data else {
-        panic!("Tank Boss animation-set reference is not an AnimationSet");
+        panic!("Heavy Enemy animation-set reference is not an AnimationSet");
     };
     let has_action = |action| {
         tank_set
@@ -4306,7 +4316,7 @@ fn souls_slice_project_is_authored_through_production_commands() {
     let aletha_profile = resource_id(&workspace, "Aletha", |data| {
         matches!(data, ResourceData::Character(_))
     });
-    let mantis_profile = resource_id(&workspace, "Rust Mantis Enemy", |data| {
+    let mantis_profile = resource_id(&workspace, "Light Enemy", |data| {
         matches!(data, ResourceData::Character(_))
     });
     let sword_light = resource_id(&workspace, "Sword1 Light", |data| {
@@ -4461,7 +4471,7 @@ fn souls_slice_project_is_authored_through_production_commands() {
     workspace.mark_dirty();
     workspace.orthographic_focus[1] = 256.0;
 
-    // The verified enemy: the Rust Mantis starter profile in the far room,
+    // The verified Light Enemy starter profile in the far room,
     // facing the doorway, with the sample-calibrated renderer scale.
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Character)));
     workspace.replace_resource_selection(mantis_profile);
