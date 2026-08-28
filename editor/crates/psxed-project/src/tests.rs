@@ -181,8 +181,10 @@ fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
             },
             role: CombatCapsuleRole::ProjectileEmitter {
                 action: CharacterAnimationAction::LightAttack,
+                charge_start_frame: 6,
                 active_start_frame: 10,
                 active_end_frame: 13,
+                projectile: None,
                 speed: 192,
                 lifetime_ticks: 150,
                 min_range: 600,
@@ -1513,27 +1515,29 @@ fn embedded_default_project_ron_deserializes() {
 }
 
 #[test]
-fn default_project_instantiates_the_single_animated_tank_boss() {
+fn default_project_instantiates_the_single_animated_heavy_enemy() {
     let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
     let tank_resource = project
         .resources
         .iter()
-        .find(|resource| resource.name == "Tank Boss")
+        .find(|resource| resource.name == "Heavy Enemy")
         .expect("default project catalogues the boss enemy");
     let ResourceData::Character(tank) = &tank_resource.data else {
-        panic!("Tank Boss is a Character resource");
+        panic!("Heavy Enemy is a Character resource");
     };
     assert_eq!(tank.spawn_role, CharacterSpawnRole::Enemy);
 
-    let model_id = tank.model.expect("Tank Boss character owns a model");
-    let model_resource = project.resource(model_id).expect("Tank Boss model exists");
+    let model_id = tank.model.expect("Heavy Enemy character owns a model");
+    let model_resource = project
+        .resource(model_id)
+        .expect("Heavy Enemy model exists");
     let ResourceData::Model(model) = &model_resource.data else {
-        panic!("Tank Boss model binding points at a Model resource");
+        panic!("Heavy Enemy model binding points at a Model resource");
     };
-    assert_eq!(model_resource.name, "Tank Boss Animated Model");
+    assert_eq!(model_resource.name, "Heavy Enemy Model");
     assert!(
         model.source_path.is_none(),
-        "generated Tank Boss animation sources remain local-only"
+        "generated Heavy Enemy animation sources remain local-only"
     );
     assert!(default_project_dir().join(&model.model_path).is_file());
     assert!(model
@@ -1543,12 +1547,12 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
 
     let animation_set_id = tank
         .animation_set
-        .expect("Tank Boss has an animation-set binding");
+        .expect("Heavy Enemy has an animation-set binding");
     let animation_set = project
         .resource(animation_set_id)
-        .expect("Tank Boss animation set exists");
+        .expect("Heavy Enemy animation set exists");
     let ResourceData::AnimationSet(animation_set) = &animation_set.data else {
-        panic!("Tank Boss animation binding points at an Animation Set");
+        panic!("Heavy Enemy animation binding points at an Animation Set");
     };
     assert_eq!(
         animation_set.clips.len(),
@@ -1570,7 +1574,7 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
             .action_clips
             .iter()
             .find(|binding| binding.action == action)
-            .unwrap_or_else(|| panic!("Tank Boss has a {action:?} binding"));
+            .unwrap_or_else(|| panic!("Heavy Enemy has a {action:?} binding"));
         let clip = project.resource(binding.clip).expect("bound clip exists");
         assert!(matches!(clip.data, ResourceData::AnimationClip(_)));
     }
@@ -1579,8 +1583,8 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
     let tank_entity = scene
         .nodes()
         .iter()
-        .find(|node| node.name == "Tank Boss" && matches!(node.kind, NodeKind::Entity))
-        .expect("animated Tank Boss is placed in the default level");
+        .find(|node| node.name == "Heavy Enemy" && matches!(node.kind, NodeKind::Entity))
+        .expect("animated Heavy Enemy is placed in the default level");
     assert!(tank_entity.children.iter().any(|child| {
         scene.node(*child).is_some_and(|node| {
             matches!(
@@ -1622,22 +1626,65 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
     let (package, report) = playtest::build_package(&project, &default_project_dir());
     assert!(
         report.is_ok(),
-        "default project with the animated Tank Boss must cook: {:?}",
+        "default project with the animated Heavy Enemy must cook: {:?}",
         report.errors
     );
     let package = package.expect("default project produces a playtest package");
     assert!(
         package.models.iter().any(|cooked| cooked.clip_count == 9),
-        "the cooked Tank Boss model carries all nine selected clips"
+        "the cooked Heavy Enemy model carries all nine selected clips"
     );
     assert!(
         package.game_entities.iter().any(|entity| {
             entity.flags & psx_level::game_entity_flags::RANGED_ATTACK != 0
-                && entity.attack_min_range == 768
-                && entity.attack_max_range == 4608
+                && entity.attack_min_range == 768 / crate::units::WORLD_UNIT_DIVISOR as u16
+                && entity.attack_max_range == 4608 / crate::units::WORLD_UNIT_DIVISOR as u16
         }),
-        "the placed Tank Boss cooks its projectile-driven AI attack band"
+        "the placed Heavy Enemy cooks its projectile-driven AI attack band: {:?}",
+        package
+            .game_entities
+            .iter()
+            .map(|entity| (
+                entity.flags,
+                entity.attack_min_range,
+                entity.attack_max_range
+            ))
+            .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn current_player_attack_slots_are_exactly_the_four_direct_shoulders() {
+    assert_eq!(
+        CharacterAnimationAction::PLAYER_ATTACKS,
+        [
+            CharacterAnimationAction::LightAttack,
+            CharacterAnimationAction::HeavyAttack,
+            CharacterAnimationAction::VertLightAttack,
+            CharacterAnimationAction::VertHeavyAttack,
+        ]
+    );
+    assert_eq!(
+        CharacterAnimationAction::LightAttack.label(),
+        "Horizon Light"
+    );
+    assert_eq!(
+        CharacterAnimationAction::HeavyAttack.label(),
+        "Horizon Heavy"
+    );
+    assert_eq!(
+        CharacterAnimationAction::VertLightAttack.label(),
+        "Zenith Light"
+    );
+    assert_eq!(
+        CharacterAnimationAction::VertHeavyAttack.label(),
+        "Zenith Heavy"
+    );
+    assert!(
+        !CharacterAnimationAction::PLAYER_ATTACKS.contains(&CharacterAnimationAction::ComboAttack)
+    );
+    assert!(!CharacterAnimationAction::PLAYER_ATTACKS
+        .contains(&CharacterAnimationAction::VertComboAttack));
 }
 
 #[test]
@@ -1652,7 +1699,7 @@ fn default_project_uses_one_complete_stun_clip_per_character() {
         "the legacy split recovery slot must not appear in current authoring"
     );
     let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
-    for character_name in ["Aletha", "Rust Mantis Enemy", "Tank Boss"] {
+    for character_name in ["Aletha", "Light Enemy", "Heavy Enemy"] {
         let character = project
             .resources
             .iter()
@@ -1749,9 +1796,9 @@ fn starter_model_files_present_on_disk() {
         .is_file());
     let mantis_idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
     assert!(mantis_idle_path.is_file());
-    let mantis_idle_bytes = std::fs::read(&mantis_idle_path).expect("read Rust Mantis idle");
+    let mantis_idle_bytes = std::fs::read(&mantis_idle_path).expect("read Light Enemy idle");
     let mantis_idle =
-        psx_asset::Animation::from_bytes(&mantis_idle_bytes).expect("parse Rust Mantis idle");
+        psx_asset::Animation::from_bytes(&mantis_idle_bytes).expect("parse Light Enemy idle");
     assert_eq!(mantis_idle.joint_count(), 22);
     assert_eq!(mantis_idle.frame_count(), 97);
     assert_eq!(mantis_idle.sample_rate_hz(), 12);
@@ -1759,23 +1806,23 @@ fn starter_model_files_present_on_disk() {
         assert_eq!(
             mantis_idle.pose(0, joint),
             mantis_idle.pose(mantis_idle.frame_count() - 1, joint),
-            "Rust Mantis idle must close exactly at joint {joint}"
+            "Light Enemy idle must close exactly at joint {joint}"
         );
     }
 }
 
 #[test]
-fn rust_mantis_look_idle_is_installed_in_every_mantis_project() {
+fn light_enemy_look_idle_is_installed_in_every_enemy_project() {
     let expected = std::fs::read(
         default_project_dir().join("assets/animations/rust_mantis_starter/idle.psxanim"),
     )
-    .expect("read selected Rust Mantis idle");
+    .expect("read selected Light Enemy idle");
 
     for project_name in ["default", "mantis", "quake-e1m1-geometry", "tech-demo"] {
         let root = projects_dir().join(project_name);
         let idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
         assert_eq!(
-            std::fs::read(&idle_path).expect("read project Rust Mantis idle"),
+            std::fs::read(&idle_path).expect("read project Light Enemy idle"),
             expected,
             "{project_name} must carry the selected look-around idle"
         );
@@ -1786,12 +1833,12 @@ fn rust_mantis_look_idle_is_installed_in_every_mantis_project() {
             .resources
             .iter()
             .find_map(|resource| match &resource.data {
-                ResourceData::AnimationClip(clip) if resource.name == "Rust Mantis / Idle" => {
+                ResourceData::AnimationClip(clip) if resource.name == "Light Enemy / Idle" => {
                     Some(clip)
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("{project_name} has no Rust Mantis idle resource"));
+            .unwrap_or_else(|| panic!("{project_name} has no Light Enemy idle resource"));
         assert!(clip.looping, "{project_name} idle must loop");
         assert_eq!(
             clip.tags,
@@ -1802,16 +1849,16 @@ fn rust_mantis_look_idle_is_installed_in_every_mantis_project() {
 }
 
 #[test]
-fn rust_mantis_turn_and_alert_are_installed_in_every_mantis_project() {
+fn light_enemy_turn_and_alert_are_installed_in_every_enemy_project() {
     let default_root = default_project_dir();
     let expected_turn =
         std::fs::read(default_root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
-            .expect("read selected Rust Mantis turn");
+            .expect("read selected Light Enemy turn");
     let expected_alert =
         std::fs::read(default_root.join("assets/animations/rust_mantis_starter/alert.psxanim"))
-            .expect("read selected Rust Mantis alert");
-    let turn = psx_asset::Animation::from_bytes(&expected_turn).expect("parse Rust Mantis turn");
-    let alert = psx_asset::Animation::from_bytes(&expected_alert).expect("parse Rust Mantis alert");
+            .expect("read selected Light Enemy alert");
+    let turn = psx_asset::Animation::from_bytes(&expected_turn).expect("parse Light Enemy turn");
+    let alert = psx_asset::Animation::from_bytes(&expected_alert).expect("parse Light Enemy alert");
     assert_eq!(
         (
             turn.joint_count(),
@@ -1833,13 +1880,13 @@ fn rust_mantis_turn_and_alert_are_installed_in_every_mantis_project() {
         let root = projects_dir().join(project_name);
         assert_eq!(
             std::fs::read(root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
-                .expect("read project Rust Mantis turn"),
+                .expect("read project Light Enemy turn"),
             expected_turn,
             "{project_name} must carry the selected turn take"
         );
         assert_eq!(
             std::fs::read(root.join("assets/animations/rust_mantis_starter/alert.psxanim"))
-                .expect("read project Rust Mantis alert"),
+                .expect("read project Light Enemy alert"),
             expected_alert,
             "{project_name} must carry the selected alert take"
         );
@@ -1850,14 +1897,12 @@ fn rust_mantis_turn_and_alert_are_installed_in_every_mantis_project() {
             .resources
             .iter()
             .find_map(|resource| match &resource.data {
-                ResourceData::AnimationSet(set)
-                    if resource.name == "Rust Mantis Starter Animation Set" =>
-                {
+                ResourceData::AnimationSet(set) if resource.name == "Light Enemy Animation Set" => {
                     Some(set)
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("{project_name} has no Rust Mantis animation set"));
+            .unwrap_or_else(|| panic!("{project_name} has no Light Enemy animation set"));
         assert!(
             set.action_clip(CharacterAnimationAction::Turn).is_some(),
             "{project_name} must bind the tracking turn"
@@ -1944,12 +1989,10 @@ fn starter_project_has_scene_tree_and_resources() {
         .resources
         .iter()
         .find_map(|resource| match &resource.data {
-            ResourceData::Character(character) if resource.name == "Rust Mantis Enemy" => {
-                Some(character)
-            }
+            ResourceData::Character(character) if resource.name == "Light Enemy" => Some(character),
             _ => None,
         })
-        .expect("starter includes the Rust Mantis enemy");
+        .expect("starter includes the Light Enemy");
     assert_eq!(mantis.spawn_role, CharacterSpawnRole::Enemy);
     assert_eq!(mantis.walk_speed, 28);
     let enemy = mantis.enemy_behavior.expect("Mantis enemy behavior preset");
@@ -1961,12 +2004,12 @@ fn starter_project_has_scene_tree_and_resources() {
         .resources
         .iter()
         .find_map(|resource| match &resource.data {
-            ResourceData::AnimationClip(clip) if resource.name == "Rust Mantis / Idle" => {
+            ResourceData::AnimationClip(clip) if resource.name == "Light Enemy / Idle" => {
                 Some(clip)
             }
             _ => None,
         })
-        .expect("starter includes the selected Rust Mantis idle");
+        .expect("starter includes the selected Light Enemy idle");
     assert_eq!(
         mantis_idle.psxanim_path,
         "assets/animations/rust_mantis_starter/idle.psxanim"
@@ -2115,12 +2158,6 @@ fn project_roundtrips_through_ron_string() {
 #[test]
 fn point_of_interest_world_message_and_boost_module_roundtrip() {
     let mut project = ProjectDocument::new("messages");
-    let module = project.add_resource(
-        "Rupture Coil",
-        ResourceData::BoostModule(BoostModuleResource {
-            kind: BoostModuleKind::Rupture,
-        }),
-    );
     let scene = project.active_scene_mut();
     let root = scene.root;
     let NodeKind::World { world_message, .. } = &mut scene.node_mut(root).expect("world root").kind
@@ -2145,8 +2182,14 @@ fn point_of_interest_world_message_and_boost_module_roundtrip() {
             repeatable: false,
             persistence_id: "archive-beacon-01".to_string(),
             reward: Some(PointOfInterestReward {
-                module: Some(module),
-                quantity: 2,
+                module: None,
+                quantity: 1,
+                item_name: "Kinetic Relay".to_string(),
+                description: "Amplifies Horizon attack output.".to_string(),
+                modifiers: vec![BoostStatModifier {
+                    stat: BoostStatKind::HorizonAttack,
+                    percent: 15,
+                }],
             }),
             enabled: true,
         },
@@ -2177,6 +2220,7 @@ fn deleting_boost_module_clears_point_of_interest_reward_reference() {
         "Surge Drive",
         ResourceData::BoostModule(BoostModuleResource {
             kind: BoostModuleKind::Surge,
+            ..BoostModuleResource::default()
         }),
     );
     let scene = project.active_scene_mut();
@@ -2194,6 +2238,7 @@ fn deleting_boost_module_clears_point_of_interest_reward_reference() {
             reward: Some(PointOfInterestReward {
                 module: Some(module),
                 quantity: 1,
+                ..PointOfInterestReward::default()
             }),
             enabled: true,
         },
@@ -2375,9 +2420,10 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
         ("Horizon Full Boost", 201, "boost.horizon.full"),
         ("Zenith Empty Boost", 202, "boost.zenith.empty"),
         ("Zenith Full Boost", 203, "boost.zenith.full"),
-        ("Rupture Inventory Item", 210, "inventory.rupture"),
-        ("Shell Inventory Item", 211, "inventory.shell"),
-        ("Surge Inventory Item", 212, "inventory.surge"),
+        ("Inventory Item Slot 1", 210, "inventory.item.0"),
+        ("Inventory Item Slot 2", 211, "inventory.item.1"),
+        ("Inventory Item Slot 3", 212, "inventory.item.2"),
+        ("Remove Socketed Module", 220, "boost.remove"),
     ] {
         let (authored_action, authored_tag) = inventory
             .nodes()
@@ -2397,9 +2443,10 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
         ("Horizon Full Boost", "F // NONE"),
         ("Zenith Empty Boost", "E // NONE"),
         ("Zenith Full Boost", "F // NONE"),
-        ("Rupture Inventory Item", "RUPTURE // 01"),
-        ("Shell Inventory Item", "SHELL   // 00"),
-        ("Surge Inventory Item", "SURGE   // 00"),
+        ("Inventory Item Slot 1", "MODULE 01"),
+        ("Inventory Item Slot 2", "MODULE 02"),
+        ("Inventory Item Slot 3", "MODULE 03"),
+        ("Remove Socketed Module", "REMOVE"),
     ] {
         let label = inventory
             .nodes()
@@ -2466,18 +2513,46 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
         assert_eq!(max, UiValueBinding::ConstantQ12(4096));
     }
 
-    for name in ["Horizon Pole Caption", "Zenith Pole Caption"] {
-        let text = inventory
+    let (assignment_text, assignment_tag) = inventory
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Assignment Prompt")
+        .and_then(|node| match &node.kind {
+            UiNodeKind::Label { text, tag, .. } => Some((text.as_str(), tag.as_str())),
+            _ => None,
+        })
+        .expect("Assignment Prompt");
+    assert_eq!(assignment_text, "ASSIGN MODULE: CHOOSE SLOT");
+    assert_eq!(assignment_tag, "boost.assignment.prompt");
+    for (name, tag) in [
+        ("Selected Module Base Effect", "boost.selected.base"),
+        ("Horizon Attack Stat", "boost.stat.horizon"),
+        ("Zenith Attack Stat", "boost.stat.zenith"),
+        ("Defence Stat", "boost.stat.defence"),
+        ("Movement Speed Stat", "boost.stat.movement"),
+        ("Attack Speed Stat", "boost.stat.attack_speed"),
+    ] {
+        let authored_tag = inventory
             .nodes()
             .iter()
             .find(|node| node.name == name)
             .and_then(|node| match &node.kind {
-                UiNodeKind::Label { text, .. } => Some(text.as_str()),
+                UiNodeKind::Label { tag, .. } => Some(tag.as_str()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("missing {name}"));
-        assert!(text.is_empty(), "{name} must not render FULL/EMPTY copy");
+        assert_eq!(authored_tag, tag);
     }
+    let zenith_caption = inventory
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Zenith Pole Caption")
+        .and_then(|node| match &node.kind {
+            UiNodeKind::Label { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("Zenith Pole Caption");
+    assert!(zenith_caption.is_empty());
 
     for (name, endpoint_x) in [
         ("Horizon Full Trace", 19),
@@ -2567,13 +2642,13 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
     for (name, expected_rect, expected_color) in [
         (
             "Collected Module Inset Rail",
-            (15, 119, 176, 22),
+            (15, 115, 112, 22),
             [126, 34, 26],
         ),
         (
-            "Selected Module Inset Rail",
-            (198, 119, 107, 22),
-            [18, 88, 80],
+            "Module Analysis Inset Rail",
+            (133, 115, 172, 22),
+            [118, 30, 25],
         ),
     ] {
         let (rect, color, shape) = inventory
@@ -2604,8 +2679,8 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
     }
 
     for (name, expected_rect) in [
-        ("Collected Module Inset Rail Rule", (15, 140, 176, 1)),
-        ("Selected Module Inset Rail Rule", (198, 140, 107, 1)),
+        ("Collected Module Inset Rail Rule", (15, 136, 112, 1)),
+        ("Module Analysis Inset Rail Rule", (133, 136, 172, 1)),
     ] {
         let rect = inventory
             .nodes()
@@ -2645,7 +2720,7 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
         "Horizon Ladder Shell",
         "Zenith Ladder Shell",
         "Collected Module Panel",
-        "Module Detail Panel",
+        "Module Analysis Panel",
     ] {
         let shape = inventory
             .nodes()
@@ -2691,30 +2766,56 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
     }
 
     for (name, expected_y) in [
-        ("Rupture Inventory Item", 145),
-        ("Shell Inventory Item", 170),
-        ("Surge Inventory Item", 195),
+        ("Inventory Item Slot 1", 143),
+        ("Inventory Item Slot 2", 166),
+        ("Inventory Item Slot 3", 189),
     ] {
-        let (rect, focus_chrome) = inventory
+        let (rect, focus_chrome, font, font_scale) = inventory
             .nodes()
             .iter()
             .find(|node| node.name == name)
             .and_then(|node| match node.kind {
                 UiNodeKind::Button {
-                    rect, focus_chrome, ..
-                } => Some((rect, focus_chrome)),
+                    rect,
+                    focus_chrome,
+                    font,
+                    font_scale,
+                    ..
+                } => Some((rect, focus_chrome, font, font_scale)),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("missing {name}"));
         assert_eq!(
             (rect.x, rect.y, rect.width, rect.height),
-            (24, expected_y, 158, 17)
+            (23, expected_y, 96, 17)
         );
         assert!(
             focus_chrome,
             "{name} must only draw selection chrome while focused"
         );
+        assert_eq!(font, UiFontChoice::Spleen5x8);
+        assert_eq!(font_scale, 256, "{name} must use native-size 5x8 copy");
     }
+
+    let empty_state = inventory
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Empty Inventory Message")
+        .and_then(|node| match &node.kind {
+            UiNodeKind::Label {
+                text,
+                tag,
+                font,
+                font_scale,
+                ..
+            } => Some((text.as_str(), tag.as_str(), *font, *font_scale)),
+            _ => None,
+        })
+        .expect("Empty Inventory Message");
+    assert_eq!(empty_state.0, "NO MODULES");
+    assert_eq!(empty_state.1, "inventory.empty");
+    assert_eq!(empty_state.2, UiFontChoice::Spleen5x8Italic);
+    assert_eq!(empty_state.3, 256);
 
     assert!(
         inventory
@@ -2723,6 +2824,65 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
             .all(|node| node.name != "Assign Hint"),
         "the redundant X PICK // X SOCKET prompt must stay removed"
     );
+}
+
+#[test]
+fn default_project_ui_controls_ship_with_cortex_sound_palette() {
+    let project_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
+    let project = ProjectDocument::load_from_path(&project_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
+    let project_root = project_path.parent().expect("default project root");
+    let mut buttons = 0usize;
+    let mut sliders = 0usize;
+
+    for scene in &project.ui_scenes {
+        for node in scene.nodes() {
+            let pools: [&[UiSfxCue]; 4] = match &node.kind {
+                UiNodeKind::Button { sfx, .. } => {
+                    buttons += 1;
+                    assert!(!sfx.focus.is_empty(), "{} needs focus SFX", node.name);
+                    assert!(!sfx.activate.is_empty(), "{} needs press SFX", node.name);
+                    [
+                        sfx.focus.as_slice(),
+                        sfx.activate.as_slice(),
+                        &[],
+                        &[],
+                    ]
+                }
+                UiNodeKind::Slider { sfx, .. } => {
+                    sliders += 1;
+                    assert!(!sfx.focus.is_empty(), "{} needs focus SFX", node.name);
+                    assert!(!sfx.nudge.is_empty(), "{} needs nudge SFX", node.name);
+                    assert!(!sfx.limit.is_empty(), "{} needs limit SFX", node.name);
+                    [
+                        sfx.focus.as_slice(),
+                        &[],
+                        sfx.nudge.as_slice(),
+                        sfx.limit.as_slice(),
+                    ]
+                }
+                _ => continue,
+            };
+            for cue in pools.into_iter().flatten() {
+                assert!(
+                    cue.wav_path.starts_with("assets/audio/ui/"),
+                    "{} uses a UI cue outside the shared palette: {}",
+                    node.name,
+                    cue.wav_path
+                );
+                assert!(
+                    project_root.join(&cue.wav_path).is_file(),
+                    "{} references missing UI cue {}",
+                    node.name,
+                    cue.wav_path
+                );
+            }
+        }
+    }
+
+    assert_eq!(buttons, 16);
+    assert_eq!(sliders, 12);
 }
 
 #[test]
@@ -2741,13 +2901,19 @@ fn default_project_system_overlay_matches_inventory_language_and_exposes_options
         .iter()
         .find(|state| state.name == "Gameplay")
         .expect("Gameplay state");
+    let inventory_state = project
+        .scene_states
+        .iter()
+        .find(|state| state.name == "Inventory Overlay")
+        .expect("Inventory Overlay state");
     let system = project
         .scene_states
         .iter()
         .find(|state| state.name == "System Overlay")
         .expect("System Overlay state");
 
-    assert_eq!(gameplay.start_state, Some(system.id));
+    assert_eq!(gameplay.start_state, Some(inventory_state.id));
+    assert_eq!(inventory_state.start_state, Some(gameplay.id));
     assert_eq!(system.start_state, Some(gameplay.id));
     assert_eq!(system.world, SceneWorldLayer::Gameplay);
     assert_eq!(system.ui_scene, Some(system_scene.id));

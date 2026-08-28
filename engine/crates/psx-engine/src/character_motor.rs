@@ -906,14 +906,38 @@ impl CharacterMotorState {
             return self.update_action(collision, config);
         }
 
-        if let Some(facing_yaw) = input.facing_yaw {
-            self.yaw = self.yaw.approach_q12(facing_yaw, config.yaw_step.as_q12());
-        }
-
         if let Some((move_x, move_z, move_mag)) = analog_move_vector(input) {
             let move_yaw = yaw_from_vector(move_x, move_z);
-            let (move_x, move_z, directional_anim) = if let Some(facing_yaw) = input.facing_yaw {
-                (move_x, move_z, locked_locomotion_anim(facing_yaw, move_yaw))
+            // Lock-on constrains ordinary locomotion to face the target, but
+            // sprinting deliberately breaks that facing constraint: the body
+            // turns into the requested direction and plays the real run. The
+            // target itself remains locked, so the next non-sprint frame
+            // turns the actor back toward it.
+            let wants_sprint = input.sprint;
+            self.update_sprint_gate(wants_sprint);
+            let sprinting = self.can_sprint(wants_sprint, config);
+            let run_freely = sprinting && input.facing_yaw.is_some();
+            let (move_x, move_z, directional_anim, locked_lateral) = if run_freely {
+                // The locked walk may have the actor facing anywhere relative
+                // to this vector. Snap at the gait change so the run starts in
+                // the direction the player requested instead of arcing toward
+                // it while covering ground in the wrong direction.
+                self.yaw = move_yaw;
+                (
+                    self.yaw.sin().mul_q12(move_mag),
+                    self.yaw.cos().mul_q12(move_mag),
+                    CharacterMotorAnim::Run,
+                    false,
+                )
+            } else if let Some(facing_yaw) = input.facing_yaw {
+                self.yaw = self.yaw.approach_q12(facing_yaw, config.yaw_step.as_q12());
+                let directional_anim = locked_locomotion_anim(facing_yaw, move_yaw);
+                (
+                    move_x,
+                    move_z,
+                    directional_anim,
+                    !matches!(directional_anim, CharacterMotorAnim::Walk),
+                )
             } else {
                 // Free movement turns at the character's turn rate and
                 // travels along the facing, so a stick reversal is a tight
@@ -924,22 +948,9 @@ impl CharacterMotorState {
                     self.yaw.sin().mul_q12(move_mag),
                     self.yaw.cos().mul_q12(move_mag),
                     CharacterMotorAnim::Walk,
+                    false,
                 )
             };
-            // Lock-on binds facing, not speed. Sprint remains available in
-            // every movement direction and never drops the target. Until a
-            // character authors directional run clips, lateral/backward
-            // sprint keeps its directional locomotion clip while gaining the
-            // full run displacement; forward sprint uses the ordinary Run.
-            let wants_sprint = input.sprint;
-            self.update_sprint_gate(wants_sprint);
-            let locked_lateral = input.facing_yaw.is_some_and(|facing_yaw| {
-                !matches!(
-                    locked_locomotion_anim(facing_yaw, move_yaw),
-                    CharacterMotorAnim::Walk
-                )
-            });
-            let sprinting = self.can_sprint(wants_sprint, config);
             let base_speed = if sprinting {
                 config.run_speed
             } else if locked_lateral {
@@ -958,15 +969,10 @@ impl CharacterMotorState {
                 config.walk_speed
             };
             let speed = move_mag.mul_i32(base_speed);
-            let directional_anim = match (sprinting, input.facing_yaw) {
-                // Locked lateral/backward sprint keeps the matching
-                // directional clip so target-facing remains visually clear.
-                (true, Some(_)) if locked_lateral => directional_anim,
-                (true, Some(_)) => CharacterMotorAnim::Run,
-                // Unlocked sprinting: the yaw already turned toward the
-                // stick above; run along it.
-                (true, None) => CharacterMotorAnim::Run,
-                (false, _) => directional_anim,
+            let directional_anim = if sprinting {
+                CharacterMotorAnim::Run
+            } else {
+                directional_anim
             };
             let (moved, blocked) = self.try_move_vector(
                 collision,
@@ -983,9 +989,8 @@ impl CharacterMotorState {
                 self.recover_stamina(config);
             }
 
-            // `directional_anim` already resolves the speed: plain `Run` when
-            // sprinting unlocked, the matching directional run clip when
-            // sprinting locked, and the walk-speed direction otherwise.
+            // `directional_anim` already resolves the speed: `Run` whenever
+            // sprinting, and the walk-speed direction otherwise.
             let anim = if !moved && blocked {
                 CharacterMotorAnim::Idle
             } else {
@@ -1001,6 +1006,10 @@ impl CharacterMotorState {
                 false,
                 false,
             ));
+        }
+
+        if let Some(facing_yaw) = input.facing_yaw {
+            self.yaw = self.yaw.approach_q12(facing_yaw, config.yaw_step.as_q12());
         }
 
         if input.turn > 0 {
@@ -4412,7 +4421,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_sprint_applies_in_every_direction_and_keeps_target_facing() {
+    fn locked_sprint_turns_into_the_movement_direction_and_uses_run() {
         let directions = [
             (Q12::ZERO, Q12::ONE),
             (Q12::ZERO, Q12::NEG_ONE),
@@ -4434,24 +4443,20 @@ mod tests {
             let walked = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO).update(
                 None,
                 input(false),
-                config(),
+                config_instant_turn(),
             );
             let sprinted = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO).update(
                 None,
                 input(true),
-                config(),
+                config_instant_turn(),
             );
 
-            // Facing is held on the target regardless of speed or direction.
+            // Walking remains target-facing. Sprinting turns into the travel
+            // vector and always uses the actual run animation.
             assert_eq!(walked.yaw, Angle::ZERO);
-            assert_eq!(sprinted.yaw, Angle::ZERO);
+            assert_eq!(sprinted.yaw, yaw_from_vector(move_x, move_z));
             assert!(sprinted.sprinting, "every locked direction should sprint");
-
-            if walked.anim == CharacterMotorAnim::Walk {
-                assert_eq!(sprinted.anim, CharacterMotorAnim::Run);
-            } else {
-                assert_eq!(sprinted.anim, walked.anim);
-            }
+            assert_eq!(sprinted.anim, CharacterMotorAnim::Run);
             let walked_distance = walked.position.x.abs() + walked.position.z.abs();
             let sprinted_distance = sprinted.position.x.abs() + sprinted.position.z.abs();
             assert!(
@@ -4462,10 +4467,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_lateral_stick_sprints_at_run_speed_and_keeps_strafe_clip() {
-        // Camera-relative forward can be lateral to the target for a few frames
-        // right after lock-on. The character strafes at walk speed facing the
-        // target rather than turning away into a run.
+    fn locked_lateral_sprint_runs_sideways_then_restores_target_facing() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let frame = motor.update(
             None,
@@ -4476,17 +4478,34 @@ mod tests {
                 sprint: true,
                 ..CharacterMotorInput::default()
             },
-            config(),
+            config_instant_turn(),
         );
 
-        assert_eq!(frame.yaw, Angle::ZERO, "facing stays on the target");
-        // +X is the left side when facing +Z.
-        assert_eq!(frame.anim, CharacterMotorAnim::StrafeLeft);
+        assert_eq!(frame.yaw, Angle::QUARTER, "run faces its travel direction");
+        assert_eq!(frame.anim, CharacterMotorAnim::Run);
         assert!(
             frame.sprinting,
             "sprint stays available sideways under lock"
         );
         assert_eq!(frame.position.x, config().run_speed >> 8);
+
+        let recovered = motor.update(
+            None,
+            CharacterMotorInput {
+                walk: 1,
+                move_x: Q12::ONE,
+                facing_yaw: Some(Angle::ZERO),
+                sprint: false,
+                ..CharacterMotorInput::default()
+            },
+            config_instant_turn(),
+        );
+        assert_eq!(
+            recovered.yaw,
+            Angle::ZERO,
+            "lock facing resumes after the run"
+        );
+        assert_eq!(recovered.anim, CharacterMotorAnim::StrafeLeft);
     }
 
     #[test]

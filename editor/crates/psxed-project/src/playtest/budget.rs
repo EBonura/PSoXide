@@ -987,7 +987,7 @@ mod tests {
             ),
             resident_asset(
                 PlaytestAssetKind::ModelAnimation,
-                "Rust Mantis / idle",
+                "Light Enemy / idle",
                 "mantis/clip_00_idle.psxanim",
                 5_000,
             ),
@@ -1011,7 +1011,7 @@ mod tests {
             audit.by_owner(),
             vec![
                 ("Aletha".to_string(), 15_000),
-                ("Rust Mantis".to_string(), 5_000),
+                ("Light Enemy".to_string(), 5_000),
             ],
             "clips and atlas must fold into the model that carries them"
         );
@@ -1045,7 +1045,7 @@ mod tests {
             ),
             resident_asset(
                 PlaytestAssetKind::ModelAnimation,
-                "Rust Mantis / idle",
+                "Light Enemy / idle",
                 "mantis/clip_00_idle.psxanim",
                 1_000,
             ),

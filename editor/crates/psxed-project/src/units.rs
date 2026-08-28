@@ -339,7 +339,22 @@ fn scale_resource(data: &mut ResourceData) {
                 div_point(&mut volume.capsule.start);
                 div_point(&mut volume.capsule.end);
                 volume.capsule.radius = div_u16_min1(volume.capsule.radius);
+                if let crate::CombatCapsuleRole::ProjectileEmitter {
+                    speed,
+                    min_range,
+                    max_range,
+                    ..
+                } = &mut volume.role
+                {
+                    *speed = div_u16_min1(*speed);
+                    *min_range = div_u16_min1(*min_range);
+                    *max_range = div_u16_min1(*max_range);
+                }
             }
+        }
+        ResourceData::Projectile(projectile) => {
+            projectile.speed = div_u16_min1(projectile.speed);
+            projectile.radius = div_u16_min1(projectile.radius);
         }
         ResourceData::Model(model) => {
             model.world_height = div_u16_min1(model.world_height);

@@ -63,7 +63,7 @@ fn main() {
     );
     let mut segment_index = 0usize;
 
-    for character_name in ["Aletha", "Rust Mantis Enemy", "Tank Boss"] {
+    for character_name in ["Aletha", "Light Enemy", "Heavy Enemy"] {
         if character_filter
             .as_deref()
             .is_some_and(|filter| !character_name.eq_ignore_ascii_case(filter))

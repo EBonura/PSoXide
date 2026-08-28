@@ -57,6 +57,8 @@ pub(crate) enum StarterCataloguePhase {
     Model,
     /// After models: weapons reference their weapon model by id.
     Weapon,
+    /// Before characters: projectile emitters reference projectile profiles.
+    Projectile,
     AnimationClip,
     AnimationSet,
     Character,
@@ -251,6 +253,7 @@ pub fn sync_starter_character_catalogue(
         StarterCataloguePhase::Material,
         StarterCataloguePhase::Model,
         StarterCataloguePhase::Weapon,
+        StarterCataloguePhase::Projectile,
         StarterCataloguePhase::AnimationClip,
         StarterCataloguePhase::AnimationSet,
         StarterCataloguePhase::Character,
@@ -360,6 +363,9 @@ pub(crate) fn starter_catalogue_resource_matches_phase(
         (ResourceData::Weapon(_), StarterCataloguePhase::Weapon) => {
             STARTER_WEAPON_NAMES.contains(&resource.name.as_str())
         }
+        (ResourceData::Projectile(_), StarterCataloguePhase::Projectile) => {
+            STARTER_PROJECTILE_NAMES.contains(&resource.name.as_str())
+        }
         (ResourceData::AnimationClip(clip), StarterCataloguePhase::AnimationClip) => {
             starter_character_asset_path(&clip.psxanim_path)
         }
@@ -396,12 +402,38 @@ pub(crate) fn find_starter_catalogue_target(
         }
     }
 
+    // Resource display names may evolve, but cooked asset paths are stable.
+    // Match them before names so a catalogue rename updates existing projects
+    // in place instead of installing a duplicate clip or model.
+    if let Some(id) = project
+        .resources
+        .iter()
+        .filter(|resource| !claimed.contains(&resource.id))
+        .find_map(|resource| match (&starter_resource.data, &resource.data) {
+            (ResourceData::Model(starter), ResourceData::Model(existing))
+                if starter.model_path == existing.model_path =>
+            {
+                Some(resource.id)
+            }
+            (ResourceData::AnimationClip(starter), ResourceData::AnimationClip(existing))
+                if starter.psxanim_path == existing.psxanim_path =>
+            {
+                Some(resource.id)
+            }
+            _ => None,
+        })
+    {
+        return Some(id);
+    }
+
     if let Some(id) = project
         .resources
         .iter()
         .filter(|resource| !claimed.contains(&resource.id))
         .find_map(|resource| {
-            (resource.name == starter_resource.name
+            ((resource.name == starter_resource.name
+                || legacy_starter_resource_names(&starter_resource.name)
+                    .contains(&resource.name.as_str()))
                 && same_resource_variant(&resource.data, &starter_resource.data))
             .then_some(resource.id)
         })
@@ -409,7 +441,7 @@ pub(crate) fn find_starter_catalogue_target(
         return Some(id);
     }
 
-    if starter_resource.name == "Rust Mantis Enemy"
+    if starter_resource.name == "Light Enemy"
         && matches!(starter_resource.data, ResourceData::Character(_))
     {
         return project
@@ -424,6 +456,18 @@ pub(crate) fn find_starter_catalogue_target(
     }
 
     None
+}
+
+fn legacy_starter_resource_names(name: &str) -> &'static [&'static str] {
+    match name {
+        "Light Enemy Model" => &["Rust Mantis"],
+        "Heavy Enemy Model" => &["Tank Boss Animated Model"],
+        "Light Enemy Animation Set" => &["Rust Mantis Starter Animation Set"],
+        "Heavy Enemy Animation Set" => &["tank_boss_ai_set"],
+        "Light Enemy" => &["Rust Mantis Enemy"],
+        "Heavy Enemy" => &["Tank Boss"],
+        _ => &[],
+    }
 }
 
 pub(crate) fn same_resource_variant(a: &ResourceData, b: &ResourceData) -> bool {
@@ -470,6 +514,13 @@ pub(crate) fn remap_resource_data(
             remap_resource_id_option(&mut character.model, id_map);
             remap_resource_id_option(&mut character.material, id_map);
             remap_resource_id_option(&mut character.animation_set, id_map);
+            for volume in &mut character.combat_capsules {
+                if let psxed_project::CombatCapsuleRole::ProjectileEmitter { projectile, .. } =
+                    &mut volume.role
+                {
+                    remap_resource_id_option(projectile, id_map);
+                }
+            }
         }
         ResourceData::Weapon(weapon) => remap_resource_id_option(&mut weapon.model, id_map),
         ResourceData::Texture { .. }
@@ -478,6 +529,7 @@ pub(crate) fn remap_resource_data(
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
         | ResourceData::Skeleton(_)
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => {}
     }
 }

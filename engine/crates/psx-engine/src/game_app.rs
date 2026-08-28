@@ -787,6 +787,14 @@ pub struct GameApp<'a, S: Scene> {
     ui_text_seed: u16,
 }
 
+struct GameplayUiText<'a, S: Scene>(&'a S);
+
+impl<S: Scene> ui::UiTextResolver for GameplayUiText<'_, S> {
+    fn resolve<'a>(&self, tag: &str, scratch: &'a mut [u8]) -> Option<&'a str> {
+        self.0.ui_text(tag, scratch)
+    }
+}
+
 /// Minimum vblanks an AUTHORED loading scene stays up before handing
 /// over (~1.7s NTSC). The built-in fallback screen keeps the old
 /// immediate handover, so probe/profiling projects without a Loading
@@ -1442,10 +1450,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let end = first.saturating_add(count).min(self.nodes.len());
         let current_ok = focus >= first
             && focus < end
-            && self
-                .nodes
-                .get(focus)
-                .is_some_and(|node| ui::is_focusable(node.kind));
+            && self.nodes.get(focus).is_some_and(|node| {
+                ui::is_focusable(node.kind)
+                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+            });
         if current_ok {
             return Some(focus);
         }
@@ -1455,9 +1463,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // player is actually looking at, not merely the first button in
         // node order.
         if let Some(selected) = (first..end).find(|&index| {
-            self.nodes
-                .get(index)
-                .is_some_and(|node| ui::is_focusable(node.kind) && node.tag.ends_with(".selected"))
+            self.nodes.get(index).is_some_and(|node| {
+                ui::is_focusable(node.kind)
+                    && node.tag.ends_with(".selected")
+                    && self.gameplay.ui_node_visible(node.tag)
+            })
         }) {
             self.cursor.menu_focus = selected as u16;
             return Some(selected);
@@ -1469,7 +1479,14 @@ impl<'a, S: Scene> GameApp<'a, S> {
             h: 0,
         }; MAX_FOCUSABLE_NODES];
         let mut node_indices = [0usize; MAX_FOCUSABLE_NODES];
-        let n = gather_focusable(self.nodes, first, count, &mut rects, &mut node_indices);
+        let n = gather_focusable(
+            self.nodes,
+            first,
+            count,
+            &mut rects,
+            &mut node_indices,
+            &|node| node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag),
+        );
         let slot = first_focus(&rects[..n])?;
         let node_index = node_indices[slot];
         self.cursor.menu_focus = node_index as u16;
@@ -1490,7 +1507,14 @@ impl<'a, S: Scene> GameApp<'a, S> {
             h: 0,
         }; MAX_FOCUSABLE_NODES];
         let mut node_indices = [0usize; MAX_FOCUSABLE_NODES];
-        let n = gather_focusable(self.nodes, first, count, &mut rects, &mut node_indices);
+        let n = gather_focusable(
+            self.nodes,
+            first,
+            count,
+            &mut rects,
+            &mut node_indices,
+            &|node| node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag),
+        );
         // Locate the current node's slot inside the focusable list the
         // resolver works over.
         let Some(current_slot) = node_indices[..n]
@@ -1707,6 +1731,34 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.begin_ui_activation(scene, node_index, UiActivationAction::Ui(node.action));
     }
 
+    /// Route a dedicated cancel press through the scene's authored Back
+    /// control. Focus moves onto the control immediately, then the same
+    /// confirmation echo and deferred action used by CROSS are played before
+    /// the screen is allowed to change.
+    fn activate_back_control(&mut self, scene: u16, first: usize, count: usize) -> bool {
+        let end = first.saturating_add(count).min(self.nodes.len());
+        let Some(node_index) = (first..end).find(|&index| {
+            self.nodes.get(index).is_some_and(|node| {
+                ui::is_focusable(node.kind)
+                    && matches!(node.action, LevelUiAction::Back)
+                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+            })
+        }) else {
+            return false;
+        };
+        let Some(node) = self.nodes.get(node_index).copied() else {
+            return false;
+        };
+
+        if self.cursor.menu_focus != node_index as u16 {
+            self.cursor.menu_focus = node_index as u16;
+            self.play_node_sfx_event(node, LevelUiSfxEvent::Focus);
+        }
+        self.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
+        self.begin_ui_activation(scene, node_index, UiActivationAction::Ui(node.action));
+        true
+    }
+
     /// Execute one cooked UI action. Shared by focused-control
     /// activation and [`Self::update_ui_timers`], so a Timer node's
     /// auto-advance walks exactly the same flow paths a button press
@@ -1810,7 +1862,13 @@ impl<'a, S: Scene> GameApp<'a, S> {
             flow_trace("psx-engine: ui cross");
             self.activate_focus(scene, first, count);
         } else if ctx.just_pressed(button::CIRCLE) {
-            self.go_back(ctx);
+            if self.current_tag().has_gameplay() {
+                let _ = self.gameplay.game_ui_cancel(ctx);
+            } else if !self.activate_back_control(scene, first, count) {
+                // Legacy UI scenes without an authored Back control retain
+                // their historical immediate stack-pop behavior.
+                self.go_back(ctx);
+            }
         } else if ctx.just_pressed(button::START) {
             // START keeps its "confirm / jump to gameplay" shortcut so a
             // title screen advances without the player hunting for the Start
@@ -1905,7 +1963,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .map(|record| record.focus_style)
             .unwrap_or(psx_level::LevelUiFocusStyle::DEFAULT);
         let ui_text_seed = self.ui_text_seed;
-        let gameplay = &self.gameplay;
+        let gameplay = &*self.gameplay;
         let mut textures = |asset| gameplay.ui_texture(asset);
         let loading_progress_q12 = self.loading_progress_q12;
         let value = |binding: LevelUiValueBinding| {
@@ -1918,7 +1976,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 &|binding| gameplay.ui_value(binding),
             )
         };
-        let text = |tag: &str| gameplay.ui_text(tag);
+        let text = GameplayUiText(gameplay);
         // Slider fill reads the live option value by id from the copied
         // store, through the same resolver the input path uses so the knob
         // position matches what scrubbing changed.
@@ -1929,6 +1987,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let visible = |node: &LevelUiNodeRecord| {
             (node.flags & ui_node_flags::ANALOG_INACTIVE_ONLY == 0 || !analog_active)
                 && (node.flags & ui_node_flags::LOADING_COMPLETE_ONLY == 0 || loading_complete)
+                && (node.tag.is_empty() || gameplay.ui_node_visible(node.tag))
         };
         // The gameplay scene lends its uploaded font atlases so menu labels
         // and buttons draw with the same glyphs the HUD uses. Empty slots
@@ -2018,6 +2077,7 @@ fn gather_focusable(
     count: usize,
     rects: &mut [NavRect; MAX_FOCUSABLE_NODES],
     node_indices: &mut [usize; MAX_FOCUSABLE_NODES],
+    visible: &impl Fn(&LevelUiNodeRecord) -> bool,
 ) -> usize {
     let end = first.saturating_add(count).min(nodes.len());
     let mut written = 0;
@@ -2025,7 +2085,7 @@ fn gather_focusable(
         if written >= MAX_FOCUSABLE_NODES {
             break;
         }
-        if ui::is_focusable(nodes[index].kind) {
+        if ui::is_focusable(nodes[index].kind) && visible(&nodes[index]) {
             rects[written] = ui::node_nav_rect(nodes, index);
             node_indices[written] = index;
             written += 1;
@@ -2172,6 +2232,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // in `update_ui_scene` below.
         if self.ui_activation.is_none() && ctx.just_pressed(button::START) {
             if let Some(target) = self.current_start_state_index() {
+                if self.current_tag().has_gameplay() && self.current_tag().ui_accepts_input() {
+                    let _ = self.gameplay.game_ui_cancel(ctx);
+                }
                 let return_to = Some(self.cursor.current);
                 self.request_flow_state(target, return_to, ctx);
                 return;
@@ -2363,6 +2426,7 @@ mod tests {
         /// When `Some`, returned as the resource key for every state (a shared
         /// set); when `None`, the trait default (`state.id`) applies.
         shared_resource_key: Option<u32>,
+        hidden_ui_tag: Option<&'static str>,
     }
 
     impl Scene for CountingScene {
@@ -2399,6 +2463,9 @@ mod tests {
         fn game_ui_action(&mut self, id: u16, _ctx: &mut Ctx) {
             self.game_actions += 1;
             self.last_game_action = id;
+        }
+        fn ui_node_visible(&self, tag: &str) -> bool {
+            self.hidden_ui_tag != Some(tag)
         }
         fn state_resource_key(&self, state: SceneStateRef) -> u32 {
             self.shared_resource_key.unwrap_or(state.id as u32)
@@ -2900,6 +2967,24 @@ mod tests {
             focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         },
     ];
+    static CIRCLE_BACK_NODES: &[LevelUiNodeRecord] = &[
+        CANVAS,
+        button(120, 80, LevelUiAction::Game { id: 7 }),
+        button(120, 120, LevelUiAction::Back),
+    ];
+    static CIRCLE_BACK_SCENES: &[LevelUiScene] = &[LevelUiScene {
+        id: 8,
+        name: "circle-back",
+        node_first: 0,
+        node_count: 3,
+        focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+    }];
+    static CIRCLE_BACK_FLOW: GameFlow = GameFlow {
+        states: &[FlowState::UiScene { scene: 8 }],
+        scene_states: &[],
+        entry: 0,
+        transition: LevelTransition::NONE,
+    };
     // The authored loading fixture extends the normal front-end pool with a
     // completion-only panel. This is the geometry the local confirmation echo
     // traces before the loading exit fade begins.
@@ -2982,6 +3067,25 @@ mod tests {
     }];
     static HORIZONTAL_MENU_FLOW: GameFlow = GameFlow {
         states: &[FlowState::UiScene { scene: 3 }],
+        scene_states: &[],
+        entry: 0,
+        transition: LevelTransition::NONE,
+    };
+
+    static DYNAMIC_LIST_NODES: &[LevelUiNodeRecord] = &[
+        CANVAS,
+        tagged_button(40, 60, "inventory.item.0", LevelUiAction::Game { id: 1 }),
+        tagged_button(40, 90, "inventory.item.1", LevelUiAction::Game { id: 2 }),
+    ];
+    static DYNAMIC_LIST_SCENES: &[LevelUiScene] = &[LevelUiScene {
+        id: 5,
+        name: "dynamic-list",
+        node_first: 0,
+        node_count: 3,
+        focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+    }];
+    static DYNAMIC_LIST_FLOW: GameFlow = GameFlow {
+        states: &[FlowState::UiScene { scene: 5 }],
         scene_states: &[],
         entry: 0,
         transition: LevelTransition::NONE,
@@ -3219,6 +3323,105 @@ mod tests {
 
         idle_tick(&mut app, &mut ctx);
         assert_eq!(app.gameplay.updates, 2);
+    }
+
+    #[test]
+    fn project_fade_wraps_start_open_and_resume_for_pause_menus() {
+        let mut scene = CountingScene {
+            shared_resource_key: Some(7),
+            ..Default::default()
+        };
+        let mut app = GameApp::new(
+            &FADE_PAUSE_COMPOSED_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        complete_loading(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 0);
+
+        press(&mut ctx, button::START);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 0, "pause waits for full fade cover");
+        assert_eq!(
+            app.transition.map(|transition| transition.spec.kind),
+            Some(LevelTransitionKind::Fade)
+        );
+        complete_flow_transition(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 1);
+
+        press(&mut ctx, button::START);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 1, "resume waits for full fade cover");
+        assert_eq!(
+            app.transition.map(|transition| transition.spec.kind),
+            Some(LevelTransitionKind::Fade)
+        );
+        complete_flow_transition(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 0);
+    }
+
+    #[test]
+    fn circle_does_not_use_the_front_end_back_stack_inside_gameplay_overlay() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &PAUSE_COMPOSED_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        complete_loading(&mut app, &mut ctx);
+        press(&mut ctx, button::START);
+        app.update(&mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 1);
+
+        press(&mut ctx, button::CIRCLE);
+        app.update(&mut ctx);
+        assert_eq!(
+            app.cursor.current, 1,
+            "Circle must not switch pause categories or resume gameplay"
+        );
+    }
+
+    #[test]
+    fn runtime_hidden_inventory_rows_are_skipped_by_focus_navigation() {
+        let mut scene = CountingScene {
+            hidden_ui_tag: Some("inventory.item.0"),
+            ..Default::default()
+        };
+        let mut app = GameApp::new(
+            &DYNAMIC_LIST_FLOW,
+            DYNAMIC_LIST_SCENES,
+            DYNAMIC_LIST_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.menu_focus, 2);
     }
 
     /// One UI update tick with no buttons held, so focus seeds without
@@ -3780,14 +3983,45 @@ mod tests {
         idle_tick(&mut app, &mut ctx);
         assert_eq!(app.cursor.menu_focus, 4);
 
-        // CIRCLE pops back to the title state and clears the return slot.
+        // CIRCLE confirms the authored Back control first. The options scene
+        // stays visible for the complete echo, then returns to the title.
         press(&mut ctx, button::CIRCLE);
         app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 1);
+        assert_eq!(app.cursor.menu_focus, 4);
+        assert!(app.ui_activation.is_some());
+        complete_activation(&mut app, &mut ctx);
         assert_eq!(app.cursor.current, 0);
         assert_eq!(app.cursor.return_to, None);
 
         // Gameplay was never entered along the way.
         assert_eq!(app.gameplay.inits, 0);
+    }
+
+    #[test]
+    fn circle_moves_focus_to_the_authored_back_control_and_plays_its_echo() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &CIRCLE_BACK_FLOW,
+            CIRCLE_BACK_SCENES,
+            CIRCLE_BACK_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.menu_focus, 1);
+
+        press(&mut ctx, button::CIRCLE);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.menu_focus, 2);
+        assert_eq!(app.ui_activation.map(|activation| activation.node), Some(2));
+        complete_activation(&mut app, &mut ctx);
     }
 
     #[test]
@@ -3818,7 +4052,10 @@ mod tests {
 
         press(&mut ctx, button::CIRCLE);
         app.update(&mut ctx);
-        assert_eq!(app.cursor.current, 1, "Circle waits for full fade cover");
+        assert_eq!(app.cursor.current, 1, "Circle waits for its Back echo");
+        assert!(app.transition.is_none(), "fade starts after the echo");
+        assert!(app.ui_activation.is_some());
+        complete_activation(&mut app, &mut ctx);
         assert_eq!(
             app.transition.map(|transition| transition.spec.kind),
             Some(LevelTransitionKind::Fade)

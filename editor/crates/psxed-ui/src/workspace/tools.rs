@@ -8,7 +8,12 @@
 
 use super::*;
 
-type BrushGizmoContext = ([f64; 3], Vec<[f64; 3]>, Vec<usize>);
+type BrushGizmoContext = (
+    [f64; 3],
+    Vec<[f64; 3]>,
+    Vec<usize>,
+    Vec<BrushElementDragMember>,
+);
 
 struct BrushPickSolvedCache {
     key: Option<u64>,
@@ -1145,6 +1150,16 @@ impl EditorWorkspace {
         else {
             return Vec::new();
         };
+        Self::brush_element_targets(brush, &self.selected_brush_elements)
+    }
+
+    /// Resolve one brush's component selection into solved world vertices.
+    /// Keeping this owner-aware is what lets a document-wide face selection
+    /// participate in one gizmo gesture without losing the earlier brushes.
+    fn brush_element_targets(
+        brush: &psxed_project::brush::Brush,
+        elements: &[BrushElement],
+    ) -> Vec<[f64; 3]> {
         let solved = brush.solve();
         let vertices = brush_elements::unique_vertices(&solved);
         let edges = brush_elements::unique_edges(&solved);
@@ -1157,7 +1172,7 @@ impl EditorWorkspace {
                 targets.push(point);
             }
         };
-        for element in &self.selected_brush_elements {
+        for element in elements {
             match element {
                 BrushElement::Vertex(key) => {
                     if let Some(vertex) = vertices
@@ -1186,6 +1201,58 @@ impl EditorWorkspace {
             }
         }
         targets
+    }
+
+    /// Exact face subsets grouped by owning brush, with the active brush
+    /// first and every other brush retained as an element-level companion.
+    fn selected_face_gizmo_context(&self) -> Option<BrushGizmoContext> {
+        let primary_index = self.selected_brush?;
+        let mut faces_by_brush = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+        for &(brush, face) in &self.selected_brush_faces {
+            let faces = faces_by_brush.entry(brush).or_default();
+            if !faces.contains(&face) {
+                faces.push(face);
+            }
+        }
+        let mut members = Vec::new();
+        for (index, faces) in faces_by_brush {
+            let base = self.project.active_scene().brushes.get(index)?.clone();
+            let elements: Vec<_> = faces.iter().copied().map(BrushElement::Face).collect();
+            let targets = Self::brush_element_targets(&base, &elements);
+            if targets.is_empty() {
+                continue;
+            }
+            members.push(BrushElementDragMember {
+                index,
+                base,
+                targets,
+                faces,
+            });
+        }
+        let primary_position = members
+            .iter()
+            .position(|member| member.index == primary_index)?;
+        let primary = members.remove(primary_position);
+
+        let mut all_targets = primary.targets.clone();
+        for member in &members {
+            for point in &member.targets {
+                if !all_targets
+                    .iter()
+                    .any(|seen| (0..3).all(|axis| (seen[axis] - point[axis]).abs() <= 0.5))
+                {
+                    all_targets.push(*point);
+                }
+            }
+        }
+        let count = all_targets.len() as f64;
+        let mut anchor = [0.0; 3];
+        for point in &all_targets {
+            for axis in 0..3 {
+                anchor[axis] += point[axis] / count;
+            }
+        }
+        Some((anchor, primary.targets, primary.faces, members))
     }
 
     /// Selected Face element indices (whole planes ride face gestures).
@@ -1221,18 +1288,28 @@ impl EditorWorkspace {
                 ];
                 let targets = brush_elements::unique_vertices(&solved);
                 let faces = (0..brush.faces.len()).collect();
-                Some((anchor, targets, faces))
+                Some((anchor, targets, faces, Vec::new()))
             }
             _ => {
                 if self.selected_brush_elements.is_empty() {
                     return None;
+                }
+                if self.brush_edit_mode == BrushEditMode::Face
+                    && !self.selected_brush_faces.is_empty()
+                {
+                    return self.selected_face_gizmo_context();
                 }
                 let anchor = self.selected_brush_element_centroid()?;
                 let targets = self.selected_brush_element_targets();
                 if targets.is_empty() {
                     return None;
                 }
-                Some((anchor, targets, self.selected_brush_element_faces()))
+                Some((
+                    anchor,
+                    targets,
+                    self.selected_brush_element_faces(),
+                    Vec::new(),
+                ))
             }
         }
     }
@@ -1265,7 +1342,7 @@ impl EditorWorkspace {
         const TARGET_PX: f32 = 72.0;
         const PROBE_WORLD: f64 = 64.0;
         const RING_SEGMENTS: usize = 24;
-        let (centroid, _, _) = self.brush_gizmo_context()?;
+        let (centroid, _, _, _) = self.brush_gizmo_context()?;
         let origin = self.project_brush_point_3d(rect, centroid)?;
         let mut world_len = [0.0f64; 3];
         for axis in 0..3 {
@@ -1315,7 +1392,7 @@ impl EditorWorkspace {
         let polylines = self.brush_element_gizmo_polylines_3d(rect)?;
         // Dead zone at the shared origin: all axes meet there, so a grab
         // is ambiguous and center clicks belong to body selection/move.
-        let (anchor, _, _) = self.brush_gizmo_context()?;
+        let (anchor, _, _, _) = self.brush_gizmo_context()?;
         if let Some(origin) = self.project_brush_point_3d(rect, anchor) {
             if origin.distance(pointer) <= 12.0 {
                 return None;
@@ -1350,7 +1427,7 @@ impl EditorWorkspace {
         let Some(index) = self.selected_brush else {
             return false;
         };
-        let Some((anchor, targets, faces)) = self.brush_gizmo_context() else {
+        let Some((anchor, targets, faces, element_others)) = self.brush_gizmo_context() else {
             return false;
         };
         if targets.is_empty() {
@@ -1379,6 +1456,7 @@ impl EditorWorkspace {
                     drag.axis_mask = mask;
                     drag.faces = faces;
                     drag.others = whole_brush_others;
+                    drag.element_others = element_others;
                 }
                 true
             }
@@ -1408,6 +1486,7 @@ impl EditorWorkspace {
                     index,
                     base,
                     others: whole_brush_others,
+                    element_others,
                     targets,
                     faces,
                     center: anchor,
@@ -1500,7 +1579,11 @@ impl EditorWorkspace {
                 || drag
                     .others
                     .iter()
-                    .any(|(_, brush)| !brush.solved_vertices_on_grid(snap_step, 0.01)))
+                    .any(|(_, brush)| !brush.solved_vertices_on_grid(snap_step, 0.01))
+                || drag
+                    .element_others
+                    .iter()
+                    .any(|member| !member.base.solved_vertices_on_grid(snap_step, 0.01)))
         {
             self.status = format!(
                 "Rotate rejected: selection is not aligned to Grid {} (lower the grid first)",
@@ -1508,7 +1591,7 @@ impl EditorWorkspace {
             );
             return;
         }
-        let mut previews = Vec::with_capacity(drag.others.len() + 1);
+        let mut previews = Vec::with_capacity(drag.others.len() + drag.element_others.len() + 1);
         let mut primary = drag.base.clone();
         if primary.transform_selected_snapped(
             &drag.faces,
@@ -1551,6 +1634,31 @@ impl EditorWorkspace {
                 return;
             }
             previews.push((*index, preview));
+        }
+        for member in &drag.element_others {
+            let mut preview = member.base.clone();
+            if preview.transform_selected_snapped(
+                &member.faces,
+                &member.targets,
+                drag.center,
+                map,
+                0.5,
+                snap_step,
+            ) == 0
+                || !brush_preview_ok(&preview)
+                || (drag.grid_safe_rotation && !preview.solved_vertices_on_grid(snap_step, 0.01))
+            {
+                self.status = if drag.rotate {
+                    format!(
+                        "Rotate {applied}° rejected: result would leave Grid {}",
+                        self.snap_units
+                    )
+                } else {
+                    format!("Scale rejected on Grid {}", self.snap_units)
+                };
+                return;
+            }
+            previews.push((member.index, preview));
         }
         {
             let scene = self.project.active_scene_mut();
@@ -1737,10 +1845,19 @@ impl EditorWorkspace {
             .others
             .iter()
             .map(|(index, _)| (*index, self.project.active_scene().brushes[*index].clone()))
+            .chain(drag.element_others.iter().map(|member| {
+                (
+                    member.index,
+                    self.project.active_scene().brushes[member.index].clone(),
+                )
+            }))
             .collect();
         self.project.active_scene_mut().brushes[drag.index] = drag.base;
         for (index, base) in &drag.others {
             self.project.active_scene_mut().brushes[*index] = base.clone();
+        }
+        for member in &drag.element_others {
+            self.project.active_scene_mut().brushes[member.index] = member.base.clone();
         }
         if drag.applied != 0 {
             self.push_undo();
@@ -2014,6 +2131,16 @@ impl EditorWorkspace {
                     *slot = base;
                 }
             }
+            for member in transform.element_others {
+                if let Some(slot) = self
+                    .project
+                    .active_scene_mut()
+                    .brushes
+                    .get_mut(member.index)
+                {
+                    *slot = member.base;
+                }
+            }
         }
         if let Some(extrude) = self.brush_extrude.take() {
             if let Some(slot) = self
@@ -2043,6 +2170,16 @@ impl EditorWorkspace {
             for (index, base) in drag.others {
                 if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(index) {
                     *slot = base;
+                }
+            }
+            for member in drag.element_others {
+                if let Some(slot) = self
+                    .project
+                    .active_scene_mut()
+                    .brushes
+                    .get_mut(member.index)
+                {
+                    *slot = member.base;
                 }
             }
             if vertex_snap {
@@ -4729,6 +4866,7 @@ impl EditorWorkspace {
             index,
             base,
             others: Vec::new(),
+            element_others: Vec::new(),
             targets,
             snap_anchor,
             press_ground: self
@@ -4798,6 +4936,11 @@ impl EditorWorkspace {
         if applied == [0; 3] {
             return Ok(std::iter::once((drag.index, drag.base.clone()))
                 .chain(drag.others.iter().cloned())
+                .chain(
+                    drag.element_others
+                        .iter()
+                        .map(|member| (member.index, member.base.clone())),
+                )
                 .collect());
         }
         let uv_lock = self.brush_texture_lock;
@@ -4813,7 +4956,7 @@ impl EditorWorkspace {
         if let Some(rejection) = brush_preview_rejection(&primary) {
             return Err(rejection);
         }
-        let mut previews = Vec::with_capacity(drag.others.len() + 1);
+        let mut previews = Vec::with_capacity(drag.others.len() + drag.element_others.len() + 1);
         previews.push((drag.index, primary));
         for (index, base) in &drag.others {
             let mut preview = base.clone();
@@ -4830,6 +4973,21 @@ impl EditorWorkspace {
             }
             previews.push((*index, preview));
         }
+        for member in &drag.element_others {
+            let mut preview = member.base.clone();
+            let moved = if member.faces.is_empty() {
+                preview.translate_solved_vertices(&member.targets, applied, 0.5, uv_lock)
+            } else {
+                preview.translate_selected(&member.faces, &member.targets, applied, 0.5, uv_lock)
+            };
+            if moved == 0 {
+                return Err(BrushPreviewRejection::NoEditablePlane);
+            }
+            if let Some(rejection) = brush_preview_rejection(&preview) {
+                return Err(rejection);
+            }
+            previews.push((member.index, preview));
+        }
         Ok(previews)
     }
 
@@ -4844,10 +5002,19 @@ impl EditorWorkspace {
             .others
             .iter()
             .map(|(index, _)| (*index, self.project.active_scene().brushes[*index].clone()))
+            .chain(drag.element_others.iter().map(|member| {
+                (
+                    member.index,
+                    self.project.active_scene().brushes[member.index].clone(),
+                )
+            }))
             .collect();
         self.project.active_scene_mut().brushes[drag.index] = drag.base;
         for (index, base) in &drag.others {
             self.project.active_scene_mut().brushes[*index] = base.clone();
+        }
+        for member in &drag.element_others {
+            self.project.active_scene_mut().brushes[member.index] = member.base.clone();
         }
         if drag.applied != [0; 3] {
             self.push_undo();
@@ -6093,7 +6260,7 @@ impl EditorWorkspace {
             self.status = "Vertex Snap: hover a corner on the selected brush".to_string();
             return false;
         };
-        let Some((_, targets, faces)) = self.brush_gizmo_context() else {
+        let Some((_, targets, faces, _)) = self.brush_gizmo_context() else {
             return false;
         };
         if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, source) {
@@ -6150,6 +6317,7 @@ impl EditorWorkspace {
             index,
             base: self.project.active_scene().brushes[index].clone(),
             others: Vec::new(),
+            element_others: Vec::new(),
             targets,
             snap_anchor,
             // In 3D this otherwise-2D field keeps the press pixel so a drag
@@ -6185,6 +6353,7 @@ impl EditorWorkspace {
         } else if let Some(source) = drag.snap_source {
             let moving: Vec<_> = std::iter::once(drag.index)
                 .chain(drag.others.iter().map(|(index, _)| *index))
+                .chain(drag.element_others.iter().map(|member| member.index))
                 .collect();
             if let Some((_, target)) =
                 self.closest_brush_vertex_3d(rect, pointer, |index, target| {

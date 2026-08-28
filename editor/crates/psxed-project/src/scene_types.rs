@@ -530,19 +530,33 @@ impl Default for WorldMessage {
 /// Optional one-time reward attached to a point of interest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PointOfInterestReward {
-    /// Boost module resource to grant.
+    /// Legacy Boost Module resource reference. Existing projects continue to
+    /// load; new rewards define their unique item inline below.
     #[serde(default)]
     pub module: Option<ResourceId>,
-    /// Number of copies to grant.
+    /// Legacy quantity. Unique modules always grant once.
     #[serde(default = "default_point_of_interest_reward_quantity")]
     pub quantity: u8,
+    /// Unique item name presented in the inventory and acquisition panel.
+    #[serde(default)]
+    pub item_name: String,
+    /// Short inventory description.
+    #[serde(default)]
+    pub description: String,
+    /// Signed percentage modifiers. Multiple entries may target the same stat
+    /// and are added together by the cooker.
+    #[serde(default)]
+    pub modifiers: Vec<crate::BoostStatModifier>,
 }
 
 impl Default for PointOfInterestReward {
     fn default() -> Self {
         Self {
             module: None,
-            quantity: default_point_of_interest_reward_quantity(),
+            quantity: 1,
+            item_name: "NEW MODULE".to_string(),
+            description: "Recovered boost module.".to_string(),
+            modifiers: vec![crate::BoostStatModifier::default()],
         }
     }
 }

@@ -363,6 +363,7 @@ impl Playtest {
     /// authored frames, invalid authored joints, and authored geometric misses
     /// stay misses.
     pub(super) fn resolve_enemy_melee(&mut self, ctx: &Ctx) {
+        self.combat_projectile_impacts.tick();
         if self.deferred_enemy_attacks.is_empty() && self.combat_projectiles.is_empty() {
             return;
         }
@@ -444,8 +445,11 @@ impl Playtest {
                         team: CombatTeam::Enemy,
                         owner: attack.entity().min(u16::MAX as usize) as u16,
                         tint_rgb: release.tint_rgb,
+                        damage_channel: release.damage_channel,
+                        visual: release.visual,
                     };
                     if self.combat_projectiles.spawn(spawn).is_ok() {
+                        telemetry::debug_log("enemy projectile:release");
                         let _ = self.game_entities.commit_deferred_attack(attack);
                     }
                 }
@@ -562,14 +566,26 @@ impl Playtest {
                 &mut projectile_impacts,
             );
         }
+        let mut horizon_projectile_damage = 0u16;
+        let mut zenith_projectile_damage = 0u16;
         for impact in projectile_impacts.as_slice() {
+            let _ = self.combat_projectile_impacts.spawn(impact);
             if impact.kind
                 == (ProjectileImpactKind::Target {
                     target: PLAYER_PROJECTILE_TARGET,
                 })
             {
                 hits = hits.saturating_add(1);
-                damage_total = damage_total.saturating_add(impact.damage);
+                match impact.damage_channel {
+                    psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
+                        horizon_projectile_damage =
+                            horizon_projectile_damage.saturating_add(impact.damage);
+                    }
+                    psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
+                        zenith_projectile_damage =
+                            zenith_projectile_damage.saturating_add(impact.damage);
+                    }
+                }
             }
         }
         if damage_total > 0 {
@@ -579,6 +595,25 @@ impl Playtest {
             // emptying BOTH pools arms the existing shared death sequence.
             let died = self.hazard_death_ticks_remaining == 0
                 && self.apply_untyped_player_damage(damage_total);
+            if died {
+                self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+            }
+        }
+        for (channel, damage) in [
+            (
+                psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon,
+                horizon_projectile_damage,
+            ),
+            (
+                psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith,
+                zenith_projectile_damage,
+            ),
+        ] {
+            if damage == 0 {
+                continue;
+            }
+            let died = self.hazard_death_ticks_remaining == 0
+                && self.apply_typed_player_damage(channel, damage);
             if died {
                 self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
             }
@@ -618,13 +653,7 @@ impl Playtest {
             return;
         }
         let spec = combat::player_melee_spec(EQUIPMENT, WEAPONS, WEAPON_HITBOXES);
-        // ComboAttack is the heaviest swing the player has, so it takes the
-        // heavy scaling too; a distinct multiplier would be a tuning change,
-        // not plumbing.
-        let spec = if matches!(
-            self.anim_state,
-            PlayerAnim::HeavyAttack | PlayerAnim::ComboAttack
-        ) {
+        let spec = if self.anim_state == PlayerAnim::HeavyAttack {
             spec.heavy()
         } else {
             spec
@@ -660,7 +689,10 @@ impl Playtest {
         // has no blade geometry, so a closed door inside its reach must
         // still block the connection on BSP worlds.
         let player_eye = melee_eye_point([player.x, player.y, player.z]);
-        let outgoing_damage = self.vitality_modifiers().outgoing_damage(spec.damage);
+        let outgoing_damage = self.vitality_modifiers().outgoing_damage(
+            Self::player_attack_channel(self.anim_state),
+            spec.damage,
+        );
         let entities = &mut self.game_entities;
         let mut bsp = self.bsp.as_mut();
         let stats = entities.apply_melee_arc_occluded(
@@ -746,7 +778,10 @@ impl Playtest {
             active[active_count] = ActivePlayerCapsule {
                 capsule,
                 previous_capsule,
-                damage: self.vitality_modifiers().outgoing_damage(record.damage),
+                damage: self.vitality_modifiers().outgoing_damage(
+                    Self::player_attack_channel(self.anim_state),
+                    record.damage,
+                ),
                 poise_damage: record.poise_damage,
             };
             active_count += 1;

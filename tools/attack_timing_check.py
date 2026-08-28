@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Read the attacks out of a headless counter log and check they play whole.
 
-The contract is simple now: R1/R2/R1+R2 swing horizontally, L1/L2/L1+L2 strike
-vertically, and each plays its clip from frame 0 to the end. That is exactly what
-is easy to break silently, so it is what this asserts, from the
+The contract is simple now: R1/R2 trigger Horizon light/heavy and L1/L2 trigger
+Zenith light/heavy, each directly and without a shoulder chord. Each plays its
+clip from frame 0 to the end. That is exactly what is easy to break silently,
+so it is what this asserts, from the
 `player_anim_phase_q12` counter (sampled where rendering samples the pose)
 rather than from a video.
 
     python3 tools/attack_timing_check.py target/tmp-fp/verify/atk1.csv
 
 The counter log comes from a headless replay of an input tape that presses
-each attack once: R1 (bit 11) at tick 300, R2 (bit 9) at 560, then R1 at 900
-and R1|R2 at 902, on a tape that presses CROSS (bit 14) at 40 to leave the
-menu. Leave enough room between presses for the clips: 2.4, 4.2 and 4.5 s.
+each attack once: R1 (bit 11), R2 (bit 9), L1 (bit 10), then L2 (bit 8), on a
+tape that presses CROSS (bit 14) to leave the menu. Leave enough room between
+presses for the clips to finish.
 
 Fails when a clip starts partway in, skips or repeats frames, or is cut off
 before its strike or its last frame. Frame counts and strike frames come from
@@ -25,16 +26,14 @@ import csv
 import sys
 from pathlib import Path
 
-# action index -> (name, cooked frames, strike frame). Horizontal axis on the
-# right shoulder pair, vertical on the left; strike frames measured with
+# action index -> (name, cooked frames, strike frame). Horizon is on the right
+# shoulder pair, Zenith on the left; strike frames measured with
 # tools/psxanim_profile.py on the cooked clips.
 ATTACKS = {
-    6: ("light", 37, 25),
-    7: ("heavy", 63, 38),
-    8: ("combo", 68, 45),
-    30: ("vert light", 57, 28),
-    31: ("vert heavy", 64, 33),
-    32: ("vert combo", 71, 41),
+    6: ("horizon light", 37, 25),
+    7: ("horizon heavy", 63, 38),
+    30: ("zenith light", 57, 28),
+    31: ("zenith heavy", 64, 33),
 }
 
 

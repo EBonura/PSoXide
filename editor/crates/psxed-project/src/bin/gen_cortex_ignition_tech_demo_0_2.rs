@@ -236,7 +236,7 @@ fn import_cortex_characters(
     let player = named_resource(&source, "Aletha", |data| {
         matches!(data, ResourceData::Character(_))
     });
-    let enemy = named_resource(&source, "Rust Mantis Enemy", |data| {
+    let enemy = named_resource(&source, "Light Enemy", |data| {
         matches!(data, ResourceData::Character(_))
     });
     let player_weapon = named_resource(&source, "Sword1 Light", |data| {
@@ -343,6 +343,17 @@ fn resource_dependencies(data: &ResourceData) -> Vec<ResourceId> {
             option(character.model);
             option(character.material);
             option(character.animation_set);
+            ids.extend(
+                character
+                    .combat_capsules
+                    .iter()
+                    .filter_map(|volume| match volume.role {
+                        psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                            projectile, ..
+                        } => projectile,
+                        _ => None,
+                    }),
+            );
         }
         ResourceData::Weapon(weapon) => option(weapon.model),
         ResourceData::Texture { .. }
@@ -352,6 +363,7 @@ fn resource_dependencies(data: &ResourceData) -> Vec<ResourceId> {
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => {}
     }
     ids
@@ -403,6 +415,13 @@ fn remap_resource_data(mut data: ResourceData, remap: &HashMap<u64, ResourceId>)
             map_option(&mut character.model);
             map_option(&mut character.material);
             map_option(&mut character.animation_set);
+            for volume in &mut character.combat_capsules {
+                if let psxed_project::CombatCapsuleRole::ProjectileEmitter { projectile, .. } =
+                    &mut volume.role
+                {
+                    map_option(projectile);
+                }
+            }
         }
         ResourceData::Weapon(weapon) => map_option(&mut weapon.model),
         ResourceData::Texture { .. }
@@ -412,6 +431,7 @@ fn remap_resource_data(mut data: ResourceData, remap: &HashMap<u64, ResourceId>)
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => {}
     }
     data

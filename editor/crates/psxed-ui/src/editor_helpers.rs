@@ -1235,19 +1235,6 @@ pub(crate) fn animation_source_authoring_label(
     }
 }
 
-pub(crate) fn collect_animation_source_options(
-    project: &ProjectDocument,
-) -> Vec<(ResourceId, String)> {
-    project
-        .resources
-        .iter()
-        .filter_map(|resource| match &resource.data {
-            ResourceData::AnimationSource(_) => Some((resource.id, resource.name.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
 pub(crate) fn collect_animation_set_options(project: &ProjectDocument) -> Vec<AnimationSetOption> {
     project
         .resources

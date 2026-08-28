@@ -195,7 +195,7 @@ fn main() {
     // Share one file when a byte compare agrees, preferring the
     // already-resident enemy atlas.
     let mantis_atlas = project.resources.iter().find_map(|r| match &r.data {
-        ResourceData::Model(m) if r.name == "Rust Mantis" => m.texture_path.clone(),
+        ResourceData::Model(m) if r.name == "Light Enemy Model" => m.texture_path.clone(),
         _ => None,
     });
     let sword_atlases: Vec<Option<String>> = model_ids
@@ -227,7 +227,7 @@ fn main() {
             for id in &model_ids {
                 repoint(&mut project, *id, target);
             }
-            println!("swords share the Rust Mantis atlas ({target})");
+            println!("swords share the Light Enemy atlas ({target})");
             shared_with_mantis = true;
         }
     }

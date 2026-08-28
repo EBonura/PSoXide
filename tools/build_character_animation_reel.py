@@ -35,9 +35,9 @@ def display_name(value: str) -> str:
 def group_title(character: str) -> tuple[str, str]:
     if character == "Aletha":
         return "PLAYER", "Aletha"
-    if character == "Rust Mantis Enemy":
-        return "LIGHT ENEMY", "Rust Mantis"
-    return "TANK ENEMY", "Animated Tank Boss"
+    if character == "Light Enemy":
+        return "LIGHT ENEMY", "Light Enemy"
+    return "HEAVY ENEMY", "Heavy Enemy"
 
 
 def title_card(path: Path, eyebrow: str, title: str, count: int) -> None:

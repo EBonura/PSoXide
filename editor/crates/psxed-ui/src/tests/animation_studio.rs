@@ -258,7 +258,7 @@ fn animation_studio_modes_are_reachable_and_navigation_is_non_destructive() {
 
 #[test]
 fn banked_enemy_atlases_render_in_animation_studio() {
-    for character_name in ["Rust Mantis Enemy", "Tank Boss"] {
+    for character_name in ["Light Enemy", "Heavy Enemy"] {
         let mut workspace = default_workspace();
         let character = resource_id(&workspace, character_name, |data| {
             matches!(data, ResourceData::Character(_))
@@ -473,17 +473,17 @@ fn root_calibration_toolbar_edits_are_undoable() {
 #[test]
 fn moveset_matrix_separates_enabled_actions_from_visual_fallbacks() {
     let mut workspace = default_workspace();
-    let character_id = resource_id(&workspace, "Tank Boss", |data| {
+    let character_id = resource_id(&workspace, "Heavy Enemy", |data| {
         matches!(data, ResourceData::Character(_))
     });
     let animation_set_id = match &workspace
         .project()
         .resource(character_id)
-        .expect("Tank Boss character")
+        .expect("Heavy Enemy character")
         .data
     {
         ResourceData::Character(character) => {
-            character.animation_set.expect("Tank Boss animation set")
+            character.animation_set.expect("Heavy Enemy animation set")
         }
         _ => unreachable!(),
     };
@@ -511,7 +511,7 @@ fn moveset_matrix_separates_enabled_actions_from_visual_fallbacks() {
 
     let run = row(CharacterAnimationAction::Run);
     assert_eq!(run.status, MovesetCapabilityStatus::Disabled);
-    assert_eq!(run.clip, None, "the Tank Boss must not gain Run");
+    assert_eq!(run.clip, None, "the Heavy Enemy must not gain Run");
     assert_eq!(
         run.visual_fallback_action,
         Some(CharacterAnimationAction::Walk),
@@ -521,7 +521,7 @@ fn moveset_matrix_separates_enabled_actions_from_visual_fallbacks() {
         "Visual: Walk · {}",
         run.visual_fallback_name
             .as_deref()
-            .expect("Tank Boss walk fallback name")
+            .expect("Heavy Enemy walk fallback name")
     );
 
     let heavy = row(CharacterAnimationAction::HeavyAttack);
@@ -545,16 +545,16 @@ fn moveset_matrix_separates_enabled_actions_from_visual_fallbacks() {
     let model_id = match &workspace
         .project()
         .resource(character_id)
-        .expect("Tank Boss character")
+        .expect("Heavy Enemy character")
         .data
     {
-        ResourceData::Character(character) => character.model.expect("Tank Boss model"),
+        ResourceData::Character(character) => character.model.expect("Heavy Enemy model"),
         _ => unreachable!(),
     };
     let mut malformed = workspace.project().clone();
     let ResourceData::AnimationSet(set) = &mut malformed
         .resource_mut(animation_set_id)
-        .expect("Tank Boss animation set")
+        .expect("Heavy Enemy animation set")
         .data
     else {
         unreachable!()

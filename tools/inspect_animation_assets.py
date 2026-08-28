@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--source", action="append", required=True, type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=30,
+        help="Scene rate used while importing glTF sampler times (default: 30)",
+    )
     return parser.parse_args(argv)
 
 
@@ -64,8 +70,12 @@ def action_record(action: bpy.types.Action) -> dict[str, object]:
     }
 
 
-def inspect_source(target_path: Path, source_path: Path) -> dict[str, object]:
+def inspect_source(target_path: Path, source_path: Path, fps: int) -> dict[str, object]:
     bpy.ops.wm.read_factory_settings(use_empty=True)
+    # Blender converts glTF animation times to scene frames during import.
+    # Set the source rate first or a 60 Hz take is silently reported at the
+    # factory scene's 24 Hz frame count.
+    bpy.context.scene.render.fps = fps
     import_asset(target_path, animations=False)
     target = one_armature("target")
     target_bones = {
@@ -168,7 +178,7 @@ def inspect_source(target_path: Path, source_path: Path) -> dict[str, object]:
 
 def main() -> None:
     args = parse_args()
-    records = [inspect_source(args.target, source) for source in args.source]
+    records = [inspect_source(args.target, source, args.fps) for source in args.source]
     payload = json.dumps(records, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

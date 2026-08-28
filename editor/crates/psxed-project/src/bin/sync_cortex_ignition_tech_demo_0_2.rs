@@ -18,8 +18,8 @@ const SOURCE_PROJECT: &str = "default";
 const DESTINATION_PROJECT: &str = "cortex-ignition-tech-demo-0.2";
 const CHARACTER_ROOTS: [(&str, ResourceKind); 5] = [
     ("Aletha", ResourceKind::Character),
-    ("Rust Mantis Enemy", ResourceKind::Character),
-    ("Tank Boss", ResourceKind::Character),
+    ("Light Enemy", ResourceKind::Character),
+    ("Heavy Enemy", ResourceKind::Character),
     ("Sword1 Light", ResourceKind::Weapon),
     ("Sword1 Heavy", ResourceKind::Weapon),
 ];
@@ -38,6 +38,7 @@ enum ResourceKind {
     Audio,
     Character,
     Weapon,
+    Projectile,
     BoostModule,
 }
 
@@ -56,6 +57,7 @@ impl ResourceKind {
             ResourceData::Audio { .. } => Self::Audio,
             ResourceData::Character(_) => Self::Character,
             ResourceData::Weapon(_) => Self::Weapon,
+            ResourceData::Projectile(_) => Self::Projectile,
             ResourceData::BoostModule(_) => Self::BoostModule,
         }
     }
@@ -74,6 +76,7 @@ impl ResourceKind {
             Self::Audio => "Audio",
             Self::Character => "Character",
             Self::Weapon => "Weapon",
+            Self::Projectile => "Projectile",
             Self::BoostModule => "BoostModule",
         }
     }
@@ -355,6 +358,17 @@ fn resource_dependencies(data: &ResourceData) -> Vec<ResourceId> {
             option(character.model);
             option(character.material);
             option(character.animation_set);
+            ids.extend(
+                character
+                    .combat_capsules
+                    .iter()
+                    .filter_map(|volume| match volume.role {
+                        psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                            projectile, ..
+                        } => projectile,
+                        _ => None,
+                    }),
+            );
         }
         ResourceData::Weapon(weapon) => option(weapon.model),
         ResourceData::Texture { .. }
@@ -363,6 +377,7 @@ fn resource_dependencies(data: &ResourceData) -> Vec<ResourceId> {
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => {}
     }
     ids
@@ -424,6 +439,13 @@ fn remap_resource_data(data: &mut ResourceData, remap: &HashMap<ResourceId, Reso
             remap_option(&mut character.model, remap);
             remap_option(&mut character.material, remap);
             remap_option(&mut character.animation_set, remap);
+            for volume in &mut character.combat_capsules {
+                if let psxed_project::CombatCapsuleRole::ProjectileEmitter { projectile, .. } =
+                    &mut volume.role
+                {
+                    remap_option(projectile, remap);
+                }
+            }
         }
         ResourceData::Weapon(weapon) => remap_option(&mut weapon.model, remap),
         ResourceData::Texture { .. }
@@ -432,6 +454,7 @@ fn remap_resource_data(data: &mut ResourceData, remap: &HashMap<ResourceId, Reso
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => {}
     }
 }
@@ -503,7 +526,10 @@ fn resource_identity(resource: &Resource) -> String {
         | ResourceData::Scene { source_path }
         | ResourceData::Script { source_path }
         | ResourceData::Audio { source_path } => format!("{kind}:{source_path}"),
-        ResourceData::Character(_) | ResourceData::Weapon(_) | ResourceData::BoostModule(_) => {
+        ResourceData::Character(_)
+        | ResourceData::Weapon(_)
+        | ResourceData::Projectile(_)
+        | ResourceData::BoostModule(_) => {
             format!("{kind}:{}", resource.name)
         }
     }
@@ -549,6 +575,7 @@ fn copy_resource_files(
         | ResourceData::AnimationSet(_)
         | ResourceData::Character(_)
         | ResourceData::Weapon(_)
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => {}
     }
 }
@@ -793,7 +820,7 @@ fn validate_characters(project: &ProjectDocument) {
     );
     validate_character_actions(
         project,
-        "Rust Mantis Enemy",
+        "Light Enemy",
         &[
             CharacterAnimationAction::Idle,
             CharacterAnimationAction::Walk,
@@ -810,7 +837,7 @@ fn validate_characters(project: &ProjectDocument) {
     );
     validate_character_actions(
         project,
-        "Tank Boss",
+        "Heavy Enemy",
         &[
             CharacterAnimationAction::Idle,
             CharacterAnimationAction::Walk,

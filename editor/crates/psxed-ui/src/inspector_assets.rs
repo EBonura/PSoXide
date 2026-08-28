@@ -1038,8 +1038,8 @@ pub(crate) fn draw_animation_clip_resource_editor(
     clip: &mut psxed_project::AnimationClipResource,
     project_root: &Path,
     skeleton_options: &[(ResourceId, String)],
-    _model_options: &[(ResourceId, String)],
-    source_options: &[(ResourceId, String)],
+    model_options: &[(ResourceId, String, Option<ResourceId>)],
+    source_options: &[(ResourceId, String, Option<ResourceId>, Option<ResourceId>)],
 ) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new(icons::label(icons::PLAY, "Animation Clip"))
@@ -1054,13 +1054,68 @@ pub(crate) fn draw_animation_clip_resource_editor(
                 &mut clip.skeleton,
                 skeleton_options,
             );
-            changed |= resource_id_picker(
-                ui,
-                "Source",
-                "animation-clip-source-picker",
-                &mut clip.source,
-                source_options,
-            );
+            let compatible_models: Vec<_> = model_options
+                .iter()
+                .filter(|(_, _, skeleton)| clip.skeleton.is_some() && *skeleton == clip.skeleton)
+                .map(|(id, name, _)| (*id, name.clone()))
+                .collect();
+            if clip
+                .target_model
+                .is_some_and(|target| !compatible_models.iter().any(|(id, _)| *id == target))
+            {
+                clip.target_model = None;
+                changed = true;
+            }
+            if clip.skeleton.is_some() {
+                changed |= resource_id_picker(
+                    ui,
+                    "Target model",
+                    "animation-clip-target-model-picker",
+                    &mut clip.target_model,
+                    &compatible_models,
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Target model");
+                    ui.weak("Select a skeleton first");
+                });
+            }
+
+            let compatible_sources: Vec<_> = source_options
+                .iter()
+                .filter(|(_, _, skeleton, target_model)| {
+                    clip.skeleton.is_some()
+                        && *skeleton == clip.skeleton
+                        && match clip.target_model {
+                            Some(target) => {
+                                target_model.is_none_or(|source_target| source_target == target)
+                            }
+                            None => target_model.is_none(),
+                        }
+                })
+                .map(|(id, name, _, _)| (*id, name.clone()))
+                .collect();
+            if clip
+                .source
+                .is_some_and(|source| !compatible_sources.iter().any(|(id, _)| *id == source))
+            {
+                clip.source = None;
+                changed = true;
+            }
+            if clip.skeleton.is_some() {
+                changed |= resource_id_picker(
+                    ui,
+                    "Source",
+                    "animation-clip-source-picker",
+                    &mut clip.source,
+                    &compatible_sources,
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Source");
+                    ui.weak("Select a skeleton first");
+                });
+            }
 
             ui.horizontal(|ui| {
                 ui.label("Bake");
@@ -1154,7 +1209,7 @@ pub(crate) fn draw_animation_source_resource_editor(
     source: &mut psxed_project::AnimationSourceResource,
     project_root: &Path,
     skeleton_options: &[(ResourceId, String)],
-    model_options: &[(ResourceId, String)],
+    model_options: &[(ResourceId, String, Option<ResourceId>)],
 ) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new(icons::label(icons::PLAY, "Animation Source"))
@@ -1187,13 +1242,34 @@ pub(crate) fn draw_animation_source_resource_editor(
                 &mut source.skeleton,
                 skeleton_options,
             );
-            changed |= resource_id_picker(
-                ui,
-                "Target model",
-                "animation-source-target-model-picker",
-                &mut source.target_model,
-                model_options,
-            );
+            let compatible_models: Vec<_> = model_options
+                .iter()
+                .filter(|(_, _, skeleton)| {
+                    source.skeleton.is_some() && *skeleton == source.skeleton
+                })
+                .map(|(id, name, _)| (*id, name.clone()))
+                .collect();
+            if source
+                .target_model
+                .is_some_and(|target| !compatible_models.iter().any(|(id, _)| *id == target))
+            {
+                source.target_model = None;
+                changed = true;
+            }
+            if source.skeleton.is_some() {
+                changed |= resource_id_picker(
+                    ui,
+                    "Target model",
+                    "animation-source-target-model-picker",
+                    &mut source.target_model,
+                    &compatible_models,
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Target model");
+                    ui.weak("Select a skeleton first");
+                });
+            }
 
             ui.horizontal(|ui| {
                 ui.label("Role");
