@@ -2186,6 +2186,7 @@ mod tests {
                 culling: Default::default(),
                 streaming: Default::default(),
                 physics: Default::default(),
+                world_message: None,
             },
         );
 
@@ -2230,6 +2231,7 @@ mod tests {
                 culling: Default::default(),
                 streaming: Default::default(),
                 physics: Default::default(),
+                world_message: None,
             },
         );
 

@@ -3988,12 +3988,21 @@ pub(crate) fn draw_node_kind_editor(
                 )
                 .changed();
             let radius_scale = inherited_sector_size.max(1) as f32;
-            let mut radius_units = *radius * radius_scale;
+            let raw_radius_units = *radius * radius_scale;
+            let mut radius_units = if raw_radius_units.is_finite() {
+                raw_radius_units.clamp(1.0, psxed_project::POINT_LIGHT_RADIUS_MAX_WORLD_UNITS)
+            } else {
+                1.0
+            };
+            if raw_radius_units != radius_units {
+                *radius = radius_units / radius_scale;
+                changed = true;
+            }
             if ui
                 .add(
                     egui::DragValue::new(&mut radius_units)
-                        .speed(64.0)
-                        .range(0.0..=u16::MAX as f32)
+                        .speed(1.0)
+                        .range(1.0..=psxed_project::POINT_LIGHT_RADIUS_MAX_WORLD_UNITS)
                         .prefix("Radius ")
                         .suffix(" units"),
                 )

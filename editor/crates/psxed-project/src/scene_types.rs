@@ -1,6 +1,11 @@
 use super::*;
 use std::collections::HashMap;
 
+/// Largest point-light radius representable by the cooked runtime record.
+/// Authoring stores radius in sectors, while editors present this world-unit
+/// limit after applying the active World's sector size.
+pub const POINT_LIGHT_RADIUS_MAX_WORLD_UNITS: f32 = u16::MAX as f32;
+
 /// Node type used by the editor scene tree.
 ///
 /// Hierarchy convention for level authoring:
