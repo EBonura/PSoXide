@@ -94,6 +94,78 @@ fn rotate_selected_yaw_rotates_entity_hosts() {
 }
 
 #[test]
+fn duplicating_point_of_interest_component_copies_its_complete_host() {
+    let mut project = ProjectDocument::new("poi-duplicate");
+    let host =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Point of Interest", NodeKind::Entity);
+    {
+        let host = project.active_scene_mut().node_mut(host).unwrap();
+        host.transform.translation = [128.0, 64.0, 256.0];
+        host.floor = 2;
+    }
+    let component = project.active_scene_mut().add_node(
+        host,
+        "Point of Interest",
+        NodeKind::PointOfInterest {
+            pages: vec!["FIRST PAGE".to_string(), "SECOND PAGE".to_string()],
+            prompt: "READ".to_string(),
+            radius: 640,
+            marker_height: 160,
+            repeatable: false,
+            persistence_id: "authored-poi-id".to_string(),
+            reward: None,
+            enabled: true,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("poi-duplicate"), project);
+
+    // Placement leaves the component selected, while viewport picking selects
+    // its host. Both routes must duplicate the same complete authored object.
+    workspace.replace_node_selection(component);
+    workspace.duplicate_current_selection();
+
+    let copied_host_id = workspace.selection.selected_node;
+    let scene = workspace.project.active_scene();
+    let source_host = scene.node(host).expect("source host remains");
+    let copied_host = scene.node(copied_host_id).expect("copied host");
+    assert_ne!(copied_host_id, host);
+    assert_eq!(copied_host.name, "Point of Interest Copy");
+    assert!(matches!(copied_host.kind, NodeKind::Entity));
+    assert_eq!(copied_host.parent, source_host.parent);
+    assert_eq!(copied_host.transform, source_host.transform);
+    assert_eq!(copied_host.floor, source_host.floor);
+    assert_eq!(copied_host.children.len(), 1);
+
+    let copied_component = scene
+        .node(copied_host.children[0])
+        .expect("copied POI component");
+    assert_eq!(copied_component.parent, Some(copied_host_id));
+    let NodeKind::PointOfInterest {
+        pages,
+        prompt,
+        radius,
+        marker_height,
+        repeatable,
+        persistence_id,
+        reward,
+        enabled,
+    } = &copied_component.kind
+    else {
+        panic!("copied child must remain a POI component");
+    };
+    assert_eq!(pages, &["FIRST PAGE", "SECOND PAGE"]);
+    assert_eq!(prompt, "READ");
+    assert_eq!(*radius, 640);
+    assert_eq!(*marker_height, 160);
+    assert!(!repeatable);
+    assert!(persistence_id.is_empty());
+    assert!(reward.is_none());
+    assert!(*enabled);
+}
+
+#[test]
 fn node_transform_inspector_hides_unused_transform_fields() {
     assert_eq!(
         node_transform_inspector(&NodeKind::Node),
