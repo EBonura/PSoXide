@@ -243,7 +243,9 @@ impl EditorWorkspace {
                                         .copied();
                                 }
                             }
-                            if response.hovered()
+                            if response.hovered() && matches!(self.active_tool, ViewTool::Brush) {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                            } else if response.hovered()
                                 && pointer_world.is_some_and(|world| {
                                     self.brush_edit_mode != BrushEditMode::Move
                                         || self.pick_brush_face_for_move_at_2d(world).is_some()
@@ -279,13 +281,10 @@ impl EditorWorkspace {
                                         if !self.begin_brush_height_drag(pos.y) {
                                             let world = transform.screen_to_world(pos);
                                             let tolerance = 8.0 / self.viewport_zoom;
-                                            // Brush keeps its legacy Shift group
-                                            // move; Select reserves modifiers for
-                                            // additive selection and marquee.
-                                            let grabbed = if modifiers.shift
-                                                || self.brush_edit_mode == BrushEditMode::Move
-                                            {
-                                                self.begin_brush_move_2d(world)
+                                            if matches!(self.active_tool, ViewTool::Brush) {
+                                                self.begin_brush_drag_2d(world);
+                                            } else if self.brush_edit_mode == BrushEditMode::Move {
+                                                self.begin_brush_move_2d(world);
                                             } else {
                                                 match self.brush_edit_mode {
                                                     BrushEditMode::Move => unreachable!(),
@@ -301,13 +300,7 @@ impl EditorWorkspace {
                                                         .begin_brush_vertex_drag_2d(
                                                             world, tolerance,
                                                         ),
-                                                }
-                                            };
-                                            if !grabbed
-                                                && matches!(self.active_tool, ViewTool::Brush)
-                                                && self.pick_brush_face_at_2d(world).is_none()
-                                            {
-                                                self.begin_brush_drag_2d(world);
+                                                };
                                             }
                                         }
                                     }
@@ -387,6 +380,9 @@ impl EditorWorkspace {
                                 .is_some_and(|drag| drag.stage == BrushCreateStage::Height)
                             {
                                 self.commit_brush_drag();
+                            } else if matches!(self.active_tool, ViewTool::Brush) {
+                                // Draw owns the pointer exclusively. Selection and
+                                // sub-element editing belong to Select mode.
                             } else if let Some(pos) = response.interact_pointer_pos() {
                                 let world = transform.screen_to_world(pos);
                                 let modifiers = ui.input(|input| input.modifiers);
@@ -599,6 +595,9 @@ impl EditorWorkspace {
             | BspToolbarMode::Clip => ViewTool::Select,
         };
         self.set_active_tool_cycle_value((tool, None));
+        if mode == BspToolbarMode::Draw {
+            self.clear_brush_selection();
+        }
         if let Some(brush_mode) = mode.brush_edit_mode() {
             self.set_brush_edit_mode(brush_mode);
         }
