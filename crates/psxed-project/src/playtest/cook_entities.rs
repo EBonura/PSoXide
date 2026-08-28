@@ -400,10 +400,40 @@ pub(crate) fn remap_runtime_model_clip(
         .flatten()
 }
 
+/// Keep an enemy in its committed Attack state until the frame containing its
+/// latest authored Light Attack event can actually be sampled. Entity state
+/// clocks are 60 Hz; animation clips retain their own cooked sample rate.
+///
+/// The previous hard-coded six ticks only advanced a 12 Hz clip by roughly one
+/// frame, so a projectile released on frame 18 could never fire. Six remains
+/// the compatibility floor for characters without a later authored event.
+pub(crate) fn cooked_game_entity_attack_active_ticks(
+    windup_ticks: u8,
+    event_end_frame: Option<u16>,
+    sample_rate_hz: Option<u16>,
+) -> u16 {
+    const LEGACY_ACTIVE_TICKS: u32 = 6;
+    let (Some(frame), Some(sample_rate_hz)) = (event_end_frame, sample_rate_hz) else {
+        return LEGACY_ACTIVE_TICKS as u16;
+    };
+    let phase_step_q12 = (u32::from(sample_rate_hz.max(1)) << 12) / 60;
+    let event_phase_q12 = u32::from(frame) << 12;
+    // Mirror `Animation::phase_step_q12` exactly. Its intentional integer
+    // truncation means a 12 Hz frame-18 marker crosses on tick 91, not the
+    // rational-math estimate of tick 90.
+    let event_tick =
+        event_phase_q12.saturating_add(phase_step_q12.saturating_sub(1)) / phase_step_q12.max(1);
+    event_tick
+        .saturating_sub(u32::from(windup_ticks))
+        .max(LEGACY_ACTIVE_TICKS)
+        .min(u32::from(u16::MAX)) as u16
+}
+
 /// Validate and compact one Character's rig-attached combat volumes. The
 /// runtime gets a bounded contiguous slice and can therefore scan it without
 /// allocation or resource lookup.
 pub(crate) fn cook_character_combat_capsules(
+    project: &ProjectDocument,
     character_name: &str,
     character: &crate::CharacterResource,
     model_joint_count: u16,
@@ -435,13 +465,6 @@ pub(crate) fn cook_character_combat_capsules(
             ));
             return None;
         };
-        if volume.capsule.radius == 0 {
-            report.error(format!(
-                "Character '{character_name}' combat volume '{}' has radius 0",
-                volume.name
-            ));
-            return None;
-        }
         let compact_point = |point: [i32; 3]| -> Option<[i16; 3]> {
             Some([
                 i16::try_from(point[0]).ok()?,
@@ -475,6 +498,17 @@ pub(crate) fn cook_character_combat_capsules(
             projectile_min_range,
             projectile_max_range,
             projectile_tint_rgb,
+            projectile_damage_channel,
+            projectile_core_rgb,
+            projectile_trail_segments,
+            projectile_glow_rgb,
+            projectile_length_ticks,
+            projectile_impact_rgb,
+            projectile_trail_spacing_ticks,
+            projectile_charge_start_frame,
+            projectile_glow_scale_q8,
+            projectile_impact_lifetime_ticks,
+            radius,
         ) = match volume.role {
             crate::CombatCapsuleRole::Hurtbox => (
                 psx_level::combat_capsule_flags::HURTBOX,
@@ -488,6 +522,17 @@ pub(crate) fn cook_character_combat_capsules(
                 0,
                 0,
                 [0; 3],
+                psx_level::projectile_damage_channel::ZENITH,
+                [0; 3],
+                0,
+                [0; 3],
+                0,
+                [0; 3],
+                0,
+                0,
+                0,
+                0,
+                volume.capsule.radius,
             ),
             crate::CombatCapsuleRole::Hitbox {
                 action,
@@ -522,12 +567,25 @@ pub(crate) fn cook_character_combat_capsules(
                     0,
                     0,
                     [0; 3],
+                    psx_level::projectile_damage_channel::ZENITH,
+                    [0; 3],
+                    0,
+                    [0; 3],
+                    0,
+                    [0; 3],
+                    0,
+                    0,
+                    0,
+                    0,
+                    volume.capsule.radius,
                 )
             }
             crate::CombatCapsuleRole::ProjectileEmitter {
                 action,
+                charge_start_frame,
                 active_start_frame,
                 active_end_frame,
+                projectile,
                 speed,
                 lifetime_ticks,
                 min_range,
@@ -550,9 +608,48 @@ pub(crate) fn cook_character_combat_capsules(
                         ));
                     return None;
                 }
-                if speed == 0 || lifetime_ticks == 0 || damage == 0 {
+                if charge_start_frame > active_start_frame {
                     report.error(format!(
-                            "Character '{character_name}' projectile emitter '{}' requires positive speed, lifetime, and damage",
+                        "Character '{character_name}' projectile emitter '{}' starts charging after its release frame",
+                        volume.name
+                    ));
+                    return None;
+                }
+                let profile = match projectile {
+                    Some(projectile_id) => {
+                        let Some(resource) = project.resource(projectile_id) else {
+                            report.error(format!(
+                                "Character '{character_name}' projectile emitter '{}' references missing Projectile #{}",
+                                volume.name,
+                                projectile_id.raw()
+                            ));
+                            return None;
+                        };
+                        let ResourceData::Projectile(profile) = &resource.data else {
+                            report.error(format!(
+                                "Character '{character_name}' projectile emitter '{}' references '{}', which is not a Projectile",
+                                volume.name, resource.name
+                            ));
+                            return None;
+                        };
+                        Some(profile)
+                    }
+                    None => None,
+                };
+                let resolved_speed = profile.map_or(speed, |profile| profile.speed);
+                let resolved_lifetime =
+                    profile.map_or(lifetime_ticks, |profile| profile.lifetime_ticks);
+                let resolved_radius =
+                    profile.map_or(volume.capsule.radius, |profile| profile.radius);
+                let resolved_damage = profile.map_or(damage, |profile| profile.damage);
+                let resolved_poise = profile.map_or(poise_damage, |profile| profile.poise_damage);
+                if resolved_speed == 0
+                    || resolved_lifetime == 0
+                    || resolved_radius == 0
+                    || resolved_damage == 0
+                {
+                    report.error(format!(
+                            "Character '{character_name}' projectile emitter '{}' requires positive speed, lifetime, radius, and damage",
                             volume.name
                         ));
                     return None;
@@ -564,28 +661,67 @@ pub(crate) fn cook_character_combat_capsules(
                         ));
                     return None;
                 }
+                let damage_channel =
+                    profile.map_or(psx_level::projectile_damage_channel::ZENITH, |profile| {
+                        match profile.damage_channel {
+                            crate::ProjectileDamageChannel::Horizon => {
+                                psx_level::projectile_damage_channel::HORIZON
+                            }
+                            crate::ProjectileDamageChannel::Zenith => {
+                                psx_level::projectile_damage_channel::ZENITH
+                            }
+                        }
+                    });
+                let core_rgb = profile.map_or(tint_rgb, |profile| profile.core_color);
+                let glow_rgb = profile.map_or(tint_rgb, |profile| profile.glow_color);
+                let impact_rgb = profile.map_or(tint_rgb, |profile| profile.impact_color);
+                let trail_segments = profile.map_or(3, |profile| profile.trail_segments.min(6));
+                let length_ticks = profile.map_or(2, |profile| profile.length_ticks.max(1));
+                let trail_spacing_ticks =
+                    profile.map_or(1, |profile| profile.trail_spacing_ticks.max(1));
+                let glow_scale_q8 = profile.map_or(384, |profile| profile.glow_scale_q8.max(256));
+                let impact_lifetime_ticks =
+                    profile.map_or(10, |profile| profile.impact_lifetime_ticks.max(1));
                 (
                     psx_level::combat_capsule_flags::PROJECTILE_EMITTER,
                     action.to_index() as u8,
                     active_start_frame,
                     active_end_frame,
-                    damage,
-                    poise_damage,
-                    speed,
-                    lifetime_ticks,
+                    resolved_damage,
+                    resolved_poise,
+                    resolved_speed,
+                    resolved_lifetime,
                     min_range,
                     max_range,
-                    tint_rgb,
+                    glow_rgb,
+                    damage_channel,
+                    core_rgb,
+                    trail_segments,
+                    glow_rgb,
+                    length_ticks,
+                    impact_rgb,
+                    trail_spacing_ticks,
+                    charge_start_frame,
+                    glow_scale_q8,
+                    impact_lifetime_ticks,
+                    resolved_radius,
                 )
             }
         };
+        if radius == 0 {
+            report.error(format!(
+                "Character '{character_name}' combat volume '{}' has radius 0",
+                volume.name
+            ));
+            return None;
+        }
         cooked.push(PlaytestCombatCapsule {
             joint,
             flags,
             action,
             start,
             end,
-            radius: volume.capsule.radius,
+            radius,
             active_start_frame,
             active_end_frame,
             damage,
@@ -595,6 +731,16 @@ pub(crate) fn cook_character_combat_capsules(
             projectile_min_range,
             projectile_max_range,
             projectile_tint_rgb,
+            projectile_damage_channel,
+            projectile_core_rgb,
+            projectile_trail_segments,
+            projectile_glow_rgb,
+            projectile_length_ticks,
+            projectile_impact_rgb,
+            projectile_trail_spacing_ticks,
+            projectile_charge_start_frame,
+            projectile_glow_scale_q8,
+            projectile_impact_lifetime_ticks,
         });
     }
     let count = u8::try_from(cooked.len()).ok()?;
@@ -710,6 +856,7 @@ pub(crate) fn cook_player_character(
         .map(|model| model.joint_count())
         .unwrap_or(0);
     let (combat_capsule_first, combat_capsule_count) = cook_character_combat_capsules(
+        project,
         character_name,
         character,
         model_joint_count,
@@ -1544,30 +1691,8 @@ pub(crate) fn register_model_for_instance(
             return None;
         }
         seen_sockets.push(socket.name.as_str());
-        // The authored offset is relative to the JOINT, but a cooked pose
-        // record is a skinning matrix, so its translation is not where the
-        // joint is: for Aletha the foot joints read y=0 while the foot mesh
-        // sits at y=-1642. Anchoring on the joint's bind point restores the
-        // meaning the runtime composition already assumes.
-        let anchor = joint_bind_anchor(&parsed_model, socket.joint);
-        let translation = [
-            anchor[0] + socket.translation[0],
-            anchor[1] + socket.translation[1],
-            anchor[2] + socket.translation[2],
-        ];
-        // Compact joint-local envelope, same contract as combat capsules:
-        // the runtime attachment math is regression-tested exactly to this
-        // cooker-enforced range.
-        if translation.iter().any(|&v| i16::try_from(v).is_err()) {
-            report.error_at(
-                PlaytestValidationTarget::Resource(model_resource_id),
-                format!(
-                    "Model '{}' socket '{}' translation is outside the compact joint-local range",
-                    resource.name, socket.name
-                ),
-            );
-            return None;
-        }
+        let translation =
+            crate::model_import::attachment_socket_bind_translation(&parsed_model, socket);
         model_sockets.push(PlaytestModelSocket {
             model: model_index,
             name: socket.name.clone(),
@@ -3262,56 +3387,13 @@ pub(crate) fn component_children<'a>(
         .filter(|node| node.kind.is_component())
 }
 
-/// Where joint `joint` actually sits in the model's bind space: the centroid
-/// of the mesh rigidly bound to it.
-///
-/// A cooked pose record is a SKINNING matrix (pose composed with the inverse
-/// bind), so `pose.translation` is not the joint's position and nothing in the
-/// cooked model carries the bind skeleton. The mesh does: the vertices of the
-/// parts bound to a joint are that joint's geometry, and their centroid is the
-/// palm for a hand, the head of the bone for anything else.
-///
-/// ponytail: centroid, not the exact bone head. It puts a grip in the fist,
-/// and the authored socket offset is the knob for the rest. Store real bind
-/// positions in the model if a socket ever needs sub-centimetre placement.
-fn joint_bind_anchor(model: &psx_asset::Model<'_>, joint: u16) -> [i32; 3] {
-    let mut sum = [0i64; 3];
-    let mut count = 0i64;
-    for part_index in 0..model.part_count() {
-        let Some(part) = model.part(part_index) else {
-            continue;
-        };
-        if part.joint_index() != joint {
-            continue;
-        }
-        for index in part.first_vertex()..part.first_vertex() + part.vertex_count() {
-            let Some(vertex) = model.vertex(index) else {
-                continue;
-            };
-            sum[0] += i64::from(vertex.position.x);
-            sum[1] += i64::from(vertex.position.y);
-            sum[2] += i64::from(vertex.position.z);
-            count += 1;
-        }
-    }
-    if count == 0 {
-        // A jointless socket (or one on a bone with no geometry) keeps the
-        // authored offset as-is, which is the pre-anchor behaviour.
-        return [0; 3];
-    }
-    [
-        (sum[0] / count) as i32,
-        (sum[1] / count) as i32,
-        (sum[2] / count) as i32,
-    ]
-}
-
 #[cfg(test)]
 mod socket_anchor_tests {
     use super::{
-        character_action_speed_for, compact_animation_bytes, joint_bind_anchor,
-        remap_authored_duration, remap_authored_frame,
+        character_action_speed_for, compact_animation_bytes,
+        cooked_game_entity_attack_active_ticks, remap_authored_duration, remap_authored_frame,
     };
+    use crate::model_import::model_joint_bind_anchor;
 
     #[test]
     fn authored_action_speed_is_clamped_before_runtime_cook() {
@@ -3394,6 +3476,20 @@ mod socket_anchor_tests {
         assert_eq!(remap_authored_frame(2, 6, 62, 29), 0);
     }
 
+    #[test]
+    fn attack_state_reaches_an_exact_late_projectile_frame() {
+        // Q12 step truncation crosses frame 18 on simulation tick 91. With 20
+        // ticks spent in Windup, Attack must remain committed for 71 ticks.
+        assert_eq!(
+            cooked_game_entity_attack_active_ticks(20, Some(18), Some(12)),
+            71
+        );
+        assert_eq!(
+            cooked_game_entity_attack_active_ticks(20, None, Some(12)),
+            6
+        );
+    }
+
     /// Aletha's hand sockets must land on her hands. Before the anchor they
     /// were composed on the skinning-matrix translation, which put the right
     /// hand grip on her left side and half a body away.
@@ -3407,8 +3503,8 @@ mod socket_anchor_tests {
         let model = psx_asset::Model::from_bytes(&bytes).expect("model");
         const RIGHT_HAND: u16 = 13;
         const LEFT_HAND: u16 = 21;
-        let right = joint_bind_anchor(&model, RIGHT_HAND);
-        let left = joint_bind_anchor(&model, LEFT_HAND);
+        let right = model_joint_bind_anchor(&model, RIGHT_HAND);
+        let left = model_joint_bind_anchor(&model, LEFT_HAND);
         assert_ne!(right, [0; 3], "right hand anchor collapsed to the origin");
         assert_ne!(left, [0; 3], "left hand anchor collapsed to the origin");
         // Hands sit on opposite sides of the body, and a hand is nowhere near

@@ -1343,6 +1343,16 @@ pub struct PlaytestCombatCapsule {
     pub projectile_min_range: u16,
     pub projectile_max_range: u16,
     pub projectile_tint_rgb: [u8; 3],
+    pub projectile_damage_channel: u8,
+    pub projectile_core_rgb: [u8; 3],
+    pub projectile_trail_segments: u8,
+    pub projectile_glow_rgb: [u8; 3],
+    pub projectile_length_ticks: u8,
+    pub projectile_impact_rgb: [u8; 3],
+    pub projectile_trail_spacing_ticks: u8,
+    pub projectile_charge_start_frame: u16,
+    pub projectile_glow_scale_q8: u16,
+    pub projectile_impact_lifetime_ticks: u8,
 }
 
 /// Weapon-local hit shape, ready for manifest emission.
@@ -1587,6 +1597,17 @@ pub struct PlaytestInteractable {
     pub flags: u16,
 }
 
+/// One unique collectible module cooked from a POI reward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestBoostModule {
+    pub name: String,
+    pub description: String,
+    pub effect_summary: String,
+    pub assignment_label: String,
+    pub remove_label: String,
+    pub percentages: [i16; psx_level::boost_stat::COUNT],
+}
+
 /// One cooked logic entity (hl-psx `LogicEnt`-shaped). Mirrors
 /// `psx_level::LevelLogicRecord`; see that type for field semantics.
 /// All names are already interned to u16 ids -- the strings die here,
@@ -1715,6 +1736,9 @@ pub struct PlaytestGameEntity {
     pub group_attack_delay_ticks: u8,
     /// Attack windup ticks.
     pub windup_ticks: u8,
+    /// Attack-state ticks. The cooker extends the legacy six-tick window far
+    /// enough for the authored Light Attack event at the cooked clip rate.
+    pub attack_active_ticks: u16,
     /// Post-attack recovery ticks.
     pub recovery_ticks: u8,
     /// Closest ranged-attack distance. Zero for melee entities.
@@ -2028,6 +2052,8 @@ pub struct PlaytestPackage {
     pub world_message: Option<PlaytestInteractableMessage>,
     /// Number of persistent flag bits assigned by this cook.
     pub persistent_flag_count: u16,
+    /// Unique collectible modules referenced by point-of-interest rewards.
+    pub boost_modules: Vec<PlaytestBoostModule>,
     /// Placed gameplay interactables.
     pub interactables: Vec<PlaytestInteractable>,
     /// Cooked logic entities (phase-3 event graph). Interactables

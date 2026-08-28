@@ -971,6 +971,7 @@ impl ProjectDocument {
                 | ResourceData::Mesh { .. }
                 | ResourceData::Character(_)
                 | ResourceData::Weapon(_)
+                | ResourceData::Projectile(_)
                 | ResourceData::BoostModule(_) => {}
             }
         }
@@ -1133,6 +1134,7 @@ impl ProjectDocument {
             | ResourceData::AnimationSet(_)
             | ResourceData::Character(_)
             | ResourceData::Weapon(_)
+            | ResourceData::Projectile(_)
             | ResourceData::BoostModule(_) => {}
         }
 
@@ -1621,6 +1623,19 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
             option_resource_reference_count(character.model, id)
                 + option_resource_reference_count(character.material, id)
                 + option_resource_reference_count(character.animation_set, id)
+                + character
+                    .combat_capsules
+                    .iter()
+                    .filter(|volume| {
+                        matches!(
+                            volume.role,
+                            crate::CombatCapsuleRole::ProjectileEmitter {
+                                projectile: Some(projectile),
+                                ..
+                            } if projectile == id
+                        )
+                    })
+                    .count()
         }
         ResourceData::Weapon(weapon) => option_resource_reference_count(weapon.model, id),
         ResourceData::Texture { .. }
@@ -1629,6 +1644,7 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => 0,
     }
 }
@@ -1673,9 +1689,17 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
             cleared
         }
         ResourceData::Character(character) => {
-            clear_option_resource(&mut character.model, id)
+            let mut cleared = clear_option_resource(&mut character.model, id)
                 + clear_option_resource(&mut character.material, id)
-                + clear_option_resource(&mut character.animation_set, id)
+                + clear_option_resource(&mut character.animation_set, id);
+            for volume in &mut character.combat_capsules {
+                if let crate::CombatCapsuleRole::ProjectileEmitter { projectile, .. } =
+                    &mut volume.role
+                {
+                    cleared += clear_option_resource(projectile, id);
+                }
+            }
+            cleared
         }
         ResourceData::Weapon(weapon) => clear_option_resource(&mut weapon.model, id),
         ResourceData::Texture { .. }
@@ -1684,6 +1708,7 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => 0,
     }
 }
@@ -2002,6 +2027,7 @@ pub(crate) fn plan_resource_file_deletes(
         | ResourceData::AnimationSet(_)
         | ResourceData::Character(_)
         | ResourceData::Weapon(_)
+        | ResourceData::Projectile(_)
         | ResourceData::BoostModule(_) => {}
     }
     plan
@@ -2294,6 +2320,7 @@ pub(crate) const fn resource_default_stem(data: &ResourceData) -> &'static str {
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "audio",
         ResourceData::Character(_) => "character",
+        ResourceData::Projectile(_) => "projectile",
         ResourceData::BoostModule(_) => "boost_module",
     }
 }
@@ -2313,6 +2340,7 @@ pub(crate) const fn resource_default_extension(data: &ResourceData) -> &'static 
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "vag",
         ResourceData::Character(_) => "char",
+        ResourceData::Projectile(_) => "projectile",
         ResourceData::BoostModule(_) => "module",
     }
 }

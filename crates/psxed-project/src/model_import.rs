@@ -27,14 +27,68 @@ use std::{
 
 use crate::{
     default_model_collision_radius_for_height, AnimationClipBakeKind, AnimationClipResource,
-    AnimationRole, AnimationSetResource, CharacterAnimationAction, ModelResource, ProjectDocument,
-    ResourceData, ResourceId, SkeletonResource,
+    AnimationRole, AnimationSetResource, AttachmentSocket, AttachmentSocketTranslationSpace,
+    CharacterAnimationAction, ModelResource, ProjectDocument, ResourceData, ResourceId,
+    SkeletonResource,
 };
 
 pub use psxed_format::texture::Depth as TextureDepth;
 pub use psxed_gltf::{
     default_collapse_bone_patterns, RigidModelConfig, RigidModelPackage, RigidModelReport,
 };
+
+/// Where geometry rigidly bound to `joint` sits in model bind space.
+///
+/// Animation pose records are skinning matrices, not joint transforms, so a
+/// zero translation does not identify a hand or another mesh-bearing joint.
+pub fn model_joint_bind_anchor(model: &psx_asset::Model<'_>, joint: u16) -> [i32; 3] {
+    let mut sum = [0i64; 3];
+    let mut count = 0i64;
+    for part_index in 0..model.part_count() {
+        let Some(part) = model.part(part_index) else {
+            continue;
+        };
+        if part.joint_index() != joint {
+            continue;
+        }
+        for index in part.first_vertex()..part.first_vertex() + part.vertex_count() {
+            let Some(vertex) = model.vertex(index) else {
+                continue;
+            };
+            sum[0] += i64::from(vertex.position.x);
+            sum[1] += i64::from(vertex.position.y);
+            sum[2] += i64::from(vertex.position.z);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return [0; 3];
+    }
+    [
+        (sum[0] / count) as i32,
+        (sum[1] / count) as i32,
+        (sum[2] / count) as i32,
+    ]
+}
+
+/// Resolve an authored socket translation to the bind-space point consumed by
+/// both Animation Studio and the runtime package.
+pub fn attachment_socket_bind_translation(
+    model: &psx_asset::Model<'_>,
+    socket: &AttachmentSocket,
+) -> [i32; 3] {
+    match socket.translation_space {
+        AttachmentSocketTranslationSpace::BindSpace => socket.translation,
+        AttachmentSocketTranslationSpace::JointOffset => {
+            let anchor = model_joint_bind_anchor(model, socket.joint);
+            [
+                anchor[0].saturating_add(socket.translation[0]),
+                anchor[1].saturating_add(socket.translation[1]),
+                anchor[2].saturating_add(socket.translation[2]),
+            ]
+        }
+    }
+}
 
 /// Header-derived statistics about a `.psxmdl` blob, suitable
 /// for editor inspector display. Computed by walking the model
@@ -1277,5 +1331,33 @@ mod tests {
         assert_eq!(stats.width, 128);
         assert_eq!(stats.height, 128);
         assert_eq!(stats.clut_entries, 256);
+    }
+
+    #[test]
+    fn socket_translation_space_resolves_once_for_studio_and_runtime() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../projects/default/assets/models/aletha_delivered/aletha_delivered.psxmdl"
+        );
+        let bytes = std::fs::read(path).expect("aletha mesh");
+        let model = psx_asset::Model::from_bytes(&bytes).expect("model");
+        let anchor = model_joint_bind_anchor(&model, 13);
+        let mut socket = AttachmentSocket {
+            name: "right_hand_grip".to_string(),
+            joint: 13,
+            translation: [11, -22, 33],
+            translation_space: AttachmentSocketTranslationSpace::JointOffset,
+            rotation_q12: [0; 3],
+        };
+        assert_eq!(
+            attachment_socket_bind_translation(&model, &socket),
+            [anchor[0] + 11, anchor[1] - 22, anchor[2] + 33]
+        );
+
+        socket.translation_space = AttachmentSocketTranslationSpace::BindSpace;
+        assert_eq!(
+            attachment_socket_bind_translation(&model, &socket),
+            socket.translation
+        );
     }
 }

@@ -764,6 +764,7 @@ pub fn build_package(
     let mut interactable_messages: Vec<PlaytestInteractableMessage> = Vec::new();
     let mut interactable_message_pages: Vec<String> = Vec::new();
     let mut interactables: Vec<PlaytestInteractable> = Vec::new();
+    let mut boost_modules: Vec<PlaytestBoostModule> = Vec::new();
     let mut poi_persistence_ids: HashSet<String> = HashSet::new();
     let mut poi_persistence_slots: HashMap<u16, String> = HashMap::new();
     let persistent_flag_count = psx_level::POI_PERSISTENT_FLAG_CAPACITY as u16;
@@ -1039,6 +1040,7 @@ pub fn build_package(
                                 .unwrap_or(0);
                             let Some((combat_capsule_first, combat_capsule_count)) =
                                 cook_character_combat_capsules(
+                                    project,
                                     archetype.as_str(),
                                     enemy_character,
                                     model_joint_count,
@@ -1060,6 +1062,40 @@ pub fn build_package(
                                     } => Some((min_range, max_range)),
                                     _ => None,
                                 });
+                            let attack_event_end = combat_capsules
+                                .get(combat_capsule_first as usize..combat_capsule_first as usize
+                                    + usize::from(combat_capsule_count))
+                                .unwrap_or(&[])
+                                .iter()
+                                .filter(|capsule| {
+                                    capsule.action
+                                        == CharacterAnimationAction::LightAttack.to_index() as u8
+                                        && capsule.flags
+                                            & (psx_level::combat_capsule_flags::HITBOX
+                                                | psx_level::combat_capsule_flags::PROJECTILE_EMITTER)
+                                            != 0
+                                })
+                                .map(|capsule| capsule.active_end_frame)
+                                .max();
+                            let attack_sample_rate_hz = node_model_instance
+                                .and_then(|instance| model_instances.get(instance as usize))
+                                .and_then(|instance| models.get(instance.model as usize))
+                                .and_then(|model| {
+                                    model_clips.get(
+                                        usize::from(model.clip_first)
+                                            .saturating_add(usize::from(state_clips.attack)),
+                                    )
+                                })
+                                .and_then(|clip| assets.get(clip.animation_asset_index))
+                                .and_then(|asset| {
+                                    psx_asset::Animation::from_bytes(&asset.bytes).ok()
+                                })
+                                .map(|animation| animation.sample_rate_hz());
+                            let attack_active_ticks = cooked_game_entity_attack_active_ticks(
+                                enemy.windup_ticks,
+                                attack_event_end,
+                                attack_sample_rate_hz,
+                            );
                             let ok =
                                 report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                                     push_game_entity(
@@ -1080,6 +1116,7 @@ pub fn build_package(
                                         state_clips,
                                         combat_capsule_first,
                                         combat_capsule_count,
+                                        attack_active_ticks,
                                         projectile_attack_range,
                                         &mut names,
                                         &mut game_entities,
@@ -1233,6 +1270,7 @@ pub fn build_package(
                             &mut interactable_messages,
                             &mut interactable_message_pages,
                             &mut interactables,
+                            &mut boost_modules,
                             report,
                         )
                     });
@@ -1858,6 +1896,91 @@ pub fn build_package(
         _ => None,
     };
 
+    // Animation Studio weapon tracks are part of the player's authored action
+    // presentation. Provision every distinct weapon/socket pair they use so
+    // the runtime draws the same loadout the Studio previews. Explicit scene
+    // Equipment remains authoritative for an already-present pair; this only
+    // fills the pairs that would otherwise be silently absent at runtime.
+    if let Some(controller) = player_controller {
+        let appearance_equipment = characters
+            .get(controller.character as usize)
+            .and_then(|character| project.resource(character.source_resource))
+            .and_then(|resource| match &resource.data {
+                ResourceData::Character(character) => character.animation_set,
+                _ => None,
+            })
+            .and_then(|set_id| project.resource(set_id))
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationSet(set) => Some(
+                    set.weapon_appearance_tracks
+                        .iter()
+                        .filter(|track| {
+                            project.resource(track.weapon).is_some_and(|resource| {
+                                matches!(resource.data, ResourceData::Weapon(_))
+                            })
+                        })
+                        .map(|track| (track.weapon, track.character_socket.clone()))
+                        .fold(Vec::new(), |mut pairs, pair| {
+                            if !pairs.contains(&pair) {
+                                pairs.push(pair);
+                            }
+                            pairs
+                        }),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        for (weapon_id, character_socket) in appearance_equipment {
+            let weapon_grip = project
+                .resource(weapon_id)
+                .and_then(|resource| match &resource.data {
+                    ResourceData::Weapon(weapon) => Some(weapon.grip.name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "grip".to_string());
+            let Some(weapon_index) = register_weapon_for_equipment(
+                project,
+                project_root,
+                weapon_id,
+                &mut assets,
+                &mut models,
+                &mut model_clips,
+                &mut model_clip_bounds,
+                &mut model_frame_bounds,
+                &mut model_sockets,
+                &mut model_for_resource,
+                &runtime_model_clips,
+                &mut model_clip_remaps,
+                &mut weapon_hitboxes,
+                &mut weapons,
+                &mut weapon_for_resource,
+                &mut report,
+            ) else {
+                return (None, report);
+            };
+            if equipment.iter().any(|record| {
+                record.flags & psx_level::equipment_flags::PLAYER != 0
+                    && record.weapon == weapon_index
+                    && record.character_socket == character_socket
+            }) {
+                continue;
+            }
+            equipment.push(PlaytestEquipment {
+                room: controller.spawn.room,
+                weapon: weapon_index,
+                x: controller.spawn.x,
+                y: controller.spawn.y,
+                z: controller.spawn.z,
+                yaw: controller.spawn.yaw,
+                character_socket,
+                weapon_grip,
+                model_instance: u16::MAX,
+                flags: psx_level::equipment_flags::PLAYER,
+            });
+        }
+    }
+
     let weapon_appearances = cook_weapon_appearances(
         project,
         &characters,
@@ -2082,6 +2205,7 @@ pub fn build_package(
             interactable_message_pages,
             world_message,
             persistent_flag_count,
+            boost_modules,
             interactables,
             logic,
             game_entities,
