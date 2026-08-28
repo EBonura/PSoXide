@@ -1569,7 +1569,33 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn duplicate_selected(&mut self) {
-        let selected = self.selected_node_ids_in_hierarchy();
+        let selected = {
+            let scene = self.project.active_scene();
+            let mut roots = Vec::new();
+            for id in self.selected_node_ids_in_hierarchy() {
+                // A POI component has no transform or beacon of its own: its
+                // Entity parent is the authored object. Placement initially
+                // selects the component, so duplicating that row must copy the
+                // complete host instead of adding a second component to the
+                // original host.
+                let root = scene
+                    .node(id)
+                    .and_then(|node| {
+                        matches!(node.kind, NodeKind::PointOfInterest { .. })
+                            .then_some(node.parent)
+                            .flatten()
+                    })
+                    .unwrap_or(id);
+                if roots
+                    .iter()
+                    .any(|ancestor| scene.is_descendant_of(root, *ancestor))
+                {
+                    continue;
+                }
+                roots.push(root);
+            }
+            roots
+        };
         if selected.is_empty() {
             return;
         }
@@ -1579,7 +1605,7 @@ impl EditorWorkspace {
             let Some(source) = self.project.active_scene().node(selected).cloned() else {
                 continue;
             };
-            if matches!(source.kind, NodeKind::Group) {
+            if matches!(source.kind, NodeKind::Group) || !source.children.is_empty() {
                 let scene = self.project.active_scene();
                 let subtree: Vec<_> = scene
                     .hierarchy_rows()
@@ -1612,12 +1638,17 @@ impl EditorWorkspace {
                     } else {
                         node.name.clone()
                     };
-                    let id = self
-                        .project
-                        .active_scene_mut()
-                        .add_node(parent, name, node.kind);
+                    let mut kind = node.kind;
+                    if let NodeKind::PointOfInterest { persistence_id, .. } = &mut kind {
+                        // Save identity is not copyable state. An empty id is
+                        // cooked from the new host's stable NodeId, avoiding
+                        // duplicate persistence keys after duplication.
+                        persistence_id.clear();
+                    }
+                    let id = self.project.active_scene_mut().add_node(parent, name, kind);
                     if let Some(copy) = self.project.active_scene_mut().node_mut(id) {
                         copy.transform = node.transform;
+                        copy.floor = node.floor;
                     }
                     remap.insert(node.id, id);
                 }
@@ -1638,6 +1669,7 @@ impl EditorWorkspace {
             );
             if let Some(node) = self.project.active_scene_mut().node_mut(id) {
                 node.transform = source.transform;
+                node.floor = source.floor;
             }
             duplicated.push(id);
         }
