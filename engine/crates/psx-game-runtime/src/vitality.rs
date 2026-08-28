@@ -270,143 +270,41 @@ pub struct DualVitalitySpillOutcome {
     pub actor_defeated: bool,
 }
 
-/// Built-in boost protocol. Zero is intentionally `None`: the editor-playtest
-/// scene lives in link-time-zero storage and this keeps its loadout valid before
-/// gameplay initialization stamps the authored defaults.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-#[repr(u8)]
-pub enum BoostProtocol {
-    /// No protocol assigned.
-    #[default]
-    None = 0,
-    /// Outgoing attack damage.
-    Rupture = 1,
-    /// Incoming damage reduction.
-    Shell = 2,
-    /// Walk/run movement speed.
-    Surge = 3,
+/// Dense id into the cooked unique module table.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BoostModuleId(pub u16);
+
+impl BoostModuleId {
+    /// No module assigned or selected.
+    pub const NONE: Self = Self(u16::MAX);
+
+    /// Construct a cooked module id when it fits the fixed runtime inventory.
+    pub const fn from_index(index: usize) -> Self {
+        if index < psx_level::MAX_BOOST_MODULES {
+            Self(index as u16)
+        } else {
+            Self::NONE
+        }
+    }
+
+    /// Dense table index, absent for [`Self::NONE`].
+    pub const fn index(self) -> Option<usize> {
+        if self.0 == u16::MAX {
+            None
+        } else {
+            Some(self.0 as usize)
+        }
+    }
+
+    /// Whether no item is represented.
+    pub const fn is_none(self) -> bool {
+        self.0 == u16::MAX
+    }
 }
 
-impl BoostProtocol {
-    /// Cycle order used by the inventory's compact assignment controls.
-    pub const fn next(self) -> Self {
-        match self {
-            Self::None => Self::Rupture,
-            Self::Rupture => Self::Shell,
-            Self::Shell => Self::Surge,
-            Self::Surge => Self::None,
-        }
-    }
-
-    /// Compact protocol label.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::None => "NONE",
-            Self::Rupture => "RUPTURE",
-            Self::Shell => "SHELL",
-            Self::Surge => "SURGE",
-        }
-    }
-
-    /// Dense stockpile index for collectible protocols. `None` is a socket
-    /// state rather than a collectible and therefore has no inventory slot.
-    pub const fn inventory_index(self) -> Option<usize> {
-        match self {
-            Self::None => None,
-            Self::Rupture => Some(0),
-            Self::Shell => Some(1),
-            Self::Surge => Some(2),
-        }
-    }
-
-    /// Stat family affected by this protocol.
-    pub const fn stat_label(self) -> &'static str {
-        match self {
-            Self::None => "NO STAT EFFECT",
-            Self::Rupture => "ATTACK OUTPUT",
-            Self::Shell => "DAMAGE GUARD",
-            Self::Surge => "MOVE SPEED",
-        }
-    }
-
-    /// Compact inventory-row copy with a bounded two-character stack count.
-    pub const fn inventory_label(self, count: u8) -> &'static str {
-        match (self, count) {
-            (Self::Rupture, 0) => "RUPTURE // 00",
-            (Self::Rupture, 1) => "RUPTURE // 01",
-            (Self::Rupture, 2) => "RUPTURE // 02",
-            (Self::Rupture, 3) => "RUPTURE // 03",
-            (Self::Rupture, 4) => "RUPTURE // 04",
-            (Self::Rupture, 5) => "RUPTURE // 05",
-            (Self::Rupture, 6) => "RUPTURE // 06",
-            (Self::Rupture, 7) => "RUPTURE // 07",
-            (Self::Rupture, 8) => "RUPTURE // 08",
-            (Self::Rupture, 9) => "RUPTURE // 09",
-            (Self::Rupture, _) => "RUPTURE // 9+",
-            (Self::Shell, 0) => "SHELL   // 00",
-            (Self::Shell, 1) => "SHELL   // 01",
-            (Self::Shell, 2) => "SHELL   // 02",
-            (Self::Shell, 3) => "SHELL   // 03",
-            (Self::Shell, 4) => "SHELL   // 04",
-            (Self::Shell, 5) => "SHELL   // 05",
-            (Self::Shell, 6) => "SHELL   // 06",
-            (Self::Shell, 7) => "SHELL   // 07",
-            (Self::Shell, 8) => "SHELL   // 08",
-            (Self::Shell, 9) => "SHELL   // 09",
-            (Self::Shell, _) => "SHELL   // 9+",
-            (Self::Surge, 0) => "SURGE   // 00",
-            (Self::Surge, 1) => "SURGE   // 01",
-            (Self::Surge, 2) => "SURGE   // 02",
-            (Self::Surge, 3) => "SURGE   // 03",
-            (Self::Surge, 4) => "SURGE   // 04",
-            (Self::Surge, 5) => "SURGE   // 05",
-            (Self::Surge, 6) => "SURGE   // 06",
-            (Self::Surge, 7) => "SURGE   // 07",
-            (Self::Surge, 8) => "SURGE   // 08",
-            (Self::Surge, 9) => "SURGE   // 09",
-            (Self::Surge, _) => "SURGE   // 9+",
-            (Self::None, _) => "NONE    // --",
-        }
-    }
-
-    /// Menu button copy for one endpoint.
-    pub const fn slot_label(self, pole: VitalityPole) -> &'static str {
-        match (pole, self) {
-            (VitalityPole::Empty, Self::None) => "E // NONE",
-            (VitalityPole::Empty, Self::Rupture) => "E // RUPTURE",
-            (VitalityPole::Empty, Self::Shell) => "E // SHELL",
-            (VitalityPole::Empty, Self::Surge) => "E // SURGE",
-            (VitalityPole::Full, Self::None) => "F // NONE",
-            (VitalityPole::Full, Self::Rupture) => "F // RUPTURE",
-            (VitalityPole::Full, Self::Shell) => "F // SHELL",
-            (VitalityPole::Full, Self::Surge) => "F // SURGE",
-        }
-    }
-
-    /// Maximum effect copy shown for a selected socket. Actual effect is this
-    /// maximum multiplied by the socket's live polarity influence.
-    pub const fn effect_label(self, pole: VitalityPole) -> &'static str {
-        match (pole, self) {
-            (_, Self::None) => "NO PROTOCOL ASSIGNED",
-            (VitalityPole::Empty, Self::Rupture) => "ATK MAX +30%",
-            (VitalityPole::Full, Self::Rupture) => "ATK MAX +10%",
-            (VitalityPole::Empty, Self::Shell) => "DEF MAX +20%",
-            (VitalityPole::Full, Self::Shell) => "DEF MAX +8%",
-            (VitalityPole::Empty, Self::Surge) => "SPD MAX +15%",
-            (VitalityPole::Full, Self::Surge) => "SPD MAX +6%",
-        }
-    }
-
-    const fn maximum_bonus_q12(self, pole: VitalityPole) -> u16 {
-        match (pole, self) {
-            (_, Self::None) => 0,
-            (VitalityPole::Empty, Self::Rupture) => 1229,
-            (VitalityPole::Full, Self::Rupture) => 410,
-            (VitalityPole::Empty, Self::Shell) => 819,
-            (VitalityPole::Full, Self::Shell) => 328,
-            (VitalityPole::Empty, Self::Surge) => 614,
-            (VitalityPole::Full, Self::Surge) => 246,
-        }
+impl Default for BoostModuleId {
+    fn default() -> Self {
+        Self::NONE
     }
 }
 
@@ -468,77 +366,101 @@ impl BoostSlotId {
 /// Four assignable power-up sockets, two around each vitality channel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PowerUpLoadout {
-    slots: [BoostProtocol; 4],
+    slots: [BoostModuleId; 4],
 }
 
 impl PowerUpLoadout {
     /// Empty loadout; also the all-zero boot representation.
     pub const EMPTY: Self = Self {
-        slots: [BoostProtocol::None; 4],
+        slots: [BoostModuleId::NONE; 4],
     };
 
     /// Default player loadout. Collected protocols begin in the inventory and
     /// must be deliberately assigned to one of these four empty sockets.
     pub const DEFAULT: Self = Self::EMPTY;
 
-    /// Protocol assigned to one socket.
-    pub const fn protocol(self, slot: BoostSlotId) -> BoostProtocol {
+    /// Unique module assigned to one socket.
+    pub const fn module(self, slot: BoostSlotId) -> BoostModuleId {
         self.slots[slot.index()]
     }
 
-    /// Replace one socket and return the protocol that was equipped there.
-    pub fn set(&mut self, slot: BoostSlotId, protocol: BoostProtocol) -> BoostProtocol {
+    /// Replace one socket and return the module that was equipped there.
+    pub fn set(&mut self, slot: BoostSlotId, module: BoostModuleId) -> BoostModuleId {
         let previous = self.slots[slot.index()];
-        self.slots[slot.index()] = protocol;
+        self.slots[slot.index()] = module;
         previous
     }
 
-    /// Cycle one socket through the built-in protocol inventory.
-    pub fn cycle(&mut self, slot: BoostSlotId) -> BoostProtocol {
-        let next = self.slots[slot.index()].next();
-        self.slots[slot.index()] = next;
-        next
-    }
-
     /// Resolve the live fixed-point modifiers contributed by all four sockets.
-    pub fn modifiers(self, vitality: &DualVitality) -> VitalityModifiers {
-        let mut outgoing_bonus = 0u32;
-        let mut incoming_reduction = 0u32;
-        let mut movement_bonus = 0u32;
+    pub fn modifiers(
+        self,
+        vitality: &DualVitality,
+        modules: &[psx_level::BoostModuleRecord],
+    ) -> VitalityModifiers {
+        let mut bonuses_q12 = [0i32; psx_level::boost_stat::COUNT];
         for slot in BoostSlotId::ALL {
-            let protocol = self.protocol(slot);
-            let influence = vitality.pool(slot.channel()).polarity().at(slot.pole());
-            let contribution = (u32::from(protocol.maximum_bonus_q12(slot.pole()))
-                * u32::from(influence))
-                / u32::from(VITALITY_Q12_ONE);
-            match protocol {
-                BoostProtocol::None => {}
-                BoostProtocol::Rupture => {
-                    outgoing_bonus = outgoing_bonus.saturating_add(contribution)
-                }
-                BoostProtocol::Shell => {
-                    incoming_reduction = incoming_reduction.saturating_add(contribution)
-                }
-                BoostProtocol::Surge => {
-                    movement_bonus = movement_bonus.saturating_add(contribution)
-                }
+            let module_id = self.module(slot);
+            let Some(module) = module_id.index().and_then(|index| modules.get(index)) else {
+                continue;
+            };
+            for index in 0..psx_level::boost_stat::COUNT {
+                bonuses_q12[index] = bonuses_q12[index].saturating_add(
+                    module_stat_bonus_q12(vitality, slot, module, index),
+                );
             }
         }
-        // Multiple Shell sockets add, but incoming damage can never be reduced
-        // by more than 35%; this prevents an endpoint loadout becoming immunity.
-        let incoming_reduction = incoming_reduction.min(1434);
+
+        let multiplier = |bonus: i32| {
+            i32::from(VITALITY_Q12_ONE)
+                .saturating_add(bonus)
+                .clamp(i32::from(VITALITY_Q12_ONE / 10), i32::from(u16::MAX)) as u16
+        };
+        // Defence is direct percentage damage reduction. Positive stacking is
+        // capped at 80%; negative trade-offs remain meaningful and increase
+        // incoming damage.
+        let defence = bonuses_q12[psx_level::boost_stat::DEFENCE]
+            .clamp(-i32::from(VITALITY_Q12_ONE) * 3, 3277);
         VitalityModifiers {
-            outgoing_damage_q12: u16::try_from(
-                u32::from(VITALITY_Q12_ONE).saturating_add(outgoing_bonus),
-            )
-            .unwrap_or(u16::MAX),
-            incoming_damage_q12: VITALITY_Q12_ONE.saturating_sub(incoming_reduction as u16),
-            movement_speed_q12: u16::try_from(
-                u32::from(VITALITY_Q12_ONE).saturating_add(movement_bonus),
-            )
-            .unwrap_or(u16::MAX),
+            horizon_damage_q12: multiplier(
+                bonuses_q12[psx_level::boost_stat::HORIZON_ATTACK],
+            ),
+            zenith_damage_q12: multiplier(bonuses_q12[psx_level::boost_stat::ZENITH_ATTACK]),
+            incoming_damage_q12: (i32::from(VITALITY_Q12_ONE) - defence)
+                .clamp(i32::from(VITALITY_Q12_ONE / 5), i32::from(u16::MAX))
+                as u16,
+            movement_speed_q12: multiplier(
+                bonuses_q12[psx_level::boost_stat::MOVEMENT_SPEED],
+            ),
+            attack_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::ATTACK_SPEED]),
         }
     }
+}
+
+/// One module's live signed percentage-point contribution in Q12 for a
+/// particular vitality socket and stat lane. The inventory uses the same
+/// calculation as gameplay so its `MODULE` column cannot disagree with the
+/// damage, defence, movement, or timeline multipliers actually applied.
+pub fn module_stat_bonus_q12(
+    vitality: &DualVitality,
+    slot: BoostSlotId,
+    module: &psx_level::BoostModuleRecord,
+    stat: usize,
+) -> i32 {
+    let Some(percent) = module.percentages.get(stat) else {
+        return 0;
+    };
+    let influence = vitality.pool(slot.channel()).polarity().at(slot.pole());
+    // Empty-end sockets are the risk/reward side: 200% at zero health,
+    // fading linearly to zero at the midpoint. Full-end sockets reach 100%
+    // only at full health and also fade to zero at the midpoint.
+    let potency_q12 = match slot.pole() {
+        VitalityPole::Empty => i32::from(influence).saturating_mul(2),
+        VitalityPole::Full => i32::from(influence),
+    };
+    let percent_q12 = i32::from(*percent)
+        .saturating_mul(i32::from(VITALITY_Q12_ONE))
+        / 100;
+    percent_q12.saturating_mul(potency_q12) / i32::from(VITALITY_Q12_ONE)
 }
 
 impl Default for PowerUpLoadout {
@@ -547,56 +469,77 @@ impl Default for PowerUpLoadout {
     }
 }
 
-/// Allocation-free stockpile of collected, currently unequipped protocols.
+/// Allocation-free set of collected, currently unequipped unique modules.
 ///
 /// Equipped copies live in [`PowerUpLoadout`]. Assignment transfers exactly
 /// one copy between the stockpile and a socket, so repeated menu operations
 /// cannot duplicate or silently discard an item.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BoostInventory {
-    counts: [u8; 3],
+    owned: u32,
 }
 
 impl BoostInventory {
-    /// Maximum copies retained for one protocol type.
-    pub const MAX_STACK: u8 = 99;
-
     /// Empty stockpile; also the all-zero boot representation.
-    pub const EMPTY: Self = Self { counts: [0; 3] };
+    pub const EMPTY: Self = Self { owned: 0 };
 
-    /// Minimal stock supplied by the default project until authored world
-    /// pickups seed the inventory: one unassigned Rupture protocol.
-    pub const STARTER: Self = Self { counts: [1, 0, 0] };
+    /// New games begin without implicit items. Authored pickups are the only
+    /// source of modules, so the inventory list reflects the actual world
+    /// state instead of presenting protocol categories as starter boons.
+    pub const STARTER: Self = Self::EMPTY;
 
-    /// Unequipped copies of one collectible protocol.
-    pub const fn count(self, protocol: BoostProtocol) -> u8 {
-        match protocol.inventory_index() {
-            Some(index) => self.counts[index],
-            None => 0,
-        }
+    /// Whether the stockpile contains no unequipped module.
+    pub const fn is_empty(self) -> bool {
+        self.owned == 0
     }
 
-    /// Add collected copies, returning the number accepted before the stack
-    /// cap. `None` and a zero amount are ignored.
-    pub fn add(&mut self, protocol: BoostProtocol, amount: u8) -> u8 {
-        let Some(index) = protocol.inventory_index() else {
-            return 0;
-        };
-        let room = Self::MAX_STACK.saturating_sub(self.counts[index]);
-        let accepted = amount.min(room);
-        self.counts[index] = self.counts[index].saturating_add(accepted);
-        accepted
+    /// The `index`th collected item, compacting away unowned module ids.
+    pub const fn item_at(self, index: u8) -> BoostModuleId {
+        let mut found = 0u8;
+        let mut module_index = 0usize;
+        while module_index < psx_level::MAX_BOOST_MODULES {
+            if self.owned & (1u32 << module_index) != 0 {
+                if found == index {
+                    return BoostModuleId::from_index(module_index);
+                }
+                found = found.saturating_add(1);
+            }
+            module_index += 1;
+        }
+        BoostModuleId::NONE
     }
 
-    /// Consume one unequipped copy when available.
-    pub fn take(&mut self, protocol: BoostProtocol) -> bool {
-        let Some(index) = protocol.inventory_index() else {
+    /// Whether one unique module is currently unequipped and available.
+    pub const fn contains(self, module: BoostModuleId) -> bool {
+        let Some(index) = module.index() else {
             return false;
         };
-        if self.counts[index] == 0 {
+        self.owned & (1u32 << index) != 0
+    }
+
+    /// Add a unique collected module. Duplicate grants are rejected.
+    pub fn add(&mut self, module: BoostModuleId) -> bool {
+        let Some(index) = module.index() else {
+            return false;
+        };
+        let bit = 1u32 << index;
+        if self.owned & bit != 0 {
             return false;
         }
-        self.counts[index] -= 1;
+        self.owned |= bit;
+        true
+    }
+
+    /// Move one unequipped unique module out of the inventory.
+    pub fn take(&mut self, module: BoostModuleId) -> bool {
+        let Some(index) = module.index() else {
+            return false;
+        };
+        let bit = 1u32 << index;
+        if self.owned & bit == 0 {
+            return false;
+        }
+        self.owned &= !bit;
         true
     }
 
@@ -607,72 +550,62 @@ impl BoostInventory {
         &mut self,
         loadout: &mut PowerUpLoadout,
         slot: BoostSlotId,
-        protocol: BoostProtocol,
+        module: BoostModuleId,
     ) -> bool {
-        let previous = loadout.protocol(slot);
-        if previous == protocol {
+        let previous = loadout.module(slot);
+        if previous == module {
             return true;
         }
-        if previous != BoostProtocol::None && self.count(previous) >= Self::MAX_STACK {
+        if !module.is_none() && !self.take(module) {
             return false;
         }
-        if protocol != BoostProtocol::None && !self.take(protocol) {
-            return false;
-        }
-        let previous = loadout.set(slot, protocol);
-        if previous != BoostProtocol::None {
-            let returned = self.add(previous, 1);
-            debug_assert_eq!(returned, 1);
+        let previous = loadout.set(slot, module);
+        if !previous.is_none() {
+            let returned = self.add(previous);
+            debug_assert!(returned);
         }
         true
-    }
-
-    /// Copy used by the compact selected-item detail readout.
-    pub const fn owned_label(self, protocol: BoostProtocol) -> &'static str {
-        match self.count(protocol) {
-            0 => "OWNED // 00",
-            1 => "OWNED // 01",
-            2 => "OWNED // 02",
-            3 => "OWNED // 03",
-            4 => "OWNED // 04",
-            5 => "OWNED // 05",
-            6 => "OWNED // 06",
-            7 => "OWNED // 07",
-            8 => "OWNED // 08",
-            9 => "OWNED // 09",
-            _ => "OWNED // 9+",
-        }
     }
 }
 
 impl Default for BoostInventory {
     fn default() -> Self {
-        Self::STARTER
+        Self::EMPTY
     }
 }
 
-/// Live player-stat multipliers derived from vitality and assigned protocols.
+/// Live player-stat multipliers derived from vitality and assigned modules.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct VitalityModifiers {
-    /// Outgoing health damage multiplier (`4096 = 1.0x`).
-    pub outgoing_damage_q12: u16,
+    /// Horizon attack damage multiplier (`4096 = 1.0x`).
+    pub horizon_damage_q12: u16,
+    /// Zenith attack damage multiplier (`4096 = 1.0x`).
+    pub zenith_damage_q12: u16,
     /// Incoming health damage multiplier after defense (`4096 = 1.0x`).
     pub incoming_damage_q12: u16,
     /// Walk/run speed multiplier (`4096 = 1.0x`).
     pub movement_speed_q12: u16,
+    /// Whole attack-timeline speed multiplier (`4096 = 1.0x`).
+    pub attack_speed_q12: u16,
 }
 
 impl VitalityModifiers {
-    /// No-op modifiers at the neutral midpoint or with no assigned protocols.
+    /// No-op modifiers at the neutral midpoint or with no assigned modules.
     pub const IDENTITY: Self = Self {
-        outgoing_damage_q12: VITALITY_Q12_ONE,
+        horizon_damage_q12: VITALITY_Q12_ONE,
+        zenith_damage_q12: VITALITY_Q12_ONE,
         incoming_damage_q12: VITALITY_Q12_ONE,
         movement_speed_q12: VITALITY_Q12_ONE,
+        attack_speed_q12: VITALITY_Q12_ONE,
     };
 
-    /// Scale outgoing damage, rounding to the nearest integer.
-    pub fn outgoing_damage(self, damage: u16) -> u16 {
-        scale_u16_q12(damage, self.outgoing_damage_q12)
+    /// Scale outgoing damage for the authored attack axis.
+    pub fn outgoing_damage(self, channel: VitalityChannelId, damage: u16) -> u16 {
+        let multiplier = match channel {
+            VitalityChannelId::One => self.horizon_damage_q12,
+            VitalityChannelId::Two => self.zenith_damage_q12,
+        };
+        scale_u16_q12(damage, multiplier)
     }
 
     /// Scale incoming damage. A non-zero connecting hit always deals at least
@@ -688,6 +621,11 @@ impl VitalityModifiers {
     /// Scale a signed movement speed, rounding to the nearest integer.
     pub fn movement_speed(self, speed: i32) -> i32 {
         scale_i32_q12(speed, self.movement_speed_q12)
+    }
+
+    /// Apply the live attack-speed multiplier to an authored Q8 playback rate.
+    pub fn attack_speed_q8(self, speed_q8: u16) -> u16 {
+        scale_u16_q12(speed_q8, self.attack_speed_q12).max(1)
     }
 }
 
@@ -707,6 +645,33 @@ fn scale_i32_q12(value: i32, multiplier_q12: u16) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MODULES: [psx_level::BoostModuleRecord; 3] = [
+        psx_level::BoostModuleRecord {
+            name: "Kinetic Relay",
+            description: "Horizon output.",
+            effect_summary: "HRZ ATK +15%",
+            assignment_label: "ASSIGN KINETIC RELAY: CHOOSE SLOT",
+            remove_label: "REMOVE KINETIC RELAY",
+            percentages: [15, 0, 0, 0, 0],
+        },
+        psx_level::BoostModuleRecord {
+            name: "Guard Matrix",
+            description: "Damage guard.",
+            effect_summary: "DEF +20%",
+            assignment_label: "ASSIGN GUARD MATRIX: CHOOSE SLOT",
+            remove_label: "REMOVE GUARD MATRIX",
+            percentages: [0, 0, 20, 0, 0],
+        },
+        psx_level::BoostModuleRecord {
+            name: "Overdrive Coil",
+            description: "Faster movement and attacks.",
+            effect_summary: "MOVE +10% / ATK SPD +5%",
+            assignment_label: "ASSIGN OVERDRIVE COIL: CHOOSE SLOT",
+            remove_label: "REMOVE OVERDRIVE COIL",
+            percentages: [0, 0, 0, 10, 5],
+        },
+    ];
 
     #[test]
     fn polarity_is_full_at_endpoints_and_zero_at_midpoint() {
@@ -781,77 +746,156 @@ mod tests {
     fn power_ups_fade_to_identity_at_the_midpoint() {
         let loadout = PowerUpLoadout {
             slots: [
-                BoostProtocol::Rupture,
-                BoostProtocol::Shell,
-                BoostProtocol::Surge,
-                BoostProtocol::Rupture,
+                BoostModuleId(0),
+                BoostModuleId(1),
+                BoostModuleId(2),
+                BoostModuleId::NONE,
             ],
         };
         let mut vitality = DualVitality::equal(100);
-        let full = loadout.modifiers(&vitality);
-        assert!(full.outgoing_damage_q12 > VITALITY_Q12_ONE);
+        let full = loadout.modifiers(&vitality, &MODULES);
         assert!(full.incoming_damage_q12 < VITALITY_Q12_ONE);
 
         let _ = vitality.apply_damage(VitalityChannelId::One, 50);
         let _ = vitality.apply_damage(VitalityChannelId::Two, 50);
-        assert_eq!(loadout.modifiers(&vitality), VitalityModifiers::IDENTITY);
-    }
-
-    #[test]
-    fn the_same_protocol_is_stronger_in_an_empty_socket() {
-        let mut vitality = DualVitality::equal(100);
-        let empty_rupture = PowerUpLoadout {
-            slots: [
-                BoostProtocol::Rupture,
-                BoostProtocol::None,
-                BoostProtocol::None,
-                BoostProtocol::None,
-            ],
-        };
-        let full_rupture = PowerUpLoadout {
-            slots: [
-                BoostProtocol::None,
-                BoostProtocol::Rupture,
-                BoostProtocol::None,
-                BoostProtocol::None,
-            ],
-        };
-        let full_bonus = full_rupture.modifiers(&vitality).outgoing_damage_q12;
-        let _ = vitality.apply_damage(VitalityChannelId::One, 100);
-        let empty_bonus = empty_rupture.modifiers(&vitality).outgoing_damage_q12;
-        assert_eq!(full_bonus, 4506);
-        assert_eq!(empty_bonus, 5325);
-    }
-
-    #[test]
-    fn starter_inventory_assigns_its_only_copy_to_one_empty_socket() {
-        let mut inventory = BoostInventory::STARTER;
-        let mut loadout = PowerUpLoadout::DEFAULT;
-
-        assert_eq!(inventory.count(BoostProtocol::Rupture), 1);
-        assert_eq!(inventory.count(BoostProtocol::Shell), 0);
-        assert_eq!(inventory.count(BoostProtocol::Surge), 0);
-        for slot in BoostSlotId::ALL {
-            assert_eq!(loadout.protocol(slot), BoostProtocol::None);
-        }
-        assert!(inventory.assign(
-            &mut loadout,
-            BoostSlotId::ZenithFull,
-            BoostProtocol::Rupture,
-        ));
-
         assert_eq!(
-            loadout.protocol(BoostSlotId::ZenithFull),
-            BoostProtocol::Rupture
+            loadout.modifiers(&vitality, &MODULES),
+            VitalityModifiers::IDENTITY
         );
-        assert_eq!(inventory.count(BoostProtocol::Rupture), 0);
+    }
+
+    #[test]
+    fn empty_socket_reaches_twice_the_full_socket_percentage() {
+        let mut vitality = DualVitality::equal(100);
+        let empty_kinetic = PowerUpLoadout {
+            slots: [
+                BoostModuleId(0),
+                BoostModuleId::NONE,
+                BoostModuleId::NONE,
+                BoostModuleId::NONE,
+            ],
+        };
+        let full_kinetic = PowerUpLoadout {
+            slots: [
+                BoostModuleId::NONE,
+                BoostModuleId(0),
+                BoostModuleId::NONE,
+                BoostModuleId::NONE,
+            ],
+        };
+        let full_bonus = full_kinetic
+            .modifiers(&vitality, &MODULES)
+            .horizon_damage_q12;
+        let _ = vitality.apply_damage(VitalityChannelId::One, 100);
+        let empty_bonus = empty_kinetic
+            .modifiers(&vitality, &MODULES)
+            .horizon_damage_q12;
+        assert_eq!(
+            empty_bonus - VITALITY_Q12_ONE,
+            (full_bonus - VITALITY_Q12_ONE) * 2
+        );
+    }
+
+    #[test]
+    fn module_effect_is_global_while_owning_bar_drives_its_strength() {
+        let loadout = PowerUpLoadout {
+            slots: [
+                BoostModuleId::NONE,
+                BoostModuleId::NONE,
+                BoostModuleId::NONE,
+                BoostModuleId(0),
+            ],
+        };
+        let vitality = DualVitality::equal(100);
+        let modifiers = loadout.modifiers(&vitality, &MODULES);
+        assert!(modifiers.horizon_damage_q12 > VITALITY_Q12_ONE);
+        assert_eq!(modifiers.zenith_damage_q12, VITALITY_Q12_ONE);
+    }
+
+    #[test]
+    fn defence_reduction_caps_at_eighty_percent() {
+        const ARMOUR: [psx_level::BoostModuleRecord; 1] = [psx_level::BoostModuleRecord {
+            name: "Armour",
+            description: "",
+            effect_summary: "DEF +100%",
+            assignment_label: "",
+            remove_label: "",
+            percentages: [0, 0, 100, 0, 0],
+        }];
+        let loadout = PowerUpLoadout {
+            slots: [
+                BoostModuleId(0),
+                BoostModuleId::NONE,
+                BoostModuleId::NONE,
+                BoostModuleId::NONE,
+            ],
+        };
+        let mut vitality = DualVitality::equal(100);
+        let _ = vitality.apply_damage(VitalityChannelId::One, 100);
+        let modifiers = loadout.modifiers(&vitality, &ARMOUR);
+        assert_eq!(modifiers.incoming_damage_q12, VITALITY_Q12_ONE / 5);
+    }
+
+    #[test]
+    fn collected_inventory_item_assigns_its_only_copy_to_one_empty_socket() {
+        let mut inventory = BoostInventory::EMPTY;
+        let mut loadout = PowerUpLoadout::DEFAULT;
+        let kinetic = BoostModuleId(0);
+
+        assert!(inventory.is_empty());
+        assert_eq!(inventory.item_at(0), BoostModuleId::NONE);
+        assert!(inventory.add(kinetic));
+
+        assert!(inventory.contains(kinetic));
+        assert!(!inventory.add(kinetic));
+        for slot in BoostSlotId::ALL {
+            assert_eq!(loadout.module(slot), BoostModuleId::NONE);
+        }
+        assert!(inventory.assign(&mut loadout, BoostSlotId::ZenithFull, kinetic,));
+
+        assert_eq!(loadout.module(BoostSlotId::ZenithFull), kinetic);
+        assert!(!inventory.contains(kinetic));
+        assert!(inventory.is_empty());
         for slot in [
             BoostSlotId::HorizonEmpty,
             BoostSlotId::HorizonFull,
             BoostSlotId::ZenithEmpty,
         ] {
-            assert_eq!(loadout.protocol(slot), BoostProtocol::None);
+            assert_eq!(loadout.module(slot), BoostModuleId::NONE);
         }
+    }
+
+    #[test]
+    fn item_list_compacts_away_unowned_module_ids() {
+        let mut inventory = BoostInventory::EMPTY;
+        assert_eq!(inventory.item_at(0), BoostModuleId::NONE);
+
+        assert!(inventory.add(BoostModuleId(1)));
+        assert!(inventory.add(BoostModuleId(2)));
+        assert_eq!(inventory.item_at(0), BoostModuleId(1));
+        assert_eq!(inventory.item_at(1), BoostModuleId(2));
+        assert_eq!(inventory.item_at(2), BoostModuleId::NONE);
+    }
+
+    #[test]
+    fn assigning_none_returns_the_socketed_item_to_inventory() {
+        let mut inventory = BoostInventory::EMPTY;
+        let mut loadout = PowerUpLoadout::DEFAULT;
+        let guard = BoostModuleId(1);
+        assert!(inventory.add(guard));
+        assert!(inventory.assign(&mut loadout, BoostSlotId::HorizonFull, guard,));
+        assert!(!inventory.contains(guard));
+
+        assert!(inventory.assign(
+            &mut loadout,
+            BoostSlotId::HorizonFull,
+            BoostModuleId::NONE,
+        ));
+        assert_eq!(
+            loadout.module(BoostSlotId::HorizonFull),
+            BoostModuleId::NONE
+        );
+        assert!(inventory.contains(guard));
     }
 
     #[test]
@@ -863,7 +907,7 @@ mod tests {
         assert!(!inventory.assign(
             &mut loadout,
             BoostSlotId::HorizonEmpty,
-            BoostProtocol::Surge,
+            BoostModuleId(2),
         ));
         assert_eq!(loadout, before);
         assert_eq!(inventory, BoostInventory::EMPTY);

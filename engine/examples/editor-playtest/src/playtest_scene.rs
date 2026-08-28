@@ -2,6 +2,92 @@ use super::*;
 
 const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
 
+fn boost_module(id: BoostModuleId) -> Option<&'static psx_level::BoostModuleRecord> {
+    id.index().and_then(|index| BOOST_MODULES.get(index))
+}
+
+fn boost_module_name(id: BoostModuleId) -> &'static str {
+    boost_module(id).map_or("NONE", |module| module.name)
+}
+
+struct UiScratch<'a> {
+    bytes: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> UiScratch<'a> {
+    fn new(bytes: &'a mut [u8]) -> Self {
+        Self { bytes, len: 0 }
+    }
+
+    fn push_str(&mut self, text: &str) {
+        let remaining = self.bytes.len().saturating_sub(self.len);
+        let count = text.len().min(remaining);
+        self.bytes[self.len..self.len + count].copy_from_slice(&text.as_bytes()[..count]);
+        self.len += count;
+    }
+
+    fn push_signed_percent_q12(&mut self, value_q12: i32) {
+        let scaled = i64::from(value_q12).saturating_mul(100);
+        let rounded = if scaled < 0 {
+            (scaled - 2048) / 4096
+        } else {
+            (scaled + 2048) / 4096
+        };
+        if rounded < 0 {
+            self.push_str("-");
+        } else {
+            self.push_str("+");
+        }
+        self.push_u64(rounded.unsigned_abs());
+        self.push_str("%");
+    }
+
+    fn push_u64(&mut self, mut value: u64) {
+        let mut digits = [0u8; 20];
+        let mut count = 0usize;
+        loop {
+            digits[count] = b'0' + (value % 10) as u8;
+            count += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        while count > 0 {
+            count -= 1;
+            if self.len >= self.bytes.len() {
+                return;
+            }
+            self.bytes[self.len] = digits[count];
+            self.len += 1;
+        }
+    }
+
+    fn finish(self) -> Option<&'a str> {
+        core::str::from_utf8(&self.bytes[..self.len]).ok()
+    }
+}
+
+fn write_stat_line<'a>(
+    scratch: &'a mut [u8],
+    label: &str,
+    active_bonus_q12: i32,
+    module_bonus_q12: Option<i32>,
+) -> Option<&'a str> {
+    let mut out = UiScratch::new(scratch);
+    out.push_str(label);
+    out.push_str("  ");
+    out.push_signed_percent_q12(active_bonus_q12);
+    out.push_str("  //  ");
+    if let Some(module_bonus_q12) = module_bonus_q12 {
+        out.push_signed_percent_q12(module_bonus_q12);
+    } else {
+        out.push_str("--");
+    }
+    out.finish()
+}
+
 impl Scene for Playtest {
     fn render_submission(&self) -> RenderSubmission {
         RenderSubmission::Queued
@@ -76,49 +162,98 @@ impl Scene for Playtest {
         }
     }
 
-    fn ui_text(&self, tag: &str) -> Option<&'static str> {
+    fn ui_text<'a>(&self, tag: &str, scratch: &'a mut [u8]) -> Option<&'a str> {
         let selected = BoostSlotId::from_index(self.selected_power_up_slot);
         let selected_item = self.selected_power_up_item;
+        let slotted_item = self.power_up_loadout.module(selected);
+        let assigning = !selected_item.is_none();
+        let detail_item = if assigning {
+            selected_item
+        } else {
+            slotted_item
+        };
+        let detail = boost_module(detail_item);
+        let modifiers = self.vitality_modifiers();
+        let module_bonus = |stat| {
+            detail.map(|module| module_stat_bonus_q12(&self.player_vitality, selected, module, stat))
+        };
         match tag {
-            "boost.horizon.empty" => Some(
-                self.power_up_loadout
-                    .protocol(BoostSlotId::HorizonEmpty)
-                    .slot_label(BoostSlotId::HorizonEmpty.pole()),
-            ),
-            "boost.horizon.full" => Some(
-                self.power_up_loadout
-                    .protocol(BoostSlotId::HorizonFull)
-                    .slot_label(BoostSlotId::HorizonFull.pole()),
-            ),
-            "boost.zenith.empty" => Some(
-                self.power_up_loadout
-                    .protocol(BoostSlotId::ZenithEmpty)
-                    .slot_label(BoostSlotId::ZenithEmpty.pole()),
-            ),
-            "boost.zenith.full" => Some(
-                self.power_up_loadout
-                    .protocol(BoostSlotId::ZenithFull)
-                    .slot_label(BoostSlotId::ZenithFull.pole()),
-            ),
-            "inventory.rupture" => Some(
-                BoostProtocol::Rupture
-                    .inventory_label(self.power_up_inventory.count(BoostProtocol::Rupture)),
-            ),
-            "inventory.shell" => Some(
-                BoostProtocol::Shell
-                    .inventory_label(self.power_up_inventory.count(BoostProtocol::Shell)),
-            ),
-            "inventory.surge" => Some(
-                BoostProtocol::Surge
-                    .inventory_label(self.power_up_inventory.count(BoostProtocol::Surge)),
-            ),
-            "boost.inventory.selected.name" => Some(selected_item.label()),
-            "boost.inventory.selected.stat" => Some(selected_item.stat_label()),
-            "boost.inventory.selected.count" => {
-                Some(self.power_up_inventory.owned_label(selected_item))
+            "boost.horizon.empty" => Some(boost_module_name(
+                self.power_up_loadout.module(BoostSlotId::HorizonEmpty),
+            )),
+            "boost.horizon.full" => Some(boost_module_name(
+                self.power_up_loadout.module(BoostSlotId::HorizonFull),
+            )),
+            "boost.zenith.empty" => Some(boost_module_name(
+                self.power_up_loadout.module(BoostSlotId::ZenithEmpty),
+            )),
+            "boost.zenith.full" => Some(boost_module_name(
+                self.power_up_loadout.module(BoostSlotId::ZenithFull),
+            )),
+            "inventory.item.0" => Some(boost_module_name(self.power_up_inventory.item_at(0))),
+            "inventory.item.1" => Some(boost_module_name(self.power_up_inventory.item_at(1))),
+            "inventory.item.2" => Some(boost_module_name(self.power_up_inventory.item_at(2))),
+            "boost.assignment.prompt" => {
+                Some(boost_module(selected_item).map_or("", |module| module.assignment_label))
             }
-            "boost.selected.name" => Some(selected_item.label()),
-            "boost.selected.effect" => Some(selected_item.effect_label(selected.pole())),
+            "boost.inventory.selected.name" => {
+                Some(detail.map_or("SELECT A MODULE", |module| module.name))
+            }
+            "boost.inventory.selected.stat" => {
+                Some(detail.map_or("", |module| module.description))
+            }
+            "boost.inventory.selected.count" => {
+                if assigning {
+                    Some("COLLECTED")
+                } else if !detail_item.is_none() {
+                    Some("EQUIPPED")
+                } else {
+                    Some("")
+                }
+            }
+            "boost.selected.name" => Some(detail.map_or("NONE", |module| module.name)),
+            "boost.selected.effect" => {
+                Some(detail.map_or("", |module| module.effect_summary))
+            }
+            "boost.selected.base" => {
+                let mut out = UiScratch::new(scratch);
+                if let Some(module) = detail {
+                    out.push_str("BASE // ");
+                    out.push_str(module.effect_summary);
+                }
+                out.finish()
+            }
+            "boost.stat.horizon" => write_stat_line(
+                scratch,
+                "HRZ ATK",
+                i32::from(modifiers.horizon_damage_q12) - 4096,
+                module_bonus(psx_level::boost_stat::HORIZON_ATTACK),
+            ),
+            "boost.stat.zenith" => write_stat_line(
+                scratch,
+                "ZTH ATK",
+                i32::from(modifiers.zenith_damage_q12) - 4096,
+                module_bonus(psx_level::boost_stat::ZENITH_ATTACK),
+            ),
+            "boost.stat.defence" => write_stat_line(
+                scratch,
+                "DEFENCE",
+                4096 - i32::from(modifiers.incoming_damage_q12),
+                module_bonus(psx_level::boost_stat::DEFENCE),
+            ),
+            "boost.stat.movement" => write_stat_line(
+                scratch,
+                "MOVE SPD",
+                i32::from(modifiers.movement_speed_q12) - 4096,
+                module_bonus(psx_level::boost_stat::MOVEMENT_SPEED),
+            ),
+            "boost.stat.attack_speed" => write_stat_line(
+                scratch,
+                "ATK SPD",
+                i32::from(modifiers.attack_speed_q12) - 4096,
+                module_bonus(psx_level::boost_stat::ATTACK_SPEED),
+            ),
+            "boost.remove" => Some(if slotted_item.is_none() { "" } else { "REMOVE" }),
             "boost.selected.pole" => Some(match selected.pole() {
                 psx_game_runtime::vitality::VitalityPole::Empty => "TARGET // HIGH GAIN",
                 psx_game_runtime::vitality::VitalityPole::Full => "TARGET // STABLE",
@@ -127,14 +262,45 @@ impl Scene for Playtest {
         }
     }
 
+    fn ui_node_visible(&self, tag: &str) -> bool {
+        let selected = BoostSlotId::from_index(self.selected_power_up_slot);
+        match tag {
+            "inventory.item.0" => !self.power_up_inventory.item_at(0).is_none(),
+            "inventory.item.1" => !self.power_up_inventory.item_at(1).is_none(),
+            "inventory.item.2" => !self.power_up_inventory.item_at(2).is_none(),
+            "inventory.empty" => self.power_up_inventory.is_empty(),
+            "boost.assignment.prompt" => !self.selected_power_up_item.is_none(),
+            "boost.remove" => !self.power_up_loadout.module(selected).is_none(),
+            _ => true,
+        }
+    }
+
     fn game_ui_action(&mut self, id: u16, _ctx: &mut Ctx) {
-        if let Some(protocol) = match id {
-            210 => Some(BoostProtocol::Rupture),
-            211 => Some(BoostProtocol::Shell),
-            212 => Some(BoostProtocol::Surge),
+        if let Some(item_index) = match id {
+            210 => Some(0),
+            211 => Some(1),
+            212 => Some(2),
             _ => None,
         } {
-            self.selected_power_up_item = protocol;
+            let module = self.power_up_inventory.item_at(item_index);
+            if !module.is_none() {
+                self.selected_power_up_item = if self.selected_power_up_item == module {
+                    BoostModuleId::NONE
+                } else {
+                    module
+                };
+            }
+            return;
+        }
+
+        if id == 220 {
+            let slot = BoostSlotId::from_index(self.selected_power_up_slot);
+            if self
+                .power_up_inventory
+                .assign(&mut self.power_up_loadout, slot, BoostModuleId::NONE)
+            {
+                self.selected_power_up_item = BoostModuleId::NONE;
+            }
             return;
         }
 
@@ -147,12 +313,21 @@ impl Scene for Playtest {
         };
         if let Some(slot) = slot {
             self.selected_power_up_slot = slot as u8;
-            let _ = self.power_up_inventory.assign(
-                &mut self.power_up_loadout,
-                slot,
-                self.selected_power_up_item,
-            );
+            if !self.selected_power_up_item.is_none()
+                && self.power_up_inventory.assign(
+                    &mut self.power_up_loadout,
+                    slot,
+                    self.selected_power_up_item,
+                )
+            {
+                self.selected_power_up_item = BoostModuleId::NONE;
+            }
         }
+    }
+
+    fn game_ui_cancel(&mut self, _ctx: &mut Ctx) -> bool {
+        self.selected_power_up_item = BoostModuleId::NONE;
+        true
     }
 
     /// Gameplay and each UI scene use distinct resource-set keys so the flow
@@ -1477,7 +1652,19 @@ impl Scene for Playtest {
         }
 
         if let Some(font) = self.ui_fonts[0].as_ref() {
-            if let Some(message) = self.poi_messages.active() {
+            if let Some(module) = self
+                .acquired_module
+                .index()
+                .and_then(|index| BOOST_MODULES.get(index))
+            {
+                draw_acquired_module(
+                    font,
+                    module.name,
+                    overlay_tick.as_u32() as u16,
+                    self.overlay_poi_panel_frame,
+                    self.overlay_poi_page_type_frame,
+                );
+            } else if let Some(message) = self.poi_messages.active() {
                 if let Some(page_text) = INTERACTABLE_MESSAGE_PAGES.get(message.page() as usize) {
                     let variant = match message.source() {
                         psx_game_runtime::poi::MessageSource::PointOfInterest(_) => {

@@ -20,6 +20,10 @@ use psx_math::int32::clamp_i16;
 /// the placement and generated-texture sizing are the crate vram module's
 /// contract.
 use crate::vram::{PARTICLE_TEXEL_U, PARTICLE_TEXTURE_SIZE};
+use crate::{
+    combat::AuthoredProjectileCharge,
+    projectiles::{ProjectileImpactEffect, ProjectileSnapshot},
+};
 const PARTICLE_TEXEL_V: u8 = 0;
 const PARTICLE_UV_MAX: u8 = PARTICLE_TEXEL_U + PARTICLE_TEXTURE_SIZE as u8 - 1;
 
@@ -153,14 +157,12 @@ pub fn draw_water_wade_splash<const OT_DEPTH: usize>(
     submitted
 }
 
-/// Draw one live combat projectile as a camera-facing additive bolt.
-/// Collision owns the projectile state; this function is deliberately a
-/// stateless presentation view over its current center/radius/tint.
+/// Draw one live combat projectile as a velocity-aligned needle with a wider
+/// additive glow, a short tapered ghost trail, and a two-frame muzzle flash.
+/// The effect uses the shared particle page and remains fully fixed-budget.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
-    position: [i32; 3],
-    radius: u16,
-    tint_rgb: [u8; 3],
+    projectile: ProjectileSnapshot,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
@@ -168,10 +170,122 @@ pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
     ot: &mut OtFrame<'_, OT_DEPTH>,
     primitive_packets: &mut PrimitivePacketArena<'_>,
 ) -> usize {
-    if radius == 0 {
+    if projectile.radius == 0 {
         return 0;
     }
-    let position = WorldVertex::new(position[0], position[1], position[2]);
+    let project = |position: [i32; 3]| {
+        let position = WorldVertex::new(position[0], position[1], position[2]);
+        if let Some(projector) = projector {
+            projector.project_world(position)
+        } else {
+            camera.project_world(position)
+        }
+    };
+    let Some(head) = project(projectile.position) else {
+        return 0;
+    };
+    let half = ((i32::from(projectile.radius) * camera.projection.focal_length) / head.sz.max(1))
+        .clamp(
+            i32::from(PARTICLE_MIN_SCREEN_SIZE),
+            i32::from(PARTICLE_MAX_SCREEN_SIZE),
+        ) as i16;
+    let tail_position = projectile_offset(
+        projectile.position,
+        projectile.velocity,
+        -i32::from(projectile.visual.length_ticks.max(1)),
+    );
+    let Some(tail) = project(tail_position) else {
+        return 0;
+    };
+    let slot = depth_range.slot::<OT_DEPTH>(head.sz.min(tail.sz));
+    let glow_half = ((i32::from(half) * i32::from(projectile.visual.glow_scale_q8.max(256))) >> 8)
+        .clamp(i32::from(half), i32::from(PARTICLE_MAX_SCREEN_SIZE)) as i16;
+    let mut submitted = draw_projectile_segment(
+        tail,
+        head,
+        glow_half,
+        particle_material
+            .with_tint(rgb_tuple(projectile.visual.glow_rgb))
+            .with_blend_mode(BlendMode::Add),
+        slot,
+        ot,
+        primitive_packets,
+    );
+    submitted += draw_projectile_segment(
+        tail,
+        head,
+        (half / 2).max(1),
+        particle_material
+            .with_tint(rgb_tuple(projectile.visual.core_rgb))
+            .with_blend_mode(BlendMode::Add),
+        slot,
+        ot,
+        primitive_packets,
+    );
+    let trail_count = projectile.visual.trail_segments.min(6);
+    let mut trail = 0u8;
+    while trail < trail_count {
+        let distance = i32::from(trail.saturating_add(1))
+            .saturating_mul(i32::from(projectile.visual.trail_spacing_ticks.max(1)));
+        let trail_head_position =
+            projectile_offset(projectile.position, projectile.velocity, -distance);
+        let trail_tail_position = projectile_offset(
+            trail_head_position,
+            projectile.velocity,
+            -i32::from(projectile.visual.length_ticks.max(1)),
+        );
+        if let (Some(trail_head), Some(trail_tail)) =
+            (project(trail_head_position), project(trail_tail_position))
+        {
+            let remaining = u16::from(trail_count.saturating_sub(trail));
+            let divisor = u16::from(trail_count).saturating_add(1);
+            let tint = scale_rgb(projectile.visual.glow_rgb, remaining, divisor);
+            let trail_half =
+                ((i32::from(half) * i32::from(remaining)) / i32::from(divisor)).max(1) as i16;
+            submitted += draw_projectile_segment(
+                trail_tail,
+                trail_head,
+                trail_half,
+                particle_material
+                    .with_tint(rgb_tuple(tint))
+                    .with_blend_mode(BlendMode::Add),
+                depth_range.slot::<OT_DEPTH>(trail_head.sz.min(trail_tail.sz)),
+                ot,
+                primitive_packets,
+            );
+        }
+        trail += 1;
+    }
+    if projectile.age_ticks <= 2 {
+        if let Some(origin) = project(projectile.origin) {
+            let flash_half = glow_half.saturating_add(projectile.age_ticks as i16 * 2);
+            submitted += draw_particle_diamond(
+                origin,
+                flash_half,
+                particle_material
+                    .with_tint(rgb_tuple(projectile.visual.core_rgb))
+                    .with_blend_mode(BlendMode::Add),
+                depth_range.slot::<OT_DEPTH>(origin.sz),
+                ot,
+                primitive_packets,
+            );
+        }
+    }
+    submitted
+}
+
+/// Draw a compact angular charge at an animated projectile muzzle.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_projectile_charge<const OT_DEPTH: usize>(
+    charge: AuthoredProjectileCharge,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let position = WorldVertex::new(charge.position[0], charge.position[1], charge.position[2]);
     let center = if let Some(projector) = projector {
         projector.project_world(position)
     } else {
@@ -180,20 +294,196 @@ pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
     let Some(center) = center else {
         return 0;
     };
-    let half = ((i32::from(radius) * camera.projection.focal_length) / center.sz.max(1)).clamp(
-        i32::from(PARTICLE_MIN_SCREEN_SIZE),
-        i32::from(PARTICLE_MAX_SCREEN_SIZE),
-    ) as i16;
-    draw_particle_quad(
+    let base = ((i32::from(charge.radius) * camera.projection.focal_length) / center.sz.max(1))
+        .clamp(2, i32::from(PARTICLE_MAX_SCREEN_SIZE)) as i16;
+    let pulse = ((u32::from(charge.progress_q8) * 5) >> 8) as i16;
+    let material = particle_material
+        .with_tint(rgb_tuple(charge.visual.glow_rgb))
+        .with_blend_mode(BlendMode::Add);
+    let slot = depth_range.slot::<OT_DEPTH>(center.sz);
+    draw_particle_diamond(
         center,
-        half,
+        base.saturating_add(pulse),
+        material,
+        slot,
+        ot,
+        primitive_packets,
+    ) + draw_particle_diamond(
+        center,
+        (base / 2).max(1),
         particle_material
-            .with_tint((tint_rgb[0], tint_rgb[1], tint_rgb[2]))
+            .with_tint(rgb_tuple(charge.visual.core_rgb))
             .with_blend_mode(BlendMode::Add),
-        depth_range.slot::<OT_DEPTH>(center.sz),
+        slot,
         ot,
         primitive_packets,
     )
+}
+
+/// Draw one expanding angular impact flare from the fixed presentation pool.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_projectile_impact<const OT_DEPTH: usize>(
+    impact: ProjectileImpactEffect,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let position = WorldVertex::new(impact.position[0], impact.position[1], impact.position[2]);
+    let center = if let Some(projector) = projector {
+        projector.project_world(position)
+    } else {
+        camera.project_world(position)
+    };
+    let Some(center) = center else {
+        return 0;
+    };
+    let lifetime = impact.visual.impact_lifetime_ticks.max(1);
+    let age = impact.age_ticks.min(lifetime);
+    let base = ((i32::from(impact.radius) * camera.projection.focal_length) / center.sz.max(1))
+        .clamp(2, i32::from(PARTICLE_MAX_SCREEN_SIZE)) as i16;
+    let expansion = ((i32::from(age) * i32::from(base) * 2) / i32::from(lifetime)).max(1) as i16;
+    let fade = u16::from(lifetime.saturating_sub(age)).max(1);
+    let tint = scale_rgb(impact.visual.impact_rgb, fade, u16::from(lifetime));
+    let material = particle_material
+        .with_tint(rgb_tuple(tint))
+        .with_blend_mode(BlendMode::Add);
+    let slot = depth_range.slot::<OT_DEPTH>(center.sz);
+    let mut submitted = draw_particle_diamond(
+        center,
+        base.saturating_add(expansion),
+        material,
+        slot,
+        ot,
+        primitive_packets,
+    );
+    let shard_half = (base / 3).max(1);
+    for (dx, dy) in [
+        (-expansion, 0),
+        (expansion, 0),
+        (0, -expansion),
+        (0, expansion),
+    ] {
+        let shard = ProjectedVertex {
+            sx: clamp_i16(i32::from(center.sx).saturating_add(i32::from(dx))),
+            sy: clamp_i16(i32::from(center.sy).saturating_add(i32::from(dy))),
+            ..center
+        };
+        submitted +=
+            draw_particle_diamond(shard, shard_half, material, slot, ot, primitive_packets);
+    }
+    submitted
+}
+
+fn projectile_offset(position: [i32; 3], velocity: [i32; 3], ticks: i32) -> [i32; 3] {
+    [
+        position[0].saturating_add(velocity[0].saturating_mul(ticks)),
+        position[1].saturating_add(velocity[1].saturating_mul(ticks)),
+        position[2].saturating_add(velocity[2].saturating_mul(ticks)),
+    ]
+}
+
+fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
+    (rgb[0], rgb[1], rgb[2])
+}
+
+fn scale_rgb(rgb: [u8; 3], numerator: u16, denominator: u16) -> [u8; 3] {
+    let denominator = denominator.max(1);
+    [
+        ((u16::from(rgb[0]) * numerator) / denominator).min(255) as u8,
+        ((u16::from(rgb[1]) * numerator) / denominator).min(255) as u8,
+        ((u16::from(rgb[2]) * numerator) / denominator).min(255) as u8,
+    ]
+}
+
+fn draw_projectile_segment<const OT_DEPTH: usize>(
+    tail: ProjectedVertex,
+    head: ProjectedVertex,
+    half: i16,
+    material: TextureMaterial,
+    slot: psx_engine::DepthSlot,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let dx = i32::from(head.sx) - i32::from(tail.sx);
+    let dy = i32::from(head.sy) - i32::from(tail.sy);
+    let length =
+        psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)))
+            .max(1);
+    let nx = (-dy).saturating_mul(i32::from(half)) / length;
+    let ny = dx.saturating_mul(i32::from(half)) / length;
+    draw_particle_oriented_quad(
+        [
+            (
+                clamp_i16(i32::from(tail.sx) + nx),
+                clamp_i16(i32::from(tail.sy) + ny),
+            ),
+            (
+                clamp_i16(i32::from(head.sx) + nx),
+                clamp_i16(i32::from(head.sy) + ny),
+            ),
+            (
+                clamp_i16(i32::from(tail.sx) - nx),
+                clamp_i16(i32::from(tail.sy) - ny),
+            ),
+            (
+                clamp_i16(i32::from(head.sx) - nx),
+                clamp_i16(i32::from(head.sy) - ny),
+            ),
+        ],
+        material,
+        slot,
+        ot,
+        primitive_packets,
+    )
+}
+
+fn draw_particle_diamond<const OT_DEPTH: usize>(
+    center: ProjectedVertex,
+    half: i16,
+    material: TextureMaterial,
+    slot: psx_engine::DepthSlot,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    draw_particle_oriented_quad(
+        [
+            (center.sx, center.sy.saturating_sub(half)),
+            (center.sx.saturating_add(half), center.sy),
+            (center.sx.saturating_sub(half), center.sy),
+            (center.sx, center.sy.saturating_add(half)),
+        ],
+        material,
+        slot,
+        ot,
+        primitive_packets,
+    )
+}
+
+fn draw_particle_oriented_quad<const OT_DEPTH: usize>(
+    screen: [(i16, i16); 4],
+    material: TextureMaterial,
+    slot: psx_engine::DepthSlot,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let quad = QuadTexturedMaterial::with_material(
+        screen,
+        [
+            (PARTICLE_TEXEL_U, PARTICLE_TEXEL_V),
+            (PARTICLE_UV_MAX, PARTICLE_TEXEL_V),
+            (PARTICLE_TEXEL_U, PARTICLE_UV_MAX),
+            (PARTICLE_UV_MAX, PARTICLE_UV_MAX),
+        ],
+        material,
+    );
+    let Some(packet) = primitive_packets.push(quad) else {
+        return 0;
+    };
+    ot.add_packet_slot(slot, packet);
+    1
 }
 
 fn draw_particle_sample<const OT_DEPTH: usize>(

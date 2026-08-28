@@ -74,6 +74,69 @@ pub enum CombatTeam {
     Enemy = 2,
 }
 
+/// Which half of the player's dual vitality receives projectile damage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ProjectileDamageChannel {
+    /// Horizontal/red vitality pool.
+    Horizon = 0,
+    /// Vertical/teal vitality pool.
+    Zenith = 1,
+}
+
+impl ProjectileDamageChannel {
+    /// Decode the compact cooked channel. Unknown values fail toward Zenith,
+    /// keeping old hand-authored manifests deterministic.
+    pub const fn from_raw(raw: u8) -> Self {
+        if raw == psx_level::projectile_damage_channel::HORIZON {
+            Self::Horizon
+        } else {
+            Self::Zenith
+        }
+    }
+}
+
+/// Bounded presentation contract carried beside projectile gameplay state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectileVisualStyle {
+    /// Bright velocity-aligned core.
+    pub core_rgb: [u8; 3],
+    /// Wider additive halo and muzzle charge.
+    pub glow_rgb: [u8; 3],
+    /// Impact flare/shard colour.
+    pub impact_rgb: [u8; 3],
+    /// Halo size relative to collision radius (`256 = 1x`).
+    pub glow_scale_q8: u16,
+    /// Bolt length in velocity ticks.
+    pub length_ticks: u8,
+    /// Number of tapered trail ghosts.
+    pub trail_segments: u8,
+    /// Velocity ticks between ghosts.
+    pub trail_spacing_ticks: u8,
+    /// Lifetime of the impact flare.
+    pub impact_lifetime_ticks: u8,
+}
+
+impl ProjectileVisualStyle {
+    /// Safe all-zero fixed-array initializer.
+    pub const EMPTY: Self = Self {
+        core_rgb: [0; 3],
+        glow_rgb: [0; 3],
+        impact_rgb: [0; 3],
+        glow_scale_q8: 256,
+        length_ticks: 1,
+        trail_segments: 0,
+        trail_spacing_ticks: 1,
+        impact_lifetime_ticks: 1,
+    };
+}
+
+impl Default for ProjectileVisualStyle {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
 /// Complete immutable description of one projectile at spawn time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectileSpawn {
@@ -97,6 +160,10 @@ pub struct ProjectileSpawn {
     pub owner: u16,
     /// Render tint retained by the runtime; collision does not interpret it.
     pub tint_rgb: [u8; 3],
+    /// Typed destination in the player's dual vitality system.
+    pub damage_channel: ProjectileDamageChannel,
+    /// Bounded PS1 presentation parameters.
+    pub visual: ProjectileVisualStyle,
 }
 
 /// Why a projectile could not enter the fixed pool.
@@ -111,6 +178,8 @@ pub enum ProjectileSpawnError {
 /// Read-only snapshot used by render and debug consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectileSnapshot {
+    /// Original muzzle position, retained for the first-frame flash.
+    pub origin: [i32; 3],
     /// Current center.
     pub position: [i32; 3],
     /// Per-tick displacement.
@@ -121,6 +190,10 @@ pub struct ProjectileSnapshot {
     pub room: RoomIndex,
     /// Render tint.
     pub tint_rgb: [u8; 3],
+    /// Bounded PS1 presentation parameters.
+    pub visual: ProjectileVisualStyle,
+    /// Ticks elapsed since release.
+    pub age_ticks: u16,
     /// Ticks left before expiry.
     pub lifetime_ticks: u16,
 }
@@ -192,6 +265,10 @@ pub struct ProjectileImpact {
     pub kind: ProjectileImpactKind,
     /// Room-local impact center.
     pub position: [i32; 3],
+    /// Collision room.
+    pub room: RoomIndex,
+    /// Collision radius of the stopped bolt.
+    pub radius: u16,
     /// Health damage copied from the projectile.
     pub damage: u16,
     /// Poise damage copied from the projectile.
@@ -200,6 +277,10 @@ pub struct ProjectileImpact {
     pub team: CombatTeam,
     /// Firing entity or [`NO_PROJECTILE_OWNER`].
     pub owner: u16,
+    /// Typed destination in the player's dual vitality system.
+    pub damage_channel: ProjectileDamageChannel,
+    /// Presentation parameters copied before the projectile slot is freed.
+    pub visual: ProjectileVisualStyle,
 }
 
 impl ProjectileImpact {
@@ -207,10 +288,14 @@ impl ProjectileImpact {
         projectile: 0,
         kind: ProjectileImpactKind::World,
         position: [0; 3],
+        room: RoomIndex::ZERO,
+        radius: 0,
         damage: 0,
         poise_damage: 0,
         team: CombatTeam::Neutral,
         owner: NO_PROJECTILE_OWNER,
+        damage_channel: ProjectileDamageChannel::Zenith,
+        visual: ProjectileVisualStyle::EMPTY,
     };
 }
 
@@ -274,6 +359,7 @@ pub struct ProjectileTickStats {
 pub struct CombatProjectiles<const N: usize> {
     active: [u8; N],
     positions: [[i32; 3]; N],
+    origins: [[i32; 3]; N],
     velocities: [[i32; 3]; N],
     radii: [u16; N],
     damage: [u16; N],
@@ -283,6 +369,9 @@ pub struct CombatProjectiles<const N: usize> {
     teams: [CombatTeam; N],
     owners: [u16; N],
     tints: [[u8; 3]; N],
+    damage_channels: [ProjectileDamageChannel; N],
+    visuals: [ProjectileVisualStyle; N],
+    age_ticks: [u16; N],
 }
 
 impl<const N: usize> CombatProjectiles<N> {
@@ -291,6 +380,7 @@ impl<const N: usize> CombatProjectiles<N> {
         Self {
             active: [0; N],
             positions: [[0; 3]; N],
+            origins: [[0; 3]; N],
             velocities: [[0; 3]; N],
             radii: [0; N],
             damage: [0; N],
@@ -300,6 +390,9 @@ impl<const N: usize> CombatProjectiles<N> {
             teams: [CombatTeam::Neutral; N],
             owners: [NO_PROJECTILE_OWNER; N],
             tints: [[0; 3]; N],
+            damage_channels: [ProjectileDamageChannel::Zenith; N],
+            visuals: [ProjectileVisualStyle::EMPTY; N],
+            age_ticks: [0; N],
         }
     }
 
@@ -328,11 +421,14 @@ impl<const N: usize> CombatProjectiles<N> {
             return None;
         }
         Some(ProjectileSnapshot {
+            origin: self.origins[index],
             position: self.positions[index],
             velocity: self.velocities[index],
             radius: self.radii[index],
             room: self.rooms[index],
             tint_rgb: self.tints[index],
+            visual: self.visuals[index],
+            age_ticks: self.age_ticks[index],
             lifetime_ticks: self.lifetime_ticks[index],
         })
     }
@@ -347,6 +443,7 @@ impl<const N: usize> CombatProjectiles<N> {
         };
         self.active[index] = 1;
         self.positions[index] = spawn.position;
+        self.origins[index] = spawn.position;
         self.velocities[index] = spawn.velocity;
         self.radii[index] = spawn.radius;
         self.damage[index] = spawn.damage;
@@ -356,6 +453,9 @@ impl<const N: usize> CombatProjectiles<N> {
         self.teams[index] = spawn.team;
         self.owners[index] = spawn.owner;
         self.tints[index] = spawn.tint_rgb;
+        self.damage_channels[index] = spawn.damage_channel;
+        self.visuals[index] = spawn.visual;
+        self.age_ticks[index] = 0;
         Ok(index)
     }
 
@@ -431,10 +531,14 @@ impl<const N: usize> CombatProjectiles<N> {
                     projectile: index.min(u16::MAX as usize) as u16,
                     kind,
                     position,
+                    room: self.rooms[index],
+                    radius: self.radii[index],
                     damage: self.damage[index],
                     poise_damage: self.poise_damage[index],
                     team: self.teams[index],
                     owner: self.owners[index],
+                    damage_channel: self.damage_channels[index],
+                    visual: self.visuals[index],
                 };
                 if !impacts.push(impact) {
                     stats.dropped_impacts = stats.dropped_impacts.saturating_add(1);
@@ -445,6 +549,7 @@ impl<const N: usize> CombatProjectiles<N> {
             }
 
             self.positions[index] = end;
+            self.age_ticks[index] = self.age_ticks[index].saturating_add(1);
             self.lifetime_ticks[index] = self.lifetime_ticks[index].saturating_sub(1);
             if self.lifetime_ticks[index] == 0 {
                 self.active[index] = 0;
@@ -453,6 +558,100 @@ impl<const N: usize> CombatProjectiles<N> {
             index += 1;
         }
         stats
+    }
+}
+
+/// One live, read-only impact presentation sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectileImpactEffect {
+    /// Room-local center.
+    pub position: [i32; 3],
+    /// Collision room.
+    pub room: RoomIndex,
+    /// Source collision radius.
+    pub radius: u16,
+    /// Current effect age.
+    pub age_ticks: u8,
+    /// Bounded presentation parameters.
+    pub visual: ProjectileVisualStyle,
+}
+
+/// Fixed-capacity impact presentation pool. It is intentionally independent
+/// of collision state so a stopped bolt can finish its flare after its combat
+/// slot is immediately recycled.
+pub struct ProjectileImpactEffects<const N: usize> {
+    active: [u8; N],
+    positions: [[i32; 3]; N],
+    rooms: [RoomIndex; N],
+    radii: [u16; N],
+    ages: [u8; N],
+    visuals: [ProjectileVisualStyle; N],
+}
+
+impl<const N: usize> ProjectileImpactEffects<N> {
+    /// Empty all-zero-compatible presentation pool.
+    pub const fn new() -> Self {
+        Self {
+            active: [0; N],
+            positions: [[0; 3]; N],
+            rooms: [RoomIndex::ZERO; N],
+            radii: [0; N],
+            ages: [0; N],
+            visuals: [ProjectileVisualStyle::EMPTY; N],
+        }
+    }
+
+    /// Remove all live effects.
+    pub fn clear(&mut self) {
+        self.active.fill(0);
+    }
+
+    /// Retain one resolved impact when a presentation slot is available.
+    pub fn spawn(&mut self, impact: &ProjectileImpact) -> bool {
+        let Some(index) = self.active.iter().position(|active| *active == 0) else {
+            return false;
+        };
+        self.active[index] = 1;
+        self.positions[index] = impact.position;
+        self.rooms[index] = impact.room;
+        self.radii[index] = impact.radius;
+        self.ages[index] = 0;
+        self.visuals[index] = impact.visual;
+        true
+    }
+
+    /// Advance and retire completed effects.
+    pub fn tick(&mut self) {
+        let mut index = 0usize;
+        while index < N {
+            if self.active[index] != 0 {
+                self.ages[index] = self.ages[index].saturating_add(1);
+                if self.ages[index] >= self.visuals[index].impact_lifetime_ticks.max(1) {
+                    self.active[index] = 0;
+                }
+            }
+            index += 1;
+        }
+    }
+
+    /// Read one live impact for rendering.
+    pub fn get(&self, index: usize) -> Option<ProjectileImpactEffect> {
+        if *self.active.get(index)? == 0 {
+            return None;
+        }
+        Some(ProjectileImpactEffect {
+            position: self.positions[index],
+            room: self.rooms[index],
+            radius: self.radii[index],
+            age_ticks: self.ages[index],
+            visual: self.visuals[index],
+        })
+    }
+}
+
+impl<const N: usize> Default for ProjectileImpactEffects<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -523,6 +722,17 @@ mod tests {
             team,
             owner: 7,
             tint_rgb: [20, 200, 255],
+            damage_channel: ProjectileDamageChannel::Zenith,
+            visual: ProjectileVisualStyle {
+                core_rgb: [220, 255, 255],
+                glow_rgb: [20, 200, 255],
+                impact_rgb: [96, 240, 255],
+                glow_scale_q8: 448,
+                length_ticks: 2,
+                trail_segments: 3,
+                trail_spacing_ticks: 1,
+                impact_lifetime_ticks: 10,
+            },
         }
     }
 
@@ -557,6 +767,18 @@ mod tests {
             ProjectileImpactKind::Target { target: 3 }
         );
         assert!((449..=451).contains(&impacts.as_slice()[0].position[0]));
+        assert_eq!(
+            impacts.as_slice()[0].damage_channel,
+            ProjectileDamageChannel::Zenith
+        );
+        let mut effects = ProjectileImpactEffects::<1>::new();
+        assert!(effects.spawn(&impacts.as_slice()[0]));
+        let effect = effects
+            .get(0)
+            .expect("impact style survives projectile removal");
+        assert_eq!(effect.visual.impact_rgb, [96, 240, 255]);
+        effects.tick();
+        assert_eq!(effects.get(0).unwrap().age_ticks, 1);
     }
 
     #[test]
