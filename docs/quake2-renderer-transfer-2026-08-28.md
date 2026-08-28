@@ -26,6 +26,21 @@ The fixed-step Quake E1M1 route measured 23.432 fps for the complete downstream
 stack. That number is not a Cortex result and must not be assigned to the
 shared engine feature in isolation.
 
+The clean downstream repin to PSoXide
+`5048fbde0ea650c8f728f1fb271a9529a447a90b` reproduced the complete result:
+
+```text
+deterministic_runs=2
+full_level_presentations=2134
+full_level_elapsed_bus_cycles=3082971718
+full_level_fps_x1000=23432
+vram_fnv1a_64=0x09a7f019bb9a5e7c
+display_fnv1a_64=0x9bac66f3bec0e66b
+```
+
+The playable feature-only disc also passed the PSoXide release boot check with
+62,240 bytes of heap free against the 8,192-byte floor.
+
 ## Cortex transfer boundary
 
 Cortex brush geometry reaches the same classic-affine submitter through the
