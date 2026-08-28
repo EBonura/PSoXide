@@ -1088,6 +1088,7 @@ impl Scene for Playtest {
                 } else {
                     player_lighting.map_or(EquipmentDrawStats::default(), |lighting| {
                         draw_player_equipment(
+                            self.anim_state,
                             crate::model_rendering::equipment_wire_q12(
                                 self.anim_state,
                                 player_pose.pose().phase_q12(),

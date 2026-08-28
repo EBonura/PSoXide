@@ -637,12 +637,84 @@ pub struct WeaponAppearanceTrack {
     /// ramps. Zero is an instantaneous visibility switch.
     #[serde(default = "default_weapon_transition_frames")]
     pub transition_frames: u16,
+    /// Optional PS1-native blade ribbon authored on the same action/hand lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<WeaponTrailConfig>,
 }
 
 pub const WEAPON_APPEARANCE_DEFAULT_TRANSITION_FRAMES: u16 = 8;
 
 const fn default_weapon_transition_frames() -> u16 {
     WEAPON_APPEARANCE_DEFAULT_TRANSITION_FRAMES
+}
+
+/// Native PlayStation semi-transparency equation used by a weapon trail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum WeaponTrailBlendMode {
+    /// `(background + ribbon) / 2`.
+    Average,
+    /// `background + ribbon`, clamped. Best default for a dark PS1 scene.
+    #[default]
+    Add,
+    /// `background - ribbon`, clamped.
+    Subtract,
+    /// `background + ribbon / 4`, clamped. Bright without washing the scene.
+    AddQuarter,
+}
+
+/// One action-scoped sword-trail ribbon.
+///
+/// The active range lives in sampled animation frames. `history_frames`
+/// controls how far back along the sampled pose arc the ribbon reaches, while
+/// `segments` controls its geometric smoothness and packet cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeaponTrailConfig {
+    #[serde(default)]
+    pub start_frame: u16,
+    #[serde(default = "default_action_frame_end")]
+    pub end_frame: u16,
+    #[serde(default = "default_weapon_trail_history_frames")]
+    pub history_frames: u16,
+    #[serde(default = "default_weapon_trail_segments")]
+    pub segments: u8,
+    #[serde(default = "default_weapon_trail_root_color")]
+    pub root_color: [u8; 3],
+    #[serde(default = "default_weapon_trail_tip_color")]
+    pub tip_color: [u8; 3],
+    #[serde(default)]
+    pub blend_mode: WeaponTrailBlendMode,
+}
+
+impl Default for WeaponTrailConfig {
+    fn default() -> Self {
+        Self {
+            start_frame: 0,
+            end_frame: ACTION_FRAME_END_FULL,
+            history_frames: default_weapon_trail_history_frames(),
+            segments: default_weapon_trail_segments(),
+            root_color: default_weapon_trail_root_color(),
+            tip_color: default_weapon_trail_tip_color(),
+            blend_mode: WeaponTrailBlendMode::default(),
+        }
+    }
+}
+
+pub const WEAPON_TRAIL_MAX_SEGMENTS: u8 = 6;
+
+const fn default_weapon_trail_history_frames() -> u16 {
+    4
+}
+
+const fn default_weapon_trail_segments() -> u8 {
+    4
+}
+
+const fn default_weapon_trail_root_color() -> [u8; 3] {
+    [96, 20, 8]
+}
+
+const fn default_weapon_trail_tip_color() -> [u8; 3] {
+    [255, 176, 64]
 }
 
 /// Model-local fallback action binding used directly on Characters.

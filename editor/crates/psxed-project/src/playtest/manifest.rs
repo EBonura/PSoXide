@@ -2146,7 +2146,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for appearance in &package.weapon_appearances {
         let _ = writeln!(
             out,
-            "    WeaponAppearanceRecord {{ character: CharacterIndex({}), action: CharacterAnimationAction::{:?}, weapon: WeaponIndex({}), character_socket: {:?}, fully_visible_frame: {}, hidden_frame: {}, transition_frames: {}, flags: 0 }},",
+            "    WeaponAppearanceRecord {{ character: CharacterIndex({}), action: CharacterAnimationAction::{:?}, weapon: WeaponIndex({}), character_socket: {:?}, fully_visible_frame: {}, hidden_frame: {}, transition_frames: {}, trail_start_frame: {}, trail_end_frame: {}, trail_history_frames: {}, trail_segments: {}, trail_blend_mode: {}, trail_root_color: [{}, {}, {}], trail_tip_color: [{}, {}, {}], flags: {} }},",
             appearance.character,
             appearance.action,
             appearance.weapon,
@@ -2154,6 +2154,23 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             appearance.fully_visible_frame,
             appearance.hidden_frame,
             appearance.transition_frames,
+            appearance.trail_start_frame,
+            appearance.trail_end_frame,
+            appearance.trail_history_frames,
+            appearance.trail_segments,
+            match appearance.trail_blend_mode {
+                crate::WeaponTrailBlendMode::Average => psx_level::weapon_trail_blend_mode::AVERAGE,
+                crate::WeaponTrailBlendMode::Add => psx_level::weapon_trail_blend_mode::ADD,
+                crate::WeaponTrailBlendMode::Subtract => psx_level::weapon_trail_blend_mode::SUBTRACT,
+                crate::WeaponTrailBlendMode::AddQuarter => psx_level::weapon_trail_blend_mode::ADD_QUARTER,
+            },
+            appearance.trail_root_color[0],
+            appearance.trail_root_color[1],
+            appearance.trail_root_color[2],
+            appearance.trail_tip_color[0],
+            appearance.trail_tip_color[1],
+            appearance.trail_tip_color[2],
+            appearance.flags,
         );
     }
     out.push_str("];\n\n");

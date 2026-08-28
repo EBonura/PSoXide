@@ -419,6 +419,10 @@ struct Playtest {
     /// Body rendering, equipment sockets, and authored combat capsules all
     /// consume this same snapshot until the next simulation tick.
     player_actor_pose: Option<PlayerActorPoseSnapshot>,
+    /// Previous consecutive player pose. Active sword hitboxes sweep from
+    /// this pose into `player_actor_pose`, preventing fast animation motion
+    /// from tunnelling through an enemy between retained samples.
+    previous_player_actor_pose: Option<PlayerActorPoseSnapshot>,
     /// Per-cooked-instance pose authority for the latest fixed update. The
     /// table index is the `MODEL_INSTANCES` index, covering both live game
     /// entities and static placed actors without render-time resampling.
@@ -618,6 +622,7 @@ impl Playtest {
         addr_of_mut!((*scene).current_collision_room).write(None);
         addr_of_mut!((*scene).character).write(None);
         addr_of_mut!((*scene).player_actor_pose).write(None);
+        addr_of_mut!((*scene).previous_player_actor_pose).write(None);
         addr_of_mut!((*scene).lock_target).write(None);
         addr_of_mut!((*scene).attack_press).write(None);
         addr_of_mut!((*scene).soft_lock_target).write(None);

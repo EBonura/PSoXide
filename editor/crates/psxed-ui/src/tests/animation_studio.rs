@@ -126,6 +126,37 @@ fn click_label(
     real_egui_workspace_frame(ctx, workspace, viewport, *time, Vec::new())
 }
 
+fn scroll_authoring_label_into_view(
+    ctx: &egui::Context,
+    workspace: &mut EditorWorkspace,
+    viewport: &crate::EditorViewport3dPresentation,
+    time: &mut f64,
+    label: &str,
+) {
+    let pointer = Pos2::new(1300.0, 420.0);
+    for delta_y in std::iter::once(10_000.0).chain(std::iter::repeat(-160.0).take(16)) {
+        *time += 1.0 / 60.0;
+        let frame = real_egui_workspace_frame(
+            ctx,
+            workspace,
+            viewport,
+            *time,
+            vec![
+                egui::Event::PointerMoved(pointer),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, delta_y),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        if text_shape_centers(&frame.shapes, label).len() == 1 {
+            return;
+        }
+    }
+    panic!("authoring label {label:?} was not reachable by scrolling");
+}
+
 fn key_event(key: egui::Key, pressed: bool) -> egui::Event {
     egui::Event::Key {
         key,
@@ -573,8 +604,8 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
     assert!(workspace.open_animation_viewer_for_resource(weapon_id));
 
     // Keep this UI fixture independent of the currently authored Light Attack
-    // timing. A finite disappearance frame adds a second "Use playhead"
-    // button and is exercised after the first edit below.
+    // timing and trail authoring. A finite disappearance frame adds a second
+    // "Use playhead" button and is exercised after the first edit below.
     let ResourceData::AnimationSet(animation_set) = &mut workspace
         .project
         .resource_mut(animation_set_id)
@@ -583,7 +614,7 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
     else {
         unreachable!()
     };
-    animation_set
+    let visibility_track = animation_set
         .weapon_appearance_tracks
         .iter_mut()
         .find(|track| {
@@ -591,8 +622,9 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
                 && track.weapon == weapon_id
                 && track.character_socket == "right_hand_grip"
         })
-        .expect("light attack weapon beat")
-        .hidden_frame = psxed_project::ACTION_FRAME_END_FULL;
+        .expect("light attack weapon beat");
+    visibility_track.hidden_frame = psxed_project::ACTION_FRAME_END_FULL;
+    visibility_track.trail = None;
 
     let ResourceData::AnimationSet(animation_set) = &workspace
         .project()
@@ -685,6 +717,16 @@ fn weapon_timing_controls_edit_only_the_selected_visibility_beat() {
     }
     let expected_tracks = animation_set.weapon_appearance_tracks.clone();
 
+    // Persisting the beat rebuilds the resource-backed panel. Return to the
+    // timing controls before exercising the disappearance toggle, independent
+    // of how many optional authoring lanes the fixture currently enables.
+    scroll_authoring_label_into_view(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        &mut time,
+        "Gone at clip end",
+    );
     let disappeared = click_label(
         &ctx,
         &mut workspace,

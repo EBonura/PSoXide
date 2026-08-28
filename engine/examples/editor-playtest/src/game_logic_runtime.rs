@@ -89,6 +89,7 @@ fn melee_eye_point(position: [i32; 3]) -> RoomPoint {
 #[derive(Clone, Copy)]
 struct ActivePlayerCapsule {
     capsule: WorldCombatCapsule,
+    previous_capsule: Option<WorldCombatCapsule>,
     damage: u16,
     poise_damage: u16,
 }
@@ -96,9 +97,28 @@ struct ActivePlayerCapsule {
 impl ActivePlayerCapsule {
     const EMPTY: Self = Self {
         capsule: WorldCombatCapsule::EMPTY,
+        previous_capsule: None,
         damage: 0,
         poise_damage: 0,
     };
+
+    fn aabb_overlaps(self, target: &WorldCombatCapsule) -> bool {
+        match self.previous_capsule {
+            Some(previous) => {
+                combat::combat_capsule_motion_aabbs_overlap(&previous, &self.capsule, target)
+            }
+            None => combat::combat_capsule_aabbs_overlap(&self.capsule, target),
+        }
+    }
+
+    fn overlaps(self, target: &WorldCombatCapsule) -> bool {
+        match self.previous_capsule {
+            Some(previous) => {
+                combat::combat_capsule_motion_overlaps(&previous, &self.capsule, target)
+            }
+            None => combat::combat_capsules_overlap(&self.capsule, target),
+        }
+    }
 }
 
 /// Movement backend for game entities. Both world backends compose other
@@ -616,6 +636,7 @@ impl Playtest {
         if let Some(stats) = self.resolve_player_combat_capsules(
             character,
             player_pose,
+            self.previous_player_actor_pose,
             phase,
             action,
             prop_blockers.as_slice(),
@@ -667,6 +688,7 @@ impl Playtest {
         &mut self,
         character: RuntimeCharacter,
         player_pose: PlayerActorPoseSnapshot,
+        previous_player_pose: Option<PlayerActorPoseSnapshot>,
         phase: u32,
         action: CharacterAnimationAction,
         prop_blockers: &[CharacterCollisionAabb],
@@ -675,7 +697,17 @@ impl Playtest {
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
         let records = COMBAT_CAPSULES.get(first..end)?;
         let action_index = action.to_index() as u8;
-        let frame = (phase >> 12).min(u32::from(u16::MAX)) as u16;
+        let previous_pose = previous_player_pose
+            .filter(|previous| {
+                previous.clip_local() == player_pose.clip_local()
+                    && player_pose
+                        .pose()
+                        .tick()
+                        .wrapping_sub(previous.pose().tick())
+                        == 1
+                    && phase >= previous.pose().phase_q12()
+            })
+            .map(|previous| previous.pose());
         let mut active = [ActivePlayerCapsule::EMPTY; psx_level::MAX_CHARACTER_COMBAT_CAPSULES];
         let mut active_count = 0usize;
         let mut authored_action = false;
@@ -686,18 +718,34 @@ impl Playtest {
                 continue;
             }
             authored_action = true;
-            if frame < record.active_start_frame
-                || frame > record.active_end_frame
-                || active_count >= active.len()
-            {
+            if active_count >= active.len() {
                 continue;
             }
-            let Some(capsule) = combat::transform_actor_combat_capsule(record, player_pose.pose())
-            else {
+            let Some((sweep_start_phase, sweep_end_phase)) = combat::active_frame_sweep_phase_range(
+                previous_pose.map(|pose| pose.phase_q12()),
+                phase,
+                record.active_start_frame,
+                record.active_end_frame,
+            ) else {
                 continue;
             };
+            let Some(capsule) = combat::transform_actor_combat_capsule(
+                record,
+                player_pose.pose().with_phase_q12(sweep_end_phase),
+            ) else {
+                continue;
+            };
+            let previous_capsule = previous_pose
+                .filter(|_| sweep_start_phase < sweep_end_phase)
+                .and_then(|previous_pose| {
+                    combat::transform_actor_combat_capsule(
+                        record,
+                        previous_pose.with_phase_q12(sweep_start_phase),
+                    )
+                });
             active[active_count] = ActivePlayerCapsule {
                 capsule,
+                previous_capsule,
                 damage: self.vitality_modifiers().outgoing_damage(record.damage),
                 poise_damage: record.poise_damage,
             };
@@ -744,7 +792,8 @@ impl Playtest {
             };
             let coarse_candidate = active[..active_count]
                 .iter()
-                .any(|hit| combat::combat_capsule_aabbs_overlap(&hit.capsule, &body));
+                .copied()
+                .any(|hit| hit.aabb_overlaps(&body));
             if !coarse_candidate {
                 entity += 1;
                 continue;
@@ -800,7 +849,7 @@ impl Playtest {
             return active
                 .iter()
                 .copied()
-                .find(|hit| combat::combat_capsules_overlap(&hit.capsule, &body_fallback));
+                .find(|hit| hit.overlaps(&body_fallback));
         }
 
         let instance_pose = self
@@ -817,11 +866,7 @@ impl Playtest {
             else {
                 continue;
             };
-            if let Some(hit) = active
-                .iter()
-                .copied()
-                .find(|hit| combat::combat_capsules_overlap(&hit.capsule, &hurtbox))
-            {
+            if let Some(hit) = active.iter().copied().find(|hit| hit.overlaps(&hurtbox)) {
                 return Some(hit);
             }
         }

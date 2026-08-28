@@ -387,6 +387,301 @@ fn submit_weapon_wireframe<const OT_DEPTH: usize>(
     drawn
 }
 
+/// Maximum authored ribbon subdivisions. The editor/cooker reject larger
+/// values, keeping the guest stack and packet budget fixed.
+const MAX_WEAPON_TRAIL_SEGMENTS: usize = 6;
+
+/// Draw action-authored player weapon trails from retained animation poses.
+///
+/// Each edge is reconstructed by sampling the same hand socket at an older
+/// Q12 animation phase. Adjacent edges form native semi-transparent Gouraud
+/// quads, producing a curved blade ribbon without history buffers or floats.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_player_weapon_trails_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const OT_DEPTH: usize,
+>(
+    tables: ModelTables,
+    appearances: &'static [WeaponAppearanceRecord],
+    character: psx_level::CharacterIndex,
+    action: CharacterAnimationAction,
+    wire_q12: [u16; MAX_PLAYER_EQUIPMENT],
+    player_pose: PlayerActorPoseSnapshot,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    quads: &mut impl PrimitiveSink<QuadGouraudBlended>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> psx_engine::WorldRenderStats {
+    let mut total = psx_engine::WorldRenderStats::default();
+    let character_model = player_pose.model();
+    let pose = player_pose.pose();
+    let current_phase = pose.phase_q12();
+    let frame_count = pose.animation().frame_count();
+    if frame_count == 0 {
+        return total;
+    }
+    let projector = LoadedWorldCameraGte::load(*camera);
+
+    for (equipment_index, equipment) in tables.equipment.iter().enumerate() {
+        if equipment.flags & equipment_flags::PLAYER == 0
+            || equipment_index >= MAX_PLAYER_EQUIPMENT
+            || wire_q12[equipment_index] == 0
+        {
+            continue;
+        }
+        let Some(appearance) = appearances.iter().find(|appearance| {
+            appearance.flags & psx_level::weapon_appearance_flags::TRAIL != 0
+                && appearance.character == character
+                && appearance.action == action
+                && appearance.weapon == equipment.weapon
+                && appearance.character_socket == equipment.character_socket
+        }) else {
+            continue;
+        };
+        let start_phase = u32::from(appearance.trail_start_frame) << 12;
+        let trail_end = if appearance.trail_end_frame == psx_level::CHARACTER_ACTION_FRAME_END_FULL
+        {
+            frame_count.saturating_sub(1)
+        } else {
+            appearance
+                .trail_end_frame
+                .min(frame_count.saturating_sub(1))
+        };
+        let end_phase_exclusive = u32::from(trail_end.saturating_add(1)) << 12;
+        if current_phase < start_phase || current_phase >= end_phase_exclusive {
+            continue;
+        }
+        let segment_count =
+            usize::from(appearance.trail_segments).clamp(1, MAX_WEAPON_TRAIL_SEGMENTS);
+        let Some(weapon) = tables.weapons.get(equipment.weapon.to_usize()) else {
+            continue;
+        };
+        let Some(weapon_model) = weapon
+            .model
+            .and_then(|index| models.get(index.to_usize()))
+            .copied()
+            .flatten()
+        else {
+            continue;
+        };
+        let Some(socket) = find_model_socket(tables, character_model, equipment.character_socket)
+            .or_else(|| {
+                find_model_socket(tables, character_model, weapon.default_character_socket)
+            })
+        else {
+            continue;
+        };
+        let Some((blade_root, blade_tip)) =
+            weapon_trail_local_segment(tables, weapon, weapon_model, model_parts, model_vertices)
+        else {
+            continue;
+        };
+
+        let mut roots = [ProjectedVertex::INVALID; MAX_WEAPON_TRAIL_SEGMENTS + 1];
+        let mut tips = [ProjectedVertex::INVALID; MAX_WEAPON_TRAIL_SEGMENTS + 1];
+        let history_q12 = u32::from(appearance.trail_history_frames.max(1)) << 12;
+        for sample in 0..=segment_count {
+            let back = history_q12.saturating_mul(sample as u32) / segment_count as u32;
+            let sample_phase = current_phase.saturating_sub(back).max(start_phase);
+            let sampled_pose = pose.with_phase_q12(sample_phase);
+            let Some(socket_pose) = attachment_socket_pose(sampled_pose, socket) else {
+                continue;
+            };
+            let (origin, rotation) = equipped_weapon_placement(
+                socket_pose,
+                weapon.grip_translation,
+                weapon.grip_rotation_q12,
+                weapon_model.local_to_world,
+            );
+            let root =
+                weapon_local_point_world(origin, rotation, weapon_model.local_to_world, blade_root);
+            let tip =
+                weapon_local_point_world(origin, rotation, weapon_model.local_to_world, blade_tip);
+            roots[sample] = projector
+                .project_world(root)
+                .unwrap_or(ProjectedVertex::INVALID);
+            tips[sample] = projector
+                .project_world(tip)
+                .unwrap_or(ProjectedVertex::INVALID);
+        }
+
+        let trail_options = options
+            .with_depth_policy(DepthPolicy::Average)
+            .with_cull_mode(CullMode::None)
+            .with_render_layer(WorldRenderLayer::Transparent);
+        let blend_mode = weapon_trail_blend_mode(appearance.trail_blend_mode);
+        for segment in 0..segment_count {
+            if roots[segment] == ProjectedVertex::INVALID
+                || tips[segment] == ProjectedVertex::INVALID
+                || roots[segment + 1] == ProjectedVertex::INVALID
+                || tips[segment + 1] == ProjectedVertex::INVALID
+            {
+                continue;
+            }
+            let current_fade = segment_count.saturating_sub(segment) as u8;
+            let previous_fade = segment_count.saturating_sub(segment + 1) as u8;
+            let colors = [
+                faded_trail_color(
+                    appearance.trail_root_color,
+                    current_fade,
+                    segment_count as u8,
+                ),
+                faded_trail_color(
+                    appearance.trail_tip_color,
+                    current_fade,
+                    segment_count as u8,
+                ),
+                faded_trail_color(
+                    appearance.trail_root_color,
+                    previous_fade,
+                    segment_count as u8,
+                ),
+                faded_trail_color(
+                    appearance.trail_tip_color,
+                    previous_fade,
+                    segment_count as u8,
+                ),
+            ];
+            let next = world.submit_blended_gouraud_quad(
+                quads,
+                [
+                    projected_lit(roots[segment], colors[0]),
+                    projected_lit(tips[segment], colors[1]),
+                    projected_lit(roots[segment + 1], colors[2]),
+                    projected_lit(tips[segment + 1], colors[3]),
+                ],
+                blend_mode,
+                trail_options,
+            );
+            accumulate_world_stats(&mut total, next);
+            if total.primitive_overflow || total.command_overflow {
+                return total;
+            }
+        }
+    }
+    total
+}
+
+fn weapon_trail_local_segment(
+    tables: ModelTables,
+    weapon: &LevelWeaponRecord,
+    weapon_model: RuntimeModelAsset,
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+) -> Option<([i32; 3], [i32; 3])> {
+    let hitbox_first = weapon.hitbox_first.to_usize();
+    let hitbox_end = hitbox_first.saturating_add(weapon.hitbox_count as usize);
+    if let Some((start, end)) = tables
+        .weapon_hitboxes
+        .get(hitbox_first..hitbox_end)
+        .and_then(|hitboxes| {
+            hitboxes.iter().find_map(|hitbox| match hitbox.shape {
+                WeaponHitShapeRecord::Capsule { start, end, .. } => Some((start, end)),
+                WeaponHitShapeRecord::Box { .. } => None,
+            })
+        })
+    {
+        return Some(
+            if local_distance_score(start, weapon.grip_translation)
+                <= local_distance_score(end, weapon.grip_translation)
+            {
+                (start, end)
+            } else {
+                (end, start)
+            },
+        );
+    }
+
+    let geometry = runtime_model_geometry(weapon_model, model_parts, model_vertices)?;
+    let mut farthest = weapon.grip_translation;
+    let mut farthest_score = 0i32;
+    for vertex in geometry.vertices {
+        let point = [
+            i32::from(vertex.position.x),
+            i32::from(vertex.position.y),
+            i32::from(vertex.position.z),
+        ];
+        let score = local_distance_score(point, weapon.grip_translation);
+        if score > farthest_score {
+            farthest_score = score;
+            farthest = point;
+        }
+    }
+    (farthest_score > 0).then_some((weapon.grip_translation, farthest))
+}
+
+fn local_distance_score(point: [i32; 3], origin: [i32; 3]) -> i32 {
+    point
+        .iter()
+        .zip(origin)
+        .map(|(point, origin)| square_i32_saturating(point.saturating_sub(origin) >> 4))
+        .fold(0, i32::saturating_add)
+}
+
+fn weapon_local_point_world(
+    origin: WorldVertex,
+    rotation: Mat3I16,
+    scale: LocalToWorldScale,
+    local: [i32; 3],
+) -> WorldVertex {
+    let rotated = rotate_offset_q12(&rotation, scaled_offset(scale, local));
+    WorldVertex::new(
+        origin.x.saturating_add(rotated[0]),
+        origin.y.saturating_add(rotated[1]),
+        origin.z.saturating_add(rotated[2]),
+    )
+}
+
+fn faded_trail_color(color: [u8; 3], numerator: u8, denominator: u8) -> (u8, u8, u8) {
+    let fade = |channel: u8| {
+        (u16::from(channel).saturating_mul(u16::from(numerator)) / u16::from(denominator.max(1)))
+            as u8
+    };
+    (fade(color[0]), fade(color[1]), fade(color[2]))
+}
+
+fn projected_lit(point: ProjectedVertex, color: (u8, u8, u8)) -> ProjectedLit {
+    ProjectedLit {
+        sx: point.sx,
+        sy: point.sy,
+        sz: point.sz.clamp(0, i32::from(u16::MAX)) as u16,
+        r: color.0,
+        g: color.1,
+        b: color.2,
+    }
+}
+
+fn weapon_trail_blend_mode(mode: u8) -> BlendMode {
+    match mode {
+        psx_level::weapon_trail_blend_mode::AVERAGE => BlendMode::Average,
+        psx_level::weapon_trail_blend_mode::ADD => BlendMode::Add,
+        psx_level::weapon_trail_blend_mode::SUBTRACT => BlendMode::Subtract,
+        _ => BlendMode::AddQuarter,
+    }
+}
+
+fn accumulate_world_stats(
+    total: &mut psx_engine::WorldRenderStats,
+    next: psx_engine::WorldRenderStats,
+) {
+    total.submitted_triangles = total
+        .submitted_triangles
+        .saturating_add(next.submitted_triangles);
+    total.culled_triangles = total.culled_triangles.saturating_add(next.culled_triangles);
+    total.clipped_triangles = total
+        .clipped_triangles
+        .saturating_add(next.clipped_triangles);
+    total.split_triangles = total.split_triangles.saturating_add(next.split_triangles);
+    total.dropped_triangles = total
+        .dropped_triangles
+        .saturating_add(next.dropped_triangles);
+    total.primitive_overflow |= next.primitive_overflow;
+    total.command_overflow |= next.command_overflow;
+}
+
 /// Draw weapons riding NON-player equipment records: each record bound
 /// to a model instance composes its socket from the instance's LIVE
 /// pose (position, yaw, state clip, phase, via
