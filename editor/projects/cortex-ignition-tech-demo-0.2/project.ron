@@ -1387,12 +1387,12 @@
         ),
         /*[21]*/ (
             id: (22),
-            name: "Cortex Humanoid 22-Bone Skeleton",
+            name: "Light Enemy Skeleton",
             data: Skeleton((
                 joint_count: 22,
                 parents: [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(3), Some(6), Some(7), Some(8), Some(3), Some(10), Some(11), Some(12), Some(0), Some(14), Some(15), Some(16), Some(0), Some(18), Some(19), Some(20)],
                 signature: "psx-parent-v1:22:root,0,1,2,3,4,3,6,7,8,3,10,11,12,0,14,15,16,0,18,19,20",
-                note: "Shared by the Aletha and Rust Mantis starter profiles",
+                note: "Shared by the Light Enemy variants",
             )),
         ),
         /*[22]*/ (
@@ -1435,7 +1435,7 @@
         ),
         /*[25]*/ (
             id: (26),
-            name: "Rust Mantis",
+            name: "Light Enemy Model",
             data: Model((
                 model_path: "assets/models/rust_mantis/rust_mantis.psxmdl",
                 source_path: Some("source_assets/characters/rust_mantis.glb"),
@@ -1523,7 +1523,7 @@
         ),
         /*[31]*/ (
             id: (32),
-            name: "Rust Mantis / Idle",
+            name: "Light Enemy / Idle",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/idle.psxanim",
                 skeleton: Some((22)),
@@ -1537,7 +1537,7 @@
         ),
         /*[32]*/ (
             id: (33),
-            name: "Rust Mantis / Walk",
+            name: "Light Enemy / Walk",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/walk.psxanim",
                 skeleton: Some((22)),
@@ -1551,7 +1551,7 @@
         ),
         /*[33]*/ (
             id: (34),
-            name: "Rust Mantis / Run",
+            name: "Light Enemy / Run",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/run.psxanim",
                 skeleton: Some((22)),
@@ -1890,7 +1890,7 @@
         ),
         /*[59]*/ (
             id: (60),
-            name: "Rust Mantis Starter Animation Set",
+            name: "Light Enemy Animation Set",
             data: AnimationSet((
                 skeleton: Some((22)),
                 idle_clip: None,
@@ -1961,7 +1961,7 @@
         ),
         /*[62]*/ (
             id: (63),
-            name: "Rust Mantis Enemy",
+            name: "Light Enemy",
             data: Character((
                 model: Some((26)),
                 material: None,
@@ -2001,7 +2001,7 @@
         ),
         /*[63]*/ (
             id: (64),
-            name: "Rust Mantis / Turn In Place",
+            name: "Light Enemy / Turn In Place",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/turn.psxanim",
                 skeleton: Some((22)),
@@ -2015,7 +2015,7 @@
         ),
         /*[64]*/ (
             id: (65),
-            name: "Rust Mantis / Alert",
+            name: "Light Enemy / Alert",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/alert.psxanim",
                 skeleton: Some((22)),
@@ -2114,7 +2114,7 @@
         ),
         /*[70]*/ (
             id: (71),
-            name: "Rust Mantis / Strafe Left",
+            name: "Light Enemy / Strafe Left",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/strafe_left.psxanim",
                 skeleton: Some((22)),
@@ -2128,7 +2128,7 @@
         ),
         /*[71]*/ (
             id: (72),
-            name: "Rust Mantis / Strafe Right",
+            name: "Light Enemy / Strafe Right",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/strafe_right.psxanim",
                 skeleton: Some((22)),
@@ -2395,7 +2395,7 @@
         ),
         /*[90]*/ (
             id: (91),
-            name: "mantis_combat_death",
+            name: "Light Enemy / Death",
             data: AnimationClip((
                 psxanim_path: "assets/animations/mantis_combat/death.psxanim",
                 skeleton: Some((22)),
@@ -2409,7 +2409,7 @@
         ),
         /*[91]*/ (
             id: (92),
-            name: "mantis_combat_hit_react",
+            name: "Light Enemy / Hit React",
             data: AnimationClip((
                 psxanim_path: "assets/animations/mantis_combat/hit_react.psxanim",
                 skeleton: Some((22)),
@@ -2423,7 +2423,7 @@
         ),
         /*[92]*/ (
             id: (93),
-            name: "mantis_combat_light_attack",
+            name: "Light Enemy / Ranged Attack",
             data: AnimationClip((
                 psxanim_path: "assets/animations/mantis_combat/light_attack.psxanim",
                 skeleton: Some((22)),
@@ -2437,7 +2437,7 @@
         ),
         /*[93]*/ (
             id: (94),
-            name: "mantis_combat_idle",
+            name: "Light Enemy / Combat Idle",
             data: AnimationClip((
                 psxanim_path: "assets/animations/mantis_combat/idle.psxanim",
                 skeleton: Some((22)),
@@ -2451,7 +2451,7 @@
         ),
         /*[94]*/ (
             id: (95),
-            name: "Tank Boss",
+            name: "Heavy Enemy",
             data: Character((
                 model: Some((97)),
                 material: None,
@@ -2491,18 +2491,18 @@
         ),
         /*[95]*/ (
             id: (96),
-            name: "Tank Boss Animated Model Skeleton",
+            name: "Heavy Enemy Skeleton",
             data: Skeleton((
                 joint_count: 27,
                 parents: [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(5), Some(8), Some(5), Some(10), Some(2), Some(12), Some(13), Some(14), Some(15), Some(0), Some(17), Some(18), Some(19), Some(20), Some(0), Some(22), Some(23), Some(24), Some(25)],
                 signature: "psx-parent-v1:27:root,0,1,2,3,4,5,6,5,8,5,10,2,12,13,14,15,0,17,18,19,20,0,22,23,24,25",
-                note: "Imported from Tank Boss Animated Model",
+                note: "Imported from the Heavy Enemy model",
                 joint_names: ["Hips", "Spine", "Spine1", "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand", "LeftHand_end", "LeftHand.001", "LeftHand.001_end", "LeftHand.002", "LeftHand.002_end", "RightShoulder", "RightArm", "RightForeArm", "RightHand", "RightHand_end", "LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase", "LeftToeBase_end", "RightUpLeg", "RightLeg", "RightFoot", "RightToeBase", "RightToeBase_end"],
             )),
         ),
         /*[96]*/ (
             id: (97),
-            name: "Tank Boss Animated Model",
+            name: "Heavy Enemy Model",
             data: Model((
                 model_path: "assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl",
                 source_path: None,
@@ -2517,7 +2517,7 @@
         ),
         /*[97]*/ (
             id: (98),
-            name: "tank_boss_ai_idle",
+            name: "Heavy Enemy / Idle",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/idle.psxanim",
                 skeleton: Some((96)),
@@ -2531,7 +2531,7 @@
         ),
         /*[98]*/ (
             id: (99),
-            name: "tank_boss_ai_walk_fwd",
+            name: "Heavy Enemy / Walk Forward",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/walk_fwd.psxanim",
                 skeleton: Some((96)),
@@ -2545,7 +2545,7 @@
         ),
         /*[99]*/ (
             id: (100),
-            name: "tank_boss_ai_set",
+            name: "Heavy Enemy Animation Set",
             data: AnimationSet((
                 skeleton: Some((96)),
                 idle_clip: None,
@@ -2560,7 +2560,7 @@
         ),
         /*[100]*/ (
             id: (101),
-            name: "tank_boss_ai_walk_bwd",
+            name: "Heavy Enemy / Walk Backward",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/walk_bwd.psxanim",
                 skeleton: Some((96)),
@@ -2574,7 +2574,7 @@
         ),
         /*[101]*/ (
             id: (102),
-            name: "tank_boss_ai_walk_lft",
+            name: "Heavy Enemy / Strafe Left",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/walk_lft.psxanim",
                 skeleton: Some((96)),
@@ -2588,7 +2588,7 @@
         ),
         /*[102]*/ (
             id: (103),
-            name: "tank_boss_ai_walk_rgt",
+            name: "Heavy Enemy / Strafe Right",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/walk_rgt.psxanim",
                 skeleton: Some((96)),
@@ -2602,7 +2602,7 @@
         ),
         /*[103]*/ (
             id: (104),
-            name: "rust_mantis_starter_walk_bwd",
+            name: "Light Enemy / Walk Backward",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/walk_bwd.psxanim",
                 skeleton: Some((22)),
@@ -2616,7 +2616,7 @@
         ),
         /*[104]*/ (
             id: (105),
-            name: "tank_boss_ai_death",
+            name: "Heavy Enemy / Death",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/death.psxanim",
                 skeleton: Some((96)),
@@ -2630,7 +2630,7 @@
         ),
         /*[105]*/ (
             id: (106),
-            name: "tank_boss_ai_hit_react",
+            name: "Heavy Enemy / Hit React",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/hit_react.psxanim",
                 skeleton: Some((96)),
@@ -2644,7 +2644,7 @@
         ),
         /*[106]*/ (
             id: (107),
-            name: "tank_boss_ai_light_attack",
+            name: "Heavy Enemy / Attack",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/light_attack.psxanim",
                 skeleton: Some((96)),
@@ -2658,7 +2658,7 @@
         ),
         /*[107]*/ (
             id: (108),
-            name: "Rust Mantis / Stun + Recovery",
+            name: "Light Enemy / Stun + Recovery",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/stun_recovery.psxanim",
                 skeleton: Some((22)),
@@ -2672,7 +2672,7 @@
         ),
         /*[108]*/ (
             id: (109),
-            name: "Tank Boss / Stun + Recovery",
+            name: "Heavy Enemy / Stun + Recovery",
             data: AnimationClip((
                 psxanim_path: "assets/animations/tank_boss_ai/stun_recovery.psxanim",
                 skeleton: Some((96)),

@@ -1973,6 +1973,22 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         package.save_title,
     );
 
+    out.push_str("/// Unique collectible modules referenced by POI rewards.\n");
+    out.push_str("pub static BOOST_MODULES: &[BoostModuleRecord] = &[\n");
+    for module in &package.boost_modules {
+        let _ = writeln!(
+            out,
+            "    BoostModuleRecord {{ name: {:?}, description: {:?}, effect_summary: {:?}, assignment_label: {:?}, remove_label: {:?}, percentages: {:?} }},",
+            module.name,
+            module.description,
+            module.effect_summary,
+            module.assignment_label,
+            module.remove_label,
+            module.percentages,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Placed gameplay interactables, room-local coordinates.\n");
     out.push_str("pub static INTERACTABLES: &[InteractableRecord] = &[\n");
     for interactable in &package.interactables {
@@ -2059,7 +2075,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for capsule in &package.combat_capsules {
         let _ = writeln!(
             out,
-            "    CombatCapsuleRecord {{ joint: {}, flags: {}, action: {}, reserved: 0, start: [{}, {}, {}], end: [{}, {}, {}], radius: {}, active_start_frame: {}, active_end_frame: {}, damage: {}, poise_damage: {}, projectile_speed: {}, projectile_lifetime_ticks: {}, projectile_min_range: {}, projectile_max_range: {}, projectile_tint_rgb: [{}, {}, {}], projectile_reserved: 0 }},",
+            "    CombatCapsuleRecord {{ joint: {}, flags: {}, action: {}, reserved: 0, start: [{}, {}, {}], end: [{}, {}, {}], radius: {}, active_start_frame: {}, active_end_frame: {}, damage: {}, poise_damage: {}, projectile_speed: {}, projectile_lifetime_ticks: {}, projectile_min_range: {}, projectile_max_range: {}, projectile_tint_rgb: [{}, {}, {}], projectile_damage_channel: {}, projectile_core_rgb: [{}, {}, {}], projectile_trail_segments: {}, projectile_glow_rgb: [{}, {}, {}], projectile_length_ticks: {}, projectile_impact_rgb: [{}, {}, {}], projectile_trail_spacing_ticks: {}, projectile_charge_start_frame: {}, projectile_glow_scale_q8: {}, projectile_impact_lifetime_ticks: {}, projectile_reserved: 0 }},",
             capsule.joint,
             capsule.flags,
             capsule.action,
@@ -2081,6 +2097,22 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             capsule.projectile_tint_rgb[0],
             capsule.projectile_tint_rgb[1],
             capsule.projectile_tint_rgb[2],
+            capsule.projectile_damage_channel,
+            capsule.projectile_core_rgb[0],
+            capsule.projectile_core_rgb[1],
+            capsule.projectile_core_rgb[2],
+            capsule.projectile_trail_segments,
+            capsule.projectile_glow_rgb[0],
+            capsule.projectile_glow_rgb[1],
+            capsule.projectile_glow_rgb[2],
+            capsule.projectile_length_ticks,
+            capsule.projectile_impact_rgb[0],
+            capsule.projectile_impact_rgb[1],
+            capsule.projectile_impact_rgb[2],
+            capsule.projectile_trail_spacing_ticks,
+            capsule.projectile_charge_start_frame,
+            capsule.projectile_glow_scale_q8,
+            capsule.projectile_impact_lifetime_ticks,
         );
     }
     out.push_str("];\n\n");
@@ -2096,7 +2128,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, attack_active_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -2135,6 +2167,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.attack_cooldown_ticks,
             entity.group_attack_delay_ticks,
             entity.windup_ticks,
+            entity.attack_active_ticks,
             entity.recovery_ticks,
             entity.attack_min_range,
             entity.attack_max_range,
@@ -4222,6 +4255,7 @@ use psx_level::{
     asset_flags,
     AssetId,
     AssetKind,
+    BoostModuleRecord,
     CHARACTER_CLIP_NONE,
     CharacterActionFrameRange,
     CharacterActionPush,

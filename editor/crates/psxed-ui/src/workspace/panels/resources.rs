@@ -52,12 +52,37 @@ impl EditorWorkspace {
         // borrow on `resource_mut` is live.
         let character_ctx = build_character_editor_context(&self.project);
         let model_options = collect_model_options(&self.project);
-        let model_resource_options: Vec<(ResourceId, String)> = model_options
+        let model_skeleton_options: Vec<(ResourceId, String, Option<ResourceId>)> = self
+            .project
+            .resources
             .iter()
-            .map(|(id, name, _)| (*id, name.clone()))
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Model(model) => {
+                    Some((resource.id, resource.name.clone(), model.skeleton))
+                }
+                _ => None,
+            })
             .collect();
         let skeleton_options = collect_skeleton_options(&self.project);
-        let animation_source_options = collect_animation_source_options(&self.project);
+        let animation_source_compatibility_options: Vec<(
+            ResourceId,
+            String,
+            Option<ResourceId>,
+            Option<ResourceId>,
+        )> = self
+            .project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::AnimationSource(source) => Some((
+                    resource.id,
+                    resource.name.clone(),
+                    source.skeleton,
+                    source.target_model,
+                )),
+                _ => None,
+            })
+            .collect();
         let animation_clip_options = collect_animation_clip_options(&self.project);
         let attachment_socket_names = collect_attachment_socket_names(&self.project);
         let material_options = self.material_lab_options();
@@ -208,7 +233,7 @@ impl EditorWorkspace {
                     source,
                     &project_root,
                     &skeleton_options,
-                    &model_resource_options,
+                    &model_skeleton_options,
                 );
             }
             ResourceData::AnimationClip(clip) => {
@@ -217,8 +242,8 @@ impl EditorWorkspace {
                     clip,
                     &project_root,
                     &skeleton_options,
-                    &model_resource_options,
-                    &animation_source_options,
+                    &model_skeleton_options,
+                    &animation_source_compatibility_options,
                 );
             }
             ResourceData::AnimationSet(set) => {
@@ -240,29 +265,164 @@ impl EditorWorkspace {
                     &attachment_socket_names,
                 );
             }
+            ResourceData::Projectile(projectile) => {
+                egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Projectile"))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        egui::ComboBox::from_label("Damage channel")
+                            .selected_text(projectile.damage_channel.label())
+                            .show_ui(ui, |ui| {
+                                for channel in psxed_project::ProjectileDamageChannel::ALL {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut projectile.damage_channel,
+                                            channel,
+                                            channel.label(),
+                                        )
+                                        .changed();
+                                }
+                            });
+                        ui.columns(2, |columns| {
+                            columns[0].label("Speed / tick");
+                            changed |= columns[1]
+                                .add(egui::DragValue::new(&mut projectile.speed).range(1..=8192))
+                                .changed();
+                            columns[0].label("Lifetime ticks");
+                            changed |= columns[1]
+                                .add(
+                                    egui::DragValue::new(&mut projectile.lifetime_ticks)
+                                        .range(1..=3600),
+                                )
+                                .changed();
+                            columns[0].label("Collision radius");
+                            changed |= columns[1]
+                                .add(egui::DragValue::new(&mut projectile.radius).range(1..=8192))
+                                .changed();
+                            columns[0].label("Damage");
+                            changed |= columns[1]
+                                .add(egui::DragValue::new(&mut projectile.damage).range(1..=9999))
+                                .changed();
+                            columns[0].label("Poise damage");
+                            changed |= columns[1]
+                                .add(
+                                    egui::DragValue::new(&mut projectile.poise_damage)
+                                        .range(0..=9999),
+                                )
+                                .changed();
+                        });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Core");
+                            changed |= ui
+                                .color_edit_button_srgb(&mut projectile.core_color)
+                                .changed();
+                            ui.label("Glow");
+                            changed |= ui
+                                .color_edit_button_srgb(&mut projectile.glow_color)
+                                .changed();
+                            ui.label("Impact");
+                            changed |= ui
+                                .color_edit_button_srgb(&mut projectile.impact_color)
+                                .changed();
+                        });
+                        ui.columns(2, |columns| {
+                            columns[0].label("Glow scale (Q8)");
+                            changed |= columns[1]
+                                .add(
+                                    egui::DragValue::new(&mut projectile.glow_scale_q8)
+                                        .range(256..=2048),
+                                )
+                                .changed();
+                            columns[0].label("Needle length (ticks)");
+                            changed |= columns[1]
+                                .add(
+                                    egui::DragValue::new(&mut projectile.length_ticks).range(1..=8),
+                                )
+                                .changed();
+                            columns[0].label("Trail ghosts");
+                            changed |= columns[1]
+                                .add(
+                                    egui::DragValue::new(&mut projectile.trail_segments)
+                                        .range(0..=6),
+                                )
+                                .changed();
+                            columns[0].label("Trail spacing (ticks)");
+                            changed |= columns[1]
+                                .add(
+                                    egui::DragValue::new(&mut projectile.trail_spacing_ticks)
+                                        .range(1..=8),
+                                )
+                                .changed();
+                            columns[0].label("Impact lifetime");
+                            changed |= columns[1]
+                                .add(
+                                    egui::DragValue::new(&mut projectile.impact_lifetime_ticks)
+                                        .range(1..=60),
+                                )
+                                .changed();
+                        });
+                    });
+            }
             ResourceData::BoostModule(module) => {
                 egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Boost Module"))
                     .default_open(true)
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Protocol").color(STUDIO_TEXT_WEAK));
-                            egui::ComboBox::from_id_salt("boost-module-kind")
-                                .selected_text(module.kind.label())
-                                .show_ui(ui, |ui| {
-                                    for kind in psxed_project::BoostModuleKind::ALL {
-                                        changed |= ui
-                                            .selectable_value(
-                                                &mut module.kind,
-                                                kind,
-                                                kind.label(),
-                                            )
-                                            .changed();
-                                    }
-                                });
-                        });
+                        ui.label(RichText::new("Description").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::multiline(&mut module.description)
+                                    .desired_rows(2)
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .changed();
+                        ui.label(RichText::new("Percentage effects").color(STUDIO_TEXT_WEAK));
+                        let mut remove_effect = None;
+                        for (index, modifier) in module.modifiers.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt(("boost-module-stat", index))
+                                    .selected_text(modifier.stat.label())
+                                    .show_ui(ui, |ui| {
+                                        for stat in psxed_project::BoostStatKind::ALL {
+                                            changed |= ui
+                                                .selectable_value(
+                                                    &mut modifier.stat,
+                                                    stat,
+                                                    stat.label(),
+                                                )
+                                                .changed();
+                                        }
+                                    });
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut modifier.percent)
+                                            .suffix("%")
+                                            .range(-100..=500),
+                                    )
+                                    .changed();
+                                if ui
+                                    .small_button(icons::text(icons::TRASH, 13.0))
+                                    .on_hover_text("Remove effect")
+                                    .clicked()
+                                {
+                                    remove_effect = Some(index);
+                                }
+                            });
+                        }
+                        if let Some(index) = remove_effect {
+                            module.modifiers.remove(index);
+                            changed = true;
+                        }
+                        if module.modifiers.len() < psx_level::boost_stat::COUNT
+                            && ui.button(icons::label(icons::PLUS, "Add effect")).clicked()
+                        {
+                            module
+                                .modifiers
+                                .push(psxed_project::BoostStatModifier::default());
+                            changed = true;
+                        }
                         ui.label(
                             RichText::new(
-                                "Collectable module granted by a Point of Interest and assigned in the Player menu.",
+                                "Reusable module definition. POIs can also author a unique item inline.",
                             )
                             .small()
                             .color(STUDIO_TEXT_WEAK),
@@ -404,6 +564,24 @@ impl EditorWorkspace {
     pub(crate) fn draw_resource_panel_actions(&mut self, ui: &mut egui::Ui) {
         ui.menu_button(icons::text(icons::PLUS, 14.0), |ui| {
             ui.set_min_width(220.0);
+
+            if ui
+                .button(icons::label(icons::FOCUS, "Projectile"))
+                .on_hover_text("Add a reusable typed projectile profile.")
+                .clicked()
+            {
+                let id = self.project.add_resource(
+                    "New Projectile",
+                    ResourceData::Projectile(psxed_project::ProjectileResource::default()),
+                );
+                self.replace_resource_selection(id);
+                self.clear_node_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = "Added projectile profile".to_string();
+                self.mark_dirty();
+                ui.close_menu();
+            }
 
             if ui
                 .button(icons::label(icons::FOCUS, "Boost Module"))

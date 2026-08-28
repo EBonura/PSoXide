@@ -5,7 +5,8 @@
 
 use super::*;
 use psx_engine::ui::{
-    draw_expanding_message_panel, draw_interaction_prompt_panel, draw_message_panel,
+    draw_expanding_message_panel, draw_interaction_prompt_panel, draw_item_acquired_panel,
+    draw_message_panel,
 };
 pub(crate) use psx_engine::ui::{MessagePageMeta, MessagePanelVariant};
 use psx_gpu::draw_quad_flat;
@@ -89,6 +90,22 @@ pub(crate) fn draw_expanding_poi_message(
         action,
         page_text,
         page,
+        frame,
+        transition_frame,
+        typewriter_frame,
+    );
+}
+
+pub(crate) fn draw_acquired_module(
+    font: &FontAtlas,
+    item_name: &str,
+    frame: u16,
+    transition_frame: u16,
+    typewriter_frame: u16,
+) {
+    draw_item_acquired_panel(
+        font,
+        item_name,
         frame,
         transition_frame,
         typewriter_frame,

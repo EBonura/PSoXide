@@ -438,6 +438,32 @@ impl ModelAnimationViewerState {
         })
     }
 
+    /// Swap only the model rendered by Animation Studio. The selected
+    /// Character remains the authoring context for its moveset and combat
+    /// volumes, while the active clip, scrub frame, and playback state remain
+    /// untouched so compatible loadout variants can be compared pose-for-pose.
+    fn switch_preview_model(&mut self, project: &ProjectDocument, model_id: ResourceId) -> bool {
+        if self.selected_model == Some(model_id)
+            || !compatible_preview_model_options(
+                project,
+                self.selected_model,
+                self.selected_clip_path.as_deref(),
+            )
+            .iter()
+            .any(|(candidate, _)| *candidate == model_id)
+        {
+            return false;
+        }
+
+        self.selected_model = Some(model_id);
+        self.invalidate_model_cache();
+        // Clip decoding also carries a stamp for the model used to establish
+        // preview bounds, so a model swap must refresh it even when the clip
+        // path itself did not change.
+        self.invalidate_clip_cache();
+        true
+    }
+
     fn reset_clip_clock(&mut self) {
         self.frame = 0.0;
         self.last_clip_path = None;
@@ -854,6 +880,11 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
         collect_resource_options(project, |data| matches!(data, ResourceData::Character(_)));
     let model_options =
         collect_resource_options(project, |data| matches!(data, ResourceData::Model(_)));
+    let preview_model_options = compatible_preview_model_options(
+        project,
+        state.selected_model,
+        state.selected_clip_path.as_deref(),
+    );
     let clip_options = state
         .selected_model
         .map(|id| build_clip_options(project, id))
@@ -911,19 +942,37 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
             }
         }
         if state.selected_character.is_none() {
+            let mut model_selection = state.selected_model;
             if resource_combo(
                 ui,
                 "Model",
                 "animation-viewer-model",
-                &mut state.selected_model,
+                &mut model_selection,
                 &model_options,
             ) {
-                state.selected_clip_path = None;
-                state.clip_filter.clear();
-                state.reset_clip_clock();
-                state.invalidate_model_cache();
-                state.invalidate_clip_cache();
-                state.ensure_selection(project);
+                let switched_compatibly = model_selection
+                    .is_some_and(|model_id| state.switch_preview_model(project, model_id));
+                if switched_compatibly {
+                    preview_texture.take();
+                } else if state.selected_model != model_selection {
+                    // Crossing to a different skeleton remains a deliberate
+                    // context change and keeps the established reset behavior.
+                    state.selected_model = model_selection;
+                    state.selected_clip_path = None;
+                    state.clip_filter.clear();
+                    state.reset_clip_clock();
+                    state.invalidate_model_cache();
+                    state.invalidate_clip_cache();
+                    state.ensure_selection(project);
+                }
+            }
+        } else if preview_model_options.len() > 1 {
+            let mut preview_model = state.selected_model;
+            if preview_model_combo(ui, &mut preview_model, &preview_model_options)
+                && preview_model
+                    .is_some_and(|model_id| state.switch_preview_model(project, model_id))
+            {
+                preview_texture.take();
             }
         }
         clip_combo(ui, state, &clip_options);
@@ -1033,8 +1082,26 @@ fn preview_combat_capsules(
     capsules
         .iter()
         .enumerate()
-        .map(
-            |(index, capsule)| model_import_preview::PreviewCombatCapsule {
+        .map(|(index, capsule)| {
+            let projectile = match capsule.role {
+                psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                    charge_start_frame,
+                    active_start_frame,
+                    tint_rgb,
+                    ..
+                } => Some(model_import_preview::PreviewProjectileCue {
+                    charge_start_frame,
+                    release_frame: active_start_frame,
+                    core_color: Color32::from_rgb(
+                        tint_rgb[0].saturating_add(96),
+                        tint_rgb[1].saturating_add(40),
+                        tint_rgb[2].saturating_add(40),
+                    ),
+                    glow_color: Color32::from_rgb(tint_rgb[0], tint_rgb[1], tint_rgb[2]),
+                }),
+                _ => None,
+            };
+            model_import_preview::PreviewCombatCapsule {
                 joint: capsule.joint,
                 start: capsule.capsule.start,
                 end: capsule.capsule.end,
@@ -1049,8 +1116,9 @@ fn preview_combat_capsules(
                     }
                 },
                 selected: index == selected,
-            },
-        )
+                projectile,
+            }
+        })
         .collect()
 }
 
@@ -1147,6 +1215,14 @@ pub(crate) fn draw_model_animation_viewer(
     let clip_context = selected_clip.as_ref().and_then(|clip| {
         load_clip_context_cached(project, project_root, state, clip, model_context.as_deref())
     });
+    let preview_in_place = character_id
+        .and_then(|character| timeline_action_context(project, character, state.selected_action))
+        .filter(|context| {
+            selected_clip.as_ref().and_then(|clip| clip.resource) == Some(context.clip)
+        })
+        .map(|context| context.options.in_place)
+        .or_else(|| selected_clip.as_ref().map(|clip| clip.calibration.in_place))
+        .unwrap_or(false);
 
     let material_layer = preview_material_layer_cached(project, project_root, state);
     let character_material =
@@ -1195,6 +1271,17 @@ pub(crate) fn draw_model_animation_viewer(
             _ => None,
         })
         .unwrap_or_default();
+    let parsed_attachment_model = model_context
+        .as_ref()
+        .and_then(|context| psx_asset::Model::from_bytes(&context.model_bytes).ok());
+    let resolved_socket_translation = |socket: &psxed_project::AttachmentSocket| {
+        parsed_attachment_model
+            .as_ref()
+            .map(|model| {
+                psxed_project::model_import::attachment_socket_bind_translation(model, socket)
+            })
+            .unwrap_or(socket.translation)
+    };
     if state.selected_attachment_socket >= sockets.len() {
         state.selected_attachment_socket = sockets.len().saturating_sub(1);
     }
@@ -1217,7 +1304,7 @@ pub(crate) fn draw_model_animation_viewer(
             .enumerate()
             .map(|(index, socket)| model_import_preview::PreviewSocket {
                 joint: socket.joint,
-                translation: socket.translation,
+                translation: resolved_socket_translation(socket),
                 rotation_q12: socket.rotation_q12,
                 selected: index == preview_socket_index,
                 gizmo_mode: if state.capsule_edit_tool == CapsuleEditTool::Rotate {
@@ -1325,7 +1412,7 @@ pub(crate) fn draw_model_animation_viewer(
                 .as_deref()
                 .unwrap_or_else(|| std::slice::from_ref(&weapon_fallback_atlas)),
             socket_joint: weapon.socket.joint,
-            socket_translation: weapon.socket.translation,
+            socket_translation: resolved_socket_translation(&weapon.socket),
             socket_rotation_q12: weapon.socket.rotation_q12,
             grip_translation: weapon.grip_translation,
             grip_rotation_q12: weapon.grip_rotation_q12,
@@ -1416,6 +1503,7 @@ pub(crate) fn draw_model_animation_viewer(
                                 &preview_sockets,
                                 &equipped_weapons,
                                 character_material.as_ref(),
+                                preview_in_place,
                                 selected_joint,
                                 joint_picking,
                             );
@@ -1502,6 +1590,7 @@ pub(crate) fn draw_model_animation_viewer(
                     &[],
                     &equipped_weapons,
                     character_material.as_ref(),
+                    preview_in_place,
                     None,
                     false,
                 );
@@ -1657,6 +1746,13 @@ struct TimelineHitbox {
     name: String,
     start: u16,
     end: u16,
+    kind: TimelineCombatKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineCombatKind {
+    Hitbox,
+    Projectile,
 }
 
 #[derive(Debug, Clone)]
@@ -2129,11 +2225,24 @@ fn draw_animation_timeline(
                                     }
                                 }
                                 for hitbox in &hitboxes {
+                                    let (detail, color) = match hitbox.kind {
+                                        TimelineCombatKind::Hitbox => (
+                                            "damage window".to_string(),
+                                            Color32::from_rgb(238, 102, 82),
+                                        ),
+                                        TimelineCombatKind::Projectile => (
+                                            format!(
+                                                "charge {} · shot {}",
+                                                hitbox.start, hitbox.end
+                                            ),
+                                            Color32::from_rgb(62, 214, 198),
+                                        ),
+                                    };
                                     let response = timeline_track_label(
                                         ui,
                                         &hitbox.name,
-                                        "damage window",
-                                        Color32::from_rgb(238, 102, 82),
+                                        &detail,
+                                        color,
                                         state.selected_combat_capsule == hitbox.index,
                                     );
                                     if response.clicked() {
@@ -2332,6 +2441,14 @@ fn draw_animation_timeline(
                                         }
 
                                         for hitbox in &hitboxes {
+                                            let color = match hitbox.kind {
+                                                TimelineCombatKind::Hitbox => {
+                                                    Color32::from_rgb(238, 102, 82)
+                                                }
+                                                TimelineCombatKind::Projectile => {
+                                                    Color32::from_rgb(62, 214, 198)
+                                                }
+                                            };
                                             let response = draw_timeline_range_lane(
                                                 ui,
                                                 &format!(
@@ -2347,7 +2464,7 @@ fn draw_animation_timeline(
                                                     .end
                                                     .min(action_max_frame)
                                                     .max(hitbox.start.min(action_max_frame)),
-                                                Color32::from_rgb(238, 102, 82),
+                                                color,
                                                 true,
                                             );
                                             if let Some(frame) = response.seek_frame {
@@ -2839,20 +2956,30 @@ fn timeline_hitboxes(
                     .iter()
                     .enumerate()
                     .filter_map(|(index, capsule)| {
-                        let (capsule_action, active_start_frame, active_end_frame) =
+                        let (capsule_action, active_start_frame, active_end_frame, kind) =
                             match capsule.role {
                                 psxed_project::CombatCapsuleRole::Hitbox {
                                     action,
                                     active_start_frame,
                                     active_end_frame,
                                     ..
-                                }
-                                | psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                                } => (
                                     action,
                                     active_start_frame,
                                     active_end_frame,
+                                    TimelineCombatKind::Hitbox,
+                                ),
+                                psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                                    action,
+                                    charge_start_frame,
+                                    active_start_frame,
                                     ..
-                                } => (action, active_start_frame, active_end_frame),
+                                } => (
+                                    action,
+                                    charge_start_frame,
+                                    active_start_frame,
+                                    TimelineCombatKind::Projectile,
+                                ),
                                 psxed_project::CombatCapsuleRole::Hurtbox => return None,
                             };
                         (capsule_action == action).then(|| TimelineHitbox {
@@ -2860,6 +2987,7 @@ fn timeline_hitboxes(
                             name: capsule.name.clone(),
                             start: active_start_frame,
                             end: active_end_frame.max(active_start_frame),
+                            kind,
                         })
                     })
                     .collect(),
@@ -2941,7 +3069,7 @@ fn store_timeline_hitbox_range(
     project: &mut ProjectDocument,
     character_id: Option<ResourceId>,
     index: usize,
-    action: CharacterAnimationAction,
+    expected_action: CharacterAnimationAction,
     start: u16,
     end: u16,
 ) -> bool {
@@ -2957,27 +3085,43 @@ fn store_timeline_hitbox_range(
     let Some(capsule) = character.combat_capsules.get_mut(index) else {
         return false;
     };
-    let (capsule_action, active_start_frame, active_end_frame) = match &mut capsule.role {
+    match &mut capsule.role {
         psxed_project::CombatCapsuleRole::Hitbox {
             action,
             active_start_frame,
             active_end_frame,
             ..
+        } => {
+            if *action != expected_action
+                || (*active_start_frame == start && *active_end_frame == end)
+            {
+                return false;
+            }
+            *active_start_frame = start;
+            *active_end_frame = end.max(start);
+            true
         }
-        | psxed_project::CombatCapsuleRole::ProjectileEmitter {
+        psxed_project::CombatCapsuleRole::ProjectileEmitter {
             action,
+            charge_start_frame,
             active_start_frame,
             active_end_frame,
             ..
-        } => (action, active_start_frame, active_end_frame),
-        psxed_project::CombatCapsuleRole::Hurtbox => return false,
-    };
-    if *capsule_action != action || (*active_start_frame == start && *active_end_frame == end) {
-        return false;
+        } => {
+            if *action != expected_action
+                || (*charge_start_frame == start
+                    && *active_start_frame == end
+                    && *active_end_frame == end)
+            {
+                return false;
+            }
+            *charge_start_frame = start.min(end);
+            *active_start_frame = end.max(start);
+            *active_end_frame = *active_start_frame;
+            true
+        }
+        psxed_project::CombatCapsuleRole::Hurtbox => false,
     }
-    *active_start_frame = start;
-    *active_end_frame = end.max(start);
-    true
 }
 
 fn store_timeline_weapon_range(
@@ -3665,6 +3809,16 @@ fn draw_combat_capsule_editor(
             _ => None,
         })
         .and_then(|model_id| model_skeleton_joint_names(project, model_id));
+    let projectile_options: Vec<_> = project
+        .resources
+        .iter()
+        .filter_map(|resource| {
+            let ResourceData::Projectile(projectile) = &resource.data else {
+                return None;
+            };
+            Some((resource.id, resource.name.clone(), projectile.clone()))
+        })
+        .collect();
     ui.horizontal(|ui| {
         ui.heading("Combat Volumes");
         let (icon, label) = if state.combat_capsules_visible {
@@ -3784,8 +3938,10 @@ fn draw_combat_capsule_editor(
                     },
                     role: psxed_project::CombatCapsuleRole::ProjectileEmitter {
                         action: psxed_project::CharacterAnimationAction::LightAttack,
+                        charge_start_frame: 4,
                         active_start_frame: 8,
-                        active_end_frame: 12,
+                        active_end_frame: 8,
+                        projectile: None,
                         speed: 160,
                         lifetime_ticks: 180,
                         min_range: 512,
@@ -3891,8 +4047,10 @@ fn draw_combat_capsule_editor(
             capsule.capsule.end = capsule.capsule.start;
             capsule.role = psxed_project::CombatCapsuleRole::ProjectileEmitter {
                 action: psxed_project::CharacterAnimationAction::LightAttack,
+                charge_start_frame: 4,
                 active_start_frame: 8,
-                active_end_frame: 12,
+                active_end_frame: 8,
+                projectile: None,
                 speed: 160,
                 lifetime_ticks: 180,
                 min_range: 512,
@@ -4038,8 +4196,10 @@ fn draw_combat_capsule_editor(
 
     if let psxed_project::CombatCapsuleRole::ProjectileEmitter {
         action,
+        charge_start_frame,
         active_start_frame,
         active_end_frame,
+        projectile,
         speed,
         lifetime_ticks,
         min_range,
@@ -4079,26 +4239,94 @@ fn draw_combat_capsule_editor(
                 );
             }
         });
-        changed |= combat_u16_editor(ui, "Release start", active_start_frame, 0, u16::MAX);
-        changed |= combat_u16_editor(ui, "Release end", active_end_frame, 0, u16::MAX);
-        if *active_end_frame < *active_start_frame {
+        let selected_projectile_name = projectile
+            .and_then(|selected| {
+                projectile_options
+                    .iter()
+                    .find(|(id, _, _)| *id == selected)
+                    .map(|(_, name, _)| name.as_str())
+            })
+            .unwrap_or("Legacy inline projectile");
+        egui::ComboBox::from_label("Projectile profile")
+            .selected_text(selected_projectile_name)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(projectile, None, "Legacy inline projectile")
+                    .changed();
+                for (id, name, _) in &projectile_options {
+                    changed |= ui.selectable_value(projectile, Some(*id), name).changed();
+                }
+            });
+        changed |= combat_u16_editor(ui, "Charge start", charge_start_frame, 0, u16::MAX);
+        changed |= combat_u16_editor(ui, "Release frame", active_start_frame, 0, u16::MAX);
+        if *charge_start_frame > *active_start_frame {
+            *charge_start_frame = *active_start_frame;
+            changed = true;
+        }
+        if *active_end_frame != *active_start_frame {
             *active_end_frame = *active_start_frame;
             changed = true;
         }
-        changed |= combat_u16_editor(ui, "Speed / tick", speed, 1, 8192);
-        changed |= combat_u16_editor(ui, "Lifetime ticks", lifetime_ticks, 1, 3600);
+        if ui
+            .button(icons::label(icons::PLAY, "Test charge + fire"))
+            .on_hover_text("Seek to the charge start and play through the exact release frame")
+            .clicked()
+        {
+            state.frame = f32::from(*charge_start_frame);
+            state.playing = true;
+            state.last_time_seconds = 0.0;
+            ui.ctx().request_repaint();
+        }
         changed |= combat_u16_editor(ui, "Minimum range", min_range, 0, u16::MAX);
         changed |= combat_u16_editor(ui, "Maximum range", max_range, 1, u16::MAX);
         if *max_range < *min_range {
             *max_range = *min_range;
             changed = true;
         }
-        changed |= combat_u16_editor(ui, "Damage", damage, 1, 9999);
-        changed |= combat_u16_editor(ui, "Poise damage", poise_damage, 0, 9999);
-        ui.horizontal(|ui| {
-            ui.label("Tint");
-            changed |= ui.color_edit_button_srgb(tint_rgb).changed();
-        });
+        if let Some((_, name, profile)) = projectile
+            .and_then(|selected| projectile_options.iter().find(|(id, _, _)| *id == selected))
+        {
+            ui.group(|ui| {
+                ui.strong(name);
+                ui.label(format!(
+                    "{} · radius {} · speed {} · damage {} / poise {}",
+                    profile.damage_channel.label(),
+                    profile.radius,
+                    profile.speed,
+                    profile.damage,
+                    profile.poise_damage
+                ));
+                ui.horizontal(|ui| {
+                    ui.label("Core");
+                    let mut core = profile.core_color;
+                    ui.color_edit_button_srgb(&mut core);
+                    ui.label("Glow");
+                    let mut glow = profile.glow_color;
+                    ui.color_edit_button_srgb(&mut glow);
+                    ui.label("Impact");
+                    let mut impact = profile.impact_color;
+                    ui.color_edit_button_srgb(&mut impact);
+                });
+                ui.label(
+                    RichText::new("Edit gameplay and visual tuning on the Projectile resource.")
+                        .small()
+                        .color(STUDIO_TEXT_WEAK),
+                );
+            });
+        } else {
+            egui::CollapsingHeader::new("Legacy inline projectile")
+                .default_open(true)
+                .show(ui, |ui| {
+                    changed |= combat_u16_editor(ui, "Speed / tick", speed, 1, 8192);
+                    changed |= combat_u16_editor(ui, "Lifetime ticks", lifetime_ticks, 1, 3600);
+                    changed |= combat_u16_editor(ui, "Damage", damage, 1, 9999);
+                    changed |= combat_u16_editor(ui, "Poise damage", poise_damage, 0, 9999);
+                    ui.horizontal(|ui| {
+                        ui.label("Tint");
+                        changed |= ui.color_edit_button_srgb(tint_rgb).changed();
+                    });
+                });
+        }
     }
 
     changed
@@ -5125,6 +5353,7 @@ fn attach_selected_socket_to_joint(
     // drag tools re-author it. The rotation survives because grip
     // orientation is usually rig-wide, not per-bone.
     socket.translation = [0, 0, 0];
+    socket.translation_space = psxed_project::AttachmentSocketTranslationSpace::JointOffset;
     true
 }
 
@@ -5447,23 +5676,33 @@ fn draw_playback_controls(
     }
     if let Some(animation) = animation {
         let frame_count = animation.frame_count.max(1);
+        let (frame_start, frame_end) = action_options
+            .map(|options| action_playback_frame_bounds(frame_count, options))
+            .unwrap_or((0, frame_count.saturating_sub(1)));
         if state.playing {
             let delta = (now - state.last_time_seconds).max(0.0) as f32;
             let delta_frames = delta * animation.sample_rate_hz as f32 * playback_speed;
-            let (frame, playing) = advance_animation_playback(
-                state.frame,
-                delta_frames,
-                frame_count,
-                action_options
-                    .map(|options| options.looping)
-                    .unwrap_or_else(|| clip.is_none_or(|clip| clip.looping)),
-            );
+            let (frame, playing) = match action_options {
+                Some(options) => advance_animation_playback_in_range(
+                    state.frame,
+                    delta_frames,
+                    frame_start,
+                    frame_end,
+                    options.looping,
+                ),
+                None => advance_animation_playback(
+                    state.frame,
+                    delta_frames,
+                    frame_count,
+                    clip.is_none_or(|clip| clip.looping),
+                ),
+            };
             state.frame = frame;
             state.playing = playing;
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));
         }
-        state.frame = state.frame.clamp(0.0, frame_count.saturating_sub(1) as f32);
+        state.frame = state.frame.clamp(frame_start as f32, frame_end as f32);
     }
     state.last_time_seconds = now;
 
@@ -5496,14 +5735,16 @@ fn draw_playback_controls(
         state.playing = !state.playing;
         state.last_time_seconds = now;
     }
-    let max_frame = animation.frame_count.saturating_sub(1).max(1);
+    let (min_frame, max_frame) = action_options
+        .map(|options| action_playback_frame_bounds(animation.frame_count.max(1), options))
+        .unwrap_or((0, animation.frame_count.saturating_sub(1)));
     let frame = state.frame.round() as u16;
     if ui
         .button(icons::text(icons::CHEVRON_LEFT, 14.0))
         .on_hover_text("Previous frame")
         .clicked()
     {
-        state.frame = frame.saturating_sub(1) as f32;
+        state.frame = frame.saturating_sub(1).max(min_frame) as f32;
         state.playing = false;
     }
     if ui
@@ -5535,7 +5776,7 @@ fn draw_playback_controls(
     let timeline_changed = ui
         .scope(|ui| {
             ui.spacing_mut().slider_width = timeline_width;
-            ui.add(egui::Slider::new(&mut timeline_frame, 0..=max_frame).show_value(false))
+            ui.add(egui::Slider::new(&mut timeline_frame, min_frame..=max_frame).show_value(false))
                 .changed()
         })
         .inner;
@@ -5549,7 +5790,7 @@ fn draw_playback_controls(
             .color(STUDIO_TEXT_WEAK),
     )
     .on_hover_text(format!(
-        "Frame {frame} of {max_frame} · {} Hz",
+        "Action frame {frame} in {min_frame}..{max_frame} · {} Hz",
         animation.sample_rate_hz
     ));
     let mut authored_speed_update = None;
@@ -5630,6 +5871,38 @@ fn action_duration_seconds(
     let frames = end.saturating_sub(start).saturating_add(1);
     let speed = f32::from(speed_q8.max(1)) / 256.0;
     f32::from(frames) / (f32::from(animation.sample_rate_hz.max(1)) * speed)
+}
+
+fn action_playback_frame_bounds(frame_count: u16, options: CharacterActionOptions) -> (u16, u16) {
+    let final_unique_frame = frame_count.saturating_sub(2);
+    let start = options.frame_start.min(final_unique_frame);
+    let end = if options.frame_end == psxed_project::ACTION_FRAME_END_FULL {
+        final_unique_frame
+    } else {
+        options.frame_end.min(final_unique_frame)
+    };
+    (start, end.max(start))
+}
+
+fn advance_animation_playback_in_range(
+    frame: f32,
+    delta_frames: f32,
+    first_frame: u16,
+    last_frame: u16,
+    looping: bool,
+) -> (f32, bool) {
+    let first = first_frame as f32;
+    let last = last_frame.max(first_frame) as f32;
+    let frame = frame.clamp(first, last);
+    if !looping {
+        let next = (frame + delta_frames.max(0.0)).min(last);
+        return (next, next < last);
+    }
+    let cycle = (last - first + 1.0).max(1.0);
+    (
+        first + (frame - first + delta_frames.max(0.0)).rem_euclid(cycle),
+        true,
+    )
 }
 
 fn advance_animation_playback(
@@ -5858,6 +6131,7 @@ fn draw_preview(
     sockets: &[model_import_preview::PreviewSocket],
     equipped_weapons: &[model_import_preview::PreviewEquippedWeapon<'_>],
     character_material: Option<&model_import_preview::PreviewMaterialLayer<'_>>,
+    preview_in_place: bool,
     selected_joint: Option<u16>,
     joint_picking: bool,
 ) -> PreviewInteraction {
@@ -6021,7 +6295,7 @@ fn draw_preview(
             pitch_q12: state.pitch_q12.rem_euclid(4096) as u16,
             radius: state.radius,
             focus_on_animated_bounds: true,
-            preview_in_place: selected_clip.calibration.in_place,
+            preview_in_place,
             pose_offset: selected_clip.calibration.offset,
             show_animation_root: state.show_animation_root,
             show_collision_guides: false,
@@ -6090,6 +6364,17 @@ fn draw_preview(
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
+            if let (Some(gizmo), Some(cue)) = (
+                render.selected_combat_gizmo,
+                combat_capsules
+                    .iter()
+                    .find(|capsule| capsule.selected)
+                    .and_then(|capsule| capsule.projectile),
+            ) {
+                let origin = preview_image_to_screen(gizmo.origin, preview_rect, render_size);
+                let aim = preview_image_to_screen(gizmo.axis_ends[2], preview_rect, render_size);
+                draw_projectile_studio_preview(&painter, origin, aim, state.frame, cue);
+            }
             if state.show_pose_corrections {
                 for &joint in &state.selected_pose_joints {
                     let Some(point) = render
@@ -6354,6 +6639,97 @@ fn preview_image_to_screen(point: [f32; 2], preview_rect: Rect, render_size: [us
     )
 }
 
+fn draw_projectile_studio_preview(
+    painter: &egui::Painter,
+    origin: Pos2,
+    aim: Pos2,
+    frame: f32,
+    cue: model_import_preview::PreviewProjectileCue,
+) {
+    let charge_start = f32::from(cue.charge_start_frame);
+    let release = f32::from(cue.release_frame);
+    if frame < charge_start || frame > release + 10.0 {
+        return;
+    }
+    let mut direction = aim - origin;
+    if direction.length_sq() < 1.0 {
+        direction = Vec2::new(1.0, 0.0);
+    } else {
+        direction = direction.normalized();
+    }
+    let perpendicular = Vec2::new(-direction.y, direction.x);
+    if frame < release {
+        let duration = (release - charge_start).max(1.0);
+        let progress = ((frame - charge_start) / duration).clamp(0.0, 1.0);
+        let radius = 11.0 - progress * 5.0;
+        let points = [
+            origin - direction * radius,
+            origin + perpendicular * radius,
+            origin + direction * radius,
+            origin - perpendicular * radius,
+        ];
+        for index in 0..4 {
+            painter.line_segment(
+                [points[index], points[(index + 1) & 3]],
+                Stroke::new(2.0, cue.glow_color.linear_multiply(0.65 + progress * 0.35)),
+            );
+        }
+        painter.circle_filled(origin, 2.0 + progress * 2.0, cue.core_color);
+        for sign in [-1.0f32, 1.0] {
+            painter.line_segment(
+                [
+                    origin + perpendicular * sign * (radius + 4.0),
+                    origin + perpendicular * sign * (radius + 8.0),
+                ],
+                Stroke::new(1.5, cue.glow_color.linear_multiply(0.75)),
+            );
+        }
+        return;
+    }
+
+    let age = (frame - release).clamp(0.0, 10.0);
+    let head = origin + direction * (14.0 + age * 17.0);
+    let tail = head - direction * 28.0;
+    painter.line_segment(
+        [tail, head],
+        Stroke::new(8.0, cue.glow_color.linear_multiply(0.42)),
+    );
+    painter.line_segment([tail, head], Stroke::new(2.5, cue.core_color));
+    for ghost in 1..=3 {
+        let fade = 0.42 / ghost as f32;
+        let ghost_head = tail - direction * (ghost as f32 * 12.0);
+        painter.line_segment(
+            [ghost_head - direction * 18.0, ghost_head],
+            Stroke::new((5 - ghost) as f32, cue.glow_color.linear_multiply(fade)),
+        );
+    }
+    if age <= 2.0 {
+        let radius = 9.0 + age * 2.0;
+        for axis in [direction, perpendicular] {
+            painter.line_segment(
+                [origin - axis * radius, origin + axis * radius],
+                Stroke::new(2.0, cue.core_color),
+            );
+        }
+    }
+    if age >= 7.0 {
+        let radius = 4.0 + (age - 7.0) * 3.0;
+        let impact = cue.glow_color.linear_multiply((10.0 - age).max(0.15) / 3.0);
+        let points = [
+            head - direction * radius,
+            head + perpendicular * radius,
+            head + direction * radius,
+            head - perpendicular * radius,
+        ];
+        for index in 0..4 {
+            painter.line_segment(
+                [points[index], points[(index + 1) & 3]],
+                Stroke::new(2.0, impact),
+            );
+        }
+    }
+}
+
 fn axis_gizmo_screen_axes(
     preview_rect: Rect,
     render_size: [usize; 2],
@@ -6584,6 +6960,36 @@ fn resource_combo(
     changed
 }
 
+fn preview_model_combo(
+    ui: &mut egui::Ui,
+    current: &mut Option<ResourceId>,
+    options: &[(ResourceId, String)],
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Loadout").color(STUDIO_TEXT_WEAK))
+            .on_hover_text(
+                "Swap the compatible model shown in the preview without changing the clip or timeline position",
+            );
+        let selected = current
+            .and_then(|id| options.iter().find(|(rid, _)| *rid == id))
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("(unavailable)");
+        changed |= searchable_picker(
+            ui,
+            "animation-viewer-preview-model",
+            current,
+            selected,
+            options,
+            SearchablePickerConfig::required()
+                .with_width(152.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search compatible loadouts…"),
+        );
+    });
+    changed
+}
+
 fn clip_combo(
     ui: &mut egui::Ui,
     state: &mut ModelAnimationViewerState,
@@ -6690,6 +7096,62 @@ fn collect_resource_options(
         .collect()
 }
 
+/// Models shown by the non-destructive Loadout picker must share the active
+/// model's skeleton. When the selected path belongs to a cooked clip resource,
+/// it must also resolve for the candidate; this prevents a target-specific
+/// animation from being silently previewed against the wrong bind pose.
+fn compatible_preview_model_options(
+    project: &ProjectDocument,
+    selected_model: Option<ResourceId>,
+    selected_clip_path: Option<&str>,
+) -> Vec<(ResourceId, String)> {
+    let Some((selected_model_id, selected_skeleton)) = selected_model.and_then(|model_id| {
+        project.resource(model_id).and_then(|resource| {
+            let ResourceData::Model(model) = &resource.data else {
+                return None;
+            };
+            Some((model_id, model.skeleton))
+        })
+    }) else {
+        return Vec::new();
+    };
+
+    let selected_clip_is_cooked = selected_clip_path.is_some_and(|path| {
+        project.resources.iter().any(|resource| {
+            matches!(
+                &resource.data,
+                ResourceData::AnimationClip(clip) if clip.psxanim_path == path
+            )
+        })
+    });
+
+    project
+        .resources
+        .iter()
+        .filter_map(|resource| {
+            let ResourceData::Model(model) = &resource.data else {
+                return None;
+            };
+            if resource.id != selected_model_id
+                && (selected_skeleton.is_none() || model.skeleton != selected_skeleton)
+            {
+                return None;
+            }
+            if selected_clip_is_cooked
+                && selected_clip_path.is_some_and(|path| {
+                    !project
+                        .resolved_model_animation_clips(resource.id)
+                        .iter()
+                        .any(|clip| clip.psxanim_path == path)
+                })
+            {
+                return None;
+            }
+            Some((resource.id, resource.name.clone()))
+        })
+        .collect()
+}
+
 fn first_model_id(project: &ProjectDocument) -> Option<ResourceId> {
     project
         .resources
@@ -6700,9 +7162,14 @@ fn first_model_id(project: &ProjectDocument) -> Option<ResourceId> {
 fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<ViewerClipOption> {
     let mut out = Vec::new();
     let mut seen_paths = HashSet::new();
-    let mut seen_resources = HashSet::new();
     let mut baked_sources = HashSet::new();
     let authoring_labels = collect_animation_clip_authoring_labels(project);
+    let model_skeleton = project.resource(model_id).and_then(|resource| {
+        let ResourceData::Model(model) = &resource.data else {
+            return None;
+        };
+        model.skeleton
+    });
 
     for clip in project.resolved_model_animation_clips(model_id) {
         let label = clip.animation_resource.map_or_else(
@@ -6716,10 +7183,9 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
         );
         let (role, looping, origin) = clip
             .animation_resource
-            .and_then(|id| project.resource(id).map(|resource| (id, resource)))
-            .and_then(|(id, resource)| match &resource.data {
+            .and_then(|id| project.resource(id))
+            .and_then(|resource| match &resource.data {
                 ResourceData::AnimationClip(clip) => {
-                    seen_resources.insert(id);
                     if let Some(source) = clip.source {
                         baked_sources.insert(source);
                     }
@@ -6746,37 +7212,16 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
     }
 
     for resource in &project.resources {
-        let ResourceData::AnimationClip(clip) = &resource.data else {
-            continue;
-        };
-        if seen_resources.contains(&resource.id) || seen_paths.contains(&clip.psxanim_path) {
-            continue;
-        }
-        seen_resources.insert(resource.id);
-        if let Some(source) = clip.source {
-            baked_sources.insert(source);
-        }
-        seen_paths.insert(clip.psxanim_path.clone());
-        out.push(ViewerClipOption {
-            label: authoring_labels
-                .get(&resource.id)
-                .cloned()
-                .unwrap_or_else(|| resource.name.clone()),
-            path: clip.psxanim_path.clone(),
-            origin: ClipOrigin::Library,
-            role: clip.role,
-            looping: clip.looping,
-            resource: Some(resource.id),
-            model_clip_index: None,
-            calibration: clip.calibration,
-            previewable: true,
-        });
-    }
-
-    for resource in &project.resources {
         let ResourceData::AnimationSource(source) = &resource.data else {
             continue;
         };
+        if source.skeleton != model_skeleton
+            || source
+                .target_model
+                .is_some_and(|target_model| target_model != model_id)
+        {
+            continue;
+        }
         if baked_sources.contains(&resource.id) {
             continue;
         }
@@ -7418,6 +7863,23 @@ mod focus_tests {
         );
         assert_eq!(advance_animation_playback(8.0, 4.0, 10, true), (3.0, true));
         assert_eq!(advance_animation_playback(0.0, 2.0, 1, false), (0.0, false));
+
+        let mut options = CharacterActionOptions::for_action(CharacterAnimationAction::HeavyAttack);
+        options.frame_start = 2;
+        options.frame_end = 5;
+        assert_eq!(action_playback_frame_bounds(10, options), (2, 5));
+        assert_eq!(
+            advance_animation_playback_in_range(0.0, 1.0, 2, 5, false),
+            (3.0, true)
+        );
+        assert_eq!(
+            advance_animation_playback_in_range(5.0, 1.0, 2, 5, false),
+            (5.0, false)
+        );
+        assert_eq!(
+            advance_animation_playback_in_range(5.0, 1.0, 2, 5, true),
+            (2.0, true)
+        );
     }
 
     #[test]
@@ -7634,6 +8096,64 @@ mod focus_tests {
     }
 
     #[test]
+    fn projectile_timeline_lane_edits_charge_to_exact_release() {
+        let (mut project, character, _, _) = timeline_fixture();
+        let ResourceData::Character(profile) = &mut project.resource_mut(character).unwrap().data
+        else {
+            panic!("character resource expected");
+        };
+        profile
+            .combat_capsules
+            .push(psxed_project::CharacterCombatCapsule {
+                name: "Choir Needle Muzzle".to_string(),
+                role: psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                    action: CharacterAnimationAction::LightAttack,
+                    charge_start_frame: 4,
+                    active_start_frame: 9,
+                    active_end_frame: 9,
+                    projectile: None,
+                    speed: 112,
+                    lifetime_ticks: 180,
+                    min_range: 512,
+                    max_range: 4096,
+                    damage: 18,
+                    poise_damage: 8,
+                    tint_rgb: [62, 214, 198],
+                },
+                ..psxed_project::CharacterCombatCapsule::default()
+            });
+        let index = profile.combat_capsules.len() - 1;
+
+        let lanes = timeline_hitboxes(&project, character, CharacterAnimationAction::LightAttack);
+        let lane = lanes.iter().find(|lane| lane.index == index).unwrap();
+        assert_eq!(lane.kind, TimelineCombatKind::Projectile);
+        assert_eq!((lane.start, lane.end), (4, 9));
+        assert!(store_timeline_hitbox_range(
+            &mut project,
+            Some(character),
+            index,
+            CharacterAnimationAction::LightAttack,
+            6,
+            12,
+        ));
+        let ResourceData::Character(profile) = &project.resource(character).unwrap().data else {
+            unreachable!();
+        };
+        let psxed_project::CombatCapsuleRole::ProjectileEmitter {
+            charge_start_frame,
+            active_start_frame,
+            active_end_frame,
+            ..
+        } = profile.combat_capsules[index].role
+        else {
+            unreachable!();
+        };
+        assert_eq!(charge_start_frame, 6);
+        assert_eq!(active_start_frame, 12);
+        assert_eq!(active_end_frame, 12);
+    }
+
+    #[test]
     fn timeline_frame_mapping_is_clamped_and_round_trips() {
         let rect = Rect::from_min_size(Pos2::new(100.0, 40.0), Vec2::new(600.0, 28.0));
         let pixels_per_frame = 12.0;
@@ -7706,6 +8226,160 @@ mod focus_tests {
 
         assert_eq!(viewer.selected_model(), Some(target_model));
         assert_eq!(viewer.selected_clip_path(), Some(clip_path));
+    }
+
+    #[test]
+    fn loadout_switches_compatible_models_without_moving_the_timeline() {
+        let mut project = ProjectDocument::new("animation-loadouts");
+        let skeleton = project.add_resource(
+            "Mantis Rig",
+            ResourceData::Skeleton(psxed_project::SkeletonResource {
+                joint_count: 2,
+                parents: vec![None, Some(0)],
+                signature: "mantis-rig".to_string(),
+                note: String::new(),
+                joint_names: vec!["Root".to_string(), "LeftForeArm".to_string()],
+            }),
+        );
+        let other_skeleton = project.add_resource(
+            "Other Rig",
+            ResourceData::Skeleton(psxed_project::SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "other-rig".to_string(),
+                note: String::new(),
+                joint_names: vec!["Root".to_string()],
+            }),
+        );
+        let make_model = |path: &str, skeleton| {
+            ResourceData::Model(psxed_project::ModelResource {
+                model_path: path.to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: Some(skeleton),
+                world_height: 1024,
+                collision_radius: 192,
+                scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+                default_visual_yaw_q12: 0,
+                attachments: Vec::new(),
+            })
+        };
+        let artigli = project.add_resource(
+            "Light Enemy / Artigli",
+            make_model("assets/mantis_artigli.psxmdl", skeleton),
+        );
+        let light = project.add_resource(
+            "Light Enemy / Light Arm",
+            make_model("assets/mantis_light.psxmdl", skeleton),
+        );
+        let heavy = project.add_resource(
+            "Light Enemy / Heavy Arm",
+            make_model("assets/mantis_heavy.psxmdl", skeleton),
+        );
+        let foreign = project.add_resource(
+            "Unrelated Enemy",
+            make_model("assets/unrelated.psxmdl", other_skeleton),
+        );
+        let shared_path = "assets/mantis_attack.psxanim";
+        project.add_resource(
+            "Mantis Attack",
+            ResourceData::AnimationClip(psxed_project::AnimationClipResource {
+                psxanim_path: shared_path.to_string(),
+                skeleton: Some(skeleton),
+                target_model: None,
+                source: None,
+                bake: psxed_project::AnimationClipBakeKind::LegacyShared,
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: Vec::new(),
+                calibration: Default::default(),
+                pose_corrections: Vec::new(),
+            }),
+        );
+        let character = project.add_resource(
+            "Light Enemy / Artigli",
+            ResourceData::Character(psxed_project::CharacterResource {
+                model: Some(artigli),
+                ..psxed_project::CharacterResource::defaults()
+            }),
+        );
+
+        let options = compatible_preview_model_options(&project, Some(artigli), Some(shared_path));
+        assert_eq!(
+            options.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![artigli, light, heavy]
+        );
+        assert!(!options.iter().any(|(id, _)| *id == foreign));
+
+        let mut viewer = ModelAnimationViewerState {
+            selected_model: Some(artigli),
+            selected_character: Some(character),
+            selected_clip_path: Some(shared_path.to_string()),
+            last_clip_path: Some(shared_path.to_string()),
+            playing: false,
+            frame: 13.5,
+            ..Default::default()
+        };
+
+        assert!(viewer.switch_preview_model(&project, heavy));
+        assert_eq!(viewer.selected_model, Some(heavy));
+        assert_eq!(viewer.selected_character, Some(character));
+        assert_eq!(viewer.selected_clip_path(), Some(shared_path));
+        assert_eq!(viewer.last_clip_path.as_deref(), Some(shared_path));
+        assert_eq!(viewer.frame, 13.5);
+        assert!(!viewer.playing);
+        assert!(!viewer.switch_preview_model(&project, foreign));
+        assert_eq!(viewer.selected_model, Some(heavy));
+    }
+
+    #[test]
+    fn loadout_hides_models_that_cannot_resolve_a_targeted_clip() {
+        let mut project = ProjectDocument::new("targeted-loadout");
+        let skeleton = project.add_resource(
+            "Rig",
+            ResourceData::Skeleton(psxed_project::SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "rig".to_string(),
+                note: String::new(),
+                joint_names: vec!["Root".to_string()],
+            }),
+        );
+        let make_model = |path: &str| {
+            ResourceData::Model(psxed_project::ModelResource {
+                model_path: path.to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: Some(skeleton),
+                world_height: 1024,
+                collision_radius: 192,
+                scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+                default_visual_yaw_q12: 0,
+                attachments: Vec::new(),
+            })
+        };
+        let target = project.add_resource("Target", make_model("assets/target.psxmdl"));
+        let sibling = project.add_resource("Sibling", make_model("assets/sibling.psxmdl"));
+        let clip_path = "assets/target_only.psxanim";
+        project.add_resource(
+            "Target Only",
+            ResourceData::AnimationClip(psxed_project::AnimationClipResource {
+                psxanim_path: clip_path.to_string(),
+                skeleton: Some(skeleton),
+                target_model: Some(target),
+                source: None,
+                bake: psxed_project::AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Idle,
+                looping: true,
+                tags: Vec::new(),
+                calibration: Default::default(),
+                pose_corrections: Vec::new(),
+            }),
+        );
+
+        let options = compatible_preview_model_options(&project, Some(target), Some(clip_path));
+        assert_eq!(options, vec![(target, "Target".to_string())]);
+        assert!(!options.iter().any(|(id, _)| *id == sibling));
     }
 
     #[test]
@@ -8028,6 +8702,140 @@ mod focus_tests {
     }
 
     #[test]
+    fn clip_picker_lists_only_the_selected_models_compatible_animation_catalogue() {
+        let mut project = ProjectDocument::new("animation-association");
+        let light_skeleton = project.add_resource(
+            "Light Enemy Skeleton",
+            ResourceData::Skeleton(psxed_project::SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "light-enemy".to_string(),
+                note: String::new(),
+                joint_names: vec!["Root".to_string()],
+            }),
+        );
+        let heavy_skeleton = project.add_resource(
+            "Heavy Enemy Skeleton",
+            ResourceData::Skeleton(psxed_project::SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "heavy-enemy".to_string(),
+                note: String::new(),
+                joint_names: vec!["Root".to_string()],
+            }),
+        );
+        let model_data = |path: &str, skeleton| {
+            ResourceData::Model(psxed_project::ModelResource {
+                model_path: path.to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: Some(skeleton),
+                world_height: 1024,
+                collision_radius: 192,
+                scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+                default_visual_yaw_q12: 0,
+                attachments: Vec::new(),
+            })
+        };
+        let light = project.add_resource(
+            "Light Enemy",
+            model_data("assets/light.psxmdl", light_skeleton),
+        );
+        let light_variant = project.add_resource(
+            "Light Enemy / Heavy Arm",
+            model_data("assets/light_heavy_arm.psxmdl", light_skeleton),
+        );
+        let heavy = project.add_resource(
+            "Heavy Enemy",
+            model_data("assets/heavy.psxmdl", heavy_skeleton),
+        );
+        let clip_data = |path: &str, skeleton, target_model| {
+            ResourceData::AnimationClip(psxed_project::AnimationClipResource {
+                psxanim_path: path.to_string(),
+                skeleton: Some(skeleton),
+                target_model,
+                source: None,
+                bake: psxed_project::AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: Vec::new(),
+                calibration: Default::default(),
+                pose_corrections: Vec::new(),
+            })
+        };
+        let light_shared = project.add_resource(
+            "Light Enemy / Attack",
+            clip_data("assets/light_attack.psxanim", light_skeleton, None),
+        );
+        let light_targeted = project.add_resource(
+            "Light Enemy / Targeted",
+            clip_data("assets/light_targeted.psxanim", light_skeleton, Some(light)),
+        );
+        let sibling_targeted = project.add_resource(
+            "Light Enemy / Variant Only",
+            clip_data(
+                "assets/light_variant.psxanim",
+                light_skeleton,
+                Some(light_variant),
+            ),
+        );
+        let heavy_clip = project.add_resource(
+            "Heavy Enemy / Attack",
+            clip_data("assets/heavy_attack.psxanim", heavy_skeleton, None),
+        );
+        let source_data = |path: &str, skeleton, target_model| {
+            ResourceData::AnimationSource(psxed_project::AnimationSourceResource {
+                source_path: path.to_string(),
+                clip_name: String::new(),
+                provider: psxed_project::AnimationSourceProvider::Other,
+                skeleton: Some(skeleton),
+                target_model,
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: Vec::new(),
+            })
+        };
+        let light_source = project.add_resource(
+            "Light Raw",
+            source_data("source/light.glb", light_skeleton, None),
+        );
+        let light_targeted_source = project.add_resource(
+            "Light Targeted Raw",
+            source_data("source/light_targeted.glb", light_skeleton, Some(light)),
+        );
+        let sibling_source = project.add_resource(
+            "Sibling Raw",
+            source_data(
+                "source/light_variant.glb",
+                light_skeleton,
+                Some(light_variant),
+            ),
+        );
+        let heavy_source = project.add_resource(
+            "Heavy Raw",
+            source_data("source/heavy.glb", heavy_skeleton, Some(heavy)),
+        );
+
+        let option_resources = build_clip_options(&project, light)
+            .into_iter()
+            .filter_map(|option| option.resource)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            option_resources,
+            vec![
+                light_targeted,
+                light_shared,
+                light_source,
+                light_targeted_source
+            ]
+        );
+        for excluded in [sibling_targeted, heavy_clip, sibling_source, heavy_source] {
+            assert!(!option_resources.contains(&excluded));
+        }
+    }
+
+    #[test]
     fn changing_pose_keys_regenerates_the_immediate_preview_clip() {
         let project_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../projects/default/project.ron");
@@ -8115,6 +8923,7 @@ mod focus_tests {
                     name: "right_hand_grip".to_string(),
                     joint: 3,
                     translation: [10, 20, 30],
+                    translation_space: psxed_project::AttachmentSocketTranslationSpace::JointOffset,
                     rotation_q12: [0, 1024, 0],
                 }],
             }),

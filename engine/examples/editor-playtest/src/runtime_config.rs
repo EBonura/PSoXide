@@ -167,21 +167,13 @@ pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 pub(super) const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
 pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
 pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
-/// Attacks: one button per level, and both shoulder buttons together for the
-/// third. Each level plays its clip whole, from frame 0 to the end, which is
-/// what the three source performances were recorded as.
-pub(super) const LIGHT_ATTACK_BUTTON: u16 = button::R1;
-pub(super) const HEAVY_ATTACK_BUTTON: u16 = button::R2;
-/// The vertical axis is the same three levels on the left shoulder pair. A
-/// level with no clip bound is simply not available, so the axis can ship one
-/// clip at a time.
-pub(super) const VERT_LIGHT_ATTACK_BUTTON: u16 = button::L1;
-pub(super) const VERT_HEAVY_ATTACK_BUTTON: u16 = button::L2;
-/// Ticks to wait after the first shoulder press before committing to a single
-/// attack. Two buttons meant as one press never land on the same tick, so
-/// without a window R1+R2 just fires whichever arrived first. 4 ticks is 67 ms
-/// of input delay on light and heavy, the standard cost of a two-button input.
-pub(super) const ATTACK_PAIR_WINDOW_TICKS: u32 = 4;
+/// The four player attacks are addressed directly. There are no shoulder
+/// chords and therefore no input-pair delay: a press maps to exactly one
+/// Horizon or Zenith action slot.
+pub(super) const HORIZON_LIGHT_ATTACK_BUTTON: u16 = button::R1;
+pub(super) const HORIZON_HEAVY_ATTACK_BUTTON: u16 = button::R2;
+pub(super) const ZENITH_LIGHT_ATTACK_BUTTON: u16 = button::L1;
+pub(super) const ZENITH_HEAVY_ATTACK_BUTTON: u16 = button::L2;
 /// Player health pool at gameplay init (the phase-3 combat slice's
 /// sane cooked default -- the Character record carries no health
 /// field yet; authoring it is a future editor slice). Death/respawn
@@ -718,6 +710,10 @@ pub(super) const MAX_PROJECTILE_IMPACTS: usize = MAX_COMBAT_PROJECTILES;
 /// Fixed projectile state owned by the gameplay scene.
 pub(super) type RuntimeCombatProjectiles =
     psx_game_runtime::projectiles::CombatProjectiles<MAX_COMBAT_PROJECTILES>;
+/// Impact flares outlive their projectile collision slot but share the same
+/// strict worst-case capacity.
+pub(super) type RuntimeProjectileImpactEffects =
+    psx_game_runtime::projectiles::ProjectileImpactEffects<MAX_PROJECTILE_IMPACTS>;
 
 /// The crate logic-entity runtime instantiated with this example's
 /// record/word/event caps.

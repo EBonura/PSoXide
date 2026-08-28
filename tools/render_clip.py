@@ -109,7 +109,7 @@ def main() -> None:
 
     scene.render.engine = "BLENDER_WORKBENCH"
     scene.display.shading.light = "STUDIO"
-    scene.display.shading.color_type = "MATERIAL"
+    scene.display.shading.color_type = "TEXTURE"
     scene.display.shading.show_shadows = True
     scene.display.shading.show_cavity = True
     scene.display.shading.background_type = "WORLD"

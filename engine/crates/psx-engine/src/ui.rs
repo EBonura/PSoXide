@@ -115,6 +115,13 @@ pub struct UiTextureSlot {
     pub texture_height: u16,
 }
 
+/// Allocation-free live-text bridge used by cooked UI scenes. The resolver
+/// may borrow static copy or compose into the per-node scratch buffer.
+pub trait UiTextResolver {
+    /// Resolve `tag`, composing into `scratch` when the text is not static.
+    fn resolve<'a>(&self, tag: &str, scratch: &'a mut [u8]) -> Option<&'a str>;
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct UiAffine {
     m00: i32,
@@ -457,7 +464,7 @@ pub fn draw_scene(
     options: &[LevelOptionDef],
     option_value: &impl Fn(u16) -> i32,
     visible: &impl Fn(&LevelUiNodeRecord) -> bool,
-    text: &impl Fn(&str) -> Option<&'static str>,
+    text: &impl UiTextResolver,
 ) {
     let end = first.saturating_add(count).min(nodes.len());
     for index in first..end {
@@ -465,13 +472,13 @@ pub fn draw_scene(
         if !node_visible_in_tree(nodes, index, visible) {
             continue;
         }
-        let mut live_node = *authored_node;
-        if !live_node.tag.is_empty() {
-            if let Some(resolved_text) = text(live_node.tag) {
-                live_node.text = resolved_text;
-            }
-        }
-        let node = &live_node;
+        let mut text_scratch = [0u8; 96];
+        let resolved_text = if authored_node.tag.is_empty() {
+            None
+        } else {
+            text.resolve(authored_node.tag, &mut text_scratch)
+        };
+        let node = authored_node;
         let resolved = node_resolved(nodes, index).unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
         match node.kind {
@@ -491,6 +498,7 @@ pub fn draw_scene(
                         paints,
                         text_seed.wrapping_add((index as u16).wrapping_mul(0x9e37)),
                         frame,
+                        resolved_text,
                     );
                 }
             }
@@ -521,6 +529,7 @@ pub fn draw_scene(
                     is_focused,
                     frame,
                     focus_style,
+                    resolved_text,
                 );
                 if is_focused {
                     draw_focus_ring(resolved, focus_style, frame, Some(shape_config(node)));
@@ -1590,8 +1599,9 @@ fn draw_label(
     paints: &[LevelUiPaintRecord],
     text_seed: u16,
     frame: u16,
+    text_override: Option<&str>,
 ) {
-    let text = selected_label_text(node, text_seed);
+    let text = text_override.unwrap_or_else(|| selected_label_text(node, text_seed));
     let paint = text_paint(node.color, node.color_paint, paints);
     let scale = node_font_scale_q8(node);
     let letter_spacing = node_letter_spacing(node);
@@ -2153,6 +2163,7 @@ fn draw_button(
     focused: bool,
     frame: u16,
     focus_style: &LevelUiFocusStyle,
+    text_override: Option<&str>,
 ) {
     let focus_chrome = node.flags & ui_node_flags::BUTTON_FOCUS_CHROME != 0;
     let draw_chrome = !focus_chrome || focused;
@@ -2190,7 +2201,8 @@ fn draw_button(
     let Some(font) = font else {
         return;
     };
-    if node.text.is_empty() {
+    let text = text_override.unwrap_or(node.text);
+    if text.is_empty() {
         return;
     }
     let scale = node_font_scale_q8(node);
@@ -2201,7 +2213,7 @@ fn draw_button(
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
     let text_x = aligned_text_x(
         font,
-        node.text,
+        text,
         0,
         resolved.width,
         align,
@@ -2219,7 +2231,7 @@ fn draw_button(
         resolved,
         text_x,
         text_y,
-        node.text,
+        text,
         scale,
         letter_spacing,
         paint,
@@ -2766,6 +2778,67 @@ pub fn draw_expanding_message_panel(
         UiPaint::Solid((114, 96, 92)),
         visible_text.len() == page_text.len(),
     );
+}
+
+/// Morph a completed POI message into the compact unique-item acquisition
+/// panel. The geometry shrinks in place with no copy during motion; the exact
+/// acquired item then types on and remains explicitly dismissible with Cross.
+pub fn draw_item_acquired_panel(
+    font: &FontAtlas,
+    item_name: &str,
+    frame: u16,
+    transition_frame: u16,
+    typewriter_frame: u16,
+) {
+    const PREFIX: &str = "ITEM ACQUIRED - ";
+    const TARGET: MessagePanelLayout = MessagePanelLayout {
+        x: 55,
+        y: 196,
+        width: 210,
+        height: 30,
+        max_lines: 1,
+    };
+    let source = message_panel_layout(MessagePanelVariant::PointOfInterest);
+    let layout = message_panel_transition_layout(source, TARGET, transition_frame);
+    let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
+    draw_archive_panel_chrome(resolved, frame);
+    if transition_frame < MESSAGE_PANEL_EXPAND_FRAMES {
+        return;
+    }
+
+    let visible_characters =
+        usize::from(typewriter_frame / MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
+    let prefix_chars = PREFIX.chars().count();
+    let visible_prefix = text_prefix_chars(PREFIX, visible_characters.min(prefix_chars));
+    let visible_name = text_prefix_chars(item_name, visible_characters.saturating_sub(prefix_chars));
+    let total_width = font
+        .text_width(PREFIX)
+        .saturating_add(font.text_width(item_name)) as i16;
+    let text_x = layout
+        .x
+        .saturating_add((i32::from(layout.width).saturating_sub(i32::from(total_width)).max(0) / 2) as i16);
+    let text_y = layout.y.saturating_add(4);
+    draw_scaled_text_paint(
+        font,
+        text_x,
+        text_y,
+        visible_prefix,
+        UI_FONT_SCALE_ONE_Q8,
+        0,
+        UiPaint::Solid((124, 64, 54)),
+    );
+    draw_scaled_text_paint(
+        font,
+        text_x.saturating_add(font.text_width(PREFIX) as i16),
+        text_y,
+        visible_name,
+        UI_FONT_SCALE_ONE_Q8,
+        0,
+        UiPaint::Solid((202, 154, 136)),
+    );
+    if visible_name.len() == item_name.len() {
+        draw_message_dismiss_hint(font, layout);
+    }
 }
 
 fn text_prefix_chars(text: &str, character_count: usize) -> &str {

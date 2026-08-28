@@ -237,6 +237,16 @@ mod tests {
             projectile_min_range: 0,
             projectile_max_range: 0,
             projectile_tint_rgb: [0; 3],
+            projectile_damage_channel: psx_level::projectile_damage_channel::ZENITH,
+            projectile_core_rgb: [0; 3],
+            projectile_trail_segments: 0,
+            projectile_glow_rgb: [0; 3],
+            projectile_length_ticks: 0,
+            projectile_impact_rgb: [0; 3],
+            projectile_trail_spacing_ticks: 0,
+            projectile_charge_start_frame: 0,
+            projectile_glow_scale_q8: 0,
+            projectile_impact_lifetime_ticks: 0,
             projectile_reserved: 0,
         };
         let capsule = transform_actor_combat_capsule(&record, pose).expect("combat capsule");
@@ -311,6 +321,16 @@ mod tests {
                         projectile_min_range: 0,
                         projectile_max_range: 0,
                         projectile_tint_rgb: [0; 3],
+                        projectile_damage_channel: psx_level::projectile_damage_channel::ZENITH,
+                        projectile_core_rgb: [0; 3],
+                        projectile_trail_segments: 0,
+                        projectile_glow_rgb: [0; 3],
+                        projectile_length_ticks: 0,
+                        projectile_impact_rgb: [0; 3],
+                        projectile_trail_spacing_ticks: 0,
+                        projectile_charge_start_frame: 0,
+                        projectile_glow_scale_q8: 0,
+                        projectile_impact_lifetime_ticks: 0,
                         projectile_reserved: 0,
                     };
                     let capsule =

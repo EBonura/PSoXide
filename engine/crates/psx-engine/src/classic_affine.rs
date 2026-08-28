@@ -2543,9 +2543,7 @@ impl<S: ClassicAffineSubdivisionCacheSink> AffinePacketWriter
 impl ResidentLevel2Scatter {
     #[inline(always)]
     unsafe fn patch_tri(&mut self, a: &Projected, b: &Projected, c: &Projected) {
-        let otz = scene::classic_otz3_from_sum(
-            u32::from(a.sz) + u32::from(b.sz) + u32::from(c.sz),
-        );
+        let otz = scene::classic_otz3_from_sum(u32::from(a.sz) + u32::from(b.sz) + u32::from(c.sz));
         if otz == 0 {
             return;
         }
@@ -2563,15 +2561,9 @@ impl ResidentLevel2Scatter {
     }
 
     #[inline(always)]
-    unsafe fn patch_quad(
-        &mut self,
-        a: &Projected,
-        b: &Projected,
-        c: &Projected,
-        d: &Projected,
-    ) {
-        let otz = ((u32::from(a.sz) + u32::from(b.sz) + u32::from(c.sz) + u32::from(d.sz))
-            >> 4) as u16;
+    unsafe fn patch_quad(&mut self, a: &Projected, b: &Projected, c: &Projected, d: &Projected) {
+        let otz =
+            ((u32::from(a.sz) + u32::from(b.sz) + u32::from(c.sz) + u32::from(d.sz)) >> 4) as u16;
         if otz == 0 {
             return;
         }
@@ -2590,13 +2582,7 @@ impl ResidentLevel2Scatter {
     }
 
     #[inline(always)]
-    unsafe fn patch_tri_at(
-        &mut self,
-        a: &Projected,
-        b: &Projected,
-        c: &Projected,
-        otz: u16,
-    ) {
+    unsafe fn patch_tri_at(&mut self, a: &Projected, b: &Projected, c: &Projected, otz: u16) {
         if otz == 0 {
             return;
         }
@@ -2670,14 +2656,8 @@ unsafe fn scatter_resident_level2_root(
         ptr::write(positions, resident_midpoint_position(r0, r1));
         ptr::write(positions.add(1), resident_midpoint_position(r1, r2));
         ptr::write(positions.add(2), resident_midpoint_position(r0, r2));
-        ptr::write(
-            positions.add(3),
-            resident_midpoint_position(r0, *positions),
-        );
-        ptr::write(
-            positions.add(4),
-            resident_midpoint_position(r1, *positions),
-        );
+        ptr::write(positions.add(3), resident_midpoint_position(r0, *positions));
+        ptr::write(positions.add(4), resident_midpoint_position(r1, *positions));
         ptr::write(
             positions.add(5),
             resident_midpoint_position(r1, *positions.add(1)),
@@ -4772,10 +4752,7 @@ pub unsafe fn collect_classic_affine_projected_subdivision_requests(
 /// contain `surface_count` descriptors whose vertex ranges fit entirely in
 /// the first `vertex_count` records. `output` must have room for every fan's
 /// worst-case packet expansion and remain live until submission completes.
-#[cfg_attr(
-    feature = "classic-affine-quake-specialized-kernel",
-    inline(always)
-)]
+#[cfg_attr(feature = "classic-affine-quake-specialized-kernel", inline(always))]
 pub unsafe fn submit_classic_affine_batch(
     vertices: *mut ClassicAffineVertex,
     vertex_count: usize,
@@ -4948,11 +4925,8 @@ unsafe fn submit_quake_level0_run(
         if otz > 0 && otz < ClassicAffineProfile::QUAKE_REFERENCE.ot_depth {
             if next != end {
                 let next_ref = unsafe { &*next };
-                let next_otz = average3_depths(
-                    root_depth,
-                    current_ref.depth as u16,
-                    next_ref.depth as u16,
-                );
+                let next_otz =
+                    average3_depths(root_depth, current_ref.depth as u16, next_ref.depth as u16);
                 if next_otz >= ClassicAffineProfile::QUAKE_REFERENCE.subdivide_once_at
                     && next_otz < ClassicAffineProfile::QUAKE_REFERENCE.ot_depth
                     && next_otz == otz
@@ -4983,8 +4957,7 @@ unsafe fn submit_quake_projected_fan_level0_runs(
     let mut surface_clip = 0x0fu8;
     let mut clip_index = 0usize;
     while clip_index < vertex_count && surface_clip != 0 {
-        surface_clip &=
-            classic_clip_code(unsafe { (*vertices.add(clip_index)).screen }, profile);
+        surface_clip &= classic_clip_code(unsafe { (*vertices.add(clip_index)).screen }, profile);
         clip_index += 1;
     }
     if surface_clip != 0 {
@@ -5069,8 +5042,7 @@ unsafe fn submit_quake_projected_fan_cold_adaptive(
     let mut surface_clip = 0x0fu8;
     let mut clip_index = 0usize;
     while clip_index < vertex_count && surface_clip != 0 {
-        surface_clip &=
-            classic_clip_code(unsafe { (*vertices.add(clip_index)).screen }, profile);
+        surface_clip &= classic_clip_code(unsafe { (*vertices.add(clip_index)).screen }, profile);
         clip_index += 1;
     }
     if surface_clip != 0 {
@@ -5158,8 +5130,7 @@ unsafe fn submit_quake_projected_fan_cold_level2(
     let mut surface_clip = 0x0fu8;
     let mut clip_index = 0usize;
     while clip_index < vertex_count && surface_clip != 0 {
-        surface_clip &=
-            classic_clip_code(unsafe { (*vertices.add(clip_index)).screen }, profile);
+        surface_clip &= classic_clip_code(unsafe { (*vertices.add(clip_index)).screen }, profile);
         clip_index += 1;
     }
     if surface_clip != 0 {
@@ -5204,15 +5175,7 @@ unsafe fn submit_quake_projected_fan_cold_level2(
                 unsafe { writer.emit_tri_unclipped(tri, tri, otz) };
             } else if otz >= profile.subdivide_twice_at {
                 unsafe {
-                    subdivide_once(
-                        writer,
-                        root,
-                        previous_ref,
-                        current_ref,
-                        generated,
-                        otz,
-                        7,
-                    )
+                    subdivide_once(writer, root, previous_ref, current_ref, generated, otz, 7)
                 };
             } else {
                 unsafe {
@@ -5469,8 +5432,7 @@ pub unsafe fn submit_classic_affine_cached_subdivision_batch<
                     let quad_refs = unsafe { [&*previous, &*current, root, &*next] };
                     #[cfg(feature = "classic-affine-resident-base-cache")]
                     if source_face != u16::MAX {
-                        let material =
-                            u32::from(surface.tpage) | (u32::from(surface.clut) << 16);
+                        let material = u32::from(surface.tpage) | (u32::from(surface.clut) << 16);
                         if let Some(slot) =
                             sink.acquire_base_packet(source_face, root_index, true, material, otz)
                         {
@@ -5587,43 +5549,45 @@ pub unsafe fn submit_classic_affine_cached_subdivision_batch<
                         }
                         #[cfg(not(feature = "classic-affine-resident-level2-scatter"))]
                         {
-                        let mut cached: CachedSubdivisionPacketPatcher<'_, S> =
-                            CachedSubdivisionPacketPatcher {
-                                active: slot.active,
-                                packets: 0,
-                                hardware_triangles: 0,
-                                profile,
-                                #[cfg(not(feature = "classic-affine-gpu-polygon-clip"))]
-                                sink,
-                                #[cfg(feature = "classic-affine-gpu-polygon-clip")]
-                                _sink: core::marker::PhantomData,
-                            };
-                        if level == 2 {
-                            unsafe {
-                                cached.emit_subdivide_twice(
-                                    root,
-                                    previous_ref,
-                                    current_ref,
-                                    generated,
-                                    otz,
-                                    7,
-                                )
-                            };
-                        } else {
-                            #[cfg(not(feature = "classic-affine-subdivision-cache-level2-only"))]
-                            unsafe {
-                                subdivide_once(
-                                    &mut cached,
-                                    root,
-                                    previous_ref,
-                                    current_ref,
-                                    generated,
-                                    otz,
-                                    7,
-                                )
-                            };
-                        }
-                        (cached.active, cached.packets, cached.hardware_triangles)
+                            let mut cached: CachedSubdivisionPacketPatcher<'_, S> =
+                                CachedSubdivisionPacketPatcher {
+                                    active: slot.active,
+                                    packets: 0,
+                                    hardware_triangles: 0,
+                                    profile,
+                                    #[cfg(not(feature = "classic-affine-gpu-polygon-clip"))]
+                                    sink,
+                                    #[cfg(feature = "classic-affine-gpu-polygon-clip")]
+                                    _sink: core::marker::PhantomData,
+                                };
+                            if level == 2 {
+                                unsafe {
+                                    cached.emit_subdivide_twice(
+                                        root,
+                                        previous_ref,
+                                        current_ref,
+                                        generated,
+                                        otz,
+                                        7,
+                                    )
+                                };
+                            } else {
+                                #[cfg(not(
+                                    feature = "classic-affine-subdivision-cache-level2-only"
+                                ))]
+                                unsafe {
+                                    subdivide_once(
+                                        &mut cached,
+                                        root,
+                                        previous_ref,
+                                        current_ref,
+                                        generated,
+                                        otz,
+                                        7,
+                                    )
+                                };
+                            }
+                            (cached.active, cached.packets, cached.hardware_triangles)
                         }
                     } else {
                         #[cfg(feature = "classic-affine-resident-level2-cold-init")]
@@ -5650,46 +5614,48 @@ pub unsafe fn submit_classic_affine_cached_subdivision_batch<
                         }
                         #[cfg(not(feature = "classic-affine-resident-level2-cold-init"))]
                         {
-                        let mut cached: CachedSubdivisionPacketWriter<'_, S> =
-                            CachedSubdivisionPacketWriter {
-                                active: slot.active,
-                                initialize: true,
-                                packets: 0,
-                                hardware_triangles: 0,
-                                clut_high_word: writer.clut_high_word,
-                                tpage_high_word: writer.tpage_high_word,
-                                profile,
-                                #[cfg(not(feature = "classic-affine-gpu-polygon-clip"))]
-                                sink,
-                                #[cfg(feature = "classic-affine-gpu-polygon-clip")]
-                                _sink: core::marker::PhantomData,
-                            };
-                        if level == 2 {
-                            unsafe {
-                                cached.emit_subdivide_twice(
-                                    root,
-                                    previous_ref,
-                                    current_ref,
-                                    generated,
-                                    otz,
-                                    7,
-                                )
-                            };
-                        } else {
-                            #[cfg(not(feature = "classic-affine-subdivision-cache-level2-only"))]
-                            unsafe {
-                                subdivide_once(
-                                    &mut cached,
-                                    root,
-                                    previous_ref,
-                                    current_ref,
-                                    generated,
-                                    otz,
-                                    7,
-                                )
-                            };
-                        }
-                        (cached.active, cached.packets, cached.hardware_triangles)
+                            let mut cached: CachedSubdivisionPacketWriter<'_, S> =
+                                CachedSubdivisionPacketWriter {
+                                    active: slot.active,
+                                    initialize: true,
+                                    packets: 0,
+                                    hardware_triangles: 0,
+                                    clut_high_word: writer.clut_high_word,
+                                    tpage_high_word: writer.tpage_high_word,
+                                    profile,
+                                    #[cfg(not(feature = "classic-affine-gpu-polygon-clip"))]
+                                    sink,
+                                    #[cfg(feature = "classic-affine-gpu-polygon-clip")]
+                                    _sink: core::marker::PhantomData,
+                                };
+                            if level == 2 {
+                                unsafe {
+                                    cached.emit_subdivide_twice(
+                                        root,
+                                        previous_ref,
+                                        current_ref,
+                                        generated,
+                                        otz,
+                                        7,
+                                    )
+                                };
+                            } else {
+                                #[cfg(not(
+                                    feature = "classic-affine-subdivision-cache-level2-only"
+                                ))]
+                                unsafe {
+                                    subdivide_once(
+                                        &mut cached,
+                                        root,
+                                        previous_ref,
+                                        current_ref,
+                                        generated,
+                                        otz,
+                                        7,
+                                    )
+                                };
+                            }
+                            (cached.active, cached.packets, cached.hardware_triangles)
                         }
                     };
                     let root_bytes = unsafe { active_end.offset_from(active_start) as usize } * 4;
@@ -7116,13 +7082,9 @@ mod tests {
         let hybrid = unsafe { hybrid_writer.finish(hybrid_words.as_mut_ptr()) };
         assert_eq!(hybrid.packets, reference.packets);
         assert_eq!(hybrid.hardware_triangles, reference.hardware_triangles);
-        let reference_len = unsafe {
-            reference
-                .next_packet
-                .offset_from(reference_words.as_ptr()) as usize
-        };
-        let hybrid_len =
-            unsafe { hybrid.next_packet.offset_from(hybrid_words.as_ptr()) as usize };
+        let reference_len =
+            unsafe { reference.next_packet.offset_from(reference_words.as_ptr()) as usize };
+        let hybrid_len = unsafe { hybrid.next_packet.offset_from(hybrid_words.as_ptr()) as usize };
         assert_eq!(hybrid_len, reference_len);
         assert_eq!(
             &hybrid_words[..hybrid_len],

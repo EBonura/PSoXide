@@ -1198,6 +1198,7 @@ pub(crate) fn push_point_of_interest(
     messages: &mut Vec<PlaytestInteractableMessage>,
     message_pages: &mut Vec<String>,
     interactables: &mut Vec<PlaytestInteractable>,
+    boost_modules: &mut Vec<PlaytestBoostModule>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     if component.radius == 0 {
@@ -1229,38 +1230,108 @@ pub(crate) fn push_point_of_interest(
     let (reward_resource, reward_quantity) = match component.reward {
         None => (psx_level::POI_REWARD_NONE, 0),
         Some(reward) => {
-            if reward.quantity == 0 {
+            if reward.quantity != 1 {
                 report.error(format!(
-                    "Point of Interest on '{node_name}' has a reward quantity of 0"
+                    "Point of Interest on '{node_name}' grants a unique module, so reward quantity must be 1"
                 ));
                 return false;
             }
-            let Some(module_id) = reward.module else {
+            if boost_modules.len() >= psx_level::MAX_BOOST_MODULES {
                 report.error(format!(
-                    "Point of Interest on '{node_name}' has a reward but no Boost Module resource"
+                    "Project exceeds the {} unique-module runtime limit",
+                    psx_level::MAX_BOOST_MODULES
                 ));
                 return false;
+            }
+
+            let (name, description, modifiers) = if !reward.item_name.trim().is_empty() {
+                (
+                    reward.item_name.trim().to_string(),
+                    reward.description.trim().to_string(),
+                    reward.modifiers.clone(),
+                )
+            } else {
+                let Some(module_id) = reward.module else {
+                    report.error(format!(
+                        "Point of Interest on '{node_name}' has a reward but no item name"
+                    ));
+                    return false;
+                };
+                let Some(resource) = project.resource(module_id) else {
+                    report.error(format!(
+                        "Point of Interest on '{node_name}' references missing reward resource #{}",
+                        module_id.raw()
+                    ));
+                    return false;
+                };
+                let ResourceData::BoostModule(module) = &resource.data else {
+                    report.error(format!(
+                        "Point of Interest on '{node_name}' reward '{}' is not a Boost Module",
+                        resource.name
+                    ));
+                    return false;
+                };
+                let modifiers = if module.modifiers.is_empty() {
+                    vec![legacy_boost_modifier(module.kind)]
+                } else {
+                    module.modifiers.clone()
+                };
+                (
+                    resource.name.trim().to_string(),
+                    module.description.trim().to_string(),
+                    modifiers,
+                )
             };
-            let Some(resource) = project.resource(module_id) else {
+            if name.is_empty() {
                 report.error(format!(
-                    "Point of Interest on '{node_name}' references missing reward resource #{}",
-                    module_id.raw()
+                    "Point of Interest on '{node_name}' has a reward with an empty item name"
                 ));
                 return false;
-            };
-            let ResourceData::BoostModule(module) = &resource.data else {
+            }
+            if boost_modules
+                .iter()
+                .any(|module| module.name.eq_ignore_ascii_case(&name))
+            {
                 report.error(format!(
-                    "Point of Interest on '{node_name}' reward '{}' is not a Boost Module",
-                    resource.name
+                    "Point of Interest on '{node_name}' reuses unique module name '{name}'"
                 ));
                 return false;
-            };
-            let selector = match module.kind {
-                crate::BoostModuleKind::Rupture => 1,
-                crate::BoostModuleKind::Shell => 2,
-                crate::BoostModuleKind::Surge => 3,
-            };
-            (selector, reward.quantity)
+            }
+            if modifiers.is_empty() {
+                report.error(format!(
+                    "Point of Interest on '{node_name}' module '{name}' needs at least one stat modifier"
+                ));
+                return false;
+            }
+            let mut percentages = [0i16; psx_level::boost_stat::COUNT];
+            for modifier in &modifiers {
+                if !(-100..=500).contains(&modifier.percent) {
+                    report.error(format!(
+                        "Point of Interest on '{node_name}' module '{name}' has {}% outside the supported -100..500 range",
+                        modifier.percent
+                    ));
+                    return false;
+                }
+                let lane = modifier.stat.runtime_index();
+                percentages[lane] = percentages[lane].saturating_add(modifier.percent);
+            }
+            if percentages.iter().all(|percent| *percent == 0) {
+                report.error(format!(
+                    "Point of Interest on '{node_name}' module '{name}' has no non-zero stat effect"
+                ));
+                return false;
+            }
+            let effect_summary = boost_effect_summary(percentages);
+            let index = boost_modules.len() as u16;
+            boost_modules.push(PlaytestBoostModule {
+                assignment_label: format!("ASSIGN {name}: CHOOSE SLOT"),
+                remove_label: format!("REMOVE {name}"),
+                name,
+                description,
+                effect_summary,
+                percentages,
+            });
+            (index, 1)
         }
     };
 
@@ -1306,6 +1377,37 @@ pub(crate) fn push_point_of_interest(
         flags,
     });
     true
+}
+
+fn legacy_boost_modifier(kind: crate::BoostModuleKind) -> crate::BoostStatModifier {
+    let stat = match kind {
+        crate::BoostModuleKind::Rupture => crate::BoostStatKind::HorizonAttack,
+        crate::BoostModuleKind::Shell => crate::BoostStatKind::Defence,
+        crate::BoostModuleKind::Surge => crate::BoostStatKind::MovementSpeed,
+    };
+    crate::BoostStatModifier { stat, percent: 10 }
+}
+
+fn boost_effect_summary(percentages: [i16; psx_level::boost_stat::COUNT]) -> String {
+    const LABELS: [&str; psx_level::boost_stat::COUNT] =
+        ["HRZ ATK", "ZTH ATK", "DEF", "MOVE", "ATK SPD"];
+    let mut summary = String::new();
+    for (index, percent) in percentages.iter().enumerate() {
+        if *percent == 0 {
+            continue;
+        }
+        if !summary.is_empty() {
+            summary.push_str(" / ");
+        }
+        summary.push_str(LABELS[index]);
+        summary.push(' ');
+        if *percent > 0 {
+            summary.push('+');
+        }
+        summary.push_str(&percent.to_string());
+        summary.push('%');
+    }
+    summary
 }
 
 /// Font occupying runtime UI slot zero, which also draws Archive messages.
@@ -1629,6 +1731,7 @@ pub(crate) fn push_game_entity(
     state_clips: GameEntityStateClips,
     combat_capsule_first: u16,
     combat_capsule_count: u8,
+    attack_active_ticks: u16,
     projectile_attack_range: Option<(u16, u16)>,
     names: &mut NameInterner,
     game_entities: &mut Vec<PlaytestGameEntity>,
@@ -1745,6 +1848,7 @@ pub(crate) fn push_game_entity(
         attack_cooldown_ticks: enemy.attack_cooldown_ticks,
         group_attack_delay_ticks: enemy.group_attack_delay_ticks,
         windup_ticks: enemy.windup_ticks,
+        attack_active_ticks,
         recovery_ticks: enemy.recovery_ticks,
         attack_min_range,
         attack_max_range,

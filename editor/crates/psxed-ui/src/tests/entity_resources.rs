@@ -181,18 +181,21 @@ fn attachment_socket_issue_counts_catches_authoring_errors() {
             name: "right_hand_grip".to_string(),
             joint: 2,
             translation: [0, 0, 0],
+            translation_space: psxed_project::AttachmentSocketTranslationSpace::JointOffset,
             rotation_q12: [0, 0, 0],
         },
         psxed_project::AttachmentSocket {
             name: "Right_Hand_Grip".to_string(),
             joint: 8,
             translation: [0, 0, 0],
+            translation_space: psxed_project::AttachmentSocketTranslationSpace::JointOffset,
             rotation_q12: [0, 0, 0],
         },
         psxed_project::AttachmentSocket {
             name: " ".to_string(),
             joint: 0,
             translation: [0, 0, 0],
+            translation_space: psxed_project::AttachmentSocketTranslationSpace::JointOffset,
             rotation_q12: [0, 0, 0],
         },
     ];
@@ -824,7 +827,7 @@ fn dropping_enemy_profile_first_preserves_authored_enemy_defaults() {
         ..psxed_project::EnemyBehaviorSettings::defaults()
     };
     let character = project.add_resource(
-        "Rust Mantis Enemy",
+        "Light Enemy",
         ResourceData::Character(psxed_project::CharacterResource {
             spawn_role: psxed_project::CharacterSpawnRole::Enemy,
             enemy_behavior: Some(enemy_behavior),

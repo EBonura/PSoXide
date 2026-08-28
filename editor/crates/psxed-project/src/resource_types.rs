@@ -264,13 +264,22 @@ pub enum CharacterAnimationAction {
     RunWindup,
     RunWinddown,
     RunWinddownAlt,
-    /// Vertical axis (overhead strikes), levels 1 to 3.
+    /// Zenith axis (overhead strikes). The third slot is serialized only for
+    /// older six-attack projects; current player input addresses light/heavy.
     VertLightAttack,
     VertHeavyAttack,
     VertComboAttack,
 }
 
 impl CharacterAnimationAction {
+    /// The only attack actions addressed by current player input.
+    pub const PLAYER_ATTACKS: [Self; 4] = [
+        Self::LightAttack,
+        Self::HeavyAttack,
+        Self::VertLightAttack,
+        Self::VertHeavyAttack,
+    ];
+
     pub const ALL: [Self; CHARACTER_ANIMATION_ACTION_COUNT] = [
         Self::Idle,
         Self::Walk,
@@ -354,9 +363,9 @@ impl CharacterAnimationAction {
             // Slot/index remains stable for existing project and package data,
             // but the default Souls-style motor no longer drives it.
             Self::Backstep => "Legacy Quickstep",
-            Self::LightAttack => "Light Attack",
-            Self::HeavyAttack => "Heavy Attack",
-            Self::ComboAttack => "Combo Attack",
+            Self::LightAttack => "Horizon Light",
+            Self::HeavyAttack => "Horizon Heavy",
+            Self::ComboAttack => "Legacy Horizon Combo",
             Self::Block => "Block",
             Self::HitReact => "Hit React",
             Self::Death => "Death",
@@ -378,9 +387,9 @@ impl CharacterAnimationAction {
             Self::RunWindup => "Run Windup",
             Self::RunWinddown => "Run Winddown",
             Self::RunWinddownAlt => "Run Winddown (mirror)",
-            Self::VertLightAttack => "Vert Light Attack",
-            Self::VertHeavyAttack => "Vert Heavy Attack",
-            Self::VertComboAttack => "Vert Combo Attack",
+            Self::VertLightAttack => "Zenith Light",
+            Self::VertHeavyAttack => "Zenith Heavy",
+            Self::VertComboAttack => "Legacy Zenith Combo",
         }
     }
 
@@ -1155,6 +1164,17 @@ impl Default for AnimationSetResource {
 /// Offsets are integer model/engine units and rotations are Q12
 /// turn units (`4096 = 360°`) so project data can be cooked
 /// directly for the PS1 without preserving floats.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttachmentSocketTranslationSpace {
+    /// Translation is an offset from the geometry-bound joint anchor. This is
+    /// the normal authoring mode and keeps small offsets stable across clips.
+    #[default]
+    JointOffset,
+    /// Translation is already a model bind-space point. Kept for placements
+    /// authored in the original Animation Studio preview.
+    BindSpace,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentSocket {
     /// User-facing socket name (`right_hand_grip`, `back_slot`, …).
@@ -1164,6 +1184,9 @@ pub struct AttachmentSocket {
     /// Local translation relative to the joint pose.
     #[serde(default)]
     pub translation: [i32; 3],
+    /// Interpretation of [`Self::translation`].
+    #[serde(default)]
+    pub translation_space: AttachmentSocketTranslationSpace,
     /// Local Euler rotation in Q12 turns: X / Y / Z, 4096 per turn.
     #[serde(default)]
     pub rotation_q12: [i16; 3],
@@ -1176,6 +1199,7 @@ impl AttachmentSocket {
             name: default_character_socket(),
             joint: 0,
             translation: [0, 0, 0],
+            translation_space: AttachmentSocketTranslationSpace::JointOffset,
             rotation_q12: [0, 0, 0],
         }
     }
@@ -1186,6 +1210,7 @@ impl AttachmentSocket {
             name: "left_hand_grip".to_string(),
             joint: 0,
             translation: [0, 0, 0],
+            translation_space: AttachmentSocketTranslationSpace::JointOffset,
             rotation_q12: [0, 0, 0],
         }
     }
@@ -1305,6 +1330,151 @@ pub(crate) const fn default_combat_capsule_radius() -> u16 {
     96
 }
 
+/// Which half of the player's dual vitality system receives projectile damage.
+/// The visual palette is intentionally authored alongside this value so an
+/// attack communicates its gameplay channel at 320x240 without extra UI text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProjectileDamageChannel {
+    /// Ember-red Horizon vitality.
+    Horizon,
+    /// Signal-teal Zenith vitality.
+    #[default]
+    Zenith,
+}
+
+impl ProjectileDamageChannel {
+    pub const ALL: [Self; 2] = [Self::Horizon, Self::Zenith];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Horizon => "Horizon",
+            Self::Zenith => "Zenith",
+        }
+    }
+}
+
+/// Reusable projectile gameplay and presentation profile.
+///
+/// Animation events own *when* and *where* a shot is released; this resource
+/// owns what travels through the world. Multiple characters and attacks can
+/// therefore share one readable projectile language without duplicating
+/// collision, damage, trail, and impact tuning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectileResource {
+    #[serde(default)]
+    pub damage_channel: ProjectileDamageChannel,
+    /// Projectile displacement per 60 Hz simulation tick.
+    #[serde(default = "default_projectile_speed")]
+    pub speed: u16,
+    /// Maximum flight time in 60 Hz simulation ticks.
+    #[serde(default = "default_projectile_lifetime_ticks")]
+    pub lifetime_ticks: u16,
+    /// Swept-sphere collision radius in engine units.
+    #[serde(default = "default_projectile_radius")]
+    pub radius: u16,
+    #[serde(default = "default_projectile_damage")]
+    pub damage: u16,
+    #[serde(default = "default_projectile_poise_damage")]
+    pub poise_damage: u16,
+    /// Bright velocity-aligned needle core.
+    #[serde(default = "default_projectile_core_color")]
+    pub core_color: [u8; 3],
+    /// Wider additive halo and charge colour.
+    #[serde(default = "default_projectile_glow_color")]
+    pub glow_color: [u8; 3],
+    /// Expanding impact-shard colour.
+    #[serde(default = "default_projectile_impact_color")]
+    pub impact_color: [u8; 3],
+    /// Halo width relative to collision radius (`256 = 1x`).
+    #[serde(default = "default_projectile_glow_scale_q8")]
+    pub glow_scale_q8: u16,
+    /// Visual needle length expressed in 60 Hz velocity steps.
+    #[serde(default = "default_projectile_length_ticks")]
+    pub length_ticks: u8,
+    /// Number of tapered ghosts behind the live core.
+    #[serde(default = "default_projectile_trail_segments")]
+    pub trail_segments: u8,
+    /// 60 Hz velocity steps between trail ghosts.
+    #[serde(default = "default_projectile_trail_spacing_ticks")]
+    pub trail_spacing_ticks: u8,
+    /// Lifetime of the expanding impact flare.
+    #[serde(default = "default_projectile_impact_lifetime_ticks")]
+    pub impact_lifetime_ticks: u8,
+}
+
+pub(crate) const fn default_projectile_speed() -> u16 {
+    112
+}
+
+pub(crate) const fn default_projectile_lifetime_ticks() -> u16 {
+    180
+}
+
+pub(crate) const fn default_projectile_radius() -> u16 {
+    48
+}
+
+pub(crate) const fn default_projectile_damage() -> u16 {
+    18
+}
+
+pub(crate) const fn default_projectile_poise_damage() -> u16 {
+    8
+}
+
+pub(crate) const fn default_projectile_core_color() -> [u8; 3] {
+    [208, 255, 244]
+}
+
+pub(crate) const fn default_projectile_glow_color() -> [u8; 3] {
+    [62, 214, 198]
+}
+
+pub(crate) const fn default_projectile_impact_color() -> [u8; 3] {
+    [112, 232, 208]
+}
+
+pub(crate) const fn default_projectile_glow_scale_q8() -> u16 {
+    448
+}
+
+pub(crate) const fn default_projectile_length_ticks() -> u8 {
+    2
+}
+
+pub(crate) const fn default_projectile_trail_segments() -> u8 {
+    3
+}
+
+pub(crate) const fn default_projectile_trail_spacing_ticks() -> u8 {
+    1
+}
+
+pub(crate) const fn default_projectile_impact_lifetime_ticks() -> u8 {
+    10
+}
+
+impl Default for ProjectileResource {
+    fn default() -> Self {
+        Self {
+            damage_channel: ProjectileDamageChannel::Zenith,
+            speed: default_projectile_speed(),
+            lifetime_ticks: default_projectile_lifetime_ticks(),
+            radius: default_projectile_radius(),
+            damage: default_projectile_damage(),
+            poise_damage: default_projectile_poise_damage(),
+            core_color: default_projectile_core_color(),
+            glow_color: default_projectile_glow_color(),
+            impact_color: default_projectile_impact_color(),
+            glow_scale_q8: default_projectile_glow_scale_q8(),
+            length_ticks: default_projectile_length_ticks(),
+            trail_segments: default_projectile_trail_segments(),
+            trail_spacing_ticks: default_projectile_trail_spacing_ticks(),
+            impact_lifetime_ticks: default_projectile_impact_lifetime_ticks(),
+        }
+    }
+}
+
 /// Gameplay role of a rig-attached combat capsule.
 ///
 /// Receiving volumes are continuously present (invulnerability remains an
@@ -1339,10 +1509,17 @@ pub enum CombatCapsuleRole {
     ProjectileEmitter {
         /// Character action whose clip drives the release.
         action: CharacterAnimationAction,
+        /// First frame of the readable charge-up presentation.
+        #[serde(default)]
+        charge_start_frame: u16,
         /// First animation frame in which the projectile may release.
         active_start_frame: u16,
         /// Last animation frame in which the projectile may release.
         active_end_frame: u16,
+        /// Reusable projectile gameplay/presentation resource. Legacy fields
+        /// below remain as a backwards-compatible fallback when this is None.
+        #[serde(default)]
+        projectile: Option<ResourceId>,
         /// Projectile displacement per 60 Hz simulation tick.
         speed: u16,
         /// Maximum lifetime in 60 Hz simulation ticks.
@@ -2264,12 +2441,87 @@ impl BoostModuleKind {
     }
 }
 
+/// Player statistic modified by a collectible module.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoostStatKind {
+    #[default]
+    HorizonAttack,
+    ZenithAttack,
+    Defence,
+    MovementSpeed,
+    AttackSpeed,
+}
+
+impl BoostStatKind {
+    pub const ALL: [Self; 5] = [
+        Self::HorizonAttack,
+        Self::ZenithAttack,
+        Self::Defence,
+        Self::MovementSpeed,
+        Self::AttackSpeed,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::HorizonAttack => "Horizon Attack",
+            Self::ZenithAttack => "Zenith Attack",
+            Self::Defence => "Defence",
+            Self::MovementSpeed => "Movement Speed",
+            Self::AttackSpeed => "Attack Speed",
+        }
+    }
+
+    pub const fn runtime_index(self) -> usize {
+        match self {
+            Self::HorizonAttack => psx_level::boost_stat::HORIZON_ATTACK,
+            Self::ZenithAttack => psx_level::boost_stat::ZENITH_ATTACK,
+            Self::Defence => psx_level::boost_stat::DEFENCE,
+            Self::MovementSpeed => psx_level::boost_stat::MOVEMENT_SPEED,
+            Self::AttackSpeed => psx_level::boost_stat::ATTACK_SPEED,
+        }
+    }
+}
+
+/// One signed percentage effect carried by a unique module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoostStatModifier {
+    #[serde(default)]
+    pub stat: BoostStatKind,
+    #[serde(default)]
+    pub percent: i16,
+}
+
+impl Default for BoostStatModifier {
+    fn default() -> Self {
+        Self {
+            stat: BoostStatKind::HorizonAttack,
+            percent: 10,
+        }
+    }
+}
+
 /// Resource-backed inventory module that can be granted by a point of
 /// interest and assigned to a vitality slot.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoostModuleResource {
+    /// Legacy built-in protocol used only when an old resource has no authored
+    /// percentage effects. New modules are defined directly by their effects.
     #[serde(default)]
     pub kind: BoostModuleKind,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub modifiers: Vec<BoostStatModifier>,
+}
+
+impl Default for BoostModuleResource {
+    fn default() -> Self {
+        Self {
+            kind: BoostModuleKind::Rupture,
+            description: "Recovered boost module.".to_string(),
+            modifiers: vec![BoostStatModifier::default()],
+        }
+    }
 }
 
 /// Resource payloads available to editor scenes.
@@ -2336,6 +2588,8 @@ pub enum ResourceData {
     /// Equipment/weapon authoring resource. A Weapon references a
     /// Model for visuals and owns grip + hitbox data for combat.
     Weapon(WeaponResource),
+    /// Reusable typed combat projectile with PS1 presentation tuning.
+    Projectile(ProjectileResource),
     /// Collectable vitality boost module.
     BoostModule(BoostModuleResource),
 }
@@ -2357,6 +2611,7 @@ impl ResourceData {
             Self::Audio { .. } => "Audio",
             Self::Character(_) => "Character Profile",
             Self::Weapon(_) => "Weapon",
+            Self::Projectile(_) => "Projectile",
             Self::BoostModule(_) => "Boost Module",
         }
     }

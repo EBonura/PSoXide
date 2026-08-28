@@ -224,12 +224,12 @@
     resources: [
         /*[0]*/ (
             id: (5),
-            name: "Cortex Humanoid 22-Bone Skeleton",
+            name: "Light Enemy Skeleton",
             data: Skeleton((
                 joint_count: 22,
                 parents: [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(3), Some(6), Some(7), Some(8), Some(3), Some(10), Some(11), Some(12), Some(0), Some(14), Some(15), Some(16), Some(0), Some(18), Some(19), Some(20)],
                 signature: "psx-parent-v1:22:root,0,1,2,3,4,3,6,7,8,3,10,11,12,0,14,15,16,0,18,19,20",
-                note: "Shared by the Aletha and Rust Mantis starter profiles",
+                note: "Shared by the Light Enemy variants",
             )),
         ),
         /*[1]*/ (
@@ -272,7 +272,7 @@
         ),
         /*[4]*/ (
             id: (15),
-            name: "Rust Mantis",
+            name: "Light Enemy Model",
             data: Model((
                 model_path: "assets/models/rust_mantis/rust_mantis.psxmdl",
                 source_path: None,
@@ -360,7 +360,7 @@
         ),
         /*[10]*/ (
             id: (98),
-            name: "Rust Mantis / Idle",
+            name: "Light Enemy / Idle",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/idle.psxanim",
                 skeleton: Some((5)),
@@ -374,7 +374,7 @@
         ),
         /*[11]*/ (
             id: (99),
-            name: "Rust Mantis / Walk",
+            name: "Light Enemy / Walk",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/walk.psxanim",
                 skeleton: Some((5)),
@@ -388,7 +388,7 @@
         ),
         /*[12]*/ (
             id: (100),
-            name: "Rust Mantis / Run",
+            name: "Light Enemy / Run",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/run.psxanim",
                 skeleton: Some((5)),
@@ -740,7 +740,7 @@
         ),
         /*[39]*/ (
             id: (133),
-            name: "Rust Mantis Starter Animation Set",
+            name: "Light Enemy Animation Set",
             data: AnimationSet((
                 skeleton: Some((5)),
                 idle_clip: None,
@@ -810,7 +810,7 @@
         ),
         /*[42]*/ (
             id: (140),
-            name: "Rust Mantis Enemy",
+            name: "Light Enemy",
             data: Character((
                 model: Some((15)),
                 material: None,
@@ -986,7 +986,7 @@
         ),
         /*[51]*/ (
             id: (149),
-            name: "Rust Mantis / Turn In Place",
+            name: "Light Enemy / Turn In Place",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/turn.psxanim",
                 skeleton: Some((5)),
@@ -1000,7 +1000,7 @@
         ),
         /*[52]*/ (
             id: (150),
-            name: "Rust Mantis / Alert",
+            name: "Light Enemy / Alert",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/alert.psxanim",
                 skeleton: Some((5)),

@@ -55,9 +55,7 @@ pub(super) fn draw_water_wade_splash(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_projectile_bolt(
-    position: [i32; 3],
-    radius: u16,
-    tint_rgb: [u8; 3],
+    projectile: psx_game_runtime::projectiles::ProjectileSnapshot,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
@@ -66,9 +64,49 @@ pub(super) fn draw_projectile_bolt(
     primitive_packets: &mut PrimitivePacketArena<'_>,
 ) -> usize {
     psx_game_runtime::particles::draw_projectile_bolt(
-        position,
-        radius,
-        tint_rgb,
+        projectile,
+        camera,
+        projector,
+        depth_range,
+        particle_material,
+        ot,
+        primitive_packets,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_projectile_charge(
+    charge: psx_game_runtime::combat::AuthoredProjectileCharge,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    psx_game_runtime::particles::draw_projectile_charge(
+        charge,
+        camera,
+        projector,
+        depth_range,
+        particle_material,
+        ot,
+        primitive_packets,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_projectile_impact(
+    impact: psx_game_runtime::projectiles::ProjectileImpactEffect,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    psx_game_runtime::particles::draw_projectile_impact(
+        impact,
         camera,
         projector,
         depth_range,

@@ -1857,7 +1857,7 @@ fn whole_brush_gizmo_rotates_and_scales_the_full_multi_selection() {
     let tool = tool_impl_3d(ViewTool::Select);
 
     let (mut workspace, originals, rect) = build();
-    let (pivot, _, _) = workspace.brush_gizmo_context().unwrap();
+    let (pivot, _, _, _) = workspace.brush_gizmo_context().unwrap();
     assert_eq!(pivot, [192.0, 64.0, 64.0]);
     workspace.set_transform_gizmo_mode(TransformGizmoMode::Scale);
     let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
@@ -1954,6 +1954,7 @@ fn element_gizmo_rotation_and_scale_snap_every_vertex_to_active_grid() {
             index: 0,
             base: base.clone(),
             others: Vec::new(),
+            element_others: Vec::new(),
             targets: Vec::new(),
             center: [128.0, 96.0, 64.0],
             axis: if rotate { 1 } else { 0 },
@@ -2050,6 +2051,102 @@ fn face_element_gizmo_drag_moves_the_face_via_real_egui() {
     assert!(workspace.project.active_scene().brushes[0]
         .solve()
         .is_valid());
+}
+
+#[test]
+fn face_element_gizmo_moves_the_full_document_wide_selection() {
+    let originals = vec![
+        psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]),
+        psxed_project::brush::Brush::cuboid([256, 0, 0], [384, 128, 128]),
+    ];
+    let mut project = ProjectDocument::new("multi-brush face gizmo");
+    project
+        .active_scene_mut()
+        .brushes
+        .extend(originals.iter().cloned());
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("multi-brush-face-gizmo"), project);
+    workspace.active_tool = ViewTool::Select;
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [1200, 900, -1200];
+    let (yaw, pitch) = camera_angles_to_look_at([1200, 900, -1200], [192, 128, 64]).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    workspace.set_brush_edit_mode(BrushEditMode::Face);
+    workspace.selected_brush = Some(1);
+    workspace.selected_brushes = vec![0, 1];
+    workspace.selected_brush_face = Some(5);
+    workspace.selected_brush_faces = vec![(0, 5), (1, 5)];
+    workspace.selected_brush_elements = vec![BrushElement::Face(5)];
+
+    let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+    let (pivot, _, _, companions) = workspace.brush_gizmo_context().expect("shared gizmo");
+    assert_eq!(companions.len(), 1, "the earlier face remains a target");
+    assert!((pivot[0] - 192.0).abs() <= 0.5, "shared pivot: {pivot:?}");
+    let polylines = workspace
+        .brush_element_gizmo_polylines_3d(viewport)
+        .expect("gizmo axes project");
+    let start = polyline_grab_point(&polylines[1]);
+    run_real_egui_viewport_drag(&mut workspace, start, start + Vec2::new(0.0, -48.0));
+
+    assert!(workspace.is_dirty(), "shared face gizmo drag must commit");
+    for (index, original) in originals.iter().enumerate() {
+        let moved = &workspace.project.active_scene().brushes[index];
+        assert_ne!(moved, original, "selected face on brush {index} moved");
+        assert!(moved.solve().is_valid(), "brush {index} remains valid");
+    }
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes, originals);
+}
+
+#[test]
+fn element_gizmo_moves_every_selected_edge_and_vertex() {
+    for mode in [BrushEditMode::Edge, BrushEditMode::Vertex] {
+        let original = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        let (mut workspace, _) = handle_test_workspace(original.clone());
+        workspace.active_tool = ViewTool::Select;
+        workspace.set_brush_edit_mode(mode);
+        let top = original.solve().polygons[5].clone().expect("top polygon");
+        workspace.selected_brush_elements = match mode {
+            BrushEditMode::Vertex => top
+                .verts
+                .iter()
+                .map(|vertex| {
+                    BrushElement::Vertex(crate::workspace::brush_elements::quantize_element_point(
+                        *vertex,
+                    ))
+                })
+                .collect(),
+            BrushEditMode::Edge => (0..top.verts.len())
+                .map(|edge| {
+                    let (a, b) = crate::workspace::brush_elements::edge_element_key(
+                        top.verts[edge],
+                        top.verts[(edge + 1) % top.verts.len()],
+                    );
+                    BrushElement::Edge(a, b)
+                })
+                .collect(),
+            _ => unreachable!(),
+        };
+
+        let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+        let (_, targets, _, companions) = workspace.brush_gizmo_context().expect("component gizmo");
+        assert_eq!(targets.len(), 4, "{mode:?} includes the full top loop");
+        assert!(companions.is_empty());
+        let polylines = workspace
+            .brush_element_gizmo_polylines_3d(viewport)
+            .expect("gizmo axes project");
+        let start = polyline_grab_point(&polylines[1]);
+        run_real_egui_viewport_drag(&mut workspace, start, start + Vec2::new(0.0, -48.0));
+
+        let moved = workspace.project.active_scene().brushes[0].solve();
+        assert!(workspace.is_dirty(), "{mode:?} gizmo drag commits");
+        assert!(moved.max[1] > 128.0, "{mode:?} raises every top component");
+        assert_eq!(moved.min[1], 0.0, "{mode:?} leaves the floor untouched");
+        workspace.do_undo();
+        assert_eq!(workspace.project.active_scene().brushes[0], original);
+    }
 }
 
 #[test]

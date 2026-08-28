@@ -60,7 +60,7 @@
                 /*[3]*/ (id: (4), name: "Animator", kind: Animator(clip: Some(28), action_clips: [], autoplay: true, pose_frame: 0), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((2)), children: []),
                 /*[4]*/ (id: (5), name: "Character Controller", kind: CharacterController(character: Some((1655)), settings: (radius: 188, height: 1024, walk_speed: 8, run_speed: 72, turn_speed_degrees_per_second: 359, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 10, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 164, roll_active_frames: 17, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6, enemy: None), player: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((2)), children: []),
                 /*[5]*/ (id: (6), name: "Camera", kind: Camera(settings: (distance: 2600, height: 1400, target_height: 800, lock_rise_percent: 25, min_floor_clearance: 108, orbit_speed_level: 3, position_lag_shift: 6, focus_lag_shift: 2, distance_lag_shift: 3)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((2)), children: []),
-                /*[6]*/ (id: (7), name: "Rust Mantis", kind: Entity, transform: (translation: (8704.0, 0.0, -3072.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: [(8), (9), (10)]),
+                /*[6]*/ (id: (7), name: "Light Enemy", kind: Entity, transform: (translation: (8704.0, 0.0, -3072.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: [(8), (9), (10)]),
                 /*[7]*/ (id: (8), name: "Model Renderer", kind: ModelRenderer(model: Some((1637)), material: None, visual_offset: (0, 0, 0), visual_scale_q8: 284), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((7)), children: []),
                 /*[8]*/ (id: (9), name: "Animator", kind: Animator(clip: Some(0), action_clips: [], autoplay: true, pose_frame: 0), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((7)), children: []),
                 /*[9]*/ (id: (10), name: "Character Controller", kind: CharacterController(character: Some((1656)), settings: (radius: 208, height: 1124, walk_speed: 28, run_speed: 96, turn_speed_degrees_per_second: 180, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 10, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 96, roll_active_frames: 14, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6, enemy: Some((aggro_radius: 2332, patrol_offset: (0, 0, -6000), patrol_wait_ticks: 60, reaction_ticks: 42, preferred_distance: 768, spacing_tolerance: 128, decision_interval_ticks: 12, circle_chance: 65, attack_priority: 4, attack_cooldown_ticks: 45, group_attack_delay_ticks: 18, windup_ticks: 20, recovery_ticks: 24, poise: 100, touch_damage: 10, max_health: 100))), player: false), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((7)), children: []),
@@ -1329,17 +1329,17 @@
     resources: [
         /*[0]*/ (
             id: (1635),
-            name: "Cortex Humanoid 22-Bone Skeleton",
+            name: "Light Enemy Skeleton",
             data: Skeleton((
                 joint_count: 22,
                 parents: [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(3), Some(6), Some(7), Some(8), Some(3), Some(10), Some(11), Some(12), Some(0), Some(14), Some(15), Some(16), Some(0), Some(18), Some(19), Some(20)],
                 signature: "psx-parent-v1:22:root,0,1,2,3,4,3,6,7,8,3,10,11,12,0,14,15,16,0,18,19,20",
-                note: "Shared by the Aletha and Rust Mantis starter profiles",
+                note: "Shared by the Light Enemy variants",
             )),
         ),
         /*[1]*/ (
             id: (1637),
-            name: "Rust Mantis",
+            name: "Light Enemy Model",
             data: Model((
                 model_path: "assets/models/rust_mantis/rust_mantis.psxmdl",
                 source_path: Some("source_assets/characters/rust_mantis.glb"),
@@ -1354,7 +1354,7 @@
         ),
         /*[2]*/ (
             id: (1651),
-            name: "Rust Mantis / Idle",
+            name: "Light Enemy / Idle",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/idle.psxanim",
                 skeleton: Some((1635)),
@@ -1368,7 +1368,7 @@
         ),
         /*[3]*/ (
             id: (1652),
-            name: "Rust Mantis / Walk",
+            name: "Light Enemy / Walk",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/walk.psxanim",
                 skeleton: Some((1635)),
@@ -1382,7 +1382,7 @@
         ),
         /*[4]*/ (
             id: (1653),
-            name: "Rust Mantis / Run",
+            name: "Light Enemy / Run",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/run.psxanim",
                 skeleton: Some((1635)),
@@ -1396,7 +1396,7 @@
         ),
         /*[5]*/ (
             id: (4088),
-            name: "Rust Mantis / Strafe Left",
+            name: "Light Enemy / Strafe Left",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/strafe_left.psxanim",
                 skeleton: Some((1635)),
@@ -1410,7 +1410,7 @@
         ),
         /*[6]*/ (
             id: (4089),
-            name: "Rust Mantis / Strafe Right",
+            name: "Light Enemy / Strafe Right",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/strafe_right.psxanim",
                 skeleton: Some((1635)),
@@ -1424,7 +1424,7 @@
         ),
         /*[7]*/ (
             id: (1654),
-            name: "Rust Mantis Starter Animation Set",
+            name: "Light Enemy Animation Set",
             data: AnimationSet((
                 skeleton: Some((1635)),
                 idle_clip: None,
@@ -1479,7 +1479,7 @@
         ),
         /*[9]*/ (
             id: (1656),
-            name: "Rust Mantis Enemy",
+            name: "Light Enemy",
             data: Character((
                 model: Some((1637)),
                 material: None,
@@ -2354,7 +2354,7 @@
         ),
         /*[70]*/ (
             id: (4090),
-            name: "mantis_combat_death",
+            name: "Light Enemy / Death",
             data: AnimationClip((
                 psxanim_path: "assets/animations/mantis_combat/death.psxanim",
                 skeleton: Some((1635)),
@@ -2368,7 +2368,7 @@
         ),
         /*[71]*/ (
             id: (4091),
-            name: "mantis_combat_hit_react",
+            name: "Light Enemy / Hit React",
             data: AnimationClip((
                 psxanim_path: "assets/animations/mantis_combat/hit_react.psxanim",
                 skeleton: Some((1635)),
@@ -2382,7 +2382,7 @@
         ),
         /*[72]*/ (
             id: (4092),
-            name: "mantis_combat_light_attack",
+            name: "Light Enemy / Ranged Attack",
             data: AnimationClip((
                 psxanim_path: "assets/animations/mantis_combat/light_attack.psxanim",
                 skeleton: Some((1635)),
@@ -2753,7 +2753,7 @@
         ),
         /*[94]*/ (
             id: (5021),
-            name: "mantis_combat_idle",
+            name: "Light Enemy / Combat Idle",
             data: AnimationClip((
                 psxanim_path: "assets/animations/mantis_combat/idle.psxanim",
                 skeleton: Some((1635)),
@@ -2835,7 +2835,7 @@
         ),
         /*[99]*/ (
             id: (5026),
-            name: "Rust Mantis / Turn In Place",
+            name: "Light Enemy / Turn In Place",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/turn.psxanim",
                 skeleton: Some((1635)),
@@ -2849,7 +2849,7 @@
         ),
         /*[100]*/ (
             id: (5027),
-            name: "Rust Mantis / Alert",
+            name: "Light Enemy / Alert",
             data: AnimationClip((
                 psxanim_path: "assets/animations/rust_mantis_starter/alert.psxanim",
                 skeleton: Some((1635)),

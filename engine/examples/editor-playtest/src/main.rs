@@ -24,8 +24,8 @@
 //! * Right stick        -- camera yaw; vertical adjusts camera height.
 //! * CIRCLE tap        -- directional roll; lock-on remains active.
 //! * CIRCLE hold       -- run while moving.
-//! * R1                -- light attack.
-//! * R2                -- heavy attack.
+//! * R1 / R2           -- Horizon light / heavy attack.
+//! * L1 / L2           -- Zenith light / heavy attack.
 
 #![no_std]
 #![no_main]
@@ -82,8 +82,8 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
-    BoostInventory, BoostProtocol, BoostSlotId, DualVitality, PowerUpLoadout, VitalityChannelId,
-    VitalityModifiers,
+    BoostInventory, BoostModuleId, BoostSlotId, DualVitality, PowerUpLoadout, VitalityChannelId,
+    VitalityModifiers, module_stat_bonus_q12,
 };
 use psx_game_runtime::{poi::MessageController, save::SaveBlock};
 use psx_gpu::{
@@ -182,7 +182,7 @@ use generated::{
     BOX_PROP_SURFACES, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS,
     COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, ENTITIES, EQUIPMENT, GAME_ENTITIES,
-    IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, INTERACTABLE_MESSAGE_PAGES, LIGHTS, LOGIC,
+    BOOST_MODULES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, INTERACTABLE_MESSAGE_PAGES, LIGHTS, LOGIC,
     MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
     MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
     PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS,
@@ -349,11 +349,6 @@ struct Playtest {
     loco: LocoPhase,
     /// Which gait's clips the phase is playing (walk or run).
     loco_gait: Gait,
-    /// Charge attack: tick the button went down, and the level reached
-    /// (0 light, 1 heavy, 2 combo). `None` when not charging.
-    /// Tick a shoulder button first went down and which axis it belongs to,
-    /// while the pair window runs.
-    attack_press: Option<(SimTick, u8)>,
     /// Tick the current locomotion phase began.
     loco_start_tick: SimTick,
     /// Last analog move vector while the stick was active; the winddown
@@ -381,6 +376,8 @@ struct Playtest {
     /// Fixed-capacity swept combat projectiles. All-zero is an empty valid
     /// state, so it remains in scene BSS beside the entity SoA.
     combat_projectiles: RuntimeCombatProjectiles,
+    /// Fixed-capacity visual aftermath for stopped combat projectiles.
+    combat_projectile_impacts: RuntimeProjectileImpactEffects,
     /// Logic-entity runtime (delay queue, master gating, fan-out)
     /// over the cooked `LOGIC` records (phase 3).
     logic: RuntimeLogic,
@@ -391,14 +388,14 @@ struct Playtest {
     /// death sequence arms; legacy untyped damage drains Horizon first and
     /// spills its excess into Zenith.
     player_vitality: DualVitality,
-    /// Four runtime-assignable protocols around the two health endpoints.
+    /// Four runtime-assignable unique modules around the two health endpoints.
     power_up_loadout: PowerUpLoadout,
-    /// Collected protocol copies which are not currently installed in a socket.
+    /// Collected unique modules which are not currently installed in a socket.
     power_up_inventory: BoostInventory,
     /// Socket targeted by the inventory detail/assignment flow.
     selected_power_up_slot: u8,
     /// Collected item highlighted in the inventory browser.
-    selected_power_up_item: BoostProtocol,
+    selected_power_up_item: BoostModuleId,
     /// Remaining death-sequence ticks, shared by every death cause
     /// (combat damage, BSP liquid hazards, lethal water). Non-zero locks
     /// player input until the shared checkpoint/spawn respawn completes.
@@ -524,6 +521,8 @@ struct Playtest {
     prepared_poi_page_type_frame: u16,
     overlay_poi_panel_frame: u16,
     overlay_poi_page_type_frame: u16,
+    /// Unique reward currently replacing the just-closed POI message panel.
+    acquired_module: BoostModuleId,
     /// Save-persistent point-of-interest read/reward state.
     poi_save: SaveBlock,
     /// Card-load gate populated during the authored loading screen.
@@ -624,7 +623,6 @@ impl Playtest {
         addr_of_mut!((*scene).player_actor_pose).write(None);
         addr_of_mut!((*scene).previous_player_actor_pose).write(None);
         addr_of_mut!((*scene).lock_target).write(None);
-        addr_of_mut!((*scene).attack_press).write(None);
         addr_of_mut!((*scene).soft_lock_target).write(None);
         addr_of_mut!((*scene).active_interactable).write(None);
         addr_of_mut!((*scene).checkpoint).write(None);
@@ -683,7 +681,7 @@ impl Playtest {
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
-        self.power_up_inventory = BoostInventory::STARTER;
+        self.power_up_inventory = BoostInventory::EMPTY;
         self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
         self.poi_save_loaded = false;
         self.poi_save_load_attempted = false;
@@ -695,7 +693,8 @@ impl Playtest {
         self.overlay_poi_panel_frame = 0;
         self.overlay_poi_page_type_frame = 0;
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
-        self.selected_power_up_item = BoostProtocol::Rupture;
+        self.selected_power_up_item = BoostModuleId::NONE;
+        self.acquired_module = BoostModuleId::NONE;
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
         self.anim_state = PlayerAnim::Idle;
         self.anim_blend_from = None;

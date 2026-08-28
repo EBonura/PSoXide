@@ -179,10 +179,11 @@ recorded traversal before adding architectural detail.
 Playtest controls:
 
 - Left stick or D-pad: camera-relative movement.
-- Right stick: orbit camera; L1 recentres it.
+- Right stick: orbit camera.
 - Circle tap: directional roll; Circle held while moving: run.
 - R3: lock/unlock the most central live target; right-stick flick switches.
-- R1: light attack; R2: heavy attack; L2: combo attack.
+- R1 / R2: Horizon light / heavy attack.
+- L1 / L2: Zenith light / heavy attack.
 - Cross: interact with doors and dismiss the checkpoint overlay.
 - Select: debug free-orbit camera, for diagnosis rather than normal play.
 
