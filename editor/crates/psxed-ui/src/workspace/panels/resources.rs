@@ -859,7 +859,7 @@ impl EditorWorkspace {
         // Snapshot resource id + path first so cache mutation below
         // cannot fight the immutable project-resource walk.
         let project_root = self.project_dir.clone();
-        let sources: Vec<(ResourceId, String, Option<String>, Option<[u8; 3]>)> = self
+        let sources: Vec<(ResourceId, String, Option<String>, Option<[u8; 3]>, bool)> = self
             .project
             .resources
             .iter()
@@ -874,12 +874,16 @@ impl EditorWorkspace {
                         psxt_path.clone(),
                         Some(psxt_path.clone()),
                         None,
+                        false,
                     )),
                     ResourceData::Material(material) => Some((
                         resource.id,
                         material_thumbnail_signature(&self.project, resource.id),
                         None,
                         Some(material.tint),
+                        material.animation.mode == MaterialAnimationMode::Flipbook
+                            && material.animation.flipbook.source_a.is_some()
+                            && material.animation.flipbook.source_b.is_some(),
                     )),
                     ResourceData::Model(model) => {
                         let psxt_path = model.texture_path.as_ref()?;
@@ -888,14 +892,15 @@ impl EditorWorkspace {
                             psxt_path.clone(),
                             Some(psxt_path.clone()),
                             None,
+                            false,
                         ))
                     }
                     _ => None,
                 }
             })
             .collect();
-        let alive: HashSet<ResourceId> = sources.iter().map(|(id, _, _, _)| *id).collect();
-        for (id, signature, psxt_path, material_tint) in sources {
+        let alive: HashSet<ResourceId> = sources.iter().map(|(id, _, _, _, _)| *id).collect();
+        for (id, signature, psxt_path, material_tint, two_material_cycle) in sources {
             if let Some(entry) = self.texture_thumbs.get(&id) {
                 if entry.signature == signature {
                     continue;
@@ -918,10 +923,16 @@ impl EditorWorkspace {
                     .flatten()
                     .map(|(_, bytes)| bytes)
             };
-            let Some((mut image, stats)) = bytes.as_deref().and_then(decode_psxt_thumbnail) else {
+            let Some((mut image, mut stats)) = bytes.as_deref().and_then(decode_psxt_thumbnail)
+            else {
                 self.remove_texture_thumb(id);
                 continue;
             };
+            if two_material_cycle {
+                image = Self::first_horizontal_cycle_frame(&image);
+                stats.width /= 2;
+                stats.pixel_bytes /= 2;
+            }
             if let Some(tint) = material_tint {
                 modulate_ps1_thumbnail(&mut image, tint);
             }
@@ -937,6 +948,24 @@ impl EditorWorkspace {
             .collect();
         for id in stale {
             self.remove_texture_thumb(id);
+        }
+    }
+
+    /// Resource cards present the selected authoring material, never the
+    /// cooker-owned A|B atlas. Material Lab itself animates both frames.
+    fn first_horizontal_cycle_frame(image: &ColorImage) -> ColorImage {
+        let width = image.size[0] / 2;
+        if width == 0 {
+            return image.clone();
+        }
+        let height = image.size[1];
+        let mut pixels = Vec::with_capacity(width * height);
+        for row in image.pixels.chunks_exact(image.size[0]) {
+            pixels.extend_from_slice(&row[..width]);
+        }
+        ColorImage {
+            size: [width, height],
+            pixels,
         }
     }
 
@@ -1295,14 +1324,21 @@ fn material_thumbnail_signature(project: &ProjectDocument, id: ResourceId) -> St
         let ResourceData::Material(material) = &resource.data else {
             return;
         };
-        if material.texture_mode != MaterialTextureMode::Transition {
-            return;
-        }
-        stack.push(id);
-        for source in [material.transition.source_a, material.transition.source_b]
-            .into_iter()
-            .flatten()
+        let sources = if material.animation.mode == MaterialAnimationMode::Flipbook
+            && (material.animation.flipbook.source_a.is_some()
+                || material.animation.flipbook.source_b.is_some())
         {
+            [
+                material.animation.flipbook.source_a,
+                material.animation.flipbook.source_b,
+            ]
+        } else if material.texture_mode == MaterialTextureMode::Transition {
+            [material.transition.source_a, material.transition.source_b]
+        } else {
+            return;
+        };
+        stack.push(id);
+        for source in sources.into_iter().flatten() {
             append(project, source, stack, out);
         }
         stack.pop();

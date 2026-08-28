@@ -505,12 +505,16 @@ impl MaterialAnimationMode {
         match self {
             Self::Static => "Static",
             Self::UvScroll => "UV Scroll",
-            Self::Flipbook => "Flipbook Atlas",
+            Self::Flipbook => "Cycle Materials",
         }
     }
 }
 
-/// Grid-packed flipbook contained in one resident 4bpp texture.
+/// Two-material authoring cycle plus its compact runtime timing/layout.
+///
+/// Authors select `source_a` and `source_b`. The host cooker resolves those
+/// materials and creates the grid-packed 4bpp runtime texture; the PS1 sees
+/// only the numeric layout and timing fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterialFlipbook {
     /// Number of frame columns in the texture.
@@ -523,6 +527,12 @@ pub struct MaterialFlipbook {
     pub ticks_per_frame: u8,
     /// Initial frame index.
     pub phase: u8,
+    /// First authoring material. Its resolved image becomes runtime frame A.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_a: Option<ResourceId>,
+    /// Second authoring material. Its resolved image becomes runtime frame B.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_b: Option<ResourceId>,
 }
 
 impl Default for MaterialFlipbook {
@@ -533,6 +543,8 @@ impl Default for MaterialFlipbook {
             frame_count: 4,
             ticks_per_frame: 6,
             phase: 0,
+            source_a: None,
+            source_b: None,
         }
     }
 }
@@ -540,10 +552,25 @@ impl Default for MaterialFlipbook {
 impl MaterialFlipbook {
     /// Clamp authored values to a non-empty atlas grid.
     pub const fn normalized(self) -> Self {
-        let columns = if self.columns == 0 { 1 } else { self.columns };
-        let rows = if self.rows == 0 { 1 } else { self.rows };
+        let two_material_sources = self.source_a.is_some() || self.source_b.is_some();
+        let columns = if two_material_sources {
+            2
+        } else if self.columns == 0 {
+            1
+        } else {
+            self.columns
+        };
+        let rows = if two_material_sources {
+            1
+        } else if self.rows == 0 {
+            1
+        } else {
+            self.rows
+        };
         let capacity = columns.saturating_mul(rows);
-        let frame_count = if self.frame_count == 0 {
+        let frame_count = if two_material_sources {
+            2
+        } else if self.frame_count == 0 {
             1
         } else if self.frame_count > capacity {
             capacity
@@ -560,6 +587,8 @@ impl MaterialFlipbook {
                 self.ticks_per_frame
             },
             phase: self.phase % frame_count,
+            source_a: self.source_a,
+            source_b: self.source_b,
         }
     }
 }
@@ -999,6 +1028,8 @@ impl MaterialResource {
                     frame_count: 4,
                     ticks_per_frame: 6,
                     phase: 0,
+                    source_a: None,
+                    source_b: None,
                 },
             },
             secondary_layer: None,
@@ -1060,6 +1091,8 @@ impl MaterialResource {
                     frame_count: 4,
                     ticks_per_frame: 6,
                     phase: 0,
+                    source_a: None,
+                    source_b: None,
                 },
             },
             secondary_layer: None,
@@ -1356,6 +1389,8 @@ impl MaterialVersionRecipe {
     fn resource_reference_count(&self, id: ResourceId) -> usize {
         usize::from(self.transition.source_a == Some(id))
             + usize::from(self.transition.source_b == Some(id))
+            + usize::from(self.animation.flipbook.source_a == Some(id))
+            + usize::from(self.animation.flipbook.source_b == Some(id))
             + self.secondary_layer.as_ref().map_or(0, |layer| {
                 usize::from(layer.transition.source_a == Some(id))
                     + usize::from(layer.transition.source_b == Some(id))
@@ -1371,8 +1406,10 @@ impl MaterialVersionRecipe {
                 0
             }
         };
-        let mut cleared =
-            clear(&mut self.transition.source_a) + clear(&mut self.transition.source_b);
+        let mut cleared = clear(&mut self.transition.source_a)
+            + clear(&mut self.transition.source_b)
+            + clear(&mut self.animation.flipbook.source_a)
+            + clear(&mut self.animation.flipbook.source_b);
         if let Some(layer) = self.secondary_layer.as_mut() {
             cleared +=
                 clear(&mut layer.transition.source_a) + clear(&mut layer.transition.source_b);
