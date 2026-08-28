@@ -256,6 +256,7 @@ pub(crate) fn push_image_prop(
     cylindrical_billboard: bool,
     collision_enabled: bool,
     collision_size: [u16; 3],
+    destructible: u16,
     texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     image_props: &mut Vec<PlaytestImageProp>,
@@ -307,6 +308,7 @@ pub(crate) fn push_image_prop(
         baked_vertex_rgb: [rgb_tuple(tint_rgb); 4],
         collision_min,
         collision_max,
+        destructible,
         flags: (if cylindrical_billboard {
             image_prop_flags::CYLINDRICAL_BILLBOARD
         } else {
@@ -384,6 +386,213 @@ pub(crate) fn image_prop_collision_aabb(
         }
     }
     (min, max)
+}
+
+/// Build the shared spatial registry consumed by both grid and PXBSP play.
+/// Specialized payload tables stay compact, but no prop/marker is allowed to
+/// bypass this room/bounds/policy contract.
+pub(crate) fn cook_world_objects(
+    image_props: &[PlaytestImageProp],
+    box_props: &[PlaytestBoxProp],
+    cylinder_props: &[PlaytestCylinderProp],
+    arch_props: &[PlaytestArchProp],
+    arch_surfaces: &[PlaytestArchPropSurface],
+    interactables: &[PlaytestInteractable],
+    report: &mut PlaytestValidationReport,
+) -> Vec<PlaytestWorldObject> {
+    use psx_level::{world_object_flags as flags, world_object_kind as kind};
+
+    let expected = image_props
+        .len()
+        .saturating_add(box_props.len())
+        .saturating_add(cylinder_props.len())
+        .saturating_add(arch_props.len())
+        .saturating_add(
+            interactables
+                .iter()
+                .filter(|item| item.kind == PlaytestInteractableKind::PointOfInterest)
+                .count(),
+        );
+    if expected > psx_level::MAX_WORLD_OBJECTS {
+        report.error(format!(
+            "Level cooks {expected} spatial world objects, exceeding the PS1 runtime contract cap of {}",
+            psx_level::MAX_WORLD_OBJECTS,
+        ));
+        return Vec::new();
+    }
+
+    let mut objects = Vec::with_capacity(expected);
+    let mut push = |room: u16,
+                    object_kind: u8,
+                    source_index: usize,
+                    object_flags: u8,
+                    destructible: u16,
+                    bounds_min: [i32; 3],
+                    bounds_max: [i32; 3]| {
+        let Ok(source_index) = u16::try_from(source_index) else {
+            report.error("World-object typed source index exceeds u16");
+            return;
+        };
+        if (0..3).any(|axis| bounds_min[axis] >= bounds_max[axis]) {
+            report.error(format!(
+                "World object kind {object_kind} source {source_index} has invalid cooked bounds {bounds_min:?}..{bounds_max:?}"
+            ));
+            return;
+        }
+        objects.push(PlaytestWorldObject {
+            room,
+            kind: object_kind,
+            flags: object_flags,
+            source_index,
+            destructible,
+            bounds_min,
+            bounds_max,
+        });
+    };
+
+    for (index, prop) in image_props.iter().enumerate() {
+        let visual_depth = if prop.flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0 {
+            prop.width
+        } else {
+            2
+        };
+        let (mut bounds_min, mut bounds_max) = image_prop_collision_aabb(
+            [prop.x, prop.y, prop.z],
+            prop.height,
+            [prop.width, prop.height, visual_depth],
+            prop.pitch,
+            prop.yaw,
+            prop.roll,
+            prop.flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0,
+        );
+        let collidable = prop.flags & image_prop_flags::COLLISION_ENABLED != 0;
+        if collidable {
+            union_bounds(
+                &mut bounds_min,
+                &mut bounds_max,
+                prop.collision_min,
+                prop.collision_max,
+            );
+        }
+        push(
+            prop.room,
+            kind::IMAGE_PROP,
+            index,
+            flags::RENDERED
+                | flags::DIRECT_BRUSH_OCCLUSION
+                | if collidable { flags::COLLIDABLE } else { 0 },
+            prop.destructible,
+            bounds_min,
+            bounds_max,
+        );
+    }
+
+    for (index, prop) in box_props.iter().enumerate() {
+        let collidable = prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED != 0;
+        push(
+            prop.room,
+            kind::BOX_PROP,
+            index,
+            flags::RENDERED
+                | flags::DIRECT_BRUSH_OCCLUSION
+                | flags::DYNAMIC
+                | if collidable { flags::COLLIDABLE } else { 0 },
+            psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
+            prop.collision_min,
+            prop.collision_max,
+        );
+    }
+
+    for (index, prop) in cylinder_props.iter().enumerate() {
+        let collidable = prop.flags & psx_level::cylinder_prop_flags::COLLISION_ENABLED != 0;
+        push(
+            prop.room,
+            kind::CYLINDER_PROP,
+            index,
+            flags::RENDERED
+                | flags::DIRECT_BRUSH_OCCLUSION
+                | if collidable { flags::COLLIDABLE } else { 0 },
+            psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
+            prop.bounds_min,
+            prop.bounds_max,
+        );
+    }
+
+    for (index, prop) in arch_props.iter().enumerate() {
+        let first = usize::from(prop.surface_first);
+        let end = first
+            .saturating_add(usize::from(prop.surface_count))
+            .min(arch_surfaces.len());
+        let mut bounds_min = [i32::MAX; 3];
+        let mut bounds_max = [i32::MIN; 3];
+        for surface in arch_surfaces.get(first..end).unwrap_or(&[]) {
+            for vertex in surface.vertices {
+                for axis in 0..3 {
+                    bounds_min[axis] = bounds_min[axis].min(vertex[axis]);
+                    bounds_max[axis] = bounds_max[axis].max(vertex[axis]);
+                }
+            }
+        }
+        if bounds_min[0] == i32::MAX {
+            let radius = prop.cull_radius.max(1);
+            bounds_min = prop.center.map(|value| value.saturating_sub(radius));
+            bounds_max = prop.center.map(|value| value.saturating_add(radius));
+        }
+        let collidable = prop.collision_count != 0;
+        push(
+            prop.room,
+            kind::ARCH_PROP,
+            index,
+            flags::RENDERED
+                | flags::DIRECT_BRUSH_OCCLUSION
+                | if collidable { flags::COLLIDABLE } else { 0 },
+            psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
+            bounds_min,
+            bounds_max,
+        );
+    }
+
+    for (index, interactable) in interactables.iter().enumerate() {
+        if interactable.kind != PlaytestInteractableKind::PointOfInterest {
+            continue;
+        }
+        // Must mirror marker_runtime::archive_beacon_world_height. The beacon
+        // rotates inside this conservative square prism and hangs from the
+        // authored floor anchor.
+        let height = i32::from(interactable.marker_height).clamp(6, 32);
+        let half = (height / 2).max(3);
+        let depth = (height / 12).clamp(1, 3);
+        let pivot = (height / 6).clamp(1, 4);
+        let radial = half.saturating_add(depth).saturating_add(1);
+        push(
+            interactable.room,
+            kind::POINT_OF_INTEREST_BEACON,
+            index,
+            flags::RENDERED | flags::DIRECT_BRUSH_OCCLUSION | flags::DYNAMIC,
+            psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
+            [
+                interactable.x.saturating_sub(radial),
+                interactable
+                    .y
+                    .saturating_sub(height.saturating_add(pivot).saturating_add(1)),
+                interactable.z.saturating_sub(radial),
+            ],
+            [
+                interactable.x.saturating_add(radial),
+                interactable.y.saturating_add(1),
+                interactable.z.saturating_add(radial),
+            ],
+        );
+    }
+
+    objects
+}
+
+fn union_bounds(min: &mut [i32; 3], max: &mut [i32; 3], other_min: [i32; 3], other_max: [i32; 3]) {
+    for axis in 0..3 {
+        min[axis] = min[axis].min(other_min[axis]);
+        max[axis] = max[axis].max(other_max[axis]);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2063,5 +2272,62 @@ mod message_page_tests {
         assert_eq!(point_of_interest_action_verb(" X - READ "), "READ");
         assert_eq!(point_of_interest_action_verb("X - "), "READ");
         assert_eq!(point_of_interest_action_verb("  "), "READ");
+    }
+
+    #[test]
+    fn world_registry_links_image_destructible_and_cooks_beacon_bounds() {
+        let image = PlaytestImageProp {
+            room: 0,
+            texture_asset_index: 0,
+            x: 10,
+            y: 20,
+            z: 30,
+            pitch: 0,
+            yaw: 0,
+            roll: 0,
+            width: 16,
+            height: 24,
+            tint_rgb: [128; 3],
+            baked_vertex_rgb: [(128, 128, 128); 4],
+            collision_min: [2, 20, 29],
+            collision_max: [18, 44, 31],
+            destructible: 3,
+            flags: image_prop_flags::COLLISION_ENABLED,
+        };
+        let poi = PlaytestInteractable {
+            room: 0,
+            kind: PlaytestInteractableKind::PointOfInterest,
+            x: 50,
+            y: 60,
+            z: 70,
+            yaw: 0,
+            radius: 32,
+            marker_height: 12,
+            prompt: "READ".to_string(),
+            message: 0,
+            logic: psx_level::INTERACTABLE_LOGIC_NONE,
+            checkpoint_id: String::new(),
+            read_flag: 0,
+            reward_flag: 1,
+            reward_resource: psx_level::POI_REWARD_NONE,
+            reward_quantity: 0,
+            flags: psx_level::interactable_flags::ENABLED,
+        };
+        let mut report = PlaytestValidationReport::default();
+        let objects = cook_world_objects(&[image], &[], &[], &[], &[], &[poi], &mut report);
+        assert!(report.is_ok());
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].kind, psx_level::world_object_kind::IMAGE_PROP);
+        assert_eq!(objects[0].destructible, 3);
+        assert_ne!(
+            objects[0].flags & psx_level::world_object_flags::COLLIDABLE,
+            0
+        );
+        assert_eq!(
+            objects[1].kind,
+            psx_level::world_object_kind::POINT_OF_INTEREST_BEACON
+        );
+        assert!(objects[1].bounds_min[0] < 50 && objects[1].bounds_max[0] > 50);
+        assert!(objects[1].bounds_min[1] < 60 && objects[1].bounds_max[1] > 60);
     }
 }
