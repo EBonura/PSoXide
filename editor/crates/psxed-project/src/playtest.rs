@@ -297,6 +297,7 @@ fn brush_world_validation_target(
         | BrushWorldCookError::MoverOriginInSolid(node)
         | BrushWorldCookError::InvalidPlayerSpawnTransform(node)
         | BrushWorldCookError::PlayerSpawnInSolid(node)
+        | BrushWorldCookError::InvalidDestructibleHealth(node)
         | BrushWorldCookError::InvalidDoorMotion { node, .. } => {
             Some(PlaytestValidationTarget::Node(*node))
         }
@@ -764,6 +765,8 @@ pub fn build_package(
     let mut interactable_messages: Vec<PlaytestInteractableMessage> = Vec::new();
     let mut interactable_message_pages: Vec<String> = Vec::new();
     let mut interactables: Vec<PlaytestInteractable> = Vec::new();
+    let mut destructibles: Vec<PlaytestDestructible> = Vec::new();
+    let mut destructible_for_node: HashMap<crate::NodeId, u16> = HashMap::new();
     let mut boost_modules: Vec<PlaytestBoostModule> = Vec::new();
     let mut poi_persistence_ids: HashSet<String> = HashSet::new();
     let mut poi_persistence_slots: HashMap<u16, String> = HashMap::new();
@@ -783,6 +786,53 @@ pub fn build_package(
     let mut model_clip_remaps: HashMap<ResourceId, Vec<Option<u16>>> = HashMap::new();
     let mut weapon_for_resource: HashMap<ResourceId, u16> = HashMap::new();
     let mut warned_unsupported: HashSet<&'static str> = HashSet::new();
+
+    for node in scene.nodes() {
+        let NodeKind::Destructible {
+            max_health,
+            damage_affinity,
+            enabled,
+        } = &node.kind
+        else {
+            continue;
+        };
+        if *max_health == 0 {
+            report.error_at(
+                PlaytestValidationTarget::Node(node.id),
+                format!(
+                    "Destructible '{}' must have at least one health point",
+                    node.name
+                ),
+            );
+            continue;
+        }
+        if destructibles.len() >= psx_level::MAX_DESTRUCTIBLES {
+            report.error(format!(
+                "Project exceeds the {} shared-destructible runtime limit",
+                psx_level::MAX_DESTRUCTIBLES,
+            ));
+            break;
+        }
+        let index = destructibles.len() as u16;
+        destructible_for_node.insert(node.id, index);
+        destructibles.push(PlaytestDestructible {
+            max_health: *max_health,
+            damage_affinity: match damage_affinity {
+                crate::DestructibleDamageAffinity::Horizon => {
+                    psx_level::destructible_affinity::HORIZON
+                }
+                crate::DestructibleDamageAffinity::Zenith => {
+                    psx_level::destructible_affinity::ZENITH
+                }
+                crate::DestructibleDamageAffinity::Both => psx_level::destructible_affinity::BOTH,
+            },
+            flags: if *enabled {
+                psx_level::destructible_flags::ENABLED
+            } else {
+                0
+            },
+        });
+    }
 
     let world_message = match scene.node(scene.root).map(|node| &node.kind) {
         Some(NodeKind::World {
@@ -1412,7 +1462,24 @@ pub fn build_package(
                 cylindrical_billboard,
                 collision_enabled,
                 collision_size,
+                destructible,
             } => {
+                let destructible = match destructible {
+                    Some(owner_id) => match destructible_for_node.get(owner_id).copied() {
+                        Some(index) => index,
+                        None => {
+                            report.error_at(
+                                PlaytestValidationTarget::Node(node.id),
+                                format!(
+                                    "Image Prop '{}' references missing/non-Destructible node {:?}",
+                                    node.name, owner_id
+                                ),
+                            );
+                            return (None, report);
+                        }
+                    },
+                    None => psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE,
+                };
                 if !push_image_prop(
                     project,
                     project_root,
@@ -1428,6 +1495,7 @@ pub fn build_package(
                     *cylindrical_billboard,
                     *collision_enabled,
                     *collision_size,
+                    destructible,
                     &mut texture_asset_for_path,
                     &mut assets,
                     &mut image_props,
@@ -1628,7 +1696,8 @@ pub fn build_package(
             | NodeKind::Equipment { .. }
             | NodeKind::PhysicsBody { .. }
             | NodeKind::Interactable { .. }
-            | NodeKind::PointOfInterest { .. } => {}
+            | NodeKind::PointOfInterest { .. }
+            | NodeKind::Destructible { .. } => {}
         }
     }
 
@@ -1663,6 +1732,16 @@ pub fn build_package(
             ));
         }
     }
+
+    let world_objects = cook_world_objects(
+        &image_props,
+        &box_props,
+        &cylinder_props,
+        &arch_props,
+        &arch_prop_surfaces,
+        &interactables,
+        &mut report,
+    );
 
     // Door links resolve now that every Box Prop has cooked: an
     // unresolved or ambiguous box name is a hard cook error.
@@ -2178,6 +2257,8 @@ pub fn build_package(
             model_frame_bounds,
             model_sockets,
             model_instances,
+            destructibles,
+            world_objects,
             image_props,
             box_props,
             box_prop_surfaces,

@@ -2869,12 +2869,14 @@ enum PlaceKind {
     /// Placed `Logic` graph node (trigger volume by default; switch
     /// the kind to relay/multisource/door in the inspector).
     Logic,
+    /// Damageable owner for one or more BSP brushes.
+    Destructible,
     /// Entity host with a procedural readable Point of Interest component.
     PointOfInterest,
 }
 
 impl PlaceKind {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::PlayerSpawn,
         Self::SpawnMarker,
         Self::ModelInstance,
@@ -2886,6 +2888,7 @@ impl PlaceKind {
         Self::PointLightMarker,
         Self::ParticleEmitter,
         Self::Logic,
+        Self::Destructible,
         Self::PointOfInterest,
     ];
 
@@ -2902,6 +2905,7 @@ impl PlaceKind {
             Self::PointLightMarker => "Point Light",
             Self::ParticleEmitter => "Particle Emitter",
             Self::Logic => "Logic",
+            Self::Destructible => "Destructible",
             Self::PointOfInterest => "Point of Interest",
         }
     }
@@ -2918,6 +2922,7 @@ impl PlaceKind {
             Self::PointLightMarker => icons::SUN,
             Self::ParticleEmitter => icons::FOCUS,
             Self::Logic => icons::BLEND,
+            Self::Destructible => icons::BOX,
             Self::PointOfInterest => icons::FOCUS,
         }
     }

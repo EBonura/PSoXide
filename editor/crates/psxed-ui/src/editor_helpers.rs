@@ -992,6 +992,7 @@ pub(crate) fn entity_bound_kind_and_size(
         NodeKind::ParticleEmitter { .. } => {
             Some((EntityBoundKind::ParticleEmitter, [160.0, 160.0, 160.0]))
         }
+        NodeKind::Destructible { .. } => Some((EntityBoundKind::Logic, [128.0, 192.0, 128.0])),
         NodeKind::Portal { .. } => Some((EntityBoundKind::Portal, [256.0, 256.0, 64.0])),
         // Trigger volumes read as their authored extent so the box is
         // clickable where it fires; point-like logic nodes get a
@@ -1104,6 +1105,16 @@ pub(crate) fn collect_room_options(project: &ProjectDocument) -> Vec<(NodeId, St
         .nodes()
         .iter()
         .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
+        .map(|node| (node.id, node.name.clone()))
+        .collect()
+}
+
+pub(crate) fn collect_destructible_options(project: &ProjectDocument) -> Vec<(NodeId, String)> {
+    project
+        .active_scene()
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Destructible { .. }))
         .map(|node| (node.id, node.name.clone()))
         .collect()
 }

@@ -845,6 +845,28 @@ pub const MODEL_CLIP_INHERIT: u16 = 0xFFFF;
 /// clip" -- same value as [`psx_level::MODEL_INSTANCE_POSE_ANIMATE`].
 pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
 
+/// Shared spatial registration for one cooked non-BSP world object.
+/// `kind`/`source_index` select the compact typed payload while this record
+/// owns room membership, conservative bounds, and runtime spatial policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestWorldObject {
+    pub room: u16,
+    pub kind: u8,
+    pub flags: u8,
+    pub source_index: u16,
+    pub destructible: u16,
+    pub bounds_min: [i32; 3],
+    pub bounds_max: [i32; 3],
+}
+
+/// Shared damage state referenced by brush submodels and typed world objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestDestructible {
+    pub max_health: u16,
+    pub damage_affinity: u8,
+    pub flags: u8,
+}
+
 /// One material-backed flat image prop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestImageProp {
@@ -876,6 +898,8 @@ pub struct PlaytestImageProp {
     pub collision_min: [i32; 3],
     /// Conservative room-local collision AABB maximum.
     pub collision_max: [i32; 3],
+    /// Shared destructible state, or [`psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE`].
+    pub destructible: u16,
     /// Runtime flags.
     pub flags: u16,
 }
@@ -1995,6 +2019,12 @@ pub struct PlaytestPackage {
     pub model_sockets: Vec<PlaytestModelSocket>,
     /// Placed model instances, room-local coordinates.
     pub model_instances: Vec<PlaytestModelInstance>,
+    /// Shared destructible states; targets refer to these indices.
+    pub destructibles: Vec<PlaytestDestructible>,
+    /// Shared spatial registry for every specialized static prop and beacon.
+    /// Structural brush geometry lives directly in PXBSP; model instances
+    /// already use the same PVS authority through their animated bounds.
+    pub world_objects: Vec<PlaytestWorldObject>,
     /// Placed flat image props, room-local coordinates.
     pub image_props: Vec<PlaytestImageProp>,
     /// Placed editable box props, room-local coordinates.

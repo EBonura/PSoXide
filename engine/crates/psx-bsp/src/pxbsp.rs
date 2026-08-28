@@ -357,6 +357,8 @@ pub mod entity_class {
     pub const BRUSH_DOOR: u16 = 1;
     /// Authored world-space entry point for the player character.
     pub const PLAYER_SPAWN: u16 = 2;
+    /// A stationary damageable brush submodel which disappears on break.
+    pub const BRUSH_DESTRUCTIBLE: u16 = 3;
 }
 
 /// Common flags stored in [`PxbspEntity::flags`].
@@ -474,6 +476,60 @@ impl CookedRecord for PxbspBrushDoor {
             },
             travel_ticks: u16::from_le_bytes([bytes[12], bytes[13]]),
             reserved: u16::from_le_bytes([bytes[14], bytes[15]]),
+        }
+    }
+}
+
+/// Fixed payload for [`entity_class::BRUSH_DESTRUCTIBLE`].
+///
+/// Health, affinity, and enabled state live in the manifest's shared
+/// destructible table. The PXBSP entity only identifies the brush submodel and
+/// links it to that state, so brush geometry and image props cannot drift onto
+/// separate damage configurations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PxbspBrushDestructible {
+    /// Index in the level manifest's shared destructible-state table.
+    pub destructible_index: u16,
+    reserved: [u8; 6],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PxbspBrushDestructibleError {
+    NonZeroReserved,
+}
+
+impl PxbspBrushDestructible {
+    pub const fn new(destructible_index: u16) -> Self {
+        Self {
+            destructible_index,
+            reserved: [0; 6],
+        }
+    }
+
+    pub fn validate(self) -> Result<(), PxbspBrushDestructibleError> {
+        if self.reserved != [0; 6] {
+            return Err(PxbspBrushDestructibleError::NonZeroReserved);
+        }
+        Ok(())
+    }
+
+    pub fn to_le_bytes(self) -> [u8; Self::SIZE] {
+        let mut bytes = [0; Self::SIZE];
+        bytes[0..2].copy_from_slice(&self.destructible_index.to_le_bytes());
+        bytes[2..8].copy_from_slice(&self.reserved);
+        bytes
+    }
+}
+
+impl CookedRecord for PxbspBrushDestructible {
+    const SIZE: usize = 8;
+
+    fn decode(bytes: &[u8]) -> Self {
+        let mut reserved = [0; 6];
+        reserved.copy_from_slice(&bytes[2..8]);
+        Self {
+            destructible_index: u16::from_le_bytes([bytes[0], bytes[1]]),
+            reserved,
         }
     }
 }
