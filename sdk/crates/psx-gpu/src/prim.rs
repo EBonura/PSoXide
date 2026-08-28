@@ -8,7 +8,9 @@
 //! Builders (`new` constructors) zero the tag; [`crate::ot::OrderingTable::add`]
 //! fills it in during insertion with `(words_after_tag << 24) | next`.
 
-use crate::material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial};
+use crate::material::{
+    BlendMode, TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial,
+};
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 
 const fn pack_packet_texcoord(u: u8, v: u8, extra: u16) -> u32 {
@@ -192,6 +194,67 @@ impl QuadGouraud {
         Self {
             tag: 0,
             color0_cmd: gp0::polygon_opcode(true, true, false, false, false)
+                | pack_color(r0, g0, b0),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            color1: pack_color(r1, g1, b1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            color2: pack_color(r2, g2, b2),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            color3: pack_color(r3, g3, b3),
+            v3: pack_vertex(verts[3].0, verts[3].1),
+        }
+    }
+}
+
+/// Semi-transparent Gouraud quad with its GP0(E1) blend state embedded in
+/// the same DMA packet.
+///
+/// Untextured translucent polygons do not carry blend bits of their own: they
+/// read them from the current draw mode. Keeping the state word and polygon in
+/// one OT packet makes the result independent of whichever textured surface
+/// happened to draw immediately before it.
+#[repr(C, align(4))]
+pub struct QuadGouraudBlended {
+    /// OT linkage.
+    pub tag: u32,
+    /// GP0(E1) draw mode selecting the native semi-transparency equation.
+    pub draw_mode: u32,
+    /// Vertex 0 colour + semi-transparent Gouraud-quad opcode.
+    pub color0_cmd: u32,
+    /// Vertex 0 position.
+    pub v0: u32,
+    /// Vertex 1 colour.
+    pub color1: u32,
+    /// Vertex 1 position.
+    pub v1: u32,
+    /// Vertex 2 colour.
+    pub color2: u32,
+    /// Vertex 2 position.
+    pub v2: u32,
+    /// Vertex 3 colour.
+    pub color3: u32,
+    /// Vertex 3 position.
+    pub v3: u32,
+}
+
+impl QuadGouraudBlended {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 9;
+
+    /// Build a native semi-transparent Gouraud ribbon segment.
+    pub const fn new(
+        verts: [(i16, i16); 4],
+        colors: [(u8, u8, u8); 4],
+        blend_mode: BlendMode,
+    ) -> Self {
+        let (r0, g0, b0) = colors[0];
+        let (r1, g1, b1) = colors[1];
+        let (r2, g2, b2) = colors[2];
+        let (r3, g3, b3) = colors[3];
+        Self {
+            tag: 0,
+            draw_mode: TextureMaterial::blended(0, 0, (0, 0, 0), blend_mode).draw_mode_word(),
+            color0_cmd: gp0::polygon_opcode(true, true, false, true, false)
                 | pack_color(r0, g0, b0),
             v0: pack_vertex(verts[0].0, verts[0].1),
             color1: pack_color(r1, g1, b1),
@@ -1292,6 +1355,32 @@ impl Sprite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blended_gouraud_quad_keeps_draw_mode_and_polygon_together() {
+        let quad = QuadGouraudBlended::new(
+            [(1, 2), (3, 4), (5, 6), (7, 8)],
+            [
+                (0x10, 0x20, 0x30),
+                (0x40, 0x50, 0x60),
+                (0x70, 0x80, 0x90),
+                (0xa0, 0xb0, 0xc0),
+            ],
+            BlendMode::AddQuarter,
+        );
+        let words = unsafe {
+            core::slice::from_raw_parts(
+                (&quad as *const QuadGouraudBlended).cast::<u32>(),
+                core::mem::size_of::<QuadGouraudBlended>() / core::mem::size_of::<u32>(),
+            )
+        };
+        assert_eq!(words.len(), 10);
+        assert_eq!(QuadGouraudBlended::WORDS, 9);
+        assert_eq!(words[0], 0, "tag zero until OT insert");
+        assert_eq!(words[1] >> 24, 0xe1, "draw-mode prefix");
+        assert_eq!((words[1] >> 5) & 3, 3, "add-quarter ABR bits");
+        assert_eq!(words[2] >> 24, 0x3a, "Gouraud+quad+semi-trans opcode");
+    }
 
     /// The Gouraud-textured quad packet must serialize to the exact GP0
     /// 0x3C word stream: a GP0(E2) texture-window prefix, then

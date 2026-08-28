@@ -1445,6 +1445,14 @@ pub struct PlaytestWeaponAppearance {
     pub fully_visible_frame: u16,
     pub hidden_frame: u16,
     pub transition_frames: u16,
+    pub trail_start_frame: u16,
+    pub trail_end_frame: u16,
+    pub trail_history_frames: u16,
+    pub trail_segments: u8,
+    pub trail_root_color: [u8; 3],
+    pub trail_tip_color: [u8; 3],
+    pub trail_blend_mode: crate::WeaponTrailBlendMode,
+    pub flags: u16,
 }
 
 /// One placed point light, room-local engine units. Mirrors

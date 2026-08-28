@@ -69,6 +69,16 @@ impl ActorPoseSnapshot {
         self.phase_q12
     }
 
+    /// Re-sample this retained pose's animation at another Q12 phase while
+    /// preserving its actor transform and presentation policy.
+    ///
+    /// Continuous combat uses this only for the portion of an active-frame
+    /// window which fell between two retained simulation poses.
+    pub const fn with_phase_q12(mut self, phase_q12: u32) -> Self {
+        self.phase_q12 = phase_q12;
+        self
+    }
+
     /// Optional outgoing-pose crossfade sampled with the body.
     pub const fn blend_from(self) -> Option<ModelPoseBlend<'static>> {
         self.blend_from

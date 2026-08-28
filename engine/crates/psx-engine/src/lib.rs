@@ -172,7 +172,7 @@ pub use render3d::{
     AdaptiveSubdivisionKindMask, AdaptiveSubdivisionProfile, CullMode, DepthPolicy,
     GouraudMeshOptions, GouraudRenderPass, GouraudTriCommand, JointViewTransform,
     JointWorldTransform, LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats,
-    ModelPoseTranslation, ModelUvMapping, ModelUvOffset, PredecodedModelInfo,
+    ModelPoseTranslation, ModelUvMapping, ModelUvOffset, PredecodedModelInfo, ProjectedLit,
     ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector, TexturedModelGeometry,
     TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex,
     ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
