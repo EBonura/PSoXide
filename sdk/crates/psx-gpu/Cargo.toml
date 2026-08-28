@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description  = "High-level PS1 GPU API: init, primitives, framebuffers."
 
+[features]
+default = []
+ot-window-insert-coalescing = []
+
 [dependencies]
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
