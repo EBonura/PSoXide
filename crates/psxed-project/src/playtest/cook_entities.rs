@@ -306,6 +306,7 @@ pub(crate) fn character_action_speed_for(options: Option<crate::CharacterActionO
     options
         .map(|options| options.speed_q8)
         .unwrap_or(crate::ACTION_SPEED_UNSCALED_Q8)
+        .clamp(crate::ACTION_SPEED_MIN_Q8, crate::ACTION_SPEED_MAX_Q8)
 }
 
 pub(crate) fn character_action_frame_range_for(
@@ -2888,6 +2889,90 @@ pub(crate) fn cook_weapon_appearances(
                 global_clip.source_frame_last,
                 global_clip.cooked_frame_count,
             );
+            let mut trail_start_frame = 0;
+            let mut trail_end_frame = crate::ACTION_FRAME_END_FULL;
+            let mut trail_history_frames = 0;
+            let mut trail_segments = 0;
+            let mut trail_root_color = [0; 3];
+            let mut trail_tip_color = [0; 3];
+            let mut trail_blend_mode = crate::WeaponTrailBlendMode::AddQuarter;
+            let mut flags = 0u16;
+            if let Some(trail) = &track.trail {
+                if trail.start_frame > source_last
+                    || (trail.end_frame != crate::ACTION_FRAME_END_FULL
+                        && trail.end_frame > source_last)
+                    || (trail.end_frame != crate::ACTION_FRAME_END_FULL
+                        && trail.end_frame < trail.start_frame)
+                {
+                    report.error_at(
+                        PlaytestValidationTarget::Resource(set_id),
+                        format!(
+                            "Animation Set '{}' {} sword trail uses frame {}..{}, but its source clip ends at frame {}",
+                            set_resource.name,
+                            track.action.label(),
+                            trail.start_frame,
+                            if trail.end_frame == crate::ACTION_FRAME_END_FULL {
+                                "end".to_owned()
+                            } else {
+                                trail.end_frame.to_string()
+                            },
+                            source_last,
+                        ),
+                    );
+                    continue;
+                }
+                if trail.history_frames == 0 {
+                    report.error_at(
+                        PlaytestValidationTarget::Resource(set_id),
+                        format!(
+                            "Animation Set '{}' {} sword trail history must be at least 1 frame",
+                            set_resource.name,
+                            track.action.label(),
+                        ),
+                    );
+                    continue;
+                }
+                if !(1..=crate::WEAPON_TRAIL_MAX_SEGMENTS).contains(&trail.segments) {
+                    report.error_at(
+                        PlaytestValidationTarget::Resource(set_id),
+                        format!(
+                            "Animation Set '{}' {} sword trail must use 1..={} segments",
+                            set_resource.name,
+                            track.action.label(),
+                            crate::WEAPON_TRAIL_MAX_SEGMENTS,
+                        ),
+                    );
+                    continue;
+                }
+                trail_start_frame = remap_authored_frame(
+                    trail.start_frame,
+                    global_clip.source_frame_first,
+                    global_clip.source_frame_last,
+                    global_clip.cooked_frame_count,
+                );
+                trail_end_frame = if trail.end_frame == crate::ACTION_FRAME_END_FULL {
+                    crate::ACTION_FRAME_END_FULL
+                } else {
+                    remap_authored_frame(
+                        trail.end_frame,
+                        global_clip.source_frame_first,
+                        global_clip.source_frame_last,
+                        global_clip.cooked_frame_count,
+                    )
+                };
+                trail_history_frames = remap_authored_duration(
+                    trail.history_frames,
+                    global_clip.source_frame_first,
+                    global_clip.source_frame_last,
+                    global_clip.cooked_frame_count,
+                )
+                .max(1);
+                trail_segments = trail.segments;
+                trail_root_color = trail.root_color;
+                trail_tip_color = trail.tip_color;
+                trail_blend_mode = trail.blend_mode;
+                flags |= psx_level::weapon_appearance_flags::TRAIL;
+            }
             out.push(PlaytestWeaponAppearance {
                 character: u16::try_from(character_index).unwrap_or(u16::MAX),
                 action: track.action,
@@ -2896,6 +2981,14 @@ pub(crate) fn cook_weapon_appearances(
                 fully_visible_frame,
                 hidden_frame,
                 transition_frames,
+                trail_start_frame,
+                trail_end_frame,
+                trail_history_frames,
+                trail_segments,
+                trail_root_color,
+                trail_tip_color,
+                trail_blend_mode,
+                flags,
             });
         }
     }
@@ -3216,8 +3309,20 @@ fn joint_bind_anchor(model: &psx_asset::Model<'_>, joint: u16) -> [i32; 3] {
 #[cfg(test)]
 mod socket_anchor_tests {
     use super::{
-        compact_animation_bytes, joint_bind_anchor, remap_authored_duration, remap_authored_frame,
+        character_action_speed_for, compact_animation_bytes, joint_bind_anchor,
+        remap_authored_duration, remap_authored_frame,
     };
+
+    #[test]
+    fn authored_action_speed_is_clamped_before_runtime_cook() {
+        let mut options =
+            crate::CharacterActionOptions::for_action(crate::CharacterAnimationAction::LightAttack);
+        assert_eq!(character_action_speed_for(None), 256);
+        options.speed_q8 = 1;
+        assert_eq!(character_action_speed_for(Some(options)), 64);
+        options.speed_q8 = 4096;
+        assert_eq!(character_action_speed_for(Some(options)), 1024);
+    }
 
     fn one_pose_animation(matrix: [i16; 9]) -> Vec<u8> {
         use psxed_format::animation;
