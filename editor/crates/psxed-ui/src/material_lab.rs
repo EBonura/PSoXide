@@ -1,5 +1,5 @@
 use super::*;
-use psxed_project::MaterialUvMotion;
+use psxed_project::{MaterialAnimation, MaterialFlipbook, MaterialUvMotion};
 
 /// Transient Material Lab view state. The authored recipe itself lives in the
 /// selected [`MaterialResource`], so switching projects or workspaces never
@@ -494,32 +494,209 @@ fn draw_primary_layer_settings_inner(
     owner: Option<ResourceId>,
 ) {
     ui.heading("Layer 1");
-    draw_material_source_presets(ui, &mut material.texture_mode);
-    ui.add_space(6.0);
-    match material.texture_mode {
-        MaterialTextureMode::SimpleImage => draw_simple_image_settings(ui, &mut material.psxt_path),
-        MaterialTextureMode::Generated => draw_generated_settings(ui, &mut material.generated),
-        MaterialTextureMode::Transition => {
-            draw_transition_settings(ui, &mut material.transition, material_options, owner)
+    if material.animation.mode == MaterialAnimationMode::Flipbook {
+        section_frame().show(ui, |ui| {
+            ui.heading("Animated image");
+            ui.label(
+                RichText::new(
+                    "Material A and Material B below provide the images. The ordinary source remains preserved as the Static fallback.",
+                )
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+            );
+        });
+    } else {
+        draw_material_source_presets(ui, &mut material.texture_mode);
+        ui.add_space(6.0);
+        match material.texture_mode {
+            MaterialTextureMode::SimpleImage => {
+                draw_simple_image_settings(ui, &mut material.psxt_path)
+            }
+            MaterialTextureMode::Generated => draw_generated_settings(ui, &mut material.generated),
+            MaterialTextureMode::Transition => {
+                draw_transition_settings(ui, &mut material.transition, material_options, owner)
+            }
+            MaterialTextureMode::ReflectiveProbe => draw_retired_reflection_notice(ui),
         }
-        MaterialTextureMode::ReflectiveProbe => draw_retired_reflection_notice(ui),
     }
     ui.add_space(6.0);
     section_frame().show(ui, |ui| {
         blend_mode_editor(ui, &mut material.blend_mode);
         draw_material_color_editor(ui, "Base colour / tint", &mut material.tint);
-        let mut motion = material.animation.uv_scroll;
-        motion.enabled = material.animation.mode == MaterialAnimationMode::UvScroll;
-        let before = motion;
-        draw_layer_motion(ui, "material_lab_layer_1_motion", &mut motion);
-        if motion != before {
-            material.animation.uv_scroll = motion;
-            material.animation.mode = if motion.enabled {
-                MaterialAnimationMode::UvScroll
-            } else {
-                MaterialAnimationMode::Static
-            };
+        draw_primary_material_animation(ui, &mut material.animation, material_options, owner);
+    });
+}
+
+fn draw_primary_material_animation(
+    ui: &mut egui::Ui,
+    animation: &mut MaterialAnimation,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
+    ui.separator();
+    ui.strong("Animation");
+    ui.horizontal_wrapped(|ui| {
+        for mode in [
+            MaterialAnimationMode::Static,
+            MaterialAnimationMode::UvScroll,
+            MaterialAnimationMode::Flipbook,
+        ] {
+            if ui
+                .add(egui::Button::new(mode.label()).selected(animation.mode == mode))
+                .clicked()
+            {
+                animation.mode = mode;
+            }
         }
+    });
+
+    animation.uv_scroll.enabled = animation.mode == MaterialAnimationMode::UvScroll;
+    match animation.mode {
+        MaterialAnimationMode::Static => {
+            ui.label(
+                RichText::new("One fixed texture with no per-frame material work.")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            );
+        }
+        MaterialAnimationMode::UvScroll => {
+            ui.label(
+                RichText::new("Signed texels per second; UVs wrap in the PS1's 0–255 space.")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            );
+            draw_uv_motion_values(ui, "material_lab_layer_1_motion", &mut animation.uv_scroll);
+        }
+        MaterialAnimationMode::Flipbook => {
+            draw_flipbook_animation(ui, &mut animation.flipbook, material_options, owner);
+        }
+    }
+}
+
+fn draw_flipbook_animation(
+    ui: &mut egui::Ui,
+    flipbook: &mut MaterialFlipbook,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
+    flipbook.columns = 2;
+    flipbook.rows = 1;
+    flipbook.frame_count = 2;
+    ui.label(
+        RichText::new(
+            "Choose two materials to cycle between. Their texture dimensions must match, so every face keeps exactly the same UVs.",
+        )
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+    ui.add_space(4.0);
+    draw_cycle_material_picker(
+        ui,
+        "cycle_material_a",
+        "Material A",
+        &mut flipbook.source_a,
+        material_options,
+        owner,
+    );
+    draw_cycle_material_picker(
+        ui,
+        "cycle_material_b",
+        "Material B",
+        &mut flipbook.source_b,
+        material_options,
+        owner,
+    );
+    if ui
+        .button(icons::label(icons::ROTATE_CCW, "Swap A / B"))
+        .clicked()
+    {
+        std::mem::swap(&mut flipbook.source_a, &mut flipbook.source_b);
+        flipbook.phase ^= 1;
+    }
+    if flipbook.source_a.is_some() && flipbook.source_a == flipbook.source_b {
+        ui.colored_label(
+            Color32::from_rgb(224, 176, 88),
+            "Choose two different materials.",
+        );
+    } else if flipbook.source_a.is_none() || flipbook.source_b.is_none() {
+        ui.colored_label(
+            Color32::from_rgb(224, 176, 88),
+            "Assign both materials before building or playing.",
+        );
+    }
+
+    egui::Grid::new("material_lab_flipbook")
+        .num_columns(2)
+        .min_col_width(112.0)
+        .spacing(Vec2::new(12.0, 5.0))
+        .show(ui, |ui| {
+            material_grid_label(ui, "Ticks per frame");
+            ui.add(egui::DragValue::new(&mut flipbook.ticks_per_frame).range(1..=u8::MAX));
+            ui.end_row();
+            material_grid_label(ui, "Start with");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut flipbook.phase, 0, "A");
+                ui.selectable_value(&mut flipbook.phase, 1, "B");
+            });
+            ui.end_row();
+        });
+    *flipbook = flipbook.normalized();
+
+    let cycle_ticks = 2 * u16::from(flipbook.ticks_per_frame);
+    ui.label(
+        RichText::new(format!(
+            "A ↔ B · {:.2}s per material · {:.2}s loop at 60 Hz.",
+            f32::from(flipbook.ticks_per_frame) / 60.0,
+            f32::from(cycle_ticks) / 60.0,
+        ))
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+    ui.label(
+        RichText::new(
+            "At cook time PSoXide jointly packs both resolved images into one shared 4bpp atlas/CLUT. Matching surface texels are locked to A's exact palette indices, so only authored differences change. The atlas is not part of the authoring workflow.",
+        )
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+}
+
+fn draw_cycle_material_picker(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    label: &str,
+    selected: &mut Option<ResourceId>,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
+    let available_options = material_options
+        .iter()
+        .filter(|(id, _)| Some(*id) != owner)
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_name = selected
+        .and_then(|selected| material_options.iter().find(|(id, _)| *id == selected))
+        .map(|(_, name)| name.as_str())
+        .unwrap_or("(choose material)");
+    let compact_name = selected_name
+        .rsplit('/')
+        .next()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(selected_name);
+    ui.horizontal(|ui| {
+        ui.label(label);
+        searchable_picker(
+            ui,
+            id_salt,
+            selected,
+            compact_name,
+            &available_options,
+            SearchablePickerConfig::optional("(none)")
+                .with_width(210.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…"),
+        );
     });
 }
 
@@ -969,25 +1146,29 @@ fn draw_layer_motion(ui: &mut egui::Ui, grid_id: &'static str, motion: &mut Mate
                 .small()
                 .color(STUDIO_TEXT_WEAK),
         );
-        egui::Grid::new(grid_id)
-            .num_columns(2)
-            .min_col_width(96.0)
-            .spacing(Vec2::new(12.0, 5.0))
-            .show(ui, |ui| {
-                material_grid_label(ui, "U speed");
-                draw_q8_speed(ui, &mut motion.speed_u_q8);
-                ui.end_row();
-                material_grid_label(ui, "V speed");
-                draw_q8_speed(ui, &mut motion.speed_v_q8);
-                ui.end_row();
-                material_grid_label(ui, "U phase");
-                ui.add(egui::DragValue::new(&mut motion.phase_u));
-                ui.end_row();
-                material_grid_label(ui, "V phase");
-                ui.add(egui::DragValue::new(&mut motion.phase_v));
-                ui.end_row();
-            });
+        draw_uv_motion_values(ui, grid_id, motion);
     });
+}
+
+fn draw_uv_motion_values(ui: &mut egui::Ui, grid_id: &'static str, motion: &mut MaterialUvMotion) {
+    egui::Grid::new(grid_id)
+        .num_columns(2)
+        .min_col_width(96.0)
+        .spacing(Vec2::new(12.0, 5.0))
+        .show(ui, |ui| {
+            material_grid_label(ui, "U speed");
+            draw_q8_speed(ui, &mut motion.speed_u_q8);
+            ui.end_row();
+            material_grid_label(ui, "V speed");
+            draw_q8_speed(ui, &mut motion.speed_v_q8);
+            ui.end_row();
+            material_grid_label(ui, "U phase");
+            ui.add(egui::DragValue::new(&mut motion.phase_u));
+            ui.end_row();
+            material_grid_label(ui, "V phase");
+            ui.add(egui::DragValue::new(&mut motion.phase_v));
+            ui.end_row();
+        });
 }
 
 fn draw_q8_speed(ui: &mut egui::Ui, value: &mut i16) {
@@ -1058,29 +1239,47 @@ fn draw_material_lab_preview(
     ui.add_space(8.0);
 
     let mut preview_error = None;
-    let image = match material.texture_mode {
-        MaterialTextureMode::Generated => {
-            let bytes = psxed_project::generate_material_texture_psxt(material.generated);
-            decode_psxt_thumbnail(&bytes).map(|(image, _)| image)
-        }
-        MaterialTextureMode::Transition => {
-            match psxed_project::generate_transition_material_texture_psxt(
-                &workspace.project,
-                material.transition,
-                workspace.project_root(),
-                Some(material_id),
-            ) {
-                Ok(bytes) => decode_psxt_thumbnail(&bytes).map(|(image, _)| image),
-                Err(error) => {
-                    preview_error = Some(error);
-                    None
-                }
+    let flipbook = material.animation.flipbook.normalized();
+    let image = if material.animation.mode == MaterialAnimationMode::Flipbook
+        && (flipbook.source_a.is_some() || flipbook.source_b.is_some())
+    {
+        match psxed_project::generate_two_material_flipbook_psxt(
+            &workspace.project,
+            flipbook,
+            workspace.project_root(),
+            Some(material_id),
+        ) {
+            Ok(bytes) => decode_psxt_thumbnail(&bytes).map(|(image, _)| image),
+            Err(error) => {
+                preview_error = Some(error);
+                None
             }
         }
-        MaterialTextureMode::SimpleImage => {
-            decode_material_image_path(workspace.project_root(), material.psxt_path.as_deref())
+    } else {
+        match material.texture_mode {
+            MaterialTextureMode::Generated => {
+                let bytes = psxed_project::generate_material_texture_psxt(material.generated);
+                decode_psxt_thumbnail(&bytes).map(|(image, _)| image)
+            }
+            MaterialTextureMode::Transition => {
+                match psxed_project::generate_transition_material_texture_psxt(
+                    &workspace.project,
+                    material.transition,
+                    workspace.project_root(),
+                    Some(material_id),
+                ) {
+                    Ok(bytes) => decode_psxt_thumbnail(&bytes).map(|(image, _)| image),
+                    Err(error) => {
+                        preview_error = Some(error);
+                        None
+                    }
+                }
+            }
+            MaterialTextureMode::SimpleImage => {
+                decode_material_image_path(workspace.project_root(), material.psxt_path.as_deref())
+            }
+            MaterialTextureMode::ReflectiveProbe => None,
         }
-        MaterialTextureMode::ReflectiveProbe => None,
     };
     let overlay_image =
         material
@@ -1186,7 +1385,7 @@ fn draw_material_lab_preview(
         } else if material.animation.mode == MaterialAnimationMode::UvScroll {
             "1 texture pass · dynamic tile UV scroll"
         } else if material.animation.mode == MaterialAnimationMode::Flipbook {
-            "1 texture pass · resident flipbook atlas"
+            "1 texture pass · cooked 2-material cycle"
         } else {
             "1 texture pass"
         };
@@ -1632,6 +1831,77 @@ mod tests {
         assert!(text.contains("Source B"));
         assert!(text.contains("50%"));
         assert!(text.contains("Edge breakup"));
+    }
+
+    #[test]
+    fn flipbook_material_controls_expose_two_frame_authoring() {
+        let mut project = ProjectDocument::new("cycle-ui");
+        let source_a = project.add_resource(
+            "Readout A",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let source_b = project.add_resource(
+            "Readout B",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let mut material = MaterialResource::opaque(Some("materials/terminal.psxt".to_string()));
+        material.animation.mode = MaterialAnimationMode::Flipbook;
+        material.animation.flipbook = MaterialFlipbook {
+            columns: 2,
+            rows: 1,
+            frame_count: 2,
+            ticks_per_frame: 24,
+            phase: 0,
+            source_a: Some(source_a),
+            source_b: Some(source_b),
+        };
+        let options = vec![
+            (source_a, "Readout A".to_string()),
+            (source_b, "Readout B".to_string()),
+        ];
+
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .expect("default proportional font family");
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("lucide".into()), proportional);
+        ctx.set_fonts(fonts);
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 1200.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_material_settings(ui, "flipbook_material", &mut material, &options, None);
+                });
+            },
+        );
+        let mut text_shapes = Vec::new();
+        for clipped in &output.shapes {
+            collect_text_shapes(&clipped.shape, &mut text_shapes);
+        }
+        let text = text_shapes
+            .iter()
+            .map(|shape| shape.galley.job.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("Animation"));
+        assert!(text.contains("Cycle Materials"));
+        assert!(text.contains("Material A"));
+        assert!(text.contains("Material B"));
+        assert!(text.contains("Readout A"));
+        assert!(text.contains("Readout B"));
+        assert!(text.contains("Swap A / B"));
+        assert!(text.contains("Ticks per frame"));
+        assert!(text.contains("Start with"));
+        assert!(text.contains("A ↔ B · 0.40s per material · 0.80s loop"));
+        assert!(text.contains("At cook time PSoXide jointly packs"));
     }
 
     #[test]
