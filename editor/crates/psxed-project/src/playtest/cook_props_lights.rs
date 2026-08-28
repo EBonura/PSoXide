@@ -995,7 +995,7 @@ pub(crate) fn push_point_light(
     // Reject obviously broken lights at cook time -- radius 0
     // contributes nothing, negative intensity is meaningless.
     // Clamp the rest into the wire format's u16 ranges.
-    if radius <= 0.0 {
+    if !radius.is_finite() || radius <= 0.0 {
         report.error(format!(
             "Light '{node_name}' has radius {radius} (must be > 0)"
         ));
