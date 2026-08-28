@@ -121,12 +121,16 @@ pub(super) fn collect_bsp_preview_bake_lights(
         .max(1) as f64;
     let mut out = Vec::new();
     for light in preview_lights(scene, hidden_scene_nodes) {
-        if light.radius <= 0.0 || !light.intensity.is_finite() || light.intensity < 0.0 {
+        let Some(radius) = preview_light_radius_world_units(light.radius, radius_units as f32)
+        else {
+            continue;
+        };
+        if !light.intensity.is_finite() || light.intensity < 0.0 {
             continue;
         }
         out.push(psxed_project::brush_light::BrushPointLight {
             position: light.transform.translation.map(f64::from),
-            radius: f64::from(light.radius) * radius_units,
+            radius: f64::from(radius),
             intensity_q8: (light.intensity * 256.0).clamp(0.0, f32::from(u16::MAX)) as u16,
             color: light.color,
         });
@@ -145,7 +149,10 @@ pub(super) fn collect_bsp_preview_lights(
         .max(1) as f32;
     let mut out = Vec::new();
     for light in preview_lights(scene, hidden_scene_nodes) {
-        if light.radius <= 0.0 || !light.intensity.is_finite() || light.intensity < 0.0 {
+        let Some(radius) = preview_light_radius_world_units(light.radius, radius_units) else {
+            continue;
+        };
+        if !light.intensity.is_finite() || light.intensity < 0.0 {
             continue;
         }
         let world = light
@@ -155,12 +162,24 @@ pub(super) fn collect_bsp_preview_lights(
         let intensity_q8 = (light.intensity * 256.0).clamp(0.0, u16::MAX as f32) as u32;
         out.push(psx_engine::PointLightSample::from_rgb_intensity(
             world,
-            (light.radius * radius_units) as i32,
+            radius,
             psx_engine::Rgb8::from_array(light.color),
             psx_engine::Q8::from_raw(intensity_q8),
         ));
     }
     out
+}
+
+pub(super) fn preview_light_radius_world_units(
+    radius_sectors: f32,
+    sector_size: f32,
+) -> Option<i32> {
+    let radius = radius_sectors * sector_size.max(1.0);
+    (radius.is_finite() && radius > 0.0).then(|| {
+        radius
+            .clamp(1.0, psxed_project::POINT_LIGHT_RADIUS_MAX_WORLD_UNITS)
+            .round() as i32
+    })
 }
 
 #[derive(Clone, Copy)]

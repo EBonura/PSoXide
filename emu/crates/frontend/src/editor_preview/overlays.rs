@@ -975,9 +975,12 @@ pub(super) fn walk_roomless_light_gizmos(
                 thickness_px: EDITOR_PREVIEW_HOVER_STROKE_WIDTH,
             }
         };
-        let radius_engine = (light.radius * radius_units) as i32;
-        if radius_engine > 0 && (is_selected || is_hovered) {
-            push_horizontal_ring(scratch, camera, center_world, radius_engine, 16, style);
+        if is_selected || is_hovered {
+            if let Some(radius_engine) =
+                preview_light_radius_world_units(light.radius, radius_units)
+            {
+                push_horizontal_ring(scratch, camera, center_world, radius_engine, 16, style);
+            }
         }
         push_light_bulb_icon(
             scratch,
@@ -1190,7 +1193,7 @@ pub(super) fn push_horizontal_ring(
     if segments < 3 || radius <= 0 {
         return;
     }
-    let mut prev_world = [center[0] + radius, center[1], center[2]];
+    let mut prev_world = [center[0].saturating_add(radius), center[1], center[2]];
     for i in 1..=segments {
         // Authored editor angles use 4096 units per turn; sample
         // the unit circle around the light origin once per segment.
@@ -1198,9 +1201,9 @@ pub(super) fn push_horizontal_ring(
         let s = sin_q12_turn(angle_q12);
         let c = cos_q12_turn(angle_q12);
         let next_world = [
-            center[0] + ((c * radius) >> 12),
+            center[0].saturating_add(q12_scale_radius(c, radius)),
             center[1],
-            center[2] + ((s * radius) >> 12),
+            center[2].saturating_add(q12_scale_radius(s, radius)),
         ];
         if let Some([prev_proj, next_proj]) =
             clip_preview_world_segment(camera, prev_world, next_world)
@@ -1209,6 +1212,11 @@ pub(super) fn push_horizontal_ring(
         }
         prev_world = next_world;
     }
+}
+
+fn q12_scale_radius(q12: i32, radius: i32) -> i32 {
+    ((i64::from(q12) * i64::from(radius)) >> 12).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+        as i32
 }
 
 pub(super) fn push_light_bulb_icon(
@@ -1604,6 +1612,23 @@ mod surface_grid_tests {
         assert_eq!(adaptive_grid_value((255, 255, 255)), BSP_SURFACE_GRID_DARK);
         assert_eq!(adaptive_grid_value((127, 127, 127)), BSP_SURFACE_GRID_LIGHT);
         assert_eq!(adaptive_grid_value((128, 128, 128)), BSP_SURFACE_GRID_DARK);
+    }
+
+    #[test]
+    fn malformed_light_radii_are_bounded_before_ring_math() {
+        assert_eq!(preview_light_radius_world_units(f32::NAN, 1024.0), None);
+        assert_eq!(preview_light_radius_world_units(0.0, 1024.0), None);
+        assert_eq!(
+            preview_light_radius_world_units(f32::MAX, 1024.0),
+            None,
+            "overflowing the sector conversion must be rejected"
+        );
+        assert_eq!(
+            preview_light_radius_world_units(100_000.0, 1.0),
+            Some(u16::MAX as i32)
+        );
+        assert_eq!(q12_scale_radius(4096, i32::MAX), i32::MAX);
+        assert_eq!(q12_scale_radius(-4096, i32::MAX), -i32::MAX);
     }
 
     #[test]
