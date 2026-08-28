@@ -74,6 +74,11 @@ tr-subdivision-ceilings = []
 # Experiment-only stress profile that expands the distance band fourfold so
 # the upward-camera tape exercises ceiling subdivision even in tall rooms.
 tr-subdivision-wide-band = []
+# Quake II transfer candidate: after the source PVS, backface, frustum, and
+# whole-surface gates admit a surface, let the GPU draw area clip generated
+# classic-affine polygons instead of repeating four CPU screen-edge tests.
+# Opt-in until the Cortex route and original hardware visual gates pass.
+classic-affine-gpu-polygon-clip = ["psx-engine/classic-affine-gpu-polygon-clip"]
 # Experiment-only reference cadence for measuring the existing 30 Hz NPC
 # schedule against collision/decision work on every 60 Hz simulation tick.
 npc-think-60hz = []

@@ -27,6 +27,138 @@ use core::ptr;
 const OT_ADDR_MASK: u32 = 0x00FF_FFFF;
 const OT_END: u32 = OT_ADDR_MASK;
 const OT_MAX_EXTRA_HOPS: usize = 131_072;
+/// Staged-tag marker for a self-contained scoped GP0(E2) packet. Tagged-stream
+/// insertion consumes this bit before replacing the low 24 bits with a DMA
+/// link, so normal ordering-table submission remains wire-identical.
+pub const TAG_SCOPED_TEXTURE_WINDOW: u32 = 1 << 16;
+#[cfg(any(
+    target_arch = "mips",
+    test,
+    feature = "ot-window-insert-coalescing"
+))]
+const GP0_TEXTURE_WINDOW_MASK: u32 = 0xFF00_0000;
+#[cfg(any(
+    target_arch = "mips",
+    test,
+    feature = "ot-window-insert-coalescing"
+))]
+const GP0_TEXTURE_WINDOW: u32 = 0xE200_0000;
+
+/// Work removed by final-GPU-order scoped texture-window coalescing.
+///
+/// A scoped packet normally carries `E2(selector), primitive, E2(reset)`.
+/// Adjacent packets with the same selector can instead carry one selector at
+/// the start of the run and one reset at its end without changing primitive
+/// order or GPU state at either boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ScopedTextureWindowCoalesce {
+    /// Scoped packets encountered in the final chain.
+    pub window_packets: u32,
+    /// Maximal same-selector runs among those packets.
+    pub runs: u32,
+    /// Run-interior selector commands made unreachable.
+    pub selectors_removed: u32,
+    /// Run-interior reset commands made unreachable.
+    pub resets_removed: u32,
+}
+
+/// Rewrite scoped texture-window packets in one already-linked DMA chain.
+///
+/// `address_base` is the DMA address represented by `base`. This indirection
+/// keeps the address/link algorithm host-testable while the PS1 caller maps
+/// low-24-bit physical addresses through KSEG0.
+///
+/// # Safety
+///
+/// Every non-terminal link reachable from `start_address` must resolve to a
+/// live, writable tag word through `base` and `address_base`. Each tag's word
+/// count must describe readable packet data. The chain must not be modified
+/// concurrently.
+#[cfg(any(target_arch = "mips", test))]
+unsafe fn coalesce_scoped_texture_window_chain(
+    start_address: u32,
+    base: *mut u32,
+    address_base: u32,
+    maximum_hops: usize,
+) -> ScopedTextureWindowCoalesce {
+    let mut result = ScopedTextureWindowCoalesce::default();
+    let mut address = start_address & OT_ADDR_MASK;
+    let mut inbound_tag: *mut u32 = ptr::null_mut();
+    let mut run_selector = 0u32;
+    let mut run_length = 0u32;
+    let mut run_last_tag: *mut u32 = ptr::null_mut();
+    let mut hops = 0usize;
+
+    while address != OT_END && hops < maximum_hops {
+        if address < address_base || (address - address_base) & 3 != 0 {
+            break;
+        }
+        hops += 1;
+        let node = unsafe { base.add(((address - address_base) >> 2) as usize) };
+        let tag = unsafe { ptr::read_volatile(node) };
+        let words = (tag >> 24) as usize;
+        let next_address = tag & OT_ADDR_MASK;
+        let selector = if words >= 3 {
+            unsafe { ptr::read_volatile(node.add(1)) }
+        } else {
+            0
+        };
+        let reset = if words >= 3 {
+            unsafe { ptr::read_volatile(node.add(words)) }
+        } else {
+            0
+        };
+        let scoped_window = selector & GP0_TEXTURE_WINDOW_MASK == GP0_TEXTURE_WINDOW
+            && selector != GP0_TEXTURE_WINDOW
+            && reset == GP0_TEXTURE_WINDOW;
+        let mut linked_tag = node;
+
+        if scoped_window {
+            result.window_packets = result.window_packets.wrapping_add(1);
+            if run_length != 0 && selector == run_selector && !inbound_tag.is_null() {
+                let previous_tag = unsafe { ptr::read_volatile(run_last_tag) };
+                let previous_words = previous_tag >> 24;
+                debug_assert!(previous_words != 0);
+                unsafe {
+                    ptr::write_volatile(
+                        run_last_tag,
+                        ((previous_words - 1) << 24) | (previous_tag & OT_ADDR_MASK),
+                    )
+                };
+
+                let selector_address = address.wrapping_add(4) & OT_ADDR_MASK;
+                let inbound = unsafe { ptr::read_volatile(inbound_tag) };
+                unsafe {
+                    ptr::write_volatile(
+                        inbound_tag,
+                        (inbound & !OT_ADDR_MASK) | selector_address,
+                    );
+                    ptr::write_volatile(
+                        node.add(1),
+                        (((words as u32) - 1) << 24) | next_address,
+                    );
+                }
+                linked_tag = unsafe { node.add(1) };
+                run_last_tag = linked_tag;
+                run_length = run_length.wrapping_add(1);
+                result.selectors_removed = result.selectors_removed.wrapping_add(1);
+                result.resets_removed = result.resets_removed.wrapping_add(1);
+            } else {
+                run_selector = selector;
+                run_length = 1;
+                run_last_tag = node;
+                result.runs = result.runs.wrapping_add(1);
+            }
+        } else if words != 0 {
+            run_length = 0;
+            run_last_tag = ptr::null_mut();
+        }
+
+        inbound_tag = linked_tag;
+        address = next_address;
+    }
+    result
+}
 
 /// Fixed-size OT. `N` depth slots. Typical values: 256, 1024, 4096.
 #[repr(C, align(4))]
@@ -383,7 +515,10 @@ impl<const N: usize> OrderingTable<N> {
         }
         debug_assert!(N > 0);
 
-        #[cfg(target_arch = "mips")]
+        #[cfg(all(
+            target_arch = "mips",
+            not(feature = "ot-window-insert-coalescing")
+        ))]
         {
             let entries = self.entries.as_mut_ptr();
             unsafe {
@@ -437,7 +572,104 @@ impl<const N: usize> OrderingTable<N> {
             }
         }
 
-        #[cfg(not(target_arch = "mips"))]
+        #[cfg(all(target_arch = "mips", feature = "ot-window-insert-coalescing"))]
+        {
+            let entries = self.entries.as_mut_ptr();
+            let stream_first = first;
+            unsafe {
+                core::arch::asm!(
+                    ".set noreorder",
+                    "lui $15, 0x00ff",
+                    "ori $15, $15, 0xffff",
+                    "ori $17, $0, 0xffff",
+                    "lui $23, 0xff00",
+                    "lui $25, 0x0100",
+                    "2:",
+                    "lw $9, 0($8)",
+                    "nop",
+                    "srl $10, $9, 22",
+                    "andi $11, $9, 0xffff",
+                    "addu $10, $8, $10",
+                    "beq $11, $17, 3f",
+                    "addiu $10, $10, 4",
+                    "sll $13, $11, 2",
+                    "addu $13, $12, $13",
+                    "lw $14, 0($13)",
+                    "srl $19, $9, 16",
+                    "andi $19, $19, 1",
+                    "beq $19, $0, 4f",
+                    "and $14, $14, $15",
+                    "and $20, $8, $23",
+                    "or $20, $20, $14",
+                    "sltu $19, $20, $18",
+                    "bne $19, $0, 4f",
+                    "nop",
+                    "sltu $19, $20, $8",
+                    "beq $19, $0, 4f",
+                    "nop",
+                    "lw $22, 4($20)",
+                    "lw $19, 4($8)",
+                    "lw $24, 0($20)",
+                    "bne $22, $19, 4f",
+                    "nop",
+                    "srl $19, $22, 24",
+                    "ori $22, $0, 0x00e2",
+                    "bne $19, $22, 4f",
+                    "nop",
+                    // Old selector becomes the tag for its polygon/run tail;
+                    // the new packet omits its reset and links to that tag.
+                    "subu $24, $24, $25",
+                    "sw $24, 4($20)",
+                    "srl $9, $9, 24",
+                    "addiu $9, $9, -1",
+                    "sll $9, $9, 24",
+                    "addiu $14, $14, 4",
+                    "and $14, $14, $15",
+                    "or $14, $14, $9",
+                    "sw $14, 0($8)",
+                    "sll $11, $8, 8",
+                    "srl $11, $11, 8",
+                    "b 3f",
+                    "sw $11, 0($13)",
+                    "4:",
+                    "sll $11, $8, 8",
+                    "srl $9, $9, 24",
+                    "sll $9, $9, 24",
+                    "or $14, $14, $9",
+                    "sw $14, 0($8)",
+                    "srl $11, $11, 8",
+                    "sw $11, 0($13)",
+                    "3:",
+                    "move $8, $10",
+                    "bne $8, $16, 2b",
+                    "nop",
+                    ".set reorder",
+                    inout("$8") first => _,
+                    in("$12") entries,
+                    in("$16") end,
+                    in("$18") stream_first,
+                    lateout("$9") _,
+                    lateout("$10") _,
+                    lateout("$11") _,
+                    lateout("$13") _,
+                    lateout("$14") _,
+                    lateout("$15") _,
+                    lateout("$17") _,
+                    lateout("$19") _,
+                    lateout("$20") _,
+                    lateout("$22") _,
+                    lateout("$23") _,
+                    lateout("$24") _,
+                    lateout("$25") _,
+                    options(nostack),
+                );
+            }
+        }
+
+        #[cfg(all(
+            not(target_arch = "mips"),
+            not(feature = "ot-window-insert-coalescing")
+        ))]
         {
             let mut packet = first;
             while packet < end {
@@ -449,6 +681,166 @@ impl<const N: usize> OrderingTable<N> {
                     debug_assert!(slot < N);
                     unsafe {
                         self.insert_unchecked_tag_high(slot, packet, staged_tag & 0xFF00_0000)
+                    };
+                }
+                packet = next;
+            }
+            debug_assert_eq!(packet, end);
+        }
+
+        #[cfg(all(
+            not(target_arch = "mips"),
+            feature = "ot-window-insert-coalescing"
+        ))]
+        {
+            let stream_first = first as usize;
+            let stream_end = end as usize;
+            let stream_base = stream_first & !(OT_ADDR_MASK as usize);
+            let mut packet = first;
+            while packet < end {
+                let staged_tag = unsafe { ptr::read(packet) };
+                let words = (staged_tag >> 24) as usize;
+                let slot = (staged_tag & u16::MAX as u32) as usize;
+                let next = unsafe { packet.add(words + 1) };
+                if slot != u16::MAX as usize {
+                    debug_assert!(slot < N);
+                    let old_address = self.entries[slot] & OT_ADDR_MASK;
+                    let old = (stream_base | old_address as usize) as *mut u32;
+                    let old_in_stream = (old as usize) >= stream_first
+                        && (old as usize) < packet as usize
+                        && (old as usize) < stream_end;
+                    let marked = staged_tag & TAG_SCOPED_TEXTURE_WINDOW != 0;
+                    let selector = if marked {
+                        unsafe { ptr::read(packet.add(1)) }
+                    } else {
+                        0
+                    };
+                    let same_window = old_in_stream
+                        && selector & GP0_TEXTURE_WINDOW_MASK == GP0_TEXTURE_WINDOW
+                        && unsafe { ptr::read(old.add(1)) } == selector;
+                    if same_window {
+                        let old_tag = unsafe { ptr::read(old) };
+                        unsafe {
+                            ptr::write(
+                                old.add(1),
+                                old_tag.wrapping_sub(1 << 24),
+                            );
+                            ptr::write(
+                                packet,
+                                (((words as u32) - 1) << 24)
+                                    | (((old as u32).wrapping_add(4)) & OT_ADDR_MASK),
+                            );
+                        }
+                        self.entries[slot] = packet as u32 & OT_ADDR_MASK;
+                    } else {
+                        unsafe {
+                            self.insert_unchecked_tag_high(
+                                slot,
+                                packet,
+                                staged_tag & 0xFF00_0000,
+                            )
+                        };
+                    }
+                }
+                packet = next;
+            }
+            debug_assert_eq!(packet, end);
+        }
+    }
+
+    /// Insert a tagged packet stream while quantising every non-sentinel OT
+    /// slot by a compile-time right shift.
+    ///
+    /// This preserves the packet sequence and every raw depth calculation,
+    /// but lets a caller back the final DMA chain with a smaller ordering
+    /// table. A staged slot of `0xffff` remains the screen-packet sentinel and
+    /// is skipped before the shift. For example, `SLOT_SHIFT = 3` maps the
+    /// classic 0..2047 depth range onto 256 slots.
+    ///
+    /// # Safety
+    ///
+    /// The packet lifetime and layout requirements match
+    /// [`Self::insert_tagged_packet_stream_unchecked`]. Every shifted slot must
+    /// be less than `N`, and `SLOT_SHIFT` must be less than 16.
+    #[inline]
+    pub unsafe fn insert_tagged_packet_stream_shifted_unchecked<const SLOT_SHIFT: u32>(
+        &mut self,
+        first: *mut u32,
+        end: *mut u32,
+    ) {
+        if first >= end {
+            return;
+        }
+        debug_assert!(N > 0);
+        debug_assert!(SLOT_SHIFT < 16);
+
+        #[cfg(target_arch = "mips")]
+        {
+            let entries = self.entries.as_mut_ptr();
+            unsafe {
+                core::arch::asm!(
+                    ".set noreorder",
+                    "lui $15, 0x00ff",
+                    "ori $15, $15, 0xffff",
+                    "ori $17, $0, 0xffff",
+                    "2:",
+                    "lw $9, 0($8)",
+                    "nop",
+                    "srl $10, $9, 22",
+                    "andi $11, $9, 0xffff",
+                    "addu $10, $8, $10",
+                    "beq $11, $17, 3f",
+                    "addiu $10, $10, 4",
+                    "srl $11, $11, {slot_shift}",
+                    "sll $13, $11, 2",
+                    "addu $13, $12, $13",
+                    "lw $14, 0($13)",
+                    "sll $11, $8, 8",
+                    "srl $9, $9, 24",
+                    "and $14, $14, $15",
+                    "sll $9, $9, 24",
+                    "or $14, $14, $9",
+                    "sw $14, 0($8)",
+                    "srl $11, $11, 8",
+                    "sw $11, 0($13)",
+                    "3:",
+                    "move $8, $10",
+                    "bne $8, $16, 2b",
+                    "nop",
+                    ".set reorder",
+                    slot_shift = const SLOT_SHIFT,
+                    inout("$8") first => _,
+                    in("$12") entries,
+                    in("$16") end,
+                    lateout("$9") _,
+                    lateout("$10") _,
+                    lateout("$11") _,
+                    lateout("$13") _,
+                    lateout("$14") _,
+                    lateout("$15") _,
+                    lateout("$17") _,
+                    options(nostack),
+                );
+            }
+        }
+
+        #[cfg(not(target_arch = "mips"))]
+        {
+            let mut packet = first;
+            while packet < end {
+                let staged_tag = unsafe { ptr::read(packet) };
+                let words = (staged_tag >> 24) as usize;
+                let slot = (staged_tag & u16::MAX as u32) as usize;
+                let next = unsafe { packet.add(words + 1) };
+                if slot != u16::MAX as usize {
+                    let shifted_slot = slot >> SLOT_SHIFT;
+                    debug_assert!(shifted_slot < N);
+                    unsafe {
+                        self.insert_unchecked_tag_high(
+                            shifted_slot,
+                            packet,
+                            staged_tag & 0xFF00_0000,
+                        )
                     };
                 }
                 packet = next;
@@ -469,6 +861,36 @@ impl<const N: usize> OrderingTable<N> {
     #[inline]
     pub fn submit_head(&self) -> *const u32 {
         &self.entries[N - 1] as *const u32
+    }
+
+    /// Coalesce adjacent scoped texture-window packets in final GPU order.
+    ///
+    /// Empty OT nodes are transparent, so packets in neighbouring depth slots
+    /// can share state when no intervening GP0 command observes the window.
+    /// Only redundant run-interior selectors and resets are made unreachable;
+    /// primitive bytes, order, run-entry state, and run-exit state are kept.
+    ///
+    /// # Safety
+    ///
+    /// Every packet linked into this table must remain live and writable until
+    /// GPU completion, and the table must not yet have been submitted.
+    pub unsafe fn coalesce_scoped_texture_windows(&mut self) -> ScopedTextureWindowCoalesce {
+        #[cfg(target_arch = "mips")]
+        {
+            let start = self.submit_head() as u32 & OT_ADDR_MASK;
+            unsafe {
+                coalesce_scoped_texture_window_chain(
+                    start,
+                    0x8000_0000usize as *mut u32,
+                    0,
+                    N.saturating_add(OT_MAX_EXTRA_HOPS),
+                )
+            }
+        }
+        #[cfg(not(target_arch = "mips"))]
+        {
+            ScopedTextureWindowCoalesce::default()
+        }
     }
 
     /// Submit the whole table to GPU via DMA channel 2 linked-list
@@ -670,6 +1092,139 @@ mod tests {
         assert_eq!(iter.next().unwrap().0, packets.as_ptr());
         assert!(iter.next().is_none());
         assert_eq!(packets[2] & 0x00ff_ffff, u16::MAX as u32);
+    }
+
+    #[cfg(feature = "ot-window-insert-coalescing")]
+    #[test]
+    fn tagged_insert_coalesces_same_slot_scoped_window_packets() {
+        const WINDOW: u32 = 0xe200_0123;
+        const RESET: u32 = 0xe200_0000;
+        let mut packets = [
+            (4 << 24) | TAG_SCOPED_TEXTURE_WINDOW | 3,
+            WINDOW,
+            0x3400_0001,
+            0x0002_0003,
+            RESET,
+            (4 << 24) | TAG_SCOPED_TEXTURE_WINDOW | 3,
+            WINDOW,
+            0x3400_0004,
+            0x0005_0006,
+            RESET,
+        ];
+        let mut ot: OrderingTable<8> = OrderingTable::new();
+        ot.clear();
+        unsafe {
+            ot.insert_tagged_packet_stream_unchecked(
+                packets.as_mut_ptr(),
+                packets.as_mut_ptr().add(packets.len()),
+            );
+        }
+
+        assert_eq!(packets[5] >> 24, 3, "new head omits its reset");
+        assert_eq!(packets[5] & OT_ADDR_MASK, (&packets[1] as *const u32 as u32) & OT_ADDR_MASK);
+        assert_eq!(packets[1] >> 24, 3, "old selector becomes a tail tag");
+        assert_eq!(packets[2], 0x3400_0001);
+        assert_eq!(packets[4], RESET, "oldest packet retains the run reset");
+    }
+
+    #[test]
+    fn shifted_tagged_stream_quantises_slots_after_the_sentinel_test() {
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        ot.clear();
+        let mut packets = [
+            (1 << 24) | 31,
+            0xAAAA_AAAA,
+            (1 << 24) | u16::MAX as u32,
+            0xBBBB_BBBB,
+            (1 << 24) | 24,
+            0xCCCC_CCCC,
+        ];
+
+        unsafe {
+            ot.insert_tagged_packet_stream_shifted_unchecked::<3>(
+                packets.as_mut_ptr(),
+                packets.as_mut_ptr().add(packets.len()),
+            );
+        }
+
+        let mut iter = unsafe { ot.iter_packets() };
+        assert_eq!(iter.next().unwrap().0, unsafe { packets.as_ptr().add(4) });
+        assert_eq!(iter.next().unwrap().0, packets.as_ptr());
+        assert!(iter.next().is_none());
+        assert_eq!(packets[2] & OT_ADDR_MASK, u16::MAX as u32);
+    }
+
+    #[test]
+    fn scoped_window_runs_keep_only_boundary_state_commands() {
+        let mut chain = [0u32; 15];
+        let address = |word: usize| (word * 4) as u32;
+        chain[0] = address(1);
+        chain[1] = (4 << 24) | address(6);
+        chain[2] = 0xE234_0012;
+        chain[3] = 0x3400_0000;
+        chain[4] = 0x1111_1111;
+        chain[5] = GP0_TEXTURE_WINDOW;
+        chain[6] = address(7);
+        chain[7] = (4 << 24) | address(12);
+        chain[8] = 0xE234_0012;
+        chain[9] = 0x3400_0000;
+        chain[10] = 0x2222_2222;
+        chain[11] = GP0_TEXTURE_WINDOW;
+        chain[12] = (1 << 24) | OT_END;
+        chain[13] = 0x2000_0000;
+
+        let result = unsafe {
+            coalesce_scoped_texture_window_chain(
+                address(0),
+                chain.as_mut_ptr(),
+                0,
+                chain.len(),
+            )
+        };
+        assert_eq!(
+            result,
+            ScopedTextureWindowCoalesce {
+                window_packets: 2,
+                runs: 1,
+                selectors_removed: 1,
+                resets_removed: 1,
+            }
+        );
+        assert_eq!(chain[1] >> 24, 3);
+        assert_eq!(chain[6] & OT_ADDR_MASK, address(8));
+        assert_eq!(chain[8] >> 24, 3);
+        assert_eq!(chain[8] & OT_ADDR_MASK, address(12));
+        assert_eq!(chain[11], GP0_TEXTURE_WINDOW);
+    }
+
+    #[test]
+    fn scoped_window_coalescing_stops_at_plain_gpu_work() {
+        let mut chain = [0u32; 16];
+        let address = |word: usize| (word * 4) as u32;
+        chain[0] = address(1);
+        chain[1] = (3 << 24) | address(5);
+        chain[2] = 0xE200_1234;
+        chain[3] = 0x3400_0000;
+        chain[4] = GP0_TEXTURE_WINDOW;
+        chain[5] = (1 << 24) | address(7);
+        chain[6] = 0x2000_0000;
+        chain[7] = (3 << 24) | OT_END;
+        chain[8] = 0xE200_1234;
+        chain[9] = 0x3400_0000;
+        chain[10] = GP0_TEXTURE_WINDOW;
+
+        let result = unsafe {
+            coalesce_scoped_texture_window_chain(
+                address(0),
+                chain.as_mut_ptr(),
+                0,
+                chain.len(),
+            )
+        };
+        assert_eq!(result.window_packets, 2);
+        assert_eq!(result.runs, 2);
+        assert_eq!(result.selectors_removed, 0);
+        assert_eq!(result.resets_removed, 0);
     }
 
     /// Build a primitive packet by hand (one tag word + N data words),
