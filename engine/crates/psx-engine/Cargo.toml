@@ -43,6 +43,101 @@ tr-subdivision-lattice = []
 # cell_depth / cell_collect CSV columns). Off by default: the per-cell
 # begin/end telemetry writes cost ~4k cycles/frame on the benchmark tape.
 cell-select-profile = []
+# Experimental classic-affine policy: adjacent unsubdivided fan triangles may
+# share one native GT4 packet even when their independently rounded OT slots
+# differ by one slot. The combined quad uses its natural four-vertex average
+# depth.
+classic-affine-relaxed-quad-pairing = []
+# Experimental exact-lattice policy: adjacent fan roots at the same
+# subdivision level share projected radial-edge vertices, so only the outer
+# boundary or a level transition retains crack-sealing underdraw.
+classic-affine-shared-subdivision-edges = []
+# Experimental code-layout split for the dominant ordinary-world case. Fans
+# whose admitted roots all remain at subdivision level zero use a compact
+# preflight/emitter; the full lattice writer stays behind a cold call.
+classic-affine-level0-fast-path = []
+# Exact code-layout experiment: emit the common level-zero fan immediately,
+# then rewind the unlinked cursor and enter the adaptive writer only when a
+# root actually requests subdivision.
+classic-affine-speculative-level0 = []
+# Exact Quake-specialized selector: omit the general affine-error estimator
+# when both configured error thresholds are zero and OTZ owns every decision.
+classic-affine-depth-only-subdivision = []
+# Exact PS1-specific depth-key experiment: reload cached projected depths into
+# SZ1..SZ3 and let GTE AVSZ3 replace the per-root MIPS multiply/shift chain.
+classic-affine-gte-otz = []
+# Architectural ceiling experiment matching the retail Quake II packet shape:
+# ordinary convex fans use fixed GT4 pairs plus an optional GT3 remainder,
+# without runtime affine-subdivision topology.
+classic-affine-fixed-fan-quads = []
+# Fixed GT4/GT3 fans with the complete adaptive path retained only for
+# screen-spanning faces whose original corners are all outside the viewport.
+classic-affine-fixed-fan-guarded = []
+# Quality/performance ladder above the fixed-fan ceiling: retain the complete
+# two-level lattice for the closest roots, but flatten level-one roots.
+classic-affine-fixed-fan-level2 = []
+# Quake II-style persistent subdivision roots. A destination renderer owns
+# fixed dual-pool packet slabs and supplies exact root identities plus OT
+# insertion; the engine keeps projection, clipping and lattice construction.
+classic-affine-subdivision-cache = []
+# Cost-aware cache variant: reserve persistence for the large level-two root
+# blocks and keep smaller level-one roots on the compact sequential writer.
+classic-affine-subdivision-cache-level2-only = ["classic-affine-subdivision-cache"]
+# Fixed cache-hit successor to the generic resident writer. Level-two roots
+# reuse their invariant packet payload and execute one compact projection/XY
+# scatter pass before the tagged-stream linker.
+classic-affine-resident-level2-scatter = [
+    "classic-affine-subdivision-cache-level2-only",
+    "classic-affine-gpu-polygon-clip",
+]
+# Keep the rare resident packet initializer outside the fixed cache-hit caller.
+classic-affine-resident-level2-cold-init = ["classic-affine-resident-level2-scatter"]
+# High-leverage resident path for the dominant unsplit world roots. One fixed
+# GT3/GT4 slot is initialized in each display pool and later patches only
+# tag/XY words.
+classic-affine-resident-base-cache = ["classic-affine-resident-level2-cold-init"]
+# Exact MIPS code-size experiment: keep one shared GT3 and GT4 constructor for
+# adaptive lattice calls instead of inlining each constructor at every leaf.
+classic-affine-compact-subdivision-emitters = []
+# Exact narrower code-size experiment: share complete L1/L2 lattice kernels,
+# while retaining their internal packet constructors and register locality.
+classic-affine-compact-subdivision-kernels = []
+# Exact hybrid: retain the frequent L1 lattice inline and share only the rare,
+# much larger sixteen-triangle L2 lattice.
+classic-affine-compact-level2-kernel = []
+# Exact writer-specialized hybrid: share only ordinary PacketWriter L2 work;
+# scoped-window and resident writers retain their locally optimized kernels.
+classic-affine-compact-world-level2-kernel = []
+# Visual-exact CPU/GPU trade: after the conservative whole-face gate admits a
+# lattice, rely on the PS1 draw area instead of rejecting each child packet.
+classic-affine-gpu-lattice-clip = []
+# Broader visual-exact form: delegate every child GT3/GT4 rejection to the
+# draw area after the source surface survives its conservative admission gate.
+classic-affine-gpu-polygon-clip = ["classic-affine-gpu-lattice-clip"]
+# Full conservative-admission form: the source PVS/frustum gate owns surface
+# rejection and the GPU draw area owns all later 2D clipping.
+classic-affine-gpu-surface-clip = ["classic-affine-gpu-polygon-clip"]
+# Monomorphize the ordinary batch submitter around Quake's one fixed profile
+# so depth/error policy and viewport constants are compile-time facts.
+classic-affine-quake-specialized-kernel = []
+# Exact hybrid: consume consecutive level-zero Quake roots in one compact
+# packet-writer run and return to the established lattice at L1/L2 roots.
+classic-affine-quake-level0-run = [
+    "classic-affine-quake-specialized-kernel",
+    "classic-affine-gpu-polygon-clip",
+]
+# Exact inverse hybrid: keep L0 emission in the batch loop and call one cold
+# specialized lattice only for the measured 7.75% L1/L2 roots.
+classic-affine-quake-cold-adaptive = [
+    "classic-affine-quake-specialized-kernel",
+    "classic-affine-gpu-polygon-clip",
+]
+# Keep L0 and the small L1 lattice local; outline only the measured 1.41% L2
+# roots whose fixed 12-point/16-child schedule dominates text size.
+classic-affine-quake-cold-level2 = [
+    "classic-affine-quake-specialized-kernel",
+    "classic-affine-gpu-polygon-clip",
+]
 # Player skinned-vertex live-capture instrument (the HWB-008..011
 # explosion-hunt channel). Off by default: the per-vertex observe and
 # per-joint compose recording cost real cycles and must not ride along
