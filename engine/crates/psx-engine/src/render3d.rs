@@ -21,11 +21,12 @@ use psx_asset::{
     Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelPoseBlend, ModelVertex,
 };
 use psx_gpu::{
-    material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
-    prim::{QuadTexturedGouraud, TriGouraud, TriTextured, TriTexturedGouraud},
+    material::{BlendMode, TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
+    prim::{QuadGouraudBlended, QuadTexturedGouraud, TriGouraud, TriTextured, TriTexturedGouraud},
 };
+pub use psx_gte::lighting::ProjectedLit;
 use psx_gte::{
-    lighting::{project_lit, project_lit_triangle, ProjectedLit},
+    lighting::{project_lit, project_lit_triangle},
     math::{Mat3I16, Vec3I16, Vec3I32},
     scene,
 };

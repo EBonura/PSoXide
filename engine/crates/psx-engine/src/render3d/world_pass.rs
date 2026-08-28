@@ -446,6 +446,73 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    /// Submit a projected Gouraud quad using one of the PS1 GPU's native
+    /// semi-transparency equations.
+    ///
+    /// The packet includes its own GP0(E1) draw mode, so it remains correct
+    /// when interleaved with textured world/model packets in the ordering
+    /// table. One quad accounts for the two hardware triangles it rasterises.
+    pub fn submit_blended_gouraud_quad(
+        &mut self,
+        quads: &mut impl PrimitiveSink<QuadGouraudBlended>,
+        verts: [ProjectedLit; 4],
+        blend_mode: BlendMode,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        let projected = [
+            ProjectedVertex::from(verts[0]),
+            ProjectedVertex::from(verts[1]),
+            ProjectedVertex::from(verts[2]),
+            ProjectedVertex::from(verts[3]),
+        ];
+        if projected_culled(
+            [projected[0], projected[1], projected[2]],
+            options.cull_mode,
+        ) && projected_culled(
+            [projected[1], projected[2], projected[3]],
+            options.cull_mode,
+        ) {
+            stats.culled_triangles = 2;
+            return stats;
+        }
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+        let Some(quad) = quads.push(QuadGouraudBlended::new(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+                (verts[3].sx, verts[3].sy),
+            ],
+            [
+                (verts[0].r, verts[0].g, verts[0].b),
+                (verts[1].r, verts[1].g, verts[1].b),
+                (verts[2].r, verts[2].g, verts[2].b),
+                (verts[3].r, verts[3].g, verts[3].b),
+            ],
+            blend_mode,
+        )) else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+        let depth = CameraDepth::new(options.depth_policy.depth([verts[0], verts[1], verts[2]]))
+            .saturating_add(options.depth_bias);
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            WorldRenderLayer::Transparent,
+            quad as *mut QuadGouraudBlended as *mut u32,
+            QuadGouraudBlended::WORDS,
+        );
+        stats.submitted_triangles = 2;
+        stats
+    }
+
     /// Submit a monochrome line between two already-projected vertices.
     ///
     /// The GPU's own line rasteriser (GP0 0x40), not a thin quad: three data
