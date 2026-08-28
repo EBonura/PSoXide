@@ -51,6 +51,12 @@ use psx_math::{cos_q12, sin_q12};
 pub const UI_CANVAS_W: u16 = 320;
 /// Canvas height counterpart to [`UI_CANVAS_W`].
 pub const UI_CANVAS_H: u16 = 240;
+/// Presented frames held between a CROSS press and its UI action.
+///
+/// The source control remains on screen for this entire beat while two
+/// shape-aware perimeter echoes expand and fade. Eight frames is long enough
+/// to read at 60 Hz without making menu input feel laggy.
+pub const ACTIVATION_ECHO_FRAMES: u16 = 8;
 
 /// Placement preset for the shared Archive-message chrome.
 ///
@@ -541,6 +547,91 @@ pub fn draw_scene(
     }
 }
 
+/// Draw the standard Cortex-style confirmation burst for one cooked UI node.
+///
+/// This is deliberately separate from [`draw_scene`]: the flow driver owns
+/// the deferred action and asks for the overlay only while that action is
+/// armed. The outline is derived from the node's encoded shape, so clipped
+/// corners expand along their real perimeter instead of falling back to an
+/// axis-aligned rectangle. Everything is integer-only and allocation-free.
+pub fn draw_activation_echo(
+    nodes: &[LevelUiNodeRecord],
+    node_index: usize,
+    style: &LevelUiFocusStyle,
+    frame: u16,
+) {
+    if frame >= ACTIVATION_ECHO_FRAMES {
+        return;
+    }
+    let Some(node) = nodes.get(node_index) else {
+        return;
+    };
+    if !matches!(
+        node.kind,
+        LevelUiNodeKind::Button | LevelUiNodeKind::Rect | LevelUiNodeKind::Image
+    ) {
+        return;
+    }
+    let Some(resolved) = node_resolved(nodes, node_index) else {
+        return;
+    };
+    if resolved.width == 0 || resolved.height == 0 {
+        return;
+    }
+    let config = shape_config(node);
+
+    // A short additive-looking body flash makes the press read before the
+    // outlines leave the control. Average blending is the same PS1-cheap path
+    // used by translucent authored panels and behaves well over dark menus.
+    if frame < 3 {
+        let strength = 96u8.saturating_sub((frame as u8).saturating_mul(28));
+        let flash = scale_color_q8(style.color_a, strength);
+        let polygon = shape_polygon(resolved, config.corners, config.cut, 1);
+        draw_shape_polygon(
+            &polygon,
+            UiPaint::Solid(flash),
+            resolved.width,
+            resolved.height,
+            true,
+        );
+    }
+
+    // Keep a bright copy on the original perimeter for the first half of the
+    // beat, then let the two delayed echoes carry the release outward.
+    if frame < 4 {
+        let strength = 255u8.saturating_sub((frame as u8).saturating_mul(44));
+        let color = scale_color_q8(style.color_a, strength);
+        let polygon = shape_polygon(resolved, config.corners, config.cut, 0);
+        draw_shape_outline(&polygon, color);
+    }
+
+    for ring in 0..2u16 {
+        let delay = ring.saturating_mul(2);
+        let Some((expansion, strength)) = activation_echo_layer(frame, delay, ring) else {
+            continue;
+        };
+        let color = scale_color_q8(style.color_a, strength);
+        let polygon = shape_polygon(resolved, config.corners, config.cut, -i32::from(expansion));
+        draw_shape_outline(&polygon, color);
+    }
+}
+
+/// Pure timing helper for one activation contour. The second contour starts
+/// two frames later and travels farther, preventing the result from reading as
+/// a static double border.
+fn activation_echo_layer(frame: u16, delay: u16, ring: u16) -> Option<(u8, u8)> {
+    if frame < delay || frame >= ACTIVATION_ECHO_FRAMES {
+        return None;
+    }
+    let age = frame - delay;
+    let life = ACTIVATION_ECHO_FRAMES - delay;
+    let remaining = life.saturating_sub(age);
+    let peak = if ring == 0 { 224u16 } else { 176u16 };
+    let strength = ((peak * remaining) / life.max(1)).min(255) as u8;
+    let expansion = if ring == 0 { 1 + age / 2 } else { 2 + age }.min(u16::from(u8::MAX)) as u8;
+    Some((expansion, strength))
+}
+
 /// Outline drawn just outside a focused control's rect so the
 /// highlight reads regardless of the control's own colours. The
 /// scene's [`LevelUiFocusStyle`] selects the animation; everything
@@ -962,12 +1053,13 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bar_frame_index, bar_frame_v_range, diamond_quad, focus_chrome_sweep_paint,
-        focus_sweep_rect, font_index, font_tint, image_effect_vertex_colors, image_effect_verts,
-        message_panel_layout, message_panel_transition_layout, node_absolute_rect, scale_u16_q8,
-        selected_label_text, shape_config, shape_edge_point, shape_perimeter, shape_polygon,
-        text_prefix_chars, MessagePageMeta, MessagePanelLayout, MessagePanelVariant, UiPaint,
-        UiShapeConfig, MESSAGE_PANEL_EXPAND_FRAMES,
+        activation_echo_layer, bar_frame_index, bar_frame_v_range, diamond_quad,
+        focus_chrome_sweep_paint, focus_sweep_rect, font_index, font_tint,
+        image_effect_vertex_colors, image_effect_verts, message_panel_layout,
+        message_panel_transition_layout, node_absolute_rect, scale_u16_q8, selected_label_text,
+        shape_config, shape_edge_point, shape_perimeter, shape_polygon, text_prefix_chars,
+        MessagePageMeta, MessagePanelLayout, MessagePanelVariant, UiPaint, UiShapeConfig,
+        ACTIVATION_ECHO_FRAMES, MESSAGE_PANEL_EXPAND_FRAMES,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiGradientDirection, LevelUiImageEffect,
@@ -1032,6 +1124,21 @@ mod tests {
         // No fonts uploaded: text is skipped entirely.
         assert_eq!(font_index(0, 0), None);
         assert_eq!(font_index(0, 7), None);
+    }
+
+    #[test]
+    fn activation_echo_staggers_and_expires_both_contours() {
+        let first = activation_echo_layer(0, 0, 0).expect("first contour starts immediately");
+        assert_eq!(first.0, 1);
+        assert!(first.1 > 0);
+
+        assert_eq!(activation_echo_layer(1, 2, 1), None);
+        let second = activation_echo_layer(2, 2, 1).expect("second contour starts after delay");
+        assert_eq!(second.0, 2);
+        assert!(second.1 > 0);
+
+        assert_eq!(activation_echo_layer(ACTIVATION_ECHO_FRAMES, 0, 0), None);
+        assert_eq!(activation_echo_layer(ACTIVATION_ECHO_FRAMES, 2, 1), None);
     }
 
     #[test]

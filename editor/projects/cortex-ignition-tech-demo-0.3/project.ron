@@ -378,8 +378,8 @@
             default_focus: None,
             focus_style: (
                 effect: Solid,
-                color_a: (248, 224, 96),
-                color_b: (96, 88, 40),
+                color_a: (255, 120, 70),
+                color_b: (92, 20, 16),
                 period: 96,
                 thickness: 1,
                 margin: 1,
@@ -395,8 +395,8 @@
                 /*[5]*/ (id: (6), parent: Some((1)), children: [], name: "Progress Track", kind: Rect(rect: (x: 24, y: 100, width: 272, height: 10, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), color: (22, 7, 11), gradient: Some((to: (40, 10, 12), direction: Horizontal)), transparent: false, shape: Some((semi_transparent_fill: true, corner_cut: 3, cut_top_left: true, cut_top_right: false, cut_bottom_right: true, cut_bottom_left: false, border_width: 1, border_color: (92, 20, 18), border_gradient: Some((to: (164, 48, 32), direction: Horizontal))))), visible_when: Always),
                 /*[6]*/ (id: (7), parent: Some((1)), children: [], name: "Progress", kind: Bar(rect: (x: 28, y: 103, width: 264, height: 4, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), value: LoadingProgress, max: ConstantQ12(4096), texture: None, frame_count: 0, fill: (255, 120, 70), fill_gradient: Some((to: (114, 0, 0), direction: Horizontal)), background: (12, 5, 8), background_gradient: None), visible_when: Always),
                 /*[7]*/ (id: (8), parent: Some((1)), children: [], name: "Loading Note", kind: Label(rect: (x: 24, y: 119, width: 272, height: 7, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), text: "PLEASE WAIT", random_message: false, messages: [], tag: "", align: Right, wrap: false, font: Basic, font_scale: 0.5, letter_spacing: 1, color: (88, 62, 60), gradient: None, effect: None), visible_when: Always),
-                /*[8]*/ (id: (9), parent: Some((1)), children: [], name: "Continue Pulse", kind: Image(rect: (x: 24, y: 177, width: 272, height: 20, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), texture: None, tint: (72, 14, 16), effect: SoftPulse), visible_when: LoadingComplete),
-                /*[9]*/ (id: (10), parent: Some((1)), children: [], name: "Loading Status", kind: Label(rect: (x: 30, y: 183, width: 260, height: 8, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), text: "PRESS X TO CONTINUE", random_message: false, messages: [], tag: "", align: Center, wrap: false, font: KenneyFutureNarrow, font_scale: 0.69921875, letter_spacing: 1, color: (244, 232, 220), gradient: Some((to: (255, 120, 70), direction: Horizontal)), effect: None), visible_when: LoadingComplete),
+                /*[8]*/ (id: (9), parent: Some((1)), children: [], name: "Continue Panel", kind: Rect(rect: (x: 96, y: 179, width: 128, height: 18, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), color: (42, 8, 12), gradient: Some((to: (92, 22, 18), direction: Horizontal)), transparent: false, shape: Some((semi_transparent_fill: true, corner_cut: 4, cut_top_left: true, cut_top_right: false, cut_bottom_right: true, cut_bottom_left: false, border_width: 1, border_color: (92, 20, 16), border_gradient: Some((to: (220, 92, 58), direction: Horizontal))))), visible_when: LoadingComplete),
+                /*[9]*/ (id: (10), parent: Some((1)), children: [], name: "Continue Label", kind: Label(rect: (x: 100, y: 184, width: 120, height: 8, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), text: "X  //  CONTINUE", random_message: false, messages: [], tag: "", align: Center, wrap: false, font: Spleen5x8Italic, font_scale: 1.0, letter_spacing: 0, color: (244, 232, 220), gradient: Some((to: (255, 120, 70), direction: Horizontal)), effect: SoftPulse), visible_when: LoadingComplete),
             ],
         ),
         /*[4]*/ (
@@ -977,6 +977,16 @@
         ),
     ],
     boot: UiScene((3)),
+    screen_transition: (
+        kind: Fade,
+        frames: 24,
+        color: (
+            4,
+            2,
+            4,
+        ),
+        seed: 29141,
+    ),
     resources: [
         /*[0]*/ (
             id: (1),

@@ -2462,6 +2462,9 @@ pub struct GameFlow {
     pub scene_states: &'static [LevelSceneState],
     /// Index into `states` of the starting state.
     pub entry: u16,
+    /// Default transition applied to ordinary state changes. Explicit
+    /// transition actions override it.
+    pub transition: LevelTransition,
 }
 
 /// Full-screen transition effect kind.
