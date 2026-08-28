@@ -3913,6 +3913,7 @@ impl EditorWorkspace {
 
     /// Start a brush-create drag at a snapped point (2D view entry).
     pub(crate) fn begin_brush_drag_2d(&mut self, world: [f32; 2]) {
+        self.clear_brush_selection();
         let point = self.brush_snap_2d(world);
         let depth_axis = self.orthographic_view.depth_axis();
         self.brush_drag = Some(BrushDrag {
@@ -6504,29 +6505,26 @@ impl ViewportTool3d for BrushTool {
         if ws.begin_brush_height_drag(pointer.y) {
             return;
         }
-        // Whole brushes use the transform gizmo exclusively. In the Brush
-        // authoring tool, dragging empty space still creates a new brush.
-        if ws.brush_edit_mode == BrushEditMode::Move {
-            if ws.active_tool == ViewTool::Brush
-                && ws
-                    .pick_brush_face_nearest_for_selection_3d(frame.rect, pointer)
-                    .is_none()
-            {
-                if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
-                    ws.brush_drag = Some(BrushDrag {
-                        anchor: point,
-                        current: point,
-                        view: OrthographicView::Top,
-                        grid_step: i32::from(ws.snap_units.max(1)),
-                        height_end: point[1].saturating_add(BRUSH_CREATE_HEIGHT),
-                        stage: BrushCreateStage::Footprint,
-                        height_press_y: 0,
-                        height_press_end: 0,
-                        height_dragging: false,
-                        settings: ws.brush_draw_settings,
-                    });
-                }
+        if ws.active_tool == ViewTool::Brush {
+            ws.clear_brush_selection();
+            if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
+                ws.brush_drag = Some(BrushDrag {
+                    anchor: point,
+                    current: point,
+                    view: OrthographicView::Top,
+                    grid_step: i32::from(ws.snap_units.max(1)),
+                    height_end: point[1].saturating_add(BRUSH_CREATE_HEIGHT),
+                    stage: BrushCreateStage::Footprint,
+                    height_press_y: 0,
+                    height_press_end: 0,
+                    height_dragging: false,
+                    settings: ws.brush_draw_settings,
+                });
             }
+            return;
+        }
+        // Whole brushes use the transform gizmo exclusively in Select mode.
+        if ws.brush_edit_mode == BrushEditMode::Move {
             return;
         }
         if let Some(axis) = ws.pick_brush_element_gizmo_axis_3d(frame.rect, pointer) {
@@ -6578,19 +6576,6 @@ impl ViewportTool3d for BrushTool {
                 return;
             };
             ws.begin_brush_face_drag_3d(frame.rect, pointer, index, face, center, normal);
-        } else if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
-            ws.brush_drag = Some(BrushDrag {
-                anchor: point,
-                current: point,
-                view: OrthographicView::Top,
-                grid_step: i32::from(ws.snap_units.max(1)),
-                height_end: point[1].saturating_add(BRUSH_CREATE_HEIGHT),
-                stage: BrushCreateStage::Footprint,
-                height_press_y: 0,
-                height_press_end: 0,
-                height_dragging: false,
-                settings: ws.brush_draw_settings,
-            });
         }
     }
 
@@ -6747,6 +6732,9 @@ impl ViewportTool3d for BrushTool {
             .is_some_and(|drag| drag.stage == BrushCreateStage::Height)
         {
             ws.commit_brush_drag();
+            return;
+        }
+        if ws.active_tool == ViewTool::Brush {
             return;
         }
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
