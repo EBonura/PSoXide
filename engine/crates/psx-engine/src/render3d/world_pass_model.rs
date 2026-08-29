@@ -13,9 +13,9 @@ pub(super) struct CameraCrystalPacketMaterials {
 
 impl CameraCrystalPacketMaterials {
     #[inline(always)]
-    fn for_area(self, area: i32) -> TexturedPacketMaterial {
+    fn band(self, area: i32) -> usize {
         let area = area.unsigned_abs() >> self.roughness.min(3);
-        let band = if area <= 8 {
+        if area <= 8 {
             3
         } else if area <= 32 {
             2
@@ -23,8 +23,25 @@ impl CameraCrystalPacketMaterials {
             1
         } else {
             0
-        };
-        self.bands[band]
+        }
+    }
+
+    #[inline(always)]
+    fn for_area(self, area: i32) -> TexturedPacketMaterial {
+        self.bands[self.band(area)]
+    }
+
+    /// The same band as [`Self::for_area`], applied to a whole material.
+    ///
+    /// Oversized triangles cannot use a prepacked packet: they are clipped
+    /// and split, and each piece resolves its own packet words. Recovering
+    /// the band tint from the packed GP0 header serves them without carrying
+    /// a second tint array, which would widen the `Option` this struct is
+    /// passed through on every hot batch loop.
+    #[inline]
+    fn material_for_area(self, material: TextureMaterial, area: i32) -> TextureMaterial {
+        let header = self.for_area(area).color_command_word;
+        material.with_tint((header as u8, (header >> 8) as u8, (header >> 16) as u8))
     }
 }
 
@@ -923,6 +940,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices,
                     faces,
                     packet_material,
+                    camera_crystal_materials,
                     secondary_material.textured_packet_material(),
                     secondary_layer.uv_offset,
                     options,
@@ -936,6 +954,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices,
                     faces,
                     packet_material,
+                    camera_crystal_materials,
                     secondary_material.textured_packet_material(),
                     secondary_layer.uv_offset,
                     options,
@@ -980,6 +999,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices,
                     faces,
                     packet_material,
+                    camera_crystal_materials,
                     authored_uv_offset.unwrap_or_default(),
                     true,
                     material,
@@ -993,6 +1013,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices,
                     faces,
                     packet_material,
+                    camera_crystal_materials,
                     authored_uv_offset.unwrap_or_default(),
                     true,
                     material,
@@ -1019,6 +1040,22 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 return stats;
             }
         } else {
+            // These general walkers deliberately carry no camera-crystal
+            // band, the one gap left in the crystal's route coverage. Three
+            // ways of closing it were measured on 2026-08-29 against the
+            // shipping route: a band per face, a model-wide band resolved
+            // just above this loop, and a model-wide band resolved once
+            // beside the crystal itself. Each cost about 70k cycles a frame
+            // in the model face stage, +57%, on frames that never enter this
+            // branch at all, and each moved untouched stages with it
+            // (`textured_model_joints` -8%), so the cost tracks where the
+            // code lands in this function rather than the band arithmetic.
+            // A model reaches here only by clipping the near plane, leaving
+            // the hardware vertex range, or asking for a depth policy the
+            // batches do not serve; `textured_model_packed_general`,
+            // `..._packed_clamped` and `..._fallback_faces` stayed at zero
+            // across every gameplay frame measured, including the closest
+            // camera the game allows. Do not reopen without a measurement.
             let mut face_index = 0usize;
             while face_index < faces.len() {
                 faces_considered = faces_considered.wrapping_add(1);
@@ -1203,11 +1240,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         )
                         }
                     } else if options.cull_mode == CullMode::Back {
+                        // Reached only by an authored, unoffset layer; a
+                        // crystal layer is never authored and walks per face.
                         self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
                             triangles,
                             projected_vertices,
                             faces,
                             packet_material,
+                            None,
                             ModelUvOffset::ZERO,
                             false,
                             material,
@@ -1221,6 +1261,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             projected_vertices,
                             faces,
                             packet_material,
+                            None,
                             ModelUvOffset::ZERO,
                             false,
                             material,
@@ -1336,6 +1377,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         projected_vertices: &[ProjectedVertex],
         faces: &[TexturedModelRenderFace],
         base_material: TexturedPacketMaterial,
+        base_camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
         secondary_material: TexturedPacketMaterial,
         secondary_uv_offset: ModelUvOffset,
         base_options: WorldSurfaceOptions,
@@ -1377,13 +1419,16 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ]
             };
 
-            if CULL_BACK
-                && psx_gte::scene::screen_area_mac0_scheduled([
+            let area = if CULL_BACK || base_camera_crystal_materials.is_some() {
+                psx_gte::scene::screen_area_mac0_scheduled([
                     (projected[0].sx, projected[0].sy),
                     (projected[1].sx, projected[1].sy),
                     (projected[2].sx, projected[2].sy),
-                ]) <= 0
-            {
+                ])
+            } else {
+                1
+            };
+            if CULL_BACK && area <= 0 {
                 culled_triangles = culled_triangles.wrapping_add(1);
                 face_index += 1;
                 continue;
@@ -1393,6 +1438,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 (projected[1].sx, projected[1].sy),
                 (projected[2].sx, projected[2].sy),
             ];
+            let base_material = base_camera_crystal_materials
+                .map(|materials| materials.for_area(area))
+                .unwrap_or(base_material);
             let base_triangle = unsafe {
                 triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
                     positions,
@@ -1847,6 +1895,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         projected_vertices: &[ProjectedVertex],
         faces: &[TexturedModelRenderFace],
         packet_material: TexturedPacketMaterial,
+        camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
         uv_offset: ModelUvOffset,
         palette_banks: bool,
         material: TextureMaterial,
@@ -1866,16 +1915,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         while face_index < faces.len() {
             *faces_considered = faces_considered.wrapping_add(1);
             let face = faces[face_index].with_uv_offset(uv_offset);
-            let packet_material = if palette_banks {
-                packet_material.with_clut_bank(face.palette_bank())
-            } else {
-                packet_material
-            };
-            let material = if palette_banks {
-                material.with_clut_bank(face.palette_bank())
-            } else {
-                material
-            };
             let [ia, ib, ic] = face.vertex_indices();
             let ia = ia as usize;
             let ib = ib as usize;
@@ -1901,11 +1940,27 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ]
             };
 
-            if CULL_BACK && projected_back_facing(projected) {
+            // The backface cross product is the crystal's band signal, so a
+            // banded face costs nothing extra here. Only a double-sided
+            // crystal model pays for an area it would not have computed.
+            let area = if CULL_BACK || camera_crystal_materials.is_some() {
+                projected_screen_area(projected)
+            } else {
+                1
+            };
+            if CULL_BACK && area <= 0 {
                 culled_triangles = culled_triangles.wrapping_add(1);
                 face_index += 1;
                 continue;
             }
+            let packet_material = camera_crystal_materials
+                .map(|materials| materials.for_area(area))
+                .unwrap_or(packet_material);
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(face.palette_bank())
+            } else {
+                packet_material
+            };
 
             if projected_triangle_preclamped_hw_extent_safe(projected) {
                 match self.submit_projected_model_triangle_preclamped_packed_average_untracked(
@@ -1971,6 +2026,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             fast_submitted_triangles = 0;
             hw_extent_fallbacks = 0;
 
+            let material = camera_crystal_materials
+                .map(|materials| materials.material_for_area(material, area))
+                .unwrap_or(material);
+            let material = if palette_banks {
+                material.with_clut_bank(face.palette_bank())
+            } else {
+                material
+            };
             let uvs = face.uvs();
             let textured = [
                 ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
@@ -2595,5 +2658,305 @@ mod prepared_model_depth_tests {
 
         let blue = (side_highlight >> 16) & 0xff;
         assert_eq!(blue, 152, "opaque crystal must not amplify lit base tint");
+    }
+}
+
+/// The camera crystal must survive every submission route a model can take.
+///
+/// It first shipped on the extent-safe batch alone, so Aletha's facets
+/// flashed back to the flat lit tint whenever a pose pushed her projected
+/// bounds past the hardware triangle extent, on and off between adjacent
+/// frames. These drive each route directly and assert the band actually
+/// reaches the emitted packet.
+#[cfg(test)]
+mod camera_crystal_route_tests {
+    use super::*;
+    use psx_gpu::ot::OrderingTable;
+
+    const ZERO_TRI: TriTextured = TriTextured::new([(0, 0); 3], [(0, 0); 3], 0, 0, (0, 0, 0));
+    const MATERIAL: TextureMaterial = TextureMaterial::opaque(0, 0, (116, 132, 152));
+    /// Screen areas landing in each of the four bands, largest first.
+    const AREAS: [i32; 4] = [1600, 100, 20, 4];
+
+    fn crystal() -> CameraCrystalPacketMaterials {
+        camera_crystal_packet_materials(MATERIAL, Mat3I16::IDENTITY, 0)
+    }
+
+    fn options() -> WorldSurfaceOptions {
+        WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 4096))
+            .with_cull_mode(CullMode::Back)
+            .with_textured_triangle_splitting(true)
+    }
+
+    /// Four right triangles, one per band, laid out so the whole set breaks
+    /// the hardware extent limit while every single triangle stays inside it.
+    /// That is exactly the dispatch case that lost the crystal.
+    fn fixture() -> ([ProjectedVertex; 12], [TexturedModelRenderFace; 4]) {
+        let mut vertices = [ProjectedVertex::new(0, 0, 512); 12];
+        let mut faces = [TexturedModelRenderFace::new([0, 1, 2], [(0, 0); 3]); 4];
+        for (index, area) in AREAS.iter().enumerate() {
+            // Legs (w, h) give a `w * h` cross product with positive winding.
+            let leg = match *area {
+                1600 => (40, 40),
+                100 => (10, 10),
+                20 => (4, 5),
+                _ => (2, 2),
+            };
+            let x = index as i16 * 100 - 200;
+            let y = index as i16 * 220 - 330;
+            let base = index * 3;
+            vertices[base] = ProjectedVertex::new(x, y, 512);
+            vertices[base + 1] = ProjectedVertex::new(x + leg.0, y, 512);
+            vertices[base + 2] = ProjectedVertex::new(x, y + leg.1, 512);
+            faces[index] = TexturedModelRenderFace::new(
+                [base as u16, base as u16 + 1, base as u16 + 2],
+                [(0, 0), (8, 0), (0, 8)],
+            );
+        }
+        (vertices, faces)
+    }
+
+    fn packet_colors(packets: &[TriTextured]) -> [u32; 4] {
+        let mut colors = [0u32; 4];
+        for (slot, packet) in colors.iter_mut().zip(packets.iter()) {
+            *slot = packet.color_cmd;
+        }
+        colors
+    }
+
+    fn model_bounds(vertices: &[ProjectedVertex]) -> (i16, i16, i16, i16) {
+        let mut bounds = (i16::MAX, i16::MIN, i16::MAX, i16::MIN);
+        for vertex in vertices {
+            bounds.0 = bounds.0.min(vertex.sx);
+            bounds.1 = bounds.1.max(vertex.sx);
+            bounds.2 = bounds.2.min(vertex.sy);
+            bounds.3 = bounds.3.max(vertex.sy);
+        }
+        bounds
+    }
+
+    fn expected_band_colors() -> [u32; 4] {
+        let crystal = crystal();
+        [
+            crystal.for_area(AREAS[0]).color_command_word,
+            crystal.for_area(AREAS[1]).color_command_word,
+            crystal.for_area(AREAS[2]).color_command_word,
+            crystal.for_area(AREAS[3]).color_command_word,
+        ]
+    }
+
+    fn assert_banded(colors: &[u32], route: &str) {
+        let expected = expected_band_colors();
+        assert_eq!(colors.len(), 4, "{route}: every face must be submitted");
+        assert_eq!(colors, &expected[..], "{route}: wrong crystal bands");
+        for pair in expected.windows(2) {
+            assert_ne!(pair[0], pair[1], "{route}: bands must stay distinguishable");
+        }
+    }
+
+    #[test]
+    fn fixture_is_the_non_extent_safe_dispatch_case() {
+        let (vertices, _) = fixture();
+        let (min_x, max_x, min_y, max_y) = model_bounds(&vertices);
+        assert!(
+            !projected_model_bounds_hw_extent_safe(min_x, max_x, min_y, max_y),
+            "fixture must fall off the extent-safe batch"
+        );
+        for face in fixture().1 {
+            let [ia, ib, ic] = face.vertex_indices();
+            let projected = [
+                vertices[ia as usize],
+                vertices[ib as usize],
+                vertices[ic as usize],
+            ];
+            assert!(
+                projected_triangle_preclamped_hw_extent_safe(projected),
+                "each face must still take the packed submit"
+            );
+        }
+    }
+
+    #[test]
+    fn packed_average_unclamped_batch_bands_every_face() {
+        let (vertices, faces) = fixture();
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 8];
+        let mut triangle_storage = [ZERO_TRI; 8];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            let overflow = pass
+                .submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
+                    &mut triangles,
+                    &vertices,
+                    &faces,
+                    MATERIAL.textured_packet_material(),
+                    Some(crystal()),
+                    ModelUvOffset::ZERO,
+                    true,
+                    MATERIAL,
+                    options(),
+                    &mut stats,
+                    &mut considered,
+                );
+            assert!(!overflow);
+            triangles.len()
+        };
+        let colors = packet_colors(&triangle_storage[..submitted]);
+        assert_eq!(submitted, 4);
+        assert_banded(&colors, "packed_average_unclamped_batch");
+    }
+
+    #[test]
+    fn extent_safe_batch_bands_every_face() {
+        let (vertices, faces) = fixture();
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 8];
+        let mut triangle_storage = [ZERO_TRI; 8];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            let overflow = pass
+                .submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                    &mut triangles,
+                    &vertices,
+                    &faces,
+                    MATERIAL.textured_packet_material(),
+                    Some(crystal()),
+                    ModelUvOffset::ZERO,
+                    true,
+                    options(),
+                    &mut stats,
+                    &mut considered,
+                );
+            assert!(!overflow);
+            triangles.len()
+        };
+        let colors = packet_colors(&triangle_storage[..submitted]);
+        assert_eq!(submitted, 4);
+        assert_banded(&colors, "packed_average_unclamped_extent_safe_batch");
+    }
+
+    #[test]
+    fn bucketed_authored_batch_bands_every_face() {
+        let (vertices, faces) = fixture();
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 8];
+        let mut triangle_storage = [ZERO_TRI; 8];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            let overflow = pass
+                .submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                    &mut triangles,
+                    &vertices,
+                    &faces,
+                    MATERIAL.textured_packet_material(),
+                    Some(crystal()),
+                    ModelUvOffset::ZERO,
+                    true,
+                    options(),
+                    &mut stats,
+                    &mut considered,
+                );
+            assert!(!overflow);
+            triangles.len()
+        };
+        let colors = packet_colors(&triangle_storage[..submitted]);
+        assert_eq!(submitted, 4);
+        assert_banded(&colors, "bucketed_extent_safe_authored_batch");
+    }
+
+    #[test]
+    fn layered_bucketed_batch_bands_the_base_layer() {
+        let (vertices, faces) = fixture();
+        let overlay = TextureMaterial::opaque(0, 0, (64, 64, 64));
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 16];
+        let mut triangle_storage = [ZERO_TRI; 16];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            pass.submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch::<
+                true,
+            >(
+                &mut triangles,
+                &vertices,
+                &faces,
+                MATERIAL.textured_packet_material(),
+                Some(crystal()),
+                overlay.textured_packet_material(),
+                ModelUvOffset::ZERO,
+                options(),
+                options().with_material_layer(overlay),
+                &mut stats,
+                &mut considered,
+            );
+            triangles.len()
+        };
+        // Base and overlay packets interleave two per face.
+        let mut base = [0u32; 4];
+        for (slot, tri) in base
+            .iter_mut()
+            .zip(triangle_storage[..submitted].iter().step_by(2))
+        {
+            *slot = tri.color_cmd;
+        }
+        assert_eq!(submitted, 8);
+        assert_banded(&base, "layered_bucketed_extent_safe_batch");
+        for overlay_packet in triangle_storage[..submitted].iter().skip(1).step_by(2) {
+            assert_eq!(
+                overlay_packet.color_cmd,
+                overlay.textured_packet_material().color_command_word,
+                "overlay layer keeps its own material"
+            );
+        }
+    }
+
+    #[test]
+    fn no_crystal_leaves_every_route_on_the_plain_material() {
+        let (vertices, faces) = fixture();
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 8];
+        let mut triangle_storage = [ZERO_TRI; 8];
+        let submitted = {
+            let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+            let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+            let mut stats = TexturedModelRenderStats::default();
+            let mut considered = 0u32;
+            let overflow = pass
+                .submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
+                    &mut triangles,
+                    &vertices,
+                    &faces,
+                    MATERIAL.textured_packet_material(),
+                    None,
+                    ModelUvOffset::ZERO,
+                    true,
+                    MATERIAL,
+                    options(),
+                    &mut stats,
+                    &mut considered,
+                );
+            assert!(!overflow);
+            triangles.len()
+        };
+        let plain = MATERIAL.textured_packet_material().color_command_word;
+        for tri in &triangle_storage[..submitted] {
+            assert_eq!(tri.color_cmd, plain);
+        }
     }
 }

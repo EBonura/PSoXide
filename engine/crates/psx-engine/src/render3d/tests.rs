@@ -396,6 +396,7 @@ fn layered_bucketed_model_batch_culls_once_and_keeps_material_passes_contiguous(
             &projected,
             &faces,
             base_material.textured_packet_material(),
+            None,
             secondary_material.textured_packet_material(),
             ModelUvOffset::new(5, 7),
             base_options,

@@ -3650,11 +3650,22 @@ fn back_facing(verts: [ProjectedLit; 3]) -> bool {
 }
 
 fn projected_back_facing(verts: [ProjectedVertex; 3]) -> bool {
+    projected_screen_area(verts) <= 0
+}
+
+/// Signed screen area of an already-projected triangle, in the same units
+/// the GTE's `NCLIP` writes to MAC0 (`psx_gte::scene::screen_area_mac0`).
+///
+/// The CPU paths already paid for this cross product to decide backfacing;
+/// returning the value instead of a bool lets the camera-crystal band come
+/// out of work that was happening anyway, with no per-face cost added.
+#[inline]
+fn projected_screen_area(verts: [ProjectedVertex; 3]) -> i32 {
     let ax = (verts[1].sx as i32) - (verts[0].sx as i32);
     let ay = (verts[1].sy as i32) - (verts[0].sy as i32);
     let bx = (verts[2].sx as i32) - (verts[0].sx as i32);
     let by = (verts[2].sy as i32) - (verts[0].sy as i32);
-    (ax * by - ay * bx) <= 0
+    ax * by - ay * bx
 }
 
 fn projected_culled(verts: [ProjectedVertex; 3], cull_mode: CullMode) -> bool {
