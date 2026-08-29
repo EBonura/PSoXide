@@ -80,6 +80,8 @@ const BSP_DESTRUCTIBLE_FRAGMENT_COLUMNS: usize = 4;
 const BSP_DESTRUCTIBLE_FRAGMENT_ROWS: usize = 4;
 const BSP_DESTRUCTIBLE_FRAGMENT_SETTLE_TICKS: u8 = 96;
 const BSP_DESTRUCTIBLE_FRAGMENT_MOTION_TICKS: i32 = 48;
+/// Largest distance one fragment can travel from the authored brush bounds.
+const FRAGMENT_TRAVEL_MARGIN: i32 = 256;
 
 /// One byte per target is enough to keep a brush fracture alive: zero means
 /// intact/no event, 1..95 is the live ballistic phase, and 96 is settled floor
@@ -942,6 +944,30 @@ impl BspRuntime {
             let Some((min, max)) = self.destructible_bounds_unchecked(target_index) else {
                 continue;
             };
+            // Settled debris is resubmitted every frame for the rest of the
+            // level, so an off-screen break kept paying for sixteen
+            // double-sided quads forever. Reject the whole lattice when its
+            // bounding sphere is entirely behind the near plane, before any
+            // per-piece work. The radius over-estimates the half-diagonal and
+            // covers the launch excursion `bsp_fragment_quad` adds.
+            let centre = RoomPoint::new(
+                min[0].saturating_add(max[0]) / 2,
+                min[1].saturating_add(max[1]) / 2,
+                min[2].saturating_add(max[2]) / 2,
+            );
+            let radius = max[0]
+                .saturating_sub(min[0])
+                .max(max[1].saturating_sub(min[1]))
+                .max(max[2].saturating_sub(min[2]))
+                .saturating_add(FRAGMENT_TRAVEL_MARGIN);
+            if camera
+                .view_vertex(centre)
+                .z
+                .saturating_add(radius)
+                < camera.projection.near_z
+            {
+                continue;
+            }
             let blend = match material.blend_mode {
                 material_blend::AVERAGE => BlendMode::Average,
                 material_blend::ADD => BlendMode::Add,
