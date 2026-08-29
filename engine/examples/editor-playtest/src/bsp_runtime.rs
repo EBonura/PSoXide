@@ -8,13 +8,16 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+use psx_asset::Texture;
 use psx_bsp::collision::{BrushTransform, LiquidContentsSample, TraceScratch};
 use psx_bsp::collision_provider::{
     select_body_hull, valid_pxbsp_body_hulls, PxbspCollisionModel, PxbspCollisionProvider,
 };
 use psx_bsp::destructible::{BrushDestructibleSet, BrushDestructibleSetError};
 use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
-use psx_bsp::pxbsp::{material_flags, PXBSP_MAX_VISIBILITY_BYTES};
+use psx_bsp::pxbsp::{
+    material_animation, material_blend, material_flags, PXBSP_MAX_VISIBILITY_BYTES,
+};
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
 use psx_bsp::{SliceReadError, Vec3I32};
@@ -23,16 +26,20 @@ use psx_engine::{
     trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
     CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
     CharacterMotorState, CollisionQueryError, CollisionTrace, CollisionTraceQuery,
-    CollisionTraceShape, OtFrame, PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig,
-    ThirdPersonCameraFrame, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, WorldCamera,
+    CollisionTraceShape, CullMode, DepthPolicy, OtFrame, PrimitivePacketArena, PrimitiveSink,
+    RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
+    ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera, WorldRenderPass,
+    WorldSurfaceOptions,
 };
-use psx_game_runtime::destructibles::{
-    DamageChannel, DamageOutcome, RuntimeDestructibles,
+use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome, RuntimeDestructibles};
+use psx_gpu::{
+    material::{BlendMode, TextureMaterial, TextureWindow},
+    prim::TriTextured,
 };
 use psx_level::{
     find_asset_of_kind, world_object_flags, AssetId, AssetKind, LevelWorldObjectRecord,
 };
+use psx_math::{cos_q12, sin_q12};
 
 use crate::generated::{
     ASSETS, DESTRUCTIBLES, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS,
@@ -40,7 +47,7 @@ use crate::generated::{
 };
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{
-    ensure_room_texture_uploaded, find_room_texture_vram_slot, pxbsp_frame_face_chain_arena,
+    ensure_room_texture_uploaded, ensure_texture_uploaded, pxbsp_frame_face_chain_arena,
     pxbsp_visible_face_chain_arena, PROJECTION,
 };
 
@@ -69,6 +76,23 @@ pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 12;
 pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 4;
 pub(super) const BSP_USE_DISTANCE: i32 = 256;
 const BSP_BOUNDS_VISIBILITY_CACHE_SIZE: usize = 16;
+const BSP_DESTRUCTIBLE_FRAGMENT_COLUMNS: usize = 4;
+const BSP_DESTRUCTIBLE_FRAGMENT_ROWS: usize = 4;
+const BSP_DESTRUCTIBLE_FRAGMENT_SETTLE_TICKS: u8 = 96;
+const BSP_DESTRUCTIBLE_FRAGMENT_MOTION_TICKS: i32 = 48;
+
+/// One byte per target is enough to keep a brush fracture alive: zero means
+/// intact/no event, 1..95 is the live ballistic phase, and 96 is settled floor
+/// debris. Keeping the terminal age lets fragments remain in the world without
+/// an allocation or a second persistent prop representation.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct BspDestructibleFragmentEvent {
+    age: u8,
+}
+
+impl BspDestructibleFragmentEvent {
+    const EMPTY: Self = Self { age: 0 };
+}
 
 /// Dynamic world bounds used to link actors/instances to every BSP leaf they
 /// touch. Coordinates use the playtest's integer engine-unit convention; the
@@ -237,6 +261,7 @@ pub(super) struct BspRuntime {
     activation_leaf: Option<usize>,
     activation_visible_leaves: usize,
     bounds_visibility_cache: [BspBoundsVisibilityCacheEntry; BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
+    fragment_events: [BspDestructibleFragmentEvent; MAX_BSP_DESTRUCTIBLES],
 }
 
 impl BspRuntime {
@@ -378,6 +403,7 @@ impl BspRuntime {
             activation_visible_leaves: 0,
             bounds_visibility_cache: [BspBoundsVisibilityCacheEntry::EMPTY;
                 BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
+            fragment_events: [BspDestructibleFragmentEvent::EMPTY; MAX_BSP_DESTRUCTIBLES],
         })
     }
 
@@ -668,23 +694,34 @@ impl BspRuntime {
                 continue;
             }
             let asset_id = AssetId(material.texture_asset);
-            let slot = match find_room_texture_vram_slot(asset_id) {
-                Some(slot) => Some(slot),
-                None => {
-                    let asset = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "PXBSP material {index} references missing texture asset {}",
-                                material.texture_asset
-                            )
-                        });
-                    assert!(
-                        !asset.bytes.is_empty(),
-                        "PXBSP texture asset {} has no baked bytes; streamed BSP textures are not implemented",
+            let asset =
+                find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture).unwrap_or_else(|| {
+                    panic!(
+                        "PXBSP material {index} references missing texture asset {}",
                         material.texture_asset
-                    );
-                    ensure_room_texture_uploaded(asset_id, asset.bytes)
-                }
+                    )
+                });
+            assert!(
+                !asset.bytes.is_empty(),
+                "PXBSP texture asset {} has no baked bytes; streamed BSP textures are not implemented",
+                material.texture_asset
+            );
+            let texture = Texture::from_bytes(asset.bytes).unwrap_or_else(|_| {
+                panic!(
+                    "PXBSP texture asset {} is not a valid PSXT",
+                    material.texture_asset
+                )
+            });
+            // Polygon blending and palette-zero cutout are independent PS1
+            // features. An opaque material may still use CLUT entry zero as a
+            // binary mask, so preserve an explicit PSXT transparent-zero flag
+            // instead of forcing all opaque room materials to opaque-zero.
+            let slot = if texture.index_zero_transparent() {
+                ensure_texture_uploaded(asset_id, asset.bytes)
+            } else if material.blend_mode == material_blend::OPAQUE {
+                ensure_room_texture_uploaded(asset_id, asset.bytes)
+            } else {
+                ensure_texture_uploaded(asset_id, asset.bytes)
             };
             let Some(slot) = slot else {
                 self.materials[index] = None;
@@ -767,8 +804,7 @@ impl BspRuntime {
             let Some(target) = self.destructible_targets.get(index) else {
                 continue;
             };
-            let outcome =
-                destructibles.apply_damage(target.destructible_index(), channel, damage);
+            let outcome = destructibles.apply_damage(target.destructible_index(), channel, damage);
             if outcome.connected {
                 result.connected = true;
                 result.broke |= outcome.broke;
@@ -787,6 +823,11 @@ impl BspRuntime {
         if !destructibles.alive(destructible.destructible_index()) {
             return None;
         }
+        self.destructible_bounds_unchecked(index)
+    }
+
+    fn destructible_bounds_unchecked(&self, index: usize) -> Option<([i32; 3], [i32; 3])> {
+        let destructible = self.destructible_targets.get(index)?;
         let model = self.map.brush_models().get(destructible.model_index())?;
         let origin = destructible.transform().origin;
         let origin = [origin.x >> 12, origin.y >> 12, origin.z >> 12];
@@ -802,6 +843,181 @@ impl BspRuntime {
                 origin[2].saturating_add(i32::from(model.maxs.z)),
             ],
         ))
+    }
+
+    /// Center and conservative size for one shared destructible state. This
+    /// deliberately remains available after health reaches zero so the break
+    /// flare can be emitted where the now-hidden geometry used to be.
+    pub(super) fn destructible_effect_origin(&self, state_index: usize) -> Option<([i32; 3], u16)> {
+        for target_index in 0..self.destructible_targets.len() {
+            let target = self.destructible_targets.get(target_index)?;
+            if target.destructible_index() != state_index {
+                continue;
+            }
+            let (min, max) = self.destructible_bounds_unchecked(target_index)?;
+            let center = core::array::from_fn(|axis| min[axis].saturating_add(max[axis]) / 2);
+            let largest_extent = (0..3)
+                .map(|axis| max[axis].saturating_sub(min[axis]).unsigned_abs())
+                .max()
+                .unwrap_or(256);
+            let radius = largest_extent.clamp(192, 768) as u16;
+            return Some((center, radius));
+        }
+        None
+    }
+
+    /// Begin a real geometry fracture for every brush target sharing this
+    /// destructible state. The intact BSP submodel disappears in the same
+    /// update and these pieces start at its exact visible plane.
+    pub(super) fn spawn_destructible_fragments(&mut self, state_index: usize) {
+        for target_index in 0..self.destructible_targets.len() {
+            let Some(target) = self.destructible_targets.get(target_index) else {
+                continue;
+            };
+            if target.destructible_index() == state_index {
+                self.fragment_events[target_index].age = 1;
+            }
+        }
+    }
+
+    pub(super) fn advance_destructible_fragments(&mut self, delta_vblanks: u16) {
+        let delta = delta_vblanks.min(u16::from(u8::MAX)) as u8;
+        for event in &mut self.fragment_events[..self.destructible_targets.len()] {
+            if event.age != 0 && event.age < BSP_DESTRUCTIBLE_FRAGMENT_SETTLE_TICKS {
+                event.age = event
+                    .age
+                    .saturating_add(delta)
+                    .min(BSP_DESTRUCTIBLE_FRAGMENT_SETTLE_TICKS);
+            }
+        }
+    }
+
+    /// Draw the visible face of a broken brush as sixteen independently
+    /// tumbling textured pieces. Collision still comes from the authored
+    /// closed brush before it breaks; only the thin display face is fractured.
+    pub(super) fn draw_destructible_fragments<const OT_DEPTH: usize>(
+        &self,
+        camera: &WorldCamera,
+        options: WorldSurfaceOptions,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) {
+        for target_index in 0..self.destructible_targets.len() {
+            let age = self.fragment_events[target_index].age;
+            if age == 0 {
+                continue;
+            }
+            let Some(target) = self.destructible_targets.get(target_index) else {
+                continue;
+            };
+            let Some(model) = self.map.brush_models().get(target.model_index()) else {
+                continue;
+            };
+            let face_range = usize::from(model.first_face)
+                ..usize::from(model.first_face.saturating_add(model.face_count));
+            // Brushes with a deliberately thin display face still carry a
+            // closed collision shell. Prefer the authored animated/blended
+            // face over those shell faces, then fracture its exact material.
+            // Every aspect-matched shard repeats one complete source tile;
+            // this keeps the dense authored pattern continuous at the break
+            // without deriving a bogus min/max from wrapped u8 UVs.
+            let Some((_material_index, binding, material)) = face_range
+                .clone()
+                .filter_map(|face_index| {
+                    let face = self.map.faces().get(face_index)?;
+                    let material_index = usize::try_from(face.texture).ok()?;
+                    Some((
+                        material_index,
+                        self.materials.get(material_index)?.as_ref()?,
+                        self.map.materials().get(material_index)?,
+                    ))
+                })
+                .max_by_key(|(_, _, material)| {
+                    u8::from(material.blend_mode != material_blend::OPAQUE) * 2
+                        + u8::from(material.animation_kind != material_animation::STATIC)
+                })
+            else {
+                continue;
+            };
+            let Some((min, max)) = self.destructible_bounds_unchecked(target_index) else {
+                continue;
+            };
+            let blend = match material.blend_mode {
+                material_blend::AVERAGE => BlendMode::Average,
+                material_blend::ADD => BlendMode::Add,
+                material_blend::SUBTRACT => BlendMode::Subtract,
+                material_blend::ADD_QUARTER => BlendMode::AddQuarter,
+                _ => BlendMode::Opaque,
+            };
+            let texture_window = TextureWindow::power_of_two_tile(
+                binding.page_uv_origin[0],
+                binding.page_uv_origin[1],
+                binding.texture_size[0],
+                binding.texture_size[1],
+            );
+            let fragment_material =
+                TextureMaterial::opaque(binding.clut, binding.texture_page, (128, 128, 128))
+                    .with_blend_mode(blend)
+                    .with_texture_window(texture_window);
+            let fragment_options = options
+                .with_depth_policy(DepthPolicy::Average)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(fragment_material)
+                .with_textured_triangle_splitting(true)
+                .with_textured_triangle_max_edge(0);
+
+            let x_span = max[0].saturating_sub(min[0]);
+            let z_span = max[2].saturating_sub(min[2]);
+            let horizontal_axis = if x_span >= z_span { 0 } else { 2 };
+            let depth_axis = if horizontal_axis == 0 { 2 } else { 0 };
+            // The author-facing display plane is the maximum side of the
+            // otherwise invisible collision hull.
+            let plane_depth = max[depth_axis];
+            let horizontal_min = min[horizontal_axis];
+            let horizontal_span = max[horizontal_axis].saturating_sub(horizontal_min);
+            let vertical_span = max[1].saturating_sub(min[1]);
+            let u_max = binding.texture_size[0].saturating_sub(1);
+            let v_max = binding.texture_size[1].saturating_sub(1);
+
+            for row in 0..BSP_DESTRUCTIBLE_FRAGMENT_ROWS {
+                for column in 0..BSP_DESTRUCTIBLE_FRAGMENT_COLUMNS {
+                    let h0 = horizontal_min.saturating_add(
+                        horizontal_span.saturating_mul(column as i32)
+                            / BSP_DESTRUCTIBLE_FRAGMENT_COLUMNS as i32,
+                    );
+                    let h1 = horizontal_min.saturating_add(
+                        horizontal_span.saturating_mul((column + 1) as i32)
+                            / BSP_DESTRUCTIBLE_FRAGMENT_COLUMNS as i32,
+                    );
+                    let y0 = min[1].saturating_add(
+                        vertical_span.saturating_mul(row as i32)
+                            / BSP_DESTRUCTIBLE_FRAGMENT_ROWS as i32,
+                    );
+                    let y1 = min[1].saturating_add(
+                        vertical_span.saturating_mul((row + 1) as i32)
+                            / BSP_DESTRUCTIBLE_FRAGMENT_ROWS as i32,
+                    );
+                    let quad = bsp_fragment_quad(
+                        horizontal_axis,
+                        plane_depth,
+                        [h0, h1],
+                        [y0, y1],
+                        min[1],
+                        age,
+                        row,
+                        column,
+                    );
+                    let _ = world.submit_textured_world_quad(
+                        triangles,
+                        *camera,
+                        quad,
+                        [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)],
+                        fragment_material,
+                        fragment_options,
+                    );
+                }
+            }
+        }
     }
 
     pub(super) fn set_door_open(&mut self, mover: usize, open: bool) {
@@ -1176,6 +1392,116 @@ impl BspRuntime {
     }
 }
 
+fn bsp_fragment_quad(
+    horizontal_axis: usize,
+    plane_depth: i32,
+    horizontal: [i32; 2],
+    vertical: [i32; 2],
+    floor_y: i32,
+    age: u8,
+    row: usize,
+    column: usize,
+) -> [RoomPoint; 4] {
+    let raw_motion_age =
+        (i32::from(age.saturating_sub(1)) / 2).min(BSP_DESTRUCTIBLE_FRAGMENT_MOTION_TICKS);
+    let settled = age >= BSP_DESTRUCTIBLE_FRAGMENT_SETTLE_TICKS;
+    let center_h = horizontal[0].saturating_add(horizontal[1]) / 2;
+    let base_center_y = vertical[0].saturating_add(vertical[1]) / 2;
+    let piece_index = (row * BSP_DESTRUCTIBLE_FRAGMENT_COLUMNS + column) as i32;
+    let scatter = (piece_index * 73 + row as i32 * 19 + column as i32 * 37 + 11) & 0xff;
+    let launch_delay = scatter % 5;
+    let motion_age = raw_motion_age.saturating_sub(launch_delay).max(0);
+    let spread_sign = if column < BSP_DESTRUCTIBLE_FRAGMENT_COLUMNS / 2 {
+        -1
+    } else {
+        1
+    };
+    let depth_sign = if scatter & 1 == 0 { -1 } else { 1 };
+    // This is a crumbling lattice, not a grenade: keep pieces close to the
+    // authored plane, while giving every shard a distinct launch vector.
+    let outward_speed = 3 + ((scatter >> 3) % 5);
+    let sideways_jitter = (scatter % 5) - 2;
+    let travel_h = spread_sign
+        * (motion_age.saturating_mul(motion_age) / 128
+            + motion_age.saturating_mul(outward_speed) / 8)
+        + sideways_jitter.saturating_mul(motion_age) / 12;
+    let depth_speed = 1 + ((scatter >> 5) % 5);
+    let travel_depth = depth_sign * motion_age.saturating_mul(depth_speed) / 6;
+    let center_y = if settled {
+        floor_y.saturating_add(3)
+    } else {
+        let launch = 8 + ((scatter >> 2) % 9);
+        let airborne_y = base_center_y
+            .saturating_add(motion_age.saturating_mul(launch))
+            .saturating_sub(motion_age.saturating_mul(motion_age) / 3);
+        let half_height = vertical[1].saturating_sub(vertical[0]).unsigned_abs() as i32 / 2;
+        airborne_y.max(floor_y.saturating_add(half_height.max(3)))
+    };
+    let pitch = if settled {
+        1024
+    } else {
+        let pitch_target = 768 + ((scatter >> 4) % 5) * 192;
+        (motion_age.saturating_mul(pitch_target) / BSP_DESTRUCTIBLE_FRAGMENT_MOTION_TICKS) as u16
+    };
+    let yaw_direction = if scatter & 2 == 0 { -1 } else { 1 };
+    let yaw_speed = 19 + (scatter % 41);
+    let yaw = ((motion_age.saturating_mul(yaw_speed) * yaw_direction) & 0x0fff) as u16;
+    let pitch_sin = sin_q12(pitch);
+    let pitch_cos = cos_q12(pitch);
+    let yaw_sin = sin_q12(yaw);
+    let yaw_cos = cos_q12(yaw);
+    let shrink_q8 = if motion_age == 0 { 256 } else { 232 };
+    let base = [
+        (horizontal[0], vertical[1]),
+        (horizontal[1], vertical[1]),
+        (horizontal[1], vertical[0]),
+        (horizontal[0], vertical[0]),
+    ];
+    let mut quad = [RoomPoint::new(0, 0, 0); 4];
+    for (index, (h, y)) in base.into_iter().enumerate() {
+        let dh = h.saturating_sub(center_h).saturating_mul(shrink_q8) / 256;
+        let dy = y.saturating_sub(base_center_y).saturating_mul(shrink_q8) / 256;
+        let (mut dx, mut ry, mut dz) = if horizontal_axis == 0 {
+            (
+                dh,
+                (dy.saturating_mul(pitch_cos)) >> 12,
+                (dy.saturating_mul(pitch_sin)) >> 12,
+            )
+        } else {
+            (
+                -((dy.saturating_mul(pitch_sin)) >> 12),
+                (dy.saturating_mul(pitch_cos)) >> 12,
+                dh,
+            )
+        };
+        let rotated_x = ((dx.saturating_mul(yaw_cos)) + (dz.saturating_mul(yaw_sin))) >> 12;
+        let rotated_z = ((dz.saturating_mul(yaw_cos)) - (dx.saturating_mul(yaw_sin))) >> 12;
+        dx = rotated_x;
+        dz = rotated_z;
+        ry = ry.saturating_add(center_y);
+        let (x, z) = if horizontal_axis == 0 {
+            (
+                center_h.saturating_add(travel_h).saturating_add(dx),
+                plane_depth.saturating_add(travel_depth).saturating_add(dz),
+            )
+        } else {
+            (
+                plane_depth.saturating_add(travel_depth).saturating_add(dx),
+                center_h.saturating_add(travel_h).saturating_add(dz),
+            )
+        };
+        quad[index] = RoomPoint::new(x, ry, z);
+    }
+    let lowest = quad.iter().map(|vertex| vertex.y).min().unwrap_or(floor_y);
+    if lowest < floor_y {
+        let correction = floor_y.saturating_sub(lowest);
+        for vertex in &mut quad {
+            vertex.y = vertex.y.saturating_add(correction);
+        }
+    }
+    quad
+}
+
 pub(super) fn pxbsp_camera(camera: WorldCamera) -> Camera {
     let orbit_yaw = angle_q12_from_basis(camera.sin_yaw.raw(), camera.cos_yaw.raw());
     // WorldCamera stores the target-to-camera orbit angle with the engine's
@@ -1278,5 +1604,24 @@ mod tests {
             );
             assert_eq!(pxbsp_camera(camera).angles[0], expected);
         }
+    }
+
+    #[test]
+    fn brush_fragments_begin_on_the_visible_plane_and_settle_on_the_floor() {
+        let initial = bsp_fragment_quad(0, -10368, [-100, 100], [896, 1296], 896, 1, 0, 1);
+        assert_eq!(initial[0], RoomPoint::new(-100, 1296, -10368));
+        assert_eq!(initial[2], RoomPoint::new(100, 896, -10368));
+
+        let settled = bsp_fragment_quad(
+            0,
+            -10368,
+            [-100, 100],
+            [896, 1296],
+            896,
+            BSP_DESTRUCTIBLE_FRAGMENT_SETTLE_TICKS,
+            0,
+            1,
+        );
+        assert!(settled.iter().all(|vertex| vertex.y == 899));
     }
 }

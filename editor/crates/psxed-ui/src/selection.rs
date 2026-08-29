@@ -309,6 +309,12 @@ pub enum EntityBoundKind {
     ParticleEmitter,
     /// Entity hosting a procedural Point of Interest beacon.
     PointOfInterest,
+    /// Shared breakable state accepting Horizon damage.
+    DestructibleHorizon,
+    /// Shared breakable state accepting Zenith damage.
+    DestructibleZenith,
+    /// Shared breakable state accepting either attack channel.
+    DestructibleBoth,
     /// `Portal`.
     Portal,
     /// Placed `Logic` graph node (trigger volume / relay /

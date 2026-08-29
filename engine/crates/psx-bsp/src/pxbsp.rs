@@ -251,6 +251,12 @@ pub enum PxbspMaterialAnimation {
         ticks_per_frame: u8,
         phase: u8,
     },
+    LightPulse {
+        minimum_q7: u8,
+        maximum_q7: u8,
+        ticks_per_cycle: u8,
+        phase: u8,
+    },
 }
 
 /// Reason a packed material recipe cannot be submitted safely.
@@ -335,9 +341,23 @@ impl PxbspMaterial {
                     phase: self.animation_data[4],
                 })
             }
+            material_animation::LIGHT_PULSE
+                if self.animation_data[0] <= self.animation_data[1]
+                    && self.animation_data[2] > 0
+                    && self.animation_data[3] < self.animation_data[2]
+                    && self.animation_data[4..] == [0; 3] =>
+            {
+                Ok(PxbspMaterialAnimation::LightPulse {
+                    minimum_q7: self.animation_data[0],
+                    maximum_q7: self.animation_data[1],
+                    ticks_per_cycle: self.animation_data[2],
+                    phase: self.animation_data[3],
+                })
+            }
             material_animation::STATIC
             | material_animation::UV_SCROLL
-            | material_animation::FLIPBOOK => Err(PxbspMaterialError::InvalidAnimationPayload(
+            | material_animation::FLIPBOOK
+            | material_animation::LIGHT_PULSE => Err(PxbspMaterialError::InvalidAnimationPayload(
                 self.animation_kind,
             )),
             other => Err(PxbspMaterialError::UnknownAnimation(other)),
@@ -349,6 +369,7 @@ pub mod material_animation {
     pub const STATIC: u8 = 0;
     pub const UV_SCROLL: u8 = 1;
     pub const FLIPBOOK: u8 = 2;
+    pub const LIGHT_PULSE: u8 = 3;
 }
 
 /// Stable PSoXide entity classes stored in [`PxbspEntity::class_id`].
@@ -1085,6 +1106,20 @@ mod tests {
                 phase: 5,
             })
         );
+        let pulse = PxbspMaterial {
+            animation_kind: material_animation::LIGHT_PULSE,
+            animation_data: [96, 192, 96, 7, 0, 0, 0],
+            ..PxbspMaterial::default()
+        };
+        assert_eq!(
+            pulse.animation(),
+            Ok(PxbspMaterialAnimation::LightPulse {
+                minimum_q7: 96,
+                maximum_q7: 192,
+                ticks_per_cycle: 96,
+                phase: 7,
+            })
+        );
     }
 
     #[test]
@@ -1116,6 +1151,17 @@ mod tests {
             bad_flipbook.validate(),
             Err(PxbspMaterialError::InvalidAnimationPayload(
                 material_animation::FLIPBOOK
+            ))
+        );
+        let bad_pulse = PxbspMaterial {
+            animation_kind: material_animation::LIGHT_PULSE,
+            animation_data: [192, 96, 0, 0, 0, 0, 0],
+            ..PxbspMaterial::default()
+        };
+        assert_eq!(
+            bad_pulse.validate(),
+            Err(PxbspMaterialError::InvalidAnimationPayload(
+                material_animation::LIGHT_PULSE
             ))
         );
     }

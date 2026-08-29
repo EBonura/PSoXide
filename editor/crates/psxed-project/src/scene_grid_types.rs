@@ -497,6 +497,8 @@ pub enum MaterialAnimationMode {
     UvScroll,
     /// Select cells from a grid packed into the resident texture.
     Flipbook,
+    /// Modulate the material's baked light between two authored levels.
+    LightPulse,
 }
 
 impl MaterialAnimationMode {
@@ -506,6 +508,58 @@ impl MaterialAnimationMode {
             Self::Static => "Static",
             Self::UvScroll => "UV Scroll",
             Self::Flipbook => "Cycle Materials",
+            Self::LightPulse => "Light Pulse",
+        }
+    }
+}
+
+/// Smooth baked-light modulation for a room material.
+///
+/// Values use the PS1 texture-modulation convention: 128 is neutral, values
+/// below darken, and values above brighten. The runtime evaluates a sine wave
+/// directly from the gameplay tick, so no per-material mutable state is
+/// required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterialLightPulse {
+    /// Darkest Q7 light multiplier (`128 = 1.0x`).
+    pub minimum_q7: u8,
+    /// Brightest Q7 light multiplier (`128 = 1.0x`).
+    pub maximum_q7: u8,
+    /// Complete dark-to-bright-to-dark cycle in gameplay ticks.
+    pub ticks_per_cycle: u8,
+    /// Initial position within the cycle, in ticks.
+    pub phase: u8,
+}
+
+impl Default for MaterialLightPulse {
+    fn default() -> Self {
+        Self {
+            minimum_q7: 80,
+            maximum_q7: 208,
+            ticks_per_cycle: 72,
+            phase: 0,
+        }
+    }
+}
+
+impl MaterialLightPulse {
+    /// Clamp the recipe to a valid non-empty cycle and ordered light range.
+    pub const fn normalized(self) -> Self {
+        let ticks_per_cycle = if self.ticks_per_cycle == 0 {
+            1
+        } else {
+            self.ticks_per_cycle
+        };
+        let minimum_q7 = if self.minimum_q7 > self.maximum_q7 {
+            self.maximum_q7
+        } else {
+            self.minimum_q7
+        };
+        Self {
+            minimum_q7,
+            maximum_q7: self.maximum_q7,
+            ticks_per_cycle,
+            phase: self.phase % ticks_per_cycle,
         }
     }
 }
@@ -604,6 +658,9 @@ pub struct MaterialAnimation {
     pub uv_scroll: MaterialUvMotion,
     /// Preserved grid-flipbook controls.
     pub flipbook: MaterialFlipbook,
+    /// Preserved baked-light pulse controls.
+    #[serde(default)]
+    pub light_pulse: MaterialLightPulse,
 }
 
 impl Default for ModelSecondaryTexture {
@@ -1031,6 +1088,7 @@ impl MaterialResource {
                     source_a: None,
                     source_b: None,
                 },
+                light_pulse: MaterialLightPulse::default(),
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Front,
@@ -1094,6 +1152,7 @@ impl MaterialResource {
                     source_a: None,
                     source_b: None,
                 },
+                light_pulse: MaterialLightPulse::default(),
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Front,

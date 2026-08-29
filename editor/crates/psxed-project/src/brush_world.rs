@@ -2109,6 +2109,21 @@ fn pack_material(
                 ],
             )
         }
+        MaterialAnimationMode::LightPulse => {
+            let pulse = animation.light_pulse.normalized();
+            (
+                material_animation::LIGHT_PULSE,
+                [
+                    pulse.minimum_q7,
+                    pulse.maximum_q7,
+                    pulse.ticks_per_cycle,
+                    pulse.phase,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+        }
     };
     Ok(PxbspMaterial {
         texture_asset,

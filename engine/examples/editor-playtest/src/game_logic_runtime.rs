@@ -26,7 +26,7 @@ use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
 use psx_game_runtime::entities::MeleeArcStats;
 use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileImpactKind, ProjectileImpacts, ProjectileSpawn, ProjectileTarget,
-    ProjectileWorldTrace, ProjectileWorldTracer,
+    ProjectileVisualStyle, ProjectileWorldTrace, ProjectileWorldTracer,
 };
 
 const PLAYER_PROJECTILE_TARGET: u16 = u16::MAX - 1;
@@ -684,6 +684,7 @@ impl Playtest {
             self.previous_player_actor_pose,
             phase,
             action,
+            spec.reach,
             prop_blockers.as_slice(),
         ) {
             self.report_player_melee_stats(stats);
@@ -708,6 +709,11 @@ impl Playtest {
         let outgoing_damage = self
             .vitality_modifiers()
             .outgoing_damage(Self::player_attack_channel(self.anim_state), spec.damage);
+        let channel = match Self::player_attack_channel(self.anim_state) {
+            VitalityChannelId::One => DamageChannel::Horizon,
+            VitalityChannelId::Two => DamageChannel::Zenith,
+        };
+        self.damage_player_environment_melee(spec.reach, channel, outgoing_damage);
         let entities = &mut self.game_entities;
         let mut bsp = self.bsp.as_mut();
         let stats = entities.apply_melee_arc_occluded(
@@ -729,6 +735,35 @@ impl Playtest {
         self.report_player_melee_stats(stats);
     }
 
+    /// Apply one active melee frame to blocking world props through a compact
+    /// forward volume. This is deliberately separate from projectile traces:
+    /// only the authored/legacy melee windows above call it.
+    fn damage_player_environment_melee(&mut self, reach: i32, channel: DamageChannel, damage: u16) {
+        let player = self.motor.position();
+        let yaw = self.motor.yaw();
+        let reach = reach.max(0);
+        let radius = self
+            .character
+            .map(|character| character.radius)
+            .unwrap_or(BSP_PLAYER_RADIUS)
+            .clamp(1, i32::from(u16::MAX)) as u16;
+        let start = [
+            player.x,
+            player.y.saturating_add(i32::from(radius)),
+            player.z,
+        ];
+        let end = [
+            player
+                .x
+                .saturating_add((yaw.sin_q12().saturating_mul(reach)) >> 12),
+            start[1],
+            player
+                .z
+                .saturating_add((yaw.cos_q12().saturating_mul(reach)) >> 12),
+        ];
+        self.damage_world_destructibles_with_capsule(start, end, radius, channel, damage);
+    }
+
     /// Damage every brush/card target through the one backend-independent
     /// shared-state owner.
     fn damage_world_destructibles_with_capsule(
@@ -739,6 +774,12 @@ impl Playtest {
         channel: DamageChannel,
         damage: u16,
     ) -> DamageOutcome {
+        let mut alive_before = 0u32;
+        for index in 0..DESTRUCTIBLES.len().min(u32::BITS as usize) {
+            if self.destructibles.alive(index) {
+                alive_before |= 1u32 << index;
+            }
+        }
         let mut result = DamageOutcome::default();
         if let Some(bsp) = self.bsp.as_ref() {
             result = bsp.damage_brush_destructibles_with_capsule(
@@ -776,17 +817,88 @@ impl Playtest {
             if !overlaps {
                 continue;
             }
-            let outcome = self.destructibles.apply_damage(
-                usize::from(object.destructible),
-                channel,
-                damage,
-            );
+            let outcome =
+                self.destructibles
+                    .apply_damage(usize::from(object.destructible), channel, damage);
             if outcome.connected {
                 result.connected = true;
                 result.broke |= outcome.broke;
             }
         }
+        if result.broke {
+            for index in 0..DESTRUCTIBLES.len().min(u32::BITS as usize) {
+                if alive_before & (1u32 << index) != 0 && !self.destructibles.alive(index) {
+                    telemetry::debug_log("DESTRUCTIBLE BREAK");
+                    self.mark_destructible_broken(index);
+                    if let Some(bsp) = self.bsp.as_mut() {
+                        bsp.spawn_destructible_fragments(index);
+                    }
+                    self.spawn_destructible_break_effect(index);
+                }
+            }
+        } else if result.connected {
+            telemetry::debug_log("DESTRUCTIBLE HIT");
+        }
         result
+    }
+
+    fn spawn_destructible_break_effect(&mut self, index: usize) {
+        let Some(record) = DESTRUCTIBLES.get(index) else {
+            return;
+        };
+        let object_origin = WORLD_OBJECTS
+            .iter()
+            .find(|object| usize::from(object.destructible) == index)
+            .map(|object| {
+                let center = core::array::from_fn(|axis| {
+                    object.bounds_min[axis].saturating_add(object.bounds_max[axis]) / 2
+                });
+                let largest_extent = (0..3)
+                    .map(|axis| {
+                        object.bounds_max[axis]
+                            .saturating_sub(object.bounds_min[axis])
+                            .unsigned_abs()
+                    })
+                    .max()
+                    .unwrap_or(256);
+                (center, object.room, largest_extent.clamp(192, 768) as u16)
+            });
+        let brush_origin = self
+            .bsp
+            .as_ref()
+            .and_then(|bsp| bsp.destructible_effect_origin(index))
+            .map(|(center, radius)| (center, self.room_index, radius));
+        let Some((position, room, radius)) = object_origin.or(brush_origin) else {
+            return;
+        };
+        let (core_rgb, glow_rgb, impact_rgb) = match record.damage_affinity {
+            psx_level::destructible_affinity::HORIZON => {
+                ([255, 184, 112], [224, 56, 24], [255, 92, 42])
+            }
+            psx_level::destructible_affinity::ZENITH => {
+                ([196, 255, 240], [30, 128, 116], [82, 194, 178])
+            }
+            _ => ([255, 240, 176], [180, 96, 24], [240, 184, 72]),
+        };
+        let _ = self.combat_projectile_impacts.spawn_effect(
+            position,
+            room,
+            radius,
+            ProjectileVisualStyle {
+                core_rgb,
+                glow_rgb,
+                impact_rgb,
+                glow_scale_q8: 448,
+                length_ticks: 1,
+                trail_segments: 0,
+                trail_spacing_ticks: 1,
+                impact_lifetime_ticks: 32,
+                // The brush runtime now fractures the actual textured face.
+                // Keep this burst for the emissive impact flare, without the
+                // old screen-space diamonds that pretended to be debris.
+                break_fragment_count: 0,
+            },
+        );
     }
 
     /// Resolve authored rig volumes when the selected action has any hitbox.
@@ -799,6 +911,7 @@ impl Playtest {
         previous_player_pose: Option<PlayerActorPoseSnapshot>,
         phase: u32,
         action: CharacterAnimationAction,
+        environment_reach: i32,
         prop_blockers: &[CharacterCollisionAabb],
     ) -> Option<MeleeArcStats> {
         let first = character.combat_capsule_first.to_usize();
@@ -873,13 +986,11 @@ impl Playtest {
             VitalityChannelId::Two => DamageChannel::Zenith,
         };
         for hit in &active[..active_count] {
-            self.damage_world_destructibles_with_capsule(
-                hit.capsule.start,
-                hit.capsule.end,
-                hit.capsule.radius,
-                channel,
-                hit.damage,
-            );
+            // A blocking prop needs a short forward contact volume rather than
+            // an inflated copy of a lateral blade capsule. Use the weapon's
+            // cooked melee reach, the player's body radius and the exact
+            // authored active frames. Projectiles never enter this path.
+            self.damage_player_environment_melee(environment_reach, channel, hit.damage);
         }
 
         let mut stats = MeleeArcStats::default();
