@@ -142,7 +142,49 @@ impl UiAffine {
         ty: 0,
     };
 
+    /// `true` when the linear part is the identity, so the transform is a
+    /// pure translation.
+    ///
+    /// Every authored node that is neither rotated nor flipped resolves to
+    /// one of these, and so does the composition of two of them, which is
+    /// the whole of a typical HUD. The translation-only forms of
+    /// [`compose`](Self::compose) and [`point`](Self::point) return
+    /// bit-identical results to the general ones for such transforms while
+    /// skipping every Q12 multiply.
+    #[inline]
+    fn is_translation(self) -> bool {
+        self.m00 == 4096 && self.m01 == 0 && self.m10 == 0 && self.m11 == 4096
+    }
+
+    /// [`point`](Self::point) specialised to a translation-only transform.
+    #[inline]
+    fn translated_point(self, x: i32, y: i32) -> (i16, i16) {
+        (
+            round_q12_to_i16(self.tx.saturating_add(x.saturating_mul(4096))),
+            round_q12_to_i16(self.ty.saturating_add(y.saturating_mul(4096))),
+        )
+    }
+
     fn from_node_rect(x: i16, y: i16, width: u16, height: u16, node: &LevelUiNodeRecord) -> Self {
+        if node.rotation_degrees == 0
+            && node.flags & (ui_node_flags::FLIP_X | ui_node_flags::FLIP_Y) == 0
+        {
+            // Unrotated, unflipped: sin = 0 and cos = 4096, so the linear
+            // part is the identity and the general formula's
+            // `centre - m00 * half_w - m01 * half_h` collapses to `x << 12`
+            // exactly (no term can saturate for i16 x and u16 width). Worth a
+            // special case because the general path spends two integer
+            // divisions in `degrees_to_q12`, two sine lookups, and ten Q12
+            // multiplies to arrive at the same six words.
+            return Self {
+                m00: 4096,
+                m01: 0,
+                m10: 0,
+                m11: 4096,
+                tx: i32::from(x) << 12,
+                ty: i32::from(y) << 12,
+            };
+        }
         let angle = degrees_to_q12(node.rotation_degrees);
         let sin = sin_q12(angle);
         let cos = cos_q12(angle);
@@ -179,6 +221,19 @@ impl UiAffine {
     }
 
     fn compose(self, child: Self) -> Self {
+        if self.is_translation() {
+            // `mul_q12(4096, v) == v` and `mul_q12(0, v) == 0` exactly, so
+            // with an identity linear part on the left the child's linear
+            // part passes straight through and the translations add.
+            return Self {
+                m00: child.m00,
+                m01: child.m01,
+                m10: child.m10,
+                m11: child.m11,
+                tx: child.tx.saturating_add(self.tx),
+                ty: child.ty.saturating_add(self.ty),
+            };
+        }
         Self {
             m00: mul_q12(self.m00, child.m00).saturating_add(mul_q12(self.m01, child.m10)),
             m01: mul_q12(self.m00, child.m01).saturating_add(mul_q12(self.m01, child.m11)),
@@ -194,6 +249,9 @@ impl UiAffine {
     }
 
     fn point(self, x: i32, y: i32) -> (i16, i16) {
+        if self.is_translation() {
+            return self.translated_point(x, y);
+        }
         let sx = self
             .tx
             .saturating_add(self.m00.saturating_mul(x))
@@ -210,6 +268,14 @@ impl UiAffine {
         let y0 = i32::from(y);
         let x1 = x0.saturating_add(i32::from(width));
         let y1 = y0.saturating_add(i32::from(height));
+        if self.is_translation() {
+            return [
+                self.translated_point(x0, y0),
+                self.translated_point(x1, y0),
+                self.translated_point(x0, y1),
+                self.translated_point(x1, y1),
+            ];
+        }
         [
             self.point(x0, y0),
             self.point(x1, y0),
@@ -319,6 +385,53 @@ fn node_resolved(nodes: &[LevelUiNodeRecord], index: usize) -> Option<UiResolved
     node_resolved_inner(nodes, index, 0)
 }
 
+/// One-entry memo for the parent a [`draw_scene`] pass just resolved.
+///
+/// A cooked scene parents nearly every control to the same canvas or
+/// group, and `draw_scene` walks the block in pool order, so the parent
+/// chain resolved for node N is almost always the one node N + 1 needs.
+/// Remembering the last one turns the per-node walk into a single index
+/// compare for a flat scene. The cached value is a pure function of the
+/// (immutable) node pool and the parent index, so nothing it returns can
+/// differ from a fresh resolve.
+type ParentResolveCache = Option<(usize, UiResolvedNode)>;
+
+/// Resolve `index` the way [`node_resolved`] does, taking the parent from
+/// `cache` when it holds that same parent and refreshing it otherwise.
+fn node_resolved_memo(
+    nodes: &[LevelUiNodeRecord],
+    index: usize,
+    cache: &mut ParentResolveCache,
+) -> Option<UiResolvedNode> {
+    let node = nodes.get(index)?;
+    if matches!(node.kind, LevelUiNodeKind::Canvas) {
+        return Some(resolved_from_parent(
+            UiAffine::IDENTITY,
+            0,
+            0,
+            node.width.max(1),
+            node.height.max(1),
+            node,
+        ));
+    }
+    let parent = node.parent.and_then(|parent| {
+        let parent_index = parent.to_usize();
+        if let Some((cached_index, cached)) = *cache {
+            if cached_index == parent_index {
+                return Some(cached);
+            }
+        }
+        // Depth 1: exactly the depth `node_resolved` would recurse at, so a
+        // malformed chain truncates at the same place with or without the memo.
+        let resolved = node_resolved_inner(nodes, parent_index, 1);
+        if let Some(resolved) = resolved {
+            *cache = Some((parent_index, resolved));
+        }
+        resolved
+    });
+    Some(resolve_against_parent(node, parent))
+}
+
 fn node_resolved_inner(
     nodes: &[LevelUiNodeRecord],
     index: usize,
@@ -341,24 +454,33 @@ fn node_resolved_inner(
 
     let parent = node
         .parent
-        .and_then(|parent| node_resolved_inner(nodes, parent.to_usize(), depth + 1))
-        .unwrap_or(UiResolvedNode {
-            width: UI_CANVAS_W,
-            height: UI_CANVAS_H,
-            transform: UiAffine::IDENTITY,
-            verts: UiAffine::IDENTITY.subrect(0, 0, UI_CANVAS_W as i16, UI_CANVAS_H as i16),
-        });
+        .and_then(|parent| node_resolved_inner(nodes, parent.to_usize(), depth + 1));
+    Some(resolve_against_parent(node, parent))
+}
+
+/// Place `node` inside an already-resolved parent rectangle, falling back
+/// to the full screen when the parent chain did not resolve.
+fn resolve_against_parent(
+    node: &LevelUiNodeRecord,
+    parent: Option<UiResolvedNode>,
+) -> UiResolvedNode {
+    let parent = parent.unwrap_or(UiResolvedNode {
+        width: UI_CANVAS_W,
+        height: UI_CANVAS_H,
+        transform: UiAffine::IDENTITY,
+        verts: UiAffine::IDENTITY.subrect(0, 0, UI_CANVAS_W as i16, UI_CANVAS_H as i16),
+    });
     let (anchor_x, anchor_y) = anchor_factors(node.flags);
     let local_x = (i32::from(parent.width) * anchor_x / 2).saturating_add(i32::from(node.x));
     let local_y = (i32::from(parent.height) * anchor_y / 2).saturating_add(i32::from(node.y));
-    Some(resolved_from_parent(
+    resolved_from_parent(
         parent.transform,
         local_x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
         local_y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
         node.width.max(1),
         node.height.max(1),
         node,
-    ))
+    )
 }
 
 fn resolved_from_parent(
@@ -467,19 +589,25 @@ pub fn draw_scene(
     text: &impl UiTextResolver,
 ) {
     let end = first.saturating_add(count).min(nodes.len());
+    // Shared across the block: the live-text compose buffer (re-zeroing 96
+    // bytes per node is pure cost when, as in a HUD, almost no node carries a
+    // tag) and the parent-resolution memo (a flat scene resolves the same
+    // canvas once instead of once per node).
+    let mut text_scratch = [0u8; 96];
+    let mut parent_cache: ParentResolveCache = None;
     for index in first..end {
         let authored_node = &nodes[index];
         if !node_visible_in_tree(nodes, index, visible) {
             continue;
         }
-        let mut text_scratch = [0u8; 96];
         let resolved_text = if authored_node.tag.is_empty() {
             None
         } else {
             text.resolve(authored_node.tag, &mut text_scratch)
         };
         let node = authored_node;
-        let resolved = node_resolved(nodes, index).unwrap_or_else(default_resolved_node);
+        let resolved =
+            node_resolved_memo(nodes, index, &mut parent_cache).unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
         match node.kind {
             LevelUiNodeKind::Canvas
@@ -1067,7 +1195,7 @@ mod tests {
         image_effect_vertex_colors, image_effect_verts, message_panel_layout,
         message_panel_transition_layout, node_absolute_rect, scale_u16_q8, selected_label_text,
         shape_config, shape_edge_point, shape_perimeter, shape_polygon, text_prefix_chars,
-        MessagePageMeta, MessagePanelLayout, MessagePanelVariant, UiPaint, UiShapeConfig,
+        MessagePageMeta, MessagePanelLayout, MessagePanelVariant, UiAffine, UiPaint, UiShapeConfig,
         ACTIVATION_ECHO_FRAMES, MESSAGE_PANEL_EXPAND_FRAMES,
     };
     use psx_level::{
@@ -1113,6 +1241,190 @@ mod tests {
             font_scale: 256,
             letter_spacing: 0,
         }
+    }
+
+    /// `UiAffine::from_node_rect` before the unrotated fast path was added,
+    /// kept verbatim so the fast path can be proved to change nothing.
+    fn reference_from_node_rect(
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        node: &LevelUiNodeRecord,
+    ) -> UiAffine {
+        let angle = super::degrees_to_q12(node.rotation_degrees);
+        let sin = psx_math::sin_q12(angle);
+        let cos = psx_math::cos_q12(angle);
+        let fx = if node.flags & ui_node_flags::FLIP_X != 0 {
+            -1
+        } else {
+            1
+        };
+        let fy = if node.flags & ui_node_flags::FLIP_Y != 0 {
+            -1
+        } else {
+            1
+        };
+        let m00 = cos.saturating_mul(fx);
+        let m01 = -sin.saturating_mul(fy);
+        let m10 = sin.saturating_mul(fx);
+        let m11 = cos.saturating_mul(fy);
+        let half_w_q12 = i32::from(width) << 11;
+        let half_h_q12 = i32::from(height) << 11;
+        let center_x_q12 = (i32::from(x) << 12).saturating_add(half_w_q12);
+        let center_y_q12 = (i32::from(y) << 12).saturating_add(half_h_q12);
+        UiAffine {
+            m00,
+            m01,
+            m10,
+            m11,
+            tx: center_x_q12
+                .saturating_sub(super::mul_q12(m00, half_w_q12))
+                .saturating_sub(super::mul_q12(m01, half_h_q12)),
+            ty: center_y_q12
+                .saturating_sub(super::mul_q12(m10, half_w_q12))
+                .saturating_sub(super::mul_q12(m11, half_h_q12)),
+        }
+    }
+
+    /// `UiAffine::compose` before the translation fast path was added.
+    fn reference_compose(parent: UiAffine, child: UiAffine) -> UiAffine {
+        UiAffine {
+            m00: super::mul_q12(parent.m00, child.m00)
+                .saturating_add(super::mul_q12(parent.m01, child.m10)),
+            m01: super::mul_q12(parent.m00, child.m01)
+                .saturating_add(super::mul_q12(parent.m01, child.m11)),
+            m10: super::mul_q12(parent.m10, child.m00)
+                .saturating_add(super::mul_q12(parent.m11, child.m10)),
+            m11: super::mul_q12(parent.m10, child.m01)
+                .saturating_add(super::mul_q12(parent.m11, child.m11)),
+            tx: super::mul_q12(parent.m00, child.tx)
+                .saturating_add(super::mul_q12(parent.m01, child.ty))
+                .saturating_add(parent.tx),
+            ty: super::mul_q12(parent.m10, child.tx)
+                .saturating_add(super::mul_q12(parent.m11, child.ty))
+                .saturating_add(parent.ty),
+        }
+    }
+
+    /// `UiAffine::point` before the translation fast path was added.
+    fn reference_point(affine: UiAffine, x: i32, y: i32) -> (i16, i16) {
+        let sx = affine
+            .tx
+            .saturating_add(affine.m00.saturating_mul(x))
+            .saturating_add(affine.m01.saturating_mul(y));
+        let sy = affine
+            .ty
+            .saturating_add(affine.m10.saturating_mul(x))
+            .saturating_add(affine.m11.saturating_mul(y));
+        (super::round_q12_to_i16(sx), super::round_q12_to_i16(sy))
+    }
+
+    /// The unrotated/unflipped, translation-only shortcuts in `UiAffine` are
+    /// an optimisation only: every one of them has to reproduce the general
+    /// Q12 formula bit for bit, or a HUD moves by a pixel somewhere.
+    #[test]
+    fn affine_fast_paths_are_bit_identical_to_the_general_formula() {
+        let rotations = [0i16, 1, -1, 45, 90, 179, 180, -270, 359, 360, 721, -721];
+        let flags = [
+            0u16,
+            ui_node_flags::FLIP_X,
+            ui_node_flags::FLIP_Y,
+            ui_node_flags::FLIP_X | ui_node_flags::FLIP_Y,
+        ];
+        let rects: [(i16, i16, u16, u16); 8] = [
+            (0, 0, 320, 240),
+            (14, 12, 35, 8),
+            (52, 21, 88, 8),
+            (125, 24, 2, 2),
+            (-40, -7, 1, 1),
+            (319, 239, 1, 1),
+            (-32768, -32768, 1, 1),
+            (32767, 32767, 65535, 65535),
+        ];
+        let probes: [(i32, i32); 6] = [(0, 0), (1, 0), (0, 1), (88, 8), (-5, -5), (65535, 65535)];
+
+        for &rotation in &rotations {
+            for &flag in &flags {
+                for &(x, y, width, height) in &rects {
+                    let mut node = ui_node(None, LevelUiNodeKind::Rect, x, y, width, height);
+                    node.rotation_degrees = rotation;
+                    node.flags = flag;
+
+                    let fast = UiAffine::from_node_rect(x, y, width, height, &node);
+                    let reference = reference_from_node_rect(x, y, width, height, &node);
+                    assert_eq!(fast, reference, "from_node_rect {rotation} {flag} {x},{y}");
+
+                    // Composed under a canvas-like parent, and under a rotated
+                    // one, so the parent-is-translation shortcut is covered in
+                    // both directions.
+                    let mut canvas = ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240);
+                    canvas.flags = 0;
+                    let flat_parent = UiAffine::from_node_rect(0, 0, 320, 240, &canvas);
+                    let mut spun = canvas;
+                    spun.rotation_degrees = 30;
+                    let spun_parent = UiAffine::from_node_rect(0, 0, 320, 240, &spun);
+                    for parent in [UiAffine::IDENTITY, flat_parent, spun_parent] {
+                        let composed = parent.compose(fast);
+                        assert_eq!(composed, reference_compose(parent, reference), "compose");
+                        for &(px, py) in &probes {
+                            assert_eq!(
+                                composed.point(px, py),
+                                reference_point(composed, px, py),
+                                "point {px},{py}"
+                            );
+                        }
+                        assert_eq!(
+                            composed.subrect(3, 4, 88, 8),
+                            [
+                                reference_point(composed, 3, 4),
+                                reference_point(composed, 91, 4),
+                                reference_point(composed, 3, 12),
+                                reference_point(composed, 91, 12),
+                            ],
+                            "subrect"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The parent memo must return exactly what a fresh resolve returns, for
+    /// every node of a scene, whatever order the pool is walked in.
+    #[test]
+    fn parent_resolve_memo_matches_an_uncached_resolve() {
+        let mut nodes = [
+            ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240),
+            ui_node(Some(psx_level::UiNodeIndex(0)), LevelUiNodeKind::Group, 8, 6, 200, 80),
+            ui_node(Some(psx_level::UiNodeIndex(1)), LevelUiNodeKind::Rect, 4, 4, 88, 8),
+            ui_node(Some(psx_level::UiNodeIndex(0)), LevelUiNodeKind::Rect, 52, 21, 88, 8),
+            ui_node(Some(psx_level::UiNodeIndex(1)), LevelUiNodeKind::Label, 2, 2, 35, 8),
+            // A parentless non-canvas node falls back to the screen rect.
+            ui_node(None, LevelUiNodeKind::Rect, 5, 5, 10, 10),
+        ];
+        nodes[3].rotation_degrees = 30;
+        nodes[4].flags = ui_node_flags::FLIP_X | 4;
+
+        let mut cache: super::ParentResolveCache = None;
+        for index in 0..nodes.len() {
+            assert_eq!(
+                super::node_resolved_memo(&nodes, index, &mut cache),
+                super::node_resolved(&nodes, index),
+                "node {index} in pool order"
+            );
+        }
+        // Re-walked backwards the memo keeps missing, which must not change
+        // a single resolved value either.
+        let mut cache: super::ParentResolveCache = None;
+        for index in (0..nodes.len()).rev() {
+            assert_eq!(
+                super::node_resolved_memo(&nodes, index, &mut cache),
+                super::node_resolved(&nodes, index),
+                "node {index} in reverse order"
+            );
+        }
+        assert_eq!(super::node_resolved_memo(&nodes, 99, &mut cache), None);
     }
 
     #[test]
@@ -2211,15 +2523,7 @@ fn draw_button(
     let text_y = ((resolved.height as i32 - line_h).max(0) / 2)
         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
-    let text_x = aligned_text_x(
-        font,
-        text,
-        0,
-        resolved.width,
-        align,
-        scale,
-        letter_spacing,
-    );
+    let text_x = aligned_text_x(font, text, 0, resolved.width, align, scale, letter_spacing);
     let paint = text_paint(node.accent, node.accent_paint, paints);
     let paint = if focus_chrome && !focused {
         dim_paint(paint)
@@ -2806,17 +3110,20 @@ pub fn draw_item_acquired_panel(
         return;
     }
 
-    let visible_characters =
-        usize::from(typewriter_frame / MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
+    let visible_characters = usize::from(typewriter_frame / MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
     let prefix_chars = PREFIX.chars().count();
     let visible_prefix = text_prefix_chars(PREFIX, visible_characters.min(prefix_chars));
-    let visible_name = text_prefix_chars(item_name, visible_characters.saturating_sub(prefix_chars));
+    let visible_name =
+        text_prefix_chars(item_name, visible_characters.saturating_sub(prefix_chars));
     let total_width = font
         .text_width(PREFIX)
         .saturating_add(font.text_width(item_name)) as i16;
-    let text_x = layout
-        .x
-        .saturating_add((i32::from(layout.width).saturating_sub(i32::from(total_width)).max(0) / 2) as i16);
+    let text_x = layout.x.saturating_add(
+        (i32::from(layout.width)
+            .saturating_sub(i32::from(total_width))
+            .max(0)
+            / 2) as i16,
+    );
     let text_y = layout.y.saturating_add(4);
     draw_scaled_text_paint(
         font,
