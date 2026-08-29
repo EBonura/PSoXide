@@ -1339,6 +1339,55 @@ pub(crate) fn draw_model_animation_viewer(
         .map(|_| character_action_weapon_tracks(project, character_id, state.selected_action))
         .unwrap_or_default();
     let mut loaded_preview_weapons = Vec::new();
+    let default_equipment = character_id
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character.default_equipment.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    for binding in &default_equipment {
+        // An authored action track is the per-action override for a socket.
+        if action_weapon_tracks
+            .iter()
+            .any(|(_, track)| track.character_socket == binding.character_socket)
+        {
+            continue;
+        }
+        let Some(weapon_id) = binding.weapon else {
+            continue;
+        };
+        let Some((model_id, grip_translation, grip_rotation_q12)) = project
+            .resource(weapon_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Weapon(weapon) => weapon
+                    .model
+                    .map(|model_id| (model_id, weapon.grip.translation, weapon.grip.rotation_q12)),
+                _ => None,
+            })
+        else {
+            continue;
+        };
+        let Some(socket) = sockets
+            .iter()
+            .find(|socket| socket.name == binding.character_socket)
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(context) = load_weapon_model_context(project, project_root, state, model_id)
+        else {
+            continue;
+        };
+        loaded_preview_weapons.push(LoadedPreviewWeapon {
+            track_index: None,
+            context,
+            socket,
+            grip_translation,
+            grip_rotation_q12,
+            materialization_q12: 4096,
+        });
+    }
     for (track_index, track) in &action_weapon_tracks {
         let Some((model_id, grip_translation, grip_rotation_q12)) = project
             .resource(track.weapon)
@@ -8269,12 +8318,12 @@ mod focus_tests {
             make_model("assets/mantis_artigli.psxmdl", skeleton),
         );
         let light = project.add_resource(
-            "Light Enemy / Light Arm",
-            make_model("assets/mantis_light.psxmdl", skeleton),
+            "Light Enemy / Clawless Body",
+            make_model("assets/mantis_clawless.psxmdl", skeleton),
         );
         let heavy = project.add_resource(
-            "Light Enemy / Heavy Arm",
-            make_model("assets/mantis_heavy.psxmdl", skeleton),
+            "Light Enemy / Alternate Body",
+            make_model("assets/mantis_alternate.psxmdl", skeleton),
         );
         let foreign = project.add_resource(
             "Unrelated Enemy",
@@ -8742,8 +8791,8 @@ mod focus_tests {
             model_data("assets/light.psxmdl", light_skeleton),
         );
         let light_variant = project.add_resource(
-            "Light Enemy / Heavy Arm",
-            model_data("assets/light_heavy_arm.psxmdl", light_skeleton),
+            "Light Enemy / Clawless Body",
+            model_data("assets/light_clawless.psxmdl", light_skeleton),
         );
         let heavy = project.add_resource(
             "Heavy Enemy",
