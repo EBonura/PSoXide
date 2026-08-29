@@ -552,8 +552,44 @@ impl App {
         // gap so the GPU draw overlaps CPU work. Holds the frame's missed
         // visual intervals for the deadline counters emitted at the flip.
         let mut pending_present: Option<u16> = None;
+        // Set while a queued scene's display flip sits in the VBlank
+        // handler's GP1 slot, carrying that frame's missed visual intervals
+        // for the deadline counters. Until the edge arrives the newly selected
+        // draw buffer is still the one on screen, so the frame clear and the
+        // ordering-table kick that follow the flip are held back -- and the
+        // fixed updates that were already due get to run in the gap that used
+        // to be a spin. See `finish_deferred_flip`.
+        let mut deferred_flip: Option<u16> = None;
 
         loop {
+            // Resolve a queued flip as soon as the handler has taken the word,
+            // or when the scheduler has nothing but a render or a wait left to
+            // offer -- at which point blocking on the edge is all there is to
+            // do. A due fixed update always goes first: covering the edge with
+            // simulation the runner owed anyway is the entire point.
+            if let Some(previous_misses) = deferred_flip {
+                if !clock.display_flip_pending()
+                    || !matches!(
+                        scheduler.next_action(clock.elapsed_sim_ticks()),
+                        SchedulerAction::RunFixedUpdate { .. }
+                    )
+                {
+                    telemetry::stage_begin(telemetry::stage::PRESENT);
+                    let landed = clock.wait_display_flip();
+                    telemetry::stage_end(telemetry::stage::PRESENT);
+                    if !landed {
+                        telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
+                    }
+                    // Counted here, not where the word was queued: the frame
+                    // reaches the screen at the edge, so `ctx.visual_frame`
+                    // advances at the same point in the cadence it did when
+                    // the swap was synchronous.
+                    emit_visual_frame_counters(previous_misses);
+                    ctx.visual_frame = ctx.visual_frame.advance();
+                    Self::finish_deferred_flip(config, scene, &mut ctx);
+                    deferred_flip = None;
+                }
+            }
             let elapsed_sim_ticks = clock.elapsed_sim_ticks();
             match scheduler.next_action(elapsed_sim_ticks) {
                 SchedulerAction::WaitForVBlank => {
@@ -729,22 +765,26 @@ impl App {
                             scene.render_overlay(&mut ctx);
                             telemetry::stage_end(telemetry::stage::RENDER);
 
+                            // Hand the display-start word to the VBlank
+                            // handler instead of spinning out the rest of the
+                            // display period waiting for the edge ourselves.
+                            // The handler applies it in the blanking interval
+                            // exactly as the synchronous swap did, so this is
+                            // no more prone to shearing; what changes is that
+                            // the CPU keeps the pending fixed updates it was
+                            // about to run and does them inside the wait. The
+                            // clear and the ordering-table kick come after the
+                            // edge, in `finish_deferred_flip`.
                             telemetry::stage_begin(telemetry::stage::PRESENT);
-                            clock.wait_vblank_edge();
-                            ctx.fb.swap();
+                            clock.queue_display_flip(ctx.fb.begin_deferred_swap());
                             telemetry::stage_end(telemetry::stage::PRESENT);
-                            emit_visual_frame_counters(previous_misses);
-                            ctx.visual_frame = ctx.visual_frame.advance();
+                            deferred_flip = Some(previous_misses);
+                        } else {
+                            // No frame was in flight, so nothing flipped and
+                            // the draw side did not move: prepare this one's
+                            // buffer straight away.
+                            Self::finish_deferred_flip(config, scene, &mut ctx);
                         }
-
-                        telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
-                        ctx.fb.clear(
-                            config.clear_color.0,
-                            config.clear_color.1,
-                            config.clear_color.2,
-                        );
-                        telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
-                        scene.submit_render(&mut ctx);
                     }
                     if !traced_render {
                         boot_visual_checkpoint_hold(
@@ -767,6 +807,26 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Take ownership of the buffer a queued flip just freed: point the GPU's
+    /// draw area/offset at it, clear it, and kick the ordering table that was
+    /// built for it.
+    ///
+    /// Every step here writes to the buffer the display was showing until the
+    /// flip landed, so none of it may run while
+    /// [`EngineClock::display_flip_pending`] is true -- that is the whole
+    /// reason the work is split out of the present.
+    fn finish_deferred_flip<S: Scene>(config: Config, scene: &mut S, ctx: &mut Ctx) {
+        ctx.fb.apply_draw_target();
+        telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+        ctx.fb.clear(
+            config.clear_color.0,
+            config.clear_color.1,
+            config.clear_color.2,
+        );
+        telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
+        scene.submit_render(ctx);
     }
 
     /// Drain the in-flight ordering-table DMA, draw the scene's 2D
