@@ -457,6 +457,16 @@ pub enum ModelUvMapping {
     Authored,
     /// Preserve authored UVs and apply a wrapping byte-space displacement.
     AuthoredOffset(ModelUvOffset),
+    /// Preserve authored UVs while applying a cheap opaque crystal response.
+    ///
+    /// The model packet path reuses the GTE's backface-area result to choose
+    /// one of four prepacked tint bands. `roughness` controls how readily a
+    /// facet changes band as the camera moves. No texture projection or
+    /// per-corner division is performed.
+    CameraCrystal {
+        /// Quantised response roughness (`0 = sharp`, `3 = rough`).
+        roughness: u8,
+    },
     /// Project the model through the screen into the active room's compact
     /// environment map. Roughness is a 0..=3 UV-quantisation level.
     ScreenSpaceReflection {
@@ -475,6 +485,14 @@ impl ModelUvMapping {
     /// Whether packet UVs can use the model's prepacked authored words.
     pub const fn is_authored(self) -> bool {
         matches!(self, Self::Authored)
+    }
+
+    /// Whether the mapping reads the face's cooked UV words directly.
+    pub const fn uses_authored_uvs(self) -> bool {
+        matches!(
+            self,
+            Self::Authored | Self::AuthoredOffset(_) | Self::CameraCrystal { .. }
+        )
     }
 }
 

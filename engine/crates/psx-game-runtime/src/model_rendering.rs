@@ -451,11 +451,17 @@ fn model_secondary_layer(
     v %= texture_height.max(1);
     let offset = ModelUvOffset::new(u, v);
     let mapping = if layer.uses_room_reflection_probe() {
-        ModelUvMapping::ScreenSpaceReflection {
-            texture_width,
-            texture_height,
-            roughness: layer.reflection_roughness_level(),
-            uv_offset: offset,
+        if layer.texture_asset.is_some() {
+            ModelUvMapping::CameraCrystal {
+                roughness: layer.reflection_roughness_level(),
+            }
+        } else {
+            ModelUvMapping::ScreenSpaceReflection {
+                texture_width,
+                texture_height,
+                roughness: layer.reflection_roughness_level(),
+                uv_offset: offset,
+            }
         }
     } else {
         ModelUvMapping::Authored
@@ -527,15 +533,22 @@ fn model_material_and_cull(
                     for channel in &mut reflection_override.tint_rgb {
                         *channel = ((u16::from(*channel) * strength + 127) / 255) as u8;
                     }
-                    return Some((
-                        model_override_material(slot, reflection_override),
-                        model_override_cull_mode(material_override),
+                    let mapping = if material_override.texture_asset.is_some() {
+                        ModelUvMapping::CameraCrystal {
+                            roughness: material_override.reflection_roughness_level(),
+                        }
+                    } else {
                         ModelUvMapping::ScreenSpaceReflection {
                             texture_width: vram_slot_texture_size_u8(slot.texture_width),
                             texture_height: vram_slot_texture_size_u8(slot.texture_height),
                             roughness: material_override.reflection_roughness_level(),
                             uv_offset,
-                        },
+                        }
+                    };
+                    return Some((
+                        model_override_material(slot, reflection_override),
+                        model_override_cull_mode(material_override),
+                        mapping,
                     ));
                 }
             }
@@ -2400,7 +2413,7 @@ mod tests {
     }
 
     #[test]
-    fn secondary_layer_can_screen_project_its_own_texture() {
+    fn secondary_layer_uses_opaque_crystal_for_its_own_texture() {
         let crystal_slot = slot(TextureWindow::power_of_two_tile(64, 64, 64, 64));
         let layer = LevelModelSecondaryLayer {
             texture_asset: Some(crystal_slot.asset),
@@ -2422,11 +2435,8 @@ mod tests {
         assert_eq!(resolved.material.clut_word(), crystal_slot.clut_word);
         assert_eq!(
             resolved.uv_mapping,
-            ModelUvMapping::ScreenSpaceReflection {
-                texture_width: 64,
-                texture_height: 64,
+            ModelUvMapping::CameraCrystal {
                 roughness: 1,
-                uv_offset: ModelUvOffset::ZERO,
             }
         );
     }
