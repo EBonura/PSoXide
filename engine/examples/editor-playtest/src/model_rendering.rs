@@ -35,7 +35,7 @@ const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
     max_model_instances: MAX_MODEL_INSTANCES,
     max_equipment_draws: MAX_EQUIPMENT_DRAWS,
     equipment_wire_q12: [mr::ASSEMBLED_Q12; mr::MAX_PLAYER_EQUIPMENT],
-    equipment_wireframe: false,
+    equipment_materialization: false,
 };
 
 /// How far up a weapon this authored visibility beat has reached, Q12.
@@ -569,7 +569,7 @@ pub(super) fn draw_player_equipment(
 ) -> EquipmentDrawStats {
     let mut knobs = MODEL_DRAW_KNOBS;
     knobs.equipment_wire_q12 = wire_q12;
-    knobs.equipment_wireframe = true;
+    knobs.equipment_materialization = true;
     let mut out = mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,
         MAX_RUNTIME_MODEL_CLIPS,
