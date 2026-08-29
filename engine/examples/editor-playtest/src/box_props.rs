@@ -188,6 +188,7 @@ pub(super) fn draw_box_prop_floor_debris<T>(
         MAX_BOX_PROP_STATE,
         BOX_PROP_BROKEN_WORDS,
         MAX_BOX_PROP_BREAK_EVENTS,
+        DEBRIS_CACHE_SLOTS,
         BOX_PROP_GTE_PROJECT_ENABLED,
         OT_DEPTH,
     >(

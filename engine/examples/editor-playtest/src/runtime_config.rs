@@ -649,6 +649,24 @@ pub(super) type RuntimeBoxProps = psx_game_runtime::box_props::BoxProps<
     MAX_BOX_PROP_BREAK_EVENTS,
 >;
 
+/// Break-time floor-debris cache slots. A slot costs about 1 KB and is keyed
+/// by box-prop index, and only a prop inside [`MAX_BOX_PROP_STATE`] can ever
+/// be toggled broken, so the state budget is a hard ceiling on how many slots
+/// can be claimed. Clamping to it kept 15 KB of cached debris for boxes this
+/// project does not author out of the PS1's 2 MB (the cook currently emits the
+/// one-prop sentinel because `BOX_PROPS` is empty). Overflowing the pool only
+/// costs a recompute on the next draw, so this can never be wrong loudly.
+pub(super) const DEBRIS_CACHE_SLOTS: usize =
+    if MAX_BOX_PROP_STATE < psx_game_runtime::box_props::MAX_DEBRIS_CACHE_SLOTS {
+        MAX_BOX_PROP_STATE
+    } else {
+        psx_game_runtime::box_props::MAX_DEBRIS_CACHE_SLOTS
+    };
+
+/// The crate break-time debris cache instantiated with this example's slot
+/// budget (see [`DEBRIS_CACHE_SLOTS`]).
+pub(super) type RuntimeDebrisCache = psx_game_runtime::box_props::DebrisCache<DEBRIS_CACHE_SLOTS>;
+
 /// Crate-owned visible-cell selection state instantiated with this
 /// example's window/pool/candidate capacities.
 #[cfg(all(

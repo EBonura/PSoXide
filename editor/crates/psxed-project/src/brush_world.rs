@@ -1657,6 +1657,29 @@ fn brush_texture_dims(
     dims
 }
 
+/// Byte budget for page-local texture promotion. Every promoted image is
+/// tiled from its source, never stretched, so spending this budget cannot
+/// change a single texel; it only moves faces from the windowed draw path
+/// (a GP0(E2) selector plus reset per surface, and `19*15` reserved words per
+/// triangle) onto the compact one (`19*13`).
+///
+/// The cost is paid twice, in VRAM and in the guest's `.data`, because a
+/// promoted texture is both uploaded and embedded in the PSX-EXE. That second
+/// cost is what pinned this at 8 KiB: the whole promotion set needs 12,288
+/// bytes more than the 8 KiB selection, and the guest link had only ~2.3 KB of
+/// RAM headroom, so 10 KiB already overflowed `.bss`. Sizing the break-time
+/// debris cache to the project's breakable-prop budget returned 14,336 bytes
+/// and let the full set land. Raise this further only against a fresh link:
+/// the binding constraint is the MIPS RAM region, not the 1 MB of VRAM (the
+/// complete set costs 1.2% of it).
+///
+/// It stays at 8 KiB because the full set was then measured and is not worth
+/// the RAM. Against a frozen source closure, with `.text` byte-identical
+/// across the pair and `.data` differing by exactly the +12,288 of promoted
+/// texels, 32 KiB moved 703 -> 1085 compact faces (41.4% -> 63.9%) for
+/// +0.11% fps and -0.18% room. The per-face saving is one selector plus two
+/// reserved words, and too few of the 382 promoted faces are on screen at
+/// once to matter. 12,288 bytes of the scarcest resource buys noise.
 const PAGE_LOCAL_PROMOTION_BUDGET_BYTES: usize = 8 * 1024;
 const PAGE_LOCAL_PROMOTION_MIN_FACE_GAIN: usize = 32;
 
