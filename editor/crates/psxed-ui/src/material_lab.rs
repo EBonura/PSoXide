@@ -1,5 +1,8 @@
 use super::*;
-use psxed_project::{MaterialAnimation, MaterialFlipbook, MaterialLightPulse, MaterialUvMotion};
+use psxed_project::{
+    MaterialAnimation, MaterialFlipbook, MaterialLightPulse, MaterialUvMotion,
+    ReflectionProbeMaterial,
+};
 
 /// Transient Material Lab view state. The authored recipe itself lives in the
 /// selected [`MaterialResource`], so switching projects or workspaces never
@@ -517,6 +520,9 @@ fn draw_primary_layer_settings_inner(
                 draw_transition_settings(ui, &mut material.transition, material_options, owner)
             }
             MaterialTextureMode::ReflectiveProbe => draw_retired_reflection_notice(ui),
+        }
+        if material.texture_mode != MaterialTextureMode::ReflectiveProbe {
+            draw_camera_reflection_settings(ui, &mut material.reflection);
         }
     }
     ui.add_space(6.0);
@@ -1099,6 +1105,30 @@ fn draw_retired_reflection_notice(ui: &mut egui::Ui) {
     });
 }
 
+fn draw_camera_reflection_settings(ui: &mut egui::Ui, reflection: &mut ReflectionProbeMaterial) {
+    ui.add_space(6.0);
+    section_frame().show(ui, |ui| {
+        ui.checkbox(&mut reflection.enabled, "Camera-reactive crystal");
+        ui.label(
+            RichText::new(
+                "Projects this material's own texture across opaque model facets; no transparency or environment capture.",
+            )
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+        );
+        if reflection.enabled {
+            ui.add(
+                egui::Slider::new(&mut reflection.strength, 0..=255)
+                    .text("Reflection strength"),
+            );
+            ui.add(
+                egui::Slider::new(&mut reflection.roughness, 0..=255)
+                    .text("Facet roughness"),
+            );
+        }
+    });
+}
+
 pub(crate) fn draw_secondary_layer_settings(
     ui: &mut egui::Ui,
     material: &mut MaterialResource,
@@ -1141,6 +1171,9 @@ fn draw_secondary_layer_settings_inner(
             draw_transition_settings(ui, &mut layer.transition, material_options, owner)
         }
         MaterialTextureMode::ReflectiveProbe => draw_retired_reflection_notice(ui),
+    }
+    if layer.texture_mode != MaterialTextureMode::ReflectiveProbe {
+        draw_camera_reflection_settings(ui, &mut layer.reflection);
     }
     ui.add_space(6.0);
     section_frame().show(ui, |ui| {

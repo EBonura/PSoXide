@@ -427,7 +427,10 @@ fn model_secondary_layer(
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
 ) -> Option<TexturedModelLayer> {
     let slot = if layer.uses_room_reflection_probe() {
-        room_reflection_probe?
+        match layer.texture_asset {
+            Some(texture_asset) => resolve_override_texture(texture_asset)?,
+            None => room_reflection_probe?,
+        }
     } else {
         resolve_override_texture(layer.texture_asset?)?
     };
@@ -514,7 +517,11 @@ fn model_material_and_cull(
             let uv_offset = ModelUvOffset::new(u, v);
             let atlas = model_override_atlas_material(runtime_model.material, material_override);
             if material_override.uses_room_reflection_probe() {
-                if let Some(slot) = room_reflection_probe {
+                let reflection_slot = match material_override.texture_asset {
+                    Some(texture_asset) => resolve_override_texture(texture_asset),
+                    None => room_reflection_probe,
+                };
+                if let Some(slot) = reflection_slot {
                     let strength = u16::from(material_override.reflection_strength());
                     let mut reflection_override = material_override;
                     for channel in &mut reflection_override.tint_rgb {
@@ -2388,6 +2395,38 @@ mod tests {
                 texture_height: 64,
                 roughness: 2,
                 uv_offset: ModelUvOffset::new(4, 5),
+            }
+        );
+    }
+
+    #[test]
+    fn secondary_layer_can_screen_project_its_own_texture() {
+        let crystal_slot = slot(TextureWindow::power_of_two_tile(64, 64, 64, 64));
+        let layer = LevelModelSecondaryLayer {
+            texture_asset: Some(crystal_slot.asset),
+            blend_mode: model_override_blend::OPAQUE,
+            tint_rgb: [128; 3],
+            motion: psx_level::LevelMaterialUvMotion::default(),
+            flags: psx_level::material_flags::MODEL_REFLECTION_PROBE
+                | (1 << psx_level::material_flags::MODEL_REFLECTION_ROUGHNESS_SHIFT)
+                | (232 << psx_level::material_flags::MODEL_REFLECTION_STRENGTH_SHIFT),
+        };
+        let resolved = model_secondary_layer(
+            layer,
+            SimTick::from_u32(0),
+            VideoHz::NTSC,
+            None,
+            &mut |asset| (asset == crystal_slot.asset).then_some(crystal_slot),
+        )
+        .expect("resident crystal texture");
+        assert_eq!(resolved.material.clut_word(), crystal_slot.clut_word);
+        assert_eq!(
+            resolved.uv_mapping,
+            ModelUvMapping::ScreenSpaceReflection {
+                texture_width: 64,
+                texture_height: 64,
+                roughness: 1,
+                uv_offset: ModelUvOffset::ZERO,
             }
         );
     }
