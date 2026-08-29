@@ -94,9 +94,10 @@ pub struct ModelDrawKnobs {
     /// its own beat: the light sword on the first throw of the arm, the heavy
     /// one on the second.
     pub equipment_wire_q12: [u16; MAX_PLAYER_EQUIPMENT],
-    /// Draw the player's weapons as a wireframe construct rather than a solid
-    /// model. Equipment on model instances stays solid.
-    pub equipment_wireframe: bool,
+    /// Apply the authored hidden -> partial wireframe -> textured visibility
+    /// envelope. Instance equipment and previews that do not use an authored
+    /// beat leave this disabled and draw the complete textured model.
+    pub equipment_materialization: bool,
 }
 
 /// Actor floor-shadow tuning, as one value.

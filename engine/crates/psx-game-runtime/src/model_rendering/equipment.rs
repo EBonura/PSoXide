@@ -126,7 +126,7 @@ pub(super) fn draw_player_equipment_from_pose<
             .get(index)
             .copied()
             .unwrap_or(ASSEMBLED_Q12);
-        if knobs.equipment_wireframe && wire_q12 == 0 {
+        if knobs.equipment_materialization && wire_q12 == 0 {
             continue;
         }
         // Player equipment follows the player across rooms, matching the
@@ -236,20 +236,14 @@ fn submit_equipped_weapon<
         .with_textured_triangle_splitting(true)
         .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
     let faces = runtime_model_faces(weapon_model, model_faces);
-    // The weapon's faces are sorted hilt-first at load, so how much of it has
-    // materialised is just how much of the face slice is drawn solid. The rest
-    // is the wireframe it fills into.
-    if knobs.equipment_wireframe {
-        // A nanobot weapon is never solid: it is a wireframe construct that
-        // grows up the blade and retreats the same way. The faces are sorted
-        // hilt-first, so how much of it exists is how much of the face list
-        // gets an outline.
-        let wired = if wire_q12 >= ASSEMBLED_Q12 {
-            faces.len()
-        } else {
-            faces.len() * usize::from(wire_q12) / 4096
-        };
-        if wired > 0 {
+    // The Animation Studio contract has three distinct states: absent at
+    // zero, a growing wireframe during either transition, and the ordinary
+    // textured model once the authored envelope reaches Q12 identity.
+    match equipment_appearance_draw_mode(knobs.equipment_materialization, wire_q12, faces.len()) {
+        EquipmentAppearanceDrawMode::Hidden => {
+            return Some(TexturedModelRenderStats::default());
+        }
+        EquipmentAppearanceDrawMode::Wireframe(wired) => {
             if let Some(geometry) =
                 runtime_model_geometry(weapon_model, model_parts, model_vertices)
             {
@@ -265,8 +259,9 @@ fn submit_equipped_weapon<
                     world,
                 );
             }
+            return Some(TexturedModelRenderStats::default());
         }
-        return Some(TexturedModelRenderStats::default());
+        EquipmentAppearanceDrawMode::Textured => {}
     }
     Some(submit_runtime_model_predecoded(
         world,
@@ -293,6 +288,34 @@ fn submit_equipped_weapon<
 
 /// A weapon at this assembly level is solid, and the normal model path draws it.
 pub const ASSEMBLED_Q12: u16 = 4096;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum EquipmentAppearanceDrawMode {
+    Hidden,
+    Wireframe(usize),
+    Textured,
+}
+
+fn equipment_appearance_draw_mode(
+    enabled: bool,
+    wire_q12: u16,
+    face_count: usize,
+) -> EquipmentAppearanceDrawMode {
+    if !enabled {
+        return EquipmentAppearanceDrawMode::Textured;
+    }
+    if wire_q12 == 0 || face_count == 0 {
+        return EquipmentAppearanceDrawMode::Hidden;
+    }
+    if wire_q12 >= ASSEMBLED_Q12 {
+        return EquipmentAppearanceDrawMode::Textured;
+    }
+    let wired = face_count
+        .saturating_mul(usize::from(wire_q12))
+        .saturating_add(usize::from(ASSEMBLED_Q12 - 1))
+        / usize::from(ASSEMBLED_Q12);
+    EquipmentAppearanceDrawMode::Wireframe(wired.min(face_count))
+}
 
 /// Draw the not-yet-solid part of a weapon as a green wireframe.
 ///
@@ -1047,6 +1070,34 @@ mod tests {
             }
         }
         Animation::from_bytes(Box::leak(bytes.into_boxed_slice())).expect("test animation")
+    }
+
+    #[test]
+    fn authored_materialization_switches_from_wireframe_to_textured_weapon() {
+        const FACES: usize = 94;
+        assert_eq!(
+            equipment_appearance_draw_mode(false, 0, FACES),
+            EquipmentAppearanceDrawMode::Textured,
+            "equipment without an authored beat remains fully textured"
+        );
+        assert_eq!(
+            equipment_appearance_draw_mode(true, 0, FACES),
+            EquipmentAppearanceDrawMode::Hidden
+        );
+        assert_eq!(
+            equipment_appearance_draw_mode(true, 1, FACES),
+            EquipmentAppearanceDrawMode::Wireframe(1),
+            "the first non-zero sample must materialise one face, like the editor"
+        );
+        assert_eq!(
+            equipment_appearance_draw_mode(true, ASSEMBLED_Q12 / 2, FACES),
+            EquipmentAppearanceDrawMode::Wireframe(FACES / 2)
+        );
+        assert_eq!(
+            equipment_appearance_draw_mode(true, ASSEMBLED_Q12, FACES),
+            EquipmentAppearanceDrawMode::Textured,
+            "Q12 identity is the editor's transition from cage to real material"
+        );
     }
 
     /// Regression for the historical "spawn-adjacent tick produced an
