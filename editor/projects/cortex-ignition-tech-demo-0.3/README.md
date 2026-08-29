@@ -13,10 +13,11 @@ contains no inherited BSP geometry or old gameplay route.
 - `Null Choir Eclipse Cube Sky` is already assigned to the World in `Cube` mode.
   Its editable 2:1 panorama lives in `source_assets/sky/`; its 1536 x 256, 4bpp,
   six-face PSXT lives in `assets/textures/sky/`.
-- Paint the sky material onto sealed BSP roof/wall brushes wherever you want an
-  aperture. It has `sky_aperture` enabled and the World uses
-  `ThroughSkySurfaces`, so the geometry remains collision-solid while showing
-  the cooked image sky.
+- The World uses `ThroughSkySurfaces`. The inward face of the large sealing
+  ceiling above the player start uses `Null Choir Eclipse Cube Sky`, so it shows
+  the infinite cube sky while the brush remains collision-solid and seals BSP.
+- Paint the same material onto other sealed BSP roof/wall faces to create more
+  Quake-style sky apertures without opening the level to the void.
 - `TEXTURE_SET_V3.md` describes the intended architectural role of each material.
 - `FUTURE_GOTHIC_TEXTURES.md` documents the optional grittier future-Gothic
   material pass now painted across the current level geometry.
