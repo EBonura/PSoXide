@@ -115,6 +115,10 @@ pub struct ProjectileVisualStyle {
     pub trail_spacing_ticks: u8,
     /// Lifetime of the impact flare.
     pub impact_lifetime_ticks: u8,
+    /// Extra ballistic fragments used by large world break events. Zero keeps
+    /// the compact four-way projectile impact; non-zero selects the chunkier
+    /// destruction presentation and is clamped by the renderer.
+    pub break_fragment_count: u8,
 }
 
 impl ProjectileVisualStyle {
@@ -128,6 +132,7 @@ impl ProjectileVisualStyle {
         trail_segments: 0,
         trail_spacing_ticks: 1,
         impact_lifetime_ticks: 1,
+        break_fragment_count: 0,
     };
 }
 
@@ -608,15 +613,28 @@ impl<const N: usize> ProjectileImpactEffects<N> {
 
     /// Retain one resolved impact when a presentation slot is available.
     pub fn spawn(&mut self, impact: &ProjectileImpact) -> bool {
+        self.spawn_effect(impact.position, impact.room, impact.radius, impact.visual)
+    }
+
+    /// Retain a standalone impact-style effect. World systems such as
+    /// destructibles can share the same bounded flare renderer without
+    /// manufacturing a combat projectile or a fake collision result.
+    pub fn spawn_effect(
+        &mut self,
+        position: [i32; 3],
+        room: RoomIndex,
+        radius: u16,
+        visual: ProjectileVisualStyle,
+    ) -> bool {
         let Some(index) = self.active.iter().position(|active| *active == 0) else {
             return false;
         };
         self.active[index] = 1;
-        self.positions[index] = impact.position;
-        self.rooms[index] = impact.room;
-        self.radii[index] = impact.radius;
+        self.positions[index] = position;
+        self.rooms[index] = room;
+        self.radii[index] = radius;
         self.ages[index] = 0;
-        self.visuals[index] = impact.visual;
+        self.visuals[index] = visual;
         true
     }
 
@@ -732,6 +750,7 @@ mod tests {
                 trail_segments: 3,
                 trail_spacing_ticks: 1,
                 impact_lifetime_ticks: 10,
+                break_fragment_count: 0,
             },
         }
     }
