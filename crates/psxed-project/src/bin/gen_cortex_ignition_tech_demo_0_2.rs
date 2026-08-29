@@ -605,6 +605,7 @@ fn cook_64_square(source: &Path, destination: &Path) {
             crop: CropMode::CentreSquare,
             resampler: Resampler::Lanczos3,
             transparent_index_zero: false,
+            clut_rows: 1,
         },
     )
     .unwrap_or_else(|error| panic!("cook {}: {error}", source.display()));

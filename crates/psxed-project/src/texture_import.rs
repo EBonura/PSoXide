@@ -50,6 +50,7 @@ impl TextureImportConfig {
             crop: self.crop,
             resampler: self.resampler,
             transparent_index_zero: self.transparent_index_zero,
+            clut_rows: 1,
         }
     }
 }
