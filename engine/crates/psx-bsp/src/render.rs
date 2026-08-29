@@ -273,6 +273,17 @@ impl ViewProjection {
     };
 }
 
+/// Result of [`FrustumPlanes::classify_aabb`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum AabbClass {
+    /// Every corner fails one plane. No vertex can be inside it.
+    Outside,
+    /// Every corner satisfies every plane, near plane included.
+    Inside,
+    /// Neither proof holds; the exact per-vertex scan decides.
+    Straddling,
+}
+
 /// Frustum planes in the space the loaded GTE view transforms from (world
 /// for the world model, model-local for movers): `dot(normal, p) + offset >= 0`
 /// keeps `p`. Normals are the view rows combined per plane (Q12), offsets are
@@ -394,6 +405,53 @@ impl FrustumPlanes {
             | (u8::from(x_depth + screen_x < 0) << 2)
             | (u8::from(y_depth - screen_y < 0) << 3)
             | (u8::from(y_depth + screen_y < 0) << 4)
+    }
+
+    /// Classify one axis-aligned box against all five clip planes.
+    ///
+    /// Both decisive answers are exact with respect to the per-vertex scan in
+    /// [`Self::vertex_outside_mask`]. A box wholly outside one plane contains
+    /// no vertex inside that plane, so the scan's `wholly_outside` mask would
+    /// keep that bit set and reject the face. A box wholly inside every plane
+    /// contains no vertex outside any plane, near plane included, so the scan
+    /// would clear every mask bit and report no near clip. Only a straddling
+    /// box needs the exact scan.
+    ///
+    /// The support-point form costs at most six 32x32 multiplies per plane
+    /// with an early reject, against twenty per vertex in the scan.
+    #[inline]
+    fn classify_aabb(&self, mins: [i16; 3], maxs: [i16; 3]) -> AabbClass {
+        let mut wholly_inside = true;
+        let mut index = 0usize;
+        while index < 5 {
+            let plane = &self.planes[index];
+            let normal = plane.0;
+            // The box corner farthest along the normal. If that one is
+            // outside, every corner is.
+            let outer = [
+                if normal[0] >= 0 { maxs[0] } else { mins[0] },
+                if normal[1] >= 0 { maxs[1] } else { mins[1] },
+                if normal[2] >= 0 { maxs[2] } else { mins[2] },
+            ];
+            if Self::distance_negative(plane, outer) {
+                return AabbClass::Outside;
+            }
+            if wholly_inside {
+                // The opposite corner. If that one is inside, every corner is.
+                let inner = [
+                    if normal[0] >= 0 { mins[0] } else { maxs[0] },
+                    if normal[1] >= 0 { mins[1] } else { maxs[1] },
+                    if normal[2] >= 0 { mins[2] } else { maxs[2] },
+                ];
+                wholly_inside = !Self::distance_negative(plane, inner);
+            }
+            index += 1;
+        }
+        if wholly_inside {
+            AabbClass::Inside
+        } else {
+            AabbClass::Straddling
+        }
     }
 
     /// True when the whole axis-aligned box lies outside any clip plane.
@@ -1435,6 +1493,35 @@ impl Renderer {
                 .add(source_offset)
                 .cast::<ClassicAffineWordSourceVertex>()
         };
+        if count == 0 {
+            return None;
+        }
+        // Bound the polygon first. Both decisive box answers are exact with
+        // respect to the scan below, and the box costs at most thirty 32x32
+        // multiplies against the scan's twenty per vertex, so only genuinely
+        // straddling faces pay for both.
+        let mut mins = unsafe { core::ptr::read(source.cast::<[i16; 3]>()) };
+        let mut maxs = mins;
+        let mut index = 1usize;
+        while index < count {
+            let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
+            let mut axis = 0usize;
+            while axis < 3 {
+                if position[axis] < mins[axis] {
+                    mins[axis] = position[axis];
+                } else if position[axis] > maxs[axis] {
+                    maxs[axis] = position[axis];
+                }
+                axis += 1;
+            }
+            index += 1;
+        }
+        match frustum.classify_aabb(mins, maxs) {
+            AabbClass::Outside => return None,
+            AabbClass::Inside => return Some(false),
+            AabbClass::Straddling => {}
+        }
+
         // A set bit means every vertex seen so far is outside that plane.
         // Clear it as soon as one vertex is on the drawable side.
         let mut wholly_outside = 0x1fu8;

@@ -456,8 +456,17 @@ impl Playtest {
         let overrides = &overrides[..override_count];
         let elapsed_tick = self.gameplay_tick(ctx.sim_tick);
         let count = MODEL_INSTANCES.len().min(self.instance_actor_poses.len());
+        let bsp_resident = self.bsp.is_some();
         let mut index = 0usize;
         while index < count {
+            // The visibility mask discards the pose after resolving it, so
+            // test it first. `resolve_instance_actor_pose` reads only shared
+            // tables, which makes the skip output-identical.
+            if bsp_resident && self.bsp_instance_visible_mask & (1u16 << index) == 0 {
+                self.instance_actor_poses[index] = None;
+                index += 1;
+                continue;
+            }
             self.instance_actor_poses[index] = mr::resolve_instance_actor_pose(
                 model_tables(),
                 &self.models,
@@ -467,9 +476,6 @@ impl Playtest {
                 elapsed_tick,
                 ctx.video_hz,
             );
-            if self.bsp.is_some() && self.bsp_instance_visible_mask & (1u16 << index) == 0 {
-                self.instance_actor_poses[index] = None;
-            }
             index += 1;
         }
     }
