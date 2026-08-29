@@ -333,7 +333,9 @@ impl ResidentMap {
     /// explicit zero-length resize invalidates every previously returned tail
     /// slice.
     pub fn streaming_tail_capacity(&self) -> usize {
-        self.bytes.capacity().saturating_sub(self.resident_bytes)
+        self.bytes
+            .capacity()
+            .saturating_sub(align_up_4(self.resident_bytes))
     }
 
     /// Resize and mutably borrow the caller-owned tail of the resident arena.
@@ -345,14 +347,17 @@ impl ResidentMap {
         if self.map_id.is_none() || len > self.streaming_tail_capacity() {
             return None;
         }
-        let end = self.resident_bytes.checked_add(len)?;
+        let start = align_up_4(self.resident_bytes);
+        let end = start.checked_add(len)?;
         self.bytes.resize(end, 0);
-        self.bytes.get_mut(self.resident_bytes..end)
+        self.bytes.get_mut(start..end)
     }
 
     /// Borrow the currently installed caller-owned streaming tail.
     pub fn streaming_tail(&self) -> &[u8] {
-        self.bytes.get(self.resident_bytes..).unwrap_or_default()
+        self.bytes
+            .get(align_up_4(self.resident_bytes)..)
+            .unwrap_or_default()
     }
 
     /// Number of valid texture rows in the source texture-data lump.
@@ -755,23 +760,28 @@ mod tests {
         let mut map = ResidentMap::with_capacity(32);
         assert!(map.resize_streaming_tail(1).is_none());
 
-        // Stand in for a successfully validated twelve-byte resident map; the
+        // Stand in for a successfully validated thirteen-byte resident map;
+        // the three padding bytes also prove that the borrowed tail is aligned
+        // for native renderer records.
         // tail API is deliberately independent of any particular wire format.
-        map.bytes.resize(12, 0x5a);
-        map.resident_bytes = 12;
+        map.bytes.resize(13, 0x5a);
+        map.resident_bytes = 13;
         map.map_id = Some(7);
-        assert_eq!(map.streaming_tail_capacity(), 20);
-        map.resize_streaming_tail(20)
-            .expect("the exact unused tail fits")
-            .copy_from_slice(&[0xa5; 20]);
-        assert_eq!(map.bytes[..12], [0x5a; 12]);
-        assert_eq!(map.streaming_tail(), [0xa5; 20]);
-        assert!(map.resize_streaming_tail(21).is_none());
+        assert_eq!(map.streaming_tail_capacity(), 16);
+        let tail = map
+            .resize_streaming_tail(16)
+            .expect("the exact unused tail fits");
+        assert_eq!(tail.as_ptr() as usize & 3, 0);
+        tail.copy_from_slice(&[0xa5; 16]);
+        assert_eq!(map.bytes[..13], [0x5a; 13]);
+        assert_eq!(map.streaming_tail(), [0xa5; 16]);
+        assert!(map.resize_streaming_tail(17).is_none());
 
         map.resize_streaming_tail(0)
             .expect("clearing the tail is always representable");
         assert!(map.streaming_tail().is_empty());
-        assert_eq!(map.bytes, [0x5a; 12]);
+        assert_eq!(map.bytes[..13], [0x5a; 13]);
+        assert_eq!(map.bytes.len(), 16);
     }
 
     #[test]
