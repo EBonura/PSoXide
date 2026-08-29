@@ -29,8 +29,8 @@ use psx_engine::{
     CharacterMotorState, CollisionQueryError, CollisionTrace, CollisionTraceQuery,
     CollisionTraceShape, CullMode, DepthPolicy, OtFrame, PrimitivePacketArena, PrimitiveSink,
     RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera, WorldRenderPass,
-    WorldSurfaceOptions,
+    ThirdPersonCameraState, ThirdPersonCameraTarget, ViewVertex, WorldCamera, WorldProjection,
+    WorldRenderPass, WorldSurfaceOptions,
 };
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome, RuntimeDestructibles};
 use psx_gpu::{
@@ -314,6 +314,9 @@ pub(super) struct BspRuntime {
     doors: BrushDoorSet<MAX_BSP_DOORS>,
     destructible_targets: BrushDestructibleSet<MAX_BSP_DESTRUCTIBLES>,
     materials: Vec<Option<PxbspTextureBinding>>,
+    /// Set once every material has resolved to a ready VRAM slot; see
+    /// [`BspRuntime::refresh_materials`] for why the table is final after that.
+    materials_latched: bool,
     trace_scratch: TraceScratch,
     activation_visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     activation_leaf: Option<usize>,
@@ -455,6 +458,7 @@ impl BspRuntime {
             doors,
             destructible_targets,
             materials: vec![None; material_count],
+            materials_latched: false,
             trace_scratch: TraceScratch::new(),
             activation_visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             activation_leaf: None,
@@ -742,7 +746,24 @@ impl BspRuntime {
 
     /// Resolve every PXBSP material through the normal playtest VRAM owner.
     /// Returns `true` only when every queued upload is ready.
+    ///
+    /// The caller re-runs this every background tick to pick up uploads that
+    /// landed late, so it kept re-parsing every PSXT header and re-querying
+    /// every VRAM slot for the whole level, rebuilding a byte-identical
+    /// binding table on every frame of gameplay. Latch instead: the table is
+    /// only rewritten while a material is still unresolved.
+    ///
+    /// A resolved table stays correct for as long as its VRAM slots do.
+    /// `evict_unreferenced_vram` cannot reach them (it belongs to the grid room
+    /// window, and the residency owner returns before it whenever `self.bsp` is
+    /// resident), but `release_gameplay_vram` frees every slot when the scene
+    /// leaves gameplay, and `Scene::init` runs once at boot rather than per
+    /// entry, so this runtime outlives that. The scene calls
+    /// [`invalidate_materials`](Self::invalidate_materials) on that edge.
     pub(super) fn refresh_materials(&mut self) -> bool {
+        if self.materials_latched {
+            return true;
+        }
         let mut ready = true;
         for (index, material) in self.map.materials().iter().enumerate() {
             if material.flags & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY)
@@ -804,7 +825,17 @@ impl BspRuntime {
                 texture_size: [width, height],
             });
         }
-        ready && self.materials_ready()
+        self.materials_latched = ready && self.materials_ready();
+        self.materials_latched
+    }
+
+    /// Drop the resolved material table so the next `refresh_materials` rebuilds
+    /// it. Call whenever the gameplay VRAM those bindings point at is released.
+    pub(super) fn invalidate_materials(&mut self) {
+        self.materials_latched = false;
+        for binding in self.materials.iter_mut() {
+            *binding = None;
+        }
     }
 
     pub(super) fn materials_ready(&self) -> bool {
@@ -968,6 +999,29 @@ impl BspRuntime {
             let Some(target) = self.destructible_targets.get(target_index) else {
                 continue;
             };
+            // Settled debris is resubmitted every frame for the rest of the
+            // level, so an off-screen break kept paying for sixteen
+            // double-sided quads forever. Reject the whole lattice when its
+            // bounding sphere lies entirely outside the view frustum, before
+            // the material scan and any per-piece work. The radius
+            // over-estimates the half-diagonal and covers the launch excursion
+            // `bsp_fragment_quad` adds.
+            let Some((min, max)) = self.destructible_bounds_unchecked(target_index) else {
+                continue;
+            };
+            let centre = RoomPoint::new(
+                min[0].saturating_add(max[0]) / 2,
+                min[1].saturating_add(max[1]) / 2,
+                min[2].saturating_add(max[2]) / 2,
+            );
+            let radius = max[0]
+                .saturating_sub(min[0])
+                .max(max[1].saturating_sub(min[1]))
+                .max(max[2].saturating_sub(min[2]))
+                .saturating_add(FRAGMENT_TRAVEL_MARGIN);
+            if sphere_outside_view_frustum(camera.view_vertex(centre), radius, camera.projection) {
+                continue;
+            }
             let Some(model) = self.map.brush_models().get(target.model_index()) else {
                 continue;
             };
@@ -997,28 +1051,6 @@ impl BspRuntime {
             else {
                 continue;
             };
-            let Some((min, max)) = self.destructible_bounds_unchecked(target_index) else {
-                continue;
-            };
-            // Settled debris is resubmitted every frame for the rest of the
-            // level, so an off-screen break kept paying for sixteen
-            // double-sided quads forever. Reject the whole lattice when its
-            // bounding sphere is entirely behind the near plane, before any
-            // per-piece work. The radius over-estimates the half-diagonal and
-            // covers the launch excursion `bsp_fragment_quad` adds.
-            let centre = RoomPoint::new(
-                min[0].saturating_add(max[0]) / 2,
-                min[1].saturating_add(max[1]) / 2,
-                min[2].saturating_add(max[2]) / 2,
-            );
-            let radius = max[0]
-                .saturating_sub(min[0])
-                .max(max[1].saturating_sub(min[1]))
-                .max(max[2].saturating_sub(min[2]))
-                .saturating_add(FRAGMENT_TRAVEL_MARGIN);
-            if camera.view_vertex(centre).z.saturating_add(radius) < camera.projection.near_z {
-                continue;
-            }
             let blend = match material.blend_mode {
                 material_blend::AVERAGE => BlendMode::Average,
                 material_blend::ADD => BlendMode::Add,
@@ -1629,10 +1661,42 @@ fn signed_quarter_angle_q12(sin: i32, cos: i32) -> i32 {
     }
 }
 
+/// Is this bounding sphere entirely outside the view frustum?
+///
+/// `WorldProjection::project_view` maps a camera-space vertex to
+/// `screen_x + x * focal / z`, `screen_y - y * focal / z`, so the visible rect
+/// is bounded by the four planes `|x| * focal = screen_x * z` and
+/// `|y| * focal = screen_y * z` plus the near plane. A sphere entirely outside
+/// any one of them contains no point that projects inside the rect, so nothing
+/// it could submit can produce a pixel and skipping it is output-identical.
+///
+/// The exact plane distance divides by `sqrt(focal^2 + half^2)`; this scales
+/// the radius by `focal + half` instead, which is never smaller. The threshold
+/// is therefore never too tight, so the test can only ever KEEP a sphere the
+/// exact test would keep. No square root, five multiplies, no division.
+fn sphere_outside_view_frustum(view: ViewVertex, radius: i32, projection: WorldProjection) -> bool {
+    if view.z.saturating_add(radius) < projection.near_z {
+        return true;
+    }
+    let focal = projection.focal_length;
+    let half_width = i32::from(projection.screen_x);
+    let half_height = i32::from(projection.screen_y);
+    let x_focal = view.x.saturating_mul(focal);
+    let y_focal = view.y.saturating_mul(focal);
+    let z_width = half_width.saturating_mul(view.z);
+    let z_height = half_height.saturating_mul(view.z);
+    let margin_width = radius.saturating_mul(focal.saturating_add(half_width));
+    let margin_height = radius.saturating_mul(focal.saturating_add(half_height));
+    x_focal.saturating_sub(z_width) > margin_width
+        || x_focal.saturating_add(z_width).saturating_neg() > margin_width
+        || y_focal.saturating_sub(z_height) > margin_height
+        || y_focal.saturating_add(z_height).saturating_neg() > margin_height
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use psx_engine::{WorldProjection, Q12};
+    use psx_engine::Q12;
 
     #[test]
     fn engine_view_cardinals_map_to_pxbsp_yaw() {
@@ -1690,5 +1754,80 @@ mod tests {
             1,
         );
         assert!(settled.iter().all(|vertex| vertex.y == 899));
+    }
+
+    /// The frustum reject must never drop a sphere that still has a point on
+    /// screen. Sweep a grid of centres and radii, project the sphere's own
+    /// axis-aligned extremes through the real `project_view`, and assert that
+    /// whenever any of them lands inside the draw rect the sphere was kept.
+    #[test]
+    fn frustum_reject_never_drops_a_sphere_with_a_point_on_screen() {
+        let projection = WorldProjection::new(160, 120, 320, 4);
+        let width = i32::from(projection.screen_x) * 2;
+        let height = i32::from(projection.screen_y) * 2;
+        let mut rejected = 0usize;
+        let mut kept = 0usize;
+        for z in [4, 8, 17, 40, 96, 250, 640, 1600, 4000] {
+            for x in (-4000..=4000).step_by(311) {
+                for y in (-3000..=3000).step_by(287) {
+                    for radius in [0, 1, 9, 64, 300, 1024] {
+                        let view = ViewVertex::new(x, y, z);
+                        let outside = sphere_outside_view_frustum(view, radius, projection);
+                        if !outside {
+                            kept += 1;
+                            continue;
+                        }
+                        rejected += 1;
+                        // Every axis extreme of the sphere, plus its centre.
+                        for probe in [
+                            (x, y, z),
+                            (x - radius, y, z),
+                            (x + radius, y, z),
+                            (x, y - radius, z),
+                            (x, y + radius, z),
+                            (x, y, z - radius),
+                            (x, y, z + radius),
+                        ] {
+                            let Some(point) =
+                                projection.project_view(ViewVertex::new(probe.0, probe.1, probe.2))
+                            else {
+                                continue;
+                            };
+                            let on_screen = i32::from(point.sx) >= 0
+                                && i32::from(point.sx) < width
+                                && i32::from(point.sy) >= 0
+                                && i32::from(point.sy) < height;
+                            assert!(
+                                !on_screen,
+                                "rejected sphere centre ({x},{y},{z}) r={radius} still \
+                                 projects {probe:?} to ({}, {})",
+                                point.sx, point.sy
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // The sweep has to exercise both outcomes or it proves nothing.
+        assert!(
+            rejected > 1000 && kept > 1000,
+            "rejected={rejected} kept={kept}"
+        );
+    }
+
+    /// A sphere straddling the screen centre is never rejected, at any depth
+    /// from the near plane out to the far end of the map.
+    #[test]
+    fn frustum_reject_keeps_the_sphere_under_the_crosshair() {
+        let projection = WorldProjection::new(160, 120, 320, 4);
+        for z in [4, 5, 16, 64, 512, 4096] {
+            for radius in [0, 1, 256, 4096] {
+                assert!(!sphere_outside_view_frustum(
+                    ViewVertex::new(0, 0, z),
+                    radius,
+                    projection
+                ));
+            }
+        }
     }
 }
