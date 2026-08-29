@@ -23,15 +23,10 @@ struct BoxPropFaceTextureRuntime {
     v_max: u8,
 }
 
-/// Break-time debris cache: a broken box's floor chips re-derived the
-/// same world quads, UVs and bilinear base colours every frame (~36
-/// multiplies per chip for the colours alone), all fixed the moment
-/// the box breaks. The most recently drawn broken boxes keep those
-/// values here; per frame only projection, fog and the submit remain.
-/// A slot is filled EAGERLY for all chips when claimed, so there is no
-/// partial-validity hazard; boxes beyond the pool simply refill on
-/// their next draw (worst case equals the old recompute cost).
-const DEBRIS_CACHE_SLOTS: usize = 16;
+/// Historic upper bound on the break-time debris pool, and the cap a game
+/// should clamp its own slot count to. See [`DebrisCache`] for why the real
+/// count is the game's breakable-prop budget rather than this number.
+pub const MAX_DEBRIS_CACHE_SLOTS: usize = 16;
 
 #[derive(Copy, Clone)]
 struct DebrisChipCache {
@@ -47,14 +42,39 @@ struct DebrisChipCache {
 /// sentinels onto the zeroed storage at boot. Chip validity rides in
 /// a parallel flag array (not `Option`) so the zeroed image stays
 /// all-zero bytes and the arena static stays in `.bss`.
-pub struct DebrisCache {
-    entries: [[DebrisChipCache; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()]; DEBRIS_CACHE_SLOTS],
-    valid: [[bool; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()]; DEBRIS_CACHE_SLOTS],
-    props: [usize; DEBRIS_CACHE_SLOTS],
+///
+/// Break-time debris cache: a broken box's floor chips re-derived the
+/// same world quads, UVs and bilinear base colours every frame (~36
+/// multiplies per chip for the colours alone), all fixed the moment
+/// the box breaks. The most recently drawn broken boxes keep those
+/// values here; per frame only projection, fog and the submit remain.
+/// A slot is filled EAGERLY for all chips when claimed, so there is no
+/// partial-validity hazard; boxes beyond the pool simply refill on
+/// their next draw (worst case equals the old recompute cost).
+///
+/// `SLOTS` is a per-game budget because a slot costs ~1 KB and only a prop
+/// that can enter the BROKEN state can ever claim one. Cache keys are box-prop
+/// indices, and a prop outside the game's `MAX_BOX_PROP_STATE` budget cannot be
+/// toggled broken at all, so `min(MAX_DEBRIS_CACHE_SLOTS, MAX_BOX_PROP_STATE)`
+/// is the largest count that can ever be reached. A project with no breakable
+/// props previously paid 16 KB of RAM to cache debris for boxes that do not
+/// exist. Over-running the pool stays graceful (recompute on next draw), so an
+/// under-estimate costs cycles, never correctness.
+pub struct DebrisCache<const SLOTS: usize> {
+    entries: [[DebrisChipCache; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()]; SLOTS],
+    valid: [[bool; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()]; SLOTS],
+    props: [usize; SLOTS],
     next: u8,
 }
 
-impl DebrisCache {
+impl<const SLOTS: usize> DebrisCache<SLOTS> {
+    /// Round-robin claim indexes modulo `SLOTS`, so an empty pool would divide
+    /// by zero. Games with no breakable props still cook a one-slot sentinel.
+    const _SLOTS_NON_EMPTY: () = assert!(
+        SLOTS > 0,
+        "DebrisCache needs at least one slot; cook a sentinel slot for prop-free projects"
+    );
+
     /// All-zero state (link-time `.bss`-safe). NOT ready for use until
     /// [`Self::init`] stamps the unclaimed-slot sentinels.
     pub const fn zeroed() -> Self {
@@ -68,7 +88,7 @@ impl DebrisCache {
     /// Stamp the unclaimed-slot sentinels (what the old static
     /// initializer stored) onto the zeroed storage.
     pub fn init(&mut self) {
-        self.props = [usize::MAX; DEBRIS_CACHE_SLOTS];
+        self.props = [usize::MAX; SLOTS];
     }
 
     fn entries_for(
@@ -83,13 +103,13 @@ impl DebrisCache {
         &[bool; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()],
     ) {
         let mut i = 0usize;
-        while i < DEBRIS_CACHE_SLOTS {
+        while i < SLOTS {
             if self.props[i] == prop_index {
                 return (&self.entries[i], &self.valid[i]);
             }
             i += 1;
         }
-        let slot = (self.next as usize) % DEBRIS_CACHE_SLOTS;
+        let slot = (self.next as usize) % SLOTS;
         self.next = self.next.wrapping_add(1);
         self.props[slot] = prop_index;
         let entries = &mut self.entries[slot];
@@ -362,12 +382,13 @@ pub fn draw_box_prop_floor_debris<
     const MAX_BOX_PROP_STATE: usize,
     const BOX_PROP_BROKEN_WORDS: usize,
     const MAX_BOX_PROP_BREAK_EVENTS: usize,
+    const DEBRIS_SLOTS: usize,
     const GTE_PROJECT: bool,
     const OT_DEPTH: usize,
 >(
     props: &[LevelBoxPropRecord],
     state: &BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>,
-    debris: &mut DebrisCache,
+    debris: &mut DebrisCache<DEBRIS_SLOTS>,
     current_room: RoomIndex,
     mut object_visible: impl FnMut(usize) -> bool,
     camera: &WorldCamera,
@@ -415,7 +436,7 @@ pub fn draw_box_prop_floor_debris<
             }
         };
         let face_textures = box_prop_face_textures(prop, &mut prop_texture_slot);
-        draw_box_prop_floor_debris_chips::<T, GTE_PROJECT, OT_DEPTH>(
+        draw_box_prop_floor_debris_chips::<T, DEBRIS_SLOTS, GTE_PROJECT, OT_DEPTH>(
             debris,
             index,
             prop,
@@ -432,8 +453,13 @@ pub fn draw_box_prop_floor_debris<
     }
 }
 
-fn draw_box_prop_floor_debris_chips<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
-    debris: &mut DebrisCache,
+fn draw_box_prop_floor_debris_chips<
+    T,
+    const DEBRIS_SLOTS: usize,
+    const GTE_PROJECT: bool,
+    const OT_DEPTH: usize,
+>(
+    debris: &mut DebrisCache<DEBRIS_SLOTS>,
     prop_index: usize,
     prop: &LevelBoxPropRecord,
     face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],

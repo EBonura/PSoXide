@@ -57,7 +57,7 @@ pub(super) struct RuntimeArenas {
     /// BSP static-world/mover drawing completes before any model path runs.
     pub(super) frame_backend: FrameWorldBackendOverlay,
     /// Break-time box-prop floor-debris cache (phase-2 box-prop carve).
-    pub(super) debris_cache: psx_game_runtime::box_props::DebrisCache,
+    pub(super) debris_cache: RuntimeDebrisCache,
     /// Owned CD controller driver state (phase-2 retirement of the
     /// crate's carried `cd_stream` statics).
     #[cfg(feature = "cd-stream-bench")]
@@ -219,7 +219,7 @@ impl RuntimeArenas {
         frame_backend: FrameWorldBackendOverlay {
             pxbsp_frame_faces: core::mem::ManuallyDrop::new([0; PXBSP_FACE_CHAIN_CAPACITY]),
         },
-        debris_cache: psx_game_runtime::box_props::DebrisCache::zeroed(),
+        debris_cache: RuntimeDebrisCache::zeroed(),
         #[cfg(feature = "cd-stream-bench")]
         cd: psx_game_runtime::cd_stream::CdController::zeroed(),
     };
@@ -459,7 +459,7 @@ pub(super) fn pxbsp_frame_face_chain_arena() -> &'static mut [u16; PXBSP_FACE_CH
 }
 
 /// Exclusive borrow of the box-prop floor-debris cache.
-pub(super) fn debris_cache_arena() -> &'static mut psx_game_runtime::box_props::DebrisCache {
+pub(super) fn debris_cache_arena() -> &'static mut RuntimeDebrisCache {
     // SAFETY: see `vram_arena`.
     unsafe { &mut (*arenas_ptr()).debris_cache }
 }
