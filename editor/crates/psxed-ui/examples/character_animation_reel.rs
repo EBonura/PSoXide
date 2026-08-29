@@ -17,8 +17,8 @@ use image::{ImageBuffer, Rgba};
 use psx_asset::{Animation, Texture};
 use psxed_project::{MaterialAnimationMode, ProjectDocument, Resource, ResourceData, ResourceId};
 use psxed_ui::model_import_preview::{
-    render_import_model_preview_with_equipment, ImportPreviewOptions, PreviewEquippedWeapon,
-    PreviewMaterialLayer,
+    render_import_model_preview_with_equipment_banks, ImportPreviewOptions,
+    PreviewEquippedWeapon, PreviewMaterialLayer,
 };
 
 const OUTPUT_FPS: u16 = 30;
@@ -27,11 +27,11 @@ const MIN_ONE_SHOT_SECONDS: f64 = 1.0;
 const FINAL_HOLD_SECONDS: f64 = 0.35;
 
 struct CharacterPreview<'a> {
-    name: &'static str,
+    name: &'a str,
     model_id: ResourceId,
     model: &'a psxed_project::ModelResource,
     model_bytes: Vec<u8>,
-    atlas: ColorImage,
+    atlas_banks: Vec<ColorImage>,
     material_atlas: Option<ColorImage>,
     material_motion: psx_level::LevelMaterialUvMotion,
 }
@@ -44,6 +44,7 @@ struct WeaponPreview {
     socket_rotation_q12: [i16; 3],
     grip_translation: [i32; 3],
     grip_rotation_q12: [i16; 3],
+    persistent: bool,
 }
 
 fn main() {
@@ -63,7 +64,13 @@ fn main() {
     );
     let mut segment_index = 0usize;
 
-    for character_name in ["Aletha", "Light Enemy", "Heavy Enemy"] {
+    let character_names = project
+        .resources
+        .iter()
+        .filter(|resource| matches!(resource.data, ResourceData::Character(_)))
+        .map(|resource| resource.name.as_str())
+        .collect::<Vec<_>>();
+    for character_name in character_names {
         if character_filter
             .as_deref()
             .is_some_and(|filter| !character_name.eq_ignore_ascii_case(filter))
@@ -71,9 +78,11 @@ fn main() {
             continue;
         }
         let preview = load_character_preview(&project, project_root, character_name);
-        let weapon = (character_name == "Aletha")
-            .then(|| load_light_weapon_preview(&project, project_root, &preview))
-            .flatten();
+        let weapon = if character_name == "Aletha" {
+            load_light_weapon_preview(&project, project_root, &preview)
+        } else {
+            load_default_weapon_preview(&project, project_root, &preview)
+        };
         let mut clips: Vec<&Resource> = project
             .resources
             .iter()
@@ -166,6 +175,14 @@ fn render_clip(
     frame_dir: &Path,
     light_weapon: Option<&WeaponPreview>,
 ) {
+    let preview_yaw_q12 = std::env::var("PSXED_REEL_YAW_Q12")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(700);
+    let preview_pitch_q12 = std::env::var("PSXED_REEL_PITCH_Q12")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(200);
     let frame_total = (display_seconds * f64::from(OUTPUT_FPS)).ceil() as usize;
     let cycle_seconds = f64::from(animation.frame_count().saturating_sub(1))
         / f64::from(animation.sample_rate_hz());
@@ -188,7 +205,12 @@ fn render_clip(
             final_pose_time.max(0.0)
         };
         let weapon_overlay = light_weapon.and_then(|weapon| {
-            runtime_light_weapon_materialization(clip_name, animation, sample_time).map(
+            let materialization = if weapon.persistent {
+                Some(4096)
+            } else {
+                runtime_light_weapon_materialization(clip_name, animation, sample_time)
+            };
+            materialization.map(
                 |materialization_q12| PreviewEquippedWeapon {
                     model_bytes: &weapon.model_bytes,
                     atlas_banks: std::slice::from_ref(&weapon.atlas),
@@ -198,7 +220,7 @@ fn render_clip(
                     grip_translation: weapon.grip_translation,
                     grip_rotation_q12: weapon.grip_rotation_q12,
                     materialization_q12,
-                    wireframe_materialization: true,
+                    wireframe_materialization: !weapon.persistent,
                     show_grip_gizmo: false,
                 },
             )
@@ -209,8 +231,8 @@ fn render_clip(
             visual_yaw_q12: preview.model.default_visual_yaw_q12,
             collision_radius: i32::from(preview.model.collision_radius),
             time_seconds: sample_time,
-            yaw_q12: 700,
-            pitch_q12: 200,
+            yaw_q12: preview_yaw_q12,
+            pitch_q12: preview_pitch_q12,
             radius: 0,
             focus_on_animated_bounds: true,
             preview_in_place: clip.calibration.in_place,
@@ -219,10 +241,10 @@ fn render_clip(
             show_collision_guides: false,
             show_bones: false,
         };
-        let image = render_import_model_preview_with_equipment(
+        let image = render_import_model_preview_with_equipment_banks(
             &preview.model_bytes,
             clip_bytes,
-            &preview.atlas,
+            &preview.atlas_banks,
             options,
             weapon_overlay.as_ref(),
             material_layer.as_ref(),
@@ -262,7 +284,7 @@ fn runtime_light_weapon_materialization(
 fn load_character_preview<'a>(
     project: &'a ProjectDocument,
     project_root: &Path,
-    name: &'static str,
+    name: &'a str,
 ) -> CharacterPreview<'a> {
     let character_resource = find_resource(project, name, |data| {
         matches!(data, ResourceData::Character(_))
@@ -277,8 +299,9 @@ fn load_character_preview<'a>(
     };
     let model_bytes = std::fs::read(resolve(project_root, &model.model_path)).expect("read model");
     let atlas_path = model.texture_path.as_deref().expect("model has an atlas");
-    let atlas =
-        decode_atlas(&std::fs::read(resolve(project_root, atlas_path)).expect("read model atlas"));
+    let atlas_banks = decode_atlas_banks(
+        &std::fs::read(resolve(project_root, atlas_path)).expect("read model atlas"),
+    );
     let (material_atlas, material_motion) = character
         .material
         .and_then(|material_id| {
@@ -313,7 +336,7 @@ fn load_character_preview<'a>(
         model_id,
         model,
         model_bytes,
-        atlas,
+        atlas_banks,
         material_atlas,
         material_motion,
     }
@@ -348,6 +371,52 @@ fn load_light_weapon_preview(
         socket_rotation_q12: socket.rotation_q12,
         grip_translation: weapon.grip.translation,
         grip_rotation_q12: weapon.grip.rotation_q12,
+        persistent: false,
+    })
+}
+
+fn load_default_weapon_preview(
+    project: &ProjectDocument,
+    project_root: &Path,
+    character: &CharacterPreview<'_>,
+) -> Option<WeaponPreview> {
+    let character_resource = find_resource(project, character.name, |data| {
+        matches!(data, ResourceData::Character(_))
+    });
+    let ResourceData::Character(character_profile) = &character_resource.data else {
+        return None;
+    };
+    let binding = character_profile
+        .default_equipment
+        .iter()
+        .find(|binding| binding.weapon.is_some())?;
+    let weapon_id = binding.weapon?;
+    let ResourceData::Weapon(weapon) = &project.resource(weapon_id)?.data else {
+        return None;
+    };
+    let weapon_model_id = weapon.model?;
+    let ResourceData::Model(weapon_model) = &project.resource(weapon_model_id)?.data else {
+        return None;
+    };
+    let socket = character
+        .model
+        .attachments
+        .iter()
+        .find(|socket| socket.name == binding.character_socket)?;
+    let parsed_model = psx_asset::Model::from_bytes(&character.model_bytes).ok()?;
+    let atlas_path = weapon_model.texture_path.as_deref()?;
+    Some(WeaponPreview {
+        model_bytes: std::fs::read(resolve(project_root, &weapon_model.model_path)).ok()?,
+        atlas: decode_atlas(&std::fs::read(resolve(project_root, atlas_path)).ok()?),
+        socket_joint: socket.joint,
+        socket_translation: psxed_project::model_import::attachment_socket_bind_translation(
+            &parsed_model,
+            socket,
+        ),
+        socket_rotation_q12: socket.rotation_q12,
+        grip_translation: weapon.grip.translation,
+        grip_rotation_q12: weapon.grip.rotation_q12,
+        persistent: true,
     })
 }
 
@@ -388,15 +457,35 @@ fn slug(value: &str) -> String {
 }
 
 fn decode_atlas(bytes: &[u8]) -> ColorImage {
+    decode_atlas_banks(bytes)
+        .into_iter()
+        .next()
+        .expect("texture has at least one palette bank")
+}
+
+fn decode_atlas_banks(bytes: &[u8]) -> Vec<ColorImage> {
     let texture = Texture::from_bytes(bytes).expect("parse psxt");
     let (width, height) = (texture.width() as usize, texture.height() as usize);
     let pixels = texture.pixel_bytes();
     let clut = texture.clut_bytes();
     let row_bytes = usize::from(texture.halfwords_per_row()) * 2;
-    let mut decoded = vec![Color32::BLACK; width * height];
-    for y in 0..height {
-        for x in 0..width {
-            let raw = match texture.depth() as u8 {
+    let entries_per_bank = match texture.depth() as u8 {
+        4 => 16,
+        8 => 256,
+        15 => 0,
+        _ => unreachable!("Texture rejects unsupported depths"),
+    };
+    let bank_count = if entries_per_bank == 0 {
+        1
+    } else {
+        (usize::from(texture.clut_entries()) / entries_per_bank).max(1)
+    };
+    (0..bank_count)
+        .map(|bank| {
+            let mut decoded = vec![Color32::BLACK; width * height];
+            for y in 0..height {
+                for x in 0..width {
+                    let raw = match texture.depth() as u8 {
                 4 => {
                     let packed = pixels[y * row_bytes + x / 2];
                     let index = if x & 1 == 0 {
@@ -404,11 +493,12 @@ fn decode_atlas(bytes: &[u8]) -> ColorImage {
                     } else {
                         packed >> 4
                     };
-                    let offset = usize::from(index) * 2;
+                    let offset = (bank * entries_per_bank + usize::from(index)) * 2;
                     u16::from_le_bytes([clut[offset], clut[offset + 1]])
                 }
                 8 => {
-                    let offset = usize::from(pixels[y * row_bytes + x]) * 2;
+                    let offset =
+                        (bank * entries_per_bank + usize::from(pixels[y * row_bytes + x])) * 2;
                     u16::from_le_bytes([clut[offset], clut[offset + 1]])
                 }
                 15 => {
@@ -417,17 +507,19 @@ fn decode_atlas(bytes: &[u8]) -> ColorImage {
                 }
                 _ => unreachable!("Texture rejects unsupported depths"),
             };
-            decoded[y * width + x] = Color32::from_rgb(
-                ((raw & 31) * 255 / 31) as u8,
-                (((raw >> 5) & 31) * 255 / 31) as u8,
-                (((raw >> 10) & 31) * 255 / 31) as u8,
-            );
-        }
-    }
-    ColorImage {
-        size: [width, height],
-        pixels: decoded,
-    }
+                    decoded[y * width + x] = Color32::from_rgb(
+                        ((raw & 31) * 255 / 31) as u8,
+                        (((raw >> 5) & 31) * 255 / 31) as u8,
+                        (((raw >> 10) & 31) * 255 / 31) as u8,
+                    );
+                }
+            }
+            ColorImage {
+                size: [width, height],
+                pixels: decoded,
+            }
+        })
+        .collect()
 }
 
 fn save_png(image: &ColorImage, path: &Path) {
