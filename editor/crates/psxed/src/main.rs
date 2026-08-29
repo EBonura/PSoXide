@@ -407,6 +407,7 @@ TEX SUBCOMMAND:
                           [--crop X,Y,W,H]        (overrides centre-square)
                           [--no-crop]             (resize-stretch the full source)
                           [--transparent-index-zero]
+                          [--clut-banks 1|2|3|4] (4bpp only; default 1)
                           [--resample nearest|triangle|lanczos3]
 
     The default crop is centre-square: the largest square that
@@ -911,6 +912,7 @@ fn run_tex(args: &[String]) -> Result<(), String> {
     let mut crop = psxed_tex::CropMode::CentreSquare;
     let mut resampler = psxed_tex::Resampler::Lanczos3;
     let mut transparent_index_zero = false;
+    let mut clut_rows = 1u8;
 
     let mut i = 0;
     while i < args.len() {
@@ -976,6 +978,20 @@ fn run_tex(args: &[String]) -> Result<(), String> {
             "--transparent-index-zero" | "--alpha" => {
                 transparent_index_zero = true;
             }
+            "--clut-banks" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "expected 1, 2, 3, or 4 after --clut-banks".to_string())?;
+                clut_rows = value
+                    .parse()
+                    .map_err(|_| format!("invalid CLUT bank count: {value}"))?;
+                if !(1..=4).contains(&clut_rows) {
+                    return Err(format!(
+                        "invalid --clut-banks: {value} (expected 1, 2, 3, or 4)"
+                    ));
+                }
+            }
             "--resample" => {
                 i += 1;
                 let val = args
@@ -1017,6 +1033,7 @@ fn run_tex(args: &[String]) -> Result<(), String> {
         crop,
         resampler,
         transparent_index_zero,
+        clut_rows,
     };
     let psxt = psxed_tex::convert(&src_bytes, &cfg).map_err(|e| format!("convert: {e}"))?;
     if let Some(parent) = output.parent() {

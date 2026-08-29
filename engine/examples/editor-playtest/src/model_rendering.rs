@@ -35,8 +35,50 @@ const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
     max_model_instances: MAX_MODEL_INSTANCES,
     max_equipment_draws: MAX_EQUIPMENT_DRAWS,
     equipment_wire_q12: [mr::ASSEMBLED_Q12; mr::MAX_PLAYER_EQUIPMENT],
+    equipment_materialization_skins: [None; mr::MAX_PLAYER_EQUIPMENT],
     equipment_materialization: false,
 };
+
+/// Resolve Horizon/Zenith presentation from the same action-authored colours
+/// that drive the blade trail. This keeps the cage, textured weapon and trail
+/// on one palette without adding a second gameplay classification.
+fn equipment_materialization_skins(
+    anim: PlayerAnim,
+) -> [Option<mr::EquipmentMaterializationSkin>; mr::MAX_PLAYER_EQUIPMENT] {
+    let mut skins = [None; mr::MAX_PLAYER_EQUIPMENT];
+    let Some(controller) = PLAYER_CONTROLLER else {
+        return skins;
+    };
+    let action = anim.action();
+    // Dual attacks may materialise a second blade on a track that does not
+    // author its own trail. Resolve the Horizon/Zenith colour once from the
+    // action's trail-bearing track, then apply it to every participating
+    // weapon/socket pair.
+    let Some([r, g, b]) = WEAPON_APPEARANCES
+        .iter()
+        .find(|appearance| {
+            appearance.flags & psx_level::weapon_appearance_flags::TRAIL != 0
+                && appearance.character == controller.character
+                && appearance.action == action
+        })
+        .map(|appearance| appearance.trail_tip_color)
+    else {
+        return skins;
+    };
+    for (index, record) in EQUIPMENT.iter().enumerate().take(mr::MAX_PLAYER_EQUIPMENT) {
+        let participates = WEAPON_APPEARANCES.iter().any(|appearance| {
+            appearance.character == controller.character
+                && appearance.action == action
+                && appearance.weapon == record.weapon
+                && appearance.character_socket == record.character_socket
+        });
+        if !participates {
+            continue;
+        }
+        skins[index] = Some(mr::EquipmentMaterializationSkin::opaque((r, g, b)));
+    }
+    skins
+}
 
 /// How far up a weapon this authored visibility beat has reached, Q12.
 /// The same sampled-frame transition runs into the fully-visible marker and
@@ -569,6 +611,7 @@ pub(super) fn draw_player_equipment(
 ) -> EquipmentDrawStats {
     let mut knobs = MODEL_DRAW_KNOBS;
     knobs.equipment_wire_q12 = wire_q12;
+    knobs.equipment_materialization_skins = equipment_materialization_skins(anim);
     knobs.equipment_materialization = true;
     let mut out = mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,
