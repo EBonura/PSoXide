@@ -329,6 +329,7 @@ fn model_no_cull_unclamped_batch_keeps_both_windings() {
             &projected,
             &faces,
             material.textured_packet_material(),
+            None,
             uv_offset,
             false,
             options,

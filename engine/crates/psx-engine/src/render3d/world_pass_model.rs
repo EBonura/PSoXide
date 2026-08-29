@@ -1,66 +1,63 @@
 use super::*;
 
-/// Cheap view-dependent facet lighting for opaque crystal materials.
+/// Four prepacked opaque-crystal colors for one model draw.
 ///
-/// Screen-space signed area falls as a face turns edge-on. Comparing it with
-/// squared edge lengths gives four coarse Fresnel bands without a divide or a
-/// square root in the model face loop. A tiny stable face hash prevents broad
-/// areas of similarly oriented triangles from collapsing to one flat value.
-fn screen_reflection_facet_tint(
-    face: TexturedModelRenderFace,
-    projected_vertices: &[ProjectedVertex],
-    base: (u8, u8, u8),
-) -> (u8, u8, u8) {
-    let indices = face.vertex_indices();
-    let Some(a) = projected_vertices.get(usize::from(indices[0])) else {
-        return base;
-    };
-    let Some(b) = projected_vertices.get(usize::from(indices[1])) else {
-        return base;
-    };
-    let Some(c) = projected_vertices.get(usize::from(indices[2])) else {
-        return base;
-    };
-    let ab_x = i32::from(b.sx) - i32::from(a.sx);
-    let ab_y = i32::from(b.sy) - i32::from(a.sy);
-    let ac_x = i32::from(c.sx) - i32::from(a.sx);
-    let ac_y = i32::from(c.sy) - i32::from(a.sy);
-    let bc_x = i32::from(c.sx) - i32::from(b.sx);
-    let bc_y = i32::from(c.sy) - i32::from(b.sy);
-    let area_x16 = ab_x
-        .saturating_mul(ac_y)
-        .saturating_sub(ab_y.saturating_mul(ac_x))
-        .saturating_abs()
-        .saturating_mul(16);
-    let edge_energy = ab_x
-        .saturating_mul(ab_x)
-        .saturating_add(ab_y.saturating_mul(ab_y))
-        .saturating_add(ac_x.saturating_mul(ac_x))
-        .saturating_add(ac_y.saturating_mul(ac_y))
-        .saturating_add(bc_x.saturating_mul(bc_x))
-        .saturating_add(bc_y.saturating_mul(bc_y))
-        .max(1);
+/// The bands are built once per model. The hot face walker selects a band
+/// from the NCLIP area the GTE already produced for backface culling, so the
+/// response adds no texture projection, division, or per-face color math.
+#[derive(Copy, Clone)]
+pub(super) struct CameraCrystalPacketMaterials {
+    bands: [TexturedPacketMaterial; 4],
+    roughness: u8,
+}
 
-    let mut light_q7 = if area_x16 <= edge_energy {
-        224i32
-    } else if area_x16 <= edge_energy.saturating_mul(2) {
-        176
-    } else if area_x16 <= edge_energy.saturating_mul(3) {
-        132
-    } else {
-        88
-    };
-    let hash =
-        (u32::from(indices[0]) * 3 + u32::from(indices[1]) * 5 + u32::from(indices[2]) * 7) & 3;
-    light_q7 += match hash {
-        0 => -10,
-        1 => 6,
-        2 => 18,
-        _ => 0,
-    };
+impl CameraCrystalPacketMaterials {
+    #[inline(always)]
+    fn for_area(self, area: i32) -> TexturedPacketMaterial {
+        let area = area.unsigned_abs() >> self.roughness.min(3);
+        let band = if area <= 8 {
+            3
+        } else if area <= 32 {
+            2
+        } else if area <= 128 {
+            1
+        } else {
+            0
+        };
+        self.bands[band]
+    }
+}
 
-    let modulate = |channel: u8| ((i32::from(channel) * light_q7 + 64) >> 7).clamp(0, 255) as u8;
-    (modulate(base.0), modulate(base.1), modulate(base.2))
+fn camera_crystal_packet_materials(
+    material: TextureMaterial,
+    view_instance: Mat3I16,
+    roughness: u8,
+) -> CameraCrystalPacketMaterials {
+    // Model-local X in camera space is a cheap, stable orbit signal. Keep its
+    // influence deliberately bounded: the earlier experiment reached 1.89x
+    // and clipped pale Aletha facets to white, hiding the response entirely.
+    let view_x = i32::from(view_instance.m[2][0]).abs().min(1 << 12);
+    let quantize_shift = 7 + roughness.min(3);
+    let quantized_view_x = (view_x >> quantize_shift) << quantize_shift;
+    let view_bias_q7 = ((quantized_view_x * 16 + (1 << 11)) >> 12) - 8;
+    let base = material.tint();
+    let make = |band_q7: i32| {
+        // Crystal may darken facets but never amplify the already lit base
+        // material. The texture itself carries the pale highlights; keeping
+        // the modulation at or below neutral prevents editor/runtime whites
+        // from diverging through PS1 color saturation.
+        let scale_q7 = (band_q7 + view_bias_q7).clamp(56, 128);
+        let channel = |value: u8| {
+            ((i32::from(value) * scale_q7 + 64) >> 7).clamp(0, 255) as u8
+        };
+        material
+            .with_tint((channel(base.0), channel(base.1), channel(base.2)))
+            .textured_packet_material()
+    };
+    CameraCrystalPacketMaterials {
+        bands: [make(68), make(84), make(104), make(120)],
+        roughness,
+    }
 }
 
 fn model_face_with_uv_mapping(
@@ -71,6 +68,7 @@ fn model_face_with_uv_mapping(
     let (texture_width, texture_height, roughness, uv_offset) = match mapping {
         ModelUvMapping::Authored => return face,
         ModelUvMapping::AuthoredOffset(offset) => return face.with_uv_offset(offset),
+        ModelUvMapping::CameraCrystal { .. } => return face,
         ModelUvMapping::ScreenSpaceReflection {
             texture_width,
             texture_height,
@@ -860,6 +858,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let mut faces_considered = 0u32;
         let packet_material = material.textured_packet_material();
+        let camera_crystal_materials = match options.model_uv_mapping {
+            ModelUvMapping::CameraCrystal { roughness } => Some(
+                camera_crystal_packet_materials(material, view_instance, roughness),
+            ),
+            _ => None,
+        };
         let packed_fast_faces =
             options.split_textured_triangles && options.textured_split_max_edge == 0;
         let packed_back_in_front_faces = packed_fast_faces
@@ -870,6 +874,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let authored_uv_offset = match options.model_uv_mapping {
             ModelUvMapping::Authored => Some(ModelUvOffset::ZERO),
             ModelUvMapping::AuthoredOffset(offset) => Some(offset),
+            ModelUvMapping::CameraCrystal { .. } => Some(ModelUvOffset::ZERO),
             ModelUvMapping::ScreenSpaceReflection { .. } => None,
         };
         // Back-culled and double-sided models can share the unclamped batch.
@@ -948,6 +953,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         projected_vertices,
                         faces,
                         packet_material,
+                        camera_crystal_materials,
                         authored_uv_offset.unwrap_or_default(),
                         true,
                         options,
@@ -960,6 +966,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         projected_vertices,
                         faces,
                         packet_material,
+                        camera_crystal_materials,
                         authored_uv_offset.unwrap_or_default(),
                         true,
                         options,
@@ -1021,20 +1028,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     options.model_uv_mapping,
                 );
                 let palette_bank = face.palette_bank();
-                let face_material = if matches!(
-                    options.model_uv_mapping,
-                    ModelUvMapping::ScreenSpaceReflection { .. }
-                ) {
-                    material
-                        .with_clut_bank(palette_bank)
-                        .with_tint(screen_reflection_facet_tint(
-                            faces[face_index],
-                            projected_vertices,
-                            material.tint(),
-                        ))
-                } else {
-                    material.with_clut_bank(palette_bank)
-                };
+                let face_material = material.with_clut_bank(palette_bank);
                 let face_packet_material = face_material.textured_packet_material();
                 let overflow = if packed_back_average_in_front_faces {
                     self.submit_predecoded_model_face_packed_back_average_in_front_fast(
@@ -1187,6 +1181,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             projected_vertices,
                             faces,
                             packet_material,
+                            None,
                             ModelUvOffset::ZERO,
                             false,
                             options,
@@ -1199,6 +1194,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             projected_vertices,
                             faces,
                             packet_material,
+                            None,
                             ModelUvOffset::ZERO,
                             false,
                             options,
@@ -1476,6 +1472,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         projected_vertices: &[ProjectedVertex],
         faces: &[TexturedModelRenderFace],
         packet_material: TexturedPacketMaterial,
+        camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
         uv_offset: ModelUvOffset,
         palette_banks: bool,
         options: WorldSurfaceOptions,
@@ -1494,6 +1491,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices,
                     faces,
                     packet_material,
+                    camera_crystal_materials,
                     palette_banks,
                     options,
                     stats,
@@ -1524,11 +1522,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let mut face_index = 0usize;
         while face_index < faces.len() {
             let face = faces[face_index];
-            let packet_material = if palette_banks {
-                packet_material.with_clut_bank(face.palette_bank())
-            } else {
-                packet_material
-            };
             let [ia, ib, ic] = face.vertex_indices();
             let ia = ia as usize;
             let ib = ib as usize;
@@ -1543,12 +1536,28 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     *projected_vertices.get_unchecked(ic),
                 ]
             };
-
-            if CULL_BACK && projected_back_facing(projected) {
+            let area = if CULL_BACK || camera_crystal_materials.is_some() {
+                psx_gte::scene::screen_area_mac0_scheduled([
+                    (projected[0].sx, projected[0].sy),
+                    (projected[1].sx, projected[1].sy),
+                    (projected[2].sx, projected[2].sy),
+                ])
+            } else {
+                1
+            };
+            if CULL_BACK && area <= 0 {
                 culled_triangles = culled_triangles.wrapping_add(1);
                 face_index += 1;
                 continue;
             }
+            let packet_material = camera_crystal_materials
+                .map(|materials| materials.for_area(area))
+                .unwrap_or(packet_material);
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(face.palette_bank())
+            } else {
+                packet_material
+            };
 
             match self.submit_projected_model_triangle_preclamped_packed_average_untracked(
                 triangles,
@@ -1626,6 +1635,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         projected_vertices: &[ProjectedVertex],
         faces: &[TexturedModelRenderFace],
         packet_material: TexturedPacketMaterial,
+        camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
         palette_banks: bool,
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
@@ -1653,7 +1663,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     *projected_vertices.get_unchecked(ic as usize),
                 ]
             };
-            let (area, uv_words, palette_bank) = if CULL_BACK {
+            let (area, uv_words, palette_bank) = if CULL_BACK
+                || camera_crystal_materials.is_some()
+            {
                 psx_gte::scene::screen_area_and_unpack_model_face_scheduled(
                     [
                         (projected[0].sx, projected[0].sy),
@@ -1670,6 +1682,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 face_index += 1;
                 continue;
             }
+            let packet_material = camera_crystal_materials
+                .map(|materials| materials.for_area(area))
+                .unwrap_or(packet_material);
             let packet_material = if palette_banks {
                 packet_material.with_clut_bank(palette_bank)
             } else {
@@ -2563,5 +2578,22 @@ mod prepared_model_depth_tests {
         // Degenerate tables/ranges keep the conservative front slot.
         assert_matches_generic::<0>(DepthBand::whole(), DepthRange::new(10, 1_000), &depths);
         assert_matches_generic::<64>(DepthBand::new(20, 10), DepthRange::new(500, 500), &depths);
+    }
+
+    #[test]
+    fn opaque_crystal_changes_with_camera_without_saturating() {
+        let material = TextureMaterial::opaque(0, 0, (116, 132, 152));
+        let front = camera_crystal_packet_materials(material, Mat3I16::IDENTITY, 0);
+        let mut side_view = Mat3I16::IDENTITY;
+        side_view.m[2][0] = 1 << 12;
+        let side = camera_crystal_packet_materials(material, side_view, 0);
+
+        let front_highlight = front.for_area(4).color_command_word;
+        let side_highlight = side.for_area(4).color_command_word;
+        assert_ne!(front_highlight, side_highlight);
+        assert_ne!(front.for_area(4), front.for_area(512));
+
+        let blue = (side_highlight >> 16) & 0xff;
+        assert_eq!(blue, 152, "opaque crystal must not amplify lit base tint");
     }
 }

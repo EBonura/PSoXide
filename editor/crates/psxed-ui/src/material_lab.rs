@@ -1111,7 +1111,7 @@ fn draw_camera_reflection_settings(ui: &mut egui::Ui, reflection: &mut Reflectio
         ui.checkbox(&mut reflection.enabled, "Camera-reactive crystal");
         ui.label(
             RichText::new(
-                "Projects this material's own texture across opaque model facets; no transparency or environment capture.",
+                "Keeps authored UVs and changes opaque facet tint with the camera; no transparency, environment capture, or projected-UV cost.",
             )
             .small()
             .color(STUDIO_TEXT_WEAK),
