@@ -1585,6 +1585,7 @@ pub(crate) fn cook_fbx_base_color_texture(
         crop: psxed_tex::CropMode::None,
         resampler: psxed_tex::Resampler::Lanczos3,
         transparent_index_zero: true,
+        clut_rows: 1,
     };
     for material in &mesh.materials {
         let texture = material.pbr.base_color.texture.as_deref().or(material

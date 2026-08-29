@@ -2294,6 +2294,7 @@ fn cook_textures(output_dir: &Path) {
                 crop: CropMode::CentreSquare,
                 resampler: Resampler::Lanczos3,
                 transparent_index_zero: false,
+                clut_rows: 1,
             },
         )
         .unwrap_or_else(|error| panic!("cook texture {}: {error}", source.display()));

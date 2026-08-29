@@ -29,6 +29,7 @@
 //!     crop: CropMode::CentreSquare,
 //!     resampler: Resampler::Lanczos3,
 //!     transparent_index_zero: false,
+//!     clut_rows: 1,
 //! };
 //! let psxt = convert(&src, &cfg).unwrap();
 //! std::fs::write("brick-wall.psxt", psxt).unwrap();
@@ -113,6 +114,10 @@ pub struct Config {
     /// from drawing black, while regular room textures leave it off so
     /// palette index 0 remains an ordinary opaque colour.
     pub transparent_index_zero: bool,
+    /// Number of identical 16-entry CLUT rows written for a 4bpp texture.
+    /// Banked models may address rows 1..3 even when every bank uses the same
+    /// generated image. Other texture depths require one row.
+    pub clut_rows: u8,
 }
 
 /// How the cooker should handle source aspect vs target aspect.
@@ -320,6 +325,7 @@ pub fn convert(src: &[u8], cfg: &Config) -> Result<Vec<u8>, Error> {
         cfg.height,
         cfg.depth,
         cfg.transparent_index_zero,
+        cfg.clut_rows,
     )
 }
 
@@ -342,7 +348,11 @@ fn encode_psxt(
     height: u16,
     depth: Depth,
     transparent_index_zero: bool,
+    clut_rows: u8,
 ) -> Result<Vec<u8>, Error> {
+    if clut_rows == 0 || clut_rows > 4 || (depth != Depth::Bit4 && clut_rows != 1) {
+        return Err(Error::InvalidIndexedInput);
+    }
     let pixels: Vec<[u8; 4]> = img.pixels().map(|p| [p[0], p[1], p[2], p[3]]).collect();
 
     match depth {
@@ -355,7 +365,11 @@ fn encode_psxt(
                 median_cut_quantize(&rgb_pixels, n_entries)
             };
             let pixel_halfwords = pack_indices(&indices, width, height, depth);
-            let clut_halfwords = encode_clut(&palette, n_entries);
+            let base_clut = encode_clut(&palette, n_entries);
+            let mut clut_halfwords = Vec::with_capacity(base_clut.len() * usize::from(clut_rows));
+            for _ in 0..clut_rows {
+                clut_halfwords.extend_from_slice(&base_clut);
+            }
             let flags = if transparent_index_zero {
                 psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT
             } else {
@@ -366,7 +380,7 @@ fn encode_psxt(
                 height,
                 depth,
                 flags,
-                n_entries as u16,
+                (n_entries * usize::from(clut_rows)) as u16,
                 &pixel_halfwords,
                 &clut_halfwords,
             ))
@@ -860,6 +874,7 @@ mod tests {
             crop: CropMode::None,
             resampler: Resampler::Nearest,
             transparent_index_zero: false,
+            clut_rows: 1,
         };
         let psxt = convert(&buf, &cfg).unwrap();
 
@@ -881,6 +896,40 @@ mod tests {
             u32::from_le_bytes([psxt[24], psxt[25], psxt[26], psxt[27]]),
             32
         );
+    }
+
+    #[test]
+    fn four_bank_4bpp_repeats_one_quantized_palette_without_repacking_pixels() {
+        let mut source = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(4, 4, |x, y| {
+            image::Rgba([(x * 63) as u8, (y * 63) as u8, 192, 255])
+        }))
+        .write_to(
+            &mut std::io::Cursor::new(&mut source),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let psxt = convert(
+            &source,
+            &Config {
+                width: 4,
+                height: 4,
+                depth: Depth::Bit4,
+                crop: CropMode::None,
+                resampler: Resampler::Nearest,
+                transparent_index_zero: false,
+                clut_rows: 4,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(u16::from_le_bytes([psxt[18], psxt[19]]), 64);
+        let pixel_bytes = u32::from_le_bytes(psxt[20..24].try_into().unwrap()) as usize;
+        assert_eq!(u32::from_le_bytes(psxt[24..28].try_into().unwrap()), 128);
+        let clut = &psxt[28 + pixel_bytes..];
+        assert_eq!(&clut[0..32], &clut[32..64]);
+        assert_eq!(&clut[0..32], &clut[64..96]);
+        assert_eq!(&clut[0..32], &clut[96..128]);
     }
 
     #[test]
@@ -926,6 +975,7 @@ mod tests {
             crop: CropMode::None,
             resampler: Resampler::Nearest,
             transparent_index_zero: true,
+            clut_rows: 1,
         };
 
         let psxt = convert(&buf, &cfg).unwrap();
