@@ -21,6 +21,7 @@ mod rendering;
 
 pub use self::rendering::{
     draw_box_prop_break_events, draw_box_prop_floor_debris, draw_box_props, DebrisCache,
+    MAX_DEBRIS_CACHE_SLOTS,
 };
 
 /// Frames a break burst stays alive.
