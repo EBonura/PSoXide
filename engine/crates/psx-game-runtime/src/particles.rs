@@ -346,11 +346,84 @@ pub fn draw_projectile_impact<const OT_DEPTH: usize>(
         .clamp(2, i32::from(PARTICLE_MAX_SCREEN_SIZE)) as i16;
     let expansion = ((i32::from(age) * i32::from(base) * 2) / i32::from(lifetime)).max(1) as i16;
     let fade = u16::from(lifetime.saturating_sub(age)).max(1);
+    let slot = depth_range.slot::<OT_DEPTH>(center.sz);
+    if impact.visual.break_fragment_count != 0 {
+        const FRAGMENT_DIRECTIONS: [(i32, i32); 12] = [
+            (-8, -8),
+            (-5, -10),
+            (-2, -7),
+            (2, -9),
+            (5, -6),
+            (8, -8),
+            (-9, -3),
+            (-4, -2),
+            (4, -3),
+            (9, -1),
+            (-6, 1),
+            (6, 2),
+        ];
+        let age_i32 = i32::from(age);
+        let lifetime_i32 = i32::from(lifetime);
+        let base_i32 = i32::from(base);
+        let travel = age_i32.saturating_mul(base_i32).saturating_mul(4) / lifetime_i32;
+        let gravity = age_i32
+            .saturating_mul(age_i32)
+            .saturating_mul(base_i32)
+            .saturating_mul(4)
+            / lifetime_i32.saturating_mul(lifetime_i32);
+        let flash_ticks = (lifetime / 5).max(2);
+        let mut submitted = 0usize;
+        if age < flash_ticks {
+            let flash_fade = u16::from(flash_ticks.saturating_sub(age)).max(1);
+            let flash_tint = scale_rgb(impact.visual.glow_rgb, flash_fade, u16::from(flash_ticks));
+            submitted += draw_particle_diamond(
+                center,
+                base.saturating_add(expansion),
+                particle_material
+                    .with_tint(rgb_tuple(flash_tint))
+                    .with_blend_mode(BlendMode::Add),
+                slot,
+                ot,
+                primitive_packets,
+            );
+        }
+        let count = usize::from(impact.visual.break_fragment_count).min(FRAGMENT_DIRECTIONS.len());
+        let shard_half = ((base_i32.saturating_mul(i32::from(fade)))
+            / lifetime_i32.saturating_mul(3))
+        .max(1) as i16;
+        for (fragment, (velocity_x, velocity_y)) in
+            FRAGMENT_DIRECTIONS[..count].iter().copied().enumerate()
+        {
+            let dx = velocity_x.saturating_mul(travel) / 8;
+            let dy = velocity_y.saturating_mul(travel) / 8 + gravity;
+            let shard = ProjectedVertex {
+                sx: clamp_i16(i32::from(center.sx).saturating_add(dx)),
+                sy: clamp_i16(i32::from(center.sy).saturating_add(dy)),
+                ..center
+            };
+            let bright = fragment % 3 == 0;
+            let rgb = if bright {
+                impact.visual.core_rgb
+            } else {
+                impact.visual.impact_rgb
+            };
+            let tint = scale_rgb(rgb, fade, u16::from(lifetime));
+            let material = particle_material
+                .with_tint(rgb_tuple(tint))
+                .with_blend_mode(if bright {
+                    BlendMode::AddQuarter
+                } else {
+                    BlendMode::Average
+                });
+            submitted +=
+                draw_particle_diamond(shard, shard_half, material, slot, ot, primitive_packets);
+        }
+        return submitted;
+    }
     let tint = scale_rgb(impact.visual.impact_rgb, fade, u16::from(lifetime));
     let material = particle_material
         .with_tint(rgb_tuple(tint))
         .with_blend_mode(BlendMode::Add);
-    let slot = depth_range.slot::<OT_DEPTH>(center.sz);
     let mut submitted = draw_particle_diamond(
         center,
         base.saturating_add(expansion),

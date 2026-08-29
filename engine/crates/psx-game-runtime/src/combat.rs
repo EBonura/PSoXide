@@ -133,6 +133,7 @@ fn projectile_visual(record: &CombatCapsuleRecord) -> ProjectileVisualStyle {
         trail_segments: record.projectile_trail_segments.min(6),
         trail_spacing_ticks: record.projectile_trail_spacing_ticks.max(1),
         impact_lifetime_ticks: record.projectile_impact_lifetime_ticks.max(1),
+        break_fragment_count: 0,
     }
 }
 

@@ -1453,8 +1453,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for destructible in &package.destructibles {
         let _ = writeln!(
             out,
-            "    LevelDestructibleRecord {{ max_health: {}, damage_affinity: {}, flags: {} }},",
-            destructible.max_health, destructible.damage_affinity, destructible.flags,
+            "    LevelDestructibleRecord {{ max_health: {}, persistent_flag: {}, damage_affinity: {}, flags: {} }},",
+            destructible.max_health,
+            destructible.persistent_flag,
+            destructible.damage_affinity,
+            destructible.flags,
         );
     }
     out.push_str("];\n\n");
@@ -3811,6 +3814,10 @@ fn level_material_animation_literal(animation: crate::MaterialAnimation) -> Stri
                 flipbook.phase,
             )
         }
+        // The retained grid renderer does not yet carry dynamic material-light
+        // multipliers. Brush worlds encode this recipe directly in PXBSP;
+        // legacy grid rooms retain their static authored tint.
+        crate::MaterialAnimationMode::LightPulse => "LevelMaterialAnimation::Static".to_string(),
     }
 }
 

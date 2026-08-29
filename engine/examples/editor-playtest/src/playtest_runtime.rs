@@ -125,6 +125,26 @@ impl Playtest {
         }
         self.poi_save_loaded = true;
         self.restore_claimed_poi_rewards();
+        self.restore_persistent_destructibles();
+    }
+
+    pub(super) fn restore_persistent_destructibles(&mut self) {
+        for (index, record) in DESTRUCTIBLES.iter().enumerate() {
+            if self.poi_save.flag(usize::from(record.persistent_flag)) {
+                let _ = self.destructibles.restore_broken(index);
+            }
+        }
+    }
+
+    pub(super) fn mark_destructible_broken(&mut self, index: usize) {
+        let Some(record) = DESTRUCTIBLES.get(index) else {
+            return;
+        };
+        let flag = usize::from(record.persistent_flag);
+        if !self.poi_save.flag(flag) {
+            self.poi_save.set_flag(flag);
+            self.poi_save_dirty = true;
+        }
     }
 
     pub(super) fn restore_claimed_poi_rewards(&mut self) {

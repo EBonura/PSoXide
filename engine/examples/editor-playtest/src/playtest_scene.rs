@@ -1862,6 +1862,11 @@ impl Playtest {
             world,
         );
         box_prop_profile_end(telemetry::stage::BOX_PROP_SHARDS);
+        if room == self.room_index {
+            if let Some(bsp) = self.bsp.as_ref() {
+                bsp.draw_destructible_fragments(camera, actor_options, primitive_packets, world);
+            }
+        }
         box_prop_profile_begin(telemetry::stage::IMAGE_CARDS);
         draw_image_props(
             IMAGE_PROPS,

@@ -155,6 +155,23 @@ fn stable_poi_flag_pair(persistence_id: &str) -> (u16, u16) {
     (read, read + 1)
 }
 
+/// Map one stable scene-node identity to a persistent world-state bit.
+/// Destructibles use their authored node id rather than cook order so inserting
+/// another object cannot make an existing memory-card flag refer to a new wall.
+fn stable_destructible_flag(node_id: crate::NodeId) -> u16 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in b"destructible:"
+        .iter()
+        .chain(node_id.raw().to_le_bytes().iter())
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    (hash as usize % psx_level::POI_PERSISTENT_FLAG_CAPACITY) as u16
+}
+
 fn project_save_identity(project_name: &str) -> (String, String) {
     const FNV_OFFSET: u32 = 0x811c9dc5;
     const FNV_PRIME: u32 = 0x01000193;
@@ -188,6 +205,25 @@ mod poi_persistence_tests {
         assert_eq!(alpha.0 % 2, 0);
         assert_eq!(alpha.1, alpha.0 + 1);
         assert!(usize::from(alpha.1) < psx_level::POI_PERSISTENT_FLAG_CAPACITY);
+    }
+
+    #[test]
+    fn destructible_flag_is_stable_and_inside_the_save_bitmap() {
+        let mut project = ProjectDocument::new("destructible-flags");
+        let scene = project.active_scene_mut();
+        let first = scene.add_node(scene.root, "first", crate::NodeKind::Node);
+        let second = scene.add_node(scene.root, "second", crate::NodeKind::Node);
+        assert_eq!(
+            stable_destructible_flag(first),
+            stable_destructible_flag(first)
+        );
+        assert_ne!(
+            stable_destructible_flag(first),
+            stable_destructible_flag(second)
+        );
+        assert!(
+            usize::from(stable_destructible_flag(first)) < psx_level::POI_PERSISTENT_FLAG_CAPACITY
+        );
     }
 
     #[test]
@@ -769,7 +805,7 @@ pub fn build_package(
     let mut destructible_for_node: HashMap<crate::NodeId, u16> = HashMap::new();
     let mut boost_modules: Vec<PlaytestBoostModule> = Vec::new();
     let mut poi_persistence_ids: HashSet<String> = HashSet::new();
-    let mut poi_persistence_slots: HashMap<u16, String> = HashMap::new();
+    let mut persistence_slots: HashMap<u16, String> = HashMap::new();
     let persistent_flag_count = psx_level::POI_PERSISTENT_FLAG_CAPACITY as u16;
     // Phase-3 gameplay records: interned names, the logic event graph,
     // and placed souls-like game entities. Door links resolve against
@@ -814,9 +850,22 @@ pub fn build_package(
             break;
         }
         let index = destructibles.len() as u16;
+        let persistent_flag = stable_destructible_flag(node.id);
+        let persistent_name = format!("destructible '{}' (node {})", node.name, node.id.raw());
+        if let Some(existing) = persistence_slots.insert(persistent_flag, persistent_name.clone()) {
+            report.error_at(
+                PlaytestValidationTarget::Node(node.id),
+                format!(
+                    "{} and {} map to the same persistent save slot; recreate one node to give it a new stable id",
+                    existing, persistent_name
+                ),
+            );
+            continue;
+        }
         destructible_for_node.insert(node.id, index);
         destructibles.push(PlaytestDestructible {
             max_health: *max_health,
+            persistent_flag,
             damage_affinity: match damage_affinity {
                 crate::DestructibleDamageAffinity::Horizon => {
                     psx_level::destructible_affinity::HORIZON
@@ -1292,17 +1341,31 @@ pub fn build_package(
                         return (None, report);
                     }
                     let (read_flag, reward_flag) = stable_poi_flag_pair(&persistence_id);
-                    if let Some(existing) = poi_persistence_slots.get(&read_flag) {
+                    if let Some(existing) = persistence_slots.get(&read_flag) {
                         report.error_at(
                             validation_target,
                             format!(
-                                "Point-of-interest persistence ids '{}' and '{}' map to the same save slot; rename one id",
+                                "Persistent object '{}' and point-of-interest '{}' map to the same save slot; rename the POI persistence id",
                                 existing, persistence_id
                             ),
                         );
                         return (None, report);
                     }
-                    poi_persistence_slots.insert(read_flag, persistence_id.clone());
+                    persistence_slots
+                        .insert(read_flag, format!("point of interest '{persistence_id}'"));
+                    if let Some(existing) = persistence_slots.insert(
+                        reward_flag,
+                        format!("point of interest reward '{persistence_id}'"),
+                    ) {
+                        report.error_at(
+                            validation_target,
+                            format!(
+                                "Persistent object '{}' and point-of-interest reward '{}' map to the same save slot; rename the POI persistence id",
+                                existing, persistence_id
+                            ),
+                        );
+                        return (None, report);
+                    }
                     let point = PointOfInterestComponent {
                         persistence_id: &persistence_id,
                         ..point

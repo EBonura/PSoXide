@@ -110,6 +110,23 @@ impl<const MAX: usize> RuntimeDestructibles<MAX> {
         }
     }
 
+    /// Force one enabled state into its already-broken form when restoring a
+    /// persistent world flag from a save block.
+    pub fn restore_broken(&mut self, index: usize) -> bool {
+        let Some(state) = self
+            .states
+            .get_mut(..self.count)
+            .and_then(|states| states.get_mut(index))
+        else {
+            return false;
+        };
+        if !state.enabled {
+            return false;
+        }
+        state.health = 0;
+        true
+    }
+
     /// Whether one state exists, is enabled, and still has health.
     pub fn alive(&self, index: usize) -> bool {
         self.states
@@ -168,6 +185,7 @@ mod tests {
         states
             .init(&[LevelDestructibleRecord {
                 max_health: 20,
+                persistent_flag: 31,
                 damage_affinity: destructible_affinity::HORIZON,
                 flags: destructible_flags::ENABLED,
             }])
@@ -186,10 +204,27 @@ mod tests {
         assert_eq!(
             states.init(&[LevelDestructibleRecord {
                 max_health: 1,
+                persistent_flag: 7,
                 damage_affinity: destructible_affinity::BOTH,
                 flags: destructible_flags::ENABLED << 1,
             }]),
             Err(DestructibleInitError::UnknownFlags(0)),
         );
+    }
+
+    #[test]
+    fn persistent_restore_removes_an_enabled_target_without_a_damage_event() {
+        let mut states = RuntimeDestructibles::<1>::EMPTY;
+        states
+            .init(&[LevelDestructibleRecord {
+                max_health: 20,
+                persistent_flag: 9,
+                damage_affinity: destructible_affinity::BOTH,
+                flags: destructible_flags::ENABLED,
+            }])
+            .unwrap();
+        assert!(states.alive(0));
+        assert!(states.restore_broken(0));
+        assert!(!states.alive(0));
     }
 }

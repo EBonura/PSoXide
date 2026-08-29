@@ -2174,6 +2174,8 @@ pub mod destructible_flags {
 pub struct LevelDestructibleRecord {
     /// Damage required to break the object.
     pub max_health: u16,
+    /// Stable bit in the project's persistent world-state save bitmap.
+    pub persistent_flag: u16,
     /// Selector from [`destructible_affinity`].
     pub damage_affinity: u8,
     /// Runtime bits from [`destructible_flags`].

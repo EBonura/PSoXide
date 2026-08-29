@@ -1215,6 +1215,7 @@ impl Renderer {
                     map,
                     face,
                     uv_offset,
+                    state.color_scale_q7,
                     &mut face_vertices[..source_count],
                 );
                 let count = clip_polygon_plane(
@@ -1285,6 +1286,7 @@ impl Renderer {
                     map,
                     face,
                     uv_offset,
+                    state.color_scale_q7,
                     &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
                 );
             }
@@ -1372,6 +1374,7 @@ impl Renderer {
         map: &PxbspResidentMap,
         face: Face,
         uv_offset: [u8; 2],
+        color_scale_q7: u8,
         output: &mut [ClassicAffineVertex],
     ) {
         let first = face.first_vertex as usize;
@@ -1405,10 +1408,13 @@ impl Renderer {
                 );
             }
         }
-        if baked_light {
-            for vertex in output {
-                vertex.color = normalize_baked_color(vertex.color);
-            }
+        for vertex in output {
+            let color = if baked_light {
+                normalize_baked_color(vertex.color)
+            } else {
+                vertex.color
+            };
+            vertex.color = scale_baked_color_q7(color, color_scale_q7);
         }
     }
 
@@ -2119,6 +2125,7 @@ struct PxbspMaterialState {
     color_command_word: u32,
     uv_offset: [u8; 2],
     page_uv_offset: [u8; 2],
+    color_scale_q7: u8,
 }
 fn pxbsp_material_state(
     material: PxbspMaterial,
@@ -2142,6 +2149,7 @@ fn pxbsp_material_state(
         .animation()
         .expect("resident PXBSP material was validated");
     let animated = pxbsp_animation_offset(animation, binding.texture_size, tick);
+    let color_scale_q7 = pxbsp_animation_color_scale_q7(animation, tick);
     let uv_offset = [
         binding.uv_origin[0].wrapping_add(animated[0]),
         binding.uv_origin[1].wrapping_add(animated[1]),
@@ -2154,7 +2162,28 @@ fn pxbsp_material_state(
             uv_offset[0].wrapping_add(binding.page_uv_origin[0]),
             uv_offset[1].wrapping_add(binding.page_uv_origin[1]),
         ],
+        color_scale_q7,
     }
+}
+
+fn pxbsp_animation_color_scale_q7(animation: PxbspMaterialAnimation, tick: u32) -> u8 {
+    let PxbspMaterialAnimation::LightPulse {
+        minimum_q7,
+        maximum_q7,
+        ticks_per_cycle,
+        phase,
+    } = animation
+    else {
+        return 128;
+    };
+    let period = u32::from(ticks_per_cycle.max(1));
+    let phase_tick = tick.wrapping_add(u32::from(phase)) % period;
+    let angle_q12 = (phase_tick.saturating_mul(4096) / period) as u16;
+    let wave_q12 = (sin_q12(angle_q12).saturating_add(4096) / 2).clamp(0, 4096);
+    let range = i32::from(maximum_q7.saturating_sub(minimum_q7));
+    i32::from(minimum_q7)
+        .saturating_add(range.saturating_mul(wave_q12) >> 12)
+        .clamp(0, 255) as u8
 }
 
 fn pxbsp_animation_offset(
@@ -2189,6 +2218,7 @@ fn pxbsp_animation_offset(
                 (frame as u8 / columns).wrapping_mul(frame_height),
             ]
         }
+        PxbspMaterialAnimation::LightPulse { .. } => [0; 2],
     }
 }
 
@@ -2321,6 +2351,15 @@ fn normalize_baked_color(color: u32) -> u32 {
     }
 }
 
+fn scale_baked_color_q7(color: u32, scale_q7: u8) -> u32 {
+    if scale_q7 == 128 {
+        return color;
+    }
+    let scale = u32::from(scale_q7);
+    let channel = |shift: u32| (((color >> shift) & 0xff) * scale / 128).min(255);
+    channel(0) | (channel(8) << 8) | (channel(16) << 16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2441,6 +2480,20 @@ mod tests {
             phase: 1,
         };
         assert_eq!(pxbsp_animation_offset(animation, [128, 64], 9), [0, 32]);
+    }
+
+    #[test]
+    fn resolves_pxbsp_light_pulse_and_scales_each_rgb_channel() {
+        let animation = PxbspMaterialAnimation::LightPulse {
+            minimum_q7: 96,
+            maximum_q7: 192,
+            ticks_per_cycle: 96,
+            phase: 0,
+        };
+        assert_eq!(pxbsp_animation_color_scale_q7(animation, 0), 144);
+        assert_eq!(pxbsp_animation_color_scale_q7(animation, 24), 192);
+        assert_eq!(pxbsp_animation_color_scale_q7(animation, 72), 96);
+        assert_eq!(scale_baked_color_q7(0x0010_2040, 192), 0x0018_3060);
     }
 
     #[test]
