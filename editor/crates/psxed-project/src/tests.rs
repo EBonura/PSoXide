@@ -4162,6 +4162,11 @@ fn delete_resource_removes_entry_and_clears_references() {
         "Character",
         ResourceData::Character(CharacterResource {
             model: Some(target),
+            default_equipment: vec![CharacterEquipmentBinding {
+                weapon: Some(target),
+                character_socket: "left_hand_grip".to_string(),
+                weapon_grip: "grip".to_string(),
+            }],
             ..CharacterResource::defaults()
         }),
     );
@@ -4224,12 +4229,12 @@ fn delete_resource_removes_entry_and_clears_references() {
             character: Some(target),
         },
     );
-    assert_eq!(project.resource_reference_count(target), 11);
+    assert_eq!(project.resource_reference_count(target), 12);
     let report = project
         .delete_resource_with_files(target, &root)
         .expect("resource exists");
     assert_eq!(report.removed.name, "Target");
-    assert_eq!(report.cleared_references, 11);
+    assert_eq!(report.cleared_references, 12);
     assert_eq!(
         report.deleted_files,
         vec![ResourceFileDelete {
@@ -4243,6 +4248,7 @@ fn delete_resource_removes_entry_and_clears_references() {
         panic!("expected character");
     };
     assert_eq!(character_data.model, None);
+    assert_eq!(character_data.default_equipment[0].weapon, None);
     let ResourceData::Weapon(weapon_data) = &project.resource(weapon).unwrap().data else {
         panic!("expected weapon");
     };

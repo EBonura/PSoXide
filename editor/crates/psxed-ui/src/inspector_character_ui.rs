@@ -205,6 +205,69 @@ pub(crate) fn draw_character_resource_editor(
             }
         });
 
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Default Equipment"))
+        .default_open(!character.default_equipment.is_empty())
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(
+                    "Weapons composed onto every placement of this Character. A scene Equipment component on the same socket overrides the default.",
+                )
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
+
+            let mut remove = None;
+            for (index, binding) in character.default_equipment.iter_mut().enumerate() {
+                ui.push_id(("character-default-equipment", index), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Weapon");
+                        let preview = binding
+                            .weapon
+                            .and_then(|id| {
+                                ctx.weapons
+                                    .iter()
+                                    .find_map(|(candidate, name)| (*candidate == id).then_some(name.as_str()))
+                            })
+                            .unwrap_or("(none)");
+                        changed |= searchable_picker(
+                            ui,
+                            "weapon-picker",
+                            &mut binding.weapon,
+                            preview,
+                            &ctx.weapons,
+                            SearchablePickerConfig::optional("(none)"),
+                        );
+                        if ui
+                            .small_button(icons::label(icons::TRASH, ""))
+                            .on_hover_text("Remove equipment binding")
+                            .clicked()
+                        {
+                            remove = Some(index);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Character Socket");
+                        changed |= ui.text_edit_singleline(&mut binding.character_socket).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Weapon Grip");
+                        changed |= ui.text_edit_singleline(&mut binding.weapon_grip).changed();
+                    });
+                    ui.separator();
+                });
+            }
+            if let Some(index) = remove {
+                character.default_equipment.remove(index);
+                changed = true;
+            }
+            if ui.button("+ Add equipment").clicked() {
+                character
+                    .default_equipment
+                    .push(psxed_project::CharacterEquipmentBinding::default());
+                changed = true;
+            }
+        });
+
     egui::CollapsingHeader::new(icons::label(icons::PALETTE, "Animation Actions"))
         .default_open(true)
         .show(ui, |ui| {

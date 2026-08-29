@@ -1624,6 +1624,11 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
                 + option_resource_reference_count(character.material, id)
                 + option_resource_reference_count(character.animation_set, id)
                 + character
+                    .default_equipment
+                    .iter()
+                    .map(|equipment| option_resource_reference_count(equipment.weapon, id))
+                    .sum::<usize>()
+                + character
                     .combat_capsules
                     .iter()
                     .filter(|volume| {
@@ -1692,6 +1697,9 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
             let mut cleared = clear_option_resource(&mut character.model, id)
                 + clear_option_resource(&mut character.material, id)
                 + clear_option_resource(&mut character.animation_set, id);
+            for equipment in &mut character.default_equipment {
+                cleared += clear_option_resource(&mut equipment.weapon, id);
+            }
             for volume in &mut character.combat_capsules {
                 if let crate::CombatCapsuleRole::ProjectileEmitter { projectile, .. } =
                     &mut volume.role

@@ -1229,8 +1229,43 @@ pub fn build_package(
                     }
                 }
 
-                for equipped in component_equipment(scene, node).collect::<Vec<_>>() {
-                    if let Some(weapon_id) = equipped.weapon {
+                // Start from the reusable Character profile, then let an
+                // Equipment component on this placement replace the default
+                // occupying the same socket. This preserves scene-specific
+                // overrides while making equipped enemy variants portable.
+                let mut equipped_bindings = character_controller
+                    .and_then(|controller| controller.character)
+                    .and_then(|character_id| project.resource(character_id))
+                    .and_then(|resource| match &resource.data {
+                        ResourceData::Character(character) => Some(
+                            character
+                                .default_equipment
+                                .iter()
+                                .map(|binding| {
+                                    (
+                                        binding.weapon,
+                                        binding.character_socket.clone(),
+                                        binding.weapon_grip.clone(),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                for explicit in component_equipment(scene, node) {
+                    equipped_bindings.retain(|(_, socket, _)| {
+                        socket.as_str() != explicit.character_socket
+                    });
+                    equipped_bindings.push((
+                        explicit.weapon,
+                        explicit.character_socket.to_string(),
+                        explicit.weapon_grip.to_string(),
+                    ));
+                }
+
+                for (weapon, character_socket, weapon_grip) in equipped_bindings {
+                    if let Some(weapon_id) = weapon {
                         let Some(weapon_index) = register_weapon_for_equipment(
                             project,
                             project_root,
@@ -1271,8 +1306,8 @@ pub fn build_package(
                             y: pos[1],
                             z: pos[2],
                             yaw,
-                            character_socket: equipped.character_socket.to_string(),
-                            weapon_grip: equipped.weapon_grip.to_string(),
+                            character_socket,
+                            weapon_grip,
                             model_instance: host_instance,
                             flags: if is_player_controlled {
                                 psx_level::equipment_flags::PLAYER
