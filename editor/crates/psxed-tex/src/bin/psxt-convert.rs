@@ -44,6 +44,7 @@ fn main() {
         crop: CropMode::None,
         resampler: Resampler::Lanczos3,
         transparent_index_zero,
+        clut_rows: 1,
     };
     let texture = convert(&bytes, &cfg).expect("convert");
     std::fs::write(out, &texture).expect("write psxt");

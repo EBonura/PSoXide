@@ -72,6 +72,24 @@ pub struct ModelTables {
 /// Player equipment records the wireframe timing can address.
 pub const MAX_PLAYER_EQUIPMENT: usize = 8;
 
+/// Energy treatment applied while an authored weapon is materialised.
+///
+/// The atlas stays unchanged. The treatment modulates the textured weapon and
+/// its construction cage with one authored colour while keeping the draw
+/// opaque.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct EquipmentMaterializationSkin {
+    /// Flat PS1 texture modulation and wireframe colour.
+    pub color: (u8, u8, u8),
+}
+
+impl EquipmentMaterializationSkin {
+    /// Build the opaque energy treatment used by Horizon and Zenith.
+    pub const fn opaque(color: (u8, u8, u8)) -> Self {
+        Self { color }
+    }
+}
+
 /// Model draw policy knobs, as one value: the split threshold and
 /// per-frame draw caps the game selects. The culling/profiling
 /// TOGGLES ride as `const` parameters on the draw functions instead
@@ -94,6 +112,10 @@ pub struct ModelDrawKnobs {
     /// its own beat: the light sword on the first throw of the arm, the heavy
     /// one on the second.
     pub equipment_wire_q12: [u16; MAX_PLAYER_EQUIPMENT],
+    /// Per-record energy colour. `None` preserves the ordinary
+    /// opaque texture and the legacy green construction cage.
+    pub equipment_materialization_skins:
+        [Option<EquipmentMaterializationSkin>; MAX_PLAYER_EQUIPMENT],
     /// Apply the authored hidden -> partial wireframe -> textured visibility
     /// envelope. Instance equipment and previews that do not use an authored
     /// beat leave this disabled and draw the complete textured model.

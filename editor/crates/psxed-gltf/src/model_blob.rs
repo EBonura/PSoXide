@@ -416,6 +416,7 @@ pub(crate) fn model_texture_config(cfg: &RigidModelConfig) -> psxed_tex::Config 
         crop: psxed_tex::CropMode::None,
         resampler: psxed_tex::Resampler::Lanczos3,
         transparent_index_zero: true,
+        clut_rows: 1,
     }
 }
 

@@ -126,6 +126,11 @@ pub(super) fn draw_player_equipment_from_pose<
             .get(index)
             .copied()
             .unwrap_or(ASSEMBLED_Q12);
+        let materialization_skin = knobs
+            .equipment_materialization_skins
+            .get(index)
+            .copied()
+            .flatten();
         if knobs.equipment_materialization && wire_q12 == 0 {
             continue;
         }
@@ -161,6 +166,7 @@ pub(super) fn draw_player_equipment_from_pose<
             weapon,
             socket_pose,
             wire_q12,
+            materialization_skin,
             knobs,
             scratch,
             models,
@@ -204,6 +210,7 @@ fn submit_equipped_weapon<
     weapon: &LevelWeaponRecord,
     socket_pose: AttachmentPose,
     wire_q12: u16,
+    materialization_skin: Option<EquipmentMaterializationSkin>,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -228,7 +235,10 @@ fn submit_equipped_weapon<
     );
     let anim = weapon_model.clip(clips, weapon_model.default_clip)?;
     let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
-    let material = lighting.shade_model_material(origin, weapon_model.material);
+    let material = equipment_materialization_material(
+        lighting.shade_model_material(origin, weapon_model.material),
+        materialization_skin,
+    );
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(CullMode::Back)
@@ -255,6 +265,9 @@ fn submit_equipped_weapon<
                     geometry.vertices,
                     camera,
                     options,
+                    materialization_skin
+                        .map(|skin| skin.color)
+                        .unwrap_or(LEGACY_WIRE_COLOR),
                     triangles,
                     world,
                 );
@@ -317,7 +330,24 @@ fn equipment_appearance_draw_mode(
     EquipmentAppearanceDrawMode::Wireframe(wired.min(face_count))
 }
 
-/// Draw the not-yet-solid part of a weapon as a green wireframe.
+/// Legacy wire colour for projects without an authored energy skin.
+const LEGACY_WIRE_COLOR: (u8, u8, u8) = (32, 255, 128);
+
+/// Apply one opaque energy skin without disturbing the atlas address or
+/// texture window.
+fn equipment_materialization_material(
+    material: TextureMaterial,
+    skin: Option<EquipmentMaterializationSkin>,
+) -> TextureMaterial {
+    match skin {
+        Some(skin) => material
+            .with_tint(skin.color)
+            .with_blend_mode(BlendMode::Opaque),
+        None => material,
+    }
+}
+
+/// Draw the not-yet-solid part of a weapon as an energy-coloured wireframe.
 ///
 /// The whole point of this over a shard cloud: the weapon stays RIGID, so every
 /// vertex shares one transform. Project the model's vertices once and an edge
@@ -336,12 +366,10 @@ fn submit_weapon_wireframe<const OT_DEPTH: usize>(
     vertices: &[ModelVertex],
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
+    wire_color: (u8, u8, u8),
     lines: &mut impl PrimitiveSink<LineMono>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> usize {
-    /// Nanobot green.
-    const WIRE_COLOR: (u8, u8, u8) = (32, 255, 128);
-
     /// Vertices a weapon may have for the wireframe path. The swords have 54
     /// and 45; anything larger falls back to no wireframe rather than growing
     /// the guest stack.
@@ -404,7 +432,7 @@ fn submit_weapon_wireframe<const OT_DEPTH: usize>(
         if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
             continue;
         }
-        world.submit_projected_line(lines, [a, b], WIRE_COLOR, wire_options);
+        world.submit_projected_line(lines, [a, b], wire_color, wire_options);
         drawn += 1;
     }
     drawn
@@ -931,6 +959,7 @@ fn submit_instance_equipment_record_from_pose<
         weapon,
         socket_pose,
         ASSEMBLED_Q12,
+        None,
         knobs,
         scratch,
         models,
@@ -1098,6 +1127,30 @@ mod tests {
             EquipmentAppearanceDrawMode::Textured,
             "Q12 identity is the editor's transition from cage to real material"
         );
+    }
+
+    #[test]
+    fn energy_skin_reuses_the_atlas_and_stays_opaque() {
+        let atlas = TextureMaterial::opaque(0x1234, 0x018f, (72, 80, 96));
+        assert_eq!(equipment_materialization_material(atlas, None), atlas);
+
+        let horizon = equipment_materialization_material(
+            atlas,
+            Some(EquipmentMaterializationSkin::opaque((255, 176, 64))),
+        );
+        assert_eq!(horizon.clut_word(), atlas.clut_word());
+        assert_eq!(horizon.tint(), (255, 176, 64));
+        assert_eq!(horizon.blend_mode(), BlendMode::Opaque);
+        assert!(!horizon.is_translucent());
+
+        let zenith = equipment_materialization_material(
+            atlas,
+            Some(EquipmentMaterializationSkin::opaque((112, 232, 208))),
+        );
+        assert_eq!(zenith.clut_word(), atlas.clut_word());
+        assert_eq!(zenith.tint(), (112, 232, 208));
+        assert_eq!(zenith.blend_mode(), BlendMode::Opaque);
+        assert!(!zenith.is_translucent());
     }
 
     /// Regression for the historical "spawn-adjacent tick produced an
