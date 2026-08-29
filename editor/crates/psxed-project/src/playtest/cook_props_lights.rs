@@ -128,7 +128,8 @@ pub(crate) fn resolve_model_material_override(
             blend_mode: layer.blend_mode,
             tint_rgb: layer.tint,
             motion: layer.motion,
-            reflection_probe: (layer.texture_mode == crate::MaterialTextureMode::ReflectiveProbe)
+            reflection_probe: (layer.texture_mode == crate::MaterialTextureMode::ReflectiveProbe
+                || layer.reflection.enabled)
                 .then_some(layer.reflection),
         }
     });
@@ -141,7 +142,8 @@ pub(crate) fn resolve_model_material_override(
             ..material.animation.uv_scroll
         },
         secondary_layer,
-        reflection_probe: (material.texture_mode == crate::MaterialTextureMode::ReflectiveProbe)
+        reflection_probe: (material.texture_mode == crate::MaterialTextureMode::ReflectiveProbe
+            || material.reflection.enabled)
             .then_some(material.reflection),
         face_sidedness: material.sidedness(),
     })

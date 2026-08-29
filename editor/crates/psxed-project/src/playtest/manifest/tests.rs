@@ -41,6 +41,7 @@ fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
         motion: crate::MaterialUvMotion::default(),
         secondary_layer: None,
         reflection_probe: Some(crate::ReflectionProbeMaterial {
+            enabled: true,
             strength: 173,
             roughness: 191,
         }),
