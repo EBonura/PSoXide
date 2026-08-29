@@ -1,5 +1,5 @@
 use super::*;
-use psxed_project::{MaterialAnimation, MaterialFlipbook, MaterialUvMotion};
+use psxed_project::{MaterialAnimation, MaterialFlipbook, MaterialLightPulse, MaterialUvMotion};
 
 /// Transient Material Lab view state. The authored recipe itself lives in the
 /// selected [`MaterialResource`], so switching projects or workspaces never
@@ -540,6 +540,7 @@ fn draw_primary_material_animation(
             MaterialAnimationMode::Static,
             MaterialAnimationMode::UvScroll,
             MaterialAnimationMode::Flipbook,
+            MaterialAnimationMode::LightPulse,
         ] {
             if ui
                 .add(egui::Button::new(mode.label()).selected(animation.mode == mode))
@@ -570,7 +571,39 @@ fn draw_primary_material_animation(
         MaterialAnimationMode::Flipbook => {
             draw_flipbook_animation(ui, &mut animation.flipbook, material_options, owner);
         }
+        MaterialAnimationMode::LightPulse => {
+            draw_light_pulse_animation(ui, &mut animation.light_pulse);
+        }
     }
+}
+
+fn draw_light_pulse_animation(ui: &mut egui::Ui, pulse: &mut MaterialLightPulse) {
+    ui.label(
+        RichText::new(
+            "Smoothly modulates baked surface light. 128 is neutral; lower values darken and higher values brighten.",
+        )
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+    egui::Grid::new("material_lab_light_pulse")
+        .num_columns(2)
+        .min_col_width(112.0)
+        .spacing(Vec2::new(12.0, 5.0))
+        .show(ui, |ui| {
+            material_grid_label(ui, "Minimum light");
+            ui.add(egui::DragValue::new(&mut pulse.minimum_q7).range(0..=255));
+            ui.end_row();
+            material_grid_label(ui, "Maximum light");
+            ui.add(egui::DragValue::new(&mut pulse.maximum_q7).range(0..=255));
+            ui.end_row();
+            material_grid_label(ui, "Ticks per cycle");
+            ui.add(egui::DragValue::new(&mut pulse.ticks_per_cycle).range(1..=255));
+            ui.end_row();
+            material_grid_label(ui, "Phase");
+            ui.add(egui::DragValue::new(&mut pulse.phase).range(0..=254));
+            ui.end_row();
+        });
+    *pulse = pulse.normalized();
 }
 
 fn draw_flipbook_animation(
@@ -1386,6 +1419,8 @@ fn draw_material_lab_preview(
             "1 texture pass · dynamic tile UV scroll"
         } else if material.animation.mode == MaterialAnimationMode::Flipbook {
             "1 texture pass · cooked 2-material cycle"
+        } else if material.animation.mode == MaterialAnimationMode::LightPulse {
+            "1 texture pass · dynamic baked-light pulse"
         } else {
             "1 texture pass"
         };
@@ -1450,13 +1485,18 @@ fn compose_material_preview(
         };
         let flipbook = (animation == MaterialAnimationMode::Flipbook)
             .then(|| material.animation.flipbook.normalized());
+        let tint = if animation == MaterialAnimationMode::LightPulse {
+            preview_light_pulse_tint(material.tint, material.animation.light_pulse, tick)
+        } else {
+            material.tint
+        };
         for y in 0..height {
             for x in 0..width {
                 let texel = sample_preview_image(base, x, y, width, height, offset, flipbook, tick);
                 composite_preview_pixel(
                     &mut output.pixels[y * width + x],
                     texel,
-                    material.tint,
+                    tint,
                     material.blend_mode,
                 );
             }
@@ -1478,6 +1518,22 @@ fn compose_material_preview(
         }
     }
     output
+}
+
+fn preview_light_pulse_tint(tint: [u8; 3], pulse: MaterialLightPulse, tick: u32) -> [u8; 3] {
+    let pulse = pulse.normalized();
+    let period = u32::from(pulse.ticks_per_cycle);
+    let phase = tick.wrapping_add(u32::from(pulse.phase)) % period;
+    let half = period.max(2) / 2;
+    let triangle_q12 = if phase <= half {
+        phase.saturating_mul(4096) / half.max(1)
+    } else {
+        period.saturating_sub(phase).saturating_mul(4096) / period.saturating_sub(half).max(1)
+    };
+    let scale = u32::from(pulse.minimum_q7)
+        + u32::from(pulse.maximum_q7.saturating_sub(pulse.minimum_q7)).saturating_mul(triangle_q12)
+            / 4096;
+    tint.map(|channel| (u32::from(channel).saturating_mul(scale) / 128).min(255) as u8)
 }
 
 fn preview_checker_pixel(x: usize, y: usize, width: usize, height: usize) -> Color32 {

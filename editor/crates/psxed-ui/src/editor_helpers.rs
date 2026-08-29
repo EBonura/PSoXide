@@ -992,7 +992,22 @@ pub(crate) fn entity_bound_kind_and_size(
         NodeKind::ParticleEmitter { .. } => {
             Some((EntityBoundKind::ParticleEmitter, [160.0, 160.0, 160.0]))
         }
-        NodeKind::Destructible { .. } => Some((EntityBoundKind::Logic, [128.0, 192.0, 128.0])),
+        NodeKind::Destructible {
+            damage_affinity, ..
+        } => Some((
+            match damage_affinity {
+                psxed_project::DestructibleDamageAffinity::Horizon => {
+                    EntityBoundKind::DestructibleHorizon
+                }
+                psxed_project::DestructibleDamageAffinity::Zenith => {
+                    EntityBoundKind::DestructibleZenith
+                }
+                psxed_project::DestructibleDamageAffinity::Both => {
+                    EntityBoundKind::DestructibleBoth
+                }
+            },
+            [128.0, 192.0, 128.0],
+        )),
         NodeKind::Portal { .. } => Some((EntityBoundKind::Portal, [256.0, 256.0, 64.0])),
         // Trigger volumes read as their authored extent so the box is
         // clickable where it fires; point-like logic nodes get a

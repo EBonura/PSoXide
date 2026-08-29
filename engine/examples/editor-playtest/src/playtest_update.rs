@@ -392,6 +392,9 @@ impl Playtest {
         self.weapon_attach_reported = false;
         self.swing_hit_mask = 0;
         self.destructibles.reset();
+        if self.poi_save_loaded {
+            self.restore_persistent_destructibles();
+        }
         self.clear_actor_pose_snapshots();
         self.sync_door_box_props();
         // Start the camera behind the AUTHORED spawn facing so the
@@ -488,6 +491,9 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::UPDATE_ACTOR);
         self.advance_box_prop_break_events(delta_vblanks);
         self.advance_box_prop_falls(delta_vblanks);
+        if let Some(bsp) = self.bsp.as_mut() {
+            bsp.advance_destructible_fragments(delta_vblanks);
+        }
         if CAMERA_SWEEP_ENABLED {
             telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
             self.update_camera_sweep(delta_vblanks);

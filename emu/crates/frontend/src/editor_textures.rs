@@ -33,7 +33,7 @@ use psx_vram::TextureWindowAtlas;
 use psxed_project::streaming::collect_scene_resource_use;
 use psxed_project::{
     generate_material_texture_psxt, MaterialResource, MaterialTextureMode, NodeKind,
-    ProjectDocument, ResourceData, ResourceId, SkyMode, TransitionMaterialTexture,
+    ProjectDocument, PsxBlendMode, ResourceData, ResourceId, SkyMode, TransitionMaterialTexture,
 };
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
@@ -1051,16 +1051,20 @@ fn push_material_resource_upload(
     }) {
         return;
     }
-    if let Some(item) = plan.iter_mut().find(|item| item.id == id) {
-        item.force_zero_opaque &= force_zero_opaque;
-        return;
-    }
     let Some(resource) = project.resource(id) else {
         return;
     };
     let ResourceData::Material(material) = &resource.data else {
         return;
     };
+    // This flag remains useful for ordinary opaque room textures, but an
+    // explicit PSXT transparent-zero declaration is authoritative during CLUT
+    // stamping. Polygon blend mode and binary texel masking are independent.
+    let force_zero_opaque = force_zero_opaque && material.blend_mode == PsxBlendMode::Opaque;
+    if let Some(item) = plan.iter_mut().find(|item| item.id == id) {
+        item.force_zero_opaque &= force_zero_opaque;
+        return;
+    }
     let (signature, cache_signature, generated_bytes, transition) = match material.texture_mode {
         MaterialTextureMode::Generated => {
             let signature = format!("@generated:{:?}", material.generated);
@@ -1690,16 +1694,16 @@ fn opaque_room_clut_entry(raw: u16) -> u16 {
     raw | 0x8000
 }
 
-/// Match the runtime's PS1 CLUT policy in the editor preview. Visible indexed
-/// texels need STP for a semi-transparent textured primitive to blend; only an
-/// explicitly transparent palette-zero entry remains clear.
+/// Match the runtime's PS1 CLUT policy in the editor preview. An explicit PSXT
+/// transparent-zero entry remains clear even on an opaque polygon: that is a
+/// binary cutout, not polygon semi-transparency.
 fn preview_clut_entry(
     index: usize,
     raw: u16,
     transparent_index_zero: bool,
-    force_zero_opaque: bool,
+    _force_zero_opaque: bool,
 ) -> u16 {
-    if transparent_index_zero && !force_zero_opaque && index == 0 && raw == 0 {
+    if transparent_index_zero && index == 0 && raw == 0 {
         0
     } else {
         opaque_room_clut_entry(raw)
@@ -1774,7 +1778,7 @@ mod tests {
     use psx_gpu_render::VRAM_WIDTH;
     use psxed_project::{
         FarVistaSettings, GeneratedMaterialTexture, MaterialResource, MaterialTextureMode,
-        ModelSecondaryLayer, NodeKind, ProjectDocument, ResourceData, SkyMode,
+        ModelSecondaryLayer, NodeKind, ProjectDocument, PsxBlendMode, ResourceData, SkyMode,
         TransitionMaterialTexture, WorldGrid,
     };
     use std::path::{Path, PathBuf};
@@ -2021,6 +2025,31 @@ mod tests {
     }
 
     #[test]
+    fn blended_room_material_honours_psxt_transparent_zero() {
+        let mut project = ProjectDocument::new("room material transparency");
+        let opaque = add_material(&mut project, "Opaque wall");
+        let cutout = project.add_resource(
+            "Blended cutout",
+            ResourceData::Material(MaterialResource::translucent(None, PsxBlendMode::Average)),
+        );
+
+        let plan = preview_texture_upload_plan(&project, Path::new("."));
+        assert!(
+            plan.iter()
+                .find(|item| item.id == opaque)
+                .expect("opaque room material")
+                .force_zero_opaque
+        );
+        assert!(
+            !plan
+                .iter()
+                .find(|item| item.id == cutout)
+                .expect("blended room cutout")
+                .force_zero_opaque
+        );
+    }
+
+    #[test]
     fn imported_model_clut_preserves_flagged_index_zero_transparency() {
         assert_eq!(model_atlas_clut_entry(0, 0, true), 0);
         assert_eq!(model_atlas_clut_entry(0, 0, false), 0x8000);
@@ -2031,9 +2060,9 @@ mod tests {
     }
 
     #[test]
-    fn preview_clut_marks_visible_entries_for_textured_blending() {
+    fn preview_clut_honours_binary_cutout_for_opaque_and_blended_materials() {
         assert_eq!(preview_clut_entry(0, 0, true, false), 0);
-        assert_eq!(preview_clut_entry(0, 0, true, true), 0x8000);
+        assert_eq!(preview_clut_entry(0, 0, true, true), 0);
         assert_eq!(preview_clut_entry(1, 0, true, false), 0x8000);
         assert_eq!(preview_clut_entry(2, 0x1234, true, false), 0x9234);
     }

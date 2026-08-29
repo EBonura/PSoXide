@@ -863,6 +863,7 @@ pub struct PlaytestWorldObject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestDestructible {
     pub max_health: u16,
+    pub persistent_flag: u16,
     pub damage_affinity: u8,
     pub flags: u8,
 }
