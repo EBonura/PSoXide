@@ -168,6 +168,9 @@ pub struct ResidentMap {
     version: Option<PsbVersion>,
     indexed_corner_count: u16,
     indexed_position_count: u16,
+    /// End of the validated resident lumps. Bytes after this point belong to
+    /// the caller-owned streaming tail and are discarded by the next load.
+    resident_bytes: usize,
     bytes: Vec<u8>,
     ranges: [LumpRange; LUMP_COUNT],
     source_ranges: [LumpRange; LUMP_COUNT],
@@ -188,6 +191,7 @@ impl ResidentMap {
             version: None,
             indexed_corner_count: 0,
             indexed_position_count: 0,
+            resident_bytes: 0,
             bytes: Vec::with_capacity(capacity),
             ranges: [LumpRange::EMPTY; LUMP_COUNT],
             source_ranges: [LumpRange::EMPTY; LUMP_COUNT],
@@ -225,6 +229,7 @@ impl ResidentMap {
         }
 
         self.bytes.resize(total, 0);
+        self.resident_bytes = total;
         let mut destination = 0usize;
         for kind in RESIDENT_LUMPS {
             destination = align_up_4(destination);
@@ -314,6 +319,40 @@ impl ResidentMap {
     /// Source-file range for caller-owned streaming such as textures or sound.
     pub const fn source_lump(&self, kind: LumpKind) -> LumpRange {
         self.source_ranges[kind as usize]
+    }
+
+    /// Number of validated resident-lump bytes currently occupying the arena.
+    pub const fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    /// Maximum caller-owned streaming bytes available after the resident map.
+    ///
+    /// This reuses the unoccupied tail of the map's fixed-capacity allocation;
+    /// it does not make a second heap allocation. A successful map load or an
+    /// explicit zero-length resize invalidates every previously returned tail
+    /// slice.
+    pub fn streaming_tail_capacity(&self) -> usize {
+        self.bytes.capacity().saturating_sub(self.resident_bytes)
+    }
+
+    /// Resize and mutably borrow the caller-owned tail of the resident arena.
+    ///
+    /// Lump ranges and all normal resident-map views remain stable because the
+    /// vector was allocated to its final capacity by [`Self::with_capacity`].
+    /// Returns `None` when no map is resident or `len` exceeds the unused tail.
+    pub fn resize_streaming_tail(&mut self, len: usize) -> Option<&mut [u8]> {
+        if self.map_id.is_none() || len > self.streaming_tail_capacity() {
+            return None;
+        }
+        let end = self.resident_bytes.checked_add(len)?;
+        self.bytes.resize(end, 0);
+        self.bytes.get_mut(self.resident_bytes..end)
+    }
+
+    /// Borrow the currently installed caller-owned streaming tail.
+    pub fn streaming_tail(&self) -> &[u8] {
+        self.bytes.get(self.resident_bytes..).unwrap_or_default()
     }
 
     /// Number of valid texture rows in the source texture-data lump.
@@ -454,6 +493,7 @@ impl ResidentMap {
         self.version = None;
         self.indexed_corner_count = 0;
         self.indexed_position_count = 0;
+        self.resident_bytes = 0;
         self.bytes.clear();
         self.ranges = [LumpRange::EMPTY; LUMP_COUNT];
         self.source_ranges = [LumpRange::EMPTY; LUMP_COUNT];
@@ -709,6 +749,30 @@ const fn valid_leaf_contents(contents: i16) -> bool {
 mod tests {
     use super::*;
     use crate::Vec3I16;
+
+    #[test]
+    fn streaming_tail_reuses_only_unused_resident_capacity() {
+        let mut map = ResidentMap::with_capacity(32);
+        assert!(map.resize_streaming_tail(1).is_none());
+
+        // Stand in for a successfully validated twelve-byte resident map; the
+        // tail API is deliberately independent of any particular wire format.
+        map.bytes.resize(12, 0x5a);
+        map.resident_bytes = 12;
+        map.map_id = Some(7);
+        assert_eq!(map.streaming_tail_capacity(), 20);
+        map.resize_streaming_tail(20)
+            .expect("the exact unused tail fits")
+            .copy_from_slice(&[0xa5; 20]);
+        assert_eq!(map.bytes[..12], [0x5a; 12]);
+        assert_eq!(map.streaming_tail(), [0xa5; 20]);
+        assert!(map.resize_streaming_tail(21).is_none());
+
+        map.resize_streaming_tail(0)
+            .expect("clearing the tail is always representable");
+        assert!(map.streaming_tail().is_empty());
+        assert_eq!(map.bytes, [0x5a; 12]);
+    }
 
     #[test]
     fn legacy_structural_records_compact_without_semantic_drift() {
