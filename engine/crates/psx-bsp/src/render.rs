@@ -49,6 +49,13 @@ const MAX_FACE_COUNT: usize = 32_767;
 /// than the whole map (E1M1 is 484/5,724); vectors may still grow for denser
 /// maps without permanently reserving two complete face tables on PS1.
 const PXBSP_NODE_POSTORDER: u32 = 1 << 31;
+/// Traversal stack entry layout: node index in the low bits, the residual
+/// clip-plane mask (Quake's clipflags) above it. Node indices are `i16`, so
+/// sixteen bits is ample.
+const PXBSP_NODE_STACK_INDEX: u32 = 0xffff;
+const PXBSP_NODE_STACK_MASK_SHIFT: u32 = 16;
+/// All five clip planes still need testing.
+const PXBSP_CLIP_ALL_PLANES: u8 = 0x1f;
 const PXBSP_FRAME_NODE_BACK: u8 = 1;
 const PXBSP_FRAME_NODE_FRONT: u8 = 2;
 const PXBSP_FRAME_FALLBACK: u8 = 3;
@@ -73,6 +80,51 @@ fn packed_bit(bits: &[u8], index: usize) -> bool {
 #[inline]
 fn set_packed_bit(bits: &mut [u8], index: usize) {
     bits[index >> 3] |= 1 << (index & 7);
+}
+
+/// Append every face whose packed two-bit state is non-zero to `output`, in
+/// ascending face order. Returns false when `output`'s fixed capacity is too
+/// small, leaving the caller to fail the frame closed.
+///
+/// Reading the packed table back out is what makes the chain sorted and
+/// unique: no comparison sort and no per-entry deduplication is needed, and
+/// the whole-byte skip means an empty region of the face table costs one load
+/// per four faces.
+fn collect_marked_faces_ascending(states: &[u8], face_count: usize, output: &mut Vec<u16>) -> bool {
+    output.clear();
+    let capacity = output.capacity();
+    for (byte_index, &packed) in states.iter().enumerate() {
+        if packed == 0 {
+            continue;
+        }
+        let base = byte_index << 2;
+        for slot in 0..4 {
+            if packed >> (slot << 1) & 3 == 0 {
+                continue;
+            }
+            let face = base + slot;
+            if face >= face_count {
+                break;
+            }
+            if output.len() == capacity {
+                return false;
+            }
+            output.push(face as u16);
+        }
+    }
+    true
+}
+
+/// True when `mins`/`maxs` lies inside every box in `ancestors`.
+fn box_fits(ancestors: &[(Vec3I16, Vec3I16)], mins: Vec3I16, maxs: Vec3I16) -> bool {
+    !ancestors.iter().any(|(amins, amaxs)| {
+        mins.x < amins.x
+            || mins.y < amins.y
+            || mins.z < amins.z
+            || maxs.x > amaxs.x
+            || maxs.y > amaxs.y
+            || maxs.z > amaxs.z
+    })
 }
 const BATCH_MAX_VERTICES: usize = 39;
 const BATCH_MAX_SURFACES: usize = 13;
@@ -407,7 +459,10 @@ impl FrustumPlanes {
             | (u8::from(y_depth + screen_y < 0) << 4)
     }
 
-    /// Classify one axis-aligned box against all five clip planes.
+    /// Classify one axis-aligned box against the clip planes named by `mask`.
+    ///
+    /// Planes outside `mask` were proven satisfied by an enclosing box, so the
+    /// answer stays exact while testing fewer planes.
     ///
     /// Both decisive answers are exact with respect to the per-vertex scan in
     /// [`Self::vertex_outside_mask`]. A box wholly outside one plane contains
@@ -420,10 +475,14 @@ impl FrustumPlanes {
     /// The support-point form costs at most six 32x32 multiplies per plane
     /// with an early reject, against twenty per vertex in the scan.
     #[inline]
-    fn classify_aabb(&self, mins: [i16; 3], maxs: [i16; 3]) -> AabbClass {
+    fn classify_aabb(&self, mins: [i16; 3], maxs: [i16; 3], mask: u8) -> AabbClass {
         let mut wholly_inside = true;
         let mut index = 0usize;
         while index < 5 {
+            if mask & (1 << index) == 0 {
+                index += 1;
+                continue;
+            }
             let plane = &self.planes[index];
             let normal = plane.0;
             // The box corner farthest along the normal. If that one is
@@ -452,6 +511,45 @@ impl FrustumPlanes {
         } else {
             AabbClass::Straddling
         }
+    }
+
+    /// Quake's `R_RecursiveWorldNode` clipflags, applied to one node box.
+    ///
+    /// `mask` names the planes a caller still has to care about; the rest were
+    /// already proven satisfied by an ancestor box. Returns `None` when the box
+    /// is wholly outside one of the masked planes, otherwise the residual mask
+    /// for the subtree, with every plane this box proves cleared.
+    fn cull_aabb(&self, mins: Vec3I16, maxs: Vec3I16, mask: u8) -> Option<u8> {
+        let mins = [mins.x, mins.y, mins.z];
+        let maxs = [maxs.x, maxs.y, maxs.z];
+        let mut residual = mask;
+        let mut index = 0usize;
+        while index < 5 {
+            if mask & (1 << index) == 0 {
+                index += 1;
+                continue;
+            }
+            let plane = &self.planes[index];
+            let normal = plane.0;
+            let outer = [
+                if normal[0] >= 0 { maxs[0] } else { mins[0] },
+                if normal[1] >= 0 { maxs[1] } else { mins[1] },
+                if normal[2] >= 0 { maxs[2] } else { mins[2] },
+            ];
+            if Self::distance_negative(plane, outer) {
+                return None;
+            }
+            let inner = [
+                if normal[0] >= 0 { mins[0] } else { maxs[0] },
+                if normal[1] >= 0 { mins[1] } else { maxs[1] },
+                if normal[2] >= 0 { mins[2] } else { maxs[2] },
+            ];
+            if !Self::distance_negative(plane, inner) {
+                residual &= !(1 << index);
+            }
+            index += 1;
+        }
+        Some(residual)
     }
 
     /// True when the whole axis-aligned box lies outside any clip plane.
@@ -709,6 +807,12 @@ pub struct Renderer {
     /// 3 leaf/staticized fallback. The node states retain the camera-side
     /// result Quake computes once for every coplanar node surface.
     frame_pxbsp_face_state: Vec<u8>,
+    /// Per-face residual clip-plane mask for this frame: the planes the
+    /// marking node could not prove. Zero means the face is wholly inside the
+    /// frustum and needs no per-face clip at all. Only narrowed below
+    /// [`PXBSP_CLIP_ALL_PLANES`] while
+    /// [`Self::pxbsp_node_bounds_enclose_faces`] holds.
+    frame_pxbsp_face_clip_mask: Vec<u8>,
     /// Cached PVS reachability for the compact PXBSP render tree.
     pxbsp_node_visible: Vec<u8>,
     pxbsp_node_discovered: Vec<u8>,
@@ -718,6 +822,12 @@ pub struct Renderer {
     /// Node ranges are empty, so visible faces are gathered from the marked
     /// leaves reached by the bounds traversal instead of node-owned ranges.
     pxbsp_node_leaf_marks: bool,
+    /// Proven once per loaded map: every face a node's subtree can mark lies
+    /// inside that node's stored bounds. Only then does a node-level "wholly
+    /// inside the frustum" result also prove it for the node's faces.
+    pxbsp_node_bounds_enclose_faces: bool,
+    /// Map generation `pxbsp_node_bounds_enclose_faces` was proven for.
+    pxbsp_node_bounds_generation: Option<u32>,
     /// Caller-owned frame-chain backing. A Vec facade is attached only for
     /// the duration of `draw_pxbsp_world`, then detached before model scratch
     /// reuses these bytes. Null means both face chains are ordinary Vecs.
@@ -823,6 +933,7 @@ impl Renderer {
         renderer.visible_pxbsp_faces = visible_pxbsp_faces;
         renderer.frame_pxbsp_faces = frame_pxbsp_faces;
         renderer.frame_pxbsp_face_state = vec![0; face_count.div_ceil(4)];
+        renderer.frame_pxbsp_face_clip_mask = vec![PXBSP_CLIP_ALL_PLANES; face_count];
         renderer.pxbsp_node_visible = vec![0; node_count.div_ceil(8)];
         renderer.pxbsp_node_discovered = vec![0; node_count.div_ceil(8)];
         renderer.pxbsp_node_count = node_count;
@@ -845,12 +956,15 @@ impl Renderer {
             visible_pxbsp_faces: Vec::new(),
             frame_pxbsp_faces: Vec::new(),
             frame_pxbsp_face_state: Vec::new(),
+            frame_pxbsp_face_clip_mask: Vec::new(),
             pxbsp_node_visible: Vec::new(),
             pxbsp_node_discovered: Vec::new(),
             pxbsp_node_count: 0,
             pxbsp_node_stack: Vec::new(),
             pxbsp_node_metadata_valid: false,
             pxbsp_node_leaf_marks: false,
+            pxbsp_node_bounds_enclose_faces: false,
+            pxbsp_node_bounds_generation: None,
             external_frame_pxbsp_faces: core::ptr::null_mut(),
             visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
@@ -1255,8 +1369,24 @@ impl Renderer {
             // path rescanned the polygon once per plane and then a sixth time
             // for near clipping; reusing each vertex's view-space dot products
             // preserves the exact clip result without that repeated work.
-            let Some(needs_near_clip) = self.pxbsp_face_clip(map, face, frustum) else {
-                continue;
+            // Planes the marking node already proved for this face are dropped
+            // from the test; an empty mask means the face is wholly inside the
+            // frustum, so the bounding pass, the box classification and the
+            // per-vertex scan are all skipped.
+            let clip_mask = match selection {
+                PxbspFaceSelection::VisibleWorld => unsafe {
+                    *self.frame_pxbsp_face_clip_mask.get_unchecked(face_index)
+                },
+                PxbspFaceSelection::ModelRange { .. } => PXBSP_CLIP_ALL_PLANES,
+            };
+            let needs_near_clip = if clip_mask == 0 {
+                false
+            } else {
+                let Some(needs_near_clip) = self.pxbsp_face_clip(map, face, frustum, clip_mask)
+                else {
+                    continue;
+                };
+                needs_near_clip
             };
             let state = pxbsp_material_state(material, binding, material_tick);
             let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
@@ -1483,6 +1613,7 @@ impl Renderer {
         map: &PxbspResidentMap,
         face: Face,
         frustum: &FrustumPlanes,
+        clip_mask: u8,
     ) -> Option<bool> {
         let first = face.first_vertex as usize;
         let count = face.vertex_count as usize;
@@ -1516,15 +1647,17 @@ impl Renderer {
             }
             index += 1;
         }
-        match frustum.classify_aabb(mins, maxs) {
+        match frustum.classify_aabb(mins, maxs, clip_mask) {
             AabbClass::Outside => return None,
             AabbClass::Inside => return Some(false),
             AabbClass::Straddling => {}
         }
 
         // A set bit means every vertex seen so far is outside that plane.
-        // Clear it as soon as one vertex is on the drawable side.
-        let mut wholly_outside = 0x1fu8;
+        // Clear it as soon as one vertex is on the drawable side. Only the
+        // masked planes can still reject: an unmasked plane is satisfied by
+        // every vertex, so its bit would clear on the first one anyway.
+        let mut wholly_outside = clip_mask;
         let mut needs_near_clip = false;
         let mut index = 0usize;
         while index < count {
@@ -1798,22 +1931,25 @@ impl Renderer {
             let end = start + leaf.mark_surface_count as usize;
             for mark_index in start..end {
                 let face = marks.get(mark_index).expect("validated mark surface") as usize;
-                if packed_face_state(&self.pxbsp_face_state, face) == 0 {
-                    if self.visible_pxbsp_faces.len() == self.visible_pxbsp_faces.capacity() {
-                        self.cached_pxbsp_visibility = None;
-                        self.visible_pxbsp_faces.clear();
-                        self.visible_leaf_count = 0;
-                        return false;
-                    }
-                    set_packed_face_state(&mut self.pxbsp_face_state, face, 1);
-                    self.visible_pxbsp_faces.push(face as u16);
-                }
+                set_packed_face_state(&mut self.pxbsp_face_state, face, 1);
             }
         }
         // The former full-table scan visited faces in ascending source order.
-        // Preserve that exact order so batching and equal-depth packet ties do
-        // not change while replacing the scan with the compact chain.
-        self.visible_pxbsp_faces.sort_unstable();
+        // Preserve that exact order: reading the packed marks back out in
+        // index order yields the same sorted, unique chain the comparison sort
+        // produced, from a byte-at-a-time pass over 2 bits per face instead of
+        // an O(n log n) quicksort over the chain.
+        if !collect_marked_faces_ascending(
+            &self.pxbsp_face_state,
+            self.pxbsp_face_count,
+            &mut self.visible_pxbsp_faces,
+        ) {
+            self.pxbsp_face_state.fill(0);
+            self.cached_pxbsp_visibility = None;
+            self.visible_pxbsp_faces.clear();
+            self.visible_leaf_count = 0;
+            return false;
+        }
         self.visible_leaf_count = visible_leaves;
         self.rebuild_pxbsp_node_visibility(map);
         self.cached_pxbsp_visibility = Some((map.generation(), leaf_index));
@@ -1890,6 +2026,131 @@ impl Renderer {
         }
         self.pxbsp_node_metadata_valid = true;
         self.pxbsp_node_leaf_marks = !owns_faces;
+        if self.pxbsp_node_bounds_generation != Some(map.generation()) {
+            self.pxbsp_node_bounds_enclose_faces = self.prove_pxbsp_node_bounds(map);
+            self.pxbsp_node_bounds_generation = Some(map.generation());
+        }
+    }
+
+    /// Prove, once per loaded map, that every face reachable under a node lies
+    /// inside that node's stored bounds.
+    ///
+    /// Quake's `qbsp` maintains this invariant and `R_RecursiveWorldNode`'s
+    /// clipflags rely on it, but a PXBSP cook is free to store looser bounds.
+    /// Without the proof, inheriting "wholly inside the frustum" down the tree
+    /// could drop a face that pokes out of its node box, so the render path
+    /// falls back to the exact per-face clip whenever this returns false.
+    ///
+    /// Node boxes are quantized outward per node, so a child's box is NOT
+    /// always contained in its parent's (89 of this project's 743 nodes break
+    /// that). Containment is therefore proven directly against every ancestor
+    /// on the path, one depth-first walk from the world root, and only for the
+    /// nodes the render traversal can actually reach.
+    fn prove_pxbsp_node_bounds(&mut self, map: &PxbspResidentMap) -> bool {
+        let nodes = map.nodes();
+        let leaves = map.leaves();
+        let marks = map.mark_surfaces();
+        let faces = map.faces();
+        let vertices = map.vertex_data();
+        let stride = core::mem::size_of::<ClassicAffineWordSourceVertex>();
+        let Some(root) = map.brush_models().get(0).map(|world| world.head_nodes[0]) else {
+            return false;
+        };
+
+        // Union box of a face range, or None when any record is out of range.
+        let face_range_box = |first_face: usize, count: usize| -> Option<(Vec3I16, Vec3I16)> {
+            let mut mins = Vec3I16 {
+                x: i16::MAX,
+                y: i16::MAX,
+                z: i16::MAX,
+            };
+            let mut maxs = Vec3I16 {
+                x: i16::MIN,
+                y: i16::MIN,
+                z: i16::MIN,
+            };
+            let mut seen = false;
+            for index in first_face..first_face.checked_add(count)? {
+                let face = faces.get(index)?;
+                let vertex_count = face.vertex_count as usize;
+                let first = face.first_vertex as usize;
+                if first.checked_add(vertex_count)?.checked_mul(stride)? > vertices.len() {
+                    return None;
+                }
+                let base = unsafe { vertices.as_ptr().add(first * stride) };
+                for vertex in 0..vertex_count {
+                    let position = unsafe {
+                        core::ptr::read_unaligned(base.add(vertex * stride).cast::<[i16; 3]>())
+                    };
+                    seen = true;
+                    mins.x = mins.x.min(position[0]);
+                    mins.y = mins.y.min(position[1]);
+                    mins.z = mins.z.min(position[2]);
+                    maxs.x = maxs.x.max(position[0]);
+                    maxs.y = maxs.y.max(position[1]);
+                    maxs.z = maxs.z.max(position[2]);
+                }
+            }
+            if seen {
+                Some((mins, maxs))
+            } else {
+                None
+            }
+        };
+
+        // Depth-first with an explicit ancestor stack. A world deeper than this
+        // simply fails the proof and keeps the exact per-face clip.
+        const MAX_DEPTH: usize = 64;
+        let mut ancestors = [(Vec3I16::default(), Vec3I16::default()); MAX_DEPTH];
+        let mut walk = [(0i16, 0usize); MAX_DEPTH * 2];
+        let mut top = 1usize;
+        walk[0] = (root, 0);
+        while top != 0 {
+            top -= 1;
+            let (child, depth) = walk[top];
+            if depth >= MAX_DEPTH {
+                return false;
+            }
+            if child < 0 {
+                let Some(leaf) = leaves.get((-1i32 - child as i32) as usize) else {
+                    return false;
+                };
+                let first = leaf.first_mark_surface as usize;
+                for mark_index in first..first + leaf.mark_surface_count as usize {
+                    let Some(face) = marks.get(mark_index) else {
+                        return false;
+                    };
+                    let Some((mins, maxs)) = face_range_box(face as usize, 1) else {
+                        return false;
+                    };
+                    if !box_fits(&ancestors[..depth], mins, maxs) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            let Some(node) = nodes.get(child as usize) else {
+                return false;
+            };
+            ancestors[depth] = (node.mins, node.maxs);
+            if node.face_count != 0 {
+                let Some((mins, maxs)) =
+                    face_range_box(node.first_face as usize, node.face_count as usize)
+                else {
+                    return false;
+                };
+                if !box_fits(&ancestors[..depth + 1], mins, maxs) {
+                    return false;
+                }
+            }
+            if top + 2 > walk.len() {
+                return false;
+            }
+            walk[top] = (node.children[0], depth + 1);
+            walk[top + 1] = (node.children[1], depth + 1);
+            top += 2;
+        }
+        true
     }
 
     fn pxbsp_leaf_visible(&self, leaf_index: usize) -> bool {
@@ -1916,6 +2177,7 @@ impl Renderer {
                     face as usize,
                     PXBSP_FRAME_FALLBACK,
                 );
+                self.frame_pxbsp_face_clip_mask[face as usize] = PXBSP_CLIP_ALL_PLANES;
             }
             self.frame_pxbsp_faces
                 .extend_from_slice(&self.visible_pxbsp_faces);
@@ -1933,17 +2195,35 @@ impl Renderer {
             return false;
         }
 
+        // Quake's R_RecursiveWorldNode carries clip state down the tree: once a
+        // node's box is wholly inside every plane, no descendant box or face
+        // can leave the frustum. Inheriting that proof (valid only while the
+        // cook's node bounds are proven to enclose their faces) lets the draw
+        // loop skip the exact per-face clip entirely.
+        let inherit_clip = self.pxbsp_node_bounds_enclose_faces;
         self.pxbsp_node_stack.clear();
-        self.pxbsp_node_stack.push(root as u32);
-        while let Some(node_index) = self.pxbsp_node_stack.pop() {
-            let index = node_index as usize;
+        self.pxbsp_node_stack
+            .push(root as u32 | (PXBSP_CLIP_ALL_PLANES as u32) << PXBSP_NODE_STACK_MASK_SHIFT);
+        while let Some(entry) = self.pxbsp_node_stack.pop() {
+            let index = (entry & PXBSP_NODE_STACK_INDEX) as usize;
             if !packed_bit(&self.pxbsp_node_visible, index) {
                 continue;
             }
             let node = nodes.get(index).expect("validated node traversal");
-            if frustum.aabb_outside(node.mins, node.maxs) {
-                continue;
+            let mut mask = (entry >> PXBSP_NODE_STACK_MASK_SHIFT) as u8;
+            if mask != 0 {
+                if !inherit_clip {
+                    if frustum.aabb_outside(node.mins, node.maxs) {
+                        continue;
+                    }
+                } else {
+                    let Some(residual) = frustum.cull_aabb(node.mins, node.maxs, mask) else {
+                        continue;
+                    };
+                    mask = residual;
+                }
             }
+            let child_tag = (mask as u32) << PXBSP_NODE_STACK_MASK_SHIFT;
 
             let plane = planes
                 .get(node.plane as usize)
@@ -1953,7 +2233,7 @@ impl Renderer {
             let far = node.children[usize::from(!behind)];
             for child in [far, near] {
                 if child >= 0 {
-                    self.pxbsp_node_stack.push(child as u32);
+                    self.pxbsp_node_stack.push(child as u32 | child_tag);
                 } else if self.pxbsp_node_leaf_marks {
                     let leaf_index = (-1i32 - child as i32) as usize;
                     if !self.pxbsp_leaf_visible(leaf_index) {
@@ -1973,6 +2253,7 @@ impl Renderer {
                                 face,
                                 PXBSP_FRAME_FALLBACK,
                             );
+                            self.frame_pxbsp_face_clip_mask[face] = mask;
                         }
                     }
                 }
@@ -1995,6 +2276,7 @@ impl Renderer {
                             PXBSP_FRAME_NODE_BACK
                         },
                     );
+                    self.frame_pxbsp_face_clip_mask[face] = mask;
                 }
             }
         }
@@ -2009,25 +2291,26 @@ impl Renderer {
                         face as usize,
                         PXBSP_FRAME_FALLBACK,
                     );
+                    self.frame_pxbsp_face_clip_mask[face as usize] = PXBSP_CLIP_ALL_PLANES;
                 }
             }
         }
-        // The persistent PVS chain is already sorted and unique. Filtering it
-        // through packed frame marks preserves the established packet order
-        // without Quake's per-frame linked-list rebuild or a comparison sort.
-        for &face in &self.visible_pxbsp_faces {
-            if packed_face_state(&self.frame_pxbsp_face_state, face as usize) != 0 {
-                if self.frame_pxbsp_faces.len() == self.frame_pxbsp_faces.capacity() {
-                    // Traversal may already have marked faces which did not
-                    // fit in the bounded output chain. This invalid-cook path
-                    // is rare, so clear the complete packed table rather than
-                    // leaving untracked marks for the next frame.
-                    self.frame_pxbsp_face_state.fill(0);
-                    self.frame_pxbsp_faces.clear();
-                    return false;
-                }
-                self.frame_pxbsp_faces.push(face);
-            }
+        // Reading the frame marks back out in index order yields exactly the
+        // chain the old filter over the sorted PVS list produced, but costs one
+        // load per four faces instead of one per PVS face: the traversal marks
+        // only a subset, and whole empty bytes are skipped.
+        if !collect_marked_faces_ascending(
+            &self.frame_pxbsp_face_state,
+            self.pxbsp_face_count,
+            &mut self.frame_pxbsp_faces,
+        ) {
+            // Traversal may already have marked faces which did not fit in the
+            // bounded output chain. This invalid-cook path is rare, so clear
+            // the complete packed table rather than leaving untracked marks
+            // for the next frame.
+            self.frame_pxbsp_face_state.fill(0);
+            self.frame_pxbsp_faces.clear();
+            return false;
         }
         true
     }
@@ -3227,6 +3510,161 @@ mod frustum_tests {
             screen: [0, 0],
             depth: 0,
         }
+    }
+
+    /// Deterministic small PRNG so the sweeps below cover many boxes without
+    /// pulling in a dependency.
+    fn lcg(state: &mut u32) -> u32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *state
+    }
+
+    #[test]
+    fn masked_classification_matches_the_full_five_plane_answer() {
+        // A residual mask may only omit planes the caller already proved. For
+        // every box, drop exactly the planes whose inner corner is inside (the
+        // proof `cull_aabb` performs) and require the same verdict.
+        let (planes, _) = planes_for([37, 70, 273], 1024, 100);
+        let mut state = 0x1234_5678u32;
+        let mut checked = 0usize;
+        for _ in 0..4000 {
+            let mut axis = || (lcg(&mut state) % 1200) as i16 - 600;
+            let a = [axis(), axis(), axis()];
+            let mut extent = || (lcg(&mut state) % 160) as i16;
+            let b = [extent(), extent(), extent()];
+            let mins = Vec3I16 {
+                x: a[0],
+                y: a[1],
+                z: a[2],
+            };
+            let maxs = Vec3I16 {
+                x: a[0] + b[0],
+                y: a[1] + b[1],
+                z: a[2] + b[2],
+            };
+            let full =
+                planes.classify_aabb([mins.x, mins.y, mins.z], [maxs.x, maxs.y, maxs.z], 0x1f);
+            let Some(residual) = planes.cull_aabb(mins, maxs, 0x1f) else {
+                assert_eq!(full, AabbClass::Outside);
+                continue;
+            };
+            assert_ne!(full, AabbClass::Outside);
+            assert_eq!(
+                full == AabbClass::Inside,
+                residual == 0,
+                "cull_aabb residual {residual:#x} disagrees with {full:?} for {mins:?}..{maxs:?}"
+            );
+            let masked =
+                planes.classify_aabb([mins.x, mins.y, mins.z], [maxs.x, maxs.y, maxs.z], residual);
+            assert_eq!(
+                masked, full,
+                "masked classification changed the verdict for {mins:?}..{maxs:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 100, "sweep degenerated to {checked} live boxes");
+    }
+
+    #[test]
+    fn a_proven_plane_cannot_reject_a_contained_box() {
+        // The inheritance contract: whatever `cull_aabb` clears for an outer
+        // box stays satisfied for every box inside it, so a descendant never
+        // needs to retest those planes.
+        let (planes, _) = planes_for([37, 70, 273], 1024, 100);
+        let mut state = 0x0bad_c0deu32;
+        for _ in 0..2000 {
+            let mut axis = || (lcg(&mut state) % 900) as i16 - 450;
+            let a = [axis(), axis(), axis()];
+            let outer_mins = Vec3I16 {
+                x: a[0],
+                y: a[1],
+                z: a[2],
+            };
+            let outer_maxs = Vec3I16 {
+                x: a[0] + 300,
+                y: a[1] + 300,
+                z: a[2] + 300,
+            };
+            let Some(residual) = planes.cull_aabb(outer_mins, outer_maxs, 0x1f) else {
+                continue;
+            };
+            // An arbitrary sub-box of the outer box.
+            let mut inset = || (lcg(&mut state) % 150) as i16;
+            let inner_mins = Vec3I16 {
+                x: outer_mins.x + inset(),
+                y: outer_mins.y + inset(),
+                z: outer_mins.z + inset(),
+            };
+            let inner_maxs = Vec3I16 {
+                x: inner_mins.x + inset(),
+                y: inner_mins.y + inset(),
+                z: inner_mins.z + inset(),
+            };
+            for plane in 0..5u8 {
+                if residual & (1 << plane) != 0 {
+                    continue;
+                }
+                let only = 1u8 << plane;
+                assert_eq!(
+                    planes.classify_aabb(
+                        [inner_mins.x, inner_mins.y, inner_mins.z],
+                        [inner_maxs.x, inner_maxs.y, inner_maxs.z],
+                        only,
+                    ),
+                    AabbClass::Inside,
+                    "plane {plane} was proven for the outer box but rejects a box inside it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn marked_face_collection_matches_a_sorted_unique_chain() {
+        // The ascending readback replaced `sort_unstable` on the face chain;
+        // it has to produce exactly the same sequence.
+        let face_count = 1699usize;
+        let mut states = vec![0u8; face_count.div_ceil(4)];
+        let mut state = 0xfeed_face_u32;
+        let mut expected: Vec<u16> = Vec::new();
+        for _ in 0..900 {
+            let face = (lcg(&mut state) as usize) % face_count;
+            if packed_face_state(&states, face) == 0 {
+                expected.push(face as u16);
+            }
+            set_packed_face_state(&mut states, face, 1);
+        }
+        expected.sort_unstable();
+        let mut output: Vec<u16> = Vec::with_capacity(face_count);
+        assert!(collect_marked_faces_ascending(
+            &states,
+            face_count,
+            &mut output
+        ));
+        assert_eq!(output, expected);
+
+        // A chain smaller than the marked set fails closed rather than growing.
+        let mut small: Vec<u16> = Vec::with_capacity(expected.len() - 1);
+        assert!(!collect_marked_faces_ascending(
+            &states, face_count, &mut small
+        ));
+    }
+
+    #[test]
+    fn face_collection_ignores_marks_past_the_face_count() {
+        // The packed table rounds up to whole bytes; the tail slots of the
+        // last byte are not faces and must never be emitted.
+        let face_count = 6usize;
+        let mut states = vec![0u8; face_count.div_ceil(4)];
+        for face in 0..8 {
+            set_packed_face_state(&mut states, face, 1);
+        }
+        let mut output: Vec<u16> = Vec::with_capacity(16);
+        assert!(collect_marked_faces_ascending(
+            &states,
+            face_count,
+            &mut output
+        ));
+        assert_eq!(output, vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
