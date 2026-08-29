@@ -389,6 +389,13 @@ impl Scene for Playtest {
             self.gameplay_epoch_set = false;
             self.clear_actor_pose_snapshots();
             release_gameplay_vram();
+            // The BSP material table caches VRAM slot words and is latched once
+            // resolved. `Scene::init` runs at boot, not per gameplay entry, so
+            // this runtime survives the release above; drop the bindings with
+            // the slots they name.
+            if let Some(bsp) = self.bsp.as_mut() {
+                bsp.invalidate_materials();
+            }
             #[cfg(feature = "cd-stream-bench")]
             {
                 self.unload_runtime_models();
