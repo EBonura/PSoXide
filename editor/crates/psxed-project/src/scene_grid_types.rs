@@ -284,6 +284,10 @@ impl Default for GeneratedMaterialTexture {
 /// Authoring controls for a room reflection-probe material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectionProbeMaterial {
+    /// Project the material's own texture in screen space for a cheap,
+    /// camera-reactive crystal/reflection treatment on models.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub enabled: bool,
     /// Reflection strength (`0 = none`, `255 = full probe colour`).
     pub strength: u8,
     /// Surface roughness used by the probe baker (`0 = mirror`).
@@ -293,6 +297,7 @@ pub struct ReflectionProbeMaterial {
 impl Default for ReflectionProbeMaterial {
     fn default() -> Self {
         Self {
+            enabled: false,
             strength: 255,
             roughness: 8,
         }
@@ -1067,6 +1072,7 @@ impl MaterialResource {
             },
             transition: TransitionMaterialTexture::DEFAULT,
             reflection: ReflectionProbeMaterial {
+                enabled: false,
                 strength: 255,
                 roughness: 8,
             },
@@ -1131,6 +1137,7 @@ impl MaterialResource {
             },
             transition: TransitionMaterialTexture::DEFAULT,
             reflection: ReflectionProbeMaterial {
+                enabled: false,
                 strength: 255,
                 roughness: 8,
             },
@@ -1511,6 +1518,10 @@ const fn model_secondary_layer_enabled_default() -> bool {
 
 fn bool_is_true(value: &bool) -> bool {
     *value
+}
+
+fn bool_is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// World-grid diagonal split.

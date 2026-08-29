@@ -1,5 +1,68 @@
 use super::*;
 
+/// Cheap view-dependent facet lighting for opaque crystal materials.
+///
+/// Screen-space signed area falls as a face turns edge-on. Comparing it with
+/// squared edge lengths gives four coarse Fresnel bands without a divide or a
+/// square root in the model face loop. A tiny stable face hash prevents broad
+/// areas of similarly oriented triangles from collapsing to one flat value.
+fn screen_reflection_facet_tint(
+    face: TexturedModelRenderFace,
+    projected_vertices: &[ProjectedVertex],
+    base: (u8, u8, u8),
+) -> (u8, u8, u8) {
+    let indices = face.vertex_indices();
+    let Some(a) = projected_vertices.get(usize::from(indices[0])) else {
+        return base;
+    };
+    let Some(b) = projected_vertices.get(usize::from(indices[1])) else {
+        return base;
+    };
+    let Some(c) = projected_vertices.get(usize::from(indices[2])) else {
+        return base;
+    };
+    let ab_x = i32::from(b.sx) - i32::from(a.sx);
+    let ab_y = i32::from(b.sy) - i32::from(a.sy);
+    let ac_x = i32::from(c.sx) - i32::from(a.sx);
+    let ac_y = i32::from(c.sy) - i32::from(a.sy);
+    let bc_x = i32::from(c.sx) - i32::from(b.sx);
+    let bc_y = i32::from(c.sy) - i32::from(b.sy);
+    let area_x16 = ab_x
+        .saturating_mul(ac_y)
+        .saturating_sub(ab_y.saturating_mul(ac_x))
+        .saturating_abs()
+        .saturating_mul(16);
+    let edge_energy = ab_x
+        .saturating_mul(ab_x)
+        .saturating_add(ab_y.saturating_mul(ab_y))
+        .saturating_add(ac_x.saturating_mul(ac_x))
+        .saturating_add(ac_y.saturating_mul(ac_y))
+        .saturating_add(bc_x.saturating_mul(bc_x))
+        .saturating_add(bc_y.saturating_mul(bc_y))
+        .max(1);
+
+    let mut light_q7 = if area_x16 <= edge_energy {
+        224i32
+    } else if area_x16 <= edge_energy.saturating_mul(2) {
+        176
+    } else if area_x16 <= edge_energy.saturating_mul(3) {
+        132
+    } else {
+        88
+    };
+    let hash =
+        (u32::from(indices[0]) * 3 + u32::from(indices[1]) * 5 + u32::from(indices[2]) * 7) & 3;
+    light_q7 += match hash {
+        0 => -10,
+        1 => 6,
+        2 => 18,
+        _ => 0,
+    };
+
+    let modulate = |channel: u8| ((i32::from(channel) * light_q7 + 64) >> 7).clamp(0, 255) as u8;
+    (modulate(base.0), modulate(base.1), modulate(base.2))
+}
+
 fn model_face_with_uv_mapping(
     mut face: TexturedModelRenderFace,
     projected_vertices: &[ProjectedVertex],
@@ -958,8 +1021,21 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     options.model_uv_mapping,
                 );
                 let palette_bank = face.palette_bank();
-                let face_packet_material = packet_material.with_clut_bank(palette_bank);
-                let face_material = material.with_clut_bank(palette_bank);
+                let face_material = if matches!(
+                    options.model_uv_mapping,
+                    ModelUvMapping::ScreenSpaceReflection { .. }
+                ) {
+                    material
+                        .with_clut_bank(palette_bank)
+                        .with_tint(screen_reflection_facet_tint(
+                            faces[face_index],
+                            projected_vertices,
+                            material.tint(),
+                        ))
+                } else {
+                    material.with_clut_bank(palette_bank)
+                };
+                let face_packet_material = face_material.textured_packet_material();
                 let overflow = if packed_back_average_in_front_faces {
                     self.submit_predecoded_model_face_packed_back_average_in_front_fast(
                         triangles,
