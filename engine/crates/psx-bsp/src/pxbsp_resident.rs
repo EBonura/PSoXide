@@ -383,13 +383,30 @@ impl PxbspResidentMap {
         self.lump_bytes(PxbspLumpKind::StreamingIndex)
     }
 
+    /// One brush model's head node for the given hull slot, without
+    /// reconstructing the rest of the 32-byte record.
+    ///
+    /// Every collision entry point resolves a hull before it can trace, and
+    /// the only field it needs is this one halfword. Decoding the whole model
+    /// there rebuilt bounds, origin, the other three head nodes and the face
+    /// range as well, which measured 115 guest instructions and a matching
+    /// pile of uncached loads per lookup. The offset mirrors
+    /// `<BrushModel as CookedRecord>::decode`, exactly as
+    /// `PlaneRecords::distance` mirrors the plane decoder for the same reason.
+    fn model_head_node(&self, model_index: usize, slot: usize) -> Option<i16> {
+        let bytes = self.brush_models().record_bytes(model_index)?;
+        let offset = 18 + slot.checked_mul(2)?;
+        let low = *bytes.get(offset)?;
+        let high = *bytes.get(offset + 1)?;
+        Some(i16::from_le_bytes([low, high]))
+    }
+
     /// Borrow one model-local point, player, or big clipnode hull.
     pub fn model_collision_hull(
         &self,
         model_index: usize,
         hull_index: usize,
     ) -> Option<CollisionHull<'_>> {
-        let model = self.brush_models().get(model_index)?;
         if hull_index == 0 {
             // Quake hull 0: point traces walk the render BSP (balanced,
             // leaf contents from the leaf records) instead of the cooked
@@ -398,10 +415,14 @@ impl PxbspResidentMap {
                 self.planes(),
                 self.nodes(),
                 self.leaves(),
-                model.head_nodes[0],
+                self.model_head_node(model_index, 0)?,
             ));
         }
-        let head_node = *model.head_nodes.get(hull_index.checked_add(1)?)?;
+        let slot = hull_index.checked_add(1)?;
+        if slot >= 4 {
+            return None;
+        }
+        let head_node = self.model_head_node(model_index, slot)?;
         let records = self.clip_nodes();
         // SAFETY: validate_references rejects a non-empty clip-node lump whose
         // address is not compatible with ClipNode. Owned resident lumps are
@@ -1492,6 +1513,25 @@ pub(crate) mod tests {
         );
         assert!(map.model_collision_hull(0, 3).is_none());
         assert!(map.model_collision_hull(1, 0).is_none());
+    }
+
+    /// `model_head_node` reads one halfword at an offset it owns rather than
+    /// rebuilding the record, so the offset has to stay tied to the decoder.
+    #[test]
+    fn lean_head_node_read_matches_the_brush_model_decoder() {
+        let mut bytes = [0u8; BrushModel::SIZE];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = (index as u8) ^ 0x5a;
+        }
+        let decoded = BrushModel::decode(&bytes);
+        for slot in 0..decoded.head_nodes.len() {
+            let offset = 18 + slot * 2;
+            assert_eq!(
+                decoded.head_nodes[slot],
+                i16::from_le_bytes([bytes[offset], bytes[offset + 1]]),
+                "head node slot {slot} moved away from offset {offset}"
+            );
+        }
     }
 
     #[test]
