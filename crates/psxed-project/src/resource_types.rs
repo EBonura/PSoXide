@@ -1757,6 +1757,11 @@ pub struct CharacterResource {
     /// walk / run / actions); cook/preview resolve roles from it.
     #[serde(default)]
     pub animation_set: Option<ResourceId>,
+    /// Equipment composed onto this character whenever it is placed.  The
+    /// weapon remains a separate model/atlas and follows the named socket, so
+    /// character variants can share one body without baking duplicate meshes.
+    #[serde(default)]
+    pub default_equipment: Vec<CharacterEquipmentBinding>,
     /// Precise damage-dealing and damage-receiving capsules attached to the
     /// animated rig. Empty preserves the legacy coarse body-cylinder combat
     /// path until a project opts into the authored volume pipeline.
@@ -1865,6 +1870,35 @@ pub enum CharacterSpawnRole {
     Enemy,
 }
 
+/// Reusable weapon attachment supplied by a [`CharacterResource`].
+///
+/// A scene-level Equipment component with the same socket overrides this
+/// default for one placement.  Keeping the binding on the character makes
+/// variants portable between projects while preserving the existing runtime
+/// socket/grip composition path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterEquipmentBinding {
+    /// Weapon resource to compose. `None` is allowed while authoring.
+    #[serde(default)]
+    pub weapon: Option<ResourceId>,
+    /// Character/model socket to follow.
+    #[serde(default = "default_character_socket")]
+    pub character_socket: String,
+    /// Weapon-local grip aligned to the socket.
+    #[serde(default = "default_weapon_grip")]
+    pub weapon_grip: String,
+}
+
+impl Default for CharacterEquipmentBinding {
+    fn default() -> Self {
+        Self {
+            weapon: None,
+            character_socket: default_character_socket(),
+            weapon_grip: default_weapon_grip(),
+        }
+    }
+}
+
 impl CharacterResource {
     /// Sensible defaults for a humanoid third-person character.
     /// Sized for the starter project's 1024-unit sector grid.
@@ -1873,6 +1907,7 @@ impl CharacterResource {
             model: None,
             material: None,
             animation_set: None,
+            default_equipment: Vec::new(),
             combat_capsules: Vec::new(),
             spawn_role: CharacterSpawnRole::Auto,
             enemy_behavior: None,
