@@ -7,9 +7,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use core::mem::MaybeUninit;
 
 use psx_asset::Texture;
-use psx_bsp::collision::{BrushTransform, LiquidContentsSample, TraceScratch};
+use psx_bsp::collision::{LiquidContentsSample, TraceScratch};
 use psx_bsp::collision_provider::{
     select_body_hull, valid_pxbsp_body_hulls, PxbspCollisionModel, PxbspCollisionProvider,
 };
@@ -55,6 +56,7 @@ pub(super) const MAX_BSP_DOORS: usize = 16;
 pub(super) const MAX_BSP_DESTRUCTIBLES: usize = psx_level::MAX_DESTRUCTIBLES;
 pub(super) const MAX_BSP_DYNAMIC_MODELS: usize = MAX_BSP_DOORS + MAX_BSP_DESTRUCTIBLES;
 pub(super) const BSP_POINT_HULL_INDEX: usize = 0;
+
 /// Body baked by `compile_brush_world` into hull one.
 pub(super) const BSP_PLAYER_RADIUS: i32 = 1;
 /// Body baked by `compile_brush_world` into hull one.
@@ -83,10 +85,64 @@ const BSP_DESTRUCTIBLE_FRAGMENT_MOTION_TICKS: i32 = 48;
 /// Largest distance one fragment can travel from the authored brush bounds.
 const FRAGMENT_TRAVEL_MARGIN: i32 = 256;
 
+/// Stack-owned list of the transformed brush submodels one collision query
+/// composes over the static world.
+///
+/// The capacity is the authored door plus destructible ceiling, but a map only
+/// ever fills as many slots as it has live movers. Declaring the buffer as a
+/// fully-initialised `[PxbspCollisionModel; MAX_BSP_DYNAMIC_MODELS]` made every
+/// collision entry point splat a 36-byte identity template across all 48 slots
+/// first: 1,728 bytes of stack stores per call, on a map with no doors and two
+/// destructibles. Only the written prefix is ever observable, so the tail is
+/// left uninitialised and is never read.
+struct CollisionModels {
+    models: [MaybeUninit<PxbspCollisionModel>; MAX_BSP_DYNAMIC_MODELS],
+    count: usize,
+}
+
+impl CollisionModels {
+    /// An empty buffer. Materialises no slot storage.
+    ///
+    /// Deliberately not a `const fn`: constant-evaluating this whole value let
+    /// codegen lower the uninitialised slots to a zero constant and splat it
+    /// with `memset` at every call, which measured worse than the array fill
+    /// it replaced (memset samples tripled). Built as a runtime value, the
+    /// slot array costs nothing and only `count` is stored.
+    fn new() -> Self {
+        Self {
+            // SAFETY: an array of `MaybeUninit` is itself always initialised;
+            // the elements it holds are not, and `push` is the only writer.
+            models: unsafe { MaybeUninit::uninit().assume_init() },
+            count: 0,
+        }
+    }
+
+    /// Append one submodel. Overflowing the authored ceiling is a cooker
+    /// contract violation and panics exactly like the old fixed array's
+    /// out-of-bounds write did.
+    fn push(&mut self, model: PxbspCollisionModel) {
+        self.models[self.count].write(model);
+        self.count += 1;
+    }
+
+    /// The written prefix, in push order.
+    fn as_slice(&self) -> &[PxbspCollisionModel] {
+        let written = &self.models[..self.count];
+        // SAFETY: `push` is the only way to advance `count`, and it writes the
+        // slot it advances past. `MaybeUninit<T>` and `T` share layout, so the
+        // written prefix is a valid `[PxbspCollisionModel]`.
+        unsafe {
+            &*(written as *const [MaybeUninit<PxbspCollisionModel>]
+                as *const [PxbspCollisionModel])
+        }
+    }
+}
+
 /// One byte per target is enough to keep a brush fracture alive: zero means
 /// intact/no event, 1..95 is the live ballistic phase, and 96 is settled floor
 /// debris. Keeping the terminal age lets fragments remain in the world without
 /// an allocation or a second persistent prop representation.
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct BspDestructibleFragmentEvent {
     age: u8,
@@ -960,12 +1016,7 @@ impl BspRuntime {
                 .max(max[1].saturating_sub(min[1]))
                 .max(max[2].saturating_sub(min[2]))
                 .saturating_add(FRAGMENT_TRAVEL_MARGIN);
-            if camera
-                .view_vertex(centre)
-                .z
-                .saturating_add(radius)
-                < camera.projection.near_z
-            {
+            if camera.view_vertex(centre).z.saturating_add(radius) < camera.projection.near_z {
                 continue;
             }
             let blend = match material.blend_mode {
@@ -1113,9 +1164,8 @@ impl BspRuntime {
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
-        let mut models =
-            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
-        let count = self.collision_models(&mut models, destructibles);
+        let mut models = CollisionModels::new();
+        self.collision_models(&mut models, destructibles);
         let shape = CollisionTraceShape::Body {
             radius: config.radius,
             height: config.height,
@@ -1125,7 +1175,7 @@ impl BspRuntime {
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
             hull_index,
-            &models[..count],
+            models.as_slice(),
             shape,
             &mut self.trace_scratch,
         )
@@ -1149,9 +1199,8 @@ impl BspRuntime {
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<BodyStep, CollisionQueryError> {
-        let mut models =
-            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
-        let count = self.collision_models(&mut models, destructibles);
+        let mut models = CollisionModels::new();
+        self.collision_models(&mut models, destructibles);
         let radius = radius.max(0);
         let height = height.max(1);
         let shape = CollisionTraceShape::Body { radius, height };
@@ -1160,7 +1209,7 @@ impl BspRuntime {
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
             hull_index,
-            &models[..count],
+            models.as_slice(),
             shape,
             &mut self.trace_scratch,
         )
@@ -1183,9 +1232,8 @@ impl BspRuntime {
         blockers: &[CharacterCollisionCylinder],
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<BodyStep, CollisionQueryError> {
-        let mut models =
-            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
-        let count = self.collision_models(&mut models, destructibles);
+        let mut models = CollisionModels::new();
+        self.collision_models(&mut models, destructibles);
         let radius = radius.max(0);
         let height = height.max(1);
         let shape = CollisionTraceShape::Body { radius, height };
@@ -1194,7 +1242,7 @@ impl BspRuntime {
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
             hull_index,
-            &models[..count],
+            models.as_slice(),
             shape,
             &mut self.trace_scratch,
         )
@@ -1231,13 +1279,12 @@ impl BspRuntime {
         aabb_blockers: &[CharacterCollisionAabb],
         destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> Result<CollisionTrace, CollisionQueryError> {
-        let mut models =
-            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
-        let count = self.collision_models(&mut models, destructibles);
+        let mut models = CollisionModels::new();
+        self.collision_models(&mut models, destructibles);
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
             BSP_POINT_HULL_INDEX,
-            &models[..count],
+            models.as_slice(),
             CollisionTraceShape::Point,
             &mut self.trace_scratch,
         )
@@ -1257,9 +1304,8 @@ impl BspRuntime {
         aabb_blockers: &[CharacterCollisionAabb],
         destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
-        let mut models =
-            [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DYNAMIC_MODELS];
-        let count = self.collision_models(&mut models, destructibles);
+        let mut models = CollisionModels::new();
+        self.collision_models(&mut models, destructibles);
         // The camera is a point and the renderer now clips world polygons at
         // the near plane, so use Quake's balanced render BSP (hull 0) for the
         // spring-arm trace. The authored collision margin still stops the eye
@@ -1268,7 +1314,7 @@ impl BspRuntime {
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
             BSP_POINT_HULL_INDEX,
-            &models[..count],
+            models.as_slice(),
             CollisionTraceShape::Point,
             &mut self.trace_scratch,
         )
@@ -1390,31 +1436,26 @@ impl BspRuntime {
 
     fn collision_models(
         &self,
-        output: &mut [PxbspCollisionModel; MAX_BSP_DYNAMIC_MODELS],
+        output: &mut CollisionModels,
         destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
-    ) -> usize {
-        let mut count = 0usize;
+    ) {
         for door in self.doors.iter() {
-            let index = count;
-            output[index] = PxbspCollisionModel::new(
+            output.push(PxbspCollisionModel::new(
                 u16::try_from(door.model_index()).expect("validated PXBSP mover index"),
                 door.transform(),
-            );
-            count += 1;
+            ));
         }
         for destructible in self
             .destructible_targets
             .iter()
             .filter(|target| destructibles.alive(target.destructible_index()))
         {
-            output[count] = PxbspCollisionModel::new(
+            output.push(PxbspCollisionModel::new(
                 u16::try_from(destructible.model_index())
                     .expect("validated PXBSP destructible model index"),
                 destructible.transform(),
-            );
-            count += 1;
+            ));
         }
-        count
     }
 }
 
