@@ -524,15 +524,23 @@ fn moveset_matrix_separates_enabled_actions_from_visual_fallbacks() {
             .expect("Heavy Enemy walk fallback name")
     );
 
+    // 7eef540e took the Heavy Enemy from nine clips to eleven and gave it a real
+    // heavy attack, so this row is Ready on its own binding. It still resolves a
+    // LightAttack visual fallback, which makes it the row that proves status
+    // follows the bound clip rather than the fallback.
     let heavy = row(CharacterAnimationAction::HeavyAttack);
-    assert_eq!(heavy.status, MovesetCapabilityStatus::Disabled);
-    assert_eq!(heavy.clip, None, "fallback must not enable Heavy Attack");
+    assert_eq!(heavy.status, MovesetCapabilityStatus::Ready);
+    assert!(
+        heavy.clip.is_some(),
+        "the Heavy Enemy owns a Heavy Attack clip"
+    );
+    assert!(heavy.clip_name.is_some());
+    assert_eq!(heavy.binding_source, Some(MovesetBindingSource::Action));
     assert_eq!(
         heavy.visual_fallback_action,
-        Some(CharacterAnimationAction::LightAttack)
+        Some(CharacterAnimationAction::LightAttack),
+        "a bound action still reports its fallback; status must not come from it"
     );
-    assert!(heavy.visual_fallback_clip.is_some());
-    assert!(heavy.visual_fallback_name.is_some());
 
     let roll = row(CharacterAnimationAction::Roll);
     assert_eq!(roll.status, MovesetCapabilityStatus::Disabled);
