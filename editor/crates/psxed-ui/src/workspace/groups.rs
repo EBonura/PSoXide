@@ -757,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn group_rotate_never_silently_lowers_the_active_grid() {
+    fn group_rotate_resnaps_the_result_without_lowering_the_active_grid() {
         let (mut workspace, _, inner, _) = grouped_workspace();
         workspace.snap_units = 128;
         workspace.project.active_scene_mut().brushes[1] =
@@ -787,15 +787,18 @@ mod tests {
 
         workspace.apply_node_gizmo_drag();
 
-        assert_eq!(workspace.project.active_scene().brushes[1], start);
-        assert!(workspace.status.contains("outside Grid 128"));
+        let rotated = &workspace.project.active_scene().brushes[1];
+        assert_ne!(rotated, &start);
+        assert!(rotated.is_pickable());
+        assert!(rotated.solved_vertices_on_grid(128, 0.01));
+        assert_eq!(workspace.snap_units, 128);
         assert!(
-            !workspace
+            workspace
                 .interaction
                 .node_gizmo_drag()
                 .expect("drag remains active")
                 .snapshot_pushed,
-            "a refused preview must not create an empty undo step"
+            "an accepted preview creates one undo step"
         );
     }
 

@@ -353,7 +353,14 @@ impl ViewportTool3d for SelectTool {
                 ws.select_brush_with_group_semantics(brush, Some(face), frame.modifiers, false);
                 ws.status = format!("Selected BSP brush {}", brush + 1);
             }
-            Some(Viewport3dPointerTarget::Surface { .. }) | None => {
+            Some(Viewport3dPointerTarget::Surface { .. }) => {
+                ws.commit_face_selection(frame.modifiers);
+            }
+            // An additive click that resolves to nothing adds nothing. It
+            // must not wipe the multi-selection the user is assembling, so
+            // only a plain click on empty space clears.
+            None if frame.modifiers.shift || frame.modifiers.command || frame.modifiers.ctrl => {}
+            None => {
                 ws.commit_face_selection(frame.modifiers);
             }
             Some(
@@ -1574,23 +1581,6 @@ impl EditorWorkspace {
             map
         };
         let snap_step = i32::from(self.snap_units.max(1));
-        if drag.grid_safe_rotation
-            && (!drag.base.solved_vertices_on_grid(snap_step, 0.01)
-                || drag
-                    .others
-                    .iter()
-                    .any(|(_, brush)| !brush.solved_vertices_on_grid(snap_step, 0.01))
-                || drag
-                    .element_others
-                    .iter()
-                    .any(|member| !member.base.solved_vertices_on_grid(snap_step, 0.01)))
-        {
-            self.status = format!(
-                "Rotate rejected: selection is not aligned to Grid {} (lower the grid first)",
-                self.snap_units
-            );
-            return;
-        }
         let mut previews = Vec::with_capacity(drag.others.len() + drag.element_others.len() + 1);
         let mut primary = drag.base.clone();
         if primary.transform_selected_snapped(
@@ -1602,17 +1592,26 @@ impl EditorWorkspace {
             snap_step,
         ) == 0
             || !brush_preview_ok(&primary)
-            || (drag.grid_safe_rotation && !primary.solved_vertices_on_grid(snap_step, 0.01))
         {
             self.status = if drag.rotate {
                 format!(
-                    "Rotate {applied}° rejected: result would leave Grid {}",
+                    "Rotate {applied}° rejected: result would not form a valid solid on Grid {}",
                     self.snap_units
                 )
             } else {
                 format!("Scale rejected on Grid {}", self.snap_units)
             };
             return;
+        }
+        if drag.grid_safe_rotation {
+            let Some(snapped) = primary.snapped_solved_to_grid(snap_step) else {
+                self.status = format!(
+                    "Rotate {applied}° rejected: result cannot be re-snapped as a valid solid on Grid {}",
+                    self.snap_units
+                );
+                return;
+            };
+            primary = snapped;
         }
         previews.push((drag.index, primary));
         for (index, base) in &drag.others {
@@ -1621,17 +1620,26 @@ impl EditorWorkspace {
             if preview.transform_selected_snapped(&faces, &[], drag.center, map, 0.5, snap_step)
                 == 0
                 || !brush_preview_ok(&preview)
-                || (drag.grid_safe_rotation && !preview.solved_vertices_on_grid(snap_step, 0.01))
             {
                 self.status = if drag.rotate {
                     format!(
-                        "Rotate {applied}° rejected: result would leave Grid {}",
+                        "Rotate {applied}° rejected: result would not form a valid solid on Grid {}",
                         self.snap_units
                     )
                 } else {
                     format!("Scale rejected on Grid {}", self.snap_units)
                 };
                 return;
+            }
+            if drag.grid_safe_rotation {
+                let Some(snapped) = preview.snapped_solved_to_grid(snap_step) else {
+                    self.status = format!(
+                        "Rotate {applied}° rejected: result cannot be re-snapped as a valid solid on Grid {}",
+                        self.snap_units
+                    );
+                    return;
+                };
+                preview = snapped;
             }
             previews.push((*index, preview));
         }
@@ -1646,17 +1654,26 @@ impl EditorWorkspace {
                 snap_step,
             ) == 0
                 || !brush_preview_ok(&preview)
-                || (drag.grid_safe_rotation && !preview.solved_vertices_on_grid(snap_step, 0.01))
             {
                 self.status = if drag.rotate {
                     format!(
-                        "Rotate {applied}° rejected: result would leave Grid {}",
+                        "Rotate {applied}° rejected: result would not form a valid solid on Grid {}",
                         self.snap_units
                     )
                 } else {
                     format!("Scale rejected on Grid {}", self.snap_units)
                 };
                 return;
+            }
+            if drag.grid_safe_rotation {
+                let Some(snapped) = preview.snapped_solved_to_grid(snap_step) else {
+                    self.status = format!(
+                        "Rotate {applied}° rejected: result cannot be re-snapped as a valid solid on Grid {}",
+                        self.snap_units
+                    );
+                    return;
+                };
+                preview = snapped;
             }
             previews.push((member.index, preview));
         }
@@ -2010,7 +2027,7 @@ impl EditorWorkspace {
         self.reconcile_brush_elements();
     }
 
-    /// Snap every point of the selected brush to the editor grid step,
+    /// Snap the selected brush's visible solved corners to the editor grid,
     /// as one undo step.
     pub(crate) fn snap_selected_brush(&mut self) {
         let Some(index) = self.selected_brush else {
@@ -2020,17 +2037,23 @@ impl EditorWorkspace {
         let Some(current) = self.project.active_scene().brushes.get(index).cloned() else {
             return;
         };
-        let mut snapped = current.clone();
-        snapped.snap_to_grid(step);
-        if snapped == current || !brush_preview_ok(&snapped) {
+        let Some(snapped) = current.snapped_solved_to_grid(step) else {
+            self.status = format!(
+                "Snap brush rejected: the {step}-unit grid cannot represent it as a valid solid"
+            );
+            return;
+        };
+        if snapped == current {
+            self.status = format!("Snap brush: visible corners are already on Grid {step}");
             return;
         }
         self.push_undo();
         self.project.active_scene_mut().brushes[index] = snapped;
         self.mark_dirty();
+        self.status = format!("Snapped brush to Grid {step}; one undo step");
     }
 
-    /// Snap every authored BSP brush point in the active level to the current
+    /// Snap every visible BSP brush corner in the active level to the current
     /// absolute grid. This is deliberately atomic: coarse grids can collapse
     /// thin brushes or make a convex plane set invalid, and applying only the
     /// surviving subset would replace small existing seams with much larger
@@ -2049,13 +2072,11 @@ impl EditorWorkspace {
         let mut changed_points = 0usize;
         let mut changed_coordinates = 0usize;
         for (index, current) in brushes.iter().enumerate() {
-            let mut snapped = current.clone();
-            snapped.snap_to_grid(step);
-            if snapped == *current {
-                continue;
-            }
-            if !brush_preview_ok(&snapped) {
+            let Some(snapped) = current.snapped_solved_to_grid(step) else {
                 invalid.push(index);
+                continue;
+            };
+            if snapped == *current {
                 continue;
             }
             for (before_face, after_face) in current.faces.iter().zip(&snapped.faces) {
@@ -2085,7 +2106,7 @@ impl EditorWorkspace {
                 .then(|| format!(" (+{remaining} more)"))
                 .unwrap_or_default();
             self.status = format!(
-                "Snap level aborted: {step}-unit grid would invalidate {} brush{} ({preview}{more}); choose a finer grid",
+                "Snap level aborted: the {step}-unit grid cannot represent {} brush{} as valid grid-aligned solids ({preview}{more}); choose a finer grid",
                 invalid.len(),
                 if invalid.len() == 1 { "" } else { "es" },
             );
@@ -2104,7 +2125,7 @@ impl EditorWorkspace {
         self.reconcile_brush_elements();
         self.mark_dirty();
         self.status = format!(
-            "Snapped {changed_brushes} brush{} to the {step}-unit grid ({changed_points} authored points, {changed_coordinates} coordinates); one undo step",
+            "Snapped {changed_brushes} brush{} to the {step}-unit grid ({changed_points} plane points, {changed_coordinates} coordinates); one undo step",
             if changed_brushes == 1 { "" } else { "es" },
         );
     }
