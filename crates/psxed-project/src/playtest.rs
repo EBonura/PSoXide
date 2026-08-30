@@ -475,6 +475,13 @@ pub fn build_package(
     // files and the editor's preview stay at the historical scale.
     let mut scaled_project = project.clone();
     crate::units::scale_project_to_engine_units(&mut scaled_project);
+    // Trim every clip to the frames the project still references, and move the
+    // authored frame indices into the trimmed clips' space on the same clone.
+    // Rebasing the document here rather than at each emit site keeps the cook's
+    // combat-timing paths reading the fields they always read, so none of them
+    // can forget to subtract and silently mistime a hitbox.
+    let clip_trim = crate::clip_window::ClipTrim::for_project(&scaled_project);
+    let scaled_project = clip_trim.rebase_project(&scaled_project);
     let project = &scaled_project;
     let mut report = PlaytestValidationReport::default();
     let scene = project.active_scene();
@@ -1008,6 +1015,7 @@ pub fn build_package(
                                         model_for_resource: &mut model_for_resource,
                                         runtime_model_clips: &runtime_model_clips,
                                         model_clip_remaps: &mut model_clip_remaps,
+                                        clip_trim: &clip_trim,
                                         report,
                                     },
                                 )
@@ -1068,6 +1076,7 @@ pub fn build_package(
                                     &mut model_for_resource,
                                     &runtime_model_clips,
                                     &mut model_clip_remaps,
+                                    &clip_trim,
                                     report,
                                 )
                             });
@@ -1149,51 +1158,89 @@ pub fn build_package(
                             else {
                                 return (None, report);
                             };
-                            let projectile_attack_range = enemy_character
+                            let projectile_attack = enemy_character
                                 .combat_capsules
                                 .iter()
                                 .find_map(|volume| match volume.role {
                                     crate::CombatCapsuleRole::ProjectileEmitter {
-                                        action: CharacterAnimationAction::LightAttack,
+                                        action,
                                         min_range,
                                         max_range,
                                         ..
-                                    } => Some((min_range, max_range)),
+                                    } => Some((action, min_range, max_range)),
                                     _ => None,
                                 });
-                            let attack_event_end = combat_capsules
-                                .get(combat_capsule_first as usize..combat_capsule_first as usize
-                                    + usize::from(combat_capsule_count))
-                                .unwrap_or(&[])
-                                .iter()
-                                .filter(|capsule| {
-                                    capsule.action
-                                        == CharacterAnimationAction::LightAttack.to_index() as u8
-                                        && capsule.flags
-                                            & (psx_level::combat_capsule_flags::HITBOX
-                                                | psx_level::combat_capsule_flags::PROJECTILE_EMITTER)
-                                            != 0
-                                })
-                                .map(|capsule| capsule.active_end_frame)
-                                .max();
-                            let attack_sample_rate_hz = node_model_instance
-                                .and_then(|instance| model_instances.get(instance as usize))
-                                .and_then(|instance| models.get(instance.model as usize))
-                                .and_then(|model| {
-                                    model_clips.get(
-                                        usize::from(model.clip_first)
-                                            .saturating_add(usize::from(state_clips.attack)),
+                            let projectile_attack_range = projectile_attack
+                                .map(|(_, min_range, max_range)| (min_range, max_range));
+                            let cooked_attack_capsules = combat_capsules
+                                .get(
+                                    combat_capsule_first as usize
+                                        ..combat_capsule_first as usize
+                                            + usize::from(combat_capsule_count),
+                                )
+                                .unwrap_or(&[]);
+                            let attack_active_ticks_for =
+                                |action: CharacterAnimationAction,
+                                 clip_index: u16,
+                                 speed_q8: u16,
+                                 frame_range: psx_level::CharacterActionFrameRange| {
+                                    let event_end = cooked_attack_capsules
+                                        .iter()
+                                        .filter(|capsule| {
+                                            capsule.action == action.to_index() as u8
+                                                && capsule.flags
+                                                    & (psx_level::combat_capsule_flags::HITBOX
+                                                        | psx_level::combat_capsule_flags::PROJECTILE_EMITTER)
+                                                    != 0
+                                        })
+                                        .map(|capsule| capsule.active_end_frame)
+                                        .max();
+                                    let clip_timing = node_model_instance
+                                        .and_then(|instance| model_instances.get(instance as usize))
+                                        .and_then(|instance| models.get(instance.model as usize))
+                                        .and_then(|model| {
+                                            model_clips.get(
+                                                usize::from(model.clip_first)
+                                                    .saturating_add(usize::from(clip_index)),
+                                            )
+                                        })
+                                        .and_then(|clip| assets.get(clip.animation_asset_index))
+                                        .and_then(|asset| {
+                                            psx_asset::Animation::from_bytes(&asset.bytes).ok()
+                                        })
+                                        .map(|animation| {
+                                            (animation.sample_rate_hz(), animation.frame_count())
+                                        });
+                                    cooked_game_entity_attack_active_ticks(
+                                        enemy.windup_ticks,
+                                        enemy.recovery_ticks,
+                                        event_end,
+                                        clip_timing.map(|timing| timing.0),
+                                        clip_timing.map(|timing| timing.1),
+                                        speed_q8,
+                                        frame_range,
                                     )
-                                })
-                                .and_then(|clip| assets.get(clip.animation_asset_index))
-                                .and_then(|asset| {
-                                    psx_asset::Animation::from_bytes(&asset.bytes).ok()
-                                })
-                                .map(|animation| animation.sample_rate_hz());
-                            let attack_active_ticks = cooked_game_entity_attack_active_ticks(
-                                enemy.windup_ticks,
-                                attack_event_end,
-                                attack_sample_rate_hz,
+                                };
+                            let attack_active_ticks = attack_active_ticks_for(
+                                CharacterAnimationAction::LightAttack,
+                                state_clips.attack,
+                                state_clips.attack_speed_q8,
+                                state_clips.attack_frame_range,
+                            );
+                            let heavy_attack_active_ticks = attack_active_ticks_for(
+                                CharacterAnimationAction::HeavyAttack,
+                                state_clips.heavy_attack,
+                                state_clips.heavy_attack_speed_q8,
+                                state_clips.heavy_attack_frame_range,
+                            );
+                            let ranged_action = projectile_attack
+                                .map(|(action, _, _)| action)
+                                .unwrap_or(CharacterAnimationAction::RangedAttack);
+                            let ranged_attack_active_ticks = attack_active_ticks_for(
+                                ranged_action,
+                                state_clips.ranged_attack,
+                                state_clips.ranged_attack_speed_q8,
+                                state_clips.ranged_attack_frame_range,
                             );
                             let ok =
                                 report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
@@ -1216,6 +1263,8 @@ pub fn build_package(
                                         combat_capsule_first,
                                         combat_capsule_count,
                                         attack_active_ticks,
+                                        heavy_attack_active_ticks,
+                                        ranged_attack_active_ticks,
                                         projectile_attack_range,
                                         &mut names,
                                         &mut game_entities,
@@ -1254,9 +1303,8 @@ pub fn build_package(
                     })
                     .unwrap_or_default();
                 for explicit in component_equipment(scene, node) {
-                    equipped_bindings.retain(|(_, socket, _)| {
-                        socket.as_str() != explicit.character_socket
-                    });
+                    equipped_bindings
+                        .retain(|(_, socket, _)| socket.as_str() != explicit.character_socket);
                     equipped_bindings.push((
                         explicit.weapon,
                         explicit.character_socket.to_string(),
@@ -1282,6 +1330,7 @@ pub fn build_package(
                             &mut weapon_hitboxes,
                             &mut weapons,
                             &mut weapon_for_resource,
+                            &clip_trim,
                             &mut report,
                         ) else {
                             return (None, report);
@@ -1509,6 +1558,7 @@ pub fn build_package(
                                 model_for_resource: &mut model_for_resource,
                                 runtime_model_clips: &runtime_model_clips,
                                 model_clip_remaps: &mut model_clip_remaps,
+                                clip_trim: &clip_trim,
                                 report,
                             },
                         )
@@ -2062,6 +2112,7 @@ pub fn build_package(
                     &mut model_clip_remaps,
                     &mut combat_capsules,
                     &mut characters,
+                    &clip_trim,
                     &mut report,
                 )
                 .map(|character_index| PlaytestPlayerController {
@@ -2132,6 +2183,7 @@ pub fn build_package(
                 &mut weapon_hitboxes,
                 &mut weapons,
                 &mut weapon_for_resource,
+                &clip_trim,
                 &mut report,
             ) else {
                 return (None, report);

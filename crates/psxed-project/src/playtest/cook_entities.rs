@@ -401,31 +401,61 @@ pub(crate) fn remap_runtime_model_clip(
         .flatten()
 }
 
-/// Keep an enemy in its committed Attack state until the frame containing its
-/// latest authored Light Attack event can actually be sampled. Entity state
-/// clocks are 60 Hz; animation clips retain their own cooked sample rate.
+/// Keep an enemy in its committed Attack state until every authored combat
+/// event has been sampled and enough clip time remains for the authored
+/// recovery state to reach the final frame. Entity state clocks are 60 Hz;
+/// animation clips retain their own cooked sample rate.
 ///
 /// The previous hard-coded six ticks only advanced a 12 Hz clip by roughly one
 /// frame, so a projectile released on frame 18 could never fire. Six remains
 /// the compatibility floor for characters without a later authored event.
 pub(crate) fn cooked_game_entity_attack_active_ticks(
     windup_ticks: u8,
+    recovery_ticks: u8,
     event_end_frame: Option<u16>,
     sample_rate_hz: Option<u16>,
+    frame_count: Option<u16>,
+    speed_q8: u16,
+    frame_range: psx_level::CharacterActionFrameRange,
 ) -> u16 {
     const LEGACY_ACTIVE_TICKS: u32 = 6;
-    let (Some(frame), Some(sample_rate_hz)) = (event_end_frame, sample_rate_hz) else {
+    let Some(sample_rate_hz) = sample_rate_hz else {
         return LEGACY_ACTIVE_TICKS as u16;
     };
-    let phase_step_q12 = (u32::from(sample_rate_hz.max(1)) << 12) / 60;
-    let event_phase_q12 = u32::from(frame) << 12;
-    // Mirror `Animation::phase_step_q12` exactly. Its intentional integer
-    // truncation means a 12 Hz frame-18 marker crosses on tick 91, not the
-    // rational-math estimate of tick 90.
-    let event_tick =
-        event_phase_q12.saturating_add(phase_step_q12.saturating_sub(1)) / phase_step_q12.max(1);
-    event_tick
+    let base_step_q12 = (u32::from(sample_rate_hz.max(1)) << 12) / 60;
+    // Host cooker: mirror Animation::phase_at_tick_scaled_q12's widened
+    // multiply exactly. The guest receives finished u16 state timings and
+    // performs no wide arithmetic for this transition.
+    let phase_step_q12 = ((u64::from(base_step_q12) * u64::from(speed_q8.max(1)))
+        / u64::from(psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8))
+        as u32;
+    let final_unique_frame = frame_count.unwrap_or(0).saturating_sub(2);
+    let start_frame = frame_range.start.min(final_unique_frame);
+    let end_frame = if frame_range.end == psx_level::CHARACTER_ACTION_FRAME_END_FULL {
+        final_unique_frame
+    } else {
+        frame_range.end.min(final_unique_frame)
+    }
+    .max(start_frame);
+    let tick_for_source_frame = |frame: u16| {
+        let relative_frame = frame
+            .clamp(start_frame, end_frame)
+            .saturating_sub(start_frame);
+        let phase_q12 = u32::from(relative_frame) << 12;
+        // Mirror `Animation::phase_step_q12` exactly. Its intentional integer
+        // truncation and Q8 speed scaling are part of the playback contract.
+        phase_q12.saturating_add(phase_step_q12.saturating_sub(1)) / phase_step_q12.max(1)
+    };
+    let event_active_ticks = event_end_frame
+        .filter(|frame| *frame >= start_frame && *frame <= end_frame)
+        .map(tick_for_source_frame)
+        .unwrap_or(0)
+        .saturating_sub(u32::from(windup_ticks));
+    let clip_active_ticks = tick_for_source_frame(end_frame)
         .saturating_sub(u32::from(windup_ticks))
+        .saturating_sub(u32::from(recovery_ticks));
+    event_active_ticks
+        .max(clip_active_ticks)
         .max(LEGACY_ACTIVE_TICKS)
         .min(u32::from(u16::MAX)) as u16
 }
@@ -780,6 +810,7 @@ pub(crate) fn cook_player_character(
     model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     combat_capsules: &mut Vec<PlaytestCombatCapsule>,
     characters: &mut Vec<PlaytestCharacter>,
+    clip_trim: &crate::clip_window::ClipTrim,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     let mut default_character = crate::CharacterResource::defaults();
@@ -848,6 +879,7 @@ pub(crate) fn cook_player_character(
         model_for_resource,
         runtime_model_clips,
         model_clip_remaps,
+        clip_trim,
         report,
     )?;
     let model = &models[model_index as usize];
@@ -1183,6 +1215,7 @@ pub(crate) fn register_model_for_instance(
     model_for_resource: &mut std::collections::HashMap<ResourceId, u16>,
     runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
     model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
+    clip_trim: &crate::clip_window::ClipTrim,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     let resource = project.resource(model_resource_id)?;
@@ -1474,6 +1507,21 @@ pub(crate) fn register_model_for_instance(
                 )
             };
         crate::units::scale_animation_blob_to_engine_units(&mut bytes);
+        // Drop the frames nothing references. build_package has already moved
+        // this clip's authored indices into the trimmed frame space, so the
+        // window and the pose table stay in step.
+        if let Some(window) = animation_resource.and_then(|clip| clip_trim.window(clip)) {
+            // Keep one frame past the window. `cooked_game_entity_attack_active_ticks`
+            // treats `frame_count - 2` as the last addressable frame, so trimming
+            // to exactly the window would put the window's own final frame out of
+            // reach and silently shorten the attack's active ticks.
+            let end = window.end.saturating_add(1);
+            if let Some((trimmed, _kept)) =
+                crate::units::trim_animation_blob_to_window(&bytes, window.start, end)
+            {
+                bytes = trimmed;
+            }
+        }
         let parsed_anim = match psx_asset::Animation::from_bytes(&bytes) {
             Ok(a) => a,
             Err(e) => {
@@ -2247,6 +2295,10 @@ pub(crate) struct ModelCookTables<'a> {
     pub(crate) model_for_resource: &'a mut HashMap<ResourceId, u16>,
     pub(crate) runtime_model_clips: &'a HashMap<ResourceId, BTreeSet<u16>>,
     pub(crate) model_clip_remaps: &'a mut HashMap<ResourceId, Vec<Option<u16>>>,
+    /// Frames each clip keeps. Decided before `build_package` rebased the
+    /// document, so it still speaks the authored frame space the `.psxanim`
+    /// files are in.
+    pub(crate) clip_trim: &'a crate::clip_window::ClipTrim,
     pub(crate) report: &'a mut PlaytestValidationReport,
 }
 
@@ -2282,6 +2334,7 @@ pub(crate) fn push_model_instance_for_resource(
         model_for_resource,
         runtime_model_clips,
         model_clip_remaps,
+        clip_trim,
         report,
     } = tables;
     let Some(model_index) = register_model_for_instance(
@@ -2302,6 +2355,7 @@ pub(crate) fn push_model_instance_for_resource(
         model_for_resource,
         runtime_model_clips,
         model_clip_remaps,
+        clip_trim,
         report,
     ) else {
         return false;
@@ -2371,6 +2425,7 @@ pub(crate) fn push_character_controller_idle_instance(
     model_for_resource: &mut HashMap<ResourceId, u16>,
     runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
     model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
+    clip_trim: &crate::clip_window::ClipTrim,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let Some(resource) = project.resource(character_id) else {
@@ -2411,6 +2466,7 @@ pub(crate) fn push_character_controller_idle_instance(
         model_for_resource,
         runtime_model_clips,
         model_clip_remaps,
+        clip_trim,
         report,
     ) else {
         return false;
@@ -2532,6 +2588,15 @@ pub(crate) struct GameEntityStateClips {
     pub run: u16,
     pub run_supported: bool,
     pub attack: u16,
+    pub attack_speed_q8: u16,
+    pub attack_frame_range: psx_level::CharacterActionFrameRange,
+    pub heavy_attack: u16,
+    pub heavy_attack_speed_q8: u16,
+    pub heavy_attack_frame_range: psx_level::CharacterActionFrameRange,
+    pub ranged_attack: u16,
+    pub ranged_attack_speed_q8: u16,
+    pub ranged_attack_frame_range: psx_level::CharacterActionFrameRange,
+    pub ranged_attack_action: u8,
     pub stagger: u16,
     pub death: u16,
 }
@@ -2551,6 +2616,15 @@ impl GameEntityStateClips {
             run: clip,
             run_supported: false,
             attack: clip,
+            attack_speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            attack_frame_range: psx_level::CharacterActionFrameRange::FULL,
+            heavy_attack: clip,
+            heavy_attack_speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            heavy_attack_frame_range: psx_level::CharacterActionFrameRange::FULL,
+            ranged_attack: clip,
+            ranged_attack_speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            ranged_attack_frame_range: psx_level::CharacterActionFrameRange::FULL,
+            ranged_attack_action: CharacterAnimationAction::RangedAttack.to_index() as u8,
             stagger: clip,
             death: clip,
         }
@@ -2612,7 +2686,7 @@ pub(crate) fn game_entity_state_clips(
         report,
     )?;
     let optional = |action: CharacterAnimationAction| {
-        character_optional_action_clip(
+        character_optional_action_playback(
             project,
             character,
             model_resource_id,
@@ -2620,41 +2694,94 @@ pub(crate) fn game_entity_state_clips(
             model_clip_remaps,
         )
     };
-    let walk = optional(CharacterAnimationAction::Walk).unwrap_or(idle);
+    let walk = optional(CharacterAnimationAction::Walk)
+        .map(|playback| playback.clip)
+        .unwrap_or(idle);
     let run = optional(CharacterAnimationAction::Run);
+    let fallback_attack = GameEntityActionPlayback::unscaled(idle);
+    let attack = optional(CharacterAnimationAction::LightAttack).unwrap_or(fallback_attack);
+    let heavy_attack = optional(CharacterAnimationAction::HeavyAttack).unwrap_or(attack);
+    let ranged_action = character
+        .combat_capsules
+        .iter()
+        .find_map(|volume| match volume.role {
+            crate::CombatCapsuleRole::ProjectileEmitter { action, .. } => Some(action),
+            _ => None,
+        })
+        .unwrap_or(CharacterAnimationAction::RangedAttack);
+    let ranged_attack = optional(ranged_action).unwrap_or(attack);
     Some(GameEntityStateClips {
         idle,
         // Intro is the first-activation role for non-player Characters; for
         // enemies that is the one-shot played on initial player acquisition.
-        alert: optional(CharacterAnimationAction::Intro).unwrap_or(idle),
-        turn: optional(CharacterAnimationAction::Turn).unwrap_or(idle),
+        alert: optional(CharacterAnimationAction::Intro)
+            .map(|playback| playback.clip)
+            .unwrap_or(idle),
+        turn: optional(CharacterAnimationAction::Turn)
+            .map(|playback| playback.clip)
+            .unwrap_or(idle),
         walk,
-        walk_backward: optional(CharacterAnimationAction::WalkBackward).unwrap_or(walk),
-        strafe_left: optional(CharacterAnimationAction::StrafeLeft).unwrap_or(walk),
-        strafe_right: optional(CharacterAnimationAction::StrafeRight).unwrap_or(walk),
-        run: run.unwrap_or(walk),
+        walk_backward: optional(CharacterAnimationAction::WalkBackward)
+            .map(|playback| playback.clip)
+            .unwrap_or(walk),
+        strafe_left: optional(CharacterAnimationAction::StrafeLeft)
+            .map(|playback| playback.clip)
+            .unwrap_or(walk),
+        strafe_right: optional(CharacterAnimationAction::StrafeRight)
+            .map(|playback| playback.clip)
+            .unwrap_or(walk),
+        run: run.map(|playback| playback.clip).unwrap_or(walk),
         run_supported: run.is_some(),
-        attack: optional(CharacterAnimationAction::LightAttack).unwrap_or(idle),
+        attack: attack.clip,
+        attack_speed_q8: attack.speed_q8,
+        attack_frame_range: attack.frame_range,
+        heavy_attack: heavy_attack.clip,
+        heavy_attack_speed_q8: heavy_attack.speed_q8,
+        heavy_attack_frame_range: heavy_attack.frame_range,
+        ranged_attack: ranged_attack.clip,
+        ranged_attack_speed_q8: ranged_attack.speed_q8,
+        ranged_attack_frame_range: ranged_attack.frame_range,
+        ranged_attack_action: ranged_action.to_index() as u8,
         // A poise break is one complete authored Stun clip, including its
         // recovery. Older characters without that action keep their existing
         // HitReact behavior rather than becoming animationless.
         stagger: optional(CharacterAnimationAction::Stun)
             .or_else(|| optional(CharacterAnimationAction::HitReact))
+            .map(|playback| playback.clip)
             .unwrap_or(idle),
-        death: optional(CharacterAnimationAction::Death).unwrap_or(idle),
+        death: optional(CharacterAnimationAction::Death)
+            .map(|playback| playback.clip)
+            .unwrap_or(idle),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GameEntityActionPlayback {
+    clip: u16,
+    speed_q8: u16,
+    frame_range: psx_level::CharacterActionFrameRange,
+}
+
+impl GameEntityActionPlayback {
+    const fn unscaled(clip: u16) -> Self {
+        Self {
+            clip,
+            speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            frame_range: psx_level::CharacterActionFrameRange::FULL,
+        }
+    }
 }
 
 /// One optional AnimationSet action clip, remapped to the runtime's
 /// model-local index. `None` for unauthored or unresolvable roles
 /// (the caller falls back down the state-clip chain).
-fn character_optional_action_clip(
+fn character_optional_action_playback(
     project: &ProjectDocument,
     character: &crate::CharacterResource,
     model_resource_id: ResourceId,
     action: CharacterAnimationAction,
     model_clip_remaps: &HashMap<ResourceId, Vec<Option<u16>>>,
-) -> Option<u16> {
+) -> Option<GameEntityActionPlayback> {
     let set = character.animation_set.and_then(|id| {
         project
             .resource(id)
@@ -2664,8 +2791,16 @@ fn character_optional_action_clip(
             })
     })?;
     let animation_id = animation_set_action_clip(project, set, action)?;
+    let options = set
+        .action_binding(action)
+        .filter(|binding| binding.clip == animation_id)
+        .and_then(|binding| binding.options);
     let index = project.resolved_model_animation_index(model_resource_id, animation_id)?;
-    remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)
+    Some(GameEntityActionPlayback {
+        clip: remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)?,
+        speed_q8: character_action_speed_for(options),
+        frame_range: character_action_frame_range_for(options),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2685,6 +2820,7 @@ pub(crate) fn register_weapon_for_equipment(
     weapon_hitboxes: &mut Vec<PlaytestWeaponHitbox>,
     weapons: &mut Vec<PlaytestWeapon>,
     weapon_for_resource: &mut HashMap<ResourceId, u16>,
+    clip_trim: &crate::clip_window::ClipTrim,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     if let Some(&existing) = weapon_for_resource.get(&weapon_resource_id) {
@@ -2768,6 +2904,7 @@ pub(crate) fn register_weapon_for_equipment(
             model_for_resource,
             runtime_model_clips,
             model_clip_remaps,
+            clip_trim,
             report,
         )?),
         None => None,
@@ -3482,12 +3619,70 @@ mod socket_anchor_tests {
         // Q12 step truncation crosses frame 18 on simulation tick 91. With 20
         // ticks spent in Windup, Attack must remain committed for 71 ticks.
         assert_eq!(
-            cooked_game_entity_attack_active_ticks(20, Some(18), Some(12)),
+            cooked_game_entity_attack_active_ticks(
+                20,
+                24,
+                Some(18),
+                Some(12),
+                Some(20),
+                256,
+                psx_level::CharacterActionFrameRange::FULL,
+            ),
             71
         );
         assert_eq!(
-            cooked_game_entity_attack_active_ticks(20, None, Some(12)),
+            cooked_game_entity_attack_active_ticks(
+                20,
+                24,
+                None,
+                None,
+                None,
+                256,
+                psx_level::CharacterActionFrameRange::FULL,
+            ),
             6
+        );
+        assert_eq!(
+            cooked_game_entity_attack_active_ticks(
+                20,
+                24,
+                None,
+                Some(15),
+                Some(62),
+                256,
+                psx_level::CharacterActionFrameRange::FULL,
+            ),
+            196,
+            "the attack and recovery phases span the complete one-shot"
+        );
+        assert_eq!(
+            cooked_game_entity_attack_active_ticks(
+                20,
+                24,
+                Some(110),
+                Some(15),
+                Some(143),
+                256,
+                psx_level::CharacterActionFrameRange {
+                    start: 89,
+                    end: 126,
+                },
+            ),
+            104,
+            "trimmed source frames are timed relative to the authored start"
+        );
+        assert_eq!(
+            cooked_game_entity_attack_active_ticks(
+                20,
+                24,
+                None,
+                Some(15),
+                Some(70),
+                640,
+                psx_level::CharacterActionFrameRange::FULL,
+            ),
+            65,
+            "Q8 playback speed shortens the committed attack exactly like presentation"
         );
     }
 
