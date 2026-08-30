@@ -56,6 +56,9 @@ const PXBSP_NODE_STACK_INDEX: u32 = 0xffff;
 const PXBSP_NODE_STACK_MASK_SHIFT: u32 = 16;
 /// All five clip planes still need testing.
 const PXBSP_CLIP_ALL_PLANES: u8 = 0x1f;
+/// Index of the near plane in [`FrustumPlanes::planes`]. It is the only plane
+/// whose per-face answer is "does any vertex fail it", rather than "do all".
+const PXBSP_CLIP_NEAR_PLANE: usize = 0;
 const PXBSP_FRAME_NODE_BACK: u8 = 1;
 const PXBSP_FRAME_NODE_FRONT: u8 = 2;
 const PXBSP_FRAME_FALLBACK: u8 = 3;
@@ -327,6 +330,7 @@ impl ViewProjection {
 
 /// Result of [`FrustumPlanes::classify_aabb`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 enum AabbClass {
     /// Every corner fails one plane. No vertex can be inside it.
     Outside,
@@ -429,11 +433,80 @@ impl FrustumPlanes {
         Self::distance(plane, position) < 0
     }
 
+    /// Clip one convex polygon against the planes named by `clip_mask`.
+    ///
+    /// `None` rejects the polygon: some live plane has every vertex outside
+    /// it. `Some(near)` keeps it, where `near` says the near plane is live and
+    /// at least one vertex fails it, so the caller must clip the polygon.
+    ///
+    /// Plane-major, and that is the point. The hierarchical clipflags leave
+    /// under two planes live per face on real routes, so the historical
+    /// vertex-major form (one pass over the vertices, all five planes each,
+    /// sharing the three view-space dot products) spent most of its work on
+    /// planes an ancestor node box had already proven. Here each live plane
+    /// loads its record once and stops at the first vertex that satisfies it,
+    /// which is the whole answer for every plane except the near one, whose
+    /// answer also needs one failing vertex.
+    ///
+    /// Same predicate, so no polygon bounding box is built: the box was a
+    /// pruning device for a five-plane-per-vertex scan that no longer happens,
+    /// and building it cost a full pass over the vertices on its own.
+    ///
+    /// Planes outside `clip_mask` were proven satisfied by an enclosing box,
+    /// so no vertex can fail them; skipping them keeps the answer exact,
+    /// near-plane reporting included.
+    #[inline(always)]
+    fn cull_polygon(
+        &self,
+        clip_mask: u8,
+        count: usize,
+        mut vertex: impl FnMut(usize) -> [i16; 3],
+    ) -> Option<bool> {
+        let mut live = clip_mask;
+        let mut needs_near_clip = false;
+        while live != 0 {
+            let plane_index = live.trailing_zeros() as usize;
+            live &= live - 1;
+            let plane = unsafe { self.planes.get_unchecked(plane_index) };
+            let mut wholly_outside = true;
+            let mut any_outside = false;
+            let mut index = 0usize;
+            while index < count {
+                if Self::distance_negative(plane, vertex(index)) {
+                    any_outside = true;
+                    // Only the near plane still has something to learn once
+                    // one vertex is outside and another is inside.
+                    if !wholly_outside {
+                        break;
+                    }
+                } else {
+                    wholly_outside = false;
+                    // Every other plane only decides whether the polygon is
+                    // wholly outside, which this vertex just answered.
+                    if plane_index != PXBSP_CLIP_NEAR_PLANE || any_outside {
+                        break;
+                    }
+                }
+                index += 1;
+            }
+            if wholly_outside {
+                return None;
+            }
+            if plane_index == PXBSP_CLIP_NEAR_PLANE {
+                needs_near_clip = any_outside;
+            }
+        }
+        Some(needs_near_clip)
+    }
+
     /// Bit mask of frustum planes for which `position` is outside.
     ///
     /// This is algebraically identical to evaluating [`Self::distance`] for
     /// each plane, but reuses the three view-space dot products. A face can
     /// intersect the frustum only when the AND of its vertex masks is zero.
+    /// Retained as the reference the plane-major [`Self::cull_polygon`] is
+    /// tested against.
+    #[cfg(test)]
     #[inline(always)]
     fn vertex_outside_mask(&self, position: [i16; 3]) -> u8 {
         let view_q12 = |row: [i16; 3], translation: i32| -> i64 {
@@ -474,6 +547,7 @@ impl FrustumPlanes {
     ///
     /// The support-point form costs at most six 32x32 multiplies per plane
     /// with an early reject, against twenty per vertex in the scan.
+    #[cfg(test)]
     #[inline]
     fn classify_aabb(&self, mins: [i16; 3], maxs: [i16; 3], mask: u8) -> AabbClass {
         let mut wholly_inside = true;
@@ -843,6 +917,11 @@ pub struct Renderer {
     /// Projection the brush-face frustum clip assumes (see
     /// [`Renderer::set_view_projection`]).
     view_projection: ViewProjection,
+    /// Per-material resolve cache, direct-mapped on the material index.
+    pxbsp_material_cache: [PxbspResolvedMaterial; PXBSP_MATERIAL_CACHE_SLOTS],
+    /// Bumped on entry to every face pass, so a cached entry from an earlier
+    /// pass (different animation tick, different binding table) never hits.
+    pxbsp_material_epoch: u32,
 }
 
 impl Renderer {
@@ -974,6 +1053,8 @@ impl Renderer {
             visible_entity_indices: Vec::with_capacity(render_entity_count),
             cached_frustum: None,
             view_projection: ViewProjection::DEFAULT,
+            pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
+            pxbsp_material_epoch: 0,
             light_styles,
         }
     }
@@ -1322,13 +1403,34 @@ impl Renderer {
         let mut batch_worst_words = 0usize;
 
         let faces = map.faces();
-        let map_materials = map.materials();
+        // Own the clip planes for the duration of the loop. Reaching them
+        // through the caller's reference made every plane test reload a
+        // spilled pointer from this frame before it could load the plane;
+        // a local copy is addressed off `sp`, which is always live.
+        let frustum_local = *frustum;
+        let frustum = &frustum_local;
+        // Every face pass gets its own epoch, so an entry cached under a
+        // different animation tick or a different binding table cannot hit.
+        self.pxbsp_material_epoch = self.pxbsp_material_epoch.wrapping_add(1);
+        let epoch = self.pxbsp_material_epoch;
         let (first_face, face_end) = selection.range(faces.len(), self.frame_pxbsp_faces.len());
         for selection_index in first_face..face_end {
             let face_index = selection.face_index(selection_index, &self.frame_pxbsp_faces);
-            let face = unsafe { faces.get_unchecked(face_index) };
+            let face = unsafe { map.face_at_unchecked(face_index) };
             let material_index = face.texture as usize;
-            let material = unsafe { map_materials.get_unchecked(material_index) };
+            let slot = PxbspResolvedMaterial::slot(material_index);
+            if !self.pxbsp_material_cache[slot].answers(material_index, epoch) {
+                self.fill_pxbsp_material_cache(
+                    map,
+                    materials,
+                    material_index,
+                    material_tick,
+                    epoch,
+                );
+            }
+            // Only the policy byte decides the three rejections below, so the
+            // rest of the record is not loaded for a face that never draws.
+            let policy = unsafe { self.pxbsp_material_cache.get_unchecked(slot).policy };
             let authored_front = match selection {
                 PxbspFaceSelection::VisibleWorld => {
                     match packed_face_state(&self.frame_pxbsp_face_state, face_index) {
@@ -1341,24 +1443,21 @@ impl Renderer {
                     front_facing_pxbsp(map, face, camera_origin)
                 }
             };
-            if !pxbsp_face_draws(material, face.flags, authored_front) {
+            if !pxbsp_policy_face_draws(policy, face.flags, authored_front) {
                 continue;
             }
 
-            if material.flags
-                & (crate::pxbsp::material_flags::SKY_APERTURE
-                    | crate::pxbsp::material_flags::DIRECTIONAL_SKY)
-                != 0
-            {
+            if policy & pxbsp_material_policy::SKY != 0 {
                 stats.visible_faces = stats.visible_faces.saturating_add(1);
                 stats.visible_sky_apertures = stats.visible_sky_apertures.saturating_add(1);
                 continue;
             }
 
-            let Some(binding) = materials.get(material_index).copied().flatten() else {
+            if policy & pxbsp_material_policy::BOUND == 0 {
                 stats.unresolved_material_faces = stats.unresolved_material_faces.saturating_add(1);
                 continue;
-            };
+            }
+            let resolved = unsafe { *self.pxbsp_material_cache.get_unchecked(slot) };
 
             let source_count = face.vertex_count as usize;
             if source_count > BATCH_MAX_VERTICES {
@@ -1388,11 +1487,9 @@ impl Renderer {
                 };
                 needs_near_clip
             };
-            let state = pxbsp_material_state(material, binding, material_tick);
+            let state = resolved.state;
             let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
-                && material.blend_mode == material_blend::OPAQUE
-                && material.animation_kind == crate::pxbsp::material_animation::STATIC
-                && material.flags & crate::pxbsp::material_flags::SKY_APERTURE == 0;
+                && policy & pxbsp_material_policy::COMPACT != 0;
             let uv_offset = if compact_surface {
                 state.page_uv_offset
             } else {
@@ -1457,13 +1554,13 @@ impl Renderer {
                 first_vertex: batch_vertex_count as u16,
                 vertex_count: vertex_count as u16,
                 tpage: state.texture_page,
-                clut: binding.clut,
+                clut: resolved.clut,
                 // PXBSP vertices are materialized with the resolved layer
                 // offset above, so the shared writer applies no second offset.
                 uv_offset: [0; 2],
                 compact: u8::from(compact_surface),
                 _padding: 0,
-                texture_window_word: binding.texture_window_word,
+                texture_window_word: resolved.texture_window_word,
                 color_command_word: state.color_command_word,
             };
             if needs_near_clip {
@@ -1606,6 +1703,63 @@ impl Renderer {
         }
     }
 
+    /// Fill one direct-mapped slot of the per-material resolve cache.
+    ///
+    /// Deliberately outlined: this runs at most once per distinct material per
+    /// face pass (twelve times a frame on this project's world), against a
+    /// face loop that consults the cache a few hundred times. Inlining it
+    /// would put the sixteen-byte record decode and the whole animation
+    /// derivation back in the loop body's instruction footprint.
+    #[inline(never)]
+    fn fill_pxbsp_material_cache(
+        &mut self,
+        map: &PxbspResidentMap,
+        materials: &[Option<PxbspTextureBinding>],
+        material_index: usize,
+        tick: u32,
+        epoch: u32,
+    ) {
+        let material = unsafe { map.materials().get_unchecked(material_index) };
+        let mut policy = (material.flags as u8) & pxbsp_material_policy::FACE_MASK;
+        if material.flags
+            & (crate::pxbsp::material_flags::SKY_APERTURE
+                | crate::pxbsp::material_flags::DIRECTIONAL_SKY)
+            != 0
+        {
+            policy |= pxbsp_material_policy::SKY;
+        }
+        if material.blend_mode == material_blend::OPAQUE
+            && material.animation_kind == crate::pxbsp::material_animation::STATIC
+            && material.flags & crate::pxbsp::material_flags::SKY_APERTURE == 0
+        {
+            policy |= pxbsp_material_policy::COMPACT;
+        }
+        let binding = materials.get(material_index).copied().flatten();
+        if binding.is_some() {
+            policy |= pxbsp_material_policy::BOUND;
+        }
+        // A face whose material has no binding, or which is a sky aperture,
+        // never reads the state; resolving against a default binding keeps
+        // this branch-free without changing any drawn packet.
+        let binding = binding.unwrap_or(PxbspTextureBinding {
+            texture_page: 0,
+            clut: 0,
+            texture_window_word: 0,
+            uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
+            texture_size: [1; 2],
+        });
+        self.pxbsp_material_cache[PxbspResolvedMaterial::slot(material_index)] =
+            PxbspResolvedMaterial {
+                state: pxbsp_material_state(material, binding, tick),
+                texture_window_word: binding.texture_window_word,
+                epoch,
+                clut: binding.clut,
+                material_index: material_index as u16,
+                policy,
+            };
+    }
+
     /// Return `None` when every face vertex is outside any one frustum plane;
     /// otherwise return whether the face crosses the near plane.
     fn pxbsp_face_clip(
@@ -1627,47 +1781,16 @@ impl Renderer {
         if count == 0 {
             return None;
         }
-        // Bound the polygon first. Both decisive box answers are exact with
-        // respect to the scan below, and the box costs at most thirty 32x32
-        // multiplies against the scan's twenty per vertex, so only genuinely
-        // straddling faces pay for both.
-        let mut mins = unsafe { core::ptr::read(source.cast::<[i16; 3]>()) };
-        let mut maxs = mins;
-        let mut index = 1usize;
-        while index < count {
-            let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
-            let mut axis = 0usize;
-            while axis < 3 {
-                if position[axis] < mins[axis] {
-                    mins[axis] = position[axis];
-                } else if position[axis] > maxs[axis] {
-                    maxs[axis] = position[axis];
-                }
-                axis += 1;
-            }
-            index += 1;
-        }
-        match frustum.classify_aabb(mins, maxs, clip_mask) {
-            AabbClass::Outside => return None,
-            AabbClass::Inside => return Some(false),
-            AabbClass::Straddling => {}
-        }
-
-        // A set bit means every vertex seen so far is outside that plane.
-        // Clear it as soon as one vertex is on the drawable side. Only the
-        // masked planes can still reject: an unmasked plane is satisfied by
-        // every vertex, so its bit would clear on the first one anyway.
-        let mut wholly_outside = clip_mask;
-        let mut needs_near_clip = false;
-        let mut index = 0usize;
-        while index < count {
-            let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
-            let outside = frustum.vertex_outside_mask(position);
-            wholly_outside &= outside;
-            needs_near_clip |= outside & 0x01 != 0;
-            index += 1;
-        }
-        (wholly_outside == 0).then_some(needs_near_clip)
+        // `ClassicAffineWordSourceVertex` is `repr(C)`, four-aligned and
+        // twelve-byte strided, with `position` first. Reading x and y as the
+        // one word they already share costs two shifts and saves a load, and
+        // a load is six cycles of RAM stall against one cycle for a shift.
+        frustum.cull_polygon(clip_mask, count, |index| unsafe {
+            let base = source.add(index).cast::<u32>();
+            let xy = core::ptr::read(base);
+            let z = core::ptr::read(base.add(1).cast::<i16>());
+            [xy as i16, (xy >> 16) as i16, z]
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1919,7 +2042,7 @@ impl Renderer {
         }
 
         let leaves = map.leaves();
-        let marks = map.mark_surfaces();
+        let marks = map.mark_surfaces_native();
         for visible_index in 0..visible_leaves {
             if self.visibility[visible_index >> 3] & (1 << (visible_index & 7)) == 0 {
                 continue;
@@ -1930,7 +2053,7 @@ impl Renderer {
             let start = leaf.first_mark_surface as usize;
             let end = start + leaf.mark_surface_count as usize;
             for mark_index in start..end {
-                let face = marks.get(mark_index).expect("validated mark surface") as usize;
+                let face = *marks.get(mark_index).expect("validated mark surface") as usize;
                 set_packed_face_state(&mut self.pxbsp_face_state, face, 1);
             }
         }
@@ -1960,7 +2083,7 @@ impl Renderer {
     /// when the camera enters a different leaf; per-frame traversal can then
     /// skip every branch that cannot lead to a PVS-visible leaf.
     fn rebuild_pxbsp_node_visibility(&mut self, map: &PxbspResidentMap) {
-        let nodes = map.nodes();
+        let nodes = map.compact_nodes();
         if nodes.len() != self.pxbsp_node_count {
             self.pxbsp_node_metadata_valid = false;
             self.pxbsp_node_leaf_marks = false;
@@ -2184,7 +2307,7 @@ impl Renderer {
             return true;
         }
 
-        let nodes = map.nodes();
+        let nodes = map.compact_nodes();
         let planes = map.planes();
         let root = map
             .brush_models()
@@ -2212,12 +2335,25 @@ impl Renderer {
             let node = nodes.get(index).expect("validated node traversal");
             let mut mask = (entry >> PXBSP_NODE_STACK_MASK_SHIFT) as u8;
             if mask != 0 {
+                // The wire record stores the box as signed eight-unit grid
+                // codes; only a node that still has a plane to test pays for
+                // expanding them.
+                let mins = Vec3I16 {
+                    x: crate::decode_node_bound_min(node.mins[0]),
+                    y: crate::decode_node_bound_min(node.mins[1]),
+                    z: crate::decode_node_bound_min(node.mins[2]),
+                };
+                let maxs = Vec3I16 {
+                    x: crate::decode_node_bound_max(node.maxs[0]),
+                    y: crate::decode_node_bound_max(node.maxs[1]),
+                    z: crate::decode_node_bound_max(node.maxs[2]),
+                };
                 if !inherit_clip {
-                    if frustum.aabb_outside(node.mins, node.maxs) {
+                    if frustum.aabb_outside(mins, maxs) {
                         continue;
                     }
                 } else {
-                    let Some(residual) = frustum.cull_aabb(node.mins, node.maxs, mask) else {
+                    let Some(residual) = frustum.cull_aabb(mins, maxs, mask) else {
                         continue;
                     };
                     mask = residual;
@@ -2244,7 +2380,7 @@ impl Renderer {
                     let end = start + leaf.mark_surface_count as usize;
                     for mark_index in start..end {
                         let face =
-                            map.mark_surfaces()
+                            *map.mark_surfaces_native()
                                 .get(mark_index)
                                 .expect("validated leaf mark") as usize;
                         if packed_face_state(&self.pxbsp_face_state, face) != 0 {
@@ -2489,7 +2625,7 @@ fn texture_window_mask(size: u8) -> u8 {
     (((!(size - 1)) as u16 & 0x00ff) as u8) / 8
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct PxbspMaterialState {
     texture_page: u16,
     color_command_word: u32,
@@ -2497,6 +2633,64 @@ struct PxbspMaterialState {
     page_uv_offset: [u8; 2],
     color_scale_q7: u8,
 }
+
+/// Everything the face loop needs from one material and its texture binding,
+/// resolved once per material per frame instead of once per face.
+///
+/// This project's world is 1699 faces drawn through 12 materials, and every
+/// term below depends only on the material index, its binding and the
+/// animation tick. Recomputing it per face meant decoding the sixteen-byte
+/// material record and re-deriving the animation state roughly 270 times a
+/// frame to produce at most a dozen distinct answers.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct PxbspResolvedMaterial {
+    state: PxbspMaterialState,
+    texture_window_word: u32,
+    /// Epoch this entry was filled for; see [`Renderer::pxbsp_material_epoch`].
+    epoch: u32,
+    clut: u16,
+    /// Material index this slot holds, so a direct-mapped collision refills
+    /// rather than answering for the wrong material.
+    material_index: u16,
+    policy: u8,
+}
+
+impl PxbspResolvedMaterial {
+    /// Slot `material_index` maps to. Direct-mapped, so two materials whose
+    /// indices are congruent modulo the slot count share one entry.
+    #[inline(always)]
+    fn slot(material_index: usize) -> usize {
+        material_index & (PXBSP_MATERIAL_CACHE_SLOTS - 1)
+    }
+
+    /// Whether this entry already answers for `material_index` in `epoch`.
+    /// Both terms are load-bearing: the epoch rejects a value resolved under
+    /// a different animation tick or binding table, the index rejects a
+    /// direct-mapped collision.
+    #[inline(always)]
+    fn answers(&self, material_index: usize, epoch: u32) -> bool {
+        self.epoch == epoch && usize::from(self.material_index) == material_index
+    }
+}
+
+/// Direct-mapped slots for [`PxbspResolvedMaterial`]. A map with more
+/// materials than this still renders identically; colliding indices simply
+/// refill their shared slot instead of hitting.
+const PXBSP_MATERIAL_CACHE_SLOTS: usize = 32;
+
+mod pxbsp_material_policy {
+    /// Sidedness, stored as `material_flags::FACE_MASK` verbatim so the
+    /// policy form of the draw test can reuse the same match arms.
+    pub const FACE_MASK: u8 = crate::pxbsp::material_flags::FACE_MASK as u8;
+    const _: () = assert!(FACE_MASK as u16 == crate::pxbsp::material_flags::FACE_MASK);
+    /// The face reveals the scene sky instead of submitting its polygon.
+    pub const SKY: u8 = 0x04;
+    /// Opaque and unanimated, so page-local UVs may skip GP0(E2).
+    pub const COMPACT: u8 = 0x08;
+    /// A texture binding resolved for this material.
+    pub const BOUND: u8 = 0x10;
+}
+
 fn pxbsp_material_state(
     material: PxbspMaterial,
     binding: PxbspTextureBinding,
@@ -2598,11 +2792,24 @@ fn pxbsp_scroll_axis(speed_q8: i16, phase: u8, period: u8, tick: u32) -> u8 {
     (travelled_q8 / 256 + i64::from(phase)).rem_euclid(i64::from(period.max(1))) as u8
 }
 
+#[cfg(test)]
 fn pxbsp_face_draws(material: PxbspMaterial, face_flags: u16, authored_front: bool) -> bool {
+    pxbsp_policy_face_draws(
+        (material.flags & material_flags::FACE_MASK) as u8,
+        face_flags,
+        authored_front,
+    )
+}
+
+/// [`pxbsp_face_draws`] against a resolved material's cached policy bits. The
+/// sidedness bits are `material_flags::FACE_MASK` verbatim, so the two agree
+/// by construction.
+#[inline(always)]
+fn pxbsp_policy_face_draws(policy: u8, face_flags: u16, authored_front: bool) -> bool {
     if face_flags & FACE_TWO_SIDED != 0 {
         return true;
     }
-    match material.flags & material_flags::FACE_MASK {
+    match u16::from(policy & pxbsp_material_policy::FACE_MASK) {
         material_flags::FACE_BACK => !authored_front,
         material_flags::FACE_BOTH => true,
         _ => authored_front,
@@ -2864,6 +3071,33 @@ mod tests {
         assert_eq!(pxbsp_animation_color_scale_q7(animation, 24), 192);
         assert_eq!(pxbsp_animation_color_scale_q7(animation, 72), 96);
         assert_eq!(scale_baked_color_q7(0x0010_2040, 192), 0x0018_3060);
+    }
+
+    #[test]
+    fn a_material_cache_entry_answers_only_for_its_own_material_and_epoch() {
+        // No cooked map here reaches the slot count, so the collision and
+        // staleness rules are pinned directly rather than through a fixture.
+        let fresh = PxbspResolvedMaterial::default();
+        assert!(
+            !fresh.answers(0, 1),
+            "a never-filled slot must miss; epochs start at one"
+        );
+        let filled = PxbspResolvedMaterial {
+            material_index: 7,
+            epoch: 42,
+            ..PxbspResolvedMaterial::default()
+        };
+        assert!(filled.answers(7, 42));
+        assert!(!filled.answers(7, 43), "a stale epoch must miss");
+        assert!(
+            !filled.answers(7 + PXBSP_MATERIAL_CACHE_SLOTS, 42),
+            "a direct-mapped collision must miss"
+        );
+        assert_eq!(
+            PxbspResolvedMaterial::slot(7),
+            PxbspResolvedMaterial::slot(7 + PXBSP_MATERIAL_CACHE_SLOTS),
+            "the collision above has to be a real one"
+        );
     }
 
     #[test]
@@ -3517,6 +3751,94 @@ mod frustum_tests {
     fn lcg(state: &mut u32) -> u32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *state
+    }
+
+    /// The predicate `cull_polygon` replaced: one pass over the vertices,
+    /// every plane evaluated for each, exactly as the code shipped before the
+    /// plane-major rewrite.
+    fn vertex_major_clip(
+        planes: &FrustumPlanes,
+        clip_mask: u8,
+        polygon: &[[i16; 3]],
+    ) -> Option<bool> {
+        if polygon.is_empty() {
+            return None;
+        }
+        let mut wholly_outside = clip_mask;
+        let mut needs_near_clip = false;
+        for position in polygon {
+            let outside = planes.vertex_outside_mask(*position);
+            wholly_outside &= outside;
+            needs_near_clip |= outside & 0x01 != 0;
+        }
+        (wholly_outside == 0).then_some(needs_near_clip)
+    }
+
+    #[test]
+    fn plane_major_clip_matches_the_vertex_major_scan() {
+        // Same answer, every mask, for polygons spread across the frustum
+        // boundary: rejection, acceptance, and the near-clip flag.
+        let (planes, _) = planes_for([37, 70, 273], 1024, 100);
+        let mut state = 0x51ed_2c07u32;
+        let mut rejected = 0usize;
+        let mut near = 0usize;
+        let mut kept = 0usize;
+        // Anchored on the camera so the sweep straddles the frustum rather
+        // than sitting far outside it; a polygon spread comparable to the
+        // anchor spread is what produces near-plane crossings.
+        for _ in 0..6000 {
+            let mut axis = || (lcg(&mut state) % 700) as i16 - 350;
+            let anchor = [37 + axis(), 70 + axis(), 273 + axis()];
+            let count = 3 + (lcg(&mut state) % 6) as usize;
+            let mut polygon = [[0i16; 3]; 8];
+            for slot in polygon.iter_mut().take(count) {
+                let mut spread = || (lcg(&mut state) % 500) as i16 - 250;
+                *slot = [
+                    anchor[0] + spread(),
+                    anchor[1] + spread(),
+                    anchor[2] + spread(),
+                ];
+            }
+            let polygon = &polygon[..count];
+            // Only masks a node walk could actually hand down: every plane the
+            // mask drops must really be satisfied by every vertex, which is
+            // what an ancestor box proves.
+            let satisfied = (0..5u8)
+                .filter(|plane| {
+                    polygon
+                        .iter()
+                        .all(|p| planes.vertex_outside_mask(*p) & (1 << plane) == 0)
+                })
+                .fold(0u8, |acc, plane| acc | 1 << plane);
+            for drop in 0..32u8 {
+                let clip_mask = 0x1f & !(drop & satisfied);
+                let expected = vertex_major_clip(&planes, clip_mask, polygon);
+                let actual = planes.cull_polygon(clip_mask, polygon.len(), |i| polygon[i]);
+                assert_eq!(
+                    actual, expected,
+                    "cull_polygon disagreed for mask {clip_mask:#x} on {polygon:?}"
+                );
+            }
+            match vertex_major_clip(&planes, 0x1f, polygon) {
+                None => {
+                    // An empty mask means an ancestor box proved all five
+                    // planes for this subtree. It must then keep even a
+                    // polygon the full mask rejects, unclipped: that is a
+                    // claim about the mask, not about the geometry.
+                    assert_eq!(
+                        planes.cull_polygon(0, polygon.len(), |i| polygon[i]),
+                        Some(false)
+                    );
+                    rejected += 1;
+                }
+                Some(true) => near += 1,
+                Some(false) => kept += 1,
+            }
+        }
+        assert!(
+            rejected > 100 && near > 20 && kept > 100,
+            "sweep degenerated: {rejected} rejected, {near} near-clipped, {kept} kept"
+        );
     }
 
     #[test]
