@@ -556,7 +556,13 @@ impl PxbspResidentMap {
                     .saturating_add(mul_q12_i32(point.y, plane.normal.y as i32))
                     .saturating_add(mul_q12_i32(point.z, plane.normal.z as i32)),
             };
-            node_index = node.children[(dot.saturating_sub(plane.distance) <= 0) as usize];
+            // A point exactly on the plane takes the FRONT child, which is
+            // Quake's SV_HullPointContents rule and what the collision hull's
+            // point_contents_from already does. Sending the tie to the back
+            // child instead walks into the solid side and resolves leaf 0, the
+            // outside-world leaf: standing exactly on a floor plane then culls
+            // every face and shows the sky through the ground.
+            node_index = node.children[(dot.saturating_sub(plane.distance) < 0) as usize];
         }
     }
 
@@ -1637,6 +1643,26 @@ pub(crate) mod tests {
                 z: 0,
             }),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn a_point_exactly_on_a_plane_takes_the_front_child() {
+        // Quake's SV_HullPointContents sends only d < 0 to the back child, and
+        // CollisionHull::point_contents_from already matches that. This lookup
+        // used <= 0, so a point resting exactly on a plane walked into the
+        // solid side and resolved leaf 0, the outside-world leaf.
+        //
+        // Standing on a floor is exactly that tie. The collision hull reported
+        // empty while the render tree reported outside the world, so every face
+        // was culled and the sky brush showed through the ground. Measured on
+        // the shipping cortex 0.3 map, eight of 405 sampled positions hit it,
+        // across two different floor heights.
+        let map = load(&write_file(&valid_lumps())).expect("resident map");
+        assert_eq!(
+            map.point_leaf_index(Vec3I32 { x: 0, y: 0, z: 0 }),
+            Some(1),
+            "on-plane point must resolve to the same side the collision hull does"
         );
     }
 

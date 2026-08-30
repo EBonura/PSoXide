@@ -445,7 +445,7 @@ impl ResidentMap {
                     .saturating_add(mul_q12_i32(point.y, plane.normal.y as i32))
                     .saturating_add(mul_q12_i32(point.z, plane.normal.z as i32)),
             };
-            node_index = node.children[(dot.saturating_sub(plane.distance) <= 0) as usize];
+            node_index = node.children[(dot.saturating_sub(plane.distance) < 0) as usize];
         }
     }
 
