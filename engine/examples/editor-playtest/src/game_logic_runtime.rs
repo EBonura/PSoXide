@@ -385,7 +385,7 @@ impl Playtest {
         let player_position = [player.x, player.y, player.z];
         // The same body-radius source the entity tick input uses, so the
         // legacy fallback arc keeps its Character-derived reach.
-        let (player_radius, player_height) = match self.character {
+        let (player_radius, player_height) = match &self.character {
             Some(character) => (character.radius, character.height),
             None if self.bsp.is_some() => (BSP_PLAYER_RADIUS, BSP_PLAYER_HEIGHT),
             None => (0, 0),
@@ -393,6 +393,7 @@ impl Playtest {
         let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
         let player_capsules = self
             .character
+            .as_ref()
             .and_then(|character| {
                 let first = character.combat_capsule_first.to_usize();
                 let end = first.saturating_add(usize::from(character.combat_capsule_count));
@@ -679,7 +680,7 @@ impl Playtest {
         let action = self.anim_state.action();
         let phase = player_pose.pose().phase_q12();
         if let Some(stats) = self.resolve_player_combat_capsules(
-            character,
+            &character,
             player_pose,
             self.previous_player_actor_pose,
             phase,
@@ -906,7 +907,7 @@ impl Playtest {
     /// window is authoritative, including frames with no active capsule.
     fn resolve_player_combat_capsules(
         &mut self,
-        character: RuntimeCharacter,
+        character: &RuntimeCharacter,
         player_pose: PlayerActorPoseSnapshot,
         previous_player_pose: Option<PlayerActorPoseSnapshot>,
         phase: u32,
