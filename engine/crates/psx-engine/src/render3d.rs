@@ -49,6 +49,13 @@ const MODEL_GTE_JOINT_COMPOSE: bool = option_env!("PSXO_DISABLE_GTE_JOINT_COMPOS
 /// animated-model path on the same coprocessor used for vertex projection.
 const MODEL_GTE_JOINT_TRANSLATION: bool =
     MODEL_GTE_JOINT_COMPOSE && option_env!("PSXO_DISABLE_GTE_JOINT_TRANSLATION").is_none();
+/// Opt-in, and measured to be a large LOSS on 2026-08-30: defaulting it ON
+/// cost `textured_model_joints` +74.7% (+75,657 cycles/frame) and -5.4%
+/// delivered frames. `textured_model_part_gte_transform_with_view_gte_packed_translation`
+/// rejects any model whose `local_to_world` is not IDENTITY, which the shipping
+/// content is, so every joint paid for the packed decode AND then fell through
+/// `or_else` to the full unpacked decode. Leave it off until the packed
+/// transform handles scaled local space.
 const MODEL_GTE_JOINT_PACKED_TRANSLATION: bool =
     option_env!("PSXO_GTE_JOINT_PACKED_TRANSLATION").is_some();
 

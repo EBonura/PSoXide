@@ -12,8 +12,16 @@ pub(super) struct CameraCrystalPacketMaterials {
 }
 
 impl CameraCrystalPacketMaterials {
+    /// Take `&self`, never `self`.
+    ///
+    /// `bands` is indexed by a runtime value, so it must live in memory. With a
+    /// by-value receiver the compiler materialised a fresh 68-byte copy of the
+    /// whole table for EVERY submitted face: 26 stack-to-stack instructions
+    /// with ten uncached RAM loads inlined into the hot batch, and an outright
+    /// `memcpy` call once the walker stood alone. Borrowing reads the caller's
+    /// one copy in place, so a banded face costs an index and four loads.
     #[inline(always)]
-    fn band(self, area: i32) -> usize {
+    fn band(&self, area: i32) -> usize {
         let area = area.unsigned_abs() >> self.roughness.min(3);
         if area <= 8 {
             3
@@ -27,7 +35,7 @@ impl CameraCrystalPacketMaterials {
     }
 
     #[inline(always)]
-    fn for_area(self, area: i32) -> TexturedPacketMaterial {
+    fn for_area(&self, area: i32) -> TexturedPacketMaterial {
         self.bands[self.band(area)]
     }
 
@@ -39,7 +47,7 @@ impl CameraCrystalPacketMaterials {
     /// a second tint array, which would widen the `Option` this struct is
     /// passed through on every hot batch loop.
     #[inline]
-    fn material_for_area(self, material: TextureMaterial, area: i32) -> TextureMaterial {
+    fn material_for_area(&self, material: TextureMaterial, area: i32) -> TextureMaterial {
         let header = self.for_area(area).color_command_word;
         material.with_tint((header as u8, (header >> 8) as u8, (header >> 16) as u8))
     }
@@ -1368,7 +1376,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
-    #[inline(always)]
+    // Cold by measurement: with this walker outlined, the shipping route
+    // retires 0.01% of its instructions here or less (the non-extent-safe,
+    // non-authored-UV and layered variants are all dead on the real content).
+    // Outlined so dead-in-practice code stops sitting between the hot batch
+    // walkers in `submit_textured_model_geometry_impl`, where it inflated the
+    // frame, register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
     pub(super) fn submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch<
         const CULL_BACK: bool,
     >(
@@ -1439,6 +1453,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 (projected[2].sx, projected[2].sy),
             ];
             let base_material = base_camera_crystal_materials
+                .as_ref()
                 .map(|materials| materials.for_area(area))
                 .unwrap_or(base_material);
             let base_triangle = unsafe {
@@ -1532,19 +1547,42 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             && faces.len() <= self.commands.len().saturating_sub(self.command_len)
         {
             if uv_offset.is_zero() {
-                self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch::<
-                    CULL_BACK,
-                >(
-                    triangles,
-                    projected_vertices,
-                    faces,
-                    packet_material,
-                    camera_crystal_materials,
-                    palette_banks,
-                    options,
-                    stats,
-                    faces_considered,
-                );
+                // The crystal band is a per-model property, so resolve it into
+                // the walker's type. A plain model then carries no band test,
+                // no band-table base and no roughness reload in its per-face
+                // body, and the crystal model keeps both in registers instead
+                // of behind an `Option` the loop must re-test every face.
+                if camera_crystal_materials.is_some() {
+                    self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch::<
+                        CULL_BACK,
+                        true,
+                    >(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        camera_crystal_materials,
+                        palette_banks,
+                        options,
+                        stats,
+                        faces_considered,
+                    );
+                } else {
+                    self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch::<
+                        CULL_BACK,
+                        false,
+                    >(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        camera_crystal_materials,
+                        palette_banks,
+                        options,
+                        stats,
+                        faces_considered,
+                    );
+                }
             } else {
                 self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch::<
                     CULL_BACK,
@@ -1599,6 +1637,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 continue;
             }
             let packet_material = camera_crystal_materials
+                .as_ref()
                 .map(|materials| materials.for_area(area))
                 .unwrap_or(packet_material);
             let packet_material = if palette_banks {
@@ -1674,9 +1713,17 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// happen once before this function; the inner loop keeps no UV-policy or
     /// packet-capacity branches. On PS1 the face UV/palette unpack occupies
     /// five mandatory NCLIP wait slots without shortening either GTE hazard.
+    ///
+    /// `#[inline(never)]` was measured on 2026-08-30 and is a large LOSS
+    /// (-6.9% delivered frames, `textured_model_faces` +52.7%): standing alone
+    /// the crystal band lookup stops being a stack copy and becomes a `memcpy`
+    /// CALL of the 68-byte band table per submitted face, with eight caller-save
+    /// spills around it. Keep it inlined. Retried once the band table became a
+    /// borrow (no memcpy): still a small loss, +0.28% frame cycles.
     #[inline(always)]
     fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch<
         const CULL_BACK: bool,
+        const CRYSTAL: bool,
     >(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -1711,9 +1758,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     *projected_vertices.get_unchecked(ic as usize),
                 ]
             };
-            let (area, uv_words, palette_bank) = if CULL_BACK
-                || camera_crystal_materials.is_some()
-            {
+            let (area, uv_words, palette_bank) = if CULL_BACK || CRYSTAL {
                 psx_gte::scene::screen_area_and_unpack_model_face_scheduled(
                     [
                         (projected[0].sx, projected[0].sy),
@@ -1730,9 +1775,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 face_index += 1;
                 continue;
             }
-            let packet_material = camera_crystal_materials
-                .map(|materials| materials.for_area(area))
-                .unwrap_or(packet_material);
+            let packet_material = match camera_crystal_materials.as_ref() {
+                Some(materials) if CRYSTAL => materials.for_area(area),
+                _ => packet_material,
+            };
             let packet_material = if palette_banks {
                 packet_material.with_clut_bank(palette_bank)
             } else {
@@ -1785,7 +1831,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         );
     }
 
-    #[inline(always)]
+    // Cold by measurement: with this walker outlined, the shipping route
+    // retires 0.01% of its instructions here or less (the non-extent-safe,
+    // non-authored-UV and layered variants are all dead on the real content).
+    // Outlined so dead-in-practice code stops sitting between the hot batch
+    // walkers in `submit_textured_model_geometry_impl`, where it inflated the
+    // frame, register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
     fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch<
         const CULL_BACK: bool,
     >(
@@ -1888,7 +1940,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         );
     }
 
-    #[inline(always)]
+    // Cold by measurement: with this walker outlined, the shipping route
+    // retires 0.01% of its instructions here or less (the non-extent-safe,
+    // non-authored-UV and layered variants are all dead on the real content).
+    // Outlined so dead-in-practice code stops sitting between the hot batch
+    // walkers in `submit_textured_model_geometry_impl`, where it inflated the
+    // frame, register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
     fn submit_predecoded_model_faces_packed_average_unclamped_batch<const CULL_BACK: bool>(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -1954,6 +2012,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 continue;
             }
             let packet_material = camera_crystal_materials
+                .as_ref()
                 .map(|materials| materials.for_area(area))
                 .unwrap_or(packet_material);
             let packet_material = if palette_banks {
@@ -2027,6 +2086,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             hw_extent_fallbacks = 0;
 
             let material = camera_crystal_materials
+                .as_ref()
                 .map(|materials| materials.material_for_area(material, area))
                 .unwrap_or(material);
             let material = if palette_banks {
@@ -2063,7 +2123,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         false
     }
 
-    #[inline(always)]
+    // Cold by measurement: `textured_model_packed_general`, `..._packed_clamped`
+    // and `..._fallback_faces` are ~0 across the shipping route. Outlined so
+    // this dead-in-practice code stops sitting between the hot batch walkers
+    // in `submit_textured_model_geometry_impl`, where it inflated the frame,
+    // register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
     fn submit_predecoded_model_face_packed_back_average_in_front_fast(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -2130,7 +2195,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats.primitive_overflow || stats.command_overflow
     }
 
-    #[inline(always)]
+    // Cold by measurement: `textured_model_packed_general`, `..._packed_clamped`
+    // and `..._fallback_faces` are ~0 across the shipping route. Outlined so
+    // this dead-in-practice code stops sitting between the hot batch walkers
+    // in `submit_textured_model_geometry_impl`, where it inflated the frame,
+    // register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
     fn submit_predecoded_model_face_packed_back_in_front_fast(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -2197,7 +2267,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats.primitive_overflow || stats.command_overflow
     }
 
-    #[inline(always)]
+    // Cold by measurement: `textured_model_packed_general`, `..._packed_clamped`
+    // and `..._fallback_faces` are ~0 across the shipping route. Outlined so
+    // this dead-in-practice code stops sitting between the hot batch walkers
+    // in `submit_textured_model_geometry_impl`, where it inflated the frame,
+    // register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
     fn submit_predecoded_model_face_packed_fast(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -2273,7 +2348,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats.primitive_overflow || stats.command_overflow
     }
 
-    #[inline(always)]
+    // Cold by measurement: `textured_model_packed_general`, `..._packed_clamped`
+    // and `..._fallback_faces` are ~0 across the shipping route. Outlined so
+    // this dead-in-practice code stops sitting between the hot batch walkers
+    // in `submit_textured_model_geometry_impl`, where it inflated the frame,
+    // register pressure and I-cache footprint of the loop that does run.
+    #[inline(never)]
     fn submit_predecoded_model_face(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
