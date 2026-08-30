@@ -2,7 +2,7 @@
 
 use crate::collision::{
     BrushTransform, CollisionHull, Trace, TraceFlag, TraceScratch, TransformedCollisionHull,
-    Q12_ONE,
+    Q12_ONE, TRACE_PLANE_EPSILON_Q12,
 };
 use crate::pxbsp_resident::PxbspResidentMap;
 use crate::Vec3I32;
@@ -268,33 +268,46 @@ fn point_to_q12(point: RoomPoint) -> Vec3I32 {
     }
 }
 
-/// Quantise one Q12 axis to world units by rounding to nearest.
+/// Quantise one Q12 axis to world units without landing inside the surface the
+/// sweep stopped against.
 ///
-/// `>> 12` floors, which silently moves a contact away from the surface the
-/// sweep stopped against whenever it travelled downward. A body sweep landing
-/// on a floor rests at Q12 200311, 48.90 in world units; flooring reports 48,
-/// and the body hull at 48 is inside the floor brush. Every later trace from
-/// there returns `start_solid`, so the motor can no longer move in any
-/// direction and the character is stuck where it stands.
+/// `>> 12` floors and plain nearest-rounding both put the body inside geometry
+/// whenever a contact lands on a fractional coordinate. Two real landings from
+/// the cortex 0.3 map, body hull radius 12 height 64:
 ///
-/// Rounding to nearest keeps that landing at 49, outside the brush, while
-/// leaving an exact contact exactly where it is: the traces already back off a
-/// small epsilon from the plane they hit, so a clean hit at 2.0 arrives as
-/// 2.0 + eps and must still quantise to 2, not 3.
-fn round_q12_to_nearest(value_q12: i32) -> i32 {
-    const HALF: i32 = Q12_ONE / 2;
-    if value_q12 >= 0 {
-        value_q12.saturating_add(HALF) >> 12
+///   Q12 200311 = 48.90 -> floor 48 (solid), nearest 49 (free)
+///   Q12 283326 = 69.17 -> floor 69 (solid), nearest 69 (solid), 70 is free
+///
+/// So the endpoint is pushed out along the contact normal instead: an axis the
+/// surface faces along rounds away from that surface. The epsilon
+/// keeps a clean contact on an integer plane where it is, because the traces
+/// already back off a hair from the plane they hit and a bare ceiling would
+/// promote an exact hit on x=2 to 3.
+
+fn quantise_out_of_surface(value_q12: i32, normal_q12: i16) -> i32 {
+    if normal_q12 > 0 {
+        // The surface faces the positive axis, so the body must not end below
+        // it: round up, less the epsilon that absorbs the trace back-off.
+        let biased = value_q12.saturating_sub(TRACE_PLANE_EPSILON_Q12);
+        -((-biased) >> 12)
+    } else if normal_q12 < 0 {
+        (value_q12.saturating_add(TRACE_PLANE_EPSILON_Q12)) >> 12
     } else {
-        -(value_q12.saturating_neg().saturating_add(HALF) >> 12)
+        // No contact on this axis: nearest keeps free motion unbiased.
+        const HALF: i32 = Q12_ONE / 2;
+        if value_q12 >= 0 {
+            value_q12.saturating_add(HALF) >> 12
+        } else {
+            -(value_q12.saturating_neg().saturating_add(HALF) >> 12)
+        }
     }
 }
 
-fn point_from_q12(point: Vec3I32) -> RoomPoint {
+fn point_from_q12(point: Vec3I32, normal: crate::Vec3I16) -> RoomPoint {
     RoomPoint::new(
-        round_q12_to_nearest(point.x),
-        round_q12_to_nearest(point.y),
-        round_q12_to_nearest(point.z),
+        quantise_out_of_surface(point.x, normal.x),
+        quantise_out_of_surface(point.y, normal.y),
+        quantise_out_of_surface(point.z, normal.z),
     )
 }
 
@@ -308,7 +321,7 @@ fn trace_to_engine(trace: Trace) -> CollisionTrace {
         all_solid: trace.all_solid.is_set(),
         start_solid: trace.start_solid.is_set(),
         fraction_q12: trace.fraction,
-        end: point_from_q12(trace.end),
+        end: point_from_q12(trace.end, trace.normal),
         normal_q12: [trace.normal.x, trace.normal.y, trace.normal.z],
         plane_distance: trace.plane_distance >> 12,
     }
@@ -333,27 +346,45 @@ mod tests {
 
     #[test]
     fn a_landing_never_quantises_into_the_surface_it_hit() {
-        // Measured on the shipping cortex 0.3 map. A body sweep (hull 1,
-        // radius 12, height 64) dropped onto the floor at x=-65 z=-1030 and
-        // came to rest at Q12 200311, which is 48.90 in world units.
+        // Both measured on the shipping cortex 0.3 map with the player body
+        // hull (index 1, radius 12, height 64), dropping onto a floor whose
+        // contact normal points up.
         //
-        // `>> 12` floors that to 48, and the body hull at 48 is inside the
-        // floor brush: every later trace from there returns start_solid, so the
-        // motor cannot move the character in any direction and it is stuck
-        // standing still. 49 is outside the brush.
-        assert_eq!(round_q12_to_nearest(200311), 49);
-        assert_eq!(200311 >> 12, 48, "the old conversion landed inside solid");
+        // The body hull is inside the floor brush at the floored value in both
+        // cases, and at the nearest value in the second. Standing there makes
+        // every later trace return start_solid, so the motor cannot move the
+        // character in any direction.
+        const UP: i16 = 4090;
 
-        // A clean contact must stay exactly where it is. The traces back off a
-        // small epsilon from the plane they hit, so a hit on the integer plane
-        // x=2 arrives just past it and must not be pushed out to 3.
-        assert_eq!(round_q12_to_nearest(2 * Q12_ONE + 3), 2);
-        assert_eq!(round_q12_to_nearest(2 * Q12_ONE), 2);
+        // x=-65 z=-1030: rest at 48.90. floor 48 solid, 49 free.
+        assert_eq!(quantise_out_of_surface(200311, UP), 49);
+        assert_eq!(200311 >> 12, 48, "flooring landed inside solid");
 
-        // Symmetric about zero, so a downward sweep below the origin rounds the
-        // same way an upward one does.
-        assert_eq!(round_q12_to_nearest(-200311), -49);
-        assert_eq!(round_q12_to_nearest(0), 0);
+        // x=-433 z=-1164: rest at 69.17. floor and nearest both 69 and solid,
+        // 70 free. This is why nearest is not enough on its own.
+        assert_eq!(quantise_out_of_surface(283326, UP), 70);
+        assert_eq!(283326 >> 12, 69, "flooring landed inside solid");
+        assert_eq!((283326 + 2048) >> 12, 69, "nearest also landed inside solid");
+
+        // A clean contact on an integer plane stays put. The traces back off a
+        // hair from the plane they hit, so a hit on x=2 arrives just past it
+        // and a bare ceiling would promote it to 3.
+        assert_eq!(
+            quantise_out_of_surface(2 * Q12_ONE + TRACE_PLANE_EPSILON_Q12, 4096),
+            2
+        );
+        assert_eq!(quantise_out_of_surface(2 * Q12_ONE, 4096), 2);
+
+        // A surface facing the negative axis pushes the other way.
+        assert_eq!(quantise_out_of_surface(-200311, -4096), -49);
+
+        // No contact on an axis leaves free motion unbiased.
+        assert_eq!(quantise_out_of_surface(200311, 0), 49);
+        assert_eq!(
+            quantise_out_of_surface(2 * Q12_ONE + TRACE_PLANE_EPSILON_Q12, 0),
+            2
+        );
+        assert_eq!(quantise_out_of_surface(0, 0), 0);
     }
 
     #[test]
