@@ -11,8 +11,9 @@ use crate::pxbsp::{
     PxbspLumpKind, PxbspMaterial, PxbspMaterialError, PxbspVersion, PXBSP_LUMP_COUNT,
 };
 use crate::{
-    encode_node_bound_max, encode_node_bound_min, BrushModel, ClipNode, CompactPlane, CookedRecord,
-    Face, Leaf, LumpRange, Node, ReadAt, RecordSlice, SliceReadError, SliceReader, Vec3I32, Vertex,
+    encode_node_bound_max, encode_node_bound_min, BrushModel, ClipNode, CompactNode, CompactPlane,
+    CookedRecord, Face, Leaf, LumpRange, Node, ReadAt, RecordSlice, SliceReadError, SliceReader,
+    Vec3I32, Vertex,
 };
 
 use crate::resident::MAX_RESIDENT_MAP_BYTES;
@@ -314,6 +315,58 @@ impl PxbspResidentMap {
             .expect("validated native PXBSP plane alignment")
     }
 
+    /// Decode one face record with the aligned halfword loads the PXBSP lump
+    /// layout guarantees.
+    ///
+    /// The ten-byte face record holds three `u16` fields at offsets zero, two
+    /// and four. Reached through a `&[u8]` their alignment is unknown, so the
+    /// MIPS guest assembles each one from two `lbu` and a shift-or: six loads
+    /// where three would do, on the hottest record in the renderer. Every
+    /// resident lump sits at a four-byte-aligned offset and the stride is
+    /// even, so every record base is two-byte aligned; `validate_references`
+    /// rejects a map where that does not hold.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be less than `self.faces().len()`.
+    #[cfg(target_endian = "little")]
+    #[inline(always)]
+    pub unsafe fn face_at_unchecked(&self, index: usize) -> Face {
+        unsafe {
+            let base = self
+                .lump_bytes(PxbspLumpKind::Faces)
+                .as_ptr()
+                .add(index * Face::SIZE);
+            debug_assert_eq!(base as usize & 1, 0);
+            Face {
+                plane: core::ptr::read(base.cast::<u16>()) as i16,
+                first_vertex: i32::from(core::ptr::read(base.add(2).cast::<u16>())),
+                texture: core::ptr::read(base.add(4).cast::<u16>()) as i16,
+                flags: u16::from(core::ptr::read(base.add(6))),
+                vertex_count: i16::from(core::ptr::read(base.add(7))),
+                light_styles: [core::ptr::read(base.add(8)), core::ptr::read(base.add(9))],
+            }
+        }
+    }
+
+    /// Borrow the render-tree nodes in their wire layout.
+    ///
+    /// [`Self::nodes`] reconstructs the larger semantic [`Node`] aggregate,
+    /// which costs sixteen byte loads and their shift-and-or assembly on every
+    /// tree step even when the step reads only a plane index and one child.
+    /// Every resident lump is placed at a four-byte-aligned offset and
+    /// `validate_references` rejects a map whose node lump is not compatible
+    /// with `CompactNode`, so this view is always available.
+    pub fn compact_nodes(&self) -> &[CompactNode] {
+        let records: RecordSlice<'_, Node> = self.records(PxbspLumpKind::Nodes);
+        if records.is_empty() {
+            return &[];
+        }
+        records
+            .as_native_compact_nodes()
+            .expect("validated native PXBSP node alignment")
+    }
+
     pub fn materials(&self) -> RecordSlice<'_, PxbspMaterial> {
         self.records(PxbspLumpKind::Materials)
     }
@@ -347,6 +400,23 @@ impl PxbspResidentMap {
         self.records(PxbspLumpKind::MarkSurfaces)
     }
 
+    /// Borrow the leaf mark-surface list as the `u16` array it already is.
+    ///
+    /// Read through `RecordSlice` each entry costs two `lbu` and a shift-or
+    /// because the slice cannot promise alignment; the visibility marking and
+    /// the render traversal walk this list several hundred entries deep every
+    /// frame. `validate_references` rejects a map whose mark lump is not
+    /// two-byte aligned, which no cooked file is.
+    #[cfg(target_endian = "little")]
+    pub fn mark_surfaces_native(&self) -> &[u16] {
+        let bytes = self.lump_bytes(PxbspLumpKind::MarkSurfaces);
+        debug_assert_eq!(bytes.as_ptr() as usize & 1, 0);
+        // SAFETY: the lump length is a multiple of the two-byte record size
+        // (checked by `RecordSlice::new` at every accessor) and the base is
+        // two-byte aligned (checked at load).
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u16>(), bytes.len() / 2) }
+    }
+
     pub fn visibility(&self) -> &[u8] {
         self.lump_bytes(PxbspLumpKind::Visibility)
     }
@@ -362,7 +432,7 @@ impl PxbspResidentMap {
         }
         let leaf = self.leaves().get(leaf_index)?;
         let offset = usize::try_from(leaf.visibility_offset).ok()?;
-        let visible_leaves = usize::try_from(self.brush_models().get(0)?.visible_leaves).ok()?;
+        let visible_leaves = usize::try_from(self.world_visible_leaves()?).ok()?;
         decompress_leaf_row(self.visibility(), offset, visible_leaves, output)
     }
 
@@ -398,6 +468,28 @@ impl PxbspResidentMap {
         let offset = 18 + slot.checked_mul(2)?;
         let low = *bytes.get(offset)?;
         let high = *bytes.get(offset + 1)?;
+        Some(i16::from_le_bytes([low, high]))
+    }
+
+    /// World model's render-BSP head node, without reconstructing the rest of
+    /// the 32-byte record.
+    ///
+    /// Same reason as [`Self::model_head_node`]: `point_leaf_index` and
+    /// `aabb_touches_visible_leaf` each opened `brush_models().get(0)` purely
+    /// to read `head_nodes[0]`, which rebuilt bounds, origin, the other three
+    /// head nodes, the visible-leaf count and the face range on every call.
+    /// Those two run several times per simulation tick and once per queried
+    /// bounds, and the decode measured 8.1M cycles over the benchmark window.
+    fn world_head_node(&self) -> Option<i16> {
+        self.model_head_node(0, 0)
+    }
+
+    /// World model's addressable empty-leaf count, read as one halfword. The
+    /// offset mirrors `<BrushModel as CookedRecord>::decode`.
+    fn world_visible_leaves(&self) -> Option<i16> {
+        let bytes = self.brush_models().record_bytes(0)?;
+        let low = *bytes.get(26)?;
+        let high = *bytes.get(27)?;
         Some(i16::from_le_bytes([low, high]))
     }
 
@@ -449,13 +541,12 @@ impl PxbspResidentMap {
 
     /// Locate a Q20.12 world point in the validated render BSP.
     pub fn point_leaf_index(&self, point: Vec3I32) -> Option<usize> {
-        let world = self.brush_models().get(0)?;
-        let mut node_index = world.head_nodes[0];
+        let mut node_index = self.world_head_node()?;
         loop {
             if node_index < 0 {
                 return Some((-1i32 - node_index as i32) as usize);
             }
-            let node = unsafe { self.nodes().get_unchecked(node_index as usize) };
+            let node = unsafe { self.compact_nodes().get_unchecked(node_index as usize) };
             let plane = unsafe { self.planes().get_unchecked(node.plane as usize) };
             let dot = match plane.kind {
                 0 => point.x,
@@ -494,11 +585,11 @@ impl PxbspResidentMap {
         {
             return false;
         }
-        let Some(world) = self.brush_models().get(0) else {
+        let Some(head_node) = self.world_head_node() else {
             return false;
         };
         let mut stack = [0i16; NODE_STACK_CAPACITY];
-        stack[0] = world.head_nodes[0];
+        stack[0] = head_node;
         let mut stack_len = 1usize;
         while stack_len != 0 {
             stack_len -= 1;
@@ -515,7 +606,7 @@ impl PxbspResidentMap {
                 continue;
             }
 
-            let node = unsafe { self.nodes().get_unchecked(node_index as usize) };
+            let node = unsafe { self.compact_nodes().get_unchecked(node_index as usize) };
             let plane = unsafe { self.planes().get_unchecked(node.plane as usize) };
             let (minimum_dot, maximum_dot) = aabb_plane_dot_range(mins, maxs, *plane);
             let minimum_distance = minimum_dot.saturating_sub(plane.distance);
@@ -601,6 +692,24 @@ impl PxbspResidentMap {
         let plane_records: RecordSlice<'_, CompactPlane> = self.records(PxbspLumpKind::Planes);
         if !plane_records.is_empty() && plane_records.as_native_compact_planes().is_none() {
             return Err(PxbspMapLoadError::BadPlane(0));
+        }
+        // Same contract as the planes above, so the traversals can read the
+        // wire node record in place. The cooker writes every lump at a
+        // four-byte-aligned file offset and the owned loader re-aligns to
+        // four, so this rejects only a hand-built or truncated file.
+        let node_records: RecordSlice<'_, Node> = self.records(PxbspLumpKind::Nodes);
+        if !node_records.is_empty() && node_records.as_native_compact_nodes().is_none() {
+            return Err(PxbspMapLoadError::BadNode(0));
+        }
+        // `face_at_unchecked` reads the record's three `u16` fields with
+        // aligned halfword loads, which needs a two-byte-aligned lump base.
+        if self.lump_bytes(PxbspLumpKind::Faces).as_ptr() as usize & 1 != 0 {
+            return Err(PxbspMapLoadError::BadFace(0));
+        }
+        // Same for the mark-surface list, which `mark_surfaces_native`
+        // borrows as a plain `&[u16]`.
+        if self.lump_bytes(PxbspLumpKind::MarkSurfaces).as_ptr() as usize & 1 != 0 {
+            return Err(PxbspMapLoadError::BadMarkSurface(0));
         }
         let planes = self.planes();
         let materials = self.materials();
@@ -1263,6 +1372,96 @@ pub(crate) mod tests {
                 }
             }
             assert_eq!(actual, expected, "sign bits {sign_bits}");
+        }
+    }
+
+    #[test]
+    fn the_native_mark_surface_view_agrees_with_the_record_slice() {
+        for bytes in [
+            write_file(&valid_lumps()),
+            write_file_version(&legacy_lumps(), crate::pxbsp::PXBSP_VERSION_V1),
+        ] {
+            let map = load(&bytes).expect("resident map");
+            let records = map.mark_surfaces();
+            let native = map.mark_surfaces_native();
+            assert_eq!(native.len(), records.len());
+            assert!(!native.is_empty(), "fixture has no mark surfaces");
+            for index in 0..records.len() {
+                assert_eq!(
+                    native[index],
+                    records.get(index).expect("mark"),
+                    "mark {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_aligned_face_read_agrees_with_the_record_decode() {
+        // `face_at_unchecked` swaps six byte loads for three halfword loads.
+        // Every field, on both the native and the transcoded legacy layout,
+        // has to come back exactly as `Face::decode` produced it.
+        for bytes in [
+            write_file(&valid_lumps()),
+            write_file_version(&legacy_lumps(), crate::pxbsp::PXBSP_VERSION_V1),
+        ] {
+            let map = load(&bytes).expect("resident map");
+            let count = map.faces().len();
+            assert!(count > 0, "fixture has no faces to compare");
+            for index in 0..count {
+                assert_eq!(
+                    unsafe { map.face_at_unchecked(index) },
+                    map.faces().get(index).expect("face"),
+                    "face {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_compact_node_view_agrees_with_the_semantic_node_decode() {
+        // `compact_nodes` reads the wire record in place instead of
+        // reconstructing `Node`. Every field the traversals use has to come
+        // back identical, bounds included once the grid codes are expanded.
+        for bytes in [
+            write_file(&valid_lumps()),
+            write_file_version(&legacy_lumps(), crate::pxbsp::PXBSP_VERSION_V1),
+        ] {
+            let map = load(&bytes).expect("resident map");
+            let compact = map.compact_nodes();
+            assert_eq!(compact.len(), map.nodes().len());
+            assert!(!compact.is_empty(), "fixture has no nodes to compare");
+            for (index, native) in compact.iter().enumerate() {
+                let node = map.nodes().get(index).expect("node");
+                assert_eq!(native.plane, node.plane, "node {index} plane");
+                assert_eq!(native.children, node.children, "node {index} children");
+                assert_eq!(
+                    native.first_face, node.first_face,
+                    "node {index} first face"
+                );
+                assert_eq!(
+                    native.face_count, node.face_count,
+                    "node {index} face count"
+                );
+                assert_eq!(
+                    Vec3I16 {
+                        x: crate::decode_node_bound_min(native.mins[0]),
+                        y: crate::decode_node_bound_min(native.mins[1]),
+                        z: crate::decode_node_bound_min(native.mins[2]),
+                    },
+                    node.mins,
+                    "node {index} mins"
+                );
+                assert_eq!(
+                    Vec3I16 {
+                        x: crate::decode_node_bound_max(native.maxs[0]),
+                        y: crate::decode_node_bound_max(native.maxs[1]),
+                        z: crate::decode_node_bound_max(native.maxs[2]),
+                    },
+                    node.maxs,
+                    "node {index} maxs"
+                );
+            }
         }
     }
 
