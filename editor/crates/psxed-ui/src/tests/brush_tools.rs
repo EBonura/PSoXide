@@ -11,13 +11,22 @@ fn polyline_grab_point(polyline: &[Pos2]) -> Pos2 {
     }
 }
 
+/// One frame of 3D-viewport pointer input, resolved the way the live
+/// viewport resolves it. `pointer_target` is what the real draw loop
+/// hands the tools, and the Select tool's click dispatch reads it, so a
+/// hard-coded `None` here would silently under-drive every selection.
 fn brush_frame(harness: &ViewportHarness, pointer: Pos2) -> ToolFrame3d {
     ToolFrame3d {
         rect: harness.viewport,
         pointer_interact: Some(pointer),
         pointer_hover: Some(pointer),
         modifiers: egui::Modifiers::default(),
-        pointer_target: None,
+        pointer_target: harness.workspace.resolve_viewport_3d_pointer_target(
+            harness.viewport,
+            pointer,
+            None,
+            true,
+        ),
         hover_room: None,
         drag_delta_y: 0.0,
     }
@@ -42,6 +51,13 @@ fn draw_brush_3d(
     tool.primary_pressed(&mut harness.workspace, &height_press);
     tool.primary_dragged(&mut harness.workspace, &height_drag);
     tool.primary_released(&mut harness.workspace, &height_drag);
+}
+
+fn fractional_corner_brush() -> psxed_project::brush::Brush {
+    psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128])
+        .clip([[101, 0, 0], [-155, 128, 0], [-155, 128, 128]])
+        .back
+        .expect("x + 2y = 101 clips a valid brush")
 }
 
 #[test]
@@ -1355,7 +1371,11 @@ fn handle_test_workspace(brush: psxed_project::brush::Brush) -> (EditorWorkspace
     let mut project = ProjectDocument::new("3D brush handles");
     project.active_scene_mut().brushes.push(brush);
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("3d-handles"), project);
-    workspace.active_tool = ViewTool::Brush;
+    // Sub-element handles live in the Vertex/Edge/Face toolbar modes, and
+    // `set_bsp_toolbar_mode` maps every one of those to `ViewTool::Select`.
+    // Draw (`ViewTool::Brush`) owns the pointer exclusively for creating new
+    // brushes, so a handle harness must not sit in it.
+    workspace.active_tool = ViewTool::Select;
     workspace.replace_brush_selection(0, None);
     workspace.snap_units = 16;
     workspace.camera_rig.mode = ViewportCameraMode::Free;
@@ -2028,6 +2048,59 @@ fn element_gizmo_rotation_and_scale_snap_every_vertex_to_active_grid() {
 }
 
 #[test]
+fn whole_brush_rotation_resnaps_fractional_solved_corners() {
+    let base = fractional_corner_brush();
+    assert!(base.is_pickable());
+    assert!(
+        !base.solved_vertices_on_grid(1, 0.01),
+        "precondition: integer plane points still solve to half-unit corners"
+    );
+    let solved = base.solve();
+    let center = std::array::from_fn(|axis| (solved.min[axis] + solved.max[axis]) * 0.5);
+    let mut project = ProjectDocument::new("rotation re-snaps solved corners");
+    project.active_scene_mut().brushes.push(base.clone());
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("rotation-resnap"), project);
+    workspace.snap_units = 1;
+    workspace.replace_brush_selection(0, None);
+    workspace.brush_element_transform = Some(crate::BrushElementTransformDrag {
+        index: 0,
+        base: base.clone(),
+        others: Vec::new(),
+        element_others: Vec::new(),
+        targets: Vec::new(),
+        center,
+        axis: 1,
+        rotate: true,
+        grid_safe_rotation: true,
+        rotation_snap_degrees: BRUSH_ROTATION_SNAP_DEGREES,
+        faces: (0..base.faces.len()).collect(),
+        start_pointer: Pos2::new(100.0, 0.0),
+        screen_axis: Vec2::RIGHT,
+        center_screen: Pos2::ZERO,
+        start_angle: 0.0,
+        applied: 0,
+    });
+
+    let angle = 70.0_f32.to_radians();
+    workspace
+        .update_brush_element_transform(Pos2::new(angle.cos() * 100.0, angle.sin() * 100.0), false);
+
+    assert_eq!(
+        workspace.brush_element_transform.as_ref().unwrap().applied,
+        90
+    );
+    assert!(
+        workspace.status.contains("Rotate 90°"),
+        "{}",
+        workspace.status
+    );
+    assert!(workspace.commit_brush_element_transform());
+    let rotated = &workspace.project.active_scene().brushes[0];
+    assert!(rotated.is_pickable());
+    assert!(rotated.solved_vertices_on_grid(1, 0.01));
+}
+
+#[test]
 fn face_element_gizmo_drag_moves_the_face_via_real_egui() {
     let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
     let (mut workspace, _) = handle_test_workspace(brush.clone());
@@ -2192,6 +2265,13 @@ fn top_view_select_and_brush_tools_pick_the_specific_topmost_brush_via_real_egui
 
         run_real_egui_orthographic_click(&mut workspace, [512.0, 384.0]);
 
+        if tool == ViewTool::Brush {
+            // Draw owns the pointer: a press authors a new footprint rather
+            // than picking, so a click there must never select geometry.
+            assert_eq!(workspace.selected_brush, None, "{tool:?}");
+            assert!(!workspace.brush_is_selected(1), "{tool:?}");
+            continue;
+        }
         assert_eq!(workspace.selected_brush, Some(1), "{tool:?}");
         assert_eq!(workspace.selected_brush_face, Some(5), "{tool:?}");
         assert!(workspace.brush_is_selected(1));
@@ -2236,6 +2316,13 @@ fn bsp_brush_click_selection_runs_through_real_egui_response_dispatch() {
             click,
             EditorViewport3dPresentation::edit(texture.id(), Vec::new()),
         );
+        if tool == ViewTool::Brush {
+            // Draw owns the pointer: a press authors a new footprint rather
+            // than picking, so a click there must never select geometry.
+            assert_eq!(harness.workspace.selected_brush, None, "{tool:?}");
+            assert!(!harness.workspace.brush_is_selected(1), "{tool:?}");
+            continue;
+        }
         assert_eq!(
             harness.workspace.selected_brush,
             Some(1),
@@ -2520,9 +2607,16 @@ fn brush_tool_face_drag_extrudes_top_face() {
         Pos2::new(500.0, 400.0),
         0.0,
     );
-    let tool = tool_impl_3d(ViewTool::Brush);
-    harness.workspace.brush_edit_mode = BrushEditMode::Face;
+    // Leaving Draw for Face mode is what the toolbar does, and it is what
+    // hands the pointer back to sub-element editing.
+    harness.workspace.set_bsp_toolbar_mode(BspToolbarMode::Face);
+    assert_eq!(
+        harness.workspace.selected_brush,
+        Some(0),
+        "leaving Draw keeps the brush the gesture just authored"
+    );
     harness.workspace.selection_mode = SelectionMode::Face;
+    let tool = tool_impl_3d(harness.workspace.active_tool);
     let solved = harness.workspace.project.active_scene().brushes[0].solve();
     let top_center = [
         (solved.min[0] + solved.max[0]) * 0.5,
@@ -2570,7 +2664,6 @@ fn brush_tool_modifier_clicks_clip_selected_brush() {
     let mut harness = ViewportHarness::floored_room("brush_tool_clip", 4);
     harness.frame(harness.room_center(), 3000.0);
     harness.workspace.active_tool = ViewTool::Brush;
-    let tool = tool_impl_3d(ViewTool::Brush);
 
     // Create and keep selected.
     draw_brush_3d(
@@ -2583,8 +2676,10 @@ fn brush_tool_modifier_clicks_clip_selected_brush() {
     let whole = harness.workspace.project.active_scene().brushes[0].solve();
 
     // Clip mode: two clicks across the middle, one above, one below the
-    // footprint on screen, then Enter (apply) cuts along the plane.
-    harness.workspace.set_brush_edit_mode(BrushEditMode::Clip);
+    // footprint on screen, then Enter (apply) cuts along the plane. Clip is
+    // a Select-tool mode; Draw never takes clip points.
+    harness.workspace.set_bsp_toolbar_mode(BspToolbarMode::Clip);
+    let tool = tool_impl_3d(harness.workspace.active_tool);
     let clip_a = brush_frame(&harness, Pos2::new(400.0, 280.0));
     let clip_b = brush_frame(&harness, Pos2::new(400.0, 430.0));
     tool.primary_clicked(&mut harness.workspace, &clip_a);
@@ -2618,7 +2713,6 @@ fn brush_tool_clip_keep_back_replaces_in_place() {
     let mut harness = ViewportHarness::floored_room("brush_tool_clip_back", 4);
     harness.frame(harness.room_center(), 3000.0);
     harness.workspace.active_tool = ViewTool::Brush;
-    let tool = tool_impl_3d(ViewTool::Brush);
 
     draw_brush_3d(
         &mut harness,
@@ -2629,7 +2723,8 @@ fn brush_tool_clip_keep_back_replaces_in_place() {
     let whole = harness.workspace.project.active_scene().brushes[0].solve();
 
     harness.workspace.brush_clip_keep = BrushClipKeep::Back;
-    harness.workspace.set_brush_edit_mode(BrushEditMode::Clip);
+    harness.workspace.set_bsp_toolbar_mode(BspToolbarMode::Clip);
+    let tool = tool_impl_3d(harness.workspace.active_tool);
     let clip_a = brush_frame(&harness, Pos2::new(400.0, 280.0));
     let clip_b = brush_frame(&harness, Pos2::new(400.0, 430.0));
     tool.primary_clicked(&mut harness.workspace, &clip_a);
@@ -2908,6 +3003,59 @@ fn snap_selected_brush_rounds_points() {
     assert_eq!(solved.max, [64.0, 64.0, 64.0]);
 }
 
+#[test]
+fn snap_selected_brush_repairs_visible_corners_and_reports_a_no_op_second_time() {
+    let mut harness = ViewportHarness::floored_room("brush_snap_sel_solved", 4);
+    let brush = fractional_corner_brush();
+    assert!(
+        !brush.solved_vertices_on_grid(1, 0.01),
+        "precondition: integer plane points still solve to half-unit corners"
+    );
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(brush.clone());
+    harness.workspace.snap_units = 1;
+    harness.workspace.replace_brush_selection(0, None);
+
+    harness.workspace.snap_selected_brush();
+
+    let snapped = harness.workspace.project.active_scene().brushes[0].clone();
+    assert_ne!(snapped, brush, "the fractional corners must be re-authored");
+    assert!(snapped.is_pickable());
+    assert!(snapped.solved_vertices_on_grid(1, 0.01));
+    assert!(harness.workspace.is_dirty());
+    assert!(
+        harness
+            .workspace
+            .status
+            .starts_with("Snapped brush to Grid"),
+        "{}",
+        harness.workspace.status
+    );
+
+    // A brush already on the grid passes straight through: no second undo
+    // step, no geometry churn, and the status says so rather than reading
+    // as a refusal.
+    harness.workspace.snap_selected_brush();
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0],
+        snapped,
+        "re-snapping an on-grid brush must not churn it"
+    );
+    assert!(
+        harness.workspace.status.contains("already on Grid"),
+        "{}",
+        harness.workspace.status
+    );
+
+    // The repair is exactly one undo step.
+    harness.workspace.do_undo();
+    assert_eq!(harness.workspace.project.active_scene().brushes[0], brush);
+}
+
 fn off_grid_absolute_snap_workspace(name: &str) -> EditorWorkspace {
     let mut project = ProjectDocument::new(name);
     project
@@ -3000,6 +3148,31 @@ fn snap_level_quantises_every_brush_as_one_undo_step() {
 
     workspace.do_undo();
     assert_eq!(workspace.project.active_scene().brushes, originals);
+}
+
+#[test]
+fn snap_level_repairs_visible_corners_not_only_authored_plane_points() {
+    let brush = fractional_corner_brush();
+    assert!(!brush.solved_vertices_on_grid(1, 0.01));
+    let project = ProjectDocument::new("snap fractional solved corners");
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("snap-solved-level"), project);
+    // Insert after workspace loading, whose legacy-project normalisation is a
+    // separate repair path. Snap level must repair geometry produced during
+    // the current editing session too.
+    workspace.project.active_scene_mut().brushes.push(brush);
+    workspace.snap_units = 1;
+
+    workspace.snap_all_brushes_to_grid();
+
+    assert!(workspace.is_dirty());
+    assert!(
+        workspace.status.starts_with("Snapped 1 brush"),
+        "{}",
+        workspace.status
+    );
+    let snapped = &workspace.project.active_scene().brushes[0];
+    assert!(snapped.is_pickable());
+    assert!(snapped.solved_vertices_on_grid(1, 0.01));
 }
 
 #[test]
@@ -3810,7 +3983,6 @@ fn shift_click_in_3d_toggles_multi_selection() {
     let mut harness = ViewportHarness::floored_room("brush_multi_3d", 4);
     harness.frame(harness.room_center(), 3000.0);
     harness.workspace.active_tool = ViewTool::Brush;
-    let tool = tool_impl_3d(ViewTool::Brush);
 
     // Two brushes created through the tool.
     for (from, to) in [
@@ -3820,6 +3992,12 @@ fn shift_click_in_3d_toggles_multi_selection() {
         draw_brush_3d(&mut harness, from, to, 0.0);
     }
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 2);
+
+    // Selection is Select-mode work: leave Draw the way the toolbar does.
+    harness
+        .workspace
+        .set_bsp_toolbar_mode(BspToolbarMode::Select);
+    let tool = tool_impl_3d(harness.workspace.active_tool);
 
     // Click the first, shift-click the second: both selected.
     let click_a = brush_frame(&harness, Pos2::new(330.0, 330.0));
@@ -4286,10 +4464,14 @@ fn brush_contents_apply_to_multiselection_clear_movers_and_are_undoable() {
         harness.workspace.project.active_scene().brushes[0].mover,
         None
     );
-    assert!(harness
-        .workspace
-        .status
-        .contains("cannot be bound to a Door"));
+    assert!(
+        harness
+            .workspace
+            .status
+            .contains("cannot be assigned to a brush-model owner"),
+        "{}",
+        harness.workspace.status
+    );
 
     harness.workspace.do_undo();
     let brushes = &harness.workspace.project.active_scene().brushes;

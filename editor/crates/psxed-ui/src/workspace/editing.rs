@@ -1693,35 +1693,32 @@ impl EditorWorkspace {
             }
             let map = group_brush_transform_map(mode, axis, steps);
             let snap_step = i32::from(self.snap_units.max(1));
-            if mode == TransformGizmoMode::Rotate
-                && group_brushes
-                    .iter()
-                    .any(|target| !target.start.solved_vertices_on_grid(snap_step, 0.01))
-            {
-                self.status = format!(
-                    "Rotate rejected: group contains geometry outside Grid {} (lower the grid first)",
-                    self.snap_units
-                );
-                return;
-            }
             let mut previews = Vec::with_capacity(group_brushes.len());
             for target in &group_brushes {
                 let mut brush = target.start.clone();
                 let faces: Vec<usize> = (0..brush.faces.len()).collect();
                 if brush.transform_selected_snapped(&faces, &[], pivot, map, 0.5, snap_step) == 0
                     || !brush.is_pickable()
-                    || (mode == TransformGizmoMode::Rotate
-                        && !brush.solved_vertices_on_grid(snap_step, 0.01))
                 {
                     self.status = if mode == TransformGizmoMode::Rotate {
                         format!(
-                            "Rotate {steps}° rejected: result would leave Grid {}",
+                            "Rotate {steps}° rejected: result would not form a valid solid on Grid {}",
                             self.snap_units
                         )
                     } else {
                         format!("Scale rejected on Grid {}", self.snap_units)
                     };
                     return;
+                }
+                if mode == TransformGizmoMode::Rotate {
+                    let Some(snapped) = brush.snapped_solved_to_grid(snap_step) else {
+                        self.status = format!(
+                            "Rotate {steps}° rejected: result cannot be re-snapped as a valid solid on Grid {}",
+                            self.snap_units
+                        );
+                        return;
+                    };
+                    brush = snapped;
                 }
                 previews.push((target.index, brush));
             }
