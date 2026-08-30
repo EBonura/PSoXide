@@ -264,6 +264,7 @@ pub(crate) fn animation_set_action_clip(
                     let role_matches = match action {
                         CharacterAnimationAction::HeavyAttack
                         | CharacterAnimationAction::ComboAttack
+                        | CharacterAnimationAction::RangedAttack
                         | CharacterAnimationAction::Block => false,
                         _ => action.role_hint().is_some_and(|role| {
                             clip.role == role

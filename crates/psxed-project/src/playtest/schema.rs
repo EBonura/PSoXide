@@ -1774,8 +1774,12 @@ pub struct PlaytestGameEntity {
     pub poise: u16,
     /// Touch/melee damage.
     pub touch_damage: u16,
-    /// Health pool at spawn.
+    /// First vitality channel's pool at spawn (Horizon).
     pub max_health: u16,
+    /// Second vitality channel's pool at spawn (Zenith).
+    pub max_health_secondary: u16,
+    /// Souls credited to the player for the killing blow. Zero grants none.
+    pub soul_value: u16,
     /// Runtime flags from `psx_level::game_entity_flags`.
     pub flags: u16,
 }
