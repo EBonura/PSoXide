@@ -1097,11 +1097,16 @@ fn preview_combat_capsules(
     capsules
         .iter()
         .enumerate()
-        .filter(|(_, capsule)| match capsule.role {
+        .filter(|(index, capsule)| match capsule.role {
             psxed_project::CombatCapsuleRole::Hurtbox => true,
             psxed_project::CombatCapsuleRole::Hitbox { action, .. }
             | psxed_project::CombatCapsuleRole::ProjectileEmitter { action, .. } => {
-                action == previewed_action
+                // The capsule being edited always draws, even when it belongs
+                // to another action. Selecting one from the list and seeing
+                // nothing in the viewport, with no indication why, is worse
+                // than showing a capsule from a clip that is not on screen:
+                // its Action dropdown is right there to reassign it.
+                action == previewed_action || *index == selected
             }
         })
         .map(|(index, capsule)| {
@@ -8777,6 +8782,22 @@ mod focus_tests {
             model_import_preview::PreviewGizmoMode::Translate,
         );
         assert_eq!(idle.len(), 1, "the hurtbox has no action and always draws");
+
+        // Selecting a capsule that belongs to another action still draws it,
+        // so the viewport never goes blank on the thing being edited.
+        let editing_heavy_from_idle = preview_combat_capsules(
+            &capsules,
+            1,
+            true,
+            CharacterAnimationAction::Idle,
+            model_import_preview::PreviewGizmoMode::Translate,
+        );
+        assert_eq!(
+            editing_heavy_from_idle.len(),
+            2,
+            "hurtbox plus the selected capsule from another action"
+        );
+        assert!(editing_heavy_from_idle[1].selected);
     }
 
     #[test]
