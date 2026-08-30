@@ -1988,7 +1988,13 @@ pub(crate) fn push_game_entity(
     }
     if enemy.max_health == 0 {
         report.error(format!(
-            "Enemy on '{node_name}' has max health 0 (must be > 0)"
+            "Enemy on '{node_name}' has Horizon health 0 (must be > 0)"
+        ));
+        return false;
+    }
+    if enemy.max_health_secondary == 0 {
+        report.error(format!(
+            "Enemy on '{node_name}' has Zenith health 0 (must be > 0)"
         ));
         return false;
     }
@@ -2066,6 +2072,8 @@ pub(crate) fn push_game_entity(
         poise: enemy.poise,
         touch_damage: enemy.touch_damage,
         max_health: enemy.max_health,
+        max_health_secondary: enemy.max_health_secondary,
+        soul_value: enemy.soul_value,
         flags,
     });
     true

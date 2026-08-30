@@ -305,6 +305,74 @@ fn reset_texture_window() {
     write_gp0(gp0::tex_window(0, 0, 0, 0));
 }
 
+/// GPU semi-transparency equation for [`FontAtlas::draw_text_blended`].
+///
+/// The PSX blends a semi-transparent primitive against the framebuffer
+/// with one of four fixed equations. The choice is *not* per-primitive:
+/// the primitive only carries a "blend me" bit, and the equation comes
+/// from the two-bit ABR field of the current GP0(E1h) draw mode. These
+/// are the same four the rest of the SDK exposes as `psx_gpu::BlendMode`,
+/// restated here so the font crate does not take a dependency on the
+/// primitive layer to name two bits.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TextBlend {
+    /// `(background + foreground) / 2`. A fixed 50% wash; the tint still
+    /// recolours, but it cannot fade a glyph away -- at tint zero the
+    /// glyph still halves whatever is behind it.
+    Average,
+    /// `background + foreground`, clamped per channel. The mode to reach
+    /// for when text has to fade: scaling the tint toward black scales
+    /// the contribution toward nothing, so the glyph dissolves instead
+    /// of darkening. Reads as emissive, which suits HUD and combat text.
+    Add,
+    /// `background - foreground`, clamped per channel. Darkens whatever
+    /// is behind the glyph, so it works as a drop shadow over a light
+    /// background as well as a dark one.
+    Subtract,
+    /// `background + foreground / 4`, clamped per channel. A quarter-
+    /// strength [`Self::Add`] for a subtler glow.
+    AddQuarter,
+}
+
+impl TextBlend {
+    /// The two-bit draw-mode semi-transparency ("ABR") field selecting
+    /// this equation.
+    pub const fn abr(self) -> u8 {
+        match self {
+            Self::Average => 0,
+            Self::Add => 1,
+            Self::Subtract => 2,
+            Self::AddQuarter => 3,
+        }
+    }
+}
+
+/// GP0 command byte for a variable-size textured rectangle with the
+/// semi-transparency bit (25) set. The opaque path uses `0x6400_0000`.
+const SEMI_TRANSPARENT_RECT_CMD: u32 = 0x6600_0000;
+
+/// GP0 command byte for a variable-size MONOCHROME rectangle with the
+/// semi-transparency bit (25) set. The opaque form is `0x6000_0000`.
+///
+/// Untextured, so it costs three data words however large it is --
+/// which is what makes a backing plate cheaper than a second pass over
+/// the glyphs it sits behind.
+const SEMI_TRANSPARENT_FLAT_RECT_CMD: u32 = 0x6200_0000;
+
+/// The GP0(E1h) word that installs `tpage` with `blend`'s equation in
+/// the ABR field. Split out from the draw call so the bit layout is
+/// checkable on the host, where no GPU exists to observe.
+const fn blended_draw_mode_word(tpage: Tpage, blend: TextBlend) -> u32 {
+    gp0::draw_mode(
+        (tpage.x() / 64) as u32,
+        if tpage.y() == 256 { 1 } else { 0 },
+        blend.abr() as u32,
+        tpage.depth() as u32,
+        false,
+        true,
+    )
+}
+
 #[inline]
 fn pack_uv_word(u: u8, v: u8, high_word: u16) -> u32 {
     u as u32 | ((v as u32) << 8) | ((high_word as u32) << 16)
@@ -948,6 +1016,119 @@ impl FontAtlas {
         }
     }
 
+    /// Draw `text` with the GPU's semi-transparency enabled, blending
+    /// each glyph against the framebuffer with `blend`'s equation.
+    ///
+    /// **Fast path** -- same GP0 0x64 textured rectangle and same 4
+    /// words per glyph as [`Self::draw_text`], with the primitive's
+    /// semi-transparency bit set and the draw mode's ABR field carrying
+    /// the equation. The only extra cost is the one draw-mode word at
+    /// the start and the one that restores the opaque mode at the end.
+    ///
+    /// Why this exists: the opaque path can only recolour a glyph, and
+    /// a tint ramped toward black draws a *black* glyph, not an absent
+    /// one. [`TextBlend::Add`] plus a ramped tint is the PS1's real
+    /// fade -- at tint zero the glyph contributes nothing and vanishes.
+    ///
+    /// Restores the atlas's opaque draw mode before returning, so a
+    /// blended run cannot leave a stray blend equation on the GPU for
+    /// whatever draws next. As with [`Self::draw_text`], the tpage slot
+    /// is left pointing at this atlas.
+    pub fn draw_text_blended(
+        &self,
+        x: i16,
+        y: i16,
+        text: &str,
+        tint: (u8, u8, u8),
+        blend: TextBlend,
+    ) {
+        self.draw_text_blended_with_spacing(x, y, text, 0, tint, blend);
+    }
+
+    /// [`Self::draw_text_blended`] with signed inter-character spacing,
+    /// measured in screen pixels and not applied after the last glyph.
+    pub fn draw_text_blended_with_spacing(
+        &self,
+        x: i16,
+        y: i16,
+        text: &str,
+        letter_spacing: i8,
+        tint: (u8, u8, u8),
+        blend: TextBlend,
+    ) {
+        wait_cmd_ready();
+        write_gp0(blended_draw_mode_word(self.tpage, blend));
+        reset_texture_window();
+
+        let font = self.font;
+        let clut_word = self.clut_word;
+        // 0x66 rather than 0x64: same variable-size textured rectangle,
+        // with bit 25 (semi-transparency) set so the ABR field above
+        // actually applies.
+        let color_cmd = SEMI_TRANSPARENT_RECT_CMD | pack_color(tint.0, tint.1, tint.2);
+        let glyph_size = pack_xy(font.glyph_w as u16, font.glyph_h as u16);
+        let gap = i16::from(letter_spacing);
+        let mut cursor_x = x;
+        for ch in text.chars() {
+            let Some((u, v)) = self.glyph_uv(ch) else {
+                cursor_x = cursor_x
+                    .wrapping_add(font.glyph_advance(ch) as i16)
+                    .wrapping_add(gap);
+                continue;
+            };
+
+            wait_cmd_ready();
+            write_gp0(color_cmd);
+            write_gp0(pack_vertex(cursor_x, y));
+            write_gp0(pack_texcoord(u, v, clut_word));
+            write_gp0(glyph_size);
+
+            cursor_x = cursor_x
+                .wrapping_add(font.glyph_advance(ch) as i16)
+                .wrapping_add(gap);
+        }
+
+        // Leave the GPU in the opaque mode every other draw path assumes.
+        self.tpage.apply_as_draw_mode();
+    }
+
+    /// Draw a flat semi-transparent rectangle in `blend`'s equation --
+    /// a backing plate for a run of text drawn on top of it.
+    ///
+    /// This is a method on the atlas rather than a free function
+    /// because the blend equation is carried by the GP0(E1h) draw-mode
+    /// word, which also names a texture page. Setting one means setting
+    /// the other, so whatever changes the equation has to know which
+    /// page the glyphs that follow will want back -- and the atlas is
+    /// what knows that. It restores the atlas's opaque draw mode on the
+    /// way out, exactly as [`Self::draw_text_blended`] does.
+    ///
+    /// [`TextBlend::Subtract`] is the equation to reach for behind
+    /// text: it darkens whatever is under it and, because it scales
+    /// with the tint, it fades to nothing along with the text it seats.
+    /// [`TextBlend::Average`] cannot fade -- at tint zero it still
+    /// halves the background, so a plate drawn with it outlives the
+    /// glyphs and is left behind as a grey box.
+    pub fn draw_backdrop_blended(
+        &self,
+        x: i16,
+        y: i16,
+        w: u16,
+        h: u16,
+        tint: (u8, u8, u8),
+        blend: TextBlend,
+    ) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        wait_cmd_ready();
+        write_gp0(blended_draw_mode_word(self.tpage, blend));
+        write_gp0(SEMI_TRANSPARENT_FLAT_RECT_CMD | pack_color(tint.0, tint.1, tint.2));
+        write_gp0(pack_vertex(x, y));
+        write_gp0(pack_xy(w, h));
+        self.tpage.apply_as_draw_mode();
+    }
+
     /// Draw `text` at screen-space `(x, y)` scaled by `(scale_x,
     /// scale_y)`. `scale=(1, 1)` matches [`Self::draw_text`]'s
     /// output, but via the quad path instead of the rect path --
@@ -1427,6 +1608,90 @@ impl TextSink for FontAtlas {
 #[cfg(test)]
 mod tests {
     extern crate std;
+
+    use super::{
+        blended_draw_mode_word, TextBlend, SEMI_TRANSPARENT_FLAT_RECT_CMD,
+        SEMI_TRANSPARENT_RECT_CMD,
+    };
+    use psx_vram::{TexDepth, Tpage};
+
+    /// The blend equation is selected by the draw mode, not the
+    /// primitive, so these two bits are the whole mechanism. Pin them
+    /// against the hardware's documented ABR encoding.
+    #[test]
+    fn text_blend_maps_to_the_hardware_abr_field() {
+        assert_eq!(TextBlend::Average.abr(), 0);
+        assert_eq!(TextBlend::Add.abr(), 1);
+        assert_eq!(TextBlend::Subtract.abr(), 2);
+        assert_eq!(TextBlend::AddQuarter.abr(), 3);
+    }
+
+    /// The blended draw mode must differ from the opaque one in the ABR
+    /// field and NOWHERE else: same page, same depth, same flags. A
+    /// stray bit here would silently repoint the atlas or change its
+    /// colour depth mid-string.
+    #[test]
+    fn blended_draw_mode_only_moves_the_abr_bits() {
+        for tpage in [
+            Tpage::new(0, 0, TexDepth::Bit4),
+            Tpage::new(640, 256, TexDepth::Bit4),
+            Tpage::new(896, 0, TexDepth::Bit8),
+        ] {
+            let opaque = blended_draw_mode_word(tpage, TextBlend::Average);
+            for blend in [
+                TextBlend::Average,
+                TextBlend::Add,
+                TextBlend::Subtract,
+                TextBlend::AddQuarter,
+            ] {
+                let word = blended_draw_mode_word(tpage, blend);
+                assert_eq!(
+                    (word >> 5) & 3,
+                    u32::from(blend.abr()),
+                    "{blend:?} ABR field"
+                );
+                assert_eq!(
+                    word & !(3 << 5),
+                    opaque & !(3 << 5),
+                    "{blend:?} changed something other than ABR"
+                );
+            }
+            // The low nine bits are the same page/blend/depth encoding
+            // the SDK embeds in a textured primitive's UV word, so the
+            // rect path and the quad path address one atlas identically.
+            for blend in [TextBlend::Average, TextBlend::Add, TextBlend::Subtract] {
+                assert_eq!(
+                    blended_draw_mode_word(tpage, blend) & 0x1FF,
+                    u32::from(tpage.uv_tpage_word(blend.abr())),
+                    "{blend:?} page/blend/depth encoding"
+                );
+            }
+        }
+    }
+
+    /// The blended rectangle differs from the opaque one only by the
+    /// semi-transparency bit. If these ever diverge further, the blended
+    /// path has stopped being the same 4-word primitive.
+    #[test]
+    fn blended_rect_command_is_the_opaque_one_plus_bit_25() {
+        const OPAQUE_RECT_CMD: u32 = 0x6400_0000;
+        assert_eq!(SEMI_TRANSPARENT_RECT_CMD, OPAQUE_RECT_CMD | (1 << 25));
+    }
+
+    /// The backdrop is the MONOCHROME rectangle, not the textured one:
+    /// same bit-25 rule, one opcode lower, and three data words instead
+    /// of four however large the plate is. That word count is the whole
+    /// reason a plate is cheaper than a second pass over the glyphs.
+    #[test]
+    fn blended_backdrop_command_is_the_flat_rect_plus_bit_25() {
+        const OPAQUE_FLAT_RECT_CMD: u32 = 0x6000_0000;
+        assert_eq!(
+            SEMI_TRANSPARENT_FLAT_RECT_CMD,
+            OPAQUE_FLAT_RECT_CMD | (1 << 25)
+        );
+        // Untextured, so it must NOT carry the textured rect's opcode.
+        assert_ne!(SEMI_TRANSPARENT_FLAT_RECT_CMD, SEMI_TRANSPARENT_RECT_CMD);
+    }
 
     /// The wrap scan in `psx-engine`'s UI carries a running sum of
     /// `glyph_advance` instead of re-measuring each prefix with

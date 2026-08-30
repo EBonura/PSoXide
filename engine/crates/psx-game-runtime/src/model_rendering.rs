@@ -39,6 +39,13 @@ use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 mod equipment;
 pub use equipment::ASSEMBLED_Q12;
 mod instances;
+mod shadows;
+
+pub use self::shadows::{
+    draw_actor_projected_shadow, draw_model_instance_projected_shadows, projected_shadow_material,
+    projected_shadow_options, projected_shadow_origin, projected_shadow_rotation,
+    ProjectedShadowTuning, ShadowLight,
+};
 
 pub use self::instances::{
     accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
@@ -116,6 +123,10 @@ pub struct ModelDrawKnobs {
     /// opaque texture and the legacy green construction cage.
     pub equipment_materialization_skins:
         [Option<EquipmentMaterializationSkin>; MAX_PLAYER_EQUIPMENT],
+    /// Energy colour for equipment riding a model INSTANCE (enemies), which
+    /// has no per-record wireframe beat to key off. `None` keeps the weapon's
+    /// own lit texture.
+    pub instance_equipment_skin: Option<EquipmentMaterializationSkin>,
     /// Apply the authored hidden -> partial wireframe -> textured visibility
     /// envelope. Instance equipment and previews that do not use an authored
     /// beat leave this disabled and draw the complete textured model.
@@ -1104,6 +1115,108 @@ pub fn resolve_player_actor_pose<
     })
 }
 
+/// Energy colour of the player's dash cage.
+///
+/// The game's own cyan energy hue rather than the weapon materialisation's
+/// legacy green, so a dash and a weapon assembling on the same frame stay
+/// distinguishable.
+pub const DASH_WIRE_COLOR: (u8, u8, u8) = (96, 224, 255);
+
+/// Where in a dash clip the wireframe starts and ends, as Q8 fractions of the
+/// action's own playable frame range.
+///
+/// The motor travels over roughly the first two thirds of the dash and lands
+/// through the last third. Keeping the solid model on the wind-up and bringing
+/// it back for the landing is what makes the cage read as a phase *through*
+/// the dodge rather than a texture that blinks off. Stated as a fraction so a
+/// re-timed or replaced dash clip keeps the same proportions untouched.
+const DASH_WIRE_START_Q8: u32 = 32;
+const DASH_WIRE_END_Q8: u32 = 192;
+
+/// True while the pose is inside a dash clip's wireframe window.
+///
+/// Both dash slots are matched against the clip the pose is actually playing,
+/// which is why no gameplay flag has to reach the renderer: a locked-on side
+/// evade is the only thing that binds those clips.
+fn dash_wireframe_active(
+    character: &RuntimeCharacter,
+    clip_local: ModelClipIndex,
+    animation: Animation<'static>,
+    phase_q12: u32,
+) -> bool {
+    let matches = |action| {
+        character.action_clip(action) == psx_level::OptionalModelClipIndex::some(clip_local)
+    };
+    let action = if matches(CharacterAnimationAction::DashLeft) {
+        CharacterAnimationAction::DashLeft
+    } else if matches(CharacterAnimationAction::DashRight) {
+        CharacterAnimationAction::DashRight
+    } else {
+        return false;
+    };
+    let (start_frame, end_frame) =
+        normalized_action_frame_range(animation, character.action_frame_range(action));
+    let start_phase = start_frame << 12;
+    let range_phase = end_frame.saturating_sub(start_frame) << 12;
+    let lo = start_phase + (range_phase * DASH_WIRE_START_Q8) / 256;
+    let hi = start_phase + (range_phase * DASH_WIRE_END_Q8) / 256;
+    phase_q12 >= lo && phase_q12 <= hi
+}
+
+/// One line per face, its longest bind-pose edge, from vertices the model
+/// submit has already skinned and projected.
+///
+/// Longest-edge rather than all three: three lines per face overlap into a
+/// solid bar at PS1 resolution and hide the silhouette, and a fixed-length cull
+/// thins the cage exactly where the mesh is finest. Same rule as the weapon
+/// materialisation cage, so the two effects read as the same material.
+///
+/// Bind-pose rather than screen-space edge lengths: which edge is longest
+/// barely changes under skinning, and choosing in model space means the cage
+/// does not flicker between edges as the pose animates.
+fn submit_model_wireframe<const OT_DEPTH: usize>(
+    lines: &mut impl PrimitiveSink<LineMono>,
+    projected: &[ProjectedVertex],
+    faces: &[TexturedModelRenderFace],
+    vertices: &[ModelVertex],
+    color: (u8, u8, u8),
+    options: WorldSurfaceOptions,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> u16 {
+    let wire_options = options.with_render_layer(psx_engine::WorldRenderLayer::Opaque);
+    let mut drawn = 0u16;
+    for face in faces {
+        let indices = face.vertex_indices();
+        let mut best = (0i32, 0usize, 0usize);
+        for corner in 0..3 {
+            let a = indices[corner] as usize;
+            let b = indices[(corner + 1) % 3] as usize;
+            let limit = projected.len().min(vertices.len());
+            if a >= limit || b >= limit {
+                continue;
+            }
+            let (pa, pb) = (vertices[a].position, vertices[b].position);
+            let dx = i32::from(pa.x) - i32::from(pb.x);
+            let dy = i32::from(pa.y) - i32::from(pb.y);
+            let dz = i32::from(pa.z) - i32::from(pb.z);
+            let length = dx * dx + dy * dy + dz * dz;
+            if length > best.0 {
+                best = (length, a, b);
+            }
+        }
+        if best.0 == 0 {
+            continue;
+        }
+        let (a, b) = (projected[best.1], projected[best.2]);
+        if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
+            continue;
+        }
+        world.submit_projected_line(lines, [a, b], color, wire_options);
+        drawn = drawn.saturating_add(1);
+    }
+    drawn
+}
+
 /// Draw the player model: pose the skeleton, skin the mesh, and submit
 /// the resulting faces into the ordering table.
 pub fn draw_player<
@@ -1243,6 +1356,69 @@ pub fn draw_player_from_pose<
             stats: TexturedModelRenderStats::default(),
             bounds_tests: 1,
             bounds_culled: 1,
+        };
+    }
+
+    // The dash is the one action that shows the player as an energy cage
+    // instead of a body. Keyed off the clip the pose is already playing, so no
+    // gameplay state has to be threaded down to the renderer.
+    //
+    // The cage rides the ORDINARY model submit with an empty face list: that
+    // poses the skeleton and projects the vertices through exactly the shipping
+    // GTE path, emits no triangles, and leaves the projected vertices in the
+    // caller's scratch for the line pass below. Teaching the model submit
+    // itself to draw edges was measured at -2.0% frame rate across every model
+    // in the scene (`textured_model_joints` +26%) purely from instantiating
+    // that function a second time, so it stays untouched.
+    if dash_wireframe_active(character, player_pose.clip_local(), anim, phase) {
+        telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
+        let faces = runtime_model_faces(runtime_model, model_faces);
+        let mut stats = match runtime_model_geometry(runtime_model, model_parts, model_vertices) {
+            Some(geometry) => {
+                let mut stats = world.submit_textured_model_predecoded_geometry_faces_layered(
+                    triangles,
+                    runtime_model.model_info,
+                    anim,
+                    phase,
+                    *camera,
+                    origin,
+                    model_rotation,
+                    local_to_world,
+                    pose_translation,
+                    &mut scratch.vertices,
+                    &mut scratch.joints,
+                    // Inert: an empty face list reads no material word, and a
+                    // line packet carries its own colour.
+                    psx_gpu::material::TextureMaterial::new(0, 0),
+                    None,
+                    options,
+                    &[],
+                    geometry,
+                    blend_from,
+                );
+                let projected = &scratch.vertices[..usize::from(stats.projected_vertices)];
+                stats.submitted_triangles = submit_model_wireframe(
+                    triangles,
+                    projected,
+                    faces,
+                    geometry.vertices,
+                    DASH_WIRE_COLOR,
+                    options,
+                    world,
+                );
+                stats
+            }
+            None => TexturedModelRenderStats {
+                vertex_overflow: true,
+                ..Default::default()
+            },
+        };
+        stats.culled_triangles = 0;
+        telemetry::stage_end(telemetry::stage::PLAYER_DRAW);
+        return PlayerModelDrawStats {
+            stats,
+            bounds_tests: 1,
+            bounds_culled: 0,
         };
     }
 

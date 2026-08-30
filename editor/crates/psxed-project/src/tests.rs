@@ -231,6 +231,10 @@ fn enemy_behavior_deserializes_without_combat_director_tuning_fields() {
         enemy.group_attack_delay_ticks,
         defaults.group_attack_delay_ticks
     );
+    // A project authored before souls existed grants the stock award rather
+    // than silently becoming worth nothing.
+    assert_eq!(enemy.soul_value, defaults.soul_value);
+    assert_ne!(defaults.soul_value, 0);
 }
 
 #[test]
@@ -1566,8 +1570,8 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
     };
     assert_eq!(
         animation_set.clips.len(),
-        9,
-        "idle, four-direction locomotion, attack, hit, stun and death ship"
+        11,
+        "idle, four-direction locomotion, light/heavy/ranged attacks, hit, stun and death ship"
     );
     for action in [
         CharacterAnimationAction::Idle,
@@ -1576,6 +1580,8 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
         CharacterAnimationAction::StrafeLeft,
         CharacterAnimationAction::StrafeRight,
         CharacterAnimationAction::LightAttack,
+        CharacterAnimationAction::HeavyAttack,
+        CharacterAnimationAction::RangedAttack,
         CharacterAnimationAction::HitReact,
         CharacterAnimationAction::Stun,
         CharacterAnimationAction::Death,
@@ -1641,8 +1647,8 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
     );
     let package = package.expect("default project produces a playtest package");
     assert!(
-        package.models.iter().any(|cooked| cooked.clip_count == 9),
-        "the cooked Heavy Enemy model carries all nine selected clips"
+        package.models.iter().any(|cooked| cooked.clip_count == 11),
+        "the cooked Heavy Enemy model carries all eleven selected clips"
     );
     assert!(
         package.game_entities.iter().any(|entity| {
@@ -1695,6 +1701,17 @@ fn current_player_attack_slots_are_exactly_the_four_direct_shoulders() {
     );
     assert!(!CharacterAnimationAction::PLAYER_ATTACKS
         .contains(&CharacterAnimationAction::VertComboAttack));
+    assert!(!CharacterAnimationAction::PLAYER_ATTACKS
+        .contains(&CharacterAnimationAction::RangedAttack));
+    assert_eq!(
+        CharacterAnimationAction::guess_from_name("three chimney missile salvo"),
+        Some(CharacterAnimationAction::RangedAttack)
+    );
+    assert_eq!(
+        CharacterAnimationAction::RangedAttack.to_index(),
+        33,
+        "the new NPC ranged slot stays appended after every legacy index"
+    );
 }
 
 #[test]
@@ -2363,7 +2380,7 @@ fn default_project_uses_the_texture_free_twin_ladder_hud() {
     assert_eq!(zenith.2, UiValueBinding::PlayerHealthSecondaryMax);
     assert_eq!((zenith.3, zenith.4), (None, 0));
 
-    for (name, text) in [("Horizon Name", "HRZ"), ("Zenith Name", "ZNT")] {
+    for (name, text) in [("Horizon Name", "HRZ"), ("Zenith Name", "ZTH")] {
         let authored = hud
             .nodes()
             .iter()

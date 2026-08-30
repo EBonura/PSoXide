@@ -872,8 +872,66 @@ impl Playtest {
             not(feature = "vis-full-active-chunks")
         ))]
         self.prewarm_visible_cell_caches();
+        // DISABLED until the heavy enemy is placed in the level.
+        //
+        // The authored end condition is defeating the HEAVY enemy, and the
+        // level currently places only the light one, so "every entity is
+        // Dead" is not the condition we want. Worse, `Dead` is also the
+        // state disabled entities spawn in, so with only a `count() > 0`
+        // guard this could be satisfied from the first tick and request a
+        // `pause_world` scene state every frame -- which reads as a shaky
+        // camera and a screen that dims at random.
+        //
+        // Re-enable by gating `check_run_complete` on the heavy enemy
+        // specifically rather than on all entities. Everything else the
+        // ending needs is built and tested: the "Ending" scene and scene
+        // state, `Ctx::request_scene_state`, and the consume in
+        // `GameApp::update`.
+        let _ = &mut *ctx;
+    }
+
+    /// Raise the authored ending state once nothing hostile is left alive.
+    ///
+    /// Death is read from [`psx_game_runtime::entities::GameEntityState::Dead`]
+    /// rather than from a health value on purpose: enemies carry a dual
+    /// Horizon/Zenith vitality and are only defeated when BOTH pools are
+    /// empty, so the entity state machine is the one place that already knows
+    /// the answer. It is also the state disabled entities spawn in, hence the
+    /// `count() > 0` guard -- a level with no entities has not been won.
+    ///
+    /// Polled rather than latched. The flow driver ignores a request for the
+    /// state it is already entering, and the transition it starts stops the
+    /// world updating, so this cannot fire twice; a latch would be state to
+    /// keep correct for no benefit.
+    fn check_run_complete(&mut self, ctx: &mut Ctx) {
+        let count = self.game_entities.count();
+        if count == 0 {
+            return;
+        }
+        let all_defeated = (0..count).all(|index| {
+            self.game_entities.state(index) == psx_game_runtime::entities::GameEntityState::Dead
+        });
+        if !all_defeated {
+            return;
+        }
+        // Resolved by name, the same convention the cook already uses for the
+        // scene named "Loading" (`LOADING_UI_SCENE`). Keeping it out of the
+        // cooked schema means a project opts into an ending by naming a state,
+        // with no editor field and no manifest change. The scan only runs on
+        // the tick the last enemy falls, so its cost never enters the
+        // steady-state profile.
+        if let Some(state) = crate::generated::SCENE_STATES
+            .iter()
+            .find(|state| state.name == ENDING_SCENE_STATE_NAME)
+        {
+            ctx.request_scene_state(state.id);
+        }
     }
 }
+
+/// Name of the composed scene state entered when the run is complete.
+/// A project without a state by this name simply never ends.
+const ENDING_SCENE_STATE_NAME: &str = "Ending";
 
 /// Phase of the three-part walk (idle -> windup -> cruise -> winddown -> idle).
 /// `Idle` is the all-zero boot value.

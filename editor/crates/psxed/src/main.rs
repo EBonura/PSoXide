@@ -45,7 +45,7 @@
 //!   --world-height N      Suggested engine/world height (default 1024).
 //!   --center-animation-root
 //!                         Freeze root-joint translation while sampling clips.
-//!   --animation PATH     Add a standalone FBX animation take. Repeatable.
+//!   --animation PATH     Add a standalone FBX/glTF/GLB animation take. Repeatable.
 //!   --prune-detached-islands N
 //!                         Drop cooked-position detached islands up to N faces (default 4).
 //! ```
@@ -392,7 +392,7 @@ GLB-MODEL SUBCOMMAND:
                           [--world-height N]       (default 1024)
                           [--center-animation-root]
                           [--fixed-model-bounds]   (extra clips do not change model quantization bounds)
-                          [--animation <anim.fbx>] (repeatable)
+                          [--animation <anim.fbx|anim.gltf|anim.glb>] (repeatable)
                           [--keep-bones]            (disable default finger/end-bone collapse)
                           [--collapse-bones name,name,...]
                           [--prune-detached-islands N] (default 4)
@@ -729,8 +729,18 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
 
     let mut clip_paths: Vec<(std::path::PathBuf, &psxed_gltf::CookedClip)> =
         Vec::with_capacity(package.clips.len());
+    let mut clip_name_counts = BTreeMap::<String, usize>::new();
     for clip in &package.clips {
-        let path = out_dir.join(format!("{name}_{}.psxanim", clip.sanitized_name));
+        let count = clip_name_counts
+            .entry(clip.sanitized_name.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        let suffix = if *count == 1 {
+            clip.sanitized_name.clone()
+        } else {
+            format!("{}_{:02}", clip.sanitized_name, count)
+        };
+        let path = out_dir.join(format!("{name}_{suffix}.psxanim"));
         std::fs::write(&path, &clip.bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
         clip_paths.push((path, clip));
     }
@@ -802,14 +812,10 @@ fn convert_rigid_model_source(
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("fbx"));
-    if is_fbx && !animation_paths.is_empty() {
-        psxed_gltf::convert_fbx_rigid_model_path_with_animation_paths(input, animation_paths, cfg)
+    if !animation_paths.is_empty() {
+        psxed_gltf::convert_rigid_model_path_with_animation_paths(input, animation_paths, cfg)
     } else if is_fbx {
         psxed_gltf::convert_fbx_rigid_model_path(input, cfg)
-    } else if !animation_paths.is_empty() {
-        Err(psxed_gltf::Error::FbxImport(
-            "extra FBX animation takes currently require an FBX model source".to_string(),
-        ))
     } else {
         psxed_gltf::convert_rigid_model_path(input, cfg)
     }

@@ -95,6 +95,19 @@ impl VitalityPool {
         }
     }
 
+    /// Create a pool at an explicit current value.
+    ///
+    /// Runtimes that keep `current` in a dense state table and `maximum` in
+    /// the cooked record (the entity SoA does exactly that) rehydrate a pool
+    /// through here rather than duplicating the maximum per actor. A zero
+    /// authored maximum normalizes exactly as [`Self::full`] does, and a
+    /// current past the maximum clamps.
+    pub const fn at(current: u16, maximum: u16) -> Self {
+        let maximum = if maximum == 0 { 1 } else { maximum };
+        let current = if current > maximum { maximum } else { current };
+        Self { current, maximum }
+    }
+
     /// Current vitality.
     pub const fn current(self) -> u16 {
         self.current
@@ -164,6 +177,15 @@ impl DualVitality {
         let pool = VitalityPool::full(maximum_each);
         Self {
             pools: [pool, pool],
+        }
+    }
+
+    /// Rehydrate both channels from separately stored pools, so a runtime
+    /// holding its two currents in parallel arrays can borrow this type's
+    /// damage/spill/defeat rules verbatim instead of restating them.
+    pub const fn from_pools(first: VitalityPool, second: VitalityPool) -> Self {
+        Self {
+            pools: [first, second],
         }
     }
 
@@ -404,9 +426,8 @@ impl PowerUpLoadout {
                 continue;
             };
             for index in 0..psx_level::boost_stat::COUNT {
-                bonuses_q12[index] = bonuses_q12[index].saturating_add(
-                    module_stat_bonus_q12(vitality, slot, module, index),
-                );
+                bonuses_q12[index] = bonuses_q12[index]
+                    .saturating_add(module_stat_bonus_q12(vitality, slot, module, index));
             }
         }
 
@@ -421,16 +442,12 @@ impl PowerUpLoadout {
         let defence = bonuses_q12[psx_level::boost_stat::DEFENCE]
             .clamp(-i32::from(VITALITY_Q12_ONE) * 3, 3277);
         VitalityModifiers {
-            horizon_damage_q12: multiplier(
-                bonuses_q12[psx_level::boost_stat::HORIZON_ATTACK],
-            ),
+            horizon_damage_q12: multiplier(bonuses_q12[psx_level::boost_stat::HORIZON_ATTACK]),
             zenith_damage_q12: multiplier(bonuses_q12[psx_level::boost_stat::ZENITH_ATTACK]),
             incoming_damage_q12: (i32::from(VITALITY_Q12_ONE) - defence)
                 .clamp(i32::from(VITALITY_Q12_ONE / 5), i32::from(u16::MAX))
                 as u16,
-            movement_speed_q12: multiplier(
-                bonuses_q12[psx_level::boost_stat::MOVEMENT_SPEED],
-            ),
+            movement_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::MOVEMENT_SPEED]),
             attack_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::ATTACK_SPEED]),
         }
     }
@@ -457,9 +474,7 @@ pub fn module_stat_bonus_q12(
         VitalityPole::Empty => i32::from(influence).saturating_mul(2),
         VitalityPole::Full => i32::from(influence),
     };
-    let percent_q12 = i32::from(*percent)
-        .saturating_mul(i32::from(VITALITY_Q12_ONE))
-        / 100;
+    let percent_q12 = i32::from(*percent).saturating_mul(i32::from(VITALITY_Q12_ONE)) / 100;
     percent_q12.saturating_mul(potency_q12) / i32::from(VITALITY_Q12_ONE)
 }
 
@@ -672,6 +687,35 @@ mod tests {
             percentages: [0, 0, 0, 10, 5],
         },
     ];
+
+    /// A single hit larger than BOTH pools must defeat the actor, and the
+    /// spill remainder must be computed in a width that can hold it. This is
+    /// the case a narrowing subtraction silently gets wrong: `damage` is u16
+    /// and so is the pool, so `damage - first_pool` looks safe right up until
+    /// someone changes a type.
+    #[test]
+    fn one_hit_larger_than_both_pools_defeats_the_actor() {
+        for damage in [u16::MAX, u16::MAX - 1, 60_000, 201, 200] {
+            let mut vitality = DualVitality::equal(100);
+            let outcome = vitality.apply_spill(VitalityChannelId::One, damage);
+            assert!(outcome.actor_defeated, "damage {damage} must defeat");
+            assert!(vitality.is_defeated(), "damage {damage}");
+            assert_eq!(outcome.first_current, 0);
+            assert_eq!(outcome.second_current, 0);
+            assert_eq!(outcome.damage_applied, 200, "damage {damage}");
+        }
+    }
+
+    /// Exactly one short leaves one point in the SECOND pool, alive.
+    #[test]
+    fn one_short_of_both_pools_leaves_the_actor_alive() {
+        let mut vitality = DualVitality::equal(100);
+        let outcome = vitality.apply_spill(VitalityChannelId::One, 199);
+        assert!(!outcome.actor_defeated);
+        assert_eq!((outcome.first_current, outcome.second_current), (0, 1));
+        assert_eq!(outcome.damage_applied, 199);
+        assert!(vitality.apply_spill(VitalityChannelId::Two, 1).actor_defeated);
+    }
 
     #[test]
     fn polarity_is_full_at_endpoints_and_zero_at_midpoint() {
@@ -886,11 +930,7 @@ mod tests {
         assert!(inventory.assign(&mut loadout, BoostSlotId::HorizonFull, guard,));
         assert!(!inventory.contains(guard));
 
-        assert!(inventory.assign(
-            &mut loadout,
-            BoostSlotId::HorizonFull,
-            BoostModuleId::NONE,
-        ));
+        assert!(inventory.assign(&mut loadout, BoostSlotId::HorizonFull, BoostModuleId::NONE,));
         assert_eq!(
             loadout.module(BoostSlotId::HorizonFull),
             BoostModuleId::NONE
@@ -904,11 +944,7 @@ mod tests {
         let mut loadout = PowerUpLoadout::DEFAULT;
         let before = loadout;
 
-        assert!(!inventory.assign(
-            &mut loadout,
-            BoostSlotId::HorizonEmpty,
-            BoostModuleId(2),
-        ));
+        assert!(!inventory.assign(&mut loadout, BoostSlotId::HorizonEmpty, BoostModuleId(2),));
         assert_eq!(loadout, before);
         assert_eq!(inventory, BoostInventory::EMPTY);
     }

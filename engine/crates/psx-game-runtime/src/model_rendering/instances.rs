@@ -178,9 +178,16 @@ pub fn draw_actor_shadow<const OT_DEPTH: usize>(
         WorldVertex::new(x.saturating_add(h), y, z.saturating_add(h)),
         WorldVertex::new(x.saturating_sub(h), y, z.saturating_add(h)),
     ];
+    // Keep the actor clearance the caller already applied and add the decal's
+    // own nudge on top. The hardcoded `-6` replaced the clearance outright and
+    // ignored `ShadowTuning::depth_bias`, which no call site could therefore
+    // affect. Measured on the benchmark tape the visible change is small (the
+    // decal moves by about one OT slot, ~140 pixels of a 320x240 frame) and
+    // the cost is zero, but a tuning field that does nothing is worse than
+    // either value.
     let shadow_options = options
         .with_depth_policy(DepthPolicy::Average)
-        .with_depth_bias(-6)
+        .with_depth_bias(options.depth_bias.saturating_add(shadow.depth_bias))
         .with_cull_mode(CullMode::None)
         .with_material_layer(material);
     const UVS: [(u8, u8); 4] = [

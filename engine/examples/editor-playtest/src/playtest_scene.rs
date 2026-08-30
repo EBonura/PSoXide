@@ -2,6 +2,37 @@ use super::*;
 
 const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
 
+/// The faces kept in VRAM while gameplay is running.
+///
+/// Menus upload the whole cooked set; gameplay pays for these two and
+/// gives the rest of the band back to room textures. Slot 0 is the
+/// cooked HUD face, which the HUD, prompts and diagnostics all read.
+/// Slot 1 is the damage numbers' own face -- see [`DAMAGE_NUMBER_FACE`]
+/// for why combat feedback does not want the HUD's typography.
+///
+/// The second atlas is the whole cost of that decision: one 4bpp page
+/// run held for the length of a gameplay session, uploaded once on
+/// gameplay entry alongside the first.
+static GAMEPLAY_FONTS: [&psx_font::BitmapFont; 2] = [HUD_FACE, DAMAGE_NUMBER_FACE];
+
+/// The cooked HUD face, or the damage face when a project cooked no UI
+/// text at all (the uncooked stub manifest). Indexing `UI_FONTS[0]`
+/// unguarded would not compile against an empty table.
+const HUD_FACE: &psx_font::BitmapFont = if UI_FONTS.is_empty() {
+    DAMAGE_NUMBER_FACE
+} else {
+    UI_FONTS[0]
+};
+
+/// Font slot the damage numbers draw from. Their own, unless the
+/// project cooked too few slots to hold a second face, in which case
+/// they fall back to sharing the HUD's.
+const DAMAGE_FONT_SLOT: usize = if MAX_RUNTIME_UI_FONTS >= GAMEPLAY_FONTS.len() {
+    1
+} else {
+    0
+};
+
 fn boost_module(id: BoostModuleId) -> Option<&'static psx_level::BoostModuleRecord> {
     id.index().and_then(|index| BOOST_MODULES.get(index))
 }
@@ -43,6 +74,29 @@ impl<'a> UiScratch<'a> {
         self.push_str("%");
     }
 
+    /// Decimal `value`, 32-bit division only. The R3000 has no 64-bit divide,
+    /// so a per-frame number must not go through `push_u64`.
+    fn push_u32(&mut self, mut value: u32) {
+        let mut digits = [0u8; 10];
+        let mut count = 0usize;
+        loop {
+            digits[count] = b'0' + (value % 10) as u8;
+            count += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        while count > 0 {
+            count -= 1;
+            if self.len >= self.bytes.len() {
+                return;
+            }
+            self.bytes[self.len] = digits[count];
+            self.len += 1;
+        }
+    }
+
     fn push_u64(&mut self, mut value: u64) {
         let mut digits = [0u8; 20];
         let mut count = 0usize;
@@ -66,6 +120,41 @@ impl<'a> UiScratch<'a> {
 
     fn finish(self) -> Option<&'a str> {
         core::str::from_utf8(&self.bytes[..self.len]).ok()
+    }
+}
+
+impl Playtest {
+    /// Answer one `souls.` text tag. `tag` arrives with the namespace already
+    /// stripped, so this is a two-arm compare on the remainder.
+    ///
+    /// The soul total is drawn every frame while the HUD is up, so it formats
+    /// with 32-bit division only: `UiScratch::push_u64` would drag in the
+    /// software `__udivdi3` this target has no business calling from a
+    /// per-frame path.
+    fn souls_ui_text<'a>(&self, tag: &str, scratch: &'a mut [u8]) -> Option<&'a str> {
+        let mut out = UiScratch::new(scratch);
+        match tag {
+            "count" => out.push_u32(self.souls.total()),
+            "gain" => {
+                // The node is gated by `ui_node_visible`, but a scene that
+                // binds this tag without the gate must still not read "+0".
+                if !self.souls.showing_recent_gain(self.souls_now()) {
+                    return None;
+                }
+                out.push_str("+");
+                out.push_u32(self.souls.recent_gain());
+            }
+            _ => return None,
+        }
+        out.finish()
+    }
+
+    /// Gameplay tick the frame being composed belongs to. The soul popup is a
+    /// deadline compare rather than a countdown, so presentation reads the
+    /// same snapshot the rest of the overlay animates from instead of the
+    /// tick current at flip time (see `overlay_sim_tick`).
+    fn souls_now(&self) -> u32 {
+        self.prepared_overlay_sim_tick.as_u32()
     }
 }
 
@@ -163,6 +252,19 @@ impl Scene for Playtest {
     }
 
     fn ui_text<'a>(&self, tag: &str, scratch: &'a mut [u8]) -> Option<&'a str> {
+        // Localisation first: it is a single load and branch in English (see
+        // `loc::translate`), and it answers only its own `ui.` namespace, so
+        // the gameplay tags below are reached with one extra byte compare.
+        if let Some(translated) = crate::loc::translate(tag) {
+            return Some(translated);
+        }
+        // Souls answers ahead of the boost-menu setup below, which resolves a
+        // loadout slot and the whole vitality modifier stack before it reaches
+        // its match. A HUD label is drawn every frame; it must not pay the
+        // inventory screen's setup to print a number.
+        if let Some(souls_tag) = tag.strip_prefix("souls.") {
+            return self.souls_ui_text(souls_tag, scratch);
+        }
         let selected = BoostSlotId::from_index(self.selected_power_up_slot);
         let selected_item = self.selected_power_up_item;
         let slotted_item = self.power_up_loadout.module(selected);
@@ -260,6 +362,11 @@ impl Scene for Playtest {
     }
 
     fn ui_node_visible(&self, tag: &str) -> bool {
+        // Ahead of the loadout resolve below, for the same reason
+        // `souls_ui_text` runs ahead of the boost setup in `ui_text`.
+        if tag == "souls.gain" {
+            return self.souls.showing_recent_gain(self.souls_now());
+        }
         let selected = BoostSlotId::from_index(self.selected_power_up_slot);
         match tag {
             "inventory.item.0" => !self.power_up_inventory.item_at(0).is_none(),
@@ -273,6 +380,10 @@ impl Scene for Playtest {
     }
 
     fn game_ui_action(&mut self, id: u16, _ctx: &mut Ctx) {
+        if id == crate::loc::LANGUAGE_TOGGLE_ACTION {
+            crate::loc::cycle_language();
+            return;
+        }
         if let Some(item_index) = match id {
             210 => Some(0),
             211 => Some(1),
@@ -344,15 +455,18 @@ impl Scene for Playtest {
     }
 
     /// Acquire the incoming scene's font resource set. Front-end scenes share
-    /// the complete cooked set; gameplay keeps only slot zero, the font used by
-    /// the HUD, prompts, and optional diagnostics. The runtime releases the old
-    /// pack before the combined replacement upload, so menu typography never
-    /// occupies gameplay VRAM.
+    /// the complete cooked set; gameplay keeps [`GAMEPLAY_FONTS`]. The runtime
+    /// releases the old pack before the combined replacement upload, so menu
+    /// typography never occupies gameplay VRAM.
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
-        let scene_fonts = if state.has_gameplay() {
-            &UI_FONTS[..UI_FONTS.len().min(1)]
-        } else {
+        let scene_fonts: &'static [&'static psx_font::BitmapFont] = if !state.has_gameplay() {
             UI_FONTS
+        } else if MAX_RUNTIME_UI_FONTS >= GAMEPLAY_FONTS.len() {
+            &GAMEPLAY_FONTS
+        } else {
+            // A project that cooked fewer font slots than gameplay wants
+            // keeps the HUD face and lets the damage numbers share it.
+            &UI_FONTS[..UI_FONTS.len().min(1)]
         };
         assert!(
             acquire_ui_fonts(scene_fonts, &mut self.ui_fonts),
@@ -1217,6 +1331,21 @@ impl Scene for Playtest {
                 let player_lighting = self.current_room_lighting(camera);
                 let actor_options = current_actor_surface_options(self.room_index);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
+                #[cfg(feature = "actor-shadows-projected")]
+                {
+                    draw_player_projected_shadow(
+                        player_pose,
+                        player.y,
+                        &camera,
+                        actor_options,
+                        &self.model_faces[..self.model_face_count],
+                        &self.model_parts[..self.model_part_count],
+                        &self.model_vertices[..self.model_vertex_count],
+                        &mut primitive_packets,
+                        &mut world,
+                    );
+                }
+                #[cfg(not(feature = "actor-shadows-projected"))]
                 if !cfg!(feature = "actor-shadows-off") {
                     if let Some(shadow_material) = self.shadow_material {
                         draw_actor_shadow(
@@ -1438,6 +1567,18 @@ impl Scene for Playtest {
                 &mut world,
             );
 
+            // The locked target's health bar goes into the same ordering table
+            // as the world it has to be occluded by. Submitted after the actors
+            // so it shares their room surface options.
+            if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
+                let _ = self.draw_enemy_health_bar_world(
+                    camera,
+                    room_surface_options(room_record),
+                    &mut primitive_packets,
+                    &mut world,
+                );
+            }
+
             telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_active_chunks);
             emit_room_chunk_mask(
                 telemetry::counter::ROOM_ACTIVE_CHUNK_MASK_LO,
@@ -1645,6 +1786,20 @@ impl Scene for Playtest {
         if let Some(target) = self.lock_target_indicator_position() {
             draw_lock_target_indicator(target, camera, overlay_tick);
         }
+
+        // Damage numbers sit above the world and below the panels: they
+        // are combat feedback, so a message box that is up should cover
+        // them rather than compete with them.
+        // `FontAtlas` is `Copy`, so take the handle by value: holding a
+        // borrow of `self.ui_fonts` here would block the `&mut` the pool
+        // needs to retire its own expired slots.
+        if let Some(font) = self.ui_fonts[DAMAGE_FONT_SLOT] {
+            let room = self.room_index;
+            let _drawn = self
+                .damage_numbers
+                .draw(&font, camera, room, overlay_tick);
+        }
+
 
         #[cfg(feature = "fps-overlay")]
         if let Some(font) = self.ui_fonts[0].as_ref() {
@@ -1886,6 +2041,28 @@ impl Playtest {
         box_prop_profile_end(telemetry::stage::IMAGE_CARDS);
         telemetry::stage_end(telemetry::stage::IMAGE_PROPS);
         telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
+        #[cfg(feature = "actor-shadows-projected")]
+        {
+            draw_model_instance_projected_shadows(
+                room,
+                &self.instance_actor_poses,
+                camera,
+                actor_options,
+                if self.bsp.is_some() {
+                    // psx-numeric-allow-next-line: per-instance visibility bitmask, see the parameter
+                    u64::from(self.bsp_instance_visible_mask)
+                } else {
+                    // psx-numeric-allow-next-line: per-instance visibility bitmask, all instances visible
+                    u64::MAX
+                },
+                &self.model_faces[..self.model_face_count],
+                &self.model_parts[..self.model_part_count],
+                &self.model_vertices[..self.model_vertex_count],
+                primitive_packets,
+                world,
+            );
+        }
+        #[cfg(not(feature = "actor-shadows-projected"))]
         if !cfg!(feature = "actor-shadows-off") {
             if let Some(shadow_material) = self.shadow_material {
                 draw_model_instance_shadows(
