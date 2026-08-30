@@ -246,6 +246,38 @@ pub fn gp1_queue_pending() -> bool {
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_pending_gp1) != 0 }
 }
 
+/// Empty the queue and hand back the word the handler has not applied, so
+/// the caller can write it to GP1 itself. Returns 0 when nothing was queued.
+///
+/// The handler only applies its word at a blank edge on which the GPU
+/// reports idle, so a long enough run of busy edges leaves it queued
+/// indefinitely. A caller that has given up waiting must take the word
+/// rather than leave it: the next [`queue_gp1_at_vblank`] overwrites the
+/// slot, and a display start that never reaches the GPU desynchronises the
+/// display side from the draw side for the rest of the session.
+///
+/// Racing the handler is harmless. If the IRQ lands between the read and
+/// the clear, the handler applies the word and the caller writes the same
+/// value again; GP1(05h) is idempotent.
+#[cfg(target_arch = "mips")]
+#[inline]
+pub fn take_pending_gp1() -> u32 {
+    unsafe {
+        let word = core::ptr::read_volatile(&raw const __psx_rt_pending_gp1);
+        if word != 0 {
+            core::ptr::write_volatile(&raw mut __psx_rt_pending_gp1, 0);
+        }
+        word
+    }
+}
+
+/// Host: nothing is ever queued, so nothing can be taken.
+#[cfg(not(target_arch = "mips"))]
+#[inline]
+pub fn take_pending_gp1() -> u32 {
+    0
+}
+
 /// Host no-op: nothing is ever pending off-target.
 #[cfg(not(target_arch = "mips"))]
 #[inline]
