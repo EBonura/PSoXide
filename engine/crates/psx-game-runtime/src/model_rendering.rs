@@ -723,7 +723,7 @@ pub fn player_clip_duration_vblanks<
 >(
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     clip: ModelClipIndex,
     video_hz: VideoHz,
     speed_q8: u16,
@@ -747,7 +747,7 @@ pub fn player_action_push_speed<
 >(
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     anim: PlayerAnim,
     local_tick: u32,
     video_hz: VideoHz,
@@ -932,6 +932,36 @@ pub struct PlayerModelDrawStats {
     pub bounds_culled: u16,
 }
 
+/// Live Q8 playback speeds for the actions one player pose samples.
+///
+/// The vitality/power-up Attack Speed lane belongs to the caller, and the
+/// resolver reads exactly two numbers out of the character because of it.
+/// Passing those two numbers is what lets a caller keep borrowing the cooked
+/// 672-byte `RuntimeCharacter` instead of retuning a copy of it every
+/// simulation tick, on a CPU with no data cache behind that copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerActionSpeeds {
+    /// Speed for the pose's own action.
+    pub action_q8: u16,
+    /// Speed for the outgoing crossfade clip's action. Never read when the
+    /// caller passes no blend.
+    pub blend_q8: u16,
+}
+
+impl PlayerActionSpeeds {
+    /// The character's own authored speeds, i.e. no live retuning.
+    pub fn authored(
+        character: &RuntimeCharacter,
+        anim_action: CharacterAnimationAction,
+        blend: Option<PlayerAnimBlend>,
+    ) -> Self {
+        Self {
+            action_q8: character.action_speed(anim_action),
+            blend_q8: blend.map_or(0, |blend| character.action_speed(blend.anim.action())),
+        }
+    }
+}
+
 /// Draw the player's animated model through the compact predecoded
 /// model path.
 #[inline]
@@ -942,10 +972,11 @@ pub struct PlayerModelDrawStats {
 /// outgoing clip is missing from the loaded set (a missing clip
 /// degrades to a hard cut, never a corrupt pose).
 pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     runtime_model: RuntimeModelAsset,
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     blend: Option<PlayerAnimBlend>,
+    blend_speed_q8: u16,
     video_hz: VideoHz,
 ) -> Option<ModelPoseBlend<'static>> {
     let blend = blend?;
@@ -960,7 +991,7 @@ pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
         blend.local_tick,
         video_hz,
         character.action_loops(action),
-        character.action_speed(action),
+        blend_speed_q8,
         character.action_frame_range(action),
     );
     anim.looped_pose_sample_q12(phase)
@@ -983,7 +1014,7 @@ pub fn resolve_player_actor_pose<
     const MAX_RUNTIME_MODEL_CLIPS: usize,
 >(
     tables: ModelTables,
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     x: i32,
@@ -994,6 +1025,7 @@ pub fn resolve_player_actor_pose<
     clip_local: ModelClipIndex,
     anim_start_tick: SimTick,
     blend: Option<PlayerAnimBlend>,
+    speeds: PlayerActionSpeeds,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
 ) -> Option<PlayerActorPoseSnapshot> {
@@ -1005,10 +1037,10 @@ pub fn resolve_player_actor_pose<
         local_tick,
         video_hz,
         character.action_loops(anim_action),
-        character.action_speed(anim_action),
+        speeds.action_q8,
         character.action_frame_range(anim_action),
     );
-    let blend_from = player_pose_blend(character, model, clips, blend, video_hz);
+    let blend_from = player_pose_blend(character, model, clips, blend, speeds.blend_q8, video_hz);
     let clip_anchor = model_clip_anchor(tables, model, clip_local);
     let reference_anchor = clip_anchor;
     let pose_translation = model_pose_anchor_translation(
@@ -1059,7 +1091,7 @@ pub fn draw_player<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -1096,6 +1128,7 @@ pub fn draw_player<
         clip_local,
         anim_start_tick,
         blend,
+        PlayerActionSpeeds::authored(character, anim_action, blend),
         elapsed_tick,
         video_hz,
     ) else {
@@ -1137,7 +1170,7 @@ pub fn draw_player_from_pose<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     player_pose: PlayerActorPoseSnapshot,
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -1535,7 +1568,7 @@ pub fn draw_player_equipment<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -1904,7 +1937,7 @@ pub fn animation_phase_at_tick_q12(
 pub fn player_joint_world_transform(
     tables: ModelTables,
     runtime_model: RuntimeModelAsset,
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     animation: Animation<'static>,
     phase_q12: u32,
     x: i32,
