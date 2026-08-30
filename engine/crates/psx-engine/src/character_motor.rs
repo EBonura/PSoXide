@@ -26,6 +26,17 @@ const DEFAULT_BODY_HEIGHT: i32 = 48;
 /// Sits in the gap between demo-scale steps (<=~576) and real walls
 /// (>=~1152).
 const STEP_UP_HEIGHT: i32 = 40;
+/// Smallest upward normal component, Q12, that a surface may have and still be
+/// stood on.
+///
+/// Quake's rule: a plane is floor when its upward normal component is at least
+/// 0.7, roughly 45.6 degrees, and anything steeper is a wall the body slides
+/// down instead of climbing. The tests here only asked for a *positive*
+/// upward component, so a near-vertical face with a normal of 0.01 up counted
+/// as walkable floor and the body could ascend an almost sheer brush.
+///
+/// 0.7 * 4096 = 2867.
+const MIN_WALKABLE_FLOOR_NORMAL_Y_Q12: i16 = 2867;
 /// Largest drop the feet snap straight down to (the descent counterpart of
 /// [`STEP_UP_HEIGHT`]): walking down demo-scale steps stays glued to the
 /// floor. A larger drop -- a ledge, or a hole over a lower floor -- leaves
@@ -1588,7 +1599,7 @@ fn trace_supporting_floor<P: CollisionTraceProvider + ?Sized>(
         return Ok(None);
     }
     if near.fraction_q12 < COLLISION_FRACTION_ONE_Q12 {
-        if near.normal_q12[1] <= 0 {
+        if near.normal_q12[1] < MIN_WALKABLE_FLOOR_NORMAL_Y_Q12 {
             return Ok(None);
         }
         return Ok(Some(near.end.y));
@@ -1606,7 +1617,7 @@ fn trace_supporting_floor<P: CollisionTraceProvider + ?Sized>(
     if far.start_solid
         || far.all_solid
         || far.fraction_q12 >= COLLISION_FRACTION_ONE_Q12
-        || far.normal_q12[1] <= 0
+        || far.normal_q12[1] < MIN_WALKABLE_FLOOR_NORMAL_Y_Q12
     {
         return Ok(None);
     }
@@ -1686,7 +1697,7 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
     if settle.start_solid
         || settle.all_solid
         || settle.fraction_q12 >= COLLISION_FRACTION_ONE_Q12
-        || settle.normal_q12[1] <= 0
+        || settle.normal_q12[1] < MIN_WALKABLE_FLOOR_NORMAL_Y_Q12
     {
         return Ok(None);
     }
@@ -3446,6 +3457,54 @@ mod tests {
         .expect("floor trace");
         assert_eq!(floor, Some(1));
         assert_eq!(provider.calls, 1, "near contact must skip the long probe");
+    }
+
+    #[test]
+    fn a_face_steeper_than_the_walk_limit_is_not_floor() {
+        struct SlopeProvider {
+            normal_y: i16,
+        }
+
+        impl CollisionTraceProvider for SlopeProvider {
+            fn trace_into(
+                &mut self,
+                query: CollisionTraceQuery,
+                output: &mut CollisionTrace,
+            ) -> bool {
+                *output = CollisionTrace {
+                    fraction_q12: 10,
+                    end: query.start.with_y(1),
+                    normal_q12: [0, self.normal_y, 0],
+                    ..CollisionTrace::default()
+                };
+                true
+            }
+        }
+
+        let probe = |normal_y: i16| {
+            trace_supporting_floor(
+                &mut SlopeProvider { normal_y },
+                RoomPoint::new(0, 8, 0),
+                CollisionTraceShape::Body {
+                    radius: 12,
+                    height: 64,
+                },
+            )
+            .expect("floor trace")
+        };
+
+        // Flat ground and a gentle ramp are floor.
+        assert_eq!(probe(4096), Some(1), "flat ground is floor");
+        assert_eq!(probe(3547), Some(1), "a 30 degree ramp is floor");
+        assert_eq!(probe(MIN_WALKABLE_FLOOR_NORMAL_Y_Q12), Some(1), "the limit itself is floor");
+
+        // Anything steeper is a wall. Before the limit existed these all
+        // reported floor, so a body could walk up an almost sheer brush: the
+        // only test was that the upward component be positive at all.
+        assert_eq!(probe(MIN_WALKABLE_FLOOR_NORMAL_Y_Q12 - 1), None, "just past the limit is a wall");
+        assert_eq!(probe(2048), None, "a 60 degree face is a wall");
+        assert_eq!(probe(41), None, "an almost vertical face is a wall");
+        assert_eq!(probe(0), None, "a vertical wall is not floor");
     }
 
     #[test]
