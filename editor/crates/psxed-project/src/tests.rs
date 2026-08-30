@@ -153,6 +153,7 @@ fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
                 end: [0, 180, 0],
                 radius: 96,
             },
+            projectile_preview_rotation_q12: [0; 3],
             role: CombatCapsuleRole::Hurtbox,
         },
         CharacterCombatCapsule {
@@ -163,6 +164,7 @@ fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
                 end: [90, 0, 0],
                 radius: 42,
             },
+            projectile_preview_rotation_q12: [0; 3],
             role: CombatCapsuleRole::Hitbox {
                 action: CharacterAnimationAction::LightAttack,
                 active_start_frame: 8,
@@ -179,6 +181,7 @@ fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
                 end: [30, 0, 0],
                 radius: 36,
             },
+            projectile_preview_rotation_q12: [0, 512, 0],
             role: CombatCapsuleRole::ProjectileEmitter {
                 action: CharacterAnimationAction::LightAttack,
                 charge_start_frame: 6,
@@ -1701,8 +1704,9 @@ fn current_player_attack_slots_are_exactly_the_four_direct_shoulders() {
     );
     assert!(!CharacterAnimationAction::PLAYER_ATTACKS
         .contains(&CharacterAnimationAction::VertComboAttack));
-    assert!(!CharacterAnimationAction::PLAYER_ATTACKS
-        .contains(&CharacterAnimationAction::RangedAttack));
+    assert!(
+        !CharacterAnimationAction::PLAYER_ATTACKS.contains(&CharacterAnimationAction::RangedAttack)
+    );
     assert_eq!(
         CharacterAnimationAction::guess_from_name("three chimney missile salvo"),
         Some(CharacterAnimationAction::RangedAttack)
@@ -1939,6 +1943,181 @@ fn light_enemy_turn_and_alert_are_installed_in_every_enemy_project() {
             "{project_name} must bind the first-acquisition alert"
         );
     }
+}
+
+#[test]
+fn cortex_v03_light_enemy_attack_ladder_uses_named_horizon_and_zenith_clips() {
+    let root = projects_dir().join("cortex-ignition-tech-demo-0.3");
+    let project = ProjectDocument::load_from_path(root.join("project.ron"))
+        .expect("load Cortex Ignition tech demo 0.3");
+    let set = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationSet(set) if resource.name == "Light Enemy Animation Set" => {
+                Some(set)
+            }
+            _ => None,
+        })
+        .expect("Light Enemy animation set");
+    let bound_name = |action| {
+        let clip = set.action_clip(action).expect("bound Light Enemy attack");
+        project
+            .resource(clip)
+            .expect("bound attack resource")
+            .name
+            .as_str()
+    };
+    assert_eq!(
+        bound_name(CharacterAnimationAction::LightAttack),
+        "Light Enemy / Horizon Light"
+    );
+    assert_eq!(
+        bound_name(CharacterAnimationAction::HeavyAttack),
+        "Light Enemy / Horizon Heavy"
+    );
+    assert_eq!(
+        bound_name(CharacterAnimationAction::VertLightAttack),
+        "Light Enemy / Zenith Light"
+    );
+
+    for (path, expected_frames) in [
+        ("assets/animations/mantis_combat/horizon_light.psxanim", 62),
+        ("assets/animations/mantis_combat/horizon_heavy.psxanim", 143),
+        ("assets/animations/mantis_combat/zenith_light.psxanim", 70),
+    ] {
+        let bytes = std::fs::read(root.join(path)).unwrap_or_else(|error| {
+            panic!("read {path}: {error}");
+        });
+        let animation = psx_asset::Animation::from_bytes(&bytes)
+            .unwrap_or_else(|error| panic!("parse {path}: {error:?}"));
+        assert_eq!(animation.joint_count(), 22, "{path}");
+        assert_eq!(animation.frame_count(), expected_frames, "{path}");
+    }
+
+    for source in ["horizon_light.glb", "horizon_heavy.glb", "zenith_light.glb"] {
+        assert!(
+            root.join("source_assets/animations/light_enemy")
+                .join(source)
+                .is_file(),
+            "missing editable source {source}"
+        );
+    }
+
+    for resource in &project.resources {
+        let ResourceData::Character(character) = &resource.data else {
+            continue;
+        };
+        if !resource.name.starts_with("Light Enemy / ") {
+            continue;
+        }
+        for volume in &character.combat_capsules {
+            if let CombatCapsuleRole::ProjectileEmitter { action, .. } = volume.role {
+                assert_eq!(
+                    action,
+                    CharacterAnimationAction::VertLightAttack,
+                    "{} / {}",
+                    resource.name,
+                    volume.name
+                );
+            }
+        }
+    }
+
+    let heavy_set = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationSet(set) if resource.name == "Heavy Enemy Animation Set" => {
+                Some(set)
+            }
+            _ => None,
+        })
+        .expect("Heavy Enemy animation set");
+    let heavy_attack_name = |action| {
+        let clip = heavy_set
+            .action_clip(action)
+            .expect("bound Heavy Enemy attack");
+        project
+            .resource(clip)
+            .expect("bound Heavy Enemy attack resource")
+            .name
+            .as_str()
+    };
+    assert_eq!(
+        heavy_attack_name(CharacterAnimationAction::LightAttack),
+        "Heavy Enemy / Light Attack"
+    );
+    assert_eq!(
+        heavy_attack_name(CharacterAnimationAction::HeavyAttack),
+        "Heavy Enemy / Heavy Attack"
+    );
+    assert_eq!(
+        heavy_attack_name(CharacterAnimationAction::RangedAttack),
+        "Heavy Enemy / Ranged Attack"
+    );
+    let heavy = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Heavy Enemy" => Some(character),
+            _ => None,
+        })
+        .expect("Heavy Enemy character");
+    assert!(heavy.combat_capsules.iter().any(|volume| matches!(
+        volume.role,
+        CombatCapsuleRole::ProjectileEmitter {
+            action: CharacterAnimationAction::RangedAttack,
+            ..
+        }
+    )));
+
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "Cortex 0.3 must cook: {:?}", report.errors);
+    let package = package.expect("Cortex 0.3 package");
+    let light = package
+        .game_entities
+        .iter()
+        .find(|entity| {
+            entity.ranged_attack_action
+                == CharacterAnimationAction::VertLightAttack.to_index() as u8
+        })
+        .expect("placed Light Enemy hybrid attack record");
+    assert_ne!(light.attack_clip, light.heavy_attack_clip);
+    assert_ne!(light.attack_clip, light.ranged_attack_clip);
+    assert_ne!(light.heavy_attack_clip, light.ranged_attack_clip);
+    assert_eq!(light.attack_speed_q8, 384);
+    // Authored 2..53. The cook drops the frames nothing references and rebases
+    // what it emits, so the runtime sees the same window against a clip that is
+    // two frames shorter at the front. The played span is unchanged: 52 frames
+    // either way.
+    assert_eq!(
+        light.attack_frame_range,
+        psx_level::CharacterActionFrameRange { start: 0, end: 51 }
+    );
+    assert_eq!(light.heavy_attack_speed_q8, 384);
+    assert_eq!(
+        light.heavy_attack_frame_range,
+        psx_level::CharacterActionFrameRange {
+            start: 81,
+            end: 118,
+        }
+    );
+    assert_eq!(light.ranged_attack_speed_q8, 640);
+    assert_eq!(
+        light.ranged_attack_frame_range,
+        psx_level::CharacterActionFrameRange::FULL
+    );
+    assert_eq!(
+        (
+            light.attack_active_ticks,
+            light.heavy_attack_active_ticks,
+            light.ranged_attack_active_ticks,
+        ),
+        (92, 55, 65),
+        "state timing must use the same trim/speed contract as presentation"
+    );
+    assert!(light.flags & psx_level::game_entity_flags::RANGED_ATTACK != 0);
 }
 
 #[test]

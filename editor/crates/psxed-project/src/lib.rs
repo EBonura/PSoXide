@@ -23,6 +23,7 @@ pub mod brush_portal;
 pub mod brush_pxbsp;
 mod brush_vis;
 pub mod brush_world;
+pub mod clip_window;
 pub mod floor_view;
 pub use animation_pose_correction::*;
 mod import_util;
