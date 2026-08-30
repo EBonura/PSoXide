@@ -317,6 +317,9 @@ impl Playtest {
             return;
         };
 
+        // New Game always starts from the authored spawn. The exit pose in
+        // `poi_save.resume_position` is intentionally persistence scaffolding
+        // for a future Continue/savestate flow and is not restored here.
         // Player init: prefer PLAYER_CONTROLLER (cook output)
         // for spawn + character; fall back to the bare
         // PLAYER_SPAWN for placeholder manifests. The spawn room
