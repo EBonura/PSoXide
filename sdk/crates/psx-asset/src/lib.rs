@@ -1274,6 +1274,37 @@ impl AnimationPoseSample<'_> {
             });
         }
 
+        // Shipping clips are v4 records inside a word-aligned pool, which is
+        // the one shape every skinned draw walks joint by joint. Decoding both
+        // frames in one body instead of two outlined calls plus an outlined
+        // lerp removes two 32-byte `JointPose` temporaries that the R3000A,
+        // having no data cache, would otherwise write to and read back from
+        // main RAM, and it loads the record base and the shared translation
+        // shift once instead of twice. The values are bit-identical to the
+        // generic path below: `pose_record_size == V4` and a word-aligned pool
+        // select exactly the same decoder, and every v4 record offset is a
+        // multiple of 16, so the whole-pool alignment test settles both
+        // records at once.
+        if self.animation.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V4 {
+            let pool = self.animation.poses.as_ptr();
+            if pool as usize & 3 == 0 {
+                let joint_offset =
+                    joint_index as usize * psxed_format::animation::POSE_RECORD_SIZE_V4;
+                // SAFETY: the joint index was checked above and both frame
+                // offsets were computed from validated animation frames, so
+                // both records lie wholly inside `poses`; the pool is word
+                // aligned and both offsets are multiples of the 16-byte record.
+                return Some(unsafe {
+                    lerp_v4_pair_word_aligned(
+                        pool.add(self.base_frame_offset + joint_offset),
+                        pool.add(self.next_frame_offset + joint_offset),
+                        self.animation.translation_shift,
+                        self.alpha_q12,
+                    )
+                });
+            }
+        }
+
         // SAFETY: the joint index was checked above and both frame offsets
         // were computed from validated animation frames.
         let a = unsafe {
@@ -1544,11 +1575,23 @@ fn lerp_gte_pose_q12(a: GteJointPose, b: GteJointPose, alpha_q12: u16) -> GteJoi
 /// Decode one 12-bit Q11 rotation code to a Q3.12 element.
 ///
 /// Ported from hl-psx's silicon-proven decoder: value = code * 2, with
-/// the reserved positive-max code 0x7FF decoding to exactly 4096. On
-/// MIPS the branchless six-instruction form avoids the select branch
-/// LLVM would otherwise emit.
+/// the reserved positive-max code 0x7FF decoding to exactly 4096. The decoder
+/// itself lives in [`decode_q11_element_wide`], including the branchless MIPS
+/// form that avoids the select branch LLVM would otherwise emit; this is that
+/// value narrowed, which is exact because the range is `+/-4096`.
 #[inline(always)]
 fn decode_q11_element(raw: u16) -> i16 {
+    decode_q11_element_wide(raw) as i16
+}
+
+/// Q11 rotation decode that keeps its result 32-bit.
+///
+/// Identical value to [`decode_q11_element`]: the decoder's range is
+/// `+/-4096`, so the `i16` narrowing there is exact and re-widening it for
+/// arithmetic is pure loss. Every use in the v4 path is arithmetic, and on MIPS
+/// each round trip through `i16` costs an `sll`/`sra` pair.
+#[inline(always)]
+fn decode_q11_element_wide(raw: u16) -> i32 {
     #[cfg(target_arch = "mips")]
     unsafe {
         let decoded: u32;
@@ -1563,7 +1606,7 @@ fn decode_q11_element(raw: u16) -> i16 {
             scratch = lateout(reg) _,
             options(nomem, nostack, preserves_flags),
         );
-        return decoded as i16;
+        return decoded as i32;
     }
 
     #[cfg(not(target_arch = "mips"))]
@@ -1571,7 +1614,7 @@ fn decode_q11_element(raw: u16) -> i16 {
         let signed = ((raw << 4) as i16) >> 4;
         signed
             .wrapping_shl(1)
-            .wrapping_add((((raw & 0x0FFF) == 0x07FF) as i16) << 1)
+            .wrapping_add((((raw & 0x0FFF) == 0x07FF) as i16) << 1) as i32
     }
 }
 
@@ -1610,37 +1653,67 @@ unsafe fn read_pose_matrix_q11_unchecked(bytes: &[u8], offset: usize) -> [[i16; 
     ]
 }
 
+/// Largest magnitude a v4 cross-product accumulator can reach.
+///
+/// Every operand is a [`decode_q11_element`] output, which is bounded to
+/// `+/-4096`, so `a*b - c*d` cannot leave `+/-2*4096*4096`. Two facts follow
+/// and [`v4_third_basis_q12`] relies on both: the saturating arithmetic the
+/// original reconstruction used could never fire, and the rounded result
+/// cannot leave `+/-8192`, which the shared `+/-4096` clamp already covers.
+const V4_CROSS_LIMIT: i32 = 2 * 4096 * 4096;
+
+/// Round one Q3.12 cross-product accumulator, half away from zero.
+///
+/// The branchless `(v ^ sign) - sign` form of this was measured and is not
+/// worth it here: identical values, +0.20% frame cycles and three frames lost,
+/// because the two arms are small enough that LLVM fills the delay slots.
 #[inline(always)]
-fn cross_component_q12(a: i16, b: i16, c: i16, d: i16) -> i16 {
-    let value = a as i32 * b as i32 - c as i32 * d as i32;
-    let rounded = if value >= 0 {
-        value.saturating_add(1 << 11) >> 12
+fn cross_round_q12(value: i32) -> i32 {
+    debug_assert!(value >= -V4_CROSS_LIMIT && value <= V4_CROSS_LIMIT);
+    if value >= 0 {
+        (value + (1 << 11)) >> 12
     } else {
-        -((value.saturating_neg().saturating_add(1 << 11)) >> 12)
+        -((-value + (1 << 11)) >> 12)
+    }
+}
+
+/// Reconstruct a v4 record's third basis row from the two stored rows and the
+/// packed correction byte.
+///
+/// Bit-identical to the `apply_v4_basis_correction(reconstruct_third_basis_q12(
+/// first, second), correction_byte)` pair this replaced, over the whole domain
+/// those two could ever see (see [`V4_CROSS_LIMIT`]); the tests hold both forms
+/// side by side and sweep it. Three things went away, all of them dead work
+/// rather than accuracy:
+///
+/// * the per-component clamp to the `i16` range, subsumed by the `+/-4096`
+///   clamp that immediately followed it;
+/// * the `saturating_add`/`saturating_neg`/`saturating_add` triple in the
+///   rounding, each of which compiles to an overflow test that can never take
+///   its other arm at this magnitude;
+/// * the runtime-indexed array write `third[axis] = ..`, which forced all three
+///   components onto the stack and back. The R3000A has no data cache, so that
+///   was six uncached accesses on every decoded record.
+#[inline(always)]
+fn v4_third_basis_q12(first: [i32; 3], second: [i32; 3], correction_byte: u8) -> [i32; 3] {
+    let ([f0, f1, f2], [s0, s1, s2]) = (first, second);
+    let x = cross_round_q12(f1 * s2 - f2 * s1);
+    let y = cross_round_q12(f2 * s0 - f0 * s2);
+    let z = cross_round_q12(f0 * s1 - f1 * s0);
+    let correction = ((((correction_byte >> 2) << 2) as i8) >> 2) as i32;
+    // Axis 3 is the "no correction" encoding, matching the `axis < 3` guard the
+    // array form used.
+    let (x, y, z) = match correction_byte & 0x03 {
+        0 => (x + correction, y, z),
+        1 => (x, y + correction, z),
+        2 => (x, y, z + correction),
+        _ => (x, y, z),
     };
-    rounded.clamp(i16::MIN as i32, i16::MAX as i32) as i16
-}
-
-#[inline(always)]
-fn reconstruct_third_basis_q12(first: [i16; 3], second: [i16; 3]) -> [i16; 3] {
     [
-        cross_component_q12(first[1], second[2], first[2], second[1]),
-        cross_component_q12(first[2], second[0], first[0], second[2]),
-        cross_component_q12(first[0], second[1], first[1], second[0]),
+        x.clamp(-4096, 4096),
+        y.clamp(-4096, 4096),
+        z.clamp(-4096, 4096),
     ]
-}
-
-#[inline(always)]
-fn apply_v4_basis_correction(mut third: [i16; 3], correction_byte: u8) -> [i16; 3] {
-    let axis = usize::from(correction_byte & 0x03);
-    if axis < 3 {
-        let correction = (((correction_byte >> 2) << 2) as i8 >> 2) as i16;
-        third[axis] = third[axis].saturating_add(correction);
-    }
-    for component in &mut third {
-        *component = (*component).clamp(-4096, 4096);
-    }
-    third
 }
 
 /// Decode a v4 packed rotation block. Its first nine bytes contain six Q11
@@ -1650,7 +1723,7 @@ fn apply_v4_basis_correction(mut third: [i16; 3], correction_byte: u8) -> [i16; 
 /// `offset + 10` must be in bounds.
 #[inline]
 unsafe fn read_pose_matrix_q11_cross_unchecked(bytes: &[u8], offset: usize) -> [[i16; 3]; 3] {
-    let mut flat = [0i16; 6];
+    let mut flat = [0i32; 6];
     let mut pair = 0usize;
     while pair < 3 {
         let o = offset + pair * 3;
@@ -1659,15 +1732,15 @@ unsafe fn read_pose_matrix_q11_cross_unchecked(bytes: &[u8], offset: usize) -> [
                 | ((bytes.as_ptr().add(o + 1).read() as u32) << 8)
                 | ((bytes.as_ptr().add(o + 2).read() as u32) << 16)
         };
-        flat[pair * 2] = decode_q11_element((packed & 0x0fff) as u16);
-        flat[pair * 2 + 1] = decode_q11_element(((packed >> 12) & 0x0fff) as u16);
+        flat[pair * 2] = decode_q11_element_wide((packed & 0x0fff) as u16);
+        flat[pair * 2 + 1] = decode_q11_element_wide(((packed >> 12) & 0x0fff) as u16);
         pair += 1;
     }
     let first = [flat[0], flat[1], flat[2]];
     let second = [flat[3], flat[4], flat[5]];
     let correction = unsafe { bytes.as_ptr().add(offset + 9).read() };
-    let third = apply_v4_basis_correction(reconstruct_third_basis_q12(first, second), correction);
-    [first, second, third]
+    let third = v4_third_basis_q12(first, second, correction);
+    [narrow_q12_row(first), narrow_q12_row(second), narrow_q12_row(third)]
 }
 
 /// Decode one word-aligned v4 record with four aligned loads.
@@ -1679,7 +1752,48 @@ unsafe fn read_pose_v4_word_aligned_unchecked(
     bytes: &[u8],
     offset: usize,
 ) -> ([[i16; 3]; 3], Vec3I16) {
-    let record = unsafe { bytes.as_ptr().add(offset) };
+    unsafe { read_pose_v4_word_aligned_ptr(bytes.as_ptr().add(offset)) }
+}
+
+/// Pointer form of [`read_pose_v4_word_aligned_unchecked`], so a caller that
+/// already holds the record address does not carry a slice length it cannot
+/// use. Identical decode.
+///
+/// # Safety
+/// `record` must be word aligned with 16 readable bytes.
+#[inline(always)]
+unsafe fn read_pose_v4_word_aligned_ptr(record: *const u8) -> ([[i16; 3]; 3], Vec3I16) {
+    let (rows, translation) = unsafe { read_pose_v4_rows_word_aligned(record) };
+    (
+        [
+            narrow_q12_row(rows[0]),
+            narrow_q12_row(rows[1]),
+            narrow_q12_row(rows[2]),
+        ],
+        translation,
+    )
+}
+
+/// Narrow a reconstructed Q3.12 basis row. Every element is already inside
+/// `+/-4096`, so this is a truncation the store would have done anyway.
+#[inline(always)]
+fn narrow_q12_row(row: [i32; 3]) -> [i16; 3] {
+    [row[0] as i16, row[1] as i16, row[2] as i16]
+}
+
+/// Decode one word-aligned v4 record into three Q3.12 basis rows held as
+/// `i32`, plus the record's packed translation.
+///
+/// This is the shape the arithmetic wants. The narrow
+/// [`read_pose_v4_word_aligned_ptr`] is this function plus three truncations,
+/// which the caller's halfword stores absorb for free; the interpolation in
+/// [`lerp_v4_pair_word_aligned`] skips them entirely and stays 32-bit from the
+/// packed code all the way to the stored matrix element.
+///
+/// # Safety
+/// `record` must be word aligned with 16 readable bytes.
+#[inline(always)]
+unsafe fn read_pose_v4_rows_word_aligned(record: *const u8) -> ([[i32; 3]; 3], Vec3I16) {
     debug_assert_eq!(record as usize & 3, 0);
     let words = record.cast::<u32>();
     let w0 = u32::from_le(unsafe { words.add(0).read() });
@@ -1691,25 +1805,92 @@ unsafe fn read_pose_v4_word_aligned_unchecked(
     let p1 = (w0 >> 24) | ((w1 & 0x0000_ffff) << 8);
     let p2 = (w1 >> 16) | ((w2 & 0x0000_00ff) << 16);
     let first = [
-        decode_q11_element((p0 & 0x0fff) as u16),
-        decode_q11_element(((p0 >> 12) & 0x0fff) as u16),
-        decode_q11_element((p1 & 0x0fff) as u16),
+        decode_q11_element_wide((p0 & 0x0fff) as u16),
+        decode_q11_element_wide(((p0 >> 12) & 0x0fff) as u16),
+        decode_q11_element_wide((p1 & 0x0fff) as u16),
     ];
     let second = [
-        decode_q11_element(((p1 >> 12) & 0x0fff) as u16),
-        decode_q11_element((p2 & 0x0fff) as u16),
-        decode_q11_element(((p2 >> 12) & 0x0fff) as u16),
+        decode_q11_element_wide(((p1 >> 12) & 0x0fff) as u16),
+        decode_q11_element_wide((p2 & 0x0fff) as u16),
+        decode_q11_element_wide(((p2 >> 12) & 0x0fff) as u16),
     ];
-    let third = apply_v4_basis_correction(
-        reconstruct_third_basis_q12(first, second),
-        ((w2 >> 8) & 0xff) as u8,
-    );
+    let third = v4_third_basis_q12(first, second, ((w2 >> 8) & 0xff) as u8);
     let translation = Vec3I16::new(
         (w2 >> 16) as u16 as i16,
         w3 as u16 as i16,
         (w3 >> 16) as u16 as i16,
     );
     ([first, second, third], translation)
+}
+
+/// Decode both frames of one word-aligned v4 joint record pair and interpolate
+/// them, in a single body.
+///
+/// Bit-identical to decoding each record with [`Animation::pose_v4_unchecked`]
+/// and feeding the two [`JointPose`] values to [`lerp_pose_q12`]; only the call
+/// shape differs. Fusing them is what keeps the two decoded poses in registers
+/// instead of round-tripping 64 bytes through uncached main RAM, which is the
+/// dominant cost of a skinned joint on the R3000A.
+///
+/// # Safety
+/// `a_record` and `b_record` must each be word aligned with 16 readable bytes.
+#[inline]
+unsafe fn lerp_v4_pair_word_aligned(
+    a_record: *const u8,
+    b_record: *const u8,
+    translation_shift: u8,
+    alpha_q12: u16,
+) -> JointPose {
+    let (a_rows, a_packed) = unsafe { read_pose_v4_rows_word_aligned(a_record) };
+    let (b_rows, b_packed) = unsafe { read_pose_v4_rows_word_aligned(b_record) };
+
+    let mut matrix = [[0i16; 3]; 3];
+    let mut col = 0;
+    while col < 3 {
+        let mut row = 0;
+        while row < 3 {
+            matrix[col][row] = lerp_q12_wide_to_i16(a_rows[col][row], b_rows[col][row], alpha_q12);
+            row += 1;
+        }
+        col += 1;
+    }
+
+    JointPose {
+        matrix,
+        translation: Vec3I32::new(
+            lerp_packed_translation_q12(a_packed.x, b_packed.x, translation_shift, alpha_q12),
+            lerp_packed_translation_q12(a_packed.y, b_packed.y, translation_shift, alpha_q12),
+            lerp_packed_translation_q12(a_packed.z, b_packed.z, translation_shift, alpha_q12),
+        ),
+    }
+}
+
+/// Interpolate one shift-packed translation component.
+///
+/// Bit-identical to `lerp_i32_q12(decode_packed_translation(a, shift),
+/// decode_packed_translation(b, shift), alpha_q12)` over the whole domain that
+/// call can reach, and the tests sweep it against exactly that expression.
+///
+/// The generic [`lerp_i32_q12`] has to saturate, because v1/v2 records store
+/// raw `i32` translations of unknown magnitude. A packed record cannot: both
+/// endpoints are `i16`, and the parser rejects a translation shift above 15, so
+/// every endpoint fits in `+/-2^30`, every delta in `+/-(2^31 - 2^15)`, and
+/// every partial product below `i32::MAX`. That makes all four saturating steps
+/// unreachable, and dropping them matters here because `saturating_mul` on this
+/// CPU is a `mult` plus a high-word comparison and branch, three times per
+/// joint.
+#[inline(always)]
+fn lerp_packed_translation_q12(a: i16, b: i16, shift: u8, alpha_q12: u16) -> i32 {
+    debug_assert!(shift <= 15);
+    debug_assert!(alpha_q12 < 4096);
+    let base = (a as i32) << shift;
+    let delta = ((b as i32) << shift) - base;
+    // Split the Q12 scale exactly as `scale_i32_q12` does: the product of a
+    // full delta and alpha does not fit in 32 bits, the two halves do.
+    let alpha = alpha_q12 as i32;
+    let whole = delta >> 12;
+    let frac = delta - (whole << 12);
+    base + whole * alpha + ((frac * alpha) >> 12)
 }
 
 /// Decode one word-aligned v3 pose record with exactly five aligned loads.
@@ -1824,6 +2005,17 @@ unsafe fn read_pose_matrix_aligned_unchecked(bytes: &[u8], offset: usize) -> [[i
 fn decode_packed_translation(value: i16, shift: u8) -> i32 {
     debug_assert!(shift <= 15);
     (value as i32) * (1i32 << shift)
+}
+
+/// Interpolate two Q3.12 elements that are already 32-bit.
+///
+/// Exactly [`lerp_i16_q12`] with its two sign extensions removed: that function
+/// widens both endpoints to `i32` before doing anything, so feeding it values
+/// that never left `i32` computes the identical expression.
+#[inline(always)]
+fn lerp_q12_wide_to_i16(a: i32, b: i32, alpha_q12: u16) -> i16 {
+    debug_assert!(alpha_q12 < 4096);
+    (a + (((b - a) * alpha_q12 as i32) >> 12)) as i16
 }
 
 #[inline]
