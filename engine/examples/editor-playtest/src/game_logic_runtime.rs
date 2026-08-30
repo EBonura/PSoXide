@@ -605,6 +605,7 @@ impl Playtest {
                 }
             }
         }
+        let gameplay_now = self.gameplay_tick(ctx.sim_tick);
         if damage_total > 0 {
             // Legacy enemy attacks are not axis-authored yet, so Horizon is
             // their deterministic migration channel and excess damage spills
@@ -612,6 +613,16 @@ impl Playtest {
             // emptying BOTH pools arms the existing shared death sequence.
             let died = self.hazard_death_ticks_remaining == 0
                 && self.apply_untyped_player_damage(damage_total);
+            // Damage taken floats off the player, not off whoever threw
+            // it, and it carries the channel it drained -- Horizon here,
+            // matching the migration routing above.
+            self.damage_numbers.spawn(
+                player_hit_anchor(player_position, player_height.max(0) as u16),
+                self.room_index,
+                damage_total,
+                DamageNumberChannel::Horizon,
+                gameplay_now,
+            );
             if died {
                 self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
             }
@@ -631,6 +642,22 @@ impl Playtest {
             }
             let died = self.hazard_death_ticks_remaining == 0
                 && self.apply_typed_player_damage(channel, damage);
+            // A projectile carries its own channel, so a Choir Needle
+            // reads teal on the way in exactly as the bolt did.
+            self.damage_numbers.spawn(
+                player_hit_anchor(player_position, player_height.max(0) as u16),
+                self.room_index,
+                damage,
+                match channel {
+                    psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
+                        DamageNumberChannel::Horizon
+                    }
+                    psx_game_runtime::projectiles::ProjectileDamageChannel::Zenith => {
+                        DamageNumberChannel::Zenith
+                    }
+                },
+                gameplay_now,
+            );
             if died {
                 self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
             }
@@ -679,6 +706,7 @@ impl Playtest {
         // equipped weapon consume; combat never reconstructs animation phase.
         let action = self.anim_state.action();
         let phase = player_pose.pose().phase_q12();
+        let gameplay_now = self.gameplay_tick(now);
         if let Some(stats) = self.resolve_player_combat_capsules(
             &character,
             player_pose,
@@ -687,6 +715,7 @@ impl Playtest {
             action,
             spec.reach,
             prop_blockers.as_slice(),
+            gameplay_now,
         ) {
             self.report_player_melee_stats(stats);
             return;
@@ -707,19 +736,27 @@ impl Playtest {
         // has no blade geometry, so a closed door inside its reach must
         // still block the connection on BSP worlds.
         let player_eye = melee_eye_point([player.x, player.y, player.z]);
+        let vitality_channel = Self::player_attack_channel(self.anim_state);
         let outgoing_damage = self
             .vitality_modifiers()
-            .outgoing_damage(Self::player_attack_channel(self.anim_state), spec.damage);
-        let channel = match Self::player_attack_channel(self.anim_state) {
+            .outgoing_damage(vitality_channel, spec.damage);
+        let channel = match vitality_channel {
             VitalityChannelId::One => DamageChannel::Horizon,
             VitalityChannelId::Two => DamageChannel::Zenith,
         };
         self.damage_player_environment_melee(spec.reach, channel, outgoing_damage);
+        // The arc sweep latches every connection into the swing mask, so
+        // the bits it newly set ARE the entities it hit. Snapshotting the
+        // mask keeps the number spawn on this side of the engine crate's
+        // API instead of widening `MeleeArcStats` with positions that
+        // only presentation wants.
+        let swing_mask_before = self.swing_hit_mask;
         let entities = &mut self.game_entities;
         let mut bsp = self.bsp.as_mut();
         let stats = entities.apply_melee_arc_occluded(
             GAME_ENTITIES,
             &arc,
+            vitality_channel,
             outgoing_damage,
             spec.poise_damage,
             &mut self.swing_hit_mask,
@@ -733,7 +770,81 @@ impl Playtest {
                 None => false,
             },
         );
+        if stats.hits > 0 {
+            self.spawn_melee_arc_damage_numbers(
+                swing_mask_before,
+                outgoing_damage,
+                damage_number_channel_for(channel),
+                gameplay_now,
+            );
+        }
+        if stats.deaths > 0 {
+            self.award_melee_arc_souls(swing_mask_before, gameplay_now);
+        }
         self.report_player_melee_stats(stats);
+    }
+
+    /// Credit the cooked award of every entity this arc sweep killed.
+    ///
+    /// The crate's arc API reports only a death COUNT, so the swing mask is
+    /// the way back to identities: a bit set since `before` is one fresh
+    /// connection this sweep made, and the sweep skips entities that were
+    /// already dead, so a newly-connected entity now reading Dead is one this
+    /// swing killed. Guarded by `stats.deaths > 0` at the call site, so a
+    /// swing that kills nothing never walks the list.
+    fn award_melee_arc_souls(&mut self, before: u64, now: SimTick) {
+        // psx-numeric-allow-next-line: swing bitmask diff; bit ops only, two-word on R3000
+        let connected = self.swing_hit_mask & !before;
+        if connected == 0 {
+            return;
+        }
+        let count = self.game_entities.count().min(GAME_ENTITIES.len());
+        for entity in 0..count {
+            // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
+            if connected & (1u64 << entity) == 0
+                || self.game_entities.state(entity)
+                    != psx_game_runtime::entities::GameEntityState::Dead
+            {
+                continue;
+            }
+            self.souls
+                .award(GAME_ENTITIES[entity].soul_value, now.as_u32());
+        }
+    }
+
+    /// Spawn a floating number over every entity this swing newly
+    /// connected with. `before` is the swing mask as it stood prior to
+    /// the sweep; every bit set since is one fresh connection, all at
+    /// the same `damage` because the arc path applies one value.
+    fn spawn_melee_arc_damage_numbers(
+        &mut self,
+        before: u64,
+        damage: u16,
+        channel: DamageNumberChannel,
+        now: SimTick,
+    ) {
+        // psx-numeric-allow-next-line: swing bitmask diff; bit ops only, two-word on R3000
+        let connected = self.swing_hit_mask & !before;
+        if connected == 0 {
+            return;
+        }
+        let count = self.game_entities.count().min(GAME_ENTITIES.len());
+        for entity in 0..count {
+            // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
+            if connected & (1u64 << entity) == 0 {
+                continue;
+            }
+            self.damage_numbers.spawn(
+                struck_actor_anchor(
+                    self.game_entities.position(entity),
+                    GAME_ENTITIES[entity].height,
+                ),
+                GAME_ENTITIES[entity].room,
+                damage,
+                channel,
+                now,
+            );
+        }
     }
 
     /// Apply one active melee frame to blocking world props through a compact
@@ -914,6 +1025,7 @@ impl Playtest {
         action: CharacterAnimationAction,
         environment_reach: i32,
         prop_blockers: &[CharacterCollisionAabb],
+        now: SimTick,
     ) -> Option<MeleeArcStats> {
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
@@ -982,10 +1094,12 @@ impl Playtest {
             return Some(MeleeArcStats::default());
         }
 
-        let channel = match Self::player_attack_channel(self.anim_state) {
+        let vitality_channel = Self::player_attack_channel(self.anim_state);
+        let channel = match vitality_channel {
             VitalityChannelId::One => DamageChannel::Horizon,
             VitalityChannelId::Two => DamageChannel::Zenith,
         };
+        let damage_number_channel = damage_number_channel_for(channel);
         for hit in &active[..active_count] {
             // A blocking prop needs a short forward contact volume rather than
             // an inflated copy of a lateral blade capsule. Use the weapon's
@@ -1058,9 +1172,28 @@ impl Playtest {
                 let outcome = self.game_entities.apply_hit(
                     GAME_ENTITIES,
                     entity,
+                    vitality_channel,
                     hit.damage,
                     hit.poise_damage,
                 );
+                if outcome.connected {
+                    // Spawned here rather than from the returned stats
+                    // because the damage is per-capsule: only this site
+                    // knows which capsule actually connected.
+                    self.damage_numbers.spawn(
+                        struck_actor_anchor(position, entity_record.height),
+                        entity_record.room,
+                        hit.damage,
+                        damage_number_channel,
+                        now,
+                    );
+                }
+                if outcome.died {
+                    // The authored-capsule path knows exactly which entity
+                    // the killing blow landed on, so it credits its own
+                    // cooked award directly.
+                    self.souls.award(entity_record.soul_value, now.as_u32());
+                }
                 stats.hits = stats.hits.saturating_add(u16::from(outcome.connected));
                 stats.staggers = stats.staggers.saturating_add(u16::from(outcome.staggered));
                 stats.deaths = stats.deaths.saturating_add(u16::from(outcome.died));

@@ -32,14 +32,26 @@ below.
 
 The GLBs in `animations/heavy_walk_pack/` and the selected core-animation
 candidates contain the same boss mesh, texture, and 27-joint rig. Selected
-Idle 2 is the authoritative model source; it and all seven additional takes
-are cooked in one native bundle against Idle 2's fixed model bounds. This is
-important because `.psxanim` does not carry a quantisation frame of its own:
+Idle 2 is the authoritative model source; every additional take is cooked
+against its fixed model bounds, either in the original native bundle or in a
+later fixed-bound combat pass. This is important because `.psxanim` does not
+carry a quantisation frame of its own:
 letting a high-travel death take enlarge the model bounds would shrink the
 standing boss, while cooking later clips against a different frame would pull
 its rigid armour sections apart. The boss Character resource uses Idle 2 plus
-forward, backward, and left/right heavy walks, selected Attack 1 as Light
-Attack, selected Hit 2, and selected Death 2.
+forward, backward, and left/right heavy walks, selected Attack 3 as its light
+two-handed shove, selected Attack 1 as its heavy overhead smash, the authored
+three-chimney missile salvo as its ranged attack, selected Hit 2, and selected
+Death 2. The combat source takes are retained under `animations/combat/`; all
+are cooked against Idle 2's fixed model bounds so their rigid armour sections
+use the same quantisation frame as the model.
+
+`animations/combat/build_missile_salvo.py` is the reproducible Blender authoring
+pass for the ranged attack. The upper shell plants and loads, then recoils on
+source frames 31, 39, and 47 (30 Hz) for the left, centre, and right chimney.
+At the runtime 12 Hz bake those beats land around frames 12, 15, and 18. The
+script moves neither root nor feet, keeping future missile emitter transforms
+stable while the engine projectile events are authored separately.
 
 The heavy walk was generated locally with MoMask on CPU from:
 

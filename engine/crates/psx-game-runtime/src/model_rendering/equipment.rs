@@ -961,7 +961,7 @@ fn submit_instance_equipment_record_from_pose<
         weapon,
         socket_pose,
         ASSEMBLED_Q12,
-        None,
+        knobs.instance_equipment_skin,
         knobs,
         scratch,
         models,

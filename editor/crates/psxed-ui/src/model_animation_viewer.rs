@@ -664,6 +664,7 @@ fn moveset_visual_fallbacks(
         A::VertLightAttack | A::VertHeavyAttack | A::VertComboAttack => {
             [Some(A::Idle), None, None, None]
         }
+        A::RangedAttack => [Some(A::Idle), None, None, None],
     }
 }
 
@@ -3268,6 +3269,7 @@ const MOVESET_ACTION_GROUPS: &[(&str, &[CharacterAnimationAction])] = &[
             CharacterAnimationAction::VertLightAttack,
             CharacterAnimationAction::VertHeavyAttack,
             CharacterAnimationAction::VertComboAttack,
+            CharacterAnimationAction::RangedAttack,
         ],
     ),
     (

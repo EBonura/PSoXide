@@ -1830,8 +1830,20 @@ pub struct LevelGameEntityRecord {
     pub poise: u16,
     /// Damage dealt by a connecting touch/melee attack.
     pub touch_damage: u16,
-    /// Health pool at spawn.
+    /// First vitality channel's pool at spawn (Horizon in Cortex Ignition).
     pub max_health: u16,
+    /// Second vitality channel's pool at spawn (Zenith in Cortex Ignition).
+    ///
+    /// Enemies carry the same two-channel vitality the player does. Zero is
+    /// a legal single-channel actor: the runtime treats an empty second pool
+    /// as already spent, so the entity dies on the first pool alone.
+    pub max_health_secondary: u16,
+    /// Souls the player is credited for landing the killing blow.
+    ///
+    /// Authored per enemy so the reward curve is tuned in the editor next to
+    /// health and touch damage. Zero is a legal "grants nothing" enemy, and
+    /// the runtime treats it as no gain at all rather than a gain of zero.
+    pub soul_value: u16,
     /// Runtime flags from [`game_entity_flags`].
     pub flags: u16,
 }
@@ -3539,7 +3551,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 33;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 34;
 
 /// Runtime animation action slot.
 ///
@@ -3618,6 +3630,9 @@ pub enum CharacterAnimationAction {
     VertHeavyAttack = 31,
     /// Legacy third Zenith slot; retained for package compatibility and NPCs.
     VertComboAttack = 32,
+    /// Dedicated NPC/projectile attack. Appended to preserve every pre-existing
+    /// cooked action index.
+    RangedAttack = 33,
 }
 
 impl CharacterAnimationAction {
@@ -3656,6 +3671,7 @@ impl CharacterAnimationAction {
         Self::VertLightAttack,
         Self::VertHeavyAttack,
         Self::VertComboAttack,
+        Self::RangedAttack,
     ];
 
     /// Convert to the cooked action slot index.

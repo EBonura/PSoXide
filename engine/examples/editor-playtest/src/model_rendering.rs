@@ -37,8 +37,26 @@ const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
     max_equipment_draws: MAX_EQUIPMENT_DRAWS,
     equipment_wire_q12: [mr::ASSEMBLED_Q12; mr::MAX_PLAYER_EQUIPMENT],
     equipment_materialization_skins: [None; mr::MAX_PLAYER_EQUIPMENT],
+    instance_equipment_skin: None,
     equipment_materialization: false,
 };
+
+/// The Horizon palette, read back from the authored track that already
+/// defines it: the player's R1 (Horizon-lane) blade trail. Enemy blades
+/// take this so a held weapon reads as the same energy lane the player
+/// swings on R1/R2, without a second authored copy of the colour to drift.
+fn horizon_skin() -> Option<mr::EquipmentMaterializationSkin> {
+    let controller = PLAYER_CONTROLLER?;
+    let [r, g, b] = WEAPON_APPEARANCES
+        .iter()
+        .find(|appearance| {
+            appearance.flags & psx_level::weapon_appearance_flags::TRAIL != 0
+                && appearance.character == controller.character
+                && appearance.action == CharacterAnimationAction::LightAttack
+        })
+        .map(|appearance| appearance.trail_tip_color)?;
+    Some(mr::EquipmentMaterializationSkin::opaque((r, g, b)))
+}
 
 /// Resolve Horizon/Zenith presentation from the same action-authored colours
 /// that drive the blade trail. This keeps the cage, textured weapon and trail
@@ -145,6 +163,21 @@ pub(super) fn equipment_wire_q12(
 
 /// This example's actor floor-shadow tuning (the `SHADOW_*` consts in
 /// `runtime_config`, as the crate value struct).
+/// Tuning for the projected (flattened-geometry) actor shadow.
+///
+/// `depth_bias` is ADDED to the actor clearance the caller already applied,
+/// so the shadow sits just behind the actor's own body but still in front of
+/// the floor it lands on.
+#[cfg(feature = "actor-shadows-projected")]
+const PROJECTED_SHADOW_TUNING: mr::ProjectedShadowTuning = mr::ProjectedShadowTuning {
+    light: mr::ShadowLight::OVERHEAD,
+    floor_lift: SHADOW_FLOOR_LIFT,
+    depth_bias: 0,
+    blend: psx_gpu::material::BlendMode::Average,
+    tint: (0, 0, 0),
+    max_drop: 512,
+};
+
 const SHADOW_TUNING: mr::ShadowTuning = mr::ShadowTuning {
     floor_lift: SHADOW_FLOOR_LIFT,
     depth_bias: SHADOW_DEPTH_BIAS,
@@ -579,12 +612,14 @@ pub(super) fn draw_instance_equipment(
 ) -> EquipmentDrawStats {
     let mut out = EquipmentDrawStats::default();
     let mut remaining = max_draws.min(MODEL_DRAW_KNOBS.max_equipment_draws);
+    let instance_equipment_skin = horizon_skin();
     for pose in instance_poses.iter().copied().flatten() {
         if remaining == 0 {
             break;
         }
         let mut knobs = MODEL_DRAW_KNOBS;
         knobs.max_equipment_draws = remaining;
+        knobs.instance_equipment_skin = instance_equipment_skin;
         let stats = mr::draw_instance_equipment_from_pose::<
             MAX_RUNTIME_MODELS,
             MAX_RUNTIME_MODEL_CLIPS,
@@ -819,6 +854,71 @@ pub(super) fn draw_actor_shadow(
 /// Shadow decal radius for an actor's collision radius.
 pub(super) fn actor_shadow_radius(base_radius: i32) -> i32 {
     mr::actor_shadow_radius(SHADOW_TUNING, base_radius)
+}
+
+/// Draw the player's own geometry flattened onto the floor plane.
+#[cfg(feature = "actor-shadows-projected")]
+pub(super) fn draw_player_projected_shadow(
+    player_pose: PlayerActorPoseSnapshot,
+    floor_y: i32,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) {
+    let runtime_model = player_pose.model();
+    mr::draw_actor_projected_shadow(
+        PROJECTED_SHADOW_TUNING,
+        model_scratch_arena(),
+        runtime_model,
+        player_pose.pose(),
+        floor_y,
+        runtime_model.material,
+        camera,
+        options,
+        model_faces,
+        model_parts,
+        model_vertices,
+        triangles,
+        world,
+    );
+}
+
+/// Draw the placed model instances of `current_room` flattened onto their
+/// floor planes.
+#[cfg(feature = "actor-shadows-projected")]
+pub(super) fn draw_model_instance_projected_shadows(
+    current_room: RoomIndex,
+    instance_poses: &[Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    // psx-numeric-allow-next-line: one bit per model instance; the width IS the instance capacity
+    visible_instance_mask: u64,
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) {
+    mr::draw_model_instance_projected_shadows(
+        model_tables(),
+        MODEL_DRAW_KNOBS,
+        PROJECTED_SHADOW_TUNING,
+        model_scratch_arena(),
+        current_room,
+        instance_poses,
+        camera,
+        options,
+        visible_instance_mask,
+        model_faces,
+        model_parts,
+        model_vertices,
+        triangles,
+        world,
+    );
 }
 
 /// The player's camera-view depth in `active`'s room frame.

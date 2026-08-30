@@ -964,8 +964,22 @@ impl<
         Some(page)
     }
 
-    /// Upload the subtract-blended circular floor shadow decal (a 64x64
-    /// 4bpp `Texture` blob) onto the shared shadow/particle page.
+    /// Upload the circular floor shadow decal (a 64x64 4bpp `Texture` blob)
+    /// onto the shared shadow/particle page.
+    ///
+    /// The blend is [`BlendMode::Average`], not subtract: `(background +
+    /// texel) / 2` with a black texel halves whatever the floor was, so one
+    /// decal reads as a shadow on every floor brightness in the level and can
+    /// never clip a dark floor to a flat black hole. Subtract's constant
+    /// absolute darkening cannot do both.
+    ///
+    /// Averaging only happens for texels whose CLUT entry sets STP (bit 15) --
+    /// see [`Color555::with_stp`][psx_vram::Color555::with_stp]. The decal
+    /// shipped with STP clear on all sixteen entries, so the GPU painted it
+    /// opaque at the palette's own near-black greys instead of blending:
+    /// measured against an `actor-shadows-off` build on the benchmark tape it
+    /// moved the floor by at most 30 of 255, against 123 once the palette
+    /// carried STP. `tools/gen_shadow_decal.py` authors the blob.
     pub fn upload_shadow_texture(&mut self, shadow_circle_blob: &[u8]) -> Option<TextureMaterial> {
         let texture = Texture::from_bytes(shadow_circle_blob).ok()?;
         if texture.width() != 64 || texture.height() != 64 || texture.clut_entries() != 16 {

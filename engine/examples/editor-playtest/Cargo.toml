@@ -85,6 +85,8 @@ npc-think-60hz = []
 # Reference build for measuring the cost of the existing single-quad actor
 # shadow implementation.
 actor-shadows-off = []
+# Projected (flattened-geometry) actor shadows instead of the blob decal.
+actor-shadows-projected = []
 cell-select-profile = ["psx-engine/cell-select-profile"]
 # High-contrast TR subdivision colors for emulator wireframe captures.
 # Diagnostic only: normal builds retain authored Gouraud lighting.
