@@ -39,6 +39,9 @@ use image::{imageops, DynamicImage, GenericImageView};
 use psxed_format::texture::{Depth, TextureHeader, MAGIC, VERSION};
 use psxed_format::AssetHeader;
 
+mod perceptual;
+mod quantise;
+
 pub use psxed_format::texture::Depth as PsxtDepth;
 
 const TRANSPARENT_ALPHA_THRESHOLD: u8 = 128;
@@ -214,7 +217,7 @@ pub fn encode_indexed_psxt(
         padded_palette.push([0, 0, 0]);
     }
     let pixel_halfwords = pack_indices(indices, width, height, depth);
-    let clut_halfwords = encode_clut(&padded_palette, n_entries);
+    let clut_halfwords = encode_clut(&padded_palette, n_entries, transparent_index_zero);
     let flags = if transparent_index_zero {
         psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT
     } else {
@@ -267,7 +270,11 @@ pub fn encode_indexed_psxt_with_clut_rows(
         while padded_palette.len() < entries_per_row {
             padded_palette.push([0, 0, 0]);
         }
-        clut_halfwords.extend(encode_clut(&padded_palette, entries_per_row));
+        clut_halfwords.extend(encode_clut(
+            &padded_palette,
+            entries_per_row,
+            transparent_index_zero,
+        ));
     }
     let clut_entries = entries_per_row
         .checked_mul(palette_rows.len())
@@ -365,7 +372,7 @@ fn encode_psxt(
                 median_cut_quantize(&rgb_pixels, n_entries)
             };
             let pixel_halfwords = pack_indices(&indices, width, height, depth);
-            let base_clut = encode_clut(&palette, n_entries);
+            let base_clut = encode_clut(&palette, n_entries, transparent_index_zero);
             let mut clut_halfwords = Vec::with_capacity(base_clut.len() * usize::from(clut_rows));
             for _ in 0..clut_rows {
                 clut_halfwords.extend_from_slice(&base_clut);
@@ -422,7 +429,7 @@ fn median_cut_quantize_with_transparent_zero(
         return (vec![[0, 0, 0]; n_entries], vec![0; pixels.len()]);
     }
 
-    let (opaque_palette, _) = median_cut_quantize(&opaque_pixels, n_entries - 1);
+    let (opaque_palette, opaque_indices) = median_cut_quantize(&opaque_pixels, n_entries - 1);
     let mut palette = Vec::with_capacity(n_entries);
     palette.push([0, 0, 0]);
     palette.extend_from_slice(&opaque_palette);
@@ -431,13 +438,18 @@ fn median_cut_quantize_with_transparent_zero(
         palette.push([0, 0, 0]);
     }
 
+    // Re-use the quantiser's own assignment rather than re-deriving it with a
+    // plain RGB nearest-match. The quantiser picks indices in Oklab against
+    // the exact colours the CLUT will hold; recomputing them here would throw
+    // that away and reintroduce entries no texel ever reaches.
+    let mut opaque = opaque_indices.iter();
     let indices = pixels
         .iter()
         .map(|p| {
             if p[3] < TRANSPARENT_ALPHA_THRESHOLD {
                 0
             } else {
-                nearest_index(&[p[0], p[1], p[2]], &palette[1..]).saturating_add(1)
+                opaque.next().copied().unwrap_or(0).saturating_add(1)
             }
         })
         .collect();
@@ -572,119 +584,45 @@ fn rgb555_to_rgb8(word: u16) -> [u8; 3] {
     ]
 }
 
-/// Median-cut colour quantisation. Input: per-pixel RGB. Output:
-/// (palette, indices) where each index is `< n_entries`.
+/// Colour quantisation for the PS1 CLUT. Input: per-pixel RGB.
+/// Output: (palette, indices) where each index is `< n_entries`.
 ///
-/// Algorithm: start with one box holding every unique colour.
-/// Repeatedly split the box with the largest RGB range along its
-/// longest channel's median until we have `n_entries` boxes. Each
-/// box contributes its per-channel mean as the final palette entry.
+/// The palette this returns is already snapped to the RGB555 lattice --
+/// every channel is the 8-bit expansion of a 5-bit value -- so
+/// [`encode_clut`] stores it losslessly and the returned indices stay
+/// correct all the way to the cooked blob.
 ///
-/// Output is deterministic for a given input -- `BTreeMap` + stable
-/// sorts -- so repeated builds produce byte-identical PSXT blobs.
+/// Algorithm (see [`quantise::solve`] for the detail):
+///
+/// 1. Histogram the input into RGB555 buckets, keeping each bucket's
+///    exact 8-bit weighted mean. Sub-lattice detail is kept in the
+///    means but the working set is bounded at 32768 entries.
+/// 2. Seed `n_entries` clusters by repeatedly splitting the cluster
+///    with the largest population-weighted squared Oklab error along
+///    its principal axis.
+/// 3. Refine with weighted Lloyd iterations in Oklab.
+/// 4. Snap each centre onto the RGB555 lattice, resolve collisions,
+///    and refill any entry that ends up with no pixels.
+///
+/// The plain median cut this replaces split on the widest raw channel
+/// range, which ignores how many pixels sit in a box: a small, loud
+/// accent cluster kept winning splits while a large near-black mass
+/// never got subdivided. It also computed box means in 8-bit RGB and
+/// only truncated to RGB555 at encode time, so several entries
+/// collapsed onto the same CLUT word and the later duplicates -- which
+/// a first-minimum nearest-match could never return -- were simply
+/// lost budget.
+///
+/// Output is deterministic for a given input. The clustering runs on
+/// `BTreeMap`-ordered buckets and the Oklab transform uses only IEEE
+/// operations that are exact on every target (see [`perceptual`]), so
+/// repeated builds on any machine produce byte-identical PSXT blobs.
 fn median_cut_quantize(pixels: &[[u8; 3]], n_entries: usize) -> (Vec<[u8; 3]>, Vec<u8>) {
     assert!(
         (2..=256).contains(&n_entries),
         "n_entries must be in [2, 256]"
     );
-
-    // Start with one box containing all pixels (as owned Vec so we
-    // can sort in place per split).
-    let mut boxes: Vec<Vec<[u8; 3]>> = vec![pixels.to_vec()];
-
-    while boxes.len() < n_entries {
-        // Find the box with the largest range along any channel.
-        let (idx, axis) = boxes
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| b.len() >= 2)
-            .map(|(i, b)| {
-                let (axis, range) = widest_axis(b);
-                (i, axis, range)
-            })
-            .max_by_key(|&(_, _, r)| r)
-            .map(|(i, a, _)| (i, a))
-            .unwrap_or_else(|| {
-                // Can't split any further (every box has <2 colours).
-                // Pad with duplicates of existing entries to hit
-                // n_entries -- quantiser caller expects exactly that count.
-                (0, 0)
-            });
-
-        let b = &mut boxes[idx];
-        if b.len() < 2 {
-            // Pad by duplicating. We only hit this when the input
-            // has fewer than n_entries unique colours.
-            let dup = b.clone();
-            boxes.push(dup);
-            continue;
-        }
-
-        // Sort along the chosen axis, split at the median.
-        b.sort_by_key(|c| c[axis]);
-        let mid = b.len() / 2;
-        let hi = b.split_off(mid);
-        boxes.push(hi);
-    }
-
-    // Compute each box's mean → palette entry.
-    let palette: Vec<[u8; 3]> = boxes
-        .iter()
-        .map(|b| {
-            let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
-            for c in b {
-                sr += c[0] as u32;
-                sg += c[1] as u32;
-                sb += c[2] as u32;
-            }
-            let n = b.len().max(1) as u32;
-            [(sr / n) as u8, (sg / n) as u8, (sb / n) as u8]
-        })
-        .collect();
-
-    // Map each source pixel to nearest palette entry.
-    let indices: Vec<u8> = pixels.iter().map(|p| nearest_index(p, &palette)).collect();
-
-    (palette, indices)
-}
-
-/// Return the (axis_index, range) of the colour channel with the
-/// widest spread in the given box.
-fn widest_axis(b: &[[u8; 3]]) -> (usize, u32) {
-    let mut lo = [u8::MAX; 3];
-    let mut hi = [0u8; 3];
-    for c in b {
-        for ch in 0..3 {
-            lo[ch] = lo[ch].min(c[ch]);
-            hi[ch] = hi[ch].max(c[ch]);
-        }
-    }
-    let ranges = [
-        hi[0] as u32 - lo[0] as u32,
-        hi[1] as u32 - lo[1] as u32,
-        hi[2] as u32 - lo[2] as u32,
-    ];
-    let (i, &r) = ranges.iter().enumerate().max_by_key(|(_, r)| *r).unwrap();
-    (i, r)
-}
-
-/// Linear scan of palette, squared-distance metric. `256 * 64 ≈
-/// 16K ops per image -- fast enough that we don't need a kd-tree
-/// for texture sizes the PSX can actually use.
-fn nearest_index(p: &[u8; 3], palette: &[[u8; 3]]) -> u8 {
-    let mut best = 0u8;
-    let mut best_d = u32::MAX;
-    for (i, c) in palette.iter().enumerate() {
-        let dr = p[0] as i32 - c[0] as i32;
-        let dg = p[1] as i32 - c[1] as i32;
-        let db = p[2] as i32 - c[2] as i32;
-        let d = (dr * dr + dg * dg + db * db) as u32;
-        if d < best_d {
-            best_d = d;
-            best = i as u8;
-        }
-    }
-    best
+    quantise::solve(pixels, n_entries)
 }
 
 /// Pack a linear `indices` buffer into halfword-aligned PSX
@@ -725,25 +663,53 @@ fn pack_indices(indices: &[u8], width: u16, height: u16, depth: Depth) -> Vec<u1
 /// Encode a palette as RGB555 halfwords. If `entries < n_entries`
 /// (rare -- only on inputs with <16 unique colours), pad with zero
 /// entries to hit the required CLUT row width.
-fn encode_clut(palette: &[[u8; 3]], n_entries: usize) -> Vec<u16> {
+///
+/// `reserve_index_zero` says entry 0 is the texture's transparency slot and
+/// must stay `0x0000`. Every other entry gets [`opaque_555`] applied, because
+/// a CLUT word of `0x0000` is a hole on real hardware and a palette that
+/// happens to contain black should draw black.
+fn encode_clut(palette: &[[u8; 3]], n_entries: usize, reserve_index_zero: bool) -> Vec<u16> {
     let mut out = Vec::with_capacity(n_entries);
-    for c in palette {
-        out.push(rgb_to_555(c[0], c[1], c[2]));
+    for (index, c) in palette.iter().enumerate() {
+        let word = rgb_to_555(c[0], c[1], c[2]);
+        out.push(if index == 0 && reserve_index_zero {
+            word
+        } else {
+            opaque_555(word)
+        });
     }
     while out.len() < n_entries {
+        // Trailing padding is never indexed, so it stays a plain zero.
         out.push(0);
     }
     out
 }
 
-/// 8-bit per channel RGB → PSX 5-5-5 + mask bit. Low 5 bits = red,
-/// next 5 = green, next 5 = blue, bit 15 = mask (kept zero here --
-/// masks are a render-time concern, not asset-time).
+/// 8-bit per channel RGB → PSX 5-5-5. Low 5 bits = red, next 5 =
+/// green, next 5 = blue. Bit 15 is left clear; [`opaque_555`] is what
+/// decides whether a colour needs it.
 fn rgb_to_555(r: u8, g: u8, b: u8) -> u16 {
     let r5 = (r as u16 >> 3) & 0x1F;
     let g5 = (g as u16 >> 3) & 0x1F;
     let b5 = (b as u16 >> 3) & 0x1F;
     r5 | (g5 << 5) | (b5 << 10)
+}
+
+/// Force a CLUT colour to actually draw.
+///
+/// The PS1 GPU treats a sampled texel whose palette word is `0x0000` as fully
+/// transparent, whatever the texture's own flags say -- so an opaque black
+/// palette entry punches a hole in the polygon instead of shading it. Bit 15
+/// is the semi-transparency bit, which the GPU only consults when the drawing
+/// primitive asks for blending, so `0x8000` is a black that renders as black
+/// on an opaque primitive and blends the same as any other colour on a
+/// translucent one.
+fn opaque_555(word: u16) -> u16 {
+    if word == 0 {
+        0x8000
+    } else {
+        word
+    }
 }
 
 /// Concatenate the header + pixel + CLUT blocks into the final
