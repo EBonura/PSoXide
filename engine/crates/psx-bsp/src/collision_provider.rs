@@ -268,8 +268,34 @@ fn point_to_q12(point: RoomPoint) -> Vec3I32 {
     }
 }
 
+/// Quantise one Q12 axis to world units by rounding to nearest.
+///
+/// `>> 12` floors, which silently moves a contact away from the surface the
+/// sweep stopped against whenever it travelled downward. A body sweep landing
+/// on a floor rests at Q12 200311, 48.90 in world units; flooring reports 48,
+/// and the body hull at 48 is inside the floor brush. Every later trace from
+/// there returns `start_solid`, so the motor can no longer move in any
+/// direction and the character is stuck where it stands.
+///
+/// Rounding to nearest keeps that landing at 49, outside the brush, while
+/// leaving an exact contact exactly where it is: the traces already back off a
+/// small epsilon from the plane they hit, so a clean hit at 2.0 arrives as
+/// 2.0 + eps and must still quantise to 2, not 3.
+fn round_q12_to_nearest(value_q12: i32) -> i32 {
+    const HALF: i32 = Q12_ONE / 2;
+    if value_q12 >= 0 {
+        value_q12.saturating_add(HALF) >> 12
+    } else {
+        -(value_q12.saturating_neg().saturating_add(HALF) >> 12)
+    }
+}
+
 fn point_from_q12(point: Vec3I32) -> RoomPoint {
-    RoomPoint::new(point.x >> 12, point.y >> 12, point.z >> 12)
+    RoomPoint::new(
+        round_q12_to_nearest(point.x),
+        round_q12_to_nearest(point.y),
+        round_q12_to_nearest(point.z),
+    )
 }
 
 /// Cross from the byte-backed shared trace into the engine's boolean result.
@@ -304,6 +330,31 @@ mod tests {
     use crate::CookedRecord;
     use crate::{ClipNode, Plane, RecordSlice};
     use psx_engine::COLLISION_FRACTION_ONE_Q12;
+
+    #[test]
+    fn a_landing_never_quantises_into_the_surface_it_hit() {
+        // Measured on the shipping cortex 0.3 map. A body sweep (hull 1,
+        // radius 12, height 64) dropped onto the floor at x=-65 z=-1030 and
+        // came to rest at Q12 200311, which is 48.90 in world units.
+        //
+        // `>> 12` floors that to 48, and the body hull at 48 is inside the
+        // floor brush: every later trace from there returns start_solid, so the
+        // motor cannot move the character in any direction and it is stuck
+        // standing still. 49 is outside the brush.
+        assert_eq!(round_q12_to_nearest(200311), 49);
+        assert_eq!(200311 >> 12, 48, "the old conversion landed inside solid");
+
+        // A clean contact must stay exactly where it is. The traces back off a
+        // small epsilon from the plane they hit, so a hit on the integer plane
+        // x=2 arrives just past it and must not be pushed out to 3.
+        assert_eq!(round_q12_to_nearest(2 * Q12_ONE + 3), 2);
+        assert_eq!(round_q12_to_nearest(2 * Q12_ONE), 2);
+
+        // Symmetric about zero, so a downward sweep below the origin rounds the
+        // same way an upward one does.
+        assert_eq!(round_q12_to_nearest(-200311), -49);
+        assert_eq!(round_q12_to_nearest(0), 0);
+    }
 
     #[test]
     fn body_hull_selection_is_ordered_bounded_and_fail_closed() {
