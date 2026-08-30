@@ -288,6 +288,11 @@ impl ModelAnimationViewerState {
                 self.set_studio_mode(AnimationStudioMode::Preview);
                 self.selected_action = CharacterAnimationAction::Idle;
                 self.selected_model = character.model;
+                self.preview_weapon = character
+                    .default_equipment
+                    .iter()
+                    .find_map(|binding| binding.weapon);
+                self.assignment_weapon = self.preview_weapon;
                 self.selected_clip_path =
                     character_action_clip_path(project, id, self.selected_action)
                         .or_else(|| self.preferred_model_clip_path(project));
@@ -1072,10 +1077,19 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
     action
 }
 
+/// Build the preview overlay for the clip currently on screen.
+///
+/// A hitbox and a projectile emitter each belong to one action, so they are
+/// only drawn while that action is being previewed. Showing every capsule on
+/// every clip made the overlay unreadable and made it look as though a capsule
+/// authored for one attack was live during another. A hurtbox carries no
+/// action, it is the body's own collider, so it is always drawn.
 fn preview_combat_capsules(
     capsules: &[psxed_project::CharacterCombatCapsule],
     selected: usize,
     visible: bool,
+    previewed_action: CharacterAnimationAction,
+    gizmo_mode: model_import_preview::PreviewGizmoMode,
 ) -> Vec<model_import_preview::PreviewCombatCapsule> {
     if !visible {
         return Vec::new();
@@ -1083,6 +1097,13 @@ fn preview_combat_capsules(
     capsules
         .iter()
         .enumerate()
+        .filter(|(_, capsule)| match capsule.role {
+            psxed_project::CombatCapsuleRole::Hurtbox => true,
+            psxed_project::CombatCapsuleRole::Hitbox { action, .. }
+            | psxed_project::CombatCapsuleRole::ProjectileEmitter { action, .. } => {
+                action == previewed_action
+            }
+        })
         .map(|(index, capsule)| {
             let projectile = match capsule.role {
                 psxed_project::CombatCapsuleRole::ProjectileEmitter {
@@ -1107,6 +1128,8 @@ fn preview_combat_capsules(
                 start: capsule.capsule.start,
                 end: capsule.capsule.end,
                 radius: capsule.capsule.radius,
+                projectile_preview_rotation_q12: capsule.projectile_preview_rotation_q12,
+                gizmo_mode,
                 color: match capsule.role {
                     psxed_project::CombatCapsuleRole::Hurtbox => Color32::from_rgb(76, 196, 224),
                     psxed_project::CombatCapsuleRole::Hitbox { .. } => {
@@ -1238,6 +1261,12 @@ pub(crate) fn draw_model_animation_viewer(
         &capsules,
         state.selected_combat_capsule,
         combat_overlays_visible,
+        state.selected_action,
+        if state.capsule_edit_tool == CapsuleEditTool::Rotate {
+            model_import_preview::PreviewGizmoMode::Rotate
+        } else {
+            model_import_preview::PreviewGizmoMode::Translate
+        },
     );
     let pose_clip_id = state
         .show_pose_corrections
@@ -1320,11 +1349,13 @@ pub(crate) fn draw_model_animation_viewer(
     };
     struct LoadedPreviewWeapon {
         track_index: Option<usize>,
+        selected_for_grip: bool,
         context: Arc<LoadedModelContext>,
         socket: psxed_project::AttachmentSocket,
         grip_translation: [i32; 3],
         grip_rotation_q12: [i16; 3],
         materialization_q12: u16,
+        trail: Option<model_import_preview::PreviewWeaponTrail>,
     }
 
     let weapon_fallback_atlas = ColorImage {
@@ -1347,6 +1378,9 @@ pub(crate) fn draw_model_animation_viewer(
             _ => None,
         })
         .unwrap_or_default();
+    let selected_socket_name = sockets
+        .get(preview_socket_index)
+        .map(|socket| socket.name.as_str());
     for binding in &default_equipment {
         // An authored action track is the per-action override for a socket.
         if action_weapon_tracks
@@ -1355,7 +1389,14 @@ pub(crate) fn draw_model_animation_viewer(
         {
             continue;
         }
-        let Some(weapon_id) = binding.weapon else {
+        let weapon_id = if selected_weapon_track.is_none()
+            && selected_socket_name == Some(binding.character_socket.as_str())
+        {
+            state.preview_weapon.or(binding.weapon)
+        } else {
+            binding.weapon
+        };
+        let Some(weapon_id) = weapon_id else {
             continue;
         };
         let Some((model_id, grip_translation, grip_rotation_q12)) = project
@@ -1382,20 +1423,28 @@ pub(crate) fn draw_model_animation_viewer(
         };
         loaded_preview_weapons.push(LoadedPreviewWeapon {
             track_index: None,
+            selected_for_grip: selected_socket_name == Some(binding.character_socket.as_str())
+                && state.preview_weapon == Some(weapon_id),
             context,
             socket,
             grip_translation,
             grip_rotation_q12,
             materialization_q12: 4096,
+            trail: None,
         });
     }
     for (track_index, track) in &action_weapon_tracks {
-        let Some((model_id, grip_translation, grip_rotation_q12)) = project
+        let Some((model_id, grip_translation, grip_rotation_q12, trail)) = project
             .resource(track.weapon)
             .and_then(|resource| match &resource.data {
-                ResourceData::Weapon(weapon) => weapon
-                    .model
-                    .map(|model_id| (model_id, weapon.grip.translation, weapon.grip.rotation_q12)),
+                ResourceData::Weapon(weapon) => weapon.model.map(|model_id| {
+                    (
+                        model_id,
+                        weapon.grip.translation,
+                        weapon.grip.rotation_q12,
+                        preview_weapon_trail(weapon, track.trail.as_ref()),
+                    )
+                }),
                 _ => None,
             })
         else {
@@ -1414,6 +1463,7 @@ pub(crate) fn draw_model_animation_viewer(
         };
         loaded_preview_weapons.push(LoadedPreviewWeapon {
             track_index: Some(*track_index),
+            selected_for_grip: *track_index == state.selected_weapon_track,
             context,
             socket,
             grip_translation,
@@ -1423,6 +1473,7 @@ pub(crate) fn draw_model_animation_viewer(
             } else {
                 preview_weapon_materialization_q12(track, state.frame, frame_count)
             },
+            trail,
         });
     }
     if loaded_preview_weapons.is_empty() && socket_model_id.is_some() {
@@ -1443,11 +1494,13 @@ pub(crate) fn draw_model_animation_viewer(
             {
                 loaded_preview_weapons.push(LoadedPreviewWeapon {
                     track_index: None,
+                    selected_for_grip: true,
                     context,
                     socket,
                     grip_translation,
                     grip_rotation_q12,
                     materialization_q12: 4096,
+                    trail: None,
                 });
             }
         }
@@ -1471,9 +1524,10 @@ pub(crate) fn draw_model_animation_viewer(
                 weapon.track_index,
                 weapon.materialization_q12,
             ),
+            trail: weapon.trail,
             show_grip_gizmo: socket_model_id.is_some()
                 && state.weapon_transform_target == WeaponTransformTarget::WeaponGrip
-                && weapon.track_index == Some(state.selected_weapon_track),
+                && weapon.selected_for_grip,
         })
         .collect::<Vec<_>>();
     let selected_joint = if state.show_pose_corrections {
@@ -1879,6 +1933,30 @@ fn character_action_weapon_tracks(
             )
         })
         .unwrap_or_default()
+}
+
+fn preview_weapon_trail(
+    weapon: &psxed_project::WeaponResource,
+    trail: Option<&psxed_project::WeaponTrailConfig>,
+) -> Option<model_import_preview::PreviewWeaponTrail> {
+    let trail = trail?;
+    let local_segment = weapon
+        .hitboxes
+        .iter()
+        .find_map(|hitbox| match hitbox.shape {
+            psxed_project::WeaponHitShape::Capsule { start, end, .. } => Some((start, end)),
+            psxed_project::WeaponHitShape::Box { .. } => None,
+        });
+    Some(model_import_preview::PreviewWeaponTrail {
+        start_frame: trail.start_frame,
+        end_frame: trail.end_frame,
+        history_frames: trail.history_frames,
+        segments: trail.segments,
+        root_color: trail.root_color,
+        tip_color: trail.tip_color,
+        blend_mode: trail.blend_mode,
+        local_segment,
+    })
 }
 
 fn preview_weapon_materialization_q12(
@@ -3966,7 +4044,12 @@ fn draw_combat_capsule_editor(
                 .push(psxed_project::CharacterCombatCapsule {
                     name: "Attack Hitbox".to_string(),
                     role: psxed_project::CombatCapsuleRole::Hitbox {
-                        action: psxed_project::CharacterAnimationAction::LightAttack,
+                        // Bind to the clip being previewed. Hardcoding an
+                        // action here sent every new hitbox to LightAttack, and
+                        // because the viewer follows the selected capsule's
+                        // action, adding one from any other clip jumped the
+                        // preview back to the light attack.
+                        action: state.selected_action,
                         active_start_frame: 8,
                         active_end_frame: 14,
                         damage: 25,
@@ -3988,7 +4071,7 @@ fn draw_combat_capsule_editor(
                         radius: 48,
                     },
                     role: psxed_project::CombatCapsuleRole::ProjectileEmitter {
-                        action: psxed_project::CharacterAnimationAction::LightAttack,
+                        action: state.selected_action,
                         charge_start_frame: 4,
                         active_start_frame: 8,
                         active_end_frame: 8,
@@ -4178,6 +4261,18 @@ fn draw_combat_capsule_editor(
         ui.label(
             RichText::new(
                 "Projectile emitters are spheres; the point is both muzzle and collision center.",
+            )
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+        );
+        changed |= crate::inspector_character_ui::q12_rotation_editor(
+            ui,
+            "Preview direction",
+            &mut capsule.projectile_preview_rotation_q12,
+        );
+        ui.label(
+            RichText::new(
+                "Rotate the local release preview without changing the live target-seeking trajectory.",
             )
             .small()
             .color(STUDIO_TEXT_WEAK),
@@ -5080,6 +5175,49 @@ fn draw_weapon_grip_editor(
     changed
 }
 
+fn draw_selected_hand_transform_editor(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    model_id: ResourceId,
+    socket_index: usize,
+) -> bool {
+    let Some(resource) = project.resource_mut(model_id) else {
+        return false;
+    };
+    let ResourceData::Model(model) = &mut resource.data else {
+        return false;
+    };
+    let Some(socket) = model.attachments.get_mut(socket_index) else {
+        return false;
+    };
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Selected hand point"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(
+                    "This is the per-character attachment transform. Rotate it to align a sword without changing that sword for every character.",
+                )
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+            );
+            changed |= crate::inspector_character_ui::int_vec3_editor(
+                ui,
+                "Position",
+                &mut socket.translation,
+                -32768,
+                32767,
+                4.0,
+            );
+            changed |= crate::inspector_character_ui::q12_rotation_editor(
+                ui,
+                "Rotation",
+                &mut socket.rotation_q12,
+            );
+        });
+    changed
+}
+
 fn suggested_hand_joint(joint_names: Option<&[String]>, hand: CharacterHand) -> Option<u16> {
     let suffix = match hand {
         CharacterHand::Right => "righthand",
@@ -5377,6 +5515,13 @@ fn draw_attachment_socket_editor(
     });
     draw_axis_gizmo_controls(ui, state, false);
 
+    changed |= draw_selected_hand_transform_editor(
+        ui,
+        project,
+        model_id,
+        state.selected_attachment_socket,
+    );
+
     if let Some(weapon_id) = state.preview_weapon {
         changed |= draw_weapon_grip_editor(ui, project, weapon_id);
     }
@@ -5624,6 +5769,20 @@ fn manipulate_selected_capsule(
             capsule.end[index] = compact_capsule_coord(capsule.end[index].saturating_add(amount));
         }
         CapsuleGizmoDelta::Rotate(turn_q12) => {
+            if matches!(
+                volume.role,
+                psxed_project::CombatCapsuleRole::ProjectileEmitter { .. }
+            ) {
+                if turn_q12 == 0 {
+                    return false;
+                }
+                let index = axis.index();
+                let turned = i32::from(volume.projectile_preview_rotation_q12[index])
+                    .saturating_add(turn_q12);
+                volume.projectile_preview_rotation_q12[index] =
+                    ((turned + 2048).rem_euclid(4096) - 2048) as i16;
+                return true;
+            }
             let angle = turn_q12 as f32 * std::f32::consts::TAU / 4096.0;
             if angle.abs() < f32::EPSILON {
                 return false;
@@ -6415,15 +6574,16 @@ fn draw_preview(
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
-            if let (Some(gizmo), Some(cue)) = (
+            if let (Some(gizmo), Some(aim), Some(cue)) = (
                 render.selected_combat_gizmo,
+                render.selected_projectile_aim,
                 combat_capsules
                     .iter()
                     .find(|capsule| capsule.selected)
                     .and_then(|capsule| capsule.projectile),
             ) {
                 let origin = preview_image_to_screen(gizmo.origin, preview_rect, render_size);
-                let aim = preview_image_to_screen(gizmo.axis_ends[2], preview_rect, render_size);
+                let aim = preview_image_to_screen(aim, preview_rect, render_size);
                 draw_projectile_studio_preview(&painter, origin, aim, state.frame, cue);
             }
             if state.show_pose_corrections {
@@ -8583,9 +8743,40 @@ mod focus_tests {
             combat_preview_action_window(&capsules, 0, CharacterAnimationAction::LightAttack),
             Some((CharacterAnimationAction::LightAttack, 8))
         );
-        let preview = preview_combat_capsules(&capsules, 1, true);
-        assert_eq!(preview.len(), 3);
-        assert!(preview[1].selected);
+        // The overlay shows the clip on screen, not every capsule the
+        // character owns. Previewing the light attack draws the always-on
+        // hurtbox and the light hitbox; the heavy attack's hitbox belongs to a
+        // different clip and stays hidden. Drawing all three made it look as
+        // though a capsule authored for one attack were live during another.
+        let light = preview_combat_capsules(
+            &capsules,
+            2,
+            true,
+            CharacterAnimationAction::LightAttack,
+            model_import_preview::PreviewGizmoMode::Translate,
+        );
+        assert_eq!(light.len(), 2, "hurtbox plus the light attack's own hitbox");
+        assert!(light[1].selected);
+
+        let heavy = preview_combat_capsules(
+            &capsules,
+            1,
+            true,
+            CharacterAnimationAction::HeavyAttack,
+            model_import_preview::PreviewGizmoMode::Translate,
+        );
+        assert_eq!(heavy.len(), 2, "hurtbox plus the heavy attack's own hitbox");
+        assert!(heavy[1].selected);
+
+        // A clip with no authored capsules still shows the hurtbox.
+        let idle = preview_combat_capsules(
+            &capsules,
+            0,
+            true,
+            CharacterAnimationAction::Idle,
+            model_import_preview::PreviewGizmoMode::Translate,
+        );
+        assert_eq!(idle.len(), 1, "the hurtbox has no action and always draws");
     }
 
     #[test]
@@ -8605,10 +8796,21 @@ mod focus_tests {
                 attachments: Vec::new(),
             }),
         );
+        let weapon = project.add_resource(
+            "Sword",
+            ResourceData::Weapon(psxed_project::WeaponResource {
+                model: Some(model),
+                ..psxed_project::WeaponResource::defaults()
+            }),
+        );
         let character = project.add_resource(
             "Fighter Profile",
             ResourceData::Character(psxed_project::CharacterResource {
                 model: Some(model),
+                default_equipment: vec![psxed_project::CharacterEquipmentBinding {
+                    weapon: Some(weapon),
+                    ..Default::default()
+                }],
                 ..psxed_project::CharacterResource::defaults()
             }),
         );
@@ -8618,6 +8820,7 @@ mod focus_tests {
 
         assert_eq!(viewer.selected_character, Some(character));
         assert_eq!(viewer.selected_model, Some(model));
+        assert_eq!(viewer.selected_weapon(), Some(weapon));
     }
 
     #[test]
@@ -8634,6 +8837,7 @@ mod focus_tests {
                         end: [100, 0, 0],
                         radius: 40,
                     },
+                    projectile_preview_rotation_q12: [0; 3],
                     role: psxed_project::CombatCapsuleRole::Hurtbox,
                 }],
                 ..psxed_project::CharacterResource::defaults()
@@ -8669,6 +8873,56 @@ mod focus_tests {
         assert_eq!(capsule.radius, 48);
         assert_eq!(capsule.start, [-110, 10, 0]);
         assert_eq!(capsule.end, [110, 10, 0]);
+    }
+
+    #[test]
+    fn projectile_rotate_gizmo_edits_preview_direction_without_moving_the_muzzle() {
+        let mut project = ProjectDocument::new("projectile-direction");
+        let character = project.add_resource(
+            "Ranged Fighter",
+            ResourceData::Character(psxed_project::CharacterResource {
+                combat_capsules: vec![psxed_project::CharacterCombatCapsule {
+                    name: "Muzzle".to_string(),
+                    joint: 8,
+                    capsule: psxed_project::JointCapsule {
+                        start: [0, 8_200, 0],
+                        end: [0, 8_200, 0],
+                        radius: 48,
+                    },
+                    projectile_preview_rotation_q12: [0; 3],
+                    role: psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                        action: CharacterAnimationAction::LightAttack,
+                        charge_start_frame: 10,
+                        active_start_frame: 18,
+                        active_end_frame: 18,
+                        projectile: None,
+                        speed: 112,
+                        lifetime_ticks: 180,
+                        min_range: 512,
+                        max_range: 4096,
+                        damage: 18,
+                        poise_damage: 8,
+                        tint_rgb: [62, 214, 198],
+                    },
+                }],
+                ..psxed_project::CharacterResource::defaults()
+            }),
+        );
+
+        assert!(manipulate_selected_capsule(
+            &mut project,
+            character,
+            0,
+            CapsuleEditAxis::Y,
+            CapsuleGizmoDelta::Rotate(512),
+        ));
+        let ResourceData::Character(profile) = &project.resource(character).unwrap().data else {
+            panic!("character resource expected");
+        };
+        let muzzle = &profile.combat_capsules[0];
+        assert_eq!(muzzle.capsule.start, [0, 8_200, 0]);
+        assert_eq!(muzzle.capsule.end, muzzle.capsule.start);
+        assert_eq!(muzzle.projectile_preview_rotation_q12, [0, 512, 0]);
     }
 
     #[test]
@@ -9330,11 +9584,24 @@ mod focus_tests {
             },
         ];
 
-        let visible = preview_combat_capsules(&capsules, 1, true);
+        let visible = preview_combat_capsules(
+            &capsules,
+            1,
+            true,
+            CharacterAnimationAction::LightAttack,
+            model_import_preview::PreviewGizmoMode::Translate,
+        );
         assert_eq!(visible.len(), 2);
         assert!(!visible[0].selected);
         assert!(visible[1].selected);
-        assert!(preview_combat_capsules(&capsules, 1, false).is_empty());
+        assert!(preview_combat_capsules(
+            &capsules,
+            1,
+            false,
+            CharacterAnimationAction::LightAttack,
+            model_import_preview::PreviewGizmoMode::Translate,
+        )
+        .is_empty());
         assert_eq!(capsules.len(), 2, "preview visibility must not delete data");
     }
 
