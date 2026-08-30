@@ -389,6 +389,15 @@ pub struct LaunchArgs {
     /// Ignore MMIO stall attribution before this route tick.
     #[arg(long, default_value_t = 0, requires = "mmio_stall_line_log")]
     pub mmio_stall_line_start_route_tick: u64,
+    /// Attribute main-RAM load stall cycles to the canonical 16-byte I-cache
+    /// line of the load that incurred them. The R3000A has no data cache, so
+    /// on a memory-bound frame these stalls can exceed instruction issue and
+    /// retired-instruction counts cannot say which loads pay for them.
+    #[arg(long)]
+    pub ram_load_stall_line_log: Option<PathBuf>,
+    /// Ignore RAM load stall attribution before this route tick.
+    #[arg(long, default_value_t = 0, requires = "ram_load_stall_line_log")]
+    pub ram_load_stall_line_start_route_tick: u64,
     /// Write every exact instruction-cache refill, including the replaced
     /// victim line and the incoming line. This measures temporal eviction
     /// pairs rather than inferring conflicts from set occupancy.
@@ -1161,7 +1170,9 @@ fn run_headless_launch(
         None => None,
     };
     cpu.set_cpu_cycle_profile_enabled(
-        args.cpu_cycle_profile_log.is_some() || args.mmio_stall_line_log.is_some(),
+        args.cpu_cycle_profile_log.is_some()
+            || args.mmio_stall_line_log.is_some()
+            || args.ram_load_stall_line_log.is_some(),
     );
     let mut cpu_cycle_profile_log = match args.cpu_cycle_profile_log.as_ref() {
         Some(path) => {
@@ -1200,6 +1211,11 @@ fn run_headless_launch(
         .as_ref()
         .map(|_| PcLineHistogram::new());
     let mut last_mmio_stall_cycles = last_cpu_cycle_profile.mmio_stall_cycles;
+    let mut ram_load_stall_lines = args
+        .ram_load_stall_line_log
+        .as_ref()
+        .map(|_| PcLineHistogram::new());
+    let mut last_ram_load_stall_cycles = last_cpu_cycle_profile.ram_load_stall_cycles;
     cpu.set_instruction_cache_event_profile_enabled(args.icache_event_log.is_some());
     let mut icache_event_log = match args.icache_event_log.as_ref() {
         Some(path) => {
@@ -1413,6 +1429,7 @@ fn run_headless_launch(
         // Capture before stepping so a stalling instruction is charged to
         // itself instead of the PC that follows it.
         let mmio_attribution_pc = mmio_stall_lines.as_ref().map(|_| cpu.pc());
+        let ram_load_attribution_pc = ram_load_stall_lines.as_ref().map(|_| cpu.pc());
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
             eprintln!(
@@ -1453,6 +1470,14 @@ fn run_headless_launch(
             let delta = now.saturating_sub(last_mmio_stall_cycles);
             last_mmio_stall_cycles = now;
             if route_ticks >= args.mmio_stall_line_start_route_tick {
+                lines.record_n(pc, delta);
+            }
+        }
+        if let (Some(lines), Some(pc)) = (ram_load_stall_lines.as_mut(), ram_load_attribution_pc) {
+            let now = cpu.cpu_cycle_profile().ram_load_stall_cycles;
+            let delta = now.saturating_sub(last_ram_load_stall_cycles);
+            last_ram_load_stall_cycles = now;
+            if route_ticks >= args.ram_load_stall_line_start_route_tick {
                 lines.record_n(pc, delta);
             }
         }
@@ -2039,6 +2064,15 @@ fn run_headless_launch(
         histogram.write(path, "mmio_stall_cycles")?;
         if emit_summary {
             eprintln!("[cli] MMIO stall attribution → {}", path.display());
+        }
+    }
+    if let (Some(path), Some(histogram)) = (
+        args.ram_load_stall_line_log.as_ref(),
+        ram_load_stall_lines.as_ref(),
+    ) {
+        histogram.write(path, "ram_load_stall_cycles")?;
+        if emit_summary {
+            eprintln!("[cli] RAM load stall attribution → {}", path.display());
         }
     }
     if let (Some(path), Some(profile)) = (
@@ -2804,6 +2838,8 @@ fn validation_launch_args(
         pc_line_start_route_tick: 0,
         mmio_stall_line_log: None,
         mmio_stall_line_start_route_tick: 0,
+        ram_load_stall_line_log: None,
+        ram_load_stall_line_start_route_tick: 0,
         icache_event_log: None,
         icache_event_start_route_tick: 0,
         instruction_class_log: None,
