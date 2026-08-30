@@ -5,21 +5,28 @@ use super::*;
 /// The bands are built once per model. The hot face walker selects a band
 /// from the NCLIP area the GTE already produced for backface culling, so the
 /// response adds no texture projection, division, or per-face color math.
+/// A band is the draw's own material with a different
+/// [`TextureMaterial::with_tint`], so the texture-window, CLUT and tpage packet
+/// words are identical in all four. Only the GP0 colour/command word is stored
+/// per band; the invariant three come from the packet material the caller
+/// already holds in registers. A banded face is then one indexed load instead
+/// of three, and the table is 20 bytes instead of 68.
 #[derive(Copy, Clone)]
 pub(super) struct CameraCrystalPacketMaterials {
-    bands: [TexturedPacketMaterial; 4],
+    plain: TexturedPacketMaterial,
+    band_color_command_words: [u32; 4],
     roughness: u8,
 }
 
 impl CameraCrystalPacketMaterials {
     /// Take `&self`, never `self`.
     ///
-    /// `bands` is indexed by a runtime value, so it must live in memory. With a
-    /// by-value receiver the compiler materialised a fresh 68-byte copy of the
+    /// The band table is indexed by a runtime value, so it must live in memory.
+    /// With a by-value receiver the compiler materialised a fresh copy of the
     /// whole table for EVERY submitted face: 26 stack-to-stack instructions
     /// with ten uncached RAM loads inlined into the hot batch, and an outright
     /// `memcpy` call once the walker stood alone. Borrowing reads the caller's
-    /// one copy in place, so a banded face costs an index and four loads.
+    /// one copy in place, so a banded face costs an index and one load.
     #[inline(always)]
     fn band(&self, area: i32) -> usize {
         let area = area.unsigned_abs() >> self.roughness.min(3);
@@ -34,9 +41,21 @@ impl CameraCrystalPacketMaterials {
         }
     }
 
+    /// Band this area onto `plain`, which must be the same material the bands
+    /// were built from (only its colour word is replaced).
+    #[inline(always)]
+    fn banded(&self, plain: TexturedPacketMaterial, area: i32) -> TexturedPacketMaterial {
+        TexturedPacketMaterial {
+            color_command_word: self.band_color_command_words[self.band(area)],
+            ..plain
+        }
+    }
+
+    /// Band this area onto the material the table was built from. Used by the
+    /// walkers that do not already carry the plain packet material in a local.
     #[inline(always)]
     fn for_area(&self, area: i32) -> TexturedPacketMaterial {
-        self.bands[self.band(area)]
+        self.banded(self.plain, area)
     }
 
     /// The same band as [`Self::for_area`], applied to a whole material.
@@ -79,8 +98,20 @@ fn camera_crystal_packet_materials(
             .with_tint((channel(base.0), channel(base.1), channel(base.2)))
             .textured_packet_material()
     };
+    let bands = [make(68), make(84), make(104), make(120)];
+    debug_assert!(bands.iter().all(|band| {
+        band.tex_window_word == bands[0].tex_window_word
+            && band.clut_high_word == bands[0].clut_high_word
+            && band.tpage_high_word == bands[0].tpage_high_word
+    }));
     CameraCrystalPacketMaterials {
-        bands: [make(68), make(84), make(104), make(120)],
+        plain: bands[0],
+        band_color_command_words: [
+            bands[0].color_command_word,
+            bands[1].color_command_word,
+            bands[2].color_command_word,
+            bands[3].color_command_word,
+        ],
         roughness,
     }
 }
@@ -155,11 +186,19 @@ impl PreparedModelDepthSlots {
         } else {
             u8::MAX
         };
+        // A degenerate band (empty slot range or empty depth range) always
+        // answers `front`. Folding that into `near` here, instead of testing
+        // `back <= front || far <= near` inside `slot`, keeps two comparisons
+        // and the two operands they need out of the per-face body of the hot
+        // model batch walkers, where every live value costs a stack reload:
+        // `depth <= i32::MAX` is unconditionally true, so the first branch
+        // still returns `front` for exactly the same inputs.
+        let degenerate = back <= front || far <= near;
         Self {
             front,
             back,
-            near,
-            far,
+            near: if degenerate { i32::MAX } else { near },
+            far: if degenerate { i32::MAX } else { far },
             span,
             band_slots,
             exact_power_of_two_shift,
@@ -168,7 +207,7 @@ impl PreparedModelDepthSlots {
 
     #[inline(always)]
     fn slot(self, depth: i32) -> usize {
-        if self.back <= self.front || self.far <= self.near || depth <= self.near {
+        if depth <= self.near {
             return self.front;
         }
         if depth >= self.far {
@@ -1775,8 +1814,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 face_index += 1;
                 continue;
             }
+            // Band onto the walker's own packet material rather than the
+            // table's copy of it: the three non-colour words then stay in the
+            // registers this loop already holds them in, instead of being
+            // re-read out of the band table on every submitted face.
             let packet_material = match camera_crystal_materials.as_ref() {
-                Some(materials) if CRYSTAL => materials.for_area(area),
+                Some(materials) if CRYSTAL => materials.banded(packet_material, area),
                 _ => packet_material,
             };
             let packet_material = if palette_banks {
@@ -2738,6 +2781,30 @@ mod prepared_model_depth_tests {
 
         let blue = (side_highlight >> 16) & 0xff;
         assert_eq!(blue, 152, "opaque crystal must not amplify lit base tint");
+    }
+
+    /// The hot bucketed walker bands onto its OWN packet material instead of
+    /// the band table's copy, so that the texture-window, CLUT and tpage words
+    /// stay in registers across the face loop. That is only sound because a
+    /// band differs from the draw's material in the colour word alone. Pin it.
+    #[test]
+    fn banding_the_draws_own_material_matches_the_band_table() {
+        for tint in [(116, 132, 152), (255, 255, 255), (8, 200, 40)] {
+            for roughness in 0..4u8 {
+                let material = TextureMaterial::opaque(0x1234, 0x5678, tint);
+                let mut view = Mat3I16::IDENTITY;
+                view.m[2][0] = 3000;
+                let crystal = camera_crystal_packet_materials(material, view, roughness);
+                let plain = material.textured_packet_material();
+                for area in [-2048, -33, -1, 0, 1, 8, 9, 32, 33, 128, 129, 4096, 1 << 20] {
+                    assert_eq!(
+                        crystal.banded(plain, area),
+                        crystal.for_area(area),
+                        "tint {tint:?} roughness {roughness} area {area}"
+                    );
+                }
+            }
+        }
     }
 }
 
