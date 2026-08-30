@@ -891,6 +891,60 @@ impl Brush {
     /// with far-flung plane points become identical to freshly drawn
     /// ones, which is what the editing gestures are tuned for.
     pub fn normalized(&self) -> Option<Brush> {
+        self.reauthored_from_solved(1, true, 1.0)
+    }
+
+    /// Re-author a brush from its visible solved corners, snapping those
+    /// corners to the absolute world grid. Quake brushes store plane-defining
+    /// points, whose intersections can be fractional even when every stored
+    /// coordinate is an integer. Editing only those stored points therefore
+    /// cannot repair the geometry that the viewport, BSP cooker, and rotation
+    /// tools actually use.
+    ///
+    /// Returns `None` when the requested grid cannot represent the brush as a
+    /// valid bounded convex solid without changing its visible face topology.
+    pub fn snapped_solved_to_grid(&self, step: i32) -> Option<Brush> {
+        let step = step.max(1);
+        let source = self.solve();
+        if !source.is_valid() || !source.within_extent(BRUSH_EDIT_EXTENT_LIMIT) {
+            return None;
+        }
+        if self.solved_vertices_on_grid(step, 0.01) && self.is_pickable() {
+            return Some(self.clone());
+        }
+
+        let source_faces = source.polygons.iter().flatten().count();
+        let mut candidate = self.clone();
+        for _ in 0..8 {
+            let next = candidate.reauthored_from_solved(step, false, f64::from(step))?;
+            if next == candidate {
+                break;
+            }
+            candidate = next;
+            let solved = candidate.solve();
+            if solved.polygons.iter().flatten().count() != source_faces {
+                return None;
+            }
+            for axis in 0..3 {
+                if (solved.min[axis] - source.min[axis]).abs() > f64::from(step)
+                    || (solved.max[axis] - source.max[axis]).abs() > f64::from(step)
+                {
+                    return None;
+                }
+            }
+            if candidate.solved_vertices_on_grid(step, 0.01) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn reauthored_from_solved(
+        &self,
+        snap_step: i32,
+        allow_fast_path: bool,
+        max_bounds_shift: f64,
+    ) -> Option<Brush> {
         let solved = self.solve();
         if !solved.is_valid() || !solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT) {
             return None;
@@ -912,9 +966,18 @@ impl Brush {
                     })
                 })
         });
-        if already_normal {
+        if allow_fast_path && already_normal {
             return Some(self.clone());
         }
+        // Round half away from zero on the grid, so `snap_step == 1` is
+        // exactly the `f64::round` the legacy normalization used and coarser
+        // grids stay symmetric about the origin.
+        let snap_step = f64::from(snap_step.max(1));
+        let snap = |coordinate: f64| {
+            ((coordinate / snap_step).round() * snap_step)
+                .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+        };
+        let quantise = |p: [f64; 3]| [snap(p[0]), snap(p[1]), snap(p[2])];
         let mut faces = Vec::new();
         for (index, polygon) in solved.polygons.iter().enumerate() {
             let Some(polygon) = polygon else { continue };
@@ -951,18 +1014,11 @@ impl Brush {
                     }
                 }
             }
-            let round = |p: [f64; 3]| {
-                [
-                    p[0].round() as i32,
-                    p[1].round() as i32,
-                    p[2].round() as i32,
-                ]
-            };
             let mut candidate = BrushFace {
                 points: [
-                    round(a),
-                    round(polygon.verts[best.0]),
-                    round(polygon.verts[best.1]),
+                    quantise(a),
+                    quantise(polygon.verts[best.0]),
+                    quantise(polygon.verts[best.1]),
                 ],
                 material: source.material,
                 uv: source.uv,
@@ -999,8 +1055,8 @@ impl Brush {
             return None;
         }
         for axis in 0..3 {
-            if (resolved.min[axis] - solved.min[axis]).abs() > 1.0
-                || (resolved.max[axis] - solved.max[axis]).abs() > 1.0
+            if (resolved.min[axis] - solved.min[axis]).abs() > max_bounds_shift
+                || (resolved.max[axis] - solved.max[axis]).abs() > max_bounds_shift
             {
                 return None;
             }
@@ -1814,6 +1870,31 @@ mod tests {
         assert_eq!(front.solve().min, [32.0, 0.0, 0.0]);
         assert_eq!(back.faces.len(), 6);
         assert_eq!(front.faces.len(), 6);
+    }
+
+    #[test]
+    fn solved_grid_snap_repairs_fractional_plane_intersections() {
+        let source = Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        // x + 2y = 101 meets x=0 at y=50.5. Every authored plane point is
+        // already an integer, but the visible clipped corners are not on even
+        // the one-unit grid. This is the case the old Snap level missed.
+        let brush = source
+            .clip([[101, 0, 0], [-155, 128, 0], [-155, 128, 128]])
+            .back
+            .expect("clipped solid");
+        assert!(brush.is_pickable());
+        assert!(!brush.solved_vertices_on_grid(1, 0.01));
+
+        let snapped = brush
+            .snapped_solved_to_grid(1)
+            .expect("visible corners can be represented on Grid 1");
+        assert_ne!(snapped, brush);
+        assert!(snapped.is_pickable());
+        assert!(snapped.solved_vertices_on_grid(1, 0.01));
+        assert_eq!(
+            snapped.solve().polygons.iter().flatten().count(),
+            brush.solve().polygons.iter().flatten().count()
+        );
     }
 
     #[test]
