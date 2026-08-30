@@ -337,10 +337,57 @@ fn cube_sky_packet_vertex(vertex: CubeSkyVertex, face: CubeFace) -> ((i16, i16),
         ((vertex.screen_q12[0] + 2048) >> 12).clamp(0, i32::from(i16::MAX)) as i16,
         ((vertex.screen_q12[1] + 2048) >> 12).clamp(0, i32::from(i16::MAX)) as i16,
     );
-    let [atlas_u, atlas_v] = cube_atlas_uv(vertex.ray, face);
-    let u = (atlas_u % CUBE_SKY_FACE_WIDTH) as u8;
-    let v = (atlas_v % 256) as u8;
+    // Packet UVs are page-local, so the atlas origin `cube_atlas_uv` adds is
+    // taken straight back out by the caller's `% 256`. Both halves are exact
+    // no-ops at this width -- `texture_page_offset` scales by the 256-wide
+    // face and `page_v_origin` is 0 -- so read the face projection directly
+    // and skip the round trip. `page_local_uv_matches_the_atlas_round_trip`
+    // pins the two forms together.
+    let [u, v] = cube_face_page_local_uv(vertex.ray, face);
     (screen, u16::from(u) | (u16::from(v) << 8))
+}
+
+/// Page-local 8-bit texel for a ray on one cube face.
+///
+/// This is [`cube_atlas_uv`] with the atlas origin left off: the clamp already
+/// bounds both axes to `0..=255`, which is exactly the range the packet's `u8`
+/// fields hold.
+#[inline]
+fn cube_face_page_local_uv(direction: [i32; 3], face: CubeFace) -> [u8; 2] {
+    let local = cube_face_uv_q12(direction, face);
+    [
+        ((local[0].saturating_add(4096) * i32::from(CUBE_SKY_FACE_WIDTH - 1)) >> 13)
+            .clamp(0, i32::from(CUBE_SKY_FACE_WIDTH - 1)) as u8,
+        ((local[1].saturating_add(4096) * i32::from(CUBE_SKY_FACE_HEIGHT - 1)) >> 13)
+            .clamp(0, i32::from(CUBE_SKY_FACE_HEIGHT - 1)) as u8,
+    ]
+}
+
+/// One grid corner of the sky lattice, with the two per-corner results the
+/// cell loop would otherwise recompute.
+///
+/// Every interior corner is shared by four cells, and the row carry already
+/// keeps each corner alive for two rows, so `cube_face` and
+/// `cube_sky_packet_vertex` used to run 432 times a frame for 130 distinct
+/// corners. Resolving both at the corner makes that 130. A cell whose four
+/// corners agree on a face wants exactly the sample each corner already holds
+/// -- the uniform branch projects every corner onto its own face -- so the
+/// cached value is the same one the old code computed.
+#[derive(Clone, Copy)]
+struct CubeSkyGridVertex {
+    vertex: CubeSkyVertex,
+    face: CubeFace,
+    uv: u16,
+}
+
+impl Default for CubeSkyGridVertex {
+    fn default() -> Self {
+        Self {
+            vertex: CubeSkyVertex::default(),
+            face: CubeFace::PositiveX,
+            uv: 0,
+        }
+    }
 }
 
 /// Select the contiguous 16-colour CLUT allocated for one cube face.
@@ -650,46 +697,111 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
     let mut packets = 0u32;
     let mut hardware_triangles = 0u32;
     let mut packet_words = 0usize;
-    let vertex_at = |column: usize, row: usize| {
-        let screen = [
-            (column * screen_width as usize / CUBE_SKY_COLUMNS) as i16,
-            (row * screen_height as usize / CUBE_SKY_ROWS) as i16,
+    // The lattice's screen positions do not depend on the view, so they are
+    // resolved once instead of per corner. They are also exactly the screen
+    // coordinates `cube_sky_packet_vertex` would return for a grid corner --
+    // `((x << 12) + 2048) >> 12 == x` for the non-negative x a column can
+    // produce -- so the uniform branch reads them straight from here and the
+    // corner cache carries only the texel.
+    let mut column_x = [0i16; CUBE_SKY_COLUMNS + 1];
+    for (column, x) in column_x.iter_mut().enumerate() {
+        *x = (column * screen_width as usize / CUBE_SKY_COLUMNS) as i16;
+    }
+    let mut row_y = [0i16; CUBE_SKY_ROWS + 1];
+    for (row, y) in row_y.iter_mut().enumerate() {
+        *y = (row * screen_height as usize / CUBE_SKY_ROWS) as i16;
+    }
+    // `screen_view_ray` is a 3x3 multiply against a point that only ever moves
+    // along the lattice, and the three terms of that sum depend on the column,
+    // the row and nothing at all respectively. Splitting them turns 9 multiplies
+    // per corner (1,170 a frame) into 39 + 30 + 3 for the whole lattice, leaving
+    // three adds and a shift per corner. The sum is formed left to right in the
+    // same order and width as the original, so it is the same i32 result --
+    // `the_separated_lattice_ray_matches_screen_view_ray` pins that.
+    let rotation = view_rotation.m;
+    let projection_term = {
+        let z = i32::from(projection.max(1)).clamp(1, 2048);
+        [
+            z * i32::from(rotation[2][0]),
+            z * i32::from(rotation[2][1]),
+            z * i32::from(rotation[2][2]),
+        ]
+    };
+    let mut column_term = [[0i32; 3]; CUBE_SKY_COLUMNS + 1];
+    for (column, term) in column_term.iter_mut().enumerate() {
+        let x = (i32::from(column_x[column]) - i32::from(screen_center[0])).clamp(-2048, 2048);
+        *term = [
+            x * i32::from(rotation[0][0]),
+            x * i32::from(rotation[0][1]),
+            x * i32::from(rotation[0][2]),
         ];
-        CubeSkyVertex {
+    }
+    let mut row_term = [[0i32; 3]; CUBE_SKY_ROWS + 1];
+    for (row, term) in row_term.iter_mut().enumerate() {
+        let y = (i32::from(row_y[row]) - i32::from(screen_center[1])).clamp(-2048, 2048);
+        *term = [
+            y * i32::from(rotation[1][0]),
+            y * i32::from(rotation[1][1]),
+            y * i32::from(rotation[1][2]),
+        ];
+    }
+    let vertex_at = |column: usize, row: usize| {
+        let screen = [column_x[column], row_y[row]];
+        let (cx, ry) = (column_term[column], row_term[row]);
+        let vertex = CubeSkyVertex {
             screen_q12: [i32::from(screen[0]) << 12, i32::from(screen[1]) << 12],
-            ray: screen_view_ray(screen, screen_center, projection.max(1), view_rotation.m),
+            ray: [
+                (cx[0] + ry[0] + projection_term[0]) >> 12,
+                (cx[1] + ry[1] + projection_term[1]) >> 12,
+                (cx[2] + ry[2] + projection_term[2]) >> 12,
+            ],
+        };
+        let face = cube_face(vertex.ray);
+        let [u, v] = cube_face_page_local_uv(vertex.ray, face);
+        CubeSkyGridVertex {
+            vertex,
+            face,
+            uv: u16::from(u) | (u16::from(v) << 8),
         }
     };
-    let mut top = [CubeSkyVertex::default(); CUBE_SKY_COLUMNS + 1];
-    for (column, vertex) in top.iter_mut().enumerate() {
+    // Two row buffers indexed by parity rather than one buffer plus a
+    // `top = bottom` copy: the corner cache made each row 364 bytes, and
+    // copying it twelve times a frame showed up as `memcpy`.
+    let mut grid = [[CubeSkyGridVertex::default(); CUBE_SKY_COLUMNS + 1]; 2];
+    for (column, vertex) in grid[0].iter_mut().enumerate() {
         *vertex = vertex_at(column, 0);
     }
     'rows: for row in 0..CUBE_SKY_ROWS {
-        let mut bottom = [CubeSkyVertex::default(); CUBE_SKY_COLUMNS + 1];
-        for (column, vertex) in bottom.iter_mut().enumerate() {
-            *vertex = vertex_at(column, row + 1);
+        let top_row = row & 1;
+        let bottom_row = (row + 1) & 1;
+        // Indexed rather than `iter_mut().enumerate()`: the iterator form is
+        // tidier but links 880 more bytes of .text, which crosses a section
+        // alignment boundary and costs 2 KiB of guest RAM for +0.02 fps.
+        #[allow(clippy::needless_range_loop)]
+        for column in 0..=CUBE_SKY_COLUMNS {
+            grid[bottom_row][column] = vertex_at(column, row + 1);
         }
         for column in 0..CUBE_SKY_COLUMNS {
-            let cell = [
-                top[column],
-                top[column + 1],
-                bottom[column + 1],
-                bottom[column],
+            let corners = [
+                grid[top_row][column],
+                grid[top_row][column + 1],
+                grid[bottom_row][column + 1],
+                grid[bottom_row][column],
             ];
-            let corner_faces = cell.map(|vertex| cube_face(vertex.ray));
-            if corner_faces[1..]
+            if corners[1..]
                 .iter()
-                .all(|face| *face == corner_faces[0])
+                .all(|corner| corner.face == corners[0].face)
             {
                 if packet_words + SKY_QUAD_WORDS > CUBE_SKY_PACKET_BUDGET_WORDS {
                     debug_assert!(false, "directional sky packet envelope exhausted");
                     break 'rows;
                 }
-                let face = corner_faces[0];
-                let samples = [cell[0], cell[1], cell[3], cell[2]]
-                    .map(|vertex| cube_sky_packet_vertex(vertex, face));
-                let vertices = [samples[0].0, samples[1].0, samples[2].0, samples[3].0];
-                let uv = samples.map(|sample| ((sample.1 & 0xff) as u8, (sample.1 >> 8) as u8));
+                let face = corners[0].face;
+                let (x0, x1) = (column_x[column], column_x[column + 1]);
+                let (y0, y1) = (row_y[row], row_y[row + 1]);
+                let vertices = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
+                let uv = [corners[0].uv, corners[1].uv, corners[3].uv, corners[2].uv]
+                    .map(|texel| ((texel & 0xff) as u8, (texel >> 8) as u8));
                 unsafe {
                     let mut quad = QuadTextured::new(
                         vertices,
@@ -707,6 +819,9 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
                 hardware_triangles = hardware_triangles.wrapping_add(2);
                 continue;
             }
+            // Only the mixed branch needs the bare vertices, and it is the rare
+            // one: materialising them for every cell cost 7% of the stage.
+            let cell = corners.map(|corner| corner.vertex);
             for face in CubeFace::ALL {
                 let (polygon, count) = clip_cube_sky_cell(cell, face);
                 if count < 3 {
@@ -745,7 +860,6 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
                 }
             }
         }
-        top = bottom;
     }
     // Linked packets are prepended to one OT slot, so the last staged packet
     // executes first and clears any texture window inherited from a prior draw.
@@ -773,6 +887,165 @@ mod tests {
         CubeFace, CUBE_SKY_ATLAS_SIZE, VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS,
     };
     use psx_gte::math::Mat3I16;
+
+    #[test]
+    fn the_separated_lattice_ray_matches_screen_view_ray() {
+        // The cube sky no longer calls `screen_view_ray` per corner; it adds a
+        // per-column, a per-row and a constant term. Require the two to agree
+        // exactly over every lattice corner, for a spread of rotations, screen
+        // sizes and centres -- including centres that push a corner past the
+        // +-2048 clamp, which is the one place the split could disagree.
+        for (rx, ry, rz) in [
+            (0u16, 0u16, 0u16),
+            (512, 1024, 2048),
+            (3000, 100, 60000),
+            (16384, 32768, 49152),
+            (65535, 65535, 65535),
+        ] {
+            let rotation = Mat3I16::rotate_xyz(rx, ry, rz).m;
+            for (width, height, cx, cy, projection) in [
+                (320i16, 240i16, 160i16, 120i16, 320i16),
+                (320, 240, 0, 0, 1),
+                (640, 480, 320, 240, 2048),
+                (320, 240, -4000, 5000, 512),
+                (1, 1, 160, 120, 300),
+            ] {
+                let projection_z = i32::from(projection.max(1)).clamp(1, 2048);
+                let constant = [
+                    projection_z * i32::from(rotation[2][0]),
+                    projection_z * i32::from(rotation[2][1]),
+                    projection_z * i32::from(rotation[2][2]),
+                ];
+                for column in 0..=super::CUBE_SKY_COLUMNS {
+                    let sx = (column * width.max(1) as usize / super::CUBE_SKY_COLUMNS) as i16;
+                    let x = (i32::from(sx) - i32::from(cx)).clamp(-2048, 2048);
+                    let column_term = [
+                        x * i32::from(rotation[0][0]),
+                        x * i32::from(rotation[0][1]),
+                        x * i32::from(rotation[0][2]),
+                    ];
+                    for row in 0..=super::CUBE_SKY_ROWS {
+                        let sy = (row * height.max(1) as usize / super::CUBE_SKY_ROWS) as i16;
+                        let y = (i32::from(sy) - i32::from(cy)).clamp(-2048, 2048);
+                        let row_term = [
+                            y * i32::from(rotation[1][0]),
+                            y * i32::from(rotation[1][1]),
+                            y * i32::from(rotation[1][2]),
+                        ];
+                        let split = [
+                            (column_term[0] + row_term[0] + constant[0]) >> 12,
+                            (column_term[1] + row_term[1] + constant[1]) >> 12,
+                            (column_term[2] + row_term[2] + constant[2]) >> 12,
+                        ];
+                        assert_eq!(
+                            split,
+                            screen_view_ray([sx, sy], [cx, cy], projection.max(1), rotation),
+                            "corner ({column},{row}) centre ({cx},{cy})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_grid_corner_keeps_its_screen_position_through_the_packet_form() {
+        // The uniform branch now reads a cell's screen corners from the
+        // lattice tables instead of from `cube_sky_packet_vertex`. That is only
+        // exact because a grid corner's Q12 position round-trips: the +2048
+        // rounding term is below one whole unit and a column position is never
+        // negative. Pin it over every screen width the sky can be asked for.
+        for x in 0i32..=1024 {
+            let q12 = x << 12;
+            assert_eq!(
+                ((q12 + 2048) >> 12).clamp(0, i32::from(i16::MAX)) as i16,
+                x as i16,
+                "grid corner {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_local_uv_matches_the_atlas_round_trip() {
+        // The packet path stopped going through `cube_atlas_uv` only because
+        // the atlas origin it adds is taken straight back out by `% 256`.
+        // Sweep every face over a spread of rays, including the axis, edge and
+        // corner directions where the projection saturates, and require the
+        // two forms to agree exactly.
+        // `screen_view_ray` clamps the camera vector to +-2048 and the
+        // projection to 1..=2048, so a runtime ray component cannot exceed
+        // 3 * 2048 * 4096 >> 12 = 6144. Sweep well past that, but stay inside
+        // the range the arithmetic is defined on.
+        let mut rays = alloc::vec![
+            [1, 0, 0],
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+            [0, 0, -1],
+            [1, 1, 1],
+            [-1, 1, -1],
+            [1, -1, 1],
+            [-1, -1, -1],
+            [0, 0, 0],
+            [6144, 6144, 6144],
+            [-6144, 6143, -6144],
+            [6144, 1, 6144],
+            [16384, 16384, 16383],
+            [-16384, -16383, -16384],
+        ];
+        let mut seed = 0x1234_5678u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) % 32_769) as i32 - 16_384
+        };
+        for _ in 0..40_000 {
+            rays.push([next(), next(), next()]);
+        }
+        // Only a ray's own face is exercised. Projecting a ray onto a face it
+        // does not belong to divides by a non-dominant axis, and the resulting
+        // Q12 coordinate can exceed the range `cube_atlas_uv`'s `* 255` step
+        // holds -- a pre-existing debug-only overflow in that function, which
+        // release builds wrap and no caller reaches: the uniform branch uses
+        // each corner's own face, and clipped vertices lie inside the face
+        // they were clipped to.
+        for ray in rays {
+            let face = cube_face(ray);
+            let [atlas_u, atlas_v] = cube_atlas_uv(ray, face);
+            let expected = [
+                (atlas_u % super::CUBE_SKY_FACE_WIDTH) as u8,
+                (atlas_v % 256) as u8,
+            ];
+            assert_eq!(
+                super::cube_face_page_local_uv(ray, face),
+                expected,
+                "ray {ray:?} face {face:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_uniform_cell_samples_every_corner_on_its_own_face() {
+        // The grid-corner cache is only sound because the uniform branch
+        // projects each corner onto the face that corner already selected.
+        // Assert that identity directly: where all four corners agree,
+        // sampling with the shared face equals sampling with each corner's own.
+        let rotation = Mat3I16::rotate_xyz(0, 0, 0);
+        for x in -160i32..160 {
+            for y in [-120i32, -40, 40, 119] {
+                let ray = screen_view_ray([x as i16, y as i16], [160, 120], 320, rotation.m);
+                let own = cube_face(ray);
+                let vertex = super::CubeSkyVertex {
+                    screen_q12: [x << 12, y << 12],
+                    ray,
+                };
+                assert_eq!(
+                    super::cube_sky_packet_vertex(vertex, own),
+                    super::cube_sky_packet_vertex(vertex, cube_face(vertex.ray)),
+                );
+            }
+        }
+    }
 
     #[test]
     fn distance_does_not_create_sky_parallax() {
