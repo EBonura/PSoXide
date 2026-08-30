@@ -264,6 +264,11 @@ test:
 	cargo test --workspace
 	cd engine && cargo test --workspace
 	cd sdk && cargo test --workspace
+# `editor-playtest` declares its own `[workspace]`, so the three lines above
+# never reach it and its `#[cfg(test)]` modules went unrun for their whole
+# existence. It host-compiles only because `no_std`/`no_main`/`no_mangle main`
+# are gated on `not(test)`; running it here is what keeps that gating honest.
+	cd engine/examples/editor-playtest && cargo test
 
 canaries:
 	cargo test --workspace -- --ignored

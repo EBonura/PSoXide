@@ -44,7 +44,13 @@ unsafe impl GlobalAlloc for BumpAllocator {
     }
 }
 
-#[global_allocator]
+/// Only registered as *the* allocator when targeting PS1 hardware, for the
+/// same reason the panic handler is (see [`crate`]): only [`crate::_start`]
+/// seeds it, so on the host it would be installed still spanning
+/// `0..0` and fail the first allocation any linking test harness makes.
+/// Host builds use `std`'s allocator. The cfg is true for every guest build,
+/// so the PS1 artifact is unaffected.
+#[cfg_attr(target_arch = "mips", global_allocator)]
 static ALLOCATOR: BumpAllocator = BumpAllocator {
     state: UnsafeCell::new(BumpState { next: 0, end: 0 }),
 };
