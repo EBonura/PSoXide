@@ -107,6 +107,16 @@
     ],
     options: [],
     boot: Gameplay,
+    screen_transition: (
+        kind: None,
+        frames: 45,
+        color: (
+            0,
+            0,
+            0,
+        ),
+        seed: 19229,
+    ),
     resources: [
         /*[0]*/ (
             id: (1),
@@ -119,7 +129,7 @@
                 generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
                 transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
                 reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
+                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
                 face_sidedness: Front,
                 sky_aperture: false,
                 double_sided: false,
@@ -136,7 +146,7 @@
                 generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
                 transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
                 reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
+                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
                 face_sidedness: Front,
                 sky_aperture: false,
                 double_sided: false,
@@ -153,7 +163,7 @@
                 generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
                 transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
                 reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
+                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
                 face_sidedness: Front,
                 sky_aperture: true,
                 double_sided: false,
