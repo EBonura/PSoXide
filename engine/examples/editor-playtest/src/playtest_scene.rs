@@ -497,6 +497,7 @@ impl Scene for Playtest {
             // A gameplay-to-front-end handoff is the other safe save boundary.
             // Gameplay overlays share the gameplay resource key, so opening the
             // pause/inventory menu does not trigger a card write here.
+            self.snapshot_resume_position();
             self.flush_poi_save();
             // Re-anchor the animation epoch on the next gameplay entry
             // (see `gameplay_epoch` in main.rs).

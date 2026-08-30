@@ -91,7 +91,9 @@ use psx_game_runtime::vitality::{
     PowerUpLoadout, VitalityChannelId, VitalityModifiers,
 };
 use psx_game_runtime::{
-    destructibles::RuntimeDestructibles, poi::MessageController, save::SaveBlock,
+    destructibles::RuntimeDestructibles,
+    poi::MessageController,
+    save::{SaveBlock, SavedPlayerPosition},
 };
 use psx_gpu::{
     draw_tri_flat_blended,
