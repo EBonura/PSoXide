@@ -433,8 +433,14 @@ pub(super) fn instance_actor_pose_from_components(
 ) -> ActorPoseSnapshot {
     let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
     let reference_anchor = model_clip_anchor(tables, runtime_model, runtime_model.default_clip);
-    let pose_translation =
-        model_pose_anchor_translation(animation, phase_q12, clip_anchor, reference_anchor, None);
+    let pose_translation = model_pose_anchor_translation(
+        animation,
+        phase_q12,
+        clip_anchor,
+        reference_anchor,
+        None,
+        None,
+    );
 
     // Instance rotation from the authored transform (or the live
     // entity pose). The entity yaw and the renderer's visual yaw

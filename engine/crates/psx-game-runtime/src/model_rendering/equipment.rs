@@ -56,6 +56,7 @@ pub(super) fn draw_player_equipment<
         anim_start_tick,
         blend,
         PlayerActionSpeeds::authored(character, anim_action, blend),
+        None,
         elapsed_tick,
         video_hz,
     ) else {
