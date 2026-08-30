@@ -823,6 +823,18 @@ impl FontAtlas {
         self.font.text_width(text)
     }
 
+    /// Pixel advance of one character, the per-glyph term
+    /// [`FontAtlas::text_width`] sums.
+    ///
+    /// Exposed so a caller scanning a string can carry a running width
+    /// instead of re-measuring every prefix: word wrap is quadratic
+    /// otherwise, which on R3000 is the most expensive thing a text layout
+    /// does. `text_width(s)` stays exactly
+    /// `s.chars().map(glyph_advance).fold(0, u16::saturating_add)`.
+    pub fn glyph_advance(&self, ch: char) -> u8 {
+        self.font.glyph_advance(ch)
+    }
+
     /// Pixel width of `text` using this atlas's font metrics plus signed
     /// spacing inserted between adjacent characters.
     pub fn text_width_with_spacing(&self, text: &str, letter_spacing: i8) -> u16 {
@@ -1415,6 +1427,51 @@ impl TextSink for FontAtlas {
 #[cfg(test)]
 mod tests {
     extern crate std;
+
+    /// The wrap scan in `psx-engine`'s UI carries a running sum of
+    /// `glyph_advance` instead of re-measuring each prefix with
+    /// `text_width`. That is only bit-exact while `text_width` stays the
+    /// saturating fold of the per-character advances, so pin it here --
+    /// including the proportional table, the out-of-range fallback and the
+    /// u16 saturation.
+    #[test]
+    fn text_width_is_the_saturating_fold_of_glyph_advance() {
+        const BITMAP: [u8; 8] = [0; 8];
+        const ADVANCES: [u8; 4] = [3, 9, 0, 255];
+        let proportional = super::BitmapFont {
+            glyph_w: 8,
+            glyph_h: 8,
+            first_char: b'a' as u16,
+            glyph_count: 4,
+            bitmap: &BITMAP,
+            glyph_advances: Some(&ADVANCES),
+            advance_x: 7,
+            line_height: 8,
+            bit_order: super::BitOrder::Lsb,
+        };
+        let fixed = super::BitmapFont {
+            glyph_advances: None,
+            ..proportional
+        };
+
+        assert_eq!(proportional.glyph_advance('a'), 3);
+        assert_eq!(proportional.glyph_advance('d'), 255);
+        // Outside the covered range: falls back to `advance_x`.
+        assert_eq!(proportional.glyph_advance('z'), 7);
+        assert_eq!(fixed.glyph_advance('a'), 7);
+
+        for font in [&proportional, &fixed] {
+            for text in ["", "a", "ad", "abcd", "abcdz", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"] {
+                let folded = text
+                    .chars()
+                    .map(|ch| u16::from(font.glyph_advance(ch)))
+                    .fold(0u16, u16::saturating_add);
+                assert_eq!(font.text_width(text), folded, "text_width({text:?})");
+            }
+        }
+        // The long run really does saturate, so the case above is load-bearing.
+        assert_eq!(proportional.text_width(&std::string::String::from("d").repeat(258)), u16::MAX);
+    }
 
     #[test]
     fn centered_text_is_symmetric_about_the_anchor() {
