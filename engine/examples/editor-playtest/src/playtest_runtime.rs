@@ -15,7 +15,12 @@ fn load_poi_save_from_card() -> PoiSaveLoad {
         Err(_) => return PoiSaveLoad::Retry,
     };
     if len != bytes.len() {
-        return PoiSaveLoad::Retry;
+        // Preserve existing POI/module progress when upgrading the original
+        // 128-byte save. Its exit pose starts empty and is populated at the
+        // next title handoff. Other sizes are unsupported schemas.
+        return SaveBlock::decode_legacy_v1(&bytes[..len], PERSISTENT_FLAG_COUNT)
+            .map(PoiSaveLoad::Loaded)
+            .unwrap_or(PoiSaveLoad::NewGame);
     }
     match SaveBlock::decode(&bytes, PERSISTENT_FLAG_COUNT) {
         Some(save) => PoiSaveLoad::Loaded(save),
@@ -160,6 +165,24 @@ impl Playtest {
                 let _ = self.power_up_inventory.add(module);
             }
         }
+    }
+
+    /// Capture the pose needed by a future Continue/savestate flow. The
+    /// current tech demo intentionally never restores this in `init_gameplay`:
+    /// its main-menu action is New Game and always uses the authored spawn.
+    pub(super) fn snapshot_resume_position(&mut self) {
+        if !self.poi_save_loaded {
+            return;
+        }
+        let position = self.motor.position();
+        let changed = self.poi_save.set_resume_position(SavedPlayerPosition {
+            room: self.room_index.raw(),
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            yaw: self.motor.yaw().as_q12(),
+        });
+        self.poi_save_dirty |= changed;
     }
 
     /// Flush pending POI state at an intentional save boundary. Memory-card
