@@ -717,10 +717,43 @@ fn plane_contact(start: Vec3I32, end: Vec3I32, plane: Plane, side: u8) -> (i32, 
     }
     numerator = numerator.clamp(0, denominator);
 
-    let fraction = ((numerator << 12) / denominator).clamp(0, i64::from(Q12_ONE)) as i32;
+    // Four 64-bit divisions used to live here, and this is the only place in
+    // the whole program that still reached `compiler_builtins`' software
+    // `u64_div_rem`: 0.85% of gameplay CPU on the benchmark route. The R3000A
+    // divides 32 by 32 in hardware, so each division takes the narrow form
+    // whenever the operands provably fit, and the wide form otherwise. The
+    // guards are what make the narrow form exact, so both arms answer
+    // identically and the fallback is not an approximation.
+    //
+    // `plane_distance` returns `i32`, so `0 <= numerator <= denominator` and
+    // `denominator <= u32::MAX` always hold after the clamp above.
+    debug_assert!(numerator >= 0 && denominator > 0);
+    let narrow_denominator = denominator as u64 as u32;
+    let fraction = if numerator < (1 << 19) {
+        // `numerator << 12` fits in `u32`, and the quotient cannot exceed
+        // `Q12_ONE` because `numerator <= denominator`, so the clamp is a
+        // `min` that never fires.
+        (((numerator as u32) << 12) / narrow_denominator).min(Q12_ONE as u32) as i32
+    } else {
+        ((numerator << 12) / denominator).clamp(0, i64::from(Q12_ONE)) as i32
+    };
     let along = |from: i32, to: i32| {
         let delta = i64::from(to) - i64::from(from);
-        let value = i64::from(from).saturating_add(delta.saturating_mul(numerator) / denominator);
+        // Both factors are bounded by `u32::MAX`, so the product cannot wrap
+        // `u64`. Truncating division is sign-symmetric, so dividing the
+        // magnitude and reapplying the sign is the same answer.
+        let magnitude = delta.unsigned_abs() * numerator as u64;
+        let offset = if magnitude <= u64::from(u32::MAX) {
+            let quotient = i64::from((magnitude as u32) / narrow_denominator);
+            if delta < 0 {
+                -quotient
+            } else {
+                quotient
+            }
+        } else {
+            delta.saturating_mul(numerator) / denominator
+        };
+        let value = i64::from(from).saturating_add(offset);
         value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
     };
     (
@@ -781,6 +814,252 @@ mod tests {
     use super::*;
     use crate::CookedRecord;
     use alloc::vec::Vec;
+
+    /// The all-i64 arithmetic `plane_contact` used before the narrow forms.
+    fn wide_plane_contact_math(
+        start_distance: i64,
+        end_distance: i64,
+        side: u8,
+        start: Vec3I32,
+        end: Vec3I32,
+    ) -> Option<(i32, Vec3I32)> {
+        let mut denominator = start_distance - end_distance;
+        if denominator == 0 {
+            return None;
+        }
+        let epsilon = i64::from(TRACE_PLANE_EPSILON_Q12);
+        let mut numerator = if side == 0 {
+            start_distance - epsilon
+        } else {
+            start_distance + epsilon
+        };
+        if denominator < 0 {
+            denominator = -denominator;
+            numerator = -numerator;
+        }
+        numerator = numerator.clamp(0, denominator);
+        let fraction = ((numerator << 12) / denominator).clamp(0, i64::from(Q12_ONE)) as i32;
+        let along = |from: i32, to: i32| {
+            let delta = i64::from(to) - i64::from(from);
+            let value =
+                i64::from(from).saturating_add(delta.saturating_mul(numerator) / denominator);
+            value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        };
+        Some((
+            fraction,
+            Vec3I32 {
+                x: along(start.x, end.x),
+                y: along(start.y, end.y),
+                z: along(start.z, end.z),
+            },
+        ))
+    }
+
+    /// The same arithmetic with the narrow fast paths `plane_contact` now
+    /// takes, so the guards can be swept without building a hull.
+    fn narrow_plane_contact_math(
+        start_distance: i64,
+        end_distance: i64,
+        side: u8,
+        start: Vec3I32,
+        end: Vec3I32,
+    ) -> Option<(i32, Vec3I32)> {
+        let mut denominator = start_distance - end_distance;
+        if denominator == 0 {
+            return None;
+        }
+        let epsilon = i64::from(TRACE_PLANE_EPSILON_Q12);
+        let mut numerator = if side == 0 {
+            start_distance - epsilon
+        } else {
+            start_distance + epsilon
+        };
+        if denominator < 0 {
+            denominator = -denominator;
+            numerator = -numerator;
+        }
+        numerator = numerator.clamp(0, denominator);
+        let narrow_denominator = denominator as u64 as u32;
+        let fraction = if numerator < (1 << 19) {
+            (((numerator as u32) << 12) / narrow_denominator).min(Q12_ONE as u32) as i32
+        } else {
+            ((numerator << 12) / denominator).clamp(0, i64::from(Q12_ONE)) as i32
+        };
+        let along = |from: i32, to: i32| {
+            let delta = i64::from(to) - i64::from(from);
+            let magnitude = delta.unsigned_abs() * numerator as u64;
+            let offset = if magnitude <= u64::from(u32::MAX) {
+                let quotient = i64::from((magnitude as u32) / narrow_denominator);
+                if delta < 0 {
+                    -quotient
+                } else {
+                    quotient
+                }
+            } else {
+                delta.saturating_mul(numerator) / denominator
+            };
+            let value = i64::from(from).saturating_add(offset);
+            value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        };
+        Some((
+            fraction,
+            Vec3I32 {
+                x: along(start.x, end.x),
+                y: along(start.y, end.y),
+                z: along(start.z, end.z),
+            },
+        ))
+    }
+
+    #[test]
+    fn the_narrow_plane_contact_divisions_answer_exactly_like_the_wide_ones() {
+        let corners = [
+            0i32,
+            1,
+            -1,
+            127,
+            128,
+            129,
+            4095,
+            4096,
+            524_287,
+            524_288,
+            524_289,
+            1 << 20,
+            (1 << 30) - 1,
+            1 << 30,
+            i32::MAX,
+            i32::MIN,
+            i32::MAX - 1,
+            i32::MIN + 1,
+        ];
+        let mut narrow_fraction = 0usize;
+        let mut wide_fraction = 0usize;
+        let mut checked = 0usize;
+        let mut state = 0x853c_49e6_748f_ea9bu64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 33) as u32
+        };
+        let mut check =
+            |start_distance: i64, end_distance: i64, side: u8, a: Vec3I32, b: Vec3I32| {
+                let wide = wide_plane_contact_math(start_distance, end_distance, side, a, b);
+                let narrow = narrow_plane_contact_math(start_distance, end_distance, side, a, b);
+                assert_eq!(
+                    wide, narrow,
+                    "plane contact disagreed for d0={start_distance} d1={end_distance} side={side}"
+                );
+                if wide.is_some() {
+                    let denominator = (start_distance - end_distance).abs();
+                    let epsilon = i64::from(TRACE_PLANE_EPSILON_Q12);
+                    let mut numerator = if side == 0 {
+                        start_distance - epsilon
+                    } else {
+                        start_distance + epsilon
+                    };
+                    if start_distance - end_distance < 0 {
+                        numerator = -numerator;
+                    }
+                    if numerator.clamp(0, denominator) < (1 << 19) {
+                        narrow_fraction += 1;
+                    } else {
+                        wide_fraction += 1;
+                    }
+                }
+                checked += 1;
+            };
+        for &first in &corners {
+            for &second in &corners {
+                for side in 0..2u8 {
+                    for &(a, b) in &[
+                        (
+                            Vec3I32 { x: 0, y: 0, z: 0 },
+                            Vec3I32 {
+                                x: 1,
+                                y: -1,
+                                z: 4096,
+                            },
+                        ),
+                        (
+                            Vec3I32 {
+                                x: i32::MIN,
+                                y: i32::MAX,
+                                z: 0,
+                            },
+                            Vec3I32 {
+                                x: i32::MAX,
+                                y: i32::MIN,
+                                z: -1,
+                            },
+                        ),
+                        (
+                            Vec3I32 {
+                                x: 1_000_000,
+                                y: -1_000_000,
+                                z: 500,
+                            },
+                            Vec3I32 {
+                                x: 1_004_096,
+                                y: -1_000_500,
+                                z: 512,
+                            },
+                        ),
+                    ] {
+                        check(i64::from(first), i64::from(second), side, a, b);
+                    }
+                }
+            }
+        }
+        for _ in 0..60_000 {
+            let first = next() as i32;
+            let second = next() as i32;
+            let a = Vec3I32 {
+                x: next() as i32,
+                y: next() as i32,
+                z: next() as i32,
+            };
+            let b = Vec3I32 {
+                x: next() as i32,
+                y: next() as i32,
+                z: next() as i32,
+            };
+            check(
+                i64::from(first),
+                i64::from(second),
+                (next() & 1) as u8,
+                a,
+                b,
+            );
+            // Near-plane geometry: small distances either side of the epsilon,
+            // which is what a real trace produces and the narrow guard targets.
+            let near_first = (next() % 40_000) as i32 - 20_000;
+            let near_second = (next() % 40_000) as i32 - 20_000;
+            let near_a = Vec3I32 {
+                x: (next() % 8_000_000) as i32,
+                y: (next() % 8_000_000) as i32,
+                z: (next() % 8_000_000) as i32,
+            };
+            let near_b = Vec3I32 {
+                x: near_a.x + (next() % 20_000) as i32 - 10_000,
+                y: near_a.y + (next() % 20_000) as i32 - 10_000,
+                z: near_a.z + (next() % 20_000) as i32 - 10_000,
+            };
+            check(
+                i64::from(near_first),
+                i64::from(near_second),
+                (next() & 1) as u8,
+                near_a,
+                near_b,
+            );
+        }
+        assert!(checked > 100_000, "sweep collapsed to {checked} cases");
+        assert!(
+            narrow_fraction > 1_000 && wide_fraction > 1_000,
+            "sweep must exercise both arms, got narrow={narrow_fraction} wide={wide_fraction}"
+        );
+    }
 
     fn axial_x_plane() -> [u8; Plane::SIZE] {
         plane(
