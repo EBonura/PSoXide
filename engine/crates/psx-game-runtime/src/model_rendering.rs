@@ -201,6 +201,7 @@ pub struct RuntimeModelAsset {
 pub struct PlayerActorPoseSnapshot {
     model: RuntimeModelAsset,
     clip_local: ModelClipIndex,
+    clip_first_root_xz: Option<[i32; 2]>,
     pose: ActorPoseSnapshot,
 }
 
@@ -213,6 +214,19 @@ impl PlayerActorPoseSnapshot {
     /// Model-local clip index active for this snapshot.
     pub const fn clip_local(self) -> ModelClipIndex {
         self.clip_local
+    }
+
+    /// This clip's first-frame root translation on the XZ plane, the constant
+    /// half of an in-place clip's root-motion correction.
+    ///
+    /// It is a property of the clip, not of the playback phase, so decoding it
+    /// again on every simulation tick is repeat work. Carrying it on the
+    /// snapshot lets the next tick hand it back to
+    /// [`resolve_player_actor_pose`] whenever the clip has not changed, which
+    /// needs no cache outside the pose state that already exists and cannot go
+    /// stale: a different clip simply misses.
+    pub const fn clip_first_root_xz(self) -> Option<[i32; 2]> {
+        self.clip_first_root_xz
     }
 
     /// Shared actor pose consumed by rendering, sockets, and hit volumes.
@@ -1026,6 +1040,7 @@ pub fn resolve_player_actor_pose<
     anim_start_tick: SimTick,
     blend: Option<PlayerAnimBlend>,
     speeds: PlayerActionSpeeds,
+    cached_clip_first_root_xz: Option<[i32; 2]>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
 ) -> Option<PlayerActorPoseSnapshot> {
@@ -1042,13 +1057,24 @@ pub fn resolve_player_actor_pose<
     );
     let blend_from = player_pose_blend(character, model, clips, blend, speeds.blend_q8, video_hz);
     let clip_anchor = model_clip_anchor(tables, model, clip_local);
+    // The origin below grounds this clip by its own cooked floor, so the
+    // clip-to-reference reconciliation is the identity and the `floor_y` term
+    // `model_pose_anchor_translation` derives from it is always exactly zero.
     let reference_anchor = clip_anchor;
+    // Resolved once per clip and then carried on the snapshot: the caller hands
+    // last tick's value back whenever the clip has not changed, which removes
+    // one full pose decode from every simulation tick.
+    let clip_first_root_xz = match cached_clip_first_root_xz {
+        Some(cached) => Some(cached),
+        None => clip_first_root_xz(animation),
+    };
     let pose_translation = model_pose_anchor_translation(
         animation,
         phase_q12,
         clip_anchor,
         reference_anchor,
         character.action_in_place_override(anim_action),
+        clip_first_root_xz,
     );
     let rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let local_to_world = visual_model_local_to_world(model, character.visual_scale_q8);
@@ -1064,6 +1090,7 @@ pub fn resolve_player_actor_pose<
     Some(PlayerActorPoseSnapshot {
         model,
         clip_local,
+        clip_first_root_xz,
         pose: ActorPoseSnapshot::new(
             elapsed_tick,
             animation,
@@ -1129,6 +1156,7 @@ pub fn draw_player<
         anim_start_tick,
         blend,
         PlayerActionSpeeds::authored(character, anim_action, blend),
+        None,
         elapsed_tick,
         video_hz,
     ) else {
@@ -1958,6 +1986,7 @@ pub fn player_joint_world_transform(
         clip_anchor,
         reference_anchor,
         character.action_in_place_override(action),
+        None,
     );
     let model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let origin = visual_model_origin(
@@ -2020,12 +2049,28 @@ pub fn model_instance_joint_world_transform(
     .joint_world_transform(u16::from(joint))
 }
 
+/// This clip's first-frame root translation on the XZ plane.
+///
+/// Constant for a clip: it is frame zero of joint zero, independent of playback
+/// phase. Callers that resolve the same clip every simulation tick should keep
+/// the answer (see [`PlayerActorPoseSnapshot::clip_first_root_xz`]) instead of
+/// decoding a pose sample for it again.
+fn clip_first_root_xz(animation: Animation<'static>) -> Option<[i32; 2]> {
+    animation
+        .pose(0, 0)
+        .map(|root| [root.translation.x, root.translation.z])
+}
+
+/// `first_root_xz` is [`clip_first_root_xz`] for `animation` when the caller
+/// already has it; `None` makes this decode it, which is what every caller that
+/// does not resolve the same clip tick after tick wants.
 fn model_pose_anchor_translation(
     animation: Animation<'static>,
     phase_q12: u32,
     clip_anchor: Option<ModelClipAnchor>,
     reference_anchor: Option<ModelClipAnchor>,
     in_place_override: Option<bool>,
+    first_root_xz: Option<[i32; 2]>,
 ) -> ModelPoseTranslation {
     let Some(clip_anchor) = clip_anchor else {
         return ModelPoseTranslation::ZERO;
@@ -2033,20 +2078,15 @@ fn model_pose_anchor_translation(
     let reference_floor_y = reference_anchor.map(|anchor| anchor.floor_y);
     let in_place = in_place_override.unwrap_or(clip_anchor.in_place);
     let root_translation = if in_place {
-        match (
-            animation.pose(0, 0),
-            animation.pose_looped_q12(phase_q12, 0),
-        ) {
+        let first_root_xz = match first_root_xz {
+            Some(resolved) => Some(resolved),
+            None => clip_first_root_xz(animation),
+        };
+        match (first_root_xz, animation.pose_looped_q12(phase_q12, 0)) {
             (Some(first_root), Some(current_root)) => [
-                first_root
-                    .translation
-                    .x
-                    .saturating_sub(current_root.translation.x),
+                first_root[0].saturating_sub(current_root.translation.x),
                 0,
-                first_root
-                    .translation
-                    .z
-                    .saturating_sub(current_root.translation.z),
+                first_root[1].saturating_sub(current_root.translation.z),
             ],
             _ => [0, 0, 0],
         }
