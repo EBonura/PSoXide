@@ -919,3 +919,408 @@ fn model_pose_blend_endpoints_and_midpoint() {
     };
     assert_eq!(blend.blend_toward(primary, 7), primary);
 }
+
+/// The v4 decode exactly as it stood before the interpolation fast path was
+/// added, kept as the oracle those changes are checked against.
+///
+/// Every function here is a verbatim copy of the code it replaced. Nothing in
+/// the crate calls it; it exists so the sweeps below can assert that the faster
+/// form is not merely close but bit-identical, over the whole domain each piece
+/// can reach. A pose that is off by one Q12 unit deforms a character subtly
+/// enough to survive a screenshot, so "looks right" is not evidence here.
+mod pre_change {
+    use super::super::{JointPose, Vec3I16, Vec3I32};
+
+    pub fn decode_q11_element(raw: u16) -> i16 {
+        let signed = ((raw << 4) as i16) >> 4;
+        signed
+            .wrapping_shl(1)
+            .wrapping_add((((raw & 0x0FFF) == 0x07FF) as i16) << 1)
+    }
+
+    pub fn cross_component_q12(a: i16, b: i16, c: i16, d: i16) -> i16 {
+        let value = a as i32 * b as i32 - c as i32 * d as i32;
+        let rounded = if value >= 0 {
+            value.saturating_add(1 << 11) >> 12
+        } else {
+            -((value.saturating_neg().saturating_add(1 << 11)) >> 12)
+        };
+        rounded.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    }
+
+    pub fn reconstruct_third_basis_q12(first: [i16; 3], second: [i16; 3]) -> [i16; 3] {
+        [
+            cross_component_q12(first[1], second[2], first[2], second[1]),
+            cross_component_q12(first[2], second[0], first[0], second[2]),
+            cross_component_q12(first[0], second[1], first[1], second[0]),
+        ]
+    }
+
+    pub fn apply_v4_basis_correction(mut third: [i16; 3], correction_byte: u8) -> [i16; 3] {
+        let axis = usize::from(correction_byte & 0x03);
+        if axis < 3 {
+            let correction = (((correction_byte >> 2) << 2) as i8 >> 2) as i16;
+            third[axis] = third[axis].saturating_add(correction);
+        }
+        for component in &mut third {
+            *component = (*component).clamp(-4096, 4096);
+        }
+        third
+    }
+
+    /// The whole 16-byte v4 record, byte addressed so alignment cannot matter.
+    pub fn read_v4_record(record: &[u8]) -> ([[i16; 3]; 3], Vec3I16) {
+        let mut flat = [0i16; 6];
+        for pair in 0..3 {
+            let o = pair * 3;
+            let packed = (record[o] as u32) | ((record[o + 1] as u32) << 8)
+                | ((record[o + 2] as u32) << 16);
+            flat[pair * 2] = decode_q11_element((packed & 0x0fff) as u16);
+            flat[pair * 2 + 1] = decode_q11_element(((packed >> 12) & 0x0fff) as u16);
+        }
+        let first = [flat[0], flat[1], flat[2]];
+        let second = [flat[3], flat[4], flat[5]];
+        let third =
+            apply_v4_basis_correction(reconstruct_third_basis_q12(first, second), record[9]);
+        let translation = Vec3I16::new(
+            i16::from_le_bytes([record[10], record[11]]),
+            i16::from_le_bytes([record[12], record[13]]),
+            i16::from_le_bytes([record[14], record[15]]),
+        );
+        ([first, second, third], translation)
+    }
+
+    pub fn decode_packed_translation(value: i16, shift: u8) -> i32 {
+        (value as i32) * (1i32 << shift)
+    }
+
+    pub fn scale_i32_q12(value: i32, scale_q12: i32) -> i32 {
+        let whole = value >> 12;
+        let frac = value - (whole << 12);
+        whole.saturating_mul(scale_q12) + ((frac * scale_q12) >> 12)
+    }
+
+    pub fn lerp_i32_q12(a: i32, b: i32, alpha_q12: u16) -> i32 {
+        let delta = b.saturating_sub(a);
+        a.saturating_add(scale_i32_q12(delta, alpha_q12 as i32))
+    }
+
+    pub fn lerp_i16_q12(a: i16, b: i16, alpha_q12: u16) -> i16 {
+        (a as i32 + (((b as i32 - a as i32) * alpha_q12 as i32) >> 12)) as i16
+    }
+
+    pub fn joint_pose(record: &[u8], shift: u8) -> JointPose {
+        let (matrix, packed) = read_v4_record(record);
+        JointPose {
+            matrix,
+            translation: Vec3I32::new(
+                decode_packed_translation(packed.x, shift),
+                decode_packed_translation(packed.y, shift),
+                decode_packed_translation(packed.z, shift),
+            ),
+        }
+    }
+
+    /// `AnimationPoseSample::pose` as it behaved before the change: decode both
+    /// frames independently, then lerp the two `JointPose` values.
+    pub fn interpolated(a: &[u8], b: &[u8], shift: u8, alpha_q12: u16) -> JointPose {
+        let a = joint_pose(a, shift);
+        let b = joint_pose(b, shift);
+        let mut matrix = [[0i16; 3]; 3];
+        for col in 0..3 {
+            for row in 0..3 {
+                matrix[col][row] = lerp_i16_q12(a.matrix[col][row], b.matrix[col][row], alpha_q12);
+            }
+        }
+        JointPose {
+            matrix,
+            translation: Vec3I32::new(
+                lerp_i32_q12(a.translation.x, b.translation.x, alpha_q12),
+                lerp_i32_q12(a.translation.y, b.translation.y, alpha_q12),
+                lerp_i32_q12(a.translation.z, b.translation.z, alpha_q12),
+            ),
+        }
+    }
+}
+
+/// Deterministic xorshift, so a failure reproduces exactly.
+struct Rng(u32);
+
+impl Rng {
+    fn next(&mut self) -> u32 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 17;
+        self.0 ^= self.0 << 5;
+        self.0
+    }
+}
+
+#[test]
+fn wide_q11_decode_equals_narrow_for_every_code() {
+    for raw in 0..=0x0fffu16 {
+        let narrow = super::decode_q11_element(raw);
+        assert_eq!(narrow, pre_change::decode_q11_element(raw), "code {raw:#05x}");
+        assert_eq!(
+            super::decode_q11_element_wide(raw),
+            narrow as i32,
+            "code {raw:#05x} widened"
+        );
+        // The reconstruction and the interpolation both rely on this bound to
+        // drop their saturating arithmetic.
+        assert!((-4096..=4096).contains(&super::decode_q11_element_wide(raw)));
+    }
+}
+
+#[test]
+fn cross_rounding_matches_the_saturating_form_across_its_whole_domain() {
+    // `cross_round_q12` only ever sees `a*b - c*d` over decoded Q11 elements,
+    // so sweep every value that expression can produce.
+    let mut value = -super::V4_CROSS_LIMIT;
+    while value <= super::V4_CROSS_LIMIT {
+        let expected = if value >= 0 {
+            value.saturating_add(1 << 11) >> 12
+        } else {
+            -((value.saturating_neg().saturating_add(1 << 11)) >> 12)
+        };
+        assert_eq!(super::cross_round_q12(value), expected, "value {value}");
+        value += 1;
+    }
+}
+
+#[test]
+fn third_basis_reconstruction_matches_the_array_form() {
+    let interesting: [i16; 9] = [-4096, -4095, -2048, -1, 0, 1, 2048, 4094, 4096];
+    let mut rng = Rng(0x5eed_1234);
+    let mut checked = 0u64;
+
+    // Every corner of the element range against every correction byte.
+    for &f0 in &interesting {
+        for &s2 in &interesting {
+            for correction_byte in 0..=255u8 {
+                let first = [f0, interesting[(correction_byte as usize) % 9], -s2];
+                let second = [s2, f0, interesting[(f0.unsigned_abs() as usize) % 9]];
+                let expected = pre_change::apply_v4_basis_correction(
+                    pre_change::reconstruct_third_basis_q12(first, second),
+                    correction_byte,
+                );
+                let actual = super::v4_third_basis_q12(
+                    [first[0] as i32, first[1] as i32, first[2] as i32],
+                    [second[0] as i32, second[1] as i32, second[2] as i32],
+                    correction_byte,
+                );
+                assert_eq!(
+                    [actual[0] as i16, actual[1] as i16, actual[2] as i16],
+                    expected,
+                    "first {first:?} second {second:?} correction {correction_byte:#04x}"
+                );
+                checked += 1;
+            }
+        }
+    }
+
+    // Plus a wide random sweep over the full decoded-element range.
+    for _ in 0..200_000 {
+        let mut element = || {
+            super::decode_q11_element((rng.next() & 0x0fff) as u16)
+        };
+        let first = [element(), element(), element()];
+        let second = [element(), element(), element()];
+        let correction_byte = (rng.next() & 0xff) as u8;
+        let expected = pre_change::apply_v4_basis_correction(
+            pre_change::reconstruct_third_basis_q12(first, second),
+            correction_byte,
+        );
+        let actual = super::v4_third_basis_q12(
+            [first[0] as i32, first[1] as i32, first[2] as i32],
+            [second[0] as i32, second[1] as i32, second[2] as i32],
+            correction_byte,
+        );
+        assert_eq!(
+            [actual[0] as i16, actual[1] as i16, actual[2] as i16],
+            expected,
+            "first {first:?} second {second:?} correction {correction_byte:#04x}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 200_000);
+}
+
+#[test]
+fn wide_element_lerp_matches_the_i16_lerp() {
+    let alphas = [0u16, 1, 2, 2047, 2048, 2049, 4093, 4094, 4095];
+    let mut a = -4096i32;
+    while a <= 4096 {
+        let mut b = -4096i32;
+        while b <= 4096 {
+            for &alpha in &alphas {
+                assert_eq!(
+                    super::lerp_q12_wide_to_i16(a, b, alpha),
+                    pre_change::lerp_i16_q12(a as i16, b as i16, alpha),
+                    "a {a} b {b} alpha {alpha}"
+                );
+            }
+            b += 37;
+        }
+        a += 31;
+    }
+}
+
+#[test]
+fn packed_translation_lerp_matches_the_saturating_form() {
+    let endpoints: [i16; 11] = [
+        i16::MIN,
+        i16::MIN + 1,
+        -30_000,
+        -4096,
+        -1,
+        0,
+        1,
+        4096,
+        30_000,
+        i16::MAX - 1,
+        i16::MAX,
+    ];
+    let alphas = [0u16, 1, 2, 1023, 2047, 2048, 2049, 4093, 4094, 4095];
+    for shift in 0..=15u8 {
+        for &a in &endpoints {
+            for &b in &endpoints {
+                for &alpha in &alphas {
+                    let expected = pre_change::lerp_i32_q12(
+                        pre_change::decode_packed_translation(a, shift),
+                        pre_change::decode_packed_translation(b, shift),
+                        alpha,
+                    );
+                    assert_eq!(
+                        super::lerp_packed_translation_q12(a, b, shift, alpha),
+                        expected,
+                        "a {a} b {b} shift {shift} alpha {alpha}"
+                    );
+                }
+            }
+        }
+    }
+
+    let mut rng = Rng(0x1234_5eed);
+    for _ in 0..400_000 {
+        let a = (rng.next() & 0xffff) as u16 as i16;
+        let b = (rng.next() & 0xffff) as u16 as i16;
+        let shift = (rng.next() % 16) as u8;
+        let alpha = (rng.next() & 0x0fff) as u16;
+        let expected = pre_change::lerp_i32_q12(
+            pre_change::decode_packed_translation(a, shift),
+            pre_change::decode_packed_translation(b, shift),
+            alpha,
+        );
+        assert_eq!(
+            super::lerp_packed_translation_q12(a, b, shift, alpha),
+            expected,
+            "a {a} b {b} shift {shift} alpha {alpha}"
+        );
+    }
+}
+
+/// Build a word-aligned v4 clip whose pose records are the given bytes.
+fn v4_clip(joint_count: u16, frame_count: u16, shift: u16, records: &[u8]) -> std::vec::Vec<u8> {
+    use psxed_format::animation;
+    let payload_len = animation::AnimationHeader::SIZE + records.len();
+    let mut blob = std::vec::Vec::new();
+    blob.extend_from_slice(&animation::MAGIC);
+    blob.extend_from_slice(&animation::VERSION_V4.to_le_bytes());
+    blob.extend_from_slice(&0u16.to_le_bytes());
+    blob.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    blob.extend_from_slice(&joint_count.to_le_bytes());
+    blob.extend_from_slice(&frame_count.to_le_bytes());
+    blob.extend_from_slice(&15u16.to_le_bytes());
+    blob.extend_from_slice(&shift.to_le_bytes());
+    blob.extend_from_slice(records);
+    blob
+}
+
+#[test]
+fn v4_interpolated_pose_is_bit_identical_to_the_pre_change_decode() {
+    use psxed_format::animation::POSE_RECORD_SIZE_V4 as REC;
+
+    const JOINTS: u16 = 6;
+    const FRAMES: u16 = 5;
+    let mut rng = Rng(0xc0ff_ee11);
+    let mut compared = 0u64;
+
+    for shift in [0u16, 1, 4, 9, 15] {
+        let mut records =
+            std::vec![0u8; JOINTS as usize * FRAMES as usize * REC];
+        for byte in records.iter_mut() {
+            *byte = (rng.next() >> 7) as u8;
+        }
+        let blob = v4_clip(JOINTS, FRAMES, shift, &records);
+        let animation = Animation::from_bytes(&blob).expect("v4 clip parses");
+        assert_eq!(animation.poses.as_ptr() as usize & 3, 0);
+
+        // Every joint, every looping frame pair, and alphas covering the
+        // zero-alpha fast path, both ends and the interior.
+        for whole in 0..u32::from(FRAMES) + 2 {
+            for frac in [0u32, 1, 2, 1365, 2048, 2731, 4093, 4094, 4095] {
+                let phase = (whole << 12) | frac;
+                let sample = animation.looped_pose_sample_q12(phase).unwrap();
+                for joint in 0..JOINTS {
+                    let stride = joint as usize * REC;
+                    let a = &records[sample.base_frame_offset + stride..][..REC];
+                    let b = &records[sample.next_frame_offset + stride..][..REC];
+                    let expected = if sample.alpha_q12 == 0
+                        || sample.base_frame == sample.next_frame
+                    {
+                        pre_change::joint_pose(a, shift as u8)
+                    } else {
+                        pre_change::interpolated(a, b, shift as u8, sample.alpha_q12)
+                    };
+                    assert_eq!(
+                        sample.pose(joint),
+                        Some(expected),
+                        "shift {shift} phase {phase:#x} joint {joint}"
+                    );
+                    // `pose_looped_q12` is the same decode through the other
+                    // public entry point.
+                    assert_eq!(animation.pose_looped_q12(phase, joint), Some(expected));
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert!(compared > 1_000);
+}
+
+#[test]
+fn v4_fast_path_and_unaligned_pool_agree_on_random_records() {
+    use psxed_format::animation::POSE_RECORD_SIZE_V4 as REC;
+
+    // The fast path is taken only for a word-aligned pool. Copying the same
+    // clip to every other alignment exercises the generic fallback and proves
+    // the two produce identical poses.
+    const JOINTS: u16 = 3;
+    const FRAMES: u16 = 4;
+    let mut rng = Rng(0x0bad_f00d);
+    let mut records = std::vec![0u8; JOINTS as usize * FRAMES as usize * REC];
+    for byte in records.iter_mut() {
+        *byte = (rng.next() >> 11) as u8;
+    }
+    let blob = v4_clip(JOINTS, FRAMES, 7, &records);
+    let aligned = Animation::from_bytes(&blob).expect("aligned clip parses");
+    assert_eq!(aligned.poses.as_ptr() as usize & 3, 0);
+
+    for skew in 1..4usize {
+        let mut storage = std::vec![0u8; blob.len() + 4];
+        let prefix = (skew + 4 - (storage.as_ptr() as usize & 3)) & 3;
+        storage[prefix..prefix + blob.len()].copy_from_slice(&blob);
+        let bytes = &storage[prefix..prefix + blob.len()];
+        let skewed = Animation::from_bytes(bytes).expect("skewed clip parses");
+        for whole in 0..u32::from(FRAMES) + 1 {
+            for frac in [0u32, 1, 999, 2048, 4095] {
+                let phase = (whole << 12) | frac;
+                let a = aligned.looped_pose_sample_q12(phase).unwrap();
+                let b = skewed.looped_pose_sample_q12(phase).unwrap();
+                for joint in 0..JOINTS {
+                    assert_eq!(a.pose(joint), b.pose(joint), "phase {phase:#x} joint {joint}");
+                }
+            }
+        }
+    }
+}
