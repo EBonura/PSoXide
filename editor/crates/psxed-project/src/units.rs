@@ -627,6 +627,71 @@ mod tests {
         asset(b"PSXA", version, &payload)
     }
 
+    /// Build a v4 clip whose every record tags its own frame, so a trim can be
+    /// checked by reading the tags that survived.
+    fn tagged_v4_clip(joints: u16, frames: u16) -> Vec<u8> {
+        use psxed_format::animation::POSE_RECORD_SIZE_V4;
+        let mut payload = Vec::new();
+        for value in [joints, frames, 30u16, 0u16] {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        for frame in 0..frames {
+            for joint in 0..joints {
+                payload.extend_from_slice(&vec![0; POSE_RECORD_SIZE_V4 - 6]);
+                payload.extend_from_slice(&frame.to_le_bytes());
+                payload.extend_from_slice(&joint.to_le_bytes());
+                payload.extend_from_slice(&0u16.to_le_bytes());
+            }
+        }
+        asset(b"PSXA", 4, &payload)
+    }
+
+    fn frame_tags(blob: &[u8]) -> Vec<u16> {
+        use psxed_format::animation::POSE_RECORD_SIZE_V4;
+        let first = psxed_format::AssetHeader::SIZE + 8;
+        let joints = read_u16(blob, psxed_format::AssetHeader::SIZE) as usize;
+        let frames = read_u16(blob, psxed_format::AssetHeader::SIZE + 2) as usize;
+        (0..frames)
+            .map(|frame| {
+                let at = first + (frame * joints) * POSE_RECORD_SIZE_V4 + POSE_RECORD_SIZE_V4 - 6;
+                read_u16(blob, at)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn trimming_keeps_exactly_the_requested_frames() {
+        let clip = tagged_v4_clip(3, 10);
+        assert_eq!(frame_tags(&clip), (0..10).collect::<Vec<_>>());
+
+        let (trimmed, kept) = trim_animation_blob_to_window(&clip, 2, 5).expect("trimmed");
+        assert_eq!(kept, 4, "2..=5 inclusive is four frames");
+        assert_eq!(frame_tags(&trimmed), vec![2, 3, 4, 5]);
+        assert!(psx_asset::Animation::from_bytes(&trimmed).is_ok(), "still parses");
+
+        // The header must agree with the body, or the runtime reads past the end.
+        let payload_len = u32::from_le_bytes(trimmed[8..12].try_into().unwrap()) as usize;
+        assert_eq!(payload_len, trimmed.len() - psxed_format::AssetHeader::SIZE);
+    }
+
+    #[test]
+    fn trimming_declines_when_there_is_nothing_to_cut() {
+        let clip = tagged_v4_clip(3, 10);
+        assert!(
+            trim_animation_blob_to_window(&clip, 0, 9).is_none(),
+            "a window covering the clip is not a trim"
+        );
+        assert!(
+            trim_animation_blob_to_window(&clip, 0, 99).is_none(),
+            "an over-long window clamps to the clip and is still not a trim"
+        );
+        assert!(
+            trim_animation_blob_to_window(&clip, 6, 2).is_none(),
+            "an inverted window is refused rather than guessed at"
+        );
+        assert!(trim_animation_blob_to_window(b"nope", 0, 1).is_none());
+    }
+
     fn decoded_translations(blob: &[u8]) -> Vec<[i32; 3]> {
         let animation = psx_asset::Animation::from_bytes(blob).expect("still parses");
         (0..animation.joint_count())
@@ -652,4 +717,54 @@ mod tests {
         scale_animation_blob_to_engine_units(&mut blob);
         assert_eq!(decoded_translations(&blob), vec![[4096, -4096, 2]]);
     }
+}
+
+/// Cut an animation blob down to `start..=end` frames, rebasing nothing else.
+///
+/// The pose table is `frame_count * joint_count` fixed-size records in frame
+/// order, so a window is a contiguous slice of it. The caller is responsible
+/// for subtracting `start` from every frame index it emits for this clip; this
+/// only moves bytes.
+///
+/// Returns the frames kept, or `None` when the blob is malformed or the window
+/// already covers it.
+pub fn trim_animation_blob_to_window(bytes: &[u8], start: u16, end: u16) -> Option<(Vec<u8>, u16)> {
+    use psxed_format::animation::{
+        AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
+        POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4,
+    };
+    let payload = psxed_format::AssetHeader::SIZE;
+    if bytes.len() < payload + AnimationHeader::SIZE || bytes[..4] != MAGIC {
+        return None;
+    }
+    let record_size = match read_u16(bytes, 4) {
+        VERSION_V1 => POSE_RECORD_SIZE_V1,
+        VERSION => POSE_RECORD_SIZE,
+        VERSION_V3 => POSE_RECORD_SIZE_V3,
+        VERSION_V4 => POSE_RECORD_SIZE_V4,
+        _ => return None,
+    };
+    let joints = read_u16(bytes, payload) as usize;
+    let frames = read_u16(bytes, payload + 2) as usize;
+    let first = payload + AnimationHeader::SIZE;
+    if joints == 0 || frames == 0 || bytes.len() < first + frames * joints * record_size {
+        return None;
+    }
+    let start = start as usize;
+    let end = (end as usize).min(frames.saturating_sub(1));
+    if start > end || (start == 0 && end + 1 >= frames) {
+        return None;
+    }
+    let kept = end - start + 1;
+
+    let stride = joints * record_size;
+    let mut out = Vec::with_capacity(first + kept * stride);
+    out.extend_from_slice(&bytes[..first]);
+    out.extend_from_slice(&bytes[first + start * stride..first + (end + 1) * stride]);
+
+    let payload_len = (AnimationHeader::SIZE + kept * stride) as u32;
+    out[8..12].copy_from_slice(&payload_len.to_le_bytes());
+    let kept_u16 = u16::try_from(kept).ok()?;
+    out[payload + 2..payload + 4].copy_from_slice(&kept_u16.to_le_bytes());
+    Some((out, kept_u16))
 }
