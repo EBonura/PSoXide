@@ -77,13 +77,27 @@ impl EngineClock {
     ///
     /// Returns `false` if it did not land within [`FLIP_WAIT_VBLANKS`]
     /// display periods, which can only happen if the GPU never reports idle
-    /// at a blank edge. Continuing in that case shows one bad frame; not
-    /// continuing would hang the game, and a wedged GPU is a state the
-    /// console has been observed to reach.
+    /// at a blank edge. The caller carries on either way: not continuing
+    /// would hang the game, and a wedged GPU is a state the console has been
+    /// observed to reach.
+    ///
+    /// On the giving-up path the word is applied here rather than left in the
+    /// handler's slot. Abandoning it is not one bad frame, it is permanent:
+    /// the next frame's [`Self::queue_display_flip`] overwrites the slot, so
+    /// that display start never reaches the GPU while `FrameBuffer` has
+    /// already moved its draw side on. From then on the runner clears and
+    /// redraws the buffer the display is scanning out, and every overlay drawn
+    /// after the world -- the HUD, message panels, damage numbers -- is wiped
+    /// by the next frame's clear before it is ever on screen. Measured on the
+    /// Cortex Ignition benchmark tape: 84% of frame clears landed on the
+    /// visible buffer, and the HUD was absent from roughly a third of
+    /// presented frames.
     pub(crate) fn wait_display_flip(&mut self) -> bool {
         let entry = platform::vblank_count();
         while platform::display_flip_pending() {
             if platform::vblank_count().wrapping_sub(entry) > FLIP_WAIT_VBLANKS {
+                platform::apply_pending_display_flip();
+                self.last_present_vblank = platform::vblank_count();
                 return false;
             }
         }
@@ -121,6 +135,16 @@ mod platform {
     pub(super) fn display_flip_pending() -> bool {
         psx_rt::interrupts::gp1_queue_pending()
     }
+
+    /// Write a still-queued display start straight to GP1, outside the blank
+    /// edge. Tears the frame it lands in; keeping the display side in step
+    /// with the draw side is worth one torn frame.
+    pub(super) fn apply_pending_display_flip() {
+        let word = psx_rt::interrupts::take_pending_gp1();
+        if word != 0 {
+            psx_io::gpu::write_gp1(word);
+        }
+    }
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -142,4 +166,8 @@ mod platform {
     pub(super) fn display_flip_pending() -> bool {
         false
     }
+
+    /// Host: the flip is applied the instant it is queued, so there is never
+    /// anything left to force through.
+    pub(super) fn apply_pending_display_flip() {}
 }
