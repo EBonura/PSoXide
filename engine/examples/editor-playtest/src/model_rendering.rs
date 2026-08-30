@@ -5,6 +5,7 @@
 //! old call-site signatures.
 
 use super::*;
+use crate::playtest_runtime::live_action_speed_q8;
 use psx_game_runtime::model_rendering as mr;
 
 pub(super) use psx_game_runtime::model_rendering::{
@@ -177,7 +178,7 @@ impl Playtest {
 
     pub(super) fn player_clip_duration_vblanks(
         &self,
-        character: RuntimeCharacter,
+        character: &RuntimeCharacter,
         clip: ModelClipIndex,
         video_hz: VideoHz,
         speed_q8: u16,
@@ -196,7 +197,7 @@ impl Playtest {
 
     pub(super) fn player_action_push_speed(
         &self,
-        character: RuntimeCharacter,
+        character: &RuntimeCharacter,
         anim: PlayerAnim,
         local_tick: u32,
         video_hz: VideoHz,
@@ -410,25 +411,43 @@ impl Playtest {
     pub(super) fn refresh_actor_pose_snapshots(&mut self, ctx: &Ctx) {
         let player = self.motor.position();
         self.previous_player_actor_pose = self.player_actor_pose;
-        self.player_actor_pose = self.character.and_then(|character| {
-            let character = self.player_character_for_anim(character, self.anim_state);
-            mr::resolve_player_actor_pose(
-                model_tables(),
-                character,
-                &self.models,
-                &self.clips,
-                player.x,
-                player.y,
-                player.z,
-                self.motor.yaw(),
-                self.anim_state.action(),
-                character.clip_for(self.anim_state),
-                self.anim_start_tick,
-                self.player_anim_blend(ctx.sim_tick),
-                ctx.sim_tick,
-                ctx.video_hz,
-            )
-        });
+        // `RuntimeCharacter` is 672 bytes and the R3000A has no data cache, so
+        // every by-value hop through this path is a full-latency RAM copy. The
+        // cooked record is borrowed from here down.
+        self.player_actor_pose = match self.character.as_ref() {
+            Some(character) => {
+                // The vitality Attack Speed lane was the only thing that made
+                // the presentation character differ from the cooked one, and
+                // the resolver reads exactly two speeds because of it. Hand it
+                // those two numbers instead of a retuned copy of the record.
+                let blend = self.player_anim_blend(ctx.sim_tick);
+                let modifiers = self.vitality_modifiers();
+                let speeds = mr::PlayerActionSpeeds {
+                    action_q8: live_action_speed_q8(modifiers, character, self.anim_state),
+                    blend_q8: blend.map_or(0, |blend| {
+                        live_action_speed_q8(modifiers, character, blend.anim)
+                    }),
+                };
+                mr::resolve_player_actor_pose(
+                    model_tables(),
+                    character,
+                    &self.models,
+                    &self.clips,
+                    player.x,
+                    player.y,
+                    player.z,
+                    self.motor.yaw(),
+                    self.anim_state.action(),
+                    character.clip_for(self.anim_state),
+                    self.anim_start_tick,
+                    blend,
+                    speeds,
+                    ctx.sim_tick,
+                    ctx.video_hz,
+                )
+            }
+            None => None,
+        };
 
         // Where rendering samples the phase is where it is worth measuring:
         // this is the number that says which cooked frame is on screen.
@@ -442,18 +461,10 @@ impl Playtest {
         for pose in self.instance_actor_poses.iter_mut() {
             *pose = None;
         }
-        let mut overrides = [ModelInstancePoseOverride {
-            instance: u16::MAX,
-            x: 0,
-            y: 0,
-            z: 0,
-            yaw: 0,
-            clip: psx_level::OptionalModelClipIndex::NONE,
-            phase_ticks: 0,
-            one_shot: false,
-        }; MAX_GAME_ENTITIES];
-        let override_count = self.game_entity_pose_overrides(&mut overrides);
-        let overrides = &overrides[..override_count];
+        let mut overrides =
+            psx_engine::FixedScratch::<ModelInstancePoseOverride, MAX_GAME_ENTITIES>::new();
+        self.game_entity_pose_overrides(&mut overrides);
+        let overrides = overrides.as_slice();
         let elapsed_tick = self.gameplay_tick(ctx.sim_tick);
         let count = MODEL_INSTANCES.len().min(self.instance_actor_poses.len());
         let bsp_resident = self.bsp.is_some();
@@ -492,7 +503,7 @@ impl Playtest {
 /// Draw the player's animated model through the crate policy.
 pub(super) fn draw_player(
     current_room: RoomIndex,
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     player_pose: PlayerActorPoseSnapshot,
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],

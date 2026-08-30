@@ -647,11 +647,11 @@ impl Playtest {
             }
         }
         if action_locked && player_anim_is_attack(self.anim_state) {
-            if let Some(character) = self.character {
+            if let Some(character) = self.character.as_ref() {
                 let character = self.player_character_for_anim(character, self.anim_state);
                 let local_tick = now.saturating_sub(self.anim_start_tick);
                 if let Some(push_speed) = self.player_action_push_speed(
-                    character,
+                    &character,
                     self.anim_state,
                     local_tick,
                     ctx.video_hz,
@@ -952,7 +952,7 @@ impl Playtest {
         let clip = character.clip_for(anim);
         Some(
             self.player_clip_duration_vblanks(
-                *character,
+                character,
                 clip,
                 video_hz,
                 self.player_action_speed_q8(character, anim),
