@@ -103,13 +103,7 @@ pub(crate) fn draw_acquired_module(
     transition_frame: u16,
     typewriter_frame: u16,
 ) {
-    draw_item_acquired_panel(
-        font,
-        item_name,
-        frame,
-        transition_frame,
-        typewriter_frame,
-    );
+    draw_item_acquired_panel(font, item_name, frame, transition_frame, typewriter_frame);
 }
 
 /// Hardware-ratification overlay (burn builds only): presented frames

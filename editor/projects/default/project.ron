@@ -2740,7 +2740,7 @@
                 bake: ModelNative,
                 role: Attack,
                 looping: false,
-                tags: ["tank_boss_ai", "missile_salvo", "three_chimney"],
+                tags: ["tank_boss_ai", "missile_salvo", "three_chimney", "momask_seed_260850", "selected_missile_salvo_03"],
             )),
         ),
     ],
