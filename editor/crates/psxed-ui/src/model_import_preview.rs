@@ -275,6 +275,35 @@ pub fn render_import_model_preview_with_equipment(
     .map(|render| render.image)
 }
 
+/// Multi-palette-bank variant of
+/// [`render_import_model_preview_with_equipment`]. Four-bank 4bpp character
+/// atlases need the face-authored bank index to reproduce editor/runtime
+/// colour; diagnostic reels must not flatten them to bank zero.
+pub fn render_import_model_preview_with_equipment_banks(
+    model_bytes: &[u8],
+    clip_bytes: &[u8],
+    atlas_banks: &[ColorImage],
+    options: ImportPreviewOptions,
+    equipped_weapon: Option<&PreviewEquippedWeapon<'_>>,
+    character_material: Option<&PreviewMaterialLayer<'_>>,
+) -> Option<ColorImage> {
+    render_import_model_preview_with_equipment_set_at_size(
+        model_bytes,
+        clip_bytes,
+        atlas_banks,
+        options,
+        yaw_rotation_matrix(options.visual_yaw_q12),
+        [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+        &[],
+        &[],
+        equipped_weapon.map(std::slice::from_ref).unwrap_or(&[]),
+        character_material,
+        None,
+        None,
+    )
+    .map(|render| render.image)
+}
+
 /// Render a model preview with the exact presentation transform used by a
 /// scene instance. Animation Studio uses this path so pitched and rolled
 /// imports do not silently fall back to the older yaw-only resource preview.

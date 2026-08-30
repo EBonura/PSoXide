@@ -1764,6 +1764,7 @@ pub(crate) struct CharacterEditorContext {
     pub(crate) model_skeletons: Vec<(ResourceId, Option<ResourceId>)>,
     pub(crate) animation_sets: Vec<AnimationSetOption>,
     pub(crate) animation_clips: Vec<(ResourceId, String)>,
+    pub(crate) weapons: Vec<(ResourceId, String)>,
 }
 
 pub(crate) fn build_character_editor_context(project: &ProjectDocument) -> CharacterEditorContext {
@@ -1791,6 +1792,14 @@ pub(crate) fn build_character_editor_context(project: &ProjectDocument) -> Chara
             .iter()
             .filter_map(|resource| match &resource.data {
                 ResourceData::AnimationClip(_) => Some((resource.id, resource.name.clone())),
+                _ => None,
+            })
+            .collect(),
+        weapons: project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Weapon(_) => Some((resource.id, resource.name.clone())),
                 _ => None,
             })
             .collect(),
