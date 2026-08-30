@@ -123,10 +123,12 @@ mod bsp_runtime;
 #[cfg(feature = "cd-stream-benchmark")]
 use psx_game_runtime::cd_stream;
 mod character_runtime;
+mod damage_numbers;
 mod debug_runtime;
 mod game_logic_runtime;
 mod image_props_runtime;
 mod input;
+mod loc;
 mod marker_runtime;
 mod model_rendering;
 mod overlay;
@@ -140,6 +142,7 @@ mod runtime_arenas;
 mod runtime_config;
 mod runtime_schedule;
 mod sky_runtime;
+mod souls;
 mod visibility_runtime;
 mod visible_cell_runtime;
 mod vram_runtime;
@@ -151,6 +154,7 @@ use active_room_streaming::*;
 use box_props::*;
 use bsp_runtime::*;
 use character_runtime::*;
+use damage_numbers::*;
 use debug_runtime::*;
 use game_logic_runtime::*;
 use image_props_runtime::*;
@@ -164,6 +168,7 @@ use runtime_arenas::*;
 use runtime_config::*;
 use runtime_schedule::RUNTIME_SCHEDULE;
 use sky_runtime::*;
+use souls::SoulsWallet;
 use visibility_runtime::*;
 use visible_cell_runtime::*;
 use vram_runtime::*;
@@ -390,6 +395,14 @@ struct Playtest {
     combat_projectiles: RuntimeCombatProjectiles,
     /// Fixed-capacity visual aftermath for stopped combat projectiles.
     combat_projectile_impacts: RuntimeProjectileImpactEffects,
+    /// Floating damage numbers for hits dealt and taken. Purely
+    /// presentational: spawned from the damage sites, expired by their
+    /// own clock, and read only by the overlay pass. All-zero is a
+    /// valid empty pool, so it needs no boot stamp.
+    damage_numbers: DamageNumbers,
+    /// The run's soul total, credited when the player lands a killing blow.
+    /// All-zero is the empty wallet, so it needs no boot stamp.
+    souls: SoulsWallet,
     /// Logic-entity runtime (delay queue, master gating, fan-out)
     /// over the cooked `LOGIC` records (phase 3).
     logic: RuntimeLogic,

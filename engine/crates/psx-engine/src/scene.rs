@@ -36,6 +36,7 @@ pub enum RenderSubmission {
 pub(crate) struct RuntimeRequests {
     timing_realign: bool,
     visual_checkpoint: bool,
+    scene_state: Option<u16>,
 }
 
 /// Per-frame context passed to [`Scene::update`] and
@@ -241,6 +242,29 @@ impl Ctx {
         let requested = self.runtime_requests.visual_checkpoint;
         self.runtime_requests.visual_checkpoint = false;
         requested
+    }
+
+    /// Ask the game flow to enter the composed scene state with this cooked
+    /// [`psx_level::LevelSceneState::id`].
+    ///
+    /// This is the one way gameplay can move the flow itself. Everything else
+    /// that changes state is driven from the front-end: a button's authored
+    /// action, or a state's START binding. A win condition has neither -- the
+    /// world decides, mid-tick, that the run is over -- so it needs to say so
+    /// without the flow driver having to know what "won" means for this game.
+    ///
+    /// The request is a plain id rather than a callback so the scene stays
+    /// unaware of the flow's cursor indices, and it is consumed once per
+    /// update: re-requesting the state the flow is already entering is
+    /// harmless, which lets a caller poll a condition instead of latching it.
+    #[inline]
+    pub fn request_scene_state(&mut self, state_id: u16) {
+        self.runtime_requests.scene_state = Some(state_id);
+    }
+
+    #[inline]
+    pub(crate) fn take_scene_state_request(&mut self) -> Option<u16> {
+        self.runtime_requests.scene_state.take()
     }
 }
 

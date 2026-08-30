@@ -2257,6 +2257,22 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             } else {
                 self.gameplay.update(ctx);
             }
+            // A world that has just decided the run is over (win, loss, a
+            // scripted end) moves the flow here, through the same funnel and
+            // the same project-wide transition a button would use. Read after
+            // the world update so the request lands on the tick that raised
+            // it, and only for states that actually ran gameplay: a paused
+            // overlay's world is not simulating and cannot have raised one.
+            if let Some(state_id) = ctx.take_scene_state_request() {
+                if let Some(target) = self.flow_index_for_scene_state(state_id) {
+                    if target != self.cursor.current {
+                        // No return_to: an ending is not somewhere the player
+                        // backs out of into a world that no longer exists.
+                        self.request_flow_state(target, None, ctx);
+                        return;
+                    }
+                }
+            }
         }
         if let Some(scene) = tag.ui_scene() {
             let state = self.state_ref_at(self.cursor.current);
@@ -2427,6 +2443,9 @@ mod tests {
         /// set); when `None`, the trait default (`state.id`) applies.
         shared_resource_key: Option<u32>,
         hidden_ui_tag: Option<&'static str>,
+        /// When `Some`, `update` asks the flow for this scene state, the way a
+        /// world raises its own win/lose condition.
+        request_state: Option<u16>,
     }
 
     impl Scene for CountingScene {
@@ -2439,6 +2458,9 @@ mod tests {
         fn update(&mut self, ctx: &mut Ctx) {
             self.updates += 1;
             self.last_update_buttons = ctx.pad.buttons.bits();
+            if let Some(state) = self.request_state {
+                ctx.request_scene_state(state);
+            }
         }
         fn render(&mut self, _ctx: &mut Ctx) {
             self.renders += 1;
@@ -3269,6 +3291,91 @@ mod tests {
         assert_eq!(app.gameplay.last_update_buttons, 0);
         assert!(ctx.pad.buttons.is_held(button::R1));
         assert_eq!(app.cursor.focused_node(), Some(1));
+    }
+
+    /// A world that decides the run is over moves the flow itself, without a
+    /// button and without START. This is the path an ending screen rides:
+    /// gameplay keeps its world layer, so the panel composites over the last
+    /// live frame instead of tearing the world down, and the world stops
+    /// simulating because the target state pauses it.
+    #[test]
+    fn gameplay_scene_can_request_a_scene_state_itself() {
+        let mut scene = CountingScene {
+            shared_resource_key: Some(7),
+            request_state: Some(43),
+            ..Default::default()
+        };
+        let mut app = GameApp::new(
+            &PAUSE_COMPOSED_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        complete_loading(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 0, "boots into the gameplay state");
+
+        // One tick of gameplay raises the request; the flow acts on it in the
+        // same update rather than a frame later.
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 1, "the requested state is now current");
+        assert!(
+            app.current_tag().has_gameplay(),
+            "the ending overlay keeps the world layer, so the game still draws behind it"
+        );
+        assert!(
+            app.current_tag().world_is_paused(),
+            "and the world is frozen while it is up"
+        );
+        assert_eq!(
+            app.cursor.return_to, None,
+            "an ending is not somewhere the player backs out of"
+        );
+
+        // The world is paused, so further ticks neither update it nor let the
+        // stale request fire again.
+        let updates_at_entry = app.gameplay.updates;
+        idle_tick(&mut app, &mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.gameplay.updates, updates_at_entry);
+        assert_eq!(app.cursor.current, 1);
+    }
+
+    /// A request naming a state the flow does not have is inert rather than
+    /// fatal: a project that has not authored an ending keeps playing.
+    #[test]
+    fn an_unknown_scene_state_request_is_ignored() {
+        let mut scene = CountingScene {
+            shared_resource_key: Some(7),
+            request_state: Some(4242),
+            ..Default::default()
+        };
+        let mut app = GameApp::new(
+            &PAUSE_COMPOSED_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        complete_loading(&mut app, &mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 0, "flow stays where it was");
+        assert!(app.gameplay.updates >= 2, "and the world keeps simulating");
     }
 
     #[test]

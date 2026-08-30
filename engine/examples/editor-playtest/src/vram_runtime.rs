@@ -378,3 +378,69 @@ pub(super) fn ensure_model_atlas_uploaded(
 ) -> Option<VramSlot> {
     vram_arena().ensure_model_atlas_uploaded(VRAM_LAYOUT, asset_id, asset_bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SHADOW_CIRCLE_BLOB;
+    use psx_asset::Texture;
+
+    /// The decal blends only where its palette says so.
+    ///
+    /// `BlendMode::Average` on the primitive selects *how* to blend; the CLUT
+    /// entry's STP bit (15) selects *which texels* blend at all. The shipped
+    /// decal had STP clear on every entry, so the GPU painted an opaque patch
+    /// of near-black grey and the "shadow" only moved a dark floor by about
+    /// 30 of 255. Nothing in the pipeline reports that, which is exactly why
+    /// it needs a test rather than a comment.
+    #[test]
+    fn shadow_decal_palette_blends_and_reserves_index_zero() {
+        let texture = Texture::from_bytes(SHADOW_CIRCLE_BLOB).expect("decal parses");
+        assert_eq!(texture.width(), 64);
+        assert_eq!(texture.height(), 64);
+        assert_eq!(texture.clut_entries(), 16);
+
+        let clut = texture.clut_bytes();
+        assert_eq!(clut.len(), 32);
+        let entry = |i: usize| u16::from_le_bytes([clut[i * 2], clut[i * 2 + 1]]);
+
+        // Index 0 is the one value the GPU skips outright: the decal's
+        // "outside the circle". Setting STP there would blend it instead.
+        assert_eq!(entry(0), 0, "index 0 must stay fully transparent");
+        for i in 1..16 {
+            assert_ne!(
+                entry(i) & 0x8000,
+                0,
+                "CLUT entry {i} has STP clear, so it would draw opaque"
+            );
+        }
+    }
+
+    /// The darkening comes from a BLACK texel under Average, not a grey one:
+    /// `(background + 0) / 2` halves any floor, while a grey texel brightens
+    /// every floor darker than itself.
+    #[test]
+    fn shadow_decal_core_is_black_and_the_rim_stays_dark() {
+        let texture = Texture::from_bytes(SHADOW_CIRCLE_BLOB).expect("decal parses");
+        let clut = texture.clut_bytes();
+        let entry = |i: usize| u16::from_le_bytes([clut[i * 2], clut[i * 2 + 1]]);
+
+        assert_eq!(entry(1), 0x8000, "the core must be STP-set pure black");
+        // Rim greys stay under 4 of 31 per channel so they cannot lift a dark
+        // Cortex floor. 0x8000 | (4 | 4<<5 | 4<<10) is the ceiling.
+        for i in 1..16 {
+            let e = entry(i);
+            for shift in [0, 5, 10] {
+                assert!(
+                    (e >> shift) & 0x1f <= 4,
+                    "CLUT entry {i} channel is too bright to stay a shadow"
+                );
+            }
+        }
+
+        // The centre texel is the darkest index, the corner is transparent.
+        let px = texture.pixel_bytes();
+        let centre = px[32 * 32 + 16] & 0x0f;
+        assert_eq!(centre, 1, "decal centre must be the black core index");
+        assert_eq!(px[0] & 0x0f, 0, "decal corner must be transparent");
+    }
+}

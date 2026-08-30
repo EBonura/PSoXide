@@ -1637,6 +1637,67 @@ mod tests {
         }
     }
 
+    /// A `Bar` carrying `FLIP_X` fills from its right edge inwards, and one
+    /// without fills from its left edge outwards.
+    ///
+    /// This is the whole mechanism behind a mirrored pair of health bars: the
+    /// fill rectangle is built in the node's LOCAL space and pushed through
+    /// `UiResolvedNode::subrect`, so the node transform -- and therefore the
+    /// authored `flip_x` -- decides which end is the anchored one. Nothing
+    /// else in the bar path is direction-aware, so if this ever regressed the
+    /// two bars would silently drain the same way and the HUD would stop
+    /// reading as a mirror. Pinning it here is cheaper than noticing by eye.
+    #[test]
+    fn flipped_bars_fill_from_the_opposite_end() {
+        // A 82x2 bar at x=69, the authored HUD geometry, half full.
+        let (x, y, width, height) = (69i16, 15i16, 82u16, 2u16);
+        let fill_width = super::status_fill_width(width as i16, 2048, 4096);
+        assert_eq!(fill_width, 41);
+
+        let mut unflipped = ui_node(None, LevelUiNodeKind::Bar, x, y, width, height);
+        unflipped.flags = 0;
+        let mut flipped = unflipped;
+        flipped.flags = ui_node_flags::FLIP_X;
+
+        let left = super::node_resolved(&[unflipped], 0).expect("unflipped resolves");
+        let right = super::node_resolved(&[flipped], 0).expect("flipped resolves");
+
+        // Both cover the same bounds: flipping is a mirror, not a move.
+        assert_eq!(left.bounds(), right.bounds());
+        assert_eq!(left.bounds(), (x, y, width, height));
+
+        let unflipped_fill = super::quad_bounds(left.subrect(0, 0, fill_width, height as i16));
+        let flipped_fill = super::quad_bounds(right.subrect(0, 0, fill_width, height as i16));
+
+        // Unflipped: anchored at the left edge, growing right.
+        assert_eq!(unflipped_fill, (69, 15, 41, 2));
+        // Flipped: anchored at the right edge, growing left. 69 + 82 - 41.
+        assert_eq!(flipped_fill, (110, 15, 41, 2));
+
+        // The two fills stay mirror images of each other at every level, which
+        // is what makes a symmetric pair read as one gauge.
+        for value in [0, 1, 1024, 2048, 4095, 4096] {
+            let w = super::status_fill_width(width as i16, value, 4096);
+            if w == 0 {
+                // `draw_status_bar` skips an empty fill outright, and
+                // `quad_bounds` floors its width at 1, so a degenerate quad
+                // would measure as one pixel wide that never gets drawn.
+                continue;
+            }
+            let (lx, _, lw, _) = super::quad_bounds(left.subrect(0, 0, w, height as i16));
+            let (rx, _, rw, _) = super::quad_bounds(right.subrect(0, 0, w, height as i16));
+            assert_eq!(lw, rw, "fill widths differ at {value}");
+            // Left fill starts at the node's left edge; right fill ends at the
+            // node's right edge.
+            assert_eq!(lx, x, "unflipped fill moved at {value}");
+            assert_eq!(
+                i32::from(rx) + i32::from(rw),
+                i32::from(x) + i32::from(width),
+                "flipped fill is not right-anchored at {value}"
+            );
+        }
+    }
+
     /// The parent memo must return exactly what a fresh resolve returns, for
     /// every node of a scene, whatever order the pool is walked in.
     #[test]

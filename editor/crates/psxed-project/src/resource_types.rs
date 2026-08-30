@@ -269,6 +269,10 @@ pub enum CharacterAnimationAction {
     VertLightAttack,
     VertHeavyAttack,
     VertComboAttack,
+    /// Dedicated NPC/projectile attack. Kept separate from either melee axis
+    /// so the Animation Studio can author projectile release events against a
+    /// stable, unambiguous timeline.
+    RangedAttack,
 }
 
 impl CharacterAnimationAction {
@@ -314,6 +318,7 @@ impl CharacterAnimationAction {
         Self::VertLightAttack,
         Self::VertHeavyAttack,
         Self::VertComboAttack,
+        Self::RangedAttack,
     ];
 
     /// Actions exposed by current editor authoring. `StunRecovery` remains in
@@ -351,6 +356,7 @@ impl CharacterAnimationAction {
         Self::VertLightAttack,
         Self::VertHeavyAttack,
         Self::VertComboAttack,
+        Self::RangedAttack,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -390,6 +396,7 @@ impl CharacterAnimationAction {
             Self::VertLightAttack => "Zenith Light",
             Self::VertHeavyAttack => "Zenith Heavy",
             Self::VertComboAttack => "Legacy Zenith Combo",
+            Self::RangedAttack => "Ranged Attack",
         }
     }
 
@@ -428,6 +435,7 @@ impl CharacterAnimationAction {
             Self::VertLightAttack => 30,
             Self::VertHeavyAttack => 31,
             Self::VertComboAttack => 32,
+            Self::RangedAttack => 33,
         }
     }
 
@@ -439,7 +447,11 @@ impl CharacterAnimationAction {
             Self::Turn => Some(AnimationRole::Turn),
             Self::Roll => Some(AnimationRole::Roll),
             Self::Backstep => Some(AnimationRole::Backstep),
-            Self::LightAttack | Self::HeavyAttack | Self::ComboAttack | Self::Block => {
+            Self::LightAttack
+            | Self::HeavyAttack
+            | Self::ComboAttack
+            | Self::RangedAttack
+            | Self::Block => {
                 Some(AnimationRole::Attack)
             }
             Self::HitReact => Some(AnimationRole::Hit),
@@ -489,6 +501,13 @@ impl CharacterAnimationAction {
         let left = name.contains("left") || name.contains("_lft");
         let right = name.contains("right") || name.contains("_rgt");
         let backward = name.contains("_bwd") || name.contains("_bkw") || name.contains("back");
+        if name.contains("ranged")
+            || name.contains("missile")
+            || name.contains("projectile")
+            || name.contains("shoot")
+        {
+            return Some(Self::RangedAttack);
+        }
         if name.contains("stun") {
             return Some(Self::Stun);
         }
@@ -2095,9 +2114,19 @@ pub struct EnemyBehaviorSettings {
     /// Damage dealt by a connecting touch/melee attack.
     #[serde(default = "default_enemy_touch_damage")]
     pub touch_damage: u16,
-    /// Health pool at spawn.
+    /// First vitality channel's pool at spawn (Horizon).
     #[serde(default = "default_enemy_max_health")]
     pub max_health: u16,
+    /// Second vitality channel's pool at spawn (Zenith). Enemies carry the
+    /// same two-channel vitality the player does. Serde-defaulted so projects
+    /// authored before the second channel load unchanged.
+    #[serde(default = "default_enemy_max_health_secondary")]
+    pub max_health_secondary: u16,
+    /// Souls credited to the player for killing this enemy. Serde-defaulted
+    /// so projects authored before the currency existed load unchanged, and
+    /// grant the default rather than nothing.
+    #[serde(default = "default_enemy_soul_value")]
+    pub soul_value: u16,
 }
 
 impl EnemyBehaviorSettings {
@@ -2120,6 +2149,8 @@ impl EnemyBehaviorSettings {
             poise: default_enemy_poise(),
             touch_damage: default_enemy_touch_damage(),
             max_health: default_enemy_max_health(),
+            max_health_secondary: default_enemy_max_health_secondary(),
+            soul_value: default_enemy_soul_value(),
         }
     }
 }
@@ -2188,6 +2219,20 @@ pub(crate) const fn default_enemy_touch_damage() -> u16 {
 
 pub(crate) const fn default_enemy_max_health() -> u16 {
     100
+}
+
+/// Equal to the Horizon default, so a freshly enabled enemy has two balanced
+/// pools exactly as `DualVitality::equal` gives the player.
+pub(crate) const fn default_enemy_max_health_secondary() -> u16 {
+    100
+}
+
+/// Souls a stock enemy is worth. Matched to the Horizon health default so the
+/// starting reward curve reads "a pool's worth of damage buys a pool's worth
+/// of souls"; every enemy is expected to be retuned from here in the
+/// inspector, and zero is legal for one that should grant nothing.
+pub(crate) const fn default_enemy_soul_value() -> u16 {
+    50
 }
 
 /// Tunable movement/collision settings authored on a

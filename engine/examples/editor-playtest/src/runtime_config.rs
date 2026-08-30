@@ -81,7 +81,10 @@ pub(super) const NEAR_Z: i32 = 4;
 pub(super) const FAR_Z: i32 = 1024;
 pub(super) const PROJECTION: WorldProjection =
     WorldProjection::new(SCREEN_CX, SCREEN_CY, FOCAL, NEAR_Z);
-pub(super) const SHADOW_DEPTH_BIAS: i32 = FAR_Z;
+/// Extra depth nudge ADDED to the actor clearance already in
+/// [`actor_surface_options`]. It was `FAR_Z` and unread; the decal path
+/// hardcoded `-6` and threw the clearance away.
+pub(super) const SHADOW_DEPTH_BIAS: i32 = -6;
 pub(super) const SHADOW_FLOOR_LIFT: i32 = 1;
 pub(super) const SHADOW_RADIUS_SCALE_NUM: i32 = 5;
 pub(super) const SHADOW_RADIUS_SCALE_DEN: i32 = 4;

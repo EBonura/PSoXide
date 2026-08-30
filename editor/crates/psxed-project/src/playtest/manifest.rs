@@ -2159,7 +2159,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, attack_active_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, attack_active_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, max_health_secondary: {}, soul_value: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -2205,6 +2205,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.poise,
             entity.touch_damage,
             entity.max_health,
+            entity.max_health_secondary,
+            entity.soul_value,
             entity.flags,
         );
     }

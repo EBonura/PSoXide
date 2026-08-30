@@ -373,6 +373,9 @@ impl RuntimeCharacter {
             CharacterAnimationAction::VertComboAttack => self
                 .action_clip(CharacterAnimationAction::VertComboAttack)
                 .unwrap_or(idle),
+            CharacterAnimationAction::RangedAttack => self
+                .action_clip(CharacterAnimationAction::RangedAttack)
+                .unwrap_or(idle),
             CharacterAnimationAction::LightAttack => self
                 .action_clip(CharacterAnimationAction::LightAttack)
                 .to_option()
