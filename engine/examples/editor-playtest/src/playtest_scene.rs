@@ -694,18 +694,10 @@ impl Scene for Playtest {
 
             // Live entity poses: instances bound to game entities
             // render where the entity runtime moved them (phase 3).
-            let mut entity_poses = [ModelInstancePoseOverride {
-                instance: u16::MAX,
-                x: 0,
-                y: 0,
-                z: 0,
-                yaw: 0,
-                clip: psx_level::OptionalModelClipIndex::NONE,
-                phase_ticks: 0,
-                one_shot: false,
-            }; MAX_GAME_ENTITIES];
-            let entity_pose_count = self.game_entity_pose_overrides(&mut entity_poses);
-            let entity_poses = &entity_poses[..entity_pose_count];
+            let mut entity_poses =
+                psx_engine::FixedScratch::<ModelInstancePoseOverride, MAX_GAME_ENTITIES>::new();
+            self.game_entity_pose_overrides(&mut entity_poses);
+            let entity_poses = entity_poses.as_slice();
 
             // PXBSP has no ActiveRuntimeRoom: that type owns parsed PSXW
             // render/collision payloads. Draw the singleton metadata room's
@@ -1244,7 +1236,7 @@ impl Scene for Playtest {
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         draw_player(
                             self.room_index,
-                            character,
+                            &character,
                             player_pose,
                             &self.model_faces[..self.model_face_count],
                             &self.model_parts[..self.model_part_count],

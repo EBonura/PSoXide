@@ -20,7 +20,7 @@ pub(super) fn draw_player_equipment<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    character: RuntimeCharacter,
+    character: &RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -55,6 +55,7 @@ pub(super) fn draw_player_equipment<
         clip_local,
         anim_start_tick,
         blend,
+        PlayerActionSpeeds::authored(character, anim_action, blend),
         elapsed_tick,
         video_hz,
     ) else {

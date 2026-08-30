@@ -383,19 +383,15 @@ impl Playtest {
         character: &RuntimeCharacter,
         anim: PlayerAnim,
     ) -> u16 {
-        let authored = character.action_speed(anim.action());
-        if player_anim_is_attack(anim) {
-            self.vitality_modifiers().attack_speed_q8(authored)
-        } else {
-            authored
-        }
+        live_action_speed_q8(self.vitality_modifiers(), character, anim)
     }
 
     pub(super) fn player_character_for_anim(
         &self,
-        mut character: RuntimeCharacter,
+        character: &RuntimeCharacter,
         _anim: PlayerAnim,
     ) -> RuntimeCharacter {
+        let mut character = *character;
         let modifiers = self.vitality_modifiers();
         for anim in [
             PlayerAnim::LightAttack,
@@ -608,7 +604,7 @@ impl Playtest {
         };
         let cycle = |anim: PlayerAnim| {
             self.player_clip_duration_vblanks(
-                *character,
+                character,
                 character.clip_for(anim),
                 video_hz,
                 self.player_action_speed_q8(character, anim),
@@ -688,7 +684,7 @@ impl Playtest {
         let clip = character.clip_for(anim);
         let duration = self
             .player_clip_duration_vblanks(
-                *character,
+                character,
                 clip,
                 video_hz,
                 self.player_action_speed_q8(character, anim),
@@ -1858,5 +1854,24 @@ impl Playtest {
             self.lock_target = Some(index);
             self.lock_invalid_ticks = 0;
         }
+    }
+}
+
+/// Live authored playback rate for an animation, Q8. Only the four attack
+/// actions use the module Attack Speed lane; locomotion and defensive actions
+/// retain their authored cadence.
+///
+/// Takes already-resolved modifiers so a caller that needs several speeds at
+/// once pays for [`Playtest::vitality_modifiers`] a single time.
+pub(super) fn live_action_speed_q8(
+    modifiers: VitalityModifiers,
+    character: &RuntimeCharacter,
+    anim: PlayerAnim,
+) -> u16 {
+    let authored = character.action_speed(anim.action());
+    if player_anim_is_attack(anim) {
+        modifiers.attack_speed_q8(authored)
+    } else {
+        authored
     }
 }

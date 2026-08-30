@@ -1131,15 +1131,18 @@ impl Playtest {
     /// Build the per-frame pose-override list: every live (visible)
     /// entity with a cooked visual renders at its runtime position and
     /// facing, playing its AI state's cooked clip on the state clock.
-    /// Returns the filled count.
+    ///
+    /// Pushes into caller-owned scratch. The list is push-only and this map
+    /// cooks one entity into a 64-slot capacity, so a pre-splatted array would
+    /// write 1,536 bytes per call to fill one 24-byte entry; `FixedScratch`
+    /// leaves the unused slots untouched.
     pub(super) fn game_entity_pose_overrides(
         &self,
-        out: &mut [ModelInstancePoseOverride; MAX_GAME_ENTITIES],
-    ) -> usize {
-        let mut count = 0usize;
+        out: &mut psx_engine::FixedScratch<ModelInstancePoseOverride, MAX_GAME_ENTITIES>,
+    ) {
         for (index, record) in GAME_ENTITIES.iter().enumerate() {
             if record.model_instance == psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE
-                || count >= out.len()
+                || out.len() >= out.capacity()
             {
                 continue;
             }
@@ -1156,7 +1159,7 @@ impl Playtest {
                 .find(|attack| attack.entity() == index)
                 .map(|attack| attack.clip())
                 .unwrap_or_else(|| self.game_entities.clip_for_state(GAME_ENTITIES, index));
-            out[count] = ModelInstancePoseOverride {
+            out.try_push(ModelInstancePoseOverride {
                 instance: record.model_instance,
                 x: position[0],
                 y: position[1],
@@ -1165,10 +1168,8 @@ impl Playtest {
                 clip: psx_level::OptionalModelClipIndex::some(psx_level::ModelClipIndex(clip.clip)),
                 phase_ticks: clip.phase_ticks,
                 one_shot: clip.one_shot,
-            };
-            count += 1;
+            });
         }
-        count
     }
 
     /// Drain the logic fire marks into example-side effects: doors
