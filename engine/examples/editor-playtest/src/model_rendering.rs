@@ -428,6 +428,19 @@ impl Playtest {
                         live_action_speed_q8(modifiers, character, blend.anim)
                     }),
                 };
+                let clip_local = character.clip_for(self.anim_state);
+                // The clip's first-frame root is constant for the clip, and
+                // sampling it was a whole pose decode per tick. Last tick's
+                // snapshot already carries it; reuse it while the same clip of
+                // the same model is playing. A clip or model change simply
+                // misses and the resolver samples once.
+                let cached_clip_first_root_xz = self
+                    .previous_player_actor_pose
+                    .filter(|previous| {
+                        previous.clip_local() == clip_local
+                            && previous.model().index == character.model
+                    })
+                    .and_then(|previous| previous.clip_first_root_xz());
                 mr::resolve_player_actor_pose(
                     model_tables(),
                     character,
@@ -438,10 +451,11 @@ impl Playtest {
                     player.z,
                     self.motor.yaw(),
                     self.anim_state.action(),
-                    character.clip_for(self.anim_state),
+                    clip_local,
                     self.anim_start_tick,
                     blend,
                     speeds,
+                    cached_clip_first_root_xz,
                     ctx.sim_tick,
                     ctx.video_hz,
                 )

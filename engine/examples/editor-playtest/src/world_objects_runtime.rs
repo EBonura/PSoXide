@@ -5,8 +5,8 @@
 //! direct brush traces; grid worlds use the all-visible value and retain their
 //! room/portal filtering.
 
-use psx_level::{LevelWorldObjectRecord, MAX_WORLD_OBJECTS};
 use psx_game_runtime::destructibles::RuntimeDestructibles;
+use psx_level::{LevelWorldObjectRecord, MAX_WORLD_OBJECTS};
 
 pub(super) const WORLD_OBJECT_VISIBILITY_WORDS: usize =
     MAX_WORLD_OBJECTS.div_ceil(u64::BITS as usize);
