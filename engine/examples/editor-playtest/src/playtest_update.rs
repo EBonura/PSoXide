@@ -58,7 +58,7 @@ impl Playtest {
         }
         let player = self.motor.position();
         let player_pos = [player.x, player.y, player.z];
-        let (player_radius, player_height) = match self.character {
+        let (player_radius, player_height) = match &self.character {
             Some(character) => (character.radius, character.height),
             None if self.bsp.is_some() => (BSP_PLAYER_RADIUS, BSP_PLAYER_HEIGHT),
             None => (0, 0),
@@ -826,7 +826,7 @@ impl Playtest {
             }
             if new_state.is_motor_fixed_action() {
                 if let Some(character) = self.character {
-                    self.lock_player_anim_action(character, new_state, now, ctx.video_hz);
+                    self.lock_player_anim_action(&character, new_state, now, ctx.video_hz);
                 }
             }
         }
@@ -945,14 +945,14 @@ impl Playtest {
     /// Duration in ticks of a bound one-shot walk transition, `None` when
     /// the action has no clip (the transition is then skipped).
     fn walk_transition_ticks(&self, anim: PlayerAnim, video_hz: VideoHz) -> Option<u32> {
-        let character = self.character?;
+        let character = self.character.as_ref()?;
         if character.action_clip(anim.action()).is_none() {
             return None;
         }
         let clip = character.clip_for(anim);
         Some(
             self.player_clip_duration_vblanks(
-                character,
+                *character,
                 clip,
                 video_hz,
                 self.player_action_speed_q8(character, anim),
@@ -1025,8 +1025,14 @@ impl Playtest {
             }
         }
         let gait = self.gait();
-        let windup = self.walk_transition_ticks(gait.windup, video_hz);
-        let winddown = self.walk_transition_ticks(gait.winddown, video_hz);
+        // Resolved on demand rather than up front. Each resolution copies the
+        // 672-byte `RuntimeCharacter` twice and divides out a clip duration,
+        // and the two phases that dominate a running route (Cruise with the
+        // stick held, Idle while not stepping) consume neither value. The
+        // resolution is a pure function of the character, the anim and the
+        // video rate, so deferring it cannot change what it returns.
+        let windup = |this: &Self| this.walk_transition_ticks(gait.windup, video_hz);
+        let winddown = |this: &Self| this.walk_transition_ticks(gait.winddown, video_hz);
         // Blocked against a wall the motor reports Idle with the stick held;
         // keep the phase and show what the motor says, as before.
         let stepping = motor_gait == Some(gait);
@@ -1037,7 +1043,7 @@ impl Playtest {
             LocoPhase::Idle => {
                 if stepping {
                     self.loco_start_tick = now;
-                    if windup.is_some() {
+                    if windup(self).is_some() {
                         self.loco = LocoPhase::Windup;
                         gait.windup
                     } else {
@@ -1049,7 +1055,7 @@ impl Playtest {
                 }
             }
             LocoPhase::Windup => {
-                if released && winddown.is_some() {
+                if released && winddown(self).is_some() {
                     self.begin_winddown(gait.winddown, now)
                 } else if released || other {
                     self.loco = LocoPhase::Idle;
@@ -1057,7 +1063,7 @@ impl Playtest {
                 } else if switched {
                     // Gait changed during the ramp: run the new gait's windup.
                     self.enter_gait_windup(motor_anim, now, video_hz)
-                } else if windup.is_some_and(|d| elapsed >= d) {
+                } else if windup(self).is_some_and(|d| elapsed >= d) {
                     self.loco = LocoPhase::Cruise;
                     gait.cruise
                 } else {
@@ -1072,7 +1078,7 @@ impl Playtest {
                     // the two cycles, so the cruise swaps directly.
                     self.loco_gait = gait_of(motor_anim).unwrap_or(WALK_GAIT);
                     motor_anim
-                } else if released && winddown.is_some() {
+                } else if released && winddown(self).is_some() {
                     self.loco = LocoPhase::StopPending;
                     self.loco_start_tick = now;
                     self.stop_if_in_phase(now, video_hz)
@@ -1169,6 +1175,7 @@ impl Playtest {
             }
             let bound = self
                 .character
+                .as_ref()
                 .is_some_and(|character| character.action_clip(anim.action()).is_some());
             if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
                 telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
@@ -1196,6 +1203,7 @@ impl Playtest {
         };
         let alt_bound = self
             .character
+            .as_ref()
             .is_some_and(|c| c.action_clip(gait.winddown_alt.action()).is_some());
         // Ticks since the Walk clip started (its frame 0 is the stride start).
         let position = now.as_u32().saturating_sub(self.anim_start_tick.as_u32()) % cycle;

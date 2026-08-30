@@ -380,7 +380,7 @@ impl Playtest {
     /// actions retain their authored cadence.
     pub(super) fn player_action_speed_q8(
         &self,
-        character: RuntimeCharacter,
+        character: &RuntimeCharacter,
         anim: PlayerAnim,
     ) -> u16 {
         let authored = character.action_speed(anim.action());
@@ -455,6 +455,13 @@ impl Playtest {
         room: RoomIndex,
         position: RoomPoint,
     ) -> Option<&'static LevelWaterCellRecord> {
+        // Two sim calls per tick (locomotion speed, then the lethal-depth
+        // check) each cost a room lookup and two `div_euclid` divides before
+        // searching. An empty cooked table can never match, so answer from the
+        // table's length instead. Exact, not a heuristic.
+        if WATER_CELLS.is_empty() {
+            return None;
+        }
         let sector_size = i32::from(ROOMS.get(room.to_usize())?.sector_size);
         if sector_size <= 0 {
             return None;
@@ -596,12 +603,12 @@ impl Playtest {
         if !from.is_gait() || !to.is_gait() || from == to {
             return 0;
         }
-        let Some(character) = self.character else {
+        let Some(character) = self.character.as_ref() else {
             return 0;
         };
         let cycle = |anim: PlayerAnim| {
             self.player_clip_duration_vblanks(
-                character,
+                *character,
                 character.clip_for(anim),
                 video_hz,
                 self.player_action_speed_q8(character, anim),
@@ -656,7 +663,7 @@ impl Playtest {
         let Some(character) = self.character else {
             return false;
         };
-        if !self.lock_player_anim_action(character, anim, now, video_hz) {
+        if !self.lock_player_anim_action(&character, anim, now, video_hz) {
             return false;
         }
         self.switch_player_anim(anim, now, video_hz);
@@ -670,7 +677,7 @@ impl Playtest {
 
     pub(super) fn lock_player_anim_action(
         &mut self,
-        character: RuntimeCharacter,
+        character: &RuntimeCharacter,
         anim: PlayerAnim,
         now: SimTick,
         video_hz: VideoHz,
@@ -681,7 +688,7 @@ impl Playtest {
         let clip = character.clip_for(anim);
         let duration = self
             .player_clip_duration_vblanks(
-                character,
+                *character,
                 clip,
                 video_hz,
                 self.player_action_speed_q8(character, anim),
@@ -694,7 +701,7 @@ impl Playtest {
     }
 
     pub(super) fn motor_config(&self) -> CharacterMotorConfig {
-        let mut config = match self.character {
+        let mut config = match &self.character {
             Some(c) => c.motor_config(),
             None => CharacterMotorConfig::character(
                 0,
@@ -927,7 +934,7 @@ impl Playtest {
     }
 
     pub(super) fn draw_collision_debug_overlay(&self, camera: WorldCamera) {
-        if let Some(character) = self.character {
+        if let Some(character) = self.character.as_ref() {
             draw_collision_cylinder_debug(
                 self.motor.position(),
                 character.radius,
