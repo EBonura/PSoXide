@@ -321,6 +321,12 @@ pub(super) struct BspRuntime {
     activation_visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     activation_leaf: Option<usize>,
     activation_visible_leaves: usize,
+    /// Last observer point handed to [`Self::activation_row`] and the leaf it
+    /// resolved to. One gameplay tick builds three activation masks (entities,
+    /// model instances, logic points) from the same observer, and each used to
+    /// repeat the same root-to-leaf descent of the render BSP.
+    activation_observer: Option<RoomPoint>,
+    activation_observer_leaf: Option<usize>,
     bounds_visibility_cache: [BspBoundsVisibilityCacheEntry; BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
     fragment_events: [BspDestructibleFragmentEvent; MAX_BSP_DESTRUCTIBLES],
 }
@@ -463,27 +469,41 @@ impl BspRuntime {
             activation_visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             activation_leaf: None,
             activation_visible_leaves: 0,
+            activation_observer: None,
+            activation_observer_leaf: None,
             bounds_visibility_cache: [BspBoundsVisibilityCacheEntry::EMPTY;
                 BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
             fragment_events: [BspDestructibleFragmentEvent::EMPTY; MAX_BSP_DESTRUCTIBLES],
         })
     }
 
-    /// Return one bit per world-space point visible from `observer` through
-    /// the cooked PXBSP PVS. Invalid/solid points and malformed visibility
-    /// fail closed. Positions are engine units; the map lookup consumes Q20.12.
-    // psx-numeric-allow-next-line: one bit per queried point; the width IS the caller's point capacity
-    pub(super) fn visible_points_mask(&mut self, observer: RoomPoint, points: &[[i32; 3]]) -> u64 {
+    /// Resolve `observer`'s PVS leaf and make sure `activation_visibility`
+    /// holds that leaf's decompressed row.
+    ///
+    /// Both the point-mask and bounds-mask queries need exactly this, and a
+    /// gameplay tick runs three of them from one observer. The leaf descent
+    /// walks only the static world model, so remembering the last observer
+    /// point and its leaf is exact, not an approximation: the same point in
+    /// the same map always lands in the same leaf. Doors, destructibles and
+    /// other movers are separate brush models and cannot move this tree.
+    fn activation_row(&mut self, observer: RoomPoint) -> Option<usize> {
         let q12 = |value: i32| value.saturating_mul(4096);
-        let observer = Vec3I32 {
-            x: q12(observer.x),
-            y: q12(observer.y),
-            z: q12(observer.z),
+        let observer_leaf = if self.activation_observer == Some(observer) {
+            self.activation_observer_leaf
+        } else {
+            let leaf = self.map.point_leaf_index(Vec3I32 {
+                x: q12(observer.x),
+                y: q12(observer.y),
+                z: q12(observer.z),
+            });
+            self.activation_observer = Some(observer);
+            self.activation_observer_leaf = leaf;
+            leaf
         };
-        let Some(observer_leaf) = self.map.point_leaf_index(observer) else {
+        let Some(observer_leaf) = observer_leaf else {
             self.activation_leaf = None;
             self.activation_visible_leaves = 0;
-            return 0;
+            return None;
         };
         if self.activation_leaf != Some(observer_leaf) {
             let Some(visible_leaves) = self
@@ -492,10 +512,22 @@ impl BspRuntime {
             else {
                 self.activation_leaf = None;
                 self.activation_visible_leaves = 0;
-                return 0;
+                return None;
             };
             self.activation_leaf = Some(observer_leaf);
             self.activation_visible_leaves = visible_leaves;
+        }
+        Some(observer_leaf)
+    }
+
+    /// Return one bit per world-space point visible from `observer` through
+    /// the cooked PXBSP PVS. Invalid/solid points and malformed visibility
+    /// fail closed. Positions are engine units; the map lookup consumes Q20.12.
+    // psx-numeric-allow-next-line: one bit per queried point; the width IS the caller's point capacity
+    pub(super) fn visible_points_mask(&mut self, observer: RoomPoint, points: &[[i32; 3]]) -> u64 {
+        let q12 = |value: i32| value.saturating_mul(4096);
+        if self.activation_row(observer).is_none() {
+            return 0;
         }
         let visible_leaves = self.activation_visible_leaves;
         let mut mask = 0u64;
@@ -530,28 +562,9 @@ impl BspRuntime {
         // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
     ) -> u64 {
         let q12 = |value: i32| value.saturating_mul(4096);
-        let observer = Vec3I32 {
-            x: q12(observer.x),
-            y: q12(observer.y),
-            z: q12(observer.z),
-        };
-        let Some(observer_leaf) = self.map.point_leaf_index(observer) else {
-            self.activation_leaf = None;
-            self.activation_visible_leaves = 0;
+        let Some(observer_leaf) = self.activation_row(observer) else {
             return 0;
         };
-        if self.activation_leaf != Some(observer_leaf) {
-            let Some(visible_leaves) = self
-                .map
-                .leaf_visibility_into(observer_leaf, &mut self.activation_visibility)
-            else {
-                self.activation_leaf = None;
-                self.activation_visible_leaves = 0;
-                return 0;
-            };
-            self.activation_leaf = Some(observer_leaf);
-            self.activation_visible_leaves = visible_leaves;
-        }
 
         let mut mask = 0u64;
         for (index, bounds) in bounds.iter().enumerate().take(64) {
