@@ -138,6 +138,32 @@ const AFFINE_BATCH_WORKSPACE_BYTES: usize =
     AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>();
 #[cfg(target_arch = "mips")]
 const _: () = assert!(AFFINE_BATCH_WORKSPACE_BYTES <= psx_engine::scratchpad::SIZE);
+
+/// PXBSP scratchpad layout: the five clip-plane records, then the batch
+/// vertex workspace.
+///
+/// The clip planes are the most re-read bytes in the face loop. Each live
+/// plane costs five loads per face, and with the hierarchical clipflags
+/// leaving under two planes live per face that is about two thousand loads a
+/// frame from main RAM at six stall cycles each. In the scratchpad they are
+/// one-cycle reads at an absolute address, so the base-pointer reload goes
+/// too. The batch gives up six vertex slots to pay for it; this project's
+/// cook has no face wider than six vertices, so the batch still groups eight
+/// faces per flush instead of nine.
+const PXBSP_CLIP_PLANE_BYTES: usize = core::mem::size_of::<[([i32; 3], i64); 5]>();
+const PXBSP_BATCH_MAX_VERTICES: usize = 33;
+const PXBSP_BATCH_MAX_SURFACES: usize = 13;
+const PXBSP_AFFINE_BATCH_VERTEX_CAPACITY: usize =
+    PXBSP_BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES;
+#[cfg(target_arch = "mips")]
+const _: () = assert!(
+    PXBSP_CLIP_PLANE_BYTES
+        + PXBSP_AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>()
+        <= psx_engine::scratchpad::SIZE
+);
+// A `ClassicAffineVertex` is four-aligned and the plane block is a multiple
+// of both its own eight-byte alignment and four.
+const _: () = assert!(PXBSP_CLIP_PLANE_BYTES.is_multiple_of(8));
 const MAX_ALIAS_VERTICES: usize = 512;
 const MAX_RENDER_ENTITIES: usize = 512;
 const CLUT_DEFAULT: u16 = 240 << 6;
@@ -455,9 +481,12 @@ impl FrustumPlanes {
     /// Planes outside `clip_mask` were proven satisfied by an enclosing box,
     /// so no vertex can fail them; skipping them keeps the answer exact,
     /// near-plane reporting included.
+    ///
+    /// `planes` is the caller's own copy of [`Self::planes`], so the guest can
+    /// hold it somewhere cheaper to read than main RAM.
     #[inline(always)]
     fn cull_polygon(
-        &self,
+        planes: &[([i32; 3], i64); 5],
         clip_mask: u8,
         count: usize,
         mut vertex: impl FnMut(usize) -> [i16; 3],
@@ -467,7 +496,7 @@ impl FrustumPlanes {
         while live != 0 {
             let plane_index = live.trailing_zeros() as usize;
             live &= live - 1;
-            let plane = unsafe { self.planes.get_unchecked(plane_index) };
+            let plane = unsafe { planes.get_unchecked(plane_index) };
             let mut wholly_outside = true;
             let mut any_outside = false;
             let mut index = 0usize;
@@ -849,17 +878,55 @@ fn lerp_vertex(
     }
 }
 
+/// `floor(sqrt(value))` for a positive `value`, zero otherwise.
+///
+/// Digit-by-digit, not Newton. The Newton form divided once per iteration and
+/// took about fifteen of them for a view-row length, and a 64-bit division on
+/// this target is a call into `compiler_builtins`' `u64_div_rem`. This runs on
+/// shifts, adds and compares only. The 32-bit kernel answers every value a
+/// squared view-row length can produce; the 64-bit tail keeps the general
+/// contract for a caller that is not `from_view`.
 fn isqrt_i64(value: i64) -> i64 {
     if value <= 0 {
         return 0;
     }
-    let mut x = value;
-    let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + value / x) / 2;
+    let value = value as u64;
+    if value <= u32::MAX as u64 {
+        let mut remainder = value as u32;
+        let mut root = 0u32;
+        let mut bit = 1u32 << 30;
+        while bit > remainder {
+            bit >>= 2;
+        }
+        while bit != 0 {
+            let trial = root + bit;
+            if remainder >= trial {
+                remainder -= trial;
+                root = (root >> 1) + bit;
+            } else {
+                root >>= 1;
+            }
+            bit >>= 2;
+        }
+        return i64::from(root);
     }
-    x
+    let mut remainder = value;
+    let mut root = 0u64;
+    let mut bit = 1u64 << 62;
+    while bit > remainder {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        let trial = root + bit;
+        if remainder >= trial {
+            remainder -= trial;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    root as i64
 }
 
 pub struct Renderer {
@@ -1384,31 +1451,48 @@ impl Renderer {
         #[cfg(target_arch = "mips")]
         let batch_vertices = unsafe {
             core::slice::from_raw_parts_mut(
-                psx_engine::scratchpad::ptr_at::<ClassicAffineVertex>(0),
-                AFFINE_BATCH_VERTEX_CAPACITY,
+                psx_engine::scratchpad::ptr_at::<ClassicAffineVertex>(PXBSP_CLIP_PLANE_BYTES),
+                PXBSP_AFFINE_BATCH_VERTEX_CAPACITY,
             )
         };
         #[cfg(not(target_arch = "mips"))]
         let mut batch_vertex_storage =
-            [ClassicAffineVertex::default(); AFFINE_BATCH_VERTEX_CAPACITY];
+            [ClassicAffineVertex::default(); PXBSP_AFFINE_BATCH_VERTEX_CAPACITY];
         #[cfg(not(target_arch = "mips"))]
         let batch_vertices = &mut batch_vertex_storage[..];
-        let mut batch_surfaces = [ClassicAffineMixedBatchSurface::default(); BATCH_MAX_SURFACES];
+        let mut batch_surfaces =
+            [ClassicAffineMixedBatchSurface::default(); PXBSP_BATCH_MAX_SURFACES];
         // One face at a time is materialized here, frustum-clipped, then
         // copied into the batch (a clip adds at most one vertex per plane).
-        let mut face_vertices = [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + 8];
-        let mut clip_scratch = [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + 8];
+        let mut face_vertices = [ClassicAffineVertex::default(); PXBSP_BATCH_MAX_VERTICES + 8];
+        let mut clip_scratch = [ClassicAffineVertex::default(); PXBSP_BATCH_MAX_VERTICES + 8];
         let mut batch_vertex_count = 0usize;
         let mut batch_surface_count = 0usize;
         let mut batch_worst_words = 0usize;
 
         let faces = map.faces();
+        // The vertex lump base, resolved once. `materialize_pxbsp_face` used
+        // to re-derive it per drawn face, which is a lump-table lookup plus a
+        // checked byte offset and a slice bounds compare.
+        let source_base = map
+            .vertex_data()
+            .as_ptr()
+            .cast::<ClassicAffineWordSourceVertex>();
         // Own the clip planes for the duration of the loop. Reaching them
         // through the caller's reference made every plane test reload a
-        // spilled pointer from this frame before it could load the plane;
-        // a local copy is addressed off `sp`, which is always live.
+        // spilled pointer from this frame before it could load the plane.
+        // On the guest they go to the head of the scratchpad, which is a
+        // constant address and one-cycle reads; on the host a local copy
+        // addressed off `sp`.
         let frustum_local = *frustum;
-        let frustum = &frustum_local;
+        #[cfg(target_arch = "mips")]
+        let clip_planes: &[([i32; 3], i64); 5] = unsafe {
+            let block = psx_engine::scratchpad::ptr_at::<([i32; 3], i64)>(0);
+            core::ptr::copy_nonoverlapping(frustum_local.planes.as_ptr(), block, 5);
+            &*block.cast::<[([i32; 3], i64); 5]>()
+        };
+        #[cfg(not(target_arch = "mips"))]
+        let clip_planes: &[([i32; 3], i64); 5] = &frustum_local.planes;
         // Every face pass gets its own epoch, so an entry cached under a
         // different animation tick or a different binding table cannot hit.
         self.pxbsp_material_epoch = self.pxbsp_material_epoch.wrapping_add(1);
@@ -1460,7 +1544,7 @@ impl Renderer {
             let resolved = unsafe { *self.pxbsp_material_cache.get_unchecked(slot) };
 
             let source_count = face.vertex_count as usize;
-            if source_count > BATCH_MAX_VERTICES {
+            if source_count > PXBSP_BATCH_MAX_VERTICES {
                 stats.packet_overflow_avoided = true;
                 break;
             }
@@ -1481,7 +1565,8 @@ impl Renderer {
             let needs_near_clip = if clip_mask == 0 {
                 false
             } else {
-                let Some(needs_near_clip) = self.pxbsp_face_clip(map, face, frustum, clip_mask)
+                let Some(needs_near_clip) =
+                    (unsafe { Self::pxbsp_face_clip(source_base, face, clip_planes, clip_mask) })
                 else {
                     continue;
                 };
@@ -1496,19 +1581,21 @@ impl Renderer {
                 state.uv_offset
             };
             let vertex_count = if needs_near_clip {
-                self.materialize_pxbsp_face(
-                    map,
-                    face,
-                    uv_offset,
-                    state.color_scale_q7,
-                    &mut face_vertices[..source_count],
-                );
+                unsafe {
+                    self.materialize_pxbsp_face(
+                        source_base,
+                        face,
+                        uv_offset,
+                        state.color_scale_q7,
+                        &mut face_vertices[..source_count],
+                    );
+                }
                 let count = clip_polygon_plane(
-                    &frustum.planes[0],
+                    &clip_planes[0],
                     &face_vertices[..source_count],
                     &mut clip_scratch,
                 );
-                if !(3..=BATCH_MAX_VERTICES).contains(&count) {
+                if !(3..=PXBSP_BATCH_MAX_VERTICES).contains(&count) {
                     continue;
                 }
                 count
@@ -1521,8 +1608,8 @@ impl Renderer {
                 } else {
                     WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE
                 };
-            if batch_vertex_count + vertex_count > BATCH_MAX_VERTICES
-                || batch_surface_count == BATCH_MAX_SURFACES
+            if batch_vertex_count + vertex_count > PXBSP_BATCH_MAX_VERTICES
+                || batch_surface_count == PXBSP_BATCH_MAX_SURFACES
                 || !packet_capacity(next, end, batch_worst_words + face_worst_words)
             {
                 if batch_surface_count != 0 {
@@ -1567,13 +1654,15 @@ impl Renderer {
                 batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count]
                     .copy_from_slice(&clip_scratch[..vertex_count]);
             } else {
-                self.materialize_pxbsp_face(
-                    map,
-                    face,
-                    uv_offset,
-                    state.color_scale_q7,
-                    &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
-                );
+                unsafe {
+                    self.materialize_pxbsp_face(
+                        source_base,
+                        face,
+                        uv_offset,
+                        state.color_scale_q7,
+                        &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
+                    );
+                }
             }
             batch_vertex_count += vertex_count;
             batch_surface_count += 1;
@@ -1654,9 +1743,16 @@ impl Renderer {
         }
     }
 
-    fn materialize_pxbsp_face(
+    /// `source_base` is the map's vertex lump, resolved once per face pass.
+    ///
+    /// # Safety
+    /// `source_base` must be the base of `map.vertex_data()` for the map the
+    /// face came from, so `face.first_vertex` indexes it in range. Deriving it
+    /// here instead cost a lump-table lookup, a checked offset multiply and a
+    /// slice bounds compare on every drawn face.
+    unsafe fn materialize_pxbsp_face(
         &self,
-        map: &PxbspResidentMap,
+        source_base: *const ClassicAffineWordSourceVertex,
         face: Face,
         uv_offset: [u8; 2],
         color_scale_q7: u8,
@@ -1667,14 +1763,12 @@ impl Renderer {
         let baked_light = face.flags & FACE_BAKED_LIGHT != 0;
         let style0 = self.light_styles[face.light_styles[0] as usize];
         let style1 = self.light_styles[face.light_styles[1] as usize];
-        let source = map.vertex_data();
-        let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
-        let source_ptr = unsafe { source.as_ptr().add(source_offset) };
+        let source_ptr = unsafe { source_base.add(first) };
         debug_assert_eq!(source_ptr as usize & 3, 0);
         if baked_light && !baked_uv {
             unsafe {
                 materialize_classic_affine_baked_light_vertices(
-                    source_ptr.cast::<ClassicAffineWordSourceVertex>(),
+                    source_ptr,
                     output.len(),
                     output.as_mut_ptr(),
                     uv_offset,
@@ -1683,7 +1777,7 @@ impl Renderer {
         } else {
             unsafe {
                 materialize_classic_affine_word_vertices(
-                    source_ptr.cast::<ClassicAffineWordSourceVertex>(),
+                    source_ptr,
                     output.len(),
                     output.as_mut_ptr(),
                     uv_offset,
@@ -1762,22 +1856,19 @@ impl Renderer {
 
     /// Return `None` when every face vertex is outside any one frustum plane;
     /// otherwise return whether the face crosses the near plane.
-    fn pxbsp_face_clip(
-        &self,
-        map: &PxbspResidentMap,
+    ///
+    /// # Safety
+    /// `source_base` must be the base of the map's vertex lump; see
+    /// [`Self::materialize_pxbsp_face`].
+    unsafe fn pxbsp_face_clip(
+        source_base: *const ClassicAffineWordSourceVertex,
         face: Face,
-        frustum: &FrustumPlanes,
+        planes: &[([i32; 3], i64); 5],
         clip_mask: u8,
     ) -> Option<bool> {
         let first = face.first_vertex as usize;
         let count = face.vertex_count as usize;
-        let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
-        let source = unsafe {
-            map.vertex_data()
-                .as_ptr()
-                .add(source_offset)
-                .cast::<ClassicAffineWordSourceVertex>()
-        };
+        let source = unsafe { source_base.add(first) };
         if count == 0 {
             return None;
         }
@@ -1785,7 +1876,7 @@ impl Renderer {
         // twelve-byte strided, with `position` first. Reading x and y as the
         // one word they already share costs two shifts and saves a load, and
         // a load is six cycles of RAM stall against one cycle for a shift.
-        frustum.cull_polygon(clip_mask, count, |index| unsafe {
+        FrustumPlanes::cull_polygon(planes, clip_mask, count, |index| unsafe {
             let base = source.add(index).cast::<u32>();
             let xy = core::ptr::read(base);
             let z = core::ptr::read(base.add(1).cast::<i16>());
@@ -3713,6 +3804,80 @@ mod tests {
 mod frustum_tests {
     use super::*;
 
+    /// The Newton-with-division form `isqrt_i64` replaced, kept as the oracle.
+    fn newton_isqrt_i64(value: i64) -> i64 {
+        if value <= 0 {
+            return 0;
+        }
+        let mut x = value;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + value / x) / 2;
+        }
+        x
+    }
+
+    #[test]
+    fn the_division_free_isqrt_agrees_with_the_newton_form() {
+        let mut checked = 0usize;
+        let mut check = |value: i64| {
+            assert_eq!(
+                isqrt_i64(value),
+                newton_isqrt_i64(value),
+                "isqrt disagreed at {value}"
+            );
+            checked += 1;
+        };
+        for value in -8i64..=4096 {
+            check(value);
+        }
+        // Perfect squares and their neighbours are where a floor answer is
+        // decided, on both sides of the 32-bit kernel boundary.
+        for root in [
+            1i64,
+            2,
+            3,
+            46340,
+            46341,
+            65535,
+            65536,
+            65537,
+            100_000,
+            3_037_000_499,
+        ] {
+            for delta in [-1i64, 0, 1] {
+                let square = root.saturating_mul(root).saturating_add(delta);
+                if square > 0 {
+                    check(square);
+                }
+            }
+        }
+        // Every power of two and either side of it, to the top of the range.
+        for shift in 0..63 {
+            for delta in [-1i64, 0, 1] {
+                let value = (1i64 << shift).saturating_add(delta);
+                if value > 0 {
+                    check(value);
+                }
+            }
+        }
+        // A deterministic spread, including the squared view-row lengths this
+        // is actually called with: three squares of a Q12 rotation row.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..40_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            check((state >> 1) as i64);
+            check((state & 0xffff_ffff) as i64);
+            let row = ((state >> 20) & 0x3fff) as i64;
+            check(3 * row * row);
+        }
+        assert!(checked > 100_000, "sweep collapsed to {checked} values");
+        assert_eq!(isqrt_i64(i64::MAX), 3_037_000_499);
+    }
+
     fn planes_for(origin: [i32; 3], yaw: i16, pitch: i16) -> (FrustumPlanes, ViewTransform) {
         psx_gte::host::reset();
         let camera = Camera {
@@ -3813,7 +3978,10 @@ mod frustum_tests {
             for drop in 0..32u8 {
                 let clip_mask = 0x1f & !(drop & satisfied);
                 let expected = vertex_major_clip(&planes, clip_mask, polygon);
-                let actual = planes.cull_polygon(clip_mask, polygon.len(), |i| polygon[i]);
+                let actual =
+                    FrustumPlanes::cull_polygon(&planes.planes, clip_mask, polygon.len(), |i| {
+                        polygon[i]
+                    });
                 assert_eq!(
                     actual, expected,
                     "cull_polygon disagreed for mask {clip_mask:#x} on {polygon:?}"
@@ -3826,7 +3994,8 @@ mod frustum_tests {
                     // polygon the full mask rejects, unclipped: that is a
                     // claim about the mask, not about the geometry.
                     assert_eq!(
-                        planes.cull_polygon(0, polygon.len(), |i| polygon[i]),
+                        FrustumPlanes::cull_polygon(&planes.planes, 0, polygon.len(), |i| polygon
+                            [i]),
                         Some(false)
                     );
                     rejected += 1;
