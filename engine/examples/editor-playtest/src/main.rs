@@ -27,8 +27,13 @@
 //! * R1 / R2           -- Horizon light / heavy attack.
 //! * L1 / L2           -- Zenith light / heavy attack.
 
-#![no_std]
-#![no_main]
+// `cfg(test)` is false for every guest build, so `not(test)` holds and both
+// attributes apply exactly as they always have -- the MIPS artifact is
+// unchanged by construction, not by measurement. Under `cargo test` on the
+// host the crate picks up `std` and lets libtest supply its own `main`, which
+// is what lets `bsp_runtime`'s pure-function tests actually run.
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
 #![allow(static_mut_refs)]
 
 extern crate alloc;
@@ -187,14 +192,14 @@ use generated::{
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS,
     COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT,
     GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, INTERACTABLE_MESSAGE_PAGES,
-    LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
-    MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
-    PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS,
-    ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
-    ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES, ROOM_RESIDENCY,
-    ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES,
-    UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES,
-    WORLD_MESSAGE, WORLD_OBJECTS,
+    LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS,
+    MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER,
+    PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE,
+    PXBSP_AMBIENT_RGB, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
+    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES,
+    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
+    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES,
+    WEAPON_HITBOXES, WORLD_MESSAGE, WORLD_OBJECTS,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -822,11 +827,16 @@ impl Playtest {
                     // is which asset and why. Reason 0..11 is a cd_stream chunk
                     // status, 100+ an asset_streaming reason code.
                     self.persistent_failure_reported = true;
-                    psx_rt::tty::print("PERSISTENT ASSET LOAD FAILED: asset ");
-                    psx_rt::tty::print_hex_u32(persistent_assets_arena().failed_asset() as u32);
-                    psx_rt::tty::print(" reason ");
-                    psx_rt::tty::print_hex_u32(persistent_assets_arena().failed_reason());
-                    psx_rt::tty::println("");
+                    // `psx_rt::tty` only exists on the guest target; the gate
+                    // is cfg-true there, so this stays the same code on MIPS.
+                    #[cfg(target_arch = "mips")]
+                    {
+                        psx_rt::tty::print("PERSISTENT ASSET LOAD FAILED: asset ");
+                        psx_rt::tty::print_hex_u32(persistent_assets_arena().failed_asset() as u32);
+                        psx_rt::tty::print(" reason ");
+                        psx_rt::tty::print_hex_u32(persistent_assets_arena().failed_reason());
+                        psx_rt::tty::println("");
+                    }
                 }
                 #[cfg(feature = "boot-trace")]
                 {
@@ -1112,7 +1122,11 @@ fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
 /// boot state at the top of `main`, before anything else touches it.
 static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zeroed();
 
-#[no_mangle]
+// psx-rt's `_start` calls this through an unmangled `extern "Rust" { fn main(); }`,
+// so the guest needs the raw symbol. Under `cargo test` libtest owns the `main`
+// entry symbol, so only there is this one left mangled. `not(test)` is true for
+// every guest build, so MIPS keeps the exact same `#[no_mangle] fn main`.
+#[cfg_attr(not(test), no_mangle)]
 fn main() -> ! {
     // Stamp the scene's boot state onto its link-time-zero storage BEFORE
     // any other use (see `SCENE` and `Playtest::init_zeroed`).

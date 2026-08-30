@@ -1828,6 +1828,64 @@ mod tests {
         );
     }
 
+    /// Stronger than the axis-extreme probe above: sample the whole surface
+    /// AND interior of the sphere on a lattice, and assert no sample of a
+    /// REJECTED sphere lands on screen. The seven axis extremes can miss a
+    /// sphere whose nearest on-screen point is off-axis.
+    #[test]
+    fn frustum_reject_survives_a_dense_sphere_lattice() {
+        let projection = WorldProjection::new(160, 120, 320, 4);
+        let width = i32::from(projection.screen_x) * 2;
+        let height = i32::from(projection.screen_y) * 2;
+        let mut checked = 0u64;
+        for z in [5, 13, 61, 200, 900, 3000] {
+            for x in (-3000..=3000).step_by(197) {
+                for y in (-2200..=2200).step_by(173) {
+                    for radius in [7, 55, 260, 900] {
+                        if !sphere_outside_view_frustum(
+                            ViewVertex::new(x, y, z),
+                            radius,
+                            projection,
+                        ) {
+                            continue;
+                        }
+                        let step = (radius / 4).max(1);
+                        let mut dx = -radius;
+                        while dx <= radius {
+                            let mut dy = -radius;
+                            while dy <= radius {
+                                let mut dz = -radius;
+                                while dz <= radius {
+                                    if dx * dx + dy * dy + dz * dz <= radius * radius {
+                                        checked += 1;
+                                        if let Some(point) = projection
+                                            .project_view(ViewVertex::new(x + dx, y + dy, z + dz))
+                                        {
+                                            assert!(
+                                                !(i32::from(point.sx) >= 0
+                                                    && i32::from(point.sx) < width
+                                                    && i32::from(point.sy) >= 0
+                                                    && i32::from(point.sy) < height),
+                                                "rejected sphere ({x},{y},{z}) r={radius} has an \
+                                                 on-screen point at (+{dx},+{dy},+{dz})"
+                                            );
+                                        }
+                                    }
+                                    dz += step;
+                                }
+                                dy += step;
+                            }
+                            dx += step;
+                        }
+                    }
+                }
+            }
+        }
+        // Guards the sweep itself: a rejection test that stopped rejecting
+        // would make every assert above vacuous and still pass.
+        assert!(checked > 100_000, "lattice samples checked: {checked}");
+    }
+
     /// A sphere straddling the screen centre is never rejected, at any depth
     /// from the near plane out to the far end of the map.
     #[test]
