@@ -31,17 +31,9 @@ const OT_MAX_EXTRA_HOPS: usize = 131_072;
 /// insertion consumes this bit before replacing the low 24 bits with a DMA
 /// link, so normal ordering-table submission remains wire-identical.
 pub const TAG_SCOPED_TEXTURE_WINDOW: u32 = 1 << 16;
-#[cfg(any(
-    target_arch = "mips",
-    test,
-    feature = "ot-window-insert-coalescing"
-))]
+#[cfg(any(target_arch = "mips", test, feature = "ot-window-insert-coalescing"))]
 const GP0_TEXTURE_WINDOW_MASK: u32 = 0xFF00_0000;
-#[cfg(any(
-    target_arch = "mips",
-    test,
-    feature = "ot-window-insert-coalescing"
-))]
+#[cfg(any(target_arch = "mips", test, feature = "ot-window-insert-coalescing"))]
 const GP0_TEXTURE_WINDOW: u32 = 0xE200_0000;
 
 /// Work removed by final-GPU-order scoped texture-window coalescing.
@@ -129,14 +121,8 @@ unsafe fn coalesce_scoped_texture_window_chain(
                 let selector_address = address.wrapping_add(4) & OT_ADDR_MASK;
                 let inbound = unsafe { ptr::read_volatile(inbound_tag) };
                 unsafe {
-                    ptr::write_volatile(
-                        inbound_tag,
-                        (inbound & !OT_ADDR_MASK) | selector_address,
-                    );
-                    ptr::write_volatile(
-                        node.add(1),
-                        (((words as u32) - 1) << 24) | next_address,
-                    );
+                    ptr::write_volatile(inbound_tag, (inbound & !OT_ADDR_MASK) | selector_address);
+                    ptr::write_volatile(node.add(1), (((words as u32) - 1) << 24) | next_address);
                 }
                 linked_tag = unsafe { node.add(1) };
                 run_last_tag = linked_tag;
@@ -515,10 +501,7 @@ impl<const N: usize> OrderingTable<N> {
         }
         debug_assert!(N > 0);
 
-        #[cfg(all(
-            target_arch = "mips",
-            not(feature = "ot-window-insert-coalescing")
-        ))]
+        #[cfg(all(target_arch = "mips", not(feature = "ot-window-insert-coalescing")))]
         {
             let entries = self.entries.as_mut_ptr();
             unsafe {
@@ -688,10 +671,7 @@ impl<const N: usize> OrderingTable<N> {
             debug_assert_eq!(packet, end);
         }
 
-        #[cfg(all(
-            not(target_arch = "mips"),
-            feature = "ot-window-insert-coalescing"
-        ))]
+        #[cfg(all(not(target_arch = "mips"), feature = "ot-window-insert-coalescing"))]
         {
             let stream_first = first as usize;
             let stream_end = end as usize;
@@ -721,10 +701,7 @@ impl<const N: usize> OrderingTable<N> {
                     if same_window {
                         let old_tag = unsafe { ptr::read(old) };
                         unsafe {
-                            ptr::write(
-                                old.add(1),
-                                old_tag.wrapping_sub(1 << 24),
-                            );
+                            ptr::write(old.add(1), old_tag.wrapping_sub(1 << 24));
                             ptr::write(
                                 packet,
                                 (((words as u32) - 1) << 24)
@@ -734,11 +711,7 @@ impl<const N: usize> OrderingTable<N> {
                         self.entries[slot] = packet as u32 & OT_ADDR_MASK;
                     } else {
                         unsafe {
-                            self.insert_unchecked_tag_high(
-                                slot,
-                                packet,
-                                staged_tag & 0xFF00_0000,
-                            )
+                            self.insert_unchecked_tag_high(slot, packet, staged_tag & 0xFF00_0000)
                         };
                     }
                 }
@@ -1121,7 +1094,10 @@ mod tests {
         }
 
         assert_eq!(packets[5] >> 24, 3, "new head omits its reset");
-        assert_eq!(packets[5] & OT_ADDR_MASK, (&packets[1] as *const u32 as u32) & OT_ADDR_MASK);
+        assert_eq!(
+            packets[5] & OT_ADDR_MASK,
+            (&packets[1] as *const u32 as u32) & OT_ADDR_MASK
+        );
         assert_eq!(packets[1] >> 24, 3, "old selector becomes a tail tag");
         assert_eq!(packets[2], 0x3400_0001);
         assert_eq!(packets[4], RESET, "oldest packet retains the run reset");
@@ -1174,12 +1150,7 @@ mod tests {
         chain[13] = 0x2000_0000;
 
         let result = unsafe {
-            coalesce_scoped_texture_window_chain(
-                address(0),
-                chain.as_mut_ptr(),
-                0,
-                chain.len(),
-            )
+            coalesce_scoped_texture_window_chain(address(0), chain.as_mut_ptr(), 0, chain.len())
         };
         assert_eq!(
             result,
@@ -1214,12 +1185,7 @@ mod tests {
         chain[10] = GP0_TEXTURE_WINDOW;
 
         let result = unsafe {
-            coalesce_scoped_texture_window_chain(
-                address(0),
-                chain.as_mut_ptr(),
-                0,
-                chain.len(),
-            )
+            coalesce_scoped_texture_window_chain(address(0), chain.as_mut_ptr(), 0, chain.len())
         };
         assert_eq!(result.window_packets, 2);
         assert_eq!(result.runs, 2);

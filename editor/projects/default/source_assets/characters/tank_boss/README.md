@@ -41,17 +41,17 @@ standing boss, while cooking later clips against a different frame would pull
 its rigid armour sections apart. The boss Character resource uses Idle 2 plus
 forward, backward, and left/right heavy walks, selected Attack 3 as its light
 two-handed shove, selected Attack 1 as its heavy overhead smash, the authored
-three-chimney missile salvo as its ranged attack, selected Hit 2, and selected
+MoMask missile-salvo candidate 3 as its ranged attack, selected Hit 2, and selected
 Death 2. The combat source takes are retained under `animations/combat/`; all
 are cooked against Idle 2's fixed model bounds so their rigid armour sections
 use the same quantisation frame as the model.
 
-`animations/combat/build_missile_salvo.py` is the reproducible Blender authoring
-pass for the ranged attack. The upper shell plants and loads, then recoils on
-source frames 31, 39, and 47 (30 Hz) for the left, centre, and right chimney.
-At the runtime 12 Hz bake those beats land around frames 12, 15, and 18. The
-script moves neither root nor feet, keeping future missile emitter transforms
-stable while the engine projectile events are authored separately.
+The ranged take was generated locally through the established MoMask audition
+workflow, retargeted onto this exact textured 27-joint rig, and selected from a
+numbered four-candidate reel. Its provenance is generation
+`psoxide_tank_missile_salvo_v1`, seed `260850`, candidate `attack_03`. The
+projectile events for the three chimneys remain independently authorable on the
+animation timeline.
 
 The heavy walk was generated locally with MoMask on CPU from:
 
