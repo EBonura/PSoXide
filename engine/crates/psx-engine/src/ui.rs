@@ -307,6 +307,15 @@ struct UiResolvedNode {
 }
 
 impl UiResolvedNode {
+    /// Filler for unoccupied [`UiLayoutMemo`] slots. Never read: a slot is
+    /// only handed out once its validity bit is set.
+    const EMPTY: Self = Self {
+        width: 0,
+        height: 0,
+        transform: UiAffine::IDENTITY,
+        verts: [(0, 0); 4],
+    };
+
     fn subrect(self, x: i16, y: i16, width: i16, height: i16) -> [(i16, i16); 4] {
         self.transform.subrect(x, y, width, height)
     }
@@ -430,6 +439,106 @@ fn node_resolved_memo(
         resolved
     });
     Some(resolve_against_parent(node, parent))
+}
+
+/// Nodes one [`draw_scene`] block can memo across frames.
+///
+/// Sized for a HUD or a menu page; a larger block simply misses the memo
+/// and pays what it paid before. 64 slots is also the width of the
+/// occupancy mask.
+const UI_LAYOUT_MEMO_CAP: usize = 64;
+
+/// Cross-frame memo for the resolved layout of one [`draw_scene`] block.
+///
+/// # Why this is sound
+///
+/// [`node_resolved`] reads nothing but the node pool: a node's parent,
+/// anchor flags, x/y, width/height and rotation. All of those come from the
+/// cooked [`LevelUiNodeRecord`] table, which is `&'static` const data.
+/// Everything that varies at runtime -- bar values, live text, visibility,
+/// texture residency, focus -- reaches the renderer through the resolver
+/// closures instead, precisely so the records can stay immutable. So for a
+/// given pool and a given index the resolved rectangle is the same on every
+/// frame, and a HUD that redraws 21 nodes at 60 Hz was re-deriving the same
+/// 21 rectangles 1,260 times a second.
+///
+/// # The contract this places on callers
+///
+/// The memo is keyed on the pool's address and length plus the block range,
+/// so a different scene, a different pool, or a resized pool all miss and
+/// recompute. It cannot see through a caller that mutates the *contents* of
+/// a pool it has already drawn from at the same address: such a caller would
+/// keep the stale layout. Cooked pools are const tables and no engine path
+/// writes to one; a game that wants a node to move must re-cook or point
+/// `draw_scene` at a different pool.
+struct UiLayoutMemo {
+    nodes: *const LevelUiNodeRecord,
+    len: usize,
+    first: usize,
+    end: usize,
+    /// Bit *i* set means `resolved[i]` holds the layout for node `first + i`.
+    valid: u64,
+    resolved: [UiResolvedNode; UI_LAYOUT_MEMO_CAP],
+}
+
+static mut UI_LAYOUT_MEMO: UiLayoutMemo = UiLayoutMemo {
+    nodes: core::ptr::null(),
+    len: 0,
+    first: 0,
+    end: 0,
+    valid: 0,
+    resolved: [UiResolvedNode::EMPTY; UI_LAYOUT_MEMO_CAP],
+};
+
+/// Point the memo at `nodes[first..end]`, dropping every entry when that is
+/// not the block it currently holds. `false` means the block is too wide to
+/// memo and the caller must resolve every node itself.
+fn layout_memo_begin(nodes: &[LevelUiNodeRecord], first: usize, end: usize) -> bool {
+    if end.saturating_sub(first) > UI_LAYOUT_MEMO_CAP {
+        return false;
+    }
+    // SAFETY: single-threaded guest; no `draw_scene` is re-entrant and the
+    // reference is not held across the call.
+    unsafe {
+        let memo = core::ptr::addr_of_mut!(UI_LAYOUT_MEMO);
+        if (*memo).nodes != nodes.as_ptr()
+            || (*memo).len != nodes.len()
+            || (*memo).first != first
+            || (*memo).end != end
+        {
+            (*memo).nodes = nodes.as_ptr();
+            (*memo).len = nodes.len();
+            (*memo).first = first;
+            (*memo).end = end;
+            (*memo).valid = 0;
+        }
+    }
+    true
+}
+
+/// Resolve `index` through the memo, filling the slot on a miss.
+fn layout_memo_resolved(
+    nodes: &[LevelUiNodeRecord],
+    index: usize,
+    first: usize,
+    cache: &mut ParentResolveCache,
+) -> Option<UiResolvedNode> {
+    let slot = index.wrapping_sub(first);
+    if slot >= UI_LAYOUT_MEMO_CAP {
+        return node_resolved_memo(nodes, index, cache);
+    }
+    let bit = 1u64 << slot;
+    // SAFETY: as `layout_memo_begin`.
+    unsafe {
+        let memo = core::ptr::addr_of_mut!(UI_LAYOUT_MEMO);
+        if (*memo).valid & bit != 0 {
+            return Some((*memo).resolved[slot]);
+        }
+        let resolved = node_resolved_memo(nodes, index, cache)?;
+        (*memo).resolved[slot] = resolved;
+        (*memo).valid |= bit;
+        Some(resolved)
+    }
 }
 
 fn node_resolved_inner(
@@ -595,6 +704,9 @@ pub fn draw_scene(
     // canvas once instead of once per node).
     let mut text_scratch = [0u8; 96];
     let mut parent_cache: ParentResolveCache = None;
+    // Layout is a pure function of the cooked pool, so it survives the frame
+    // that computed it. See `UiLayoutMemo` for the caller contract.
+    let memoised = layout_memo_begin(nodes, first, end);
     for index in first..end {
         let authored_node = &nodes[index];
         if !node_visible_in_tree(nodes, index, visible) {
@@ -606,8 +718,12 @@ pub fn draw_scene(
             text.resolve(authored_node.tag, &mut text_scratch)
         };
         let node = authored_node;
-        let resolved =
-            node_resolved_memo(nodes, index, &mut parent_cache).unwrap_or_else(default_resolved_node);
+        let resolved = if memoised {
+            layout_memo_resolved(nodes, index, first, &mut parent_cache)
+        } else {
+            node_resolved_memo(nodes, index, &mut parent_cache)
+        }
+        .unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
         match node.kind {
             LevelUiNodeKind::Canvas
@@ -1191,7 +1307,9 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 mod tests {
     use super::{
         activation_echo_layer, bar_frame_index, bar_frame_v_range, diamond_quad,
-        focus_chrome_sweep_paint, focus_sweep_rect, font_index, font_tint,
+        focus_chrome_sweep_paint, focus_sweep_rect, font_index, font_tint, layout_memo_begin,
+        scaled_run_width, TextRun,
+        layout_memo_resolved, ParentResolveCache, UI_LAYOUT_MEMO_CAP,
         image_effect_vertex_colors, image_effect_verts, message_panel_layout,
         message_panel_transition_layout, node_absolute_rect, scale_u16_q8, selected_label_text,
         shape_config, shape_edge_point, shape_perimeter, shape_polygon, text_prefix_chars,
@@ -1318,6 +1436,135 @@ mod tests {
             .saturating_add(affine.m10.saturating_mul(x))
             .saturating_add(affine.m11.saturating_mul(y));
         (super::round_q12_to_i16(sx), super::round_q12_to_i16(sy))
+    }
+
+    /// `wrapped_line_end` carries a running width instead of re-measuring
+    /// `text[start..next]` at every character. That is only legitimate while
+    /// the accumulated run reports exactly what a fresh measurement of the
+    /// same prefix would, for every prefix, at every scale and spacing --
+    /// including where the advance sum saturates u16 and where negative
+    /// spacing drives the result to the clamp.
+    ///
+    /// This is the whole correctness claim of the linear rewrite, and it
+    /// needs no `FontAtlas`: `TextRun` sees glyph advances, not glyphs.
+    #[test]
+    fn accumulated_run_width_matches_measuring_the_prefix() {
+        // A proportional font's advances, including a zero-width glyph and a
+        // wide one, repeated far enough to saturate the u16 sum.
+        let advances: [u8; 1500] = core::array::from_fn(|index| [3u8, 9, 0, 255, 1, 12][index % 6]);
+        for &scale in &[1u16, 64, 255, 256, 257, 512, 1024, u16::MAX] {
+            for &spacing in &[0i8, 1, 3, -1, -4, i8::MIN, i8::MAX] {
+                let mut run = TextRun::default();
+                let mut sum = 0u16;
+                for (count, &advance) in advances.iter().enumerate() {
+                    run.push(advance);
+                    sum = sum.saturating_add(u16::from(advance));
+                    assert_eq!(
+                        run.scaled_width(scale, spacing),
+                        scaled_run_width(sum, count + 1, scale, spacing),
+                        "prefix of {} at scale {scale} spacing {spacing}",
+                        count + 1
+                    );
+                }
+                assert_eq!(run.advance, u16::MAX, "the fixture must saturate");
+            }
+        }
+        // The empty run is the empty string: no glyphs, no gaps.
+        assert_eq!(TextRun::default().scaled_width(256, 4), 0);
+    }
+
+    /// The cross-frame layout memo is an optimisation only: on a hit it has
+    /// to hand back exactly what `node_resolved` would have computed, and it
+    /// has to re-key when the pool or the block changes, or a scene switch
+    /// would paint the previous scene's rectangles.
+    ///
+    /// One test, not several: `UI_LAYOUT_MEMO` is a single global and the
+    /// test harness runs test functions on parallel threads.
+    #[test]
+    fn layout_memo_matches_a_fresh_resolve_and_rekeys_on_a_new_block() {
+        let mut nodes = [
+            ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Rect,
+                10,
+                20,
+                100,
+                30,
+            ),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Rect,
+                40,
+                60,
+                24,
+                12,
+            ),
+        ];
+        nodes[2].rotation_degrees = 45;
+        nodes[2].flags = ui_node_flags::FLIP_X;
+
+        // Two passes over the same block: the second is all hits.
+        for _ in 0..2 {
+            assert!(layout_memo_begin(&nodes, 0, nodes.len()));
+            let mut cache: ParentResolveCache = None;
+            for index in 0..nodes.len() {
+                assert_eq!(
+                    layout_memo_resolved(&nodes, index, 0, &mut cache),
+                    super::node_resolved(&nodes, index),
+                    "memo diverged at node {index}"
+                );
+            }
+        }
+
+        // A narrower block over the same pool is a different key, so slot 0
+        // must hold node 1 rather than the node 0 left there by the pass above.
+        assert!(layout_memo_begin(&nodes, 1, nodes.len()));
+        let mut cache: ParentResolveCache = None;
+        assert_eq!(
+            layout_memo_resolved(&nodes, 1, 1, &mut cache),
+            super::node_resolved(&nodes, 1)
+        );
+
+        // A different pool at the same range is also a different key.
+        let other = [
+            ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Rect,
+                77,
+                88,
+                12,
+                14,
+            ),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Rect,
+                1,
+                2,
+                3,
+                4,
+            ),
+        ];
+        assert!(layout_memo_begin(&other, 0, other.len()));
+        let mut cache: ParentResolveCache = None;
+        for index in 0..other.len() {
+            assert_eq!(
+                layout_memo_resolved(&other, index, 0, &mut cache),
+                super::node_resolved(&other, index),
+                "memo kept the previous pool at node {index}"
+            );
+        }
+
+        // Blocks wider than the memo decline it instead of indexing past the
+        // end, and the fallback still resolves.
+        let wide = [ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240); UI_LAYOUT_MEMO_CAP + 1];
+        assert!(!layout_memo_begin(&wide, 0, wide.len()));
+        let mut cache: ParentResolveCache = None;
+        assert_eq!(
+            layout_memo_resolved(&wide, UI_LAYOUT_MEMO_CAP, 0, &mut cache),
+            super::node_resolved(&wide, UI_LAYOUT_MEMO_CAP)
+        );
     }
 
     /// The unrotated/unflipped, translation-only shortcuts in `UiAffine` are
@@ -1807,15 +2054,54 @@ fn scale_u16_q8(value: u16, scale_q8: u16) -> u16 {
     scaled.min(u32::from(u16::MAX)) as u16
 }
 
-fn scaled_text_width(font: &FontAtlas, text: &str, scale_q8: u16, letter_spacing: i8) -> u16 {
-    let base = i32::from(scale_u16_q8(font.text_width(text), scale_q8));
-    let gaps = text
-        .chars()
-        .count()
-        .saturating_sub(1)
-        .min(i32::MAX as usize) as i32;
+/// The scaled width of a run of `chars` characters whose glyph advances sum
+/// to `advance`. Split out of [`scaled_text_width`] so [`TextRun`] can reach
+/// the identical arithmetic from an accumulated prefix instead of a `&str`.
+fn scaled_run_width(advance: u16, chars: usize, scale_q8: u16, letter_spacing: i8) -> u16 {
+    let base = i32::from(scale_u16_q8(advance, scale_q8));
+    let gaps = chars.saturating_sub(1).min(i32::MAX as usize) as i32;
     let spacing = gaps.saturating_mul(i32::from(letter_spacing));
     base.saturating_add(spacing).clamp(0, i32::from(u16::MAX)) as u16
+}
+
+fn scaled_text_width(font: &FontAtlas, text: &str, scale_q8: u16, letter_spacing: i8) -> u16 {
+    scaled_run_width(
+        font.text_width(text),
+        text.chars().count(),
+        scale_q8,
+        letter_spacing,
+    )
+}
+
+/// A text prefix measured incrementally.
+///
+/// [`wrapped_line_end`] used to call [`scaled_text_width`] on `text[start..next]`
+/// once per character, and each of those calls re-walked the prefix twice
+/// (once to sum advances, once to count characters). That is quadratic in the
+/// line length, and it was the single most expensive thing the UI did per
+/// character on this hardware.
+///
+/// Both quantities the width formula needs are running totals, so carrying
+/// them costs one add each per character. `FontAtlas::text_width` folds the
+/// advances with `u16::saturating_add` and every advance is non-negative, so
+/// the running sum equals the fold over the same prefix; `chars` is
+/// `str::chars().count()` by construction. The scaled result is therefore
+/// bit-identical to re-measuring, which the accumulator's unit test pins.
+#[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
+struct TextRun {
+    advance: u16,
+    chars: usize,
+}
+
+impl TextRun {
+    fn push(&mut self, advance: u8) {
+        self.advance = self.advance.saturating_add(u16::from(advance));
+        self.chars = self.chars.saturating_add(1);
+    }
+
+    fn scaled_width(self, scale_q8: u16, letter_spacing: i8) -> u16 {
+        scaled_run_width(self.advance, self.chars, scale_q8, letter_spacing)
+    }
 }
 
 fn scaled_line_height(font: &FontAtlas, scale_q8: u16) -> i16 {
@@ -2094,6 +2380,7 @@ fn wrapped_line_end(
         return start;
     }
     let mut last_space = None;
+    let mut run = TextRun::default();
     for (offset, ch) in text[start..].char_indices() {
         let end = start + offset;
         if ch == '\n' {
@@ -2103,9 +2390,10 @@ fn wrapped_line_end(
         if ch == ' ' {
             last_space = Some(end);
         }
-        if next > start
-            && scaled_text_width(font, &text[start..next], scale, letter_spacing) > width
-        {
+        // `run` now covers `text[start..next]`, so this is the width the old
+        // code got by re-measuring that slice.
+        run.push(font.glyph_advance(ch));
+        if next > start && run.scaled_width(scale, letter_spacing) > width {
             return last_space
                 .filter(|space| *space > start)
                 .unwrap_or(if end > start { end } else { next });
@@ -2756,6 +3044,56 @@ fn shape_polygon(
     polygon
 }
 
+/// Per-vertex colours for one polygon under one paint, evaluated once.
+///
+/// [`shape_paint_color`] costs an integer division and nine multiplies per
+/// vertex for a gradient, and both consumers reference each polygon vertex
+/// two or three times: the fan in [`draw_shape_polygon`] shares vertex 0
+/// across every triangle and repeats each interior vertex, and the ring in
+/// [`draw_shape_border`] visits all four corner vertices of each quad twice.
+/// Evaluating per polygon vertex instead of per triangle vertex is the same
+/// arithmetic on the same inputs, so the colours are bit-identical.
+#[derive(Clone, Copy)]
+struct UiShapeColors {
+    colors: [(u8, u8, u8); 8],
+    /// `true` when the paint is a gradient, i.e. the triangles must go out
+    /// as Gouraud primitives rather than flat ones.
+    gouraud: bool,
+}
+
+impl UiShapeColors {
+    fn new(polygon: &UiShapePolygon, paint: UiPaint, width: u16, height: u16) -> Self {
+        match paint {
+            // A solid paint is the same colour at every vertex, and
+            // `draw_shape_triangle` reads only the first of the three it is
+            // handed, but the border ring indexes the array at the vertex
+            // position, so fill it whole.
+            UiPaint::Solid(color) => Self {
+                colors: [color; 8],
+                gouraud: false,
+            },
+            UiPaint::Gradient { .. } => {
+                let mut colors = [(0u8, 0u8, 0u8); 8];
+                let mut index = 0;
+                while index < polygon.len && index < colors.len() {
+                    colors[index] =
+                        shape_paint_color(paint, polygon.vertices[index].local, width, height);
+                    index += 1;
+                }
+                Self {
+                    colors,
+                    gouraud: true,
+                }
+            }
+        }
+    }
+}
+
+/// Outlined: the fan expands to a colour resolve plus up to six triangle
+/// submissions, and it has five call sites. Letting it inline added 7.8 KB
+/// of `.text` to `draw_archive_panel_chrome` alone, which is RAM this
+/// project does not have to spare for a path that costs 551 cycles a frame.
+#[inline(never)]
 fn draw_shape_polygon(
     polygon: &UiShapePolygon,
     paint: UiPaint,
@@ -2766,16 +3104,17 @@ fn draw_shape_polygon(
     if polygon.len < 3 {
         return;
     }
+    let paint_colors = UiShapeColors::new(polygon, paint, width, height);
+    let colors = &paint_colors.colors;
     for index in 1..polygon.len - 1 {
         draw_shape_triangle(
             [
-                polygon.vertices[0],
-                polygon.vertices[index],
-                polygon.vertices[index + 1],
+                polygon.vertices[0].screen,
+                polygon.vertices[index].screen,
+                polygon.vertices[index + 1].screen,
             ],
-            paint,
-            width,
-            height,
+            [colors[0], colors[index], colors[index + 1]],
+            paint_colors.gouraud,
             blended,
         );
     }
@@ -2797,60 +3136,61 @@ fn draw_shape_border(
         draw_shape_polygon(&outer, paint, resolved.width, resolved.height, false);
         return;
     }
+    let outer_paint = UiShapeColors::new(&outer, paint, resolved.width, resolved.height);
+    let inner_paint = UiShapeColors::new(&inner, paint, resolved.width, resolved.height);
+    let (outer_colors, inner_colors) = (&outer_paint.colors, &inner_paint.colors);
     for index in 0..outer.len {
         let next = (index + 1) % outer.len;
         draw_shape_triangle(
             [
-                outer.vertices[index],
-                outer.vertices[next],
-                inner.vertices[index],
+                outer.vertices[index].screen,
+                outer.vertices[next].screen,
+                inner.vertices[index].screen,
             ],
-            paint,
-            resolved.width,
-            resolved.height,
+            [
+                outer_colors[index],
+                outer_colors[next],
+                inner_colors[index],
+            ],
+            outer_paint.gouraud,
             false,
         );
         draw_shape_triangle(
             [
-                outer.vertices[next],
-                inner.vertices[index],
-                inner.vertices[next],
+                outer.vertices[next].screen,
+                inner.vertices[index].screen,
+                inner.vertices[next].screen,
             ],
-            paint,
-            resolved.width,
-            resolved.height,
+            [outer_colors[next], inner_colors[index], inner_colors[next]],
+            outer_paint.gouraud,
             false,
         );
     }
 }
 
+/// Submit one shape triangle with its vertex colours already resolved.
+///
+/// `gouraud` selects the primitive the paint asked for: a solid paint draws
+/// a flat triangle from `colors[0]`, a gradient draws a Gouraud triangle
+/// from all three.
 fn draw_shape_triangle(
-    vertices: [UiShapeVertex; 3],
-    paint: UiPaint,
-    width: u16,
-    height: u16,
+    screen: [(i16, i16); 3],
+    colors: [(u8, u8, u8); 3],
+    gouraud: bool,
     blended: bool,
 ) {
-    let screen = [vertices[0].screen, vertices[1].screen, vertices[2].screen];
-    match paint {
-        UiPaint::Solid((r, g, b)) => {
-            if blended {
-                draw_tri_flat_blended(screen, r, g, b, BlendMode::Average);
-            } else {
-                draw_tri_flat(screen, r, g, b);
-            }
+    if gouraud {
+        if blended {
+            draw_tri_gouraud_blended(screen, colors, BlendMode::Average);
+        } else {
+            draw_tri_gouraud(screen, colors);
         }
-        UiPaint::Gradient { .. } => {
-            let colors = [
-                shape_paint_color(paint, vertices[0].local, width, height),
-                shape_paint_color(paint, vertices[1].local, width, height),
-                shape_paint_color(paint, vertices[2].local, width, height),
-            ];
-            if blended {
-                draw_tri_gouraud_blended(screen, colors, BlendMode::Average);
-            } else {
-                draw_tri_gouraud(screen, colors);
-            }
+    } else {
+        let (r, g, b) = colors[0];
+        if blended {
+            draw_tri_flat_blended(screen, r, g, b, BlendMode::Average);
+        } else {
+            draw_tri_flat(screen, r, g, b);
         }
     }
 }
