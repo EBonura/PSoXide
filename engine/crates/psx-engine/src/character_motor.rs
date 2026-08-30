@@ -349,6 +349,29 @@ impl<'room, 'room_ref, 'blockers> CharacterCollision<'room, 'room_ref, 'blockers
     }
 }
 
+/// Where a body ends one committed step, plus the supporting floor the step
+/// itself measured there.
+///
+/// `grounded_floor` is `Some(floor)` only when the solve proved the body ends
+/// the step standing exactly on `floor` at `position`'s XZ, so
+/// [`CharacterMotorState::apply_vertical`] can reuse it on the next tick
+/// instead of re-tracing the same floor. Backends that cannot prove that
+/// report `None`, which keeps the old behaviour of re-querying.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct StandOutcome {
+    position: RoomPoint,
+    grounded_floor: Option<i32>,
+}
+
+impl StandOutcome {
+    const fn unmeasured(position: RoomPoint) -> Self {
+        Self {
+            position,
+            grounded_floor: None,
+        }
+    }
+}
+
 trait CharacterCollisionBackend {
     fn supporting_floor(
         &mut self,
@@ -361,13 +384,13 @@ trait CharacterCollisionBackend {
         start: RoomPoint,
         target: RoomPoint,
         shape: CollisionTraceShape,
-    ) -> Result<Option<RoomPoint>, CollisionQueryError>;
+    ) -> Result<Option<StandOutcome>, CollisionQueryError>;
 
     fn recovery_position(
         &mut self,
         start: RoomPoint,
         shape: CollisionTraceShape,
-    ) -> Result<Option<RoomPoint>, CollisionQueryError>;
+    ) -> Result<Option<StandOutcome>, CollisionQueryError>;
 
     fn has_world_collision(&self) -> bool;
 }
@@ -395,22 +418,25 @@ impl CharacterCollisionBackend for GridCharacterCollision<'_, '_, '_> {
         _start: RoomPoint,
         target: RoomPoint,
         shape: CollisionTraceShape,
-    ) -> Result<Option<RoomPoint>, CollisionQueryError> {
+    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
         let CollisionTraceShape::Body { radius, height } = shape else {
             return Err(CollisionQueryError);
         };
-        Ok(body_stand_position(self.collision, target, radius, height))
+        // The grid backend is left exactly as it was: it reports no measured
+        // floor, so the motor keeps re-querying it every tick.
+        Ok(body_stand_position(self.collision, target, radius, height)
+            .map(StandOutcome::unmeasured))
     }
 
     fn recovery_position(
         &mut self,
         start: RoomPoint,
         shape: CollisionTraceShape,
-    ) -> Result<Option<RoomPoint>, CollisionQueryError> {
+    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
         let CollisionTraceShape::Body { height, .. } = shape else {
             return Err(CollisionQueryError);
         };
-        Ok(body_stand_position(self.collision, start, 0, height))
+        Ok(body_stand_position(self.collision, start, 0, height).map(StandOutcome::unmeasured))
     }
 
     fn has_world_collision(&self) -> bool {
@@ -441,7 +467,7 @@ impl<P: CollisionTraceProvider + ?Sized> CharacterCollisionBackend
         start: RoomPoint,
         target: RoomPoint,
         shape: CollisionTraceShape,
-    ) -> Result<Option<RoomPoint>, CollisionQueryError> {
+    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
         trace_stand_position(self.provider, start, target, shape)
     }
 
@@ -449,7 +475,7 @@ impl<P: CollisionTraceProvider + ?Sized> CharacterCollisionBackend
         &mut self,
         start: RoomPoint,
         shape: CollisionTraceShape,
-    ) -> Result<Option<RoomPoint>, CollisionQueryError> {
+    ) -> Result<Option<StandOutcome>, CollisionQueryError> {
         trace_stand_position(self.provider, start, start, shape)
     }
 
@@ -1235,6 +1261,30 @@ impl CharacterMotorState {
         self.try_commit_move(collision, target, radius, height)
     }
 
+    /// Adopt a committed step's own floor measurement as the ground cache, so
+    /// the next tick's [`Self::apply_vertical`] takes its grounded fast path
+    /// instead of re-tracing the floor the step just traced.
+    ///
+    /// Guarded so the reuse is exact rather than merely plausible. The step's
+    /// floor probe swept down from `probe_start_y + TRACE_FLOOR_PROBE_LIFT`
+    /// and contacted `floor`, which proves the hull is clear everywhere above
+    /// `floor` up to that height. When `floor <= probe_start_y`, the next
+    /// tick's probe starts at `floor + LIFT`, inside that proven-clear span,
+    /// so it contacts the same plane at the same height: `plane_contact`
+    /// re-solves against the query segment and a horizontal contact is
+    /// independent of where the segment started. A step UP starts the next
+    /// probe above anything this one examined, so it is not adopted.
+    ///
+    /// `self.grounded` is never changed here, only the cached floor and its
+    /// anchor, so an airborne body keeps falling exactly as before.
+    fn adopt_step_floor(&mut self, grounded_floor: Option<i32>, probe_start_y: i32) {
+        if let Some(floor) = grounded_floor {
+            if self.grounded && floor <= probe_start_y {
+                self.set_grounded(floor);
+            }
+        }
+    }
+
     fn try_commit_move<C: CharacterCollisionBackend>(
         &mut self,
         collision: &mut C,
@@ -1243,21 +1293,27 @@ impl CharacterMotorState {
         height: i32,
     ) -> Result<(bool, bool), CollisionQueryError> {
         let shape = CollisionTraceShape::Body { radius, height };
-        if let Some(position) = collision.stand_position(self.position, target, shape)? {
-            self.position = position;
+        let probe_start_y = self.position.y;
+        if let Some(stand) = collision.stand_position(self.position, target, shape)? {
+            self.position = stand.position;
+            self.adopt_step_floor(stand.grounded_floor, probe_start_y);
             return Ok((true, false));
         }
 
         let start = self.position;
         let x_only = RoomPoint::new(target.x, start.y, start.z);
-        if let Some(position) = collision.stand_position(start, x_only, shape)? {
+        if let Some(stand) = collision.stand_position(start, x_only, shape)? {
+            let position = stand.position;
             self.position = position;
+            self.adopt_step_floor(stand.grounded_floor, probe_start_y);
             return Ok((position.x != start.x || position.z != start.z, true));
         }
 
         let z_only = RoomPoint::new(start.x, start.y, target.z);
-        if let Some(position) = collision.stand_position(start, z_only, shape)? {
+        if let Some(stand) = collision.stand_position(start, z_only, shape)? {
+            let position = stand.position;
             self.position = position;
+            self.adopt_step_floor(stand.grounded_floor, probe_start_y);
             return Ok((position.x != start.x || position.z != start.z, true));
         }
 
@@ -1281,10 +1337,13 @@ impl CharacterMotorState {
         if target == start {
             return Ok((false, false));
         }
-        let Some(position) = collision.recovery_position(start, shape)? else {
+        // This branch is only reachable while airborne (the grounded case
+        // returned above), so the recovery solve's floor is deliberately not
+        // adopted: `adopt_step_floor` would reject it anyway.
+        let Some(stand) = collision.recovery_position(start, shape)? else {
             return Ok((false, true));
         };
-        self.position = position;
+        self.position = stand.position;
         Ok((false, true))
     }
 
@@ -1559,7 +1618,7 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
     start: RoomPoint,
     target: RoomPoint,
     shape: CollisionTraceShape,
-) -> Result<Option<RoomPoint>, CollisionQueryError> {
+) -> Result<Option<StandOutcome>, CollisionQueryError> {
     let direct = trace_collision(
         provider,
         CollisionTraceQuery {
@@ -1575,7 +1634,13 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
         if floor > target.y.saturating_add(STEP_UP_HEIGHT) {
             return Ok(None);
         }
-        return Ok(Some(target.with_y(resolve_step_down(target.y, floor))));
+        let settled_y = resolve_step_down(target.y, floor);
+        return Ok(Some(StandOutcome {
+            position: target.with_y(settled_y),
+            // A deeper drop than one step keeps the feet where they were and
+            // leaves the body over a ledge: that is not standing on `floor`.
+            grounded_floor: (settled_y == floor).then_some(floor),
+        }));
     }
 
     // A direct body sweep that hits a low riser gets one bounded step attempt:
@@ -1625,7 +1690,12 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
     {
         return Ok(None);
     }
-    Ok(Some(settle.end))
+    // The settle sweep ended on an upward-facing floor, so the step-up lands
+    // standing exactly on it.
+    Ok(Some(StandOutcome {
+        position: settle.end,
+        grounded_floor: Some(settle.end.y),
+    }))
 }
 
 /// Resolve the supporting floor height under `(x, z)` in the motor's
@@ -1887,9 +1957,22 @@ fn trace_body_grounded_stand_position<P: CollisionTraceProvider + ?Sized>(
     target: RoomPoint,
     shape: CollisionTraceShape,
 ) -> Result<Option<RoomPoint>, CollisionQueryError> {
-    let Some(position) = trace_stand_position(provider, start, target, shape)? else {
+    let Some(stand) = trace_stand_position(provider, start, target, shape)? else {
         return Ok(None);
     };
+    let position = stand.position;
+    // The solve already traced the floor here and proved the body ends the
+    // step standing on it, so the grounding rule below is satisfied by
+    // construction (`position.y == floor`, a zero drop) and `with_y(floor)`
+    // is `position`. Re-probing would be a second full floor trace per
+    // candidate direction on every AI body step. The `floor <= target.y`
+    // guard is the same one `adopt_step_floor` uses: a step UP would start
+    // the second probe above anything the first one examined.
+    if let Some(floor) = stand.grounded_floor {
+        if floor <= target.y {
+            return Ok(Some(position));
+        }
+    }
     let Some(floor) = trace_supporting_floor(provider, position, shape)? else {
         return Ok(None);
     };
@@ -3462,8 +3545,81 @@ mod tests {
             },
         )
         .expect("slope step trace");
-        assert_eq!(position, Some(RoomPoint::new(689, 5, 25)));
+        assert_eq!(
+            position,
+            Some(StandOutcome {
+                position: RoomPoint::new(689, 5, 25),
+                // The settle sweep ended on an upward-facing floor, so the
+                // step-up reports the floor it landed on.
+                grounded_floor: Some(5),
+            })
+        );
         assert_eq!(provider.calls, 4);
+    }
+
+    /// A committed step adopts its own floor measurement, so the next tick's
+    /// vertical pass takes the grounded fast path instead of re-tracing the
+    /// floor that step just traced. The trace count is the assertion: two
+    /// traces on the second tick instead of three, at the identical position.
+    #[test]
+    fn committed_step_grounds_on_its_own_floor_measurement() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut provider = FlatTraceProvider::new(None);
+        let input = CharacterMotorInput {
+            walk: 1,
+            ..CharacterMotorInput::default()
+        };
+
+        // Tick one starts un-grounded, so it pays the vertical floor probe.
+        let first = motor
+            .update_vblanks_with_trace_provider(&mut provider, input, config_instant_turn(), 1)
+            .expect("first step");
+        let first_calls = provider.calls;
+        assert!(first.moved);
+        assert_eq!(motor.position().y, 0, "the step settles on the flat floor");
+
+        provider.calls = 0;
+        let second = motor
+            .update_vblanks_with_trace_provider(&mut provider, input, config_instant_turn(), 1)
+            .expect("second step");
+        assert!(second.moved);
+        assert_eq!(motor.position().y, 0, "still on the same flat floor");
+        assert_eq!(
+            provider.calls, 2,
+            "the second tick reuses the first step's floor: one body sweep \
+             plus one floor probe at the destination, with no third probe \
+             re-measuring the floor already under the feet"
+        );
+        assert!(
+            provider.calls < first_calls,
+            "the cold first tick must be the one that pays the extra probe"
+        );
+    }
+
+    /// The adoption is guarded: it is only exact when the measured floor is at
+    /// or below the height the probe started from. A step UP starts the next
+    /// tick's probe above anything this one examined, so it is not adopted and
+    /// the vertical pass re-measures as before.
+    #[test]
+    fn step_up_does_not_adopt_its_floor_measurement() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        motor.grounded = true;
+        motor.set_grounded(0);
+        motor.adopt_step_floor(Some(-8), 0);
+        assert_eq!(motor.ground_floor, -8, "a step down or level is adopted");
+
+        motor.set_grounded(0);
+        motor.adopt_step_floor(Some(12), 0);
+        assert_eq!(motor.ground_floor, 0, "a step up is not adopted");
+
+        motor.grounded = false;
+        motor.set_grounded(0);
+        motor.grounded = false;
+        motor.adopt_step_floor(Some(-8), 0);
+        assert_eq!(
+            motor.ground_floor, 0,
+            "an airborne body keeps falling; nothing is adopted"
+        );
     }
 
     fn config() -> CharacterMotorConfig {
