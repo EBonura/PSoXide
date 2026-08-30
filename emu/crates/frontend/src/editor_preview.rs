@@ -1364,6 +1364,12 @@ struct PreviewModelInstance<'a> {
     tint: (u8, u8, u8),
     /// PS1 optical blend selected by the authored material.
     blend_mode: BlendMode,
+    /// Camera-reactive crystal roughness, when the material enables it. The
+    /// engine model pass applies the same opaque facet bands the runtime does.
+    crystal_roughness: Option<u8>,
+    /// The project's runtime model split threshold, so the preview walks the
+    /// same engine raster path the cooked game does.
+    texture_split_max_edge: u16,
     /// Optional independently blended second texture pass.
     secondary_layer: Option<PreviewModelSecondaryLayer>,
     /// Authored model face-sidedness after material override.
@@ -1541,6 +1547,16 @@ fn resolve_and_draw_model_instances(
         let base_tint = material_override
             .map(|material| material.tint)
             .unwrap_or((0x80, 0x80, 0x80));
+        // Runtime parity: shade from the posed frame's bounding sphere, the
+        // same sphere `psx_game_runtime` builds out of the cooked frame bounds.
+        let bounds_sphere = Some(preview_model_bounds_sphere(
+            &model,
+            &animation,
+            preview_frame_q12(&animation, meta.autoplay, meta.pose_frame, tick),
+            origin,
+            meta.model_rotation,
+            meta.visual_scale_q8,
+        ));
         instances.push(PreviewModelInstance {
             model,
             animation,
@@ -1548,14 +1564,31 @@ fn resolve_and_draw_model_instances(
             origin,
             model_rotation: meta.model_rotation,
             visual_scale_q8: meta.visual_scale_q8,
-            tint: shade_model_tint(origin, *camera, fog, lights, ambient, base_tint),
+            tint: shade_model_tint(
+                origin,
+                bounds_sphere,
+                *camera,
+                fog,
+                lights,
+                ambient,
+                base_tint,
+            ),
             blend_mode: material_override
                 .map(|material| material.blend_mode)
                 .unwrap_or(BlendMode::Opaque),
+            crystal_roughness: material_override.and_then(|material| material.crystal_roughness),
+            texture_split_max_edge: project.runtime_texture_split_max_edge,
             secondary_layer: material_override.and_then(|material| {
                 material.secondary_layer.map(|mut layer| {
-                    layer.tint =
-                        shade_model_tint(origin, *camera, fog, lights, ambient, layer.tint);
+                    layer.tint = shade_model_tint(
+                        origin,
+                        bounds_sphere,
+                        *camera,
+                        fog,
+                        lights,
+                        ambient,
+                        layer.tint,
+                    );
                     layer
                 })
             }),
@@ -1915,17 +1948,12 @@ fn submit_preview_model_instance(
     source_vertex_pool: &mut [psx_asset::ModelVertex],
     joint_view_transforms: &mut [psx_engine::JointViewTransform],
 ) -> bool {
-    // Parked animators hold their authored pose frame. Same convention as the
-    // runtime's model instances: whole frames in the high bits of a Q12 phase,
-    // clamped so an authored frame past the end of a shorter clip still draws.
-    let frame_q12 = if instance.autoplay {
-        instance.animation.phase_at_tick_q12(tick, 60)
-    } else {
-        (instance
-            .pose_frame
-            .min(instance.animation.frame_count().saturating_sub(1)) as u32)
-            << 12
-    };
+    let frame_q12 = preview_frame_q12(
+        &instance.animation,
+        instance.autoplay,
+        instance.pose_frame,
+        tick,
+    );
     let material = TextureMaterial::opaque(
         instance.texture.clut_word,
         instance.texture.tpage_word,
@@ -1933,7 +1961,12 @@ fn submit_preview_model_instance(
     )
     .with_texture_window(instance.texture.texture_window)
     .with_blend_mode(instance.blend_mode);
-    let options = preview_model_surface_options(material, instance.face_sidedness);
+    let options = preview_model_surface_options(
+        material,
+        instance.face_sidedness,
+        instance.texture_split_max_edge,
+    )
+    .with_model_uv_mapping(preview_model_uv_mapping(instance.crystal_roughness));
     let Some((geometry, faces)) = predecode_preview_model_geometry_faces(
         instance.model,
         face_pool,
@@ -1952,8 +1985,14 @@ fn submit_preview_model_instance(
         )
         .with_texture_window(layer.texture.texture_window);
         let [u, v] = layer.motion.offset_at_tick(tick, 60);
+        let mapping = preview_model_uv_mapping(layer.crystal_roughness);
         psx_engine::TexturedModelLayer::new(layer_material)
-            .with_uv_offset(psx_engine::ModelUvOffset::new(u, v))
+            .with_uv_mapping(mapping)
+            .with_uv_offset(if mapping.is_authored() {
+                psx_engine::ModelUvOffset::new(u, v)
+            } else {
+                psx_engine::ModelUvOffset::ZERO
+            })
     });
     let stats = world.submit_textured_model_predecoded_geometry_faces_layered(
         triangles,
@@ -2051,6 +2090,29 @@ fn predecode_preview_model_geometry_faces<'a>(
     ))
 }
 
+/// Parked animators hold their authored pose frame. Same convention as the
+/// runtime's model instances: whole frames in the high bits of a Q12 phase,
+/// clamped so an authored frame past the end of a shorter clip still draws.
+fn preview_frame_q12(
+    animation: &psx_asset::Animation<'_>,
+    autoplay: bool,
+    pose_frame: u16,
+    tick: u32,
+) -> u32 {
+    if autoplay {
+        animation.phase_at_tick_q12(tick, 60)
+    } else {
+        u32::from(pose_frame.min(animation.frame_count().saturating_sub(1))) << 12
+    }
+}
+
+fn preview_model_uv_mapping(crystal_roughness: Option<u8>) -> psx_engine::ModelUvMapping {
+    match crystal_roughness {
+        Some(roughness) => psx_engine::ModelUvMapping::CameraCrystal { roughness },
+        None => psx_engine::ModelUvMapping::Authored,
+    }
+}
+
 fn preview_model_uv_limits(model: psx_asset::Model<'_>) -> (u8, u8) {
     (
         preview_model_uv_max(model.texture_width()),
@@ -2066,9 +2128,19 @@ fn clamp_preview_model_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
     (uv.0.min(max_u), uv.1.min(max_v))
 }
 
+/// Model draw options, matching `psx_game_runtime`'s model pass.
+///
+/// `texture_split_max_edge` is the project's own runtime knob. Splitting has
+/// to stay ENABLED for parity even though these meshes never subdivide at the
+/// default edge of zero: `split_textured_triangles && max_edge == 0` is what
+/// selects the engine's packed model batch, and the packed batch is the only
+/// path that applies the camera-crystal facet bands. The editor used to force
+/// splitting off, which silently routed every preview model down a different
+/// raster path from the game and hid the crystal response entirely.
 fn preview_model_surface_options(
     material: TextureMaterial,
     face_sidedness: psxed_project::MaterialFaceSidedness,
+    texture_split_max_edge: u16,
 ) -> psx_engine::WorldSurfaceOptions {
     let cull_mode = match face_sidedness {
         psxed_project::MaterialFaceSidedness::Front => psx_engine::CullMode::Back,
@@ -2085,25 +2157,112 @@ fn preview_model_surface_options(
     .with_depth_policy(psx_engine::DepthPolicy::Average)
     .with_cull_mode(cull_mode)
     .with_material_layer(material)
-    .with_textured_triangle_splitting(false)
+    .with_textured_triangle_splitting(true)
+    .with_textured_triangle_max_edge(texture_split_max_edge)
 }
 
+/// Shade one model's single material tint from its world-space bounding
+/// sphere, the way `psx_game_runtime::shade_model_material_at_bounds` does.
+///
+/// Sampling a dimensionless origin made the editor darker than the game: the
+/// runtime widens every light's cutoff by the receiver radius, so a light
+/// starts reaching a visible limb before the actor's root crosses the cutoff.
+/// `sphere` carries the runtime's `(center, radius)`; `None` keeps the old
+/// point sample for models whose bounds cannot be baked.
 fn shade_model_tint(
     origin: psx_engine::WorldVertex,
+    sphere: Option<PreviewModelBoundsSphere>,
     camera: psx_engine::WorldCamera,
     fog: PreviewFog,
     lights: &[psx_engine::PointLightSample],
     ambient: [u8; 3],
     base_tint: (u8, u8, u8),
 ) -> (u8, u8, u8) {
+    let (point, receiver_radius) = match sphere {
+        Some(sphere) => (sphere.center, sphere.radius.max(0)),
+        None => (origin, 0),
+    };
     let lit = psx_engine::shade_material_tint_with_lights(
         psx_engine::MaterialTint::from_tuple(base_tint),
-        [origin.x, origin.y, origin.z],
+        [point.x, point.y, point.z],
         psx_engine::Rgb8::from_array(ambient),
-        lights.iter().copied(),
+        lights.iter().map(|light| psx_engine::PointLightSample {
+            radius: light.radius.saturating_add(receiver_radius),
+            ..*light
+        }),
     )
     .to_tuple();
-    fog.apply_rgb(lit, camera.view_vertex(origin).z)
+    fog.apply_rgb(lit, camera.view_vertex(point).z)
+}
+
+/// World-space bounding sphere of one posed model instance, in the editor's
+/// authored units (the cook divides the same numbers by
+/// `psxed_project::units::WORLD_UNIT_DIVISOR`, and its light radii with them).
+#[derive(Clone, Copy)]
+struct PreviewModelBoundsSphere {
+    center: psx_engine::WorldVertex,
+    radius: i32,
+}
+
+/// Bake the current animation frame pair's bounds exactly like the cook, then
+/// place them like `psx_game_runtime::model_world_bounds`: rotate the scaled
+/// model-local centre onto the instance and scale the radius by the renderer's
+/// visual scale.
+fn preview_model_bounds_sphere(
+    model: &psx_asset::Model<'_>,
+    animation: &psx_asset::Animation<'_>,
+    frame_q12: u32,
+    origin: psx_engine::WorldVertex,
+    rotation: Mat3I16,
+    visual_scale_q8: u16,
+) -> PreviewModelBoundsSphere {
+    let cycle_frames = animation.frame_count().saturating_sub(1).max(1);
+    let a = ((frame_q12 >> 12) % u32::from(cycle_frames)) as u16;
+    let b = if cycle_frames <= 1 || a + 1 >= cycle_frames {
+        0
+    } else {
+        a + 1
+    };
+    let bounds = psxed_project::playtest::bake_model_frame_pair_bounds(
+        model,
+        animation,
+        a,
+        b,
+        // The cook divides this pad by WORLD_UNIT_DIVISOR because it bakes
+        // against an engine-unit blob; the editor's blob is still authored.
+        psxed_project::playtest::MODEL_FRAME_BOUNDS_PAD_UNITS,
+    );
+    let center = rotate_bounds_center(
+        rotation,
+        [
+            scale_model_q8(bounds.center[0], visual_scale_q8),
+            scale_model_q8(bounds.center[1], visual_scale_q8),
+            scale_model_q8(bounds.center[2], visual_scale_q8),
+        ],
+    );
+    PreviewModelBoundsSphere {
+        center: psx_engine::WorldVertex::new(
+            origin.x.saturating_add(center[0]),
+            origin.y.saturating_add(center[1]),
+            origin.z.saturating_add(center[2]),
+        ),
+        radius: scale_model_q8(bounds.radius, visual_scale_q8).max(0),
+    }
+}
+
+fn scale_model_q8(value: i32, scale_q8: u16) -> i32 {
+    value.saturating_mul(i32::from(scale_q8.max(1)))
+        / i32::from(psxed_project::MODEL_SCALE_ONE_Q8)
+}
+
+fn rotate_bounds_center(rotation: Mat3I16, center: [i32; 3]) -> [i32; 3] {
+    let row = |r: [i16; 3]| -> i32 {
+        let x = i32::from(r[0]).saturating_mul(center[0]);
+        let y = i32::from(r[1]).saturating_mul(center[1]);
+        let z = i32::from(r[2]).saturating_mul(center[2]);
+        x.saturating_add(y).saturating_add(z) >> 12
+    };
+    [row(rotation.m[0]), row(rotation.m[1]), row(rotation.m[2])]
 }
 
 #[derive(Clone, Copy)]
@@ -2111,6 +2270,10 @@ struct PreviewModelMaterialOverride {
     texture: Option<MaterialSlot>,
     blend_mode: BlendMode,
     tint: (u8, u8, u8),
+    /// `ModelUvMapping::CameraCrystal` roughness when the authored material
+    /// enables the camera-reactive crystal over a texture the cook resolves.
+    /// The runtime picks the same mapping in `model_material_and_cull`.
+    crystal_roughness: Option<u8>,
     secondary_layer: Option<PreviewModelSecondaryLayer>,
     face_sidedness: psxed_project::MaterialFaceSidedness,
 }
@@ -2120,7 +2283,42 @@ struct PreviewModelSecondaryLayer {
     texture: MaterialSlot,
     blend_mode: BlendMode,
     tint: (u8, u8, u8),
+    crystal_roughness: Option<u8>,
     motion: psxed_project::MaterialUvMotion,
+}
+
+/// Crystal/probe authoring, resolved the way `cook_props_lights` cooks it.
+/// `crystal` is `true` when the cook would give the override its own texture
+/// asset, which is what selects `CameraCrystal` over the retired room-probe
+/// screen-space mapping in `psx_game_runtime::model_material_and_cull`.
+fn preview_reflection_settings(
+    texture_mode: psxed_project::MaterialTextureMode,
+    psxt_path: Option<&str>,
+    reflection: psxed_project::ReflectionProbeMaterial,
+) -> Option<(psxed_project::ReflectionProbeMaterial, bool)> {
+    if texture_mode != psxed_project::MaterialTextureMode::ReflectiveProbe && !reflection.enabled {
+        return None;
+    }
+    let cooks_own_texture = matches!(
+        texture_mode,
+        psxed_project::MaterialTextureMode::Generated
+            | psxed_project::MaterialTextureMode::Transition
+    ) || psxt_path.is_some_and(|path| !path.trim().is_empty());
+    Some((reflection, cooks_own_texture))
+}
+
+/// `LevelModelMaterialOverride::reflection_roughness_level`, from authoring
+/// units: `cook_props_lights` stores `roughness >> 6` clamped to three.
+fn preview_reflection_roughness_level(roughness: u8) -> u8 {
+    (roughness >> 6).min(3)
+}
+
+/// The runtime scales a reflective override's tint by its strength before
+/// lighting it (`model_material_and_cull`). Previewing the authored tint
+/// unscaled made the editor's crystal materials read brighter than the game.
+fn preview_reflection_tint(tint: (u8, u8, u8), strength: u8) -> (u8, u8, u8) {
+    let scale = |channel: u8| ((u16::from(channel) * u16::from(strength) + 127) / 255) as u8;
+    (scale(tint.0), scale(tint.1), scale(tint.2))
 }
 
 fn preview_model_material_override(
@@ -2149,15 +2347,43 @@ fn preview_model_material_override(
         | psxed_project::MaterialTextureMode::Transition
         | psxed_project::MaterialTextureMode::ReflectiveProbe => textures.slot(material_id),
     };
+    let reflection = preview_reflection_settings(
+        material.texture_mode,
+        material.psxt_path.as_deref(),
+        material.reflection,
+    );
+    // A reflective override only reaches the runtime's reflection path once its
+    // texture resolves; without a slot the preview keeps the plain material.
+    let reflection = reflection.filter(|_| replacement_texture.is_some());
+    let mut tint = (material.tint[0], material.tint[1], material.tint[2]);
+    if let Some((reflection, _)) = reflection {
+        tint = preview_reflection_tint(tint, reflection.strength);
+    }
     Some(PreviewModelMaterialOverride {
         texture: replacement_texture,
         blend_mode: psx_blend_mode(material.blend_mode),
-        tint: (material.tint[0], material.tint[1], material.tint[2]),
+        tint,
+        crystal_roughness: reflection.and_then(|(reflection, crystal)| {
+            crystal.then(|| preview_reflection_roughness_level(reflection.roughness))
+        }),
         secondary_layer: material.enabled_secondary_layer().and_then(|layer| {
+            let texture = textures.secondary_slot(material_id)?;
+            let reflection = preview_reflection_settings(
+                layer.texture_mode,
+                layer.psxt_path.as_deref(),
+                layer.reflection,
+            );
+            let mut tint = (layer.tint[0], layer.tint[1], layer.tint[2]);
+            if let Some((reflection, _)) = reflection {
+                tint = preview_reflection_tint(tint, reflection.strength);
+            }
             Some(PreviewModelSecondaryLayer {
-                texture: textures.secondary_slot(material_id)?,
+                texture,
                 blend_mode: psx_blend_mode(layer.blend_mode),
-                tint: (layer.tint[0], layer.tint[1], layer.tint[2]),
+                tint,
+                crystal_roughness: reflection.and_then(|(reflection, crystal)| {
+                    crystal.then(|| preview_reflection_roughness_level(reflection.roughness))
+                }),
                 motion: layer.motion,
             })
         }),
