@@ -326,10 +326,24 @@ impl Playtest {
         // may be a manual portal room rather than room zero.
         let (spawn, character) = match PLAYER_CONTROLLER {
             Some(pc) => {
-                let character = CHARACTERS
-                    .get(pc.character.to_usize())
-                    .map(runtime_character_from_record);
-                (pc.spawn, character)
+                let record = CHARACTERS.get(pc.character.to_usize());
+                // Authored stance tuning travels with the character record, so
+                // a project can retune damage, recovery and the swap without a
+                // rebuild. The reset above installed the defaults; this
+                // replaces them once the cooked values are in hand.
+                if let Some(record) = record {
+                    self.player_stance_config = CombatStanceConfig {
+                        aligned_damage_q12: record.stance_aligned_damage_q12,
+                        opposed_damage_q12: record.stance_opposed_damage_q12,
+                        regen_delay_ticks: record.stance_regen_delay_ticks,
+                        broken_regen_delay_ticks: record.stance_broken_regen_delay_ticks,
+                        regen_per_tick_q12: record.stance_regen_per_tick_q12,
+                        break_threshold_q12: record.stance_break_threshold_q12,
+                        swap_cooldown_ticks: record.stance_swap_cooldown_ticks,
+                        swap_duration_ticks: record.stance_swap_duration_ticks,
+                    };
+                }
+                (pc.spawn, record.map(runtime_character_from_record))
             }
             None => (PLAYER_SPAWN, None),
         };

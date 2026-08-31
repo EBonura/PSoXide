@@ -3810,6 +3810,22 @@ pub struct LevelCharacterRecord {
     pub roll_recovery_frames: u8,
     /// Roll invulnerability display frames from action start.
     pub roll_invulnerable_frames: u8,
+    /// Authored stance tuning: see CombatStanceConfig.
+    pub stance_aligned_damage_q12: u16,
+    /// Authored stance tuning: see CombatStanceConfig.
+    pub stance_opposed_damage_q12: u16,
+    /// Authored stance tuning: see CombatStanceConfig.
+    pub stance_regen_delay_ticks: u16,
+    /// Authored stance tuning: see CombatStanceConfig.
+    pub stance_broken_regen_delay_ticks: u16,
+    /// Authored stance tuning: see CombatStanceConfig.
+    pub stance_regen_per_tick_q12: u16,
+    /// Authored stance tuning: see CombatStanceConfig.
+    pub stance_break_threshold_q12: u16,
+    /// Authored stance tuning: see CombatStanceConfig.
+    pub stance_swap_cooldown_ticks: u16,
+    /// Authored stance tuning: see CombatStanceConfig.
+    pub stance_swap_duration_ticks: u16,
     /// Stamina spent to start a backstep.
     pub backstep_cost_q12: i32,
     /// Backstep travel speed in Q8 world units per display frame.
