@@ -2093,6 +2093,27 @@ pub(crate) struct NodeKindEditorContext<'a> {
     pub(crate) camera_preview: Option<EditorCameraPreviewPresentation>,
 }
 
+/// What the placement's loadout picker shows, or `None` when it should not be
+/// drawn at all.
+///
+/// A Character with one way to be equipped should not grow a control that only
+/// ever offers "Default". The exception is a placement that still holds a
+/// selection after the loadouts were deleted: hiding the control there would
+/// leave a value on the node that cannot be seen or cleared, even though the
+/// cook quietly treats it as the default.
+pub(crate) fn loadout_picker_label(loadout: Option<u16>, names: &[String]) -> Option<&str> {
+    if names.is_empty() && loadout.is_none() {
+        return None;
+    }
+    // A stale index cooks as the default, so name it as such rather than
+    // showing an index the Character no longer has.
+    Some(
+        loadout
+            .and_then(|index| names.get(index as usize))
+            .map_or("Default", String::as_str),
+    )
+}
+
 /// Loadout picker for a placed Character Controller.
 ///
 /// Hidden entirely when the Character declares no loadouts, which is the
@@ -2104,27 +2125,22 @@ fn draw_character_loadout_picker(
     loadout: &mut Option<u16>,
     character_loadouts: &[(ResourceId, Vec<String>)],
 ) -> bool {
-    let Some(names) = character
+    let names = character
         .and_then(|id| {
             character_loadouts
                 .iter()
-                .find_map(|(candidate, names)| (*candidate == id).then_some(names))
+                .find_map(|(candidate, names)| (*candidate == id).then_some(names.as_slice()))
         })
-        .filter(|names| !names.is_empty())
-    else {
+        .unwrap_or_default();
+    let Some(selected_label) = loadout_picker_label(*loadout, names) else {
         return false;
     };
 
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label("Loadout");
-        // A stale index still cooks as the default, so name it as such rather
-        // than showing an index the Character no longer has.
-        let preview = loadout
-            .and_then(|index| names.get(index as usize))
-            .map_or("Default", String::as_str);
         egui::ComboBox::from_id_salt("character-controller-loadout")
-            .selected_text(preview)
+            .selected_text(selected_label)
             .show_ui(ui, |ui| {
                 changed |= ui
                     .selectable_value(loadout, None, "Default")
