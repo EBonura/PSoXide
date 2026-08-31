@@ -272,6 +272,16 @@ pub enum NodeKind {
         /// Character profile resource.
         #[serde(default)]
         character: Option<ResourceId>,
+        /// Which of the Character's named loadouts this placement carries, as
+        /// an index into `CharacterResource::loadouts`.
+        ///
+        /// `None`, or an index the character no longer has, means
+        /// `default_equipment`. A stale index is therefore a downgrade rather
+        /// than a cook failure, which is what makes deleting a loadout safe.
+        /// An Equipment component on the same node still overrides individual
+        /// sockets on top of whatever this selects.
+        #[serde(default)]
+        loadout: Option<u16>,
         /// Per-placement override of the Character's movement, stamina, evade
         /// and capsule tuning.
         ///

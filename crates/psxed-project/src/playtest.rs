@@ -1282,13 +1282,15 @@ pub fn build_package(
                 // Equipment component on this placement replace the default
                 // occupying the same socket. This preserves scene-specific
                 // overrides while making equipped enemy variants portable.
+                let selected_loadout =
+                    character_controller.and_then(|controller| controller.loadout);
                 let mut equipped_bindings = character_controller
                     .and_then(|controller| controller.character)
                     .and_then(|character_id| project.resource(character_id))
                     .and_then(|resource| match &resource.data {
                         ResourceData::Character(character) => Some(
                             character
-                                .default_equipment
+                                .equipment_for(selected_loadout)
                                 .iter()
                                 .map(|binding| {
                                     (

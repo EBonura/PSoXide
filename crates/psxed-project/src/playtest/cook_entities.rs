@@ -3333,6 +3333,7 @@ pub(crate) struct CharacterControllerComponent {
     pub(crate) character: Option<ResourceId>,
     pub(crate) settings: Option<CharacterControllerSettings>,
     pub(crate) player: bool,
+    pub(crate) loadout: Option<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -3421,10 +3422,12 @@ pub(crate) fn component_character_controller(
             character,
             settings,
             player,
+            loadout,
         } => Some(CharacterControllerComponent {
             character: *character,
             settings: *settings,
             player: *player,
+            loadout: *loadout,
         }),
         _ => None,
     })
