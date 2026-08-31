@@ -1390,6 +1390,75 @@ fn typed_brush_cook_issue_selects_and_frames_the_authored_brush() {
 }
 
 #[test]
+fn brush_overlap_audit_focuses_the_exact_offending_face() {
+    let mut project = ProjectDocument::new("brush overlap audit");
+    let duplicate = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 64, 192]);
+    project.active_scene_mut().brushes.push(duplicate.clone());
+    project.active_scene_mut().brushes.push(duplicate);
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+    workspace.run_brush_overlap_audit();
+    let overlaps = workspace
+        .brush_overlap_report
+        .as_ref()
+        .expect("report stays open");
+    assert_eq!(overlaps.len(), 6);
+    let overlap = overlaps[0];
+
+    assert!(workspace.focus_brush_overlap_face(overlap.brush_b, overlap.face_b));
+    assert_eq!(workspace.active_workspace, WorkspaceView::Room);
+    assert_eq!(workspace.active_tool, ViewTool::Brush);
+    assert_eq!(workspace.brush_edit_mode, BrushEditMode::Face);
+    assert_eq!(workspace.selected_brush, Some(overlap.brush_b));
+    assert_eq!(workspace.selected_brush_face, Some(overlap.face_b));
+    assert_eq!(workspace.selected_brushes, vec![overlap.brush_b]);
+}
+
+#[test]
+fn deleting_one_reported_brush_refreshes_the_overlap_audit_and_is_undoable() {
+    let mut project = ProjectDocument::new("delete brush overlap");
+    let duplicate = psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]);
+    project.active_scene_mut().brushes.push(duplicate.clone());
+    project.active_scene_mut().brushes.push(duplicate);
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+    workspace.run_brush_overlap_audit();
+    workspace.delete_brush_from_overlap_report(1);
+
+    assert_eq!(workspace.project.active_scene().brushes.len(), 1);
+    assert!(workspace
+        .brush_overlap_report
+        .as_ref()
+        .expect("refreshed report remains open")
+        .is_empty());
+    assert!(workspace.is_dirty());
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes.len(), 2);
+}
+
+#[test]
+fn brush_overlap_report_renders_actionable_rows() {
+    let mut project = ProjectDocument::new("render brush overlap report");
+    let duplicate = psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]);
+    project.active_scene_mut().brushes.push(duplicate.clone());
+    project.active_scene_mut().brushes.push(duplicate);
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.run_brush_overlap_audit();
+
+    let ctx = egui::Context::default();
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+            ..egui::RawInput::default()
+        },
+        |ctx| workspace.draw_brush_overlap_dialog(ctx),
+    );
+
+    assert!(!output.shapes.is_empty(), "the results window must paint");
+    assert_eq!(workspace.brush_overlap_report.as_ref().unwrap().len(), 6);
+}
+
+#[test]
 fn stale_typed_cook_issue_target_falls_back_cleanly() {
     let mut workspace = EditorWorkspace::with_project(
         std::env::temp_dir(),

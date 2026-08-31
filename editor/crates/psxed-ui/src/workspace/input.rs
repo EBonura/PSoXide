@@ -1641,6 +1641,21 @@ impl EditorWorkspace {
             }
         });
         ui.menu_button("Tools", |ui| {
+            let can_check_brushes = self.project.active_scene().brushes.len() >= 2;
+            if ui
+                .add_enabled(
+                    can_check_brushes,
+                    egui::Button::new("Check Overlapping Brush Faces..."),
+                )
+                .on_hover_text(
+                    "Find positive-area, same-facing coplanar faces on different brushes",
+                )
+                .clicked()
+            {
+                self.run_brush_overlap_audit();
+                ui.close_menu();
+            }
+            ui.separator();
             if ui.button("Build Project").clicked() {
                 self.request_project_build();
                 ui.close_menu();

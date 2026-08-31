@@ -45,6 +45,7 @@ impl EditorWorkspace {
         self.draw_clipboard_notice(ctx);
         self.draw_new_project_dialog(ctx);
         self.draw_delete_project_dialog(ctx);
+        self.draw_brush_overlap_dialog(ctx);
         self.draw_texture_import_dialog(ctx);
         self.draw_model_import_dialog(ctx);
     }

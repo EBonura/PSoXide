@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) mod brush_elements;
+mod brush_overlaps;
 mod dialogs;
 mod editing;
 mod geometry;
