@@ -688,9 +688,13 @@ pub(super) type RuntimeVisibleCellSelector = psx_game_runtime::world_cells::Visi
 
 /// The crate accepted-cell draw scratch instantiated with this
 /// example's candidate capacity.
-#[cfg(feature = "world-grid-visible")]
+/// PXBSP builds retain a one-cell sentinel so the shared grid-render source
+/// still type-checks, but never pay for the unreachable 192-cell arrays.
+#[cfg(all(feature = "world-grid-visible", not(playtest_pxbsp)))]
 pub(super) type RuntimeCellDrawScratch =
     psx_game_runtime::world_cells::CellDrawScratch<MAX_PRECOMPUTED_VISIBLE_CELLS>;
+#[cfg(all(feature = "world-grid-visible", playtest_pxbsp))]
+pub(super) type RuntimeCellDrawScratch = psx_game_runtime::world_cells::CellDrawScratch<1>;
 
 /// The crate model projected-vertex + joint scratch instantiated with
 /// this example's caps (see `MODEL_VERTEX_CAP`/`JOINT_CAP` above).
