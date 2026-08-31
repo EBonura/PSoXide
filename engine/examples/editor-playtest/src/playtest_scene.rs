@@ -401,6 +401,12 @@ impl Scene for Playtest {
             "inventory.empty" => self.power_up_inventory.is_empty(),
             "boost.assignment.prompt" => !self.selected_power_up_item.is_none(),
             "boost.remove" => !self.power_up_loadout.module(selected).is_none(),
+            // The HUD keeps each channel's own name beside its bar while the
+            // bars themselves stay put: the active one is always the large top
+            // bar. Four labels, two shown, so HRZ and ZTH trade places on a
+            // swap without duplicating the bars or their dividers.
+            "stance.horizon.active" => self.player_stance.active() == VitalityChannelId::One,
+            "stance.zenith.active" => self.player_stance.active() == VitalityChannelId::Two,
             _ => true,
         }
     }
