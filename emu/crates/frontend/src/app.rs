@@ -2561,6 +2561,9 @@ impl AppState {
 /// Play state machine, project builds, and input-tape recording/replay. The
 /// whole surface drops out without the `editor` feature.
 #[cfg(feature = "editor")]
+const DEFAULT_EMBEDDED_PLAYTEST_FEATURES: &str = "cd-stream-bench";
+
+#[cfg(feature = "editor")]
 impl AppState {
     /// Configure a deterministic native-editor launch before the event loop
     /// starts. This is the implementation behind the frontend's `--editor`
@@ -2906,20 +2909,19 @@ impl AppState {
             .current_dir(&workspace_root)
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_stderr));
-        // The embedded preview only ever runs inside this emulator, so build
-        // it with the emulator-only stage/counter telemetry that feeds the
-        // debug sidebar profiler. Export builds keep the hardware-safe
-        // defaults (telemetry MMIO writes are not for real hardware).
-        // A feature env set when launching the editor wins, so experimental
-        // feature sets (e.g. the PVS visibility candidate) can be played
-        // without editing this default.
+        // Keep ordinary embedded Play on the hardware-equivalent guest. The
+        // current v0.4 content has only a few KiB of static-RAM headroom and
+        // emulator telemetry moves the BSS start by 16 KiB, so silently adding
+        // it makes Play fail at link time even though the export build fits.
+        // Profiling remains opt-in by launching the editor with an explicit
+        // EDITOR_PLAYTEST_FEATURES value that includes emulator-telemetry.
         if matches!(completion, EditorBuildCompletion::RunEmbedded { .. })
             && std::env::var_os("EDITOR_PLAYTEST_FEATURES").is_none()
             && std::env::var_os("EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS").is_none()
         {
             command.env(
                 "EDITOR_PLAYTEST_FEATURES",
-                "cd-stream-bench emulator-telemetry",
+                DEFAULT_EMBEDDED_PLAYTEST_FEATURES,
             );
         }
         let child = command
