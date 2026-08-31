@@ -69,6 +69,10 @@ pub struct ModelInstancePoseOverride {
     /// One-shot playback: clamp at the clip's final frame instead of
     /// looping.
     pub one_shot: bool,
+    /// Q8 playback speed carried by the live state selection.
+    pub speed_q8: u16,
+    /// Inclusive source-frame window carried by the live state selection.
+    pub frame_range: psx_level::CharacterActionFrameRange,
 }
 
 /// Look up the pose override for instance `index`, if any (linear
@@ -393,8 +397,8 @@ fn resolve_instance_actor_pose_record<
             u32::from(live.phase_ticks),
             video_hz,
             !live.one_shot,
-            psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
-            psx_level::CharacterActionFrameRange::FULL,
+            live.speed_q8,
+            live.frame_range,
         ),
         _ => {
             if inst.pose_frame == psx_level::MODEL_INSTANCE_POSE_ANIMATE {
@@ -887,6 +891,8 @@ mod tests {
             clip: OptionalModelClipIndex::some(ModelClipIndex::new(1)),
             phase_ticks,
             one_shot,
+            speed_q8: psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            frame_range: psx_level::CharacterActionFrameRange::FULL,
         }
     }
 

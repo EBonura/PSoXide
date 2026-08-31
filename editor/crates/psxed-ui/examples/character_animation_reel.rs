@@ -221,6 +221,7 @@ fn render_clip(
                     grip_rotation_q12: weapon.grip_rotation_q12,
                     materialization_q12,
                     wireframe_materialization: !weapon.persistent,
+                    trail: None,
                     show_grip_gizmo: false,
                 },
             )

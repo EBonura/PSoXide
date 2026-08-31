@@ -456,3 +456,75 @@ fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
         color.2,
     );
 }
+
+/// The two stance bars, drawn crossing over each other mid-swap.
+///
+/// The authored HUD keeps its bars at fixed heights and swaps which pool feeds
+/// which, so a swap would otherwise be an instant jump. Node rects cannot be
+/// animated from a binding, so for the length of the swap the authored bars
+/// stand down and these take over, sliding each bar to the other's slot.
+///
+/// `progress_q12` runs 0..=4096 across the swap. `rising` is the pool becoming
+/// active, `falling` the one standing down; each fill is its own 0..=4096
+/// share of its bar.
+pub(crate) fn draw_stance_swap(
+    progress_q12: u16,
+    rising_fill_q12: u16,
+    rising_rgb: (u8, u8, u8),
+    falling_fill_q12: u16,
+    falling_rgb: (u8, u8, u8),
+) {
+    // Authored geometry of the two slots, mirroring the HUD scene.
+    const TOP: (i16, i16, i16, i16) = (34, 8, 140, 12);
+    const LOW: (i16, i16, i16, i16) = (34, 24, 100, 8);
+    const INSET: i16 = 3;
+
+    let t = progress_q12.min(4096) as i32;
+    // Ease in and out so the crossing reads as a deliberate exchange rather
+    // than a linear slide. 3t^2 - 2t^3 over Q12.
+    let eased = {
+        let x = t;
+        let x2 = (x * x) >> 12;
+        let x3 = (x2 * x) >> 12;
+        (3 * x2 - 2 * x3).clamp(0, 4096)
+    };
+    let lerp = |from: i16, to: i16| -> i16 {
+        (i32::from(from) + (((i32::from(to) - i32::from(from)) * eased) >> 12)) as i16
+    };
+    let slot = |from: (i16, i16, i16, i16), to: (i16, i16, i16, i16)| {
+        (
+            lerp(from.0, to.0),
+            lerp(from.1, to.1),
+            lerp(from.2, to.2),
+            lerp(from.3, to.3),
+        )
+    };
+
+    let bar = |(x, y, w, h): (i16, i16, i16, i16), fill_q12: u16, rgb: (u8, u8, u8)| {
+        // Shell, then the fill inset inside it, so the moving bar keeps the
+        // authored look of a bordered ladder.
+        draw_quad_flat(
+            [(x, y), (x + w, y), (x, y + h), (x + w, y + h)],
+            rgb.0 / 4,
+            rgb.1 / 4,
+            rgb.2 / 4,
+        );
+        let iw = (w - INSET * 2).max(0);
+        let ih = (h - INSET * 2).max(0);
+        let fw = ((i32::from(iw) * i32::from(fill_q12.min(4096))) >> 12) as i16;
+        if fw <= 0 || ih <= 0 {
+            return;
+        }
+        let (fx, fy) = (x + INSET, y + INSET);
+        draw_quad_flat(
+            [(fx, fy), (fx + fw, fy), (fx, fy + ih), (fx + fw, fy + ih)],
+            rgb.0,
+            rgb.1,
+            rgb.2,
+        );
+    };
+
+    // The pool standing down travels top to low; the one taking over rises.
+    bar(slot(TOP, LOW), falling_fill_q12, falling_rgb);
+    bar(slot(LOW, TOP), rising_fill_q12, rising_rgb);
+}

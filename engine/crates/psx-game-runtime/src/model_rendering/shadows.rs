@@ -414,11 +414,7 @@ mod tests {
     #[test]
     fn slanted_light_shears_by_the_vertical_row() {
         let r = Mat3I16 {
-            m: [
-                [q12(1.0), 0, 0],
-                [0, q12(1.0), 0],
-                [0, 0, q12(1.0)],
-            ],
+            m: [[q12(1.0), 0, 0], [0, q12(1.0), 0], [0, 0, q12(1.0)]],
         };
         let light = ShadowLight::new(q12(0.5) as i32, q12(-0.25) as i32);
         let f = projected_shadow_rotation(r, light);
