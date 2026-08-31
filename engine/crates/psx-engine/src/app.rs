@@ -43,7 +43,7 @@ use psx_level::{
 };
 use psx_pad::{enable_analog_port1, poll_port1};
 
-use crate::game_app::{GameApp, GAMEPLAY_ONLY};
+use crate::game_app::GameApp;
 use crate::scene::{Ctx, RenderSubmission, Scene};
 use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
@@ -435,14 +435,41 @@ impl App {
     /// }
     /// ```
     pub fn run<S: Scene>(config: Config, scene: &mut S) -> ! {
-        // Auto-wrap the bare gameplay scene in the unified runtime
-        // spine over GAMEPLAY_ONLY. That flow has a single Gameplay
-        // state entered at boot, so `GameApp::init` forwards straight
-        // to `scene.init` and `update`/`render` forward straight to
-        // the scene every tick -- the old one-init-then-loop shape,
-        // plus one already-taken `match` branch. No UI scenes, no
-        // nodes, no options: the front-end arms are dead code on this path.
-        Self::run_with_flow(config, &GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], scene)
+        // Drive the gameplay scene directly. It is deliberately NOT
+        // wrapped in `GameApp` over GAMEPLAY_ONLY any more.
+        //
+        // Wrapping cost ~115 KB of code in the linked binary. `GameApp`
+        // holds the flow and the UI tables as *runtime* fields
+        // (`flow: &'static GameFlow`), so the `match` on `flow.states`
+        // is not provably monomorphic: LLVM cannot see that
+        // GAMEPLAY_ONLY never yields `FlowState::UiScene`, and keeps
+        // that arm together with everything it reaches --
+        // `render_ui_scene`, transitions, focus ring, shape nodes,
+        // text paints. The arms were dead in the sense that they never
+        // execute, but they were still linked.
+        //
+        // `run_scheduled` is already generic over `S: Scene`, so the
+        // gameplay scene can be driven without an adapter and the
+        // front-end is never monomorphised at all.
+        //
+        // Behaviour note: `GameApp::init` parks on the built-in loading
+        // screen and defers `gameplay.init` until it has rendered once,
+        // which lets streaming scenes finish boot residency first. This
+        // path calls `init` before the loop instead. Every in-tree
+        // `App::run` caller is a self-contained example or game;
+        // `editor-playtest`, the one streaming consumer, uses
+        // `run_with_flow` and is unaffected.
+        let (mut clock, mut ctx) = Self::boot(config);
+
+        boot_trace("psx-engine: scene init");
+        scene.load_shared_assets(&mut ctx);
+        scene.init(&mut ctx);
+        boot_trace("psx-engine: scene init ok");
+        clock.reset_origin();
+
+        let visual_interval = config.visual_pacing.interval_vblanks();
+        boot_trace("psx-engine: loop");
+        Self::run_scheduled(config, scene, clock, ctx, visual_interval)
     }
 
     /// Run `scene` as the gameplay state of a cooked [`GameFlow`].
@@ -467,10 +494,31 @@ impl App {
         ui_sfx_cues: &'static [LevelUiSfxCueRecord],
         scene: &mut S,
     ) -> ! {
+        let (clock, ctx) = Self::boot(config);
+        Self::run_with_flow_booted(
+            config,
+            flow,
+            scenes,
+            nodes,
+            paints,
+            options,
+            ui_sfx_samples,
+            ui_sfx_cues,
+            scene,
+            clock,
+            ctx,
+        )
+    }
+
+    /// Shared boot: GPU, clock, framebuffer, pad and `Ctx`.
+    ///
+    /// Split out so the gameplay-only path can reuse it without going
+    /// through `GameApp` -- see [`run`](Self::run).
+    fn boot(config: Config) -> (EngineClock, Ctx) {
         boot_trace("psx-engine: run");
         gpu::init(config.video_mode, config.resolution);
         boot_trace("psx-engine: gpu ok");
-        let mut clock = EngineClock::new();
+        let clock = EngineClock::new();
         boot_trace("psx-engine: clock ok");
         let fb = FrameBuffer::new(config.screen_w, config.screen_h);
         gpu::set_draw_area(
@@ -507,6 +555,24 @@ impl App {
         );
         boot_visual_checkpoint(&mut ctx.fb, (200, 96, 0), "02 CTX READY");
 
+        boot_trace("psx-engine: ctx ok");
+        (clock, ctx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_with_flow_booted<S: Scene>(
+        config: Config,
+        flow: &'static GameFlow,
+        scenes: &'static [LevelUiScene],
+        nodes: &'static [LevelUiNodeRecord],
+        paints: &'static [LevelUiPaintRecord],
+        options: &'static [LevelOptionDef],
+        ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
+        ui_sfx_cues: &'static [LevelUiSfxCueRecord],
+        scene: &mut S,
+        mut clock: EngineClock,
+        mut ctx: Ctx,
+    ) -> ! {
         // The wrapper is the Scene the scheduled loop drives: its
         // init/update/render dispatch to the borrowed gameplay scene
         // (or the UI renderer) per flow state.
