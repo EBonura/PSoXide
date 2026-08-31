@@ -457,12 +457,14 @@ fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
     );
 }
 
-/// The two stance bars, drawn crossing over each other mid-swap.
+/// The two stance bars, crossing over each other on a swap.
 ///
-/// The authored HUD keeps its bars at fixed heights and swaps which pool feeds
-/// which, so a swap would otherwise be an instant jump. Node rects cannot be
-/// animated from a binding, so for the length of the swap the authored bars
-/// stand down and these take over, sliding each bar to the other's slot.
+/// These are drawn here rather than authored as UI nodes because a node's rect
+/// is static: bindings drive a Bar's value and max, nothing moves or resizes
+/// it. Hiding authored bars for the length of a swap was not available either,
+/// since Rect and Bar carry no runtime tag and all sixteen node-flag bits are
+/// spoken for. Owning the geometry here costs eighteen fewer authored nodes and
+/// gives the swap somewhere to animate.
 ///
 /// `progress_q12` runs 0..=4096 across the swap. `rising` is the pool becoming
 /// active, `falling` the one standing down; each fill is its own 0..=4096
@@ -500,6 +502,7 @@ pub(crate) fn draw_stance_swap(
         )
     };
 
+    const LADDER_STEPS: i16 = 8;
     let bar = |(x, y, w, h): (i16, i16, i16, i16), fill_q12: u16, rgb: (u8, u8, u8)| {
         // Shell, then the fill inset inside it, so the moving bar keeps the
         // authored look of a bordered ladder.
@@ -522,6 +525,21 @@ pub(crate) fn draw_stance_swap(
             rgb.1,
             rgb.2,
         );
+        // Ladder ticks, so the bar reads as segments rather than a smooth
+        // gauge, the way the authored HUD drew it.
+        let mut step = 1;
+        while step < LADDER_STEPS {
+            let tx = fx + (iw * step) / LADDER_STEPS;
+            if tx < fx + fw {
+                draw_quad_flat(
+                    [(tx, fy), (tx + 1, fy), (tx, fy + ih), (tx + 1, fy + ih)],
+                    rgb.0 / 3,
+                    rgb.1 / 3,
+                    rgb.2 / 3,
+                );
+            }
+            step += 1;
+        }
     };
 
     // The pool standing down travels top to low; the one taking over rises.
