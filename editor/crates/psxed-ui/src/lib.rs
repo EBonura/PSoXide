@@ -636,6 +636,10 @@ pub struct EditorWorkspace {
     /// object it blames. The auto-focus only ever jumps to the first
     /// focusable error; this list lets the author pick any row.
     last_cook_errors: Vec<psxed_project::playtest::PlaytestValidationError>,
+    /// On-demand same-facing coplanar brush-face audit. `None` closes the
+    /// report; `Some`, including an empty report, keeps the results window
+    /// open until the author dismisses it or edits geometry.
+    brush_overlap_report: Option<Vec<psxed_project::brush_overlap::BrushFaceOverlap>>,
     /// Floating duplicate placement created by Cmd+D. While active,
     /// `project` contains the preview copy, but `base_project`
     /// lets Escape cancel without dirtying the document and lets
@@ -3316,6 +3320,7 @@ impl EditorWorkspace {
             validation_issue_primitives: Vec::new(),
             validation_issue_rooms: HashSet::new(),
             last_cook_errors: Vec::new(),
+            brush_overlap_report: None,
             floating_geometry: None,
             portable_geometry_clipboard: None,
             clipboard_notice: None,
