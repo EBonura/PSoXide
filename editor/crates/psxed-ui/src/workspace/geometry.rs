@@ -2342,6 +2342,7 @@ impl EditorWorkspace {
         // Build/Play replaces it with another exact package report.
         self.last_playtest_budget = None;
         self.clear_validation_issues();
+        self.brush_overlap_report = None;
         self.schedule_bsp_leak_refresh();
     }
 
