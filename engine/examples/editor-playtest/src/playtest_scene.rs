@@ -124,13 +124,6 @@ impl<'a> UiScratch<'a> {
 }
 
 impl Playtest {
-    /// Whether the stance is at rest, so the authored HUD owns the bars.
-    fn settled_stance(&self) -> bool {
-        self.player_stance
-            .swap_progress_q12(&self.player_stance_config)
-            >= 4096
-    }
-
     /// Answer one `souls.` text tag. `tag` arrives with the namespace already
     /// stripped, so this is a two-arm compare on the remainder.
     ///
@@ -412,15 +405,11 @@ impl Scene for Playtest {
             // bars themselves stay put: the active one is always the large top
             // bar. Four labels, two shown, so HRZ and ZTH trade places on a
             // swap without duplicating the bars or their dividers.
-            "stance.horizon.active" => {
-                self.settled_stance() && self.player_stance.active() == VitalityChannelId::One
-            }
-            "stance.zenith.active" => {
-                self.settled_stance() && self.player_stance.active() == VitalityChannelId::Two
-            }
-            // The bars and their ladders stand down for the length of a swap so
-            // the overlay can slide them across without drawing twice.
-            "stance.settled" => self.settled_stance(),
+            // The bars themselves are drawn by the overlay, which owns their
+            // geometry so a swap has somewhere to animate. Only the names are
+            // authored, and each channel's name shows beside its own bar.
+            "stance.horizon.active" => self.player_stance.active() == VitalityChannelId::One,
+            "stance.zenith.active" => self.player_stance.active() == VitalityChannelId::Two,
             _ => true,
         }
     }
@@ -1860,7 +1849,7 @@ impl Scene for Playtest {
         {
             let config = self.player_stance_config;
             let progress = self.player_stance.swap_progress_q12(&config);
-            if progress < VITALITY_Q12_ONE {
+            {
                 let share = |channel| {
                     let pool = self.player_vitality.pool(channel);
                     if pool.maximum() == 0 {
