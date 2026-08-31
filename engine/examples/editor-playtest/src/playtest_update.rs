@@ -382,6 +382,11 @@ impl Playtest {
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
+        // would mean no damage and no recovery at all, so it is set explicitly
+        // on every reset rather than relying on the zero pattern.
+        self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
         if self.poi_save_loaded {
@@ -453,6 +458,22 @@ impl Playtest {
         if let Some(bsp) = self.bsp.as_mut() {
             bsp.tick_doors();
         }
+
+        // Swap the active vitality state. Only the active pool takes damage and
+        // only the inactive one recovers, so this is both the defensive and the
+        // healing move. A refused press is silent: the cooldown and a broken
+        // target are the two reasons, and both are already on the HUD.
+        if ctx.just_pressed(button::TRIANGLE) {
+            let config = self.player_stance_config;
+            if self.player_stance.request_swap(&config).is_some() {
+                telemetry::debug_log("player stance:swap");
+            }
+        }
+        // Recovery and cooldowns advance once per fixed tick, after any swap so
+        // a fresh swap does not lose its first tick of cooldown.
+        let config = self.player_stance_config;
+        self.player_stance
+            .tick(&mut self.player_vitality, &config, 0);
 
         if ctx.just_pressed(button::R3) {
             if self.is_locked() {
