@@ -87,8 +87,8 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
-    module_stat_bonus_q12, BoostInventory, BoostModuleId, BoostSlotId, DualVitality,
-    PowerUpLoadout, VitalityChannelId, VitalityModifiers,
+    module_stat_bonus_q12, BoostInventory, BoostModuleId, BoostSlotId, CombatStance,
+    CombatStanceConfig, DualVitality, PowerUpLoadout, VitalityChannelId, VitalityModifiers,
 };
 use psx_game_runtime::{
     destructibles::RuntimeDestructibles,
@@ -415,6 +415,12 @@ struct Playtest {
     /// death sequence arms; legacy untyped damage drains Horizon first and
     /// spills its excess into Zenith.
     player_vitality: DualVitality,
+    /// Which pool is active. Only the active pool takes damage and only the
+    /// inactive one recovers, so swapping is how the player heals.
+    player_stance: CombatStance,
+    /// Authored tuning for the stance: damage multipliers, recovery delays and
+    /// rate, break threshold, and the swap cooldown.
+    player_stance_config: CombatStanceConfig,
     /// Four runtime-assignable unique modules around the two health endpoints.
     power_up_loadout: PowerUpLoadout,
     /// Collected unique modules which are not currently installed in a socket.
@@ -708,6 +714,11 @@ impl Playtest {
         }
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
+        // would mean no damage and no recovery at all, so it is set explicitly
+        // on every reset rather than relying on the zero pattern.
+        self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
         self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
