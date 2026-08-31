@@ -469,6 +469,51 @@ fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
 /// `progress_q12` runs 0..=4096 across the swap. `rising` is the pool becoming
 /// active, `falling` the one standing down; each fill is its own 0..=4096
 /// share of its bar.
+/// A rectangle with its top-left and bottom-right corners chamfered.
+///
+/// The authored stance shells carried `corner_cut: 2` on exactly those two
+/// corners, and that slant is the HUD's signature. When the bars moved into
+/// the overlay so a swap could animate, the cut did not come with them and
+/// both bars went square.
+///
+/// The overlay's primitive is a four-point polygon and a two-corner chamfer is
+/// a hexagon, so this draws three quads split at the cut columns: a sliver
+/// with a sloped top edge, the square middle, and a sliver with a sloped
+/// bottom edge. At the authored cut of two pixels the outer two are slivers,
+/// so the whole shell costs two extra polygons.
+fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8)) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    // A cut wider than half the box would cross the slopes over each other.
+    let cut = cut.min(w / 2).min(h / 2).max(0);
+    if cut == 0 {
+        draw_rect(x, y, w, h, color);
+        return;
+    }
+    let (r, g, b) = color;
+    // Left sliver: top edge rises from (x, y + cut) to (x + cut, y).
+    draw_quad_flat(
+        [(x, y + cut), (x + cut, y), (x, y + h), (x + cut, y + h)],
+        r,
+        g,
+        b,
+    );
+    draw_rect(x + cut, y, w - cut * 2, h, color);
+    // Right sliver: bottom edge falls from (x + w - cut, y + h) to (x + w, y + h - cut).
+    draw_quad_flat(
+        [
+            (x + w - cut, y),
+            (x + w, y),
+            (x + w - cut, y + h),
+            (x + w, y + h - cut),
+        ],
+        r,
+        g,
+        b,
+    );
+}
+
 pub(crate) fn draw_stance_swap(
     progress_q12: u16,
     rising_fill_q12: u16,
@@ -503,15 +548,12 @@ pub(crate) fn draw_stance_swap(
     };
 
     const LADDER_STEPS: i16 = 8;
+    /// Matches the `corner_cut` the authored stance shells carried.
+    const SHELL_CUT: i16 = 2;
     let bar = |(x, y, w, h): (i16, i16, i16, i16), fill_q12: u16, rgb: (u8, u8, u8)| {
         // Shell, then the fill inset inside it, so the moving bar keeps the
         // authored look of a bordered ladder.
-        draw_quad_flat(
-            [(x, y), (x + w, y), (x, y + h), (x + w, y + h)],
-            rgb.0 / 4,
-            rgb.1 / 4,
-            rgb.2 / 4,
-        );
+        draw_chamfered(x, y, w, h, SHELL_CUT, (rgb.0 / 4, rgb.1 / 4, rgb.2 / 4));
         let iw = (w - INSET * 2).max(0);
         let ih = (h - INSET * 2).max(0);
         let fw = ((i32::from(iw) * i32::from(fill_q12.min(4096))) >> 12) as i16;
