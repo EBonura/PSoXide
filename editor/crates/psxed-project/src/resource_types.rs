@@ -1849,6 +1849,30 @@ pub struct CharacterResource {
     /// Legacy quickstep invulnerability frames.
     #[serde(default = "default_character_backstep_invulnerable_frames")]
     pub backstep_invulnerable_frames: u8,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_aligned_damage_q12")]
+    pub stance_aligned_damage_q12: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_opposed_damage_q12")]
+    pub stance_opposed_damage_q12: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_regen_delay_ticks")]
+    pub stance_regen_delay_ticks: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_broken_regen_delay_ticks")]
+    pub stance_broken_regen_delay_ticks: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_regen_per_tick_q12")]
+    pub stance_regen_per_tick_q12: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_break_threshold_q12")]
+    pub stance_break_threshold_q12: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_swap_cooldown_ticks")]
+    pub stance_swap_cooldown_ticks: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_swap_duration_ticks")]
+    pub stance_swap_duration_ticks: u16,
     /// Distance the third-person camera trails the character.
     pub camera_distance: i32,
     /// Camera vertical offset above the character origin.
@@ -1949,6 +1973,14 @@ impl CharacterResource {
             backstep_active_frames: default_character_backstep_active_frames(),
             backstep_recovery_frames: default_character_backstep_recovery_frames(),
             backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
+            stance_aligned_damage_q12: default_stance_aligned_damage_q12(),
+            stance_opposed_damage_q12: default_stance_opposed_damage_q12(),
+            stance_regen_delay_ticks: default_stance_regen_delay_ticks(),
+            stance_broken_regen_delay_ticks: default_stance_broken_regen_delay_ticks(),
+            stance_regen_per_tick_q12: default_stance_regen_per_tick_q12(),
+            stance_break_threshold_q12: default_stance_break_threshold_q12(),
+            stance_swap_cooldown_ticks: default_stance_swap_cooldown_ticks(),
+            stance_swap_duration_ticks: default_stance_swap_duration_ticks(),
             camera_distance: 6144,
             camera_height: 1280,
             camera_target_height: 640,
@@ -2019,6 +2051,38 @@ pub(crate) const fn default_character_roll_cost_q12() -> i32 {
 
 pub(crate) const fn default_character_roll_speed() -> i32 {
     96
+}
+
+pub(crate) const fn default_stance_aligned_damage_q12() -> u16 {
+    2048
+}
+
+pub(crate) const fn default_stance_opposed_damage_q12() -> u16 {
+    6144
+}
+
+pub(crate) const fn default_stance_regen_delay_ticks() -> u16 {
+    90
+}
+
+pub(crate) const fn default_stance_broken_regen_delay_ticks() -> u16 {
+    300
+}
+
+pub(crate) const fn default_stance_regen_per_tick_q12() -> u16 {
+    1024
+}
+
+pub(crate) const fn default_stance_break_threshold_q12() -> u16 {
+    1024
+}
+
+pub(crate) const fn default_stance_swap_cooldown_ticks() -> u16 {
+    30
+}
+
+pub(crate) const fn default_stance_swap_duration_ticks() -> u16 {
+    12
 }
 
 pub(crate) const fn default_character_roll_active_frames() -> u8 {
@@ -2300,6 +2364,30 @@ pub struct CharacterControllerSettings {
     /// See [`EnemyBehaviorSettings`].
     #[serde(default)]
     pub enemy: Option<EnemyBehaviorSettings>,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_aligned_damage_q12")]
+    pub stance_aligned_damage_q12: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_opposed_damage_q12")]
+    pub stance_opposed_damage_q12: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_regen_delay_ticks")]
+    pub stance_regen_delay_ticks: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_broken_regen_delay_ticks")]
+    pub stance_broken_regen_delay_ticks: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_regen_per_tick_q12")]
+    pub stance_regen_per_tick_q12: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_break_threshold_q12")]
+    pub stance_break_threshold_q12: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_swap_cooldown_ticks")]
+    pub stance_swap_cooldown_ticks: u16,
+    /// Authored stance tuning; see CombatStanceConfig.
+    #[serde(default = "default_stance_swap_duration_ticks")]
+    pub stance_swap_duration_ticks: u16,
 }
 
 impl CharacterControllerSettings {
@@ -2325,6 +2413,14 @@ impl CharacterControllerSettings {
             backstep_recovery_frames: default_character_backstep_recovery_frames(),
             backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
             enemy: None,
+            stance_aligned_damage_q12: default_stance_aligned_damage_q12(),
+            stance_opposed_damage_q12: default_stance_opposed_damage_q12(),
+            stance_regen_delay_ticks: default_stance_regen_delay_ticks(),
+            stance_broken_regen_delay_ticks: default_stance_broken_regen_delay_ticks(),
+            stance_regen_per_tick_q12: default_stance_regen_per_tick_q12(),
+            stance_break_threshold_q12: default_stance_break_threshold_q12(),
+            stance_swap_cooldown_ticks: default_stance_swap_cooldown_ticks(),
+            stance_swap_duration_ticks: default_stance_swap_duration_ticks(),
         }
     }
 
@@ -2351,6 +2447,14 @@ impl CharacterControllerSettings {
             backstep_invulnerable_frames: character.backstep_invulnerable_frames,
             enemy: (character.spawn_role == CharacterSpawnRole::Enemy)
                 .then_some(character.enemy_behavior.unwrap_or_default()),
+            stance_aligned_damage_q12: character.stance_aligned_damage_q12,
+            stance_opposed_damage_q12: character.stance_opposed_damage_q12,
+            stance_regen_delay_ticks: character.stance_regen_delay_ticks,
+            stance_broken_regen_delay_ticks: character.stance_broken_regen_delay_ticks,
+            stance_regen_per_tick_q12: character.stance_regen_per_tick_q12,
+            stance_break_threshold_q12: character.stance_break_threshold_q12,
+            stance_swap_cooldown_ticks: character.stance_swap_cooldown_ticks,
+            stance_swap_duration_ticks: character.stance_swap_duration_ticks,
         }
     }
 }

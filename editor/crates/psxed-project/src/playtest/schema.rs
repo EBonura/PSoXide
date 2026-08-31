@@ -1885,6 +1885,14 @@ pub struct PlaytestCharacter {
     pub backstep_recovery_frames: u8,
     /// Legacy quickstep invulnerability frames.
     pub backstep_invulnerable_frames: u8,
+    pub stance_aligned_damage_q12: u16,
+    pub stance_opposed_damage_q12: u16,
+    pub stance_regen_delay_ticks: u16,
+    pub stance_broken_regen_delay_ticks: u16,
+    pub stance_regen_per_tick_q12: u16,
+    pub stance_break_threshold_q12: u16,
+    pub stance_swap_cooldown_ticks: u16,
+    pub stance_swap_duration_ticks: u16,
     /// Camera follow distance (engine units).
     pub camera_distance: i32,
     /// Camera vertical offset above the character origin.
