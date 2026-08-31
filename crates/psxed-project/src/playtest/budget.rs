@@ -203,6 +203,72 @@ pub struct PlaytestBudgetReport {
     pub issues: Vec<PlaytestBudgetIssue>,
 }
 
+/// Draw cost of one non-solid PXBSP leaf's decompressed visibility set.
+///
+/// `base_triangle_count` and `base_packet_slots` describe the renderer's
+/// emitted triangle fans before runtime near-plane clipping or perspective
+/// subdivision. They are therefore useful for comparing BSP locations and
+/// sizing the baseline packet arena, but are not a claim about final GPU
+/// packets for an arbitrary camera pose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PxbspLeafDrawCost {
+    /// Index in the cooked PXBSP leaf lump. Leaf zero is solid and omitted.
+    pub leaf_index: usize,
+    /// Number of non-solid leaves selected by this leaf's decompressed PVS.
+    pub visible_leaf_count: usize,
+    /// Unique marked faces selected by the PVS, including sky apertures.
+    pub visible_face_count: usize,
+    /// Visible sky-aperture faces, which trigger the projected sky but do not
+    /// themselves emit ordinary face triangles.
+    pub visible_sky_aperture_face_count: usize,
+    /// Unique visible face triangles after excluding sky apertures.
+    pub base_triangle_count: usize,
+    /// Fixed packet slots for the projected sky pass in this leaf.
+    pub projected_sky_packet_slots: usize,
+    /// Baseline world packet slots: face triangles plus projected sky.
+    pub base_packet_slots: usize,
+    /// Approximate authored-space location derived from the bounds of faces
+    /// directly marked by this leaf. Compact PXBSP leaves deliberately omit
+    /// their old bounds, so this is a navigation aid rather than a BSP bound.
+    pub authored_surface_anchor: Option<[i32; 3]>,
+    pub authored_surface_bounds_min: Option<[i32; 3]>,
+    pub authored_surface_bounds_max: Option<[i32; 3]>,
+}
+
+/// Per-leaf draw-cost analysis of the exact cooked PXBSP/PVS representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PxbspDrawCostReport {
+    pub world_face_count: usize,
+    pub world_base_triangle_count: usize,
+    /// All-face fallback including a projected sky pass when applicable.
+    pub world_base_packet_slots: usize,
+    pub non_solid_leaf_count: usize,
+    /// Leaves whose visibility row could not be decoded. A valid current cook
+    /// should report zero; these leaves are omitted from [`Self::leaves`].
+    pub unreadable_pvs_leaf_count: usize,
+    pub leaves: Vec<PxbspLeafDrawCost>,
+}
+
+impl PxbspDrawCostReport {
+    /// Return the most expensive leaves, with deterministic leaf-index ties.
+    pub fn heaviest_leaves(&self, limit: usize) -> Vec<&PxbspLeafDrawCost> {
+        let mut leaves = self.leaves.iter().collect::<Vec<_>>();
+        leaves.sort_by(|left, right| {
+            right
+                .base_packet_slots
+                .cmp(&left.base_packet_slots)
+                .then_with(|| right.visible_face_count.cmp(&left.visible_face_count))
+                .then_with(|| left.leaf_index.cmp(&right.leaf_index))
+        });
+        leaves.truncate(limit);
+        leaves
+    }
+
+    pub fn worst_leaf(&self) -> Option<&PxbspLeafDrawCost> {
+        self.heaviest_leaves(1).into_iter().next()
+    }
+}
+
 impl PlaytestBudgetReport {
     pub fn first_actionable_issue(&self) -> Option<&PlaytestBudgetIssue> {
         self.issues.iter().find(|issue| issue.target.is_some())
@@ -422,16 +488,21 @@ pub fn cooked_playtest_budgets(
     report
 }
 
-/// Emitted-face PXBSP packet count, or zero when the package is not PXBSP or
-/// the world bytes fail to parse.
-fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
+/// Analyze the exact resident PXBSP structures used by the runtime.
+///
+/// Each PVS row is decompressed, its visible leaves are expanded through the
+/// mark-surface lump, and face indices are deduplicated before triangle costs
+/// are accumulated. This intentionally does not consult the removed world-grid
+/// cells: PXBSP leaves and their PVS are the current spatial authority.
+pub fn analyze_pxbsp_draw_cost(
+    package: &PlaytestPackage,
+) -> Result<Option<PxbspDrawCostReport>, String> {
     let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-        return 0;
+        return Ok(None);
     };
     let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
-    if map.load(0, &mut SliceReader::new(&world.bytes)).is_err() {
-        return 0;
-    }
+    map.load(0, &mut SliceReader::new(&world.bytes))
+        .map_err(|error| format!("could not load cooked PXBSP for draw-cost analysis: {error}"))?;
     let faces = map.faces();
     let materials = map.materials();
     let is_sky_aperture = |surface: usize| -> bool {
@@ -461,30 +532,33 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
             })
         }
     };
-    let mut total: usize = (0..faces.len()).map(packet_slots_of).sum();
-    if projected_sky_slots != 0 && (sky_is_always || (0..faces.len()).any(is_sky_aperture)) {
-        total = total.saturating_add(projected_sky_slots);
-    }
-    // The packet arena only ever holds ONE frame's draw, and a frame
-    // draws the PVS of one leaf, not the whole map. Size from the worst
-    // leaf's deduped visible-surface triangles; the map total (which
-    // light subdivision inflates freely) only measures content, and
-    // deriving the arena from it is what pushed lit worlds out of RAM.
+    let world_base_triangle_count: usize = (0..faces.len()).map(packet_slots_of).sum();
+    let world_base_packet_slots = world_base_triangle_count.saturating_add(
+        if projected_sky_slots != 0 && (sky_is_always || (0..faces.len()).any(is_sky_aperture)) {
+            projected_sky_slots
+        } else {
+            0
+        },
+    );
     let leaves = map.leaves();
     let marks = map.mark_surfaces();
+    let vertices = map.vertices();
     let leaf_count = leaves.len();
     let mut row = vec![0u8; leaf_count / 8 + 16];
     let mut seen = vec![false; faces.len()];
-    let mut worst = 0usize;
+    let mut costs = Vec::with_capacity(leaf_count.saturating_sub(1));
+    let mut unreadable_pvs_leaf_count = 0usize;
     for leaf_index in 1..leaf_count {
+        row.fill(0);
         let Some(visible_leaves) = map.leaf_visibility_into(leaf_index, &mut row) else {
+            unreadable_pvs_leaf_count += 1;
             continue;
         };
-        for flag in seen.iter_mut() {
-            *flag = false;
-        }
-        let mut frame_packet_slots = 0usize;
-        let mut frame_has_sky_aperture = false;
+        seen.fill(false);
+        let mut visible_leaf_count = 0usize;
+        let mut visible_face_count = 0usize;
+        let mut visible_sky_aperture_face_count = 0usize;
+        let mut base_triangle_count = 0usize;
         for bit in 0..visible_leaves {
             if row[bit / 8] & (1 << (bit % 8)) == 0 {
                 continue;
@@ -492,6 +566,7 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
             let Some(visible) = leaves.get(bit + 1) else {
                 continue;
             };
+            visible_leaf_count += 1;
             let first = usize::from(visible.first_mark_surface);
             for mark in first..first.saturating_add(usize::from(visible.mark_surface_count)) {
                 let Some(surface) = marks.get(mark).map(usize::from) else {
@@ -499,22 +574,104 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
                 };
                 if surface < seen.len() && !seen[surface] {
                     seen[surface] = true;
-                    frame_has_sky_aperture |= is_sky_aperture(surface);
-                    frame_packet_slots =
-                        frame_packet_slots.saturating_add(packet_slots_of(surface));
+                    visible_face_count += 1;
+                    if is_sky_aperture(surface) {
+                        visible_sky_aperture_face_count += 1;
+                    } else {
+                        base_triangle_count =
+                            base_triangle_count.saturating_add(packet_slots_of(surface));
+                    }
                 }
             }
         }
-        if projected_sky_slots != 0 && (sky_is_always || frame_has_sky_aperture) {
-            frame_packet_slots = frame_packet_slots.saturating_add(projected_sky_slots);
+        let leaf_sky_packet_slots = if projected_sky_slots != 0
+            && (sky_is_always || visible_sky_aperture_face_count != 0)
+        {
+            projected_sky_slots
+        } else {
+            0
+        };
+        let (authored_surface_bounds_min, authored_surface_bounds_max) = leaves
+            .get(leaf_index)
+            .and_then(|leaf| pxbsp_leaf_authored_surface_bounds(leaf, marks, faces, vertices))
+            .map_or((None, None), |(min, max)| (Some(min), Some(max)));
+        let authored_surface_anchor = authored_surface_bounds_min
+            .zip(authored_surface_bounds_max)
+            .map(|(min, max)| std::array::from_fn(|axis| min[axis].saturating_add(max[axis]) / 2));
+        costs.push(PxbspLeafDrawCost {
+            leaf_index,
+            visible_leaf_count,
+            visible_face_count,
+            visible_sky_aperture_face_count,
+            base_triangle_count,
+            projected_sky_packet_slots: leaf_sky_packet_slots,
+            base_packet_slots: base_triangle_count.saturating_add(leaf_sky_packet_slots),
+            authored_surface_anchor,
+            authored_surface_bounds_min,
+            authored_surface_bounds_max,
+        });
+    }
+    Ok(Some(PxbspDrawCostReport {
+        world_face_count: faces.len(),
+        world_base_triangle_count,
+        world_base_packet_slots,
+        non_solid_leaf_count: leaf_count.saturating_sub(1),
+        unreadable_pvs_leaf_count,
+        leaves: costs,
+    }))
+}
+
+fn pxbsp_leaf_authored_surface_bounds(
+    leaf: Leaf,
+    marks: psx_bsp::RecordSlice<'_, u16>,
+    faces: psx_bsp::RecordSlice<'_, Face>,
+    vertices: psx_bsp::RecordSlice<'_, Vertex>,
+) -> Option<([i32; 3], [i32; 3])> {
+    let mut min = [i32::MAX; 3];
+    let mut max = [i32::MIN; 3];
+    let first_mark = usize::from(leaf.first_mark_surface);
+    for mark in first_mark..first_mark.saturating_add(usize::from(leaf.mark_surface_count)) {
+        let surface = marks.get(mark).map(usize::from)?;
+        let face = faces.get(surface)?;
+        let first_vertex = usize::try_from(face.first_vertex).ok()?;
+        let vertex_count = usize::try_from(face.vertex_count).ok()?;
+        for vertex_index in first_vertex..first_vertex.checked_add(vertex_count)? {
+            let vertex = vertices.get(vertex_index)?;
+            let position = [
+                i32::from(vertex.position.x),
+                i32::from(vertex.position.y),
+                i32::from(vertex.position.z),
+            ];
+            for axis in 0..3 {
+                min[axis] = min[axis].min(position[axis]);
+                max[axis] = max[axis].max(position[axis]);
+            }
         }
-        worst = worst.max(frame_packet_slots);
     }
-    if worst == 0 {
-        total
-    } else {
-        worst
+    if min[0] == i32::MAX {
+        return None;
     }
+    let scale = crate::units::WORLD_UNIT_DIVISOR;
+    Some((
+        min.map(|coordinate| coordinate.saturating_mul(scale)),
+        max.map(|coordinate| coordinate.saturating_mul(scale)),
+    ))
+}
+
+/// Emitted-face PXBSP packet count, or zero when the package is not PXBSP or
+/// the world bytes fail to parse.
+fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
+    analyze_pxbsp_draw_cost(package)
+        .ok()
+        .flatten()
+        .map(|report| {
+            report
+                .worst_leaf()
+                .map_or(report.world_base_packet_slots, |leaf| {
+                    leaf.base_packet_slots
+                })
+        })
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1125,18 +1282,36 @@ mod tests {
             total >= face_count && total <= face_count * 3,
             "{total} for {face_count} faces"
         );
+        let leaves = index.lump(PxbspLumpKind::Leaves).len as usize
+            / PxbspLumpKind::Leaves.record_size(index.version()).unwrap() as usize;
         let worst_leaf = cooked_bsp_packets(&package);
         assert!(
             worst_leaf > 0 && worst_leaf <= total,
             "{worst_leaf} vs {total}"
         );
+        let draw_cost = analyze_pxbsp_draw_cost(&package)
+            .expect("valid PXBSP analysis")
+            .expect("PXBSP report");
+        assert_eq!(draw_cost.world_face_count, face_count);
+        assert_eq!(draw_cost.world_base_triangle_count, total);
+        assert_eq!(draw_cost.world_base_packet_slots, total);
+        assert_eq!(draw_cost.non_solid_leaf_count, leaves.saturating_sub(1));
+        assert_eq!(draw_cost.unreadable_pvs_leaf_count, 0);
+        assert_eq!(draw_cost.leaves.len(), leaves.saturating_sub(1));
+        assert_eq!(
+            draw_cost.worst_leaf().map(|leaf| leaf.base_packet_slots),
+            Some(worst_leaf)
+        );
+        assert!(draw_cost.leaves.iter().all(|leaf| {
+            leaf.visible_face_count <= world.max_visible_faces
+                && leaf.base_triangle_count <= total
+                && leaf.authored_surface_anchor.is_some()
+        }));
         let budget = cooked_playtest_budgets(&project, &package);
         assert_eq!(
             budget.packet_count,
             cooked_packet_count(&package, worst_leaf)
         );
-        let leaves = index.lump(PxbspLumpKind::Leaves).len as usize
-            / PxbspLumpKind::Leaves.record_size(index.version()).unwrap() as usize;
         assert_eq!(budget.pvs_row_bytes, leaves.saturating_sub(1).div_ceil(8));
     }
 }

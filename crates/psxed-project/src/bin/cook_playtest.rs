@@ -19,8 +19,8 @@ use std::process::ExitCode;
 use psxed_project::{
     default_project_dir,
     playtest::{
-        build_package, cook_to_dir, default_generated_dir, playtest_performance_envelope,
-        streamed_room_chunk_memory_report, PlaytestWorldGeometry,
+        analyze_pxbsp_draw_cost, build_package, cook_to_dir, default_generated_dir,
+        playtest_performance_envelope, streamed_room_chunk_memory_report, PlaytestWorldGeometry,
     },
     NodeKind, ProjectDocument,
 };
@@ -85,6 +85,37 @@ fn main() -> ExitCode {
                         world.bytes.len(),
                         world.movers.len(),
                     );
+                }
+                match analyze_pxbsp_draw_cost(&package) {
+                    Ok(Some(draw_cost)) => {
+                        println!(
+                            "[cook-playtest] PXBSP draw cost: {} faces  {} base triangles  {} non-solid leaves  {} unreadable PVS rows",
+                            draw_cost.world_face_count,
+                            draw_cost.world_base_triangle_count,
+                            draw_cost.non_solid_leaf_count,
+                            draw_cost.unreadable_pvs_leaf_count,
+                        );
+                        for leaf in draw_cost.heaviest_leaves(8) {
+                            let location = leaf.authored_surface_anchor.map_or_else(
+                                || "anchor unavailable".to_string(),
+                                |[x, y, z]| format!("authored anchor ({x}, {y}, {z})"),
+                            );
+                            println!(
+                                "[cook-playtest]   hot leaf {}: {} PVS leaves  {} unique faces ({} sky)  {} base triangles  {} base packet slots  {}",
+                                leaf.leaf_index,
+                                leaf.visible_leaf_count,
+                                leaf.visible_face_count,
+                                leaf.visible_sky_aperture_face_count,
+                                leaf.base_triangle_count,
+                                leaf.base_packet_slots,
+                                location,
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("[cook-playtest] warning: {error}");
+                    }
                 }
                 let portal_marker_count = project
                     .active_scene()
