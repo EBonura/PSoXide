@@ -25,6 +25,7 @@ TEXTURES = (
     ("dp_city_hanging_lattice", "08  HANGING LATTICE  [ALPHA]", True),
     ("dp_city_ceiling_underside", "09  CEILING / UNDERSIDE", False),
     ("dp_city_structural_beam", "10  STRUCTURAL BEAM", False),
+    ("dp_city_guardrail", "11  GUARDRAIL  [CUTOUT]", True),
 )
 
 # Gamma below 1.0 lifts shadow albedo while preserving the brightest accents.
@@ -41,6 +42,7 @@ ALBEDO_GRADE = {
     "dp_city_hanging_lattice": (0.78, 1.04),
     "dp_city_ceiling_underside": (0.82, 1.08),
     "dp_city_structural_beam": (0.82, 1.06),
+    "dp_city_guardrail": (0.78, 1.04),
 }
 
 
@@ -90,6 +92,20 @@ def cutout_source(source: Image.Image, stem: str) -> Image.Image:
     return source
 
 
+def extract_guardrail_bay(source: Image.Image) -> Image.Image:
+    """Crop one centre-to-centre bay so horizontal repeats share each post."""
+    source = source.convert("RGBA")
+    solid_alpha = source.getchannel("A").point(lambda value: 255 if value >= 96 else 0)
+    bounds = solid_alpha.getbbox()
+    if bounds is None:
+        raise ValueError("guardrail master has no visible pixels")
+    left, top, right, bottom = bounds
+    width = right - left
+    bay_left = round(left + width * 0.50)
+    bay_right = round(left + width * 0.955)
+    return source.crop((bay_left, top, bay_right, bottom))
+
+
 def quantize_cutout(reduced: Image.Image) -> Image.Image:
     alpha = reduced.getchannel("A").point(lambda value: 255 if value >= 96 else 0)
     rgb = Image.new("RGB", reduced.size, (0, 0, 0))
@@ -124,10 +140,30 @@ def grade_albedo(source: Image.Image, stem: str) -> Image.Image:
 
 def build_texture(stem: str, cutout: bool) -> Image.Image:
     source = Image.open(MASTERS / f"{stem}_master.png")
+    if stem == "dp_city_guardrail":
+        source = extract_guardrail_bay(source)
     source = cutout_source(source, stem) if cutout else source.convert("RGB")
     source = grade_albedo(source, stem)
     reduced = source.resize((64, 64), Image.Resampling.LANCZOS)
-    reduced = reconcile_wrapped_edges(reduced)
+    if stem == "dp_city_guardrail":
+        # This material is a lateral safety boundary, not a vertically tiled grid.
+        # Reconcile only the post-centred side seams and preserve its distinct
+        # top rail and armored kick plate.
+        pixels = reduced.load()
+        for inset in range(4):
+            left = inset
+            right = reduced.width - 1 - inset
+            for y in range(reduced.height):
+                a = pixels[left, y]
+                b = pixels[right, y]
+                average = tuple(
+                    (int(a[channel]) + int(b[channel]) + 1) // 2
+                    for channel in range(len(a))
+                )
+                pixels[left, y] = average
+                pixels[right, y] = average
+    else:
+        reduced = reconcile_wrapped_edges(reduced)
     if cutout:
         reduced = quantize_cutout(reduced)
     else:
@@ -220,7 +256,8 @@ def main() -> None:
         assert image.size == (64, 64)
         assert colors <= 16
         assert all(image.getpixel((0, y)) == image.getpixel((63, y)) for y in range(64))
-        assert all(image.getpixel((x, 0)) == image.getpixel((x, 63)) for x in range(64))
+        if stem != "dp_city_guardrail":
+            assert all(image.getpixel((x, 0)) == image.getpixel((x, 63)) for x in range(64))
         alpha = "alpha" if image.mode == "RGBA" else "opaque"
         print(f"{stem}: 64x64, {colors} colours, {alpha}, wrapped edges verified")
 

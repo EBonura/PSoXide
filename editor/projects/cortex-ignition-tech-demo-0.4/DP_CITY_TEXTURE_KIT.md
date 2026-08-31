@@ -4,26 +4,28 @@ This is the compact construction set for rebuilding the supplied fog-city
 mockups as a 3D BSP level. The initial set deliberately spent its eight slots on
 large-scale architectural readability and the signature cyan/green/blue
 accents, rather than on interchangeable micro-detail. Two structural surfaces
-extend that set for complete floating-building shells.
+extend that set for complete floating-building shells, and an open guardrail
+closes off playable edges without hiding the fog-city depth.
 
 ![DP City texture contact sheet](source_assets/textures/dp_city_kit/dp_city_kit_contact.png)
 
 ## Runtime contract
 
-- Ten textures, each exactly 64 x 64.
+- Eleven textures, each exactly 64 x 64.
 - 4bpp indexed PSXT, at most sixteen palette entries per texture.
 - Opposite border pixels are reconciled and verified for seamless repetition.
 - Per-role gamma and saturation grades lift the diffuse albedo before palette
   reduction; room lights can darken and shape it instead of rescuing crushed
   source blacks.
 - Opaque materials use neutral PS1 modulation tint `(128, 128, 128)`.
-- Cable and lattice reserve palette index zero for transparency, use `Average`
-  PS1 blending, and render from both sides.
+- Cable, lattice, and guardrail reserve palette index zero for transparency and
+  render from both sides. Cable and lattice use `Average` PS1 blending; the
+  guardrail keeps its metal opaque and uses transparency only for its openings.
 - Editable ImageGen masters remain in `source_assets/textures/dp_city_kit/masters/`.
 - Deterministic runtime PNGs are in `source_assets/textures/dp_city_kit/final_64/`.
 - Cooked textures are in `assets/textures/dp_city_kit/`.
 
-## The ten materials
+## The eleven materials
 
 | Material browser name | Intended BSP role |
 | --- | --- |
@@ -37,10 +39,12 @@ extend that set for complete floating-building shells.
 | `DP City / Hanging Lattice (Average)` | Suspended gridwork, cages and service scaffolds on thin cards; transparent-zero and semi-transparent. |
 | `DP City / Ceiling Underside` | One large framed service plate with a central vent for ceilings and floating-structure undersides. |
 | `DP City / Structural Beam` | One full-tile X brace for broad horizontal or vertical support brushes. |
+| `DP City / Guardrail (Cutout)` | Solid mechanical safety railing for playable-area boundaries; one horizontally repeating bay with transparent openings. |
 
-The cable and lattice are cutout materials. Put them on thin brush planes or
-image props instead of coating a solid wall. Their `Both` sidedness makes a
-suspended card readable from either direction.
+The cable, lattice, and guardrail are cutout materials. Put them on thin brush
+planes or image props instead of coating a solid wall. Their `Both` sidedness
+makes each card readable from either direction. The guardrail is intended to
+tile horizontally only; its top rail and armored kick plate deliberately differ.
 
 ## ImageGen prompt set
 
@@ -76,6 +80,9 @@ The role-specific instructions were:
    frame, four compact fasteners, a central vent and two short channels.
 10. Exactly one structural X spanning nearly the full tile, with a compact
     central gusset and no separate machinery or trim bands above or below it.
+11. One catwalk guardrail bay with two open rails, heavy shared posts and a
+    greebled armored kick plate, restyled against the existing kit contact sheet
+    and extracted on real transparent RGBA.
 
 ImageGen supplied real alpha for the cable. The lattice generator painted its
 transparency preview into RGB, so `build_kit.py` deterministically extracts the
@@ -96,7 +103,8 @@ Cook opaque sources without transparency:
 target/release/psxt-convert source.png destination.psxt 64 64 4
 ```
 
-Cook `dp_city_cable_run.png` and `dp_city_hanging_lattice.png` with:
+Cook `dp_city_cable_run.png`, `dp_city_hanging_lattice.png`, and
+`dp_city_guardrail.png` with:
 
 ```sh
 target/release/psxt-convert source.png destination.psxt 64 64 4 --transparent-zero
