@@ -10,12 +10,12 @@
             1408,
             7680,
         ),
-        free_yaw_q12: 44141,
-        free_pitch_q12: 3902,
+        free_yaw_q12: 43877,
+        free_pitch_q12: 169,
         free_position: (
-            -11753,
-            3866,
-            -17596,
+            -12604,
+            -1508,
+            -28500,
         ),
         free_initialized: true,
         zoom_speed: 1.0,
@@ -40,7 +40,7 @@
             12665.015,
         ),
         viewport_zoom: 0.035015184,
-        snap_units: 128,
+        snap_units: 512,
     ),
     bsp_cook_mode: Draft,
     runtime_depth_sort_mode: HybridWalls,
@@ -70,7 +70,7 @@
                 /*[14]*/ (id: (99), name: "Character Controller", kind: CharacterController(character: Some((95)), loadout: None, settings: (radius: 384, height: 1536, walk_speed: 48, run_speed: 96, turn_speed_degrees_per_second: 180, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 10, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 96, roll_active_frames: 14, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6, enemy: Some((aggro_radius: 2048, patrol_offset: (0, 0, 0), patrol_wait_ticks: 60, reaction_ticks: 18, preferred_distance: 768, spacing_tolerance: 128, decision_interval_ticks: 12, circle_chance: 65, attack_priority: 4, attack_cooldown_ticks: 45, group_attack_delay_ticks: 18, windup_ticks: 20, recovery_ticks: 24, poise: 100, touch_damage: 10, max_health: 50, max_health_secondary: 50, soul_value: 50)), stance_aligned_damage_q12: 2048, stance_opposed_damage_q12: 6144, stance_regen_delay_ticks: 90, stance_broken_regen_delay_ticks: 300, stance_regen_per_tick_q12: 1024, stance_break_threshold_q12: 1024, stance_swap_cooldown_ticks: 30, stance_swap_duration_ticks: 12), player: false), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((96)), children: []),
             ],
             brushes: [
-                /*[0]*/ (faces: [(points: ((-5888, 697, -21248), (-5888, 953, -21248), (-2816, 953, -21248)), material: Some((161)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((-2816, 697, -18176), (-2816, 953, -18176), (-5888, 953, -18176)), material: Some((161)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((-5888, 697, -18176), (-5888, 953, -18176), (-5888, 953, -21248)), material: Some((161)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((-2816, 697, -21248), (-2816, 953, -21248), (-2816, 953, -18176)), material: Some((161)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((-5888, 697, -21248), (-2816, 697, -21248), (-2816, 697, -18176)), material: Some((160)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((-5888, 953, -18176), (-2816, 953, -18176), (-2816, 953, -21248)), material: Some((159)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512)))]),
+                /*[0]*/ (faces: [(points: ((-6144, 0, -28672), (-6144, 5817, -28672), (0, 6144, -28672)), material: Some((159)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((0, 327, -22528), (0, 6144, -22528), (-6144, 5817, -22528)), material: Some((159)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((-6144, 0, -22528), (-6144, 5817, -22528), (-6144, 5817, -28672)), material: Some((159)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((0, 327, -28672), (0, 6144, -28672), (0, 6144, -22528)), material: Some((159)), uv: (offset_texels: (0, 10), rotation_deg: 0, scale_q8: (512, 512))), (points: ((-6144, 0, -28672), (0, 327, -28672), (0, 327, -22528)), material: Some((159)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((-6144, 5817, -22528), (0, 6144, -22528), (0, 6144, -28672)), material: Some((159)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512)))]),
             ],
         ),
     ],
@@ -881,346 +881,6 @@
     ),
     resources: [
         /*[0]*/ (
-            id: (1),
-            name: "Choir Bulkhead",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_bulkhead_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (93, 99, 113),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Both,
-                sky_aperture: false,
-                double_sided: true,
-            )),
-        ),
-        /*[1]*/ (
-            id: (2),
-            name: "Choir Bulkhead (V2 Draft)",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_bulkhead_v2.psxt"),
-                blend_mode: Opaque,
-                tint: (152, 160, 168),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[2]*/ (
-            id: (3),
-            name: "Choir Bulkhead (V1 Draft)",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_bulkhead.psxt"),
-                blend_mode: Opaque,
-                tint: (152, 160, 168),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[3]*/ (
-            id: (4),
-            name: "Choir Deck Grating",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_deck_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (110, 132, 145),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[4]*/ (
-            id: (5),
-            name: "Choir Deck Grating (V2 Draft)",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_deck_v2.psxt"),
-                blend_mode: Opaque,
-                tint: (152, 144, 136),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[5]*/ (
-            id: (6),
-            name: "Choir Deck Grating (V1 Draft)",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_deck.psxt"),
-                blend_mode: Opaque,
-                tint: (152, 144, 136),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[6]*/ (
-            id: (7),
-            name: "Choir Emergency Rib",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_rib_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (85, 98, 100),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[7]*/ (
-            id: (8),
-            name: "Choir Emergency Rib (V2 Draft)",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_rib_v2.psxt"),
-                blend_mode: Opaque,
-                tint: (160, 136, 136),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[8]*/ (
-            id: (9),
-            name: "Choir Emergency Rib (V1 Draft)",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_rib.psxt"),
-                blend_mode: Opaque,
-                tint: (160, 136, 136),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[9]*/ (
-            id: (10),
-            name: "Choir Signal Core",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_core_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (136, 168, 184),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[10]*/ (
-            id: (11),
-            name: "Choir Signal Core (V2 Draft)",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_core_v2.psxt"),
-                blend_mode: Opaque,
-                tint: (136, 168, 184),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[11]*/ (
-            id: (12),
-            name: "Choir Signal Core (V1 Draft)",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_core.psxt"),
-                blend_mode: Opaque,
-                tint: (173, 160, 160),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[12]*/ (
-            id: (13),
-            name: "Choir Wall Plinth",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_wall_base_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (144, 144, 144),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[13]*/ (
-            id: (14),
-            name: "Choir Layered Beam",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_beam_face_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (232, 249, 255),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[14]*/ (
-            id: (15),
-            name: "Choir Beam Knee",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_beam_joint_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (144, 128, 124),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[15]*/ (
-            id: (16),
-            name: "Choir Deck Edge",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_deck_edge_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (136, 144, 148),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[16]*/ (
-            id: (17),
-            name: "Choir Ceiling Vent",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_ceiling_vent_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (120, 120, 120),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[17]*/ (
-            id: (18),
-            name: "Choir Trench Liner",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_trench_liner_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (112, 144, 152),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[18]*/ (
-            id: (19),
-            name: "Choir Hazard Inset",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_hazard_inset_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (160, 120, 116),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[19]*/ (
-            id: (20),
-            name: "Choir Service Panel",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/null_choir_service_panel_v3.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 136, 140),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[20]*/ (
             id: (21),
             name: "DP Fog City Cube Sky",
             data: Material((
@@ -1237,7 +897,7 @@
                 double_sided: false,
             )),
         ),
-        /*[21]*/ (
+        /*[1]*/ (
             id: (22),
             name: "Light Enemy Skeleton",
             data: Skeleton((
@@ -1247,7 +907,7 @@
                 note: "Shared by the Light Enemy arm variants",
             )),
         ),
-        /*[22]*/ (
+        /*[2]*/ (
             id: (23),
             name: "Aletha Delivered Skeleton",
             data: Skeleton((
@@ -1258,7 +918,7 @@
                 joint_names: ["Hips", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot", "Spine", "Chest", "Neck", "RightShoulder", "RightUpperArm", "RightLowerArm", "RightHand", "RightThumbMetacarpal", "RightThumbProximal", "RightIndexProximal", "RightIndexIntermediate", "LeftShoulder", "LeftUpperArm", "LeftLowerArm", "LeftHand", "LeftThumbMetacarpal", "LeftThumbProximal", "LeftIndexProximal", "LeftIndexIntermediate"],
             )),
         ),
-        /*[23]*/ (
+        /*[3]*/ (
             id: (24),
             name: "Sword1 Light Skeleton",
             data: Skeleton((
@@ -1269,7 +929,7 @@
                 joint_names: ["root"],
             )),
         ),
-        /*[24]*/ (
+        /*[4]*/ (
             id: (25),
             name: "Aletha Crystal",
             data: Material((
@@ -1285,7 +945,7 @@
                 double_sided: false,
             )),
         ),
-        /*[25]*/ (
+        /*[5]*/ (
             id: (26),
             name: "Light Enemy / Artigli",
             data: Model((
@@ -1300,7 +960,7 @@
                 attachments: [],
             )),
         ),
-        /*[26]*/ (
+        /*[6]*/ (
             id: (27),
             name: "Aletha Delivered",
             data: Model((
@@ -1315,7 +975,7 @@
                 attachments: [(name: "right_hand_grip", joint: 13, translation: (-17390, -2240, -6229), translation_space: BindSpace, rotation_q12: (32, 0, 1696)), (name: "left_hand_grip", joint: 21, translation: (17899, -2032, -6523), translation_space: BindSpace, rotation_q12: (32, 0, -1696))],
             )),
         ),
-        /*[27]*/ (
+        /*[7]*/ (
             id: (28),
             name: "Sword1 Light Energy",
             data: Model((
@@ -1330,7 +990,7 @@
                 attachments: [],
             )),
         ),
-        /*[28]*/ (
+        /*[8]*/ (
             id: (29),
             name: "Sword1 Heavy Energy",
             data: Model((
@@ -1345,7 +1005,7 @@
                 attachments: [],
             )),
         ),
-        /*[29]*/ (
+        /*[9]*/ (
             id: (30),
             name: "Sword1 Light Energy",
             data: Weapon((
@@ -1359,7 +1019,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[30]*/ (
+        /*[10]*/ (
             id: (31),
             name: "Sword1 Heavy Energy",
             data: Weapon((
@@ -1373,7 +1033,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[31]*/ (
+        /*[11]*/ (
             id: (32),
             name: "Light Enemy / Idle",
             data: AnimationClip((
@@ -1386,7 +1046,7 @@
                 tags: ["rust_mantis_idle_look_v2", "selected_idle_look_01"],
             )),
         ),
-        /*[32]*/ (
+        /*[12]*/ (
             id: (33),
             name: "Light Enemy / Walk",
             data: AnimationClip((
@@ -1399,7 +1059,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[33]*/ (
+        /*[13]*/ (
             id: (34),
             name: "Light Enemy / Run",
             data: AnimationClip((
@@ -1412,7 +1072,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[34]*/ (
+        /*[14]*/ (
             id: (36),
             name: "aletha_dash_fwd",
             data: AnimationClip((
@@ -1425,7 +1085,7 @@
                 tags: [],
             )),
         ),
-        /*[35]*/ (
+        /*[15]*/ (
             id: (39),
             name: "aletha_death",
             data: AnimationClip((
@@ -1438,7 +1098,7 @@
                 tags: [],
             )),
         ),
-        /*[36]*/ (
+        /*[16]*/ (
             id: (43),
             name: "aletha_hurt_a",
             data: AnimationClip((
@@ -1451,7 +1111,7 @@
                 tags: [],
             )),
         ),
-        /*[37]*/ (
+        /*[17]*/ (
             id: (45),
             name: "aletha_idle",
             data: AnimationClip((
@@ -1464,7 +1124,7 @@
                 tags: [],
             )),
         ),
-        /*[38]*/ (
+        /*[18]*/ (
             id: (49),
             name: "aletha_rest_pose",
             data: AnimationClip((
@@ -1477,7 +1137,7 @@
                 tags: [],
             )),
         ),
-        /*[39]*/ (
+        /*[19]*/ (
             id: (50),
             name: "aletha_run_bwd",
             data: AnimationClip((
@@ -1490,7 +1150,7 @@
                 tags: [],
             )),
         ),
-        /*[40]*/ (
+        /*[20]*/ (
             id: (51),
             name: "aletha_run_fwd",
             data: AnimationClip((
@@ -1503,7 +1163,7 @@
                 tags: [],
             )),
         ),
-        /*[41]*/ (
+        /*[21]*/ (
             id: (52),
             name: "aletha_run_lft",
             data: AnimationClip((
@@ -1516,7 +1176,7 @@
                 tags: [],
             )),
         ),
-        /*[42]*/ (
+        /*[22]*/ (
             id: (53),
             name: "aletha_run_rgt",
             data: AnimationClip((
@@ -1529,7 +1189,7 @@
                 tags: [],
             )),
         ),
-        /*[43]*/ (
+        /*[23]*/ (
             id: (54),
             name: "aletha_stun",
             data: AnimationClip((
@@ -1542,7 +1202,7 @@
                 tags: [],
             )),
         ),
-        /*[44]*/ (
+        /*[24]*/ (
             id: (55),
             name: "aletha_stun_recovery",
             data: AnimationClip((
@@ -1555,7 +1215,7 @@
                 tags: [],
             )),
         ),
-        /*[45]*/ (
+        /*[25]*/ (
             id: (56),
             name: "aletha_walk_bkw",
             data: AnimationClip((
@@ -1568,7 +1228,7 @@
                 tags: [],
             )),
         ),
-        /*[46]*/ (
+        /*[26]*/ (
             id: (57),
             name: "aletha_walk_fwd",
             data: AnimationClip((
@@ -1581,7 +1241,7 @@
                 tags: [],
             )),
         ),
-        /*[47]*/ (
+        /*[27]*/ (
             id: (58),
             name: "aletha_walk_lft",
             data: AnimationClip((
@@ -1594,7 +1254,7 @@
                 tags: [],
             )),
         ),
-        /*[48]*/ (
+        /*[28]*/ (
             id: (59),
             name: "aletha_walk_rgt",
             data: AnimationClip((
@@ -1607,7 +1267,7 @@
                 tags: [],
             )),
         ),
-        /*[49]*/ (
+        /*[29]*/ (
             id: (60),
             name: "Light Enemy Animation Set",
             data: AnimationSet((
@@ -1622,7 +1282,7 @@
                 clips: [(32), (33), (34), (71), (72), (91), (92), (93), (104), (64), (65), (108), (139), (141)],
             )),
         ),
-        /*[50]*/ (
+        /*[30]*/ (
             id: (61),
             name: "Aletha Delivered Animation Set",
             data: AnimationSet((
@@ -1638,7 +1298,7 @@
                 clips: [(36), (39), (43), (45), (49), (50), (51), (52), (53), (54), (55), (56), (57), (58), (59)],
             )),
         ),
-        /*[51]*/ (
+        /*[31]*/ (
             id: (62),
             name: "Aletha",
             data: Character((
@@ -1687,7 +1347,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[52]*/ (
+        /*[32]*/ (
             id: (64),
             name: "Light Enemy / Turn In Place",
             data: AnimationClip((
@@ -1700,7 +1360,7 @@
                 tags: ["rust_mantis_combat", "selected_turn_servo_01"],
             )),
         ),
-        /*[53]*/ (
+        /*[33]*/ (
             id: (65),
             name: "Light Enemy / Alert",
             data: AnimationClip((
@@ -1713,41 +1373,7 @@
                 tags: ["rust_mantis_combat", "selected_alert_brace_01"],
             )),
         ),
-        /*[54]*/ (
-            id: (66),
-            name: "Sky: Quake Layered Sunset",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/sky/quake_layered_sunset_4bpp.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: true,
-                double_sided: false,
-            )),
-        ),
-        /*[55]*/ (
-            id: (67),
-            name: "Sky: Directional Sunset Cube",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/sky/directional_sunset_cube_4bpp.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: true,
-                double_sided: false,
-            )),
-        ),
-        /*[56]*/ (
+        /*[34]*/ (
             id: (68),
             name: "MENU_MAIN_PIECE_FULL",
             data: Material((
@@ -1764,7 +1390,7 @@
                 double_sided: false,
             )),
         ),
-        /*[57]*/ (
+        /*[35]*/ (
             id: (69),
             name: "MENU_FRAME_OVERLAY_FULL",
             data: Material((
@@ -1781,7 +1407,7 @@
                 double_sided: false,
             )),
         ),
-        /*[58]*/ (
+        /*[36]*/ (
             id: (70),
             name: "MENU_GRID_FLOOR_FULL",
             data: Material((
@@ -1798,7 +1424,7 @@
                 double_sided: false,
             )),
         ),
-        /*[59]*/ (
+        /*[37]*/ (
             id: (71),
             name: "Light Enemy / Strafe Left",
             data: AnimationClip((
@@ -1811,7 +1437,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[60]*/ (
+        /*[38]*/ (
             id: (72),
             name: "Light Enemy / Strafe Right",
             data: AnimationClip((
@@ -1824,7 +1450,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[61]*/ (
+        /*[39]*/ (
             id: (73),
             name: "gen_walk_fwd",
             data: AnimationClip((
@@ -1838,7 +1464,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[62]*/ (
+        /*[40]*/ (
             id: (74),
             name: "gen_walk_fwd_windup",
             data: AnimationClip((
@@ -1852,7 +1478,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[63]*/ (
+        /*[41]*/ (
             id: (75),
             name: "gen_walk_fwd_winddown",
             data: AnimationClip((
@@ -1866,7 +1492,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[64]*/ (
+        /*[42]*/ (
             id: (76),
             name: "gen_walk_fwd_winddown_mirror",
             data: AnimationClip((
@@ -1880,7 +1506,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[65]*/ (
+        /*[43]*/ (
             id: (77),
             name: "gen_run_fwd",
             data: AnimationClip((
@@ -1894,7 +1520,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[66]*/ (
+        /*[44]*/ (
             id: (78),
             name: "gen_run_fwd_winddown_mirror",
             data: AnimationClip((
@@ -1908,7 +1534,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[67]*/ (
+        /*[45]*/ (
             id: (79),
             name: "gen_run_fwd_windup",
             data: AnimationClip((
@@ -1922,7 +1548,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[68]*/ (
+        /*[46]*/ (
             id: (80),
             name: "gen_run_fwd_winddown",
             data: AnimationClip((
@@ -1936,7 +1562,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[69]*/ (
+        /*[47]*/ (
             id: (81),
             name: "gen_walk_bwd",
             data: AnimationClip((
@@ -1950,7 +1576,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[70]*/ (
+        /*[48]*/ (
             id: (82),
             name: "gen_walk_lft",
             data: AnimationClip((
@@ -1964,7 +1590,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[71]*/ (
+        /*[49]*/ (
             id: (83),
             name: "gen_walk_rgt",
             data: AnimationClip((
@@ -1978,7 +1604,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[72]*/ (
+        /*[50]*/ (
             id: (84),
             name: "gen_light_attack",
             data: AnimationClip((
@@ -1992,7 +1618,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[73]*/ (
+        /*[51]*/ (
             id: (85),
             name: "gen_heavy_attack",
             data: AnimationClip((
@@ -2006,7 +1632,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[74]*/ (
+        /*[52]*/ (
             id: (87),
             name: "gen_hit_react",
             data: AnimationClip((
@@ -2020,7 +1646,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[75]*/ (
+        /*[53]*/ (
             id: (88),
             name: "gen_vert_light_attack",
             data: AnimationClip((
@@ -2034,7 +1660,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[76]*/ (
+        /*[54]*/ (
             id: (89),
             name: "gen_vert_heavy_attack",
             data: AnimationClip((
@@ -2048,7 +1674,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[77]*/ (
+        /*[55]*/ (
             id: (91),
             name: "Light Enemy / Death",
             data: AnimationClip((
@@ -2061,7 +1687,7 @@
                 tags: ["mantis_combat"],
             )),
         ),
-        /*[78]*/ (
+        /*[56]*/ (
             id: (92),
             name: "Light Enemy / Hit React",
             data: AnimationClip((
@@ -2074,7 +1700,7 @@
                 tags: ["mantis_combat"],
             )),
         ),
-        /*[79]*/ (
+        /*[57]*/ (
             id: (93),
             name: "Light Enemy / Zenith Light",
             data: AnimationClip((
@@ -2087,7 +1713,7 @@
                 tags: ["light_enemy", "zenith_light", "ranged", "recorded"],
             )),
         ),
-        /*[80]*/ (
+        /*[58]*/ (
             id: (94),
             name: "Light Enemy / Zenith Light Source",
             data: AnimationSource((
@@ -2101,7 +1727,7 @@
                 tags: ["light_enemy", "zenith_light", "ranged", "recorded"],
             )),
         ),
-        /*[81]*/ (
+        /*[59]*/ (
             id: (95),
             name: "Heavy Enemy",
             data: Character((
@@ -2150,7 +1776,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[82]*/ (
+        /*[60]*/ (
             id: (96),
             name: "Heavy Enemy Skeleton",
             data: Skeleton((
@@ -2161,7 +1787,7 @@
                 joint_names: ["Hips", "Spine", "Spine1", "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand", "LeftHand_end", "LeftHand.001", "LeftHand.001_end", "LeftHand.002", "LeftHand.002_end", "RightShoulder", "RightArm", "RightForeArm", "RightHand", "RightHand_end", "LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase", "LeftToeBase_end", "RightUpLeg", "RightLeg", "RightFoot", "RightToeBase", "RightToeBase_end"],
             )),
         ),
-        /*[83]*/ (
+        /*[61]*/ (
             id: (97),
             name: "Heavy Enemy Model",
             data: Model((
@@ -2176,7 +1802,7 @@
                 attachments: [],
             )),
         ),
-        /*[84]*/ (
+        /*[62]*/ (
             id: (98),
             name: "Heavy Enemy / Idle",
             data: AnimationClip((
@@ -2190,7 +1816,7 @@
                 tags: ["tank_boss_ai", "selected_idle_02"],
             )),
         ),
-        /*[85]*/ (
+        /*[63]*/ (
             id: (99),
             name: "Heavy Enemy / Walk Forward",
             data: AnimationClip((
@@ -2204,7 +1830,7 @@
                 tags: ["tank_boss_ai"],
             )),
         ),
-        /*[86]*/ (
+        /*[64]*/ (
             id: (100),
             name: "Heavy Enemy Animation Set",
             data: AnimationSet((
@@ -2219,7 +1845,7 @@
                 clips: [(98), (99), (101), (102), (103), (105), (106), (107), (109), (137), (138)],
             )),
         ),
-        /*[87]*/ (
+        /*[65]*/ (
             id: (101),
             name: "Heavy Enemy / Walk Backward",
             data: AnimationClip((
@@ -2233,7 +1859,7 @@
                 tags: ["tank_boss_ai"],
             )),
         ),
-        /*[88]*/ (
+        /*[66]*/ (
             id: (102),
             name: "Heavy Enemy / Strafe Left",
             data: AnimationClip((
@@ -2247,7 +1873,7 @@
                 tags: ["tank_boss_ai"],
             )),
         ),
-        /*[89]*/ (
+        /*[67]*/ (
             id: (103),
             name: "Heavy Enemy / Strafe Right",
             data: AnimationClip((
@@ -2261,7 +1887,7 @@
                 tags: ["tank_boss_ai"],
             )),
         ),
-        /*[90]*/ (
+        /*[68]*/ (
             id: (104),
             name: "Light Enemy / Walk Backward",
             data: AnimationClip((
@@ -2274,7 +1900,7 @@
                 tags: ["rust_mantis_starter"],
             )),
         ),
-        /*[91]*/ (
+        /*[69]*/ (
             id: (105),
             name: "Heavy Enemy / Death",
             data: AnimationClip((
@@ -2288,7 +1914,7 @@
                 tags: ["tank_boss_ai", "selected_death_02"],
             )),
         ),
-        /*[92]*/ (
+        /*[70]*/ (
             id: (106),
             name: "Heavy Enemy / Hit React",
             data: AnimationClip((
@@ -2302,7 +1928,7 @@
                 tags: ["tank_boss_ai", "selected_hit_02"],
             )),
         ),
-        /*[93]*/ (
+        /*[71]*/ (
             id: (107),
             name: "Heavy Enemy / Heavy Attack",
             data: AnimationClip((
@@ -2316,7 +1942,7 @@
                 tags: ["tank_boss_ai", "selected_attack_01", "heavy_attack"],
             )),
         ),
-        /*[94]*/ (
+        /*[72]*/ (
             id: (108),
             name: "Light Enemy / Stun + Recovery",
             data: AnimationClip((
@@ -2329,7 +1955,7 @@
                 tags: ["rust_mantis_combat", "stun_recovery", "momask_seed_260843", "selected_severe_impact_02"],
             )),
         ),
-        /*[95]*/ (
+        /*[73]*/ (
             id: (109),
             name: "Heavy Enemy / Stun + Recovery",
             data: AnimationClip((
@@ -2343,7 +1969,7 @@
                 tags: ["tank_boss_ai", "stun_recovery", "momask_seed_260832", "selected_heavy_h1"],
             )),
         ),
-        /*[96]*/ (
+        /*[74]*/ (
             id: (110),
             name: "Choir Needle",
             data: Projectile((
@@ -2363,7 +1989,7 @@
                 impact_lifetime_ticks: 10,
             )),
         ),
-        /*[97]*/ (
+        /*[75]*/ (
             id: (111),
             name: "Light Enemy / Clawless Body",
             data: Model((
@@ -2378,7 +2004,7 @@
                 attachments: [(name: "left_hand_grip", joint: 8, translation: (0, 0, 0), translation_space: JointOffset, rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[98]*/ (
+        /*[76]*/ (
             id: (113),
             name: "Light Enemy",
             data: Character((
@@ -2428,313 +2054,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[99]*/ (
-            id: (115),
-            name: "Future Gothic / Layered Beam",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_beam.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (38, 36, 34), noise_enabled: true, noise_color: (88, 82, 76), noise: (seed: 115, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 115),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[100]*/ (
-            id: (116),
-            name: "Future Gothic / Bulkhead",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_bulkhead.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (48, 48, 46), noise_enabled: true, noise_color: (96, 92, 84), noise: (seed: 116, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 116),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[101]*/ (
-            id: (117),
-            name: "Future Gothic / Deck Grating",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_deck.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (44, 42, 40), noise_enabled: true, noise_color: (92, 84, 78), noise: (seed: 117, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 117),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[102]*/ (
-            id: (118),
-            name: "Future Gothic / Emergency Rib",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_rib.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (54, 44, 42), noise_enabled: true, noise_color: (112, 84, 76), noise: (seed: 118, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 118),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[103]*/ (
-            id: (119),
-            name: "Future Gothic / Service Panel",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_service_panel.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (40, 38, 34), noise_enabled: true, noise_color: (88, 80, 70), noise: (seed: 119, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 119),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[104]*/ (
-            id: (120),
-            name: "Future Gothic / Wall Plinth",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_wall_plinth.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (40, 38, 34), noise_enabled: true, noise_color: (88, 80, 70), noise: (seed: 120, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 120),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[105]*/ (
-            id: (121),
-            name: "Future Gothic / Exterior Rock",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_exterior_rock.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (58, 54, 48), noise_enabled: true, noise_color: (104, 94, 78), noise: (seed: 121, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 121),
-                reflection: (strength: 16, roughness: 224),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[106]*/ (
-            id: (122),
-            name: "Future Gothic / Computer Terminal",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_computer_terminal.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (26, 42, 42), noise_enabled: true, noise_color: (26, 166, 178), noise: (seed: 122, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 122),
-                reflection: (strength: 80, roughness: 80),
-                animation: (mode: Flipbook, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 1, frame_count: 2, ticks_per_frame: 24, phase: 0, source_a: Some((128)), source_b: Some((129))), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[107]*/ (
-            id: (123),
-            name: "Future Gothic / Computer Terminal Left",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_computer_terminal_left.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (32, 30, 27), noise_enabled: true, noise_color: (76, 70, 61), noise: (seed: 123, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 123),
-                reflection: (strength: 80, roughness: 80),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[108]*/ (
-            id: (124),
-            name: "Future Gothic / Computer Terminal Right",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_computer_terminal_right.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (32, 30, 27), noise_enabled: true, noise_color: (76, 70, 61), noise: (seed: 124, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 124),
-                reflection: (strength: 80, roughness: 80),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[109]*/ (
-            id: (125),
-            name: "Future Gothic / Computer Terminal Back",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_computer_terminal_back.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (32, 30, 27), noise_enabled: true, noise_color: (76, 70, 61), noise: (seed: 125, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 125),
-                reflection: (strength: 80, roughness: 80),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[110]*/ (
-            id: (126),
-            name: "Future Gothic / Computer Terminal Top",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_computer_terminal_top.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (32, 30, 27), noise_enabled: true, noise_color: (76, 70, 61), noise: (seed: 126, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 126),
-                reflection: (strength: 80, roughness: 80),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[111]*/ (
-            id: (127),
-            name: "Future Gothic / Computer Terminal Bottom",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_computer_terminal_bottom.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (32, 30, 27), noise_enabled: true, noise_color: (76, 70, 61), noise: (seed: 127, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 127),
-                reflection: (strength: 80, roughness: 80),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[112]*/ (
-            id: (128),
-            name: "Future Gothic / Computer Terminal Readout A",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_computer_terminal.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (26, 42, 42), noise_enabled: true, noise_color: (26, 166, 178), noise: (seed: 128, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 128),
-                reflection: (strength: 80, roughness: 80),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[113]*/ (
-            id: (129),
-            name: "Future Gothic / Computer Terminal Readout B",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/future_gothic/gritty_gothic_computer_terminal_front_b.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (26, 42, 42), noise_enabled: true, noise_color: (26, 166, 178), noise: (seed: 129, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 129),
-                reflection: (strength: 80, roughness: 80),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[114]*/ (
-            id: (130),
-            name: "Infection / Horizon Membrane",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/infection_barrier_horizon_grate_v4.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (30, 4, 3), noise_enabled: true, noise_color: (188, 38, 13), noise: (seed: 130, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 130),
-                reflection: (strength: 24, roughness: 112),
-                animation: (mode: LightPulse, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 72, maximum_q7: 128, ticks_per_cycle: 96, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: true,
-            )),
-        ),
-        /*[115]*/ (
-            id: (131),
-            name: "Infection / Zenith Membrane",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/infection_barrier_zenith_grate_v4.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (3, 24, 27), noise_enabled: true, noise_color: (20, 181, 184), noise: (seed: 131, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 131),
-                reflection: (strength: 24, roughness: 112),
-                animation: (mode: LightPulse, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: -2048, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 72, maximum_q7: 128, ticks_per_cycle: 96, phase: 48)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: true,
-            )),
-        ),
-        /*[116]*/ (
-            id: (132),
-            name: "Utility / No Draw Cutout",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/infection_barrier_nodraw_v1.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 8, base_color: (0, 0, 0), noise_enabled: false, noise_color: (0, 0, 0), noise: (seed: 132, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 8, coverage: 0, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 0, seed: 132),
-                reflection: (strength: 0, roughness: 128),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[117]*/ (
+        /*[77]*/ (
             id: (133),
             name: "Sword1 Light",
             data: Model((
@@ -2749,7 +2069,7 @@
                 attachments: [],
             )),
         ),
-        /*[118]*/ (
+        /*[78]*/ (
             id: (134),
             name: "Sword1 Heavy",
             data: Model((
@@ -2764,7 +2084,7 @@
                 attachments: [],
             )),
         ),
-        /*[119]*/ (
+        /*[79]*/ (
             id: (135),
             name: "Sword1 Light",
             data: Weapon((
@@ -2778,7 +2098,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[120]*/ (
+        /*[80]*/ (
             id: (136),
             name: "Sword1 Heavy",
             data: Weapon((
@@ -2792,7 +2112,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[121]*/ (
+        /*[81]*/ (
             id: (137),
             name: "Heavy Enemy / Light Attack",
             data: AnimationClip((
@@ -2806,7 +2126,7 @@
                 tags: ["tank_boss_ai", "selected_attack_03", "light_attack"],
             )),
         ),
-        /*[122]*/ (
+        /*[82]*/ (
             id: (138),
             name: "Heavy Enemy / Ranged Attack",
             data: AnimationClip((
@@ -2820,7 +2140,7 @@
                 tags: ["tank_boss_ai", "missile_salvo", "three_chimney", "momask_seed_260850", "selected_missile_salvo_03"],
             )),
         ),
-        /*[123]*/ (
+        /*[83]*/ (
             id: (139),
             name: "Light Enemy / Horizon Light",
             data: AnimationClip((
@@ -2833,7 +2153,7 @@
                 tags: ["light_enemy", "horizon_light", "recorded"],
             )),
         ),
-        /*[124]*/ (
+        /*[84]*/ (
             id: (140),
             name: "Light Enemy / Horizon Light Source",
             data: AnimationSource((
@@ -2847,7 +2167,7 @@
                 tags: ["light_enemy", "horizon_light", "recorded"],
             )),
         ),
-        /*[125]*/ (
+        /*[85]*/ (
             id: (141),
             name: "Light Enemy / Horizon Heavy",
             data: AnimationClip((
@@ -2860,7 +2180,7 @@
                 tags: ["light_enemy", "horizon_heavy", "recorded"],
             )),
         ),
-        /*[126]*/ (
+        /*[86]*/ (
             id: (142),
             name: "Light Enemy / Horizon Heavy Source",
             data: AnimationSource((
@@ -2874,279 +2194,7 @@
                 tags: ["light_enemy", "horizon_heavy", "recorded"],
             )),
         ),
-        /*[127]*/ (
-            id: (143),
-            name: "DP BSP / Wall Blocks",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_wall_blocks.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (16, 24, 27), noise_enabled: false, noise_color: (16, 24, 27), noise: (seed: 143, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 143),
-                reflection: (strength: 16, roughness: 192),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[128]*/ (
-            id: (144),
-            name: "DP BSP / Wall Recess",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_wall_recess.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (14, 21, 24), noise_enabled: false, noise_color: (14, 21, 24), noise: (seed: 144, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 144),
-                reflection: (strength: 16, roughness: 192),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[129]*/ (
-            id: (145),
-            name: "DP BSP / Circuit Panel",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_circuit_panel.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (15, 25, 28), noise_enabled: false, noise_color: (15, 25, 28), noise: (seed: 145, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 145),
-                reflection: (strength: 20, roughness: 184),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[130]*/ (
-            id: (146),
-            name: "DP BSP / Machine Panel",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_machine_panel.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (17, 25, 27), noise_enabled: false, noise_color: (17, 25, 27), noise: (seed: 146, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 146),
-                reflection: (strength: 20, roughness: 184),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[131]*/ (
-            id: (147),
-            name: "DP BSP / Conduit Node",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_conduit_node.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (18, 28, 30), noise_enabled: false, noise_color: (18, 28, 30), noise: (seed: 147, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 147),
-                reflection: (strength: 20, roughness: 180),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[132]*/ (
-            id: (148),
-            name: "DP BSP / Vent Vertical",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_vent_vertical.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (21, 31, 33), noise_enabled: false, noise_color: (21, 31, 33), noise: (seed: 148, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 148),
-                reflection: (strength: 18, roughness: 188),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[133]*/ (
-            id: (149),
-            name: "DP BSP / Vent Horizontal",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_vent_horizontal.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (21, 31, 33), noise_enabled: false, noise_color: (21, 31, 33), noise: (seed: 149, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 149),
-                reflection: (strength: 18, roughness: 188),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[134]*/ (
-            id: (150),
-            name: "DP BSP / Inset Plate",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_inset_plate.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (18, 26, 29), noise_enabled: false, noise_color: (18, 26, 29), noise: (seed: 150, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 150),
-                reflection: (strength: 18, roughness: 188),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[135]*/ (
-            id: (151),
-            name: "DP BSP / Rib Straight",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_rib_straight.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (34, 24, 21), noise_enabled: false, noise_color: (34, 24, 21), noise: (seed: 151, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 151),
-                reflection: (strength: 18, roughness: 196),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[136]*/ (
-            id: (152),
-            name: "DP BSP / Rib Joint Left",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_rib_joint_left.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (34, 24, 21), noise_enabled: false, noise_color: (34, 24, 21), noise: (seed: 152, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 152),
-                reflection: (strength: 18, roughness: 196),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[137]*/ (
-            id: (153),
-            name: "DP BSP / Rib Joint Right",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_rib_joint_right.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (34, 24, 21), noise_enabled: false, noise_color: (34, 24, 21), noise: (seed: 153, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 153),
-                reflection: (strength: 18, roughness: 196),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[138]*/ (
-            id: (154),
-            name: "DP BSP / Rib Damaged",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_rib_damaged.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (31, 22, 20), noise_enabled: false, noise_color: (31, 22, 20), noise: (seed: 154, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 154),
-                reflection: (strength: 16, roughness: 204),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[139]*/ (
-            id: (155),
-            name: "DP BSP / Signal Green",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_signal_green.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (6, 30, 16), noise_enabled: false, noise_color: (6, 30, 16), noise: (seed: 155, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 155),
-                reflection: (strength: 48, roughness: 120),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[140]*/ (
-            id: (156),
-            name: "DP BSP / Signal Blue",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_signal_blue.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (8, 19, 42), noise_enabled: false, noise_color: (8, 19, 42), noise: (seed: 156, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 156),
-                reflection: (strength: 48, roughness: 120),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[141]*/ (
-            id: (157),
-            name: "DP BSP / Signal Magenta",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_signal_magenta.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (37, 10, 34), noise_enabled: false, noise_color: (37, 10, 34), noise: (seed: 157, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 157),
-                reflection: (strength: 48, roughness: 120),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[142]*/ (
-            id: (158),
-            name: "DP BSP / Signal Amber",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/dp_bsp_tiles/dp_bsp_signal_amber.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (38, 22, 4), noise_enabled: false, noise_color: (38, 22, 4), noise: (seed: 158, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 158),
-                reflection: (strength: 48, roughness: 120),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 0, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 1, rows: 1, frame_count: 1, ticks_per_frame: 1, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
-                face_sidedness: Front,
-                sky_aperture: false,
-                double_sided: false,
-            )),
-        ),
-        /*[143]*/ (
+        /*[87]*/ (
             id: (159),
             name: "DP City / Deck Plate",
             data: Material((
@@ -3163,7 +2211,7 @@
                 double_sided: false,
             )),
         ),
-        /*[144]*/ (
+        /*[88]*/ (
             id: (160),
             name: "DP City / Megastructure Wall",
             data: Material((
@@ -3180,7 +2228,7 @@
                 double_sided: false,
             )),
         ),
-        /*[145]*/ (
+        /*[89]*/ (
             id: (161),
             name: "DP City / Platform Edge",
             data: Material((
@@ -3197,7 +2245,7 @@
                 double_sided: false,
             )),
         ),
-        /*[146]*/ (
+        /*[90]*/ (
             id: (162),
             name: "DP City / Dense Teal Light Bay",
             data: Material((
@@ -3214,7 +2262,7 @@
                 double_sided: false,
             )),
         ),
-        /*[147]*/ (
+        /*[91]*/ (
             id: (163),
             name: "DP City / Bright Green Signal",
             data: Material((
@@ -3231,7 +2279,7 @@
                 double_sided: false,
             )),
         ),
-        /*[148]*/ (
+        /*[92]*/ (
             id: (164),
             name: "DP City / Bright Blue Signal",
             data: Material((
@@ -3248,7 +2296,7 @@
                 double_sided: false,
             )),
         ),
-        /*[149]*/ (
+        /*[93]*/ (
             id: (165),
             name: "DP City / Cable Run (Average)",
             data: Material((
@@ -3265,7 +2313,7 @@
                 double_sided: false,
             )),
         ),
-        /*[150]*/ (
+        /*[94]*/ (
             id: (166),
             name: "DP City / Hanging Lattice (Average)",
             data: Material((
@@ -3282,7 +2330,7 @@
                 double_sided: false,
             )),
         ),
-        /*[151]*/ (
+        /*[95]*/ (
             id: (167),
             name: "DP City / Ceiling Underside",
             data: Material((
@@ -3299,7 +2347,7 @@
                 double_sided: false,
             )),
         ),
-        /*[152]*/ (
+        /*[96]*/ (
             id: (168),
             name: "DP City / Structural Beam",
             data: Material((
@@ -3316,6 +2364,40 @@
                 double_sided: false,
             )),
         ),
+        /*[97]*/ (
+            id: (169),
+            name: "Sky: Quake Layered Sunset",
+            data: Material((
+                texture_mode: SimpleImage,
+                psxt_path: Some("assets/textures/sky/quake_layered_sunset_4bpp.psxt"),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
+                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
+                reflection: (strength: 255, roughness: 8),
+                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
+                face_sidedness: Front,
+                sky_aperture: true,
+                double_sided: false,
+            )),
+        ),
+        /*[98]*/ (
+            id: (170),
+            name: "Sky: Directional Sunset Cube",
+            data: Material((
+                texture_mode: SimpleImage,
+                psxt_path: Some("assets/textures/sky/directional_sunset_cube_4bpp.psxt"),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
+                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
+                reflection: (strength: 255, roughness: 8),
+                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0), light_pulse: (minimum_q7: 80, maximum_q7: 208, ticks_per_cycle: 72, phase: 0)),
+                face_sidedness: Front,
+                sky_aperture: true,
+                double_sided: false,
+            )),
+        ),
     ],
-    next_resource_id: 169,
+    next_resource_id: 171,
 )
