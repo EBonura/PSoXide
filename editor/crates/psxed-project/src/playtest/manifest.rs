@@ -441,8 +441,26 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     // Both classes share UI.PAK / UI_PACK_TOC; only the staging differs.
     let ui_pack_max_chunk_bytes = streamed_class_max_chunk_bytes(package, StreamedClass::UiImage);
     let ui_pack_image_cache_slots = streamed_class_chunk_count(package, StreamedClass::UiImage);
-    let gameplay_pack_max_chunk_bytes =
-        streamed_class_max_chunk_bytes(package, StreamedClass::Gameplay);
+    // A cube sky is band-streamed straight into VRAM by
+    // `VramRuntime::upload_cube_sky_banded`, never staged whole, so it must not
+    // size the transient staging buffer. At 1536x256 4bpp it is 196,828 bytes
+    // against a 32,924-byte runner-up, and letting it set this constant cost
+    // 94 KiB of guest RAM for a texture that is copied once and discarded.
+    let cube_sky_assets: Vec<usize> = package
+        .rooms
+        .iter()
+        .filter(|room| room.sky.flags & psx_level::sky_flags::CUBE != 0)
+        .filter_map(|room| room.sky.texture_asset_index)
+        .collect();
+    let gameplay_pack_max_chunk_bytes = package
+        .assets
+        .iter()
+        .enumerate()
+        .filter(|(_, asset)| asset.streamed_class == StreamedClass::Gameplay)
+        .filter(|(index, _)| !cube_sky_assets.contains(index))
+        .map(|(_, asset)| asset.bytes.len())
+        .max()
+        .unwrap_or(0);
     let persistent_asset_slot_count = package.assets.len().max(1);
     let persistent_asset_page_count = package
         .assets
@@ -2159,7 +2177,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, attack_active_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, max_health_secondary: {}, soul_value: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, alert_clip: {}, turn_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, attack_speed_q8: {}, attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, heavy_attack_clip: {}, heavy_attack_speed_q8: {}, heavy_attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, ranged_attack_clip: {}, ranged_attack_speed_q8: {}, ranged_attack_frame_range: CharacterActionFrameRange {{ start: {}, end: {} }}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, ranged_attack_action: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, attack_active_ticks: {}, heavy_attack_active_ticks: {}, ranged_attack_active_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, max_health_secondary: {}, soul_value: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -2172,10 +2190,22 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.strafe_right_clip,
             entity.run_clip,
             entity.attack_clip,
+            entity.attack_speed_q8,
+            entity.attack_frame_range.start,
+            entity.attack_frame_range.end,
+            entity.heavy_attack_clip,
+            entity.heavy_attack_speed_q8,
+            entity.heavy_attack_frame_range.start,
+            entity.heavy_attack_frame_range.end,
+            entity.ranged_attack_clip,
+            entity.ranged_attack_speed_q8,
+            entity.ranged_attack_frame_range.start,
+            entity.ranged_attack_frame_range.end,
             entity.stagger_clip,
             entity.death_clip,
             entity.combat_capsule_first,
             entity.combat_capsule_count,
+            entity.ranged_attack_action,
             entity.x,
             entity.y,
             entity.z,
@@ -2199,6 +2229,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.group_attack_delay_ticks,
             entity.windup_ticks,
             entity.attack_active_ticks,
+            entity.heavy_attack_active_ticks,
+            entity.ranged_attack_active_ticks,
             entity.recovery_ticks,
             entity.attack_min_range,
             entity.attack_max_range,
