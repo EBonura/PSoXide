@@ -160,6 +160,12 @@ impl VitalityPool {
         self.current = self.maximum;
     }
 
+    fn heal(&mut self, amount: u16) -> u16 {
+        let before = self.current;
+        self.current = self.current.saturating_add(amount).min(self.maximum);
+        self.current - before
+    }
+
     fn empty(&mut self) {
         self.current = 0;
     }
@@ -252,6 +258,13 @@ impl DualVitality {
     pub fn refill(&mut self) {
         self.pools[0].refill();
         self.pools[1].refill();
+    }
+
+    /// Restore up to `amount` to one channel, returning what was actually
+    /// restored. Regeneration needs a partial top-up; `refill` is all or
+    /// nothing.
+    pub fn heal(&mut self, channel: VitalityChannelId, amount: u16) -> u16 {
+        self.pools[channel.index()].heal(amount)
     }
 
     /// Empty both channels for an unconditional environmental death.
@@ -419,8 +432,25 @@ impl PowerUpLoadout {
         vitality: &DualVitality,
         modules: &[psx_level::BoostModuleRecord],
     ) -> VitalityModifiers {
+        self.modifiers_for(vitality, modules, None)
+    }
+
+    /// The same sum restricted to one channel's two sockets.
+    ///
+    /// Under the active-stance rules only the active state's boons act, so the
+    /// inactive state's sockets are inert until it is swapped to. Passing
+    /// `None` keeps the historical behaviour of summing all four.
+    pub fn modifiers_for(
+        self,
+        vitality: &DualVitality,
+        modules: &[psx_level::BoostModuleRecord],
+        active: Option<VitalityChannelId>,
+    ) -> VitalityModifiers {
         let mut bonuses_q12 = [0i32; psx_level::boost_stat::COUNT];
         for slot in BoostSlotId::ALL {
+            if active.is_some_and(|channel| slot.channel() != channel) {
+                continue;
+            }
             let module_id = self.module(slot);
             let Some(module) = module_id.index().and_then(|index| modules.get(index)) else {
                 continue;
@@ -714,7 +744,11 @@ mod tests {
         assert!(!outcome.actor_defeated);
         assert_eq!((outcome.first_current, outcome.second_current), (0, 1));
         assert_eq!(outcome.damage_applied, 199);
-        assert!(vitality.apply_spill(VitalityChannelId::Two, 1).actor_defeated);
+        assert!(
+            vitality
+                .apply_spill(VitalityChannelId::Two, 1)
+                .actor_defeated
+        );
     }
 
     #[test]
@@ -957,5 +991,451 @@ mod tests {
         vitality.refill();
         assert_eq!(vitality.pool(VitalityChannelId::One).current(), 75);
         assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 75);
+    }
+}
+
+/// Authored numbers governing the active/inactive vitality stance.
+///
+/// Every value is exposed rather than baked so the feel can be tuned without a
+/// rebuild. Q12 fields are multipliers where 4096 is unity.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CombatStanceConfig {
+    /// Damage taken when the incoming attack matches the active channel.
+    pub aligned_damage_q12: u16,
+    /// Damage taken when it does not.
+    pub opposed_damage_q12: u16,
+    /// Ticks after taking damage before the inactive pool starts recovering.
+    pub regen_delay_ticks: u16,
+    /// Ticks before a pool that reached zero starts recovering. Longer than
+    /// [`Self::regen_delay_ticks`]: breaking a state is meant to cost.
+    pub broken_regen_delay_ticks: u16,
+    /// Health restored per tick, Q12, so a rate below one per tick is
+    /// expressible without a separate accumulator in the caller.
+    pub regen_per_tick_q12: u16,
+    /// Fraction of maximum a broken pool must reach to be selectable again.
+    pub break_threshold_q12: u16,
+    /// Ticks before another voluntary swap is allowed.
+    pub swap_cooldown_ticks: u16,
+    /// Ticks the HUD spends animating a swap. Presentation only.
+    pub swap_duration_ticks: u16,
+}
+
+impl CombatStanceConfig {
+    /// Starting point for authoring: 50% aligned, 150% opposed.
+    pub const DEFAULT: Self = Self {
+        aligned_damage_q12: VITALITY_Q12_ONE / 2,
+        opposed_damage_q12: VITALITY_Q12_ONE + VITALITY_Q12_ONE / 2,
+        regen_delay_ticks: 90,
+        broken_regen_delay_ticks: 300,
+        regen_per_tick_q12: VITALITY_Q12_ONE / 4,
+        break_threshold_q12: VITALITY_Q12_ONE / 4,
+        swap_cooldown_ticks: 30,
+        swap_duration_ticks: 12,
+    };
+}
+
+impl Default for CombatStanceConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Why a swap happened, so presentation and cooldown can differ.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StanceSwap {
+    /// The player pressed swap and it was allowed.
+    Voluntary,
+    /// The active pool broke, so the stance had nowhere to stay.
+    Forced,
+}
+
+/// Result of one damage event routed through the stance.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct StanceDamageOutcome {
+    /// Damage actually removed, after alignment scaling.
+    pub damage_applied: u16,
+    /// The active pool reached zero on this event.
+    pub broke: bool,
+    /// The break forced a swap to the other channel.
+    pub forced_swap: bool,
+    /// Both pools are empty.
+    pub defeated: bool,
+}
+
+/// Which vitality channel is active, and the timers around swapping.
+///
+/// Only the active pool takes damage; only the inactive pool recovers. Swapping
+/// is therefore the healing mechanic, and the cooldown is what stops it being
+/// free.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CombatStance {
+    active: VitalityChannelId,
+    swap_cooldown: u16,
+    swap_elapsed: u16,
+    regen_delay: [u16; 2],
+    broken: [bool; 2],
+    regen_fraction_q12: [u16; 2],
+}
+
+impl CombatStance {
+    /// Start in `active` with both pools whole and no timers running.
+    pub const fn new(active: VitalityChannelId) -> Self {
+        Self {
+            active,
+            swap_cooldown: 0,
+            swap_elapsed: 0,
+            regen_delay: [0; 2],
+            broken: [false; 2],
+            regen_fraction_q12: [0; 2],
+        }
+    }
+
+    /// The channel taking damage and using its boons.
+    pub const fn active(self) -> VitalityChannelId {
+        self.active
+    }
+
+    /// The channel recovering.
+    pub const fn inactive(self) -> VitalityChannelId {
+        self.active.other()
+    }
+
+    /// Whether a channel is broken and unselectable.
+    pub const fn is_broken(self, channel: VitalityChannelId) -> bool {
+        self.broken[channel.index()]
+    }
+
+    /// Ticks left before another voluntary swap.
+    pub const fn swap_cooldown(self) -> u16 {
+        self.swap_cooldown
+    }
+
+    /// How far through the swap animation the HUD is, Q12.
+    pub fn swap_progress_q12(self, config: &CombatStanceConfig) -> u16 {
+        if config.swap_duration_ticks == 0 || self.swap_elapsed >= config.swap_duration_ticks {
+            return VITALITY_Q12_ONE;
+        }
+        ((u32::from(self.swap_elapsed) * u32::from(VITALITY_Q12_ONE))
+            / u32::from(config.swap_duration_ticks)) as u16
+    }
+
+    /// Whether the player may swap right now.
+    pub const fn can_swap(self) -> bool {
+        self.swap_cooldown == 0 && !self.broken[self.inactive().index()]
+    }
+
+    /// Attempt a voluntary swap.
+    pub fn request_swap(&mut self, config: &CombatStanceConfig) -> Option<StanceSwap> {
+        if !self.can_swap() {
+            return None;
+        }
+        self.swap_to(self.inactive(), config);
+        Some(StanceSwap::Voluntary)
+    }
+
+    fn swap_to(&mut self, channel: VitalityChannelId, config: &CombatStanceConfig) {
+        self.active = channel;
+        self.swap_cooldown = config.swap_cooldown_ticks;
+        self.swap_elapsed = 0;
+    }
+
+    /// Route one incoming attack. Only the active pool is damaged; the
+    /// multiplier is chosen by whether the attack's channel matches it.
+    pub fn apply_damage(
+        &mut self,
+        vitality: &mut DualVitality,
+        attack: VitalityChannelId,
+        damage: u16,
+        config: &CombatStanceConfig,
+    ) -> StanceDamageOutcome {
+        let scale = if attack == self.active {
+            config.aligned_damage_q12
+        } else {
+            config.opposed_damage_q12
+        };
+        let scaled = ((u32::from(damage) * u32::from(scale)) / u32::from(VITALITY_Q12_ONE))
+            .min(u32::from(u16::MAX)) as u16;
+        let outcome = vitality.apply_damage(self.active, scaled);
+
+        let active = self.active.index();
+        if outcome.damage_applied > 0 {
+            self.regen_delay[active] = config.regen_delay_ticks;
+            self.regen_fraction_q12[active] = 0;
+        }
+
+        let mut result = StanceDamageOutcome {
+            damage_applied: outcome.damage_applied,
+            broke: outcome.channel_depleted,
+            forced_swap: false,
+            defeated: vitality.is_defeated(),
+        };
+        if outcome.channel_depleted {
+            self.broken[active] = true;
+            // A broken pool cannot stay active, so the swap ignores the
+            // cooldown: refusing it would leave the player with no selectable
+            // state at all. It still costs the longer recovery delay.
+            self.regen_delay[active] = config.broken_regen_delay_ticks;
+            if !result.defeated {
+                self.swap_to(self.inactive(), config);
+                result.forced_swap = true;
+            }
+        }
+        result
+    }
+
+    /// Advance one fixed tick: cooldowns, then recovery on the inactive pool.
+    ///
+    /// `regen_bonus_q12` is the Regeneration boon's contribution, which comes
+    /// from the *active* state's boons and heals the inactive pool.
+    pub fn tick(
+        &mut self,
+        vitality: &mut DualVitality,
+        config: &CombatStanceConfig,
+        regen_bonus_q12: u16,
+    ) {
+        self.swap_cooldown = self.swap_cooldown.saturating_sub(1);
+        self.swap_elapsed = self.swap_elapsed.saturating_add(1);
+
+        let inactive = self.inactive();
+        let index = inactive.index();
+        if self.regen_delay[index] > 0 {
+            self.regen_delay[index] -= 1;
+            return;
+        }
+
+        let pool = vitality.pool(inactive);
+        if pool.current() >= pool.maximum() {
+            return;
+        }
+        let rate = config.regen_per_tick_q12.saturating_add(regen_bonus_q12);
+        let carried = self.regen_fraction_q12[index].saturating_add(rate);
+        let whole = carried / VITALITY_Q12_ONE;
+        self.regen_fraction_q12[index] = carried % VITALITY_Q12_ONE;
+        if whole > 0 {
+            vitality.heal(inactive, whole);
+        }
+
+        // Selectable again once recovery passes the authored threshold.
+        if self.broken[index] {
+            let pool = vitality.pool(inactive);
+            let threshold = ((u32::from(pool.maximum()) * u32::from(config.break_threshold_q12))
+                / u32::from(VITALITY_Q12_ONE)) as u16;
+            if pool.current() >= threshold.max(1) {
+                self.broken[index] = false;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stance_tests {
+    use super::*;
+
+    fn config() -> CombatStanceConfig {
+        CombatStanceConfig {
+            regen_delay_ticks: 2,
+            broken_regen_delay_ticks: 5,
+            regen_per_tick_q12: VITALITY_Q12_ONE,
+            break_threshold_q12: VITALITY_Q12_ONE / 2,
+            swap_cooldown_ticks: 3,
+            swap_duration_ticks: 4,
+            ..CombatStanceConfig::DEFAULT
+        }
+    }
+
+    #[test]
+    fn only_the_active_pool_takes_damage() {
+        let mut vitality = DualVitality::equal(100);
+        let mut stance = CombatStance::new(VitalityChannelId::One);
+        stance.apply_damage(&mut vitality, VitalityChannelId::One, 20, &config());
+        assert_eq!(
+            vitality.pool(VitalityChannelId::Two).current(),
+            100,
+            "the inactive pool is never touched by an attack"
+        );
+    }
+
+    #[test]
+    fn alignment_halves_and_mismatch_multiplies() {
+        let config = config();
+        let mut aligned = DualVitality::equal(200);
+        let mut stance = CombatStance::new(VitalityChannelId::One);
+        // Attack on the active channel: 50%.
+        let hit = stance.apply_damage(&mut aligned, VitalityChannelId::One, 40, &config);
+        assert_eq!(hit.damage_applied, 20);
+
+        let mut opposed = DualVitality::equal(200);
+        let mut stance = CombatStance::new(VitalityChannelId::One);
+        // Attack on the other channel while One is active: 150%.
+        let hit = stance.apply_damage(&mut opposed, VitalityChannelId::Two, 40, &config);
+        assert_eq!(hit.damage_applied, 60);
+        assert_eq!(
+            opposed.pool(VitalityChannelId::One).current(),
+            140,
+            "the opposed hit still lands on the active pool, only harder"
+        );
+    }
+
+    #[test]
+    fn breaking_the_active_pool_forces_a_swap_through_the_cooldown() {
+        let config = config();
+        let mut vitality = DualVitality::equal(30);
+        let mut stance = CombatStance::new(VitalityChannelId::One);
+        // Put a cooldown on the clock so the forced swap has one to ignore.
+        stance.request_swap(&config);
+        stance.request_swap(&config);
+        assert!(!stance.can_swap(), "a voluntary swap is on cooldown");
+
+        let active = stance.active();
+        let hit = stance.apply_damage(&mut vitality, active, 1000, &config);
+        assert!(hit.broke);
+        assert!(hit.forced_swap, "a broken pool cannot stay active");
+        assert!(!hit.defeated, "the other pool is still whole");
+        assert_eq!(stance.active(), active.other());
+        assert!(stance.is_broken(active));
+        assert!(
+            !stance.can_swap(),
+            "swapping back into a broken pool is refused"
+        );
+    }
+
+    #[test]
+    fn a_broken_pool_waits_longer_then_becomes_selectable_at_the_threshold() {
+        let config = config();
+        let mut vitality = DualVitality::equal(10);
+        let mut stance = CombatStance::new(VitalityChannelId::One);
+        stance.apply_damage(&mut vitality, VitalityChannelId::One, 1000, &config);
+        assert!(stance.is_broken(VitalityChannelId::One));
+
+        // The longer delay runs before a single point comes back.
+        for _ in 0..config.broken_regen_delay_ticks {
+            stance.tick(&mut vitality, &config, 0);
+            assert_eq!(vitality.pool(VitalityChannelId::One).current(), 0);
+        }
+        // Then one point per tick. The threshold is half of ten.
+        for _ in 0..4 {
+            stance.tick(&mut vitality, &config, 0);
+        }
+        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 4);
+        assert!(stance.is_broken(VitalityChannelId::One), "still under half");
+        stance.tick(&mut vitality, &config, 0);
+        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 5);
+        assert!(
+            !stance.is_broken(VitalityChannelId::One),
+            "reaching the threshold makes it selectable again"
+        );
+    }
+
+    #[test]
+    fn only_the_inactive_pool_regenerates_and_only_after_the_delay() {
+        let config = config();
+        let mut vitality = DualVitality::equal(100);
+        let mut stance = CombatStance::new(VitalityChannelId::One);
+        // Damage the inactive pool by swapping, taking a hit, swapping back.
+        stance.apply_damage(&mut vitality, VitalityChannelId::One, 40, &config);
+        let hurt = vitality.pool(VitalityChannelId::One).current();
+        stance.request_swap(&config);
+
+        // The delay set by that damage still has to run out.
+        for _ in 0..config.regen_delay_ticks {
+            stance.tick(&mut vitality, &config, 0);
+            assert_eq!(vitality.pool(VitalityChannelId::One).current(), hurt);
+        }
+        stance.tick(&mut vitality, &config, 0);
+        assert_eq!(vitality.pool(VitalityChannelId::One).current(), hurt + 1);
+        assert_eq!(
+            vitality.pool(VitalityChannelId::Two).current(),
+            100,
+            "the active pool never regenerates"
+        );
+    }
+
+    #[test]
+    fn the_regeneration_boon_speeds_the_inactive_pool() {
+        let config = config();
+        let mut plain =
+            DualVitality::from_pools(VitalityPool::at(50, 100), VitalityPool::full(100));
+        let mut boosted =
+            DualVitality::from_pools(VitalityPool::at(50, 100), VitalityPool::full(100));
+        let mut a = CombatStance::new(VitalityChannelId::Two);
+        let mut b = CombatStance::new(VitalityChannelId::Two);
+        for _ in 0..4 {
+            a.tick(&mut plain, &config, 0);
+            b.tick(&mut boosted, &config, VITALITY_Q12_ONE);
+        }
+        assert_eq!(plain.pool(VitalityChannelId::One).current(), 54);
+        assert_eq!(
+            boosted.pool(VitalityChannelId::One).current(),
+            58,
+            "the boon doubles the authored rate here"
+        );
+    }
+
+    #[test]
+    fn a_fractional_rate_accumulates_instead_of_rounding_to_nothing() {
+        let mut config = config();
+        // A quarter point per tick must still heal, four ticks at a time.
+        config.regen_per_tick_q12 = VITALITY_Q12_ONE / 4;
+        config.regen_delay_ticks = 0;
+        let mut vitality =
+            DualVitality::from_pools(VitalityPool::at(50, 100), VitalityPool::full(100));
+        let mut stance = CombatStance::new(VitalityChannelId::Two);
+        for _ in 0..3 {
+            stance.tick(&mut vitality, &config, 0);
+        }
+        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 50);
+        stance.tick(&mut vitality, &config, 0);
+        assert_eq!(vitality.pool(VitalityChannelId::One).current(), 51);
+    }
+
+    #[test]
+    fn death_needs_both_pools_empty() {
+        let config = config();
+        let mut vitality = DualVitality::equal(10);
+        let mut stance = CombatStance::new(VitalityChannelId::One);
+        let first = stance.apply_damage(&mut vitality, VitalityChannelId::One, 1000, &config);
+        assert!(!first.defeated, "one broken pool is not death");
+        let second = stance.apply_damage(&mut vitality, stance.active(), 1000, &config);
+        assert!(second.defeated);
+        assert!(
+            !second.forced_swap,
+            "there is nowhere to swap to once both are gone"
+        );
+    }
+
+    #[test]
+    fn only_the_active_states_sockets_contribute() {
+        // Two sockets sit on each channel. Under the stance rules the inactive
+        // state's boons are inert, so a per-channel sum must not reach across.
+        for channel in [VitalityChannelId::One, VitalityChannelId::Two] {
+            let mine = BoostSlotId::ALL
+                .into_iter()
+                .filter(|slot| slot.channel() == channel)
+                .count();
+            assert_eq!(mine, 2, "each state owns exactly two boon slots");
+        }
+        for slot in BoostSlotId::ALL {
+            assert_ne!(
+                slot.channel(),
+                slot.channel().other(),
+                "a socket belongs to one state only"
+            );
+        }
+    }
+
+    #[test]
+    fn the_swap_animation_reports_progress_and_completes() {
+        let config = config();
+        let mut vitality = DualVitality::equal(100);
+        let mut stance = CombatStance::new(VitalityChannelId::One);
+        stance.request_swap(&config);
+        assert_eq!(stance.swap_progress_q12(&config), 0);
+        stance.tick(&mut vitality, &config, 0);
+        stance.tick(&mut vitality, &config, 0);
+        assert_eq!(stance.swap_progress_q12(&config), VITALITY_Q12_ONE / 2);
+        for _ in 0..4 {
+            stance.tick(&mut vitality, &config, 0);
+        }
+        assert_eq!(stance.swap_progress_q12(&config), VITALITY_Q12_ONE);
     }
 }
