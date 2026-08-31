@@ -1601,7 +1601,7 @@ fn legacy_boost_modifier(kind: crate::BoostModuleKind) -> crate::BoostStatModifi
 
 fn boost_effect_summary(percentages: [i16; psx_level::boost_stat::COUNT]) -> String {
     const LABELS: [&str; psx_level::boost_stat::COUNT] =
-        ["HRZ ATK", "ZTH ATK", "DEF", "MOVE", "ATK SPD"];
+        ["HRZ ATK", "ZTH ATK", "DEF", "MOVE", "ATK SPD", "REGEN"];
     let mut summary = String::new();
     for (index, percent) in percentages.iter().enumerate() {
         if *percent == 0 {
