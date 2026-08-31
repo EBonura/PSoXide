@@ -1815,6 +1815,22 @@ impl EditorWorkspace {
                                         _ => None,
                                     })
                                     .collect();
+                                let character_loadouts: Vec<_> = self
+                                    .project
+                                    .resources
+                                    .iter()
+                                    .filter_map(|resource| match &resource.data {
+                                        psxed_project::ResourceData::Character(character) => Some((
+                                            resource.id,
+                                            character
+                                                .loadouts
+                                                .iter()
+                                                .map(|loadout| loadout.name.clone())
+                                                .collect::<Vec<_>>(),
+                                        )),
+                                        _ => None,
+                                    })
+                                    .collect();
                                 let weapon_options = collect_weapon_options(&self.project);
                                 let boost_module_options: Vec<(ResourceId, String)> = self
                                     .project
@@ -1928,6 +1944,7 @@ impl EditorWorkspace {
                                                 &mut node.kind,
                                             NodeKindEditorContext {
                                                 character_defaults: &character_defaults,
+                                                character_loadouts: &character_loadouts,
                                                 material_options: &material_options,
                                                 material_texture_dimensions:
                                                     &material_texture_dimensions,

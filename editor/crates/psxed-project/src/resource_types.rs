@@ -1789,6 +1789,14 @@ pub struct CharacterResource {
     /// character variants can share one body without baking duplicate meshes.
     #[serde(default)]
     pub default_equipment: Vec<CharacterEquipmentBinding>,
+    /// Named alternatives to [`Self::default_equipment`], selected per
+    /// placement by [`NodeKind::CharacterController::loadout`].
+    ///
+    /// Empty means this character has exactly one way to be equipped, which is
+    /// the common case and stays as `default_equipment`. Adding loadouts never
+    /// invalidates that: an out-of-range or absent selection falls back to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loadouts: Vec<CharacterLoadout>,
     /// Precise damage-dealing and damage-receiving capsules attached to the
     /// animated rig. Empty preserves the legacy coarse body-cylinder combat
     /// path until a project opts into the authored volume pipeline.
@@ -1921,6 +1929,24 @@ pub enum CharacterSpawnRole {
     Enemy,
 }
 
+/// One named equipment set a character can be spawned with.
+///
+/// A character is one body and one moveset; what it carries is a property of
+/// the placement, not a separate character. Before this existed the project
+/// modelled "Light Enemy with claws", "with a light weapon" and "with a heavy
+/// weapon" as three whole Character resources sharing a model and an animation
+/// set, which meant combat capsules authored on one did not reach the others
+/// and the Studio offered three near-identical entries to pick between.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterLoadout {
+    /// Shown in the editor and in the placement's loadout picker.
+    pub name: String,
+    /// What this loadout carries. An empty list is a real answer: it is how an
+    /// unarmed loadout is expressed.
+    #[serde(default)]
+    pub equipment: Vec<CharacterEquipmentBinding>,
+}
+
 /// Reusable weapon attachment supplied by a [`CharacterResource`].
 ///
 /// A scene-level Equipment component with the same socket overrides this
@@ -1951,6 +1977,20 @@ impl Default for CharacterEquipmentBinding {
 }
 
 impl CharacterResource {
+    /// What a placement carries, given the loadout it selected.
+    ///
+    /// Every consumer resolves equipment through here, so the fallback rule
+    /// is stated once: no selection, or a selection this character no longer
+    /// has, means [`Self::default_equipment`]. A placement therefore survives
+    /// a loadout being deleted or reordered instead of cooking as an error.
+    pub fn equipment_for(&self, loadout: Option<u16>) -> &[CharacterEquipmentBinding] {
+        loadout
+            .and_then(|index| self.loadouts.get(index as usize))
+            .map_or(self.default_equipment.as_slice(), |loadout| {
+                loadout.equipment.as_slice()
+            })
+    }
+
     /// Sensible defaults for a humanoid third-person character.
     /// Sized for the starter project's 1024-unit sector grid.
     pub const fn defaults() -> Self {
@@ -1959,6 +1999,7 @@ impl CharacterResource {
             material: None,
             animation_set: None,
             default_equipment: Vec::new(),
+            loadouts: Vec::new(),
             combat_capsules: Vec::new(),
             spawn_role: CharacterSpawnRole::Auto,
             enemy_behavior: None,

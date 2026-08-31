@@ -434,6 +434,7 @@ fn normalize_loaded_removes_only_legacy_character_capsule_colliders() {
         character,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: Some(CharacterControllerSettings::default()),
             player: true,
@@ -4403,6 +4404,7 @@ fn delete_resource_removes_entry_and_clears_references() {
         entity,
         "Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: Some(target),
             settings: Some(CharacterControllerSettings::default()),
             player: true,
@@ -5013,4 +5015,88 @@ fn a_cooked_bsp_package_carries_no_grid_spatial_state() {
         package.world_geometry,
         crate::playtest::PlaytestWorldGeometry::Pxbsp(_)
     ));
+}
+
+/// A binding is only identified by its socket here; the weapon is what the
+/// assertions care about.
+fn loadout_binding(weapon: ResourceId) -> CharacterEquipmentBinding {
+    CharacterEquipmentBinding {
+        weapon: Some(weapon),
+        character_socket: "left_hand_grip".to_string(),
+        weapon_grip: "grip".to_string(),
+    }
+}
+
+#[test]
+fn a_placement_without_a_loadout_carries_the_character_default() {
+    let mut project = ProjectDocument::default();
+    let sword = project.add_resource("Sword", ResourceData::Weapon(Default::default()));
+    let mut character = CharacterResource::defaults();
+    character.default_equipment = vec![loadout_binding(sword)];
+
+    assert_eq!(character.equipment_for(None).len(), 1);
+    assert_eq!(character.equipment_for(None)[0].weapon, Some(sword));
+}
+
+#[test]
+fn a_placement_with_a_loadout_carries_that_loadout_instead_of_the_default() {
+    let mut project = ProjectDocument::default();
+    let default_sword = project.add_resource("Default", ResourceData::Weapon(Default::default()));
+    let heavy_sword = project.add_resource("Heavy", ResourceData::Weapon(Default::default()));
+    let mut character = CharacterResource::defaults();
+    character.default_equipment = vec![loadout_binding(default_sword)];
+    character.loadouts = vec![
+        CharacterLoadout {
+            name: "Unarmed".to_string(),
+            equipment: Vec::new(),
+        },
+        CharacterLoadout {
+            name: "Heavy Weapon".to_string(),
+            equipment: vec![loadout_binding(heavy_sword)],
+        },
+    ];
+
+    // An unarmed loadout is a real answer, not a missing one: it must not
+    // fall through to the default the way an absent selection does.
+    assert!(character.equipment_for(Some(0)).is_empty());
+    assert_eq!(character.equipment_for(Some(1))[0].weapon, Some(heavy_sword));
+}
+
+#[test]
+fn a_loadout_index_the_character_no_longer_has_falls_back_to_the_default() {
+    // Deleting or reordering loadouts must degrade a stale placement to the
+    // default rather than cooking as an error or an empty hand.
+    let mut project = ProjectDocument::default();
+    let sword = project.add_resource("Sword", ResourceData::Weapon(Default::default()));
+    let mut character = CharacterResource::defaults();
+    character.default_equipment = vec![loadout_binding(sword)];
+
+    assert_eq!(character.equipment_for(Some(7))[0].weapon, Some(sword));
+}
+
+#[test]
+fn a_weapon_reachable_only_through_a_loadout_is_still_a_reference() {
+    // Reference counting decides what a delete may remove and what the cook
+    // may prune, so a loadout-only weapon must not read as unreferenced.
+    let mut project = ProjectDocument::default();
+    let sword = project.add_resource("Sword", ResourceData::Weapon(Default::default()));
+    let mut character = CharacterResource::defaults();
+    character.loadouts = vec![CharacterLoadout {
+        name: "Armed".to_string(),
+        equipment: vec![loadout_binding(sword)],
+    }];
+    project.add_resource("Enemy", ResourceData::Character(character));
+
+    assert_eq!(project.resource_reference_count(sword), 1);
+
+    project.delete_resource(sword);
+    let remaining = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Enemy" => Some(character),
+            _ => None,
+        })
+        .expect("character survives");
+    assert_eq!(remaining.loadouts[0].equipment[0].weapon, None);
 }

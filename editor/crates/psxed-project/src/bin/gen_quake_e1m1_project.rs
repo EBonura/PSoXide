@@ -317,6 +317,7 @@ fn scale_component(kind: NodeKind) -> NodeKind {
             }
         }
         NodeKind::CharacterController {
+            loadout: _,
             character,
             mut settings,
             player,
@@ -336,6 +337,7 @@ fn scale_component(kind: NodeKind) -> NodeKind {
                 }
             }
             NodeKind::CharacterController {
+                loadout: None,
                 character,
                 settings,
                 player,

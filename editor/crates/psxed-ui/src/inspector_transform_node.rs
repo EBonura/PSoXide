@@ -2080,6 +2080,9 @@ pub(crate) struct NodeKindEditorContext<'a> {
     /// Each Character's own tuning, used as the shown value and the seed for a
     /// per-placement override.
     pub(crate) character_defaults: &'a [(ResourceId, psxed_project::CharacterControllerSettings)],
+    /// Each Character's named loadouts, in declaration order, so a placement
+    /// can pick one by index without reaching back into the project.
+    pub(crate) character_loadouts: &'a [(ResourceId, Vec<String>)],
     pub(crate) weapon_options: &'a [(ResourceId, String)],
     pub(crate) boost_module_options: &'a [(ResourceId, String)],
     pub(crate) animator_clip_context: Option<&'a AnimatorClipContext>,
@@ -2088,6 +2091,54 @@ pub(crate) struct NodeKindEditorContext<'a> {
     pub(crate) nav_target: &'a mut Option<ResourceId>,
     pub(crate) character_preview_action: &'a mut Option<psxed_project::CharacterAnimationAction>,
     pub(crate) camera_preview: Option<EditorCameraPreviewPresentation>,
+}
+
+/// Loadout picker for a placed Character Controller.
+///
+/// Hidden entirely when the Character declares no loadouts, which is the
+/// common case: a character with one way to be equipped should not grow a
+/// control that only ever offers "Default".
+fn draw_character_loadout_picker(
+    ui: &mut egui::Ui,
+    character: Option<ResourceId>,
+    loadout: &mut Option<u16>,
+    character_loadouts: &[(ResourceId, Vec<String>)],
+) -> bool {
+    let Some(names) = character
+        .and_then(|id| {
+            character_loadouts
+                .iter()
+                .find_map(|(candidate, names)| (*candidate == id).then_some(names))
+        })
+        .filter(|names| !names.is_empty())
+    else {
+        return false;
+    };
+
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Loadout");
+        // A stale index still cooks as the default, so name it as such rather
+        // than showing an index the Character no longer has.
+        let preview = loadout
+            .and_then(|index| names.get(index as usize))
+            .map_or("Default", String::as_str);
+        egui::ComboBox::from_id_salt("character-controller-loadout")
+            .selected_text(preview)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(loadout, None, "Default")
+                    .changed();
+                for (index, name) in names.iter().enumerate() {
+                    changed |= ui
+                        .selectable_value(loadout, Some(index as u16), name)
+                        .changed();
+                }
+            });
+    })
+    .response
+    .on_hover_text("Which of the Character's named loadouts this placement carries.");
+    changed
 }
 
 pub(crate) fn draw_node_kind_editor(
@@ -2114,6 +2165,7 @@ pub(crate) fn draw_node_kind_editor(
         model_options,
         character_options,
         character_defaults,
+        character_loadouts,
         weapon_options,
         boost_module_options,
         animator_clip_context,
@@ -3511,6 +3563,7 @@ pub(crate) fn draw_node_kind_editor(
             changed |= collider_shape_editor(ui, shape);
         }
         NodeKind::CharacterController {
+            loadout,
             character,
             settings,
             player,
@@ -3544,6 +3597,7 @@ pub(crate) fn draw_node_kind_editor(
                 *settings = Some(working);
             }
             changed |= edited;
+            changed |= draw_character_loadout_picker(ui, *character, loadout, character_loadouts);
         }
         NodeKind::Camera { settings } => {
             ui.weak("Component: third-person gameplay camera for the player Entity. The Entity transform supplies the start position and yaw.");

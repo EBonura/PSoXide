@@ -1774,6 +1774,7 @@ fn snap_entities_to_floor_preserves_exact_ramp_height_and_deduplicates_component
         entity,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: None,
             player: false,
