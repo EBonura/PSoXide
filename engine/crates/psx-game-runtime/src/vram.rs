@@ -1836,6 +1836,20 @@ impl<
                 continue;
             }
 
+            // A cube atlas is 1536x256 at 4bpp: 196,608 bytes of pixels that
+            // are copied straight to VRAM and never read again. Staging that
+            // whole is what sized the load/render arena at 192 KiB, so stream
+            // it through a few KiB instead and upload row bands as they land.
+            if kind == SkyTextureKind::Cube {
+                if self
+                    .upload_cube_sky_banded(cd, scratch, asset.id, ui_pack_start_lba, ui_pack_toc)
+                    .is_none()
+                {
+                    telemetry::counter(telemetry::counter::VRAM_CLUT_FULL, 0);
+                }
+                continue;
+            }
+
             // The CD read writes whole sectors as bytes through the scratch's
             // u32-aligned staging view; the read consumes it before the
             // upload, and nothing else touches it during gameplay.
@@ -1862,6 +1876,142 @@ impl<
             };
             let _ = self.ensure_sky_texture_uploaded(layout, kind, asset.id, bytes);
         }
+    }
+
+    /// Stream one cube-sky atlas from CD straight into VRAM.
+    ///
+    /// VRAM is reserved before the read so the per-band callback only needs the
+    /// destination rects, never `&mut self`. Each band uploads whole atlas rows
+    /// (768 bytes at 1536 texels of 4bpp) and the trailing CLUT lands in the
+    /// final tail, so the window never has to hold more than a row plus a
+    /// sector. Returns `None` and frees the reservation if anything fails, so a
+    /// bad read cannot leave VRAM allocated to a half-written sky.
+    #[cfg(feature = "cd-stream-bench")]
+    fn upload_cube_sky_banded<const LEN: usize>(
+        &mut self,
+        cd: &mut cd_stream::CdController,
+        scratch: &mut FontPackScratch<LEN>,
+        asset_id: AssetId,
+        ui_pack_start_lba: u32,
+        ui_pack_toc: &'static [LevelWorldPackEntryRecord],
+    ) -> Option<()> {
+        const ASSET_AND_TEXTURE_HEADER_BYTES: usize = 28;
+        let halfwords_per_row = DIRECTIONAL_SKY_ATLAS_WIDTH / 4;
+        let row_bytes = usize::from(halfwords_per_row) * 2;
+        let clut_bytes = usize::from(DIRECTIONAL_SKY_CLUT_ENTRIES) * 2;
+
+        if self
+            .find_vram_slot(asset_id, VramSlotClutMode::DirectionalSky)
+            .is_some()
+        {
+            return Some(());
+        }
+
+        let idx = self.next_vram_slot()?;
+        let (left_tpage, page_region) = self.allocator.alloc_page_run(6, TexDepth::Bit4, 256)?;
+        let (clut, clut_region) = match self.allocator.alloc_clut(DIRECTIONAL_SKY_CLUT_ENTRIES) {
+            Some(allocation) => allocation,
+            None => {
+                self.allocator.free(page_region);
+                telemetry::counter(telemetry::counter::VRAM_CLUT_FULL, 1);
+                return None;
+            }
+        };
+
+        // One row plus one sector is the smallest window that always makes
+        // progress; round up to keep the staging view word aligned.
+        let window_words = (row_bytes + cd_stream::SECTOR_BYTES * 2).div_ceil(4);
+        let Some(window) = scratch.stage_words_mut(window_words) else {
+            self.allocator.free(page_region);
+            self.allocator.free(clut_region);
+            return None;
+        };
+
+        telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
+        let base_x = left_tpage.x();
+        let base_y = left_tpage.y();
+        let mut header_taken = false;
+        let mut rows_done: u16 = 0;
+        let mut clut_done = false;
+        let result = cd_stream::read_chunk_banded(
+            cd,
+            ui_pack_start_lba,
+            ui_pack_toc,
+            asset_id.0 as u32,
+            window,
+            |_offset, bytes| {
+                let mut taken = 0usize;
+                if !header_taken {
+                    if bytes.len() < ASSET_AND_TEXTURE_HEADER_BYTES {
+                        return 0;
+                    }
+                    // Dimensions are fixed for a cube atlas and validated by the
+                    // cook; the header is skipped rather than reparsed here
+                    // because the pixel run must stay contiguous.
+                    header_taken = true;
+                    taken = ASSET_AND_TEXTURE_HEADER_BYTES;
+                }
+                if rows_done < DIRECTIONAL_SKY_ATLAS_HEIGHT {
+                    let rows_available = (bytes.len() - taken) / row_bytes;
+                    let rows_left = usize::from(DIRECTIONAL_SKY_ATLAS_HEIGHT - rows_done);
+                    let rows = rows_available.min(rows_left);
+                    if rows > 0 {
+                        let span = rows * row_bytes;
+                        upload_bytes(
+                            VramRect::new(
+                                base_x,
+                                base_y.saturating_add(rows_done),
+                                halfwords_per_row,
+                                rows as u16,
+                            ),
+                            &bytes[taken..taken + span],
+                        );
+                        rows_done = rows_done.saturating_add(rows as u16);
+                        taken += span;
+                    }
+                }
+                if !clut_done
+                    && rows_done == DIRECTIONAL_SKY_ATLAS_HEIGHT
+                    && bytes.len() - taken >= clut_bytes
+                {
+                    upload_model_clut(
+                        VramRect::new(clut.x(), clut.y(), DIRECTIONAL_SKY_CLUT_ENTRIES, 1),
+                        &bytes[taken..taken + clut_bytes],
+                        false,
+                    );
+                    clut_done = true;
+                    taken += clut_bytes;
+                }
+                taken
+            },
+        );
+        telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
+
+        if result.status != cd_stream::ROOM_CHUNK_STATUS_OK
+            || rows_done != DIRECTIONAL_SKY_ATLAS_HEIGHT
+            || !clut_done
+        {
+            self.allocator.free(page_region);
+            self.allocator.free(clut_region);
+            return None;
+        }
+        telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
+
+        self.slots[idx] = Some(VramSlot {
+            asset: asset_id,
+            clut_mode: VramSlotClutMode::DirectionalSky,
+            ready: true,
+            clut_word: clut.uv_clut_word(),
+            tpage_word: left_tpage.uv_tpage_word(0),
+            texture_window: TextureWindow::NONE,
+            texture_width: DIRECTIONAL_SKY_ATLAS_WIDTH,
+            texture_height: DIRECTIONAL_SKY_ATLAS_HEIGHT,
+            region: page_region,
+            clut_region,
+        });
+        self.slot_count = self.slot_count.saturating_add(1);
+        let _ = self.residency.mark_vram_resident(asset_id);
+        Some(())
     }
 
     /// Free the streamed sky panorama's VRAM on gameplay exit: return its two-page

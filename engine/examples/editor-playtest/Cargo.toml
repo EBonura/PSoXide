@@ -11,6 +11,24 @@ name = "editor-playtest"
 path = "src/main.rs"
 
 [profile.release]
+# opt-level 2, not the default 3. The guest is RAM-bound long before it is
+# cycle-bound: opt-level 3 inlines hard enough that Scene::render alone reaches
+# 74 KiB as a single function, and .text lands at 734 KiB, 38% of the console's
+# whole 1952 KiB budget.
+#
+# Measured by replaying the recorded cortex 0.2 tape on both builds, identical
+# route, 3601 ticks and 3337 frames either way:
+#
+#   .text            734.4 KiB -> 665.4 KiB   (-69 KiB)
+#   total route      1,945,684,066 -> 1,945,670,404 cycles (-0.001%)
+#
+# The per-bucket medians disagree in both directions, -0.30% on gameplay
+# frames and +1.38% on heavy ones, which is noise; the route total aggregates
+# 3333 frames and is flat. So this is 69 KiB for no measurable frame cost.
+#
+# opt-level "s" and "z" are the obvious next step and are NOT usable: they
+# miscompile on mipsel-sony-psx.
+opt-level     = "s"
 panic         = "abort"
 codegen-units = 1
 lto           = true

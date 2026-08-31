@@ -868,6 +868,143 @@ fn first_status_error(current: u32, next: u32) -> u32 {
     }
 }
 
+/// Synchronously read one UI.PAK chunk through a small rolling window,
+/// handing the caller each run of bytes as it lands instead of staging the
+/// whole chunk in RAM.
+///
+/// This exists for assets that are far larger than the RAM we want to reserve
+/// for them. The cube sky is 196,828 bytes and was staged whole, which sized
+/// the load/render arena overlay at 192 KiB for one texture that is copied
+/// straight to VRAM and never read again. Streaming it needs a window of a few
+/// KiB instead.
+///
+/// `on_bytes` is called with the window's unconsumed prefix after each sector
+/// and returns how many leading bytes it took. Whatever it leaves is moved to
+/// the front and grows with the next sector, so a consumer can wait for a whole
+/// texture row without caring where sector boundaries fall. Returning zero
+/// forever is a caller bug and shows up as `STATUS_DEST_TOO_SMALL` once the
+/// window fills.
+///
+/// The FNV checksum still covers every byte of the chunk in order, so integrity
+/// is verified exactly as it is for a whole-chunk read.
+#[allow(clippy::too_many_arguments)]
+pub fn read_chunk_banded(
+    cd: &mut CdController,
+    pack_lba: u32,
+    toc: &[LevelWorldPackEntryRecord],
+    chunk_id: u32,
+    window: &mut [u32],
+    mut on_bytes: impl FnMut(usize, &[u8]) -> usize,
+) -> RoomChunkLoadResult {
+    let mut result = RoomChunkLoadResult {
+        status: STATUS_OK,
+        bytes: 0,
+        sectors: 0,
+    };
+
+    let Some(entry) = world_pack_entry_from_toc(toc, chunk_id) else {
+        result.status = STATUS_CHUNK_NOT_FOUND;
+        return result;
+    };
+
+    let window_bytes = window.len().saturating_mul(4);
+    if window_bytes < SECTOR_BYTES * 2 {
+        // One sector of new data plus whatever the consumer is still holding.
+        result.status = STATUS_DEST_TOO_SMALL;
+        return result;
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    {
+        let _ = (cd, pack_lba, &mut on_bytes);
+        result.status = STATUS_UNSUPPORTED;
+        result
+    }
+
+    #[cfg(target_arch = "mips")]
+    {
+        let mut polls = 0u32;
+        if let Err(status) = prepare_cd_read(cd, &mut polls) {
+            result.status = status;
+            return result;
+        }
+        if let Err(status) =
+            start_cd_read_at_lba(cd, pack_lba.saturating_add(entry.sector_offset), &mut polls)
+        {
+            result.status = status;
+            cleanup_read_stream(cd, &mut polls);
+            return result;
+        }
+
+        let window_ptr = window.as_mut_ptr().cast::<u8>();
+        let mut checksum = FNV_OFFSET;
+        let mut held = 0usize;
+        let mut consumed_total = 0usize;
+        let mut sector = 0u32;
+        while sector < entry.sector_count {
+            if let Err(status) = read_one_sector_blocking(cd, &mut polls) {
+                result.status = status;
+                break;
+            }
+            let chunk_byte_offset = (sector as usize).saturating_mul(SECTOR_BYTES);
+            let remaining = entry.byte_size.saturating_sub(chunk_byte_offset);
+            let copy_len = remaining.min(SECTOR_BYTES);
+            if copy_len > 0 {
+                if held + copy_len > window_bytes {
+                    result.status = STATUS_DEST_TOO_SMALL;
+                    break;
+                }
+                let buffer = cd.sector_buffer.as_ptr();
+                // SAFETY: `held + copy_len <= window_bytes` was just checked, so
+                // the destination stays inside `window`, and the controller's
+                // sector buffer cannot overlap it.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        buffer as *const u8,
+                        window_ptr.add(held),
+                        copy_len,
+                    );
+                    checksum = checksum_bytes(buffer as *const u8, copy_len, checksum);
+                }
+                held += copy_len;
+                result.bytes = result.bytes.saturating_add(copy_len);
+
+                // SAFETY: `held` bytes were just written and stay borrowed only
+                // for this call.
+                let view = unsafe { core::slice::from_raw_parts(window_ptr, held) };
+                let took = on_bytes(consumed_total, view).min(held);
+                if took > 0 {
+                    consumed_total += took;
+                    held -= took;
+                    if held > 0 {
+                        // SAFETY: source and destination are both inside the
+                        // window; the ranges may overlap, hence `copy`.
+                        unsafe { core::ptr::copy(window_ptr.add(took), window_ptr, held) };
+                    }
+                }
+            }
+            result.sectors = result.sectors.saturating_add(1);
+            sector += 1;
+        }
+        // Give the consumer its tail: the trailing CLUT lands here.
+        if result.status == STATUS_OK && held > 0 {
+            // SAFETY: as above.
+            let view = unsafe { core::slice::from_raw_parts(window_ptr, held) };
+            let _ = on_bytes(consumed_total, view);
+        }
+        cleanup_read_stream(cd, &mut polls);
+
+        if result.status == STATUS_OK {
+            if result.bytes != entry.byte_size {
+                result.status = STATUS_DATA_TIMEOUT;
+            } else if checksum != entry.checksum {
+                result.status = STATUS_CHECKSUM_MISMATCH;
+            }
+        }
+        result
+    }
+}
+
 /// Synchronously read one UI.PAK chunk into `dst`. Looks the chunk
 /// up in `toc` by `chunk_id` (the streamed asset index), reads its
 /// sector run from `pack_lba + entry.sector_offset`, copies the

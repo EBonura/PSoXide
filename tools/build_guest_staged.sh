@@ -36,7 +36,27 @@ GUEST_DIR="engine/examples/editor-playtest"
 EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 # The linker script is reached relative to the guest crate directory, so the
 # stage has to mirror the repository layout rather than flatten it.
-RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
+# -disable-mips-df-backward-search is a CORRECTNESS flag, not a tuning knob.
+# LLVM's MipsDelaySlotFiller searches backwards for an instruction to fill a
+# branch delay slot and will hoist a load into it whose destination the very
+# next instruction reads. On MIPS-I that reads the register one cycle before
+# the load lands:
+#
+#   bne   $3, $1, ...      ; branch
+#   lwr   $2, 0x4($6)      ; delay slot: loads into $2
+#   addiu $8, $2, -0x1     ; load delay slot: reads the STALE $2
+#
+# The R3000A has no load interlock, so this is silently wrong on hardware and
+# in any faithful emulator. Measured by hashing 900 CollisionHull::trace_into
+# calls and 300 point_leaf_index queries over the real cooked brush_world.pxbsp
+# against a native oracle: opt-z, lto=thin and lto=off all diverge, and this
+# flag makes every one of them bit-exact. A scan of the shipping guest found
+# eight violating load sites at opt-level 2 and three at opt-level "s"; with
+# this flag, zero at both.
+#
+# This also retires the standing "guest opt-level s miscompiles" rule, which
+# was mis-attributed: opt-s is correct, the delay-slot filler was not.
+RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort -Cllvm-args=-disable-mips-df-backward-search -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 # Raw PS-X EXE builds have no symbol table. Ask lld for an optional side map
 # without changing the output image, so an exact profiled binary can be
 # attributed instead of rebuilt through a layout-changing diagnostic path.
