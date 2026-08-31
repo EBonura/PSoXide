@@ -3642,6 +3642,14 @@ fn render_ui_value_binding(binding: UiValueBinding) -> String {
                 crate::playtest::cook_option_id(option)
             )
         }
+        UiValueBinding::PlayerStanceActiveHealth => "LevelUiValueBinding::PlayerStanceActiveHealth".to_string(),
+        UiValueBinding::PlayerStanceActiveHealthMax => "LevelUiValueBinding::PlayerStanceActiveHealthMax".to_string(),
+        UiValueBinding::PlayerStanceInactiveHealth => "LevelUiValueBinding::PlayerStanceInactiveHealth".to_string(),
+        UiValueBinding::PlayerStanceInactiveHealthMax => "LevelUiValueBinding::PlayerStanceInactiveHealthMax".to_string(),
+        UiValueBinding::PlayerStanceSwapProgress => "LevelUiValueBinding::PlayerStanceSwapProgress".to_string(),
+        UiValueBinding::PlayerStanceActiveIsZenith => "LevelUiValueBinding::PlayerStanceActiveIsZenith".to_string(),
+        UiValueBinding::PlayerStanceActiveBroken => "LevelUiValueBinding::PlayerStanceActiveBroken".to_string(),
+        UiValueBinding::PlayerStanceInactiveBroken => "LevelUiValueBinding::PlayerStanceInactiveBroken".to_string(),
         UiValueBinding::PlayerHealth => "LevelUiValueBinding::PlayerHealth".to_string(),
         UiValueBinding::PlayerHealthMax => "LevelUiValueBinding::PlayerHealthMax".to_string(),
         UiValueBinding::PlayerHealthSecondary => {

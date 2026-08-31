@@ -2734,6 +2734,25 @@ pub enum LevelUiValueBinding {
     PlayerHealthSecondaryEmptyInfluence,
     /// Full-end influence of the secondary health channel (Q12).
     PlayerHealthSecondaryFullInfluence,
+    /// Health of whichever pool is currently active, so a bar can follow the
+    /// stance instead of a fixed colour.
+    PlayerStanceActiveHealth,
+    /// Maximum of the active pool.
+    PlayerStanceActiveHealthMax,
+    /// Health of the pool that is currently recovering.
+    PlayerStanceInactiveHealth,
+    /// Maximum of the inactive pool.
+    PlayerStanceInactiveHealthMax,
+    /// How far through a stance swap the HUD is, Q12, reaching one when the
+    /// swap has settled. Presentation only.
+    PlayerStanceSwapProgress,
+    /// One when Zenith is the active pool, zero when Horizon is. Lets an
+    /// authored bar tint itself for the state it is showing.
+    PlayerStanceActiveIsZenith,
+    /// One while the active pool is broken.
+    PlayerStanceActiveBroken,
+    /// One while the inactive pool is broken and cannot be swapped to.
+    PlayerStanceInactiveBroken,
     /// Player stamina value.
     PlayerStamina,
     /// Player stamina maximum.

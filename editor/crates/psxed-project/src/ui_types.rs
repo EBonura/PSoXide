@@ -365,6 +365,24 @@ pub enum UiValueBinding {
     PlayerStamina,
     /// Player stamina maximum.
     PlayerStaminaMax,
+    /// Health of whichever pool is currently active, so a bar follows the
+    /// stance rather than a fixed colour.
+    PlayerStanceActiveHealth,
+    /// Maximum of the active pool.
+    PlayerStanceActiveHealthMax,
+    /// Health of the pool that is currently recovering.
+    PlayerStanceInactiveHealth,
+    /// Maximum of the inactive pool.
+    PlayerStanceInactiveHealthMax,
+    /// How far through a stance swap the HUD is (Q12), reaching one when the
+    /// swap has settled.
+    PlayerStanceSwapProgress,
+    /// One when Zenith is active, zero when Horizon is.
+    PlayerStanceActiveIsZenith,
+    /// One while the active pool is broken.
+    PlayerStanceActiveBroken,
+    /// One while the inactive pool is broken and cannot be swapped to.
+    PlayerStanceInactiveBroken,
     /// Live world-load progress (Q12, 0..=4096) while the engine
     /// streams the next state's world. Zero outside loading screens.
     LoadingProgress,
@@ -386,6 +404,14 @@ impl UiValueBinding {
             Self::PlayerHealthSecondaryFullInfluence => "Player Secondary Health Full Influence",
             Self::PlayerStamina => "Player Stamina",
             Self::PlayerStaminaMax => "Player Stamina Max",
+            Self::PlayerStanceActiveHealth => "Active State Health",
+            Self::PlayerStanceActiveHealthMax => "Active State Health Max",
+            Self::PlayerStanceInactiveHealth => "Inactive State Health",
+            Self::PlayerStanceInactiveHealthMax => "Inactive State Health Max",
+            Self::PlayerStanceSwapProgress => "State Swap Progress",
+            Self::PlayerStanceActiveIsZenith => "Active State Is Zenith",
+            Self::PlayerStanceActiveBroken => "Active State Broken",
+            Self::PlayerStanceInactiveBroken => "Inactive State Broken",
             Self::LoadingProgress => "Loading Progress",
         }
     }
