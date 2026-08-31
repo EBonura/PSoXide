@@ -19,6 +19,7 @@ pub mod destructible;
 pub mod mover;
 pub mod pxbsp;
 pub mod pxbsp_resident;
+pub mod toolchain_probe;
 pub mod render;
 pub mod resident;
 pub mod sky;
