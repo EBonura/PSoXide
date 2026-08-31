@@ -451,9 +451,7 @@ impl CharacterAnimationAction {
             | Self::HeavyAttack
             | Self::ComboAttack
             | Self::RangedAttack
-            | Self::Block => {
-                Some(AnimationRole::Attack)
-            }
+            | Self::Block => Some(AnimationRole::Attack),
             Self::HitReact => Some(AnimationRole::Hit),
             Self::Death => Some(AnimationRole::Death),
             Self::Stun | Self::StunRecovery | Self::HitReactAlt => Some(AnimationRole::Hit),
@@ -1568,9 +1566,18 @@ pub struct CharacterCombatCapsule {
     /// Joint-local capsule geometry.
     #[serde(default)]
     pub capsule: JointCapsule,
+    /// Editor-authored local orientation for a procedural projectile preview.
+    /// Enemy projectile gameplay still aims at its live target; this controls
+    /// how the charge and release direction are inspected in Animation Studio.
+    #[serde(default, skip_serializing_if = "is_zero_q12_rotation")]
+    pub projectile_preview_rotation_q12: [i16; 3],
     /// Whether this volume receives or deals damage.
     #[serde(default)]
     pub role: CombatCapsuleRole,
+}
+
+fn is_zero_q12_rotation(rotation: &[i16; 3]) -> bool {
+    *rotation == [0; 3]
 }
 
 impl Default for CharacterCombatCapsule {
@@ -1579,6 +1586,7 @@ impl Default for CharacterCombatCapsule {
             name: "Body Hurtbox".to_string(),
             joint: 0,
             capsule: JointCapsule::default(),
+            projectile_preview_rotation_q12: [0; 3],
             role: CombatCapsuleRole::Hurtbox,
         }
     }
