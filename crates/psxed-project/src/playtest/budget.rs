@@ -82,9 +82,17 @@ pub const PLAYTEST_RESIDENT_ASSET_PAGE_BYTES: usize = 2048;
 /// limit was a linker overflow after the fact, naming a section rather than a
 /// clip.
 ///
-/// Measured 2026-08-19 by raising `PERSISTENT_ASSET_PAGE_COUNT` in the
-/// generated manifest and relinking: 354 pages (724,992 B) fits, 355 overflows
-/// the RAM region by 368 bytes. The linker script gives static sections
+/// Re-measured 2026-08-31 the way this doc prescribes, by raising
+/// `PERSISTENT_ASSET_PAGE_COUNT` in the generated manifest and relinking:
+/// 491 pages fits, 492 overflows. The previous figure (354 measured, 344 cap)
+/// had gone stale in the direction that matters: the cook passed a 331-page
+/// package that the linker then rejected by 71,212 B, so the audit was waving
+/// through builds it exists to stop and every failure surfaced as an opaque
+/// `.bss will not fit` instead of a budget message.
+///
+/// The ceiling moved up, not down, because the guest freed ~250 KiB in the
+/// same session: opt-level "s" plus -disable-mips-df-backward-search, and
+/// band-streaming the cube sky out of the 192 KiB load/render overlay. The linker script gives static sections
 /// `2M - 64K BIOS - 32K stack` = 1,998,848 B, so that ceiling is really "what
 /// is left after this build's code and other arenas", and it moves when they
 /// do. The cap sits 10 pages under the measured point so ordinary code growth
@@ -95,11 +103,11 @@ pub const PLAYTEST_RESIDENT_ASSET_PAGE_BYTES: usize = 2048;
 /// residency lands this becomes a per-scene figure. Re-measure by bisecting the
 /// manifest constant against the link; do not trust this value after a large
 /// code change.
-pub const PLAYTEST_RESIDENT_ASSET_PAGES: usize = 344;
+pub const PLAYTEST_RESIDENT_ASSET_PAGES: usize = 481;
 
 /// Measured link ceiling behind [`PLAYTEST_RESIDENT_ASSET_PAGES`], kept so the
 /// margin is visible rather than folded into one rounded number.
-pub const PLAYTEST_RESIDENT_ASSET_MEASURED_PAGES: usize = 354;
+pub const PLAYTEST_RESIDENT_ASSET_MEASURED_PAGES: usize = 491;
 
 /// Resident ceiling in bytes.
 pub const PLAYTEST_RESIDENT_ASSET_BYTES: usize =
