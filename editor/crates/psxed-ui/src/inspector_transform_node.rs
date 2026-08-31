@@ -2083,6 +2083,9 @@ pub(crate) struct NodeKindEditorContext<'a> {
     /// Each Character's named loadouts, in declaration order, so a placement
     /// can pick one by index without reaching back into the project.
     pub(crate) character_loadouts: &'a [(ResourceId, Vec<String>)],
+    /// How many solid brushes name the node being edited as their model
+    /// owner, so a brush module can say when it owns nothing yet.
+    pub(crate) owned_brush_count: usize,
     pub(crate) weapon_options: &'a [(ResourceId, String)],
     pub(crate) boost_module_options: &'a [(ResourceId, String)],
     pub(crate) animator_clip_context: Option<&'a AnimatorClipContext>,
@@ -2182,6 +2185,7 @@ pub(crate) fn draw_node_kind_editor(
         character_options,
         character_defaults,
         character_loadouts,
+        owned_brush_count,
         weapon_options,
         boost_module_options,
         animator_clip_context,
@@ -3923,6 +3927,25 @@ pub(crate) fn draw_node_kind_editor(
             ui.weak(
                 "Brush module. Assign one or more solid BSP brushes through their Model owner; all assigned brushes break as one object.",
             );
+            // A brush module with no brushes looks identical in the viewport to
+            // one that is wired up: both are just the placeholder marker. Say
+            // which it is, and where the wiring lives.
+            let owned = owned_brush_count;
+            if owned == 0 {
+                ui.colored_label(
+                    Color32::from_rgb(220, 120, 100),
+                    "No brushes assigned. Select a brush, then set its Model owner to this node.",
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!(
+                        "{owned} brush{} assigned",
+                        if owned == 1 { "" } else { "es" }
+                    ))
+                    .color(STUDIO_TEXT_WEAK)
+                    .small(),
+                );
+            }
             changed |= ui.checkbox(enabled, "Enabled").changed();
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Health").color(STUDIO_TEXT_WEAK));

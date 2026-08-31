@@ -1844,6 +1844,16 @@ impl EditorWorkspace {
                                     })
                                     .collect();
                                 let selected = self.selection.selected_node;
+                                // Brushes naming this node as their model owner.
+                                // A Door or Destructible that owns none looks
+                                // exactly like one that is wired up.
+                                let owned_brush_count = self
+                                    .project
+                                    .active_scene()
+                                    .brushes
+                                    .iter()
+                                    .filter(|brush| brush.mover == Some(selected))
+                                    .count();
                                 let animator_clip_context = selected_animator_clip_context(
                                     &self.project,
                                     selected,
@@ -1945,6 +1955,7 @@ impl EditorWorkspace {
                                             NodeKindEditorContext {
                                                 character_defaults: &character_defaults,
                                                 character_loadouts: &character_loadouts,
+                                                owned_brush_count,
                                                 material_options: &material_options,
                                                 material_texture_dimensions:
                                                     &material_texture_dimensions,
