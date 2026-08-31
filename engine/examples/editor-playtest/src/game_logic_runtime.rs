@@ -357,6 +357,64 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
     ) -> [i32; 3] {
         self.step_inner(entity, room, position, dx, dz, radius, height, true)
     }
+
+    fn line_of_sight(
+        &mut self,
+        room: RoomIndex,
+        from: [i32; 3],
+        to: [i32; 3],
+    ) -> bool {
+        if room != self.player_room {
+            return false;
+        }
+        let mut aabbs =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
+        let Some(_) = self
+            .box_props
+            .collect_collision_blockers_checked_into(BOX_PROPS, room, &mut aabbs)
+        else {
+            return false;
+        };
+        let Some(_) =
+            psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked_into(
+                ARCH_PROPS,
+                ARCH_PROP_COLLISIONS,
+                room,
+                &mut aabbs,
+            )
+        else {
+            return false;
+        };
+        let Some(_) =
+            psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into_filtered(
+                IMAGE_PROPS,
+                room,
+                &mut aabbs,
+                |index| {
+                    typed_world_object_active(
+                        WORLD_OBJECTS,
+                        self.destructibles,
+                        psx_level::world_object_kind::IMAGE_PROP,
+                        index,
+                    )
+                },
+            )
+        else {
+            return false;
+        };
+        let Some(bsp) = self.bsp.as_deref_mut() else {
+            // Legacy grid projects have no arbitrary 3D segment provider.
+            return true;
+        };
+        bsp.trace_point_segment(
+            RoomPoint::new(from[0], from[1], from[2]),
+            RoomPoint::new(to[0], to[1], to[2]),
+            aabbs.as_slice(),
+            self.destructibles,
+        )
+        .is_ok_and(|trace| !trace.hit())
+    }
 }
 
 /// The game entity owning cooked model instance `instance`, if any.
@@ -433,10 +491,10 @@ impl Playtest {
                 .copied()
                 .flatten()
                 .map(|snapshot| snapshot.pose());
-            if entity.flags & psx_level::game_entity_flags::RANGED_ATTACK != 0 {
+            if attack.is_ranged() {
                 if let Some(release) = combat::authored_projectile_release(
                     attacker_capsules,
-                    CharacterAnimationAction::LightAttack,
+                    attack.action(),
                     attacker_pose,
                 ) {
                     let aim = [
@@ -478,7 +536,7 @@ impl Playtest {
             }
             let contact = combat::resolve_authored_actor_contact(
                 attacker_capsules,
-                CharacterAnimationAction::LightAttack,
+                attack.action(),
                 attacker_pose,
                 player_capsules,
                 player_pose,
@@ -1301,6 +1359,8 @@ impl Playtest {
                 clip: psx_level::OptionalModelClipIndex::some(psx_level::ModelClipIndex(clip.clip)),
                 phase_ticks: clip.phase_ticks,
                 one_shot: clip.one_shot,
+                speed_q8: clip.speed_q8,
+                frame_range: clip.frame_range,
             });
         }
     }

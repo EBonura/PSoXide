@@ -2684,9 +2684,7 @@ mod tests {
         assert_eq!(resolved.material.clut_word(), crystal_slot.clut_word);
         assert_eq!(
             resolved.uv_mapping,
-            ModelUvMapping::CameraCrystal {
-                roughness: 1,
-            }
+            ModelUvMapping::CameraCrystal { roughness: 1 }
         );
     }
 

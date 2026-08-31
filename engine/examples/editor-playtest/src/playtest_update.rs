@@ -227,6 +227,7 @@ impl Playtest {
                     player: player_pos,
                     player_room: self.room_index,
                     player_radius,
+                    player_height,
                     player_invulnerable,
                     // SAFETY: every active-room entry below `active_count` was
                     // initialized while walking the resident window above.
