@@ -5676,11 +5676,12 @@ impl EditorWorkspace {
                             }
                         }
                         BrushEditMode::Face => {
+                            // Every face, including the ones facing away. Culling
+                            // them meant a face's handle vanished the moment you
+                            // orbited past it, or never appeared at all from
+                            // inside a room.
                             for (_, center, normal) in brush_elements::face_handles(brush, &solved)
                             {
-                                if !self.brush_face_handle_visible(center, normal) {
-                                    continue;
-                                }
                                 let normal_end = [
                                     center[0] + normal[0] * 48.0,
                                     center[1] + normal[1] * 48.0,
@@ -6055,7 +6056,13 @@ impl EditorWorkspace {
         })
     }
 
-    pub(crate) fn brush_face_handle_visible(&self, center: [f64; 3], normal: [f64; 3]) -> bool {
+    /// Whether a face's outward normal points back at the 3D camera.
+    ///
+    /// Face handles are drawn and picked on both sides of a brush, so this no
+    /// longer gates visibility: a face you have orbited behind still offers its
+    /// handle. It survives as the tie-break for picking, where a face and the
+    /// one opposite it can project onto the same screen point.
+    pub(crate) fn brush_face_faces_camera(&self, center: [f64; 3], normal: [f64; 3]) -> bool {
         let camera = self.viewport_3d_camera().basis().position;
         let to_camera = [
             f64::from(camera[0]) - center[0],
@@ -6121,10 +6128,15 @@ impl EditorWorkspace {
                 }
             }
             BrushEditMode::Face => {
-                for (face, center, normal) in brush_elements::face_handles(brush, &solved) {
-                    if !self.brush_face_handle_visible(center, normal) {
-                        continue;
-                    }
+                // Both sides are pickable, so a face and the one opposite it can
+                // land within the same handle radius. `consider` keeps the first
+                // of equal distances, so offer the camera-facing ones first and
+                // the near face wins.
+                let mut faces = brush_elements::face_handles(brush, &solved);
+                faces.sort_by_key(|(_, center, normal)| {
+                    u8::from(!self.brush_face_faces_camera(*center, *normal))
+                });
+                for (face, center, normal) in faces {
                     if let Some(screen) = self.project_brush_point_3d(rect, center) {
                         consider(
                             screen,
