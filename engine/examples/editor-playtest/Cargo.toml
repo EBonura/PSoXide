@@ -26,9 +26,24 @@ path = "src/main.rs"
 # frames and +1.38% on heavy ones, which is noise; the route total aggregates
 # 3333 frames and is flat. So this is 69 KiB for no measurable frame cost.
 #
-# opt-level "s" and "z" are the obvious next step and are NOT usable: they
-# miscompile on mipsel-sony-psx.
-opt-level     = "s"
+# opt-level "s" is correct here, and is still not the right trade. The old ban
+# was mis-attributed to the optimisation level; the real fault was LLVM's MIPS
+# delay-slot filler, now disabled in tools/build_guest_staged.sh. But measured
+# on the same 0.2 tape, -Os redistributes the same total work into far spikier
+# frames:
+#
+#                            >8 vblanks   4-8   heavy median
+#   opt2 + flag                      10   357      2,832,423
+#   opt-s + flag                    112   190      3,519,313
+#
+# Total route cycles are within 0.03% of each other, so this is scheduling and
+# instruction-cache behaviour, not more work: -Os gives up the unrolling that
+# keeps this renderer inside a 4 KB I-cache. 112 frames over eight vblanks is a
+# visible hitch; the RAM it buys is better found in the assets.
+#
+# opt-level "z" remains unusable for a different reason: rustc itself SIGSEGVs
+# compiling psx-engine with it.
+opt-level     = 2
 panic         = "abort"
 codegen-units = 1
 lto           = true
