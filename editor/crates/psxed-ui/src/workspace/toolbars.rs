@@ -988,12 +988,12 @@ impl EditorWorkspace {
                 let snap_before = self.snap_units;
                 ui.add(
                     egui::DragValue::new(&mut self.snap_units)
-                        .range(1..=256)
+                        .range(1..=2048)
                         .speed(1.0)
                         .prefix("Grid "),
                 );
                 ui.horizontal_wrapped(|ui| {
-                    for step in [1_u16, 2, 4, 8, 16, 32, 64, 128, 256] {
+                    for step in [1_u16, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048] {
                         ui.selectable_value(&mut self.snap_units, step, step.to_string());
                     }
                 });
