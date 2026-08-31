@@ -1259,3 +1259,43 @@ fn resource_filter_and_search_match_expected_resources() {
         &material_search
     ));
 }
+
+#[test]
+fn the_loadout_picker_hides_for_a_character_that_has_no_loadouts() {
+    // Aletha and the Heavy Enemy have one way to be equipped; a control that
+    // only ever offers "Default" is noise on every placement of them.
+    assert_eq!(
+        crate::inspector_transform_node::loadout_picker_label(None, &[]),
+        None
+    );
+}
+
+#[test]
+fn the_loadout_picker_stays_visible_for_a_selection_that_outlived_its_loadouts() {
+    // Otherwise the placement keeps a value nobody can see or clear.
+    assert_eq!(
+        crate::inspector_transform_node::loadout_picker_label(Some(1), &[]),
+        Some("Default")
+    );
+}
+
+#[test]
+fn the_loadout_picker_names_the_selection_and_falls_back_for_a_stale_index() {
+    let names = ["Artigli".to_string(), "Light Weapon".to_string()];
+    assert_eq!(
+        crate::inspector_transform_node::loadout_picker_label(None, &names),
+        Some("Default")
+    );
+    assert_eq!(
+        crate::inspector_transform_node::loadout_picker_label(Some(0), &names),
+        Some("Artigli")
+    );
+    assert_eq!(
+        crate::inspector_transform_node::loadout_picker_label(Some(1), &names),
+        Some("Light Weapon")
+    );
+    assert_eq!(
+        crate::inspector_transform_node::loadout_picker_label(Some(9), &names),
+        Some("Default")
+    );
+}
