@@ -124,6 +124,13 @@ impl<'a> UiScratch<'a> {
 }
 
 impl Playtest {
+    /// Whether the stance is at rest, so the authored HUD owns the bars.
+    fn settled_stance(&self) -> bool {
+        self.player_stance
+            .swap_progress_q12(&self.player_stance_config)
+            >= 4096
+    }
+
     /// Answer one `souls.` text tag. `tag` arrives with the namespace already
     /// stripped, so this is a two-arm compare on the remainder.
     ///
@@ -405,8 +412,15 @@ impl Scene for Playtest {
             // bars themselves stay put: the active one is always the large top
             // bar. Four labels, two shown, so HRZ and ZTH trade places on a
             // swap without duplicating the bars or their dividers.
-            "stance.horizon.active" => self.player_stance.active() == VitalityChannelId::One,
-            "stance.zenith.active" => self.player_stance.active() == VitalityChannelId::Two,
+            "stance.horizon.active" => {
+                self.settled_stance() && self.player_stance.active() == VitalityChannelId::One
+            }
+            "stance.zenith.active" => {
+                self.settled_stance() && self.player_stance.active() == VitalityChannelId::Two
+            }
+            // The bars and their ladders stand down for the length of a swap so
+            // the overlay can slide them across without drawing twice.
+            "stance.settled" => self.settled_stance(),
             _ => true,
         }
     }
@@ -1833,6 +1847,47 @@ impl Scene for Playtest {
                 .draw(&font, camera, room, overlay_tick);
         }
 
+
+        /// Q12 unity, matching psx_game_runtime::vitality.
+        const VITALITY_Q12_ONE: u16 = 4096;
+        /// Bar colours mirroring the authored HUD labels.
+        const HORIZON_BAR_RGB: (u8, u8, u8) = (214, 75, 48);
+        const ZENITH_BAR_RGB: (u8, u8, u8) = (67, 169, 154);
+
+        // While a stance swap is settling the authored bars stand down and the
+        // overlay draws the pair crossing over, because a node's rect cannot be
+        // animated from a binding.
+        {
+            let config = self.player_stance_config;
+            let progress = self.player_stance.swap_progress_q12(&config);
+            if progress < VITALITY_Q12_ONE {
+                let share = |channel| {
+                    let pool = self.player_vitality.pool(channel);
+                    if pool.maximum() == 0 {
+                        0
+                    } else {
+                        ((u32::from(pool.current()) * u32::from(VITALITY_Q12_ONE))
+                            / u32::from(pool.maximum())) as u16
+                    }
+                };
+                let rising = self.player_stance.active();
+                let falling = self.player_stance.inactive();
+                let rgb = |channel| {
+                    if channel == VitalityChannelId::One {
+                        HORIZON_BAR_RGB
+                    } else {
+                        ZENITH_BAR_RGB
+                    }
+                };
+                draw_stance_swap(
+                    progress,
+                    share(rising),
+                    rgb(rising),
+                    share(falling),
+                    rgb(falling),
+                );
+            }
+        }
 
         #[cfg(feature = "fps-overlay")]
         if let Some(font) = self.ui_fonts[0].as_ref() {

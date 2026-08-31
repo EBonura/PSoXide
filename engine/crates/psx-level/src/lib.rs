@@ -1654,8 +1654,9 @@ pub mod game_entity_flags {
     pub const ENABLED: u16 = 1 << 0;
     /// The Character authors a Run action, enabling chase-speed locomotion.
     pub const CAN_RUN: u16 = 1 << 1;
-    /// The LightAttack action releases an authored projectile and uses the
-    /// cooked ranged attack band instead of body-radius melee reach.
+    /// The Character has an authored projectile attack variant. The runtime
+    /// uses its cooked range band at distance and keeps close-range attacks
+    /// on the Horizon light/heavy actions.
     pub const RANGED_ATTACK: u16 = 1 << 2;
 }
 
@@ -1766,6 +1767,22 @@ pub struct LevelGameEntityRecord {
     pub run_clip: u16,
     /// One-shot clip spanning Windup + Attack + Recover.
     pub attack_clip: u16,
+    /// Q8 playback speed authored for the Horizon Light action.
+    pub attack_speed_q8: u16,
+    /// Inclusive authored playback range for the Horizon Light action.
+    pub attack_frame_range: CharacterActionFrameRange,
+    /// Horizon Heavy variant, falling back to `attack_clip` at cook time.
+    pub heavy_attack_clip: u16,
+    /// Q8 playback speed authored for the Horizon Heavy action.
+    pub heavy_attack_speed_q8: u16,
+    /// Inclusive authored playback range for the Horizon Heavy action.
+    pub heavy_attack_frame_range: CharacterActionFrameRange,
+    /// Authored projectile variant, falling back to `attack_clip` at cook time.
+    pub ranged_attack_clip: u16,
+    /// Q8 playback speed authored for the projectile action.
+    pub ranged_attack_speed_q8: u16,
+    /// Inclusive authored playback range for the projectile action.
+    pub ranged_attack_frame_range: CharacterActionFrameRange,
     /// Complete one-shot while Staggered: impact, disabled beat, and recovery.
     /// Cooked from the Stun action, with HitReact as the legacy fallback.
     pub stagger_clip: u16,
@@ -1777,6 +1794,8 @@ pub struct LevelGameEntityRecord {
     /// Number of rig-attached volumes (bounded by
     /// [`MAX_CHARACTER_COMBAT_CAPSULES`]).
     pub combat_capsule_count: u8,
+    /// [`CharacterAnimationAction`] index owning the projectile emitter.
+    pub ranged_attack_action: u8,
     /// Room-local spawn X.
     pub x: i32,
     /// Y.
@@ -1826,6 +1845,10 @@ pub struct LevelGameEntityRecord {
     /// 60 Hz ticks in the committed attack state. The cooker extends the
     /// legacy six ticks when an authored hit or projectile event lands later.
     pub attack_active_ticks: u16,
+    /// Committed ticks for the Horizon Heavy variant.
+    pub heavy_attack_active_ticks: u16,
+    /// Committed ticks for the projectile variant.
+    pub ranged_attack_active_ticks: u16,
     /// 60 Hz ticks of post-attack recovery (the punish window).
     pub recovery_ticks: u8,
     /// Closest XZ distance at which a ranged attack may begin. Zero for melee.
@@ -3702,6 +3725,12 @@ impl CharacterAnimationAction {
     /// Convert to the cooked action slot index.
     pub const fn to_index(self) -> usize {
         self as usize
+    }
+
+    /// Resolve a compact cooked action index without accepting invalid enum
+    /// discriminants from malformed package data.
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
     }
 }
 

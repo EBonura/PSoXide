@@ -1129,7 +1129,7 @@ impl Playtest {
             let Some(entity) = GAME_ENTITIES.get(attack.entity()) else {
                 continue;
             };
-            if entity.flags & psx_level::game_entity_flags::RANGED_ATTACK == 0 {
+            if !attack.is_ranged() {
                 continue;
             }
             let first = entity.combat_capsule_first.to_usize();
@@ -1143,7 +1143,7 @@ impl Playtest {
                 .map(|snapshot| snapshot.pose());
             let Some(charge) = psx_game_runtime::combat::authored_projectile_charge(
                 capsules,
-                CharacterAnimationAction::LightAttack,
+                attack.action(),
                 pose,
             ) else {
                 continue;

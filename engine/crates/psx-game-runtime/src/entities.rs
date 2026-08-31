@@ -36,7 +36,10 @@
 
 use crate::combat::{arc_hits_circle, MeleeArc};
 use crate::vitality::{DualVitality, VitalityChannelId, VitalityPool};
-use psx_level::{game_entity_flags, LevelGameEntityRecord, RoomIndex};
+use psx_level::{
+    game_entity_flags, CharacterActionFrameRange, CharacterAnimationAction, LevelGameEntityRecord,
+    RoomIndex, CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+};
 use psx_math::atan2_q12;
 
 /// Souls behavior state for one entity. The all-zero pattern is
@@ -125,6 +128,15 @@ pub const GAME_ENTITY_ATTACK_REACH_MARGIN: i32 = 8;
 /// Ticks the attack active window lasts.
 pub const GAME_ENTITY_ATTACK_ACTIVE_TICKS: u16 = 6;
 
+/// Packed selected-attack values. Bit 7 records which close-range variant is
+/// next, keeping selection and alternation to one byte per entity.
+const GAME_ENTITY_ATTACK_LIGHT: u8 = 0;
+const GAME_ENTITY_ATTACK_HEAVY: u8 = 1;
+const GAME_ENTITY_ATTACK_RANGED: u8 = 2;
+const GAME_ENTITY_ATTACK_KIND_MASK: u8 = 3;
+const GAME_ENTITY_ATTACK_MELEE_CHASE: u8 = 1 << 6;
+const GAME_ENTITY_ATTACK_NEXT_HEAVY: u8 = 1 << 7;
+
 /// Front-arc half-width for entity attacks, PSX angle units
 /// (60 degrees). The entity faced the player when it committed to
 /// its windup; a player who rolls past the body during the swing
@@ -211,6 +223,13 @@ pub trait GameEntityMover {
     ) -> [i32; 3] {
         self.step(entity, room, position, dx, dz, radius, height)
     }
+
+    /// Whether a point segment from an NPC's eye to the player's eye is clear
+    /// of world geometry. Games without a BSP visibility provider retain the
+    /// previous behavior; BSP-backed games override this and fail closed.
+    fn line_of_sight(&mut self, _room: RoomIndex, _from: [i32; 3], _to: [i32; 3]) -> bool {
+        true
+    }
 }
 
 /// No-clip mover: commits every step verbatim. Host-test shape, and
@@ -248,6 +267,9 @@ pub struct GameEntityTickInput<'a> {
     /// Player body radius, engine units (the player Character's
     /// capsule; the other half of Character-derived attack reach).
     pub player_radius: i32,
+    /// Player body height, used to trace sight at torso height instead of
+    /// along the floor.
+    pub player_height: i32,
     /// True while the player's motor action grants i-frames (roll /
     /// active roll invulnerability). Entity attacks resolve no
     /// contact against an invulnerable player -- the swing stays
@@ -316,7 +338,7 @@ impl GameEntityHitOutcome {
 /// Animation selection for one entity this tick (the AI-state ->
 /// animation-clip seam): which cooked model-local clip its bound
 /// instance should play and where in the clip playback is.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameEntityClip {
     /// Model-local clip index from the cooked record.
     pub clip: u16,
@@ -325,6 +347,24 @@ pub struct GameEntityClip {
     /// One-shot playback: clamp at the clip's final frame instead of
     /// looping.
     pub one_shot: bool,
+    /// Q8 playback speed (`256 = 1.0x`). Combat actions carry the exact
+    /// Animation Set option authored in the editor.
+    pub speed_q8: u16,
+    /// Inclusive source-frame window. Combat event tests and presentation
+    /// therefore sample the same trimmed phase.
+    pub frame_range: CharacterActionFrameRange,
+}
+
+impl Default for GameEntityClip {
+    fn default() -> Self {
+        Self {
+            clip: 0,
+            phase_ticks: 0,
+            one_shot: false,
+            speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            frame_range: CharacterActionFrameRange::FULL,
+        }
+    }
 }
 
 /// One attack contact opportunity frozen by [`GameEntities::tick_delta_deferred`].
@@ -340,6 +380,8 @@ pub struct DeferredGameEntityAttack {
     tick_generation: u16,
     swing_sequence: u16,
     clip: GameEntityClip,
+    action: CharacterAnimationAction,
+    ranged: bool,
     position: [i32; 3],
     yaw: u16,
     room: RoomIndex,
@@ -354,7 +396,11 @@ impl DeferredGameEntityAttack {
             clip: 0,
             phase_ticks: 0,
             one_shot: false,
+            speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            frame_range: CharacterActionFrameRange::FULL,
         },
+        action: CharacterAnimationAction::LightAttack,
+        ranged: false,
         position: [0; 3],
         yaw: 0,
         room: RoomIndex(0),
@@ -368,6 +414,16 @@ impl DeferredGameEntityAttack {
     /// Exact model clip/phase that body, equipment, and hit geometry use.
     pub const fn clip(self) -> GameEntityClip {
         self.clip
+    }
+
+    /// Authored action whose hitbox or projectile emitter owns this swing.
+    pub const fn action(self) -> CharacterAnimationAction {
+        self.action
+    }
+
+    /// Whether this committed swing is the projectile variant.
+    pub const fn is_ranged(self) -> bool {
+        self.ranged
     }
 
     /// Frozen room of the attacker for the contact tick.
@@ -500,6 +556,8 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// Wrapping identity of each entity's current swing. Deferred tokens use
     /// it to reject a contact retained across a later attack.
     attack_sequence: [u16; MAX_ENTITIES],
+    /// Packed selected swing plus next close-range alternation bit.
+    attack_mode: [u8; MAX_ENTITIES],
     /// Free-movement combat choice ([`GameEntityIntent`] as raw u8).
     intent: [u8; MAX_ENTITIES],
     /// Remaining local post-attack cooldown in 60 Hz ticks.
@@ -527,6 +585,110 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
 
     fn has_ranged_attack(record: &LevelGameEntityRecord) -> bool {
         record.flags & game_entity_flags::RANGED_ATTACK != 0
+    }
+
+    fn selected_attack_kind(&self, index: usize) -> u8 {
+        self.attack_mode[index] & GAME_ENTITY_ATTACK_KIND_MASK
+    }
+
+    fn selected_attack_is_ranged(&self, index: usize) -> bool {
+        self.selected_attack_kind(index) == GAME_ENTITY_ATTACK_RANGED
+    }
+
+    fn selected_attack_clip(&self, record: &LevelGameEntityRecord, index: usize) -> u16 {
+        match self.selected_attack_kind(index) {
+            GAME_ENTITY_ATTACK_HEAVY => record.heavy_attack_clip,
+            GAME_ENTITY_ATTACK_RANGED => record.ranged_attack_clip,
+            _ => record.attack_clip,
+        }
+    }
+
+    fn selected_attack_active_ticks(&self, record: &LevelGameEntityRecord, index: usize) -> u16 {
+        match self.selected_attack_kind(index) {
+            GAME_ENTITY_ATTACK_HEAVY => record.heavy_attack_active_ticks,
+            GAME_ENTITY_ATTACK_RANGED => record.ranged_attack_active_ticks,
+            _ => record.attack_active_ticks,
+        }
+        .max(GAME_ENTITY_ATTACK_ACTIVE_TICKS)
+    }
+
+    fn selected_attack_playback(
+        &self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+    ) -> (u16, CharacterActionFrameRange) {
+        match self.selected_attack_kind(index) {
+            GAME_ENTITY_ATTACK_HEAVY => (
+                record.heavy_attack_speed_q8,
+                record.heavy_attack_frame_range,
+            ),
+            GAME_ENTITY_ATTACK_RANGED => (
+                record.ranged_attack_speed_q8,
+                record.ranged_attack_frame_range,
+            ),
+            _ => (record.attack_speed_q8, record.attack_frame_range),
+        }
+    }
+
+    fn selected_attack_action(
+        &self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+    ) -> CharacterAnimationAction {
+        match self.selected_attack_kind(index) {
+            GAME_ENTITY_ATTACK_HEAVY => CharacterAnimationAction::HeavyAttack,
+            GAME_ENTITY_ATTACK_RANGED => {
+                CharacterAnimationAction::from_index(usize::from(record.ranged_attack_action))
+                    .unwrap_or(CharacterAnimationAction::RangedAttack)
+            }
+            _ => CharacterAnimationAction::LightAttack,
+        }
+    }
+
+    /// Update the hybrid attack stance with hysteresis. Enter melee chase at
+    /// the authored preferred distance (never inside the projectile minimum),
+    /// but do not return to ranged until the player has also crossed the
+    /// authored spacing tolerance.
+    fn update_melee_chase(
+        &mut self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        input: GameEntityTickInput<'_>,
+    ) -> bool {
+        if !Self::has_ranged_attack(record) {
+            return true;
+        }
+        let was_melee = self.attack_mode[index] & GAME_ENTITY_ATTACK_MELEE_CHASE != 0;
+        let melee_entry = i32::from(record.preferred_distance.max(record.attack_min_range));
+        let limit = if was_melee {
+            melee_entry.saturating_add(i32::from(record.spacing_tolerance))
+        } else {
+            melee_entry
+        };
+        let melee = self.player_within(index, input, limit);
+        if melee {
+            self.attack_mode[index] |= GAME_ENTITY_ATTACK_MELEE_CHASE;
+        } else {
+            self.attack_mode[index] &= !GAME_ENTITY_ATTACK_MELEE_CHASE;
+        }
+        melee
+    }
+
+    /// Commit one action for the entire Windup/Attack/Recover grammar. Close
+    /// attacks alternate Light, Heavy, Light, Heavy without consuming the
+    /// alternation on ranged shots.
+    fn select_attack(&mut self, index: usize, ranged: bool) {
+        let persistent = self.attack_mode[index]
+            & (GAME_ENTITY_ATTACK_MELEE_CHASE | GAME_ENTITY_ATTACK_NEXT_HEAVY);
+        self.attack_mode[index] = if ranged {
+            persistent | GAME_ENTITY_ATTACK_RANGED
+        } else if persistent & GAME_ENTITY_ATTACK_NEXT_HEAVY != 0 {
+            GAME_ENTITY_ATTACK_MELEE_CHASE | GAME_ENTITY_ATTACK_HEAVY
+        } else {
+            GAME_ENTITY_ATTACK_MELEE_CHASE
+                | GAME_ENTITY_ATTACK_NEXT_HEAVY
+                | GAME_ENTITY_ATTACK_LIGHT
+        };
     }
 
     fn approach_clip(record: &LevelGameEntityRecord) -> u16 {
@@ -568,6 +730,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         move_tried: [0; MAX_ENTITIES],
         attack_hit: [0; MAX_ENTITIES],
         attack_sequence: [0; MAX_ENTITIES],
+        attack_mode: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
         attack_cooldown: [0; MAX_ENTITIES],
         attack_wait_ticks: [0; MAX_ENTITIES],
@@ -607,6 +770,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             self.intent[index] = GameEntityIntent::Hold as u8;
             self.attack_cooldown[index] = 0;
             self.attack_wait_ticks[index] = 0;
+            self.attack_mode[index] = GAME_ENTITY_ATTACK_LIGHT;
             let enabled = record.flags & game_entity_flags::ENABLED != 0;
             self.state[index] = if enabled {
                 GameEntityState::Idle as u8
@@ -748,15 +912,29 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
         let record = &records[index];
         let ticks = self.state_ticks[index];
+        let attack_clip = self.selected_attack_clip(record, index);
+        let attack_active_ticks = self.selected_attack_active_ticks(record, index);
+        let (attack_speed_q8, attack_frame_range) = self.selected_attack_playback(record, index);
         let looping = |clip: u16| GameEntityClip {
             clip,
             phase_ticks: ticks,
             one_shot: false,
+            speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            frame_range: CharacterActionFrameRange::FULL,
         };
         let one_shot = |clip: u16, phase_ticks: u16| GameEntityClip {
             clip,
             phase_ticks,
             one_shot: true,
+            speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            frame_range: CharacterActionFrameRange::FULL,
+        };
+        let attack_one_shot = |phase_ticks: u16| GameEntityClip {
+            clip: attack_clip,
+            phase_ticks,
+            one_shot: true,
+            speed_q8: attack_speed_q8,
+            frame_range: attack_frame_range,
         };
         match self.state(index) {
             GameEntityState::Idle => looping(record.idle_clip),
@@ -773,22 +951,18 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                     clip: record.turn_clip,
                     phase_ticks: self.turn_phase_ticks[index],
                     one_shot: false,
+                    speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+                    frame_range: CharacterActionFrameRange::FULL,
                 },
                 GameEntityIntent::Hold => looping(record.idle_clip),
             },
-            GameEntityState::Windup => one_shot(record.attack_clip, ticks),
-            GameEntityState::Attack => one_shot(
-                record.attack_clip,
-                u16::from(record.windup_ticks).saturating_add(ticks),
-            ),
-            GameEntityState::Recover => one_shot(
-                record.attack_clip,
+            GameEntityState::Windup => attack_one_shot(ticks),
+            GameEntityState::Attack => {
+                attack_one_shot(u16::from(record.windup_ticks).saturating_add(ticks))
+            }
+            GameEntityState::Recover => attack_one_shot(
                 u16::from(record.windup_ticks)
-                    .saturating_add(
-                        record
-                            .attack_active_ticks
-                            .max(GAME_ENTITY_ATTACK_ACTIVE_TICKS),
-                    )
+                    .saturating_add(attack_active_ticks)
                     .saturating_add(ticks),
             ),
             GameEntityState::Staggered => one_shot(record.stagger_clip, ticks),
@@ -1032,7 +1206,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             }
             self.state_ticks[index] = self.state_ticks[index].saturating_add(delta_ticks);
             match state {
-                GameEntityState::Idle => self.tick_idle(record, index, input, &mut stats),
+                GameEntityState::Idle => self.tick_idle(record, index, input, mover, &mut stats),
                 GameEntityState::Patrol => {
                     self.tick_patrol(record, index, input, mover, delta_ticks, &mut stats)
                 }
@@ -1050,11 +1224,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                         Some(attacks) => attacks.push(self.deferred_attack(record, index)),
                         None => self.resolve_attack_contact(record, index, input, &mut stats),
                     }
-                    if self.state_ticks[index]
-                        >= record
-                            .attack_active_ticks
-                            .max(GAME_ENTITY_ATTACK_ACTIVE_TICKS)
-                    {
+                    if self.state_ticks[index] >= self.selected_attack_active_ticks(record, index) {
                         self.enter_state(index, GameEntityState::Recover, &mut stats);
                     }
                 }
@@ -1088,15 +1258,22 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         record: &LevelGameEntityRecord,
         index: usize,
     ) -> DeferredGameEntityAttack {
+        let action = self.selected_attack_action(record, index);
+        let ranged = self.selected_attack_is_ranged(index);
+        let (speed_q8, frame_range) = self.selected_attack_playback(record, index);
         DeferredGameEntityAttack {
             entity: index.min(u16::MAX as usize) as u16,
             tick_generation: self.attack_tick_generation,
             swing_sequence: self.attack_sequence[index],
             clip: GameEntityClip {
-                clip: record.attack_clip,
+                clip: self.selected_attack_clip(record, index),
                 phase_ticks: u16::from(record.windup_ticks).saturating_add(self.state_ticks[index]),
                 one_shot: true,
+                speed_q8,
+                frame_range,
             },
+            action,
+            ranged,
             position: [self.x[index], self.y[index], self.z[index]],
             yaw: self.yaw[index] as u16,
             room: record.room,
@@ -1133,7 +1310,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             return false;
         }
         let record = &records[index];
-        if Self::has_ranged_attack(record) {
+        if attack.is_ranged() {
             return false;
         }
         let arc = MeleeArc {
@@ -1306,7 +1483,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         input: GameEntityTickInput<'_>,
         stats: &mut GameEntityTickStats,
     ) {
-        if Self::has_ranged_attack(record)
+        if self.selected_attack_is_ranged(index)
             || self.attack_hit[index] != 0
             || input.player_invulnerable
             || input.player_room != record.room
@@ -1318,7 +1495,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             x: self.x[index],
             z: self.z[index],
             yaw: self.yaw[index] as u16,
-            reach: Self::attack_reach(record, input),
+            reach: Self::melee_attack_reach(record, input),
             half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
         };
         // The player hurtbox center is the motor position; its radius
@@ -1353,14 +1530,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
     }
 
-    fn attack_too_close(
-        &self,
-        record: &LevelGameEntityRecord,
-        index: usize,
-        input: GameEntityTickInput<'_>,
-    ) -> bool {
-        Self::has_ranged_attack(record)
-            && self.player_within(index, input, i32::from(record.attack_min_range))
+    fn melee_attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
+        i32::from(record.radius)
+            .saturating_add(input.player_radius.max(0))
+            .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
     }
 
     /// Aggro notice test: distance AND same room. Cooked positions
@@ -1372,9 +1545,34 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         record: &LevelGameEntityRecord,
         index: usize,
         input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
     ) -> bool {
-        input.player_room == record.room
-            && self.player_within(index, input, i32::from(record.aggro_radius))
+        if input.player_room != record.room
+            || !self.player_within(index, input, i32::from(record.aggro_radius))
+        {
+            return false;
+        }
+        self.player_in_line_of_sight(record, index, input, mover)
+    }
+
+    fn player_in_line_of_sight(
+        &self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
+    ) -> bool {
+        let from = [
+            self.x[index],
+            self.y[index].saturating_add(i32::from(record.height) / 2),
+            self.z[index],
+        ];
+        let to = [
+            input.player[0],
+            input.player[1].saturating_add(input.player_height.max(1) / 2),
+            input.player[2],
+        ];
+        mover.line_of_sight(record.room, from, to)
     }
 
     fn tick_idle(
@@ -1382,9 +1580,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         record: &LevelGameEntityRecord,
         index: usize,
         input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
         stats: &mut GameEntityTickStats,
     ) {
-        if self.player_noticed(record, index, input) {
+        if self.player_noticed(record, index, input, mover) {
             self.enter_state(index, GameEntityState::Aggro, stats);
             return;
         }
@@ -1405,7 +1604,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         delta_ticks: u16,
         stats: &mut GameEntityTickStats,
     ) {
-        if self.player_noticed(record, index, input) {
+        if self.player_noticed(record, index, input, mover) {
             self.enter_state(index, GameEntityState::Aggro, stats);
             return;
         }
@@ -1450,23 +1649,24 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             return;
         }
 
+        // Stance selection is independent of the shared attack token. An
+        // enemy that has entered close combat must continue following the
+        // player while another actor owns the swing, rather than falling back
+        // to the ranged standoff ring until its turn arrives.
+        let melee_chase = self.update_melee_chase(record, index, input);
+
         if self.attack_owner() == Some(index) {
-            if self.attack_too_close(record, index, input) {
-                self.set_intent(index, GameEntityIntent::Retreat);
-                self.step_relative_to_player(
-                    record,
-                    index,
-                    input,
-                    GAME_ENTITY_HALF_TURN,
-                    record.walk_speed.saturating_mul(i32::from(delta_ticks)),
-                    mover,
-                );
-                stats.retreating = stats.retreating.saturating_add(1);
-                return;
-            }
             self.set_intent(index, GameEntityIntent::Approach);
-            if self.player_within(index, input, Self::attack_reach(record, input)) {
+            let commit_reach = if melee_chase {
+                Self::melee_attack_reach(record, input)
+            } else {
+                Self::attack_reach(record, input)
+            };
+            if self.player_within(index, input, commit_reach)
+                && self.player_in_line_of_sight(record, index, input, mover)
+            {
                 self.face_toward(index, input.player);
+                self.select_attack(index, !melee_chase);
                 self.enter_state(index, GameEntityState::Windup, stats);
                 return;
             }
@@ -1477,6 +1677,25 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 Self::approach_speed(record).saturating_mul(i32::from(delta_ticks)),
                 mover,
             );
+            return;
+        }
+
+        if melee_chase && Self::has_ranged_attack(record) {
+            let melee_reach = Self::melee_attack_reach(record, input);
+            if !self.player_within(index, input, melee_reach) {
+                self.set_intent(index, GameEntityIntent::Approach);
+                self.step_toward(
+                    record,
+                    index,
+                    input.player,
+                    Self::approach_speed(record).saturating_mul(i32::from(delta_ticks)),
+                    mover,
+                );
+            } else {
+                self.set_intent(index, GameEntityIntent::Hold);
+                self.face_toward(index, input.player);
+                stats.holding = stats.holding.saturating_add(1);
+            }
             return;
         }
 
@@ -1990,10 +2209,19 @@ mod tests {
             strafe_right_clip: 8,
             run_clip: 2,
             attack_clip: 3,
+            attack_speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            attack_frame_range: CharacterActionFrameRange::FULL,
+            heavy_attack_clip: 11,
+            heavy_attack_speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            heavy_attack_frame_range: CharacterActionFrameRange::FULL,
+            ranged_attack_clip: 12,
+            ranged_attack_speed_q8: CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            ranged_attack_frame_range: CharacterActionFrameRange::FULL,
             stagger_clip: 4,
             death_clip: 5,
             combat_capsule_first: psx_level::CombatCapsuleIndex(0),
             combat_capsule_count: 0,
+            ranged_attack_action: CharacterAnimationAction::RangedAttack.to_index() as u8,
             x,
             y: 0,
             z,
@@ -2017,6 +2245,8 @@ mod tests {
             group_attack_delay_ticks: 0,
             windup_ticks: 3,
             attack_active_ticks: GAME_ENTITY_ATTACK_ACTIVE_TICKS,
+            heavy_attack_active_ticks: GAME_ENTITY_ATTACK_ACTIVE_TICKS + 1,
+            ranged_attack_active_ticks: GAME_ENTITY_ATTACK_ACTIVE_TICKS + 2,
             recovery_ticks: 4,
             attack_min_range: 0,
             attack_max_range: 0,
@@ -2070,6 +2300,7 @@ mod tests {
     static RANGED_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
         aggro_radius: 4096,
         preferred_distance: 1200,
+        spacing_tolerance: 100,
         attack_min_range: 500,
         attack_max_range: 1600,
         flags: game_entity_flags::ENABLED
@@ -2085,6 +2316,14 @@ mod tests {
                 | game_entity_flags::RANGED_ATTACK,
         )
     }];
+    static RANGED_PAIR: [LevelGameEntityRecord; 2] = [
+        RANGED_ENEMY[0],
+        LevelGameEntityRecord {
+            z: 1200,
+            patrol_z: 1200,
+            ..RANGED_ENEMY[0]
+        },
+    ];
 
     const ACTIVE: [RoomIndex; 1] = [RoomIndex(0)];
 
@@ -2093,6 +2332,7 @@ mod tests {
             player: [100_000, 0, 100_000],
             player_room: RoomIndex(0),
             player_radius: 192,
+            player_height: 1024,
             player_invulnerable: false,
             active_rooms,
         }
@@ -2103,6 +2343,7 @@ mod tests {
             player: [1200, 0, 1000],
             player_room: RoomIndex(0),
             player_radius: 192,
+            player_height: 1024,
             player_invulnerable: false,
             active_rooms,
         }
@@ -2122,6 +2363,36 @@ mod tests {
             _height: i32,
         ) -> [i32; 3] {
             position
+        }
+    }
+
+    #[derive(Default)]
+    struct SightMover {
+        clear: bool,
+        queries: u16,
+        last_from: [i32; 3],
+        last_to: [i32; 3],
+    }
+
+    impl GameEntityMover for SightMover {
+        fn step(
+            &mut self,
+            _entity: usize,
+            _room: RoomIndex,
+            position: [i32; 3],
+            _dx: i32,
+            _dz: i32,
+            _radius: i32,
+            _height: i32,
+        ) -> [i32; 3] {
+            position
+        }
+
+        fn line_of_sight(&mut self, _room: RoomIndex, from: [i32; 3], to: [i32; 3]) -> bool {
+            self.queries = self.queries.saturating_add(1);
+            self.last_from = from;
+            self.last_to = to;
+            self.clear
         }
     }
 
@@ -2204,28 +2475,96 @@ mod tests {
     }
 
     #[test]
-    fn ranged_owner_retreats_inside_minimum_and_commits_inside_band() {
+    fn hybrid_owner_chases_for_melee_then_returns_to_ranged_after_escape_margin() {
         let mut close = GameEntities::<8>::EMPTY;
         close.spawn_from_records(&RANGED_ENEMY);
         let close_input = GameEntityTickInput {
-            player: [1200, 0, 1000],
+            player: [1450, 0, 1000],
             ..near_input(&ACTIVE)
         };
         close.tick(&RANGED_ENEMY, close_input, &mut NoClipMover);
         close.tick(&RANGED_ENEMY, close_input, &mut NoClipMover);
         assert_eq!(close.state(0), GameEntityState::Aggro);
-        assert_eq!(close.intent(0), GameEntityIntent::Retreat);
-        assert!(close.position(0)[0] < 1000, "ranged owner creates space");
+        assert_eq!(close.intent(0), GameEntityIntent::Approach);
+        assert!(close.position(0)[0] > 1000, "hybrid owner closes for melee");
 
-        let mut in_band = GameEntities::<8>::EMPTY;
-        in_band.spawn_from_records(&RANGED_ENEMY);
-        let band_input = GameEntityTickInput {
-            player: [2200, 0, 1000],
+        let still_close_input = GameEntityTickInput {
+            player: [2300, 0, 1000],
             ..near_input(&ACTIVE)
         };
-        in_band.tick(&RANGED_ENEMY, band_input, &mut NoClipMover);
-        in_band.tick(&RANGED_ENEMY, band_input, &mut NoClipMover);
-        assert_eq!(in_band.state(0), GameEntityState::Windup);
+        let before_follow = close.position(0)[0];
+        close.tick(&RANGED_ENEMY, still_close_input, &mut NoClipMover);
+        assert_eq!(close.state(0), GameEntityState::Aggro);
+        assert_eq!(close.intent(0), GameEntityIntent::Approach);
+        assert!(
+            close.position(0)[0] > before_follow,
+            "the wider exit threshold keeps following instead of oscillating to ranged"
+        );
+
+        let escaped_input = GameEntityTickInput {
+            player: [2500, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+        close.tick(&RANGED_ENEMY, escaped_input, &mut NoClipMover);
+        assert_eq!(close.state(0), GameEntityState::Windup);
+        assert!(close.selected_attack_is_ranged(0));
+        assert_eq!(
+            close.selected_attack_action(&RANGED_ENEMY[0], 0),
+            CharacterAnimationAction::RangedAttack
+        );
+    }
+
+    #[test]
+    fn close_hybrid_waiting_for_attack_slot_keeps_pursuing() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&RANGED_PAIR);
+        let input = GameEntityTickInput {
+            player: [1450, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+
+        entities.tick(&RANGED_PAIR, input, &mut NoClipMover);
+        entities.tick(&RANGED_PAIR, input, &mut NoClipMover);
+
+        assert_eq!(entities.attack_owner(), Some(0));
+        assert_eq!(entities.intent(1), GameEntityIntent::Approach);
+        assert!(
+            entities.position(1)[0] > 1000,
+            "a close waiting enemy pressures forward instead of retreating to its firing ring"
+        );
+    }
+
+    #[test]
+    fn close_attacks_alternate_light_heavy_without_ranged_consuming_the_sequence() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&RANGED_ENEMY);
+
+        entities.select_attack(0, false);
+        assert_eq!(
+            entities.selected_attack_action(&RANGED_ENEMY[0], 0),
+            CharacterAnimationAction::LightAttack
+        );
+        assert_eq!(entities.selected_attack_clip(&RANGED_ENEMY[0], 0), 3);
+
+        entities.select_attack(0, true);
+        assert_eq!(
+            entities.selected_attack_action(&RANGED_ENEMY[0], 0),
+            CharacterAnimationAction::RangedAttack
+        );
+        assert_eq!(entities.selected_attack_clip(&RANGED_ENEMY[0], 0), 12);
+
+        entities.select_attack(0, false);
+        assert_eq!(
+            entities.selected_attack_action(&RANGED_ENEMY[0], 0),
+            CharacterAnimationAction::HeavyAttack
+        );
+        assert_eq!(entities.selected_attack_clip(&RANGED_ENEMY[0], 0), 11);
+
+        entities.select_attack(0, false);
+        assert_eq!(
+            entities.selected_attack_action(&RANGED_ENEMY[0], 0),
+            CharacterAnimationAction::LightAttack
+        );
     }
 
     #[test]
@@ -2376,6 +2715,7 @@ mod tests {
                 clip: 9,
                 phase_ticks: 0,
                 one_shot: true,
+                ..GameEntityClip::default()
             }
         );
 
@@ -2406,6 +2746,7 @@ mod tests {
             player: [1600, 0, 1000],
             player_room: RoomIndex(0),
             player_radius: 192,
+            player_height: 1024,
             player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
@@ -2422,6 +2763,7 @@ mod tests {
                 clip: 10,
                 phase_ticks: 0,
                 one_shot: false,
+                ..GameEntityClip::default()
             }
         );
 
@@ -2567,7 +2909,8 @@ mod tests {
             GameEntityClip {
                 clip: 0,
                 phase_ticks: 0,
-                one_shot: false
+                one_shot: false,
+                ..GameEntityClip::default()
             }
         );
         entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
@@ -2576,7 +2919,8 @@ mod tests {
             GameEntityClip {
                 clip: 0,
                 phase_ticks: 1,
-                one_shot: false
+                one_shot: false,
+                ..GameEntityClip::default()
             }
         );
         // Newly acquired Aggro holds the idle clip until the director
@@ -2588,7 +2932,8 @@ mod tests {
             GameEntityClip {
                 clip: 0,
                 phase_ticks: 0,
-                one_shot: false
+                one_shot: false,
+                ..GameEntityClip::default()
             }
         );
         // Windup entered next tick; from there the attack clip is ONE
@@ -2602,7 +2947,8 @@ mod tests {
             GameEntityClip {
                 clip: 3,
                 phase_ticks: 0,
-                one_shot: true
+                one_shot: true,
+                ..GameEntityClip::default()
             }
         );
         for expected in 1..=12u16 {
@@ -2612,7 +2958,8 @@ mod tests {
                 GameEntityClip {
                     clip: 3,
                     phase_ticks: expected,
-                    one_shot: true
+                    one_shot: true,
+                    ..GameEntityClip::default()
                 }
             );
         }
@@ -2625,7 +2972,8 @@ mod tests {
             GameEntityClip {
                 clip: 4,
                 phase_ticks: 0,
-                one_shot: true
+                one_shot: true,
+                ..GameEntityClip::default()
             }
         );
         entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
@@ -2640,7 +2988,8 @@ mod tests {
             GameEntityClip {
                 clip: 5,
                 phase_ticks: 0,
-                one_shot: true
+                one_shot: true,
+                ..GameEntityClip::default()
             }
         );
         for _ in 0..3 {
@@ -2652,7 +3001,8 @@ mod tests {
             GameEntityClip {
                 clip: 5,
                 phase_ticks: 3,
-                one_shot: true
+                one_shot: true,
+                ..GameEntityClip::default()
             }
         );
         // Out-of-range indices read inert.
@@ -2714,6 +3064,7 @@ mod tests {
             player: [1800, 0, 1000],
             player_room: RoomIndex(0),
             player_radius: 192,
+            player_height: 1024,
             player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
@@ -2743,6 +3094,7 @@ mod tests {
             player: [1800, 0, 1000],
             player_room: RoomIndex(0),
             player_radius: 192,
+            player_height: 1024,
             player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
@@ -2868,6 +3220,7 @@ mod tests {
             player: [1200, 0, 1000],
             player_room: RoomIndex(7),
             player_radius: 192,
+            player_height: 1024,
             player_invulnerable: false,
             active_rooms: rooms,
         };
@@ -2894,6 +3247,7 @@ mod tests {
             player: [1200, 0, 1000],
             player_room: RoomIndex(7),
             player_radius: 192,
+            player_height: 1024,
             player_invulnerable: false,
             active_rooms: &ROOM_7,
         };
@@ -2923,11 +3277,93 @@ mod tests {
             player: [1200, 0, 1000],
             player_room: RoomIndex(3),
             player_radius: 192,
+            player_height: 1024,
             player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
         entities.tick(&IDLE_ENEMY, aliased, &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Idle);
+    }
+
+    #[test]
+    fn line_of_sight_gates_acquisition_and_attack_commit_without_dropping_aggro() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        let mut sight = SightMover::default();
+
+        entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut sight);
+        assert_eq!(sight.queries, 0, "distance rejects before the BSP trace");
+
+        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
+        assert_eq!(entities.state(0), GameEntityState::Idle);
+        assert_eq!(sight.queries, 1);
+        assert_eq!(sight.last_from, [1000, 512, 1000]);
+        assert_eq!(sight.last_to, [1200, 512, 1000]);
+
+        sight.clear = true;
+        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+
+        sight.clear = false;
+        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
+        assert_eq!(
+            entities.state(0),
+            GameEntityState::Aggro,
+            "an occluder prevents attack commitment but does not erase awareness"
+        );
+
+        sight.clear = true;
+        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
+        assert_eq!(entities.state(0), GameEntityState::Windup);
+    }
+
+    #[test]
+    fn selected_attack_clip_carries_authored_speed_and_trim_range() {
+        const LIGHT_RANGE: CharacterActionFrameRange =
+            CharacterActionFrameRange { start: 2, end: 53 };
+        const HEAVY_RANGE: CharacterActionFrameRange = CharacterActionFrameRange {
+            start: 89,
+            end: 126,
+        };
+        static PACED_ATTACK: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
+            attack_speed_q8: 320,
+            attack_frame_range: LIGHT_RANGE,
+            heavy_attack_speed_q8: 448,
+            heavy_attack_frame_range: HEAVY_RANGE,
+            ranged_attack_speed_q8: 640,
+            ranged_attack_frame_range: CharacterActionFrameRange::FULL,
+            ..test_record(
+                1000,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::RANGED_ATTACK,
+            )
+        }];
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&PACED_ATTACK);
+        entities.state[0] = GameEntityState::Windup as u8;
+
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_LIGHT;
+        let light = entities.clip_for_state(&PACED_ATTACK, 0);
+        assert_eq!(
+            (light.clip, light.speed_q8, light.frame_range),
+            (3, 320, LIGHT_RANGE)
+        );
+
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_HEAVY;
+        let heavy = entities.clip_for_state(&PACED_ATTACK, 0);
+        assert_eq!(
+            (heavy.clip, heavy.speed_q8, heavy.frame_range),
+            (11, 448, HEAVY_RANGE)
+        );
+
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_RANGED;
+        let ranged = entities.clip_for_state(&PACED_ATTACK, 0);
+        assert_eq!(
+            (ranged.clip, ranged.speed_q8, ranged.frame_range),
+            (12, 640, CharacterActionFrameRange::FULL)
+        );
     }
 
     #[test]
@@ -3052,13 +3488,17 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
         for _ in 0..3 {
-            assert!(!entities
-                .apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 25, 0)
-                .died);
+            assert!(
+                !entities
+                    .apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 25, 0)
+                    .died
+            );
         }
-        assert!(entities
-            .apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 25, 0)
-            .died);
+        assert!(
+            entities
+                .apply_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 25, 0)
+                .died
+        );
     }
 
     /// One overwhelming hit must kill outright. `u16::MAX` damage against a
@@ -3097,9 +3537,11 @@ mod tests {
         assert_eq!((entities.health(0), entities.health_secondary(0)), (0, 1));
         assert_ne!(entities.state(0), GameEntityState::Dead);
         // And the last point finishes it.
-        assert!(entities
-            .apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::Two, 1, 0)
-            .died);
+        assert!(
+            entities
+                .apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::Two, 1, 0)
+                .died
+        );
     }
 
     /// The same overwhelming hit from the Zenith side, so a width bug cannot
@@ -3108,9 +3550,11 @@ mod tests {
     fn an_overwhelming_zenith_hit_kills_outright() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&EVEN_ENEMY);
-        assert!(entities
-            .apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::Two, u16::MAX, 0)
-            .died);
+        assert!(
+            entities
+                .apply_hit(&EVEN_ENEMY, 0, VitalityChannelId::Two, u16::MAX, 0)
+                .died
+        );
         assert_eq!((entities.health(0), entities.health_secondary(0)), (0, 0));
     }
 
@@ -3151,9 +3595,11 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
         assert_eq!(entities.health_secondary(0), 0);
-        assert!(entities
-            .apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 100, 0)
-            .died);
+        assert!(
+            entities
+                .apply_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 100, 0)
+                .died
+        );
         assert_eq!(entities.state(0), GameEntityState::Dead);
     }
 
@@ -3278,8 +3724,15 @@ mod tests {
 
         // A wall between the actors: no hit, no damage, and crucially the
         // swing bit stays clear so the same swing can connect later.
-        let stats =
-            entities.apply_melee_arc_occluded(&IDLE_ENEMY, &arc, VitalityChannelId::One, 30, 40, &mut swing, |_, _| true);
+        let stats = entities.apply_melee_arc_occluded(
+            &IDLE_ENEMY,
+            &arc,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+            |_, _| true,
+        );
         assert_eq!(stats, MeleeArcStats::default());
         assert_eq!(entities.health(0), 100);
         assert_eq!(swing, 0);
@@ -3329,7 +3782,14 @@ mod tests {
         // psx-numeric-allow-next-line: swing bitmask scratch in tests
         let mut swing = 0u64;
         // Swing 1: connects (poise 40 <= pool 50, no stagger)...
-        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, VitalityChannelId::One, 30, 40, &mut swing);
+        let stats = entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &arc,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         assert_eq!(
             stats,
             MeleeArcStats {
@@ -3340,23 +3800,58 @@ mod tests {
         );
         assert_eq!(entities.health(0), 70);
         // ...and the same swing never double-taps.
-        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, VitalityChannelId::One, 30, 40, &mut swing);
+        let stats = entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &arc,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         assert_eq!(stats, MeleeArcStats::default());
         // Swing 2: accumulated poise (40 + 40) breaks the 50 pool.
         swing = 0;
-        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, VitalityChannelId::One, 30, 40, &mut swing);
+        let stats = entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &arc,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         assert_eq!(stats.staggers, 1);
         assert_eq!(entities.state(0), GameEntityState::Staggered);
         // Swing 3 (health 40 - 30 = 10), swing 4 kills.
         swing = 0;
-        entities.apply_melee_arc(&IDLE_ENEMY, &arc, VitalityChannelId::One, 30, 40, &mut swing);
+        entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &arc,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         swing = 0;
-        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, VitalityChannelId::One, 30, 40, &mut swing);
+        let stats = entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &arc,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         assert_eq!(stats.deaths, 1);
         assert_eq!(entities.state(0), GameEntityState::Dead);
         // Dead entities are no longer targets.
         swing = 0;
-        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, VitalityChannelId::One, 30, 40, &mut swing);
+        let stats = entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &arc,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         assert_eq!(stats, MeleeArcStats::default());
 
         // Wrong-room arcs never connect (cooked positions are
@@ -3368,7 +3863,14 @@ mod tests {
             room: RoomIndex(2),
             ..arc
         };
-        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &wrong_room, VitalityChannelId::One, 30, 40, &mut swing);
+        let stats = entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &wrong_room,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         assert_eq!(stats, MeleeArcStats::default());
         assert_eq!(entities.health(0), 100);
 
@@ -3381,11 +3883,25 @@ mod tests {
             yaw: 1024,
             ..arc
         };
-        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &away, VitalityChannelId::One, 30, 40, &mut swing);
+        let stats = entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &away,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         assert_eq!(stats, MeleeArcStats::default());
         swing = 0;
         let toward = MeleeArc { yaw: 3072, ..away };
-        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &toward, VitalityChannelId::One, 30, 40, &mut swing);
+        let stats = entities.apply_melee_arc(
+            &IDLE_ENEMY,
+            &toward,
+            VitalityChannelId::One,
+            30,
+            40,
+            &mut swing,
+        );
         assert_eq!(stats.hits, 1);
     }
 
