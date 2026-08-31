@@ -1484,8 +1484,14 @@ pub mod boost_stat {
     pub const MOVEMENT_SPEED: usize = 3;
     /// Complete attack timeline speed.
     pub const ATTACK_SPEED: usize = 4;
+    /// Recovery rate of the inactive vitality pool. Equipped on the active
+    /// state like every other lane, but it acts on the pool that is resting:
+    /// a pool only recovers while inactive, and an inactive state's modules do
+    /// not act, so a lane that boosted its own pool would be inert by
+    /// construction.
+    pub const REGENERATION: usize = 5;
     /// Number of stat lanes in one cooked module.
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 6;
 }
 
 /// Maximum unique boost modules addressable by the fixed runtime inventory.

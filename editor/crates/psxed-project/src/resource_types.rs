@@ -2530,15 +2530,21 @@ pub enum BoostStatKind {
     Defence,
     MovementSpeed,
     AttackSpeed,
+    /// Recovery rate of the resting pool. Equipped on the active state like
+    /// every other lane, but it speeds the pool that is inactive, because a
+    /// pool only recovers while inactive and an inactive state's modules do
+    /// not act.
+    Regeneration,
 }
 
 impl BoostStatKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::HorizonAttack,
         Self::ZenithAttack,
         Self::Defence,
         Self::MovementSpeed,
         Self::AttackSpeed,
+        Self::Regeneration,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -2548,6 +2554,7 @@ impl BoostStatKind {
             Self::Defence => "Defence",
             Self::MovementSpeed => "Movement Speed",
             Self::AttackSpeed => "Attack Speed",
+            Self::Regeneration => "Regeneration",
         }
     }
 
@@ -2558,6 +2565,7 @@ impl BoostStatKind {
             Self::Defence => psx_level::boost_stat::DEFENCE,
             Self::MovementSpeed => psx_level::boost_stat::MOVEMENT_SPEED,
             Self::AttackSpeed => psx_level::boost_stat::ATTACK_SPEED,
+            Self::Regeneration => psx_level::boost_stat::REGENERATION,
         }
     }
 }

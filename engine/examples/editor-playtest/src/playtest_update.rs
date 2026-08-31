@@ -472,8 +472,11 @@ impl Playtest {
         // Recovery and cooldowns advance once per fixed tick, after any swap so
         // a fresh swap does not lose its first tick of cooldown.
         let config = self.player_stance_config;
+        // Regeneration comes from the active state's modules and heals the
+        // inactive pool, so the bonus is read before the tick that spends it.
+        let regeneration = self.vitality_modifiers().regeneration_q12;
         self.player_stance
-            .tick(&mut self.player_vitality, &config, 0);
+            .tick(&mut self.player_vitality, &config, regeneration);
 
         if ctx.just_pressed(button::R3) {
             if self.is_locked() {
