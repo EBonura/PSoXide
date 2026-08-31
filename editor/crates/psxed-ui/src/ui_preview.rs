@@ -1811,6 +1811,18 @@ pub(crate) fn ui_binding_preview_q12(binding: UiValueBinding) -> i32 {
         UiValueBinding::PlayerHealthSecondaryFullInfluence => 0,
         UiValueBinding::PlayerStamina => 3072,
         UiValueBinding::PlayerStaminaMax => 4096,
+        // Preview the stance mid-fight: the active pool hurt, the inactive one
+        // most of the way back, so both bars read as bars and the difference
+        // between them is visible while authoring.
+        UiValueBinding::PlayerStanceActiveHealth => 2458,
+        UiValueBinding::PlayerStanceActiveHealthMax => 4096,
+        UiValueBinding::PlayerStanceInactiveHealth => 3277,
+        UiValueBinding::PlayerStanceInactiveHealthMax => 4096,
+        // A settled swap, so an authored transition previews at its rest pose.
+        UiValueBinding::PlayerStanceSwapProgress => 4096,
+        UiValueBinding::PlayerStanceActiveIsZenith => 0,
+        UiValueBinding::PlayerStanceActiveBroken => 0,
+        UiValueBinding::PlayerStanceInactiveBroken => 0,
         // Preview a load two-thirds done so the bar reads as a bar.
         UiValueBinding::LoadingProgress => 2730,
     }

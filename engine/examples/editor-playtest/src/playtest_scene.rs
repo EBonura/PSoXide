@@ -233,6 +233,32 @@ impl Scene for Playtest {
                 Some(health_q12(zenith.current(), zenith.maximum()))
             }
             LevelUiValueBinding::PlayerHealthSecondaryMax => Some(PLAYER_HEALTH_MAX_Q12),
+            // Stance-relative readings. A bar bound to these follows whichever
+            // pool is live rather than a fixed colour, so the HUD keeps saying
+            // "this is the one taking damage" across a swap.
+            LevelUiValueBinding::PlayerStanceActiveHealth => {
+                let pool = self.player_vitality.pool(self.player_stance.active());
+                Some(health_q12(pool.current(), pool.maximum()))
+            }
+            LevelUiValueBinding::PlayerStanceActiveHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
+            LevelUiValueBinding::PlayerStanceInactiveHealth => {
+                let pool = self.player_vitality.pool(self.player_stance.inactive());
+                Some(health_q12(pool.current(), pool.maximum()))
+            }
+            LevelUiValueBinding::PlayerStanceInactiveHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
+            LevelUiValueBinding::PlayerStanceSwapProgress => Some(i32::from(
+                self.player_stance
+                    .swap_progress_q12(&self.player_stance_config),
+            )),
+            LevelUiValueBinding::PlayerStanceActiveIsZenith => Some(i32::from(
+                self.player_stance.active() == VitalityChannelId::Two,
+            )),
+            LevelUiValueBinding::PlayerStanceActiveBroken => Some(i32::from(
+                self.player_stance.is_broken(self.player_stance.active()),
+            )),
+            LevelUiValueBinding::PlayerStanceInactiveBroken => Some(i32::from(
+                self.player_stance.is_broken(self.player_stance.inactive()),
+            )),
             LevelUiValueBinding::PlayerHealthEmptyInfluence => {
                 Some(i32::from(horizon.polarity().empty_q12))
             }
