@@ -30,27 +30,38 @@ pub struct ClipWindow {
     /// First referenced frame. The cook drops everything before this and
     /// subtracts it from every frame index it emits for the clip.
     pub start: u16,
-    /// Last referenced frame.
-    pub end: u16,
+    /// Last referenced frame, or `None` when a consumer plays to the clip's
+    /// own end and the tail cannot be shortened.
+    pub end: Option<u16>,
 }
 
 impl ClipWindow {
-    /// Frames kept by this window.
-    pub const fn frames(&self) -> u16 {
-        self.end.saturating_sub(self.start).saturating_add(1)
+    /// Last frame to keep, given how long the clip actually is.
+    pub fn end_within(&self, frame_count: u16) -> u16 {
+        self.end
+            .unwrap_or_else(|| frame_count.saturating_sub(1))
+            .max(self.start)
+    }
+
+    /// Whether this window would drop anything from a clip of `frame_count`.
+    pub fn trims(&self, frame_count: u16) -> bool {
+        self.start > 0 || self.end_within(frame_count) + 1 < frame_count
     }
 }
 
-/// Widen `slot` to include `frame`, or pin the clip when `frame` is `None`.
-fn widen(slot: &mut Option<Option<(u16, u16)>>, frame: Option<(u16, u16)>) {
-    match (slot.as_mut(), frame) {
-        (_, None) => *slot = Some(None),
-        (Some(None), _) => {}
-        (Some(Some(range)), Some((low, high))) => {
-            range.0 = range.0.min(low);
-            range.1 = range.1.max(high);
+/// Widen `slot` to include frames `low..=high`, where `high` of `None` means
+/// the consumer plays to the clip's own end.
+fn widen(slot: &mut Option<(u16, Option<u16>)>, low: u16, high: Option<u16>) {
+    match slot {
+        None => *slot = Some((low, high)),
+        Some((current_low, current_high)) => {
+            *current_low = (*current_low).min(low);
+            // Once anything runs to the end, the tail stays.
+            *current_high = match (*current_high, high) {
+                (None, _) | (_, None) => None,
+                (Some(a), Some(b)) => Some(a.max(b)),
+            };
         }
-        (None, Some(range)) => *slot = Some(Some(range)),
     }
 }
 
@@ -58,8 +69,8 @@ fn widen(slot: &mut Option<Option<(u16, u16)>>, frame: Option<(u16, u16)>) {
 ///
 /// A clip absent from the result is never bound to an action and is left
 /// alone; a clip mapped to `None` is needed whole.
-pub fn clip_windows(project: &ProjectDocument) -> HashMap<ResourceId, Option<ClipWindow>> {
-    let mut windows: HashMap<ResourceId, Option<Option<(u16, u16)>>> = HashMap::new();
+pub fn clip_windows(project: &ProjectDocument) -> HashMap<ResourceId, ClipWindow> {
+    let mut windows: HashMap<ResourceId, Option<(u16, Option<u16>)>> = HashMap::new();
 
     for resource in &project.resources {
         let ResourceData::AnimationSet(set) = &resource.data else {
@@ -84,21 +95,28 @@ pub fn clip_windows(project: &ProjectDocument) -> HashMap<ResourceId, Option<Cli
             let slot = windows.entry(binding.clip).or_default();
             let Some(options) = binding.options else {
                 // No options at all means the whole clip plays.
-                widen(slot, None);
+                widen(slot, 0, None);
                 continue;
             };
-            if options.frame_end == ACTION_FRAME_END_FULL {
-                widen(slot, None);
-                continue;
-            }
-            // The root push is authored in the same frame space as the action.
-            let low = options.frame_start.min(options.push_frame_start);
-            let high = options.frame_end.max(if options.push_frame_end == ACTION_FRAME_END_FULL {
-                options.frame_end
+            // The root push is authored in the same frame space as the action,
+            // but only when it is a real window. A push end left at
+            // ACTION_FRAME_END_FULL means no push was authored at all, and
+            // reading it as "runs to the clip's end" would unpin the tail of
+            // every clip that simply has no root motion.
+            let pushes = options.push_frame_end != ACTION_FRAME_END_FULL;
+            let low = if pushes {
+                options.frame_start.min(options.push_frame_start)
             } else {
-                options.push_frame_end
-            });
-            widen(slot, Some((low, high.max(low))));
+                options.frame_start
+            };
+            let high = if options.frame_end == ACTION_FRAME_END_FULL {
+                None
+            } else if pushes {
+                Some(options.frame_end.max(options.push_frame_end).max(low))
+            } else {
+                Some(options.frame_end.max(low))
+            };
+            widen(slot, low, high);
         }
 
         // Weapon visibility beats and sword trails index the action's clip.
@@ -115,7 +133,7 @@ pub fn clip_windows(project: &ProjectDocument) -> HashMap<ResourceId, Option<Cli
                 low = low.min(trail.start_frame);
                 high = high.max(trail.end_frame.saturating_add(trail.history_frames));
             }
-            widen(windows.entry(clip).or_default(), Some((low, high)));
+            widen(windows.entry(clip).or_default(), low, Some(high));
         }
 
         // Hitboxes and emitters live on the characters using this set.
@@ -150,10 +168,7 @@ pub fn clip_windows(project: &ProjectDocument) -> HashMap<ResourceId, Option<Cli
                 let Some(clip) = clip_for(action) else {
                     continue;
                 };
-                widen(
-                    windows.entry(clip).or_default(),
-                    Some((low, high.max(low))),
-                );
+                widen(windows.entry(clip).or_default(), low, Some(high.max(low)));
             }
         }
     }
@@ -161,11 +176,8 @@ pub fn clip_windows(project: &ProjectDocument) -> HashMap<ResourceId, Option<Cli
     windows
         .into_iter()
         .filter_map(|(clip, slot)| {
-            let slot = slot?;
-            Some((
-                clip,
-                slot.map(|(start, end)| ClipWindow { start, end }),
-            ))
+            let (start, end) = slot?;
+            Some((clip, ClipWindow { start, end }))
         })
         .collect()
 }
@@ -177,28 +189,48 @@ mod tests {
     #[test]
     fn a_window_covers_every_authored_beat() {
         let mut slot = None;
-        widen(&mut slot, Some((10, 20)));
-        widen(&mut slot, Some((4, 12)));
-        assert_eq!(slot, Some(Some((4, 20))), "the union, not the last writer");
+        widen(&mut slot, 10, Some(20));
+        widen(&mut slot, 4, Some(12));
+        assert_eq!(slot, Some((4, Some(20))), "the union, not the last writer");
     }
 
     #[test]
-    fn one_unbounded_consumer_pins_the_whole_clip() {
+    fn playing_to_the_end_pins_the_tail_but_not_the_head() {
+        // This is Aletha's idle: authored to start at 84 and run to the clip's
+        // own end. Frames 0..83 never play and are exactly what is worth
+        // dropping, so a full end must not pin the whole clip.
         let mut slot = None;
-        widen(&mut slot, Some((10, 20)));
-        widen(&mut slot, None);
-        widen(&mut slot, Some((4, 12)));
+        widen(&mut slot, 84, None);
+        assert_eq!(slot, Some((84, None)));
+
+        let window = ClipWindow {
+            start: 84,
+            end: None,
+        };
+        assert_eq!(window.end_within(170), 169, "the tail runs to the last frame");
+        assert!(window.trims(170), "but the first 84 frames still go");
+    }
+
+    #[test]
+    fn the_head_is_the_earliest_frame_any_consumer_needs() {
+        let mut slot = None;
+        widen(&mut slot, 84, None);
+        widen(&mut slot, 12, Some(30));
         assert_eq!(
             slot,
-            Some(None),
-            "a clip needed whole can never become trimmable again"
+            Some((12, None)),
+            "an earlier consumer pulls the head back and the open end stays open"
         );
     }
 
     #[test]
-    fn a_window_reports_its_inclusive_length() {
-        assert_eq!(ClipWindow { start: 0, end: 0 }.frames(), 1);
-        assert_eq!(ClipWindow { start: 2, end: 53 }.frames(), 52);
+    fn a_window_over_the_whole_clip_trims_nothing() {
+        let window = ClipWindow {
+            start: 0,
+            end: None,
+        };
+        assert!(!window.trims(170));
+        assert_eq!(window.end_within(170), 169);
     }
 }
 
@@ -211,7 +243,7 @@ mod tests {
 /// means an emit site can never forget to rebase and silently mistime combat.
 #[derive(Debug, Default, Clone)]
 pub struct ClipTrim {
-    windows: HashMap<ResourceId, Option<ClipWindow>>,
+    windows: HashMap<ResourceId, ClipWindow>,
 }
 
 impl ClipTrim {
@@ -229,7 +261,7 @@ impl ClipTrim {
 
     /// The window a clip is trimmed to, if it is trimmed at all.
     pub fn window(&self, clip: ResourceId) -> Option<ClipWindow> {
-        self.windows.get(&clip).copied().flatten()
+        self.windows.get(&clip).copied()
     }
 
     /// Frames dropped from the front of `clip`, which every frame index
