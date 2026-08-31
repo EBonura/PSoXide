@@ -1820,3 +1820,44 @@ fn arrows_and_shift_arrows_nudge_without_duplicating() {
     let repeated = rig.workspace.project.active_scene().brushes[0].solve();
     assert_eq!(repeated.min[2].round() as i32, 192);
 }
+
+/// Face handles are drawn and picked on both sides of a brush.
+///
+/// Culling the ones pointing away meant a handle vanished the moment you
+/// orbited past its face, and never appeared at all when the camera sat inside
+/// a room, which is exactly when you want to drag a wall.
+///
+/// This drives the handle picker rather than a click, because clicking selects
+/// the face under the ray and that is always a front one.
+#[test]
+fn a_face_pointing_away_from_the_camera_still_offers_its_handle() {
+    let mut rig = MouseRig::single_cube("rig-back-face-handle");
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
+    rig.click(rig.world_to_screen([256.0, 256.0, 128.0]));
+
+    let brush = &rig.workspace.project.active_scene().brushes[0];
+    let solved = brush.solve();
+    let handles = crate::workspace::brush_elements::face_handles(brush, &solved);
+    // The cube spans [0,0,0]..[512,256,256] and the camera sits out at
+    // [1400,1200,-1400]. Take an away-facing handle no other handle crowds, so
+    // a hit can only be the face under test.
+    let (face, center, _) = handles
+        .iter()
+        .copied()
+        .find(|(_, center, normal)| {
+            !rig.workspace.brush_face_faces_camera(*center, *normal)
+                && handles.iter().all(|(_, other, _)| {
+                    other == center
+                        || rig.world_to_screen(*other).distance(rig.world_to_screen(*center)) > 32.0
+                })
+        })
+        .expect("an isolated away-facing handle");
+
+    let picked = rig
+        .workspace
+        .pick_brush_handle_3d(RIG_VIEWPORT, rig.world_to_screen(center));
+    assert!(
+        matches!(picked, Some((0, crate::workspace::tools::BrushHandle3d::Face { face: hit, .. })) if hit == face),
+        "the away-facing handle is pickable, got {picked:?}",
+    );
+}
