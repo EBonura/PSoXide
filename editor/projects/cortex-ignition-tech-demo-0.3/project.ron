@@ -43,6 +43,7 @@
         snap_units: 128,
     ),
     bsp_cook_mode: Draft,
+    animation_error_budget_degrees: 2,
     runtime_depth_sort_mode: HybridWalls,
     runtime_texture_split_mode: All,
     runtime_room_draw_order_mode: Distance,
