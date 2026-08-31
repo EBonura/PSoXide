@@ -587,6 +587,10 @@ pub(super) const FONT_PACK_SCRATCH_LEN: usize = FONT_PACK_U16;
 /// The crate font/sky staging scratch instantiated with this example's length.
 pub(super) type RuntimeFontPackScratch = FontPackScratch<FONT_PACK_SCRATCH_LEN>;
 
+// A cube sky is band-streamed into VRAM and never staged whole, so the cook
+// leaves it out of GAMEPLAY_PACK_MAX_CHUNK_BYTES and this assert now covers the
+// largest chunk that really does stage: the transient textures read through
+// `with_transient_gameplay_asset_bytes`.
 #[cfg(feature = "cd-stream-bench")]
 const SKY_STAGE_WORDS: usize = (GAMEPLAY_PACK_MAX_CHUNK_BYTES + 3) / 4;
 #[cfg(feature = "cd-stream-bench")]
