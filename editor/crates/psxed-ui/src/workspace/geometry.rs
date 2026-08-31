@@ -1834,6 +1834,7 @@ impl EditorWorkspace {
                                             return;
                                         };
                                         let NodeKind::CharacterController {
+                                            loadout: _,
                                             character,
                                             settings,
                                             player,

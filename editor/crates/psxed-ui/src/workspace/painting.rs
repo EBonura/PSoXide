@@ -688,6 +688,7 @@ impl EditorWorkspace {
             entity,
             "Character Controller",
             NodeKind::CharacterController {
+                loadout: None,
                 character: Some(character_id),
                 // No override: the placement inherits the Character, so later
                 // edits to the type reach it. `settings` is materialised only

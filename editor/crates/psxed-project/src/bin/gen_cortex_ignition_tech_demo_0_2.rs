@@ -561,6 +561,7 @@ fn place_character(
         entity,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: Some(character_id),
             settings: Some(controller),
             player,
@@ -640,6 +641,7 @@ mod tests {
             .iter()
             .filter_map(|node| match &node.kind {
                 NodeKind::CharacterController {
+                    loadout: _,
                     character,
                     settings,
                     player,

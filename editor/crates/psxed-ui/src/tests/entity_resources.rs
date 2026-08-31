@@ -262,6 +262,7 @@ fn component_templates_filter_by_host_kind_and_singletons() {
 
     let entity_existing = [
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: Some(CharacterControllerSettings::default()),
             player: false,
@@ -364,6 +365,7 @@ fn inline_character_controller_edit_undoes_with_entity_selected() {
         entity,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: Some(settings),
             player: false,
@@ -416,6 +418,7 @@ fn character_action_preview_uses_animator_binding_without_mutating_animator() {
         entity,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: Some(CharacterControllerSettings::default()),
             player: false,
@@ -472,6 +475,7 @@ fn editing_animator_clears_transient_action_preview_that_would_mask_editor_clip(
         entity,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: Some(CharacterControllerSettings::default()),
             player: true,
@@ -543,6 +547,7 @@ fn character_motion_preview_moves_without_mutating_authored_transform_and_tracks
         entity,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: Some(settings),
             player: true,
@@ -654,6 +659,7 @@ fn add_component_to_host_creates_child_and_selects_it() {
             entity,
             "Character Controller",
             NodeKind::CharacterController {
+                loadout: None,
                 character: None,
                 settings: Some(CharacterControllerSettings::default()),
                 player: false,
@@ -1035,6 +1041,7 @@ fn player_source_demote_handles_spawn_points_and_character_controllers() {
         entity,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: Some(CharacterControllerSettings::default()),
             player: true,
@@ -1080,6 +1087,7 @@ fn character_controller_player_toggle_demotes_existing_player_source() {
         entity,
         "Character Controller",
         NodeKind::CharacterController {
+            loadout: None,
             character: None,
             settings: Some(CharacterControllerSettings::default()),
             player: false,

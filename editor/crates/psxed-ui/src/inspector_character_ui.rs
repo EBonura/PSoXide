@@ -216,54 +216,49 @@ pub(crate) fn draw_character_resource_editor(
                 .small(),
             );
 
+            changed |= equipment_bindings_ui(ui, ctx, "character-default-equipment", &mut character.default_equipment);
+        });
+
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Loadouts"))
+        .default_open(!character.loadouts.is_empty())
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(
+                    "Named alternatives to the default. A placement picks one on its Character Controller; anything without a pick uses the default.",
+                )
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
+
             let mut remove = None;
-            for (index, binding) in character.default_equipment.iter_mut().enumerate() {
-                ui.push_id(("character-default-equipment", index), |ui| {
+            for (index, loadout) in character.loadouts.iter_mut().enumerate() {
+                ui.push_id(("character-loadout", index), |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Weapon");
-                        let preview = binding
-                            .weapon
-                            .and_then(|id| {
-                                ctx.weapons
-                                    .iter()
-                                    .find_map(|(candidate, name)| (*candidate == id).then_some(name.as_str()))
-                            })
-                            .unwrap_or("(none)");
-                        changed |= searchable_picker(
-                            ui,
-                            "weapon-picker",
-                            &mut binding.weapon,
-                            preview,
-                            &ctx.weapons,
-                            SearchablePickerConfig::optional("(none)"),
-                        );
+                        ui.label("Name");
+                        changed |= ui.text_edit_singleline(&mut loadout.name).changed();
                         if ui
                             .small_button(icons::label(icons::TRASH, ""))
-                            .on_hover_text("Remove equipment binding")
+                            .on_hover_text("Remove loadout")
                             .clicked()
                         {
                             remove = Some(index);
                         }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Character Socket");
-                        changed |= ui.text_edit_singleline(&mut binding.character_socket).changed();
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Weapon Grip");
-                        changed |= ui.text_edit_singleline(&mut binding.weapon_grip).changed();
+                    ui.indent(("loadout-equipment", index), |ui| {
+                        changed |= equipment_bindings_ui(ui, ctx, "character-loadout-equipment", &mut loadout.equipment);
                     });
                     ui.separator();
                 });
             }
             if let Some(index) = remove {
-                character.default_equipment.remove(index);
+                character.loadouts.remove(index);
                 changed = true;
             }
-            if ui.button("+ Add equipment").clicked() {
-                character
-                    .default_equipment
-                    .push(psxed_project::CharacterEquipmentBinding::default());
+            if ui.button("+ Add loadout").clicked() {
+                character.loadouts.push(psxed_project::CharacterLoadout {
+                    name: format!("Loadout {}", character.loadouts.len() + 1),
+                    equipment: Vec::new(),
+                });
                 changed = true;
             }
         });
@@ -363,6 +358,68 @@ pub(crate) fn draw_character_resource_editor(
             );
         });
 
+    changed
+}
+
+/// Editor for one list of equipment bindings.
+///
+/// Shared by Default Equipment and by every named loadout, so the two cannot
+/// drift into offering different controls for the same data.
+fn equipment_bindings_ui(
+    ui: &mut egui::Ui,
+    ctx: &CharacterEditorContext,
+    id_salt: &str,
+    bindings: &mut Vec<psxed_project::CharacterEquipmentBinding>,
+) -> bool {
+    let mut changed = false;
+    let mut remove = None;
+    for (index, binding) in bindings.iter_mut().enumerate() {
+        ui.push_id((id_salt, index), |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Weapon");
+                let preview = binding
+                    .weapon
+                    .and_then(|id| {
+                        ctx.weapons
+                            .iter()
+                            .find_map(|(candidate, name)| (*candidate == id).then_some(name.as_str()))
+                    })
+                    .unwrap_or("(none)");
+                changed |= searchable_picker(
+                    ui,
+                    "weapon-picker",
+                    &mut binding.weapon,
+                    preview,
+                    &ctx.weapons,
+                    SearchablePickerConfig::optional("(none)"),
+                );
+                if ui
+                    .small_button(icons::label(icons::TRASH, ""))
+                    .on_hover_text("Remove equipment binding")
+                    .clicked()
+                {
+                    remove = Some(index);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Character Socket");
+                changed |= ui.text_edit_singleline(&mut binding.character_socket).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Weapon Grip");
+                changed |= ui.text_edit_singleline(&mut binding.weapon_grip).changed();
+            });
+            ui.separator();
+        });
+    }
+    if let Some(index) = remove {
+        bindings.remove(index);
+        changed = true;
+    }
+    if ui.button("+ Add equipment").clicked() {
+        bindings.push(psxed_project::CharacterEquipmentBinding::default());
+        changed = true;
+    }
     changed
 }
 
