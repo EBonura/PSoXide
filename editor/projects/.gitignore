@@ -10,6 +10,8 @@
 !cortex-ignition-tech-demo-0.2/**
 !cortex-ignition-tech-demo-0.3/
 !cortex-ignition-tech-demo-0.3/**
+!cortex-ignition-tech-demo-0.4/
+!cortex-ignition-tech-demo-0.4/**
 !null-choir-texture-kit/
 !null-choir-texture-kit/**
 
@@ -21,3 +23,5 @@ default/source_assets/**/previews/
 **/cooked/
 **/baked/
 **/logs/
+# Emulator/editor screen grabs: working output, regenerated on demand.
+**/captures/
