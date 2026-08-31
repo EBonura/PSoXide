@@ -23,6 +23,9 @@ pub(crate) struct PreviewCombatCapsule {
     pub start: [i32; 3],
     pub end: [i32; 3],
     pub radius: u16,
+    /// Local direction used by Animation Studio's procedural projectile cue.
+    pub projectile_preview_rotation_q12: [i16; 3],
+    pub gizmo_mode: PreviewGizmoMode,
     pub color: Color32,
     pub selected: bool,
     /// Optional Animation Studio-only projectile cue. The model renderer does
@@ -81,6 +84,24 @@ pub struct PreviewMaterialLayer<'a> {
     pub motion: psx_level::LevelMaterialUvMotion,
 }
 
+/// Action-authored blade ribbon shown by Animation Studio.
+///
+/// The preview reconstructs the ribbon from older sampled socket poses, just
+/// like the PS1 runtime, rather than keeping an editor-only point history.
+#[derive(Clone, Copy, Debug)]
+pub struct PreviewWeaponTrail {
+    pub start_frame: u16,
+    pub end_frame: u16,
+    pub history_frames: u16,
+    pub segments: u8,
+    pub root_color: [u8; 3],
+    pub tip_color: [u8; 3],
+    pub blend_mode: psxed_project::WeaponTrailBlendMode,
+    /// Preferred hilt-to-tip segment in weapon-model local coordinates.
+    /// When absent, the renderer derives one from the grip and mesh bounds.
+    pub local_segment: Option<([i32; 3], [i32; 3])>,
+}
+
 /// Equipped-weapon overlay: a second rigid model rendered riding a
 /// socket, placed with the runtime equipment composition (socket pose
 /// times grip inverse) so the preview equals what Play shows.
@@ -96,6 +117,8 @@ pub struct PreviewEquippedWeapon<'a> {
     pub materialization_q12: u16,
     /// Draw the materialised faces as the runtime's green nanobot cage.
     pub wireframe_materialization: bool,
+    /// Optional action-authored blade trail for the current weapon lane.
+    pub trail: Option<PreviewWeaponTrail>,
     /// Expose a projected gizmo at the aligned grip point.
     pub show_grip_gizmo: bool,
 }
@@ -108,6 +131,9 @@ pub(crate) struct ImportPreviewRender {
     pub selected_socket_gizmo: Option<PreviewAxisGizmo>,
     pub selected_joint_gizmo: Option<PreviewAxisGizmo>,
     pub selected_combat_gizmo: Option<PreviewAxisGizmo>,
+    /// Projected procedural projectile direction, independent of which
+    /// transform tool owns the combat gizmo axes.
+    pub selected_projectile_aim: Option<[f32; 2]>,
     pub selected_weapon_grip_gizmo: Option<PreviewAxisGizmo>,
 }
 
@@ -120,8 +146,9 @@ pub(crate) struct JointCapsuleFit {
 
 /// Fit a conservative capsule around vertices primarily assigned to `joint`.
 /// The longest local axis becomes the segment and the other two axes size the
-/// radius. Values are returned in the same engine-unit joint space used by the
-/// combat capsule contract.
+/// radius. Endpoints remain in model-local coordinates because the animated
+/// joint matrix applies model scale; radius is converted to engine units
+/// because the runtime deliberately preserves it without model scaling.
 pub(crate) fn fit_capsule_to_joint(
     model_bytes: &[u8],
     joint: u16,
@@ -159,25 +186,23 @@ pub(crate) fn fit_capsule_to_joint(
     }
     let scale = preview_model_local_to_world(&model, visual_scale_q8);
     let center = [
-        scale.apply(min[0].saturating_add(max[0]) / 2),
-        scale.apply(min[1].saturating_add(max[1]) / 2),
-        scale.apply(min[2].saturating_add(max[2]) / 2),
+        min[0].saturating_add(max[0]) / 2,
+        min[1].saturating_add(max[1]) / 2,
+        min[2].saturating_add(max[2]) / 2,
     ];
     let extents = [
-        scale.apply(max[0].saturating_sub(min[0]).abs()) / 2,
-        scale.apply(max[1].saturating_sub(min[1]).abs()) / 2,
-        scale.apply(max[2].saturating_sub(min[2]).abs()) / 2,
+        max[0].saturating_sub(min[0]).abs() / 2,
+        max[1].saturating_sub(min[1]).abs() / 2,
+        max[2].saturating_sub(min[2]).abs() / 2,
     ];
     let segment_axis = (0..3).max_by_key(|axis| extents[*axis])?;
-    let radius = (0..3)
+    let local_radius = (0..3)
         .filter(|axis| *axis != segment_axis)
         .map(|axis| extents[axis])
         .max()
-        .unwrap_or(1)
-        .clamp(12, i32::from(u16::MAX)) as u16;
-    let half_segment = extents[segment_axis]
-        .saturating_sub(i32::from(radius))
-        .max(0);
+        .unwrap_or(1);
+    let radius = scale.apply(local_radius).clamp(12, i32::from(u16::MAX)) as u16;
+    let half_segment = extents[segment_axis].saturating_sub(local_radius).max(0);
     let mut start = center;
     let mut end = center;
     start[segment_axis] = start[segment_axis].saturating_sub(half_segment);
@@ -457,13 +482,19 @@ pub(crate) fn render_import_model_preview_with_equipment_set_at_size(
     let mut z_buffer = vec![f32::INFINITY; render_width * render_height];
     let mut joint_transforms =
         vec![JointWorldTransform::ZERO; model.joint_count().min(animation.joint_count()) as usize];
-    for (joint, transform) in joint_transforms.iter_mut().enumerate() {
+    let mut joint_bases = vec![Mat3I16::IDENTITY; joint_transforms.len()];
+    for (joint, (transform, basis)) in joint_transforms
+        .iter_mut()
+        .zip(joint_bases.iter_mut())
+        .enumerate()
+    {
         let mut pose = animation.pose_looped_q12(frame_q12, joint as u16)?;
         if let Some(delta) = root_delta {
             apply_root_motion_delta(&mut pose, delta);
         }
         apply_pose_offset(&mut pose, options.pose_offset);
         *transform = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
+        *basis = compute_joint_world_basis(pose, instance_rotation);
     }
     let projected_body_anchor =
         body_anchor_projected(camera, projection, focus.map(|focus| focus.center), origin);
@@ -575,6 +606,24 @@ pub(crate) fn render_import_model_preview_with_equipment_set_at_size(
             selected_weapon_grip_gizmo = grip_gizmo;
         }
     }
+    // The runtime submits trails after opaque character/equipment geometry.
+    // Keep the same order here so the ribbon remains readable while sharing
+    // the preview depth buffer with the body and both dual-wielded weapons.
+    for weapon in equipped_weapons {
+        draw_equipped_weapon_trail(
+            &mut image,
+            &z_buffer,
+            camera,
+            weapon,
+            &animation,
+            frame_q12,
+            options.preview_in_place,
+            options.pose_offset,
+            instance_rotation,
+            local_to_world,
+            origin,
+        );
+    }
 
     if options.show_animation_root {
         if let Some(anchor) = projected_body_anchor {
@@ -597,24 +646,49 @@ pub(crate) fn render_import_model_preview_with_equipment_set_at_size(
     }
 
     let mut selected_combat_gizmo = None;
+    let mut selected_projectile_aim = None;
     for capsule in combat_capsules {
         let Some(joint) = joint_transforms.get(capsule.joint as usize).copied() else {
             continue;
         };
-        draw_joint_combat_capsule(&mut image, camera, projection, joint, capsule);
+        let Some(joint_basis) = joint_bases.get(capsule.joint as usize).copied() else {
+            continue;
+        };
+        draw_joint_combat_capsule(&mut image, camera, projection, joint, joint_basis, capsule);
         if capsule.selected {
             let center = [
                 capsule.start[0].saturating_add(capsule.end[0]) / 2,
                 capsule.start[1].saturating_add(capsule.end[1]) / 2,
                 capsule.start[2].saturating_add(capsule.end[2]) / 2,
             ];
-            selected_combat_gizmo = project_joint_local_axis_gizmo(
+            let joint_local_gizmo = project_joint_local_axis_gizmo(
                 camera,
                 projection,
                 joint,
                 center,
                 gizmo_local_axis_units,
             );
+            selected_combat_gizmo = joint_local_gizmo;
+            if capsule.projectile.is_some() {
+                let aim_basis = joint_basis.mul(&euler_rotation_q12([
+                    capsule.projectile_preview_rotation_q12[0] as u16,
+                    capsule.projectile_preview_rotation_q12[1] as u16,
+                    capsule.projectile_preview_rotation_q12[2] as u16,
+                ]));
+                let center_world = joint_local_point(joint, center);
+                let projectile_gizmo = project_axis_gizmo(
+                    camera,
+                    projection,
+                    center_world,
+                    &aim_basis,
+                    gizmo_axis_length,
+                    gizmo_local_axis_units,
+                );
+                selected_projectile_aim = projectile_gizmo.map(|gizmo| gizmo.axis_ends[2]);
+                if capsule.gizmo_mode == PreviewGizmoMode::Rotate {
+                    selected_combat_gizmo = projectile_gizmo;
+                }
+            }
         }
     }
     let mut selected_socket_gizmo = None;
@@ -692,6 +766,7 @@ pub(crate) fn render_import_model_preview_with_equipment_set_at_size(
         selected_socket_gizmo,
         selected_joint_gizmo,
         selected_combat_gizmo,
+        selected_projectile_aim,
         selected_weapon_grip_gizmo,
     })
 }
@@ -1503,6 +1578,7 @@ fn draw_joint_combat_capsule(
     camera: WorldCamera,
     projection: WorldProjection,
     joint: JointWorldTransform,
+    joint_basis: Mat3I16,
     capsule: &PreviewCombatCapsule,
 ) {
     let radius = i32::from(capsule.radius.max(1));
@@ -1515,17 +1591,19 @@ fn draw_joint_combat_capsule(
         capsule.color
     };
 
-    // Three great circles at each endpoint keep the volume readable from any
-    // camera angle. Their local axes rotate with the animated joint.
+    // Endpoints are model-local and therefore pass through the scaled joint
+    // matrix. Radius is already in engine units, so offset it through the
+    // orthonormal joint basis. Applying the scaled matrix to both was the
+    // reason combat volumes appeared implausibly thin on imported models.
     for center in [capsule.start, capsule.end] {
         for plane in [(0usize, 1usize), (0, 2), (1, 2)] {
             let mut previous = None;
             for step in 0..=24 {
                 let angle = Angle::from_q12(((step * 4096) / 24) as u16);
-                let mut local = center;
-                local[plane.0] = local[plane.0].saturating_add(angle.sin().mul_i32(radius));
-                local[plane.1] = local[plane.1].saturating_add(angle.cos().mul_i32(radius));
-                let world = joint_local_point(joint, local);
+                let mut offset = [0; 3];
+                offset[plane.0] = angle.sin().mul_i32(radius);
+                offset[plane.1] = angle.cos().mul_i32(radius);
+                let world = capsule_radius_world_point(joint, &joint_basis, center, offset);
                 if let Some(previous) = previous {
                     draw_projected_world_line(image, camera, projection, previous, world, line);
                 }
@@ -1544,10 +1622,27 @@ fn draw_joint_combat_capsule(
         [0, 0, radius],
         [0, 0, -radius],
     ] {
-        let a = joint_local_point(joint, add_i32x3(capsule.start, offset));
-        let b = joint_local_point(joint, add_i32x3(capsule.end, offset));
+        let a = basis_offset_point(
+            joint_local_point(joint, capsule.start),
+            &joint_basis,
+            offset,
+        );
+        let b = basis_offset_point(joint_local_point(joint, capsule.end), &joint_basis, offset);
         draw_projected_world_line(image, camera, projection, a, b, line);
     }
+}
+
+fn capsule_radius_world_point(
+    joint: JointWorldTransform,
+    joint_basis: &Mat3I16,
+    center_local: [i32; 3],
+    radius_offset: [i32; 3],
+) -> WorldVertex {
+    basis_offset_point(
+        joint_local_point(joint, center_local),
+        joint_basis,
+        radius_offset,
+    )
 }
 
 /// Rasterise an equipped weapon riding a socket into the preview,
@@ -1720,6 +1815,354 @@ fn draw_equipped_weapon_overlay(
     grip_gizmo
 }
 
+#[derive(Clone, Copy)]
+struct PreviewTrailVertex {
+    x: f32,
+    y: f32,
+    z: f32,
+    color: [f32; 3],
+}
+
+impl PreviewTrailVertex {
+    fn from_projected(projected: ProjectedVertex, color: [u8; 3]) -> Self {
+        Self {
+            x: projected.sx as f32,
+            y: projected.sy as f32,
+            z: projected.sz as f32,
+            color: color.map(f32::from),
+        }
+    }
+}
+
+/// Reconstruct and rasterise the current weapon ribbon from sampled poses.
+/// This mirrors `draw_player_weapon_trails_from_pose` in the guest renderer,
+/// including the active frame window and history clamp at the trail start.
+#[allow(clippy::too_many_arguments)]
+fn draw_equipped_weapon_trail(
+    image: &mut ColorImage,
+    z_buffer: &[f32],
+    camera: WorldCamera,
+    weapon: &PreviewEquippedWeapon<'_>,
+    animation: &Animation<'_>,
+    current_phase: u32,
+    preview_in_place: bool,
+    pose_offset: [i32; 3],
+    instance_rotation: Mat3I16,
+    character_local_to_world: LocalToWorldScale,
+    character_origin: WorldVertex,
+) {
+    let Some(trail) = weapon.trail else {
+        return;
+    };
+    if weapon.materialization_q12 == 0 || animation.frame_count() == 0 {
+        return;
+    }
+    let start_phase = u32::from(trail.start_frame) << 12;
+    let end_frame = if trail.end_frame == psxed_project::ACTION_FRAME_END_FULL {
+        animation.frame_count().saturating_sub(1)
+    } else {
+        trail
+            .end_frame
+            .min(animation.frame_count().saturating_sub(1))
+    };
+    let end_phase_exclusive = u32::from(end_frame.saturating_add(1)) << 12;
+    if current_phase < start_phase || current_phase >= end_phase_exclusive {
+        return;
+    }
+
+    let Ok(weapon_model) = Model::from_bytes(weapon.model_bytes) else {
+        return;
+    };
+    let Some((blade_root, blade_tip)) = preview_weapon_trail_local_segment(
+        &weapon_model,
+        weapon.grip_translation,
+        trail.local_segment,
+    ) else {
+        return;
+    };
+    let segment_count =
+        usize::from(trail.segments).clamp(1, usize::from(psxed_project::WEAPON_TRAIL_MAX_SEGMENTS));
+    let history_q12 = u32::from(trail.history_frames.max(1)) << 12;
+    let mut roots = vec![None; segment_count + 1];
+    let mut tips = vec![None; segment_count + 1];
+    for sample in 0..=segment_count {
+        let back = history_q12.saturating_mul(sample as u32) / segment_count as u32;
+        let sample_phase = current_phase.saturating_sub(back).max(start_phase);
+        let Some((origin, rotation, scale)) = preview_equipped_weapon_placement(
+            weapon,
+            &weapon_model,
+            animation,
+            sample_phase,
+            preview_in_place,
+            pose_offset,
+            instance_rotation,
+            character_local_to_world,
+            character_origin,
+        ) else {
+            continue;
+        };
+        roots[sample] = camera.project_world(preview_weapon_local_point_world(
+            origin, rotation, scale, blade_root,
+        ));
+        tips[sample] = camera.project_world(preview_weapon_local_point_world(
+            origin, rotation, scale, blade_tip,
+        ));
+    }
+
+    for segment in 0..segment_count {
+        let (Some(root_now), Some(tip_now), Some(root_old), Some(tip_old)) = (
+            roots[segment],
+            tips[segment],
+            roots[segment + 1],
+            tips[segment + 1],
+        ) else {
+            continue;
+        };
+        let current_fade = segment_count.saturating_sub(segment) as u8;
+        let previous_fade = segment_count.saturating_sub(segment + 1) as u8;
+        let vertices = [
+            PreviewTrailVertex::from_projected(
+                root_now,
+                preview_faded_trail_color(trail.root_color, current_fade, segment_count as u8),
+            ),
+            PreviewTrailVertex::from_projected(
+                tip_now,
+                preview_faded_trail_color(trail.tip_color, current_fade, segment_count as u8),
+            ),
+            PreviewTrailVertex::from_projected(
+                root_old,
+                preview_faded_trail_color(trail.root_color, previous_fade, segment_count as u8),
+            ),
+            PreviewTrailVertex::from_projected(
+                tip_old,
+                preview_faded_trail_color(trail.tip_color, previous_fade, segment_count as u8),
+            ),
+        ];
+        raster_gouraud_blended_triangle(
+            image,
+            z_buffer,
+            [vertices[0], vertices[1], vertices[2]],
+            trail.blend_mode,
+        );
+        raster_gouraud_blended_triangle(
+            image,
+            z_buffer,
+            [vertices[1], vertices[3], vertices[2]],
+            trail.blend_mode,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn preview_equipped_weapon_placement(
+    weapon: &PreviewEquippedWeapon<'_>,
+    weapon_model: &Model<'_>,
+    animation: &Animation<'_>,
+    phase_q12: u32,
+    preview_in_place: bool,
+    pose_offset: [i32; 3],
+    instance_rotation: Mat3I16,
+    character_local_to_world: LocalToWorldScale,
+    character_origin: WorldVertex,
+) -> Option<(WorldVertex, Mat3I16, LocalToWorldScale)> {
+    let mut pose = animation.pose_looped_q12(phase_q12, weapon.socket_joint)?;
+    if preview_in_place {
+        if let Some(delta) = root_motion_delta_q12(animation, phase_q12) {
+            apply_root_motion_delta(&mut pose, delta);
+        }
+    }
+    apply_pose_offset(&mut pose, pose_offset);
+    let joint = compute_joint_world_transform(
+        pose,
+        instance_rotation,
+        character_local_to_world,
+        character_origin,
+    );
+    let socket_origin = joint_local_point(joint, weapon.socket_translation);
+    let socket_rotation =
+        compute_joint_world_basis(pose, instance_rotation).mul(&euler_rotation_q12([
+            weapon.socket_rotation_q12[0] as u16,
+            weapon.socket_rotation_q12[1] as u16,
+            weapon.socket_rotation_q12[2] as u16,
+        ]));
+    let weapon_rotation =
+        socket_rotation.mul(&euler_rotation_q12_inverse(weapon.grip_rotation_q12));
+    let weapon_local_to_world = LocalToWorldScale::from_q12(weapon_model.local_to_world_q12());
+    let grip = weapon
+        .grip_translation
+        .map(|value| weapon_local_to_world.apply(value));
+    let grip_world = basis_offset_point(WorldVertex::ZERO, &weapon_rotation, grip);
+    let weapon_origin = WorldVertex::new(
+        socket_origin.x.saturating_sub(grip_world.x),
+        socket_origin.y.saturating_sub(grip_world.y),
+        socket_origin.z.saturating_sub(grip_world.z),
+    );
+    Some((weapon_origin, weapon_rotation, weapon_local_to_world))
+}
+
+fn preview_weapon_trail_local_segment(
+    weapon_model: &Model<'_>,
+    grip: [i32; 3],
+    authored: Option<([i32; 3], [i32; 3])>,
+) -> Option<([i32; 3], [i32; 3])> {
+    if let Some((start, end)) = authored {
+        return Some(
+            if preview_local_distance_score(start, grip) <= preview_local_distance_score(end, grip)
+            {
+                (start, end)
+            } else {
+                (end, start)
+            },
+        );
+    }
+    let mut farthest = grip;
+    let mut farthest_score = 0i32;
+    for vertex_index in 0..weapon_model.vertex_count() {
+        let vertex = weapon_model.vertex(vertex_index)?;
+        let point = [
+            i32::from(vertex.position.x),
+            i32::from(vertex.position.y),
+            i32::from(vertex.position.z),
+        ];
+        let score = preview_local_distance_score(point, grip);
+        if score > farthest_score {
+            farthest_score = score;
+            farthest = point;
+        }
+    }
+    (farthest_score > 0).then_some((grip, farthest))
+}
+
+fn preview_local_distance_score(point: [i32; 3], origin: [i32; 3]) -> i32 {
+    point
+        .iter()
+        .zip(origin)
+        .map(|(point, origin)| {
+            let delta = point.saturating_sub(origin) >> 4;
+            delta.saturating_mul(delta)
+        })
+        .fold(0, i32::saturating_add)
+}
+
+fn preview_weapon_local_point_world(
+    origin: WorldVertex,
+    rotation: Mat3I16,
+    scale: LocalToWorldScale,
+    local: [i32; 3],
+) -> WorldVertex {
+    let scaled = local.map(|value| scale.apply(value));
+    basis_offset_point(origin, &rotation, scaled)
+}
+
+fn preview_faded_trail_color(color: [u8; 3], numerator: u8, denominator: u8) -> [u8; 3] {
+    color.map(|channel| {
+        (u16::from(channel).saturating_mul(u16::from(numerator)) / u16::from(denominator.max(1)))
+            as u8
+    })
+}
+
+fn raster_gouraud_blended_triangle(
+    image: &mut ColorImage,
+    z_buffer: &[f32],
+    tri: [PreviewTrailVertex; 3],
+    blend_mode: psxed_project::WeaponTrailBlendMode,
+) {
+    let width = image.size[0];
+    let height = image.size[1];
+    if width == 0 || height == 0 || z_buffer.len() < width.saturating_mul(height) {
+        return;
+    }
+    let edge = |a: PreviewTrailVertex, b: PreviewTrailVertex, x: f32, y: f32| {
+        (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x)
+    };
+    let area = edge(tri[0], tri[1], tri[2].x, tri[2].y);
+    if area.abs() < f32::EPSILON {
+        return;
+    }
+    let min_x = tri
+        .iter()
+        .map(|vertex| vertex.x.floor() as i32)
+        .min()
+        .unwrap_or(0)
+        .clamp(0, width as i32 - 1);
+    let max_x = tri
+        .iter()
+        .map(|vertex| vertex.x.ceil() as i32)
+        .max()
+        .unwrap_or(0)
+        .clamp(0, width as i32 - 1);
+    let min_y = tri
+        .iter()
+        .map(|vertex| vertex.y.floor() as i32)
+        .min()
+        .unwrap_or(0)
+        .clamp(0, height as i32 - 1);
+    let max_y = tri
+        .iter()
+        .map(|vertex| vertex.y.ceil() as i32)
+        .max()
+        .unwrap_or(0)
+        .clamp(0, height as i32 - 1);
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let w0 = edge(tri[1], tri[2], px, py);
+            let w1 = edge(tri[2], tri[0], px, py);
+            let w2 = edge(tri[0], tri[1], px, py);
+            let inside = if area > 0.0 {
+                w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0
+            } else {
+                w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0
+            };
+            if !inside {
+                continue;
+            }
+            let b0 = w0 / area;
+            let b1 = w1 / area;
+            let b2 = w2 / area;
+            let depth = tri[0].z * b0 + tri[1].z * b1 + tri[2].z * b2;
+            let index = y as usize * width + x as usize;
+            // Transparent packets do not write depth. A tiny tolerance keeps
+            // the live blade edge from erasing its own coplanar ribbon.
+            if depth > z_buffer[index] + 2.0 {
+                continue;
+            }
+            let color = [0, 1, 2].map(|channel| {
+                (tri[0].color[channel] * b0
+                    + tri[1].color[channel] * b1
+                    + tri[2].color[channel] * b2)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            });
+            image.pixels[index] = preview_blend_color(image.pixels[index], color, blend_mode);
+        }
+    }
+}
+
+fn preview_blend_color(
+    background: Color32,
+    foreground: [u8; 3],
+    mode: psxed_project::WeaponTrailBlendMode,
+) -> Color32 {
+    let background = [background.r(), background.g(), background.b()];
+    let output = [0, 1, 2].map(|channel| match mode {
+        psxed_project::WeaponTrailBlendMode::Average => {
+            ((u16::from(background[channel]) + u16::from(foreground[channel])) / 2) as u8
+        }
+        psxed_project::WeaponTrailBlendMode::Add => {
+            background[channel].saturating_add(foreground[channel])
+        }
+        psxed_project::WeaponTrailBlendMode::Subtract => {
+            background[channel].saturating_sub(foreground[channel])
+        }
+        psxed_project::WeaponTrailBlendMode::AddQuarter => {
+            background[channel].saturating_add(foreground[channel] / 4)
+        }
+    });
+    Color32::from_rgb(output[0], output[1], output[2])
+}
+
 /// Inverse of [`euler_rotation_q12`]: negate each angle and compose in
 /// the opposite order, matching the runtime's grip-inverse helper.
 fn euler_rotation_q12_inverse(rotation_q12: [i16; 3]) -> Mat3I16 {
@@ -1857,14 +2300,6 @@ fn basis_offset_point(origin: WorldVertex, basis: &Mat3I16, local: [i32; 3]) -> 
         origin.y.saturating_add(rotate(basis.m[1])),
         origin.z.saturating_add(rotate(basis.m[2])),
     )
-}
-
-fn add_i32x3(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
-    [
-        a[0].saturating_add(b[0]),
-        a[1].saturating_add(b[1]),
-        a[2].saturating_add(b[2]),
-    ]
 }
 
 fn joint_local_point(joint: JointWorldTransform, local: [i32; 3]) -> WorldVertex {
@@ -2271,6 +2706,7 @@ mod tests {
             grip_rotation_q12: [0, 0, 0],
             materialization_q12: 4096,
             wireframe_materialization: false,
+            trail: None,
             show_grip_gizmo: false,
         }));
         assert_ne!(
@@ -2291,6 +2727,7 @@ mod tests {
             grip_rotation_q12: [0, 0, 0],
             materialization_q12: 4096,
             wireframe_materialization: false,
+            trail: None,
             show_grip_gizmo: false,
         }));
         assert_ne!(
@@ -2316,6 +2753,7 @@ mod tests {
                 grip_rotation_q12: [0, 0, 0],
                 materialization_q12: 0,
                 wireframe_materialization: false,
+                trail: None,
                 show_grip_gizmo: true,
             }),
             material_layer.as_ref(),
@@ -2338,6 +2776,7 @@ mod tests {
                 grip_rotation_q12: [0, 0, 0],
                 materialization_q12: 4096,
                 wireframe_materialization: false,
+                trail: None,
                 show_grip_gizmo: false,
             },
             PreviewEquippedWeapon {
@@ -2354,6 +2793,7 @@ mod tests {
                 grip_rotation_q12: [0, 0, 0],
                 materialization_q12: 4096,
                 wireframe_materialization: false,
+                trail: None,
                 show_grip_gizmo: true,
             },
         ];
@@ -2388,6 +2828,174 @@ mod tests {
             }
             std::fs::write(path, out).expect("write weapon preview ppm");
         }
+    }
+
+    #[test]
+    fn authored_blade_trail_is_visible_while_scrubbing_an_attack() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let model = std::fs::read(root.join(
+            "editor/projects/default/assets/models/aletha_delivered/aletha_delivered.psxmdl",
+        ))
+        .expect("tracked Aletha model");
+        let clip = std::fs::read(
+            root.join("editor/projects/default/assets/animations/gen/light_attack.psxanim"),
+        )
+        .expect("tracked light attack");
+        let character_atlas = crate::model_animation_viewer::decode_psxt_palette_banks(
+            &std::fs::read(root.join(
+                "editor/projects/default/assets/models/aletha_delivered/aletha_delivered.psxt",
+            ))
+            .expect("tracked Aletha atlas"),
+        )
+        .expect("decode Aletha atlas banks");
+        let weapon_model = std::fs::read(
+            root.join("editor/projects/default/assets/models/sword1_light/sword1_light.psxmdl"),
+        )
+        .expect("tracked light sword model");
+        let weapon_atlas = crate::model_animation_viewer::decode_psxt_palette_banks(
+            &std::fs::read(
+                root.join("editor/projects/default/assets/models/sword1_light/sword1_light.psxt"),
+            )
+            .expect("tracked light sword atlas"),
+        )
+        .expect("decode light sword atlas banks");
+        let parsed_model = Model::from_bytes(&model).expect("parse Aletha model");
+        let animation = Animation::from_bytes(&clip).expect("parse light attack");
+        assert!(
+            animation.frame_count() > 30,
+            "fixture must cover the trail window"
+        );
+        let socket = psxed_project::AttachmentSocket {
+            name: "right_hand_grip".to_string(),
+            joint: 13,
+            translation: [-17_390, -2_240, -6_229],
+            translation_space: psxed_project::AttachmentSocketTranslationSpace::JointOffset,
+            rotation_q12: [32, 0, 1696],
+        };
+        let socket_translation =
+            psxed_project::model_import::attachment_socket_bind_translation(&parsed_model, &socket);
+        let options_at = |frame: u16| ImportPreviewOptions {
+            world_height: 1024,
+            visual_scale_q8: MODEL_SCALE_ONE_Q8,
+            visual_yaw_q12: 0,
+            collision_radius: 192,
+            time_seconds: f64::from(frame) / f64::from(animation.sample_rate_hz().max(1)),
+            yaw_q12: 340,
+            pitch_q12: 350,
+            radius: 0,
+            focus_on_animated_bounds: true,
+            preview_in_place: true,
+            pose_offset: [0, 0, 0],
+            show_animation_root: false,
+            show_collision_guides: false,
+            show_bones: false,
+        };
+        let trail = PreviewWeaponTrail {
+            start_frame: 23,
+            end_frame: 35,
+            history_frames: 5,
+            segments: 4,
+            root_color: [96, 20, 8],
+            tip_color: [255, 176, 64],
+            blend_mode: psxed_project::WeaponTrailBlendMode::Add,
+            local_segment: Some(([0, -5_000, 0], [0, -30_000, 0])),
+        };
+        let render = |frame: u16, trail: Option<PreviewWeaponTrail>| {
+            let weapon = PreviewEquippedWeapon {
+                model_bytes: &weapon_model,
+                atlas_banks: &weapon_atlas,
+                socket_joint: socket.joint,
+                socket_translation,
+                socket_rotation_q12: socket.rotation_q12,
+                grip_translation: [0, -25_370, 0],
+                grip_rotation_q12: [0, 0, 0],
+                materialization_q12: 4096,
+                wireframe_materialization: false,
+                trail,
+                show_grip_gizmo: false,
+            };
+            render_import_model_preview_with_equipment_set_at_size(
+                &model,
+                &clip,
+                &character_atlas,
+                options_at(frame),
+                yaw_rotation_matrix(0),
+                [640, 480],
+                &[],
+                &[],
+                std::slice::from_ref(&weapon),
+                None,
+                None,
+                None,
+            )
+            .expect("attack preview renders")
+            .image
+        };
+
+        let plain = render(30, None);
+        let with_trail = render(30, Some(trail));
+        let changed_pixels = plain
+            .pixels
+            .iter()
+            .zip(&with_trail.pixels)
+            .filter(|(before, after)| before != after)
+            .count();
+        assert!(
+            changed_pixels > 24,
+            "active trail should add a visible ribbon, changed only {changed_pixels} pixels"
+        );
+        assert_eq!(
+            render(20, None).pixels,
+            render(20, Some(trail)).pixels,
+            "the trail must stay hidden before its authored start frame"
+        );
+
+        if let Ok(path) = std::env::var("DUMP_WEAPON_TRAIL_PREVIEW") {
+            let mut out =
+                format!("P6\n{} {}\n255\n", with_trail.size[0], with_trail.size[1]).into_bytes();
+            for pixel in &with_trail.pixels {
+                out.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b()]);
+            }
+            std::fs::write(path, out).expect("write blade-trail preview");
+        }
+    }
+
+    #[test]
+    fn preview_blend_modes_match_the_ps1_equations() {
+        let background = Color32::from_rgb(100, 80, 60);
+        let foreground = [80, 100, 240];
+        assert_eq!(
+            preview_blend_color(
+                background,
+                foreground,
+                psxed_project::WeaponTrailBlendMode::Average,
+            ),
+            Color32::from_rgb(90, 90, 150),
+        );
+        assert_eq!(
+            preview_blend_color(
+                background,
+                foreground,
+                psxed_project::WeaponTrailBlendMode::Add,
+            ),
+            Color32::from_rgb(180, 180, 255),
+        );
+        assert_eq!(
+            preview_blend_color(
+                background,
+                foreground,
+                psxed_project::WeaponTrailBlendMode::Subtract,
+            ),
+            Color32::from_rgb(20, 0, 0),
+        );
+        assert_eq!(
+            preview_blend_color(
+                background,
+                foreground,
+                psxed_project::WeaponTrailBlendMode::AddQuarter,
+            ),
+            Color32::from_rgb(120, 105, 120),
+        );
     }
 
     #[test]
@@ -2437,6 +3045,186 @@ mod tests {
             lit_pixels > 32,
             "expected the cooked model preview to draw visible pixels, got {lit_pixels}"
         );
+    }
+
+    #[test]
+    fn tracked_light_enemy_equipment_and_capsule_render_together() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let project_root = root.join("editor/projects/cortex-ignition-tech-demo-0.3");
+        let model = std::fs::read(
+            project_root.join("assets/models/rust_mantis_clawless/rust_mantis_clawless.psxmdl"),
+        )
+        .expect("tracked clawless Light Enemy model");
+        let clip =
+            std::fs::read(project_root.join("assets/animations/rust_mantis_starter/idle.psxanim"))
+                .expect("tracked Light Enemy idle");
+        let atlas = crate::model_animation_viewer::decode_psxt_palette_banks(
+            &std::fs::read(project_root.join("assets/models/shared_enemy_01/shared_enemy_01.psxt"))
+                .expect("tracked shared enemy atlas"),
+        )
+        .expect("decode shared enemy atlas banks");
+        let weapon_model =
+            std::fs::read(project_root.join("assets/models/sword1_light/sword1_light.psxmdl"))
+                .expect("tracked Light Enemy sword");
+        let capsule = PreviewCombatCapsule {
+            joint: 3,
+            start: [0, -8_000, 0],
+            end: [0, 8_000, 0],
+            radius: 184,
+            projectile_preview_rotation_q12: [0; 3],
+            gizmo_mode: PreviewGizmoMode::Translate,
+            color: Color32::from_rgb(238, 102, 82),
+            selected: true,
+            projectile: None,
+        };
+        let render_at = |socket_rotation_q12| {
+            let weapon = PreviewEquippedWeapon {
+                model_bytes: &weapon_model,
+                atlas_banks: &atlas,
+                socket_joint: 8,
+                socket_translation: [0; 3],
+                socket_rotation_q12,
+                grip_translation: [0, -25_370, 0],
+                grip_rotation_q12: [0; 3],
+                materialization_q12: 4096,
+                wireframe_materialization: false,
+                trail: None,
+                show_grip_gizmo: false,
+            };
+            render_import_model_preview_with_equipment_set_at_size(
+                &model,
+                &clip,
+                &atlas,
+                ImportPreviewOptions {
+                    world_height: 1024,
+                    visual_scale_q8: MODEL_SCALE_ONE_Q8,
+                    visual_yaw_q12: 0,
+                    collision_radius: 192,
+                    time_seconds: 0.0,
+                    yaw_q12: 340,
+                    pitch_q12: 350,
+                    radius: 0,
+                    focus_on_animated_bounds: true,
+                    preview_in_place: true,
+                    pose_offset: [0; 3],
+                    show_animation_root: false,
+                    show_collision_guides: false,
+                    show_bones: true,
+                },
+                Mat3I16::IDENTITY,
+                [640, 640],
+                std::slice::from_ref(&capsule),
+                &[],
+                std::slice::from_ref(&weapon),
+                None,
+                None,
+                None,
+            )
+            .expect("tracked Light Enemy preview")
+        };
+        let render = render_at([0; 3]);
+
+        let selected_pixels = render
+            .image
+            .pixels
+            .iter()
+            .filter(|pixel| **pixel == Color32::from_rgb(255, 194, 72))
+            .count();
+        assert!(
+            selected_pixels > 80,
+            "the correctly scaled torso capsule should be clearly visible"
+        );
+        if let Ok(path) = std::env::var("DUMP_LIGHT_ENEMY_COMBAT_PREVIEW") {
+            let mut out = format!(
+                "P6\n{} {}\n255\n",
+                render.image.size[0], render.image.size[1]
+            )
+            .into_bytes();
+            for pixel in &render.image.pixels {
+                out.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b()]);
+            }
+            std::fs::write(path, out).expect("write Light Enemy combat preview");
+        }
+    }
+
+    #[test]
+    fn tracked_light_enemy_claw_capsule_renders_at_runtime_scale() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let project_root = root.join("editor/projects/cortex-ignition-tech-demo-0.3");
+        let model =
+            std::fs::read(project_root.join("assets/models/rust_mantis/rust_mantis.psxmdl"))
+                .expect("tracked claw Light Enemy model");
+        let clip =
+            std::fs::read(project_root.join("assets/animations/rust_mantis_starter/idle.psxanim"))
+                .expect("tracked Light Enemy idle");
+        let atlas = crate::model_animation_viewer::decode_psxt_palette_banks(
+            &std::fs::read(project_root.join("assets/models/shared_enemy_01/shared_enemy_01.psxt"))
+                .expect("tracked shared enemy atlas"),
+        )
+        .expect("decode shared enemy atlas banks");
+        let capsule = PreviewCombatCapsule {
+            joint: 3,
+            start: [-2_664, -8_000, 0],
+            end: [-2_664, 8_000, 0],
+            radius: 184,
+            projectile_preview_rotation_q12: [0; 3],
+            gizmo_mode: PreviewGizmoMode::Translate,
+            color: Color32::from_rgb(238, 102, 82),
+            selected: true,
+            projectile: None,
+        };
+        let render = render_import_model_preview_with_equipment_set_at_size(
+            &model,
+            &clip,
+            &atlas,
+            ImportPreviewOptions {
+                world_height: 1024,
+                visual_scale_q8: MODEL_SCALE_ONE_Q8,
+                visual_yaw_q12: 0,
+                collision_radius: 192,
+                time_seconds: 0.0,
+                yaw_q12: 340,
+                pitch_q12: 350,
+                radius: 0,
+                focus_on_animated_bounds: true,
+                preview_in_place: true,
+                pose_offset: [0; 3],
+                show_animation_root: false,
+                show_collision_guides: false,
+                show_bones: true,
+            },
+            Mat3I16::IDENTITY,
+            [640, 640],
+            std::slice::from_ref(&capsule),
+            &[],
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("tracked claw Light Enemy preview");
+
+        let selected_pixels = render
+            .image
+            .pixels
+            .iter()
+            .filter(|pixel| **pixel == Color32::from_rgb(255, 194, 72))
+            .count();
+        assert!(
+            selected_pixels > 80,
+            "the claw variant torso capsule should render at runtime scale"
+        );
+        if let Ok(path) = std::env::var("DUMP_LIGHT_ENEMY_CLAW_CAPSULE") {
+            let mut out = format!(
+                "P6\n{} {}\n255\n",
+                render.image.size[0], render.image.size[1]
+            )
+            .into_bytes();
+            for pixel in &render.image.pixels {
+                out.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b()]);
+            }
+            std::fs::write(path, out).expect("write claw Light Enemy capsule preview");
+        }
     }
 
     #[test]
@@ -2514,6 +3302,8 @@ mod tests {
                 start: [0, -96, 0],
                 end: [0, 96, 0],
                 radius: 96,
+                projectile_preview_rotation_q12: [0; 3],
+                gizmo_mode: PreviewGizmoMode::Translate,
                 color: Color32::CYAN,
                 selected: true,
                 projectile: None,
@@ -2622,6 +3412,36 @@ mod tests {
         // conservative capsule is a sphere. Equal endpoints are an explicit
         // part of the serialized JointCapsule contract.
         assert_eq!(fit.start, fit.end);
+    }
+
+    #[test]
+    fn joint_capsule_fit_keeps_endpoints_local_but_scales_radius_to_world_units() {
+        let model = two_joint_model_with_child_part();
+        let full =
+            fit_capsule_to_joint(&model, 1, MODEL_SCALE_ONE_Q8).expect("full-scale capsule fit");
+        let half = fit_capsule_to_joint(&model, 1, MODEL_SCALE_ONE_Q8 / 2)
+            .expect("half-scale capsule fit");
+
+        assert_eq!(half.start, full.start);
+        assert_eq!(half.end, full.end);
+        assert_eq!(half.radius, full.radius / 2);
+    }
+
+    #[test]
+    fn combat_capsule_radius_does_not_inherit_model_scale() {
+        let joint = JointWorldTransform {
+            rotation: Mat3I16 {
+                m: [[128, 0, 0], [0, 128, 0], [0, 0, 128]],
+            },
+            translation: WorldVertex::ZERO,
+        };
+        let center = [0, 8_000, 0];
+        let center_world = joint_local_point(joint, center);
+        let edge_world = capsule_radius_world_point(joint, &Mat3I16::IDENTITY, center, [184, 0, 0]);
+
+        assert_eq!(edge_world.x - center_world.x, 184);
+        assert_eq!(edge_world.y, center_world.y);
+        assert_eq!(edge_world.z, center_world.z);
     }
 
     #[test]

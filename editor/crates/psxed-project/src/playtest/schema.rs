@@ -1713,6 +1713,22 @@ pub struct PlaytestGameEntity {
     pub run_clip: u16,
     /// Windup/Attack/Recover one-shot clip.
     pub attack_clip: u16,
+    /// Q8 playback speed authored for the Horizon Light action.
+    pub attack_speed_q8: u16,
+    /// Inclusive authored playback range for the Horizon Light action.
+    pub attack_frame_range: psx_level::CharacterActionFrameRange,
+    /// Horizon Heavy one-shot clip.
+    pub heavy_attack_clip: u16,
+    /// Q8 playback speed authored for the Horizon Heavy action.
+    pub heavy_attack_speed_q8: u16,
+    /// Inclusive authored playback range for the Horizon Heavy action.
+    pub heavy_attack_frame_range: psx_level::CharacterActionFrameRange,
+    /// Projectile one-shot clip.
+    pub ranged_attack_clip: u16,
+    /// Q8 playback speed authored for the projectile action.
+    pub ranged_attack_speed_q8: u16,
+    /// Inclusive authored playback range for the projectile action.
+    pub ranged_attack_frame_range: psx_level::CharacterActionFrameRange,
     /// Complete Stun one-shot, including recovery (HitReact fallback).
     pub stagger_clip: u16,
     /// Death one-shot clip.
@@ -1721,6 +1737,8 @@ pub struct PlaytestGameEntity {
     pub combat_capsule_first: u16,
     /// Number of rig-attached volumes.
     pub combat_capsule_count: u8,
+    /// Compact `CharacterAnimationAction` index owning the projectile emitter.
+    pub ranged_attack_action: u8,
     /// Room-local spawn X.
     pub x: i32,
     /// Y.
@@ -1764,6 +1782,10 @@ pub struct PlaytestGameEntity {
     /// Attack-state ticks. The cooker extends the legacy six-tick window far
     /// enough for the authored Light Attack event at the cooked clip rate.
     pub attack_active_ticks: u16,
+    /// Attack-state ticks for Horizon Heavy.
+    pub heavy_attack_active_ticks: u16,
+    /// Attack-state ticks for the projectile action.
+    pub ranged_attack_active_ticks: u16,
     /// Post-attack recovery ticks.
     pub recovery_ticks: u8,
     /// Closest ranged-attack distance. Zero for melee entities.
