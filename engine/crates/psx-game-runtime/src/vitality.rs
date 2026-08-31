@@ -479,6 +479,12 @@ impl PowerUpLoadout {
                 as u16,
             movement_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::MOVEMENT_SPEED]),
             attack_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::ATTACK_SPEED]),
+            // Regeneration is an additive rate, not a multiplier: a module
+            // reading "+10" adds that much recovery rather than scaling a base
+            // the player cannot see. Negative stacking floors at zero so a
+            // trade-off can cancel recovery but never drain the pool.
+            regeneration_q12: bonuses_q12[psx_level::boost_stat::REGENERATION]
+                .clamp(0, i32::from(u16::MAX)) as u16,
         }
     }
 }
@@ -632,6 +638,9 @@ pub struct VitalityModifiers {
     pub movement_speed_q12: u16,
     /// Whole attack-timeline speed multiplier (`4096 = 1.0x`).
     pub attack_speed_q12: u16,
+    /// Extra recovery for the inactive pool, Q12 per tick, from the active
+    /// state's Regeneration modules. Added to the authored base rate.
+    pub regeneration_q12: u16,
 }
 
 impl VitalityModifiers {
@@ -642,6 +651,8 @@ impl VitalityModifiers {
         incoming_damage_q12: VITALITY_Q12_ONE,
         movement_speed_q12: VITALITY_Q12_ONE,
         attack_speed_q12: VITALITY_Q12_ONE,
+        // Additive, so identity is no extra recovery rather than unity.
+        regeneration_q12: 0,
     };
 
     /// Scale outgoing damage for the authored attack axis.
@@ -698,7 +709,7 @@ mod tests {
             effect_summary: "HRZ ATK +15%",
             assignment_label: "ASSIGN KINETIC RELAY: CHOOSE SLOT",
             remove_label: "REMOVE KINETIC RELAY",
-            percentages: [15, 0, 0, 0, 0],
+            percentages: [15, 0, 0, 0, 0, 0],
         },
         psx_level::BoostModuleRecord {
             name: "Guard Matrix",
@@ -706,7 +717,7 @@ mod tests {
             effect_summary: "DEF +20%",
             assignment_label: "ASSIGN GUARD MATRIX: CHOOSE SLOT",
             remove_label: "REMOVE GUARD MATRIX",
-            percentages: [0, 0, 20, 0, 0],
+            percentages: [0, 0, 20, 0, 0, 0],
         },
         psx_level::BoostModuleRecord {
             name: "Overdrive Coil",
@@ -714,7 +725,7 @@ mod tests {
             effect_summary: "MOVE +10% / ATK SPD +5%",
             assignment_label: "ASSIGN OVERDRIVE COIL: CHOOSE SLOT",
             remove_label: "REMOVE OVERDRIVE COIL",
-            percentages: [0, 0, 0, 10, 5],
+            percentages: [0, 0, 0, 10, 5, 0],
         },
     ];
 
@@ -898,7 +909,7 @@ mod tests {
             effect_summary: "DEF +100%",
             assignment_label: "",
             remove_label: "",
-            percentages: [0, 0, 100, 0, 0],
+            percentages: [0, 0, 100, 0, 0, 0],
         }];
         let loadout = PowerUpLoadout {
             slots: [
@@ -1421,6 +1432,46 @@ mod stance_tests {
                 "a socket belongs to one state only"
             );
         }
+    }
+
+    #[test]
+    fn a_regeneration_module_on_the_active_state_speeds_the_resting_pool() {
+        // The lane is additive, not a multiplier: "+10" adds recovery rather
+        // than scaling a base the player never sees.
+        let modules = [psx_level::BoostModuleRecord {
+            name: "Mending Coil",
+            description: "Rest recovery.",
+            effect_summary: "REGEN +10",
+            assignment_label: "ASSIGN MENDING COIL: CHOOSE SLOT",
+            remove_label: "REMOVE MENDING COIL",
+            percentages: [0, 0, 0, 0, 0, 10],
+        }];
+        let vitality = DualVitality::equal(100);
+
+        let mut loadout = PowerUpLoadout::EMPTY;
+        // Socket it on channel One's full-end pole: an empty-end socket is
+        // weighted by how hurt the pool is and contributes nothing at full
+        // health, which would prove nothing here.
+        let slot = BoostSlotId::ALL
+            .into_iter()
+            .find(|slot| {
+                slot.channel() == VitalityChannelId::One && slot.pole() == VitalityPole::Full
+            })
+            .expect("channel one owns a full-end socket");
+        loadout.set(slot, BoostModuleId::from_index(0));
+
+        let active_one =
+            loadout.modifiers_for(&vitality, &modules, Some(VitalityChannelId::One));
+        let active_two =
+            loadout.modifiers_for(&vitality, &modules, Some(VitalityChannelId::Two));
+        assert!(
+            active_one.regeneration_q12 > 0,
+            "the state holding the module contributes while active"
+        );
+        assert_eq!(
+            active_two.regeneration_q12, 0,
+            "the other state's sockets are dormant"
+        );
     }
 
     #[test]
