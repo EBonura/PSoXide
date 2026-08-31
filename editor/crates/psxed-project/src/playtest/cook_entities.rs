@@ -1515,11 +1515,14 @@ pub(crate) fn register_model_for_instance(
             // treats `frame_count - 2` as the last addressable frame, so trimming
             // to exactly the window would put the window's own final frame out of
             // reach and silently shorten the attack's active ticks.
-            let end = window.end.saturating_add(1);
-            if let Some((trimmed, _kept)) =
-                crate::units::trim_animation_blob_to_window(&bytes, window.start, end)
-            {
-                bytes = trimmed;
+            let frame_count = u16::from_le_bytes([bytes[14], bytes[15]]);
+            let end = window.end_within(frame_count).saturating_add(1);
+            if window.trims(frame_count) {
+                if let Some((trimmed, _kept)) =
+                    crate::units::trim_animation_blob_to_window(&bytes, window.start, end)
+                {
+                    bytes = trimmed;
+                }
             }
         }
         let parsed_anim = match psx_asset::Animation::from_bytes(&bytes) {
