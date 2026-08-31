@@ -35,8 +35,8 @@ extend that set for complete floating-building shells.
 | `DP City / Bright Blue Signal` | Large high-priority cyan-blue wall marker. |
 | `DP City / Cable Run (Average)` | Sagging cable cards stretched between buildings; transparent-zero and semi-transparent. |
 | `DP City / Hanging Lattice (Average)` | Suspended gridwork, cages and service scaffolds on thin cards; transparent-zero and semi-transparent. |
-| `DP City / Ceiling Underside` | Broad recessed service plating for ceilings and the lower faces of floating structures. |
-| `DP City / Structural Beam` | Strong X-braced girder surface for long horizontal or vertical support brushes. |
+| `DP City / Ceiling Underside` | One large framed service plate with a central vent for ceilings and floating-structure undersides. |
+| `DP City / Structural Beam` | One full-tile X brace for broad horizontal or vertical support brushes. |
 
 The cable and lattice are cutout materials. Put them on thin brush planes or
 image props instead of coating a solid wall. Their `Both` sidedness makes a
@@ -72,10 +72,10 @@ The role-specific instructions were:
    real transparent RGBA with clamps and sparse secondary wires.
 8. An edge-to-edge hanging industrial lattice of rails, rings, clamps, cages
    and a central conduit, isolated from its background for cutout use.
-9. Broad load-bearing underside plating with heavy ribs, inset access panels,
-   short conduits and vents, kept quieter than a primary wall.
-10. A directional structural girder with outer rails and a large repeating
-    X-braced central band that remains legible on narrow beam brushes.
+9. One large recessed underside plate related to the deck plate, with a heavy
+   frame, four compact fasteners, a central vent and two short channels.
+10. Exactly one structural X spanning nearly the full tile, with a compact
+    central gusset and no separate machinery or trim bands above or below it.
 
 ImageGen supplied real alpha for the cable. The lattice generator painted its
 transparency preview into RGB, so `build_kit.py` deterministically extracts the
