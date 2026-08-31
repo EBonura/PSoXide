@@ -259,7 +259,16 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             started: false,
             ready: false,
             failed: false,
-            failed_asset: ASSET_ID_UNKNOWN,
+            // Deliberately 0 rather than ASSET_ID_UNKNOWN, unlike `new` and
+            // `reset` below. The guest embeds one of these inside a ~800 KB
+            // arena static whose whole point is to be all-zero bytes so it
+            // lands in `.bss`; a single 0xFFFF here moved the entire static
+            // into `.data`, storing 800 KB of zeros in the flat PSX-EXE and
+            // copying them off CD at boot. Nothing reads this field in the
+            // zeroed state: `fail` is the only writer of `failed` and it sets
+            // this in the same breath, so an unattributed failure is still
+            // reported as ASSET_ID_UNKNOWN.
+            failed_asset: 0,
             failed_reason: 0,
         }
     }
@@ -955,6 +964,20 @@ mod tests {
             "slot id out of range names the asset"
         );
         assert_eq!(bad.failed_reason(), ASSET_FAIL_BAD_RECORD);
+    }
+
+    #[test]
+    fn the_zeroed_image_stores_no_sentinel() {
+        // The guest holds one of these inside a ~800 KB arena static that is
+        // built entirely from all-zero images so it lands in `.bss`. One
+        // non-zero byte anywhere in that tree moves the whole static to
+        // `.data`, which stores the zeros in the flat PSX-EXE and copies them
+        // off CD at boot. `failed_asset` was 0xFFFF here and cost exactly
+        // that, so pin it: the sentinel belongs in `new` and `reset`, which
+        // run on the console rather than at link time.
+        let zeroed = PersistentAssetStreamer::<1, 2>::zeroed();
+        assert_eq!(zeroed.failed_asset(), 0);
+        assert_eq!(PersistentAssetStreamer::<1, 2>::new().failed_asset(), ASSET_ID_UNKNOWN);
     }
 
     #[test]
