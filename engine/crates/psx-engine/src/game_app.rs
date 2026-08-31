@@ -2139,7 +2139,15 @@ fn resolve_ui_value(
         | LevelUiValueBinding::PlayerHealthSecondaryEmptyInfluence
         | LevelUiValueBinding::PlayerHealthSecondaryFullInfluence
         | LevelUiValueBinding::PlayerStamina
-        | LevelUiValueBinding::PlayerStaminaMax => gameplay_value(binding).unwrap_or(0),
+        | LevelUiValueBinding::PlayerStaminaMax
+        | LevelUiValueBinding::PlayerStanceActiveHealth
+        | LevelUiValueBinding::PlayerStanceActiveHealthMax
+        | LevelUiValueBinding::PlayerStanceInactiveHealth
+        | LevelUiValueBinding::PlayerStanceInactiveHealthMax
+        | LevelUiValueBinding::PlayerStanceSwapProgress
+        | LevelUiValueBinding::PlayerStanceActiveIsZenith
+        | LevelUiValueBinding::PlayerStanceActiveBroken
+        | LevelUiValueBinding::PlayerStanceInactiveBroken => gameplay_value(binding).unwrap_or(0),
     }
 }
 
