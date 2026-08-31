@@ -442,9 +442,11 @@ impl Playtest {
     /// their authored axis is available.
     pub(super) fn apply_untyped_player_damage(&mut self, damage: u16) -> bool {
         let damage = self.vitality_modifiers().incoming_damage(damage);
-        self.player_vitality
-            .apply_spill(VitalityChannelId::One, damage)
-            .actor_defeated
+        // Untyped damage has no colour to compare, so it is treated as aligned
+        // with whatever is active: the player cannot read an axis that was
+        // never authored, and should not be punished for it.
+        let active = self.player_stance.active();
+        self.apply_stance_damage(active, damage)
     }
 
     /// Route an authored coloured projectile into exactly one vitality pool.
@@ -464,9 +466,19 @@ impl Playtest {
                 VitalityChannelId::Two
             }
         };
-        self.player_vitality
-            .apply_damage(channel, damage)
-            .actor_defeated
+        self.apply_stance_damage(channel, damage)
+    }
+
+    /// Route one incoming hit through the stance.
+    ///
+    /// Only the active pool is damaged; the attack's channel decides whether
+    /// that costs half or half again. A break swaps the stance here rather
+    /// than leaving the caller to notice.
+    fn apply_stance_damage(&mut self, attack: VitalityChannelId, damage: u16) -> bool {
+        let config = self.player_stance_config;
+        self.player_stance
+            .apply_damage(&mut self.player_vitality, attack, damage, &config)
+            .defeated
     }
 
     pub(super) fn water_cell_at(
