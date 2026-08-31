@@ -28,6 +28,10 @@ name = "cook-playtest"
 path = "src/bin/cook_playtest.rs"
 
 [[bin]]
+name = "pxbsp-draw-cost"
+path = "src/bin/pxbsp_draw_cost.rs"
+
+[[bin]]
 name = "gen-stress-map"
 path = "src/bin/gen_stress_map.rs"
 
