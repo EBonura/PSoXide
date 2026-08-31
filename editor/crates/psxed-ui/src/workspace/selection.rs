@@ -1266,9 +1266,11 @@ impl EditorWorkspace {
         let hits = match mode {
             BrushEditMode::Face => brush_elements::face_handles(brush, &solved)
                 .into_iter()
-                .filter_map(|(face, center, normal)| {
-                    (self.brush_face_handle_visible(center, normal) && contains(center))
-                        .then_some(BrushElement::Face(face))
+                .filter_map(|(face, center, _normal)| {
+                    // Matches the viewport: handles are drawn on both sides, so a
+                    // marquee takes whatever it encloses rather than silently
+                    // skipping the faces pointing away.
+                    contains(center).then_some(BrushElement::Face(face))
                 })
                 .collect(),
             BrushEditMode::Edge => brush_elements::unique_edges(&solved)
