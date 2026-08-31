@@ -303,6 +303,7 @@ mod tests {
             entity,
             "Controller",
             NodeKind::CharacterController {
+                loadout: None,
                 character: Some(character),
                 settings: Some(crate::CharacterControllerSettings::default()),
                 player: true,

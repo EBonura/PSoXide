@@ -1626,6 +1626,7 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
                 + character
                     .default_equipment
                     .iter()
+                    .chain(character.loadouts.iter().flat_map(|loadout| &loadout.equipment))
                     .map(|equipment| option_resource_reference_count(equipment.weapon, id))
                     .sum::<usize>()
                 + character
@@ -1697,7 +1698,11 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
             let mut cleared = clear_option_resource(&mut character.model, id)
                 + clear_option_resource(&mut character.material, id)
                 + clear_option_resource(&mut character.animation_set, id);
-            for equipment in &mut character.default_equipment {
+            for equipment in character
+                .default_equipment
+                .iter_mut()
+                .chain(character.loadouts.iter_mut().flat_map(|loadout| &mut loadout.equipment))
+            {
                 cleared += clear_option_resource(&mut equipment.weapon, id);
             }
             for volume in &mut character.combat_capsules {
