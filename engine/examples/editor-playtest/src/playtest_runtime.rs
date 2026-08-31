@@ -394,8 +394,14 @@ impl Playtest {
     /// Fixed-point stat multipliers from the four endpoint sockets at the
     /// current Horizon/Zenith health positions.
     pub(super) fn vitality_modifiers(&self) -> VitalityModifiers {
-        self.power_up_loadout
-            .modifiers(&self.player_vitality, BOOST_MODULES)
+        // Only the active state's two sockets act. The inactive state's modules
+        // are dormant until it is swapped to, which is what makes the boon
+        // layout a choice rather than four always-on bonuses.
+        self.power_up_loadout.modifiers_for(
+            &self.player_vitality,
+            BOOST_MODULES,
+            Some(self.player_stance.active()),
+        )
     }
 
     /// Live authored playback rate for an animation. Only the four attack
