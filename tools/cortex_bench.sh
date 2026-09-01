@@ -15,7 +15,14 @@ PROJECT="${CORTEX_BENCH_PROJECT:-editor/projects/cortex-ignition-tech-demo-0.4/p
 TAPE="${CORTEX_BENCH_TAPE:-editor/archive/fixtures/cortex-0.4/whole-level.pxtape}"
 OUT="${CORTEX_BENCH_OUT:-${TMPDIR:-/tmp}/psoxide-cortex-bench}"
 STAGE_ROOT="${CORTEX_BENCH_STAGE_ROOT:-${TMPDIR:-/tmp}/psoxide-psx-guest-cortex-bench}"
-FEATURES="${CORTEX_BENCH_FEATURES:-cd-stream-bench}"
+# lockstep-visuals renders exactly once per two fixed ticks regardless of
+# wall-clock vblanks, so two builds of different speed present the same guest
+# states and their display/VRAM hashes are comparable. Without it a code-layout
+# change alone moves which vblank a frame lands on and the hashes diverge
+# (observed 2026-09-01: an inlining change diverged at route tick 978, in the
+# menu, before any gameplay). Shipping cadence measurements use
+# CORTEX_BENCH_FEATURES="cd-stream-bench".
+FEATURES="${CORTEX_BENCH_FEATURES:-cd-stream-bench lockstep-visuals}"
 STEPS="${CORTEX_BENCH_STEPS:-6000000000}"
 FRONTEND="$ROOT/target/release/frontend"
 
@@ -44,7 +51,9 @@ sh tools/guest_symbol_gate.sh "$OUT/link.map" | tee "$OUT/symbol-gate.txt" || tr
 
 for RUN in 1 2; do
     echo "cortex-bench: replay $RUN/2"
-    "$FRONTEND" launch --path "$CUE" --embedded-playtest \
+    # The tape-end frame is the same guest state on every build (poll-bound
+    # tape), so it doubles as the visual A/B pair; dump it at 4x.
+    PSOXIDE_HW_DUMP_SCALE=4 "$FRONTEND" launch --path "$CUE" --embedded-playtest \
         --input-tape "$TAPE" --steps "$STEPS" --dump-hash \
         --route-log "$OUT/route-$RUN.csv" \
         --cpu-cycle-profile-log "$OUT/cycles-$RUN.csv" \

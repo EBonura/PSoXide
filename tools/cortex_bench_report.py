@@ -7,12 +7,15 @@ cycles-N.csv, checks the two replays agree byte for byte, writes
 an earlier output directory. Frame rate is display-start flips per vblank over
 the whole tape; the cycle attribution is the emulator's own accounting.
 
-A poll-bound tape ends after a fixed number of simulation ticks, so the bus
-cycles to tape end are constant by construction. The continuous performance
-number is therefore `idle_instructions`: retired instructions inside
-`App::run_scheduled`, which is the vblank wait loop (exact PC-line counts
-symbolised against the guest link map). `work_instructions` is everything
-else. Flips quantise to whole vblanks and only move at a cadence boundary.
+Under the bench's default `lockstep-visuals` build every visual frame is
+rendered, so the bus cycles to tape end scale with the work done and are the
+primary number (they include RAM, I-cache and interlock stalls, which retired
+instruction counts do not). `work_instructions` (retired instructions outside
+`App::run_scheduled`, the vblank wait loop, symbolised against the guest link
+map) is the secondary, stall-blind number. On a shipping-cadence build
+(`CORTEX_BENCH_FEATURES="cd-stream-bench"`) the tape ends after a fixed number
+of simulation ticks, bus cycles are constant by construction, and idle share
+plus flips are what move.
 """
 import bisect
 import argparse
@@ -109,7 +112,7 @@ def main() -> None:
     rows = [("after", one)]
     if args.baseline:
         rows.insert(0, ("before", json.loads((args.baseline / "summary.json").read_text())))
-    cols = ["work_instructions", "idle_percent", "flips", "fps", "vram_hash", "display_hash", "symbol_gate"]
+    cols = ["bus_cycles", "work_instructions", "idle_percent", "flips", "vram_hash", "display_hash", "symbol_gate"]
     for _, r in rows:
         r.setdefault("work_instructions", "n/a"); r.setdefault("idle_percent", "n/a")
     print("| run | " + " | ".join(cols) + " | ram_load% | icache% | muldiv% |")
@@ -123,9 +126,12 @@ def main() -> None:
     if args.baseline:
         b = rows[0][1]
         same = one["vram_hash"] == b["vram_hash"] and one["display_hash"] == b["display_hash"]
+        cycles = 100.0 * (one["bus_cycles"] - b["bus_cycles"]) / b["bus_cycles"]
+        line = f"\nbus cycles: {cycles:+.3f}% (the number that matters under lockstep: stalls included)"
         if isinstance(b.get("work_instructions"), int) and isinstance(one.get("work_instructions"), int):
             delta = 100.0 * (one["work_instructions"] - b["work_instructions"]) / b["work_instructions"]
-            print(f"\nwork instructions: {delta:+.3f}%  ({'hashes identical' if same else 'HASHES DIFFER: visual change, needs the 6.2 A/B'})")
+            line += f"; work instructions: {delta:+.3f}%"
+        print(line + f"  ({'hashes identical' if same else 'HASHES DIFFER: visual change, needs the 6.2 A/B'})")
     print(f"\ncortex-bench: PASS (two replays identical; summary in {args.out / 'summary.json'})")
 
 
