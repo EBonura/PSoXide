@@ -312,6 +312,7 @@ pub struct RuntimeModelAsset {
 #[derive(Copy, Clone)]
 pub struct PlayerActorPoseSnapshot {
     model: RuntimeModelAsset,
+    action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     clip_first_root_xz: Option<[i32; 2]>,
     pose: ActorPoseSnapshot,
@@ -321,6 +322,11 @@ impl PlayerActorPoseSnapshot {
     /// Runtime model whose skeleton the pose samples.
     pub const fn model(self) -> RuntimeModelAsset {
         self.model
+    }
+
+    /// Gameplay action that produced this pose.
+    pub const fn action(self) -> CharacterAnimationAction {
+        self.action
     }
 
     /// Model-local clip index active for this snapshot.
@@ -1201,6 +1207,7 @@ pub fn resolve_player_actor_pose<
     );
     Some(PlayerActorPoseSnapshot {
         model,
+        action: anim_action,
         clip_local,
         clip_first_root_xz,
         pose: ActorPoseSnapshot::new(
@@ -1259,28 +1266,26 @@ pub enum DashWireVisual {
     },
 }
 
-/// True while the pose is inside a dash clip's wireframe window.
+/// Resolve the wireframe phase for forward rolls and locked-on side dashes.
 ///
-/// Both dash slots are matched against the clip the pose is actually playing,
-/// which is why no gameplay flag has to reach the renderer: a locked-on side
-/// evade is the only thing that binds those clips.
+/// The frozen pose carries the gameplay action that produced it. This matters
+/// when a character deliberately reuses one clip for Roll, DashLeft, and
+/// DashRight: clip identity alone cannot tell those actions apart.
 #[inline(never)]
 fn dash_wire_visual(
     character: &RuntimeCharacter,
-    clip_local: ModelClipIndex,
+    action: CharacterAnimationAction,
     animation: Animation<'static>,
     phase_q12: u32,
 ) -> DashWireVisual {
-    let matches = |action| {
-        character.action_clip(action) == psx_level::OptionalModelClipIndex::some(clip_local)
-    };
-    let action = if matches(CharacterAnimationAction::DashLeft) {
-        CharacterAnimationAction::DashLeft
-    } else if matches(CharacterAnimationAction::DashRight) {
-        CharacterAnimationAction::DashRight
-    } else {
+    if !matches!(
+        action,
+        CharacterAnimationAction::Roll
+            | CharacterAnimationAction::DashLeft
+            | CharacterAnimationAction::DashRight
+    ) {
         return DashWireVisual::Solid;
-    };
+    }
     let (start_frame, end_frame) =
         normalized_action_frame_range(animation, character.action_frame_range(action));
     let start_phase = start_frame << 12;
@@ -1317,7 +1322,7 @@ pub fn player_dash_wire_visual(
     let actor_pose = pose.pose();
     dash_wire_visual(
         character,
-        pose.clip_local(),
+        pose.action(),
         actor_pose.animation(),
         actor_pose.phase_q12(),
     )
@@ -1336,7 +1341,7 @@ pub fn player_pose_draws_wireframe(
     matches!(
         dash_wire_visual(
             character,
-            pose.clip_local(),
+            pose.action(),
             actor_pose.animation(),
             actor_pose.phase_q12(),
         ),
@@ -1609,7 +1614,7 @@ pub fn draw_player_from_pose<
     // itself to draw edges was measured at -2.0% frame rate across every model
     // in the scene (`textured_model_joints` +26%) purely from instantiating
     // that function a second time, so it stays untouched.
-    let dash_visual = dash_wire_visual(character, player_pose.clip_local(), anim, phase);
+    let dash_visual = dash_wire_visual(character, player_pose.action(), anim, phase);
     if matches!(dash_visual, DashWireVisual::Wire) {
         telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
