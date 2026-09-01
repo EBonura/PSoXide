@@ -1162,12 +1162,23 @@ fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
 /// boot state at the top of `main`, before anything else touches it.
 static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zeroed();
 
+/// Noise-floor probe: a called, never-inlined no-op shifts every function
+/// after it by a few bytes so I-cache set aliasing changes without any
+/// semantic change. Not for shipping.
+#[inline(never)]
+fn layout_probe() {
+    let value = 0u32;
+    // SAFETY: reading a local through a volatile pointer keeps the call alive.
+    unsafe { core::ptr::read_volatile(&value) };
+}
+
 // psx-rt's `_start` calls this through an unmangled `extern "Rust" { fn main(); }`,
 // so the guest needs the raw symbol. Under `cargo test` libtest owns the `main`
 // entry symbol, so only there is this one left mangled. `not(test)` is true for
 // every guest build, so MIPS keeps the exact same `#[no_mangle] fn main`.
 #[cfg_attr(not(test), no_mangle)]
 fn main() -> ! {
+    layout_probe();
     // Stamp the scene's boot state onto its link-time-zero storage BEFORE
     // any other use (see `SCENE` and `Playtest::init_zeroed`).
     // SAFETY: single-threaded boot path; the raw stamping happens before
