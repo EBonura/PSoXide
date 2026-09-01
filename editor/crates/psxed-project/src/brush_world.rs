@@ -3,13 +3,14 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::brush::{Brush, BrushContents, BRUSH_UV_UNITS_PER_TEXEL};
+use crate::brush::{paraxial_uv, rebase_texel_uvs, Brush, BrushContents, BRUSH_UV_UNITS_PER_TEXEL};
 use crate::brush_collision_hulls::{
     compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
 };
 use crate::brush_compile::{
     build_surface_bsp, compile_authored_surfaces, compile_csg_surfaces, pack_normalized_plane,
-    replace_bsp_render_surfaces, subdivide_surfaces_to_budget, CompiledSurface, CompiledSurfaceBsp,
+    replace_bsp_render_surfaces, subdivide_polygon_for_lighting, subdivide_surfaces_to_budget,
+    CompiledSurface, CompiledSurfaceBsp,
 };
 use crate::brush_light::{
     bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
@@ -123,6 +124,29 @@ pub struct CompiledBrushWorld {
     pub body_hulls: [CookedBodyHull; 2],
     /// Quake-style pointfile path when the occupied world reaches outside.
     pub leak_path: Vec<[i32; 3]>,
+    /// Surfaces the u8 texel window forced apart, world and submodels summed.
+    pub uv_window: UvWindowStats,
+}
+
+/// Cook-time census of surfaces whose texel span exceeded the GPU's u8 UV
+/// window and had to be split (or could not be).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UvWindowStats {
+    /// Surfaces split because a texel axis spanned more than 255.
+    pub split_surfaces: usize,
+    /// Extra render faces those splits produced.
+    pub added_faces: usize,
+    /// Surfaces still wrapping: unknown texture dimensions, or the split
+    /// floor was reached without fitting.
+    pub unfixable_surfaces: usize,
+}
+
+impl UvWindowStats {
+    fn add(&mut self, other: Self) {
+        self.split_surfaces += other.split_surfaces;
+        self.added_faces += other.added_faces;
+        self.unfixable_surfaces += other.unfixable_surfaces;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +189,13 @@ pub enum BrushWorldCookError {
     InvalidTexture {
         material: Option<ResourceId>,
         error: String,
+    },
+    /// Fitting surfaces to the u8 texel window pushed the render-face count
+    /// past the resident budget that the extent coarsening had just met.
+    UvWindowFaceBudget {
+        faces: usize,
+        max: usize,
+        split_surfaces: usize,
     },
     /// Submodel table overflowed while compiling this mover's brush model.
     ModelIndexOverflow(NodeId),
@@ -261,6 +292,12 @@ impl fmt::Display for BrushWorldCookError {
                 Some(material) => write!(formatter, "material {material:?} is invalid: {error}"),
                 None => write!(formatter, "default brush texture is invalid: {error}"),
             },
+            Self::UvWindowFaceBudget { faces, max, split_surfaces } => write!(
+                formatter,
+                "{faces} render faces exceed the {max} resident budget after splitting \
+                 {split_surfaces} surfaces whose texel span exceeded the 255-texel UV window; \
+                 reduce texture scale on the largest faces or raise the budget"
+            ),
             Self::ModelIndexOverflow(node) => {
                 write!(formatter, "PXBSP model index exceeds u16 at node {node:?}")
             }
@@ -502,8 +539,9 @@ pub fn compile_brush_world(
     let (lights, light_nodes) = scene_lights(scene);
     let material_tints = material_tints(project);
     let texture_dims = brush_texture_dims(project, scene, &options);
+    let uv_window_skip = sky_aperture_materials(project);
     let occupant_points = player_occupant_points(scene);
-    let (mut world_geometry, world_collision, leak_path) = compile_model(
+    let (mut world_geometry, world_collision, leak_path, mut uv_window) = compile_model(
         &static_brushes,
         &all_brushes,
         &occupant_points,
@@ -511,6 +549,7 @@ pub fn compile_brush_world(
         &light_nodes,
         &material_tints,
         &texture_dims,
+        &uv_window_skip,
         options.mode,
         options.ambient,
         &collision_hulls,
@@ -589,7 +628,7 @@ pub fn compile_brush_world(
         let local_brushes = translate_brushes(&bound, origin);
         let local_occluders = translate_brushes(&all_brushes, origin);
         let local_lights = translate_lights(&lights, origin);
-        let (geometry, collision, _) = compile_model(
+        let (geometry, collision, _, submodel_uv_window) = compile_model(
             &local_brushes,
             &local_occluders,
             &[],
@@ -597,10 +636,12 @@ pub fn compile_brush_world(
             &light_nodes,
             &material_tints,
             &texture_dims,
+            &uv_window_skip,
             options.mode,
             options.ambient,
             &collision_hulls,
         )?;
+        uv_window.add(submodel_uv_window);
         let model_index = u16::try_from(submodels.len() + 1)
             .map_err(|_| BrushWorldCookError::ModelIndexOverflow(node.id))?;
         let leaf_probe = model_center_world_q12(origin, geometry.mins, geometry.maxs);
@@ -781,7 +822,146 @@ pub fn compile_brush_world(
         movers,
         body_hulls,
         leak_path,
+        uv_window,
     })
+}
+
+/// Largest texel span a packed surface may carry on one axis: the u8 UV
+/// window minus nothing, since `rebase_texel_uvs` already parks the minimum
+/// at or above zero.
+const UV_WINDOW_TEXELS: f64 = 255.0;
+/// Do not split a surface below this world extent chasing the window; a face
+/// this small with a span over 255 texels has a texture scale that cannot be
+/// represented and is reported as unfixable instead.
+const UV_WINDOW_MIN_SPLIT_UNITS: f64 = 8.0;
+/// Most pieces one surface may become while chasing the window. A 2048-unit
+/// face at one texel per unit needs 64 pieces of 256 units; anything past
+/// this is a texture scale the u8 window cannot carry and is reported.
+const UV_WINDOW_MAX_PIECES: usize = 64;
+
+/// Materials whose faces are sky apertures: they never submit a textured
+/// polygon, so the UV-window pass leaves them alone.
+fn sky_aperture_materials(
+    project: &ProjectDocument,
+) -> std::collections::HashSet<Option<ResourceId>> {
+    project
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            ResourceData::Material(material) if material.sky_aperture => Some(Some(resource.id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether every packed texel coordinate of `surface` lands inside the u8
+/// window, computed exactly as `brush_pack::pack_bsp_geometry` will. `None`
+/// dimensions mean the packer keeps the historic wrap for this material.
+fn surface_fits_uv_window(surface: &CompiledSurface, dims: Option<&[u16; 2]>) -> Option<bool> {
+    let dims = dims?;
+    let mut uvs: Vec<[f64; 2]> = surface
+        .vertices
+        .iter()
+        .map(|&vertex| {
+            let raw_uv = paraxial_uv(&surface.plane, vertex);
+            surface.uv.apply([
+                raw_uv[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                raw_uv[1] / BRUSH_UV_UNITS_PER_TEXEL,
+            ])
+        })
+        .collect();
+    rebase_texel_uvs(
+        &mut uvs,
+        [f64::from(dims[0].max(1)), f64::from(dims[1].max(1))],
+    );
+    Some(uvs.iter().all(|uv| {
+        uv.iter().all(|&value| {
+            value.is_finite() && value.round() >= 0.0 && value.round() <= UV_WINDOW_TEXELS
+        })
+    }))
+}
+
+/// Split every surface whose texel UVs do not fit the u8 window until they
+/// do, halving along the widest world axis each round. Surfaces that fit
+/// pass through untouched, so a level that never wrapped cooks identically.
+fn fit_surfaces_to_uv_window(
+    surfaces: Vec<CompiledSurface>,
+    texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
+    skip_materials: &std::collections::HashSet<Option<ResourceId>>,
+) -> (Vec<CompiledSurface>, UvWindowStats) {
+    let mut stats = UvWindowStats::default();
+    let mut out = Vec::with_capacity(surfaces.len());
+    let always_lit = [([0.0; 3], f64::INFINITY)];
+    for surface in surfaces {
+        // Sky apertures reveal the scene sky and never submit their polygon,
+        // so their (deliberately huge, densely scaled) UVs are irrelevant.
+        if skip_materials.contains(&surface.material) {
+            out.push(surface);
+            continue;
+        }
+        let dims = texture_dims.get(&surface.material);
+        match surface_fits_uv_window(&surface, dims) {
+            Some(true) => {
+                out.push(surface);
+                continue;
+            }
+            None => {
+                stats.unfixable_surfaces += 1;
+                out.push(surface);
+                continue;
+            }
+            Some(false) => {}
+        }
+        let before = out.len();
+        let mut queue = vec![surface.clone()];
+        let mut overflow = false;
+        while let Some(piece) = queue.pop() {
+            if out.len() - before + queue.len() >= UV_WINDOW_MAX_PIECES {
+                overflow = true;
+                break;
+            }
+            if surface_fits_uv_window(&piece, dims) == Some(true) {
+                out.push(piece);
+                continue;
+            }
+            let mut min = [f64::MAX; 3];
+            let mut max = [f64::MIN; 3];
+            for vertex in &piece.vertices {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(vertex[axis]);
+                    max[axis] = max[axis].max(vertex[axis]);
+                }
+            }
+            let widest = (0..3).map(|axis| max[axis] - min[axis]).fold(0.0, f64::max);
+            if widest < UV_WINDOW_MIN_SPLIT_UNITS {
+                overflow = true;
+                break;
+            }
+            let pieces =
+                subdivide_polygon_for_lighting(piece.vertices.clone(), widest * 0.5, &always_lit);
+            if pieces.len() < 2 {
+                overflow = true;
+                break;
+            }
+            for vertices in pieces {
+                let mut child = piece.clone();
+                child.vertices = vertices;
+                queue.push(child);
+            }
+        }
+        if overflow {
+            // A face whose texture is denser than the window can represent
+            // at any sane split count: keep it whole (it wraps, as before)
+            // and report it instead of flooding the face budget.
+            out.truncate(before);
+            out.push(surface);
+            stats.unfixable_surfaces += 1;
+            continue;
+        }
+        stats.split_surfaces += 1;
+        stats.added_faces += (out.len() - before).saturating_sub(1);
+    }
+    (out, stats)
 }
 
 fn player_occupant_points(scene: &Scene) -> Vec<[f64; 3]> {
@@ -926,10 +1106,14 @@ fn compile_model(
     light_nodes: &[NodeId],
     material_tints: &[BrushMaterialTint],
     texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
+    uv_window_skip: &std::collections::HashSet<Option<ResourceId>>,
     mode: BrushWorldCookMode,
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
-) -> Result<(PackedBspGeometry, CompiledCollisionHulls, Vec<[i32; 3]>), BrushWorldCookError> {
+) -> Result<
+    (PackedBspGeometry, CompiledCollisionHulls, Vec<[i32; 3]>, UvWindowStats),
+    BrushWorldCookError,
+> {
     let (topology_surfaces, render_surfaces) = compile_model_surfaces(brushes);
     let (mut bsp, portals, leak_diagnostic) =
         compile_model_topology(&topology_surfaces, brushes, occupant_points, true);
@@ -956,6 +1140,25 @@ fn compile_model(
         MAX_RESIDENT_WORLD_FACES,
         &light_spheres,
     );
+    // The packer stores vertex UVs as u8 texels (`brush_pack::pack_vertex`
+    // wraps them modulo 256), so a surface whose texel span exceeds the
+    // GPU's 255-texel window rasterises one stretched repeat instead of
+    // tiling. The budget loop above coarsens the extent cap on a large
+    // level until the face budget is met, which is exactly when surfaces
+    // grow past that span. Split those back down before packing; the
+    // editor preview samples float UVs and never sees the wrap, which is
+    // why this only ever showed in-game.
+    let budgeted_faces = render_surfaces.len();
+    let (render_surfaces, uv_window) =
+        fit_surfaces_to_uv_window(render_surfaces, texture_dims, uv_window_skip);
+    if render_surfaces.len() > MAX_RESIDENT_WORLD_FACES && budgeted_faces <= MAX_RESIDENT_WORLD_FACES
+    {
+        return Err(BrushWorldCookError::UvWindowFaceBudget {
+            faces: render_surfaces.len(),
+            max: MAX_RESIDENT_WORLD_FACES,
+            split_surfaces: uv_window.split_surfaces,
+        });
+    }
     replace_bsp_render_surfaces(&mut bsp, render_surfaces);
     // Small editor BSPs can afford the same separator-flow VIS used by a
     // release cook. Larger interactive cooks retain Quake's conservative
@@ -1012,7 +1215,7 @@ fn compile_model(
         )?
     };
     let collision = compile_runtime_collision_hulls(brushes, collision_hulls)?;
-    Ok((geometry, collision, leak_diagnostic.path))
+    Ok((geometry, collision, leak_diagnostic.path, uv_window))
 }
 
 fn compile_model_surfaces(brushes: &[Brush]) -> (Vec<CompiledSurface>, Vec<CompiledSurface>) {
@@ -2175,6 +2378,49 @@ mod tests {
     use super::*;
     use crate::DestructibleDamageAffinity;
     use crate::{brush::BrushContents, MaterialResource, Transform3};
+
+    fn floor_surface(half_extent: i32) -> CompiledSurface {
+        let e = half_extent;
+        CompiledSurface {
+            plane: crate::brush::Plane::from_points([[-e, 0, -e], [e, 0, -e], [e, 0, e]])
+                .expect("floor plane"),
+            vertices: vec![
+                [-e as f64, 0.0, -e as f64],
+                [e as f64, 0.0, -e as f64],
+                [e as f64, 0.0, e as f64],
+                [-e as f64, 0.0, e as f64],
+            ],
+            material: None,
+            uv: crate::brush::FaceUv::default(),
+            contents: BrushContents::Solid,
+            source_brush: 0,
+            source_face: 0,
+        }
+    }
+
+    #[test]
+    fn uv_window_fit_splits_only_surfaces_that_wrap() {
+        let mut dims = std::collections::HashMap::new();
+        dims.insert(None, [64u16, 64u16]);
+        // 8192 units at 16 units per texel is a 512-texel span: wraps.
+        let (pieces, stats) = fit_surfaces_to_uv_window(vec![floor_surface(4096)], &dims, &Default::default());
+        assert_eq!(stats.split_surfaces, 1);
+        assert_eq!(stats.unfixable_surfaces, 0);
+        assert!(pieces.len() >= 4, "expected at least four pieces, got {}", pieces.len());
+        assert_eq!(stats.added_faces, pieces.len() - 1);
+        for piece in &pieces {
+            assert_eq!(surface_fits_uv_window(piece, dims.get(&None)), Some(true));
+        }
+        // 2048 units is a 128-texel span: untouched, byte-identical cook.
+        let small = floor_surface(1024);
+        let (pieces, stats) = fit_surfaces_to_uv_window(vec![small.clone()], &dims, &Default::default());
+        assert_eq!(stats, UvWindowStats::default());
+        assert_eq!(pieces, vec![small]);
+        // Unknown texture dimensions keep the historic wrap and are counted.
+        let (_, stats) = fit_surfaces_to_uv_window(vec![floor_surface(4096)], &Default::default(), &Default::default());
+        assert_eq!(stats.unfixable_surfaces, 1);
+        assert_eq!(stats.split_surfaces, 0);
+    }
 
     #[test]
     fn repeated_page_texture_preserves_every_source_texel_and_clut() {
