@@ -119,6 +119,15 @@ fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
 }
 
 impl Playtest {
+    /// Depth range for effects in `room`: they sort against whichever world
+    /// renderer owns the room, see [`world_depth_range`].
+    fn effect_depth_range(&self, room: RoomIndex) -> DepthRange {
+        ROOMS
+            .get(room.to_usize())
+            .map(|record| world_depth_range(record, self.bsp.is_some()))
+            .unwrap_or(WORLD_DEPTH_RANGE)
+    }
+
     pub(super) fn ensure_poi_save_loaded(&mut self) {
         if self.poi_save_loaded {
             return;
@@ -1070,10 +1079,7 @@ impl Playtest {
         };
         let mut submitted = 0usize;
         if self.bsp.is_some() {
-            let depth_range = ROOMS
-                .get(self.room_index.to_usize())
-                .map(room_depth_range)
-                .unwrap_or(WORLD_DEPTH_RANGE);
+            let depth_range = self.effect_depth_range(self.room_index);
             let mut projector = None;
             for emitter in PARTICLE_EMITTERS {
                 if emitter.room != self.room_index {
@@ -1109,10 +1115,7 @@ impl Playtest {
                 continue;
             }
             let room_camera = camera_for_room(camera, active);
-            let depth_range = ROOMS
-                .get(active.index.to_usize())
-                .map(room_depth_range)
-                .unwrap_or(WORLD_DEPTH_RANGE);
+            let depth_range = self.effect_depth_range(active.index);
             let mut projector = None;
             for emitter in PARTICLE_EMITTERS {
                 if emitter.room != active.index {
@@ -1209,10 +1212,7 @@ impl Playtest {
                 }
                 camera_for_room(camera, active)
             };
-            let depth_range = ROOMS
-                .get(attack.room().to_usize())
-                .map(room_depth_range)
-                .unwrap_or(WORLD_DEPTH_RANGE);
+            let depth_range = self.effect_depth_range(attack.room());
             submitted += draw_projectile_charge(
                 charge,
                 room_camera,
@@ -1236,10 +1236,7 @@ impl Playtest {
                 }
                 (
                     camera,
-                    ROOMS
-                        .get(projectile.room.to_usize())
-                        .map(room_depth_range)
-                        .unwrap_or(WORLD_DEPTH_RANGE),
+                    self.effect_depth_range(projectile.room),
                 )
             } else {
                 let Some(active) = self
@@ -1259,10 +1256,7 @@ impl Playtest {
                 }
                 (
                     camera_for_room(camera, active),
-                    ROOMS
-                        .get(projectile.room.to_usize())
-                        .map(room_depth_range)
-                        .unwrap_or(WORLD_DEPTH_RANGE),
+                    self.effect_depth_range(projectile.room),
                 )
             };
             submitted += draw_projectile_bolt(
@@ -1289,10 +1283,7 @@ impl Playtest {
                 }
                 (
                     camera,
-                    ROOMS
-                        .get(impact.room.to_usize())
-                        .map(room_depth_range)
-                        .unwrap_or(WORLD_DEPTH_RANGE),
+                    self.effect_depth_range(impact.room),
                 )
             } else {
                 let Some(active) = self
@@ -1312,10 +1303,7 @@ impl Playtest {
                 }
                 (
                     camera_for_room(camera, active),
-                    ROOMS
-                        .get(impact.room.to_usize())
-                        .map(room_depth_range)
-                        .unwrap_or(WORLD_DEPTH_RANGE),
+                    self.effect_depth_range(impact.room),
                 )
             };
             submitted += draw_projectile_impact(
@@ -1355,10 +1343,7 @@ impl Playtest {
         let Some(particle_material) = self.particle_material else {
             return 0;
         };
-        let depth_range = ROOMS
-            .get(self.room_index.to_usize())
-            .map(room_depth_range)
-            .unwrap_or(WORLD_DEPTH_RANGE);
+        let depth_range = self.effect_depth_range(self.room_index);
         let projector =
             PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
         draw_water_wade_splash(
