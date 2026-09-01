@@ -326,13 +326,13 @@ impl EditorWorkspace {
             .paint_at(ui, rect);
         let painter = ui.painter_at(rect);
         Self::draw_viewport_3d_overlay_lines(&painter, rect, &viewport_3d);
-        if self.draw_point_of_interest_beacons_overlay(
-            &painter,
-            rect,
-            ui.input(|input| input.time as f32),
-        ) {
+        if self
+            .collect_entity_bounds(None)
+            .iter()
+            .any(|bounds| bounds.kind == EntityBoundKind::PointOfInterest)
+        {
             // POI beacons rotate in both the editor and the game. Keep this
-            // editor-only overlay moving even when the scene itself is idle.
+            // depth-sorted preview geometry moving even when the scene is idle.
             ui.ctx().request_repaint();
         }
         self.draw_bsp_leak_notice(&painter, rect);
@@ -749,147 +749,6 @@ impl EditorWorkspace {
             FontId::monospace(11.0),
             Color32::from_rgb(225, 178, 92),
         );
-    }
-
-    /// Draw the procedural POI beacon as an editor affordance rather than
-    /// relying on the optional generic entity-bounds pass. The runtime owns
-    /// its PS1-native geometry; this overlay deliberately mirrors the same
-    /// shallow, opposing-corner-cut red shell so an authored POI is visible
-    /// immediately, including while its component child is selected.
-    fn draw_point_of_interest_beacons_overlay(
-        &self,
-        painter: &egui::Painter,
-        rect: Rect,
-        elapsed_seconds: f32,
-    ) -> bool {
-        let scene = self.project.active_scene();
-        let selected_host = scene
-            .node(self.selection.selected_node)
-            .and_then(|selected| {
-                if matches!(selected.kind, NodeKind::Entity) {
-                    Some(selected.id)
-                } else if matches!(selected.kind, NodeKind::PointOfInterest { .. }) {
-                    selected.parent
-                } else {
-                    None
-                }
-            });
-        let mut drew_beacon = false;
-
-        for bounds in self
-            .collect_entity_bounds(None)
-            .into_iter()
-            .filter(|bounds| bounds.kind == EntityBoundKind::PointOfInterest)
-        {
-            let Some(host) = scene.node(bounds.node) else {
-                continue;
-            };
-            let Some((pages, enabled)) = host.children.iter().find_map(|child| {
-                scene.node(*child).and_then(|child| match &child.kind {
-                    NodeKind::PointOfInterest { pages, enabled, .. } => Some((pages, *enabled)),
-                    _ => None,
-                })
-            }) else {
-                continue;
-            };
-
-            drew_beacon = true;
-            let incomplete = pages.is_empty() || pages.iter().any(|page| page.trim().is_empty());
-            let selected = selected_host == Some(bounds.node);
-            let outline = if !enabled {
-                Color32::from_rgba_unmultiplied(100, 49, 45, 150)
-            } else if incomplete {
-                Color32::from_rgb(255, 183, 68)
-            } else if selected {
-                Color32::from_rgb(255, 103, 76)
-            } else {
-                Color32::from_rgb(220, 58, 39)
-            };
-            let fill = if !enabled {
-                Color32::from_rgba_unmultiplied(45, 18, 18, 70)
-            } else if incomplete {
-                Color32::from_rgba_unmultiplied(107, 55, 13, 130)
-            } else {
-                Color32::from_rgba_unmultiplied(105, 15, 11, 145)
-            };
-
-            let height = (bounds.half_extents[1] * 2.0).max(64.0);
-            let half = height * 0.5;
-            let cut = height * 0.22;
-            let half_depth = (height * 0.08).max(4.0);
-            let ground_y = bounds.center[1] - bounds.half_extents[1];
-            let center = [bounds.center[0], ground_y + half, bounds.center[2]];
-            // Match the runtime's steady spin while retaining authored yaw as
-            // the starting phase. Rotation is around the grounded Y axis.
-            let yaw = (bounds.yaw_degrees + elapsed_seconds * 48.0).to_radians();
-            let right = [yaw.cos(), 0.0, -yaw.sin()];
-            let depth = [yaw.sin(), 0.0, yaw.cos()];
-            let local_face = [
-                [-half + cut, half],
-                [half, half],
-                [half, -half + cut],
-                [half - cut, -half],
-                [-half, -half],
-                [-half, half - cut],
-            ];
-            let face_world = |depth_offset: f32| {
-                local_face.map(|[x, y]| {
-                    [
-                        center[0] + right[0] * x + depth[0] * depth_offset,
-                        center[1] + y,
-                        center[2] + right[2] * x + depth[2] * depth_offset,
-                    ]
-                })
-            };
-            let project_face = |world: [[f32; 3]; 6]| -> Option<Vec<Pos2>> {
-                world
-                    .into_iter()
-                    .map(|point| self.project_brush_point_3d(rect, point.map(f64::from)))
-                    .collect()
-            };
-            let Some(back) = project_face(face_world(-half_depth)) else {
-                continue;
-            };
-            let Some(front) = project_face(face_world(half_depth)) else {
-                continue;
-            };
-
-            painter.add(egui::Shape::convex_polygon(
-                back.clone(),
-                fill,
-                Stroke::new(1.0, outline.gamma_multiply(0.65)),
-            ));
-            for edge in 0..local_face.len() {
-                let next = (edge + 1) % local_face.len();
-                painter.add(egui::Shape::convex_polygon(
-                    vec![back[edge], back[next], front[next], front[edge]],
-                    fill.gamma_multiply(0.82),
-                    Stroke::NONE,
-                ));
-            }
-            painter.add(egui::Shape::convex_polygon(
-                front.clone(),
-                fill,
-                Stroke::new(if selected { 2.25 } else { 1.6 }, outline),
-            ));
-
-            if incomplete {
-                let label_anchor = front
-                    .iter()
-                    .copied()
-                    .min_by(|a, b| a.y.total_cmp(&b.y))
-                    .unwrap_or(rect.center());
-                painter.text(
-                    label_anchor + Vec2::new(0.0, -7.0),
-                    Align2::CENTER_BOTTOM,
-                    "POI · MESSAGE REQUIRED",
-                    FontId::monospace(9.0),
-                    outline,
-                );
-            }
-        }
-
-        drew_beacon
     }
 
     /// Play-mode 3D body -- paints the live emulator framebuffer into

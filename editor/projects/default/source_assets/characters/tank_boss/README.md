@@ -53,6 +53,17 @@ numbered four-candidate reel. Its provenance is generation
 projectile events for the three chimneys remain independently authorable on the
 animation timeline.
 
+When baking an add-on Tank Boss clip, keep Idle 2's embedded animation enabled
+while computing the model precision bounds, and keep the add-on take itself out
+of those bounds. In cooker terms this is
+`ignore_embedded_animations = false` with
+`extra_animations_affect_bounds = false`. The runtime animation format does not
+store its own quantisation frame, so using bind-only bounds (for example the
+defaults of the old Rust Mantis scratch cooker) produces valid-looking clip
+bytes whose translations tear the Tank Boss armour apart when paired with the
+authoritative model. The registered eleven-clip set has been rebaked against
+this one Idle 2 frame.
+
 The heavy walk was generated locally with MoMask on CPU from:
 
 > A large heavy person walks forward slowly and steadily with short deliberate

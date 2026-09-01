@@ -736,6 +736,7 @@ impl AppState {
             .sync_fast_boot_label(out.settings.emulator.fast_boot_disc);
         out.menu
             .set_menu_opacity(out.settings.video.menu_opacity_pct);
+        out.menu.set_ui_scale(out.settings.video.ui_scale_pct);
         #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
@@ -2552,6 +2553,23 @@ impl AppState {
             Err(e) => {
                 eprintln!("[frontend] {e}");
                 self.status_message_set(format!("{msg} (settings save failed)"));
+            }
+        }
+    }
+
+    /// Cycle the DPI-aware host UI scale, update its Settings row, and persist
+    /// it immediately. The renderer applies the new zoom on its next frame.
+    pub fn cycle_ui_scale(&mut self) {
+        let next = next_ui_scale_pct(self.settings.video.ui_scale_pct);
+        self.settings.video.ui_scale_pct = next;
+        self.menu.set_ui_scale(next);
+
+        let message = format!("UI scale: {next}%");
+        match self.save_settings() {
+            Ok(()) => self.status_message_set(message),
+            Err(error) => {
+                eprintln!("[frontend] {error}");
+                self.status_message_set(format!("{message} (settings save failed)"));
             }
         }
     }
@@ -4412,6 +4430,7 @@ pub fn build_ui(
     display_uv: egui::Rect,
     dt: f32,
 ) {
+    ctx.set_zoom_factor(ui_zoom_factor(state.settings.video.ui_scale_pct));
     ui::draw_layout(
         ctx,
         state,
@@ -4425,9 +4444,85 @@ pub fn build_ui(
     );
 }
 
+fn ui_zoom_factor(scale_pct: u8) -> f32 {
+    f32::from(scale_pct.clamp(50, 150)) / 100.0
+}
+
+fn next_ui_scale_pct(current: u8) -> u8 {
+    // Compact presets come first because the common request is to reclaim
+    // workspace on a high-DPI display; enlarged presets remain available
+    // without a separate submenu.
+    const PRESETS: [u8; 5] = [100, 75, 50, 125, 150];
+    PRESETS
+        .iter()
+        .position(|preset| *preset == current)
+        .map_or(PRESETS[0], |index| PRESETS[(index + 1) % PRESETS.len()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn embedded_play_default_does_not_force_ram_heavy_telemetry() {
+        assert_eq!(DEFAULT_EMBEDDED_PLAYTEST_FEATURES, "cd-stream-bench");
+        assert!(!DEFAULT_EMBEDDED_PLAYTEST_FEATURES.contains("emulator-telemetry"));
+    }
+
+    #[test]
+    fn ui_zoom_factor_clamps_to_supported_range() {
+        assert_eq!(ui_zoom_factor(0), 0.5);
+        assert_eq!(ui_zoom_factor(50), 0.5);
+        assert_eq!(ui_zoom_factor(75), 0.75);
+        assert_eq!(ui_zoom_factor(100), 1.0);
+        assert_eq!(ui_zoom_factor(150), 1.5);
+        assert_eq!(ui_zoom_factor(u8::MAX), 1.5);
+    }
+
+    #[test]
+    fn ui_scale_cycle_reaches_compact_presets_first() {
+        assert_eq!(next_ui_scale_pct(100), 75);
+        assert_eq!(next_ui_scale_pct(75), 50);
+        assert_eq!(next_ui_scale_pct(50), 125);
+        assert_eq!(next_ui_scale_pct(125), 150);
+        assert_eq!(next_ui_scale_pct(150), 100);
+        assert_eq!(next_ui_scale_pct(0), 100);
+    }
+
+    #[test]
+    fn half_scale_on_retina_yields_one_physical_pixel_per_ui_point() {
+        let context = egui::Context::default();
+        context.set_zoom_factor(ui_zoom_factor(50));
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1920.0, 1080.0),
+        ));
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .native_pixels_per_point = Some(2.0);
+
+        let output = context.run(input, |_| {});
+
+        assert_eq!(output.pixels_per_point, 1.0);
+    }
+
+    #[test]
+    fn cycling_ui_scale_persists_the_compact_choice() {
+        let root = frontend_test_temp_dir("ui-scale-persistence");
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        assert_eq!(state.settings.video.ui_scale_pct, 100);
+
+        state.cycle_ui_scale();
+
+        assert_eq!(state.settings.video.ui_scale_pct, 75);
+        let reloaded = Settings::load(&state.paths.settings_file()).unwrap();
+        assert_eq!(reloaded.video.ui_scale_pct, 75);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn whole_run_profile_is_written_next_to_its_input_tape() {

@@ -1039,19 +1039,24 @@ impl EditorWorkspace {
         }
         self.cancel_brush_gestures();
         let previous = self.brush_edit_mode;
+        // A mode switch changes the granularity of editing, not which
+        // brushes the user selected. Capture the complete owner set before
+        // clearing mode-specific face/element state so a multi-selection
+        // does not collapse to only the active brush.
+        let selected_brushes = self.selected_brush_set();
         self.brush_edit_mode = mode;
         if previous == BrushEditMode::Face && mode != BrushEditMode::Face {
             self.selected_brush_faces.clear();
             self.selected_brush_elements.clear();
-            self.selected_brushes = self.selected_brush.into_iter().collect();
+            self.selected_brushes = selected_brushes;
         } else if mode == BrushEditMode::Face {
             self.selected_brush_faces.clear();
             self.selected_brush_elements.clear();
             if let (Some(brush), Some(face)) = (self.selected_brush, self.selected_brush_face) {
                 self.selected_brush_faces.push((brush, face));
                 self.selected_brush_elements.push(BrushElement::Face(face));
-                self.selected_brushes = vec![brush];
             }
+            self.selected_brushes = selected_brushes;
         }
         if let Some(selection_mode) = mode.selection_mode() {
             self.set_selection_mode(selection_mode);

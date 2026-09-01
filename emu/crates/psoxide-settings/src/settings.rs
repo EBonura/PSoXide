@@ -80,10 +80,19 @@ pub struct VideoSettings {
     /// clearly over gameplay.
     #[serde(default = "default_menu_opacity_pct")]
     pub menu_opacity_pct: u8,
+    /// Host UI scale relative to the operating system's native DPI scale.
+    /// 100 keeps the platform default; 50 on a 2x Retina display yields the
+    /// same one-physical-pixel-per-point density as a native 4K capture.
+    #[serde(default = "default_ui_scale_pct")]
+    pub ui_scale_pct: u8,
 }
 
 fn default_menu_opacity_pct() -> u8 {
     90
+}
+
+fn default_ui_scale_pct() -> u8 {
+    100
 }
 
 impl Default for VideoSettings {
@@ -92,6 +101,7 @@ impl Default for VideoSettings {
             integer_scale: true,
             scanline_filter: false,
             menu_opacity_pct: default_menu_opacity_pct(),
+            ui_scale_pct: default_ui_scale_pct(),
         }
     }
 }
@@ -627,7 +637,25 @@ mod tests {
         .unwrap();
         let loaded = Settings::load(&path).unwrap();
         assert!(!loaded.video.integer_scale);
+        assert_eq!(loaded.video.ui_scale_pct, 100);
         assert_eq!(loaded.input, InputSettings::default());
+    }
+
+    #[test]
+    fn ui_scale_round_trips_and_old_files_default_to_native_scale() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.ron");
+        let mut settings = Settings::default();
+        settings.video.ui_scale_pct = 75;
+        settings.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap().video.ui_scale_pct, 75);
+
+        std::fs::write(
+            &path,
+            "(version: 4, video: (integer_scale: true, scanline_filter: false))",
+        )
+        .unwrap();
+        assert_eq!(Settings::load(&path).unwrap().video.ui_scale_pct, 100);
     }
 
     #[test]
