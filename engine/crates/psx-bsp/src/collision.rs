@@ -9,7 +9,7 @@ use core::mem::MaybeUninit;
 use crate::{ClipNode, CompactPlane, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32};
 use psx_engine::div_q12_i32;
 use psx_gte::math::Mat3I16;
-use psx_math::int32::{mul_q12_i32, mul_q12_i32_wide};
+use psx_math::int32::{div_u64_by_u32, mul_q12_i32, mul_q12_i32_wide};
 
 pub const CONTENTS_EMPTY: i16 = -1;
 pub const CONTENTS_SOLID: i16 = -2;
@@ -698,63 +698,66 @@ fn interpolate(start: Vec3I32, end: Vec3I32, fraction: i32) -> Vec3I32 {
 
 /// Return the public Q0.12 fraction and a high-precision Q20.12 endpoint for
 /// the epsilon-offset intersection of an original segment and hit plane.
+///
+/// Every quantity is a sign plus a `u32` magnitude: the two plane distances
+/// are `i32`, so their difference and the epsilon-shifted numerator fit
+/// `u32` exactly, and the only products are 32x32 (one R3000 `mult`).
+/// Divisions use the hardware 32-bit divide where the operands fit and
+/// [`psx_math::int32::div_u64_by_u32`] otherwise, so no 64-bit helper is
+/// ever linked. Values are identical to the earlier `i64` formulation for
+/// every segment a map can hold (the old form saturated only past 2^63,
+/// which needs a segment longer than the coordinate range).
+///
+/// Inlined into the tracer: it is its only caller, and as a standalone
+/// function the two evicted each other from the 4 KiB direct-mapped I-cache
+/// on every hit (5% of all refills in the Cortex gameplay profile).
+#[inline(always)]
 fn plane_contact(start: Vec3I32, end: Vec3I32, plane: Plane, side: u8) -> (i32, Vec3I32) {
-    let start_distance = i64::from(plane_distance(plane, start));
-    let end_distance = i64::from(plane_distance(plane, end));
-    let mut denominator = start_distance - end_distance;
-    if denominator == 0 {
+    let start_distance = plane_distance(plane, start);
+    let end_distance = plane_distance(plane, end);
+    if start_distance == end_distance {
         return (0, start);
     }
-    let epsilon = i64::from(TRACE_PLANE_EPSILON_Q12);
-    let mut numerator = if side == 0 {
-        start_distance - epsilon
+    // `denominator = start - end`, oriented positive; the numerator follows
+    // that orientation and is then clamped to `0..=denominator`.
+    let denominator = start_distance.abs_diff(end_distance);
+    let flip = start_distance < end_distance;
+    let (numerator_nonnegative, numerator_magnitude) = if side == 0 {
+        signed_offset(start_distance, -TRACE_PLANE_EPSILON_Q12)
     } else {
-        start_distance + epsilon
+        signed_offset(start_distance, TRACE_PLANE_EPSILON_Q12)
     };
-    if denominator < 0 {
-        denominator = -denominator;
-        numerator = -numerator;
-    }
-    numerator = numerator.clamp(0, denominator);
-
-    // Four 64-bit divisions used to live here, and this is the only place in
-    // the whole program that still reached `compiler_builtins`' software
-    // `u64_div_rem`: 0.85% of gameplay CPU on the benchmark route. The R3000A
-    // divides 32 by 32 in hardware, so each division takes the narrow form
-    // whenever the operands provably fit, and the wide form otherwise. The
-    // guards are what make the narrow form exact, so both arms answer
-    // identically and the fallback is not an approximation.
-    //
-    // `plane_distance` returns `i32`, so `0 <= numerator <= denominator` and
-    // `denominator <= u32::MAX` always hold after the clamp above.
-    debug_assert!(numerator >= 0 && denominator > 0);
-    let narrow_denominator = denominator as u64 as u32;
-    let fraction = if numerator < (1 << 19) {
-        // `numerator << 12` fits in `u32`, and the quotient cannot exceed
-        // `Q12_ONE` because `numerator <= denominator`, so the clamp is a
-        // `min` that never fires.
-        (((numerator as u32) << 12) / narrow_denominator).min(Q12_ONE as u32) as i32
+    let numerator = if numerator_nonnegative != flip {
+        numerator_magnitude.min(denominator)
     } else {
-        ((numerator << 12) / denominator).clamp(0, i64::from(Q12_ONE)) as i32
+        0
+    };
+    debug_assert!(numerator <= denominator);
+    let fraction = if numerator < (1 << 19) {
+        // `numerator << 12` fits `u32`, and the quotient cannot exceed
+        // `Q12_ONE` because `numerator <= denominator`.
+        ((numerator << 12) / denominator).min(Q12_ONE as u32) as i32
+    } else {
+        div_u64_by_u32(numerator >> 20, numerator << 12, denominator).min(Q12_ONE as u32) as i32
     };
     let along = |from: i32, to: i32| {
-        let delta = i64::from(to) - i64::from(from);
-        // Both factors are bounded by `u32::MAX`, so the product cannot wrap
-        // `u64`. Truncating division is sign-symmetric, so dividing the
-        // magnitude and reapplying the sign is the same answer.
-        let magnitude = delta.unsigned_abs() * numerator as u64;
-        let offset = if magnitude <= u64::from(u32::MAX) {
-            let quotient = i64::from((magnitude as u32) / narrow_denominator);
-            if delta < 0 {
-                -quotient
-            } else {
-                quotient
-            }
+        let delta = from.abs_diff(to);
+        // psx-numeric-allow-next-line: R3000 MULTU natively produces this 64-bit product; the divide below is 32-bit only
+        let product = u64::from(delta) * u64::from(numerator);
+        // psx-numeric-allow-next-line: splitting the MULTU result into its HI and LO words
+        let (high, low) = ((product >> 32) as u32, product as u32);
+        // `numerator <= denominator`, so the quotient is at most `delta` and
+        // `high < denominator`: the exact 64-by-32 form applies.
+        let quotient = if high == 0 {
+            low / denominator
         } else {
-            delta.saturating_mul(numerator) / denominator
+            div_u64_by_u32(high, low, denominator)
         };
-        let value = i64::from(from).saturating_add(offset);
-        value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        if to >= from {
+            from.saturating_add_unsigned(quotient)
+        } else {
+            from.saturating_sub_unsigned(quotient)
+        }
     };
     (
         fraction,
@@ -764,6 +767,20 @@ fn plane_contact(start: Vec3I32, end: Vec3I32, plane: Plane, side: u8) -> (i32, 
             z: along(start.z, end.z),
         },
     )
+}
+
+/// `value + offset` as a non-negative flag plus a `u32` magnitude, exact for
+/// every `i32` input (the sum can exceed `i32` by `|offset|`).
+#[inline(always)]
+fn signed_offset(value: i32, offset: i32) -> (bool, u32) {
+    let offset_magnitude = offset.unsigned_abs();
+    if (value >= 0) == (offset >= 0) {
+        (value >= 0, value.unsigned_abs() + offset_magnitude)
+    } else if value.unsigned_abs() >= offset_magnitude {
+        (value >= 0, value.unsigned_abs() - offset_magnitude)
+    } else {
+        (offset >= 0, offset_magnitude - value.unsigned_abs())
+    }
 }
 
 fn inverse_rotate_q12(rotation: Mat3I16, vector: Vec3I32) -> Vec3I32 {
@@ -812,6 +829,80 @@ fn normal_dot_point(normal: Vec3I16, point: Vec3I32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `i64` form `plane_contact` replaced, kept as the host oracle.
+    fn plane_contact_wide(start: Vec3I32, end: Vec3I32, plane: Plane, side: u8) -> (i32, Vec3I32) {
+        let start_distance = i64::from(plane_distance(plane, start));
+        let end_distance = i64::from(plane_distance(plane, end));
+        let mut denominator = start_distance - end_distance;
+        if denominator == 0 {
+            return (0, start);
+        }
+        let epsilon = i64::from(TRACE_PLANE_EPSILON_Q12);
+        let mut numerator = if side == 0 {
+            start_distance - epsilon
+        } else {
+            start_distance + epsilon
+        };
+        if denominator < 0 {
+            denominator = -denominator;
+            numerator = -numerator;
+        }
+        numerator = numerator.clamp(0, denominator);
+        let fraction = ((numerator << 12) / denominator).clamp(0, i64::from(Q12_ONE)) as i32;
+        let along = |from: i32, to: i32| {
+            let delta = i64::from(to) - i64::from(from);
+            let value = i64::from(from) + delta * numerator / denominator;
+            value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        };
+        (
+            fraction,
+            Vec3I32 {
+                x: along(start.x, end.x),
+                y: along(start.y, end.y),
+                z: along(start.z, end.z),
+            },
+        )
+    }
+
+    #[test]
+    fn plane_contact_matches_the_wide_oracle() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for iteration in 0..50_000u32 {
+            // Mix map-scale segments (the reachable regime) with full-range
+            // coordinates so every branch of both forms is exercised.
+            let span: i32 = if iteration % 4 == 0 { i32::MAX } else { 1 << 24 };
+            let mut values = [0i32; 7];
+            for value in &mut values {
+                *value = (next() as i32) % span;
+            }
+            let start = Vec3I32 { x: values[0], y: values[1], z: values[2] };
+            let end = Vec3I32 { x: values[3], y: values[4], z: values[5] };
+            let kind = (next() % 4) as i32;
+            let normal = [next() as i16, next() as i16, next() as i16];
+            let plane = Plane {
+                normal: Vec3I16 {
+                    x: normal[0] & 0x1fff,
+                    y: normal[1] & 0x1fff,
+                    z: normal[2] & 0x1fff,
+                },
+                distance: values[6],
+                kind,
+            };
+            let side = (next() & 1) as u8;
+            assert_eq!(
+                plane_contact(start, end, plane, side),
+                plane_contact_wide(start, end, plane, side),
+                "start {start:?} end {end:?} plane {plane:?} side {side}"
+            );
+        }
+    }
     use crate::CookedRecord;
     use alloc::vec::Vec;
 
