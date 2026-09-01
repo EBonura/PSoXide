@@ -263,6 +263,14 @@ pub struct LaunchArgs {
     /// benchmark that cannot diverge.
     #[arg(long)]
     pub input_tape_transcribe: Option<PathBuf>,
+    /// Stop once port 1 has completed this many controller polls. A poll is
+    /// one fixed simulation tick, so two builds of different speed stop in
+    /// the same guest state and their final `--dump-hw` frames compare byte
+    /// for byte, which a run that simply exhausts its tape does not guarantee
+    /// (observed: builds ending one poll apart, 5,258 against 5,259, rendered
+    /// the player one animation tick apart). `--steps` still caps the run.
+    #[arg(long)]
+    pub stop_at_poll: Option<u64>,
     /// Press pad-1 button masks on the headless route clock. Format:
     /// `<mask>@<tick>+<frames>`, comma-separated, e.g.
     /// `0x4000@45+12,0x4000@80+16`.
@@ -1864,6 +1872,12 @@ fn run_headless_launch(
             stopped_at = Some(i + 1);
             break;
         }
+        if let Some(target) = args.stop_at_poll {
+            if bus.port1_completed_polls() >= target {
+                stopped_at = Some(i + 1);
+                break;
+            }
+        }
         if let Some(target) = guest_frame_limit {
             // When replaying a tape the natural clock is tape ticks, not
             // `frames_seen`; otherwise `--guest-frames N` stops at the wrong
@@ -2811,6 +2825,7 @@ fn validation_launch_args(
         input_tape,
         input_tape_delay_ticks: 0,
         input_tape_transcribe: None,
+        stop_at_poll: None,
         pad_pulses: checkpoint.pad_pulses.clone(),
         digital_pad: false,
         embedded_playtest: artifact.embedded_playtest,
@@ -4203,6 +4218,23 @@ mod press_script_tests {
         };
         assert_eq!(args.memcard, Some(PathBuf::from("slot-1.mcd")));
         assert_eq!(args.memcard2, Some(PathBuf::from("slot-2.mcd")));
+    }
+
+    #[test]
+    fn launch_parses_the_poll_stop() {
+        let cli = Cli::try_parse_from([
+            "frontend",
+            "launch",
+            "--path",
+            "game.cue",
+            "--stop-at-poll",
+            "5250",
+        ])
+        .expect("poll-stop launch arguments");
+        let Some(Command::Launch(args)) = cli.command else {
+            panic!("expected launch command");
+        };
+        assert_eq!(args.stop_at_poll, Some(5250));
     }
 
     #[test]
