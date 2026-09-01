@@ -341,6 +341,15 @@ pub trait Scene {
     /// [`render`]: Scene::render
     fn update(&mut self, ctx: &mut Ctx);
 
+    /// Drain confirmed gameplay SFX edges raised by the latest [`update`].
+    /// Bits are [`psx_level::LevelGameplaySfxEvent::bit`] values. The flow
+    /// wrapper consumes the mask once, after simulation, so held input and
+    /// render retries cannot replay a sound.
+    #[inline]
+    fn take_gameplay_sfx_events(&mut self) -> u8 {
+        0
+    }
+
     /// Advance resource work for a front-end UI state. The flow driver calls
     /// this once per UI tick before handling input/rendering. Scenes can use it
     /// to progressively stream optional menu assets without blocking the

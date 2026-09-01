@@ -36,6 +36,7 @@
 #![cfg_attr(not(test), no_main)]
 #![allow(static_mut_refs)]
 
+#[cfg(test)]
 extern crate alloc;
 extern crate psx_rt;
 
@@ -90,6 +91,7 @@ use psx_game_runtime::vitality::{
     module_stat_bonus_q12, BoostInventory, BoostModuleId, BoostSlotId, CombatStance,
     CombatStanceConfig, DualVitality, PowerUpLoadout, VitalityChannelId, VitalityModifiers,
 };
+use psx_game_runtime::vitality_circles::VitalityCircleState;
 use psx_game_runtime::{
     destructibles::RuntimeDestructibles,
     poi::MessageController,
@@ -111,8 +113,9 @@ use psx_level::{
     find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
     InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
-    LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding,
-    LevelWaterCellRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex, RuntimeDebugMask,
+    LevelGameplaySfxEvent, LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord,
+    LevelUiValueBinding, LevelWaterCellRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
+    RuntimeDebugMask,
 };
 use psx_vram::{TexDepth, Tpage};
 
@@ -138,6 +141,7 @@ mod particle_runtime;
 mod playtest_runtime;
 mod playtest_scene;
 mod playtest_update;
+mod vitality_circle_runtime;
 use playtest_update::{Gait, LocoPhase};
 mod room_lighting_runtime;
 mod runtime_arenas;
@@ -198,15 +202,15 @@ use generated::{
     BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS,
     COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT,
-    GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, INTERACTABLE_MESSAGE_PAGES,
-    LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS,
-    MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER,
-    PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE,
-    PXBSP_AMBIENT_RGB, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
-    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES,
-    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
-    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES,
-    WEAPON_HITBOXES, WORLD_MESSAGE, WORLD_OBJECTS,
+    GAMEPLAY_SFX_CUES, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES,
+    INTERACTABLE_MESSAGE_PAGES, LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
+    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT,
+    PLAYER_CONTROLLER, PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME,
+    PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES,
+    ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS,
+    ROOM_REFLECTION_PROBES, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS,
+    UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, VITALITY_CIRCLES,
+    WATER_CELLS, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_MESSAGE, WORLD_OBJECTS,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -421,6 +425,8 @@ struct Playtest {
     /// Authored tuning for the stance: damage multipliers, recovery delays and
     /// rate, break threshold, and the swap cooldown.
     player_stance_config: CombatStanceConfig,
+    /// Compact claim/effect state for authored vitality fields.
+    vitality_circles: VitalityCircleState,
     /// Four runtime-assignable unique modules around the two health endpoints.
     power_up_loadout: PowerUpLoadout,
     /// Collected unique modules which are not currently installed in a socket.
@@ -521,6 +527,9 @@ struct Playtest {
     /// Last movement result; stationary frames can use a broader cached
     /// visibility candidate set without rebuilding it for camera-only turns.
     player_moved_last_tick: bool,
+    /// Edge-triggered gameplay audio bits consumed once by GameApp after this
+    /// fixed update. A byte replaces five booleans and is zero-valid.
+    gameplay_sfx_events: u8,
     /// True when the latest input frame is manually rotating the camera.
     camera_turning_last_tick: bool,
     /// Index into `MODEL_INSTANCES` for the current lock-on target.
@@ -603,9 +612,12 @@ struct Playtest {
     clips: [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     /// VRAM-bound subtract-blended circular floor shadow.
     shadow_material: Option<TextureMaterial>,
+    /// VRAM-bound tintable machine glyph for authored vitality circles.
+    vitality_circle_material: Option<TextureMaterial>,
     /// VRAM-bound 16x16 white circular sprite used by particle emitters.
     particle_material: Option<TextureMaterial>,
     /// Immediate-mode cylinder overlay for tuning actor blockers.
+    #[cfg(feature = "collision-debug-overlay")]
     show_collision_debug: bool,
     /// Cooperative background policy for room-window and VRAM upload work.
     streaming_jobs: RuntimeStreamingJobs,
@@ -662,6 +674,7 @@ impl Playtest {
         addr_of_mut!((*scene).message_overlay).write(None);
         addr_of_mut!((*scene).poi_messages).write(MessageController::new());
         addr_of_mut!((*scene).shadow_material).write(None);
+        addr_of_mut!((*scene).vitality_circle_material).write(None);
         addr_of_mut!((*scene).particle_material).write(None);
         for slot in 0..MAX_RUNTIME_UI_FONTS {
             addr_of_mut!((*scene).ui_fonts[slot]).write(None);
@@ -718,6 +731,7 @@ impl Playtest {
         // would mean no damage and no recovery at all, so it is set explicitly
         // on every reset rather than relying on the zero pattern.
         self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.vitality_circles = VitalityCircleState::EMPTY;
         self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
@@ -1199,6 +1213,7 @@ fn main() -> ! {
         OPTIONS,
         UI_SFX_SAMPLES,
         UI_SFX_CUES,
+        GAMEPLAY_SFX_CUES,
         scene,
     );
 }

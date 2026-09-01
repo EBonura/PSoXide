@@ -23,6 +23,7 @@ type CookedUi = (
     Vec<PlaytestUiScene>,
     Vec<PlaytestUiSfxSample>,
     Vec<PlaytestUiSfxCue>,
+    Vec<PlaytestGameplaySfxCue>,
     PlaytestGameFlow,
     Vec<PlaytestCddaTrack>,
 );
@@ -45,6 +46,7 @@ pub(crate) fn cook_ui_nodes(
     let mut ui_sfx_samples: Vec<PlaytestUiSfxSample> = Vec::new();
     let mut ui_sfx_cues: Vec<PlaytestUiSfxCue> = Vec::new();
     let mut ui_sfx_sample_for_wav: HashMap<String, u16> = HashMap::new();
+    let mut gameplay_sfx_cues: Vec<PlaytestGameplaySfxCue> = Vec::new();
     let mut cdda_tracks: Vec<PlaytestCddaTrack> = Vec::new();
     let mut cdda_track_for_wav: HashMap<String, u8> = HashMap::new();
     let mut ui_image_texture_for_path: HashMap<String, CookedUiImageTexture> = HashMap::new();
@@ -82,6 +84,58 @@ pub(crate) fn cook_ui_nodes(
 
     let game_flow = cook_game_flow(project, &ui_scenes);
 
+    // Gameplay audio deliberately follows a tiny project convention instead
+    // of growing five editor fields into every legacy document. If the bank
+    // directory is absent the project remains silent; once present, every
+    // named cue is validated and cooked through the exact same deduplicating
+    // resident sample path as UI audio.
+    for (filename, event, volume) in [
+        (
+            "footstep.wav",
+            psx_level::LevelGameplaySfxEvent::Footstep,
+            48,
+        ),
+        (
+            "light_hit.wav",
+            psx_level::LevelGameplaySfxEvent::LightHit,
+            72,
+        ),
+        (
+            "heavy_hit.wav",
+            psx_level::LevelGameplaySfxEvent::HeavyHit,
+            88,
+        ),
+        (
+            "player_damage.wav",
+            psx_level::LevelGameplaySfxEvent::PlayerDamage,
+            82,
+        ),
+        (
+            "enemy_death.wav",
+            psx_level::LevelGameplaySfxEvent::EnemyDeath,
+            90,
+        ),
+    ] {
+        let path = format!("assets/audio/gameplay/{filename}");
+        if project_root.join(&path).is_file() {
+            if let Some(sample) = cook_ui_sfx_sample_index(
+                &path,
+                project_root,
+                &mut ui_sfx_samples,
+                &mut ui_sfx_sample_for_wav,
+                report,
+            ) {
+                gameplay_sfx_cues.push(PlaytestGameplaySfxCue {
+                    sample,
+                    event,
+                    volume_percent: volume,
+                    pitch_q12: crate::UI_SFX_PITCH_UNITY_Q12,
+                    flags: 0,
+                });
+            }
+        }
+    }
+
     // Harvest from the same dedupe maps the cook used, so the shipped set
     // cannot drift from what was actually read.
     used_ui_source_paths.extend(ui_sfx_sample_for_wav.keys().cloned());
@@ -97,6 +151,7 @@ pub(crate) fn cook_ui_nodes(
         ui_scenes,
         ui_sfx_samples,
         ui_sfx_cues,
+        gameplay_sfx_cues,
         game_flow,
         cdda_tracks,
     )

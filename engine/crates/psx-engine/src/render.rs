@@ -884,6 +884,43 @@ impl<'a> PrimitivePacketArena<'a> {
         self.remaining().saturating_mul(PRIMITIVE_PACKET_SLOT_WORDS)
     }
 
+    /// Mutate an initialized range of slots as packets of one concrete type.
+    ///
+    /// This supports post-submit packet effects without another geometry pass
+    /// or packet buffer. The range is validated against the arena cursor; a
+    /// malformed range returns `false` without touching storage.
+    ///
+    /// # Safety
+    ///
+    /// Every slot in `start_slot..end_slot` must have been initialized as `T`
+    /// during this arena frame and must still contain `T`. The callback must
+    /// not modify the packet's tag or retain the reference.
+    pub unsafe fn mutate_typed_slots<T>(
+        &mut self,
+        start_slot: usize,
+        end_slot: usize,
+        mut mutate: impl FnMut(&mut T),
+    ) -> bool {
+        let size = core::mem::size_of::<T>();
+        if size == 0
+            || size > core::mem::size_of::<PrimitivePacketSlot>()
+            || core::mem::align_of::<T>() > core::mem::align_of::<PrimitivePacketSlot>()
+            || start_slot > end_slot
+            || end_slot > self.used_slots
+        {
+            return false;
+        }
+        let mut index = start_slot;
+        while index < end_slot {
+            let packet = self.storage[index].words.as_mut_ptr().cast::<T>();
+            // SAFETY: guaranteed by this method's caller contract and the
+            // range/size/alignment validation above.
+            mutate(unsafe { &mut *packet });
+            index += 1;
+        }
+        true
+    }
+
     /// True when no packets have been written.
     pub const fn is_empty(&self) -> bool {
         self.packet_count == 0
@@ -1112,6 +1149,44 @@ mod tests {
         assert_eq!(*replayed, expected);
         assert_eq!(arena.len(), 1);
         assert_eq!(arena.remaining(), 0);
+    }
+
+    #[test]
+    fn packet_arena_mutates_only_the_valid_typed_slot_range() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(C)]
+        struct Packet {
+            tag: u32,
+            value: u32,
+        }
+
+        let mut scratch = PrimitivePacketScratch::<3>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut scratch);
+        arena.push(Packet { tag: 1, value: 10 }).unwrap();
+        arena.push(Packet { tag: 2, value: 20 }).unwrap();
+        arena.push(Packet { tag: 3, value: 30 }).unwrap();
+
+        let changed = unsafe {
+            arena.mutate_typed_slots::<Packet>(1, 3, |packet| {
+                packet.value += 5;
+            })
+        };
+        assert!(changed);
+        assert!(!unsafe { arena.mutate_typed_slots::<Packet>(2, 4, |_| {}) });
+
+        let mut replay = PrimitivePacketArena::new(&mut scratch);
+        assert_eq!(
+            unsafe { *replay.reuse_packet::<Packet>().unwrap() }.value,
+            10
+        );
+        assert_eq!(
+            unsafe { *replay.reuse_packet::<Packet>().unwrap() }.value,
+            25
+        );
+        assert_eq!(
+            unsafe { *replay.reuse_packet::<Packet>().unwrap() }.value,
+            35
+        );
     }
 
     #[test]
