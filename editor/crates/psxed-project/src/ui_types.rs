@@ -787,11 +787,15 @@ pub enum UiFontChoice {
     Spleen5x8,
     /// Spleen 5x8 native bitmap UI font with a one-pixel italic shear.
     Spleen5x8Italic,
+    /// Drippy Space futuristic display font.
+    DrippySpace,
+    /// Drippy Space uppercase face rasterized natively for large titles.
+    DrippySpaceDisplay,
 }
 
 impl UiFontChoice {
     /// All editor-selectable built-in UI fonts.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 41] = [
         Self::Basic,
         Self::Basic8x16,
         Self::KenneyBlocks,
@@ -831,6 +835,8 @@ impl UiFontChoice {
         Self::ZenDotsDisplay,
         Self::Spleen5x8,
         Self::Spleen5x8Italic,
+        Self::DrippySpace,
+        Self::DrippySpaceDisplay,
     ];
 
     /// Bitmap metrics used by the PS1 runtime for this built-in face.
@@ -879,6 +885,8 @@ impl UiFontChoice {
             Self::ZenDotsDisplay => &psx_font::fonts::ZEN_DOTS_DISPLAY,
             Self::Spleen5x8 => &psx_font::fonts::SPLEEN_5X8,
             Self::Spleen5x8Italic => &psx_font::fonts::SPLEEN_5X8_ITALIC,
+            Self::DrippySpace => &psx_font::fonts::DRIPPY_SPACE,
+            Self::DrippySpaceDisplay => &psx_font::fonts::DRIPPY_SPACE_DISPLAY,
         }
     }
 
@@ -924,6 +932,8 @@ impl UiFontChoice {
             Self::ZenDotsDisplay => "Zen Dots Display",
             Self::Spleen5x8 => "Spleen 5x8",
             Self::Spleen5x8Italic => "Spleen 5x8 Italic",
+            Self::DrippySpace => "Drippy Space",
+            Self::DrippySpaceDisplay => "Drippy Space Display",
         }
     }
 
@@ -969,6 +979,8 @@ impl UiFontChoice {
             Self::ZenDotsDisplay => "zen-dots-display",
             Self::Spleen5x8 => "spleen-5x8",
             Self::Spleen5x8Italic => "spleen-5x8-italic",
+            Self::DrippySpace => "drippy-space",
+            Self::DrippySpaceDisplay => "drippy-space-display",
         }
     }
 
@@ -1014,6 +1026,8 @@ impl UiFontChoice {
             Self::ZenDotsDisplay => 36,
             Self::Spleen5x8 => 37,
             Self::Spleen5x8Italic => 38,
+            Self::DrippySpace => 39,
+            Self::DrippySpaceDisplay => 40,
         }
     }
 }
@@ -1281,6 +1295,11 @@ pub enum UiNodeKind {
         /// Optional text gradient ending colour/direction.
         #[serde(default)]
         gradient: Option<UiGradient>,
+        /// Dim this label unless the immediately following sibling control
+        /// is focused. The focused control also expands its focus outline to
+        /// encompass this label, allowing one compact label + value row.
+        #[serde(default, skip_serializing_if = "ui_bool_is_false")]
+        focus_with_next_control: bool,
         /// Animated effect. Shimmer/FastShimmer sweep a bright sheen
         /// across the glyphs at runtime -- the "Built with PSoXide"
         /// boot-tag idiom. Other effects are ignored on labels.
@@ -2107,6 +2126,10 @@ impl UiScene {
 
 pub(crate) fn clamp_ui_rect_coord(value: i32) -> i16 {
     value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn ui_bool_is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub(crate) fn default_ui_scenes() -> Vec<UiScene> {

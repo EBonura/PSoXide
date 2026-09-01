@@ -444,6 +444,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 letter_spacing,
                 color,
                 gradient,
+                focus_with_next_control,
                 effect: _,
             } => {
                 let candidates = messages
@@ -460,6 +461,9 @@ pub(crate) fn cook_ui_scene_nodes(
                 let mut flags = ui_node_flags(rect.anchor, *align, *wrap);
                 if use_random {
                     flags |= psx_level::ui_node_flags::TEXT_RANDOM_MESSAGE;
+                }
+                if *focus_with_next_control {
+                    flags |= psx_level::ui_node_flags::LABEL_FOCUS_WITH_NEXT_CONTROL;
                 }
                 (
                     rect.x,

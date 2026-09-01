@@ -1909,6 +1909,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn drippy_space_is_display_only_and_fits_the_ps1_upload_budget() {
+        for font in [
+            &crate::fonts::DRIPPY_SPACE,
+            &crate::fonts::DRIPPY_SPACE_DISPLAY,
+        ] {
+            let expected_first = if font.glyph_count == 26 { b'A' } else { b' ' };
+            assert_eq!(font.first_char, expected_first as u16);
+            let (_, atlas_w, atlas_h, halfwords_per_row) = font_atlas_dims(font);
+            assert!(atlas_w <= FontAtlas::MAX_ATLAS_W_TEXELS);
+            assert!(atlas_h <= u8::MAX as u16);
+            assert!(
+                usize::from(halfwords_per_row) * usize::from(atlas_h)
+                    <= FontAtlas::MAX_PACK_HALFWORDS
+            );
+        }
+        assert_eq!(crate::fonts::DRIPPY_SPACE.glyph_count, 0x5B - 0x20);
+        assert_eq!(crate::fonts::DRIPPY_SPACE_DISPLAY.glyph_count, 26);
+    }
+
     const ARENA_FONTS: &[&BitmapFont] = &[
         &crate::fonts::ZEN_DOTS_DISPLAY,
         &crate::fonts::ZEN_DOTS,
