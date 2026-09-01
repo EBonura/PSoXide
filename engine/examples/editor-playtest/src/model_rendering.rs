@@ -632,8 +632,8 @@ pub(super) fn draw_player(
     triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
-    let tint_sweep =
-        tint_sweep.filter(|_| !mr::player_pose_draws_wireframe(character, player_pose));
+    let dash_visual = mr::player_dash_wire_visual(character, player_pose);
+    let tint_sweep = tint_sweep.filter(|_| matches!(dash_visual, mr::DashWireVisual::Solid));
     let first_slot = triangles.used_slots();
     let stats = mr::draw_player_from_pose::<
         MODEL_VERTEX_CAP,
@@ -934,6 +934,36 @@ pub(super) fn draw_actor_shadow(
         floor_y,
         z,
         radius,
+        camera,
+        options,
+        material,
+        triangles,
+        world,
+    );
+}
+
+/// Draw a 64x64 gameplay decal from the shared effects page without borrowing
+/// the actor-shadow material policy.
+pub(super) fn draw_ground_decal(
+    x: i32,
+    floor_y: i32,
+    z: i32,
+    radius: i32,
+    uv_origin: (u8, u8),
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    material: TextureMaterial,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) {
+    mr::draw_ground_decal(
+        x,
+        floor_y,
+        z,
+        radius,
+        SHADOW_FLOOR_LIFT,
+        SHADOW_DEPTH_BIAS,
+        uv_origin,
         camera,
         options,
         material,

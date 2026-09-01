@@ -612,6 +612,8 @@ struct Playtest {
     clips: [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     /// VRAM-bound subtract-blended circular floor shadow.
     shadow_material: Option<TextureMaterial>,
+    /// VRAM-bound tintable machine glyph for authored vitality circles.
+    vitality_circle_material: Option<TextureMaterial>,
     /// VRAM-bound 16x16 white circular sprite used by particle emitters.
     particle_material: Option<TextureMaterial>,
     /// Immediate-mode cylinder overlay for tuning actor blockers.
@@ -672,6 +674,7 @@ impl Playtest {
         addr_of_mut!((*scene).message_overlay).write(None);
         addr_of_mut!((*scene).poi_messages).write(MessageController::new());
         addr_of_mut!((*scene).shadow_material).write(None);
+        addr_of_mut!((*scene).vitality_circle_material).write(None);
         addr_of_mut!((*scene).particle_material).write(None);
         for slot in 0..MAX_RUNTIME_UI_FONTS {
             addr_of_mut!((*scene).ui_fonts[slot]).write(None);

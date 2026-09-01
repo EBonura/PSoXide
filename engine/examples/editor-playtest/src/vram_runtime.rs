@@ -208,6 +208,12 @@ pub(super) fn upload_shadow_texture() -> Option<TextureMaterial> {
     vram_arena().upload_shadow_texture(SHADOW_CIRCLE_BLOB)
 }
 
+/// Upload the tintable vitality-circle machine glyph into the shared effects
+/// page.
+pub(super) fn upload_vitality_circle_texture() -> Option<TextureMaterial> {
+    vram_arena().upload_vitality_circle_texture(VITALITY_CIRCLE_GLYPH_BLOB)
+}
+
 /// Generate and upload the 16x16 white circular particle sprite.
 pub(super) fn upload_particle_texture() -> Option<TextureMaterial> {
     vram_arena().upload_particle_texture()

@@ -323,6 +323,18 @@ impl UiResolvedNode {
     fn bounds(self) -> (i16, i16, u16, u16) {
         quad_bounds(self.verts)
     }
+
+    fn translated(mut self, dx: i16, dy: i16) -> Self {
+        let dx_q12 = i32::from(dx) << 12;
+        let dy_q12 = i32::from(dy) << 12;
+        self.transform.tx = self.transform.tx.saturating_add(dx_q12);
+        self.transform.ty = self.transform.ty.saturating_add(dy_q12);
+        for vertex in &mut self.verts {
+            vertex.0 = vertex.0.saturating_add(dx);
+            vertex.1 = vertex.1.saturating_add(dy);
+        }
+        self
+    }
 }
 
 fn mul_q12(a: i32, b_q12: i32) -> i32 {
@@ -687,6 +699,7 @@ pub fn draw_scene(
     paints: &[LevelUiPaintRecord],
     fonts: &[Option<&FontAtlas>],
     focused: Option<usize>,
+    focus_offset: (i16, i16),
     focus_style: &LevelUiFocusStyle,
     frame: u16,
     text_seed: u16,
@@ -725,6 +738,11 @@ pub fn draw_scene(
         }
         .unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
+        let focus_resolved = if is_focused {
+            resolved.translated(focus_offset.0, focus_offset.1)
+        } else {
+            resolved
+        };
         match node.kind {
             LevelUiNodeKind::Canvas
             | LevelUiNodeKind::Group
@@ -769,6 +787,7 @@ pub fn draw_scene(
                     node_font(fonts, node.font),
                     node,
                     resolved,
+                    focus_resolved,
                     paints,
                     is_focused,
                     frame,
@@ -776,7 +795,7 @@ pub fn draw_scene(
                     resolved_text,
                 );
                 if is_focused {
-                    draw_focus_ring(resolved, focus_style, frame, Some(shape_config(node)));
+                    draw_focus_ring(focus_resolved, focus_style, frame, Some(shape_config(node)));
                 }
             }
             LevelUiNodeKind::Slider => {
@@ -793,7 +812,7 @@ pub fn draw_scene(
                     shape_paint(node.accent, node.accent_paint, paints),
                 );
                 if is_focused {
-                    draw_focus_ring(resolved, focus_style, frame, None);
+                    draw_focus_ring(focus_resolved, focus_style, frame, None);
                 }
             }
         }
@@ -2847,6 +2866,7 @@ fn draw_button(
     font: Option<&FontAtlas>,
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
+    focus_resolved: UiResolvedNode,
     paints: &[LevelUiPaintRecord],
     focused: bool,
     frame: u16,
@@ -2866,8 +2886,13 @@ fn draw_button(
         period: focus_style.period,
         color: focus_style.color_a,
     });
+    let chrome_resolved = if focus_chrome && focused {
+        focus_resolved
+    } else {
+        resolved
+    };
     let config = if draw_chrome {
-        draw_shape_node(node, resolved, paints, Some(fill), sweep)
+        draw_shape_node(node, chrome_resolved, paints, Some(fill), sweep)
     } else {
         shape_config(node)
     };
@@ -2875,12 +2900,12 @@ fn draw_button(
         && !config.transparent
         && config.corners == 0
         && config.border == 0
-        && resolved.height > 3
+        && chrome_resolved.height > 3
         && fill.is_solid()
     {
         let color = brighten(fill.from());
         draw_quad_flat(
-            resolved.subrect(0, 0, resolved.width as i16, 1),
+            chrome_resolved.subrect(0, 0, chrome_resolved.width as i16, 1),
             color.0,
             color.1,
             color.2,
