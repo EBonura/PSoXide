@@ -63,6 +63,11 @@ RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort -Cllvm-args=-disable
 if [ -n "${PSOXIDE_GUEST_LINK_MAP:-}" ]; then
     RUSTFLAGS_VALUE="$RUSTFLAGS_VALUE -Clink-arg=-Map=$PSOXIDE_GUEST_LINK_MAP"
 fi
+# Extra rustc flags for layout experiments (symbol ordering files, linker
+# diagnostics). Empty in every shipping build.
+if [ -n "${PSOXIDE_GUEST_EXTRA_RUSTFLAGS:-}" ]; then
+    RUSTFLAGS_VALUE="$RUSTFLAGS_VALUE $PSOXIDE_GUEST_EXTRA_RUSTFLAGS"
+fi
 
 # Everything the guest link closure reads. Directories are mirrored with
 # --delete so a removed source file cannot survive in the stage.
