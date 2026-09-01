@@ -283,12 +283,39 @@ pub fn configure_projection() {
     scene::set_avsz_weights(0x155, 0x100);
 }
 
+/// Uniform scale the XBSP view remaps bake into the rotation (3.0 in Q12).
+///
+/// Projection divides it back out, so screen positions are unchanged, but
+/// every GTE `SZ` the classic affine path reads is this many times the true
+/// view depth, and so is every OTZ it stages (`SZ / 4` with the installed
+/// `ZSF3 = 0x155`, `ZSF4 = 0x100`). Anything else that sorts into the same
+/// ordering table must key its depth through the same law; see
+/// [`pxbsp_classic_far_depth`].
+pub const XBSP_VIEW_SCALE_Q12: i32 = 0x3000;
+
+/// True view depth at which a flat PXBSP surface reaches OT slot `ot_depth`,
+/// the first slot the classic path rejects: `ot_depth * 4 / scale`.
+///
+/// Mapping `0..=this` linearly onto the world band reproduces the classic
+/// triangle key for equal-depth vertices to within a slot, so the runtime
+/// uses it as the far end of the depth range every non-world draw maps
+/// through. Surfaces beyond it are not drawn by the world renderer at all.
+pub const fn pxbsp_classic_far_depth(ot_depth: u16) -> i32 {
+    (ot_depth as i32 * 4 * 4096 + XBSP_VIEW_SCALE_Q12 / 2) / XBSP_VIEW_SCALE_Q12
+}
+
+const XBSP_VIEW_SCALE: i16 = XBSP_VIEW_SCALE_Q12 as i16;
+
 /// Build and load the classic XBSP camera transform.
 pub fn load_view(camera: Camera) -> ViewTransform {
     load_view_with_coordinates(
         camera,
         Mat3I16 {
-            m: [[0, -0x3000, 0], [0, 0, -0x3000], [0x3000, 0, 0]],
+            m: [
+                [0, -XBSP_VIEW_SCALE, 0],
+                [0, 0, -XBSP_VIEW_SCALE],
+                [XBSP_VIEW_SCALE, 0, 0],
+            ],
         },
     )
 }
@@ -306,7 +333,11 @@ pub fn load_pxbsp_view(camera: Camera) -> ViewTransform {
     load_view_with_coordinates(
         camera,
         Mat3I16 {
-            m: [[0, 0, 0x3000], [0, -0x3000, 0], [0x3000, 0, 0]],
+            m: [
+                [0, 0, XBSP_VIEW_SCALE],
+                [0, -XBSP_VIEW_SCALE, 0],
+                [XBSP_VIEW_SCALE, 0, 0],
+            ],
         },
     )
 }

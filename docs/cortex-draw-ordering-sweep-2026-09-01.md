@@ -1,6 +1,6 @@
 # Cortex Ignition draw-ordering sweep (2026-09-01)
 
-Status: IN PROGRESS. Written incrementally so partial findings survive.
+Status: findings complete, fix on `fix/draw-ordering-sweep`; numbers at the end.
 
 Branch `fix/draw-ordering-sweep` from `origin/main` at `be93eb6b`, in worktree
 `.claude/worktrees/psoxide-draw-ordering` (the assigned `psoxide-perf-idle-probes`
@@ -32,7 +32,7 @@ Slot 0 is nearest (drawn last), slot 2047 farthest (drawn first).
 
 | Path | Depth key | Units | Slot mapping | Bias | Clamp |
 |---|---|---|---|---|---|
-| PXBSP world (classic affine) | per patch: tri `average3` = `classic_otz3_from_sum` (ZSF3 = 0x155), quad `sum4 >> 4` | view z / 4 | slot = OTZ (2048 slots, whole table) | underdraw crack-seal triangles +8 slots | rejected if OTZ == 0 or OTZ >= 2048 |
+| PXBSP world (classic affine) | per patch: tri `average3` = `classic_otz3_from_sum` (ZSF3 = 0x155), quad `sum4 >> 4`, on GTE `SZ` | `SZ` = 3 x view z (`load_pxbsp_view` bakes a 3.0 scale into the rotation), so OTZ = 3 z / 4 | slot = OTZ (2048 slots, whole table) | underdraw crack-seal triangles +8 slots | rejected if OTZ == 0 or OTZ >= 2048, i.e. beyond z = 2731 |
 | Sky panorama | fixed | none | slot 2047, inserted after PXBSP so same-slot prepend executes it first | none | none |
 | Room-owned model instances / props (`pxbsp_surface_options`) | per tri `(sz0+sz1+sz2)/3` | view z | `WORLD_BAND (0..2046)` over `PXBSP_CLASSIC_DEPTH_RANGE (0, 8192)`: slot = z*2046/8192 | 0 | clamp to band |
 | Actors: player, enemies, model instances drawn with `pxbsp_actor_surface_options` | same | view z | same | `-sector_size/2` (actor clearance) | clamp to band |
@@ -123,3 +123,102 @@ that wall are at about the same depth, and the outcome is decided by the
 per-face average keys, not by a scale or bias mismatch. The cooked level has
 no box, arch, cylinder or image props and no destructibles, so every `34`
 or `3C` packet is PXBSP world.
+
+E6. The BSP view transform, read back from the guest (`load_pxbsp_view`
+output at the tape end): rotation rows `(12255, 0, 903)`, `(-243, -11844,
+3267)`, `(870, -3276, -11814)`, translation `(-4048, 1540, -1629)`. Every row
+has magnitude 12288 = 0x3000 = 3.0 in Q12. The remap matrix in
+`psx-bsp/src/render.rs::load_pxbsp_view` (and the classic `load_view`) is
+`[[0,0,0x3000],[0,-0x3000,0],[0x3000,0,0]]`: a proper rotation scaled by
+three, inherited from the lifted XBSP renderer. Projection divides the scale
+out (`SX = H * 3x / 3z`), so the world lands on the same pixels as the
+models, but the GTE `SZ` the classic affine path keys on is `3 z`, and with
+`ZSF3 = 0x155` its OTZ is `3 z / 4`. Cross-check with the tags recorded in
+E5: the wall patches under the enemy at true depth 258..304 (my projection
+of faces 803/809 at those pixels) carry slots 193..228 = 0.75 x depth; the
+far wall at 1,165 carries 872..884; the enemy itself, at 779, would carry
+592 under the world's law but the entity path put it at (779 - 64) / 4 =
+178. Every non-world draw is keyed at one third of the world's key.
+
+## The defect
+
+One rule was intended (`PXBSP_CLASSIC_DEPTH_RANGE`, "a flat triangle at
+view depth z lands at z / 4, so map 0..8192 onto the world band"), and it
+was derived without the view scale. The consequences:
+
+- An actor at true depth z sorts in front of every wall farther than z / 3.
+  The enemy in the tape-end frame (z = 779) beats the wall at z = 300 that
+  should hide it. The player (z = 241) beats anything beyond 80 units,
+  which is why she never clips into the floor or a pillar.
+- Archive beacons (POI markers) and vitality circles use the same range,
+  so they show through walls the same way (symptom 2).
+- Effects were worse still (F1): keyed at about z / 2 through the room
+  draw-distance range, so they vanished behind walls that are behind them.
+- The actor clearance of 64 units was effectively 16 slots against a world
+  whose slot is worth 1.33 units; against the corrected law it is 48 slots,
+  which is what "half a sector" meant.
+- The world itself fills the table by z = 2731 and rejects surfaces beyond
+  that (OTZ >= 2048). The room's cooked draw distance is 4096; nothing in
+  the 0.4 level is that far, but it is a real ceiling and now documented.
+
+## The fix
+
+One law, defined next to the thing that creates it:
+
+- `psx_bsp::render::XBSP_VIEW_SCALE_Q12` names the 3.0 the view remaps bake
+  in (both remaps now use it instead of a literal), and
+  `pxbsp_classic_far_depth(ot_depth)` = `ot_depth * 4 / scale` = 2731 is the
+  true depth at which the world reaches its last slot.
+- `PXBSP_CLASSIC_DEPTH_RANGE` is `0..=pxbsp_classic_far_depth(OT_DEPTH)`; the
+  host test `dynamic_world_range_matches_classic_affine_triangle_otz` now
+  feeds the scaled `SZ` into `classic_otz3_from_sum` and asserts the slots
+  match at 0, 4, 32, 127, 256, 512, 1024, 2048, 2730 and 2731, and that past
+  the far depth the world rejects while runtime draws clamp to the back of
+  the band.
+- `runtime_config::world_depth_range(record, uses_pxbsp)` is the single
+  chooser; `pxbsp_surface_options` and a new `Playtest::effect_depth_range`
+  (particles, projectile charge/bolt/impact, wade splash) go through it, so
+  effects stop using the room draw-distance range in BSP mode.
+- No bias was changed. The actor clearance, shadow, water, decal, beacon
+  line and underdraw biases are all expressed in view units or slots and
+  stay as they were; only the unit conversion under them is now right.
+
+Not changed, worth knowing: the BSP camera quantises yaw and pitch to 256
+steps per turn (`rotate_xyz(angle >> 4)`), about 1.4 degrees, while models
+use the exact camera basis, so world and model pixels can disagree by a few
+pixels at the screen edge (my projections of faces 803/809 were off by
+10..20 px from the drawn triangles for this reason). Separate issue.
+
+## Numbers
+
+Cortex whole-level bench (`make cortex-bench`, features
+`cd-stream-bench lockstep-visuals`, private stage root, two identical
+replays each):
+
+| run | bus_cycles | work_instructions | idle_percent | flips | vram_hash | display_hash |
+|---|---|---|---|---|---|---|
+| before (origin/main be93eb6b) | 7603165754 | 3320634480 | 5.78 | 2625 | 0xd46c0e234f54b3f7 | 0x91c4e0b506217302 |
+| after (this branch) | 7615169907 | 3320633097 | 5.83 | 2625 | 0x38709e1d4ded36c8 | 0x4c9bafe26e2f05ff |
+
+Bus cycles +0.158 percent, work instructions unchanged (-1,383 over 3.3
+billion). The extra bus cycles are GPU-side ordering (the same packets in a
+different slot order) and the ordering table walk; no guest instruction
+was added on the per-triangle path (a constant changed and one range
+lookup moved into a helper). The 64-bit symbol gate fails on main before
+and after (pre-existing, unrelated).
+
+Tape-end frame pair (4x, 1280x960):
+
+- before: `/private/tmp/claude-501/-Users-ebonura-Desktop-repos-PSoXide--claude-worktrees-psoxide-demo-disc-optimization-923892/3e5f59a4-d27b-4166-8dc7-46f2a8b2741e/scratchpad/ordering/bench-baseline/final-1.ppm`
+- after: `/private/tmp/claude-501/-Users-ebonura-Desktop-repos-PSoXide--claude-worktrees-psoxide-demo-disc-optimization-923892/3e5f59a4-d27b-4166-8dc7-46f2a8b2741e/scratchpad/ordering/bench-fix/final-1.ppm`
+- side by side crops: `/private/tmp/claude-501/-Users-ebonura-Desktop-repos-PSoXide--claude-worktrees-psoxide-demo-disc-optimization-923892/3e5f59a4-d27b-4166-8dc7-46f2a8b2741e/scratchpad/ordering/pair-enemy-crop.png` (enemy now
+  hidden behind the wall except the part past its edge),
+  `/private/tmp/claude-501/-Users-ebonura-Desktop-repos-PSoXide--claude-worktrees-psoxide-demo-disc-optimization-923892/3e5f59a4-d27b-4166-8dc7-46f2a8b2741e/scratchpad/ordering/pair-ledge-crop.png` (the black patch the player's blob
+  shadow painted over the ledge wall is gone),
+  `/private/tmp/claude-501/-Users-ebonura-Desktop-repos-PSoXide--claude-worktrees-psoxide-demo-disc-optimization-923892/3e5f59a4-d27b-4166-8dc7-46f2a8b2741e/scratchpad/ordering/pair-player-crop.png` (player unchanged).
+
+10,298 of 1,228,800 pixels differ, all in those three regions.
+
+Host gates: `cargo test -p psx-engine -p psx-bsp` (155 + 405 + 1 pass),
+`cargo test --manifest-path engine/examples/editor-playtest/Cargo.toml`
+(48 pass, including the corrected depth-law test).
