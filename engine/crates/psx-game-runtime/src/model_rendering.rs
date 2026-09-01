@@ -12,9 +12,10 @@ use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
 use psx_engine::{
     telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping, ModelUvOffset,
-    PredecodedModelInfo, PrimitiveSink, ProjectedLit, ProjectedVertex, RoomPoint, SimTick,
-    TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats,
-    VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
+    PredecodedModelInfo, PrimitivePacketArena, PrimitiveSink, ProjectedLit, ProjectedVertex,
+    RoomPoint, SimTick, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
+    TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
+    WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
@@ -32,7 +33,6 @@ use psx_math::int32::{clamp_i16, square_i32_saturating};
 
 use crate::actor_pose::ActorPoseSnapshot;
 use crate::character::{PlayerAnim, PlayerAnimBlend, RuntimeCharacter};
-use crate::room_cache::ActiveRuntimeRoom;
 use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 
@@ -47,11 +47,13 @@ pub use self::shadows::{
     ProjectedShadowTuning, ShadowLight,
 };
 
+#[cfg(feature = "collision-debug-overlay")]
+pub use self::instances::draw_collision_cylinder_debug;
 pub use self::instances::{
     accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
-    draw_collision_cylinder_debug, draw_model_instance_from_pose, draw_model_instance_shadows,
+    draw_ground_decal, draw_model_instance_from_pose, draw_model_instance_shadows,
     draw_model_instances, resolve_instance_actor_pose, InstanceActorPoseSnapshot,
-    ModelInstanceDepthPass, ModelInstanceDrawStats, ModelInstancePoseOverride,
+    ModelInstanceDrawStats, ModelInstancePoseOverride,
 };
 
 /// The cooked model-family tables the render policy walks, bundled so
@@ -88,6 +90,105 @@ pub const MAX_PLAYER_EQUIPMENT: usize = 8;
 pub struct EquipmentMaterializationSkin {
     /// Flat PS1 texture modulation and wireframe colour.
     pub color: (u8, u8, u8),
+}
+
+/// Screen-space colour sweep applied to an actor's existing textured packets.
+///
+/// The sweep changes only each triangle's modulation word while it is being
+/// submitted. It does not draw the model twice and owns no vertex or packet
+/// buffer, which keeps a stance mutation readable without doubling actor
+/// geometry cost. `progress_q12` raises the coloured region from `bottom_y`
+/// toward `top_y`; a narrow feather keeps the boundary from looking like a
+/// hard horizontal cut on coarse meshes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ModelTintSweep {
+    color: (u8, u8, u8),
+    frontier_y: i16,
+}
+
+/// Eight pixels on either side of the rising frontier. Keeping this a power
+/// of two turns the per-triangle blend strength into one shift on MIPS.
+const MODEL_TINT_SWEEP_FEATHER_PX: i32 = 8;
+
+impl ModelTintSweep {
+    /// Build a bottom-to-top stance-colour sweep.
+    pub fn rising(color: (u8, u8, u8), progress_q12: u16, first_y: i16, second_y: i16) -> Self {
+        let (top_y, bottom_y) = if first_y <= second_y {
+            (first_y, second_y)
+        } else {
+            (second_y, first_y)
+        };
+        let span = (bottom_y as i32).saturating_sub(top_y as i32).max(1);
+        let progress_q12 = if progress_q12 > 4096 {
+            4096
+        } else {
+            progress_q12
+        };
+        let frontier_y = (bottom_y as i32)
+            .saturating_sub(span.saturating_mul(progress_q12 as i32) / 4096)
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        Self { color, frontier_y }
+    }
+
+    fn tint_at_y(self, base: (u8, u8, u8), y: i16) -> (u8, u8, u8) {
+        let band_position = i32::from(y)
+            .saturating_sub(i32::from(self.frontier_y))
+            .saturating_add(MODEL_TINT_SWEEP_FEATHER_PX)
+            .clamp(0, MODEL_TINT_SWEEP_FEATHER_PX * 2);
+        let strength_q8 = band_position << 4;
+        (
+            lerp_tint_channel(base.0, self.color.0, strength_q8),
+            lerp_tint_channel(base.1, self.color.1, strength_q8),
+            lerp_tint_channel(base.2, self.color.2, strength_q8),
+        )
+    }
+
+    /// Apply this sweep to a just-submitted range of textured model packets.
+    ///
+    /// This is deliberately a packet post-pass: the shipping projection and
+    /// face walkers retain their one existing monomorphization and their hot
+    /// inner loops gain no stance-effect branch.
+    ///
+    /// # Safety
+    ///
+    /// Every arena slot from `first_slot` through the arena's current cursor
+    /// must contain a [`TriTextured`] emitted by one model submit. Call this
+    /// immediately after that submit, before any other packet type is pushed.
+    pub unsafe fn apply_to_model_packets(
+        self,
+        arena: &mut PrimitivePacketArena<'_>,
+        first_slot: usize,
+    ) -> bool {
+        let end_slot = arena.used_slots();
+        // SAFETY: forwarded from this method's caller contract.
+        unsafe {
+            arena.mutate_typed_slots::<TriTextured>(first_slot, end_slot, |triangle| {
+                tint_model_triangle(triangle, self);
+            })
+        }
+    }
+}
+
+fn lerp_tint_channel(base: u8, target: u8, strength_q8: i32) -> u8 {
+    let base = i32::from(base);
+    (base + (i32::from(target) - base) * strength_q8 / 256).clamp(0, 255) as u8
+}
+
+#[inline]
+fn tint_model_triangle(triangle: &mut TriTextured, sweep: ModelTintSweep) {
+    let screen_y = |word: u32| i32::from((word >> 16) as u16 as i16);
+    let average_y = ((screen_y(triangle.v0) + screen_y(triangle.v1) + screen_y(triangle.v2)) / 3)
+        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    let base = (
+        triangle.color_cmd as u8,
+        (triangle.color_cmd >> 8) as u8,
+        (triangle.color_cmd >> 16) as u8,
+    );
+    let tint = sweep.tint_at_y(base, average_y);
+    triangle.color_cmd = (triangle.color_cmd & 0xff00_0000)
+        | u32::from(tint.0)
+        | (u32::from(tint.1) << 8)
+        | (u32::from(tint.2) << 16);
 }
 
 impl EquipmentMaterializationSkin {
@@ -211,6 +312,7 @@ pub struct RuntimeModelAsset {
 #[derive(Copy, Clone)]
 pub struct PlayerActorPoseSnapshot {
     model: RuntimeModelAsset,
+    action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     clip_first_root_xz: Option<[i32; 2]>,
     pose: ActorPoseSnapshot,
@@ -220,6 +322,11 @@ impl PlayerActorPoseSnapshot {
     /// Runtime model whose skeleton the pose samples.
     pub const fn model(self) -> RuntimeModelAsset {
         self.model
+    }
+
+    /// Gameplay action that produced this pose.
+    pub const fn action(self) -> CharacterAnimationAction {
+        self.action
     }
 
     /// Model-local clip index active for this snapshot.
@@ -1100,6 +1207,7 @@ pub fn resolve_player_actor_pose<
     );
     Some(PlayerActorPoseSnapshot {
         model,
+        action: anim_action,
         clip_local,
         clip_first_root_xz,
         pose: ActorPoseSnapshot::new(
@@ -1120,7 +1228,7 @@ pub fn resolve_player_actor_pose<
 /// The game's own cyan energy hue rather than the weapon materialisation's
 /// legacy green, so a dash and a weapon assembling on the same frame stay
 /// distinguishable.
-pub const DASH_WIRE_COLOR: (u8, u8, u8) = (96, 224, 255);
+pub const DASH_WIRE_COLOR: (u8, u8, u8) = (196, 255, 255);
 
 /// Where in a dash clip the wireframe starts and ends, as Q8 fractions of the
 /// action's own playable frame range.
@@ -1130,37 +1238,115 @@ pub const DASH_WIRE_COLOR: (u8, u8, u8) = (96, 224, 255);
 /// it back for the landing is what makes the cage read as a phase *through*
 /// the dodge rather than a texture that blinks off. Stated as a fraction so a
 /// re-timed or replaced dash clip keeps the same proportions untouched.
-const DASH_WIRE_START_Q8: u32 = 32;
+const DASH_CONVERT_START_Q8: u32 = 8;
+const DASH_WIRE_START_Q8: u32 = 64;
 const DASH_WIRE_END_Q8: u32 = 192;
+const DASH_RESTORE_END_Q8: u32 = 248;
 
-/// True while the pose is inside a dash clip's wireframe window.
+/// Directional material phase of a dash pose.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DashWireVisual {
+    /// Ordinary textured body.
+    Solid,
+    /// Energy cage advances from the movement-leading side.
+    Converting {
+        /// Fraction of the projected body reached by the cage frontier.
+        progress_q8: u8,
+        /// Whether the frontier begins on screen-left.
+        from_left: bool,
+    },
+    /// Entire body is the line cage.
+    Wire,
+    /// Texture returns from the same movement-leading side.
+    Restoring {
+        /// Fraction of the projected body restored to textured material.
+        progress_q8: u8,
+        /// Whether restoration begins on screen-left.
+        from_left: bool,
+    },
+}
+
+/// Resolve the wireframe phase for forward rolls and locked-on side dashes.
 ///
-/// Both dash slots are matched against the clip the pose is actually playing,
-/// which is why no gameplay flag has to reach the renderer: a locked-on side
-/// evade is the only thing that binds those clips.
-fn dash_wireframe_active(
+/// The frozen pose carries the gameplay action that produced it. This matters
+/// when a character deliberately reuses one clip for Roll, DashLeft, and
+/// DashRight: clip identity alone cannot tell those actions apart.
+#[inline(never)]
+fn dash_wire_visual(
     character: &RuntimeCharacter,
-    clip_local: ModelClipIndex,
+    action: CharacterAnimationAction,
     animation: Animation<'static>,
     phase_q12: u32,
-) -> bool {
-    let matches = |action| {
-        character.action_clip(action) == psx_level::OptionalModelClipIndex::some(clip_local)
-    };
-    let action = if matches(CharacterAnimationAction::DashLeft) {
-        CharacterAnimationAction::DashLeft
-    } else if matches(CharacterAnimationAction::DashRight) {
-        CharacterAnimationAction::DashRight
-    } else {
-        return false;
-    };
+) -> DashWireVisual {
+    if !matches!(
+        action,
+        CharacterAnimationAction::Roll
+            | CharacterAnimationAction::DashLeft
+            | CharacterAnimationAction::DashRight
+    ) {
+        return DashWireVisual::Solid;
+    }
     let (start_frame, end_frame) =
         normalized_action_frame_range(animation, character.action_frame_range(action));
     let start_phase = start_frame << 12;
     let range_phase = end_frame.saturating_sub(start_frame) << 12;
-    let lo = start_phase + (range_phase * DASH_WIRE_START_Q8) / 256;
-    let hi = start_phase + (range_phase * DASH_WIRE_END_Q8) / 256;
-    phase_q12 >= lo && phase_q12 <= hi
+    if range_phase == 0 {
+        return DashWireVisual::Solid;
+    }
+    let local_q8 = phase_q12.saturating_sub(start_phase).saturating_mul(256) / range_phase;
+    let from_left = action == CharacterAnimationAction::DashLeft;
+    if local_q8 < DASH_CONVERT_START_Q8 || local_q8 > DASH_RESTORE_END_Q8 {
+        DashWireVisual::Solid
+    } else if local_q8 < DASH_WIRE_START_Q8 {
+        DashWireVisual::Converting {
+            progress_q8: (((local_q8 - DASH_CONVERT_START_Q8) * 255)
+                / (DASH_WIRE_START_Q8 - DASH_CONVERT_START_Q8)) as u8,
+            from_left,
+        }
+    } else if local_q8 <= DASH_WIRE_END_Q8 {
+        DashWireVisual::Wire
+    } else {
+        DashWireVisual::Restoring {
+            progress_q8: (((local_q8 - DASH_WIRE_END_Q8) * 255)
+                / (DASH_RESTORE_END_Q8 - DASH_WIRE_END_Q8)) as u8,
+            from_left,
+        }
+    }
+}
+
+/// Resolve the dash material phase for a frozen player pose.
+pub fn player_dash_wire_visual(
+    character: &RuntimeCharacter,
+    pose: PlayerActorPoseSnapshot,
+) -> DashWireVisual {
+    let actor_pose = pose.pose();
+    dash_wire_visual(
+        character,
+        pose.action(),
+        actor_pose.animation(),
+        actor_pose.phase_q12(),
+    )
+}
+
+/// Whether the resolved player pose uses the dash line cage instead of
+/// textured body packets this frame.
+///
+/// Packet post-effects use this to avoid interpreting line slots as textured
+/// triangles when stance swapping and dashing overlap.
+pub fn player_pose_draws_wireframe(
+    character: &RuntimeCharacter,
+    pose: PlayerActorPoseSnapshot,
+) -> bool {
+    let actor_pose = pose.pose();
+    matches!(
+        dash_wire_visual(
+            character,
+            pose.action(),
+            actor_pose.animation(),
+            actor_pose.phase_q12(),
+        ),
+        DashWireVisual::Wire
+    )
 }
 
 /// One line per face, its longest bind-pose edge, from vertices the model
@@ -1179,13 +1365,28 @@ fn submit_model_wireframe<const OT_DEPTH: usize>(
     projected: &[ProjectedVertex],
     faces: &[TexturedModelRenderFace],
     vertices: &[ModelVertex],
+    visual: DashWireVisual,
     color: (u8, u8, u8),
     options: WorldSurfaceOptions,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> u16 {
     let wire_options = options.with_render_layer(psx_engine::WorldRenderLayer::Opaque);
     let mut drawn = 0u16;
-    for face in faces {
+    let mut min_x = i16::MAX;
+    let mut max_x = i16::MIN;
+    for vertex in projected.iter().copied() {
+        if vertex != ProjectedVertex::INVALID {
+            min_x = min_x.min(vertex.sx);
+            max_x = max_x.max(vertex.sx);
+        }
+    }
+    if min_x >= max_x {
+        return 0;
+    }
+    for (face_index, face) in faces.iter().enumerate() {
+        if face_index & 3 != 0 {
+            continue;
+        }
         let indices = face.vertex_indices();
         let mut best = (0i32, 0usize, 0usize);
         for corner in 0..3 {
@@ -1211,10 +1412,53 @@ fn submit_model_wireframe<const OT_DEPTH: usize>(
         if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
             continue;
         }
+        let average_x = (i32::from(a.sx) + i32::from(b.sx)) / 2;
+        if !dash_wire_contains_x(visual, average_x as i16, min_x, max_x) {
+            continue;
+        }
         world.submit_projected_line(lines, [a, b], color, wire_options);
         drawn = drawn.saturating_add(1);
     }
     drawn
+}
+
+#[inline(never)]
+fn dash_wire_contains_x(visual: DashWireVisual, x: i16, min_x: i16, max_x: i16) -> bool {
+    let span = i32::from(max_x).saturating_sub(i32::from(min_x)).max(1);
+    let frontier = |progress_q8: u8, from_left: bool| {
+        let travel = span.saturating_mul(i32::from(progress_q8)) / 255;
+        if from_left {
+            i32::from(min_x).saturating_add(travel)
+        } else {
+            i32::from(max_x).saturating_sub(travel)
+        }
+    };
+    match visual {
+        DashWireVisual::Solid => false,
+        DashWireVisual::Wire => true,
+        DashWireVisual::Converting {
+            progress_q8,
+            from_left,
+        } => {
+            let edge = frontier(progress_q8, from_left);
+            if from_left {
+                i32::from(x) <= edge
+            } else {
+                i32::from(x) >= edge
+            }
+        }
+        DashWireVisual::Restoring {
+            progress_q8,
+            from_left,
+        } => {
+            let edge = frontier(progress_q8, from_left);
+            if from_left {
+                i32::from(x) > edge
+            } else {
+                i32::from(x) < edge
+            }
+        }
+    }
 }
 
 /// Draw the player model: pose the skeleton, skin the mesh, and submit
@@ -1370,7 +1614,8 @@ pub fn draw_player_from_pose<
     // itself to draw edges was measured at -2.0% frame rate across every model
     // in the scene (`textured_model_joints` +26%) purely from instantiating
     // that function a second time, so it stays untouched.
-    if dash_wireframe_active(character, player_pose.clip_local(), anim, phase) {
+    let dash_visual = dash_wire_visual(character, player_pose.action(), anim, phase);
+    if matches!(dash_visual, DashWireVisual::Wire) {
         telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
         let mut stats = match runtime_model_geometry(runtime_model, model_parts, model_vertices) {
@@ -1402,6 +1647,7 @@ pub fn draw_player_from_pose<
                     projected,
                     faces,
                     geometry.vertices,
+                    DashWireVisual::Wire,
                     DASH_WIRE_COLOR,
                     options,
                     world,
@@ -1479,7 +1725,7 @@ pub fn draw_player_from_pose<
             );
             layer
         });
-    let stats = submit_runtime_model_predecoded(
+    let mut stats = submit_runtime_model_predecoded(
         world,
         triangles,
         runtime_model,
@@ -1500,6 +1746,27 @@ pub fn draw_player_from_pose<
         PROFILE,
         scratch,
     );
+    if matches!(
+        dash_visual,
+        DashWireVisual::Converting { .. } | DashWireVisual::Restoring { .. }
+    ) {
+        if let Some(geometry) = runtime_model_geometry(runtime_model, model_parts, model_vertices) {
+            let projected = &scratch.vertices[..usize::from(stats.projected_vertices)];
+            stats.submitted_triangles =
+                stats
+                    .submitted_triangles
+                    .saturating_add(submit_model_wireframe(
+                        triangles,
+                        projected,
+                        faces,
+                        geometry.vertices,
+                        dash_visual,
+                        DASH_WIRE_COLOR,
+                        options,
+                        world,
+                    ));
+        }
+    }
     telemetry::stage_end(telemetry::stage::PLAYER_DRAW);
     PlayerModelDrawStats {
         stats,
@@ -1965,29 +2232,6 @@ pub fn emit_model_counters(
     if overflow != 0 {
         telemetry::counter(telemetry::counter::MODEL_OVERFLOW_FLAGS, overflow);
     }
-}
-
-/// The player's camera-view depth in `active`'s room frame (for the
-/// behind/in-front model-instance depth passes).
-#[inline]
-pub fn player_actor_depth_for_room<const MAX_RUNTIME_MODELS: usize>(
-    active: ActiveRuntimeRoom,
-    character: Option<RuntimeCharacter>,
-    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
-    player: RoomPoint,
-    camera: &WorldCamera,
-) -> Option<i32> {
-    let character = character?;
-    let runtime_model = models.get(character.model.to_usize()).copied().flatten()?;
-    // Depth only: an approximate lift is close enough for room ordering.
-    let origin = WorldVertex::new(
-        player.x.saturating_sub(active.offset_x),
-        player
-            .y
-            .saturating_add(runtime_model.local_to_world.apply(runtime_model.floor_lift)),
-        player.z.saturating_sub(active.offset_z),
-    );
-    Some(camera.view_vertex(origin).z)
 }
 
 fn accumulate_model_stats(total: &mut TexturedModelRenderStats, next: TexturedModelRenderStats) {
@@ -2533,6 +2777,61 @@ mod tests {
     }
 
     #[test]
+    fn tint_sweep_raises_destination_colour_without_changing_packet_opcode() {
+        assert!(core::mem::size_of::<ModelTintSweep>() <= 8);
+        let sweep = ModelTintSweep::rising((240, 80, 40), 2048, 0, 100);
+        let material = TextureMaterial::opaque(1, 2, (128, 128, 128));
+        let triangle_at = |y| {
+            TriTextured::with_material(
+                [(0, y), (4, y), (0, y + 1)],
+                [(0, 0), (1, 0), (0, 1)],
+                material,
+            )
+        };
+
+        let mut above = triangle_at(20);
+        let above_opcode = above.color_cmd & 0xff00_0000;
+        tint_model_triangle(&mut above, sweep);
+        assert_eq!(above.color_cmd & 0x00ff_ffff, 0x0080_8080);
+        assert_eq!(above.color_cmd & 0xff00_0000, above_opcode);
+
+        let mut below = triangle_at(80);
+        tint_model_triangle(&mut below, sweep);
+        assert_eq!(below.color_cmd & 0x00ff_ffff, 0x0028_50f0);
+
+        let mut frontier = triangle_at(50);
+        tint_model_triangle(&mut frontier, sweep);
+        let rgb = (
+            frontier.color_cmd as u8,
+            (frontier.color_cmd >> 8) as u8,
+            (frontier.color_cmd >> 16) as u8,
+        );
+        assert!(rgb.0 > 128 && rgb.0 < 240);
+        assert!(rgb.1 > 80 && rgb.1 < 128);
+        assert!(rgb.2 > 40 && rgb.2 < 128);
+    }
+
+    #[test]
+    fn tint_sweep_post_pass_adds_no_packets_or_slots() {
+        let material = TextureMaterial::opaque(1, 2, (128, 128, 128));
+        let triangle = TriTextured::with_material(
+            [(0, 80), (4, 80), (0, 81)],
+            [(0, 0), (1, 0), (0, 1)],
+            material,
+        );
+        let mut scratch = psx_engine::PrimitivePacketScratch::<2>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut scratch);
+        let first_slot = arena.used_slots();
+        arena.push(triangle).expect("model packet");
+        let packets_before = arena.len();
+        let slots_before = arena.used_slots();
+        let sweep = ModelTintSweep::rising((240, 80, 40), 4096, 0, 100);
+        assert!(unsafe { sweep.apply_to_model_packets(&mut arena, first_slot) });
+        assert_eq!(arena.len(), packets_before);
+        assert_eq!(arena.used_slots(), slots_before);
+    }
+
+    #[test]
     fn override_blend_codes_decode_to_sdk_modes() {
         assert_eq!(
             model_override_blend_mode(model_override_blend::OPAQUE),
@@ -2703,5 +3002,22 @@ mod tests {
             model_override_cull_mode(override_record(0, material_flags::FACE_BOTH)),
             CullMode::None
         );
+    }
+
+    #[test]
+    fn dash_wire_frontier_travels_and_restores_from_leading_side() {
+        let converting = DashWireVisual::Converting {
+            progress_q8: 128,
+            from_left: true,
+        };
+        assert!(dash_wire_contains_x(converting, 25, 0, 100));
+        assert!(!dash_wire_contains_x(converting, 75, 0, 100));
+
+        let restoring = DashWireVisual::Restoring {
+            progress_q8: 128,
+            from_left: true,
+        };
+        assert!(!dash_wire_contains_x(restoring, 25, 0, 100));
+        assert!(dash_wire_contains_x(restoring, 75, 0, 100));
     }
 }

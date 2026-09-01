@@ -207,7 +207,11 @@ mod tests {
             start: 84,
             end: None,
         };
-        assert_eq!(window.end_within(170), 169, "the tail runs to the last frame");
+        assert_eq!(
+            window.end_within(170),
+            169,
+            "the tail runs to the last frame"
+        );
         assert!(window.trims(170), "but the first 84 frames still go");
     }
 
@@ -311,9 +315,7 @@ impl ClipTrim {
             .resources
             .iter()
             .filter_map(|resource| match &resource.data {
-                ResourceData::Character(character) => {
-                    Some((resource.id, character.animation_set))
-                }
+                ResourceData::Character(character) => Some((resource.id, character.animation_set)),
                 _ => None,
             })
             .collect();
@@ -321,8 +323,7 @@ impl ClipTrim {
         for resource in &mut rebased.resources {
             match &mut resource.data {
                 ResourceData::AnimationSet(set) => {
-                    let clips: Vec<ResourceId> =
-                        set.action_clips.iter().map(|b| b.clip).collect();
+                    let clips: Vec<ResourceId> = set.action_clips.iter().map(|b| b.clip).collect();
                     let actions: Vec<usize> = set
                         .action_clips
                         .iter()

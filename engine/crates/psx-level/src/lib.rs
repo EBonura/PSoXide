@@ -1584,6 +1584,30 @@ pub struct InteractableRecord {
     pub flags: u16,
 }
 
+/// Maximum vitality fields in one level. Claim state uses one u32 bitset.
+pub const MAX_VITALITY_CIRCLES: usize = 32;
+
+/// One cooked, ground-anchored vitality field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelVitalityCircleRecord {
+    /// Owning room.
+    pub room: RoomIndex,
+    /// Room-local X.
+    pub x: i32,
+    /// Floor Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Effect and strike radius.
+    pub radius: u16,
+    /// 0 = Horizon, 1 = Zenith.
+    pub axis: u8,
+    /// Matching pool recovery per second.
+    pub refill_per_second: u16,
+    /// Mismatched pool drain per second.
+    pub drain_per_second: u16,
+}
+
 /// Sentinel for interned cook-time name ids: "no name". The playtest
 /// compiler interns authored strings (node names used as targetnames,
 /// Character resource names used as enemy archetype tags) into one
@@ -2782,6 +2806,18 @@ pub enum LevelUiValueBinding {
     PlayerStanceActiveBroken,
     /// One while the inactive pool is broken and cannot be swapped to.
     PlayerStanceInactiveBroken,
+    /// Current hard/soft combat target's Horizon pool, or zero without one.
+    TargetHealth,
+    /// Current hard/soft combat target's Horizon maximum, or zero without one.
+    TargetHealthMax,
+    /// Current hard/soft combat target's Zenith pool, or zero without one.
+    TargetHealthSecondary,
+    /// Current hard/soft combat target's Zenith maximum, or zero without one.
+    TargetHealthSecondaryMax,
+    /// Current combat target's guard-mutation progress in Q12.
+    TargetStanceSwapProgress,
+    /// One when the current combat target guards Zenith, zero otherwise.
+    TargetStanceActiveIsZenith,
     /// Player stamina value.
     PlayerStamina,
     /// Player stamina maximum.
@@ -2821,6 +2857,46 @@ pub struct LevelUiSfxCueRecord {
     pub sample: u16,
     /// Event that triggers this cue.
     pub event: LevelUiSfxEvent,
+    /// Per-play volume as a percentage of full voice volume.
+    pub volume_percent: u8,
+    /// Pitch multiplier in Q12 (`4096` = source pitch).
+    pub pitch_q12: u16,
+    /// Reserved runtime flags.
+    pub flags: u16,
+}
+
+/// Gameplay event routed into the shared resident SFX bank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LevelGameplaySfxEvent {
+    /// A moving gait crossed a foot-down phase.
+    Footstep = 0,
+    /// A light attack actually connected.
+    LightHit = 1,
+    /// A heavy attack actually connected.
+    HeavyHit = 2,
+    /// The player's vitality was actually reduced.
+    PlayerDamage = 3,
+    /// An enemy transitioned to dead.
+    EnemyDeath = 4,
+}
+
+impl LevelGameplaySfxEvent {
+    /// Compact event bit consumed once by the game-flow wrapper.
+    pub const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// One authored gameplay cue backed by the same resident sample table as UI
+/// cues. Gameplay uses a disjoint voice range, so a hit cannot steal a menu
+/// confirmation voice during a composed gameplay overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelGameplaySfxCueRecord {
+    /// Index into the generated `UI_SFX_SAMPLES` table.
+    pub sample: u16,
+    /// Confirmed gameplay edge that triggers this cue.
+    pub event: LevelGameplaySfxEvent,
     /// Per-play volume as a percentage of full voice volume.
     pub volume_percent: u8,
     /// Pitch multiplier in Q12 (`4096` = source pitch).

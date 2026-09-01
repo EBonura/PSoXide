@@ -38,8 +38,8 @@
 use psx_gpu::framebuf::FrameBuffer;
 use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_level::{
-    GameFlow, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene,
-    LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
+    GameFlow, LevelGameplaySfxCueRecord, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord,
+    LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
 use psx_pad::{enable_analog_port1, poll_port1};
 
@@ -442,7 +442,18 @@ impl App {
         // the scene every tick -- the old one-init-then-loop shape,
         // plus one already-taken `match` branch. No UI scenes, no
         // nodes, no options: the front-end arms are dead code on this path.
-        Self::run_with_flow(config, &GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], scene)
+        Self::run_with_flow(
+            config,
+            &GAMEPLAY_ONLY,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            scene,
+        )
     }
 
     /// Run `scene` as the gameplay state of a cooked [`GameFlow`].
@@ -465,6 +476,7 @@ impl App {
         options: &'static [LevelOptionDef],
         ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
         ui_sfx_cues: &'static [LevelUiSfxCueRecord],
+        gameplay_sfx_cues: &'static [LevelGameplaySfxCueRecord],
         scene: &mut S,
     ) -> ! {
         boot_trace("psx-engine: run");
@@ -510,7 +522,7 @@ impl App {
         // The wrapper is the Scene the scheduled loop drives: its
         // init/update/render dispatch to the borrowed gameplay scene
         // (or the UI renderer) per flow state.
-        let mut app = GameApp::new(
+        let mut app = GameApp::new_with_gameplay_sfx(
             flow,
             scenes,
             nodes,
@@ -518,6 +530,7 @@ impl App {
             options,
             ui_sfx_samples,
             ui_sfx_cues,
+            gameplay_sfx_cues,
             config.loading_ui_scene,
             scene,
         );

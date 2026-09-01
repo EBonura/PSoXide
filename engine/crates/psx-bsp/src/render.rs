@@ -184,6 +184,11 @@ const ALIAS_MODEL_ROTATES: u8 = 8;
 const PXBSP_MATERIAL_TICKS_PER_SECOND: i64 = 60;
 const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
 const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
+/// The third-person camera exposes large, oblique floor polygons much farther
+/// from the near plane than Quake's first-person view. Keep one profile
+/// authority for every world, special-surface and alias submission so their
+/// shared edges cross subdivision bands together.
+const PXBSP_RENDER_PROFILE: ClassicAffineProfile = ClassicAffineProfile::PXBSP_THIRD_PERSON;
 
 /// Q20.12 world camera and Q0.12 turn angles.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -989,6 +994,10 @@ pub struct Renderer {
     /// Bumped on entry to every face pass, so a cached entry from an earlier
     /// pass (different animation tick, different binding table) never hits.
     pxbsp_material_epoch: u32,
+    /// Whether sky faces must survive sidedness testing to report visible
+    /// apertures. Always-visible skies disable this so their non-rendering BSP
+    /// faces leave the hot path before plane-side and clip work.
+    track_sky_apertures: bool,
 }
 
 impl Renderer {
@@ -1000,6 +1009,15 @@ impl Renderer {
     /// half-extents), so the brush-face frustum clip matches it.
     pub fn set_view_projection(&mut self, projection: ViewProjection) {
         self.view_projection = projection;
+    }
+
+    /// Configure whether PXBSP sky surfaces act as visibility apertures.
+    ///
+    /// Leave this enabled for `ThroughSkySurfaces` skies. An always-visible
+    /// sky does not consume the aperture result, so disabling it is exact and
+    /// avoids evaluating every sky-marked BSP face each frame.
+    pub fn set_track_sky_apertures(&mut self, track: bool) {
+        self.track_sky_apertures = track;
     }
 
     /// Construct the render scratch needed by a validated PXBSP world.
@@ -1122,6 +1140,7 @@ impl Renderer {
             view_projection: ViewProjection::DEFAULT,
             pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
             pxbsp_material_epoch: 0,
+            track_sky_apertures: true,
             light_styles,
         }
     }
@@ -1226,7 +1245,7 @@ impl Renderer {
                             texture.texture_page,
                             CLUT_DEFAULT,
                             special_texture_window(texture).word(),
-                            ClassicAffineProfile::QUAKE_REFERENCE,
+                            PXBSP_RENDER_PROFILE,
                         )
                     };
                     next = submitted.next_packet;
@@ -1515,6 +1534,9 @@ impl Renderer {
             // Only the policy byte decides the three rejections below, so the
             // rest of the record is not loaded for a face that never draws.
             let policy = unsafe { self.pxbsp_material_cache.get_unchecked(slot).policy };
+            if policy & pxbsp_material_policy::SKY != 0 && !self.track_sky_apertures {
+                continue;
+            }
             let authored_front = match selection {
                 PxbspFaceSelection::VisibleWorld => {
                     match packed_face_state(&self.frame_pxbsp_face_state, face_index) {
@@ -1991,7 +2013,7 @@ impl Renderer {
                     header.skins[skin].texture_page,
                     CLUT_DEFAULT,
                     tint,
-                    ClassicAffineProfile::QUAKE_REFERENCE,
+                    PXBSP_RENDER_PROFILE,
                 )
             };
             next = submitted.next_packet;
@@ -2936,7 +2958,7 @@ unsafe fn flush_batch(
             surfaces.as_ptr(),
             surface_count,
             output,
-            ClassicAffineProfile::QUAKE_REFERENCE,
+            PXBSP_RENDER_PROFILE,
         )
     }
 }
@@ -2962,14 +2984,7 @@ unsafe fn flush_pxbsp_batch(
             surfaces.as_ptr(),
             surface_count,
             output,
-            // The extended third-person profile keeps subdivision active at
-            // twice Quake's distance for every brush surface. On dense PXBSP
-            // scenes that multiplies both transform work and packet pressure,
-            // including for walls that do not benefit from the extra splits.
-            // Keep the proven Quake depth bands as the global baseline; a
-            // future quality pass can selectively extend them for nearby
-            // floor surfaces under a bounded per-frame packet budget.
-            ClassicAffineProfile::QUAKE_REFERENCE,
+            PXBSP_RENDER_PROFILE,
         )
     }
 }
@@ -3443,6 +3458,44 @@ mod tests {
     }
 
     #[test]
+    fn always_visible_sky_skips_aperture_faces() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        lumps[PxbspLumpKind::Materials as usize][2..4]
+            .copy_from_slice(&material_flags::LAYERED_SKY.to_le_bytes());
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(10, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let mut packets = [0u32; 16];
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        renderer.set_track_sky_apertures(false);
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[None],
+            0,
+            &mut packets,
+        );
+
+        assert_eq!(frame.stats.visible_faces, 0);
+        assert_eq!(frame.stats.visible_sky_apertures, 0);
+        assert_eq!(frame.stats.unresolved_material_faces, 0);
+        assert_eq!(frame.stats.packets, 0);
+        assert_eq!(frame.packet_words, 0);
+    }
+
+    #[test]
     fn legacy_directional_sky_bit_migrates_to_the_aperture_contract() {
         configure_projection();
         let mut lumps = valid_lumps();
@@ -3803,6 +3856,17 @@ mod tests {
 #[cfg(test)]
 mod frustum_tests {
     use super::*;
+
+    #[test]
+    fn pxbsp_renderer_uses_the_third_person_affine_profile() {
+        assert_eq!(
+            PXBSP_RENDER_PROFILE,
+            ClassicAffineProfile::PXBSP_THIRD_PERSON
+        );
+        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_once_at, 272);
+        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_twice_at, 136);
+        assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);
+    }
 
     /// The Newton-with-division form `isqrt_i64` replaced, kept as the oracle.
     fn newton_isqrt_i64(value: i64) -> i64 {

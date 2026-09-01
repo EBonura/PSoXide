@@ -2304,8 +2304,7 @@ fn preview_model_bounds_sphere(
 }
 
 fn scale_model_q8(value: i32, scale_q8: u16) -> i32 {
-    value.saturating_mul(i32::from(scale_q8.max(1)))
-        / i32::from(psxed_project::MODEL_SCALE_ONE_Q8)
+    value.saturating_mul(i32::from(scale_q8.max(1))) / i32::from(psxed_project::MODEL_SCALE_ONE_Q8)
 }
 
 fn rotate_bounds_center(rotation: Mat3I16, center: [i32; 3]) -> [i32; 3] {

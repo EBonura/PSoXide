@@ -380,9 +380,9 @@ fn equipment_bindings_ui(
                 let preview = binding
                     .weapon
                     .and_then(|id| {
-                        ctx.weapons
-                            .iter()
-                            .find_map(|(candidate, name)| (*candidate == id).then_some(name.as_str()))
+                        ctx.weapons.iter().find_map(|(candidate, name)| {
+                            (*candidate == id).then_some(name.as_str())
+                        })
                     })
                     .unwrap_or("(none)");
                 changed |= searchable_picker(
@@ -403,7 +403,9 @@ fn equipment_bindings_ui(
             });
             ui.horizontal(|ui| {
                 ui.label("Character Socket");
-                changed |= ui.text_edit_singleline(&mut binding.character_socket).changed();
+                changed |= ui
+                    .text_edit_singleline(&mut binding.character_socket)
+                    .changed();
             });
             ui.horizontal(|ui| {
                 ui.label("Weapon Grip");
@@ -1895,6 +1897,56 @@ pub(crate) fn draw_ui_value_binding_editor(
                 ),
                 ("Player Stamina", UiValueBinding::PlayerStamina),
                 ("Player Stamina Max", UiValueBinding::PlayerStaminaMax),
+                (
+                    "Player Active State Health",
+                    UiValueBinding::PlayerStanceActiveHealth,
+                ),
+                (
+                    "Player Active State Health Max",
+                    UiValueBinding::PlayerStanceActiveHealthMax,
+                ),
+                (
+                    "Player Inactive State Health",
+                    UiValueBinding::PlayerStanceInactiveHealth,
+                ),
+                (
+                    "Player Inactive State Health Max",
+                    UiValueBinding::PlayerStanceInactiveHealthMax,
+                ),
+                (
+                    "Player State Swap Progress",
+                    UiValueBinding::PlayerStanceSwapProgress,
+                ),
+                (
+                    "Player Active State Is Zenith",
+                    UiValueBinding::PlayerStanceActiveIsZenith,
+                ),
+                (
+                    "Player Active State Broken",
+                    UiValueBinding::PlayerStanceActiveBroken,
+                ),
+                (
+                    "Player Inactive State Broken",
+                    UiValueBinding::PlayerStanceInactiveBroken,
+                ),
+                ("Target Horizon Health", UiValueBinding::TargetHealth),
+                ("Target Horizon Health Max", UiValueBinding::TargetHealthMax),
+                (
+                    "Target Zenith Health",
+                    UiValueBinding::TargetHealthSecondary,
+                ),
+                (
+                    "Target Zenith Health Max",
+                    UiValueBinding::TargetHealthSecondaryMax,
+                ),
+                (
+                    "Target State Swap Progress",
+                    UiValueBinding::TargetStanceSwapProgress,
+                ),
+                (
+                    "Target State Is Zenith",
+                    UiValueBinding::TargetStanceActiveIsZenith,
+                ),
                 ("Constant", UiValueBinding::ConstantQ12(4096)),
                 (
                     "Option",
@@ -1968,6 +2020,59 @@ pub(crate) fn ui_value_binding_same_variant(a: UiValueBinding, b: UiValueBinding
             | (
                 UiValueBinding::PlayerStaminaMax,
                 UiValueBinding::PlayerStaminaMax
+            )
+            | (
+                UiValueBinding::PlayerStanceActiveHealth,
+                UiValueBinding::PlayerStanceActiveHealth
+            )
+            | (
+                UiValueBinding::PlayerStanceActiveHealthMax,
+                UiValueBinding::PlayerStanceActiveHealthMax
+            )
+            | (
+                UiValueBinding::PlayerStanceInactiveHealth,
+                UiValueBinding::PlayerStanceInactiveHealth
+            )
+            | (
+                UiValueBinding::PlayerStanceInactiveHealthMax,
+                UiValueBinding::PlayerStanceInactiveHealthMax
+            )
+            | (
+                UiValueBinding::PlayerStanceSwapProgress,
+                UiValueBinding::PlayerStanceSwapProgress
+            )
+            | (
+                UiValueBinding::PlayerStanceActiveIsZenith,
+                UiValueBinding::PlayerStanceActiveIsZenith
+            )
+            | (
+                UiValueBinding::PlayerStanceActiveBroken,
+                UiValueBinding::PlayerStanceActiveBroken
+            )
+            | (
+                UiValueBinding::PlayerStanceInactiveBroken,
+                UiValueBinding::PlayerStanceInactiveBroken
+            )
+            | (UiValueBinding::TargetHealth, UiValueBinding::TargetHealth)
+            | (
+                UiValueBinding::TargetHealthMax,
+                UiValueBinding::TargetHealthMax
+            )
+            | (
+                UiValueBinding::TargetHealthSecondary,
+                UiValueBinding::TargetHealthSecondary
+            )
+            | (
+                UiValueBinding::TargetHealthSecondaryMax,
+                UiValueBinding::TargetHealthSecondaryMax
+            )
+            | (
+                UiValueBinding::TargetStanceSwapProgress,
+                UiValueBinding::TargetStanceSwapProgress
+            )
+            | (
+                UiValueBinding::TargetStanceActiveIsZenith,
+                UiValueBinding::TargetStanceActiveIsZenith
             )
     )
 }

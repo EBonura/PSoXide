@@ -1823,6 +1823,12 @@ pub(crate) fn ui_binding_preview_q12(binding: UiValueBinding) -> i32 {
         UiValueBinding::PlayerStanceActiveIsZenith => 0,
         UiValueBinding::PlayerStanceActiveBroken => 0,
         UiValueBinding::PlayerStanceInactiveBroken => 0,
+        UiValueBinding::TargetHealth => 3072,
+        UiValueBinding::TargetHealthMax => 4096,
+        UiValueBinding::TargetHealthSecondary => 2048,
+        UiValueBinding::TargetHealthSecondaryMax => 4096,
+        UiValueBinding::TargetStanceSwapProgress => 4096,
+        UiValueBinding::TargetStanceActiveIsZenith => 1,
         // Preview a load two-thirds done so the bar reads as a bar.
         UiValueBinding::LoadingProgress => 2730,
     }
