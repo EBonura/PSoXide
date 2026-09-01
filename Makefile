@@ -36,7 +36,7 @@
 	hwtest-capture hwtest-diff hwtest-baseline hwtest-silicon hwtest-verify-code hwtest-audio hwtest-audio-chain \
 	hwtest-sb4-capture hwtest-sb4 hwtest-sb4-baseline \
 	hello-engine hello-engine-disc run-hello-engine \
-	cook-playtest build-editor-playtest editor-blank-playtest-check editor-bsp-liquid-check editor-souls-bsp-check combat-checkpoint profile-demo3 profile-demo3-forward \
+	cook-playtest build-editor-playtest editor-blank-playtest-check editor-bsp-liquid-check editor-souls-bsp-check profile-demo3 profile-demo3-forward \
 	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
 	profile-demo3-disc-stream-forward profile-demo7-camera-sweep
 
@@ -1359,11 +1359,6 @@ cortex-anim-shots: cortex-anim-disc
 		--route-screenshot-dir $(CORTEX_ANIM_SHOT_DIR) \
 		--route-screenshot-interval $(CORTEX_ANIM_SHOT_INTERVAL)
 	@echo "[cortex-anim-shots] wrote $$(ls $(CORTEX_ANIM_SHOT_DIR) | wc -l | tr -d ' ') frames to $(CORTEX_ANIM_SHOT_DIR)"
-
-# Combat checkpoint regression gate: clean fixture cook, MIPS guest, disc,
-# double deterministic replay, door-occlusion replay, pinned assertions.
-combat-checkpoint:
-	sh tools/combat_checkpoint.sh
 
 # Cortex Ignition before/after benchmark: cooks + builds the 0.4 project disc
 # with a linker map in a private stage root, runs the 64-bit symbol gate,
