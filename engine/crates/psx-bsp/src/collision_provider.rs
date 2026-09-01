@@ -364,7 +364,11 @@ mod tests {
         // 70 free. This is why nearest is not enough on its own.
         assert_eq!(quantise_out_of_surface(283326, UP), 70);
         assert_eq!(283326 >> 12, 69, "flooring landed inside solid");
-        assert_eq!((283326 + 2048) >> 12, 69, "nearest also landed inside solid");
+        assert_eq!(
+            (283326 + 2048) >> 12,
+            69,
+            "nearest also landed inside solid"
+        );
 
         // A clean contact on an integer plane stays put. The traces back off a
         // hair from the plane they hit, so a hit on x=2 arrives just past it

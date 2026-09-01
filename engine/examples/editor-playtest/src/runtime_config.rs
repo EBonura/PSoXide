@@ -90,6 +90,7 @@ pub(super) const SHADOW_RADIUS_SCALE_NUM: i32 = 5;
 pub(super) const SHADOW_RADIUS_SCALE_DEN: i32 = 4;
 pub(super) const SHADOW_RADIUS_MIN: i32 = 10;
 pub(super) const SHADOW_RADIUS_MAX: i32 = 20;
+#[cfg(feature = "collision-debug-overlay")]
 pub(super) const COLLISION_DEBUG_BUTTON: u16 = button::L3;
 pub(super) const FLOOR_LINK_CROSS_EPSILON: i32 = 2;
 /// Dead-band (engine units) below a floor boundary before a downward room
@@ -170,13 +171,13 @@ pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 pub(super) const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
 pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
 pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
-/// The four player attacks are addressed directly. There are no shoulder
-/// chords and therefore no input-pair delay: a press maps to exactly one
-/// Horizon or Zenith action slot.
-pub(super) const HORIZON_LIGHT_ATTACK_BUTTON: u16 = button::R1;
-pub(super) const HORIZON_HEAVY_ATTACK_BUTTON: u16 = button::R2;
-pub(super) const ZENITH_LIGHT_ATTACK_BUTTON: u16 = button::L1;
-pub(super) const ZENITH_HEAVY_ATTACK_BUTTON: u16 = button::L2;
+/// R1/R2 always address the active stance; L1/L2 retain the opposite stance.
+/// This keeps all four attacks reachable without a chord or input delay while
+/// making the primary shoulder pair follow the player's defensive state.
+pub(super) const ACTIVE_LIGHT_ATTACK_BUTTON: u16 = button::R1;
+pub(super) const ACTIVE_HEAVY_ATTACK_BUTTON: u16 = button::R2;
+pub(super) const OPPOSITE_LIGHT_ATTACK_BUTTON: u16 = button::L1;
+pub(super) const OPPOSITE_HEAVY_ATTACK_BUTTON: u16 = button::L2;
 /// Player health pool at gameplay init (the phase-3 combat slice's
 /// sane cooked default -- the Character record carries no health
 /// field yet; authoring it is a future editor slice). Death/respawn
@@ -200,6 +201,16 @@ pub(super) const OT_DEPTH: usize = 512;
 // still executes the sky first.
 pub(super) const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 2);
 pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
+/// Camera-depth range that maps ordinary world-pass packets onto the classic
+/// affine PXBSP renderer's staged OTZ convention.
+///
+/// PXBSP installs ZSF3=0x155 and ZSF4=0x100, so a flat triangle/quad at view
+/// depth `z` lands at approximately `z / 4`. With the 2,046-slot world band,
+/// mapping `0..8192` reproduces the triangle formula exactly for equal-depth
+/// vertices: `z * 2046 / 8192 == z * 1023 / 4096`. Models, beacons and other
+/// runtime geometry must use this range when the resident BSP owns the static
+/// world or a nearer BSP wall can otherwise sort behind them.
+pub(super) const PXBSP_CLASSIC_DEPTH_RANGE: DepthRange = DepthRange::new(0, 8192);
 #[cfg(feature = "world-grid-visible")]
 pub(super) const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
 #[cfg(all(
@@ -325,11 +336,34 @@ pub(super) fn actor_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOpt
     room_surface_options(record).with_depth_bias(-clearance)
 }
 
+/// Room options whose OT slots are directly comparable with resident PXBSP
+/// classic-affine packets already linked into the same ordering table.
+pub(super) fn pxbsp_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
+    let mut options = room_surface_options(record);
+    options.depth_range = PXBSP_CLASSIC_DEPTH_RANGE;
+    options
+}
+
+/// Actor-clearance counterpart to [`pxbsp_surface_options`].
+pub(super) fn pxbsp_actor_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
+    let clearance = i32::from(record.sector_size) / 2;
+    pxbsp_surface_options(record).with_depth_bias(-clearance)
+}
+
 /// [`actor_surface_options`] for the room an actor currently occupies.
-pub(super) fn current_actor_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
+pub(super) fn current_actor_surface_options(
+    room_index: RoomIndex,
+    uses_pxbsp: bool,
+) -> WorldSurfaceOptions {
     ROOMS
         .get(room_index.to_usize())
-        .map(actor_surface_options)
+        .map(|record| {
+            if uses_pxbsp {
+                pxbsp_actor_surface_options(record)
+            } else {
+                actor_surface_options(record)
+            }
+        })
         .unwrap_or_else(fallback_surface_options)
 }
 
@@ -767,3 +801,23 @@ pub(super) const VISIBLE_CELL_TUNING: psx_game_runtime::world_cells::VisibleCell
         wedge_den: ROOM_VISIBLE_CELL_WEDGE_DEN,
         near_z: NEAR_Z,
     };
+
+#[cfg(test)]
+mod pxbsp_depth_order_tests {
+    use super::*;
+
+    #[cfg(feature = "ot-2048")]
+    #[test]
+    fn dynamic_world_range_matches_classic_affine_triangle_otz() {
+        assert_eq!(OT_DEPTH, 2048);
+        for depth in [0, 4, 32, 127, 256, 512, 1024, 4096, 8191, 8192] {
+            let dynamic_slot = WORLD_BAND
+                .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, depth)
+                .index();
+            let classic_slot = usize::from(psx_gte::scene::classic_otz3_from_sum(
+                (depth as u32).saturating_mul(3),
+            ));
+            assert_eq!(dynamic_slot, classic_slot, "view depth {depth}");
+        }
+    }
+}
