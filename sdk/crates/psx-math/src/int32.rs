@@ -118,9 +118,63 @@ pub fn mul_q12_i32_wide(value: i32, q12: i32) -> i32 {
     ((i64::from(value) * i64::from(q12)) >> 12) as i32
 }
 
+/// `floor((hi * 2^32 + lo) / divisor)` for a quotient that fits `u32`, in
+/// 32-bit operations only.
+///
+/// Requires `divisor != 0` and `hi < divisor`, which is exactly the shape of
+/// a Q12 fraction (`numerator <= denominator`) or a segment interpolation
+/// (`|delta| * fraction_numerator / denominator` with the numerator at most
+/// the denominator). The R3000A divides 32 by 32 in hardware but has no
+/// 64-by-32 form, so this is 32 restoring-division steps; the generic
+/// compiler-builtins `u64_div_rem` it replaces was 1,412 bytes of branchy
+/// code and the only 64-bit divide reachable from runtime code.
+#[inline]
+pub fn div_u64_by_u32(hi: u32, lo: u32, divisor: u32) -> u32 {
+    debug_assert!(divisor != 0 && hi < divisor);
+    let mut remainder = hi;
+    let mut low = lo;
+    let mut quotient = 0u32;
+    for _ in 0..32 {
+        // The remainder stays below the divisor, so doubling it plus one
+        // incoming bit stays below 2^33: a carry out of bit 31 means the
+        // true value exceeds any 32-bit divisor and the subtraction's
+        // wrapped low word is the exact new remainder.
+        let carry = remainder >> 31;
+        remainder = (remainder << 1) | (low >> 31);
+        low <<= 1;
+        quotient <<= 1;
+        if carry != 0 || remainder >= divisor {
+            remainder = remainder.wrapping_sub(divisor);
+            quotient |= 1;
+        }
+    }
+    quotient
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn div_u64_by_u32_matches_the_wide_reference() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let divisor = ((next() as u32) | 1).max(2);
+            let hi = (next() as u32) % divisor;
+            let lo = next() as u32;
+            let wide = ((u64::from(hi) << 32) | u64::from(lo)) / u64::from(divisor);
+            assert_eq!(u64::from(div_u64_by_u32(hi, lo, divisor)), wide);
+        }
+        assert_eq!(div_u64_by_u32(0, 0, 1), 0);
+        assert_eq!(div_u64_by_u32(u32::MAX - 1, u32::MAX, u32::MAX), u32::MAX);
+        assert_eq!(div_u64_by_u32(0, 4096 << 12, 4096), 4096);
+    }
 
     #[test]
     fn mul_q12_i32_matches_wide_where_exact() {
