@@ -89,37 +89,41 @@ pub(crate) fn cook_ui_nodes(
     // directory is absent the project remains silent; once present, every
     // named cue is validated and cooked through the exact same deduplicating
     // resident sample path as UI audio.
-    for (filename, event, volume) in [
+    for (path, event, volume) in [
         (
-            "footstep.wav",
+            "assets/audio/gameplay/footstep.wav",
             psx_level::LevelGameplaySfxEvent::Footstep,
             48,
         ),
         (
-            "light_hit.wav",
+            "assets/audio/gameplay/light_hit.wav",
             psx_level::LevelGameplaySfxEvent::LightHit,
             72,
         ),
         (
-            "heavy_hit.wav",
+            "assets/audio/gameplay/heavy_hit.wav",
             psx_level::LevelGameplaySfxEvent::HeavyHit,
             88,
         ),
         (
-            "player_damage.wav",
+            "assets/audio/gameplay/player_damage.wav",
             psx_level::LevelGameplaySfxEvent::PlayerDamage,
             82,
         ),
         (
-            "enemy_death.wav",
+            "assets/audio/gameplay/enemy_death.wav",
             psx_level::LevelGameplaySfxEvent::EnemyDeath,
             90,
         ),
+        (
+            "assets/audio/ui/ui_confirm.wav",
+            psx_level::LevelGameplaySfxEvent::StanceSwapReady,
+            54,
+        ),
     ] {
-        let path = format!("assets/audio/gameplay/{filename}");
         if project_root.join(&path).is_file() {
             if let Some(sample) = cook_ui_sfx_sample_index(
-                &path,
+                path,
                 project_root,
                 &mut ui_sfx_samples,
                 &mut ui_sfx_sample_for_wav,

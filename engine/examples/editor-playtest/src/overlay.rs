@@ -10,6 +10,7 @@ use psx_engine::ui::{
 };
 pub(crate) use psx_engine::ui::{MessagePageMeta, MessagePanelVariant};
 use psx_gpu::draw_quad_flat;
+use psx_gpu::draw_tri_textured_material;
 
 /// Apply the six-step demo-disc brightness control as a native PS1 blend over
 /// the composed frame. This costs two flat triangles and no VRAM. Level one
@@ -599,11 +600,11 @@ struct VitalityBarGeometry {
 }
 
 const ACTIVE_VITALITY_BAR: VitalityBarGeometry = VitalityBarGeometry {
-    bounds: (34, 3, 152, 17),
+    bounds: (34, 5, 152, 13),
     cut: 8,
 };
 const INACTIVE_VITALITY_BAR: VitalityBarGeometry = VitalityBarGeometry {
-    bounds: (34, 21, 104, 11),
+    bounds: (34, 19, 104, 11),
     cut: 5,
 };
 
@@ -737,19 +738,11 @@ fn draw_swap_cooldown_circle(
     rgb: (u8, u8, u8),
     echo_elapsed: Option<u16>,
 ) {
-    // The generated 32x32 source is drawn into a 26-pixel footprint: large
-    // enough to preserve its concentric breaks, but still one pixel detached
-    // from the bars.  Cooldown brightness rises with charge while the outer
-    // ticks retain an exact eight-step reading.
-    let filled = swap_cooldown_segments(progress_q12);
-    let dim = (rgb.0 / 10, rgb.1 / 10, rgb.2 / 10);
+    // The authored hollow dial is always visible in neutral grey. A second
+    // pass reveals the active stance tint clockwise in sixteen radial wedges,
+    // providing a direct reading of the remaining lockout without replacing
+    // the texture's fine concentric detail.
     if let Some(material) = dial_material {
-        let intensity = 36 + ((u32::from(progress_q12.min(4096)) * 92) >> 12) as u8;
-        let dial_tint = (
-            ((u16::from(rgb.0) * u16::from(intensity)) >> 7).min(255) as u8,
-            ((u16::from(rgb.1) * u16::from(intensity)) >> 7).min(255) as u8,
-            ((u16::from(rgb.2) * u16::from(intensity)) >> 7).min(255) as u8,
-        );
         let x0 = cx - 13;
         let y0 = cy - 13;
         let x1 = cx + 13;
@@ -758,64 +751,17 @@ fn draw_swap_cooldown_circle(
         let v0 = psx_game_runtime::vram::VITALITY_HUD_DIAL_TEXEL_V;
         let u1 = u0.saturating_add(31);
         let v1 = v0.saturating_add(31);
-        draw_quad_textured_material(
-            [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
-            [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
-            material.with_tint(dial_tint),
-        );
+        let verts = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
+        let uvs = [(u0, v0), (u1, v0), (u0, v1), (u1, v1)];
+        if progress_q12 >= 4096 {
+            // The stable ready state is one quad, not sixteen persistent
+            // wedges. The radial work exists only during the short lockout.
+            draw_quad_textured_material(verts, uvs, material.with_tint(rgb));
+        } else {
+            draw_quad_textured_material(verts, uvs, material.with_tint((72, 72, 72)));
+            draw_clockwise_dial_fill(cx, cy, u0, v0, material.with_tint(rgb), progress_q12);
+        }
     }
-
-    // Eight outer ticks fill clockwise from twelve o'clock. Diagonal ticks
-    // are deliberately square rather than antialiased, matching the authored
-    // pixel language of the bars.
-    draw_rect(
-        cx - 2,
-        cy - 12,
-        4,
-        2,
-        cooldown_tick_rgb(filled, 1, rgb, dim),
-    );
-    draw_rect(cx + 7, cy - 9, 3, 2, cooldown_tick_rgb(filled, 2, rgb, dim));
-    draw_rect(
-        cx + 10,
-        cy - 2,
-        2,
-        4,
-        cooldown_tick_rgb(filled, 3, rgb, dim),
-    );
-    draw_rect(cx + 7, cy + 7, 3, 2, cooldown_tick_rgb(filled, 4, rgb, dim));
-    draw_rect(
-        cx - 2,
-        cy + 10,
-        4,
-        2,
-        cooldown_tick_rgb(filled, 5, rgb, dim),
-    );
-    draw_rect(
-        cx - 10,
-        cy + 7,
-        3,
-        2,
-        cooldown_tick_rgb(filled, 6, rgb, dim),
-    );
-    draw_rect(
-        cx - 12,
-        cy - 2,
-        2,
-        4,
-        cooldown_tick_rgb(filled, 7, rgb, dim),
-    );
-    draw_rect(
-        cx - 10,
-        cy - 9,
-        3,
-        2,
-        cooldown_tick_rgb(filled, 8, rgb, dim),
-    );
-
-    // The texture owns the broken inner rings and hollow aperture.  Keeping
-    // those details out of immediate-mode geometry avoids drawing a second,
-    // mismatched circle on top of the authored one.
 
     // Completion sends two additive rings out from the charge cell, echoing
     // the main-menu confirmation language without any text or extra chrome.
@@ -830,42 +776,141 @@ fn draw_swap_cooldown_circle(
         draw_rect(cx + radius, cy - 3, 1, 6, echo_rgb);
         draw_rect(cx - 3, cy + radius, 6, 1, echo_rgb);
         draw_rect(cx - radius, cy - 3, 1, 6, echo_rgb);
+        let diagonal = (radius * 3) / 4;
+        draw_rect(cx + diagonal, cy - diagonal, 2, 2, echo_rgb);
+        draw_rect(cx + diagonal, cy + diagonal, 2, 2, echo_rgb);
+        draw_rect(cx - diagonal, cy + diagonal, 2, 2, echo_rgb);
+        draw_rect(cx - diagonal, cy - diagonal, 2, 2, echo_rgb);
+    }
+}
+
+#[inline(never)]
+fn draw_clockwise_dial_fill(
+    cx: i16,
+    cy: i16,
+    u0: u8,
+    v0: u8,
+    material: TextureMaterial,
+    progress_q12: u16,
+) {
+    const SCREEN_RING: [(i16, i16); 17] = [
+        (0, -13),
+        (7, -13),
+        (13, -13),
+        (13, -7),
+        (13, 0),
+        (13, 7),
+        (13, 13),
+        (7, 13),
+        (0, 13),
+        (-7, 13),
+        (-13, 13),
+        (-13, 7),
+        (-13, 0),
+        (-13, -7),
+        (-13, -13),
+        (-7, -13),
+        (0, -13),
+    ];
+    const UV_RING: [(u8, u8); 17] = [
+        (16, 0),
+        (24, 0),
+        (31, 0),
+        (31, 8),
+        (31, 16),
+        (31, 24),
+        (31, 31),
+        (24, 31),
+        (16, 31),
+        (8, 31),
+        (0, 31),
+        (0, 24),
+        (0, 16),
+        (0, 8),
+        (0, 0),
+        (8, 0),
+        (16, 0),
+    ];
+
+    let scaled = u32::from(progress_q12.min(4096)) * 16;
+    let complete = (scaled >> 12).min(16) as usize;
+    let partial_q12 = (scaled & 4095) as i32;
+    let center_uv = (u0.saturating_add(16), v0.saturating_add(16));
+    let mut wedge = 0usize;
+    while wedge < complete {
+        let a = SCREEN_RING[wedge];
+        let b = SCREEN_RING[wedge + 1];
+        let auv = UV_RING[wedge];
+        let buv = UV_RING[wedge + 1];
+        draw_tri_textured_material(
+            [(cx, cy), (cx + a.0, cy + a.1), (cx + b.0, cy + b.1)],
+            [
+                center_uv,
+                (u0.saturating_add(auv.0), v0.saturating_add(auv.1)),
+                (u0.saturating_add(buv.0), v0.saturating_add(buv.1)),
+            ],
+            material,
+        );
+        wedge += 1;
+    }
+    if complete < 16 && partial_q12 > 0 {
+        let a = SCREEN_RING[complete];
+        let b = SCREEN_RING[complete + 1];
+        let auv = UV_RING[complete];
+        let buv = UV_RING[complete + 1];
+        let end = (
+            a.0 + (((i32::from(b.0) - i32::from(a.0)) * partial_q12) >> 12) as i16,
+            a.1 + (((i32::from(b.1) - i32::from(a.1)) * partial_q12) >> 12) as i16,
+        );
+        let end_uv = (
+            i32::from(auv.0) + ((i32::from(buv.0) - i32::from(auv.0)) * partial_q12 >> 12),
+            i32::from(auv.1) + ((i32::from(buv.1) - i32::from(auv.1)) * partial_q12 >> 12),
+        );
+        draw_tri_textured_material(
+            [(cx, cy), (cx + a.0, cy + a.1), (cx + end.0, cy + end.1)],
+            [
+                center_uv,
+                (u0.saturating_add(auv.0), v0.saturating_add(auv.1)),
+                (
+                    u0.saturating_add(end_uv.0 as u8),
+                    v0.saturating_add(end_uv.1 as u8),
+                ),
+            ],
+            material,
+        );
     }
 }
 
 #[inline(always)]
-fn cooldown_tick_rgb(
-    filled: u8,
-    threshold: u8,
-    ready: (u8, u8, u8),
-    waiting: (u8, u8, u8),
-) -> (u8, u8, u8) {
-    if filled >= threshold {
-        ready
-    } else {
-        waiting
+pub(crate) fn swap_cooldown_display_progress_q12(total: u16, remaining: u16) -> u16 {
+    if total == 0 || remaining == 0 {
+        return 4096;
     }
-}
-
-#[inline(always)]
-fn swap_cooldown_segments(progress_q12: u16) -> u8 {
-    ((progress_q12.min(4096).saturating_add(511) >> 9) as u8).min(8)
+    // The request and the first cooldown tick share one update. Hold that
+    // first presented frame at zero (fully grey), then map the remaining
+    // ticks across the complete radial sweep.
+    let visible_span = total.saturating_sub(1).max(1);
+    let spent = total
+        .saturating_sub(remaining)
+        .saturating_sub(1)
+        .min(visible_span);
+    ((u32::from(spent) * 4096) / u32::from(visible_span)) as u16
 }
 
 #[cfg(test)]
 mod vitality_hud_tests {
     use super::{
-        swap_cooldown_segments, vitality_swap_geometry, ACTIVE_VITALITY_BAR, INACTIVE_VITALITY_BAR,
+        swap_cooldown_display_progress_q12, vitality_swap_geometry, ACTIVE_VITALITY_BAR,
+        INACTIVE_VITALITY_BAR,
     };
 
     #[test]
-    fn swap_cooldown_circle_consumes_then_refills_clockwise() {
-        assert_eq!(swap_cooldown_segments(0), 0);
-        assert_eq!(swap_cooldown_segments(1), 1);
-        assert_eq!(swap_cooldown_segments(512), 1);
-        assert_eq!(swap_cooldown_segments(1024), 2);
-        assert_eq!(swap_cooldown_segments(2048), 4);
-        assert_eq!(swap_cooldown_segments(4096), 8);
+    fn cooldown_display_starts_grey_and_finishes_fully_coloured() {
+        assert_eq!(swap_cooldown_display_progress_q12(30, 29), 0);
+        assert!(swap_cooldown_display_progress_q12(30, 15) > 1800);
+        assert!(swap_cooldown_display_progress_q12(30, 15) < 2200);
+        assert_eq!(swap_cooldown_display_progress_q12(30, 0), 4096);
+        assert_eq!(swap_cooldown_display_progress_q12(0, 0), 4096);
     }
 
     #[test]
@@ -877,6 +922,15 @@ mod vitality_hud_tests {
         let (incoming, outgoing) = vitality_swap_geometry(4096);
         assert_eq!(incoming, ACTIVE_VITALITY_BAR);
         assert_eq!(outgoing, INACTIVE_VITALITY_BAR);
+    }
+
+    #[test]
+    fn active_bar_is_two_pixels_thicker_and_keeps_the_tight_gap() {
+        assert_eq!(ACTIVE_VITALITY_BAR.bounds.3, INACTIVE_VITALITY_BAR.bounds.3 + 2);
+        assert_eq!(
+            ACTIVE_VITALITY_BAR.bounds.1 + ACTIVE_VITALITY_BAR.bounds.3 + 1,
+            INACTIVE_VITALITY_BAR.bounds.1
+        );
     }
 
     #[test]
