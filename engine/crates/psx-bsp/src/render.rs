@@ -994,6 +994,10 @@ pub struct Renderer {
     /// Bumped on entry to every face pass, so a cached entry from an earlier
     /// pass (different animation tick, different binding table) never hits.
     pxbsp_material_epoch: u32,
+    /// Whether sky faces must survive sidedness testing to report visible
+    /// apertures. Always-visible skies disable this so their non-rendering BSP
+    /// faces leave the hot path before plane-side and clip work.
+    track_sky_apertures: bool,
 }
 
 impl Renderer {
@@ -1005,6 +1009,15 @@ impl Renderer {
     /// half-extents), so the brush-face frustum clip matches it.
     pub fn set_view_projection(&mut self, projection: ViewProjection) {
         self.view_projection = projection;
+    }
+
+    /// Configure whether PXBSP sky surfaces act as visibility apertures.
+    ///
+    /// Leave this enabled for `ThroughSkySurfaces` skies. An always-visible
+    /// sky does not consume the aperture result, so disabling it is exact and
+    /// avoids evaluating every sky-marked BSP face each frame.
+    pub fn set_track_sky_apertures(&mut self, track: bool) {
+        self.track_sky_apertures = track;
     }
 
     /// Construct the render scratch needed by a validated PXBSP world.
@@ -1127,6 +1140,7 @@ impl Renderer {
             view_projection: ViewProjection::DEFAULT,
             pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
             pxbsp_material_epoch: 0,
+            track_sky_apertures: true,
             light_styles,
         }
     }
@@ -1520,6 +1534,9 @@ impl Renderer {
             // Only the policy byte decides the three rejections below, so the
             // rest of the record is not loaded for a face that never draws.
             let policy = unsafe { self.pxbsp_material_cache.get_unchecked(slot).policy };
+            if policy & pxbsp_material_policy::SKY != 0 && !self.track_sky_apertures {
+                continue;
+            }
             let authored_front = match selection {
                 PxbspFaceSelection::VisibleWorld => {
                     match packed_face_state(&self.frame_pxbsp_face_state, face_index) {
@@ -3437,6 +3454,44 @@ mod tests {
         assert!(!frame.stats.packet_overflow_avoided);
         assert_eq!(frame.stats.packets, 0);
         assert_eq!(frame.stats.hardware_triangles, 0);
+        assert_eq!(frame.packet_words, 0);
+    }
+
+    #[test]
+    fn always_visible_sky_skips_aperture_faces() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        lumps[PxbspLumpKind::Materials as usize][2..4]
+            .copy_from_slice(&material_flags::LAYERED_SKY.to_le_bytes());
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(10, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let mut packets = [0u32; 16];
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        renderer.set_track_sky_apertures(false);
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[None],
+            0,
+            &mut packets,
+        );
+
+        assert_eq!(frame.stats.visible_faces, 0);
+        assert_eq!(frame.stats.visible_sky_apertures, 0);
+        assert_eq!(frame.stats.unresolved_material_faces, 0);
+        assert_eq!(frame.stats.packets, 0);
         assert_eq!(frame.packet_words, 0);
     }
 

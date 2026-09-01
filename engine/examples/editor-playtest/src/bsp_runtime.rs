@@ -36,14 +36,14 @@ use psx_gpu::{
     prim::TriTextured,
 };
 use psx_level::{
-    find_asset_of_kind, world_object_flags, AssetId, AssetKind, LevelWorldObjectRecord,
-    MAX_ROOM_MATERIALS,
+    find_asset_of_kind, sky_flags, world_object_flags, AssetId, AssetKind,
+    LevelWorldObjectRecord, MAX_ROOM_MATERIALS,
 };
 use psx_math::{cos_q12, sin_q12};
 
 use crate::generated::{
     ASSETS, DESTRUCTIBLES, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS,
-    PXBSP_WORLD, WORLD_OBJECTS,
+    PXBSP_WORLD, ROOMS, WORLD_OBJECTS,
 };
 use crate::world_objects_runtime::WorldObjectVisibility;
 use crate::{
@@ -474,6 +474,11 @@ impl BspRuntime {
             half_height: i32::from(PROJECTION.screen_y),
             ..psx_bsp::render::ViewProjection::DEFAULT
         });
+        renderer.set_track_sky_apertures(
+            ROOMS
+                .first()
+                .is_some_and(|room| room.sky.flags & sky_flags::THROUGH_SKY_SURFACES != 0),
+        );
         crate::game_trace("editor-playtest: bsp runtime assemble");
         Ok(Self {
             map,
