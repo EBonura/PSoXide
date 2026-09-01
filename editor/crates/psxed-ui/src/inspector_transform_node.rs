@@ -84,6 +84,7 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         | NodeKind::Portal { .. } => NodeTransformInspector::Hidden,
         NodeKind::PointLight { .. }
         | NodeKind::ParticleEmitter { .. }
+        | NodeKind::VitalityCircle { .. }
         | NodeKind::Logic { .. }
         | NodeKind::Destructible { .. } => NodeTransformInspector::PositionOnly,
         NodeKind::ModelRenderer { .. }
@@ -2145,9 +2146,7 @@ fn draw_character_loadout_picker(
         egui::ComboBox::from_id_salt("character-controller-loadout")
             .selected_text(selected_label)
             .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(loadout, None, "Default")
-                    .changed();
+                changed |= ui.selectable_value(loadout, None, "Default").changed();
                 for (index, name) in names.iter().enumerate() {
                     changed |= ui
                         .selectable_value(loadout, Some(index as u16), name)
@@ -3917,6 +3916,50 @@ pub(crate) fn draw_node_kind_editor(
                         .small()
                         .color(STUDIO_TEXT_WEAK),
                 );
+            }
+        }
+        NodeKind::VitalityCircle {
+            axis,
+            radius,
+            refill_per_second,
+            drain_per_second,
+            enabled,
+        } => {
+            ui.weak("A matching-axis strike permanently claims this field. While claimed, it affects only the active pool and locks voluntary stance swapping.");
+            changed |= ui.checkbox(enabled, "Enabled").changed();
+            egui::ComboBox::from_id_salt("vitality-circle-axis")
+                .selected_text(match axis {
+                    psxed_project::VitalityCircleAxis::Horizon => "Horizon",
+                    psxed_project::VitalityCircleAxis::Zenith => "Zenith",
+                })
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(
+                            axis,
+                            psxed_project::VitalityCircleAxis::Horizon,
+                            "Horizon",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(axis, psxed_project::VitalityCircleAxis::Zenith, "Zenith")
+                        .changed();
+                });
+            for (label, value) in [
+                ("Radius", radius),
+                ("Refill / second", refill_per_second),
+                ("Drain / second", drain_per_second),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK));
+                    let mut edit = i32::from(*value);
+                    if ui
+                        .add(egui::DragValue::new(&mut edit).speed(1.0).range(0..=8192))
+                        .changed()
+                    {
+                        *value = edit.clamp(0, u16::MAX as i32) as u16;
+                        changed = true;
+                    }
+                });
             }
         }
         NodeKind::Destructible {

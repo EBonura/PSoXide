@@ -12,9 +12,10 @@ use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
 use psx_engine::{
     telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping, ModelUvOffset,
-    PredecodedModelInfo, PrimitiveSink, ProjectedLit, ProjectedVertex, RoomPoint, SimTick,
-    TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats,
-    VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
+    PredecodedModelInfo, PrimitivePacketArena, PrimitiveSink, ProjectedLit, ProjectedVertex,
+    RoomPoint, SimTick, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
+    TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
+    WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
@@ -32,7 +33,6 @@ use psx_math::int32::{clamp_i16, square_i32_saturating};
 
 use crate::actor_pose::ActorPoseSnapshot;
 use crate::character::{PlayerAnim, PlayerAnimBlend, RuntimeCharacter};
-use crate::room_cache::ActiveRuntimeRoom;
 use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 
@@ -47,11 +47,13 @@ pub use self::shadows::{
     ProjectedShadowTuning, ShadowLight,
 };
 
+#[cfg(feature = "collision-debug-overlay")]
+pub use self::instances::draw_collision_cylinder_debug;
 pub use self::instances::{
     accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
-    draw_collision_cylinder_debug, draw_model_instance_from_pose, draw_model_instance_shadows,
-    draw_model_instances, resolve_instance_actor_pose, InstanceActorPoseSnapshot,
-    ModelInstanceDepthPass, ModelInstanceDrawStats, ModelInstancePoseOverride,
+    draw_model_instance_from_pose, draw_model_instance_shadows, draw_model_instances,
+    resolve_instance_actor_pose, InstanceActorPoseSnapshot, ModelInstanceDrawStats,
+    ModelInstancePoseOverride,
 };
 
 /// The cooked model-family tables the render policy walks, bundled so
@@ -88,6 +90,105 @@ pub const MAX_PLAYER_EQUIPMENT: usize = 8;
 pub struct EquipmentMaterializationSkin {
     /// Flat PS1 texture modulation and wireframe colour.
     pub color: (u8, u8, u8),
+}
+
+/// Screen-space colour sweep applied to an actor's existing textured packets.
+///
+/// The sweep changes only each triangle's modulation word while it is being
+/// submitted. It does not draw the model twice and owns no vertex or packet
+/// buffer, which keeps a stance mutation readable without doubling actor
+/// geometry cost. `progress_q12` raises the coloured region from `bottom_y`
+/// toward `top_y`; a narrow feather keeps the boundary from looking like a
+/// hard horizontal cut on coarse meshes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ModelTintSweep {
+    color: (u8, u8, u8),
+    frontier_y: i16,
+}
+
+/// Eight pixels on either side of the rising frontier. Keeping this a power
+/// of two turns the per-triangle blend strength into one shift on MIPS.
+const MODEL_TINT_SWEEP_FEATHER_PX: i32 = 8;
+
+impl ModelTintSweep {
+    /// Build a bottom-to-top stance-colour sweep.
+    pub fn rising(color: (u8, u8, u8), progress_q12: u16, first_y: i16, second_y: i16) -> Self {
+        let (top_y, bottom_y) = if first_y <= second_y {
+            (first_y, second_y)
+        } else {
+            (second_y, first_y)
+        };
+        let span = (bottom_y as i32).saturating_sub(top_y as i32).max(1);
+        let progress_q12 = if progress_q12 > 4096 {
+            4096
+        } else {
+            progress_q12
+        };
+        let frontier_y = (bottom_y as i32)
+            .saturating_sub(span.saturating_mul(progress_q12 as i32) / 4096)
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        Self { color, frontier_y }
+    }
+
+    fn tint_at_y(self, base: (u8, u8, u8), y: i16) -> (u8, u8, u8) {
+        let band_position = i32::from(y)
+            .saturating_sub(i32::from(self.frontier_y))
+            .saturating_add(MODEL_TINT_SWEEP_FEATHER_PX)
+            .clamp(0, MODEL_TINT_SWEEP_FEATHER_PX * 2);
+        let strength_q8 = band_position << 4;
+        (
+            lerp_tint_channel(base.0, self.color.0, strength_q8),
+            lerp_tint_channel(base.1, self.color.1, strength_q8),
+            lerp_tint_channel(base.2, self.color.2, strength_q8),
+        )
+    }
+
+    /// Apply this sweep to a just-submitted range of textured model packets.
+    ///
+    /// This is deliberately a packet post-pass: the shipping projection and
+    /// face walkers retain their one existing monomorphization and their hot
+    /// inner loops gain no stance-effect branch.
+    ///
+    /// # Safety
+    ///
+    /// Every arena slot from `first_slot` through the arena's current cursor
+    /// must contain a [`TriTextured`] emitted by one model submit. Call this
+    /// immediately after that submit, before any other packet type is pushed.
+    pub unsafe fn apply_to_model_packets(
+        self,
+        arena: &mut PrimitivePacketArena<'_>,
+        first_slot: usize,
+    ) -> bool {
+        let end_slot = arena.used_slots();
+        // SAFETY: forwarded from this method's caller contract.
+        unsafe {
+            arena.mutate_typed_slots::<TriTextured>(first_slot, end_slot, |triangle| {
+                tint_model_triangle(triangle, self);
+            })
+        }
+    }
+}
+
+fn lerp_tint_channel(base: u8, target: u8, strength_q8: i32) -> u8 {
+    let base = i32::from(base);
+    (base + (i32::from(target) - base) * strength_q8 / 256).clamp(0, 255) as u8
+}
+
+#[inline]
+fn tint_model_triangle(triangle: &mut TriTextured, sweep: ModelTintSweep) {
+    let screen_y = |word: u32| i32::from((word >> 16) as u16 as i16);
+    let average_y = ((screen_y(triangle.v0) + screen_y(triangle.v1) + screen_y(triangle.v2)) / 3)
+        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    let base = (
+        triangle.color_cmd as u8,
+        (triangle.color_cmd >> 8) as u8,
+        (triangle.color_cmd >> 16) as u8,
+    );
+    let tint = sweep.tint_at_y(base, average_y);
+    triangle.color_cmd = (triangle.color_cmd & 0xff00_0000)
+        | u32::from(tint.0)
+        | (u32::from(tint.1) << 8)
+        | (u32::from(tint.2) << 16);
 }
 
 impl EquipmentMaterializationSkin {
@@ -1163,6 +1264,24 @@ fn dash_wireframe_active(
     phase_q12 >= lo && phase_q12 <= hi
 }
 
+/// Whether the resolved player pose uses the dash line cage instead of
+/// textured body packets this frame.
+///
+/// Packet post-effects use this to avoid interpreting line slots as textured
+/// triangles when stance swapping and dashing overlap.
+pub fn player_pose_draws_wireframe(
+    character: &RuntimeCharacter,
+    pose: PlayerActorPoseSnapshot,
+) -> bool {
+    let actor_pose = pose.pose();
+    dash_wireframe_active(
+        character,
+        pose.clip_local(),
+        actor_pose.animation(),
+        actor_pose.phase_q12(),
+    )
+}
+
 /// One line per face, its longest bind-pose edge, from vertices the model
 /// submit has already skinned and projected.
 ///
@@ -1967,29 +2086,6 @@ pub fn emit_model_counters(
     }
 }
 
-/// The player's camera-view depth in `active`'s room frame (for the
-/// behind/in-front model-instance depth passes).
-#[inline]
-pub fn player_actor_depth_for_room<const MAX_RUNTIME_MODELS: usize>(
-    active: ActiveRuntimeRoom,
-    character: Option<RuntimeCharacter>,
-    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
-    player: RoomPoint,
-    camera: &WorldCamera,
-) -> Option<i32> {
-    let character = character?;
-    let runtime_model = models.get(character.model.to_usize()).copied().flatten()?;
-    // Depth only: an approximate lift is close enough for room ordering.
-    let origin = WorldVertex::new(
-        player.x.saturating_sub(active.offset_x),
-        player
-            .y
-            .saturating_add(runtime_model.local_to_world.apply(runtime_model.floor_lift)),
-        player.z.saturating_sub(active.offset_z),
-    );
-    Some(camera.view_vertex(origin).z)
-}
-
 fn accumulate_model_stats(total: &mut TexturedModelRenderStats, next: TexturedModelRenderStats) {
     total.projected_vertices = total
         .projected_vertices
@@ -2530,6 +2626,61 @@ mod tests {
             secondary_layer: None,
             flags,
         }
+    }
+
+    #[test]
+    fn tint_sweep_raises_destination_colour_without_changing_packet_opcode() {
+        assert!(core::mem::size_of::<ModelTintSweep>() <= 8);
+        let sweep = ModelTintSweep::rising((240, 80, 40), 2048, 0, 100);
+        let material = TextureMaterial::opaque(1, 2, (128, 128, 128));
+        let triangle_at = |y| {
+            TriTextured::with_material(
+                [(0, y), (4, y), (0, y + 1)],
+                [(0, 0), (1, 0), (0, 1)],
+                material,
+            )
+        };
+
+        let mut above = triangle_at(20);
+        let above_opcode = above.color_cmd & 0xff00_0000;
+        tint_model_triangle(&mut above, sweep);
+        assert_eq!(above.color_cmd & 0x00ff_ffff, 0x0080_8080);
+        assert_eq!(above.color_cmd & 0xff00_0000, above_opcode);
+
+        let mut below = triangle_at(80);
+        tint_model_triangle(&mut below, sweep);
+        assert_eq!(below.color_cmd & 0x00ff_ffff, 0x0028_50f0);
+
+        let mut frontier = triangle_at(50);
+        tint_model_triangle(&mut frontier, sweep);
+        let rgb = (
+            frontier.color_cmd as u8,
+            (frontier.color_cmd >> 8) as u8,
+            (frontier.color_cmd >> 16) as u8,
+        );
+        assert!(rgb.0 > 128 && rgb.0 < 240);
+        assert!(rgb.1 > 80 && rgb.1 < 128);
+        assert!(rgb.2 > 40 && rgb.2 < 128);
+    }
+
+    #[test]
+    fn tint_sweep_post_pass_adds_no_packets_or_slots() {
+        let material = TextureMaterial::opaque(1, 2, (128, 128, 128));
+        let triangle = TriTextured::with_material(
+            [(0, 80), (4, 80), (0, 81)],
+            [(0, 0), (1, 0), (0, 1)],
+            material,
+        );
+        let mut scratch = psx_engine::PrimitivePacketScratch::<2>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut scratch);
+        let first_slot = arena.used_slots();
+        arena.push(triangle).expect("model packet");
+        let packets_before = arena.len();
+        let slots_before = arena.used_slots();
+        let sweep = ModelTintSweep::rising((240, 80, 40), 4096, 0, 100);
+        assert!(unsafe { sweep.apply_to_model_packets(&mut arena, first_slot) });
+        assert_eq!(arena.len(), packets_before);
+        assert_eq!(arena.used_slots(), slots_before);
     }
 
     #[test]

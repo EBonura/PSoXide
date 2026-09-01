@@ -481,10 +481,24 @@ impl Playtest {
     /// that costs half or half again. A break swaps the stance here rather
     /// than leaving the caller to notice.
     fn apply_stance_damage(&mut self, attack: VitalityChannelId, damage: u16) -> bool {
+        let before = u32::from(self.player_vitality.pool(VitalityChannelId::One).current())
+            + u32::from(self.player_vitality.pool(VitalityChannelId::Two).current());
         let config = self.player_stance_config;
-        self.player_stance
+        let outcome = self
+            .player_stance
             .apply_damage(&mut self.player_vitality, attack, damage, &config)
-            .defeated
+            .defeated;
+        let after = u32::from(self.player_vitality.pool(VitalityChannelId::One).current())
+            + u32::from(self.player_vitality.pool(VitalityChannelId::Two).current());
+        if after < before {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerDamage);
+        }
+        outcome
+    }
+
+    #[inline]
+    pub(super) fn queue_gameplay_sfx(&mut self, event: LevelGameplaySfxEvent) {
+        self.gameplay_sfx_events |= event.bit();
     }
 
     pub(super) fn water_cell_at(
@@ -970,6 +984,7 @@ impl Playtest {
         count
     }
 
+    #[cfg(feature = "collision-debug-overlay")]
     pub(super) fn draw_collision_debug_overlay(&self, camera: WorldCamera) {
         if let Some(character) = self.character.as_ref() {
             draw_collision_cylinder_debug(
@@ -1575,6 +1590,15 @@ impl Playtest {
 
     pub(super) fn soft_lock_target_position(&self) -> Option<RoomPoint> {
         self.target_position(self.soft_lock_target?)
+    }
+
+    /// Gameplay entity currently driving combat readability. A deliberate
+    /// hard lock wins; otherwise reuse the camera's existing soft lock. This
+    /// is the single target authority for the enemy HUD and stance tell.
+    pub(super) fn combat_target_entity_index(&self) -> Option<usize> {
+        let model_instance = self.lock_target.or(self.soft_lock_target)?;
+        self.target_position(model_instance)?;
+        game_entity_for_instance(u16::try_from(model_instance).ok()?)
     }
 
     pub(super) fn target_position(&self, index: usize) -> Option<RoomPoint> {

@@ -281,6 +281,9 @@ fn scale_node(node: &mut SceneNode) {
             *radius = div_u16_min1(*radius);
             *marker_height = div_u16_min1(*marker_height);
         }
+        NodeKind::VitalityCircle { radius, .. } => {
+            *radius = div_u16_min1(*radius);
+        }
         _ => {}
     }
 }
@@ -667,7 +670,10 @@ mod tests {
         let (trimmed, kept) = trim_animation_blob_to_window(&clip, 2, 5).expect("trimmed");
         assert_eq!(kept, 4, "2..=5 inclusive is four frames");
         assert_eq!(frame_tags(&trimmed), vec![2, 3, 4, 5]);
-        assert!(psx_asset::Animation::from_bytes(&trimmed).is_ok(), "still parses");
+        assert!(
+            psx_asset::Animation::from_bytes(&trimmed).is_ok(),
+            "still parses"
+        );
 
         // The header must agree with the body, or the runtime reads past the end.
         let payload_len = u32::from_le_bytes(trimmed[8..12].try_into().unwrap()) as usize;

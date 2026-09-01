@@ -209,8 +209,7 @@ const STRUCK_ACTOR_X_OFFSET: i8 = 36;
 /// Alternates that also passed, if this reads too wide in motion:
 /// `KENNEY_MINI_SQUARE` (12x16, the same two-pixel weight in a tighter
 /// advance), `BASIC_8X16` (8x16, lighter and narrower again).
-pub(super) const DAMAGE_NUMBER_FACE: &psx_font::BitmapFont =
-    &psx_font::fonts::KENNEY_FUTURE_NARROW;
+pub(super) const DAMAGE_NUMBER_FACE: &psx_font::BitmapFont = &psx_font::fonts::KENNEY_FUTURE_NARROW;
 
 /// Damage channel a number is tinted by.
 ///
@@ -670,7 +669,10 @@ mod tests {
         }
         for age in 0..=NUMBER_LIFETIME_TICKS {
             let envelope = envelope_q8(age);
-            assert!((0..=256).contains(&envelope), "envelope {envelope} at {age}");
+            assert!(
+                (0..=256).contains(&envelope),
+                "envelope {envelope} at {age}"
+            );
         }
     }
 
@@ -678,8 +680,14 @@ mod tests {
     fn tint_reaches_the_authored_colour_and_zero() {
         // At full envelope the additive glyph contributes exactly the
         // authored RGB, because the tint's neutral point is 128.
-        assert_eq!(channel_tint(0, 256), (HORIZON_RGB.0 / 2, HORIZON_RGB.1 / 2, HORIZON_RGB.2 / 2));
-        assert_eq!(channel_tint(1, 256), (ZENITH_RGB.0 / 2, ZENITH_RGB.1 / 2, ZENITH_RGB.2 / 2));
+        assert_eq!(
+            channel_tint(0, 256),
+            (HORIZON_RGB.0 / 2, HORIZON_RGB.1 / 2, HORIZON_RGB.2 / 2)
+        );
+        assert_eq!(
+            channel_tint(1, 256),
+            (ZENITH_RGB.0 / 2, ZENITH_RGB.1 / 2, ZENITH_RGB.2 / 2)
+        );
         assert_eq!(channel_tint(0, 0), (0, 0, 0));
         assert_eq!(channel_tint(1, 0), (0, 0, 0));
         // The two channels never collide, or the feedback would be
@@ -920,13 +928,21 @@ mod tests {
         // Once the clocks meet, it ages normally and expires on time.
         assert_eq!(slot_age(&numbers.slots[0], 1_000), 0);
         assert_eq!(slot_age(&numbers.slots[0], 1_010), 10);
-        assert!(slot_age(&numbers.slots[0], 1_000 + NUMBER_LIFETIME_TICKS) >= NUMBER_LIFETIME_TICKS);
+        assert!(
+            slot_age(&numbers.slots[0], 1_000 + NUMBER_LIFETIME_TICKS) >= NUMBER_LIFETIME_TICKS
+        );
     }
 
     #[test]
     fn zero_damage_never_occupies_a_slot() {
         let mut numbers = DamageNumbers::default();
-        numbers.spawn(player_hit_anchor([0, 0, 0], 64), RoomIndex(0), 0, DamageNumberChannel::Horizon, SimTick::ZERO);
+        numbers.spawn(
+            player_hit_anchor([0, 0, 0], 64),
+            RoomIndex(0),
+            0,
+            DamageNumberChannel::Horizon,
+            SimTick::ZERO,
+        );
         assert!(numbers.slots.iter().all(|slot| slot.live == 0));
     }
 
@@ -949,10 +965,15 @@ mod tests {
 
         // Still inside every lifetime, so the pool is genuinely full.
         let now = SimTick::from_u32(MAX_DAMAGE_NUMBERS as u32);
-        numbers.spawn(player_hit_anchor([0, 0, 0], 64), RoomIndex(0), 999, DamageNumberChannel::Zenith, now);
+        numbers.spawn(
+            player_hit_anchor([0, 0, 0], 64),
+            RoomIndex(0),
+            999,
+            DamageNumberChannel::Zenith,
+            now,
+        );
 
-        let amounts: alloc::vec::Vec<u16> =
-            numbers.slots.iter().map(|slot| slot.amount).collect();
+        let amounts: alloc::vec::Vec<u16> = numbers.slots.iter().map(|slot| slot.amount).collect();
         assert!(amounts.contains(&999), "newest hit was dropped");
         // Slot 0 held the oldest (spawn tick 0) and is the one reused.
         assert!(!amounts.contains(&1), "oldest hit was not recycled");
@@ -963,10 +984,25 @@ mod tests {
     #[test]
     fn expired_slots_are_reused_before_live_ones() {
         let mut numbers = DamageNumbers::default();
-        numbers.spawn(player_hit_anchor([0, 0, 0], 64), RoomIndex(0), 11, DamageNumberChannel::Horizon, SimTick::ZERO);
+        numbers.spawn(
+            player_hit_anchor([0, 0, 0], 64),
+            RoomIndex(0),
+            11,
+            DamageNumberChannel::Horizon,
+            SimTick::ZERO,
+        );
         let later = SimTick::from_u32(NUMBER_LIFETIME_TICKS);
-        numbers.spawn(player_hit_anchor([0, 0, 0], 64), RoomIndex(0), 22, DamageNumberChannel::Horizon, later);
-        assert_eq!(numbers.slots[0].amount, 22, "expired slot 0 should be reused");
+        numbers.spawn(
+            player_hit_anchor([0, 0, 0], 64),
+            RoomIndex(0),
+            22,
+            DamageNumberChannel::Horizon,
+            later,
+        );
+        assert_eq!(
+            numbers.slots[0].amount, 22,
+            "expired slot 0 should be reused"
+        );
         assert!(numbers.slots[1..].iter().all(|slot| slot.live == 0));
     }
 
@@ -1041,7 +1077,11 @@ mod tests {
     /// weapon ever does cook a three-digit hit, this recomputes and the
     /// assertion below asks for a wider sidestep.
     fn widest_realistic_half_width() -> i32 {
-        let hardest = WEAPONS.iter().map(|weapon| weapon.damage).max().unwrap_or(99);
+        let hardest = WEAPONS
+            .iter()
+            .map(|weapon| weapon.damage)
+            .max()
+            .unwrap_or(99);
         // '8' is the widest digit in every fixed-cell face here, and the
         // proportional ones advance by glyph, so measure the real value.
         let mut digits = [0u8; DIGIT_BUFFER];
@@ -1115,8 +1155,17 @@ mod tests {
         // for, silently dropping numbers at the top edge.
         let plate_top_at = |y: i32| y + DIGIT_INK_TOP - PLATE_PAD_Y;
         let last_visible = -(DIGIT_INK_HEIGHT + PLATE_PAD_Y * 2) - DIGIT_INK_TOP + PLATE_PAD_Y;
-        assert!(on_screen(100, last_visible, 16), "dropped a number still on screen");
-        assert!(!on_screen(100, last_visible - 1, 16), "kept a number fully above the frame");
-        assert!(plate_top_at(last_visible) < 0, "the check should be at the top edge");
+        assert!(
+            on_screen(100, last_visible, 16),
+            "dropped a number still on screen"
+        );
+        assert!(
+            !on_screen(100, last_visible - 1, 16),
+            "kept a number fully above the frame"
+        );
+        assert!(
+            plate_top_at(last_visible) < 0,
+            "the check should be at the top edge"
+        );
     }
 }

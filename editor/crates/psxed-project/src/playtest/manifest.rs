@@ -1767,6 +1767,18 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Cooked gameplay SFX cue bindings.\n");
+    out.push_str("pub static GAMEPLAY_SFX_CUES: &[LevelGameplaySfxCueRecord] = &[\n");
+    for cue in &package.gameplay_sfx_cues {
+        let event = render_gameplay_sfx_event(cue.event);
+        let _ = writeln!(
+            out,
+            "    LevelGameplaySfxCueRecord {{ sample: {}, event: {event}, volume_percent: {}, pitch_q12: {}, flags: {} }},",
+            cue.sample, cue.volume_percent, cue.pitch_q12, cue.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Addressable cooked UI scenes indexing `UI_NODES`.\n");
     out.push_str("pub static UI_SCENES: &[LevelUiScene] = &[\n");
     for scene in &package.ui_scenes {
@@ -2073,6 +2085,24 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             interactable.reward_resource,
             interactable.reward_quantity,
             interactable.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Placed dual-vitality fields.\n");
+    out.push_str("pub static VITALITY_CIRCLES: &[LevelVitalityCircleRecord] = &[\n");
+    for circle in &package.vitality_circles {
+        let _ = writeln!(
+            out,
+            "    LevelVitalityCircleRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, radius: {}, axis: {}, refill_per_second: {}, drain_per_second: {} }},",
+            circle.room,
+            circle.x,
+            circle.y,
+            circle.z,
+            circle.radius,
+            circle.axis,
+            circle.refill_per_second,
+            circle.drain_per_second,
         );
     }
     out.push_str("];\n\n");
@@ -3671,6 +3701,16 @@ fn render_ui_sfx_event(event: psx_level::LevelUiSfxEvent) -> &'static str {
     }
 }
 
+fn render_gameplay_sfx_event(event: psx_level::LevelGameplaySfxEvent) -> &'static str {
+    match event {
+        psx_level::LevelGameplaySfxEvent::Footstep => "LevelGameplaySfxEvent::Footstep",
+        psx_level::LevelGameplaySfxEvent::LightHit => "LevelGameplaySfxEvent::LightHit",
+        psx_level::LevelGameplaySfxEvent::HeavyHit => "LevelGameplaySfxEvent::HeavyHit",
+        psx_level::LevelGameplaySfxEvent::PlayerDamage => "LevelGameplaySfxEvent::PlayerDamage",
+        psx_level::LevelGameplaySfxEvent::EnemyDeath => "LevelGameplaySfxEvent::EnemyDeath",
+    }
+}
+
 fn render_ui_value_binding(binding: UiValueBinding) -> String {
     match binding {
         UiValueBinding::ConstantQ12(value) => {
@@ -3682,14 +3722,44 @@ fn render_ui_value_binding(binding: UiValueBinding) -> String {
                 crate::playtest::cook_option_id(option)
             )
         }
-        UiValueBinding::PlayerStanceActiveHealth => "LevelUiValueBinding::PlayerStanceActiveHealth".to_string(),
-        UiValueBinding::PlayerStanceActiveHealthMax => "LevelUiValueBinding::PlayerStanceActiveHealthMax".to_string(),
-        UiValueBinding::PlayerStanceInactiveHealth => "LevelUiValueBinding::PlayerStanceInactiveHealth".to_string(),
-        UiValueBinding::PlayerStanceInactiveHealthMax => "LevelUiValueBinding::PlayerStanceInactiveHealthMax".to_string(),
-        UiValueBinding::PlayerStanceSwapProgress => "LevelUiValueBinding::PlayerStanceSwapProgress".to_string(),
-        UiValueBinding::PlayerStanceActiveIsZenith => "LevelUiValueBinding::PlayerStanceActiveIsZenith".to_string(),
-        UiValueBinding::PlayerStanceActiveBroken => "LevelUiValueBinding::PlayerStanceActiveBroken".to_string(),
-        UiValueBinding::PlayerStanceInactiveBroken => "LevelUiValueBinding::PlayerStanceInactiveBroken".to_string(),
+        UiValueBinding::PlayerStanceActiveHealth => {
+            "LevelUiValueBinding::PlayerStanceActiveHealth".to_string()
+        }
+        UiValueBinding::PlayerStanceActiveHealthMax => {
+            "LevelUiValueBinding::PlayerStanceActiveHealthMax".to_string()
+        }
+        UiValueBinding::PlayerStanceInactiveHealth => {
+            "LevelUiValueBinding::PlayerStanceInactiveHealth".to_string()
+        }
+        UiValueBinding::PlayerStanceInactiveHealthMax => {
+            "LevelUiValueBinding::PlayerStanceInactiveHealthMax".to_string()
+        }
+        UiValueBinding::PlayerStanceSwapProgress => {
+            "LevelUiValueBinding::PlayerStanceSwapProgress".to_string()
+        }
+        UiValueBinding::PlayerStanceActiveIsZenith => {
+            "LevelUiValueBinding::PlayerStanceActiveIsZenith".to_string()
+        }
+        UiValueBinding::PlayerStanceActiveBroken => {
+            "LevelUiValueBinding::PlayerStanceActiveBroken".to_string()
+        }
+        UiValueBinding::PlayerStanceInactiveBroken => {
+            "LevelUiValueBinding::PlayerStanceInactiveBroken".to_string()
+        }
+        UiValueBinding::TargetHealth => "LevelUiValueBinding::TargetHealth".to_string(),
+        UiValueBinding::TargetHealthMax => "LevelUiValueBinding::TargetHealthMax".to_string(),
+        UiValueBinding::TargetHealthSecondary => {
+            "LevelUiValueBinding::TargetHealthSecondary".to_string()
+        }
+        UiValueBinding::TargetHealthSecondaryMax => {
+            "LevelUiValueBinding::TargetHealthSecondaryMax".to_string()
+        }
+        UiValueBinding::TargetStanceSwapProgress => {
+            "LevelUiValueBinding::TargetStanceSwapProgress".to_string()
+        }
+        UiValueBinding::TargetStanceActiveIsZenith => {
+            "LevelUiValueBinding::TargetStanceActiveIsZenith".to_string()
+        }
         UiValueBinding::PlayerHealth => "LevelUiValueBinding::PlayerHealth".to_string(),
         UiValueBinding::PlayerHealthMax => "LevelUiValueBinding::PlayerHealthMax".to_string(),
         UiValueBinding::PlayerHealthSecondary => {
@@ -4356,6 +4426,7 @@ use psx_level::{
     InteractableKind,
     InteractableMessageRecord,
     InteractableRecord,
+    LevelVitalityCircleRecord,
     LevelCachedRoomCellRecord,
     LevelCachedRoomSurfaceRecord,
     LevelCachedRoomVertexRecord,
@@ -4371,6 +4442,8 @@ use psx_level::{
     LevelCloudLayerRecord,
     LevelCharacterRecord,
     LevelGameEntityRecord,
+    LevelGameplaySfxCueRecord,
+    LevelGameplaySfxEvent,
     LevelLogicRecord,
     LevelChunkNeighbours,
     LevelChunkRecord,

@@ -808,6 +808,7 @@ pub fn build_package(
     let mut interactable_messages: Vec<PlaytestInteractableMessage> = Vec::new();
     let mut interactable_message_pages: Vec<String> = Vec::new();
     let mut interactables: Vec<PlaytestInteractable> = Vec::new();
+    let mut vitality_circles: Vec<PlaytestVitalityCircle> = Vec::new();
     let mut destructibles: Vec<PlaytestDestructible> = Vec::new();
     let mut destructible_for_node: HashMap<crate::NodeId, u16> = HashMap::new();
     let mut boost_modules: Vec<PlaytestBoostModule> = Vec::new();
@@ -1493,6 +1494,47 @@ pub fn build_package(
                     weight_q8: PHYSICS_WEIGHT_ONE_Q8,
                     renderer: None,
                     animator: None,
+                });
+            }
+            NodeKind::VitalityCircle {
+                axis,
+                radius,
+                refill_per_second,
+                drain_per_second,
+                enabled,
+            } => {
+                if !*enabled {
+                    continue;
+                }
+                if *radius == 0 {
+                    report.error_at(
+                        PlaytestValidationTarget::Node(node.id),
+                        format!(
+                            "Vitality Circle '{}' must have a non-zero radius",
+                            node.name
+                        ),
+                    );
+                    return (None, report);
+                }
+                if vitality_circles.len() >= psx_level::MAX_VITALITY_CIRCLES {
+                    report.error_at(
+                        PlaytestValidationTarget::Node(node.id),
+                        format!("Vitality Circle cap is {}", psx_level::MAX_VITALITY_CIRCLES),
+                    );
+                    return (None, report);
+                }
+                vitality_circles.push(PlaytestVitalityCircle {
+                    room: room_index,
+                    x: floor_pos[0],
+                    y: floor_pos[1],
+                    z: floor_pos[2],
+                    radius: *radius,
+                    axis: match axis {
+                        crate::VitalityCircleAxis::Horizon => 0,
+                        crate::VitalityCircleAxis::Zenith => 1,
+                    },
+                    refill_per_second: *refill_per_second,
+                    drain_per_second: *drain_per_second,
                 });
             }
             NodeKind::SpawnPoint { player: false, .. } => {
@@ -2249,15 +2291,23 @@ pub fn build_package(
     let mut lights = lights;
     let room_floor_links = Vec::new();
     let room_overlapped_rooms = Vec::new();
-    let (ui_nodes, ui_paints, ui_scenes, ui_sfx_samples, ui_sfx_cues, game_flow, cdda_tracks) =
-        cook_ui_nodes(
-            project,
-            project_root,
-            &mut texture_asset_for_path,
-            &mut assets,
-            &mut used_ui_source_paths,
-            &mut report,
-        );
+    let (
+        ui_nodes,
+        ui_paints,
+        ui_scenes,
+        ui_sfx_samples,
+        ui_sfx_cues,
+        gameplay_sfx_cues,
+        game_flow,
+        cdda_tracks,
+    ) = cook_ui_nodes(
+        project,
+        project_root,
+        &mut texture_asset_for_path,
+        &mut assets,
+        &mut used_ui_source_paths,
+        &mut report,
+    );
     if !report.is_ok() {
         return (None, report);
     }
@@ -2424,6 +2474,7 @@ pub fn build_package(
             ui_scenes,
             ui_sfx_samples,
             ui_sfx_cues,
+            gameplay_sfx_cues,
             game_flow,
             options,
             cdda_tracks,
@@ -2440,6 +2491,7 @@ pub fn build_package(
             persistent_flag_count,
             boost_modules,
             interactables,
+            vitality_circles,
             logic,
             game_entities,
             spawn,

@@ -309,6 +309,10 @@ pub enum EntityBoundKind {
     ParticleEmitter,
     /// Entity hosting a procedural Point of Interest beacon.
     PointOfInterest,
+    /// Ground-anchored Horizon vitality field.
+    VitalityCircleHorizon,
+    /// Ground-anchored Zenith vitality field.
+    VitalityCircleZenith,
     /// Shared breakable state accepting Horizon damage.
     DestructibleHorizon,
     /// Shared breakable state accepting Zenith damage.

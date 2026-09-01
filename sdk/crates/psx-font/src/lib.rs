@@ -1735,7 +1735,10 @@ mod tests {
             }
         }
         // The long run really does saturate, so the case above is load-bearing.
-        assert_eq!(proportional.text_width(&std::string::String::from("d").repeat(258)), u16::MAX);
+        assert_eq!(
+            proportional.text_width(&std::string::String::from("d").repeat(258)),
+            u16::MAX
+        );
     }
 
     #[test]

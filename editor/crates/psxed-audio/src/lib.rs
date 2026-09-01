@@ -12,6 +12,12 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 const SPU_SAMPLE_RATE_HZ: u32 = 44_100;
+/// One-shot effects do not need CD-quality bandwidth, and their cooked ADPCM
+/// bytes remain resident in main RAM after the identical copy reaches SPU
+/// RAM. Preserve already-lower-rate sources and cap higher-rate WAVs at the
+/// PS1-appropriate 22.05 kHz tier instead of blindly upsampling everything to
+/// 44.1 kHz.
+const SFX_SAMPLE_RATE_CAP_HZ: u32 = 22_050;
 const CDDA_SAMPLE_RATE_HZ: u32 = 44_100;
 const CDDA_CHANNELS: usize = 2;
 const CDDA_SECTOR_BYTES: usize = 2352;
@@ -365,13 +371,16 @@ pub fn cook_cdda_track_from_wav_at_speed(
 /// Convert a source WAV into a cooked `.psau` one-shot sample for SPU SFX.
 ///
 /// The output is mono SPU ADPCM wrapped in the shared PSoXide audio asset
-/// header. It uses the same defaults as the audio-pack importer: 44.1 kHz
-/// target sample rate and 0.9 peak normalization.
+/// header. Source rates at or below 22.05 kHz are preserved; higher-rate
+/// sources are downsampled to 22.05 kHz. Playback duration and pitch remain
+/// exact because the selected rate is stored in the PSAU header. Peak
+/// normalization remains 0.9.
 pub fn cook_sfx_from_wav(src: &[u8]) -> Result<Vec<u8>, Error> {
+    let source = parse_wav_pcm(src)?;
     let cooked = cook_wav(
         src,
         &CookConfig {
-            sample_rate_hz: SPU_SAMPLE_RATE_HZ,
+            sample_rate_hz: source.sample_rate_hz.min(SFX_SAMPLE_RATE_CAP_HZ),
             normalize_peak: 0.9,
         },
     )?;
@@ -1016,6 +1025,20 @@ mod tests {
         assert_eq!(cooked.psau[12], CODEC_SPU_ADPCM);
         assert_eq!(cooked.psau[13], 1);
         assert_eq!(cooked.decoded_preview.len(), samples.len());
+    }
+
+    #[test]
+    fn one_shot_cook_caps_high_rate_sources_and_preserves_low_rate_sources() {
+        // Equal-duration sources: 448 @ 44.1 kHz and 112 @ 11.025 kHz.
+        let high = write_wav_mono_i16(44_100, &[0; 448]);
+        let low = write_wav_mono_i16(11_025, &[0; 112]);
+
+        let high = cook_sfx_from_wav(&high).unwrap();
+        let low = cook_sfx_from_wav(&low).unwrap();
+
+        assert_eq!(read_u32(&high, 16).unwrap(), 22_050);
+        assert_eq!(read_u32(&low, 16).unwrap(), 11_025);
+        assert!(low.len() < high.len());
     }
 
     #[test]
