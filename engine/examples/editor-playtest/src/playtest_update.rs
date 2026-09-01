@@ -465,6 +465,28 @@ impl Playtest {
         cd_stream::run_benchmark(cd_arena());
     }
 
+    /// `BspRuntime::player_contents` at the motor's current position,
+    /// answered from the memo when neither position nor height moved since
+    /// the last sample. Byte-identical to sampling every time: a moved player
+    /// always resamples, and a failed sample is never memoised.
+    fn player_contents_memo(
+        &mut self,
+        height: i32,
+    ) -> Option<psx_bsp::collision::LiquidContentsSample> {
+        let position = self.motor.position();
+        if let Some((at, at_height, sample)) = self.player_contents_memo {
+            if at == position && at_height == height {
+                return Some(sample);
+            }
+        }
+        let sample = self
+            .bsp
+            .as_ref()
+            .and_then(|bsp| bsp.player_contents(position, height));
+        self.player_contents_memo = sample.map(|sample| (position, height, sample));
+        sample
+    }
+
     pub(super) fn update_gameplay(&mut self, ctx: &mut Ctx) {
         // First gameplay update after loading: anchor the animation
         // epoch here so value-based phases do not inherit the variable
@@ -703,10 +725,7 @@ impl Playtest {
             input = self.walk_transition_input(input, stick_active, now, ctx.video_hz);
         }
         let mut config = self.motor_config();
-        let bsp_contents = self
-            .bsp
-            .as_ref()
-            .and_then(|bsp| bsp.player_contents(self.motor.position(), config.height));
+        let bsp_contents = self.player_contents_memo(config.height);
         if bsp_contents.is_some_and(|sample| sample.water_level > 0) {
             // Shared BSP liquids retain 60 percent locomotion. The same
             // contents query feeds Quake's richer swim rules; the general
@@ -842,11 +861,7 @@ impl Playtest {
 
         let hazard_countdown_was_active = self.hazard_death_ticks_remaining > 0;
         if !hazard_countdown_was_active {
-            if let Some(sample) = self
-                .bsp
-                .as_ref()
-                .and_then(|bsp| bsp.player_contents(self.motor.position(), config.height))
-            {
+            if let Some(sample) = self.player_contents_memo(config.height) {
                 let damage = bsp_hazard_damage(sample.contents, now.as_u32());
                 if damage > 0 {
                     let died = self.apply_untyped_player_damage(damage);
