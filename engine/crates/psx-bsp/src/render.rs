@@ -1586,6 +1586,8 @@ impl Renderer {
         };
         #[cfg(not(target_arch = "mips"))]
         let clip_planes: &[([i32; 3], i32); 5] = &frustum_local.planes;
+        #[cfg(target_arch = "mips")]
+        load_gte_clip_planes(clip_planes);
         // Every face pass gets its own epoch, so an entry cached under a
         // different animation tick or a different binding table cannot hit.
         self.pxbsp_material_epoch = self.pxbsp_material_epoch.wrapping_add(1);
@@ -1662,10 +1664,15 @@ impl Renderer {
             let needs_near_clip = if clip_mask == 0 {
                 false
             } else {
-                let Some(needs_near_clip) =
-                    (unsafe {
-                        Self::pxbsp_face_clip(source_base, face, clip_planes, side_error, clip_mask)
-                    })
+                #[cfg(target_arch = "mips")]
+                let classified = unsafe {
+                    Self::pxbsp_face_clip_gte(source_base, face, clip_planes, side_error, clip_mask)
+                };
+                #[cfg(not(target_arch = "mips"))]
+                let classified = unsafe {
+                    Self::pxbsp_face_clip(source_base, face, clip_planes, side_error, clip_mask)
+                };
+                let Some(needs_near_clip) = classified
                 else {
                     continue;
                 };
@@ -1961,6 +1968,82 @@ impl Renderer {
     /// # Safety
     /// `source_base` must be the base of the map's vertex lump; see
     /// [`Self::materialize_pxbsp_face`].
+    /// [`Self::pxbsp_face_clip`] with the five plane dot products on the GTE.
+    ///
+    /// The CPU form is plane-major with three `mult`s per vertex per plane;
+    /// on the R3000 each `mult` interlocks the following `mflo`, and the
+    /// per-vertex loop of the world pass was the single hottest code in
+    /// the Cortex whole-level profile. Here one `MVMVA` against the light
+    /// matrix yields three plane distances for a vertex at once, a second
+    /// against the colour matrix the remaining two, and the scan is
+    /// vertex-major with the same early exits. Plane constants are added
+    /// on the CPU because MVMVA scales its translation vector by 4096
+    /// before the add, which is not exact without the fractional shift.
+    /// Every distance is the same wrapping `i32` dot product, so the answer
+    /// is bit-identical to the plane-major scan; the whole-level tape
+    /// hashes pin that.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::pxbsp_face_clip`], and [`load_gte_clip_planes`] must have
+    /// loaded `planes` since the last light or colour matrix write.
+    #[cfg(target_arch = "mips")]
+    #[inline(always)]
+    unsafe fn pxbsp_face_clip_gte(
+        source_base: *const ClassicAffineWordSourceVertex,
+        face: FaceRef,
+        planes: &[([i32; 3], i32); 5],
+        side_error: i32,
+        clip_mask: u8,
+    ) -> Option<bool> {
+        const NEAR: u8 = 1 << PXBSP_CLIP_NEAR_PLANE;
+        let count = face.vertex_count();
+        if count == 0 {
+            return None;
+        }
+        let source = unsafe { source_base.add(face.first_vertex()) };
+        // Bit p stays set while every vertex so far was surely outside p.
+        let mut wholly_outside = clip_mask;
+        let near_tested = clip_mask & NEAR != 0;
+        let mut near_any_outside = false;
+        let mut index = 0usize;
+        while index < count {
+            let base = unsafe { source.add(index).cast::<u32>() };
+            let xy = unsafe { core::ptr::read(base) };
+            let z = unsafe { core::ptr::read(base.add(1).cast::<i16>()) } as i32 as u32;
+            let (d0, d1, d2) = unsafe { gte_dot3::<MVMVA_LLM_V0_SF0>(xy, z) };
+            // The near band is zero, so that plane keeps its exact answers.
+            if d0.wrapping_add(planes[0].1) >= 0 {
+                wholly_outside &= !NEAR;
+            } else {
+                near_any_outside = true;
+            }
+            if d1.wrapping_add(planes[1].1) >= -side_error {
+                wholly_outside &= !(1 << 1);
+            }
+            if d2.wrapping_add(planes[2].1) >= -side_error {
+                wholly_outside &= !(1 << 2);
+            }
+            if wholly_outside & 0x18 != 0 {
+                let (d3, d4, _) = unsafe { gte_dot3::<MVMVA_LCM_V0_SF0>(xy, z) };
+                if d3.wrapping_add(planes[3].1) >= -side_error {
+                    wholly_outside &= !(1 << 3);
+                }
+                if d4.wrapping_add(planes[4].1) >= -side_error {
+                    wholly_outside &= !(1 << 4);
+                }
+            }
+            if wholly_outside == 0 && (!near_tested || near_any_outside) {
+                break;
+            }
+            index += 1;
+        }
+        if wholly_outside != 0 {
+            return None;
+        }
+        Some(near_tested && near_any_outside)
+    }
+
     unsafe fn pxbsp_face_clip(
         source_base: *const ClassicAffineWordSourceVertex,
         face: FaceRef,
@@ -3072,6 +3155,69 @@ fn front_facing(map: &ResidentMap, face: Face, point: Vec3I32) -> bool {
     let plane = unsafe { map.planes().get_unchecked(face.plane as usize) };
     let behind = plane_distance(plane, point) < 0;
     behind == (face.flags & FACE_BACKSIDE != 0)
+}
+
+/// `MVMVA(mx=LLM, vx=V0, cv=none, sf=0, lm=0)`: three plane dots at once.
+#[cfg(target_arch = "mips")]
+const MVMVA_LLM_V0_SF0: u32 = 0x4A02_6012;
+/// `MVMVA(mx=LCM, vx=V0, cv=none, sf=0, lm=0)`.
+#[cfg(target_arch = "mips")]
+const MVMVA_LCM_V0_SF0: u32 = 0x4A04_6012;
+
+/// Load the five frustum planes for [`Renderer::pxbsp_face_clip_gte`]:
+/// planes 0..3 fill the light matrix rows, planes 3..5 the first two colour
+/// matrix rows. Both matrices are free during the world pass (the batch
+/// writer only uses the rotation and translation), and every later lit
+/// submission reloads them.
+#[cfg(target_arch = "mips")]
+#[inline(never)]
+fn load_gte_clip_planes(planes: &[([i32; 3], i32); 5]) {
+    #[inline(always)]
+    fn row(plane: &([i32; 3], i32)) -> [i16; 3] {
+        // Near rows are Q12 view rows, side rows are rounded to an L1 norm
+        // of at most SIDE_L1_LIMIT, so every component fits.
+        debug_assert!(plane
+            .0
+            .iter()
+            .all(|c| (i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(c)));
+        [plane.0[0] as i16, plane.0[1] as i16, plane.0[2] as i16]
+    }
+    scene::load_light_matrix(&Mat3I16 {
+        m: [row(&planes[0]), row(&planes[1]), row(&planes[2])],
+    });
+    scene::load_light_colour_matrix(&Mat3I16 {
+        m: [row(&planes[3]), row(&planes[4]), [0; 3]],
+    });
+}
+
+/// One vertex through `OP` (an MVMVA against V0) and its three MAC results,
+/// with the console-confirmed V0 commit distance used by the SDK's AABB
+/// classifier.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn gte_dot3<const OP: u32>(xy: u32, z: u32) -> (i32, i32, i32) {
+    let a: u32;
+    let b: u32;
+    let c: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word 0x48880000", // mtc2 $8, VXY0
+            ".word 0x48890800", // mtc2 $9, VZ0
+            ".word 0",
+            ".word 0",
+            ".word {op}",
+            ".word 0x4808c800", // mfc2 $8, MAC1
+            ".word 0x4809d000", // mfc2 $9, MAC2
+            ".word 0x480ad800", // mfc2 $10, MAC3
+            ".word 0",
+            op = const OP,
+            inlateout("$8") xy => a,
+            inlateout("$9") z => b,
+            out("$10") c,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    (a as i32, b as i32, c as i32)
 }
 
 fn front_facing_pxbsp(map: &PxbspResidentMap, plane: usize, flags: u16, point: Vec3I32) -> bool {
