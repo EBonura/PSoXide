@@ -440,6 +440,7 @@ impl DbgLine {
     }
 }
 
+#[inline(never)]
 fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
     if width <= 0 || height <= 0 {
         return;
@@ -457,18 +458,6 @@ fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
     );
 }
 
-/// The two stance bars, crossing over each other on a swap.
-///
-/// These are drawn here rather than authored as UI nodes because a node's rect
-/// is static: bindings drive a Bar's value and max, nothing moves or resizes
-/// it. Hiding authored bars for the length of a swap was not available either,
-/// since Rect and Bar carry no runtime tag and all sixteen node-flag bits are
-/// spoken for. Owning the geometry here costs eighteen fewer authored nodes and
-/// gives the swap somewhere to animate.
-///
-/// `progress_q12` runs 0..=4096 across the swap. `rising` is the pool becoming
-/// active, `falling` the one standing down; each fill is its own 0..=4096
-/// share of its bar.
 /// A rectangle with its top-left and bottom-right corners chamfered.
 ///
 /// The authored stance shells carried `corner_cut: 2` on exactly those two
@@ -481,6 +470,7 @@ fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
 /// with a sloped top edge, the square middle, and a sliver with a sloped
 /// bottom edge. At the authored cut of two pixels the outer two are slivers,
 /// so the whole shell costs two extra polygons.
+#[inline(never)]
 fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8)) {
     if w <= 0 || h <= 0 {
         return;
@@ -514,77 +504,164 @@ fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8))
     );
 }
 
-pub(crate) fn draw_stance_swap(
-    progress_q12: u16,
-    rising_fill_q12: u16,
-    rising_rgb: (u8, u8, u8),
-    falling_fill_q12: u16,
-    falling_rgb: (u8, u8, u8),
+/// Draw the complete player vitality cluster. Owning the two bars and mutation
+/// charge in one pass prevents the old animated bar from surviving behind the
+/// authored shell, and lets the active channel stay deliberately longer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_player_vitality_hud(
+    font: &FontAtlas,
+    active: VitalityChannelId,
+    active_fill_q12: u16,
+    inactive_fill_q12: u16,
+    swap_progress_q12: u16,
+    completion_echo_elapsed: Option<u16>,
+    frame: u16,
 ) {
-    // Authored geometry of the two slots, mirroring the HUD scene.
-    const TOP: (i16, i16, i16, i16) = (34, 8, 140, 12);
-    const LOW: (i16, i16, i16, i16) = (34, 24, 100, 8);
-    const INSET: i16 = 3;
-
-    let t = progress_q12.min(4096) as i32;
-    // Ease in and out so the crossing reads as a deliberate exchange rather
-    // than a linear slide. 3t^2 - 2t^3 over Q12.
-    let eased = {
-        let x = t;
-        let x2 = (x * x) >> 12;
-        let x3 = (x2 * x) >> 12;
-        (3 * x2 - 2 * x3).clamp(0, 4096)
-    };
-    let lerp = |from: i16, to: i16| -> i16 {
-        (i32::from(from) + (((i32::from(to) - i32::from(from)) * eased) >> 12)) as i16
-    };
-    let slot = |from: (i16, i16, i16, i16), to: (i16, i16, i16, i16)| {
-        (
-            lerp(from.0, to.0),
-            lerp(from.1, to.1),
-            lerp(from.2, to.2),
-            lerp(from.3, to.3),
-        )
-    };
-
-    const LADDER_STEPS: i16 = 8;
-    /// Matches the `corner_cut` the authored stance shells carried.
-    const SHELL_CUT: i16 = 2;
-    let bar = |(x, y, w, h): (i16, i16, i16, i16), fill_q12: u16, rgb: (u8, u8, u8)| {
-        // Shell, then the fill inset inside it, so the moving bar keeps the
-        // authored look of a bordered ladder.
-        draw_chamfered(x, y, w, h, SHELL_CUT, (rgb.0 / 4, rgb.1 / 4, rgb.2 / 4));
-        let iw = (w - INSET * 2).max(0);
-        let ih = (h - INSET * 2).max(0);
-        let fw = ((i32::from(iw) * i32::from(fill_q12.min(4096))) >> 12) as i16;
-        if fw <= 0 || ih <= 0 {
-            return;
+    const HORIZON_RGB: (u8, u8, u8) = (234, 82, 48);
+    const ZENITH_RGB: (u8, u8, u8) = (76, 202, 181);
+    let channel_style = |channel| {
+        if channel == VitalityChannelId::One {
+            (HORIZON_RGB, "HRZ")
+        } else {
+            (ZENITH_RGB, "ZTH")
         }
-        let (fx, fy) = (x + INSET, y + INSET);
-        draw_quad_flat(
-            [(fx, fy), (fx + fw, fy), (fx, fy + ih), (fx + fw, fy + ih)],
-            rgb.0,
-            rgb.1,
-            rgb.2,
-        );
-        // Ladder ticks, so the bar reads as segments rather than a smooth
-        // gauge, the way the authored HUD drew it.
+    };
+    let (active_rgb, active_label) = channel_style(active);
+    let (inactive_rgb, inactive_label) = channel_style(active.other());
+
+    // The active pool is visibly dominant rather than merely recoloured.
+    draw_vitality_bar(
+        font,
+        (34, 3, 144, 16),
+        7,
+        active_fill_q12,
+        active_rgb,
+        active_label,
+    );
+    draw_vitality_bar(
+        font,
+        (34, 34, 112, 13),
+        5,
+        inactive_fill_q12,
+        inactive_rgb,
+        inactive_label,
+    );
+    draw_stance_charge_circle(
+        20,
+        26,
+        swap_progress_q12,
+        active_rgb,
+        completion_echo_elapsed,
+        frame,
+    );
+}
+
+#[inline(never)]
+fn draw_vitality_bar(
+    font: &FontAtlas,
+    (x, y, w, h): (i16, i16, i16, i16),
+    cut: i16,
+    fill_q12: u16,
+    rgb: (u8, u8, u8),
+    label: &str,
+) {
+    draw_chamfered(x, y, w, h, cut, (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2));
+    draw_chamfered(
+        x + 1,
+        y + 1,
+        w - 2,
+        h - 2,
+        cut.saturating_sub(1),
+        (rgb.0 / 11, rgb.1 / 11, rgb.2 / 11),
+    );
+
+    let fill_x = x + 28;
+    let fill_y = y + 5;
+    let fill_w = (w - 34).max(0);
+    let fill_h = (h - 10).max(3);
+    let filled = ((i32::from(fill_w) * i32::from(fill_q12.min(4096))) >> 12) as i16;
+    draw_rect(fill_x, fill_y, fill_w, fill_h, (rgb.0 / 12, rgb.1 / 12, rgb.2 / 12));
+    if filled > 0 {
+        draw_rect(fill_x, fill_y, filled, fill_h, rgb);
         let mut step = 1;
-        while step < LADDER_STEPS {
-            let tx = fx + (iw * step) / LADDER_STEPS;
-            if tx < fx + fw {
-                draw_quad_flat(
-                    [(tx, fy), (tx + 1, fy), (tx, fy + ih), (tx + 1, fy + ih)],
-                    rgb.0 / 3,
-                    rgb.1 / 3,
-                    rgb.2 / 3,
-                );
+        while step < 8 {
+            let tx = fill_x + (fill_w * step) / 8;
+            if tx < fill_x + filled {
+                draw_rect(tx, fill_y, 1, fill_h, (rgb.0 / 3, rgb.1 / 3, rgb.2 / 3));
             }
             step += 1;
         }
-    };
+    }
+    font.draw_text(x + 6, y + 4, label, (rgb.0, rgb.1, rgb.2));
+}
 
-    // The pool standing down travels top to low; the one taking over rises.
-    bar(slot(TOP, LOW), falling_fill_q12, falling_rgb);
-    bar(slot(LOW, TOP), rising_fill_q12, rising_rgb);
+#[inline(never)]
+fn draw_stance_charge_circle(
+    cx: i16,
+    cy: i16,
+    progress_q12: u16,
+    rgb: (u8, u8, u8),
+    echo_elapsed: Option<u16>,
+    frame: u16,
+) {
+    // Two chamfered plates form a mechanical ring using the same primitive as
+    // the health shells. The darker inset punches the centre back out.
+    draw_chamfered(
+        cx - 11,
+        cy - 11,
+        22,
+        22,
+        7,
+        (rgb.0 / 8, rgb.1 / 8, rgb.2 / 8),
+    );
+    draw_chamfered(cx - 7, cy - 7, 14, 14, 5, (5, 8, 9));
+
+    let filled = stance_charge_segments(progress_q12);
+    let head = if (frame & 1) == 0 { (255, 244, 220) } else { rgb };
+    if filled >= 1 {
+        draw_rect(cx - 4, cy - 11, 8, 2, if filled == 1 { head } else { rgb });
+    }
+    if filled >= 2 {
+        draw_rect(cx + 9, cy - 4, 2, 8, if filled == 2 { head } else { rgb });
+    }
+    if filled >= 3 {
+        draw_rect(cx - 4, cy + 9, 8, 2, if filled == 3 { head } else { rgb });
+    }
+    if filled >= 4 {
+        draw_rect(cx - 11, cy - 4, 2, 8, rgb);
+    }
+
+    // Completion sends two additive rings out from the charge cell, echoing
+    // the main-menu confirmation language without any text or extra chrome.
+    if let Some(elapsed) = echo_elapsed {
+        let radius = 12 + ((elapsed.min(12) >> 2) as i16);
+        let echo_rgb = if elapsed < 6 {
+            rgb
+        } else {
+            (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2)
+        };
+        draw_rect(cx - 3, cy - radius, 6, 1, echo_rgb);
+        draw_rect(cx + radius, cy - 3, 1, 6, echo_rgb);
+        draw_rect(cx - 3, cy + radius, 6, 1, echo_rgb);
+        draw_rect(cx - radius, cy - 3, 1, 6, echo_rgb);
+    }
+}
+
+#[inline(always)]
+fn stance_charge_segments(progress_q12: u16) -> u8 {
+    ((progress_q12.min(4096).saturating_add(1023) >> 10) as u8).min(4)
+}
+
+#[cfg(test)]
+mod vitality_hud_tests {
+    use super::stance_charge_segments;
+
+    #[test]
+    fn stance_charge_circle_consumes_then_refills_clockwise() {
+        assert_eq!(stance_charge_segments(0), 0);
+        assert_eq!(stance_charge_segments(1), 1);
+        assert_eq!(stance_charge_segments(1024), 1);
+        assert_eq!(stance_charge_segments(2048), 2);
+        assert_eq!(stance_charge_segments(4096), 4);
+    }
 }

@@ -1904,45 +1904,40 @@ impl Scene for Playtest {
             let _drawn = self.damage_numbers.draw(&font, camera, room, overlay_tick);
         }
 
-        /// Q12 unity, matching psx_game_runtime::vitality.
-        const VITALITY_Q12_ONE: u16 = 4096;
-        /// Bar colours mirroring the authored HUD labels.
-        const HORIZON_BAR_RGB: (u8, u8, u8) = (214, 75, 48);
-        const ZENITH_BAR_RGB: (u8, u8, u8) = (67, 169, 154);
-
-        // While a stance swap is settling the authored bars stand down and the
-        // overlay draws the pair crossing over, because a node's rect cannot be
-        // animated from a binding.
-        {
+        // One runtime-owned cluster draws the mutation charge and both health
+        // pools. The previous implementation layered a moving rectangular bar
+        // beneath an authored slanted bar, leaving both visible at rest.
+        if let Some(font) = self.ui_fonts[0].as_ref() {
+            const VITALITY_Q12_ONE: u16 = 4096;
             let config = self.player_stance_config;
-            let progress = self.player_stance.swap_progress_q12(&config);
+            let active = self.player_stance.active();
+            let share = |channel| {
+                let pool = self.player_vitality.pool(channel);
+                if pool.maximum() == 0 {
+                    0
+                } else {
+                    ((u32::from(pool.current()) * u32::from(VITALITY_Q12_ONE))
+                        / u32::from(pool.maximum())) as u16
+                }
+            };
+            let elapsed = self.player_stance.swap_elapsed_ticks();
+            let echo_elapsed = if elapsed != u16::MAX
+                && elapsed >= config.swap_duration_ticks
+                && elapsed < config.swap_duration_ticks.saturating_add(13)
             {
-                let share = |channel| {
-                    let pool = self.player_vitality.pool(channel);
-                    if pool.maximum() == 0 {
-                        0
-                    } else {
-                        ((u32::from(pool.current()) * u32::from(VITALITY_Q12_ONE))
-                            / u32::from(pool.maximum())) as u16
-                    }
-                };
-                let rising = self.player_stance.active();
-                let falling = self.player_stance.inactive();
-                let rgb = |channel| {
-                    if channel == VitalityChannelId::One {
-                        HORIZON_BAR_RGB
-                    } else {
-                        ZENITH_BAR_RGB
-                    }
-                };
-                draw_stance_swap(
-                    progress,
-                    share(rising),
-                    rgb(rising),
-                    share(falling),
-                    rgb(falling),
-                );
-            }
+                Some(elapsed - config.swap_duration_ticks)
+            } else {
+                None
+            };
+            draw_player_vitality_hud(
+                font,
+                active,
+                share(active),
+                share(active.other()),
+                self.player_stance.swap_progress_q12(&config),
+                echo_elapsed,
+                overlay_tick.as_u32() as u16,
+            );
         }
 
         #[cfg(feature = "fps-overlay")]
