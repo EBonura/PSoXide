@@ -84,6 +84,7 @@ fn collect_ui_font_table<'font>(
 /// this, so the entry path can tell an uninitialised cursor from a
 /// genuine focus on node 0.
 const MENU_FOCUS_NONE: u16 = u16::MAX;
+const MENU_FOCUS_MOTION_FRAMES: u8 = 8;
 const MENU_FOCUS_LOADING_UNRENDERED: u16 = u16::MAX - 1;
 const MENU_FOCUS_LOADING_RENDERED: u16 = u16::MAX - 2;
 const MENU_FOCUS_LOADING_INITED: u16 = u16::MAX - 3;
@@ -614,6 +615,11 @@ pub struct FlowCursor {
     /// `focused` parameter directly. Reset to the sentinel on every
     /// scene change so the new scene re-seeds via [`first_focus`].
     menu_focus: u16,
+    /// Previous focused pool node while the highlight travels to the current
+    /// control.
+    menu_focus_from: u16,
+    /// Rendered frames elapsed in the current focus transition.
+    menu_focus_motion_elapsed: u8,
     /// Small flow scratch. Timed UI states will use it as a countdown; while
     /// a loading screen is pending it stores the target flow-state index.
     intro_timer: u16,
@@ -633,6 +639,8 @@ impl FlowCursor {
             return_to: None,
             gameplay_inited: false,
             menu_focus: MENU_FOCUS_NONE,
+            menu_focus_from: MENU_FOCUS_NONE,
+            menu_focus_motion_elapsed: MENU_FOCUS_MOTION_FRAMES,
             intro_timer: 0,
             active_resource_key: RESOURCE_KEY_NONE,
         }
@@ -688,6 +696,8 @@ impl FlowCursor {
     fn begin_loading(&mut self, target: u16, return_to: Option<u16>) {
         self.return_to = return_to;
         self.menu_focus = MENU_FOCUS_LOADING_UNRENDERED;
+        self.menu_focus_from = MENU_FOCUS_NONE;
+        self.menu_focus_motion_elapsed = MENU_FOCUS_MOTION_FRAMES;
         self.intro_timer = target;
     }
 
@@ -1281,6 +1291,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.cursor.current = state_index;
         self.cursor.return_to = return_to;
         self.cursor.menu_focus = MENU_FOCUS_NONE;
+        self.cursor.menu_focus_from = MENU_FOCUS_NONE;
+        self.cursor.menu_focus_motion_elapsed = MENU_FOCUS_MOTION_FRAMES;
         self.cursor.intro_timer = 0;
         if !self.current_tag().has_gameplay() {
             return;
@@ -1590,6 +1602,38 @@ impl<'a, S: Scene> GameApp<'a, S> {
         Some(node_index)
     }
 
+    /// Offset from the destination control back toward the previous one.
+    /// Smoothstep keeps both ends at zero velocity, so changing option reads
+    /// as one cursor travelling rather than a highlight disappearing and
+    /// reappearing.
+    fn focus_motion_offset(&self, focused: Option<usize>) -> (i16, i16) {
+        let Some(target_index) = focused else {
+            return (0, 0);
+        };
+        if self.cursor.menu_focus_from == MENU_FOCUS_NONE
+            || self.cursor.menu_focus_motion_elapsed >= MENU_FOCUS_MOTION_FRAMES
+        {
+            return (0, 0);
+        }
+        let from = ui::node_nav_rect(self.nodes, usize::from(self.cursor.menu_focus_from));
+        let target = ui::node_nav_rect(self.nodes, target_index);
+        let t_q8 = u32::from(self.cursor.menu_focus_motion_elapsed).saturating_mul(256)
+            / u32::from(MENU_FOCUS_MOTION_FRAMES.max(1));
+        let smooth_q8 = t_q8
+            .saturating_mul(t_q8)
+            .saturating_mul(768u32.saturating_sub(t_q8.saturating_mul(2)))
+            >> 16;
+        let remaining_q8 = 256u32.saturating_sub(smooth_q8);
+        let offset = |from: i16, to: i16| {
+            (i32::from(from)
+                .saturating_sub(i32::from(to))
+                .saturating_mul(remaining_q8 as i32)
+                / 256)
+                .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+        };
+        (offset(from.x, target.x), offset(from.y, target.y))
+    }
+
     /// Move focus one step in `dir` over the scene's focusable controls,
     /// updating [`FlowCursor::menu_focus`] (a pool index) in place. A
     /// move with no candidate in that direction leaves focus untouched.
@@ -1622,11 +1666,15 @@ impl<'a, S: Scene> GameApp<'a, S> {
         };
         if let Some(next_slot) = next_focus(&rects[..n], current_slot, dir) {
             let next_node = node_indices[next_slot];
-            self.cursor.menu_focus = next_node as u16;
             if next_node != current_node {
+                self.cursor.menu_focus_from = current_node as u16;
+                self.cursor.menu_focus_motion_elapsed = 0;
+                self.cursor.menu_focus = next_node as u16;
                 if let Some(node) = self.nodes.get(next_node).copied() {
                     self.play_node_sfx_event(node, LevelUiSfxEvent::Focus);
                 }
+            } else {
+                self.cursor.menu_focus = next_node as u16;
             }
         }
     }
@@ -2042,6 +2090,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let (first, count) = self.scene_node_range(scene);
         crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 120, 220), "37 UI RANGE OK");
         let focused = self.resolved_focus(first, count);
+        let focus_offset = self.focus_motion_offset(focused);
         crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 160, 220), "37 UI FOCUS OK");
         // Copy the node pool + option store out of `self` first so the
         // resolver closures borrow only these Copy locals, not `self`
@@ -2098,6 +2147,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             paints,
             &font_table,
             focused,
+            focus_offset,
             &focus_style,
             (ctx.sim_tick.as_u32() & 0xffff) as u16,
             ui_text_seed,
@@ -2108,6 +2158,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
             &visible,
             &text,
         );
+        self.cursor.menu_focus_motion_elapsed = self
+            .cursor
+            .menu_focus_motion_elapsed
+            .saturating_add(1)
+            .min(MENU_FOCUS_MOTION_FRAMES);
         if let Some(activation) = self.ui_activation.filter(|active| active.scene == scene) {
             ui::draw_activation_echo(
                 nodes,

@@ -64,6 +64,11 @@ pub const DIRECTIONAL_SKY_ATLAS_HEIGHT: u16 = 256;
 /// Shadow decal's texel U origin inside the shared shadow/particle 4bpp
 /// page. UVs are page-relative, so only the page base moves.
 pub const SHADOW_TEXEL_U: u8 = 64;
+/// Vitality-circle glyph origin inside the free lower-left 64x64 block of the
+/// shared 128x128 gameplay-effects quadrant.
+pub const VITALITY_CIRCLE_TEXEL_U: u8 = 0;
+/// Vitality-circle glyph V origin inside the gameplay-effects quadrant.
+pub const VITALITY_CIRCLE_TEXEL_V: u8 = 64;
 /// Particle decals use the U=0 half of the shared shadow/particle 4bpp page.
 pub const PARTICLE_TEXEL_U: u8 = 0;
 /// Generated particle decal edge in texels.
@@ -634,6 +639,7 @@ pub struct VramRuntime<
     small_texture_region: VramHandle,
     small_model_quadrants: u8,
     shadow_clut_region: VramHandle,
+    vitality_circle_clut_region: VramHandle,
     particle_clut_region: VramHandle,
     upload_queue: VramUploadQueue,
     /// Streamed UI image VRAM slots created on menu entry, tracked so they
@@ -689,6 +695,7 @@ impl<
             small_texture_region: VramHandle::Empty,
             small_model_quadrants: 0,
             shadow_clut_region: VramHandle::Empty,
+            vitality_circle_clut_region: VramHandle::Empty,
             particle_clut_region: VramHandle::Empty,
             upload_queue: VramUploadQueue::new(),
             ui_image_slots: [None; MAX_UI_IMAGE_SLOTS],
@@ -1011,6 +1018,47 @@ impl<
                 BlendMode::Average,
             )
             .with_raw_texture(true)
+            .with_texture_window(TextureWindow::power_of_two_tile(128, 128, 128, 128)),
+        )
+    }
+
+    /// Upload the 64x64 vitality-circle machine glyph into unused pixels of
+    /// the shared gameplay-effects quadrant. Only its 16-entry CLUT consumes
+    /// allocator space; the texels do not reserve another texture page.
+    pub fn upload_vitality_circle_texture(
+        &mut self,
+        vitality_circle_blob: &[u8],
+    ) -> Option<TextureMaterial> {
+        let texture = Texture::from_bytes(vitality_circle_blob).ok()?;
+        if texture.width() != 64 || texture.height() != 64 || texture.clut_entries() != 16 {
+            return None;
+        }
+
+        let page = self.effect_texture_page()?;
+        let (clut, clut_region) = self.allocator.alloc_clut(texture.clut_entries())?;
+        self.vitality_circle_clut_region = clut_region;
+        upload_bytes(
+            VramRect::new(
+                page.x() + 128 / 4 + u16::from(VITALITY_CIRCLE_TEXEL_U) / 4,
+                page.y() + 128 + u16::from(VITALITY_CIRCLE_TEXEL_V),
+                texture.halfwords_per_row(),
+                texture.height(),
+            ),
+            texture.pixel_bytes(),
+        );
+        upload_clut(
+            VramRect::new(clut.x(), clut.y(), texture.clut_entries(), 1),
+            texture.clut_bytes(),
+        );
+
+        Some(
+            TextureMaterial::blended(
+                clut.uv_clut_word(),
+                page.uv_tpage_word(0),
+                (0x80, 0x80, 0x80),
+                BlendMode::Add,
+            )
+            .with_raw_texture(false)
             .with_texture_window(TextureWindow::power_of_two_tile(128, 128, 128, 128)),
         )
     }
@@ -2065,6 +2113,10 @@ impl<
         ));
         self.allocator.free(core::mem::replace(
             &mut self.shadow_clut_region,
+            VramHandle::Empty,
+        ));
+        self.allocator.free(core::mem::replace(
+            &mut self.vitality_circle_clut_region,
             VramHandle::Empty,
         ));
         self.allocator.free(core::mem::replace(

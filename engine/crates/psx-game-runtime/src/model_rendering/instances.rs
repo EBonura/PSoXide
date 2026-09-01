@@ -6,7 +6,6 @@ use psx_gpu::draw_line_mono;
 /// Shadow decals share the shadow/particle 4bpp page allocated by the unified
 /// VRAM allocator. UVs are page-relative, so only the page base moves; the
 /// texel origin is the crate vram module's placement contract.
-const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
 #[cfg(feature = "collision-debug-overlay")]
 const COLLISION_DEBUG_SEGMENTS: usize = 8;
 #[cfg(feature = "collision-debug-overlay")]
@@ -152,10 +151,49 @@ pub fn draw_actor_shadow<const OT_DEPTH: usize>(
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
+    draw_ground_decal(
+        x,
+        floor_y,
+        z,
+        radius,
+        shadow.floor_lift,
+        shadow.depth_bias,
+        (SHADOW_TEXEL_U, 0),
+        camera,
+        options,
+        material,
+        triangles,
+        world,
+    );
+}
+
+/// Draw one square, horizontal gameplay decal using a 64x64 sub-texture.
+///
+/// Shadows and vitality fields share the same allocation-free quad path, but
+/// retain independent UV origins, blend modes, floor clearance, and depth
+/// bias. Keeping those concerns explicit prevents a gameplay glyph from
+/// inheriting the shadow's darkening policy merely because both lie on a
+/// floor.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_ground_decal<const OT_DEPTH: usize>(
+    x: i32,
+    floor_y: i32,
+    z: i32,
+    radius: i32,
+    floor_lift: i32,
+    depth_bias: i32,
+    uv_origin: (u8, u8),
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    material: TextureMaterial,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) {
     if radius <= 0 {
         return;
     }
-    let y = floor_y.saturating_add(shadow.floor_lift);
+    let y = floor_y.saturating_add(floor_lift);
     let h = radius;
     let verts = [
         WorldVertex::new(x.saturating_sub(h), y, z.saturating_sub(h)),
@@ -170,19 +208,17 @@ pub fn draw_actor_shadow<const OT_DEPTH: usize>(
     // decal moves by about one OT slot, ~140 pixels of a 320x240 frame) and
     // the cost is zero, but a tuning field that does nothing is worse than
     // either value.
-    let shadow_options = options
+    let decal_options = options
         .with_depth_policy(DepthPolicy::Average)
-        .with_depth_bias(options.depth_bias.saturating_add(shadow.depth_bias))
+        .with_depth_bias(options.depth_bias.saturating_add(depth_bias))
         .with_cull_mode(CullMode::None)
         .with_material_layer(material);
-    const UVS: [(u8, u8); 4] = [
-        (SHADOW_TEXEL_U, 0),
-        (SHADOW_UV_MAX, 0),
-        (SHADOW_UV_MAX, 63),
-        (SHADOW_TEXEL_U, 63),
-    ];
+    let (u, v) = uv_origin;
+    let u_max = u.saturating_add(63);
+    let v_max = v.saturating_add(63);
+    let uvs = [(u, v), (u_max, v), (u_max, v_max), (u, v_max)];
     let _ =
-        world.submit_textured_world_quad(triangles, *camera, verts, UVS, material, shadow_options);
+        world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, decal_options);
 }
 
 /// Shadow decal radius for an actor's collision radius.

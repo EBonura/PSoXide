@@ -316,6 +316,7 @@ impl Playtest {
     pub(super) fn init_gameplay(&mut self) {
         crate::game_trace("editor-playtest: gameplay init begin");
         self.shadow_material = upload_shadow_texture();
+        self.vitality_circle_material = upload_vitality_circle_texture();
         self.particle_material = upload_particle_texture();
         self.destructibles
             .init(DESTRUCTIBLES)

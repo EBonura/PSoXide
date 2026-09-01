@@ -51,9 +51,9 @@ pub use self::shadows::{
 pub use self::instances::draw_collision_cylinder_debug;
 pub use self::instances::{
     accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
-    draw_model_instance_from_pose, draw_model_instance_shadows, draw_model_instances,
-    resolve_instance_actor_pose, InstanceActorPoseSnapshot, ModelInstanceDrawStats,
-    ModelInstancePoseOverride,
+    draw_ground_decal, draw_model_instance_from_pose, draw_model_instance_shadows,
+    draw_model_instances, resolve_instance_actor_pose, InstanceActorPoseSnapshot,
+    ModelInstanceDrawStats, ModelInstancePoseOverride,
 };
 
 /// The cooked model-family tables the render policy walks, bundled so
@@ -1221,7 +1221,7 @@ pub fn resolve_player_actor_pose<
 /// The game's own cyan energy hue rather than the weapon materialisation's
 /// legacy green, so a dash and a weapon assembling on the same frame stay
 /// distinguishable.
-pub const DASH_WIRE_COLOR: (u8, u8, u8) = (96, 224, 255);
+pub const DASH_WIRE_COLOR: (u8, u8, u8) = (196, 255, 255);
 
 /// Where in a dash clip the wireframe starts and ends, as Q8 fractions of the
 /// action's own playable frame range.
@@ -1231,20 +1231,46 @@ pub const DASH_WIRE_COLOR: (u8, u8, u8) = (96, 224, 255);
 /// it back for the landing is what makes the cage read as a phase *through*
 /// the dodge rather than a texture that blinks off. Stated as a fraction so a
 /// re-timed or replaced dash clip keeps the same proportions untouched.
-const DASH_WIRE_START_Q8: u32 = 32;
+const DASH_CONVERT_START_Q8: u32 = 8;
+const DASH_WIRE_START_Q8: u32 = 64;
 const DASH_WIRE_END_Q8: u32 = 192;
+const DASH_RESTORE_END_Q8: u32 = 248;
+
+/// Directional material phase of a dash pose.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DashWireVisual {
+    /// Ordinary textured body.
+    Solid,
+    /// Energy cage advances from the movement-leading side.
+    Converting {
+        /// Fraction of the projected body reached by the cage frontier.
+        progress_q8: u8,
+        /// Whether the frontier begins on screen-left.
+        from_left: bool,
+    },
+    /// Entire body is the line cage.
+    Wire,
+    /// Texture returns from the same movement-leading side.
+    Restoring {
+        /// Fraction of the projected body restored to textured material.
+        progress_q8: u8,
+        /// Whether restoration begins on screen-left.
+        from_left: bool,
+    },
+}
 
 /// True while the pose is inside a dash clip's wireframe window.
 ///
 /// Both dash slots are matched against the clip the pose is actually playing,
 /// which is why no gameplay flag has to reach the renderer: a locked-on side
 /// evade is the only thing that binds those clips.
-fn dash_wireframe_active(
+#[inline(never)]
+fn dash_wire_visual(
     character: &RuntimeCharacter,
     clip_local: ModelClipIndex,
     animation: Animation<'static>,
     phase_q12: u32,
-) -> bool {
+) -> DashWireVisual {
     let matches = |action| {
         character.action_clip(action) == psx_level::OptionalModelClipIndex::some(clip_local)
     };
@@ -1253,15 +1279,48 @@ fn dash_wireframe_active(
     } else if matches(CharacterAnimationAction::DashRight) {
         CharacterAnimationAction::DashRight
     } else {
-        return false;
+        return DashWireVisual::Solid;
     };
     let (start_frame, end_frame) =
         normalized_action_frame_range(animation, character.action_frame_range(action));
     let start_phase = start_frame << 12;
     let range_phase = end_frame.saturating_sub(start_frame) << 12;
-    let lo = start_phase + (range_phase * DASH_WIRE_START_Q8) / 256;
-    let hi = start_phase + (range_phase * DASH_WIRE_END_Q8) / 256;
-    phase_q12 >= lo && phase_q12 <= hi
+    if range_phase == 0 {
+        return DashWireVisual::Solid;
+    }
+    let local_q8 = phase_q12.saturating_sub(start_phase).saturating_mul(256) / range_phase;
+    let from_left = action == CharacterAnimationAction::DashLeft;
+    if local_q8 < DASH_CONVERT_START_Q8 || local_q8 > DASH_RESTORE_END_Q8 {
+        DashWireVisual::Solid
+    } else if local_q8 < DASH_WIRE_START_Q8 {
+        DashWireVisual::Converting {
+            progress_q8: (((local_q8 - DASH_CONVERT_START_Q8) * 255)
+                / (DASH_WIRE_START_Q8 - DASH_CONVERT_START_Q8)) as u8,
+            from_left,
+        }
+    } else if local_q8 <= DASH_WIRE_END_Q8 {
+        DashWireVisual::Wire
+    } else {
+        DashWireVisual::Restoring {
+            progress_q8: (((local_q8 - DASH_WIRE_END_Q8) * 255)
+                / (DASH_RESTORE_END_Q8 - DASH_WIRE_END_Q8)) as u8,
+            from_left,
+        }
+    }
+}
+
+/// Resolve the dash material phase for a frozen player pose.
+pub fn player_dash_wire_visual(
+    character: &RuntimeCharacter,
+    pose: PlayerActorPoseSnapshot,
+) -> DashWireVisual {
+    let actor_pose = pose.pose();
+    dash_wire_visual(
+        character,
+        pose.clip_local(),
+        actor_pose.animation(),
+        actor_pose.phase_q12(),
+    )
 }
 
 /// Whether the resolved player pose uses the dash line cage instead of
@@ -1274,11 +1333,14 @@ pub fn player_pose_draws_wireframe(
     pose: PlayerActorPoseSnapshot,
 ) -> bool {
     let actor_pose = pose.pose();
-    dash_wireframe_active(
-        character,
-        pose.clip_local(),
-        actor_pose.animation(),
-        actor_pose.phase_q12(),
+    matches!(
+        dash_wire_visual(
+            character,
+            pose.clip_local(),
+            actor_pose.animation(),
+            actor_pose.phase_q12(),
+        ),
+        DashWireVisual::Wire
     )
 }
 
@@ -1298,13 +1360,28 @@ fn submit_model_wireframe<const OT_DEPTH: usize>(
     projected: &[ProjectedVertex],
     faces: &[TexturedModelRenderFace],
     vertices: &[ModelVertex],
+    visual: DashWireVisual,
     color: (u8, u8, u8),
     options: WorldSurfaceOptions,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> u16 {
     let wire_options = options.with_render_layer(psx_engine::WorldRenderLayer::Opaque);
     let mut drawn = 0u16;
-    for face in faces {
+    let mut min_x = i16::MAX;
+    let mut max_x = i16::MIN;
+    for vertex in projected.iter().copied() {
+        if vertex != ProjectedVertex::INVALID {
+            min_x = min_x.min(vertex.sx);
+            max_x = max_x.max(vertex.sx);
+        }
+    }
+    if min_x >= max_x {
+        return 0;
+    }
+    for (face_index, face) in faces.iter().enumerate() {
+        if face_index & 3 != 0 {
+            continue;
+        }
         let indices = face.vertex_indices();
         let mut best = (0i32, 0usize, 0usize);
         for corner in 0..3 {
@@ -1330,10 +1407,53 @@ fn submit_model_wireframe<const OT_DEPTH: usize>(
         if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
             continue;
         }
+        let average_x = (i32::from(a.sx) + i32::from(b.sx)) / 2;
+        if !dash_wire_contains_x(visual, average_x as i16, min_x, max_x) {
+            continue;
+        }
         world.submit_projected_line(lines, [a, b], color, wire_options);
         drawn = drawn.saturating_add(1);
     }
     drawn
+}
+
+#[inline(never)]
+fn dash_wire_contains_x(visual: DashWireVisual, x: i16, min_x: i16, max_x: i16) -> bool {
+    let span = i32::from(max_x).saturating_sub(i32::from(min_x)).max(1);
+    let frontier = |progress_q8: u8, from_left: bool| {
+        let travel = span.saturating_mul(i32::from(progress_q8)) / 255;
+        if from_left {
+            i32::from(min_x).saturating_add(travel)
+        } else {
+            i32::from(max_x).saturating_sub(travel)
+        }
+    };
+    match visual {
+        DashWireVisual::Solid => false,
+        DashWireVisual::Wire => true,
+        DashWireVisual::Converting {
+            progress_q8,
+            from_left,
+        } => {
+            let edge = frontier(progress_q8, from_left);
+            if from_left {
+                i32::from(x) <= edge
+            } else {
+                i32::from(x) >= edge
+            }
+        }
+        DashWireVisual::Restoring {
+            progress_q8,
+            from_left,
+        } => {
+            let edge = frontier(progress_q8, from_left);
+            if from_left {
+                i32::from(x) > edge
+            } else {
+                i32::from(x) < edge
+            }
+        }
+    }
 }
 
 /// Draw the player model: pose the skeleton, skin the mesh, and submit
@@ -1489,7 +1609,8 @@ pub fn draw_player_from_pose<
     // itself to draw edges was measured at -2.0% frame rate across every model
     // in the scene (`textured_model_joints` +26%) purely from instantiating
     // that function a second time, so it stays untouched.
-    if dash_wireframe_active(character, player_pose.clip_local(), anim, phase) {
+    let dash_visual = dash_wire_visual(character, player_pose.clip_local(), anim, phase);
+    if matches!(dash_visual, DashWireVisual::Wire) {
         telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
         let mut stats = match runtime_model_geometry(runtime_model, model_parts, model_vertices) {
@@ -1521,6 +1642,7 @@ pub fn draw_player_from_pose<
                     projected,
                     faces,
                     geometry.vertices,
+                    DashWireVisual::Wire,
                     DASH_WIRE_COLOR,
                     options,
                     world,
@@ -1598,7 +1720,7 @@ pub fn draw_player_from_pose<
             );
             layer
         });
-    let stats = submit_runtime_model_predecoded(
+    let mut stats = submit_runtime_model_predecoded(
         world,
         triangles,
         runtime_model,
@@ -1619,6 +1741,27 @@ pub fn draw_player_from_pose<
         PROFILE,
         scratch,
     );
+    if matches!(
+        dash_visual,
+        DashWireVisual::Converting { .. } | DashWireVisual::Restoring { .. }
+    ) {
+        if let Some(geometry) = runtime_model_geometry(runtime_model, model_parts, model_vertices) {
+            let projected = &scratch.vertices[..usize::from(stats.projected_vertices)];
+            stats.submitted_triangles =
+                stats
+                    .submitted_triangles
+                    .saturating_add(submit_model_wireframe(
+                        triangles,
+                        projected,
+                        faces,
+                        geometry.vertices,
+                        dash_visual,
+                        DASH_WIRE_COLOR,
+                        options,
+                        world,
+                    ));
+        }
+    }
     telemetry::stage_end(telemetry::stage::PLAYER_DRAW);
     PlayerModelDrawStats {
         stats,
@@ -2854,5 +2997,22 @@ mod tests {
             model_override_cull_mode(override_record(0, material_flags::FACE_BOTH)),
             CullMode::None
         );
+    }
+
+    #[test]
+    fn dash_wire_frontier_travels_and_restores_from_leading_side() {
+        let converting = DashWireVisual::Converting {
+            progress_q8: 128,
+            from_left: true,
+        };
+        assert!(dash_wire_contains_x(converting, 25, 0, 100));
+        assert!(!dash_wire_contains_x(converting, 75, 0, 100));
+
+        let restoring = DashWireVisual::Restoring {
+            progress_q8: 128,
+            from_left: true,
+        };
+        assert!(!dash_wire_contains_x(restoring, 25, 0, 100));
+        assert!(dash_wire_contains_x(restoring, 75, 0, 100));
     }
 }

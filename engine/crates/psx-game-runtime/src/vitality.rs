@@ -1094,7 +1094,10 @@ impl CombatStance {
         Self {
             active,
             swap_cooldown: 0,
-            swap_elapsed: 0,
+            // A fresh stance is stable, not twelve ticks into a mutation.
+            // Saturation keeps the no-swap state valid for any authored
+            // duration without another flag.
+            swap_elapsed: u16::MAX,
             regen_delay: [0; 2],
             broken: [false; 2],
             regen_fraction_q12: [0; 2],
@@ -1119,6 +1122,15 @@ impl CombatStance {
     /// Ticks left before another voluntary swap.
     pub const fn swap_cooldown(self) -> u16 {
         self.swap_cooldown
+    }
+
+    /// Ticks elapsed since the latest stance mutation began.
+    ///
+    /// A fresh stance returns `u16::MAX`, which lets presentation code avoid
+    /// mistaking startup for a just-completed mutation. After a real swap the
+    /// value advances through the mutation and its short completion echo.
+    pub const fn swap_elapsed_ticks(self) -> u16 {
+        self.swap_elapsed
     }
 
     /// How far through the swap animation the HUD is, Q12.
