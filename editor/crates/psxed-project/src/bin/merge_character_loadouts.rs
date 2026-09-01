@@ -28,16 +28,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use psxed_project::{
-    CharacterLoadout, NodeKind, ProjectDocument, ResourceData, ResourceId,
-};
+use psxed_project::{CharacterLoadout, NodeKind, ProjectDocument, ResourceData, ResourceId};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = PathBuf::from(
-        args.next()
-            .expect("usage: merge_character_loadouts <project.ron> --keep <name> --fold <name>=<loadout>"),
-    );
+    let path = PathBuf::from(args.next().expect(
+        "usage: merge_character_loadouts <project.ron> --keep <name> --fold <name>=<loadout>",
+    ));
     let (mut keep_name, mut folds, mut write) = (None, Vec::new(), false);
     let mut name_the_default = None;
     while let Some(flag) = args.next() {
@@ -65,7 +62,9 @@ fn main() {
         let mut found = project.resources.iter().filter(|resource| {
             resource.name == wanted && matches!(resource.data, ResourceData::Character(_))
         });
-        let first = found.next().unwrap_or_else(|| panic!("no Character named {wanted:?}"));
+        let first = found
+            .next()
+            .unwrap_or_else(|| panic!("no Character named {wanted:?}"));
         assert!(
             found.next().is_none(),
             "more than one Character named {wanted:?}; names must be unique to fold by name",
@@ -82,10 +81,12 @@ fn main() {
     // Read every folded Character's equipment out before mutating anything:
     // the kept Character is itself a candidate for being read here.
     let mut appended: Vec<(ResourceId, u16)> = Vec::new();
-    let (mut loadouts, kept_equipment) = match &project.resource(keep).expect("kept character").data {
-        ResourceData::Character(character) => {
-            (character.loadouts.clone(), character.default_equipment.clone())
-        }
+    let (mut loadouts, kept_equipment) = match &project.resource(keep).expect("kept character").data
+    {
+        ResourceData::Character(character) => (
+            character.loadouts.clone(),
+            character.default_equipment.clone(),
+        ),
         _ => panic!("--keep is not a Character"),
     };
     // The kept Character's own equipment is a loadout like any other. Naming
@@ -96,7 +97,11 @@ fn main() {
             loadouts.is_empty(),
             "--name-default only makes sense before any loadout exists",
         );
-        println!("name default {:<28} -> loadout 0 {name:?} ({} binding(s))", "", kept_equipment.len());
+        println!(
+            "name default {:<28} -> loadout 0 {name:?} ({} binding(s))",
+            "",
+            kept_equipment.len()
+        );
         loadouts.push(CharacterLoadout {
             name: name.clone(),
             equipment: kept_equipment,
@@ -105,7 +110,8 @@ fn main() {
     for (character_name, name) in &folds {
         let id = character_named(&project, character_name);
         assert_ne!(id, keep, "--fold {character_name:?} is also --keep");
-        let ResourceData::Character(character) = &project.resource(id).expect("folded character").data
+        let ResourceData::Character(character) =
+            &project.resource(id).expect("folded character").data
         else {
             unreachable!("character_named filters on Character");
         };
@@ -185,7 +191,10 @@ fn main() {
         folded.len() - still_referenced.len(),
     );
     for (id, count) in &still_referenced {
-        println!("  kept {}: still referenced {count} time(s), not removed", id.raw());
+        println!(
+            "  kept {}: still referenced {count} time(s), not removed",
+            id.raw()
+        );
     }
 
     if write {

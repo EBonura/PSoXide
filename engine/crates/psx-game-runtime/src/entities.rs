@@ -137,6 +137,24 @@ const GAME_ENTITY_ATTACK_KIND_MASK: u8 = 3;
 const GAME_ENTITY_ATTACK_MELEE_CHASE: u8 = 1 << 6;
 const GAME_ENTITY_ATTACK_NEXT_HEAVY: u8 = 1 << 7;
 
+/// Enemy guard is packed into the spare bits of the one-hit-per-swing byte.
+/// Bit zero remains the contact latch, bit seven is the guarded channel, and
+/// bits one through four carry the short mutation tell. This costs no extra
+/// per-entity RAM at the 64 actor cap.
+const GAME_ENTITY_ATTACK_CONNECTED: u8 = 1;
+const GAME_ENTITY_STANCE_SWAP_SHIFT: u8 = 1;
+const GAME_ENTITY_STANCE_SWAP_MASK: u8 = 0b0001_1110;
+const GAME_ENTITY_STANCE_ZENITH: u8 = 1 << 7;
+
+/// Duration of the enemy guard-colour sweep in 60 Hz simulation ticks.
+pub const GAME_ENTITY_STANCE_SWAP_DURATION_TICKS: u8 = 12;
+
+/// Damage against the channel an enemy currently guards (Q12 = 0.5x).
+pub const GAME_ENTITY_GUARDED_DAMAGE_Q12: u16 = 2048;
+
+/// Damage against the channel an enemy leaves exposed (Q12 = 1.5x).
+pub const GAME_ENTITY_OPPOSED_DAMAGE_Q12: u16 = 6144;
+
 /// Front-arc half-width for entity attacks, PSX angle units
 /// (60 degrees). The entity faced the player when it committed to
 /// its windup; a player who rolls past the body during the swing
@@ -550,9 +568,10 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     move_yaw_valid: [u8; MAX_ENTITIES],
     /// Directions rejected during the current bounded local search.
     move_tried: [u8; MAX_ENTITIES],
-    /// 1 while the current Attack window already connected (one hit
-    /// per swing); cleared on entering Attack.
-    attack_hit: [u8; MAX_ENTITIES],
+    /// Packed combat presentation/latch byte. Bit zero is one while the
+    /// current Attack window already connected; bits one through four retain
+    /// stance-mutation elapsed ticks; bit seven selects Zenith guard.
+    combat_flags: [u8; MAX_ENTITIES],
     /// Wrapping identity of each entity's current swing. Deferred tokens use
     /// it to reject a contact retained across a later attack.
     attack_sequence: [u16; MAX_ENTITIES],
@@ -728,7 +747,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         move_yaw: [0; MAX_ENTITIES],
         move_yaw_valid: [0; MAX_ENTITIES],
         move_tried: [0; MAX_ENTITIES],
-        attack_hit: [0; MAX_ENTITIES],
+        combat_flags: [0; MAX_ENTITIES],
         attack_sequence: [0; MAX_ENTITIES],
         attack_mode: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
@@ -771,6 +790,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             self.attack_cooldown[index] = 0;
             self.attack_wait_ticks[index] = 0;
             self.attack_mode[index] = GAME_ENTITY_ATTACK_LIGHT;
+            self.set_stance_swap_elapsed(index, GAME_ENTITY_STANCE_SWAP_DURATION_TICKS);
             let enabled = record.flags & game_entity_flags::ENABLED != 0;
             self.state[index] = if enabled {
                 GameEntityState::Idle as u8
@@ -883,6 +903,75 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
     }
 
+    /// Vitality channel currently guarded by entity `index`.
+    /// Out-of-range entities fail to Horizon, the all-zero packed default.
+    pub fn stance(&self, index: usize) -> VitalityChannelId {
+        if index < self.count() && self.combat_flags[index] & GAME_ENTITY_STANCE_ZENITH != 0 {
+            VitalityChannelId::Two
+        } else {
+            VitalityChannelId::One
+        }
+    }
+
+    /// Q12 presentation progress for the entity's current guard mutation.
+    /// Settled and invalid entities return one, matching player HUD semantics.
+    pub fn stance_swap_progress_q12(&self, index: usize) -> u16 {
+        if index >= self.count() {
+            return 4096;
+        }
+        let elapsed = self.stance_swap_elapsed(index);
+        ((u32::from(elapsed) * 4096) / u32::from(GAME_ENTITY_STANCE_SWAP_DURATION_TICKS)).min(4096)
+            as u16
+    }
+
+    /// Whether the entity's rising stance-colour tell is still active.
+    pub fn stance_swap_in_progress(&self, index: usize) -> bool {
+        index < self.count()
+            && self.stance_swap_elapsed(index) < GAME_ENTITY_STANCE_SWAP_DURATION_TICKS
+    }
+
+    /// Defensive damage scale selected by the target's current guard.
+    pub fn stance_damage_scale_q12(&self, index: usize, attack: VitalityChannelId) -> u16 {
+        if attack == self.stance(index) {
+            GAME_ENTITY_GUARDED_DAMAGE_Q12
+        } else {
+            GAME_ENTITY_OPPOSED_DAMAGE_Q12
+        }
+    }
+
+    /// Apply the current enemy guard multiplier to one authored damage value.
+    pub fn scaled_stance_damage(
+        &self,
+        index: usize,
+        attack: VitalityChannelId,
+        damage: u16,
+    ) -> u16 {
+        let scale = self.stance_damage_scale_q12(index, attack);
+        ((u32::from(damage) * u32::from(scale)) / 4096).min(u32::from(u16::MAX)) as u16
+    }
+
+    fn stance_swap_elapsed(&self, index: usize) -> u8 {
+        (self.combat_flags[index] & GAME_ENTITY_STANCE_SWAP_MASK) >> GAME_ENTITY_STANCE_SWAP_SHIFT
+    }
+
+    fn set_stance_swap_elapsed(&mut self, index: usize, elapsed: u8) {
+        let elapsed = elapsed.min(GAME_ENTITY_STANCE_SWAP_DURATION_TICKS);
+        self.combat_flags[index] = (self.combat_flags[index] & !GAME_ENTITY_STANCE_SWAP_MASK)
+            | (elapsed << GAME_ENTITY_STANCE_SWAP_SHIFT);
+    }
+
+    fn advance_stance_swap(&mut self, index: usize, delta_ticks: u16) {
+        let elapsed = self
+            .stance_swap_elapsed(index)
+            .saturating_add(delta_ticks.min(u16::from(u8::MAX)) as u8);
+        self.set_stance_swap_elapsed(index, elapsed);
+    }
+
+    fn mutate_stance(&mut self, index: usize) {
+        self.combat_flags[index] ^= GAME_ENTITY_STANCE_ZENITH;
+        self.set_stance_swap_elapsed(index, 0);
+    }
+
     /// Entity `index`'s two vitality pools, rehydrated from the dense state
     /// tables and the cooked maxima. The whole point is that enemy vitality
     /// obeys [`DualVitality`] itself rather than a parallel reimplementation.
@@ -972,8 +1061,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
 
     /// Apply a hit to entity `index`: channel-routed health damage plus poise
     /// damage. Accumulated poise damage past the record's pool staggers (and
-    /// the accumulator resets). Combat resolution routes every player weapon
-    /// hit through here (usually via [`Self::apply_melee_arc`]).
+    /// the accumulator resets). This is the raw, unscaled path retained for
+    /// callers that do not participate in Cortex stance combat; authored
+    /// player attacks use [`Self::apply_stance_hit`].
     ///
     /// `channel` is the attack's vitality channel, which the player side
     /// already derives from the swing (horizontal = Horizon, vertical =
@@ -984,6 +1074,32 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// drains on the attacks that own it. The entity dies when BOTH pools are
     /// empty, which is [`DualVitality::is_defeated`] and nothing local.
     pub fn apply_hit(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        index: usize,
+        channel: VitalityChannelId,
+        damage: u16,
+        poise_damage: u16,
+    ) -> GameEntityHitOutcome {
+        self.apply_scaled_hit(records, index, channel, damage, poise_damage)
+    }
+
+    /// Apply a Cortex-style stance-aware hit. The guarded channel takes 50%
+    /// damage and the exposed channel takes 150%; routing and spill remain the
+    /// same as [`Self::apply_hit`]. Poise stays authored and unscaled.
+    pub fn apply_stance_hit(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        index: usize,
+        channel: VitalityChannelId,
+        damage: u16,
+        poise_damage: u16,
+    ) -> GameEntityHitOutcome {
+        let damage = self.scaled_stance_damage(index, channel, damage);
+        self.apply_scaled_hit(records, index, channel, damage, poise_damage)
+    }
+
+    fn apply_scaled_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
         index: usize,
@@ -1035,7 +1151,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// Sweep the player's melee arc over the live entities: every
     /// enemy in the arc's room whose hurtbox cylinder the arc reaches
     /// (and whose bit in `already_hit` is clear) takes one
-    /// [`Self::apply_hit`], and its bit latches so one swing connects
+    /// [`Self::apply_stance_hit`], and its bit latches so one swing connects
     /// at most once per enemy. `O(live entities)` with the
     /// per-axis/squared early-outs of [`arc_hits_circle`]; the owning
     /// game clears `already_hit` when a new swing starts. Bit `i`
@@ -1098,7 +1214,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 || occluded(entity, self.position(entity));
             if !skip {
                 *already_hit |= mask;
-                let outcome = self.apply_hit(records, entity, channel, damage, poise_damage);
+                let outcome = self.apply_stance_hit(records, entity, channel, damage, poise_damage);
                 stats.hits += u16::from(outcome.connected);
                 stats.staggers += u16::from(outcome.staggered);
                 stats.deaths += u16::from(outcome.died);
@@ -1183,6 +1299,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 index += 1;
                 continue;
             }
+            self.advance_stance_swap(index, delta_ticks);
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             let activation_allows = if self.spatial_activation_enabled {
@@ -1287,7 +1404,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         index < self.count()
             && attack.tick_generation == self.attack_tick_generation
             && attack.swing_sequence == self.attack_sequence[index]
-            && self.attack_hit[index] == 0
+            && self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED == 0
     }
 
     /// Test the explicitly legacy Character-radius/front-arc contact policy for
@@ -1341,7 +1458,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if !self.deferred_attack_can_connect(attack) {
             return false;
         }
-        self.attack_hit[attack.entity()] = 1;
+        self.combat_flags[attack.entity()] |= GAME_ENTITY_ATTACK_CONNECTED;
         true
     }
 
@@ -1464,9 +1581,12 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             GameEntityState::Attack => {
                 stats.attack_enters += 1;
                 // A fresh swing gets one connection.
-                self.attack_hit[index] = 0;
+                self.combat_flags[index] &= !GAME_ENTITY_ATTACK_CONNECTED;
                 self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
             }
+            // Recover is the player's punish window, so rotate the guard here:
+            // the twelve-tick colour sweep reads before another attack grant.
+            GameEntityState::Recover => self.mutate_stance(index),
             _ => {}
         }
     }
@@ -1484,7 +1604,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         stats: &mut GameEntityTickStats,
     ) {
         if self.selected_attack_is_ranged(index)
-            || self.attack_hit[index] != 0
+            || self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED != 0
             || input.player_invulnerable
             || input.player_room != record.room
         {
@@ -1505,7 +1625,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if !arc_hits_circle(&arc, input.player[0], input.player[2], 0) {
             return;
         }
-        self.attack_hit[index] = 1;
+        self.combat_flags[index] |= GAME_ENTITY_ATTACK_CONNECTED;
         stats.player_hits += 1;
         stats.player_damage = stats.player_damage.saturating_add(record.touch_damage);
     }
@@ -3429,6 +3549,45 @@ mod tests {
         assert_eq!(entities.health_channel(0, VitalityChannelId::Two), 40);
     }
 
+    #[test]
+    fn guarded_and_exposed_hits_use_half_and_half_again_damage() {
+        let mut guarded = GameEntities::<8>::EMPTY;
+        guarded.spawn_from_records(&DUAL_ENEMY);
+        let hit = guarded.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 40, 0);
+        assert!(hit.connected && !hit.died);
+        assert_eq!((guarded.health(0), guarded.health_secondary(0)), (40, 40));
+
+        let mut exposed = GameEntities::<8>::EMPTY;
+        exposed.spawn_from_records(&DUAL_ENEMY);
+        let hit = exposed.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::Two, 40, 0);
+        assert!(hit.connected && !hit.died);
+        // 1.5x = 60: Zenith's 40 drains first, then the remaining 20 spills.
+        assert_eq!((exposed.health(0), exposed.health_secondary(0)), (40, 0));
+    }
+
+    #[test]
+    fn recover_rotates_enemy_guard_and_reports_a_twelve_tick_tell() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&DUAL_ENEMY);
+        assert_eq!(entities.stance(0), VitalityChannelId::One);
+        assert_eq!(entities.stance_swap_progress_q12(0), 4096);
+
+        entities.enter_state(
+            0,
+            GameEntityState::Recover,
+            &mut GameEntityTickStats::default(),
+        );
+        assert_eq!(entities.stance(0), VitalityChannelId::Two);
+        assert_eq!(entities.stance_swap_progress_q12(0), 0);
+        assert!(entities.stance_swap_in_progress(0));
+
+        entities.advance_stance_swap(0, 6);
+        assert_eq!(entities.stance_swap_progress_q12(0), 2048);
+        entities.advance_stance_swap(0, 6);
+        assert_eq!(entities.stance_swap_progress_q12(0), 4096);
+        assert!(!entities.stance_swap_in_progress(0));
+    }
+
     /// A hit inside the named channel's pool never touches the other one.
     /// This is the whole reason the channel is threaded down from the swing.
     #[test]
@@ -3760,7 +3919,7 @@ mod tests {
                 deaths: 0
             }
         );
-        assert_eq!(entities.health(0), 70);
+        assert_eq!(entities.health(0), 85);
         assert_eq!(probed, Some((0, entities.position(0))));
         assert_ne!(swing, 0);
     }
@@ -3786,7 +3945,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            30,
+            60,
             40,
             &mut swing,
         );
@@ -3804,7 +3963,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            30,
+            60,
             40,
             &mut swing,
         );
@@ -3815,7 +3974,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            30,
+            60,
             40,
             &mut swing,
         );
@@ -3827,7 +3986,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            30,
+            60,
             40,
             &mut swing,
         );

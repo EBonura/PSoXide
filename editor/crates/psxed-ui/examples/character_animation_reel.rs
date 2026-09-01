@@ -17,8 +17,8 @@ use image::{ImageBuffer, Rgba};
 use psx_asset::{Animation, Texture};
 use psxed_project::{MaterialAnimationMode, ProjectDocument, Resource, ResourceData, ResourceId};
 use psxed_ui::model_import_preview::{
-    render_import_model_preview_with_equipment_banks, ImportPreviewOptions,
-    PreviewEquippedWeapon, PreviewMaterialLayer,
+    render_import_model_preview_with_equipment_banks, ImportPreviewOptions, PreviewEquippedWeapon,
+    PreviewMaterialLayer,
 };
 
 const OUTPUT_FPS: u16 = 30;
@@ -210,21 +210,19 @@ fn render_clip(
             } else {
                 runtime_light_weapon_materialization(clip_name, animation, sample_time)
             };
-            materialization.map(
-                |materialization_q12| PreviewEquippedWeapon {
-                    model_bytes: &weapon.model_bytes,
-                    atlas_banks: std::slice::from_ref(&weapon.atlas),
-                    socket_joint: weapon.socket_joint,
-                    socket_translation: weapon.socket_translation,
-                    socket_rotation_q12: weapon.socket_rotation_q12,
-                    grip_translation: weapon.grip_translation,
-                    grip_rotation_q12: weapon.grip_rotation_q12,
-                    materialization_q12,
-                    wireframe_materialization: !weapon.persistent,
-                    trail: None,
-                    show_grip_gizmo: false,
-                },
-            )
+            materialization.map(|materialization_q12| PreviewEquippedWeapon {
+                model_bytes: &weapon.model_bytes,
+                atlas_banks: std::slice::from_ref(&weapon.atlas),
+                socket_joint: weapon.socket_joint,
+                socket_translation: weapon.socket_translation,
+                socket_rotation_q12: weapon.socket_rotation_q12,
+                grip_translation: weapon.grip_translation,
+                grip_rotation_q12: weapon.grip_rotation_q12,
+                materialization_q12,
+                wireframe_materialization: !weapon.persistent,
+                trail: None,
+                show_grip_gizmo: false,
+            })
         });
         let options = ImportPreviewOptions {
             world_height: i32::from(preview.model.world_height),
@@ -487,27 +485,28 @@ fn decode_atlas_banks(bytes: &[u8]) -> Vec<ColorImage> {
             for y in 0..height {
                 for x in 0..width {
                     let raw = match texture.depth() as u8 {
-                4 => {
-                    let packed = pixels[y * row_bytes + x / 2];
-                    let index = if x & 1 == 0 {
-                        packed & 0x0f
-                    } else {
-                        packed >> 4
+                        4 => {
+                            let packed = pixels[y * row_bytes + x / 2];
+                            let index = if x & 1 == 0 {
+                                packed & 0x0f
+                            } else {
+                                packed >> 4
+                            };
+                            let offset = (bank * entries_per_bank + usize::from(index)) * 2;
+                            u16::from_le_bytes([clut[offset], clut[offset + 1]])
+                        }
+                        8 => {
+                            let offset = (bank * entries_per_bank
+                                + usize::from(pixels[y * row_bytes + x]))
+                                * 2;
+                            u16::from_le_bytes([clut[offset], clut[offset + 1]])
+                        }
+                        15 => {
+                            let offset = y * row_bytes + x * 2;
+                            u16::from_le_bytes([pixels[offset], pixels[offset + 1]])
+                        }
+                        _ => unreachable!("Texture rejects unsupported depths"),
                     };
-                    let offset = (bank * entries_per_bank + usize::from(index)) * 2;
-                    u16::from_le_bytes([clut[offset], clut[offset + 1]])
-                }
-                8 => {
-                    let offset =
-                        (bank * entries_per_bank + usize::from(pixels[y * row_bytes + x])) * 2;
-                    u16::from_le_bytes([clut[offset], clut[offset + 1]])
-                }
-                15 => {
-                    let offset = y * row_bytes + x * 2;
-                    u16::from_le_bytes([pixels[offset], pixels[offset + 1]])
-                }
-                _ => unreachable!("Texture rejects unsupported depths"),
-            };
                     decoded[y * width + x] = Color32::from_rgb(
                         ((raw & 31) * 255 / 31) as u8,
                         (((raw >> 5) & 31) * 255 / 31) as u8,

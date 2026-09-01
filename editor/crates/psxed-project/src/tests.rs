@@ -5059,7 +5059,10 @@ fn a_placement_with_a_loadout_carries_that_loadout_instead_of_the_default() {
     // An unarmed loadout is a real answer, not a missing one: it must not
     // fall through to the default the way an absent selection does.
     assert!(character.equipment_for(Some(0)).is_empty());
-    assert_eq!(character.equipment_for(Some(1))[0].weapon, Some(heavy_sword));
+    assert_eq!(
+        character.equipment_for(Some(1))[0].weapon,
+        Some(heavy_sword)
+    );
 }
 
 #[test]

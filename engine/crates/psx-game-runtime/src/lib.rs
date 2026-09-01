@@ -39,6 +39,7 @@ pub mod save;
 pub mod schedule;
 pub mod sky;
 pub mod vitality;
+pub mod vitality_circles;
 pub mod vram;
 pub mod water;
 pub mod world_cells;

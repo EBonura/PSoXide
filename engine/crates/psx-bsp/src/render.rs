@@ -184,6 +184,11 @@ const ALIAS_MODEL_ROTATES: u8 = 8;
 const PXBSP_MATERIAL_TICKS_PER_SECOND: i64 = 60;
 const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
 const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
+/// The third-person camera exposes large, oblique floor polygons much farther
+/// from the near plane than Quake's first-person view. Keep one profile
+/// authority for every world, special-surface and alias submission so their
+/// shared edges cross subdivision bands together.
+const PXBSP_RENDER_PROFILE: ClassicAffineProfile = ClassicAffineProfile::PXBSP_THIRD_PERSON;
 
 /// Q20.12 world camera and Q0.12 turn angles.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1226,7 +1231,7 @@ impl Renderer {
                             texture.texture_page,
                             CLUT_DEFAULT,
                             special_texture_window(texture).word(),
-                            ClassicAffineProfile::QUAKE_REFERENCE,
+                            PXBSP_RENDER_PROFILE,
                         )
                     };
                     next = submitted.next_packet;
@@ -1991,7 +1996,7 @@ impl Renderer {
                     header.skins[skin].texture_page,
                     CLUT_DEFAULT,
                     tint,
-                    ClassicAffineProfile::QUAKE_REFERENCE,
+                    PXBSP_RENDER_PROFILE,
                 )
             };
             next = submitted.next_packet;
@@ -2936,7 +2941,7 @@ unsafe fn flush_batch(
             surfaces.as_ptr(),
             surface_count,
             output,
-            ClassicAffineProfile::QUAKE_REFERENCE,
+            PXBSP_RENDER_PROFILE,
         )
     }
 }
@@ -2962,14 +2967,7 @@ unsafe fn flush_pxbsp_batch(
             surfaces.as_ptr(),
             surface_count,
             output,
-            // The extended third-person profile keeps subdivision active at
-            // twice Quake's distance for every brush surface. On dense PXBSP
-            // scenes that multiplies both transform work and packet pressure,
-            // including for walls that do not benefit from the extra splits.
-            // Keep the proven Quake depth bands as the global baseline; a
-            // future quality pass can selectively extend them for nearby
-            // floor surfaces under a bounded per-frame packet budget.
-            ClassicAffineProfile::QUAKE_REFERENCE,
+            PXBSP_RENDER_PROFILE,
         )
     }
 }
@@ -3803,6 +3801,17 @@ mod tests {
 #[cfg(test)]
 mod frustum_tests {
     use super::*;
+
+    #[test]
+    fn pxbsp_renderer_uses_the_third_person_affine_profile() {
+        assert_eq!(
+            PXBSP_RENDER_PROFILE,
+            ClassicAffineProfile::PXBSP_THIRD_PERSON
+        );
+        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_once_at, 272);
+        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_twice_at, 136);
+        assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);
+    }
 
     /// The Newton-with-division form `isqrt_i64` replaced, kept as the oracle.
     fn newton_isqrt_i64(value: i64) -> i64 {

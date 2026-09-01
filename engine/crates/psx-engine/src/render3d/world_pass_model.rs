@@ -91,9 +91,7 @@ fn camera_crystal_packet_materials(
         // the modulation at or below neutral prevents editor/runtime whites
         // from diverging through PS1 color saturation.
         let scale_q7 = (band_q7 + view_bias_q7).clamp(56, 128);
-        let channel = |value: u8| {
-            ((i32::from(value) * scale_q7 + 64) >> 7).clamp(0, 255) as u8
-        };
+        let channel = |value: u8| ((i32::from(value) * scale_q7 + 64) >> 7).clamp(0, 255) as u8;
         material
             .with_tint((channel(base.0), channel(base.1), channel(base.2)))
             .textured_packet_material()
@@ -922,12 +920,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let mut faces_considered = 0u32;
         let packet_material = material.textured_packet_material();
-        let camera_crystal_materials = match options.model_uv_mapping {
-            ModelUvMapping::CameraCrystal { roughness } => Some(
-                camera_crystal_packet_materials(material, view_instance, roughness),
-            ),
-            _ => None,
-        };
+        let camera_crystal_materials =
+            match options.model_uv_mapping {
+                ModelUvMapping::CameraCrystal { roughness } => Some(
+                    camera_crystal_packet_materials(material, view_instance, roughness),
+                ),
+                _ => None,
+            };
         let packed_fast_faces =
             options.split_textured_triangles && options.textured_split_max_edge == 0;
         let packed_back_in_front_faces = packed_fast_faces

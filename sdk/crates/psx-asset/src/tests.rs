@@ -973,8 +973,8 @@ mod pre_change {
         let mut flat = [0i16; 6];
         for pair in 0..3 {
             let o = pair * 3;
-            let packed = (record[o] as u32) | ((record[o + 1] as u32) << 8)
-                | ((record[o + 2] as u32) << 16);
+            let packed =
+                (record[o] as u32) | ((record[o + 1] as u32) << 8) | ((record[o + 2] as u32) << 16);
             flat[pair * 2] = decode_q11_element((packed & 0x0fff) as u16);
             flat[pair * 2 + 1] = decode_q11_element(((packed >> 12) & 0x0fff) as u16);
         }
@@ -1059,7 +1059,11 @@ impl Rng {
 fn wide_q11_decode_equals_narrow_for_every_code() {
     for raw in 0..=0x0fffu16 {
         let narrow = super::decode_q11_element(raw);
-        assert_eq!(narrow, pre_change::decode_q11_element(raw), "code {raw:#05x}");
+        assert_eq!(
+            narrow,
+            pre_change::decode_q11_element(raw),
+            "code {raw:#05x}"
+        );
         assert_eq!(
             super::decode_q11_element_wide(raw),
             narrow as i32,
@@ -1120,9 +1124,7 @@ fn third_basis_reconstruction_matches_the_array_form() {
 
     // Plus a wide random sweep over the full decoded-element range.
     for _ in 0..200_000 {
-        let mut element = || {
-            super::decode_q11_element((rng.next() & 0x0fff) as u16)
-        };
+        let mut element = || super::decode_q11_element((rng.next() & 0x0fff) as u16);
         let first = [element(), element(), element()];
         let second = [element(), element(), element()];
         let correction_byte = (rng.next() & 0xff) as u8;
@@ -1246,8 +1248,7 @@ fn v4_interpolated_pose_is_bit_identical_to_the_pre_change_decode() {
     let mut compared = 0u64;
 
     for shift in [0u16, 1, 4, 9, 15] {
-        let mut records =
-            std::vec![0u8; JOINTS as usize * FRAMES as usize * REC];
+        let mut records = std::vec![0u8; JOINTS as usize * FRAMES as usize * REC];
         for byte in records.iter_mut() {
             *byte = (rng.next() >> 7) as u8;
         }
@@ -1265,13 +1266,12 @@ fn v4_interpolated_pose_is_bit_identical_to_the_pre_change_decode() {
                     let stride = joint as usize * REC;
                     let a = &records[sample.base_frame_offset + stride..][..REC];
                     let b = &records[sample.next_frame_offset + stride..][..REC];
-                    let expected = if sample.alpha_q12 == 0
-                        || sample.base_frame == sample.next_frame
-                    {
-                        pre_change::joint_pose(a, shift as u8)
-                    } else {
-                        pre_change::interpolated(a, b, shift as u8, sample.alpha_q12)
-                    };
+                    let expected =
+                        if sample.alpha_q12 == 0 || sample.base_frame == sample.next_frame {
+                            pre_change::joint_pose(a, shift as u8)
+                        } else {
+                            pre_change::interpolated(a, b, shift as u8, sample.alpha_q12)
+                        };
                     assert_eq!(
                         sample.pose(joint),
                         Some(expected),
@@ -1318,7 +1318,11 @@ fn v4_fast_path_and_unaligned_pool_agree_on_random_records() {
                 let a = aligned.looped_pose_sample_q12(phase).unwrap();
                 let b = skewed.looped_pose_sample_q12(phase).unwrap();
                 for joint in 0..JOINTS {
-                    assert_eq!(a.pose(joint), b.pose(joint), "phase {phase:#x} joint {joint}");
+                    assert_eq!(
+                        a.pose(joint),
+                        b.pose(joint),
+                        "phase {phase:#x} joint {joint}"
+                    );
                 }
             }
         }

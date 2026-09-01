@@ -26,6 +26,27 @@ unsafe fn initialized_prefix_mut<T>(
     unsafe { core::slice::from_raw_parts_mut(values.as_mut_ptr().cast::<T>(), len) }
 }
 
+/// True once for each authored gait foot-down phase (frame zero and halfway
+/// around the loop). local_tick may grow beyond one cycle, so the bucket
+/// comparison handles wrap without retaining another per-player timer.
+fn gait_footstep_crossed(
+    moved: bool,
+    was_gait: bool,
+    local_tick: u32,
+    delta_ticks: u16,
+    cycle_ticks: u32,
+) -> bool {
+    if !moved || cycle_ticks == 0 {
+        return false;
+    }
+    if !was_gait {
+        return true;
+    }
+    let beat = (cycle_ticks / 2).max(1);
+    let previous = local_tick.saturating_sub(u32::from(delta_ticks));
+    local_tick / beat != previous / beat
+}
+
 impl Playtest {
     /// Phase-3 gameplay layer tick: entity state machines (moved
     /// through the engine motor's collision by [`SceneEntityMover`]),
@@ -401,6 +422,7 @@ impl Playtest {
         // would mean no damage and no recovery at all, so it is set explicitly
         // on every reset rather than relying on the zero pattern.
         self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.vitality_circles = VitalityCircleState::EMPTY;
         self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
@@ -478,7 +500,16 @@ impl Playtest {
         // only the inactive one recovers, so this is both the defensive and the
         // healing move. A refused press is silent: the cooldown and a broken
         // target are the two reasons, and both are already on the HUD.
-        if ctx.just_pressed(button::TRIANGLE) {
+        let circle_position = self.motor.position();
+        let circle_locks_stance = self.vitality_circles.tick(
+            VITALITY_CIRCLES,
+            self.room_index,
+            circle_position.x,
+            circle_position.z,
+            self.player_stance.active(),
+            &mut self.player_vitality,
+        );
+        if ctx.just_pressed(button::TRIANGLE) && !circle_locks_stance {
             let config = self.player_stance_config;
             if self.player_stance.request_swap(&config).is_some() {
                 telemetry::debug_log("player stance:swap");
@@ -508,6 +539,7 @@ impl Playtest {
             self.lock_invalid_ticks = 0;
             self.soft_lock_target = None;
         }
+        #[cfg(feature = "collision-debug-overlay")]
         if ctx.just_pressed(COLLISION_DEBUG_BUTTON) {
             self.show_collision_debug = !self.show_collision_debug;
         }
@@ -849,6 +881,7 @@ impl Playtest {
             }
         }
 
+        let previous_anim = self.anim_state;
         let new_state = if self.anim_lock_until_tick > now {
             // Any locked action (attack, evade, hit) cancels the walk phases.
             self.loco = LocoPhase::Idle;
@@ -869,6 +902,29 @@ impl Playtest {
             if new_state.is_motor_fixed_action() {
                 if let Some(character) = self.character {
                     self.lock_player_anim_action(&character, new_state, now, ctx.video_hz);
+                }
+            }
+        }
+        if self.anim_state.is_gait() && motor_frame.moved {
+            if let Some(character) = self.character {
+                let cycle = self
+                    .player_clip_duration_vblanks(
+                        &character,
+                        character.clip_for(self.anim_state),
+                        ctx.video_hz,
+                        self.player_action_speed_q8(&character, self.anim_state),
+                        character.action_frame_range(self.anim_state.action()),
+                    )
+                    .unwrap_or(0);
+                let local_tick = now.saturating_sub(self.anim_start_tick);
+                if gait_footstep_crossed(
+                    true,
+                    previous_anim.is_gait(),
+                    local_tick,
+                    delta_vblanks,
+                    cycle,
+                ) {
+                    self.queue_gameplay_sfx(LevelGameplaySfxEvent::Footstep);
                 }
             }
         }
@@ -968,6 +1024,26 @@ impl Playtest {
         {
             ctx.request_scene_state(state.id);
         }
+    }
+}
+
+#[cfg(test)]
+mod gameplay_audio_tests {
+    use super::gait_footstep_crossed;
+
+    #[test]
+    fn footstep_is_edge_triggered_at_half_cycle() {
+        assert!(!gait_footstep_crossed(true, true, 14, 1, 30));
+        assert!(gait_footstep_crossed(true, true, 15, 1, 30));
+        assert!(!gait_footstep_crossed(true, true, 16, 1, 30));
+        assert!(gait_footstep_crossed(true, true, 30, 1, 30));
+    }
+
+    #[test]
+    fn footstep_requires_real_movement_and_valid_cycle() {
+        assert!(!gait_footstep_crossed(false, true, 15, 1, 30));
+        assert!(!gait_footstep_crossed(true, true, 15, 1, 0));
+        assert!(gait_footstep_crossed(true, false, 0, 1, 30));
     }
 }
 
@@ -1253,23 +1329,39 @@ impl Playtest {
         }
     }
 
-    /// Direct four-button attack layout: R1/R2 are light/heavy Horizon swings;
-    /// L1/L2 are light/heavy Zenith strikes. A missing clip leaves only that
-    /// one input unavailable. Heavy bindings are checked first so pressing
-    /// both buttons on one shoulder in the same tick resolves predictably.
+    /// Stance-relative four-button attack layout. R1/R2 are the active
+    /// channel's light/heavy attacks; L1/L2 retain the opposite channel. A
+    /// missing clip leaves only that one input unavailable. Heavy bindings
+    /// are checked first so pressing both buttons on one shoulder in the same
+    /// tick resolves predictably.
     ///
     /// Returns true while an attack owns the player's input.
     fn update_attack_input(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
-        const ATTACKS: [(u16, PlayerAnim); 4] = [
-            (HORIZON_HEAVY_ATTACK_BUTTON, PlayerAnim::HeavyAttack),
-            (HORIZON_LIGHT_ATTACK_BUTTON, PlayerAnim::LightAttack),
-            (ZENITH_HEAVY_ATTACK_BUTTON, PlayerAnim::VertHeavyAttack),
-            (ZENITH_LIGHT_ATTACK_BUTTON, PlayerAnim::VertLightAttack),
-        ];
         if action_locked || !self.motor.action().is_idle() {
             return false;
         }
-        for (button, anim) in ATTACKS {
+        let (active_heavy, active_light, opposite_heavy, opposite_light) =
+            match self.player_stance.active() {
+                VitalityChannelId::One => (
+                    PlayerAnim::HeavyAttack,
+                    PlayerAnim::LightAttack,
+                    PlayerAnim::VertHeavyAttack,
+                    PlayerAnim::VertLightAttack,
+                ),
+                VitalityChannelId::Two => (
+                    PlayerAnim::VertHeavyAttack,
+                    PlayerAnim::VertLightAttack,
+                    PlayerAnim::HeavyAttack,
+                    PlayerAnim::LightAttack,
+                ),
+            };
+        let attacks = [
+            (ACTIVE_HEAVY_ATTACK_BUTTON, active_heavy),
+            (ACTIVE_LIGHT_ATTACK_BUTTON, active_light),
+            (OPPOSITE_HEAVY_ATTACK_BUTTON, opposite_heavy),
+            (OPPOSITE_LIGHT_ATTACK_BUTTON, opposite_light),
+        ];
+        for (button, anim) in attacks {
             if !ctx.just_pressed(button) {
                 continue;
             }

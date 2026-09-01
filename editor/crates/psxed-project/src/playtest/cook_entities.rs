@@ -427,8 +427,7 @@ pub(crate) fn cooked_game_entity_attack_active_ticks(
     // multiply exactly. The guest receives finished u16 state timings and
     // performs no wide arithmetic for this transition.
     let phase_step_q12 = ((u64::from(base_step_q12) * u64::from(speed_q8.max(1)))
-        / u64::from(psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8))
-        as u32;
+        / u64::from(psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8)) as u32;
     let final_unique_frame = frame_count.unwrap_or(0).saturating_sub(2);
     let start_frame = frame_range.start.min(final_unique_frame);
     let end_frame = if frame_range.end == psx_level::CHARACTER_ACTION_FRAME_END_FULL {

@@ -1254,6 +1254,16 @@ impl EditorWorkspace {
                     enabled: true,
                 },
             ),
+            PlaceKind::VitalityCircle => (
+                "Horizon Vitality Circle".to_string(),
+                NodeKind::VitalityCircle {
+                    axis: psxed_project::VitalityCircleAxis::Horizon,
+                    radius: psxed_project::default_vitality_circle_radius(),
+                    refill_per_second: psxed_project::default_vitality_circle_refill_rate(),
+                    drain_per_second: psxed_project::default_vitality_circle_drain_rate(),
+                    enabled: true,
+                },
+            ),
             PlaceKind::PointOfInterest => unreachable!("handled above"),
         };
         self.push_undo();

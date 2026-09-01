@@ -48,9 +48,10 @@
 
 use psx_gpu::draw_quad_flat;
 use psx_level::{
-    first_focus, next_focus, scene_state_flags, ui_node_flags, FlowState, GameFlow, LevelOptionDef,
-    LevelSceneState, LevelTransition, LevelTransitionKind, LevelUiAction, LevelUiNodeKind,
-    LevelUiNodeRecord, LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord,
+    first_focus, next_focus, scene_state_flags, ui_node_flags, FlowState, GameFlow,
+    LevelGameplaySfxCueRecord, LevelGameplaySfxEvent, LevelOptionDef, LevelSceneState,
+    LevelTransition, LevelTransitionKind, LevelUiAction, LevelUiNodeKind, LevelUiNodeRecord,
+    LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord,
     LevelUiValueBinding, LevelWorldLayer, NavDir, NavRect, SCENE_STATE_NONE, UI_OPTION_NONE,
     UI_SCENE_NONE, UI_SFX_NONE,
 };
@@ -110,6 +111,10 @@ const UI_SFX_SAMPLE_BASE_BYTES: u32 = 0x30000;
 const UI_SFX_VOICE_BASE: u8 = 20;
 #[cfg(target_arch = "mips")]
 const UI_SFX_VOICE_COUNT: u8 = 4;
+#[cfg(target_arch = "mips")]
+const GAMEPLAY_SFX_VOICE_BASE: u8 = 16;
+#[cfg(target_arch = "mips")]
+const GAMEPLAY_SFX_VOICE_COUNT: u8 = 4;
 const CDDA_RETRY_TICKS: u32 = 60;
 const CDDA_STATUS_TICKS: u32 = 30;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
@@ -486,6 +491,14 @@ fn scaled_pitch(base_q12: u16, multiplier_q12: u16) -> psx_spu::Pitch {
     psx_spu::Pitch::raw(raw.clamp(1, 0x3FFF) as u16)
 }
 
+#[inline]
+fn gameplay_sfx_cue_for_event(
+    cues: &[LevelGameplaySfxCueRecord],
+    event: LevelGameplaySfxEvent,
+) -> Option<LevelGameplaySfxCueRecord> {
+    cues.iter().copied().find(|cue| cue.event == event)
+}
+
 #[cfg(target_arch = "mips")]
 fn cdda_route_audio(volume_percent: u8) {
     cdda_set_volume(volume_percent);
@@ -729,6 +742,8 @@ pub struct GameApp<'a, S: Scene> {
     pub ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
     /// Cooked UI SFX cues, sliced by per-node `sfx_first` / `sfx_count`.
     pub ui_sfx_cues: &'static [LevelUiSfxCueRecord],
+    /// Gameplay cues backed by the same uploaded sample bank.
+    pub gameplay_sfx_cues: &'static [LevelGameplaySfxCueRecord],
     /// Borrowed gameplay scene. Not owned, so the caller keeps it.
     pub gameplay: &'a mut S,
     /// Where in the flow we currently are.
@@ -748,6 +763,9 @@ pub struct GameApp<'a, S: Scene> {
     ui_sfx_runtime_len: usize,
     /// Round-robin cursor for choosing cue variants and voices.
     ui_sfx_cursor: u16,
+    /// Round-robin gameplay voice cursor. Kept separate from UI voices so a
+    /// world impact cannot steal a menu confirmation.
+    gameplay_sfx_cursor: u8,
     /// Active full-screen transition, if a button-triggered flow change is
     /// delaying the cursor switch.
     transition: Option<FlowTransition>,
@@ -858,6 +876,34 @@ impl<'a, S: Scene> GameApp<'a, S> {
         loading_scene: u16,
         gameplay: &'a mut S,
     ) -> Self {
+        Self::new_with_gameplay_sfx(
+            flow,
+            scenes,
+            nodes,
+            paints,
+            options,
+            ui_sfx_samples,
+            ui_sfx_cues,
+            &[],
+            loading_scene,
+            gameplay,
+        )
+    }
+
+    /// Build a flow driver with the optional resident gameplay cue table.
+    #[inline]
+    pub fn new_with_gameplay_sfx(
+        flow: &'static GameFlow,
+        scenes: &'static [LevelUiScene],
+        nodes: &'static [LevelUiNodeRecord],
+        paints: &'static [psx_level::LevelUiPaintRecord],
+        options: &'static [LevelOptionDef],
+        ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
+        ui_sfx_cues: &'static [LevelUiSfxCueRecord],
+        gameplay_sfx_cues: &'static [LevelGameplaySfxCueRecord],
+        loading_scene: u16,
+        gameplay: &'a mut S,
+    ) -> Self {
         let mut option_values = [0i32; MAX_OPTIONS];
         let option_len = options.len().min(MAX_OPTIONS);
         for (slot, option) in option_values[..option_len].iter_mut().zip(options) {
@@ -871,6 +917,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             options,
             ui_sfx_samples,
             ui_sfx_cues,
+            gameplay_sfx_cues,
             gameplay,
             cursor: FlowCursor::new(flow.entry),
             option_values,
@@ -879,6 +926,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             ui_sfx_runtime_samples: [UiSfxRuntimeSample::EMPTY; MAX_UI_SFX_SAMPLES],
             ui_sfx_runtime_len: 0,
             ui_sfx_cursor: 0,
+            gameplay_sfx_cursor: 0,
             transition: None,
             ui_activation: None,
             loading_exit_transition: None,
@@ -1010,6 +1058,55 @@ impl<'a, S: Scene> GameApp<'a, S> {
         if let Some(cue) = selected {
             self.play_ui_sfx_cue(cue);
         }
+    }
+
+    fn play_gameplay_sfx_events(&mut self, events: u8) {
+        const EVENTS: [LevelGameplaySfxEvent; 5] = [
+            LevelGameplaySfxEvent::Footstep,
+            LevelGameplaySfxEvent::LightHit,
+            LevelGameplaySfxEvent::HeavyHit,
+            LevelGameplaySfxEvent::PlayerDamage,
+            LevelGameplaySfxEvent::EnemyDeath,
+        ];
+        for event in EVENTS {
+            if events & event.bit() == 0 {
+                continue;
+            }
+            if let Some(cue) = gameplay_sfx_cue_for_event(self.gameplay_sfx_cues, event) {
+                self.play_gameplay_sfx_cue(cue);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "mips")]
+    fn play_gameplay_sfx_cue(&mut self, cue: LevelGameplaySfxCueRecord) {
+        let Some(sample) = self
+            .ui_sfx_runtime_samples
+            .get(cue.sample as usize)
+            .copied()
+            .filter(|sample| sample.loaded)
+        else {
+            return;
+        };
+        let voice_index =
+            GAMEPLAY_SFX_VOICE_BASE + (self.gameplay_sfx_cursor % GAMEPLAY_SFX_VOICE_COUNT);
+        self.gameplay_sfx_cursor = self.gameplay_sfx_cursor.wrapping_add(1);
+        let pitch = scaled_pitch(sample.base_pitch_q12, cue.pitch_q12);
+        let volume = psx_spu::Volume::linear(cue.volume_percent.min(100) as u16, 100);
+        let resident =
+            psx_sfx::Sample::resident(psx_spu::SpuAddr::new(sample.addr_bytes), 44_100, 0);
+        psx_sfx::OneShot::new(resident, volume)
+            .with_pitch(pitch)
+            // Adsr::sample has an infinite release on real silicon after END.
+            // Percussive terminates this event voice and is safe for resident
+            // one-shots that have no scheduled length cutoff.
+            .with_adsr(psx_spu::Adsr::percussive())
+            .play(psx_spu::Voice::new(voice_index));
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    fn play_gameplay_sfx_cue(&mut self, _cue: LevelGameplaySfxCueRecord) {
+        self.gameplay_sfx_cursor = self.gameplay_sfx_cursor.wrapping_add(1);
     }
 
     #[cfg(target_arch = "mips")]
@@ -2147,7 +2244,13 @@ fn resolve_ui_value(
         | LevelUiValueBinding::PlayerStanceSwapProgress
         | LevelUiValueBinding::PlayerStanceActiveIsZenith
         | LevelUiValueBinding::PlayerStanceActiveBroken
-        | LevelUiValueBinding::PlayerStanceInactiveBroken => gameplay_value(binding).unwrap_or(0),
+        | LevelUiValueBinding::PlayerStanceInactiveBroken
+        | LevelUiValueBinding::TargetHealth
+        | LevelUiValueBinding::TargetHealthMax
+        | LevelUiValueBinding::TargetHealthSecondary
+        | LevelUiValueBinding::TargetHealthSecondaryMax
+        | LevelUiValueBinding::TargetStanceSwapProgress
+        | LevelUiValueBinding::TargetStanceActiveIsZenith => gameplay_value(binding).unwrap_or(0),
     }
 }
 
@@ -2265,6 +2368,8 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             } else {
                 self.gameplay.update(ctx);
             }
+            let gameplay_sfx_events = self.gameplay.take_gameplay_sfx_events();
+            self.play_gameplay_sfx_events(gameplay_sfx_events);
             // A world that has just decided the run is over (win, loss, a
             // scripted end) moves the flow here, through the same funnel and
             // the same project-wide transition a button would use. Read after
@@ -2397,6 +2502,32 @@ mod tests {
     use crate::frames::{SimTick, VideoHz, VisualFrame};
     use psx_gpu::framebuf::FrameBuffer;
     use psx_pad::ButtonState;
+
+    #[test]
+    fn gameplay_sfx_routes_only_the_requested_confirmed_event() {
+        let cues = [
+            LevelGameplaySfxCueRecord {
+                sample: 4,
+                event: LevelGameplaySfxEvent::Footstep,
+                volume_percent: 50,
+                pitch_q12: 4096,
+                flags: 0,
+            },
+            LevelGameplaySfxCueRecord {
+                sample: 9,
+                event: LevelGameplaySfxEvent::HeavyHit,
+                volume_percent: 90,
+                pitch_q12: 4096,
+                flags: 0,
+            },
+        ];
+        assert_eq!(
+            gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::HeavyHit)
+                .map(|cue| cue.sample),
+            Some(9)
+        );
+        assert!(gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::EnemyDeath).is_none());
+    }
 
     #[test]
     fn authored_loading_progress_is_monotonic_and_visibly_catches_up() {

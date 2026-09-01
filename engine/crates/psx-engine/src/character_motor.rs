@@ -3496,12 +3496,20 @@ mod tests {
         // Flat ground and a gentle ramp are floor.
         assert_eq!(probe(4096), Some(1), "flat ground is floor");
         assert_eq!(probe(3547), Some(1), "a 30 degree ramp is floor");
-        assert_eq!(probe(MIN_WALKABLE_FLOOR_NORMAL_Y_Q12), Some(1), "the limit itself is floor");
+        assert_eq!(
+            probe(MIN_WALKABLE_FLOOR_NORMAL_Y_Q12),
+            Some(1),
+            "the limit itself is floor"
+        );
 
         // Anything steeper is a wall. Before the limit existed these all
         // reported floor, so a body could walk up an almost sheer brush: the
         // only test was that the upward component be positive at all.
-        assert_eq!(probe(MIN_WALKABLE_FLOOR_NORMAL_Y_Q12 - 1), None, "just past the limit is a wall");
+        assert_eq!(
+            probe(MIN_WALKABLE_FLOOR_NORMAL_Y_Q12 - 1),
+            None,
+            "just past the limit is a wall"
+        );
         assert_eq!(probe(2048), None, "a 60 degree face is a wall");
         assert_eq!(probe(41), None, "an almost vertical face is a wall");
         assert_eq!(probe(0), None, "a vertical wall is not floor");

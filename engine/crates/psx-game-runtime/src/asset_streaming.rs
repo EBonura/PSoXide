@@ -977,7 +977,10 @@ mod tests {
         // run on the console rather than at link time.
         let zeroed = PersistentAssetStreamer::<1, 2>::zeroed();
         assert_eq!(zeroed.failed_asset(), 0);
-        assert_eq!(PersistentAssetStreamer::<1, 2>::new().failed_asset(), ASSET_ID_UNKNOWN);
+        assert_eq!(
+            PersistentAssetStreamer::<1, 2>::new().failed_asset(),
+            ASSET_ID_UNKNOWN
+        );
     }
 
     #[test]

@@ -358,12 +358,7 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         self.step_inner(entity, room, position, dx, dz, radius, height, true)
     }
 
-    fn line_of_sight(
-        &mut self,
-        room: RoomIndex,
-        from: [i32; 3],
-        to: [i32; 3],
-    ) -> bool {
+    fn line_of_sight(&mut self, room: RoomIndex, from: [i32; 3], to: [i32; 3]) -> bool {
         if room != self.player_room {
             return false;
         }
@@ -795,6 +790,14 @@ impl Playtest {
         // still block the connection on BSP worlds.
         let player_eye = melee_eye_point([player.x, player.y, player.z]);
         let vitality_channel = Self::player_attack_channel(self.anim_state);
+        self.vitality_circles.claim_struck(
+            VITALITY_CIRCLES,
+            self.room_index,
+            player.x,
+            player.z,
+            spec.reach.clamp(0, i32::from(u16::MAX)) as u16,
+            vitality_channel,
+        );
         let outgoing_damage = self
             .vitality_modifiers()
             .outgoing_damage(vitality_channel, spec.damage);
@@ -1153,6 +1156,15 @@ impl Playtest {
         }
 
         let vitality_channel = Self::player_attack_channel(self.anim_state);
+        let player = self.motor.position();
+        self.vitality_circles.claim_struck(
+            VITALITY_CIRCLES,
+            self.room_index,
+            player.x,
+            player.z,
+            environment_reach.clamp(0, i32::from(u16::MAX)) as u16,
+            vitality_channel,
+        );
         let channel = match vitality_channel {
             VitalityChannelId::One => DamageChannel::Horizon,
             VitalityChannelId::Two => DamageChannel::Zenith,
@@ -1227,7 +1239,10 @@ impl Playtest {
                     }
                 }
                 self.swing_hit_mask |= mask;
-                let outcome = self.game_entities.apply_hit(
+                let applied_damage =
+                    self.game_entities
+                        .scaled_stance_damage(entity, vitality_channel, hit.damage);
+                let outcome = self.game_entities.apply_stance_hit(
                     GAME_ENTITIES,
                     entity,
                     vitality_channel,
@@ -1241,7 +1256,7 @@ impl Playtest {
                     self.damage_numbers.spawn(
                         struck_actor_anchor(position, entity_record.height),
                         entity_record.room,
-                        hit.damage,
+                        applied_damage,
                         damage_number_channel,
                         now,
                     );
@@ -1301,9 +1316,18 @@ impl Playtest {
         None
     }
 
-    fn report_player_melee_stats(&self, stats: MeleeArcStats) {
+    fn report_player_melee_stats(&mut self, stats: MeleeArcStats) {
         if stats.hits > 0 {
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
+            let event = if matches!(
+                self.anim_state,
+                PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+            ) {
+                LevelGameplaySfxEvent::HeavyHit
+            } else {
+                LevelGameplaySfxEvent::LightHit
+            };
+            self.queue_gameplay_sfx(event);
         }
         if stats.staggers > 0 {
             telemetry::counter(
@@ -1316,6 +1340,7 @@ impl Playtest {
                 telemetry::counter::GAME_ENTITY_DEATHS,
                 u32::from(stats.deaths),
             );
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyDeath);
         }
     }
 
