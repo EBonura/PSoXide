@@ -42,6 +42,7 @@ mod bsp_support;
 mod camera;
 mod overlays;
 mod particles;
+mod poi;
 mod primitives;
 
 use backdrop::*;
@@ -49,6 +50,7 @@ use bsp_support::*;
 use camera::*;
 use overlays::*;
 use particles::*;
+use poi::*;
 use primitives::*;
 
 /// Maximum sectors we'll attempt to render in one preview pass.
@@ -424,6 +426,18 @@ pub fn build_phase1_frame_reusing(
         hidden_scene_nodes,
         &mut scratch,
     );
+    // POI beacons are world geometry, not host UI. Submitting them into the
+    // same ordering table as the BSP lets nearer brush surfaces cover them,
+    // matching the runtime beacon instead of painting through walls.
+    walk_point_of_interest_beacons(
+        project,
+        hidden_scene_nodes,
+        selected,
+        hovered_entity_node,
+        entity_bounds,
+        preview_tick,
+        &mut scratch,
+    );
     // World-space light gizmos (BSP scenes): rooms never iterate here, so
     // roomless lights draw their ring + bulb right after the brushes,
     // while the camera GTE state is still installed.
@@ -465,10 +479,26 @@ pub fn build_phase1_frame_reusing(
     // would project entity bound lines into junk.
     let _ = setup_gte_for_camera(camera);
     if preview_bounds {
-        walk_entity_bounds(entity_bounds, selected, hovered_entity_node, &mut scratch);
+        walk_entity_bounds(
+            project,
+            world_camera,
+            hidden_scene_nodes,
+            entity_bounds,
+            selected,
+            hovered_entity_node,
+            &mut scratch,
+        );
     }
     if let Some((center, half_extents)) = selected_bounds {
-        if !selected_node_is_image_prop(project, selected) {
+        if !selected_node_is_image_prop(project, selected)
+            && !selected_point_light_bound_occluded(
+                project,
+                world_camera,
+                hidden_scene_nodes,
+                selected,
+                center,
+            )
+        {
             push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
         }
     }
@@ -1534,7 +1564,7 @@ fn resolve_and_draw_model_instances(
         };
         let origin = visual_model_origin(
             meta.origin,
-            model.bind_pose_floor_lift(),
+            preview_clip_floor_lift(&model, &animation),
             preview_local_to_world(&model, meta.visual_scale_q8),
             meta.visual_offset,
             meta.model_rotation,
@@ -1817,6 +1847,29 @@ fn preview_local_to_world(
         + (psxed_project::MODEL_SCALE_ONE_Q8 as u32 / 2))
         / psxed_project::MODEL_SCALE_ONE_Q8 as u32;
     psx_engine::LocalToWorldScale::from_q12(q12.clamp(1, u16::MAX as u32) as u16)
+}
+
+/// Origin-to-feet distance for the animation the editor actually draws.
+///
+/// Runtime character rendering grounds a clip from the lowest posed vertex of
+/// its first cooked frame. The editor used to lift every preview from the mesh
+/// bind pose instead, which is observably wrong for clips whose root pose moves
+/// the skeleton away from that bind pose (the Light Enemy idle is the clearest
+/// example). Use the same frame-pair bounds routine as the cooker so preview
+/// placement agrees with the game without mutating the authored transform.
+fn preview_clip_floor_lift(
+    model: &psx_asset::Model<'_>,
+    animation: &psx_asset::Animation<'_>,
+) -> i32 {
+    let cycle_frames = animation.frame_count().saturating_sub(1).max(1);
+    let next = if cycle_frames <= 1 { 0 } else { 1 };
+    let floor_y =
+        psxed_project::playtest::bake_model_frame_pair_bounds(model, animation, 0, next, 0).floor_y;
+    if floor_y < 0 {
+        floor_y.saturating_neg()
+    } else {
+        model.bind_pose_floor_lift()
+    }
 }
 
 fn visual_model_origin(
@@ -2389,4 +2442,51 @@ fn preview_model_material_override(
         }),
         face_sidedness: material.sidedness(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn light_enemy_preview_grounds_from_idle_pose_instead_of_bind_pose() {
+        let model = psx_asset::Model::from_bytes(include_bytes!(
+            "../../../../editor/projects/default/assets/models/rust_mantis/rust_mantis.psxmdl"
+        ))
+        .expect("tracked Light Enemy model");
+        let animation = psx_asset::Animation::from_bytes(include_bytes!(
+            "../../../../editor/projects/default/assets/animations/rust_mantis_starter/idle.psxanim"
+        ))
+        .expect("tracked Light Enemy idle clip");
+
+        let bind_lift = model.bind_pose_floor_lift();
+        let posed_lift = preview_clip_floor_lift(&model, &animation);
+        assert!(
+            posed_lift > bind_lift,
+            "fixture must expose the editor/runtime grounding mismatch: bind={bind_lift}, posed={posed_lift}"
+        );
+
+        let local_to_world = preview_local_to_world(&model, 448);
+        let rotation = yaw_rotation_q12(0);
+        let bind_origin = visual_model_origin(
+            psx_engine::WorldVertex::new(0, 0, 0),
+            bind_lift,
+            local_to_world,
+            [0, -640, 0],
+            rotation,
+        );
+        let posed_origin = visual_model_origin(
+            psx_engine::WorldVertex::new(0, 0, 0),
+            posed_lift,
+            local_to_world,
+            [0, -640, 0],
+            rotation,
+        );
+        assert!(
+            posed_origin.y > bind_origin.y,
+            "posed grounding must recover the buried preview: bind_y={}, posed_y={}",
+            bind_origin.y,
+            posed_origin.y,
+        );
+    }
 }

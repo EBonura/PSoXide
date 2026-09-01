@@ -684,6 +684,7 @@ fn cmd_info(paths: &ConfigPaths) -> Result<(), String> {
         fmt_empty(&settings.paths.game_library)
     );
     println!("  video.int.scale  : {}", settings.video.integer_scale);
+    println!("  video.ui.scale   : {}%", settings.video.ui_scale_pct);
     println!(
         "  emu.hle-bios-exe : {}",
         settings.emulator.hle_bios_for_side_load
@@ -3222,6 +3223,7 @@ fn headless_editor_viewport_image(
     let mut assets = crate::editor_assets::EditorAssets::new();
     assets.refresh(project, project_root);
     let hidden = HashSet::new();
+    let entity_bounds = editor.collect_entity_bounds(None);
     let mut frame = crate::editor_preview::build_phase1_frame(
         project,
         editor.viewport_3d_camera(),
@@ -3231,7 +3233,7 @@ fn headless_editor_viewport_image(
         NodeId::ROOT,
         None,
         None,
-        &[],
+        &entity_bounds,
         None,
         &textures,
         &assets,
@@ -3482,6 +3484,9 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
     let (project_root, project_file) = resolve_project_arg(&args.project);
     let project = ProjectDocument::load_from_path(&project_file)
         .map_err(|e| format!("load {}: {e}", project_file.display()))?;
+    let editor = EditorWorkspace::open_directory(&project_root)
+        .map_err(|error| format!("open editor project at {}: {error}", project_root.display()))?;
+    let entity_bounds = editor.collect_entity_bounds(None);
 
     let camera = ViewportCameraState {
         mode: ViewportCameraMode::Orbit,
@@ -3508,7 +3513,7 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         NodeId::ROOT,
         None,
         None,
-        &[],
+        &entity_bounds,
         None,
         &textures,
         &assets,
