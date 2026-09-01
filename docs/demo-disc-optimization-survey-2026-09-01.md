@@ -582,8 +582,17 @@ primary number under lockstep; instruction counts are stall-blind.
 | B0 `bench/cortex-fixture` | on main (`b6398a0e`) | baseline | baseline | tape fixture, `cortex-bench`, `guest-symbol-gate`; lockstep made the default after a cadence divergence at tick 978 |
 | B1 `build/ram-headroom` | on main (`2e58a7cb`) | +0.12% | identical | .bss -21,344 B, .text -9,628 B, image end -29,536 B; +0.12% is inside the unmeasured layout band (noise probe running) |
 | B2 `fix/cook-uv-wrap` | pushed, awaiting Manny's 6.2 review | +6.10% | differ (intended) | 371 surfaces split, +693 faces; tape-end pair: guardrail tiles instead of smearing; needs B1 to link |
-| B3 `perf/collision-trace` | WIP local, split into two variant benches | -0.34% | identical | +1.08% instructions (32-step exact divide replaces the builtin) but fewer stall cycles; measuring plane_contact-only vs bounds-skip-only to keep the half that pays |
-| noise probe | running | ? | | called never-inlined no-op in main() to shift code layout |
+| B3 `perf/collision-trace` | on main (`5d2e45ae`) as the plane_contact rewrite only | -0.57% | identical | +0.95% instructions, I-cache refill share 9.22% -> 8.61%. The segment-box pre-test per model hull was measured separately: +0.23% cycles on top (a model hull walk is cheaper than the inverse rotation the test needs) and its standalone variant hung the guest at boot (361 polls, `pc 0x80010248`, not chased), so it was dropped |
+| noise probe | first run on top of B1: +0.104% cycles / +0.284% instructions, i.e. the same as B1 itself, so the layout shift cost ~0.02% and B1's +0.28% instructions is real and unexplained (identical output). Second probe on the baseline's exact base: **-0.048% cycles, +0.000% instructions, identical hashes. Noise band is under 0.1% of bus cycles.** | | | |
+
+| B6 `perf/idle-motor-probes` | pushed for review | -0.10% vs main `5d2e45ae` | identical | memoise `player_contents` per (position, height); only idle ticks benefit, the tape is mostly in motion |
+| main at `5d2e45ae` (B1 + B3) vs the old baseline | measured | **+0.08%** | identical | B1 alone was +0.12% and B3 alone -0.57%; combined they read +0.08%. B1 removed 9.6 KB of .text, which relaid every function after it. **Large relayouts swing bus cycles by ~0.5% even though a one-function layout probe moved only 0.05%.** Sub-1% cycle deltas are therefore not conclusive from one build; B3's value is the rule compliance and the I-cache refill reduction, not a proven 0.5% |
+
+Consequence for the protocol: for changes expected under ~1%, report retired
+instructions and the stall breakdown alongside cycles, and either accept them
+on those grounds or bench them under two or three deliberate layouts (the
+`layout_probe` no-op at different sizes) before claiming a cycle win. Cycle
+deltas above ~1% (B2's +6.1%) stand on one build.
 
 Things learned that change the plan:
 - Grid room capacities were already gated on `playtest_pxbsp` for the arenas;
