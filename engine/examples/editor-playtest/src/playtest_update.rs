@@ -553,7 +553,9 @@ impl Playtest {
 
         if self.message_overlay.is_some() {
             if ctx.just_pressed(INTERACT_BUTTON) || ctx.just_pressed(button::CIRCLE) {
-                self.message_overlay = None;
+                if !self.complete_legacy_message_reveal() {
+                    self.message_overlay = None;
+                }
             }
             self.camera_turning_last_tick = false;
             return;

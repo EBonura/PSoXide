@@ -2002,11 +2002,17 @@ impl Scene for Playtest {
                             variant,
                             page,
                             overlay_tick.as_u32() as u16,
+                            self.overlay_poi_page_type_frame,
                         ),
                     }
                 }
             } else if let Some(message) = self.message_overlay {
-                draw_interactable_message(font, message.title, message.body);
+                draw_interactable_message(
+                    font,
+                    message.title,
+                    message.body,
+                    self.overlay_poi_page_type_frame,
+                );
             } else if let Some(index) = self.active_interactable {
                 if let Some(interactable) = INTERACTABLES.get(index) {
                     draw_interaction_prompt_animated(

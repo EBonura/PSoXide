@@ -3478,18 +3478,21 @@ pub fn draw_message_panel(
     variant: MessagePanelVariant,
     page: MessagePageMeta,
     frame: u16,
+    typewriter_frame: u16,
 ) {
     let layout = message_panel_layout(variant);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
     draw_archive_panel_chrome(resolved, frame);
+    let visible_characters = typewriter_frame / MESSAGE_PANEL_TYPE_TICKS_PER_CHAR;
+    let visible_text = text_prefix_chars(page_text, usize::from(visible_characters));
     draw_message_panel_body(
         font,
         page_text,
-        page_text,
+        visible_text,
         layout,
         page,
         UiPaint::Solid((114, 96, 92)),
-        true,
+        visible_text.len() == page_text.len(),
     );
 }
 
