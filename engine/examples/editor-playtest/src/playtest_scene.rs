@@ -485,15 +485,11 @@ impl Scene for Playtest {
             "inventory.empty" => self.power_up_inventory.is_empty(),
             "boost.assignment.prompt" => !self.selected_power_up_item.is_none(),
             "boost.remove" => !self.power_up_loadout.module(selected).is_none(),
-            // The HUD keeps each channel's own name beside its bar while the
-            // bars themselves stay put: the active one is always the large top
-            // bar. Four labels, two shown, so HRZ and ZTH trade places on a
-            // swap without duplicating the bars or their dividers.
-            // The bars themselves are drawn by the overlay, which owns their
-            // geometry so a swap has somewhere to animate. Only the names are
-            // authored, and each channel's name shows beside its own bar.
-            "stance.horizon.active" => self.player_stance.active() == VitalityChannelId::One,
-            "stance.zenith.active" => self.player_stance.active() == VitalityChannelId::Two,
+            // The runtime overlay now owns the complete player HUD, including
+            // the stance names inside its moving bars. Legacy authored labels
+            // with these tags otherwise remain underneath the translucent dial
+            // and leak through its hollow centre during a swap.
+            "stance.horizon.active" | "stance.zenith.active" => false,
             "target.hud" => self.combat_target_entity_index().is_some(),
             _ => true,
         }
@@ -1892,16 +1888,8 @@ impl Scene for Playtest {
             };
             let elapsed = self.player_stance.swap_elapsed_ticks();
             let cooldown_remaining = self.player_stance.swap_cooldown();
-            let cooldown_progress_q12 = if config.swap_cooldown_ticks == 0 {
-                VITALITY_Q12_ONE
-            } else {
-                ((u32::from(
-                    config
-                        .swap_cooldown_ticks
-                        .saturating_sub(cooldown_remaining),
-                ) * u32::from(VITALITY_Q12_ONE))
-                    / u32::from(config.swap_cooldown_ticks)) as u16
-            };
+            let cooldown_progress_q12 =
+                swap_cooldown_display_progress_q12(config.swap_cooldown_ticks, cooldown_remaining);
             let echo_elapsed = if elapsed != u16::MAX
                 && elapsed >= config.swap_cooldown_ticks
                 && elapsed < config.swap_cooldown_ticks.saturating_add(13)

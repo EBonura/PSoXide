@@ -523,8 +523,12 @@ impl Playtest {
         // Regeneration comes from the active state's modules and heals the
         // inactive pool, so the bonus is read before the tick that spends it.
         let regeneration = self.vitality_modifiers().regeneration_q12;
+        let swap_cooldown_before_tick = self.player_stance.swap_cooldown();
         self.player_stance
             .tick(&mut self.player_vitality, &config, regeneration);
+        if swap_cooldown_before_tick > 0 && self.player_stance.swap_cooldown() == 0 {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwapReady);
+        }
 
         if ctx.just_pressed(button::R3) {
             if self.is_locked() {
