@@ -98,7 +98,7 @@ use psx_game_runtime::{
     save::{SaveBlock, SavedPlayerPosition},
 };
 use psx_gpu::{
-    draw_tri_flat_blended,
+    draw_quad_textured_material, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
     prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
