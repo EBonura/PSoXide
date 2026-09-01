@@ -1365,6 +1365,17 @@ cortex-anim-shots: cortex-anim-disc
 combat-checkpoint:
 	sh tools/combat_checkpoint.sh
 
+# Cortex Ignition before/after benchmark: cooks + builds the 0.4 project disc
+# with a linker map in a private stage root, runs the 64-bit symbol gate,
+# replays the tracked whole-level tape twice and prints one benchmark row.
+# CORTEX_BENCH_BASELINE=<previous out dir> prints before/after.
+cortex-bench:
+	sh tools/cortex_bench.sh
+
+# No 64-bit integer helpers in a guest link map (project rule 2026-09-01).
+guest-symbol-gate:
+	sh tools/guest_symbol_gate.sh $(GUEST_LINK_MAP)
+
 # Souls vertical-slice regression gate: re-author the tracked slice through
 # production editor commands, clean cook, MIPS guest, disc, double
 # deterministic canonical replay plus a negative replay, pinned souls-loop
