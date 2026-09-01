@@ -1307,14 +1307,13 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 mod tests {
     use super::{
         activation_echo_layer, bar_frame_index, bar_frame_v_range, diamond_quad,
-        focus_chrome_sweep_paint, focus_sweep_rect, font_index, font_tint, layout_memo_begin,
-        scaled_run_width, TextRun,
-        layout_memo_resolved, ParentResolveCache, UI_LAYOUT_MEMO_CAP,
-        image_effect_vertex_colors, image_effect_verts, message_panel_layout,
-        message_panel_transition_layout, node_absolute_rect, scale_u16_q8, selected_label_text,
-        shape_config, shape_edge_point, shape_perimeter, shape_polygon, text_prefix_chars,
-        MessagePageMeta, MessagePanelLayout, MessagePanelVariant, UiAffine, UiPaint, UiShapeConfig,
-        ACTIVATION_ECHO_FRAMES, MESSAGE_PANEL_EXPAND_FRAMES,
+        focus_chrome_sweep_paint, focus_sweep_rect, font_index, font_tint,
+        image_effect_vertex_colors, image_effect_verts, layout_memo_begin, layout_memo_resolved,
+        message_panel_layout, message_panel_transition_layout, node_absolute_rect, scale_u16_q8,
+        scaled_run_width, selected_label_text, shape_config, shape_edge_point, shape_perimeter,
+        shape_polygon, text_prefix_chars, MessagePageMeta, MessagePanelLayout, MessagePanelVariant,
+        ParentResolveCache, TextRun, UiAffine, UiPaint, UiShapeConfig, ACTIVATION_ECHO_FRAMES,
+        MESSAGE_PANEL_EXPAND_FRAMES, UI_LAYOUT_MEMO_CAP,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiGradientDirection, LevelUiImageEffect,
@@ -1704,10 +1703,38 @@ mod tests {
     fn parent_resolve_memo_matches_an_uncached_resolve() {
         let mut nodes = [
             ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240),
-            ui_node(Some(psx_level::UiNodeIndex(0)), LevelUiNodeKind::Group, 8, 6, 200, 80),
-            ui_node(Some(psx_level::UiNodeIndex(1)), LevelUiNodeKind::Rect, 4, 4, 88, 8),
-            ui_node(Some(psx_level::UiNodeIndex(0)), LevelUiNodeKind::Rect, 52, 21, 88, 8),
-            ui_node(Some(psx_level::UiNodeIndex(1)), LevelUiNodeKind::Label, 2, 2, 35, 8),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Group,
+                8,
+                6,
+                200,
+                80,
+            ),
+            ui_node(
+                Some(psx_level::UiNodeIndex(1)),
+                LevelUiNodeKind::Rect,
+                4,
+                4,
+                88,
+                8,
+            ),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Rect,
+                52,
+                21,
+                88,
+                8,
+            ),
+            ui_node(
+                Some(psx_level::UiNodeIndex(1)),
+                LevelUiNodeKind::Label,
+                2,
+                2,
+                35,
+                8,
+            ),
             // A parentless non-canvas node falls back to the screen rect.
             ui_node(None, LevelUiNodeKind::Rect, 5, 5, 10, 10),
         ];
@@ -3208,11 +3235,7 @@ fn draw_shape_border(
                 outer.vertices[next].screen,
                 inner.vertices[index].screen,
             ],
-            [
-                outer_colors[index],
-                outer_colors[next],
-                inner_colors[index],
-            ],
+            [outer_colors[index], outer_colors[next], inner_colors[index]],
             outer_paint.gouraud,
             false,
         );

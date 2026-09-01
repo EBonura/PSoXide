@@ -1,12 +1,15 @@
 use super::*;
 use crate::vram::SHADOW_TEXEL_U;
+#[cfg(feature = "collision-debug-overlay")]
 use psx_gpu::draw_line_mono;
 
 /// Shadow decals share the shadow/particle 4bpp page allocated by the unified
 /// VRAM allocator. UVs are page-relative, so only the page base moves; the
 /// texel origin is the crate vram module's placement contract.
 const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
+#[cfg(feature = "collision-debug-overlay")]
 const COLLISION_DEBUG_SEGMENTS: usize = 8;
+#[cfg(feature = "collision-debug-overlay")]
 const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
 
 /// Animate + render placed model instances whose owning room matches
@@ -26,18 +29,6 @@ pub struct ModelInstanceDrawStats {
     pub bounds_culled: u16,
     /// Model submit stats.
     pub stats: TexturedModelRenderStats,
-}
-
-/// Depth-pass selector for the two-pass instance draw around the
-/// player.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ModelInstanceDepthPass {
-    /// Draw every instance.
-    All,
-    /// Draw instances at or beyond the player's view depth.
-    BehindPlayer(i32),
-    /// Draw instances nearer than the player's view depth.
-    InFrontOfPlayer(i32),
 }
 
 /// Live pose override for one cooked model instance: a game entity
@@ -83,16 +74,6 @@ fn pose_override_for(
 ) -> Option<ModelInstancePoseOverride> {
     let index = u16::try_from(index).ok()?;
     overrides.iter().copied().find(|o| o.instance == index)
-}
-
-impl ModelInstanceDepthPass {
-    fn includes(self, depth: i32) -> bool {
-        match self {
-            Self::All => true,
-            Self::BehindPlayer(player_depth) => depth >= player_depth,
-            Self::InFrontOfPlayer(player_depth) => depth < player_depth,
-        }
-    }
 }
 
 /// Sum instance draw stats across rooms/passes.
@@ -215,6 +196,7 @@ pub fn actor_shadow_radius(shadow: ShadowTuning, base_radius: i32) -> i32 {
 }
 
 /// Immediate-mode wireframe cylinder for tuning actor blockers.
+#[cfg(feature = "collision-debug-overlay")]
 pub fn draw_collision_cylinder_debug(
     position: RoomPoint,
     radius: i32,
@@ -258,6 +240,7 @@ pub fn draw_collision_cylinder_debug(
     }
 }
 
+#[cfg(feature = "collision-debug-overlay")]
 fn collision_debug_ring_offset(radius: i32, index: usize) -> (i32, i32) {
     let diagonal = radius.saturating_mul(181) >> 8;
     match index & 7 {
@@ -272,10 +255,12 @@ fn collision_debug_ring_offset(radius: i32, index: usize) -> (i32, i32) {
     }
 }
 
+#[cfg(feature = "collision-debug-overlay")]
 fn screen_xy(vertex: ProjectedVertex) -> (i16, i16) {
     (vertex.sx, vertex.sy)
 }
 
+#[cfg(feature = "collision-debug-overlay")]
 fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color: (u8, u8, u8)) {
     let (Some(a), Some(b)) = (a, b) else {
         return;
@@ -525,7 +510,6 @@ pub fn draw_model_instance_from_pose<
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
-    depth_pass: ModelInstanceDepthPass,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -552,9 +536,6 @@ pub fn draw_model_instance_from_pose<
     let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
     let bounds_origin =
         model_pose_translated_origin(origin, model_rotation, local_to_world, pose_translation);
-    if !depth_pass.includes(camera.view_vertex(origin).z) {
-        return out;
-    }
     telemetry::stage_begin(telemetry::stage::MODEL_BOUNDS);
     out.bounds_tests = 1;
     let visible = match bounds {
@@ -657,8 +638,7 @@ pub fn draw_model_instance_from_pose<
     out
 }
 
-/// Animate + draw the placed model instances of `current_room` that
-/// fall in `depth_pass`.
+/// Animate + draw the placed model instances of `current_room`.
 #[inline]
 pub fn draw_model_instances<
     const MAX_RUNTIME_MODELS: usize,
@@ -685,7 +665,6 @@ pub fn draw_model_instances<
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     pose_overrides: &[ModelInstancePoseOverride],
-    depth_pass: ModelInstanceDepthPass,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -729,7 +708,6 @@ pub fn draw_model_instances<
             model_faces,
             model_parts,
             model_vertices,
-            depth_pass,
             resolve_override_texture,
             triangles,
             world,

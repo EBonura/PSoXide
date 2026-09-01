@@ -8,11 +8,12 @@ use super::*;
 use crate::playtest_runtime::live_action_speed_q8;
 use psx_game_runtime::model_rendering as mr;
 
+#[cfg(feature = "collision-debug-overlay")]
+pub(super) use psx_game_runtime::model_rendering::draw_collision_cylinder_debug;
 pub(super) use psx_game_runtime::model_rendering::{
-    accumulate_model_instance_draw_stats, distance_xz_sq, draw_collision_cylinder_debug,
-    emit_model_counters, EquipmentDrawStats, InstanceActorPoseSnapshot, ModelInstanceDepthPass,
-    ModelInstanceDrawStats, ModelInstancePoseOverride, PlayerActorPoseSnapshot,
-    PlayerModelDrawStats, RuntimeModelAsset,
+    accumulate_model_instance_draw_stats, distance_xz_sq, emit_model_counters, EquipmentDrawStats,
+    InstanceActorPoseSnapshot, ModelInstanceDrawStats, ModelInstancePoseOverride, ModelTintSweep,
+    PlayerActorPoseSnapshot, PlayerModelDrawStats, RuntimeModelAsset,
 };
 
 /// The cooked model-family tables bundled for the crate render policy.
@@ -26,6 +27,16 @@ pub(super) fn model_tables() -> mr::ModelTables {
         weapons: WEAPONS,
         weapon_hitboxes: WEAPON_HITBOXES,
         entities: ENTITIES,
+    }
+}
+
+const HORIZON_STANCE_RGB: (u8, u8, u8) = (255, 113, 58);
+const ZENITH_STANCE_RGB: (u8, u8, u8) = (108, 224, 198);
+
+fn stance_rgb(stance: VitalityChannelId) -> (u8, u8, u8) {
+    match stance {
+        VitalityChannelId::One => HORIZON_STANCE_RGB,
+        VitalityChannelId::Two => ZENITH_STANCE_RGB,
     }
 }
 
@@ -56,6 +67,63 @@ fn horizon_skin() -> Option<mr::EquipmentMaterializationSkin> {
         })
         .map(|appearance| appearance.trail_tip_color)?;
     Some(mr::EquipmentMaterializationSkin::opaque((r, g, b)))
+}
+
+/// Build the player's stance-change colour sweep from the same projected
+/// floor/head span the current camera sees. The destination stance becomes
+/// active as soon as the swap is accepted, so its colour is also the colour
+/// visibly rising over the actor.
+pub(super) fn player_stance_tint_sweep(
+    stance: CombatStance,
+    config: &CombatStanceConfig,
+    position: RoomPoint,
+    height: i32,
+    camera: &WorldCamera,
+) -> Option<ModelTintSweep> {
+    if !stance.swap_in_progress(config) {
+        return None;
+    }
+    let floor = camera.project_world(WorldVertex::new(position.x, position.y, position.z))?;
+    let head = camera.project_world(WorldVertex::new(
+        position.x,
+        position.y.saturating_add(height),
+        position.z,
+    ))?;
+    Some(ModelTintSweep::rising(
+        stance_rgb(stance.active()),
+        stance.swap_progress_q12(config),
+        head.sy,
+        floor.sy,
+    ))
+}
+
+/// Resolve the same colour tell for one entity-owned model instance. Static
+/// props have no game-entity owner and return `None`; enemy stance remains the
+/// sole state authority.
+fn enemy_stance_tint_sweep(
+    entities: &RuntimeGameEntities,
+    pose: InstanceActorPoseSnapshot,
+    camera: &WorldCamera,
+) -> Option<ModelTintSweep> {
+    let instance = u16::try_from(pose.instance_index()).ok()?;
+    let entity = game_entity_for_instance(instance)?;
+    if !entities.stance_swap_in_progress(entity) {
+        return None;
+    }
+    let [x, y, z] = entities.position(entity);
+    let visual_scale_q8 = MODEL_INSTANCES
+        .get(pose.instance_index())
+        .map_or(256, |record| record.visual_scale_q8.max(1));
+    let height =
+        i32::from(pose.model().world_height).saturating_mul(i32::from(visual_scale_q8)) / 256;
+    let floor = camera.project_world(WorldVertex::new(x, y, z))?;
+    let head = camera.project_world(WorldVertex::new(x, y.saturating_add(height), z))?;
+    Some(ModelTintSweep::rising(
+        stance_rgb(entities.stance(entity)),
+        entities.stance_swap_progress_q12(entity),
+        head.sy,
+        floor.sy,
+    ))
 }
 
 /// Resolve Horizon/Zenith presentation from the same action-authored colours
@@ -560,10 +628,14 @@ pub(super) fn draw_player(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
+    tint_sweep: Option<ModelTintSweep>,
+    triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
-    mr::draw_player_from_pose::<
+    let tint_sweep =
+        tint_sweep.filter(|_| !mr::player_pose_draws_wireframe(character, player_pose));
+    let first_slot = triangles.used_slots();
+    let stats = mr::draw_player_from_pose::<
         MODEL_VERTEX_CAP,
         JOINT_CAP,
         OT_DEPTH,
@@ -587,7 +659,14 @@ pub(super) fn draw_player(
         &mut model_texture_slot,
         triangles,
         world,
-    )
+    );
+    if let Some(sweep) = tint_sweep {
+        // SAFETY: `draw_player_from_pose` emits only TriTextured packets into
+        // this arena range. The sweep runs immediately, before equipment or
+        // any other packet type is submitted.
+        let _ = unsafe { sweep.apply_to_model_packets(triangles, first_slot) };
+    }
+    stats
 }
 
 /// Draw non-player equipment riding its bound model instances (the
@@ -742,6 +821,7 @@ pub(super) fn draw_player_equipment(
 /// the crate policy.
 pub(super) fn draw_model_instances(
     current_room: RoomIndex,
+    entities: &RuntimeGameEntities,
     instance_poses: &[Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     elapsed_tick: SimTick,
     video_hz: VideoHz,
@@ -751,8 +831,7 @@ pub(super) fn draw_model_instances(
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
-    depth_pass: ModelInstanceDepthPass,
-    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
+    triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
     let mut out = ModelInstanceDrawStats::default();
@@ -762,6 +841,7 @@ pub(super) fn draw_model_instances(
         .copied()
         .flatten()
     {
+        let first_slot = triangles.used_slots();
         let stats = mr::draw_model_instance_from_pose::<
             MODEL_VERTEX_CAP,
             JOINT_CAP,
@@ -783,11 +863,22 @@ pub(super) fn draw_model_instances(
             model_faces,
             model_parts,
             model_vertices,
-            depth_pass,
             &mut model_texture_slot,
             triangles,
             world,
         );
+        // Resolve/project the tell only after the ordinary instance draw
+        // survived room and bounds rejection. Static props still stop
+        // at the cheap owner lookup; only an actively swapping enemy pays the
+        // two endpoint projections and packet post-pass.
+        if triangles.used_slots() > first_slot {
+            if let Some(sweep) = enemy_stance_tint_sweep(entities, pose, camera) {
+                // SAFETY: an instance body submit emits only TriTextured
+                // packets in this immediate arena range. Enemy equipment is
+                // a later pass.
+                let _ = unsafe { sweep.apply_to_model_packets(triangles, first_slot) };
+            }
+        }
         accumulate_model_instance_draw_stats(&mut out, stats);
         if stats.stats.primitive_overflow || stats.stats.command_overflow {
             break;
@@ -919,15 +1010,4 @@ pub(super) fn draw_model_instance_projected_shadows(
         triangles,
         world,
     );
-}
-
-/// The player's camera-view depth in `active`'s room frame.
-pub(super) fn player_actor_depth_for_room(
-    active: ActiveRuntimeRoom,
-    character: Option<RuntimeCharacter>,
-    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
-    player: RoomPoint,
-    camera: &WorldCamera,
-) -> Option<i32> {
-    mr::player_actor_depth_for_room(active, character, models, player, camera)
 }

@@ -1068,6 +1068,8 @@ pub(super) fn entity_bound_style(
         psxed_ui::EntityBoundKind::PointLight => (0xFF, 0xD8, 0x70),
         psxed_ui::EntityBoundKind::ParticleEmitter => (0x98, 0xD6, 0xE6),
         psxed_ui::EntityBoundKind::PointOfInterest => (0xE0, 0x48, 0x38),
+        psxed_ui::EntityBoundKind::VitalityCircleHorizon => (0xFF, 0x58, 0x30),
+        psxed_ui::EntityBoundKind::VitalityCircleZenith => (0x40, 0xE8, 0xC0),
         psxed_ui::EntityBoundKind::DestructibleHorizon => (0xFF, 0x64, 0x3A),
         psxed_ui::EntityBoundKind::DestructibleZenith => (0x52, 0xC2, 0xB2),
         psxed_ui::EntityBoundKind::DestructibleBoth => (0xF0, 0xB8, 0x48),

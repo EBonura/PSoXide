@@ -4,8 +4,6 @@
 //! construct it; a malformed BSP manifest fails during scene initialization
 //! rather than silently falling back to the synthetic grid room.
 
-use alloc::vec;
-use alloc::vec::Vec;
 use core::fmt;
 use core::mem::MaybeUninit;
 
@@ -39,6 +37,7 @@ use psx_gpu::{
 };
 use psx_level::{
     find_asset_of_kind, world_object_flags, AssetId, AssetKind, LevelWorldObjectRecord,
+    MAX_ROOM_MATERIALS,
 };
 use psx_math::{cos_q12, sin_q12};
 
@@ -228,6 +227,10 @@ const fn inset_toward(value: i32, observer: i32) -> i32 {
 pub(super) enum BspRuntimeInitError {
     EmptyWorld,
     NoMaterials,
+    TooManyMaterials {
+        count: usize,
+        capacity: usize,
+    },
     Map(PxbspMapLoadError<SliceReadError>),
     Doors(BrushDoorSetError),
     Destructibles(BrushDestructibleSetError),
@@ -261,6 +264,10 @@ impl fmt::Display for BspRuntimeInitError {
                 formatter.write_str("manifest selected PXBSP but embedded no world")
             }
             Self::NoMaterials => formatter.write_str("PXBSP world contains no materials"),
+            Self::TooManyMaterials { count, capacity } => write!(
+                formatter,
+                "PXBSP world contains {count} materials, exceeding runtime capacity {capacity}"
+            ),
             Self::Map(error) => write!(formatter, "PXBSP map load failed: {error:?}"),
             Self::Doors(error) => write!(formatter, "PXBSP mover load failed: {error:?}"),
             Self::Destructibles(error) => {
@@ -313,7 +320,11 @@ pub(super) struct BspRuntime {
     renderer: Renderer,
     doors: BrushDoorSet<MAX_BSP_DOORS>,
     destructible_targets: BrushDestructibleSet<MAX_BSP_DESTRUCTIBLES>,
-    materials: Vec<Option<PxbspTextureBinding>>,
+    /// VRAM bindings are bounded by the same cooker/runtime material contract
+    /// as grid rooms. Keeping them inline makes a resident BSP genuinely
+    /// allocation-free at gameplay entry instead of depending on the tiny
+    /// residual linker gap between static data and the reserved stack.
+    materials: [Option<PxbspTextureBinding>; MAX_ROOM_MATERIALS],
     /// Set once every material has resolved to a ready VRAM slot; see
     /// [`BspRuntime::refresh_materials`] for why the table is final after that.
     materials_latched: bool,
@@ -441,6 +452,12 @@ impl BspRuntime {
         if material_count == 0 {
             return Err(BspRuntimeInitError::NoMaterials);
         }
+        if material_count > MAX_ROOM_MATERIALS {
+            return Err(BspRuntimeInitError::TooManyMaterials {
+                count: material_count,
+                capacity: MAX_ROOM_MATERIALS,
+            });
+        }
         crate::game_trace("editor-playtest: bsp renderer begin");
         let mut renderer = Renderer::new_pxbsp_with_external_face_chains(
             map.faces().len(),
@@ -463,7 +480,7 @@ impl BspRuntime {
             renderer,
             doors,
             destructible_targets,
-            materials: vec![None; material_count],
+            materials: [None; MAX_ROOM_MATERIALS],
             materials_latched: false,
             trace_scratch: TraceScratch::new(),
             activation_visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],

@@ -384,6 +384,25 @@ pub enum NodeKind {
         #[serde(default = "default_true")]
         enabled: bool,
     },
+    /// Ground-anchored dual-vitality field. The circle starts dormant and is
+    /// permanently claimed by the first matching-axis player strike.
+    VitalityCircle {
+        /// Fixed colour/gameplay axis of this field.
+        #[serde(default)]
+        axis: VitalityCircleAxis,
+        /// Gameplay radius in XZ engine units.
+        #[serde(default = "default_vitality_circle_radius")]
+        radius: u16,
+        /// Matching-active-pool recovery per second.
+        #[serde(default = "default_vitality_circle_refill_rate")]
+        refill_per_second: u16,
+        /// Mismatched-active-pool drain per second.
+        #[serde(default = "default_vitality_circle_drain_rate")]
+        drain_per_second: u16,
+        /// Disabled circles remain authored but are omitted from runtime data.
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
     /// Static point light.
     PointLight {
         /// RGB light colour.
@@ -513,6 +532,7 @@ impl NodeKind {
             Self::PhysicsBody { .. } => "Physics Body",
             Self::Interactable { .. } => "Interactable",
             Self::PointOfInterest { .. } => "Point of Interest",
+            Self::VitalityCircle { .. } => "Vitality Circle",
             Self::Logic { .. } => "Logic",
             Self::Destructible { .. } => "Destructible",
             Self::PointLight { .. } => "Point Light",
@@ -539,6 +559,28 @@ impl NodeKind {
                 | Self::PointOfInterest { .. }
         )
     }
+}
+
+/// Authored Horizon/Zenith identity of a vitality circle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VitalityCircleAxis {
+    #[default]
+    Horizon,
+    Zenith,
+}
+
+impl VitalityCircleAxis {
+    pub const ALL: [Self; 2] = [Self::Horizon, Self::Zenith];
+}
+
+pub const fn default_vitality_circle_radius() -> u16 {
+    512
+}
+pub const fn default_vitality_circle_refill_rate() -> u16 {
+    12
+}
+pub const fn default_vitality_circle_drain_rate() -> u16 {
+    8
 }
 
 /// Per-scene body-only launch message.

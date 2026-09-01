@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn vitality_circles_emit_a_dedicated_manifest_table() {
+    let package = PlaytestPackage {
+        vitality_circles: vec![PlaytestVitalityCircle {
+            room: 3,
+            x: -40,
+            y: 12,
+            z: 90,
+            radius: 256,
+            axis: 1,
+            refill_per_second: 14,
+            drain_per_second: 9,
+        }],
+        ..PlaytestPackage::default()
+    };
+    let source = render_manifest_source(&package);
+    assert!(source.contains("pub static VITALITY_CIRCLES: &[LevelVitalityCircleRecord]"));
+    assert!(source.contains(
+        "room: RoomIndex(3), x: -40, y: 12, z: 90, radius: 256, axis: 1, refill_per_second: 14, drain_per_second: 9"
+    ));
+}
+
+#[test]
 fn cached_room_lighting_policy_emits_no_fog_passthrough() {
     let mut source = String::new();
     write_cached_room_lighting_policy(&mut source, false, false);

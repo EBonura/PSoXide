@@ -1740,7 +1740,11 @@ unsafe fn read_pose_matrix_q11_cross_unchecked(bytes: &[u8], offset: usize) -> [
     let second = [flat[3], flat[4], flat[5]];
     let correction = unsafe { bytes.as_ptr().add(offset + 9).read() };
     let third = v4_third_basis_q12(first, second, correction);
-    [narrow_q12_row(first), narrow_q12_row(second), narrow_q12_row(third)]
+    [
+        narrow_q12_row(first),
+        narrow_q12_row(second),
+        narrow_q12_row(third),
+    ]
 }
 
 /// Decode one word-aligned v4 record with four aligned loads.

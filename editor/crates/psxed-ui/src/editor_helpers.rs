@@ -866,6 +866,15 @@ pub(crate) fn entity_bound_kind_and_size(
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. }
         | NodeKind::PointOfInterest { .. } => None,
+        NodeKind::VitalityCircle { axis, radius, .. } => Some((
+            match axis {
+                psxed_project::VitalityCircleAxis::Horizon => {
+                    EntityBoundKind::VitalityCircleHorizon
+                }
+                psxed_project::VitalityCircleAxis::Zenith => EntityBoundKind::VitalityCircleZenith,
+            },
+            [f32::from(*radius), 8.0, f32::from(*radius)],
+        )),
         NodeKind::Entity => {
             if let Some(model) = entity_model_resource(workspace, node) {
                 let h = (model.world_height as f32).max(256.0);

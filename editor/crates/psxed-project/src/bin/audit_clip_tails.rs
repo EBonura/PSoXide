@@ -58,7 +58,11 @@ fn main() {
                 if options.frame_end == ACTION_FRAME_END_FULL {
                     None
                 } else {
-                    Some(options.frame_end.max(options.push_frame_end.min(u16::MAX - 1)))
+                    Some(
+                        options
+                            .frame_end
+                            .max(options.push_frame_end.min(u16::MAX - 1)),
+                    )
                 }
             });
             require(&mut needed, binding.clip, bound.flatten());

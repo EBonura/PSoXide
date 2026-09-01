@@ -1848,7 +1848,10 @@ fn a_face_pointing_away_from_the_camera_still_offers_its_handle() {
             !rig.workspace.brush_face_faces_camera(*center, *normal)
                 && handles.iter().all(|(_, other, _)| {
                     other == center
-                        || rig.world_to_screen(*other).distance(rig.world_to_screen(*center)) > 32.0
+                        || rig
+                            .world_to_screen(*other)
+                            .distance(rig.world_to_screen(*center))
+                            > 32.0
                 })
         })
         .expect("an isolated away-facing handle");
