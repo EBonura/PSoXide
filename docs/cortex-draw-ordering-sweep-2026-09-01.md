@@ -84,3 +84,42 @@ no separate primitive covers them), not POI markers. No archive beacon is
 drawn in that frame (no gouraud `30..33` packets), so the POI symptom needs a
 different tape position.
 
+
+## Experiments
+
+E1. Actor clearance 0 (temporary edit of `pxbsp_actor_surface_options`),
+same disc features, tape-end frame: the enemy at the upper left still paints
+over the left wall. Frame diff against the baseline is 8,773 of 1.2M pixels
+(4x), concentrated at the right-hand ledge next to the player and a few
+hundred pixels of the enemy. The clearance is not what puts that enemy in
+front of the wall.
+
+E2. Walking the ordering table out of a `--dump-ram` image at the tape end is
+not usable: the run stops mid-build and the OT chains are inconsistent
+(400k packets walked, 132 decodable draws).
+
+E3. A guest built with `emulator-telemetry` for the debug-log channel changes
+tape pacing (361 pad polls instead of 5,260; the game never leaves the front
+end), so positions are read back through a plain RAM ring buffer instead
+(`DIAG_ORDERING_BUF`, temporary, dumped with `--dump-ram` and located through
+the link map).
+
+E4. Tape-end frame positions (RAM ring, cooked units): camera (1394, 350,
+-559), yaw sin -370/4096, pitch sin -1395/4096 (about 20 degrees down);
+player (1413, 224, -769) at view z 241. The enemy at the upper left is model
+instance 0 at (1161, 224, -1363), view (x -306, y 147, z 779): with
+FOCAL 320 it projects to screen (35, 60), a ground enemy standing 538 units
+beyond the player and to the left. Its OT slot is about (779 - 64) / 4 = 178.
+
+E5. Draw-list forensics for that frame (`--dump-draws`, last frame after the
+final full-screen fill): the packets under the enemy are the sky (`2C`,
+slot 2047), far wall triangles (`34`, tags 872..878, z about 3,500), then the
+tall left wall faces `[(32,-6),(45,122),(39,61)]`, `[(3,164),(32,-6),(19,67)]`
+(world `34`), then the enemy's `24` triangles (tpage 0x1C) interleaved with
+two more wall faces `[(3,164),(-10,76),(19,67),(10,-14)]` and
+`[(-26,-40),(8,203),(-7,94)]`. So the wall faces on the enemy's right sort
+farther than the enemy and the ones on its left sort nearer: the enemy and
+that wall are at about the same depth, and the outcome is decided by the
+per-face average keys, not by a scale or bias mismatch. The cooked level has
+no box, arch, cylinder or image props and no destructibles, so every `34`
+or `3C` packet is PXBSP world.
