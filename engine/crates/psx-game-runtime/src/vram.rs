@@ -69,6 +69,14 @@ pub const SHADOW_TEXEL_U: u8 = 64;
 pub const VITALITY_CIRCLE_TEXEL_U: u8 = 0;
 /// Vitality-circle glyph V origin inside the gameplay-effects quadrant.
 pub const VITALITY_CIRCLE_TEXEL_V: u8 = 64;
+/// HUD swap-dial origin in the otherwise-unused upper-left of the shared
+/// gameplay-effects quadrant.  It sits to the right of the particle decal and
+/// above the world vitality-circle glyph, so no extra texture page is needed.
+pub const VITALITY_HUD_DIAL_TEXEL_U: u8 = 16;
+/// HUD swap-dial V origin inside the gameplay-effects quadrant.
+pub const VITALITY_HUD_DIAL_TEXEL_V: u8 = 0;
+/// Square HUD swap-dial edge in texels.
+pub const VITALITY_HUD_DIAL_TEXEL_SIZE: u16 = 32;
 /// Particle decals use the U=0 half of the shared shadow/particle 4bpp page.
 pub const PARTICLE_TEXEL_U: u8 = 0;
 /// Generated particle decal edge in texels.
@@ -1061,6 +1069,37 @@ impl<
             .with_raw_texture(false)
             .with_texture_window(TextureWindow::power_of_two_tile(128, 128, 128, 128)),
         )
+    }
+
+    /// Upload the tintable 32x32 HUD swap dial into unused pixels of the
+    /// shared gameplay-effects quadrant.  The dial intentionally shares the
+    /// neutral grayscale CLUT allocated by [`Self::upload_vitality_circle_texture`]:
+    /// this keeps the HUD addition to 512 bytes of texels and no extra runtime
+    /// allocation or scene field.
+    pub fn upload_vitality_hud_dial_texels(&mut self, vitality_hud_dial_blob: &[u8]) -> bool {
+        let Ok(texture) = Texture::from_bytes(vitality_hud_dial_blob) else {
+            return false;
+        };
+        if texture.width() != VITALITY_HUD_DIAL_TEXEL_SIZE
+            || texture.height() != VITALITY_HUD_DIAL_TEXEL_SIZE
+            || texture.clut_entries() != 16
+        {
+            return false;
+        }
+
+        let Some(page) = self.effect_texture_page() else {
+            return false;
+        };
+        upload_bytes(
+            VramRect::new(
+                page.x() + 128 / 4 + u16::from(VITALITY_HUD_DIAL_TEXEL_U) / 4,
+                page.y() + 128 + u16::from(VITALITY_HUD_DIAL_TEXEL_V),
+                texture.halfwords_per_row(),
+                texture.height(),
+            ),
+            texture.pixel_bytes(),
+        );
+        true
     }
 
     /// Generate and upload the 16x16 white circular particle sprite onto

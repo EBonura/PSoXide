@@ -511,18 +511,19 @@ fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8))
     );
 }
 
-/// Draw the complete player vitality cluster. Owning the two bars and mutation
-/// charge in one pass prevents the old animated bar from surviving behind the
+/// Draw the complete player vitality cluster. Owning the two bars and cooldown
+/// dial in one pass prevents the old animated bar from surviving behind the
 /// authored shell, and lets the active channel stay deliberately longer.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_player_vitality_hud(
     font: &FontAtlas,
+    dial_material: Option<TextureMaterial>,
     active: VitalityChannelId,
     active_fill_q12: u16,
     inactive_fill_q12: u16,
-    swap_progress_q12: u16,
+    swap_motion_progress_q12: u16,
+    swap_cooldown_progress_q12: u16,
     completion_echo_elapsed: Option<u16>,
-    frame: u16,
 ) {
     const HORIZON_RGB: (u8, u8, u8) = (234, 82, 48);
     const ZENITH_RGB: (u8, u8, u8) = (76, 202, 181);
@@ -536,31 +537,141 @@ pub(crate) fn draw_player_vitality_hud(
     let (active_rgb, active_label) = channel_style(active);
     let (inactive_rgb, inactive_label) = channel_style(active.other());
 
-    // The active pool is visibly dominant rather than merely recoloured.
-    draw_vitality_bar(
-        font,
-        (34, 3, 144, 16),
-        7,
-        active_fill_q12,
-        active_rgb,
-        active_label,
-    );
-    draw_vitality_bar(
-        font,
-        (34, 34, 112, 13),
-        5,
-        inactive_fill_q12,
-        inactive_rgb,
-        inactive_label,
-    );
-    draw_stance_charge_circle(
+    // The gameplay state changes channel as soon as Triangle is accepted, but
+    // the HUD keeps the previous frame's composition at progress zero. The
+    // newly active channel then rises and grows into the dominant slot while
+    // the old channel drops and contracts. Their small opposing horizontal
+    // arcs let the two ribbons visibly pass one another instead of occupying
+    // the exact same pixels at the midpoint.
+    let (incoming, outgoing) = vitality_swap_geometry(swap_motion_progress_q12);
+    if swap_motion_progress_q12 < 2048 {
+        // The old active bar is still on the near side of the orbit.
+        draw_vitality_bar(
+            font,
+            incoming.bounds,
+            incoming.cut,
+            active_fill_q12,
+            active_rgb,
+            active_label,
+        );
+        draw_vitality_bar(
+            font,
+            outgoing.bounds,
+            outgoing.cut,
+            inactive_fill_q12,
+            inactive_rgb,
+            inactive_label,
+        );
+    } else {
+        // After the crossing, the newly active bar comes to the near side.
+        draw_vitality_bar(
+            font,
+            outgoing.bounds,
+            outgoing.cut,
+            inactive_fill_q12,
+            inactive_rgb,
+            inactive_label,
+        );
+        draw_vitality_bar(
+            font,
+            incoming.bounds,
+            incoming.cut,
+            active_fill_q12,
+            active_rgb,
+            active_label,
+        );
+    }
+    let circle_rgb = lerp_rgb(inactive_rgb, active_rgb, swap_motion_progress_q12);
+    draw_swap_cooldown_circle(
         20,
-        26,
-        swap_progress_q12,
-        active_rgb,
+        18,
+        dial_material,
+        swap_cooldown_progress_q12,
+        circle_rgb,
         completion_echo_elapsed,
-        frame,
     );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VitalityBarGeometry {
+    bounds: (i16, i16, i16, i16),
+    cut: i16,
+}
+
+const ACTIVE_VITALITY_BAR: VitalityBarGeometry = VitalityBarGeometry {
+    bounds: (34, 3, 152, 17),
+    cut: 8,
+};
+const INACTIVE_VITALITY_BAR: VitalityBarGeometry = VitalityBarGeometry {
+    bounds: (34, 21, 104, 11),
+    cut: 5,
+};
+
+/// Return the geometry of the new active bar and the previous active bar.
+///
+/// The endpoints exactly match the resting HUD. At progress zero this makes
+/// the first swap frame indistinguishable from the preceding frame even
+/// though gameplay has already changed channel; at one the new layout is
+/// likewise identical to the normal resting composition.
+#[inline(always)]
+fn vitality_swap_geometry(progress_q12: u16) -> (VitalityBarGeometry, VitalityBarGeometry) {
+    let raw_t = progress_q12.min(4096);
+    let t = smoothstep_q12(raw_t);
+    // 4t(1-t), in Q12: zero at both endpoints and one at the midpoint.
+    let arc_q12 = ((i32::from(raw_t) * i32::from(4096 - raw_t)) >> 10) as u16;
+
+    let incoming = lerp_bar(INACTIVE_VITALITY_BAR, ACTIVE_VITALITY_BAR, t, -3, arc_q12);
+    let outgoing = lerp_bar(ACTIVE_VITALITY_BAR, INACTIVE_VITALITY_BAR, t, 8, arc_q12);
+    (incoming, outgoing)
+}
+
+#[inline(always)]
+fn lerp_bar(
+    from: VitalityBarGeometry,
+    to: VitalityBarGeometry,
+    t_q12: u16,
+    arc_pixels: i16,
+    arc_q12: u16,
+) -> VitalityBarGeometry {
+    let (from_x, from_y, from_w, from_h) = from.bounds;
+    let (to_x, to_y, to_w, to_h) = to.bounds;
+    VitalityBarGeometry {
+        bounds: (
+            lerp_i16(from_x, to_x, t_q12) + lerp_i16(0, arc_pixels, arc_q12),
+            lerp_i16(from_y, to_y, t_q12),
+            lerp_i16(from_w, to_w, t_q12),
+            lerp_i16(from_h, to_h, t_q12),
+        ),
+        cut: lerp_i16(from.cut, to.cut, t_q12),
+    }
+}
+
+#[inline(always)]
+fn smoothstep_q12(value: u16) -> u16 {
+    let t = i32::from(value.min(4096));
+    let t_squared = (t * t) >> 12;
+    ((t_squared * (12288 - 2 * t)) >> 12) as u16
+}
+
+#[inline(always)]
+fn lerp_i16(from: i16, to: i16, t_q12: u16) -> i16 {
+    let delta = i32::from(to) - i32::from(from);
+    let scaled = delta * i32::from(t_q12.min(4096));
+    let rounded = if scaled >= 0 {
+        scaled + 2048
+    } else {
+        scaled - 2048
+    };
+    from + (rounded / 4096) as i16
+}
+
+#[inline(always)]
+fn lerp_rgb(from: (u8, u8, u8), to: (u8, u8, u8), t_q12: u16) -> (u8, u8, u8) {
+    (
+        lerp_i16(i16::from(from.0), i16::from(to.0), t_q12) as u8,
+        lerp_i16(i16::from(from.1), i16::from(to.1), t_q12) as u8,
+        lerp_i16(i16::from(from.2), i16::from(to.2), t_q12) as u8,
+    )
 }
 
 #[inline(never)]
@@ -582,10 +693,13 @@ fn draw_vitality_bar(
         (rgb.0 / 11, rgb.1 / 11, rgb.2 / 11),
     );
 
-    let fill_x = x + 28;
-    let fill_y = y + 5;
+    const LABEL_SLOT_W: i16 = 28;
+    const LABEL_INK_H: i16 = 6;
+    const LABEL_TOP_BEARING: i16 = 1;
+    let fill_x = x + LABEL_SLOT_W;
     let fill_w = (w - 34).max(0);
     let fill_h = (h - 10).max(3);
+    let fill_y = y + (h - fill_h) / 2;
     let filled = ((i32::from(fill_w) * i32::from(fill_q12.min(4096))) >> 12) as i16;
     draw_rect(
         fill_x,
@@ -605,48 +719,103 @@ fn draw_vitality_bar(
             step += 1;
         }
     }
-    font.draw_text(x + 6, y + 4, label, (rgb.0, rgb.1, rgb.2));
+    // These fixed three-letter uppercase labels use rows 1..=6 of the 5x8
+    // atlas. Centre their visible ink rather than the atlas cell, whose blank
+    // first and last rows made the compact inactive shell look bottom-heavy.
+    let label_w = font.text_width(label) as i16;
+    let label_x = x + (LABEL_SLOT_W - label_w + 1) / 2;
+    let label_y = y + (h - LABEL_INK_H) / 2 - LABEL_TOP_BEARING;
+    font.draw_text(label_x, label_y, label, (rgb.0, rgb.1, rgb.2));
 }
 
 #[inline(never)]
-fn draw_stance_charge_circle(
+fn draw_swap_cooldown_circle(
     cx: i16,
     cy: i16,
+    dial_material: Option<TextureMaterial>,
     progress_q12: u16,
     rgb: (u8, u8, u8),
     echo_elapsed: Option<u16>,
-    frame: u16,
 ) {
-    // Two chamfered plates form a mechanical ring using the same primitive as
-    // the health shells. The darker inset punches the centre back out.
-    draw_chamfered(
-        cx - 11,
-        cy - 11,
-        22,
-        22,
-        7,
-        (rgb.0 / 8, rgb.1 / 8, rgb.2 / 8),
-    );
-    draw_chamfered(cx - 7, cy - 7, 14, 14, 5, (5, 8, 9));
+    // The generated 32x32 source is drawn into a 26-pixel footprint: large
+    // enough to preserve its concentric breaks, but still one pixel detached
+    // from the bars.  Cooldown brightness rises with charge while the outer
+    // ticks retain an exact eight-step reading.
+    let filled = swap_cooldown_segments(progress_q12);
+    let dim = (rgb.0 / 10, rgb.1 / 10, rgb.2 / 10);
+    if let Some(material) = dial_material {
+        let intensity = 36 + ((u32::from(progress_q12.min(4096)) * 92) >> 12) as u8;
+        let dial_tint = (
+            ((u16::from(rgb.0) * u16::from(intensity)) >> 7).min(255) as u8,
+            ((u16::from(rgb.1) * u16::from(intensity)) >> 7).min(255) as u8,
+            ((u16::from(rgb.2) * u16::from(intensity)) >> 7).min(255) as u8,
+        );
+        let x0 = cx - 13;
+        let y0 = cy - 13;
+        let x1 = cx + 13;
+        let y1 = cy + 13;
+        let u0 = psx_game_runtime::vram::VITALITY_HUD_DIAL_TEXEL_U;
+        let v0 = psx_game_runtime::vram::VITALITY_HUD_DIAL_TEXEL_V;
+        let u1 = u0.saturating_add(31);
+        let v1 = v0.saturating_add(31);
+        draw_quad_textured_material(
+            [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
+            [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
+            material.with_tint(dial_tint),
+        );
+    }
 
-    let filled = stance_charge_segments(progress_q12);
-    let head = if (frame & 1) == 0 {
-        (255, 244, 220)
-    } else {
-        rgb
-    };
-    if filled >= 1 {
-        draw_rect(cx - 4, cy - 11, 8, 2, if filled == 1 { head } else { rgb });
-    }
-    if filled >= 2 {
-        draw_rect(cx + 9, cy - 4, 2, 8, if filled == 2 { head } else { rgb });
-    }
-    if filled >= 3 {
-        draw_rect(cx - 4, cy + 9, 8, 2, if filled == 3 { head } else { rgb });
-    }
-    if filled >= 4 {
-        draw_rect(cx - 11, cy - 4, 2, 8, rgb);
-    }
+    // Eight outer ticks fill clockwise from twelve o'clock. Diagonal ticks
+    // are deliberately square rather than antialiased, matching the authored
+    // pixel language of the bars.
+    draw_rect(
+        cx - 2,
+        cy - 12,
+        4,
+        2,
+        cooldown_tick_rgb(filled, 1, rgb, dim),
+    );
+    draw_rect(cx + 7, cy - 9, 3, 2, cooldown_tick_rgb(filled, 2, rgb, dim));
+    draw_rect(
+        cx + 10,
+        cy - 2,
+        2,
+        4,
+        cooldown_tick_rgb(filled, 3, rgb, dim),
+    );
+    draw_rect(cx + 7, cy + 7, 3, 2, cooldown_tick_rgb(filled, 4, rgb, dim));
+    draw_rect(
+        cx - 2,
+        cy + 10,
+        4,
+        2,
+        cooldown_tick_rgb(filled, 5, rgb, dim),
+    );
+    draw_rect(
+        cx - 10,
+        cy + 7,
+        3,
+        2,
+        cooldown_tick_rgb(filled, 6, rgb, dim),
+    );
+    draw_rect(
+        cx - 12,
+        cy - 2,
+        2,
+        4,
+        cooldown_tick_rgb(filled, 7, rgb, dim),
+    );
+    draw_rect(
+        cx - 10,
+        cy - 9,
+        3,
+        2,
+        cooldown_tick_rgb(filled, 8, rgb, dim),
+    );
+
+    // The texture owns the broken inner rings and hollow aperture.  Keeping
+    // those details out of immediate-mode geometry avoids drawing a second,
+    // mismatched circle on top of the authored one.
 
     // Completion sends two additive rings out from the charge cell, echoing
     // the main-menu confirmation language without any text or extra chrome.
@@ -665,20 +834,57 @@ fn draw_stance_charge_circle(
 }
 
 #[inline(always)]
-fn stance_charge_segments(progress_q12: u16) -> u8 {
-    ((progress_q12.min(4096).saturating_add(1023) >> 10) as u8).min(4)
+fn cooldown_tick_rgb(
+    filled: u8,
+    threshold: u8,
+    ready: (u8, u8, u8),
+    waiting: (u8, u8, u8),
+) -> (u8, u8, u8) {
+    if filled >= threshold {
+        ready
+    } else {
+        waiting
+    }
+}
+
+#[inline(always)]
+fn swap_cooldown_segments(progress_q12: u16) -> u8 {
+    ((progress_q12.min(4096).saturating_add(511) >> 9) as u8).min(8)
 }
 
 #[cfg(test)]
 mod vitality_hud_tests {
-    use super::stance_charge_segments;
+    use super::{
+        swap_cooldown_segments, vitality_swap_geometry, ACTIVE_VITALITY_BAR, INACTIVE_VITALITY_BAR,
+    };
 
     #[test]
-    fn stance_charge_circle_consumes_then_refills_clockwise() {
-        assert_eq!(stance_charge_segments(0), 0);
-        assert_eq!(stance_charge_segments(1), 1);
-        assert_eq!(stance_charge_segments(1024), 1);
-        assert_eq!(stance_charge_segments(2048), 2);
-        assert_eq!(stance_charge_segments(4096), 4);
+    fn swap_cooldown_circle_consumes_then_refills_clockwise() {
+        assert_eq!(swap_cooldown_segments(0), 0);
+        assert_eq!(swap_cooldown_segments(1), 1);
+        assert_eq!(swap_cooldown_segments(512), 1);
+        assert_eq!(swap_cooldown_segments(1024), 2);
+        assert_eq!(swap_cooldown_segments(2048), 4);
+        assert_eq!(swap_cooldown_segments(4096), 8);
+    }
+
+    #[test]
+    fn vitality_swap_preserves_both_resting_endpoints() {
+        let (incoming, outgoing) = vitality_swap_geometry(0);
+        assert_eq!(incoming, INACTIVE_VITALITY_BAR);
+        assert_eq!(outgoing, ACTIVE_VITALITY_BAR);
+
+        let (incoming, outgoing) = vitality_swap_geometry(4096);
+        assert_eq!(incoming, ACTIVE_VITALITY_BAR);
+        assert_eq!(outgoing, INACTIVE_VITALITY_BAR);
+    }
+
+    #[test]
+    fn vitality_bars_pass_on_separate_horizontal_arcs() {
+        let (incoming, outgoing) = vitality_swap_geometry(2048);
+        assert!(incoming.bounds.0 < outgoing.bounds.0);
+        assert_eq!(incoming.bounds.1, outgoing.bounds.1);
+        assert_eq!(incoming.bounds.2, outgoing.bounds.2);
+        assert_eq!(incoming.bounds.3, outgoing.bounds.3);
     }
 }
