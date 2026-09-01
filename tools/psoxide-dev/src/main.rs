@@ -2801,22 +2801,31 @@ fn gen_fonts() -> Result<(), String> {
             continue;
         }
         let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        // The font itself, not the bitmap array that precedes it.
-        let Some(konst) = text.lines().find_map(|line| {
+        // Export every font descriptor in a hand-maintained module. Spleen
+        // intentionally carries both its regular and italic variants in one
+        // file; taking only the first descriptor silently dropped the latter
+        // whenever generated `mod.rs` was refreshed.
+        for konst in text.lines().filter_map(|line| {
             let rest = line.trim().strip_prefix("pub const ")?;
             let (name, ty) = rest.split_once(": ")?;
             ty.starts_with("BitmapFont")
                 .then(|| name.trim().to_string())
-        }) else {
-            continue;
-        };
-        hand_written.push((stem.to_string(), konst));
+        }) {
+            hand_written.push((stem.to_string(), konst));
+        }
     }
     hand_written.sort();
     if !hand_written.is_empty() {
         mod_rs.push_str("\n// Hand-maintained fonts: no generator entry, kept as-is.\n");
+        let mut previous_module: Option<&str> = None;
         for (module, konst) in &hand_written {
-            mod_rs.push_str(&format!("pub mod {module};\npub use {module}::{konst};\n"));
+            if previous_module != Some(module.as_str()) {
+                mod_rs.push_str(&format!(
+                    "/// Hand-maintained built-in font module.\npub mod {module};\n"
+                ));
+                previous_module = Some(module.as_str());
+            }
+            mod_rs.push_str(&format!("pub use {module}::{konst};\n"));
         }
     }
     fs::write(out_dir.join("mod.rs"), mod_rs).map_err(|e| e.to_string())?;
@@ -2848,6 +2857,8 @@ struct FontEntry {
     max_cell_h: usize,
     preferred_px: f32,
     min_px: f32,
+    align_to_baseline: bool,
+    coverage_threshold: u8,
     advances: Option<Vec<u8>>,
 }
 
@@ -3141,6 +3152,13 @@ fn font_entries() -> Vec<FontEntry> {
             "SIL OFL 1.1",
             "Jura, rasterized from Google Fonts.",
         ),
+        (
+            "itchio/drippy-space/DrippySpace-Regular.ttf",
+            "drippy_space",
+            "DRIPPY_SPACE",
+            "SIL OFL 1.1",
+            "Drippy Space by Syntaxes of Play, rasterized for futuristic display UI.",
+        ),
     ] {
         let mut entry = font_entry(
             source,
@@ -3154,6 +3172,26 @@ fn font_entries() -> Vec<FontEntry> {
             0,
             0,
         );
+        if module == "drippy_space" {
+            // The face is made from extremely thin, disconnected strokes.
+            // Generic 50% coverage thresholding erases diagonal joins, while
+            // top-left packing makes punctuation and digits float because it
+            // ignores each glyph's baseline bearings.
+            // Below 20 source pixels the W/M diagonals quantize into an
+            // N-like shape even in FreeType. Treat this as a display face,
+            // never as a compact HUD/menu font.
+            entry.max_cell_w = 20;
+            entry.max_cell_h = 24;
+            entry.preferred_px = 20.0;
+            entry.min_px = 20.0;
+            entry.align_to_baseline = true;
+            entry.coverage_threshold = 80;
+            // Space, punctuation, digits, and uppercase A-Z. Lowercase is
+            // intentionally excluded: this is a title face, and retaining
+            // all 96 printable glyphs at this cell size would overflow the
+            // fixed 16 KiB PS1 upload scratch buffer.
+            entry.count = 0x5B - 0x20;
+        }
         if let Some((cell_w, cell_h, px)) = LARGE_CELL_TTF_FONTS
             .iter()
             .find(|(name, ..)| *name == module)
@@ -3168,6 +3206,29 @@ fn font_entries() -> Vec<FontEntry> {
         }
         entries.push(entry);
     }
+
+    // Likewise, a title made by magnifying the 16px 1bpp atlas only makes
+    // its stair-steps larger. This compact A-Z atlas preserves the outline at
+    // the title size while remaining small enough for one PS1 font tpage.
+    let mut drippy_space_display = font_entry(
+        "itchio/drippy-space/DrippySpace-Regular.ttf",
+        FontFormat::Ttf,
+        "drippy_space_display",
+        "DRIPPY_SPACE_DISPLAY",
+        "SIL OFL 1.1",
+        0x41,
+        26,
+        "Drippy Space uppercase display face, rasterized natively for large UI titles.",
+        0,
+        0,
+    );
+    drippy_space_display.max_cell_w = 32;
+    drippy_space_display.max_cell_h = 36;
+    drippy_space_display.preferred_px = 28.0;
+    drippy_space_display.min_px = 28.0;
+    drippy_space_display.align_to_baseline = true;
+    drippy_space_display.coverage_threshold = 80;
+    entries.push(drippy_space_display);
 
     // The regular Zen Dots atlas deliberately fits the complete printable
     // ASCII range into a compact 16px-high cell. Enlarging that 1bpp raster
@@ -3247,6 +3308,8 @@ fn font_entry(
         max_cell_h: 16,
         preferred_px: 16.0,
         min_px: 8.0,
+        align_to_baseline: false,
+        coverage_threshold: 128,
         advances: None,
     }
 }
@@ -3299,14 +3362,29 @@ fn parse_ttf_font(path: &Path, entry: &mut FontEntry) -> Result<Vec<Vec<u8>>, St
     for px in (entry.min_px as u32..=entry.preferred_px as u32).rev() {
         let mut cell_w = 0usize;
         let mut cell_h = 0usize;
+        let mut min_x = 0i32;
+        let mut min_y = 0i32;
+        let mut max_x = 0i32;
+        let mut max_y = 0i32;
         for cp in entry.first_cp..entry.first_cp + entry.count as u32 {
             if cp == 0x20 {
                 continue;
             }
             let ch = char::from_u32(cp).unwrap_or(' ');
             let (metrics, _) = font.rasterize(ch, px as f32);
-            cell_w = cell_w.max(metrics.width + 2);
-            cell_h = cell_h.max(metrics.height + 2);
+            if entry.align_to_baseline {
+                min_x = min_x.min(metrics.xmin);
+                min_y = min_y.min(metrics.ymin);
+                max_x = max_x.max(metrics.xmin + metrics.width as i32);
+                max_y = max_y.max(metrics.ymin + metrics.height as i32);
+            } else {
+                cell_w = cell_w.max(metrics.width + 2);
+                cell_h = cell_h.max(metrics.height + 2);
+            }
+        }
+        if entry.align_to_baseline {
+            cell_w = (max_x - min_x).max(0) as usize + 2;
+            cell_h = (max_y - min_y).max(0) as usize + 2;
         }
         if cell_w <= entry.max_cell_w && cell_h <= entry.max_cell_h {
             chosen_px = Some((px as f32, cell_w.max(1), cell_h.max(1)));
@@ -3326,17 +3404,41 @@ fn parse_ttf_font(path: &Path, entry: &mut FontEntry) -> Result<Vec<Vec<u8>>, St
     entry.advance = cell_w;
     entry.line_height = cell_h;
     let row_bytes = cell_w.div_ceil(8);
+    let (global_min_x, global_max_y) = if entry.align_to_baseline {
+        let mut min_x = 0i32;
+        let mut max_y = 0i32;
+        for cp in entry.first_cp..entry.first_cp + entry.count as u32 {
+            if cp == 0x20 {
+                continue;
+            }
+            let ch = char::from_u32(cp).unwrap_or(' ');
+            let (metrics, _) = font.rasterize(ch, px);
+            min_x = min_x.min(metrics.xmin);
+            max_y = max_y.max(metrics.ymin + metrics.height as i32);
+        }
+        (min_x, max_y)
+    } else {
+        (0, 0)
+    };
     let mut glyphs = Vec::new();
     let mut advances = Vec::new();
     for cp in entry.first_cp..entry.first_cp + entry.count as u32 {
         let ch = char::from_u32(cp).unwrap_or(' ');
         let (metrics, bitmap) = font.rasterize(ch, px);
         let mut rows = vec![0u8; row_bytes * cell_h];
-        let offset_x = 1usize;
-        let offset_y = 1usize;
+        let offset_x = if entry.align_to_baseline {
+            (1 + metrics.xmin - global_min_x).max(0) as usize
+        } else {
+            1
+        };
+        let offset_y = if entry.align_to_baseline {
+            (1 + global_max_y - (metrics.ymin + metrics.height as i32)).max(0) as usize
+        } else {
+            1
+        };
         for y in 0..metrics.height.min(cell_h.saturating_sub(offset_y)) {
             for x in 0..metrics.width.min(cell_w.saturating_sub(offset_x)) {
-                if bitmap[y * metrics.width + x] >= 128 {
+                if bitmap[y * metrics.width + x] >= entry.coverage_threshold {
                     let dx = offset_x + x;
                     rows[(offset_y + y) * row_bytes + dx / 8] |= 1 << (dx % 8);
                 }

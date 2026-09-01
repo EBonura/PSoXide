@@ -85,6 +85,10 @@ pub mod syncopate;
 pub mod share_tech_mono;
 /// Built-in font: `jura` (U+0020..U+007F, 96 glyphs).
 pub mod jura;
+/// Built-in font: `drippy_space` (U+0020..U+005A, 59 glyphs).
+pub mod drippy_space;
+/// Built-in font: `drippy_space_display` (U+0041..U+005A, 26 glyphs).
+pub mod drippy_space_display;
 /// Built-in font: `zen_dots_display` (U+0041..U+005A, 26 glyphs).
 pub mod zen_dots_display;
 
@@ -128,9 +132,12 @@ pub use aldrich::ALDRICH;
 pub use syncopate::SYNCOPATE;
 pub use share_tech_mono::SHARE_TECH_MONO;
 pub use jura::JURA;
+pub use drippy_space::DRIPPY_SPACE;
+pub use drippy_space_display::DRIPPY_SPACE_DISPLAY;
 pub use zen_dots_display::ZEN_DOTS_DISPLAY;
 
-/// Spleen 5x8, hand-maintained: no `psoxide-dev gen-fonts` entry, so
-/// unlike its siblings in this module it is edited directly.
+// Hand-maintained fonts: no generator entry, kept as-is.
+/// Hand-maintained built-in font module.
 pub mod spleen_5x8;
-pub use spleen_5x8::{SPLEEN_5X8, SPLEEN_5X8_ITALIC};
+pub use spleen_5x8::SPLEEN_5X8;
+pub use spleen_5x8::SPLEEN_5X8_ITALIC;

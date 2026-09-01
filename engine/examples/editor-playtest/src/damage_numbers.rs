@@ -147,18 +147,17 @@ const PLATE_PAD_Y: i32 = 2;
 /// The band of the glyph cell that digits actually ink, as a row offset
 /// from the text origin and a height.
 ///
-/// The plate is sized to THIS, not to `line_height`. A display face's
-/// cell is full height and mostly leading -- [`DAMAGE_NUMBER_FACE`]
-/// inks rows 1..10 of a 14-row cell -- so a plate sized to the cell
-/// hangs four empty rows below the digits and reads as a box the number
+/// The plate is sized to THIS, not to `line_height`. The Basic 8x8 face
+/// inks rows 0..6, so a plate sized to the full cell hangs an empty row
+/// below the digits and reads as a box the number
 /// is sitting on top of rather than one it is inside. Sizing to the ink
 /// also makes the plate smaller, which is the cheaper thing to fill.
 ///
 /// Hand-written but not unchecked: `the_plate_is_sized_to_the_digits`
 /// recomputes both from the face's own bitmap.
-const DIGIT_INK_TOP: i32 = 1;
+const DIGIT_INK_TOP: i32 = 0;
 /// Height of the band described by [`DIGIT_INK_TOP`].
-const DIGIT_INK_HEIGHT: i32 = 10;
+const DIGIT_INK_HEIGHT: i32 = 7;
 
 /// Horizontal screen offset for a number over a struck actor, pixels.
 ///
@@ -173,43 +172,18 @@ const DIGIT_INK_HEIGHT: i32 = 10;
 /// Half the bar's width, plus half the widest value this level's
 /// weapons can deal, plus a margin.
 ///
-/// Has grown twice with the face -- 26 for the original 5x8, 32 for a
-/// 10px-advance display face, 36 for [`DAMAGE_NUMBER_FACE`]'s 12px one
-/// -- because what it has to clear is a font metric, not a layout
-/// choice. Each step is the smallest value that leaves any clearance at
-/// all, since every pixel here also pushes the number further from the
-/// point it was dealt at. The test at the bottom of this file recomputes
-/// the requirement from the font and the cooked weapon table, so the
-/// next face change cannot regress it silently.
+/// This remains conservative for the narrower Basic 8x8 face. The test at
+/// the bottom of this file recomputes the requirement from the font and the
+/// cooked weapon table, so a later face change cannot regress it silently.
 const STRUCK_ACTOR_X_OFFSET: i8 = 36;
 
 /// The face damage numbers are drawn in.
 ///
-/// Deliberately NOT the HUD's face. HUD chrome is set in a compact 5x8
-/// italic that suits a static label read at leisure; a damage number is
-/// read in a glance while both it and the camera are moving, so it
-/// wants the opposite -- upright, heavy strokes, and digits that cannot
-/// be mistaken for each other.
-///
-/// Picked from a comparison sheet rendered over this level's real
-/// surfaces at the shipping 25% light intensity. `KENNEY_FUTURE_NARROW`
-/// carries two-pixel strokes on an 8px-wide digit set in a 12px cell,
-/// so the four columns of built-in letterspacing keep a two-digit value
-/// from fusing into one blob while the camera moves. All ten digits are
-/// pixel-distinct; the closest pair still differs in six pixels.
-///
-/// The extra advance is the whole cost of the choice, and it is paid in
-/// exactly one place -- [`STRUCK_ACTOR_X_OFFSET`], which has to be wide
-/// enough to walk the number around the enemy health bar.
-///
-/// The obvious weight candidate, `KENNEY_BLOCKS`, is ruled out on
-/// legibility rather than weight: its cut-out display forms make `0`/`8`
-/// and `4`/`1` nearly identical at this size.
-///
-/// Alternates that also passed, if this reads too wide in motion:
-/// `KENNEY_MINI_SQUARE` (12x16, the same two-pixel weight in a tighter
-/// advance), `BASIC_8X16` (8x16, lighter and narrower again).
-pub(super) const DAMAGE_NUMBER_FACE: &psx_font::BitmapFont = &psx_font::fonts::KENNEY_FUTURE_NARROW;
+/// Damage numbers share the project's upright Basic 8x8 HUD face. Keeping
+/// combat feedback inside the three-face project palette avoids a hidden
+/// fourth atlas and guarantees that the runtime and the layout tests measure
+/// the same glyphs.
+pub(super) const DAMAGE_NUMBER_FACE: &psx_font::BitmapFont = &psx_font::fonts::BASIC;
 
 /// Damage channel a number is tinted by.
 ///
@@ -524,7 +498,7 @@ const MINUS_CHAR: char = '-';
 /// A hand-written constant, but not an unchecked one:
 /// `the_sign_sits_at_the_digits_mid_height` recomputes it from the
 /// face's own bitmap and fails if a face change moves it.
-const MINUS_DROP: i16 = 4;
+const MINUS_DROP: i16 = 0;
 
 /// Age of a number in simulation ticks, clamped to zero while its spawn
 /// tick is still in the future.
@@ -790,9 +764,8 @@ mod tests {
         inked_rows(ch).1
     }
 
-    /// The sign is drawn as its own run at [`MINUS_DROP`] rows below the
-    /// digits, because these display faces put their hyphen at cap-top.
-    /// Recompute the correct drop from the face's own bitmap so a face
+    /// The sign is drawn as its own run with [`MINUS_DROP`] derived from the
+    /// face's ink. Recompute the correct offset from the bitmap so a face
     /// change cannot leave the sign floating above the number.
     #[test]
     fn the_sign_sits_at_the_digits_mid_height() {
@@ -1107,31 +1080,11 @@ mod tests {
         );
     }
 
-    /// The whole point of the face swap: damage numbers are read at a
-    /// glance while moving, so they must not be set in the HUD's compact
-    /// italic. Pin the two properties that decision rests on.
+    /// Damage feedback follows the same upright Basic 8x8 face as HUD labels,
+    /// rather than smuggling another atlas into the three-font project.
     #[test]
-    fn the_damage_face_is_upright_and_heavier_than_the_hud_face() {
-        let hud = &psx_font::fonts::SPLEEN_5X8_ITALIC;
-        assert!(
-            DAMAGE_NUMBER_FACE.glyph_h > hud.glyph_h,
-            "the damage face must be taller than the HUD's 5x8"
-        );
-        // Ink coverage over the digits stands in for stroke weight: the
-        // HUD face is one pixel wide everywhere, the damage face two.
-        let ink = |font: &psx_font::BitmapFont| -> u32 {
-            ('0'..='9')
-                .filter_map(|ch| font.glyph_index(ch))
-                .flat_map(|glyph| {
-                    (0..font.glyph_h).map(move |row| font.glyph_row_packed(glyph, row))
-                })
-                .map(u32::count_ones)
-                .sum()
-        };
-        assert!(
-            ink(DAMAGE_NUMBER_FACE) > ink(hud) * 2,
-            "the damage face should carry far more ink per digit than the HUD's"
-        );
+    fn the_damage_face_is_the_upright_basic_hud_face() {
+        assert!(core::ptr::eq(DAMAGE_NUMBER_FACE, &psx_font::fonts::BASIC));
     }
 
     #[test]

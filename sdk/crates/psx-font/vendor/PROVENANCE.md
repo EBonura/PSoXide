@@ -132,3 +132,15 @@ These are rasterized to generated Rust bitmap modules rather than
 loaded dynamically. The editor can expose the full list, while cooked
 runtime manifests reference only the font modules used by authored UI
 text.
+
+## `itchio/drippy-space/DrippySpace-Regular.ttf` - Drippy Space
+
+Author: Syntaxes of Play (`eerieA`)
+Upstream: https://synofplay.itch.io/drippy-space-futuristic-sci-fi-display-font
+License: **SIL Open Font License 1.1** (`itchio/drippy-space/OFL.txt`)
+
+Drippy Space is a minimalist futuristic display face intended for titles,
+logos, HUD accents, and short interface labels. The author notes that it has
+only basic glyph coverage, so it is kept as a display option rather than a
+general prose font. The Rust bitmap module is generated from the vendored TTF
+with `psoxide-dev gen-fonts`.

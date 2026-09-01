@@ -1212,6 +1212,8 @@ pub(crate) fn ui_preview_font_source(font: UiFontChoice) -> &'static psx_font::B
         UiFontChoice::ZenDotsDisplay => &psx_font::fonts::ZEN_DOTS_DISPLAY,
         UiFontChoice::Spleen5x8 => &psx_font::fonts::SPLEEN_5X8,
         UiFontChoice::Spleen5x8Italic => &psx_font::fonts::SPLEEN_5X8_ITALIC,
+        UiFontChoice::DrippySpace => &psx_font::fonts::DRIPPY_SPACE,
+        UiFontChoice::DrippySpaceDisplay => &psx_font::fonts::DRIPPY_SPACE_DISPLAY,
     }
 }
 
