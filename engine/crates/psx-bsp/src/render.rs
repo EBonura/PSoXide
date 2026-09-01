@@ -31,7 +31,7 @@ use crate::pxbsp::{
     decompress_visibility, material_blend, material_flags, PxbspMaterial, PxbspMaterialAnimation,
     PXBSP_MAX_VISIBILITY_BYTES,
 };
-use crate::pxbsp_resident::PxbspResidentMap;
+use crate::pxbsp_resident::{FaceRef, PxbspResidentMap};
 use crate::resident::ResidentMap;
 use crate::{
     CompactPlane, Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT,
@@ -1593,8 +1593,8 @@ impl Renderer {
         let (first_face, face_end) = selection.range(faces.len(), self.frame_pxbsp_faces.len());
         for selection_index in first_face..face_end {
             let face_index = selection.face_index(selection_index, &self.frame_pxbsp_faces);
-            let face = unsafe { map.face_at_unchecked(face_index) };
-            let material_index = face.texture as usize;
+            let face = unsafe { map.face_ref_unchecked(face_index) };
+            let material_index = face.texture();
             let slot = PxbspResolvedMaterial::slot(material_index);
             if !self.pxbsp_material_cache[slot].answers(material_index, epoch) {
                 self.fill_pxbsp_material_cache(
@@ -1616,14 +1616,15 @@ impl Renderer {
                     match packed_face_state(&self.frame_pxbsp_face_state, face_index) {
                         PXBSP_FRAME_NODE_BACK => false,
                         PXBSP_FRAME_NODE_FRONT => true,
-                        _ => front_facing_pxbsp(map, face, camera_origin),
+                        _ => front_facing_pxbsp(map, face.plane(), face.flags(), camera_origin),
                     }
                 }
                 PxbspFaceSelection::ModelRange { .. } => {
-                    front_facing_pxbsp(map, face, camera_origin)
+                    front_facing_pxbsp(map, face.plane(), face.flags(), camera_origin)
                 }
             };
-            if !pxbsp_policy_face_draws(policy, face.flags, authored_front) {
+            let face_flags = face.flags();
+            if !pxbsp_policy_face_draws(policy, face_flags, authored_front) {
                 continue;
             }
 
@@ -1639,7 +1640,7 @@ impl Renderer {
             }
             let resolved = unsafe { *self.pxbsp_material_cache.get_unchecked(slot) };
 
-            let source_count = face.vertex_count as usize;
+            let source_count = face.vertex_count();
             if source_count > PXBSP_BATCH_MAX_VERTICES {
                 stats.packet_overflow_avoided = true;
                 break;
@@ -1671,7 +1672,7 @@ impl Renderer {
                 needs_near_clip
             };
             let state = resolved.state;
-            let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
+            let compact_surface = face_flags & FACE_PAGE_LOCAL_UV != 0
                 && policy & pxbsp_material_policy::COMPACT != 0;
             let uv_offset = if compact_surface {
                 state.page_uv_offset
@@ -1851,16 +1852,18 @@ impl Renderer {
     unsafe fn materialize_pxbsp_face(
         &self,
         source_base: *const ClassicAffineWordSourceVertex,
-        face: Face,
+        face: FaceRef,
         uv_offset: [u8; 2],
         color_scale_q7: u8,
         output: &mut [ClassicAffineVertex],
     ) {
-        let first = face.first_vertex as usize;
-        let baked_uv = face.flags & FACE_BAKED_UV != 0;
-        let baked_light = face.flags & FACE_BAKED_LIGHT != 0;
-        let style0 = self.light_styles[face.light_styles[0] as usize];
-        let style1 = self.light_styles[face.light_styles[1] as usize];
+        let first = face.first_vertex();
+        let flags = face.flags();
+        let baked_uv = flags & FACE_BAKED_UV != 0;
+        let baked_light = flags & FACE_BAKED_LIGHT != 0;
+        let light_styles = face.light_styles();
+        let style0 = self.light_styles[light_styles[0] as usize];
+        let style1 = self.light_styles[light_styles[1] as usize];
         let source_ptr = unsafe { source_base.add(first) };
         debug_assert_eq!(source_ptr as usize & 3, 0);
         if baked_light && !baked_uv {
@@ -1960,13 +1963,13 @@ impl Renderer {
     /// [`Self::materialize_pxbsp_face`].
     unsafe fn pxbsp_face_clip(
         source_base: *const ClassicAffineWordSourceVertex,
-        face: Face,
+        face: FaceRef,
         planes: &[([i32; 3], i32); 5],
         side_error: i32,
         clip_mask: u8,
     ) -> Option<bool> {
-        let first = face.first_vertex as usize;
-        let count = face.vertex_count as usize;
+        let first = face.first_vertex();
+        let count = face.vertex_count();
         let source = unsafe { source_base.add(first) };
         if count == 0 {
             return None;
@@ -2569,10 +2572,11 @@ impl Renderer {
                     let start = leaf.first_mark_surface as usize;
                     let end = start + leaf.mark_surface_count as usize;
                     for mark_index in start..end {
+                        // `validate_references` checked every mark index
+                        // against the face count at load.
                         let face =
-                            *map.mark_surfaces_native()
-                                .get(mark_index)
-                                .expect("validated leaf mark") as usize;
+                            unsafe { *map.mark_surfaces_native().get_unchecked(mark_index) }
+                                as usize;
                         if packed_face_state(&self.pxbsp_face_state, face) != 0 {
                             set_packed_face_state(
                                 &mut self.frame_pxbsp_face_state,
@@ -2590,9 +2594,7 @@ impl Renderer {
             for face in start..end {
                 if packed_face_state(&self.pxbsp_face_state, face) != 0 {
                     let authored_front = behind
-                        == (map.faces().get(face).expect("validated node face").flags
-                            & FACE_BACKSIDE
-                            != 0);
+                        == (unsafe { map.face_ref_unchecked(face) }.flags() & FACE_BACKSIDE != 0);
                     set_packed_face_state(
                         &mut self.frame_pxbsp_face_state,
                         face,
@@ -3072,10 +3074,10 @@ fn front_facing(map: &ResidentMap, face: Face, point: Vec3I32) -> bool {
     behind == (face.flags & FACE_BACKSIDE != 0)
 }
 
-fn front_facing_pxbsp(map: &PxbspResidentMap, face: Face, point: Vec3I32) -> bool {
-    let plane = unsafe { map.planes().get_unchecked(face.plane as usize) };
+fn front_facing_pxbsp(map: &PxbspResidentMap, plane: usize, flags: u16, point: Vec3I32) -> bool {
+    let plane = unsafe { map.planes().get_unchecked(plane) };
     let behind = compact_plane_distance(*plane, point) < 0;
-    behind == (face.flags & FACE_BACKSIDE != 0)
+    behind == (flags & FACE_BACKSIDE != 0)
 }
 
 fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
@@ -3348,9 +3350,11 @@ mod tests {
         assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
         assert_eq!(packed_face_state(&renderer.pxbsp_face_state, 0), 2);
         assert_eq!(renderer.visible_pxbsp_faces, [0]);
+        let face = map.faces().get(0).expect("face");
         assert!(front_facing_pxbsp(
             &map,
-            map.faces().get(0).expect("face"),
+            face.plane as usize,
+            face.flags,
             camera.origin
         ));
         assert!(pxbsp_face_draws(
