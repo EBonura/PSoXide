@@ -9,16 +9,16 @@ use psx_level::{
     LevelBoxPropSurfaceRecord, LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord,
     LevelCachedRoomVertexRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
     LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelDestructibleRecord,
-    LevelFarVistaRecord, LevelGameEntityRecord, LevelImagePropRecord, LevelLogicRecord,
-    LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
+    LevelFarVistaRecord, LevelGameEntityRecord, LevelGameplaySfxCueRecord, LevelImagePropRecord,
+    LevelLogicRecord, LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelOptionDef, LevelRoomPortalRecord, LevelRoomRecord,
     LevelRoomSurfaceCacheRecord, LevelRoomVisibilityRecord, LevelSceneState, LevelSkyRecord,
     LevelTransition, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene, LevelUiSfxCueRecord,
     LevelUiSfxSampleRecord, LevelVisibilityCellRecord, LevelVisibilityPvsRecord,
-    LevelWaterCellRecord, LevelWeaponRecord, LevelWorldObjectRecord, LevelWorldPackEntryRecord,
-    ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
-    RoomResidencyRecord, WeaponAppearanceRecord, WeaponHitboxRecord,
+    LevelVitalityCircleRecord, LevelWaterCellRecord, LevelWeaponRecord, LevelWorldObjectRecord,
+    LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
+    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponAppearanceRecord, WeaponHitboxRecord,
 };
 
 pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
@@ -99,6 +99,7 @@ pub static UI_NODES: &[LevelUiNodeRecord] = &[];
 pub static UI_SFX_SAMPLES: &[LevelUiSfxSampleRecord] = &[];
 pub static UI_SFX_CUES: &[LevelUiSfxCueRecord] = &[];
 pub static GAMEPLAY_SFX_CUES: &[LevelGameplaySfxCueRecord] = &[];
+pub static VITALITY_CIRCLES: &[LevelVitalityCircleRecord] = &[];
 pub static UI_SCENES: &[LevelUiScene] = &[];
 pub static SCENE_STATES: &[LevelSceneState] = &[];
 pub static GAME_FLOW: GameFlow = GameFlow {
@@ -115,6 +116,7 @@ pub static WEAPON_APPEARANCES: &[WeaponAppearanceRecord] = &[];
 pub static LIGHTS: &[PointLightRecord] = &[];
 pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[];
 pub static INTERACTABLE_MESSAGES: &[InteractableMessageRecord] = &[];
+pub static INTERACTABLE_MESSAGE_PAGES: &[&str] = &[];
 pub static INTERACTABLES: &[InteractableRecord] = &[];
 pub static BOOST_MODULES: &[BoostModuleRecord] = &[];
 pub static LOGIC: &[LevelLogicRecord] = &[];
@@ -123,6 +125,10 @@ pub static CHARACTERS: &[LevelCharacterRecord] = &[];
 pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;
 pub static ENTITIES: &[EntityRecord] = &[];
 pub static COMBAT_CAPSULES: &[CombatCapsuleRecord] = &[];
+pub static WORLD_MESSAGE: Option<InteractableMessageRecord> = None;
+pub const PERSISTENT_FLAG_COUNT: u16 = 1;
+pub const PROJECT_SAVE_NAME: &str = "BESLES-PSOXIDE";
+pub const PROJECT_SAVE_TITLE: &str = "PSOXIDE PLAYTEST";
 pub const LOADING_UI_SCENE: u16 = psx_level::UI_SCENE_NONE;
 
 macro_rules! draw_project_cached_room {
