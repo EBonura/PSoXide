@@ -109,6 +109,8 @@ pub enum MenuAction {
     ChooseGamesPath,
     /// Cycle the menu backdrop opacity through a few presets.
     CycleMenuOpacity,
+    /// Cycle the DPI-aware host UI scale through compact and enlarged presets.
+    CycleUiScale,
     /// Web: reconnect a previously-saved BIOS + games folder.
     #[cfg(target_arch = "wasm32")]
     Reconnect,
@@ -635,6 +637,19 @@ impl MenuState {
                 .find(|item| item.action == MenuAction::CycleMenuOpacity)
             {
                 item.value = Some(format!("{}%", self.backdrop_pct));
+            }
+        }
+    }
+
+    /// Reflect the persisted host UI scale in the Settings row.
+    pub fn set_ui_scale(&mut self, pct: u8) {
+        if let Some(settings) = self.categories.iter_mut().find(|c| c.name == "Settings") {
+            if let Some(item) = settings
+                .items
+                .iter_mut()
+                .find(|item| item.action == MenuAction::CycleUiScale)
+            {
+                item.value = Some(format!("{}%", pct.clamp(50, 150)));
             }
         }
     }
@@ -2429,6 +2444,12 @@ fn build_settings_category() -> Category {
                 burn_action: None,
                 value: Some("90%".into()),
             },
+            MenuItem {
+                label: "UI scale".into(),
+                action: MenuAction::CycleUiScale,
+                burn_action: None,
+                value: Some("100%".into()),
+            },
             // Web only: reload the BIOS + games folder remembered from a
             // previous visit (Chrome/Edge; no-op where unsupported).
             #[cfg(target_arch = "wasm32")]
@@ -2978,5 +2999,22 @@ mod tests {
             Some("SCPH1001.BIN")
         );
         assert_eq!(s.categories[4].items[1].value.as_deref(), Some("discs"));
+    }
+
+    #[test]
+    fn ui_scale_setting_updates_its_menu_value() {
+        let mut state = MenuState::new();
+        state.set_ui_scale(75);
+        let settings = state
+            .categories
+            .iter()
+            .find(|category| category.name == "Settings")
+            .unwrap();
+        let scale = settings
+            .items
+            .iter()
+            .find(|item| item.action == MenuAction::CycleUiScale)
+            .unwrap();
+        assert_eq!(scale.value.as_deref(), Some("75%"));
     }
 }

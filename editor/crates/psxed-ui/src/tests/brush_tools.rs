@@ -2174,6 +2174,59 @@ fn face_element_gizmo_moves_the_full_document_wide_selection() {
 }
 
 #[test]
+fn bsp_mode_changes_preserve_multi_brush_selection() {
+    let mut project = ProjectDocument::new("mode change selection persistence");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [256, 0, 0],
+            [384, 128, 128],
+        ));
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("mode-change-selection-persistence"), project);
+    workspace.active_tool = ViewTool::Select;
+    workspace.set_brush_edit_mode(BrushEditMode::Face);
+    workspace.selected_brush = Some(1);
+    workspace.selected_brushes = vec![0, 1];
+    workspace.selected_brush_face = Some(5);
+    workspace.selected_brush_faces = vec![(0, 5), (1, 5)];
+    workspace.selected_brush_elements = vec![BrushElement::Face(5)];
+
+    workspace.set_bsp_toolbar_mode(BspToolbarMode::Select);
+
+    assert_eq!(
+        workspace.active_bsp_toolbar_mode(),
+        Some(BspToolbarMode::Select)
+    );
+    assert_eq!(workspace.selected_brush_set(), vec![0, 1]);
+    assert_eq!(workspace.selected_brush, Some(1));
+    assert!(workspace.selected_brush_faces.is_empty());
+    assert!(workspace.selected_brush_elements.is_empty());
+
+    workspace.set_bsp_toolbar_mode(BspToolbarMode::Face);
+
+    assert_eq!(
+        workspace.active_bsp_toolbar_mode(),
+        Some(BspToolbarMode::Face)
+    );
+    assert_eq!(workspace.selected_brush_set(), vec![0, 1]);
+    assert_eq!(workspace.selected_brush, Some(1));
+    assert_eq!(workspace.selected_brush_faces, vec![(1, 5)]);
+    assert_eq!(
+        workspace.selected_brush_elements,
+        vec![BrushElement::Face(5)]
+    );
+}
+
+#[test]
 fn element_gizmo_moves_every_selected_edge_and_vertex() {
     for mode in [BrushEditMode::Edge, BrushEditMode::Vertex] {
         let original = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);

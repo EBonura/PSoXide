@@ -200,7 +200,7 @@ fn append_occluded_bsp_segment(
         let in_front = camera.view_vertex(world_vertex_from_f64(midpoint)).z
             >= camera.projection.near_z.max(1);
         let visible = in_front
-            && !leak_point_occluded(
+            && !world_point_occluded_by_solid_brush(
                 scene,
                 solved_brushes,
                 hidden_scene_nodes,
@@ -288,7 +288,7 @@ fn world_vertex_from_f64(point: [f64; 3]) -> psx_engine::WorldVertex {
     )
 }
 
-fn leak_point_occluded(
+fn world_point_occluded_by_solid_brush(
     scene: &Scene,
     solved_brushes: &[PreviewSolvedBrush],
     hidden_scene_nodes: &HashSet<NodeId>,
@@ -946,53 +946,65 @@ pub(super) fn walk_roomless_light_gizmos(
         .world_sector_size_for_node(scene.root)
         .unwrap_or(1024)
         .max(1) as f32;
-    for light in preview_lights(scene, hidden_scene_nodes) {
-        let center_world = light
-            .transform
-            .translation
-            .map(|value| value.round() as i32);
-        let center_world = [center_world[0], center_world[1], center_world[2]];
-        let is_selected = preview_reference_selected(selected, light.host_id, None, None, None);
-        let is_hovered = hovered
-            .is_some_and(|id| preview_reference_selected(id, light.host_id, None, None, None));
-        let style = if is_selected {
-            FaceOutlineStyle {
-                rgb: (0xFF, 0xE0, 0x80),
-                thickness_px: EDITOR_PREVIEW_SELECTED_STROKE_WIDTH,
+    with_cached_solved_brushes(project, |solved_brushes| {
+        for light in preview_lights(scene, hidden_scene_nodes) {
+            let center_world = light
+                .transform
+                .translation
+                .map(|value| value.round() as i32);
+            let center_world = [center_world[0], center_world[1], center_world[2]];
+            if world_point_occluded_by_solid_brush(
+                scene,
+                solved_brushes,
+                hidden_scene_nodes,
+                camera.position,
+                center_world.map(f64::from),
+            ) {
+                continue;
             }
-        } else if is_hovered {
-            FaceOutlineStyle {
-                rgb: (0xFF, 0xF0, 0x90),
-                thickness_px: EDITOR_PREVIEW_HOVER_STROKE_WIDTH,
+
+            let is_selected = preview_reference_selected(selected, light.host_id, None, None, None);
+            let is_hovered = hovered
+                .is_some_and(|id| preview_reference_selected(id, light.host_id, None, None, None));
+            let style = if is_selected {
+                FaceOutlineStyle {
+                    rgb: (0xFF, 0xE0, 0x80),
+                    thickness_px: EDITOR_PREVIEW_SELECTED_STROKE_WIDTH,
+                }
+            } else if is_hovered {
+                FaceOutlineStyle {
+                    rgb: (0xFF, 0xF0, 0x90),
+                    thickness_px: EDITOR_PREVIEW_HOVER_STROKE_WIDTH,
+                }
+            } else {
+                FaceOutlineStyle {
+                    rgb: (
+                        light.color[0].max(0x40),
+                        light.color[1].max(0x40),
+                        light.color[2].max(0x40),
+                    ),
+                    thickness_px: EDITOR_PREVIEW_HOVER_STROKE_WIDTH,
+                }
+            };
+            if is_selected || is_hovered {
+                if let Some(radius_engine) =
+                    preview_light_radius_world_units(light.radius, radius_units)
+                {
+                    push_horizontal_ring(scratch, camera, center_world, radius_engine, 16, style);
+                }
             }
-        } else {
-            FaceOutlineStyle {
-                rgb: (
+            push_light_bulb_icon(
+                scratch,
+                center_world,
+                (
                     light.color[0].max(0x40),
                     light.color[1].max(0x40),
                     light.color[2].max(0x40),
                 ),
-                thickness_px: EDITOR_PREVIEW_HOVER_STROKE_WIDTH,
-            }
-        };
-        if is_selected || is_hovered {
-            if let Some(radius_engine) =
-                preview_light_radius_world_units(light.radius, radius_units)
-            {
-                push_horizontal_ring(scratch, camera, center_world, radius_engine, 16, style);
-            }
+                is_selected || is_hovered,
+            );
         }
-        push_light_bulb_icon(
-            scratch,
-            center_world,
-            (
-                light.color[0].max(0x40),
-                light.color[1].max(0x40),
-                light.color[2].max(0x40),
-            ),
-            is_selected || is_hovered,
-        );
-    }
+    });
 }
 
 /// Wireframe AABB + facing arrow per selectable scene entity.
@@ -1007,40 +1019,62 @@ pub(super) fn walk_roomless_light_gizmos(
 /// the room face palette for cross-tool consistency: yellow for
 /// hover, cyan-bold for selected.
 pub(super) fn walk_entity_bounds(
+    project: &ProjectDocument,
+    camera: psx_engine::WorldCamera,
+    hidden_scene_nodes: &HashSet<NodeId>,
     bounds: &[psxed_ui::EntityBounds],
     selected: psxed_project::NodeId,
     hovered: Option<psxed_project::NodeId>,
     scratch: &mut PreviewScratch,
 ) {
-    for b in bounds {
-        if matches!(
-            b.kind,
-            psxed_ui::EntityBoundKind::ImageProp
-                | psxed_ui::EntityBoundKind::BoxProp
-                | psxed_ui::EntityBoundKind::CylinderProp
-                | psxed_ui::EntityBoundKind::Portal
-        ) {
-            continue;
-        }
-        let is_selected = b.node == selected;
-        let is_hovered = hovered == Some(b.node);
-        let style = entity_bound_style(b.kind, is_selected, is_hovered);
-        push_aabb_wireframe(scratch, b.center, b.half_extents, style);
+    with_cached_solved_brushes(project, |solved_brushes| {
+        let scene = project.active_scene();
+        for b in bounds {
+            if matches!(
+                b.kind,
+                psxed_ui::EntityBoundKind::ImageProp
+                    | psxed_ui::EntityBoundKind::BoxProp
+                    | psxed_ui::EntityBoundKind::CylinderProp
+                    | psxed_ui::EntityBoundKind::PointOfInterest
+                    | psxed_ui::EntityBoundKind::Portal
+            ) {
+                continue;
+            }
+            // Point-light bounds are host-composited wireframes, so they do
+            // not participate in the BSP ordering table. Suppress the whole
+            // marker when the light itself is behind solid room geometry,
+            // matching the bulb/radius gizmo visibility rule above.
+            if b.kind == psxed_ui::EntityBoundKind::PointLight
+                && world_point_occluded_by_solid_brush(
+                    scene,
+                    solved_brushes,
+                    hidden_scene_nodes,
+                    camera.position,
+                    b.center.map(f64::from),
+                )
+            {
+                continue;
+            }
+            let is_selected = b.node == selected;
+            let is_hovered = hovered == Some(b.node);
+            let style = entity_bound_style(b.kind, is_selected, is_hovered);
+            push_aabb_wireframe(scratch, b.center, b.half_extents, style);
 
-        // Yaw arrow only for kinds with meaningful facing --
-        // models and spawn points point at where they'll
-        // render / face. Lights and portals are either
-        // omnidirectional or carry their own
-        // direction gizmo elsewhere (light radius ring).
-        if matches!(
-            b.kind,
-            psxed_ui::EntityBoundKind::Model
-                | psxed_ui::EntityBoundKind::SpawnPoint
-                | psxed_ui::EntityBoundKind::MeshFallback
-        ) {
-            push_facing_arrow(scratch, b.center, b.half_extents, b.yaw_degrees, style);
+            // Yaw arrow only for kinds with meaningful facing --
+            // models and spawn points point at where they'll
+            // render / face. Lights and portals are either
+            // omnidirectional or carry their own
+            // direction gizmo elsewhere (light radius ring).
+            if matches!(
+                b.kind,
+                psxed_ui::EntityBoundKind::Model
+                    | psxed_ui::EntityBoundKind::SpawnPoint
+                    | psxed_ui::EntityBoundKind::MeshFallback
+            ) {
+                push_facing_arrow(scratch, b.center, b.half_extents, b.yaw_degrees, style);
+            }
         }
-    }
+    });
 }
 
 /// Pick the outline style for one bound. Selected wins over
@@ -1148,6 +1182,35 @@ pub(super) fn selected_node_is_image_prop(project: &ProjectDocument, selected: N
         matches!(
             node.kind,
             NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } | NodeKind::CylinderProp { .. }
+        )
+    })
+}
+
+/// Selected bounds are submitted through a second, always-on path so they
+/// remain available when idle preview bounds are disabled. Keep that selected
+/// point-light box behind BSP too; otherwise selecting an occluded light would
+/// reintroduce the exact host-overlay leak filtered by `walk_entity_bounds`.
+pub(super) fn selected_point_light_bound_occluded(
+    project: &ProjectDocument,
+    camera: psx_engine::WorldCamera,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+    center: [f32; 3],
+) -> bool {
+    if !project
+        .active_scene()
+        .node(selected)
+        .is_some_and(|node| matches!(node.kind, NodeKind::PointLight { .. }))
+    {
+        return false;
+    }
+    with_cached_solved_brushes(project, |solved_brushes| {
+        world_point_occluded_by_solid_brush(
+            project.active_scene(),
+            solved_brushes,
+            hidden_scene_nodes,
+            camera.position,
+            center.map(f64::from),
         )
     })
 }
@@ -1491,6 +1554,140 @@ mod surface_grid_tests {
             lines.len(),
             1,
             "hidden editor geometry must not cast an overlay shadow"
+        );
+    }
+
+    #[test]
+    fn point_light_icon_visibility_obeys_solid_brush_occlusion() {
+        let mut project = ProjectDocument::new("point light icon visibility");
+        let root = project.active_scene().root;
+        project.active_scene_mut().add_node(
+            root,
+            "Light behind wall",
+            NodeKind::PointLight {
+                color: [255, 216, 112],
+                intensity: 1.0,
+                radius: 1.0,
+            },
+        );
+        let mut scratch = new_preview_scratch();
+        let camera = setup_gte_for_camera(ViewportCameraState {
+            mode: psxed_ui::ViewportCameraMode::Orbit,
+            yaw_q12: 0,
+            pitch_q12: 0,
+            radius: 512,
+            target: [0; 3],
+            position: [0; 3],
+        });
+        walk_roomless_light_gizmos(
+            &project,
+            camera,
+            &HashSet::new(),
+            NodeId::ROOT,
+            None,
+            &mut scratch,
+        );
+        assert!(
+            !scratch.overlay_lines.is_empty(),
+            "an unobstructed bulb icon must remain visible"
+        );
+
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [-128, -128, 128],
+                [128, 128, 256],
+            ));
+        scratch.overlay_lines.clear();
+        walk_roomless_light_gizmos(
+            &project,
+            camera,
+            &HashSet::new(),
+            NodeId::ROOT,
+            None,
+            &mut scratch,
+        );
+
+        assert!(
+            scratch.overlay_lines.is_empty(),
+            "a bulb icon behind a solid wall must not be host-composited over it"
+        );
+    }
+
+    #[test]
+    fn point_light_bounds_obey_solid_brush_occlusion() {
+        let mut project = ProjectDocument::new("point light bound visibility");
+        let light = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Light behind wall",
+            NodeKind::PointLight {
+                color: [255, 216, 112],
+                intensity: 1.0,
+                radius: 1.0,
+            },
+        );
+        let bounds = [psxed_ui::EntityBounds {
+            node: light,
+            room: None,
+            kind: psxed_ui::EntityBoundKind::PointLight,
+            center: [0.0; 3],
+            half_extents: [16.0; 3],
+            yaw_degrees: 0.0,
+        }];
+        let mut scratch = new_preview_scratch();
+        let camera = setup_gte_for_camera(ViewportCameraState {
+            mode: psxed_ui::ViewportCameraMode::Orbit,
+            yaw_q12: 0,
+            pitch_q12: 0,
+            radius: 512,
+            target: [0; 3],
+            position: [0; 3],
+        });
+        walk_entity_bounds(
+            &project,
+            camera,
+            &HashSet::new(),
+            &bounds,
+            NodeId::ROOT,
+            None,
+            &mut scratch,
+        );
+        assert!(
+            !scratch.overlay_lines.is_empty(),
+            "an unobstructed point-light bound must remain visible"
+        );
+
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [-128, -128, 128],
+                [128, 128, 256],
+            ));
+        scratch.overlay_lines.clear();
+        walk_entity_bounds(
+            &project,
+            camera,
+            &HashSet::new(),
+            &bounds,
+            NodeId::ROOT,
+            None,
+            &mut scratch,
+        );
+        assert!(
+            scratch.overlay_lines.is_empty(),
+            "a point-light bound behind a solid wall must not be host-composited over it"
+        );
+        assert!(
+            selected_point_light_bound_occluded(
+                &project,
+                camera,
+                &HashSet::new(),
+                light,
+                bounds[0].center,
+            ),
+            "the always-on selected bound path must obey the same BSP occlusion"
         );
     }
 
