@@ -1891,22 +1891,34 @@ impl Scene for Playtest {
                 }
             };
             let elapsed = self.player_stance.swap_elapsed_ticks();
+            let cooldown_remaining = self.player_stance.swap_cooldown();
+            let cooldown_progress_q12 = if config.swap_cooldown_ticks == 0 {
+                VITALITY_Q12_ONE
+            } else {
+                ((u32::from(
+                    config
+                        .swap_cooldown_ticks
+                        .saturating_sub(cooldown_remaining),
+                ) * u32::from(VITALITY_Q12_ONE))
+                    / u32::from(config.swap_cooldown_ticks)) as u16
+            };
             let echo_elapsed = if elapsed != u16::MAX
-                && elapsed >= config.swap_duration_ticks
-                && elapsed < config.swap_duration_ticks.saturating_add(13)
+                && elapsed >= config.swap_cooldown_ticks
+                && elapsed < config.swap_cooldown_ticks.saturating_add(13)
             {
-                Some(elapsed - config.swap_duration_ticks)
+                Some(elapsed - config.swap_cooldown_ticks)
             } else {
                 None
             };
             draw_player_vitality_hud(
                 font,
+                self.vitality_circle_material,
                 active,
                 share(active),
                 share(active.other()),
                 self.player_stance.swap_progress_q12(&config),
+                cooldown_progress_q12,
                 echo_elapsed,
-                overlay_tick.as_u32() as u16,
             );
         }
 

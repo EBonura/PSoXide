@@ -73,6 +73,8 @@ pub(super) const GAMEPLAY_RESOURCE_KEY: u32 = 3;
 pub(super) static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
 pub(super) static VITALITY_CIRCLE_GLYPH_BLOB: &[u8] =
     include_bytes!("../assets/vitality_circle_machine_glyph_64.psxt");
+pub(super) static VITALITY_HUD_DIAL_BLOB: &[u8] =
+    include_bytes!("../assets/vitality_hud_dial_32.psxt");
 pub(super) const SCREEN_W: i16 = 320;
 pub(super) const SCREEN_H: i16 = 240;
 pub(super) const SCREEN_CX: i16 = 160;
