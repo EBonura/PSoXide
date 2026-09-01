@@ -323,6 +323,18 @@ impl UiResolvedNode {
     fn bounds(self) -> (i16, i16, u16, u16) {
         quad_bounds(self.verts)
     }
+
+    fn translated(mut self, dx: i16, dy: i16) -> Self {
+        let dx_q12 = i32::from(dx) << 12;
+        let dy_q12 = i32::from(dy) << 12;
+        self.transform.tx = self.transform.tx.saturating_add(dx_q12);
+        self.transform.ty = self.transform.ty.saturating_add(dy_q12);
+        for vertex in &mut self.verts {
+            vertex.0 = vertex.0.saturating_add(dx);
+            vertex.1 = vertex.1.saturating_add(dy);
+        }
+        self
+    }
 }
 
 fn mul_q12(a: i32, b_q12: i32) -> i32 {
@@ -687,6 +699,7 @@ pub fn draw_scene(
     paints: &[LevelUiPaintRecord],
     fonts: &[Option<&FontAtlas>],
     focused: Option<usize>,
+    focus_offset: (i16, i16),
     focus_style: &LevelUiFocusStyle,
     frame: u16,
     text_seed: u16,
@@ -725,6 +738,11 @@ pub fn draw_scene(
         }
         .unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
+        let focus_resolved = if is_focused {
+            resolved.translated(focus_offset.0, focus_offset.1)
+        } else {
+            resolved
+        };
         match node.kind {
             LevelUiNodeKind::Canvas
             | LevelUiNodeKind::Group
@@ -769,6 +787,7 @@ pub fn draw_scene(
                     node_font(fonts, node.font),
                     node,
                     resolved,
+                    focus_resolved,
                     paints,
                     is_focused,
                     frame,
@@ -776,7 +795,7 @@ pub fn draw_scene(
                     resolved_text,
                 );
                 if is_focused {
-                    draw_focus_ring(resolved, focus_style, frame, Some(shape_config(node)));
+                    draw_focus_ring(focus_resolved, focus_style, frame, Some(shape_config(node)));
                 }
             }
             LevelUiNodeKind::Slider => {
@@ -793,7 +812,7 @@ pub fn draw_scene(
                     shape_paint(node.accent, node.accent_paint, paints),
                 );
                 if is_focused {
-                    draw_focus_ring(resolved, focus_style, frame, None);
+                    draw_focus_ring(focus_resolved, focus_style, frame, None);
                 }
             }
         }
@@ -1307,14 +1326,13 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 mod tests {
     use super::{
         activation_echo_layer, bar_frame_index, bar_frame_v_range, diamond_quad,
-        focus_chrome_sweep_paint, focus_sweep_rect, font_index, font_tint, layout_memo_begin,
-        scaled_run_width, TextRun,
-        layout_memo_resolved, ParentResolveCache, UI_LAYOUT_MEMO_CAP,
-        image_effect_vertex_colors, image_effect_verts, message_panel_layout,
-        message_panel_transition_layout, node_absolute_rect, scale_u16_q8, selected_label_text,
-        shape_config, shape_edge_point, shape_perimeter, shape_polygon, text_prefix_chars,
-        MessagePageMeta, MessagePanelLayout, MessagePanelVariant, UiAffine, UiPaint, UiShapeConfig,
-        ACTIVATION_ECHO_FRAMES, MESSAGE_PANEL_EXPAND_FRAMES,
+        focus_chrome_sweep_paint, focus_sweep_rect, font_index, font_tint,
+        image_effect_vertex_colors, image_effect_verts, layout_memo_begin, layout_memo_resolved,
+        message_panel_layout, message_panel_transition_layout, node_absolute_rect, scale_u16_q8,
+        scaled_run_width, selected_label_text, shape_config, shape_edge_point, shape_perimeter,
+        shape_polygon, text_prefix_chars, MessagePageMeta, MessagePanelLayout, MessagePanelVariant,
+        ParentResolveCache, TextRun, UiAffine, UiPaint, UiShapeConfig, ACTIVATION_ECHO_FRAMES,
+        MESSAGE_PANEL_EXPAND_FRAMES, UI_LAYOUT_MEMO_CAP,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiGradientDirection, LevelUiImageEffect,
@@ -1704,10 +1722,38 @@ mod tests {
     fn parent_resolve_memo_matches_an_uncached_resolve() {
         let mut nodes = [
             ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240),
-            ui_node(Some(psx_level::UiNodeIndex(0)), LevelUiNodeKind::Group, 8, 6, 200, 80),
-            ui_node(Some(psx_level::UiNodeIndex(1)), LevelUiNodeKind::Rect, 4, 4, 88, 8),
-            ui_node(Some(psx_level::UiNodeIndex(0)), LevelUiNodeKind::Rect, 52, 21, 88, 8),
-            ui_node(Some(psx_level::UiNodeIndex(1)), LevelUiNodeKind::Label, 2, 2, 35, 8),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Group,
+                8,
+                6,
+                200,
+                80,
+            ),
+            ui_node(
+                Some(psx_level::UiNodeIndex(1)),
+                LevelUiNodeKind::Rect,
+                4,
+                4,
+                88,
+                8,
+            ),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Rect,
+                52,
+                21,
+                88,
+                8,
+            ),
+            ui_node(
+                Some(psx_level::UiNodeIndex(1)),
+                LevelUiNodeKind::Label,
+                2,
+                2,
+                35,
+                8,
+            ),
             // A parentless non-canvas node falls back to the screen rect.
             ui_node(None, LevelUiNodeKind::Rect, 5, 5, 10, 10),
         ];
@@ -2820,6 +2866,7 @@ fn draw_button(
     font: Option<&FontAtlas>,
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
+    focus_resolved: UiResolvedNode,
     paints: &[LevelUiPaintRecord],
     focused: bool,
     frame: u16,
@@ -2839,8 +2886,13 @@ fn draw_button(
         period: focus_style.period,
         color: focus_style.color_a,
     });
+    let chrome_resolved = if focus_chrome && focused {
+        focus_resolved
+    } else {
+        resolved
+    };
     let config = if draw_chrome {
-        draw_shape_node(node, resolved, paints, Some(fill), sweep)
+        draw_shape_node(node, chrome_resolved, paints, Some(fill), sweep)
     } else {
         shape_config(node)
     };
@@ -2848,12 +2900,12 @@ fn draw_button(
         && !config.transparent
         && config.corners == 0
         && config.border == 0
-        && resolved.height > 3
+        && chrome_resolved.height > 3
         && fill.is_solid()
     {
         let color = brighten(fill.from());
         draw_quad_flat(
-            resolved.subrect(0, 0, resolved.width as i16, 1),
+            chrome_resolved.subrect(0, 0, chrome_resolved.width as i16, 1),
             color.0,
             color.1,
             color.2,
@@ -3208,11 +3260,7 @@ fn draw_shape_border(
                 outer.vertices[next].screen,
                 inner.vertices[index].screen,
             ],
-            [
-                outer_colors[index],
-                outer_colors[next],
-                inner_colors[index],
-            ],
+            [outer_colors[index], outer_colors[next], inner_colors[index]],
             outer_paint.gouraud,
             false,
         );

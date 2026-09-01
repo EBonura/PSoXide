@@ -177,9 +177,106 @@ fn write_stat_line<'a>(
     out.finish()
 }
 
+fn target_ui_value(
+    binding: LevelUiValueBinding,
+    entities: &RuntimeGameEntities,
+    target: Option<usize>,
+) -> Option<i32> {
+    let health_q12 = |current: u16, maximum: u16| {
+        if maximum == 0 {
+            0
+        } else {
+            (i32::from(current) * PLAYER_HEALTH_MAX_Q12) / i32::from(maximum)
+        }
+    };
+    let record = target.and_then(|index| GAME_ENTITIES.get(index));
+    match binding {
+        LevelUiValueBinding::TargetHealth => {
+            Some(target.zip(record).map_or(0, |(index, record)| {
+                health_q12(entities.health(index), record.max_health)
+            }))
+        }
+        LevelUiValueBinding::TargetHealthMax => Some(record.map_or(0, |record| {
+            if record.max_health == 0 {
+                0
+            } else {
+                PLAYER_HEALTH_MAX_Q12
+            }
+        })),
+        LevelUiValueBinding::TargetHealthSecondary => {
+            Some(target.zip(record).map_or(0, |(index, record)| {
+                health_q12(
+                    entities.health_secondary(index),
+                    record.max_health_secondary,
+                )
+            }))
+        }
+        LevelUiValueBinding::TargetHealthSecondaryMax => Some(record.map_or(0, |record| {
+            if record.max_health_secondary == 0 {
+                0
+            } else {
+                PLAYER_HEALTH_MAX_Q12
+            }
+        })),
+        LevelUiValueBinding::TargetStanceSwapProgress => Some(target.map_or(0, |index| {
+            i32::from(entities.stance_swap_progress_q12(index))
+        })),
+        LevelUiValueBinding::TargetStanceActiveIsZenith => Some(target.map_or(0, |index| {
+            i32::from(entities.stance(index) == VitalityChannelId::Two)
+        })),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod target_ui_tests {
+    use super::*;
+
+    #[test]
+    fn target_bindings_resolve_live_pools_guard_and_absence() {
+        assert!(!GAME_ENTITIES.is_empty(), "cortex fixture has an enemy");
+        let mut entities = RuntimeGameEntities::EMPTY;
+        entities.spawn_from_records(GAME_ENTITIES);
+        let record = &GAME_ENTITIES[0];
+
+        assert_eq!(
+            target_ui_value(LevelUiValueBinding::TargetHealth, &entities, Some(0)),
+            Some(PLAYER_HEALTH_MAX_Q12)
+        );
+        assert_eq!(
+            target_ui_value(LevelUiValueBinding::TargetHealthMax, &entities, Some(0)),
+            Some(PLAYER_HEALTH_MAX_Q12)
+        );
+        assert_eq!(
+            target_ui_value(
+                LevelUiValueBinding::TargetStanceActiveIsZenith,
+                &entities,
+                Some(0)
+            ),
+            Some(0)
+        );
+
+        entities.apply_stance_hit(GAME_ENTITIES, 0, VitalityChannelId::One, 10, 0);
+        let expected =
+            (i32::from(entities.health(0)) * PLAYER_HEALTH_MAX_Q12) / i32::from(record.max_health);
+        assert_eq!(
+            target_ui_value(LevelUiValueBinding::TargetHealth, &entities, Some(0)),
+            Some(expected)
+        );
+        assert_eq!(
+            target_ui_value(LevelUiValueBinding::TargetHealth, &entities, None),
+            Some(0)
+        );
+    }
+}
+
 impl Scene for Playtest {
     fn render_submission(&self) -> RenderSubmission {
         RenderSubmission::Queued
+    }
+
+    fn take_gameplay_sfx_events(&mut self) -> u8 {
+        core::mem::take(&mut self.gameplay_sfx_events)
     }
 
     /// Lend the uploaded HUD font to the flow driver so front-end UI
@@ -215,6 +312,13 @@ impl Scene for Playtest {
     }
 
     fn ui_value(&self, binding: LevelUiValueBinding) -> Option<i32> {
+        if let Some(value) = target_ui_value(
+            binding,
+            &self.game_entities,
+            self.combat_target_entity_index(),
+        ) {
+            return Some(value);
+        }
         let horizon = self.player_vitality.pool(VitalityChannelId::One);
         let zenith = self.player_vitality.pool(VitalityChannelId::Two);
         let health_q12 = |current: u16, maximum: u16| {
@@ -410,6 +514,7 @@ impl Scene for Playtest {
             // authored, and each channel's name shows beside its own bar.
             "stance.horizon.active" => self.player_stance.active() == VitalityChannelId::One,
             "stance.zenith.active" => self.player_stance.active() == VitalityChannelId::Two,
+            "target.hud" => self.combat_target_entity_index().is_some(),
             _ => true,
         }
     }
@@ -857,14 +962,15 @@ impl Scene for Playtest {
                 if let (Some(room_record), Some(lighting)) =
                     (room_record, self.current_room_lighting(camera))
                 {
-                    let room_options = room_surface_options(room_record).with_material_animation(
+                    let room_options = pxbsp_surface_options(room_record).with_material_animation(
                         self.gameplay_tick(ctx.sim_tick).as_u32(),
                         ctx.video_hz.as_u16(),
                     );
-                    let actor_options = actor_surface_options(room_record).with_material_animation(
-                        self.gameplay_tick(ctx.sim_tick).as_u32(),
-                        ctx.video_hz.as_u16(),
-                    );
+                    let actor_options = pxbsp_actor_surface_options(room_record)
+                        .with_material_animation(
+                            self.gameplay_tick(ctx.sim_tick).as_u32(),
+                            ctx.video_hz.as_u16(),
+                        );
                     let instance_stats = self.draw_room_world_content(
                         self.room_index,
                         &camera,
@@ -872,7 +978,6 @@ impl Scene for Playtest {
                         room_options,
                         actor_options,
                         &lighting,
-                        ModelInstanceDepthPass::All,
                         entity_poses,
                         world_object_visibility,
                         ctx,
@@ -1320,16 +1425,6 @@ impl Scene for Playtest {
                         world.command_len().saturating_sub(room_command_start) as u32,
                     );
                 }
-                let player = self.motor.position();
-                let instance_depth_pass = player_actor_depth_for_room(
-                    active,
-                    self.character,
-                    &self.models,
-                    player,
-                    &room_camera,
-                )
-                .map(ModelInstanceDepthPass::BehindPlayer)
-                .unwrap_or(ModelInstanceDepthPass::All);
                 let instance_stats = self.draw_room_world_content(
                     active.index,
                     &room_camera,
@@ -1337,7 +1432,6 @@ impl Scene for Playtest {
                     room_options,
                     actor_options,
                     &lighting,
-                    instance_depth_pass,
                     entity_poses,
                     world_object_visibility,
                     ctx,
@@ -1365,7 +1459,8 @@ impl Scene for Playtest {
                 }
                 let player = self.motor.position();
                 let player_lighting = self.current_room_lighting(camera);
-                let actor_options = current_actor_surface_options(self.room_index);
+                let actor_options =
+                    current_actor_surface_options(self.room_index, self.bsp.is_some());
                 telemetry::stage_begin(telemetry::stage::PLAYER);
                 #[cfg(feature = "actor-shadows-projected")]
                 {
@@ -1399,6 +1494,13 @@ impl Scene for Playtest {
                 }
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
+                        let tint_sweep = player_stance_tint_sweep(
+                            self.player_stance,
+                            &self.player_stance_config,
+                            player,
+                            character.height,
+                            &camera,
+                        );
                         draw_player(
                             self.room_index,
                             &character,
@@ -1411,6 +1513,7 @@ impl Scene for Playtest {
                             &camera,
                             actor_options,
                             &lighting,
+                            tint_sweep,
                             &mut primitive_packets,
                             &mut world,
                         )
@@ -1481,13 +1584,12 @@ impl Scene for Playtest {
             }
 
             if self.character.is_some() {
-                let player = self.motor.position();
                 let mut instance_equipment_remaining = MAX_EQUIPMENT_DRAWS;
                 if self.bsp.is_some() {
                     if let (Some(room_record), Some(lighting)) =
                         (room_record, self.current_room_lighting(camera))
                     {
-                        let actor_options = actor_surface_options(room_record)
+                        let actor_options = pxbsp_actor_surface_options(room_record)
                             .with_material_animation(
                                 self.gameplay_tick(ctx.sim_tick).as_u32(),
                                 ctx.video_hz.as_u16(),
@@ -1526,15 +1628,6 @@ impl Scene for Playtest {
                         continue;
                     }
                     let room_camera = camera_for_room(camera, active);
-                    let Some(player_depth) = player_actor_depth_for_room(
-                        active,
-                        self.character,
-                        &self.models,
-                        player,
-                        &room_camera,
-                    ) else {
-                        continue;
-                    };
                     let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                         continue;
                     };
@@ -1549,28 +1642,10 @@ impl Scene for Playtest {
                         fog_far: room_record.fog_far,
                         lights: room_light_slice(LIGHTS, active.index),
                     };
-                    telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
-                    let instance_stats = draw_model_instances(
-                        active.index,
-                        &self.instance_actor_poses,
-                        self.gameplay_tick(ctx.sim_tick),
-                        ctx.video_hz,
-                        &room_camera,
-                        actor_options,
-                        &lighting,
-                        &self.model_faces[..self.model_face_count],
-                        &self.model_parts[..self.model_part_count],
-                        &self.model_vertices[..self.model_vertex_count],
-                        ModelInstanceDepthPass::InFrontOfPlayer(player_depth),
-                        &mut primitive_packets,
-                        &mut world,
-                    );
-                    telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
-                    accumulate_model_instance_draw_stats(&mut total_instance_stats, instance_stats);
-                    // Enemy weapons ride their instances' live poses;
-                    // one pass per room after both instance depth
-                    // passes (the OT depth-sorts the weapon with its
-                    // body).
+                    // Enemy weapons ride their instances' live poses. Bodies
+                    // were submitted once with their room content above; the
+                    // same per-face OT depth sorts this later equipment pass
+                    // against body, player and room surfaces.
                     telemetry::stage_begin(telemetry::stage::EQUIPMENT);
                     let equipment_stats = draw_instance_equipment(
                         active.index,
@@ -1602,18 +1677,12 @@ impl Scene for Playtest {
                 &mut primitive_packets,
                 &mut world,
             );
-
-            // The locked target's health bar goes into the same ordering table
-            // as the world it has to be occluded by. Submitted after the actors
-            // so it shares their room surface options.
-            if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-                let _ = self.draw_enemy_health_bar_world(
-                    camera,
-                    room_surface_options(room_record),
-                    &mut primitive_packets,
-                    &mut world,
-                );
-            }
+            self.draw_vitality_circles_world(
+                camera,
+                self.gameplay_tick(ctx.sim_tick),
+                &mut primitive_packets,
+                &mut world,
+            );
 
             telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_active_chunks);
             emit_room_chunk_mask(
@@ -1815,6 +1884,7 @@ impl Scene for Playtest {
             draw_room_atmosphere_overlay(room_record, overlay_tick);
         }
 
+        #[cfg(feature = "collision-debug-overlay")]
         if self.show_collision_debug {
             self.draw_collision_debug_overlay(camera);
         }
@@ -1831,51 +1901,43 @@ impl Scene for Playtest {
         // needs to retire its own expired slots.
         if let Some(font) = self.ui_fonts[DAMAGE_FONT_SLOT] {
             let room = self.room_index;
-            let _drawn = self
-                .damage_numbers
-                .draw(&font, camera, room, overlay_tick);
+            let _drawn = self.damage_numbers.draw(&font, camera, room, overlay_tick);
         }
 
-
-        /// Q12 unity, matching psx_game_runtime::vitality.
-        const VITALITY_Q12_ONE: u16 = 4096;
-        /// Bar colours mirroring the authored HUD labels.
-        const HORIZON_BAR_RGB: (u8, u8, u8) = (214, 75, 48);
-        const ZENITH_BAR_RGB: (u8, u8, u8) = (67, 169, 154);
-
-        // While a stance swap is settling the authored bars stand down and the
-        // overlay draws the pair crossing over, because a node's rect cannot be
-        // animated from a binding.
-        {
+        // One runtime-owned cluster draws the mutation charge and both health
+        // pools. The previous implementation layered a moving rectangular bar
+        // beneath an authored slanted bar, leaving both visible at rest.
+        if let Some(font) = self.ui_fonts[0].as_ref() {
+            const VITALITY_Q12_ONE: u16 = 4096;
             let config = self.player_stance_config;
-            let progress = self.player_stance.swap_progress_q12(&config);
+            let active = self.player_stance.active();
+            let share = |channel| {
+                let pool = self.player_vitality.pool(channel);
+                if pool.maximum() == 0 {
+                    0
+                } else {
+                    ((u32::from(pool.current()) * u32::from(VITALITY_Q12_ONE))
+                        / u32::from(pool.maximum())) as u16
+                }
+            };
+            let elapsed = self.player_stance.swap_elapsed_ticks();
+            let echo_elapsed = if elapsed != u16::MAX
+                && elapsed >= config.swap_duration_ticks
+                && elapsed < config.swap_duration_ticks.saturating_add(13)
             {
-                let share = |channel| {
-                    let pool = self.player_vitality.pool(channel);
-                    if pool.maximum() == 0 {
-                        0
-                    } else {
-                        ((u32::from(pool.current()) * u32::from(VITALITY_Q12_ONE))
-                            / u32::from(pool.maximum())) as u16
-                    }
-                };
-                let rising = self.player_stance.active();
-                let falling = self.player_stance.inactive();
-                let rgb = |channel| {
-                    if channel == VitalityChannelId::One {
-                        HORIZON_BAR_RGB
-                    } else {
-                        ZENITH_BAR_RGB
-                    }
-                };
-                draw_stance_swap(
-                    progress,
-                    share(rising),
-                    rgb(rising),
-                    share(falling),
-                    rgb(falling),
-                );
-            }
+                Some(elapsed - config.swap_duration_ticks)
+            } else {
+                None
+            };
+            draw_player_vitality_hud(
+                font,
+                active,
+                share(active),
+                share(active.other()),
+                self.player_stance.swap_progress_q12(&config),
+                echo_elapsed,
+                overlay_tick.as_u32() as u16,
+            );
         }
 
         #[cfg(feature = "fps-overlay")]
@@ -1968,7 +2030,6 @@ impl Playtest {
         room_options: WorldSurfaceOptions,
         actor_options: WorldSurfaceOptions,
         lighting: &RuntimeRoomLighting,
-        instance_depth_pass: ModelInstanceDepthPass,
         entity_poses: &[ModelInstancePoseOverride],
         world_object_visibility: WorldObjectVisibility,
         ctx: &Ctx,
@@ -2163,6 +2224,7 @@ impl Playtest {
         }
         let stats = draw_model_instances(
             room,
+            &self.game_entities,
             &self.instance_actor_poses,
             self.gameplay_tick(ctx.sim_tick),
             ctx.video_hz,
@@ -2172,7 +2234,6 @@ impl Playtest {
             &self.model_faces[..self.model_face_count],
             &self.model_parts[..self.model_part_count],
             &self.model_vertices[..self.model_vertex_count],
-            instance_depth_pass,
             primitive_packets,
             world,
         );

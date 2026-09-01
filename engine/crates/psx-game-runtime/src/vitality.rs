@@ -1094,7 +1094,10 @@ impl CombatStance {
         Self {
             active,
             swap_cooldown: 0,
-            swap_elapsed: 0,
+            // A fresh stance is stable, not twelve ticks into a mutation.
+            // Saturation keeps the no-swap state valid for any authored
+            // duration without another flag.
+            swap_elapsed: u16::MAX,
             regen_delay: [0; 2],
             broken: [false; 2],
             regen_fraction_q12: [0; 2],
@@ -1121,6 +1124,15 @@ impl CombatStance {
         self.swap_cooldown
     }
 
+    /// Ticks elapsed since the latest stance mutation began.
+    ///
+    /// A fresh stance returns `u16::MAX`, which lets presentation code avoid
+    /// mistaking startup for a just-completed mutation. After a real swap the
+    /// value advances through the mutation and its short completion echo.
+    pub const fn swap_elapsed_ticks(self) -> u16 {
+        self.swap_elapsed
+    }
+
     /// How far through the swap animation the HUD is, Q12.
     pub fn swap_progress_q12(self, config: &CombatStanceConfig) -> u16 {
         if config.swap_duration_ticks == 0 || self.swap_elapsed >= config.swap_duration_ticks {
@@ -1128,6 +1140,15 @@ impl CombatStance {
         }
         ((u32::from(self.swap_elapsed) * u32::from(VITALITY_Q12_ONE))
             / u32::from(config.swap_duration_ticks)) as u16
+    }
+
+    /// Whether the stance-change presentation window is still active.
+    ///
+    /// [`Self::swap_progress_q12`] intentionally saturates at one so UI
+    /// bindings can consume it directly; render effects need this separate
+    /// predicate to avoid tinting the actor forever after the first swap.
+    pub const fn swap_in_progress(self, config: &CombatStanceConfig) -> bool {
+        config.swap_duration_ticks > 0 && self.swap_elapsed < config.swap_duration_ticks
     }
 
     /// Whether the player may swap right now.
@@ -1460,10 +1481,8 @@ mod stance_tests {
             .expect("channel one owns a full-end socket");
         loadout.set(slot, BoostModuleId::from_index(0));
 
-        let active_one =
-            loadout.modifiers_for(&vitality, &modules, Some(VitalityChannelId::One));
-        let active_two =
-            loadout.modifiers_for(&vitality, &modules, Some(VitalityChannelId::Two));
+        let active_one = loadout.modifiers_for(&vitality, &modules, Some(VitalityChannelId::One));
+        let active_two = loadout.modifiers_for(&vitality, &modules, Some(VitalityChannelId::Two));
         assert!(
             active_one.regeneration_q12 > 0,
             "the state holding the module contributes while active"
@@ -1480,6 +1499,7 @@ mod stance_tests {
         let mut vitality = DualVitality::equal(100);
         let mut stance = CombatStance::new(VitalityChannelId::One);
         stance.request_swap(&config);
+        assert!(stance.swap_in_progress(&config));
         assert_eq!(stance.swap_progress_q12(&config), 0);
         stance.tick(&mut vitality, &config, 0);
         stance.tick(&mut vitality, &config, 0);
@@ -1488,5 +1508,6 @@ mod stance_tests {
             stance.tick(&mut vitality, &config, 0);
         }
         assert_eq!(stance.swap_progress_q12(&config), VITALITY_Q12_ONE);
+        assert!(!stance.swap_in_progress(&config));
     }
 }

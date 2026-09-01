@@ -2877,10 +2877,12 @@ enum PlaceKind {
     Destructible,
     /// Entity host with a procedural readable Point of Interest component.
     PointOfInterest,
+    /// Ground-anchored dual-vitality field.
+    VitalityCircle,
 }
 
 impl PlaceKind {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::PlayerSpawn,
         Self::SpawnMarker,
         Self::ModelInstance,
@@ -2894,6 +2896,7 @@ impl PlaceKind {
         Self::Logic,
         Self::Destructible,
         Self::PointOfInterest,
+        Self::VitalityCircle,
     ];
 
     const fn label(self) -> &'static str {
@@ -2911,6 +2914,7 @@ impl PlaceKind {
             Self::Logic => "Logic",
             Self::Destructible => "Destructible",
             Self::PointOfInterest => "Point of Interest",
+            Self::VitalityCircle => "Vitality Circle",
         }
     }
 
@@ -2928,6 +2932,7 @@ impl PlaceKind {
             Self::Logic => icons::BLEND,
             Self::Destructible => icons::BOX,
             Self::PointOfInterest => icons::FOCUS,
+            Self::VitalityCircle => icons::BLEND,
         }
     }
 }

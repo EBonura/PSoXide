@@ -27,6 +27,10 @@ vis-anchor-cache = []
 vis-anchor-pvs-candidates = []
 vis-coarse-yaw = []
 vis-broad-pvs = []
+# Immediate-mode actor collision cylinders. Keep this out of shipping builds:
+# the helper is intentionally explicit and sizeable on MIPS, and is only useful
+# while tuning authored collision bounds.
+collision-debug-overlay = []
 
 [dependencies]
 # Explicit paths, same rationale as psx-engine: resolvable when

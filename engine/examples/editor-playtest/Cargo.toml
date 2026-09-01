@@ -127,6 +127,9 @@ tessellation-debug = []
 # On-screen presented-fps + worst-frame-gap counter for hardware
 # ratification burns. Off by default: shipping builds must not carry it.
 fps-overlay = []
+# Opt-in actor collision-cylinder tuning overlay (L3). The complete input,
+# scene-state and renderer path is absent from normal/shipping playtests.
+collision-debug-overlay = ["psx-game-runtime/collision-debug-overlay"]
 ot-1024 = []
 ot-2048 = []
 
