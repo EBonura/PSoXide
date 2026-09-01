@@ -1218,6 +1218,16 @@ pub struct PlaytestUiSfxCue {
     pub flags: u16,
 }
 
+/// One cooked gameplay SFX cue backed by the shared resident SFX sample bank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestGameplaySfxCue {
+    pub sample: u16,
+    pub event: psx_level::LevelGameplaySfxEvent,
+    pub volume_percent: u8,
+    pub pitch_q12: u16,
+    pub flags: u16,
+}
+
 /// One cooked UI scene addressing a contiguous block of
 /// [`PlaytestPackage::ui_nodes`]. Mirrors
 /// [`psx_level::LevelUiScene`].
@@ -1620,6 +1630,19 @@ pub struct PlaytestInteractable {
     pub reward_quantity: u8,
     /// Runtime flags from [`psx_level::interactable_flags`].
     pub flags: u16,
+}
+
+/// Cooked vitality circle before manifest emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestVitalityCircle {
+    pub room: u16,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub radius: u16,
+    pub axis: u8,
+    pub refill_per_second: u16,
+    pub drain_per_second: u16,
 }
 
 /// One unique collectible module cooked from a POI reward.
@@ -2088,6 +2111,8 @@ pub struct PlaytestPackage {
     /// Cooked UI SFX cues, sliced by [`PlaytestUiNode::sfx_first`] /
     /// [`PlaytestUiNode::sfx_count`].
     pub ui_sfx_cues: Vec<PlaytestUiSfxCue>,
+    /// Project-convention gameplay cues backed by `ui_sfx_samples`.
+    pub gameplay_sfx_cues: Vec<PlaytestGameplaySfxCue>,
     /// Cooked game-state flow definition.
     pub game_flow: PlaytestGameFlow,
     /// Cooked project options, flattened to bounded integer ranges.
@@ -2121,6 +2146,8 @@ pub struct PlaytestPackage {
     pub boost_modules: Vec<PlaytestBoostModule>,
     /// Placed gameplay interactables.
     pub interactables: Vec<PlaytestInteractable>,
+    /// Placed dual-vitality fields.
+    pub vitality_circles: Vec<PlaytestVitalityCircle>,
     /// Cooked logic entities (phase-3 event graph). Interactables
     /// emit one of these alongside their `PlaytestInteractable` so
     /// the graph can reference them; trigger/relay/door authoring

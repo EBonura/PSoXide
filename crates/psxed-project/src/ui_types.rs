@@ -383,6 +383,18 @@ pub enum UiValueBinding {
     PlayerStanceActiveBroken,
     /// One while the inactive pool is broken and cannot be swapped to.
     PlayerStanceInactiveBroken,
+    /// Current hard/soft combat target's Horizon pool.
+    TargetHealth,
+    /// Current hard/soft combat target's Horizon maximum.
+    TargetHealthMax,
+    /// Current hard/soft combat target's Zenith pool.
+    TargetHealthSecondary,
+    /// Current hard/soft combat target's Zenith maximum.
+    TargetHealthSecondaryMax,
+    /// Current target's guard-mutation progress (Q12).
+    TargetStanceSwapProgress,
+    /// One when the current target guards Zenith, zero otherwise.
+    TargetStanceActiveIsZenith,
     /// Live world-load progress (Q12, 0..=4096) while the engine
     /// streams the next state's world. Zero outside loading screens.
     LoadingProgress,
@@ -412,6 +424,12 @@ impl UiValueBinding {
             Self::PlayerStanceActiveIsZenith => "Active State Is Zenith",
             Self::PlayerStanceActiveBroken => "Active State Broken",
             Self::PlayerStanceInactiveBroken => "Inactive State Broken",
+            Self::TargetHealth => "Target Horizon Health",
+            Self::TargetHealthMax => "Target Horizon Health Max",
+            Self::TargetHealthSecondary => "Target Zenith Health",
+            Self::TargetHealthSecondaryMax => "Target Zenith Health Max",
+            Self::TargetStanceSwapProgress => "Target State Swap Progress",
+            Self::TargetStanceActiveIsZenith => "Target State Is Zenith",
             Self::LoadingProgress => "Loading Progress",
         }
     }

@@ -2,6 +2,31 @@ use super::*;
 use crate::{NodeId, ProjectDocument};
 
 #[test]
+fn authored_vitality_circle_cooks_as_dedicated_record() {
+    let mut project = ProjectDocument::starter();
+    let scene = project.active_scene_mut();
+    let id = scene.add_node(
+        scene.root,
+        "Zenith Field",
+        crate::NodeKind::VitalityCircle {
+            axis: crate::VitalityCircleAxis::Zenith,
+            radius: 333,
+            refill_per_second: 17,
+            drain_per_second: 11,
+            enabled: true,
+        },
+    );
+    scene.node_mut(id).unwrap().transform.translation = [24.0, 8.0, -48.0];
+    let (package, report) = build_package(&project, &crate::default_project_dir());
+    assert!(report.is_ok(), "circle fixture cooks: {:?}", report.errors);
+    let circle = package.expect("package").vitality_circles[0];
+    assert_eq!(circle.axis, 1);
+    assert_eq!(circle.radius, 21, "world-unit conversion rounds up");
+    assert_eq!(circle.refill_per_second, 17);
+    assert_eq!(circle.drain_per_second, 11);
+}
+
+#[test]
 fn cook_output_capture_mirrors_main_and_worker_diagnostics() {
     let (value, lines) = capture_cook_output(|| {
         emit_cook_output(format_args!("[cook-capture-test] main"));
