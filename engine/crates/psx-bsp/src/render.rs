@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use psx_engine::{
     attributed_clip::{
-        clip_convex_plane, crossing_fraction_q16_i64, lerp_q16_i32, AttributedClipPlane,
+        clip_convex_plane, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
         ClipTraversal,
     },
     compose_classic_alias_transform, materialize_classic_affine_baked_light_vertices,
@@ -23,7 +23,7 @@ use psx_gpu::material::TextureWindow;
 use psx_gpu::prim::ClassicTriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene::{self, AabbClipPlane};
-use psx_math::int32::mul_q12_i32;
+use psx_math::int32::{isqrt_i32, mul_q12_i32};
 use psx_math::{cos_q12, sin_q12};
 
 use crate::collision::BrushTransform;
@@ -150,7 +150,7 @@ const _: () = assert!(AFFINE_BATCH_WORKSPACE_BYTES <= psx_engine::scratchpad::SI
 /// too. The batch gives up six vertex slots to pay for it; this project's
 /// cook has no face wider than six vertices, so the batch still groups eight
 /// faces per flush instead of nine.
-const PXBSP_CLIP_PLANE_BYTES: usize = core::mem::size_of::<[([i32; 3], i64); 5]>();
+const PXBSP_CLIP_PLANE_BYTES: usize = core::mem::size_of::<[([i32; 3], i32); 5]>();
 const PXBSP_BATCH_MAX_VERTICES: usize = 33;
 const PXBSP_BATCH_MAX_SURFACES: usize = 13;
 const PXBSP_AFFINE_BATCH_VERTEX_CAPACITY: usize =
@@ -384,7 +384,18 @@ enum AabbClass {
 /// be oversize.
 #[derive(Copy, Clone, Debug)]
 pub struct FrustumPlanes {
-    planes: [([i32; 3], i64); 5],
+    /// Plane normal and constant term, `distance(p) = n . p + c`, all `i32`.
+    ///
+    /// The near plane is exact: a Q12 view row against `i16` positions and
+    /// an `i16`-range camera origin fits `i32`. The side planes carry the
+    /// focal length and half-extent factors, so their normals are rounded
+    /// down by `side_shift` bits to fit; [`Self::side_error`] bounds the
+    /// rounding error of any side distance and every classification below
+    /// treats that band as "undecided" so a rounded plane can neither reject
+    /// a visible polygon nor vouch for a box it does not contain.
+    planes: [([i32; 3], i32); 5],
+    /// Worst-case rounding error of a side-plane distance (zero for near).
+    side_error: i32,
     view_rows: [[i16; 3]; 3],
     view_translation: [i32; 3],
     side_scale: [i32; 2],
@@ -399,6 +410,7 @@ impl FrustumPlanes {
     pub fn from_view(
         rotation: &Mat3I16,
         translation: GteVec3I32,
+        camera_origin_units: [i32; 3],
         projection: ViewProjection,
     ) -> Self {
         let row = |i: usize| -> [i32; 3] {
@@ -409,36 +421,81 @@ impl FrustumPlanes {
             ]
         };
         let (right, down, forward) = (row(0), row(1), row(2));
-        let scale_q12 = isqrt_i64(
-            forward[0] as i64 * forward[0] as i64
-                + forward[1] as i64 * forward[1] as i64
-                + forward[2] as i64 * forward[2] as i64,
-        ) as i32;
+        // Squared Q12 row length: three products of at most 3 * 4096 each,
+        // under 4.6e8, so the 32-bit square root answers it.
+        let scale_q12 = isqrt_i32(
+            forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2],
+        );
         let near_view = projection.near_world.saturating_mul(scale_q12) >> 12;
-        // near: forward.p + T.z >= near_view
-        let near = (forward, ((translation.z - near_view) as i64) << 12);
+        // The view translation is the rotated, negated camera origin in world
+        // units, so `T.z << 12` is `-forward . camera` and every distance is
+        // camera-relative: a Q12 row against an `i16` position stays under
+        // 7e8, and the near constant under 2^30, so the near plane is exact
+        // in `i32` and bit-identical to the former i64 evaluation.
+        let _ = camera_origin_units;
+        let near = (
+            forward,
+            (translation.z << 12).wrapping_sub(near_view << 12),
+        );
         // side planes: |view_x| <= (half_w + margin)/H * view_z, same for y.
         let kx = projection.half_width + projection.edge_margin;
         let ky = projection.half_height + projection.edge_margin;
         let h = projection.focal_length.max(1);
-        let combine = |axis: [i32; 3], axis_t: i32, k: i32, sign: i32| -> ([i32; 3], i64) {
-            let n = [
+        // Largest normal L1 that keeps `n . q` inside i32 for |q| < 65536 with
+        // room for the constant term.
+        const SIDE_L1_LIMIT: i32 = 30_000;
+        let mut side_shift = 0u32;
+        let raw_side = |axis: [i32; 3], k: i32, sign: i32| -> [i32; 3] {
+            [
                 k * forward[0] - sign * h * axis[0],
                 k * forward[1] - sign * h * axis[1],
                 k * forward[2] - sign * h * axis[2],
-            ];
-            let c =
-                (k as i64 * translation.z as i64 - sign as i64 * h as i64 * axis_t as i64) << 12;
-            (n, c)
+            ]
         };
+        let raw = [
+            raw_side(right, kx, 1),
+            raw_side(right, kx, -1),
+            raw_side(down, ky, 1),
+            raw_side(down, ky, -1),
+        ];
+        for n in &raw {
+            let l1 = n[0].unsigned_abs() + n[1].unsigned_abs() + n[2].unsigned_abs();
+            while (l1 >> side_shift) > SIDE_L1_LIMIT as u32 {
+                side_shift += 1;
+            }
+        }
+        let round = |value: i32| -> i32 {
+            if side_shift == 0 {
+                value
+            } else {
+                (value + (1 << (side_shift - 1))) >> side_shift
+            }
+        };
+        // The side constant is `(k * T.z - sign * h * T.axis) << 12` reduced
+        // by the same shift, exact because the shift never exceeds twelve.
+        let side = |n: [i32; 3], axis_t: i32, k: i32, sign: i32| -> ([i32; 3], i32) {
+            let n = [round(n[0]), round(n[1]), round(n[2])];
+            let constant = k.wrapping_mul(translation.z).wrapping_sub(sign.wrapping_mul(h).wrapping_mul(axis_t));
+            let constant = if side_shift <= 12 {
+                constant << (12 - side_shift)
+            } else {
+                constant >> (side_shift - 12)
+            };
+            (n, constant)
+        };
+        // Each rounded component is off by at most one half; the distance of a
+        // point up to 65535 units away on every axis is off by at most that
+        // times three halves. Zero when nothing was rounded.
+        let side_error = if side_shift == 0 { 0 } else { 3 * 65_536 / 2 };
         Self {
             planes: [
                 near,
-                combine(right, translation.x, kx, 1),
-                combine(right, translation.x, kx, -1),
-                combine(down, translation.y, ky, 1),
-                combine(down, translation.y, ky, -1),
+                side(raw[0], translation.x, kx, 1),
+                side(raw[1], translation.x, kx, -1),
+                side(raw[2], translation.y, ky, 1),
+                side(raw[3], translation.y, ky, -1),
             ],
+            side_error,
             view_rows: [rotation.m[0], rotation.m[1], rotation.m[2]],
             view_translation: [translation.x, translation.y, translation.z],
             side_scale: [kx, ky],
@@ -446,24 +503,33 @@ impl FrustumPlanes {
             near_view,
         }
     }
-
-    #[inline]
-    fn distance(plane: &([i32; 3], i64), position: [i16; 3]) -> i64 {
-        plane.0[0] as i64 * position[0] as i64
-            + plane.0[1] as i64 * position[1] as i64
-            + plane.0[2] as i64 * position[2] as i64
-            + plane.1
-    }
-
-    /// Exact sign of [`Self::distance`]. Keep this expression shared between
-    /// host validation and the MIPS guest: a previous hand-written HI:LO
-    /// accumulator returned false signs on real guest inputs and caused
-    /// visible world polygons to be rejected as outside the frustum.
+    /// Rounding error band of plane `index`: zero for the exact near plane.
     #[inline(always)]
-    fn distance_negative(plane: &([i32; 3], i64), position: [i16; 3]) -> bool {
-        Self::distance(plane, position) < 0
+    fn error_of(&self, index: usize) -> i32 {
+        if index == PXBSP_CLIP_NEAR_PLANE {
+            0
+        } else {
+            self.side_error
+        }
     }
-
+    #[inline(always)]
+    fn distance(plane: &([i32; 3], i32), position: [i16; 3]) -> i32 {
+        plane.0[0]
+            .wrapping_mul(position[0] as i32)
+            .wrapping_add(plane.0[1].wrapping_mul(position[1] as i32))
+            .wrapping_add(plane.0[2].wrapping_mul(position[2] as i32))
+            .wrapping_add(plane.1)
+    }
+    /// The point is outside beyond any rounding doubt.
+    #[inline(always)]
+    fn surely_outside(plane: &([i32; 3], i32), error: i32, position: [i16; 3]) -> bool {
+        Self::distance(plane, position) < -error
+    }
+    /// The point is inside beyond any rounding doubt.
+    #[inline(always)]
+    fn surely_inside(plane: &([i32; 3], i32), error: i32, position: [i16; 3]) -> bool {
+        Self::distance(plane, position) >= error
+    }
     /// Clip one convex polygon against the planes named by `clip_mask`.
     ///
     /// `None` rejects the polygon: some live plane has every vertex outside
@@ -491,7 +557,8 @@ impl FrustumPlanes {
     /// hold it somewhere cheaper to read than main RAM.
     #[inline(always)]
     fn cull_polygon(
-        planes: &[([i32; 3], i64); 5],
+        planes: &[([i32; 3], i32); 5],
+        side_error: i32,
         clip_mask: u8,
         count: usize,
         mut vertex: impl FnMut(usize) -> [i16; 3],
@@ -502,22 +569,32 @@ impl FrustumPlanes {
             let plane_index = live.trailing_zeros() as usize;
             live &= live - 1;
             let plane = unsafe { planes.get_unchecked(plane_index) };
+            let error = if plane_index == PXBSP_CLIP_NEAR_PLANE { 0 } else { side_error };
             let mut wholly_outside = true;
             let mut any_outside = false;
             let mut index = 0usize;
             while index < count {
-                if Self::distance_negative(plane, vertex(index)) {
-                    any_outside = true;
-                    // Only the near plane still has something to learn once
-                    // one vertex is outside and another is inside.
-                    if !wholly_outside {
+                // A rounded side plane has an error band: a vertex inside it
+                // neither proves the polygon visible nor lets it be rejected.
+                // Rejection needs every vertex surely outside; the near clip
+                // decision fires for any vertex not surely inside. The near
+                // band is zero, so that plane keeps its exact answers.
+                let distance = Self::distance(plane, vertex(index));
+                if distance >= error {
+                    wholly_outside = false;
+                    // Every other plane only decides whether the polygon is
+                    // wholly outside, which this vertex just answered; the
+                    // near plane still wants to know whether any vertex is
+                    // outside.
+                    if plane_index != PXBSP_CLIP_NEAR_PLANE || any_outside {
                         break;
                     }
                 } else {
-                    wholly_outside = false;
-                    // Every other plane only decides whether the polygon is
-                    // wholly outside, which this vertex just answered.
-                    if plane_index != PXBSP_CLIP_NEAR_PLANE || any_outside {
+                    any_outside = true;
+                    if distance >= -error {
+                        wholly_outside = false;
+                    }
+                    if !wholly_outside {
                         break;
                     }
                 }
@@ -600,7 +677,8 @@ impl FrustumPlanes {
                 if normal[1] >= 0 { maxs[1] } else { mins[1] },
                 if normal[2] >= 0 { maxs[2] } else { mins[2] },
             ];
-            if Self::distance_negative(plane, outer) {
+            let error = self.error_of(index);
+            if Self::surely_outside(plane, error, outer) {
                 return AabbClass::Outside;
             }
             if wholly_inside {
@@ -610,7 +688,7 @@ impl FrustumPlanes {
                     if normal[1] >= 0 { mins[1] } else { maxs[1] },
                     if normal[2] >= 0 { mins[2] } else { maxs[2] },
                 ];
-                wholly_inside = !Self::distance_negative(plane, inner);
+                wholly_inside = Self::surely_inside(plane, error, inner);
             }
             index += 1;
         }
@@ -644,7 +722,8 @@ impl FrustumPlanes {
                 if normal[1] >= 0 { maxs[1] } else { mins[1] },
                 if normal[2] >= 0 { maxs[2] } else { mins[2] },
             ];
-            if Self::distance_negative(plane, outer) {
+            let error = self.error_of(index);
+            if Self::surely_outside(plane, error, outer) {
                 return None;
             }
             let inner = [
@@ -652,7 +731,7 @@ impl FrustumPlanes {
                 if normal[1] >= 0 { mins[1] } else { maxs[1] },
                 if normal[2] >= 0 { mins[2] } else { maxs[2] },
             ];
-            if !Self::distance_negative(plane, inner) {
+            if Self::surely_inside(plane, error, inner) {
                 residual &= !(1 << index);
             }
             index += 1;
@@ -667,13 +746,13 @@ impl FrustumPlanes {
     fn aabb_outside(&self, mins: Vec3I16, maxs: Vec3I16) -> bool {
         let mins = [mins.x, mins.y, mins.z];
         let maxs = [maxs.x, maxs.y, maxs.z];
-        self.planes.iter().any(|plane| {
+        self.planes.iter().enumerate().any(|(index, plane)| {
             let positive = [
                 if plane.0[0] >= 0 { maxs[0] } else { mins[0] },
                 if plane.0[1] >= 0 { maxs[1] } else { mins[1] },
                 if plane.0[2] >= 0 { maxs[2] } else { mins[2] },
             ];
-            Self::distance_negative(plane, positive)
+            Self::surely_outside(plane, self.error_of(index), positive)
         })
     }
 
@@ -776,8 +855,11 @@ impl FrustumPlanes {
         for vertex in &vertices[..count] {
             let mut vertex_outside = 0u8;
             for (plane_index, plane) in self.planes.iter().enumerate() {
-                if Self::distance(plane, vertex.position) < 0 {
+                let error = self.error_of(plane_index);
+                if !Self::surely_inside(plane, error, vertex.position) {
                     all_inside = false;
+                }
+                if Self::surely_outside(plane, error, vertex.position) {
                     vertex_outside |= 1 << plane_index;
                 }
             }
@@ -811,10 +893,10 @@ impl FrustumPlanes {
     }
 }
 
-struct PxbspClipPlane<'a>(&'a ([i32; 3], i64));
+struct PxbspClipPlane<'a>(&'a ([i32; 3], i32));
 
 impl AttributedClipPlane<ClassicAffineVertex> for PxbspClipPlane<'_> {
-    type Distance = i64;
+    type Distance = i32;
 
     #[inline(always)]
     fn distance(&self, _: usize, vertex: &ClassicAffineVertex) -> Self::Distance {
@@ -836,14 +918,14 @@ impl AttributedClipPlane<ClassicAffineVertex> for PxbspClipPlane<'_> {
         second: &ClassicAffineVertex,
         second_distance: Self::Distance,
     ) -> ClassicAffineVertex {
-        let fraction = crossing_fraction_q16_i64(first_distance, second_distance);
+        let fraction = crossing_fraction_q16_i32(first_distance, second_distance);
         lerp_vertex(first, second, fraction)
     }
 }
 
 #[inline(never)]
 fn clip_polygon_plane(
-    plane: &([i32; 3], i64),
+    plane: &([i32; 3], i32),
     source: &[ClassicAffineVertex],
     destination: &mut [ClassicAffineVertex],
 ) -> usize {
@@ -860,9 +942,9 @@ fn clip_polygon_plane(
 fn lerp_vertex(
     a: &ClassicAffineVertex,
     b: &ClassicAffineVertex,
-    fraction_q16: i64,
+    fraction_q16: u32,
 ) -> ClassicAffineVertex {
-    let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32(x, y, fraction_q16) };
+    let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32_exact(x, y, fraction_q16) };
     let lerp_u8 = |x: u8, y: u8| -> u8 { lerp_i(x as i32, y as i32).clamp(0, 255) as u8 };
     let ca = a.color;
     let cb = b.color;
@@ -883,56 +965,6 @@ fn lerp_vertex(
     }
 }
 
-/// `floor(sqrt(value))` for a positive `value`, zero otherwise.
-///
-/// Digit-by-digit, not Newton. The Newton form divided once per iteration and
-/// took about fifteen of them for a view-row length, and a 64-bit division on
-/// this target is a call into `compiler_builtins`' `u64_div_rem`. This runs on
-/// shifts, adds and compares only. The 32-bit kernel answers every value a
-/// squared view-row length can produce; the 64-bit tail keeps the general
-/// contract for a caller that is not `from_view`.
-fn isqrt_i64(value: i64) -> i64 {
-    if value <= 0 {
-        return 0;
-    }
-    let value = value as u64;
-    if value <= u32::MAX as u64 {
-        let mut remainder = value as u32;
-        let mut root = 0u32;
-        let mut bit = 1u32 << 30;
-        while bit > remainder {
-            bit >>= 2;
-        }
-        while bit != 0 {
-            let trial = root + bit;
-            if remainder >= trial {
-                remainder -= trial;
-                root = (root >> 1) + bit;
-            } else {
-                root >>= 1;
-            }
-            bit >>= 2;
-        }
-        return i64::from(root);
-    }
-    let mut remainder = value;
-    let mut root = 0u64;
-    let mut bit = 1u64 << 62;
-    while bit > remainder {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        let trial = root + bit;
-        if remainder >= trial {
-            remainder -= trial;
-            root = (root >> 1) + bit;
-        } else {
-            root >>= 1;
-        }
-        bit >>= 2;
-    }
-    root as i64
-}
 
 pub struct Renderer {
     frame: u32,
@@ -1368,7 +1400,12 @@ impl Renderer {
         scene::load_translation(view.translation);
 
         let frustum =
-            FrustumPlanes::from_view(&view.rotation, view.translation, self.view_projection);
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                self.view_projection,
+            );
         let frame = if self.mark_visible_pxbsp_faces(map, camera.origin)
             && self.select_frame_pxbsp_faces(map, camera.origin, &frustum)
         {
@@ -1429,7 +1466,12 @@ impl Renderer {
         );
         scene::load_rotation(&rotation);
         scene::load_translation(translation);
-        let frustum = FrustumPlanes::from_view(&rotation, translation, self.view_projection);
+        let frustum = FrustumPlanes::from_view(
+            &rotation,
+            translation,
+            [local_camera.x >> 12, local_camera.y >> 12, local_camera.z >> 12],
+            self.view_projection,
+        );
 
         // Quake-PSX R_DrawBrushModel also scans the brush model's bounded
         // surface slice and performs its plane-side test per face. World-node
@@ -1504,14 +1546,15 @@ impl Renderer {
         // constant address and one-cycle reads; on the host a local copy
         // addressed off `sp`.
         let frustum_local = *frustum;
+        let side_error = frustum_local.side_error;
         #[cfg(target_arch = "mips")]
-        let clip_planes: &[([i32; 3], i64); 5] = unsafe {
-            let block = psx_engine::scratchpad::ptr_at::<([i32; 3], i64)>(0);
+        let clip_planes: &[([i32; 3], i32); 5] = unsafe {
+            let block = psx_engine::scratchpad::ptr_at::<([i32; 3], i32)>(0);
             core::ptr::copy_nonoverlapping(frustum_local.planes.as_ptr(), block, 5);
-            &*block.cast::<[([i32; 3], i64); 5]>()
+            &*block.cast::<[([i32; 3], i32); 5]>()
         };
         #[cfg(not(target_arch = "mips"))]
-        let clip_planes: &[([i32; 3], i64); 5] = &frustum_local.planes;
+        let clip_planes: &[([i32; 3], i32); 5] = &frustum_local.planes;
         // Every face pass gets its own epoch, so an entry cached under a
         // different animation tick or a different binding table cannot hit.
         self.pxbsp_material_epoch = self.pxbsp_material_epoch.wrapping_add(1);
@@ -1588,7 +1631,9 @@ impl Renderer {
                 false
             } else {
                 let Some(needs_near_clip) =
-                    (unsafe { Self::pxbsp_face_clip(source_base, face, clip_planes, clip_mask) })
+                    (unsafe {
+                        Self::pxbsp_face_clip(source_base, face, clip_planes, side_error, clip_mask)
+                    })
                 else {
                     continue;
                 };
@@ -1885,7 +1930,8 @@ impl Renderer {
     unsafe fn pxbsp_face_clip(
         source_base: *const ClassicAffineWordSourceVertex,
         face: Face,
-        planes: &[([i32; 3], i64); 5],
+        planes: &[([i32; 3], i32); 5],
+        side_error: i32,
         clip_mask: u8,
     ) -> Option<bool> {
         let first = face.first_vertex as usize;
@@ -1898,7 +1944,7 @@ impl Renderer {
         // twelve-byte strided, with `position` first. Reading x and y as the
         // one word they already share costs two shifts and saves a load, and
         // a load is six cycles of RAM stall against one cycle for a shift.
-        FrustumPlanes::cull_polygon(planes, clip_mask, count, |index| unsafe {
+        FrustumPlanes::cull_polygon(planes, side_error, clip_mask, count, |index| unsafe {
             let base = source.add(index).cast::<u32>();
             let xy = core::ptr::read(base);
             let z = core::ptr::read(base.add(1).cast::<i16>());
@@ -3771,7 +3817,12 @@ mod tests {
 
         let view = load_pxbsp_view(camera);
         let frustum =
-            FrustumPlanes::from_view(&view.rotation, view.translation, renderer.view_projection);
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                renderer.view_projection,
+            );
         assert!(renderer.select_frame_pxbsp_faces(&map, camera.origin, &frustum));
         assert_eq!(renderer.frame_pxbsp_faces, [0]);
         assert_eq!(
@@ -3868,80 +3919,6 @@ mod frustum_tests {
         assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);
     }
 
-    /// The Newton-with-division form `isqrt_i64` replaced, kept as the oracle.
-    fn newton_isqrt_i64(value: i64) -> i64 {
-        if value <= 0 {
-            return 0;
-        }
-        let mut x = value;
-        let mut y = (x + 1) / 2;
-        while y < x {
-            x = y;
-            y = (x + value / x) / 2;
-        }
-        x
-    }
-
-    #[test]
-    fn the_division_free_isqrt_agrees_with_the_newton_form() {
-        let mut checked = 0usize;
-        let mut check = |value: i64| {
-            assert_eq!(
-                isqrt_i64(value),
-                newton_isqrt_i64(value),
-                "isqrt disagreed at {value}"
-            );
-            checked += 1;
-        };
-        for value in -8i64..=4096 {
-            check(value);
-        }
-        // Perfect squares and their neighbours are where a floor answer is
-        // decided, on both sides of the 32-bit kernel boundary.
-        for root in [
-            1i64,
-            2,
-            3,
-            46340,
-            46341,
-            65535,
-            65536,
-            65537,
-            100_000,
-            3_037_000_499,
-        ] {
-            for delta in [-1i64, 0, 1] {
-                let square = root.saturating_mul(root).saturating_add(delta);
-                if square > 0 {
-                    check(square);
-                }
-            }
-        }
-        // Every power of two and either side of it, to the top of the range.
-        for shift in 0..63 {
-            for delta in [-1i64, 0, 1] {
-                let value = (1i64 << shift).saturating_add(delta);
-                if value > 0 {
-                    check(value);
-                }
-            }
-        }
-        // A deterministic spread, including the squared view-row lengths this
-        // is actually called with: three squares of a Q12 rotation row.
-        let mut state = 0x2545_f491_4f6c_dd1du64;
-        for _ in 0..40_000 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            check((state >> 1) as i64);
-            check((state & 0xffff_ffff) as i64);
-            let row = ((state >> 20) & 0x3fff) as i64;
-            check(3 * row * row);
-        }
-        assert!(checked > 100_000, "sweep collapsed to {checked} values");
-        assert_eq!(isqrt_i64(i64::MAX), 3_037_000_499);
-    }
-
     fn planes_for(origin: [i32; 3], yaw: i16, pitch: i16) -> (FrustumPlanes, ViewTransform) {
         psx_gte::host::reset();
         let camera = Camera {
@@ -3960,7 +3937,12 @@ mod frustum_tests {
             ..ViewProjection::DEFAULT
         };
         (
-            FrustumPlanes::from_view(&view.rotation, view.translation, projection),
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                projection,
+            ),
             view,
         )
     }
@@ -4015,6 +3997,8 @@ mod frustum_tests {
         // Anchored on the camera so the sweep straddles the frustum rather
         // than sitting far outside it; a polygon spread comparable to the
         // anchor spread is what produces near-plane crossings.
+        let mut kept_by_band = 0usize;
+        let mut compared = 0usize;
         for _ in 0..6000 {
             let mut axis = || (lcg(&mut state) % 700) as i16 - 350;
             let anchor = [37 + axis(), 70 + axis(), 273 + axis()];
@@ -4043,13 +4027,26 @@ mod frustum_tests {
                 let clip_mask = 0x1f & !(drop & satisfied);
                 let expected = vertex_major_clip(&planes, clip_mask, polygon);
                 let actual =
-                    FrustumPlanes::cull_polygon(&planes.planes, clip_mask, polygon.len(), |i| {
+                    FrustumPlanes::cull_polygon(&planes.planes, planes.side_error, clip_mask, polygon.len(), |i| {
                         polygon[i]
                     });
-                assert_eq!(
-                    actual, expected,
-                    "cull_polygon disagreed for mask {clip_mask:#x} on {polygon:?}"
-                );
+                // The exact scan is the oracle. The plane-major test may keep
+                // a polygon the oracle rejects when every vertex sits in a
+                // rounded side plane's error band (conservative), but it may
+                // never reject one the oracle keeps, and the near-clip answer
+                // is exact.
+                match (expected, actual) {
+                    (None, None) => {}
+                    (None, Some(_)) => kept_by_band += 1,
+                    (Some(_), None) => panic!(
+                        "cull_polygon rejected a kept polygon for mask {clip_mask:#x} on {polygon:?}"
+                    ),
+                    (Some(expected_near), Some(actual_near)) => assert_eq!(
+                        actual_near, expected_near,
+                        "near clip answer differs for mask {clip_mask:#x} on {polygon:?}"
+                    ),
+                }
+                compared += 1;
             }
             match vertex_major_clip(&planes, 0x1f, polygon) {
                 None => {
@@ -4058,7 +4055,7 @@ mod frustum_tests {
                     // polygon the full mask rejects, unclipped: that is a
                     // claim about the mask, not about the geometry.
                     assert_eq!(
-                        FrustumPlanes::cull_polygon(&planes.planes, 0, polygon.len(), |i| polygon
+                        FrustumPlanes::cull_polygon(&planes.planes, planes.side_error, 0, polygon.len(), |i| polygon
                             [i]),
                         Some(false)
                     );
@@ -4071,6 +4068,11 @@ mod frustum_tests {
         assert!(
             rejected > 100 && near > 20 && kept > 100,
             "sweep degenerated: {rejected} rejected, {near} near-clipped, {kept} kept"
+        );
+        assert!(compared > 100_000, "sweep collapsed to {compared} comparisons");
+        assert!(
+            kept_by_band * 50 < compared,
+            "{kept_by_band} of {compared} rejections were withheld by the error band"
         );
     }
 
@@ -4259,7 +4261,7 @@ mod frustum_tests {
         for v in &verts[..n] {
             let d = FrustumPlanes::distance(&planes.planes[0], v.position);
             assert!(
-                d >= -(1i64 << 14),
+                d >= -(1i32 << 14),
                 "clipped vertex behind the near plane: {:?} d={d}",
                 v.position
             );
@@ -4298,7 +4300,14 @@ mod frustum_tests {
     }
 
     #[test]
-    fn one_pass_vertex_masks_match_all_exact_plane_signs() {
+    fn one_pass_vertex_masks_never_contradict_the_wide_oracle() {
+        // `vertex_outside_mask` keeps the exact i64 planes. The i32 planes
+        // round the side normals, so they may only be undecided inside
+        // their error band: they must never call a point surely outside
+        // when the oracle has it inside, nor surely inside when the oracle
+        // has it outside. The near plane is exact and must agree bit for bit.
+        let mut undecided = 0usize;
+        let mut checked = 0usize;
         for origin in [[0, 0, 0], [37, 70, 273], [-96, 24, 128]] {
             for yaw in [0, 257, 1024, 2051, 3072] {
                 for pitch in [-320, 0, 100, 512] {
@@ -4307,25 +4316,45 @@ mod frustum_tests {
                         for y in (-192i16..=256).step_by(64) {
                             for z in (-320i16..=320).step_by(64) {
                                 let position = [x, y, z];
-                                let exact = planes.planes.iter().enumerate().fold(
-                                    0u8,
-                                    |mask, (index, plane)| {
-                                        mask | (u8::from(FrustumPlanes::distance_negative(
-                                            plane, position,
-                                        )) << index)
-                                    },
-                                );
-                                assert_eq!(
-                                    planes.vertex_outside_mask(position),
-                                    exact,
-                                    "origin={origin:?} yaw={yaw} pitch={pitch} point={position:?}",
-                                );
+                                let oracle = planes.vertex_outside_mask(position);
+                                for (index, plane) in planes.planes.iter().enumerate() {
+                                    let error = planes.error_of(index);
+                                    let outside = FrustumPlanes::surely_outside(plane, error, position);
+                                    let inside = FrustumPlanes::surely_inside(plane, error, position);
+                                    let oracle_outside = oracle & (1 << index) != 0;
+                                    checked += 1;
+                                    if index == PXBSP_CLIP_NEAR_PLANE {
+                                        assert_eq!(outside, oracle_outside, "near {position:?}");
+                                        assert_eq!(inside, !oracle_outside, "near {position:?}");
+                                        continue;
+                                    }
+                                    assert!(
+                                        !(outside && !oracle_outside),
+                                        "plane {index} rejected an inside point {position:?}"
+                                    );
+                                    assert!(
+                                        !(inside && oracle_outside),
+                                        "plane {index} vouched for an outside point {position:?}"
+                                    );
+                                    if !outside && !inside {
+                                        undecided += 1;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        // The band must be narrow. This grid sits within 320 units of the
+        // camera, where the fixed error bound (sized for 65535-unit
+        // positions) is at its widest relative to the distances; even there
+        // rounding must decide the vast majority of points.
+        assert!(checked > 50_000, "sweep collapsed to {checked} checks");
+        assert!(
+            undecided * 20 < checked,
+            "{undecided} of {checked} plane tests were undecided"
+        );
     }
 
     #[test]

@@ -269,14 +269,53 @@ impl<const MAX_DOORS: usize> Default for BrushDoorSet<MAX_DOORS> {
     }
 }
 
+/// `origin + offset * progress / duration`, truncating toward zero exactly as
+/// the former i64 form did, in 32-bit operations: the quotient and remainder
+/// of `offset / duration` are scaled separately, and the remainder term
+/// (`|remainder| < duration <= 65535`, times `progress <= 65535`) fits `u32`.
 fn endpoint_axis(origin: i32, offset: i32, progress: u16, duration: u16) -> i32 {
-    let delta = i64::from(offset) * i64::from(progress) / i64::from(duration);
-    origin.saturating_add(delta.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+    let duration = u32::from(duration.max(1));
+    let progress = u32::from(progress);
+    let magnitude = offset.unsigned_abs();
+    let whole = (magnitude / duration).wrapping_mul(progress);
+    let part = (magnitude % duration) * progress / duration;
+    let delta = whole.wrapping_add(part);
+    if offset < 0 {
+        origin.saturating_sub_unsigned(delta)
+    } else {
+        origin.saturating_add_unsigned(delta)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::vec;
+
+    #[test]
+    fn endpoint_axis_matches_the_wide_truncating_form() {
+        let wide = |origin: i32, offset: i32, progress: u16, duration: u16| -> i32 {
+            let delta = i64::from(offset) * i64::from(progress) / i64::from(duration);
+            origin.saturating_add(delta.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+        };
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..50_000 {
+            let origin = next() as i32;
+            let offset = (next() as i32) >> (next() % 8);
+            let duration = ((next() as u16) | 1).max(1);
+            let progress = (next() as u16) % duration.saturating_add(1);
+            assert_eq!(
+                endpoint_axis(origin, offset, progress, duration),
+                wide(origin, offset, progress, duration),
+                "origin {origin} offset {offset} progress {progress} duration {duration}"
+            );
+        }
+    }
 
     use super::*;
     use crate::pxbsp::PXBSP_ENTITY_TABLE_HEADER_BYTES;
