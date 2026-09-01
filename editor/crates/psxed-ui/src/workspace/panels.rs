@@ -1190,6 +1190,7 @@ impl EditorWorkspace {
                 letter_spacing,
                 color,
                 gradient,
+                focus_with_next_control,
                 effect,
             } => {
                 inspector_section(ui, "ui-label-layout", icons::MOVE, "Layout", true, |ui| {
@@ -1212,6 +1213,9 @@ impl EditorWorkspace {
                         });
                         changed |= ui
                             .checkbox(random_message, "Random message on scene entry")
+                            .changed();
+                        changed |= ui
+                            .checkbox(focus_with_next_control, "Share focus with next control")
                             .changed();
                         if *random_message {
                             ui.weak(

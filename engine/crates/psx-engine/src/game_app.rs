@@ -84,7 +84,10 @@ fn collect_ui_font_table<'font>(
 /// this, so the entry path can tell an uninitialised cursor from a
 /// genuine focus on node 0.
 const MENU_FOCUS_NONE: u16 = u16::MAX;
-const MENU_FOCUS_MOTION_FRAMES: u8 = 8;
+/// Keep focus travel visible without making rapid menu navigation feel like
+/// the highlight is lagging behind the selected option. At 30 FPS this is a
+/// 100 ms move with two interpolated positions between the endpoints.
+const MENU_FOCUS_MOTION_FRAMES: u8 = 3;
 const MENU_FOCUS_LOADING_UNRENDERED: u16 = u16::MAX - 1;
 const MENU_FOCUS_LOADING_RENDERED: u16 = u16::MAX - 2;
 const MENU_FOCUS_LOADING_INITED: u16 = u16::MAX - 3;

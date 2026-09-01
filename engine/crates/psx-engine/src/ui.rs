@@ -646,6 +646,93 @@ fn node_visible_in_tree(
     true
 }
 
+/// Return the label immediately preceding `control_index` when both nodes
+/// are siblings and the label explicitly opts into a shared focus row.
+/// The positional link costs no extra words in the cooked node record.
+fn linked_focus_label(
+    nodes: &[LevelUiNodeRecord],
+    first: usize,
+    control_index: usize,
+) -> Option<usize> {
+    if control_index <= first {
+        return None;
+    }
+    let label_index = control_index - 1;
+    let label = nodes.get(label_index)?;
+    let control = nodes.get(control_index)?;
+    if label.kind != LevelUiNodeKind::Label
+        || label.flags & ui_node_flags::LABEL_FOCUS_WITH_NEXT_CONTROL == 0
+        || label.parent != control.parent
+        || !matches!(
+            control.kind,
+            LevelUiNodeKind::Button | LevelUiNodeKind::Slider
+        )
+    {
+        return None;
+    }
+    Some(label_index)
+}
+
+fn label_linked_control(
+    nodes: &[LevelUiNodeRecord],
+    label_index: usize,
+    end: usize,
+) -> Option<usize> {
+    let label = nodes.get(label_index)?;
+    if label.flags & ui_node_flags::LABEL_FOCUS_WITH_NEXT_CONTROL == 0 {
+        return None;
+    }
+    let control_index = label_index.checked_add(1)?;
+    if control_index >= end {
+        return None;
+    }
+    let control = nodes.get(control_index)?;
+    if label.parent != control.parent
+        || !matches!(
+            control.kind,
+            LevelUiNodeKind::Button | LevelUiNodeKind::Slider
+        )
+    {
+        return None;
+    }
+    Some(control_index)
+}
+
+/// Expand a focused control's outline across its linked label. Settings rows
+/// keep their thin slider while gaining one readable menu-style selection
+/// box around the complete row.
+fn linked_focus_bounds(
+    nodes: &[LevelUiNodeRecord],
+    first: usize,
+    control_index: usize,
+    control: UiResolvedNode,
+    focus_offset: (i16, i16),
+) -> UiResolvedNode {
+    let Some(label_index) = linked_focus_label(nodes, first, control_index) else {
+        return control;
+    };
+    let Some(label) = node_resolved(nodes, label_index) else {
+        return control;
+    };
+    let label = label.translated(focus_offset.0, focus_offset.1);
+    let (control_x, control_y, control_w, control_h) = control.bounds();
+    let (label_x, label_y, label_w, label_h) = label.bounds();
+    let left = control_x.min(label_x);
+    let top = control_y.min(label_y);
+    let right = control_x
+        .saturating_add(control_w as i16)
+        .max(label_x.saturating_add(label_w as i16));
+    let bottom = control_y
+        .saturating_add(control_h as i16)
+        .max(label_y.saturating_add(label_h as i16));
+    screen_resolved_node(
+        left,
+        top,
+        right.saturating_sub(left).max(1) as u16,
+        bottom.saturating_sub(top).max(1) as u16,
+    )
+}
+
 /// Draw the cooked nodes `nodes[first..first + count]` of one UI scene
 /// to the framebuffer.
 ///
@@ -753,14 +840,40 @@ pub fn draw_scene(
             }
             LevelUiNodeKind::Label => {
                 if let Some(font) = node_font(fonts, node.font) {
+                    let linked_control = label_linked_control(nodes, index, end);
+                    if let Some(control_index) =
+                        linked_control.filter(|control| Some(*control) == focused)
+                    {
+                        if node_visible_in_tree(nodes, control_index, visible) {
+                            if let Some(control) = node_resolved(nodes, control_index) {
+                                let control = control.translated(focus_offset.0, focus_offset.1);
+                                draw_linked_focus_background(
+                                    linked_focus_bounds(
+                                        nodes,
+                                        first,
+                                        control_index,
+                                        control,
+                                        focus_offset,
+                                    ),
+                                    frame,
+                                    focus_style,
+                                );
+                            }
+                        }
+                    }
                     draw_label(
                         font,
                         node,
-                        resolved,
+                        if linked_control.is_some() {
+                            resolved.translated(0, 1)
+                        } else {
+                            resolved
+                        },
                         paints,
                         text_seed.wrapping_add((index as u16).wrapping_mul(0x9e37)),
                         frame,
                         resolved_text,
+                        linked_control.is_some() && linked_control != focused,
                     );
                 }
             }
@@ -793,9 +906,15 @@ pub fn draw_scene(
                     frame,
                     focus_style,
                     resolved_text,
+                    linked_focus_label(nodes, first, index).is_some(),
                 );
                 if is_focused {
-                    draw_focus_ring(focus_resolved, focus_style, frame, Some(shape_config(node)));
+                    draw_focus_ring(
+                        linked_focus_bounds(nodes, first, index, focus_resolved, focus_offset),
+                        focus_style,
+                        frame,
+                        Some(shape_config(node)),
+                    );
                 }
             }
             LevelUiNodeKind::Slider => {
@@ -812,7 +931,12 @@ pub fn draw_scene(
                     shape_paint(node.accent, node.accent_paint, paints),
                 );
                 if is_focused {
-                    draw_focus_ring(focus_resolved, focus_style, frame, None);
+                    draw_focus_ring(
+                        linked_focus_bounds(nodes, first, index, focus_resolved, focus_offset),
+                        focus_style,
+                        frame,
+                        Some(SLIDER_FOCUS_SHAPE),
+                    );
                 }
             }
         }
@@ -1326,13 +1450,14 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 mod tests {
     use super::{
         activation_echo_layer, bar_frame_index, bar_frame_v_range, diamond_quad,
-        focus_chrome_sweep_paint, focus_sweep_rect, font_index, font_tint,
-        image_effect_vertex_colors, image_effect_verts, layout_memo_begin, layout_memo_resolved,
-        message_panel_layout, message_panel_transition_layout, node_absolute_rect, scale_u16_q8,
-        scaled_run_width, selected_label_text, shape_config, shape_edge_point, shape_perimeter,
-        shape_polygon, text_prefix_chars, MessagePageMeta, MessagePanelLayout, MessagePanelVariant,
-        ParentResolveCache, TextRun, UiAffine, UiPaint, UiShapeConfig, ACTIVATION_ECHO_FRAMES,
-        MESSAGE_PANEL_EXPAND_FRAMES, UI_LAYOUT_MEMO_CAP,
+        focus_chrome_sweep_paint, focus_inner_fill_bounds, focus_sweep_rect, font_index, font_tint,
+        image_effect_vertex_colors, image_effect_verts, label_linked_control, layout_memo_begin,
+        layout_memo_resolved, linked_focus_bounds, linked_focus_label, message_panel_layout,
+        message_panel_transition_layout, node_absolute_rect, optically_centered_text_y,
+        scale_u16_q8, scaled_run_width, screen_resolved_node, selected_label_text, shape_config,
+        shape_edge_point, shape_perimeter, shape_polygon, text_prefix_chars, MessagePageMeta,
+        MessagePanelLayout, MessagePanelVariant, ParentResolveCache, TextRun, UiAffine, UiPaint,
+        UiShapeConfig, ACTIVATION_ECHO_FRAMES, MESSAGE_PANEL_EXPAND_FRAMES, UI_LAYOUT_MEMO_CAP,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiGradientDirection, LevelUiImageEffect,
@@ -1377,6 +1502,46 @@ mod tests {
             font_scale: 256,
             letter_spacing: 0,
         }
+    }
+
+    #[test]
+    fn linked_settings_row_pairs_only_explicit_sibling_label_and_control() {
+        let canvas = ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240);
+        let mut label = ui_node(None, LevelUiNodeKind::Label, 20, 20, 70, 10);
+        label.flags |= ui_node_flags::LABEL_FOCUS_WITH_NEXT_CONTROL;
+        let slider = ui_node(None, LevelUiNodeKind::Slider, 100, 20, 80, 6);
+        let nodes = [canvas, label, slider];
+
+        assert_eq!(linked_focus_label(&nodes, 0, 2), Some(1));
+        assert_eq!(label_linked_control(&nodes, 1, nodes.len()), Some(2));
+    }
+
+    #[test]
+    fn linked_settings_row_focus_bounds_cover_label_and_thin_slider() {
+        let canvas = ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240);
+        let mut label = ui_node(None, LevelUiNodeKind::Label, 20, 20, 70, 10);
+        label.flags |= ui_node_flags::LABEL_FOCUS_WITH_NEXT_CONTROL;
+        let slider = ui_node(None, LevelUiNodeKind::Slider, 100, 20, 80, 6);
+        let nodes = [canvas, label, slider];
+        let control = screen_resolved_node(100, 20, 80, 6);
+
+        assert_eq!(
+            linked_focus_bounds(&nodes, 0, 2, control, (0, 0)).bounds(),
+            (20, 20, 160, 10)
+        );
+    }
+
+    #[test]
+    fn button_text_uses_pixel_font_optical_center() {
+        assert_eq!(optically_centered_text_y(16, 8), 5);
+        assert_eq!(optically_centered_text_y(13, 8), 3);
+        assert_eq!(optically_centered_text_y(8, 8), 0);
+    }
+
+    #[test]
+    fn focus_fill_meets_margin_two_tracer_without_black_seams() {
+        let row = screen_resolved_node(56, 94, 224, 11);
+        assert_eq!(focus_inner_fill_bounds(row, 2).bounds(), (55, 93, 227, 14));
     }
 
     /// `UiAffine::from_node_rect` before the unrotated fast path was added,
@@ -2305,9 +2470,11 @@ fn draw_label(
     text_seed: u16,
     frame: u16,
     text_override: Option<&str>,
+    dimmed: bool,
 ) {
     let text = text_override.unwrap_or_else(|| selected_label_text(node, text_seed));
     let paint = text_paint(node.color, node.color_paint, paints);
+    let paint = if dimmed { dim_paint(paint) } else { paint };
     let scale = node_font_scale_q8(node);
     let letter_spacing = node_letter_spacing(node);
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
@@ -2872,9 +3039,10 @@ fn draw_button(
     frame: u16,
     focus_style: &LevelUiFocusStyle,
     text_override: Option<&str>,
+    shared_focus_background: bool,
 ) {
     let focus_chrome = node.flags & ui_node_flags::BUTTON_FOCUS_CHROME != 0;
-    let draw_chrome = !focus_chrome || focused;
+    let draw_chrome = (!focus_chrome || focused) && !shared_focus_background;
     let fill = shape_paint(node.color, node.color_paint, paints);
     let fill = if focus_chrome && focused {
         focus_chrome_sweep_paint(fill, frame, focus_style.period)
@@ -2920,9 +3088,8 @@ fn draw_button(
     }
     let scale = node_font_scale_q8(node);
     let letter_spacing = node_letter_spacing(node);
-    let line_h = scaled_line_height(font, scale) as i32;
-    let text_y = ((resolved.height as i32 - line_h).max(0) / 2)
-        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let line_h = scaled_line_height(font, scale);
+    let text_y = optically_centered_text_y(resolved.height, line_h);
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
     let text_x = aligned_text_x(font, text, 0, resolved.width, align, scale, letter_spacing);
     let paint = text_paint(node.accent, node.accent_paint, paints);
@@ -2950,6 +3117,84 @@ struct UiShapeConfig {
     border: u8,
     transparent: bool,
     semi_transparent_fill: bool,
+}
+
+/// Sliders share the menu's opposing-corner chamfer when focused. Keeping
+/// this as renderer chrome avoids spending authored nodes or runtime RAM on
+/// a decorative box for every option row.
+const SLIDER_FOCUS_SHAPE: UiShapeConfig = UiShapeConfig {
+    corners: ui_shape::TOP_LEFT | ui_shape::BOTTOM_RIGHT,
+    cut: 4,
+    border: 0,
+    transparent: true,
+    semi_transparent_fill: false,
+};
+
+/// Active-row fill shared by the settings label and its control. It uses the
+/// same animated red gradient as the main-menu buttons while keeping the
+/// slider itself thin and readable.
+fn draw_linked_focus_background(
+    resolved: UiResolvedNode,
+    frame: u16,
+    focus_style: &LevelUiFocusStyle,
+) {
+    let resolved = focus_inner_fill_bounds(resolved, focus_style.margin);
+    let shape = UiShapeConfig {
+        transparent: false,
+        semi_transparent_fill: true,
+        ..SLIDER_FOCUS_SHAPE
+    };
+    let polygon = shape_polygon(resolved, shape.corners, shape.cut, 0);
+    let fill = focus_chrome_sweep_paint(
+        UiPaint::Gradient {
+            from: (58, 12, 16),
+            to: (104, 28, 22),
+            direction: LevelUiGradientDirection::Vertical,
+        },
+        frame,
+        focus_style.period,
+    );
+    draw_shape_polygon(
+        &polygon,
+        fill,
+        resolved.width,
+        resolved.height,
+        shape.semi_transparent_fill,
+    );
+    draw_focus_sweep(
+        resolved,
+        shape,
+        UiShapeSweep {
+            frame,
+            period: focus_style.period,
+            color: focus_style.color_a,
+        },
+    );
+}
+
+/// Expand a focused control's fill to the inner edge of its external tracer.
+/// PS1 polygon rasterisation includes the near edge and excludes the far edge,
+/// hence the deliberate `margin - 1` / `margin` asymmetry. For the Cortex
+/// settings margin of two this fills one pixel above/left and two below/right,
+/// eliminating the black seam without painting over the outline.
+fn focus_inner_fill_bounds(resolved: UiResolvedNode, margin: u8) -> UiResolvedNode {
+    let near = u16::from(margin.saturating_sub(1));
+    let far = u16::from(margin);
+    let (x, y, width, height) = resolved.bounds();
+    screen_resolved_node(
+        x.saturating_sub(near as i16),
+        y.saturating_sub(near as i16),
+        width.saturating_add(near).saturating_add(far),
+        height.saturating_add(near).saturating_add(far),
+    )
+}
+
+/// Pixel-font line boxes include a little more visual weight above the
+/// baseline. A one-pixel optical correction keeps button copy centred in its
+/// chrome instead of looking pinned to the top edge.
+fn optically_centered_text_y(container_height: u16, line_height: i16) -> i16 {
+    let slack = (i32::from(container_height) - i32::from(line_height)).max(0);
+    (slack / 2 + i32::from(slack >= 2)) as i16
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

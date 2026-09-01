@@ -424,7 +424,12 @@ pub mod ui_node_flags {
     /// control.
     pub const TIMER_SKIPPABLE: u16 = 1 << 14;
     /// Button fill and border are drawn only while the button has focus.
+    /// On labels the same kind-specific bit links the label to the immediately
+    /// following sibling control for shared focus text and outline treatment.
     pub const BUTTON_FOCUS_CHROME: u16 = 1 << 15;
+    /// Label is dimmed unless its immediately following sibling control is
+    /// focused; that control's focus outline encompasses both nodes.
+    pub const LABEL_FOCUS_WITH_NEXT_CONTROL: u16 = BUTTON_FOCUS_CHROME;
 }
 
 typed_index! {

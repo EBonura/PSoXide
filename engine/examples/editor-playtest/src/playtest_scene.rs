@@ -2,36 +2,16 @@ use super::*;
 
 const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
 
-/// The faces kept in VRAM while gameplay is running.
-///
-/// Menus upload the whole cooked set; gameplay pays for these two and
-/// gives the rest of the band back to room textures. Slot 0 is the
-/// cooked HUD face, which the HUD, prompts and diagnostics all read.
-/// Slot 1 is the damage numbers' own face -- see [`DAMAGE_NUMBER_FACE`]
-/// for why combat feedback does not want the HUD's typography.
-///
-/// The second atlas is the whole cost of that decision: one 4bpp page
-/// run held for the length of a gameplay session, uploaded once on
-/// gameplay entry alongside the first.
-static GAMEPLAY_FONTS: [&psx_font::BitmapFont; 2] = [HUD_FACE, DAMAGE_NUMBER_FACE];
-
-/// The cooked HUD face, or the damage face when a project cooked no UI
-/// text at all (the uncooked stub manifest). Indexing `UI_FONTS[0]`
-/// unguarded would not compile against an empty table.
-const HUD_FACE: &psx_font::BitmapFont = if UI_FONTS.is_empty() {
-    DAMAGE_NUMBER_FACE
-} else {
-    UI_FONTS[0]
-};
-
-/// Font slot the damage numbers draw from. Their own, unless the
-/// project cooked too few slots to hold a second face, in which case
-/// they fall back to sharing the HUD's.
-const DAMAGE_FONT_SLOT: usize = if MAX_RUNTIME_UI_FONTS >= GAMEPLAY_FONTS.len() {
-    1
-} else {
-    0
-};
+/// Find the authored Basic 8x8 atlas used by HUD feedback. Cooked font slots
+/// are ordered by first use, so a hard-coded index would change whenever an
+/// earlier UI node changes face. Projects without Basic retain slot-zero as a
+/// safe fallback.
+fn damage_font_slot() -> usize {
+    UI_FONTS
+        .iter()
+        .position(|font| core::ptr::eq(*font, DAMAGE_NUMBER_FACE))
+        .unwrap_or(0)
+}
 
 fn boost_module(id: BoostModuleId) -> Option<&'static psx_level::BoostModuleRecord> {
     id.index().and_then(|index| BOOST_MODULES.get(index))
@@ -166,9 +146,9 @@ fn write_stat_line<'a>(
 ) -> Option<&'a str> {
     let mut out = UiScratch::new(scratch);
     out.push_str(label);
-    out.push_str("  ");
+    out.push_str(" ");
     out.push_signed_percent_q12(active_bonus_q12);
-    out.push_str("  //  ");
+    out.push_str(" / ");
     if let Some(module_bonus_q12) = module_bonus_q12 {
         out.push_signed_percent_q12(module_bonus_q12);
     } else {
@@ -580,10 +560,10 @@ impl Scene for Playtest {
 
     /// Gameplay and each UI scene use distinct resource-set keys so the flow
     /// driver fires `on_exit_state`/`on_enter_state` across menu-to-menu and
-    /// menu-to-gameplay boundaries. The UI font atlas and menu image RAM cache
-    /// are shared by all menu states; streamed UI image VRAM is scoped to the
-    /// active UI scene so a splash/logo screen does not keep its texture resident
-    /// beside every main-menu strip.
+    /// menu-to-gameplay boundaries. Gameplay overlays share the gameplay key
+    /// and the selector-preserving cooked font pack. Streamed UI image VRAM is scoped
+    /// to the active front-end scene so a splash/logo screen does not keep its
+    /// texture resident beside every main-menu strip.
     fn state_resource_key(&self, state: SceneStateRef) -> u32 {
         if state.has_gameplay() {
             GAMEPLAY_RESOURCE_KEY
@@ -594,22 +574,12 @@ impl Scene for Playtest {
         }
     }
 
-    /// Acquire the incoming scene's font resource set. Front-end scenes share
-    /// the complete cooked set; gameplay keeps [`GAMEPLAY_FONTS`]. The runtime
-    /// releases the old pack before the combined replacement upload, so menu
-    /// typography never occupies gameplay VRAM.
+    /// Acquire the cooked font set without changing selector positions between
+    /// front-end and gameplay-backed UI. The old HUD-only pack caused pause
+    /// labels above slot one to fall back silently to the italic default face.
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
-        let scene_fonts: &'static [&'static psx_font::BitmapFont] = if !state.has_gameplay() {
-            UI_FONTS
-        } else if MAX_RUNTIME_UI_FONTS >= GAMEPLAY_FONTS.len() {
-            &GAMEPLAY_FONTS
-        } else {
-            // A project that cooked fewer font slots than gameplay wants
-            // keeps the HUD face and lets the damage numbers share it.
-            &UI_FONTS[..UI_FONTS.len().min(1)]
-        };
         assert!(
-            acquire_ui_fonts(scene_fonts, &mut self.ui_fonts),
+            acquire_ui_fonts(UI_FONTS, &mut self.ui_fonts),
             "UI font VRAM pack failed"
         );
         // Streamed UI images live only in menu states. Menu entry uploads any
@@ -1899,7 +1869,7 @@ impl Scene for Playtest {
         // `FontAtlas` is `Copy`, so take the handle by value: holding a
         // borrow of `self.ui_fonts` here would block the `&mut` the pool
         // needs to retire its own expired slots.
-        if let Some(font) = self.ui_fonts[DAMAGE_FONT_SLOT] {
+        if let Some(font) = self.ui_fonts[damage_font_slot()] {
             let room = self.room_index;
             let _drawn = self.damage_numbers.draw(&font, camera, room, overlay_tick);
         }

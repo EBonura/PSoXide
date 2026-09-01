@@ -3523,6 +3523,7 @@ fn ui_scene_remove_node_removes_descendants_and_root_is_stable() {
             letter_spacing: default_ui_letter_spacing(),
             color: [220, 226, 240],
             gradient: None,
+            focus_with_next_control: false,
             effect: UiImageEffect::None,
         },
     );
@@ -3564,6 +3565,7 @@ fn ui_scene_parent_rect_offsets_children() {
             letter_spacing: default_ui_letter_spacing(),
             color: [220, 226, 240],
             gradient: None,
+            focus_with_next_control: false,
             effect: UiImageEffect::None,
         },
     );
@@ -3604,6 +3606,7 @@ fn ui_scene_absolute_rect_preserves_visual_transform() {
             letter_spacing: default_ui_letter_spacing(),
             color: [220, 226, 240],
             gradient: None,
+            focus_with_next_control: false,
             effect: UiImageEffect::None,
         },
     );
@@ -3649,6 +3652,7 @@ fn ui_scene_move_node_reparents_and_rejects_cycles() {
             letter_spacing: default_ui_letter_spacing(),
             color: [255, 255, 255],
             gradient: None,
+            focus_with_next_control: false,
             effect: UiImageEffect::None,
         },
     );
