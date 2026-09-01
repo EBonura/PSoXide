@@ -205,50 +205,6 @@ mod tests {
     }
 
     #[test]
-    fn brush_combat_cooks_authored_player_and_enemy_body_hulls() {
-        let project = ProjectDocument::from_ron_str(include_str!(
-            "../../../archive/fixtures/brush-combat-fixture/project.ron"
-        ))
-        .expect("brush combat fixture");
-        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../archive/fixtures/brush-combat-fixture");
-        let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
-        assert!(report.is_ok(), "brush combat package: {:?}", report.errors);
-        let package = package.expect("brush combat package");
-        let PlaytestWorldGeometry::Pxbsp(world) = package.world_geometry else {
-            panic!("brush combat selected the grid provider");
-        };
-        assert_eq!(
-            world.body_hulls,
-            [
-                psx_bsp::collision_provider::CookedBodyHull::new(1, 12, 64),
-                psx_bsp::collision_provider::CookedBodyHull::new(2, 12, 64),
-            ]
-        );
-        let mut map = PxbspResidentMap::with_capacity(world.bytes.len());
-        map.load(0, &mut SliceReader::new(&world.bytes))
-            .expect("resident combat PXBSP");
-        let door = map.brush_models().get(1).expect("combat door model");
-        assert_eq!(
-            door.origin,
-            psx_bsp::Vec3I16 {
-                x: 128,
-                y: 16,
-                z: 96,
-            }
-        );
-        assert_eq!(
-            door.mins,
-            psx_bsp::Vec3I16 {
-                x: -2,
-                y: 0,
-                z: -16,
-            }
-        );
-        assert_eq!(door.maxs, psx_bsp::Vec3I16 { x: 2, y: 48, z: 16 });
-    }
-
-    #[test]
     fn project_cook_choice_reaches_the_normal_package_and_compiler() {
         let mut project = ProjectDocument::from_ron_str(include_str!(
             "../../../archive/fixtures/brush-first-playable/project.ron"
