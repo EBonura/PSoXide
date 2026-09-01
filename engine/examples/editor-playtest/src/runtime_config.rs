@@ -261,12 +261,12 @@ pub(super) const ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES: bool = true;
 // ~26KB of .bss the 2MB budget cannot spare, while gameplay telemetry
 // peaks at 77 visible cells; the runtime degrades gracefully past the
 // cap (overflow guards fall back to uncached selection).
-pub(super) const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 192;
+pub(super) const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = if cfg!(playtest_pxbsp) { 1 } else { 192 };
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-pub(super) const MAX_ACTIVE_VISIBLE_CELLS: usize = 192;
+pub(super) const MAX_ACTIVE_VISIBLE_CELLS: usize = if cfg!(playtest_pxbsp) { 1 } else { 192 };
 
 pub(super) fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
     psx_game_runtime::world_cells::room_draw_distance(record, NEAR_Z)
@@ -453,7 +453,12 @@ pub(super) const MAX_ROOM_MATERIALS: usize = psx_level::MAX_ROOM_MATERIALS;
 /// runtime window. The world-level resident room limit picks the effective
 /// count per cooked build; this cap only prevents the fixed arrays from
 /// growing past the editor-exposed maximum.
-pub(super) const MAX_ACTIVE_ROOMS: usize = 16;
+// A PXBSP world is one room record: the grid room window, portal
+// visibility and cell selector below are dead on that path (the same
+// `playtest_pxbsp` gate the prebuilt-quad arenas use), and at 16 rooms they
+// cost ~28 KB of `.bss` that the 0.4 tech demo needs for its UV-window face
+// splits and for an `emulator-telemetry` build to link at all.
+pub(super) const MAX_ACTIVE_ROOMS: usize = if cfg!(playtest_pxbsp) { 1 } else { 16 };
 /// Reachability draw model: the camera's room plus this many portal hops are the
 /// ACTIVE/DRAWN set, with no frustum or far-plane room cull (per-polygon
 /// backface + screen culling still applies). Side and behind rooms stay drawn.
@@ -462,9 +467,9 @@ pub(super) const RESIDENT_DRAW_DEPTH: u16 = 3;
 /// Resident radius = RESIDENT_DRAW_DEPTH + RESIDENT_PREFETCH_HOPS; since it
 /// covers the draw depth, resident is a superset of drawn by construction.
 pub(super) const RESIDENT_PREFETCH_HOPS: u16 = 2;
-pub(super) const MAX_PORTAL_FRUSTUMS: usize = 64;
-pub(super) const MAX_PORTAL_FRONTIER_ROOMS: usize = 32;
-pub(super) const MAX_PORTAL_ROOM_BOUNDS: usize = 256;
+pub(super) const MAX_PORTAL_FRUSTUMS: usize = if cfg!(playtest_pxbsp) { 1 } else { 64 };
+pub(super) const MAX_PORTAL_FRONTIER_ROOMS: usize = if cfg!(playtest_pxbsp) { 1 } else { 32 };
+pub(super) const MAX_PORTAL_ROOM_BOUNDS: usize = if cfg!(playtest_pxbsp) { 1 } else { 256 };
 pub(super) const PORTAL_ROOM_BOUNDS_MIN_Y: i32 = -4096;
 pub(super) const PORTAL_ROOM_BOUNDS_MAX_Y: i32 = 8192;
 pub(super) type RuntimePortalVisibility =
