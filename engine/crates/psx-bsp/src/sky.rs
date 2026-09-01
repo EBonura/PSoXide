@@ -556,10 +556,14 @@ pub unsafe fn submit_view_ray_layered_sky_to_slot(
     let background_origin = [atlas_origin[0].wrapping_add(width), atlas_origin[1]];
     let background_window =
         TextureWindow::power_of_two_tile(background_origin[0], background_origin[1], width, height);
+    // `tick * width / period` modulo 256, without the 64-bit product: split
+    // the tick into whole periods and a remainder; only the low byte of the
+    // quotient is kept, so the whole-period term may wrap freely.
     let scroll = |cycle_seconds: u32| {
-        ((u64::from(material_tick) * u64::from(width)
-            / u64::from(MATERIAL_TICKS_PER_SECOND * cycle_seconds))
-            & 0xff) as u8
+        let period = (MATERIAL_TICKS_PER_SECOND * cycle_seconds).max(1);
+        let whole = (material_tick / period).wrapping_mul(u32::from(width));
+        let part = (material_tick % period) * u32::from(width) / period;
+        (whole.wrapping_add(part) & 0xff) as u8
     };
     let foreground_scroll = [
         scroll(SKY_FOREGROUND_CYCLE_SECONDS),
