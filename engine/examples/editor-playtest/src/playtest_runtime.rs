@@ -281,7 +281,7 @@ impl Playtest {
             self.poi_page_type_frame = 0;
             return;
         }
-        if self.complete_active_poi_reveal() {
+        if self.complete_active_message_reveal() {
             return;
         }
         match self.poi_messages.advance() {
@@ -328,19 +328,21 @@ impl Playtest {
     /// The first Cross press during panel motion or type-on completes the
     /// current presentation instead of skipping unread copy. A later press is
     /// then free to advance/close through `MessageController`.
-    fn complete_active_poi_reveal(&mut self) -> bool {
-        use psx_game_runtime::poi::MessageSource;
-
+    fn complete_active_message_reveal(&mut self) -> bool {
         let Some(message) = self.poi_messages.active() else {
             return false;
         };
-        if !matches!(message.source(), MessageSource::PointOfInterest(_)) {
-            return false;
-        }
         let Some(page_text) = INTERACTABLE_MESSAGE_PAGES.get(message.page() as usize) else {
             return false;
         };
-        let required_panel = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
+        let required_panel = if matches!(
+            message.source(),
+            psx_game_runtime::poi::MessageSource::PointOfInterest(_)
+        ) {
+            psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES
+        } else {
+            0
+        };
         let required_type = u16::try_from(page_text.chars().count())
             .unwrap_or(u16::MAX)
             .saturating_mul(psx_engine::ui::MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
@@ -349,6 +351,23 @@ impl Playtest {
         }
 
         self.poi_panel_frame = required_panel;
+        self.poi_page_type_frame = required_type;
+        true
+    }
+
+    /// A legacy Message/Checkpoint panel follows the same first-press rule as
+    /// paged Archive copy: finish the current type-on before allowing the next
+    /// press to dismiss it.
+    pub(super) fn complete_legacy_message_reveal(&mut self) -> bool {
+        let Some(message) = self.message_overlay else {
+            return false;
+        };
+        let required_type = u16::try_from(message.body.chars().count())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(psx_engine::ui::MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
+        if self.poi_page_type_frame >= required_type {
+            return false;
+        }
         self.poi_page_type_frame = required_type;
         true
     }
@@ -366,15 +385,16 @@ impl Playtest {
             return;
         }
         let Some(message) = self.poi_messages.active() else {
+            if self.message_overlay.is_some() {
+                self.poi_page_type_frame = self.poi_page_type_frame.saturating_add(1);
+            }
             return;
         };
-        if !matches!(
+        if matches!(
             message.source(),
             psx_game_runtime::poi::MessageSource::PointOfInterest(_)
-        ) {
-            return;
-        }
-        if self.poi_panel_frame < psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+        ) && self.poi_panel_frame < psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES
+        {
             self.poi_panel_frame = self.poi_panel_frame.saturating_add(1);
         } else {
             self.poi_page_type_frame = self.poi_page_type_frame.saturating_add(1);
@@ -385,10 +405,15 @@ impl Playtest {
         let Some(message) = WORLD_MESSAGE else {
             return;
         };
-        let _ = self.poi_messages.open_world(
+        if self.poi_messages.open_world(
             0,
             psx_game_runtime::poi::MessagePageSpan::new(message.page_first, message.page_count),
-        );
+        ) {
+            // World copy has no compact prompt to expand from, so its first
+            // presented frame begins typing immediately.
+            self.poi_panel_frame = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
+            self.poi_page_type_frame = 0;
+        }
     }
 
     /// Fixed-point stat multipliers from the four endpoint sockets at the
@@ -1745,6 +1770,7 @@ impl Playtest {
         }
         let (title, body) = interactable_message_text(interactable);
         self.message_overlay = Some(RuntimeMessageOverlay { title, body });
+        self.poi_page_type_frame = 0;
     }
 
     pub(super) fn lock_target_indicator_position(&self) -> Option<RoomPoint> {

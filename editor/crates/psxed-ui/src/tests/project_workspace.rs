@@ -1,21 +1,42 @@
 use super::*;
 
 #[test]
-fn project_build_request_opens_the_bottom_console() {
+fn build_and_play_requests_preserve_viewport_layout_and_camera() {
     let mut workspace = EditorWorkspace::with_project(
         test_temp_dir("project-build-console"),
         ProjectDocument::new("project build console"),
     );
     workspace.resources_open = false;
     workspace.content_browser_view = ContentBrowserView::Resources;
+    workspace.camera_rig.yaw = 1234;
+    workspace.camera_rig.pitch = 3456;
+    workspace.camera_rig.radius = 789;
+    workspace.camera_rig.target = [111, 222, 333];
+    let camera = workspace.current_editor_camera_state();
 
     workspace.request_project_build();
 
-    assert!(workspace.resources_open);
-    assert_eq!(workspace.content_browser_view, ContentBrowserView::Debug);
+    assert!(!workspace.resources_open);
+    assert_eq!(
+        workspace.content_browser_view,
+        ContentBrowserView::Resources
+    );
+    assert_eq!(workspace.current_editor_camera_state(), camera);
     assert_eq!(
         workspace.take_playtest_request(),
         Some(EditorPlaytestRequest::BuildProject)
+    );
+
+    workspace.request_play_or_rebuild(EditorPlaytestStatus::Idle);
+    assert!(!workspace.resources_open);
+    assert_eq!(
+        workspace.content_browser_view,
+        ContentBrowserView::Resources
+    );
+    assert_eq!(workspace.current_editor_camera_state(), camera);
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::Play)
     );
 }
 

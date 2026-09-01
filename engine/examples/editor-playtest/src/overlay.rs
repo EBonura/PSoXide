@@ -53,13 +53,19 @@ pub(crate) fn draw_interaction_prompt_animated(font: &FontAtlas, prompt: &str, f
     draw_interaction_prompt_panel(font, prompt, frame);
 }
 
-pub(crate) fn draw_interactable_message(font: &FontAtlas, _title: &str, body: &str) {
+pub(crate) fn draw_interactable_message(
+    font: &FontAtlas,
+    _title: &str,
+    body: &str,
+    typewriter_frame: u16,
+) {
     draw_message_page(
         font,
         body,
         MessagePanelVariant::PointOfInterest,
         MessagePageMeta::new(0, 1),
         0,
+        typewriter_frame,
     );
 }
 
@@ -70,8 +76,9 @@ pub(crate) fn draw_message_page(
     variant: MessagePanelVariant,
     page: MessagePageMeta,
     frame: u16,
+    typewriter_frame: u16,
 ) {
-    draw_message_panel(font, page_text, variant, page, frame);
+    draw_message_panel(font, page_text, variant, page, frame, typewriter_frame);
 }
 
 /// POI-only presentation bridge that visibly morphs the active interaction
@@ -580,7 +587,13 @@ fn draw_vitality_bar(
     let fill_w = (w - 34).max(0);
     let fill_h = (h - 10).max(3);
     let filled = ((i32::from(fill_w) * i32::from(fill_q12.min(4096))) >> 12) as i16;
-    draw_rect(fill_x, fill_y, fill_w, fill_h, (rgb.0 / 12, rgb.1 / 12, rgb.2 / 12));
+    draw_rect(
+        fill_x,
+        fill_y,
+        fill_w,
+        fill_h,
+        (rgb.0 / 12, rgb.1 / 12, rgb.2 / 12),
+    );
     if filled > 0 {
         draw_rect(fill_x, fill_y, filled, fill_h, rgb);
         let mut step = 1;
@@ -617,7 +630,11 @@ fn draw_stance_charge_circle(
     draw_chamfered(cx - 7, cy - 7, 14, 14, 5, (5, 8, 9));
 
     let filled = stance_charge_segments(progress_q12);
-    let head = if (frame & 1) == 0 { (255, 244, 220) } else { rgb };
+    let head = if (frame & 1) == 0 {
+        (255, 244, 220)
+    } else {
+        rgb
+    };
     if filled >= 1 {
         draw_rect(cx - 4, cy - 11, 8, 2, if filled == 1 { head } else { rgb });
     }
