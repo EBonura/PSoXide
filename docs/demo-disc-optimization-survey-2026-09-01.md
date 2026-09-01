@@ -568,3 +568,30 @@ Waves: 0 = B9, B0 || B1. 1 = B2 || B3, then repin quake-psx and run its
 benches. 2 = B4 (then repin hl-psx, tram gate), B5, B6. 3 = B7, B8, then a
 re-attribution run decides between P10 and P11.
 Needed from Manny before wave 0: the recorded tape; keep-or-drop `e31ea70b`.
+
+### 9.1 Execution log (2026-09-01 evening)
+
+Bench = `make cortex-bench` on the whole-level tape, `lockstep-visuals` build,
+compared to the lockstep baseline (bus cycles 7,170,338,576; vram
+`0x4bcf7983f4adcc89`, display `0x1a31c1db8cb7879c`). Bus cycles are the
+primary number under lockstep; instruction counts are stall-blind.
+
+| Branch | State | Bus cycles | Hashes | Notes |
+|---|---|---:|---|---|
+| B9 `chore/land-quake-sdk` | on main (`dd4b0d6e`) | n/a | n/a | cherry-pick of e31ea70b, psx-bsp 154 tests |
+| B0 `bench/cortex-fixture` | on main (`b6398a0e`) | baseline | baseline | tape fixture, `cortex-bench`, `guest-symbol-gate`; lockstep made the default after a cadence divergence at tick 978 |
+| B1 `build/ram-headroom` | on main (`2e58a7cb`) | +0.12% | identical | .bss -21,344 B, .text -9,628 B, image end -29,536 B; +0.12% is inside the unmeasured layout band (noise probe running) |
+| B2 `fix/cook-uv-wrap` | pushed, awaiting Manny's 6.2 review | +6.10% | differ (intended) | 371 surfaces split, +693 faces; tape-end pair: guardrail tiles instead of smearing; needs B1 to link |
+| B3 `perf/collision-trace` | WIP local, split into two variant benches | -0.34% | identical | +1.08% instructions (32-step exact divide replaces the builtin) but fewer stall cycles; measuring plane_contact-only vs bounds-skip-only to keep the half that pays |
+| noise probe | running | ? | | called never-inlined no-op in main() to shift code layout |
+
+Things learned that change the plan:
+- Grid room capacities were already gated on `playtest_pxbsp` for the arenas;
+  RAM is now dominated by resident content (persistent asset streamer 659 KB
+  of the 796 KB arena) and the 110 KB frame render scratch. Further headroom
+  is content policy (clip residency), not capacities.
+- The numeric guard (`psoxide-dev runtime-numeric-guard`) is red on main at
+  `world_objects_runtime.rs:39` (a `u64` bit mask) and does not scan psx-bsp.
+- `attributed_clip`'s Q16 i64 path is a documented, measured exception
+  (E1M1 gate: faster and smaller than Q12). B4/B5 must be one change with
+  the PXBSP plane math, gated on the 6.2 A/B, not a mechanical edit.
