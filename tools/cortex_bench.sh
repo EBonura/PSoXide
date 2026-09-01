@@ -24,9 +24,6 @@ STAGE_ROOT="${CORTEX_BENCH_STAGE_ROOT:-${TMPDIR:-/tmp}/psoxide-psx-guest-cortex-
 # CORTEX_BENCH_FEATURES="cd-stream-bench".
 FEATURES="${CORTEX_BENCH_FEATURES:-cd-stream-bench lockstep-visuals}"
 STEPS="${CORTEX_BENCH_STEPS:-6000000000}"
-# Stop both replays in the same guest state: the whole-level tape has 5,260
-# polls and a run that merely exhausts it can end a poll early or late.
-STOP_POLL="${CORTEX_BENCH_STOP_POLL:-5250}"
 FRONTEND="$ROOT/target/release/frontend"
 
 fail() { echo "cortex-bench: FAIL: $1" >&2; exit 1; }
@@ -38,13 +35,6 @@ mkdir -p "$OUT"
 echo "cortex-bench: frontend"
 (cd emu && cargo build -p frontend --release --quiet)
 
-# A reused stage root can hand the disc a stale guest executable: the staged
-# sources are rsynced with their mtimes, so cargo may keep an older rlib or
-# skip the final link (observed 2026-09-01: two benches of different commits
-# produced the same exe hash). Start from an empty stage unless told to keep it.
-if [ "${CORTEX_BENCH_KEEP_STAGE:-0}" != "1" ]; then
-    rm -rf "$STAGE_ROOT"
-fi
 echo "cortex-bench: disc ($FEATURES) with link map"
 (cd emu && EDITOR_PLAYTEST_FEATURES="$FEATURES" \
     PSOXIDE_GUEST_STAGE_ROOT="$STAGE_ROOT" \
@@ -64,7 +54,7 @@ for RUN in 1 2; do
     # The tape-end frame is the same guest state on every build (poll-bound
     # tape), so it doubles as the visual A/B pair; dump it at 4x.
     PSOXIDE_HW_DUMP_SCALE=4 "$FRONTEND" launch --path "$CUE" --embedded-playtest \
-        --input-tape "$TAPE" --steps "$STEPS" --stop-at-poll "$STOP_POLL" --dump-hash \
+        --input-tape "$TAPE" --steps "$STEPS" --dump-hash \
         --route-log "$OUT/route-$RUN.csv" \
         --cpu-cycle-profile-log "$OUT/cycles-$RUN.csv" \
         --pc-line-log "$OUT/pcline-$RUN.csv" \

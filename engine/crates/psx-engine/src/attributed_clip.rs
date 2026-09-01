@@ -8,6 +8,7 @@
 //! deliberately to one measured numeric policy.
 
 use core::mem::MaybeUninit;
+use psx_math::int32::div_u64_by_u32;
 
 /// Cyclic traversal order for one clip plane.
 ///
@@ -34,15 +35,57 @@ pub fn crossing_fraction_q12_i32(first_distance: i32, second_distance: i32) -> i
     ratio_q12_i32(first_distance, first_distance.wrapping_sub(second_distance))
 }
 
-/// Q16 crossing fraction for renderers whose exact plane distances already
-/// live in `i64`.
+/// Exact Q16 crossing fraction of an edge from its two signed plane distances.
 ///
-/// PXBSP retains this policy because its same-tree E1M1 gate proved it faster
-/// and materially smaller than reducing the wide plane result to Q12.
+/// `(first << 16) / (first - second)`, clamped to `0..=65536`, computed with
+/// 32-bit operations only: the R3000A has no 64-bit divide, and the earlier
+/// `i64` form of this function was the last 64-bit division helper linked
+/// into the PXBSP world path. The magnitude runs through the hardware divide
+/// when `first << 16` fits, and through [`div_u64_by_u32`] otherwise; both
+/// are exact, so the result equals the wide form bit for bit.
 #[inline(always)]
-// psx-numeric-allow-next-line: rare exact PXBSP boundary crossing; measured Q16 parity path, not the common inside/outside test
-pub fn crossing_fraction_q16_i64(first_distance: i64, second_distance: i64) -> i64 {
-    ((first_distance << 16) / first_distance.wrapping_sub(second_distance)).clamp(0, 1 << 16)
+pub fn crossing_fraction_q16_i32(first_distance: i32, second_distance: i32) -> u32 {
+    // Sign of the ratio: positive only when the numerator and the difference
+    // agree, which is every straddling edge; equal-sign inputs clamp to an end.
+    let difference_positive = first_distance > second_distance;
+    if first_distance == second_distance {
+        return 1 << 16;
+    }
+    if (first_distance >= 0) != difference_positive {
+        return 0;
+    }
+    let numerator = first_distance.unsigned_abs();
+    let denominator = first_distance.abs_diff(second_distance);
+    let magnitude = if numerator < (1 << 16) {
+        (numerator << 16) / denominator
+    } else {
+        // `numerator >> 16 < denominator` because `numerator <= denominator`
+        // fails only when the ratio exceeds one, and `div_u64_by_u32` still
+        // needs `hi < divisor`; guard that case by the clamp below.
+        if (numerator >> 16) >= denominator {
+            return 1 << 16;
+        }
+        div_u64_by_u32(numerator >> 16, numerator << 16, denominator)
+    };
+    magnitude.min(1 << 16)
+}
+
+/// Exact `first + (second - first) * fraction / 65536`, truncating toward
+/// negative infinity like a shift, in 32-bit operations.
+///
+/// The product is split so nothing exceeds `i32` for `|second - first|` below
+/// `2^23`: enough for `i16` positions and screen coordinates, byte attributes
+/// and Q12 depths, which is everything a clipped world vertex carries.
+#[inline(always)]
+pub fn lerp_q16_i32_exact(first: i32, second: i32, fraction_q16: u32) -> i32 {
+    let delta = second.wrapping_sub(first);
+    debug_assert!(delta.unsigned_abs() < (1 << 23));
+    let high = (fraction_q16 >> 8) as i32;
+    let low = (fraction_q16 & 0xff) as i32;
+    // delta * f / 2^16 == delta * (f >> 8) / 2^8 + delta * (f & 255) / 2^16,
+    // and floor distributes here because the first term is exact after one
+    // more shift: (delta * high + ((delta * low) >> 8)) >> 8.
+    first.wrapping_add((delta.wrapping_mul(high).wrapping_add((delta.wrapping_mul(low)) >> 8)) >> 8)
 }
 
 /// Bounded Q12 interpolation with truncation toward the lower fixed point.
@@ -78,13 +121,6 @@ pub fn lerp_q12_i32_wide(first: i32, second: i32, fraction: i32) -> i32 {
         .wrapping_add(((delta % 4096).wrapping_mul(fraction)) >> 12)
 }
 
-/// Q16 interpolation for an `i32` authored attribute using a wide fraction.
-#[inline(always)]
-// psx-numeric-allow-next-line: paired with the reviewed exact PXBSP Q16 boundary fraction above
-pub fn lerp_q16_i32(first: i32, second: i32, fraction: i64) -> i32 {
-    // psx-numeric-allow-next-line: exact Q16 crossing interpolation; invoked only for a straddling edge
-    (first as i64 + ((second.wrapping_sub(first) as i64).wrapping_mul(fraction) >> 16)) as i32
-}
 
 /// Overflow-safe non-negative Q12 ratio, clamped to one.
 ///
@@ -441,8 +477,8 @@ mod tests {
         assert_eq!(lerp_q12_i32(10, 110, q12), 79);
         assert_eq!(lerp_q12_i32_rounded(10, 110, q12), 80);
 
-        let q16 = crossing_fraction_q16_i64(7, -3);
-        assert_eq!(lerp_q16_i32(10, 110, q16), 79);
+        let q16 = crossing_fraction_q16_i32(7, -3);
+        assert_eq!(lerp_q16_i32_exact(10, 110, q16), 79);
     }
 
     #[test]
@@ -454,5 +490,43 @@ mod tests {
         assert_eq!(&inside_output[..inside_count], &inside);
         let (_, outside_count) = clip::<true>(&outside, ClipTraversal::PreviousToCurrent);
         assert_eq!(outside_count, 0);
+    }
+
+    /// The `i64` forms these replaced, kept as the host oracles.
+    fn crossing_fraction_q16_i64(first: i64, second: i64) -> i64 {
+        ((first << 16) / first.wrapping_sub(second)).clamp(0, 1 << 16)
+    }
+
+    fn lerp_q16_i64(first: i32, second: i32, fraction: i64) -> i32 {
+        (first as i64 + ((second.wrapping_sub(first) as i64).wrapping_mul(fraction) >> 16)) as i32
+    }
+
+    #[test]
+    fn q16_crossing_and_lerp_match_the_wide_oracles() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for iteration in 0..100_000u32 {
+            let span: i32 = if iteration % 3 == 0 { i32::MAX } else { 1 << 24 };
+            let first = (next() as i32) % span;
+            let second = (next() as i32) % span;
+            if first == second {
+                continue;
+            }
+            let expected = crossing_fraction_q16_i64(i64::from(first), i64::from(second));
+            let actual = crossing_fraction_q16_i32(first, second);
+            assert_eq!(i64::from(actual), expected, "first {first} second {second}");
+            let a = (next() as i32) % (1 << 22);
+            let b = (next() as i32) % (1 << 22);
+            assert_eq!(
+                lerp_q16_i32_exact(a, b, actual),
+                lerp_q16_i64(a, b, expected),
+                "lerp {a} {b} fraction {actual}"
+            );
+        }
     }
 }
