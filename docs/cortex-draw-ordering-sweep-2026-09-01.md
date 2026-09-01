@@ -222,3 +222,55 @@ Tape-end frame pair (4x, 1280x960):
 Host gates: `cargo test -p psx-engine -p psx-bsp` (155 + 405 + 1 pass),
 `cargo test --manifest-path engine/examples/editor-playtest/Cargo.toml`
 (48 pass, including the corrected depth-law test).
+
+## Combat checkpoint
+
+`make combat-checkpoint` cannot run on `origin/main` at be93eb6b: its first
+step invokes `cargo run -p psxed-project --bin gen_brush_combat_fixture`,
+and that binary was removed when the BSP authoring was consolidated
+(75d7c57e). The remaining steps (clean cook of the tracked fixture, MIPS
+guest with `cd-stream-bench emulator-telemetry`, disc, two canonical
+replays, the door replay) were run by hand in a private stage root, on this
+branch and on unmodified `origin/main`, to separate what this change moves
+from what was already stale.
+
+## POI markers (symptom 2)
+
+Archive beacons are drawn through `pxbsp_surface_options` (no clearance,
+frame lines at -2), so they were keyed at z / 4 against a 3 z / 4 world
+exactly like the enemy, and the same range change corrects them. The
+whole-level tape never frames a beacon next to an occluding wall at a
+screenshot interval I could pin down (the cyan and green glyphs seen on
+walls in the route sheet are wall texture, not beacon packets), so there is
+no before/after beacon pair; the mechanism and the fix are the same as for
+the enemy, and the beacon draw path itself was not touched.
+
+| run | melee hits | staggers | deaths | hits taken | post-kill x (biased) | vram_hash | display_hash | door display_hash |
+|---|---|---|---|---|---|---|---|---|
+| pinned in `tools/combat_checkpoint.sh` | 4 | 1 | 1 | 3 | 1003625 | 0xd6e3486e71e17d02 | 0x30c47969ed94bd59 | (not pinned) |
+| origin/main be93eb6b, by hand | 4 | 1 | 0 | 7 | 1000227 | 0xe0d9c18fac19a030 | 0x246471bb0f276375 | 0x9dc5396c7707eac3 |
+| this branch, by hand | 4 | 1 | 0 | 7 | 1000227 | 0x145340d20d84356b | 0xc555866cde643a27 | 0x9b73ff2231e204f7 |
+
+Both runs are deterministic (two identical canonical replays each). The
+gameplay counters are identical between main and this branch and already
+disagree with the pins on main (no death, seven hits taken, a different
+post-kill position), so the pinned gameplay expectations went stale before
+this change, together with the generator. This change moves only the
+hashes, which an ordering fix must. The pins were not updated here: the
+hash pins alone cannot be re-pinned while the gate cannot run and its
+gameplay pins are wrong, and deciding what the canonical tape should
+assert now is Manny's call. Logs: `/private/tmp/claude-501/-Users-ebonura-Desktop-repos-PSoXide--claude-worktrees-psoxide-demo-disc-optimization-923892/3e5f59a4-d27b-4166-8dc7-46f2a8b2741e/scratchpad/ordering/combat-base/` and
+`/private/tmp/claude-501/-Users-ebonura-Desktop-repos-PSoXide--claude-worktrees-psoxide-demo-disc-optimization-923892/3e5f59a4-d27b-4166-8dc7-46f2a8b2741e/scratchpad/ordering/combat-fix/`.
+
+## Open items for Manny
+
+1. Restore the combat checkpoint: reinstate or replace
+   `gen_brush_combat_fixture`, then re-pin melee/stagger/death/hits-taken
+   and the hashes from a run the design agrees with (the canonical tape no
+   longer kills the enemy on main).
+2. The BSP camera quantises yaw and pitch to 256 steps per turn while
+   models use the exact basis; worth a look if world/model seams show.
+3. The world renderer rejects surfaces beyond 2731 true units (OTZ >=
+   2048) although the room's cooked draw distance is 4096; fine for 0.4,
+   a ceiling for larger spaces.
+4. The 64-bit symbol gate fails on main (i64 helpers linked), unrelated.
