@@ -277,8 +277,7 @@ impl Playtest {
                 return;
             }
             self.acquired_module = BoostModuleId::NONE;
-            self.poi_panel_frame = 0;
-            self.poi_page_type_frame = 0;
+            self.set_poi_presentation_frames(0, 0);
             return;
         }
         if self.complete_active_message_reveal() {
@@ -286,7 +285,7 @@ impl Playtest {
         }
         match self.poi_messages.advance() {
             MessageAdvance::Advanced(_) => {
-                self.poi_page_type_frame = 0;
+                self.set_poi_page_type_frame(0);
             }
             MessageAdvance::Closed(MessageSource::PointOfInterest(index)) => {
                 if let Some(interactable) = INTERACTABLES.get(usize::from(index)) {
@@ -296,8 +295,7 @@ impl Playtest {
                 }
                 if let Some(module) = self.grant_point_of_interest_reward(usize::from(index)) {
                     self.acquired_module = module;
-                    self.poi_panel_frame = 0;
-                    self.poi_page_type_frame = 0;
+                    self.set_poi_presentation_frames(0, 0);
                 }
             }
             MessageAdvance::Closed(MessageSource::World) | MessageAdvance::Inactive => {}
@@ -320,8 +318,7 @@ impl Playtest {
         if self.poi_panel_frame >= required_panel && self.poi_page_type_frame >= required_type {
             return false;
         }
-        self.poi_panel_frame = required_panel;
-        self.poi_page_type_frame = required_type;
+        self.set_poi_presentation_frames(required_panel, required_type);
         true
     }
 
@@ -350,8 +347,7 @@ impl Playtest {
             return false;
         }
 
-        self.poi_panel_frame = required_panel;
-        self.poi_page_type_frame = required_type;
+        self.set_poi_presentation_frames(required_panel, required_type);
         true
     }
 
@@ -368,8 +364,25 @@ impl Playtest {
         if self.poi_page_type_frame >= required_type {
             return false;
         }
-        self.poi_page_type_frame = required_type;
+        self.set_poi_page_type_frame(required_type);
         true
+    }
+
+    /// Keep live, prepared, and submitted POI presentation counters coherent
+    /// when input changes the content between deferred render stages. Without
+    /// this atomic reset a new page can flash fully typed, or a reward panel
+    /// can draw at its compact endpoint before jumping back to the full panel.
+    pub(super) fn set_poi_presentation_frames(&mut self, panel: u16, page: u16) {
+        self.poi_panel_frame = panel;
+        self.prepared_poi_panel_frame = panel;
+        self.overlay_poi_panel_frame = panel;
+        self.set_poi_page_type_frame(page);
+    }
+
+    pub(super) fn set_poi_page_type_frame(&mut self, page: u16) {
+        self.poi_page_type_frame = page;
+        self.prepared_poi_page_type_frame = page;
+        self.overlay_poi_page_type_frame = page;
     }
 
     /// Advance Archive presentation only when a new frame is actually being
@@ -411,8 +424,7 @@ impl Playtest {
         ) {
             // World copy has no compact prompt to expand from, so its first
             // presented frame begins typing immediately.
-            self.poi_panel_frame = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
-            self.poi_page_type_frame = 0;
+            self.set_poi_presentation_frames(psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES, 0);
         }
     }
 
@@ -1727,6 +1739,21 @@ impl Playtest {
                 true
             }
             InteractableKind::PointOfInterest => {
+                // A successful pickup is already a complete interaction. Do
+                // not make the player acknowledge an authored recovery page
+                // before showing the useful confirmation. Lore-only POIs and
+                // rewards that could not be granted still use their pages.
+                if let Some(module) = self.grant_point_of_interest_reward(index) {
+                    if poi_persistent_flags(interactable).mark_read(&mut self.poi_save) {
+                        self.poi_save_dirty = true;
+                    }
+                    self.acquired_module = module;
+                    self.set_poi_presentation_frames(
+                        psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES,
+                        0,
+                    );
+                    return true;
+                }
                 let Some(message) = INTERACTABLE_MESSAGES.get(interactable.message as usize) else {
                     return false;
                 };
@@ -1738,8 +1765,7 @@ impl Playtest {
                     ),
                 );
                 if opened {
-                    self.poi_panel_frame = 0;
-                    self.poi_page_type_frame = 0;
+                    self.set_poi_presentation_frames(0, 0);
                 }
                 opened
             }
@@ -1770,7 +1796,7 @@ impl Playtest {
         }
         let (title, body) = interactable_message_text(interactable);
         self.message_overlay = Some(RuntimeMessageOverlay { title, body });
-        self.poi_page_type_frame = 0;
+        self.set_poi_page_type_frame(0);
     }
 
     pub(super) fn lock_target_indicator_position(&self) -> Option<RoomPoint> {
