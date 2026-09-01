@@ -1213,8 +1213,11 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn request_play_or_rebuild(&mut self, playtest_status: EditorPlaytestStatus) {
-        self.resources_open = true;
-        self.content_browser_view = ContentBrowserView::Debug;
+        // Building is not a navigation action. Automatically opening the
+        // bottom Console changes the viewport rectangle and makes the 3D view
+        // appear to jump even though the camera rig itself is unchanged.
+        // Keep the author's dock layout intact; build output remains available
+        // in the Console tab whenever they choose to open it.
         self.pending_playtest_request = Some(if playtest_status.is_active() {
             EditorPlaytestRequest::Rebuild
         } else {
@@ -1223,8 +1226,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn request_project_build(&mut self) {
-        self.resources_open = true;
-        self.content_browser_view = ContentBrowserView::Debug;
+        // Preserve the viewport and camera framing for standalone builds too.
         self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
     }
 
