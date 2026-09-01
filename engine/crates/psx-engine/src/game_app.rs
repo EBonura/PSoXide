@@ -1074,12 +1074,13 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn play_gameplay_sfx_events(&mut self, events: u8) {
-        const EVENTS: [LevelGameplaySfxEvent; 5] = [
+        const EVENTS: [LevelGameplaySfxEvent; 6] = [
             LevelGameplaySfxEvent::Footstep,
             LevelGameplaySfxEvent::LightHit,
             LevelGameplaySfxEvent::HeavyHit,
             LevelGameplaySfxEvent::PlayerDamage,
             LevelGameplaySfxEvent::EnemyDeath,
+            LevelGameplaySfxEvent::StanceSwapReady,
         ];
         for event in EVENTS {
             if events & event.bit() == 0 {
@@ -2578,6 +2579,13 @@ mod tests {
                 pitch_q12: 4096,
                 flags: 0,
             },
+            LevelGameplaySfxCueRecord {
+                sample: 1,
+                event: LevelGameplaySfxEvent::StanceSwapReady,
+                volume_percent: 54,
+                pitch_q12: 4096,
+                flags: 0,
+            },
         ];
         assert_eq!(
             gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::HeavyHit)
@@ -2585,6 +2593,11 @@ mod tests {
             Some(9)
         );
         assert!(gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::EnemyDeath).is_none());
+        assert_eq!(
+            gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::StanceSwapReady)
+                .map(|cue| cue.sample),
+            Some(1)
+        );
     }
 
     #[test]
