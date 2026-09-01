@@ -10,7 +10,6 @@ use psx_engine::ui::{
 };
 pub(crate) use psx_engine::ui::{MessagePageMeta, MessagePanelVariant};
 use psx_gpu::draw_quad_flat;
-use psx_gpu::draw_tri_textured_material;
 
 /// Apply the six-step demo-disc brightness control as a native PS1 blend over
 /// the composed frame. This costs two flat triangles and no VRAM. Level one
@@ -518,7 +517,6 @@ fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8))
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_player_vitality_hud(
     font: &FontAtlas,
-    dial_material: Option<TextureMaterial>,
     active: VitalityChannelId,
     active_fill_q12: u16,
     inactive_fill_q12: u16,
@@ -582,13 +580,11 @@ pub(crate) fn draw_player_vitality_hud(
             active_label,
         );
     }
-    let circle_rgb = lerp_rgb(inactive_rgb, active_rgb, swap_motion_progress_q12);
-    draw_swap_cooldown_circle(
+    draw_swap_cooldown_diamond(
         20,
         18,
-        dial_material,
         swap_cooldown_progress_q12,
-        circle_rgb,
+        active_rgb,
         completion_echo_elapsed,
     );
 }
@@ -666,15 +662,6 @@ fn lerp_i16(from: i16, to: i16, t_q12: u16) -> i16 {
     from + (rounded / 4096) as i16
 }
 
-#[inline(always)]
-fn lerp_rgb(from: (u8, u8, u8), to: (u8, u8, u8), t_q12: u16) -> (u8, u8, u8) {
-    (
-        lerp_i16(i16::from(from.0), i16::from(to.0), t_q12) as u8,
-        lerp_i16(i16::from(from.1), i16::from(to.1), t_q12) as u8,
-        lerp_i16(i16::from(from.2), i16::from(to.2), t_q12) as u8,
-    )
-}
-
 #[inline(never)]
 fn draw_vitality_bar(
     font: &FontAtlas,
@@ -730,155 +717,128 @@ fn draw_vitality_bar(
 }
 
 #[inline(never)]
-fn draw_swap_cooldown_circle(
+fn draw_swap_cooldown_diamond(
     cx: i16,
     cy: i16,
-    dial_material: Option<TextureMaterial>,
     progress_q12: u16,
     rgb: (u8, u8, u8),
     echo_elapsed: Option<u16>,
 ) {
-    // The authored hollow dial is always visible in neutral grey. A second
-    // pass reveals the active stance tint clockwise in sixteen radial wedges,
-    // providing a direct reading of the remaining lockout without replacing
-    // the texture's fine concentric detail.
-    if let Some(material) = dial_material {
-        let x0 = cx - 13;
-        let y0 = cy - 13;
-        let x1 = cx + 13;
-        let y1 = cy + 13;
-        let u0 = psx_game_runtime::vram::VITALITY_HUD_DIAL_TEXEL_U;
-        let v0 = psx_game_runtime::vram::VITALITY_HUD_DIAL_TEXEL_V;
-        let u1 = u0.saturating_add(31);
-        let v1 = v0.saturating_add(31);
-        let verts = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
-        let uvs = [(u0, v0), (u1, v0), (u0, v1), (u1, v1)];
-        if progress_q12 >= 4096 {
-            // The stable ready state is one quad, not sixteen persistent
-            // wedges. The radial work exists only during the short lockout.
-            draw_quad_textured_material(verts, uvs, material.with_tint(rgb));
-        } else {
-            draw_quad_textured_material(verts, uvs, material.with_tint((72, 72, 72)));
-            draw_clockwise_dial_fill(cx, cy, u0, v0, material.with_tint(rgb), progress_q12);
-        }
-    }
-
-    // Completion sends two additive rings out from the charge cell, echoing
-    // the main-menu confirmation language without any text or extra chrome.
+    // Completion sends a second diamond out from the charge cell, echoing the
+    // main-menu confirmation language without restoring circular decoration.
     if let Some(elapsed) = echo_elapsed {
-        let radius = 12 + ((elapsed.min(12) >> 2) as i16);
+        let radius = 14 + ((elapsed.min(12) >> 1) as i16);
         let echo_rgb = if elapsed < 6 {
             rgb
         } else {
             (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2)
         };
-        draw_rect(cx - 3, cy - radius, 6, 1, echo_rgb);
-        draw_rect(cx + radius, cy - 3, 1, 6, echo_rgb);
-        draw_rect(cx - 3, cy + radius, 6, 1, echo_rgb);
-        draw_rect(cx - radius, cy - 3, 1, 6, echo_rgb);
-        let diagonal = (radius * 3) / 4;
-        draw_rect(cx + diagonal, cy - diagonal, 2, 2, echo_rgb);
-        draw_rect(cx + diagonal, cy + diagonal, 2, 2, echo_rgb);
-        draw_rect(cx - diagonal, cy + diagonal, 2, 2, echo_rgb);
-        draw_rect(cx - diagonal, cy - diagonal, 2, 2, echo_rgb);
+        draw_diamond_outline(cx, cy, radius, echo_rgb);
+    }
+
+    // One dark outer quad gives the cell a hard silhouette. During lockout a
+    // brighter neutral grey advances clockwise over a darker grey remainder;
+    // stance colour appears only when the swap is available again.
+    draw_diamond(cx, cy, 13, (18, 20, 23));
+    if progress_q12 >= 4096 {
+        draw_diamond(cx, cy, 11, rgb);
+    } else {
+        draw_diamond(cx, cy, 11, (54, 54, 54));
+        draw_clockwise_diamond_fill(cx, cy, (112, 112, 112), progress_q12);
     }
 }
 
 #[inline(never)]
-fn draw_clockwise_dial_fill(
+fn draw_clockwise_diamond_fill(
     cx: i16,
     cy: i16,
-    u0: u8,
-    v0: u8,
-    material: TextureMaterial,
+    rgb: (u8, u8, u8),
     progress_q12: u16,
 ) {
+    // Four evenly spaced samples per edge keep the same smooth sixteen-step
+    // clockwise read as the old dial while following the diamond silhouette.
     const SCREEN_RING: [(i16, i16); 17] = [
-        (0, -13),
-        (7, -13),
-        (13, -13),
-        (13, -7),
-        (13, 0),
-        (13, 7),
-        (13, 13),
-        (7, 13),
-        (0, 13),
-        (-7, 13),
-        (-13, 13),
-        (-13, 7),
-        (-13, 0),
-        (-13, -7),
-        (-13, -13),
-        (-7, -13),
-        (0, -13),
-    ];
-    const UV_RING: [(u8, u8); 17] = [
-        (16, 0),
-        (24, 0),
-        (31, 0),
-        (31, 8),
-        (31, 16),
-        (31, 24),
-        (31, 31),
-        (24, 31),
-        (16, 31),
-        (8, 31),
-        (0, 31),
-        (0, 24),
-        (0, 16),
-        (0, 8),
-        (0, 0),
-        (8, 0),
-        (16, 0),
+        (0, -11),
+        (3, -8),
+        (6, -5),
+        (8, -3),
+        (11, 0),
+        (8, 3),
+        (6, 5),
+        (3, 8),
+        (0, 11),
+        (-3, 8),
+        (-6, 5),
+        (-8, 3),
+        (-11, 0),
+        (-8, -3),
+        (-6, -5),
+        (-3, -8),
+        (0, -11),
     ];
 
     let scaled = u32::from(progress_q12.min(4096)) * 16;
     let complete = (scaled >> 12).min(16) as usize;
     let partial_q12 = (scaled & 4095) as i32;
-    let center_uv = (u0.saturating_add(16), v0.saturating_add(16));
     let mut wedge = 0usize;
     while wedge < complete {
         let a = SCREEN_RING[wedge];
         let b = SCREEN_RING[wedge + 1];
-        let auv = UV_RING[wedge];
-        let buv = UV_RING[wedge + 1];
-        draw_tri_textured_material(
+        draw_tri_flat_blended(
             [(cx, cy), (cx + a.0, cy + a.1), (cx + b.0, cy + b.1)],
-            [
-                center_uv,
-                (u0.saturating_add(auv.0), v0.saturating_add(auv.1)),
-                (u0.saturating_add(buv.0), v0.saturating_add(buv.1)),
-            ],
-            material,
+            rgb.0,
+            rgb.1,
+            rgb.2,
+            BlendMode::Opaque,
         );
         wedge += 1;
     }
     if complete < 16 && partial_q12 > 0 {
         let a = SCREEN_RING[complete];
         let b = SCREEN_RING[complete + 1];
-        let auv = UV_RING[complete];
-        let buv = UV_RING[complete + 1];
         let end = (
             a.0 + (((i32::from(b.0) - i32::from(a.0)) * partial_q12) >> 12) as i16,
             a.1 + (((i32::from(b.1) - i32::from(a.1)) * partial_q12) >> 12) as i16,
         );
-        let end_uv = (
-            i32::from(auv.0) + ((i32::from(buv.0) - i32::from(auv.0)) * partial_q12 >> 12),
-            i32::from(auv.1) + ((i32::from(buv.1) - i32::from(auv.1)) * partial_q12 >> 12),
-        );
-        draw_tri_textured_material(
+        draw_tri_flat_blended(
             [(cx, cy), (cx + a.0, cy + a.1), (cx + end.0, cy + end.1)],
-            [
-                center_uv,
-                (u0.saturating_add(auv.0), v0.saturating_add(auv.1)),
-                (
-                    u0.saturating_add(end_uv.0 as u8),
-                    v0.saturating_add(end_uv.1 as u8),
-                ),
-            ],
-            material,
+            rgb.0,
+            rgb.1,
+            rgb.2,
+            BlendMode::Opaque,
         );
     }
+}
+
+#[inline(always)]
+fn draw_diamond(cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
+    draw_quad_flat(
+        [
+            (cx, cy - radius),
+            (cx + radius, cy),
+            (cx - radius, cy),
+            (cx, cy + radius),
+        ],
+        rgb.0,
+        rgb.1,
+        rgb.2,
+    );
+}
+
+#[inline(always)]
+fn draw_diamond_outline(cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
+    let top = (cx, cy - radius);
+    let right = (cx + radius, cy);
+    let bottom = (cx, cy + radius);
+    let left = (cx - radius, cy);
+    draw_line_mono(top.0, top.1, right.0, right.1, rgb.0, rgb.1, rgb.2);
+    draw_line_mono(
+        right.0, right.1, bottom.0, bottom.1, rgb.0, rgb.1, rgb.2,
+    );
+    draw_line_mono(
+        bottom.0, bottom.1, left.0, left.1, rgb.0, rgb.1, rgb.2,
+    );
+    draw_line_mono(left.0, left.1, top.0, top.1, rgb.0, rgb.1, rgb.2);
 }
 
 #[inline(always)]
