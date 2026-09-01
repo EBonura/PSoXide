@@ -1900,7 +1900,6 @@ impl Scene for Playtest {
             };
             draw_player_vitality_hud(
                 font,
-                self.vitality_circle_material,
                 active,
                 share(active),
                 share(active.other()),

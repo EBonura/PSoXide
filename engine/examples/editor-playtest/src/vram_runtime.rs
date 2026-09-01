@@ -214,12 +214,6 @@ pub(super) fn upload_vitality_circle_texture() -> Option<TextureMaterial> {
     vram_arena().upload_vitality_circle_texture(VITALITY_CIRCLE_GLYPH_BLOB)
 }
 
-/// Upload the tintable 32x32 HUD swap-dial texels.  Its material and CLUT are
-/// shared with the world vitality-circle glyph.
-pub(super) fn upload_vitality_hud_dial_texels() -> bool {
-    vram_arena().upload_vitality_hud_dial_texels(VITALITY_HUD_DIAL_BLOB)
-}
-
 /// Generate and upload the 16x16 white circular particle sprite.
 pub(super) fn upload_particle_texture() -> Option<TextureMaterial> {
     vram_arena().upload_particle_texture()
