@@ -2884,6 +2884,8 @@ pub enum LevelGameplaySfxEvent {
     PlayerDamage = 3,
     /// An enemy transitioned to dead.
     EnemyDeath = 4,
+    /// The stance-swap cooldown completed and is available again.
+    StanceSwapReady = 5,
 }
 
 impl LevelGameplaySfxEvent {
