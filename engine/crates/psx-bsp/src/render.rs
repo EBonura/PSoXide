@@ -77,6 +77,17 @@ unsafe fn packed_face_state_unchecked(states: &[u8], index: usize) -> u8 {
     (unsafe { *states.get_unchecked(index >> 2) } >> ((index & 3) << 1)) & 3
 }
 
+/// [`set_packed_face_state`] for an index the table is known to cover.
+///
+/// # Safety
+/// `index >> 2` must be less than `states.len()`.
+#[inline(always)]
+unsafe fn set_packed_face_state_unchecked(states: &mut [u8], index: usize, state: u8) {
+    let shift = (index & 3) << 1;
+    let byte = unsafe { states.get_unchecked_mut(index >> 2) };
+    *byte = (*byte & !(3 << shift)) | ((state & 3) << shift);
+}
+
 #[inline]
 fn set_packed_face_state(states: &mut [u8], index: usize, state: u8) {
     let shift = (index & 3) << 1;
@@ -2836,13 +2847,19 @@ impl Renderer {
                         let face =
                             unsafe { *map.mark_surfaces_native().get_unchecked(mark_index) }
                                 as usize;
-                        if packed_face_state(&self.pxbsp_face_state, face) != 0 {
-                            set_packed_face_state(
-                                &mut self.frame_pxbsp_face_state,
-                                face,
-                                PXBSP_FRAME_FALLBACK,
-                            );
-                            self.frame_pxbsp_face_clip_mask[face] = mask;
+                        // Mark indices were validated against the face
+                        // count at load; the three tables are face-sized.
+                        if unsafe { packed_face_state_unchecked(&self.pxbsp_face_state, face) }
+                            != 0
+                        {
+                            unsafe {
+                                set_packed_face_state_unchecked(
+                                    &mut self.frame_pxbsp_face_state,
+                                    face,
+                                    PXBSP_FRAME_FALLBACK,
+                                );
+                                *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = mask;
+                            }
                         }
                     }
                 }
@@ -2851,19 +2868,22 @@ impl Renderer {
             let start = node.first_face as usize;
             let end = start + node.face_count as usize;
             for face in start..end {
-                if packed_face_state(&self.pxbsp_face_state, face) != 0 {
+                // The node's face range was validated at load.
+                if unsafe { packed_face_state_unchecked(&self.pxbsp_face_state, face) } != 0 {
                     let authored_front = behind
                         == (unsafe { map.face_ref_unchecked(face) }.flags() & FACE_BACKSIDE != 0);
-                    set_packed_face_state(
-                        &mut self.frame_pxbsp_face_state,
-                        face,
-                        if authored_front {
-                            PXBSP_FRAME_NODE_FRONT
-                        } else {
-                            PXBSP_FRAME_NODE_BACK
-                        },
-                    );
-                    self.frame_pxbsp_face_clip_mask[face] = mask;
+                    unsafe {
+                        set_packed_face_state_unchecked(
+                            &mut self.frame_pxbsp_face_state,
+                            face,
+                            if authored_front {
+                                PXBSP_FRAME_NODE_FRONT
+                            } else {
+                                PXBSP_FRAME_NODE_BACK
+                            },
+                        );
+                        *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = mask;
+                    }
                 }
             }
         }
