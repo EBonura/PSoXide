@@ -561,6 +561,10 @@ struct Playtest {
     /// Paged POI/world-message controller. Unlike legacy checkpoint overlays,
     /// it never pauses gameplay and only Cross can advance it.
     poi_messages: MessageController,
+    /// Floor height under each Point of Interest, resolved once by a
+    /// downward BSP trace so the beacon stands on the floor whatever height
+    /// the point was authored at. `i32::MIN` until resolved.
+    poi_floor_y: [i32; INTERACTABLES.len()],
     /// Presented-frame progress for the active POI panel and page type-on.
     /// Prepared/overlay copies keep deferred UI matched to its world frame.
     poi_panel_frame: u16,
@@ -746,6 +750,7 @@ impl Playtest {
         self.poi_save_loaded = false;
         self.poi_save_load_attempted = false;
         self.poi_save_dirty = false;
+        self.poi_floor_y = [i32::MIN; INTERACTABLES.len()];
         self.poi_panel_frame = 0;
         self.poi_page_type_frame = 0;
         self.prepared_poi_panel_frame = 0;

@@ -39,6 +39,32 @@ impl Playtest {
     /// Submit every visible Archive Beacon in the current room into the same
     /// world ordering table as BSP/grid surfaces and actors. Unlike the former
     /// overlay marker, walls and props can now correctly occlude the beacon.
+    /// Resolve the floor under every Point of Interest in the current room
+    /// once the BSP is resident: trace straight down from a little above the
+    /// point. The beacon panel hangs down from its base point, so a point
+    /// authored at floor height would otherwise sit inside the floor.
+    pub(super) fn resolve_poi_floors(&mut self) {
+        let Some(bsp) = self.bsp.as_mut() else {
+            return;
+        };
+        for (index, interactable) in INTERACTABLES.iter().enumerate() {
+            if interactable.kind != InteractableKind::PointOfInterest
+                || interactable.room != self.room_index
+                || self.poi_floor_y[index] != i32::MIN
+            {
+                continue;
+            }
+            let height = archive_beacon_world_height(interactable.marker_height);
+            let from = RoomPoint::new(interactable.x, interactable.y + height, interactable.z);
+            let to = RoomPoint::new(interactable.x, interactable.y - height * 4, interactable.z);
+            let floor = match bsp.trace_point_segment(from, to, &[], &self.destructibles) {
+                Ok(trace) if trace.hit() && !trace.start_solid => trace.end.y + height,
+                _ => interactable.y,
+            };
+            self.poi_floor_y[index] = floor;
+        }
+    }
+
     pub(super) fn draw_archive_beacons_world<T>(
         &self,
         camera: WorldCamera,
@@ -99,8 +125,14 @@ impl Playtest {
             } else {
                 ArchiveBeaconVisualState::Active
             };
+            let floor_y = self.poi_floor_y[index];
+            let base_y = if floor_y == i32::MIN {
+                interactable.y
+            } else {
+                floor_y
+            };
             submitted += draw_archive_beacon_world(
-                RoomPoint::new(interactable.x, interactable.y, interactable.z),
+                RoomPoint::new(interactable.x, base_y, interactable.z),
                 Angle::from_q12(interactable.yaw as u16),
                 interactable.marker_height,
                 state,
