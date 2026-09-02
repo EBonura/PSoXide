@@ -18,7 +18,8 @@ use psx_bsp::pxbsp::{
     material_animation, material_blend, material_flags, PXBSP_MAX_VISIBILITY_BYTES,
 };
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
-use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
+use psx_bsp::render::{load_pxbsp_view_rotation, Camera, PxbspTextureBinding, Renderer};
+use psx_engine::Mat3I16;
 use psx_bsp::{SliceReadError, Vec3I32};
 use psx_engine::{
     commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider,
@@ -1422,8 +1423,9 @@ impl BspRuntime {
             PROJECTION.focal_length.clamp(1, i32::from(u16::MAX)) as u16
         );
         psx_gte::scene::set_avsz_weights(0x155, 0x100);
+        let view_rotation = pxbsp_view_rotation(camera);
         let camera = pxbsp_camera(camera);
-        let view = load_pxbsp_view(camera);
+        let view = load_pxbsp_view_rotation(camera.origin, view_rotation);
         let capacity = primitive_packets.remaining_words();
         let Some(mut reservation) = primitive_packets.reserve_packet_words(capacity) else {
             return false;
@@ -1634,6 +1636,22 @@ fn bsp_fragment_quad(
         }
     }
     quad
+}
+
+/// The world pass view rotation from the camera's exact Q12 trig, in the
+/// PXBSP convention [`pxbsp_camera`] derives its angles in: PXBSP yaw is
+/// the orbit yaw plus a quarter turn and PXBSP pitch the negated look
+/// pitch, so `sin(yaw + 90) = cos(yaw)`, `cos(yaw + 90) = -sin(yaw)`,
+/// `sin(-pitch) = -sin(pitch)`. No table, no angle recovery: the world
+/// rotates by exactly the camera the model pass renders with.
+pub(super) fn pxbsp_view_rotation(camera: WorldCamera) -> Mat3I16 {
+    let q12 = |value: i32| value.clamp(-0x1000, 0x1000) as i16;
+    psx_bsp::render::pxbsp_view_rotation(
+        q12(-camera.sin_pitch.raw()),
+        q12(camera.cos_pitch.raw()),
+        q12(camera.cos_yaw.raw()),
+        q12(-camera.sin_yaw.raw()),
+    )
 }
 
 pub(super) fn pxbsp_camera(camera: WorldCamera) -> Camera {
