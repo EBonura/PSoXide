@@ -2063,6 +2063,20 @@ impl Renderer {
                 );
             }
         }
+        // The common face is baked light at the neutral scale: the copy above
+        // already placed the colour words, and the only fix-up is the
+        // saturation flag in the high byte. Skip the second pass over the
+        // vertices unless something actually changes a word.
+        if color_scale_q7 == 128 {
+            if baked_light {
+                for vertex in output {
+                    if vertex.color & 0xff00_0000 != 0 {
+                        vertex.color = 0x00ff_ffff;
+                    }
+                }
+            }
+            return;
+        }
         for vertex in output {
             let color = if baked_light {
                 normalize_baked_color(vertex.color)
