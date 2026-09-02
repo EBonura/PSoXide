@@ -18,7 +18,9 @@ use psx_bsp::pxbsp::{
     material_animation, material_blend, material_flags, PXBSP_MAX_VISIBILITY_BYTES,
 };
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
-use psx_bsp::render::{load_pxbsp_view_rotation, Camera, PxbspTextureBinding, Renderer};
+use psx_bsp::render::{
+    load_pxbsp_view_rotation, Camera, FrustumPlanes, PxbspTextureBinding, Renderer,
+};
 use psx_engine::Mat3I16;
 use psx_bsp::{SliceReadError, Vec3I32};
 use psx_engine::{
@@ -637,10 +639,27 @@ impl BspRuntime {
     /// camera-to-bounds sample through the exact point collision hull.
     pub(super) fn visible_world_objects(
         &mut self,
-        observer: RoomPoint,
+        camera: WorldCamera,
         objects: &[LevelWorldObjectRecord],
         destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> WorldObjectVisibility {
+        let observer = RoomPoint::new(camera.position.x, camera.position.y, camera.position.z);
+        // The strict-occlusion samples below trace from the camera to each
+        // object across the whole level, up to seven long segments per
+        // object per frame, and on the Cortex whole-level tape they were
+        // most of the collision cost. An object outside the view frustum is
+        // never drawn, so it is not traced either. This is the world pass's
+        // own frustum, built the same way it builds it.
+        let frustum = {
+            let pxbsp = pxbsp_camera(camera);
+            let view = load_pxbsp_view_rotation(pxbsp.origin, pxbsp_view_rotation(camera));
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [pxbsp.origin.x >> 12, pxbsp.origin.y >> 12, pxbsp.origin.z >> 12],
+                self.renderer.view_projection(),
+            )
+        };
         let mut visibility = WorldObjectVisibility::NONE;
         let count = objects.len().min(psx_level::MAX_WORLD_OBJECTS);
         let mut first = 0usize;
@@ -659,6 +678,11 @@ impl BspRuntime {
                 let object = &objects[first + local];
                 if object.destructible != psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
                     && !destructibles.alive(usize::from(object.destructible))
+                {
+                    continue;
+                }
+                if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
+                    && frustum.box_surely_outside(object.bounds_min, object.bounds_max)
                 {
                     continue;
                 }

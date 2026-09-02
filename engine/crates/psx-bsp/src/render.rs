@@ -881,6 +881,25 @@ impl FrustumPlanes {
         Some(residual)
     }
 
+    /// [`Self::aabb_outside`] for a box in `i32` world units, computed on
+    /// the CPU so it needs no GTE state: for the handful of world objects a
+    /// frame asks about, that is cheaper than loading the plane matrices.
+    /// Coordinates are clamped to the `i16` range the planes were built
+    /// for; a box that large is never surely outside anyway.
+    pub fn box_surely_outside(&self, mins: [i32; 3], maxs: [i32; 3]) -> bool {
+        let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        let mins = [clamp(mins[0]), clamp(mins[1]), clamp(mins[2])];
+        let maxs = [clamp(maxs[0]), clamp(maxs[1]), clamp(maxs[2])];
+        self.planes.iter().enumerate().any(|(index, plane)| {
+            let positive = [
+                if plane.0[0] >= 0 { maxs[0] } else { mins[0] },
+                if plane.0[1] >= 0 { maxs[1] } else { mins[1] },
+                if plane.0[2] >= 0 { maxs[2] } else { mins[2] },
+            ];
+            Self::distance(plane, positive) < -self.error_of(index)
+        })
+    }
+
     /// True when the whole axis-aligned box lies outside any clip plane.
     /// Testing the vertex farthest along each plane normal makes this a
     /// conservative hierarchical reject; intersecting nodes still reach the
@@ -1183,6 +1202,11 @@ impl Renderer {
     /// half-extents), so the brush-face frustum clip matches it.
     pub fn set_view_projection(&mut self, projection: ViewProjection) {
         self.view_projection = projection;
+    }
+
+    /// The projection the world pass builds its frustum from.
+    pub fn view_projection(&self) -> ViewProjection {
+        self.view_projection
     }
 
     /// Configure whether PXBSP sky surfaces act as visibility apertures.
