@@ -56,7 +56,7 @@ EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 #
 # This also retires the standing "guest opt-level s miscompiles" rule, which
 # was mis-attributed: opt-s is correct, the delay-slot filler was not.
-RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort -Cllvm-args=-disable-mips-df-backward-search -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
+RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 # Raw PS-X EXE builds have no symbol table. Ask lld for an optional side map
 # without changing the output image, so an exact profiled binary can be
 # attributed instead of rebuilt through a layout-changing diagnostic path.
@@ -162,18 +162,20 @@ RUSTFLAGS="$RUSTFLAGS_VALUE" \
 
 staged_exe="$STAGE/$EXE_RELATIVE"
 [ -f "$staged_exe" ] || { echo "[guest-build] staged build produced no $EXE_RELATIVE" >&2; exit 1; }
-# The delay-slot filler flag above is only a promise; prove the image has no
-# load-in-delay-slot hazard (see tools/hazard_scan.py). Skipped without the
-# MIPS binutils so a host without them still builds.
-if command -v mipsel-none-elf-objdump >/dev/null 2>&1; then
-    python3 "$ROOT/tools/hazard_scan.py" "$staged_exe" >"$STAGE/hazard-scan.txt" 2>&1 || {
-        cat "$STAGE/hazard-scan.txt" >&2
-        echo "[guest-build] load-delay hazards in $EXE_RELATIVE; refusing to stage it" >&2
-        exit 1
-    }
-else
-    echo "[guest-build] mipsel-none-elf-objdump missing; hazard scan skipped" >&2
-fi
+# LLVM's delay-slot filler leaves loads in branch delay slots whose consumer
+# runs inside the R3000 load delay. Rather than disabling the filler (tens of
+# kilobytes of nops), reroute those branches through the guest's
+# HAZARD_TRAMPOLINES array post-link and prove the image clean
+# (tools/hazard_patch.py). The MIPS binutils are required for that proof.
+command -v mipsel-none-elf-objdump >/dev/null 2>&1 || {
+    echo "[guest-build] mipsel-none-elf-objdump missing; cannot patch load-delay hazards" >&2
+    exit 1
+}
+python3 "$ROOT/tools/hazard_patch.py" "$staged_exe" >"$STAGE/hazard-patch.txt" 2>&1 || {
+    cat "$STAGE/hazard-patch.txt" >&2
+    echo "[guest-build] load-delay hazards remain in $EXE_RELATIVE; refusing to stage it" >&2
+    exit 1
+}
 mkdir -p "$ROOT/$(dirname "$EXE_RELATIVE")"
 cp "$staged_exe" "$ROOT/$EXE_RELATIVE"
 echo "[guest-build] canonical stage $STAGE"
