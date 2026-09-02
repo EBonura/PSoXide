@@ -316,6 +316,8 @@ fn brush_world_validation_target(
     use crate::brush_world::BrushWorldCookError;
 
     match error {
+        // Budget overflow is a level-wide condition, not one node's fault.
+        BrushWorldCookError::UvWindowFaceBudget { .. } => None,
         BrushWorldCookError::InvalidBrush { brush, face } => {
             Some(PlaytestValidationTarget::Brush {
                 brush: *brush,
@@ -724,6 +726,18 @@ pub fn build_package(
                 compiled.leak_path.len(),
                 crate::brush_playtest::BRUSH_LEAK_FILENAME,
             ));
+    }
+    if compiled.uv_window.split_surfaces > 0 {
+        report.warn(format!(
+            "{} brush surfaces exceeded the 255-texel UV window and were split into {} extra faces (in-game UVs would otherwise wrap)",
+            compiled.uv_window.split_surfaces, compiled.uv_window.added_faces,
+        ));
+    }
+    if compiled.uv_window.unfixable_surfaces > 0 {
+        report.warn(format!(
+            "{} brush surfaces still exceed the 255-texel UV window (no texture dimensions or below the split floor); their textures wrap in-game",
+            compiled.uv_window.unfixable_surfaces,
+        ));
     }
     let authored_leak_path: Vec<_> = compiled
         .leak_path
