@@ -3181,7 +3181,12 @@ const fn uv_compact_word(vertex: &ClassicAffineProjectedVertex) -> u16 {
 
 #[inline(always)]
 fn midpoint(a: &ClassicAffineVertex, b: &ClassicAffineVertex) -> ClassicAffineVertex {
-    let light = ((a.color as u8 as u16 + b.color as u8 as u16) >> 1) as u32;
+    // Average every colour channel. The colour word carries baked RGB light
+    // on PXBSP faces; averaging one byte and replicating it turned every
+    // generated near-band vertex grey, so the floor and rails darkened in a
+    // band that followed the camera.
+    let color = ((a.color & 0x00ff_00ff) + (b.color & 0x00ff_00ff)) >> 1 & 0x00ff_00ff
+        | ((a.color & 0x0000_ff00) + (b.color & 0x0000_ff00)) >> 1 & 0x0000_ff00;
     let a_uv = u16::from_le_bytes(a.uv);
     let b_uv = u16::from_le_bytes(b.uv);
     // Average both packed bytes independently. Clearing each byte's low bit
@@ -3194,7 +3199,7 @@ fn midpoint(a: &ClassicAffineVertex, b: &ClassicAffineVertex) -> ClassicAffineVe
             ((a.position[2] as i32 + b.position[2] as i32) >> 1) as i16,
         ],
         uv: uv.to_le_bytes(),
-        color: light | (light << 8) | (light << 16),
+        color,
         screen: [0; 2],
         depth: 0,
     }
@@ -8140,6 +8145,26 @@ mod tests {
         assert_eq!(mid.position, [-1, 12, 20]);
         assert_eq!(mid.uv, [2, 130]);
         assert_eq!(mid.color, 0x0018_1818);
+    }
+
+    #[test]
+    fn midpoint_averages_every_colour_channel() {
+        // Baked RGB light on a PXBSP floor: teal corners must stay teal at
+        // the generated vertex, not collapse to the red channel.
+        let a = ClassicAffineVertex {
+            color: 0x00ec_c62b,
+            ..ClassicAffineVertex::default()
+        };
+        let b = ClassicAffineVertex {
+            color: 0x00ff_db31,
+            ..ClassicAffineVertex::default()
+        };
+        assert_eq!(midpoint(&a, &b).color, 0x00f5_d02e);
+        let dark = ClassicAffineVertex {
+            color: 0x0000_00ff,
+            ..ClassicAffineVertex::default()
+        };
+        assert_eq!(midpoint(&dark, &dark).color, 0x0000_00ff);
     }
 
     #[test]
