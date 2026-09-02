@@ -2243,8 +2243,7 @@ impl Renderer {
         let behind = if known != 0 {
             known == 2
         } else {
-            let record = unsafe { map.planes().get_unchecked(plane) };
-            let behind = compact_plane_distance(*record, point) < 0;
+            let behind = plane_behind_point(map, plane, point);
             *byte |= (if behind { 2 } else { 1 }) << shift;
             behind
         };
@@ -3497,10 +3496,16 @@ unsafe fn gte_dot3<const OP: u32>(xy: u32, z: u32) -> (i32, i32, i32) {
     (a as i32, b as i32, c as i32)
 }
 
-fn front_facing_pxbsp(map: &PxbspResidentMap, plane: usize, flags: u16, point: Vec3I32) -> bool {
+/// Whether `point` lies behind map plane `plane`.
+#[inline(always)]
+fn plane_behind_point(map: &PxbspResidentMap, plane: usize, point: Vec3I32) -> bool {
     let plane = unsafe { map.planes().get_unchecked(plane) };
-    let behind = compact_plane_distance(*plane, point) < 0;
-    behind == (flags & FACE_BACKSIDE != 0)
+    compact_plane_distance(*plane, point) < 0
+}
+
+#[cfg(test)]
+fn front_facing_pxbsp(map: &PxbspResidentMap, plane: usize, flags: u16, point: Vec3I32) -> bool {
+    plane_behind_point(map, plane, point) == (flags & FACE_BACKSIDE != 0)
 }
 
 fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
