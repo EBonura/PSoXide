@@ -523,3 +523,31 @@ Parked on branch `perf/delay-slot-flag` (325d240); main untouched.
   move already succeeds at full fraction, or whether the two-tick 30 fps
   cadence is the target build.
 - hl-psx: where 17 KB of RAM comes from before its correctness fix ships.
+
+## Night pass 2 (2026-09-02, 23:30 onward): trampolines and selection reuse
+
+hl-psx could not afford the delay-slot nop flag, so `tools/hazard_patch.py`
+now reroutes each hazardous branch through a trampoline in a `.data` array
+psx-rt declares for every guest, and PSoXide's staged guest build patches
+instead of passing the flag. Cortex 0.4 gets back 40,960 bytes of heap and
+41,604 bytes of code, and 2.75% of bus cycles. hl-psx trampolines its
+thirteen sites for 392 bytes with a tram ride identical to control.
+
+With the RAM back, alternate-frame world selection reuse landed for Cortex:
+odd frames draw the previous frame's selected chain on the exact clip path,
+so the PVS mark and the node walk run at half rate.
+
+| Cortex 0.4 whole-level tape | bus cycles vs trim baseline |
+|---|---|
+| trampolines instead of the nop flag | -2.75% |
+| plus alternate-frame selection reuse | -9.3% |
+
+Evidence: `cortex-trampolines-polls.png` and `cortex-selection-reuse-polls.png`
+in this folder (left control, right candidate, diff on the right). The
+selection-reuse sheet is pixel-identical at polls 800, 1600, 2400 and 4800;
+polls 3200 and 4000 differ by the frame-cadence offset two identical builds
+already show on this tape. The switch is the `world-selection-reuse` line in
+`engine/examples/editor-playtest/Cargo.toml`'s default features.
+
+Negative: the aperture-bounded sky lattice rebased onto this base measured
++4.19% bus cycles and was reverted.

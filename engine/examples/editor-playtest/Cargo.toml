@@ -51,6 +51,11 @@ lto           = true
 [features]
 default = [
     "cd-stream-bench",
+    # Alternate-frame world selection reuse (see the feature below): -6.7%
+    # bus cycles on the 0.4 whole-level tape, poll-bound frames identical to
+    # the per-frame selection at four of six sampled polls and cadence-offset
+    # at the other two. Remove this line to select every frame again.
+    "world-selection-reuse",
     # Bucketed = OT-as-radix-sort, no per-frame comparison sort. The exact
     # intra-slot ordering modes (slot/global/linked) cost 122k-313k extra
     # cycles per render vblank for no observed visual difference; see
@@ -115,6 +120,10 @@ classic-affine-gpu-polygon-clip = ["psx-engine/classic-affine-gpu-polygon-clip"]
 # Experiment-only reference cadence for measuring the existing 30 Hz NPC
 # schedule against collision/decision work on every 60 Hz simulation tick.
 npc-think-60hz = []
+# Draw every other frame from the previous frame's selected world chain on
+# the exact clip path, halving the PVS mark and node walk. Experiment: a face
+# entering the frustum on a reuse frame appears one frame late.
+world-selection-reuse = []
 # Reference build for measuring the cost of the existing single-quad actor
 # shadow implementation.
 actor-shadows-off = []
