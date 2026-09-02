@@ -411,3 +411,115 @@ tearing is not a missing-subdivision problem) stands.
   spill heavily. Smaller functions with fewer live values in the hot
   loops, or a scratchpad-resident working set for the world pass, are
   the levers.
+
+## Evening pass (2026-09-02, 17:00 to 23:30)
+
+### The quake stall was a compiler bug, and it was everywhere
+
+The E1M1 chain bench had stalled at waypoint 17 for every SDK pin since
+41b968f2. Guest-side probe rings showed the first door reaching its open
+state while its brush stayed put: after `place_mover` the entity origin read
+back as its own render index. The disassembly explains it. LLVM's MIPS
+delay-slot filler had hoisted `lw s3,24(sp)` into the delay slot of the
+mover-kind branch, and the branch target's first instruction was
+`move s8,s3`. The R3000 has no load interlock, so that move read the stale
+s3. Hardware and PSoXide behave identically. The mover arithmetic that the
+bisect had blamed was proven innocent on the guest: 1,461 calls, zero
+divergences between the i64 and u32 forms.
+
+PSoXide's staged guest build has carried
+`-Cllvm-args=-disable-mips-df-backward-search` since 21f15c1b; the game
+repos never inherited it. Landed:
+
+| Repo | Commit | Hazards before / after |
+|---|---|---|
+| quake-psx | 0094422 | 5 / 0 |
+| nitroxide | f26a3cd | 2 / 0 |
+| psxcel | ff9025e | 1 / 0 |
+| voxide | a9d2200 | scan clean |
+| gh-psx | 37b5b65 | scan clean |
+| pico8-psx | 66f900e | 0 real (8 data false positives fixed in the scanner) |
+| psx-demo-disc | eb322fd | loader and launcher flag inline |
+| PSoXide | 035d61d8, ee31b815 | `tools/hazard_scan.py`; staged guest build refuses a hazardous image |
+
+hl-psx is the exception: its image has 12 hazards and the flag costs
+31,508 bytes of RAM it does not have. See below.
+
+quake-build also set RUSTFLAGS itself for link maps, which replaces the cargo
+config entry, so every map-requesting build (the accepted-stack bench among
+them) silently lost the flag. Fixed in quake 37c9886.
+
+### quake-psx: the accepted renderer stack now ships
+
+The disc built with `default = []`, so every accepted gain in RENDERING.md
+lived only in the benches. quake 37c9886 makes the accepted stack the
+default.
+
+| E1M1 chain route, PSoXide 16decb2c | fps | VRAM / display FNV |
+|---|---|---|
+| plain build (former shipping) | 21.219 | 0x6af3a0dee5cd6a90 / 0x621bf7ee03f427a4 |
+| accepted stack (now default) | 24.314 | identical |
+
+Demo disc 2756cdd carries it; quake-headless-check (both replays identical,
+pins 0xc991ba1b29ab3b48 / 0xca8a8ab705d30905) and program-headless-check
+(9 routes) pass.
+
+Gameplay-only PC profile of the shipped build (route ticks 1200 onward):
+vblank wait 18.5%, collision about 23% (hull trace 13.4%), renderer about
+35%, game logic 7%, liquid 4%. A guest counter census shows 56 scene traces
+per frame, all from the player's physics; monsters think at 10 Hz and barely
+register. The hull walker is already explicit-stack with axial fast paths
+and a broad phase (RENDERING.md's "recursive" note is stale). The per-tick
+sequence mirrors SV_WalkMove, so the only cuts left change player physics.
+At a real 30 fps cadence the bench's three ticks per frame become two, which
+removes a third of that cost by itself.
+
+The whole-route profile is dominated by the CD sector spin (21.5% of route
+instructions), but every CD command sits inside the two map-load windows,
+so that is load time, not fps.
+
+### Cortex 0.4
+
+Engine flag sweep on the whole-level tape against the trim baseline, noise
+floor 0.151% (bench-noise vs bench-noise2):
+
+| Feature | Bus cycles | Frames |
+|---|---|---|
+| classic-affine-gpu-polygon-clip | -0.220% | identical |
+| classic-affine-gte-otz | -0.137% | cadence-shifted hash |
+| classic-affine-level0-fast-path | does not compile | |
+
+Nothing above noise. Two designs remain and both need RAM: the
+aperture-bounded sky lattice (about 4 KB of code) and alternate-frame
+selection reuse (a persistent copy of the 2,283-entry face chain, about
+4.6 KB, because the frame chain is overlaid by model scratch). The cooked
+manifest sits at every floor already: packet capacity 1,536, grid arenas
+collapsed to one slot, and the persistent asset streamer at 319 pages
+(about 638 KB) is content-derived. There is no engine-side RAM diet.
+
+### hl-psx
+
+Tram ride against the installed default build, same recipe and frontend:
+
+| Build | Moving segments 0 to 4, fps |
+|---|---|
+| control, no flag | 16.70 / 13.01 / 19.40 / 9.77 / 16.49 |
+| flag, opt-level z | 10.93 / 7.95 / 13.91 / 6.23 / 11.13 |
+| flag, opt-level s | 13.63 / 10.45 / 17.26 / 8.19 / 12.94 |
+| flag, full opt, model pool 46,720 | 16.18 / 12.61 / 18.96 / 9.49 / 16.04 |
+
+The last row is the one to ship, about 3% for correctness, but it does not
+fit: size-optimising the cold SDK crates recovers 8,192 B, the model pool can
+give at most the 6,200 B the weapon-cache audit leaves (the audit only means
+something against a cook made with the same cap), and cutting the view-model
+pool moves the requirement rather than removing it. Still about 17 KB short.
+Parked on branch `perf/delay-slot-flag` (325d240); main untouched.
+
+### Decisions waiting
+
+- Cortex: asset or content cuts; the renderer and the RAM carve are at their
+  floors for this level.
+- Quake: whether player physics may skip the step sweeps when the straight
+  move already succeeds at full fraction, or whether the two-tick 30 fps
+  cadence is the target build.
+- hl-psx: where 17 KB of RAM comes from before its correctness fix ships.
