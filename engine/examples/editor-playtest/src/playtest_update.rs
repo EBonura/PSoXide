@@ -317,7 +317,6 @@ impl Playtest {
         crate::game_trace("editor-playtest: gameplay init begin");
         self.shadow_material = upload_shadow_texture();
         self.vitality_circle_material = upload_vitality_circle_texture();
-        let _ = upload_vitality_hud_dial_texels();
         self.particle_material = upload_particle_texture();
         self.destructibles
             .init(DESTRUCTIBLES)
@@ -433,6 +432,8 @@ impl Playtest {
         }
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
         self.selected_power_up_item = BoostModuleId::NONE;
+        self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
+        self.inventory_overlay_active = false;
         self.acquired_module = BoostModuleId::NONE;
         self.hazard_death_ticks_remaining = 0;
         self.death_by_combat = false;
@@ -545,8 +546,12 @@ impl Playtest {
         // Regeneration comes from the active state's modules and heals the
         // inactive pool, so the bonus is read before the tick that spends it.
         let regeneration = self.vitality_modifiers().regeneration_q12;
+        let swap_cooldown_before_tick = self.player_stance.swap_cooldown();
         self.player_stance
             .tick(&mut self.player_vitality, &config, regeneration);
+        if swap_cooldown_before_tick > 0 && self.player_stance.swap_cooldown() == 0 {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwapReady);
+        }
 
         if ctx.just_pressed(button::R3) {
             if self.is_locked() {

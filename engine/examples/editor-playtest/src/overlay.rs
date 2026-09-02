@@ -517,7 +517,6 @@ fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8))
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_player_vitality_hud(
     font: &FontAtlas,
-    dial_material: Option<TextureMaterial>,
     active: VitalityChannelId,
     active_fill_q12: u16,
     inactive_fill_q12: u16,
@@ -581,13 +580,11 @@ pub(crate) fn draw_player_vitality_hud(
             active_label,
         );
     }
-    let circle_rgb = lerp_rgb(inactive_rgb, active_rgb, swap_motion_progress_q12);
-    draw_swap_cooldown_circle(
+    draw_swap_cooldown_diamond(
         20,
         18,
-        dial_material,
         swap_cooldown_progress_q12,
-        circle_rgb,
+        active_rgb,
         completion_echo_elapsed,
     );
 }
@@ -599,11 +596,11 @@ struct VitalityBarGeometry {
 }
 
 const ACTIVE_VITALITY_BAR: VitalityBarGeometry = VitalityBarGeometry {
-    bounds: (34, 3, 152, 17),
+    bounds: (34, 5, 152, 13),
     cut: 8,
 };
 const INACTIVE_VITALITY_BAR: VitalityBarGeometry = VitalityBarGeometry {
-    bounds: (34, 21, 104, 11),
+    bounds: (34, 19, 104, 11),
     cut: 5,
 };
 
@@ -665,15 +662,6 @@ fn lerp_i16(from: i16, to: i16, t_q12: u16) -> i16 {
     from + (rounded / 4096) as i16
 }
 
-#[inline(always)]
-fn lerp_rgb(from: (u8, u8, u8), to: (u8, u8, u8), t_q12: u16) -> (u8, u8, u8) {
-    (
-        lerp_i16(i16::from(from.0), i16::from(to.0), t_q12) as u8,
-        lerp_i16(i16::from(from.1), i16::from(to.1), t_q12) as u8,
-        lerp_i16(i16::from(from.2), i16::from(to.2), t_q12) as u8,
-    )
-}
-
 #[inline(never)]
 fn draw_vitality_bar(
     font: &FontAtlas,
@@ -729,143 +717,160 @@ fn draw_vitality_bar(
 }
 
 #[inline(never)]
-fn draw_swap_cooldown_circle(
+fn draw_swap_cooldown_diamond(
     cx: i16,
     cy: i16,
-    dial_material: Option<TextureMaterial>,
     progress_q12: u16,
     rgb: (u8, u8, u8),
     echo_elapsed: Option<u16>,
 ) {
-    // The generated 32x32 source is drawn into a 26-pixel footprint: large
-    // enough to preserve its concentric breaks, but still one pixel detached
-    // from the bars.  Cooldown brightness rises with charge while the outer
-    // ticks retain an exact eight-step reading.
-    let filled = swap_cooldown_segments(progress_q12);
-    let dim = (rgb.0 / 10, rgb.1 / 10, rgb.2 / 10);
-    if let Some(material) = dial_material {
-        let intensity = 36 + ((u32::from(progress_q12.min(4096)) * 92) >> 12) as u8;
-        let dial_tint = (
-            ((u16::from(rgb.0) * u16::from(intensity)) >> 7).min(255) as u8,
-            ((u16::from(rgb.1) * u16::from(intensity)) >> 7).min(255) as u8,
-            ((u16::from(rgb.2) * u16::from(intensity)) >> 7).min(255) as u8,
-        );
-        let x0 = cx - 13;
-        let y0 = cy - 13;
-        let x1 = cx + 13;
-        let y1 = cy + 13;
-        let u0 = psx_game_runtime::vram::VITALITY_HUD_DIAL_TEXEL_U;
-        let v0 = psx_game_runtime::vram::VITALITY_HUD_DIAL_TEXEL_V;
-        let u1 = u0.saturating_add(31);
-        let v1 = v0.saturating_add(31);
-        draw_quad_textured_material(
-            [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
-            [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
-            material.with_tint(dial_tint),
-        );
-    }
-
-    // Eight outer ticks fill clockwise from twelve o'clock. Diagonal ticks
-    // are deliberately square rather than antialiased, matching the authored
-    // pixel language of the bars.
-    draw_rect(
-        cx - 2,
-        cy - 12,
-        4,
-        2,
-        cooldown_tick_rgb(filled, 1, rgb, dim),
-    );
-    draw_rect(cx + 7, cy - 9, 3, 2, cooldown_tick_rgb(filled, 2, rgb, dim));
-    draw_rect(
-        cx + 10,
-        cy - 2,
-        2,
-        4,
-        cooldown_tick_rgb(filled, 3, rgb, dim),
-    );
-    draw_rect(cx + 7, cy + 7, 3, 2, cooldown_tick_rgb(filled, 4, rgb, dim));
-    draw_rect(
-        cx - 2,
-        cy + 10,
-        4,
-        2,
-        cooldown_tick_rgb(filled, 5, rgb, dim),
-    );
-    draw_rect(
-        cx - 10,
-        cy + 7,
-        3,
-        2,
-        cooldown_tick_rgb(filled, 6, rgb, dim),
-    );
-    draw_rect(
-        cx - 12,
-        cy - 2,
-        2,
-        4,
-        cooldown_tick_rgb(filled, 7, rgb, dim),
-    );
-    draw_rect(
-        cx - 10,
-        cy - 9,
-        3,
-        2,
-        cooldown_tick_rgb(filled, 8, rgb, dim),
-    );
-
-    // The texture owns the broken inner rings and hollow aperture.  Keeping
-    // those details out of immediate-mode geometry avoids drawing a second,
-    // mismatched circle on top of the authored one.
-
-    // Completion sends two additive rings out from the charge cell, echoing
-    // the main-menu confirmation language without any text or extra chrome.
+    // Completion sends a second diamond out from the charge cell, echoing the
+    // main-menu confirmation language without restoring circular decoration.
     if let Some(elapsed) = echo_elapsed {
-        let radius = 12 + ((elapsed.min(12) >> 2) as i16);
+        let radius = 14 + ((elapsed.min(12) >> 1) as i16);
         let echo_rgb = if elapsed < 6 {
             rgb
         } else {
             (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2)
         };
-        draw_rect(cx - 3, cy - radius, 6, 1, echo_rgb);
-        draw_rect(cx + radius, cy - 3, 1, 6, echo_rgb);
-        draw_rect(cx - 3, cy + radius, 6, 1, echo_rgb);
-        draw_rect(cx - radius, cy - 3, 1, 6, echo_rgb);
+        draw_diamond_outline(cx, cy, radius, echo_rgb);
     }
-}
 
-#[inline(always)]
-fn cooldown_tick_rgb(
-    filled: u8,
-    threshold: u8,
-    ready: (u8, u8, u8),
-    waiting: (u8, u8, u8),
-) -> (u8, u8, u8) {
-    if filled >= threshold {
-        ready
+    // One dark outer quad gives the cell a hard silhouette. During lockout a
+    // brighter neutral grey advances clockwise over a darker grey remainder;
+    // stance colour appears only when the swap is available again.
+    draw_diamond(cx, cy, 13, (18, 20, 23));
+    if progress_q12 >= 4096 {
+        draw_diamond(cx, cy, 11, rgb);
     } else {
-        waiting
+        draw_diamond(cx, cy, 11, (54, 54, 54));
+        draw_clockwise_diamond_fill(cx, cy, (112, 112, 112), progress_q12);
+    }
+}
+
+#[inline(never)]
+fn draw_clockwise_diamond_fill(
+    cx: i16,
+    cy: i16,
+    rgb: (u8, u8, u8),
+    progress_q12: u16,
+) {
+    // Four evenly spaced samples per edge keep the same smooth sixteen-step
+    // clockwise read as the old dial while following the diamond silhouette.
+    const SCREEN_RING: [(i16, i16); 17] = [
+        (0, -11),
+        (3, -8),
+        (6, -5),
+        (8, -3),
+        (11, 0),
+        (8, 3),
+        (6, 5),
+        (3, 8),
+        (0, 11),
+        (-3, 8),
+        (-6, 5),
+        (-8, 3),
+        (-11, 0),
+        (-8, -3),
+        (-6, -5),
+        (-3, -8),
+        (0, -11),
+    ];
+
+    let scaled = u32::from(progress_q12.min(4096)) * 16;
+    let complete = (scaled >> 12).min(16) as usize;
+    let partial_q12 = (scaled & 4095) as i32;
+    let mut wedge = 0usize;
+    while wedge < complete {
+        let a = SCREEN_RING[wedge];
+        let b = SCREEN_RING[wedge + 1];
+        draw_tri_flat_blended(
+            [(cx, cy), (cx + a.0, cy + a.1), (cx + b.0, cy + b.1)],
+            rgb.0,
+            rgb.1,
+            rgb.2,
+            BlendMode::Opaque,
+        );
+        wedge += 1;
+    }
+    if complete < 16 && partial_q12 > 0 {
+        let a = SCREEN_RING[complete];
+        let b = SCREEN_RING[complete + 1];
+        let end = (
+            a.0 + (((i32::from(b.0) - i32::from(a.0)) * partial_q12) >> 12) as i16,
+            a.1 + (((i32::from(b.1) - i32::from(a.1)) * partial_q12) >> 12) as i16,
+        );
+        draw_tri_flat_blended(
+            [(cx, cy), (cx + a.0, cy + a.1), (cx + end.0, cy + end.1)],
+            rgb.0,
+            rgb.1,
+            rgb.2,
+            BlendMode::Opaque,
+        );
     }
 }
 
 #[inline(always)]
-fn swap_cooldown_segments(progress_q12: u16) -> u8 {
-    ((progress_q12.min(4096).saturating_add(511) >> 9) as u8).min(8)
+fn draw_diamond(cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
+    draw_quad_flat(
+        [
+            (cx, cy - radius),
+            (cx + radius, cy),
+            (cx - radius, cy),
+            (cx, cy + radius),
+        ],
+        rgb.0,
+        rgb.1,
+        rgb.2,
+    );
+}
+
+#[inline(always)]
+fn draw_diamond_outline(cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
+    let top = (cx, cy - radius);
+    let right = (cx + radius, cy);
+    let bottom = (cx, cy + radius);
+    let left = (cx - radius, cy);
+    draw_line_mono(top.0, top.1, right.0, right.1, rgb.0, rgb.1, rgb.2);
+    draw_line_mono(
+        right.0, right.1, bottom.0, bottom.1, rgb.0, rgb.1, rgb.2,
+    );
+    draw_line_mono(
+        bottom.0, bottom.1, left.0, left.1, rgb.0, rgb.1, rgb.2,
+    );
+    draw_line_mono(left.0, left.1, top.0, top.1, rgb.0, rgb.1, rgb.2);
+}
+
+#[inline(always)]
+pub(crate) fn swap_cooldown_display_progress_q12(total: u16, remaining: u16) -> u16 {
+    if total == 0 || remaining == 0 {
+        return 4096;
+    }
+    // The request and the first cooldown tick share one update. Hold that
+    // first presented frame at zero (fully grey), then map the remaining
+    // ticks across the complete radial sweep.
+    let visible_span = total.saturating_sub(1).max(1);
+    let spent = total
+        .saturating_sub(remaining)
+        .saturating_sub(1)
+        .min(visible_span);
+    ((u32::from(spent) * 4096) / u32::from(visible_span)) as u16
 }
 
 #[cfg(test)]
 mod vitality_hud_tests {
     use super::{
-        swap_cooldown_segments, vitality_swap_geometry, ACTIVE_VITALITY_BAR, INACTIVE_VITALITY_BAR,
+        swap_cooldown_display_progress_q12, vitality_swap_geometry, ACTIVE_VITALITY_BAR,
+        INACTIVE_VITALITY_BAR,
     };
 
     #[test]
-    fn swap_cooldown_circle_consumes_then_refills_clockwise() {
-        assert_eq!(swap_cooldown_segments(0), 0);
-        assert_eq!(swap_cooldown_segments(1), 1);
-        assert_eq!(swap_cooldown_segments(512), 1);
-        assert_eq!(swap_cooldown_segments(1024), 2);
-        assert_eq!(swap_cooldown_segments(2048), 4);
-        assert_eq!(swap_cooldown_segments(4096), 8);
+    fn cooldown_display_starts_grey_and_finishes_fully_coloured() {
+        assert_eq!(swap_cooldown_display_progress_q12(30, 29), 0);
+        assert!(swap_cooldown_display_progress_q12(30, 15) > 1800);
+        assert!(swap_cooldown_display_progress_q12(30, 15) < 2200);
+        assert_eq!(swap_cooldown_display_progress_q12(30, 0), 4096);
+        assert_eq!(swap_cooldown_display_progress_q12(0, 0), 4096);
     }
 
     #[test]
@@ -877,6 +882,15 @@ mod vitality_hud_tests {
         let (incoming, outgoing) = vitality_swap_geometry(4096);
         assert_eq!(incoming, ACTIVE_VITALITY_BAR);
         assert_eq!(outgoing, INACTIVE_VITALITY_BAR);
+    }
+
+    #[test]
+    fn active_bar_is_two_pixels_thicker_and_keeps_the_tight_gap() {
+        assert_eq!(ACTIVE_VITALITY_BAR.bounds.3, INACTIVE_VITALITY_BAR.bounds.3 + 2);
+        assert_eq!(
+            ACTIVE_VITALITY_BAR.bounds.1 + ACTIVE_VITALITY_BAR.bounds.3 + 1,
+            INACTIVE_VITALITY_BAR.bounds.1
+        );
     }
 
     #[test]
