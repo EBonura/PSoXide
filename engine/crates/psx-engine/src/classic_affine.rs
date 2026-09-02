@@ -826,8 +826,9 @@ pub struct ClassicAffineMixedBatchSurface {
     pub uv_offset: [u8; 2],
     /// Non-zero selects compact packets without GP0(E2).
     pub compact: u8,
-    /// Explicit alignment padding kept deterministic across targets.
-    pub _padding: u8,
+    /// Non-zero keys this surface's packets at their farthest vertex
+    /// ([`ClassicAffineProfile::farthest_depth_key`]); floors and ceilings.
+    pub depth_law: u8,
     /// Fully encoded GP0(E2) command used by windowed packets.
     pub texture_window_word: u32,
     /// GP0 textured-Gouraud triangle command in the high byte.
@@ -859,6 +860,14 @@ pub struct ClassicAffineProfile {
     pub subdivide_twice_error_texels: u8,
     /// OT slot bias applied to crack-sealing underdraw triangles.
     pub underdraw_slot_bias: u16,
+    /// Key each emitted packet at its farthest vertex instead of the vertex
+    /// average. Floors and ceilings take this: a large floor triangle keyed at
+    /// its average sorts in front of anything standing on its far half and
+    /// paints it out (beacons down to a sliver, actors' feet). Keyed at its
+    /// far edge the floor draws first and what stands on it draws over it.
+    /// Subdivision and quad pairing still use the average, so tessellation
+    /// is unchanged.
+    pub farthest_depth_key: bool,
 }
 
 impl ClassicAffineProfile {
@@ -872,6 +881,7 @@ impl ClassicAffineProfile {
         subdivide_once_error_texels: 0,
         subdivide_twice_error_texels: 0,
         underdraw_slot_bias: 8,
+        farthest_depth_key: false,
     };
 
     /// Experimental bounded-lattice affine-error profile.
@@ -896,6 +906,7 @@ impl ClassicAffineProfile {
         subdivide_once_error_texels: 4,
         subdivide_twice_error_texels: 8,
         underdraw_slot_bias: 8,
+        farthest_depth_key: false,
     };
 
     /// PSoXide brush-world profile: the same topology as
@@ -3898,6 +3909,16 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
             previous_ref.depth as u16,
             current_ref.depth as u16,
         );
+        // The packet key: the average, or the farthest vertex on the same
+        // law (three equal depths give the same slot either way).
+        let key_otz = if profile.farthest_depth_key {
+            let far = root_depth
+                .max(previous_ref.depth as u16)
+                .max(current_ref.depth as u16);
+            scene::classic_otz3_from_sum(u32::from(far) * 3)
+        } else {
+            otz
+        };
         if otz > 0 && otz < profile.ot_depth {
             let subdivision_level =
                 classic_affine_subdivision_level([root, previous_ref, current_ref], otz, profile);
@@ -3934,6 +3955,16 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
                         >> 4) as u16;
                     #[cfg(not(feature = "classic-affine-relaxed-quad-pairing"))]
                     let quad_otz = otz;
+                    let quad_otz = if profile.farthest_depth_key {
+                        (u32::from(
+                            root_depth
+                                .max(previous_ref.depth as u16)
+                                .max(current_ref.depth as u16)
+                                .max(next_ref.depth as u16),
+                        ) >> 2) as u16
+                    } else {
+                        quad_otz
+                    };
                     unsafe { writer.emit_quad(quad_refs, quad_refs, quad_otz) };
                     #[cfg(feature = "classic-affine-shared-subdivision-edges")]
                     {
@@ -3982,7 +4013,7 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
                         previous_ref,
                         current_ref,
                         generated,
-                        otz,
+                        key_otz,
                         underdraw_edges,
                     )
                 };
@@ -3999,14 +4030,14 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
                         previous_ref,
                         current_ref,
                         generated,
-                        otz,
+                        key_otz,
                         underdraw_edges,
                     )
                 };
             } else {
                 writer.topology_event(1);
                 let root_refs = [root, previous_ref, current_ref];
-                unsafe { writer.emit_tri(root_refs, root_refs, otz) };
+                unsafe { writer.emit_tri(root_refs, root_refs, key_otz) };
             }
             #[cfg(feature = "classic-affine-shared-subdivision-edges")]
             {
@@ -4099,6 +4130,16 @@ unsafe fn submit_classic_affine_level0_fan_if_supported(
                         >> 4) as u16;
                     #[cfg(not(feature = "classic-affine-relaxed-quad-pairing"))]
                     let quad_otz = otz;
+                    let quad_otz = if profile.farthest_depth_key {
+                        (u32::from(
+                            root_depth
+                                .max(previous_ref.depth as u16)
+                                .max(current_ref.depth as u16)
+                                .max(next_ref.depth as u16),
+                        ) >> 2) as u16
+                    } else {
+                        quad_otz
+                    };
                     unsafe { writer.emit_quad(quad_refs, quad_refs, quad_otz) };
                     previous = next;
                     current = unsafe { next.add(1) };
@@ -5062,6 +5103,16 @@ unsafe fn submit_quake_projected_fan_cold_adaptive(
             previous_ref.depth as u16,
             current_ref.depth as u16,
         );
+        // The packet key: the average, or the farthest vertex on the same
+        // law (three equal depths give the same slot either way).
+        let key_otz = if profile.farthest_depth_key {
+            let far = root_depth
+                .max(previous_ref.depth as u16)
+                .max(current_ref.depth as u16);
+            scene::classic_otz3_from_sum(u32::from(far) * 3)
+        } else {
+            otz
+        };
         if otz > 0 && otz < profile.ot_depth {
             if otz >= profile.subdivide_once_at {
                 let next = unsafe { current.add(1) };
@@ -5150,6 +5201,16 @@ unsafe fn submit_quake_projected_fan_cold_level2(
             previous_ref.depth as u16,
             current_ref.depth as u16,
         );
+        // The packet key: the average, or the farthest vertex on the same
+        // law (three equal depths give the same slot either way).
+        let key_otz = if profile.farthest_depth_key {
+            let far = root_depth
+                .max(previous_ref.depth as u16)
+                .max(current_ref.depth as u16);
+            scene::classic_otz3_from_sum(u32::from(far) * 3)
+        } else {
+            otz
+        };
         if otz > 0 && otz < profile.ot_depth {
             if otz >= profile.subdivide_once_at {
                 let next = unsafe { current.add(1) };
@@ -6364,6 +6425,7 @@ pub unsafe fn submit_classic_affine_mixed_batch(
                 debug_assert!(first_vertex + surface_vertices <= vertex_count);
                 writer.tpage_high_word = (surface.tpage as u32) << 16;
                 writer.clut_high_word = (surface.clut as u32) << 16;
+                writer.profile.farthest_depth_key = surface.depth_law != 0;
                 unsafe {
                     submit_classic_affine_projected_fan_into_writer(
                         vertices.add(first_vertex),
@@ -6398,6 +6460,7 @@ pub unsafe fn submit_classic_affine_mixed_batch(
                 debug_assert!(first_vertex + surface_vertices <= vertex_count);
                 writer.tpage_high_word = (surface.tpage as u32) << 16;
                 writer.clut_high_word = (surface.clut as u32) << 16;
+                writer.profile.farthest_depth_key = surface.depth_law != 0;
                 writer.uv_offset = surface.uv_offset;
                 writer.texture_window_word = surface.texture_window_word;
                 writer.color_command_word = surface.color_command_word;
@@ -8509,6 +8572,66 @@ mod tests {
         assert_eq!(packets[11], window);
         assert_eq!(packets[12] >> 24, 0x34);
         assert_eq!(packets[21], TextureWindow::NONE.word());
+    }
+
+    #[test]
+    fn far_keyed_surface_sorts_at_its_farthest_vertex() {
+        // One sloped floor triangle spanning depths 400..1000. Average-keyed it
+        // lands near the middle; far-keyed it lands where its far vertex is,
+        // so anything standing on its near half draws after it.
+        psx_gte::host::reset();
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(160);
+        scene::set_avsz_weights(0x155, 0x100);
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::ZERO);
+        let otz_of = |depth_law: u8| -> u16 {
+            let mut vertices = [ClassicAffineVertex::default(); 3 + EXTRA_VERTICES];
+            for (index, position) in [[-80, -40, 1000], [0, 40, 400], [80, -40, 700]]
+                .into_iter()
+                .enumerate()
+            {
+                vertices[index] = ClassicAffineVertex {
+                    position,
+                    color: 0x0080_8080,
+                    ..ClassicAffineVertex::default()
+                };
+            }
+            let surfaces = [ClassicAffineMixedBatchSurface {
+                first_vertex: 0,
+                vertex_count: 3,
+                tpage: 0x0105,
+                clut: 0x1234,
+                compact: 1,
+                depth_law,
+                ..ClassicAffineMixedBatchSurface::default()
+            }];
+            let mut packets = [0u32; 32];
+            let profile = ClassicAffineProfile {
+                subdivide_once_at: 0,
+                subdivide_twice_at: 0,
+                ..ClassicAffineProfile::QUAKE_REFERENCE
+            };
+            let submit = unsafe {
+                submit_classic_affine_mixed_batch(
+                    vertices.as_mut_ptr(),
+                    3,
+                    surfaces.as_ptr(),
+                    surfaces.len(),
+                    packets.as_mut_ptr(),
+                    profile,
+                )
+            };
+            assert_eq!(submit.packets, 1);
+            (packets[0] & 0xffff) as u16
+        };
+        let average = otz_of(0);
+        let farthest = otz_of(1);
+        // Identity view: SZ is the vertex z. Average of 1000, 400, 700 over 4
+        // versus the far vertex 1000 over 4, on the same ZSF3 law.
+        assert_eq!(average, scene::classic_otz3_from_sum(1000 + 400 + 700));
+        assert_eq!(farthest, scene::classic_otz3_from_sum(3000));
+        assert!(farthest > average);
     }
 
     #[test]
