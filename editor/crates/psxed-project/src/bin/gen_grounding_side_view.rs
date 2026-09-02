@@ -108,7 +108,11 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
         let cube_x = ACTOR_X[index] + 384;
         let mut cube = Brush::cuboid(
             [cube_x, SLAB_TOP, ACTOR_Z - CUBE_DEPTH / 2],
-            [cube_x + CUBE_SIZE, SLAB_TOP + CUBE_HEIGHT, ACTOR_Z + CUBE_DEPTH / 2],
+            [
+                cube_x + CUBE_SIZE,
+                SLAB_TOP + CUBE_HEIGHT,
+                ACTOR_Z + CUBE_DEPTH / 2,
+            ],
         );
         paint(&mut cube, floor_material);
         scene.brushes.push(cube);
@@ -141,7 +145,11 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
         let cube_x = poi_x + 192;
         let mut cube = Brush::cuboid(
             [cube_x, SLAB_TOP, ACTOR_Z - CUBE_DEPTH / 2],
-            [cube_x + CUBE_SIZE, SLAB_TOP + CUBE_HEIGHT, ACTOR_Z + CUBE_DEPTH / 2],
+            [
+                cube_x + CUBE_SIZE,
+                SLAB_TOP + CUBE_HEIGHT,
+                ACTOR_Z + CUBE_DEPTH / 2,
+            ],
         );
         paint(&mut cube, floor_material);
         scene.brushes.push(cube);
@@ -185,7 +193,9 @@ fn paint(brush: &mut Brush, material: ResourceId) {
 
 /// `target` relative to `base`, both taken as directories under the same root.
 fn pathdiff(target: &Path, base: &Path) -> PathBuf {
-    let target = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+    let target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
     let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
     let target: Vec<_> = target.components().collect();
     let base: Vec<_> = base.components().collect();
