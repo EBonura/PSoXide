@@ -231,6 +231,23 @@ struct CubeSkyVertex {
     ray: [i32; 3],
 }
 
+/// The four edge-plane distances of one cube face for a ray, in plane order.
+/// Each face is its signed major axis against the two others; the four
+/// sums are exactly the per-plane table in [`cube_face_plane_distance`].
+#[inline(always)]
+const fn cube_face_plane_distances(ray: [i32; 3], face: CubeFace) -> [i32; 4] {
+    let [x, y, z] = ray;
+    let (major, a, b) = match face {
+        CubeFace::PositiveX => (x, y, z),
+        CubeFace::NegativeX => (-x, y, z),
+        CubeFace::PositiveY => (y, x, z),
+        CubeFace::NegativeY => (-y, x, z),
+        CubeFace::PositiveZ => (z, x, y),
+        CubeFace::NegativeZ => (-z, x, y),
+    };
+    [major - a, major + a, major - b, major + b]
+}
+
 #[inline]
 const fn cube_face_plane_distance(ray: [i32; 3], face: CubeFace, plane: usize) -> i32 {
     let [x, y, z] = ray;
@@ -290,21 +307,52 @@ fn interpolate_cube_sky_vertex(
     }
 }
 
-fn clip_cube_sky_cell(cell: [CubeSkyVertex; 4], face: CubeFace) -> ([CubeSkyVertex; 8], usize) {
-    let mut input = [CubeSkyVertex::default(); 8];
-    input[..4].copy_from_slice(&cell);
-    let mut input_count = 4usize;
-    let mut output = [CubeSkyVertex::default(); 8];
-    for plane in 0..4 {
-        if input_count == 0 {
-            break;
+/// Clip one lattice cell to `face`. The polygon lands in `polygon` and its
+/// vertex count is returned; `scratch` is the other Sutherland-Hodgman
+/// buffer. Both are the caller's, sized once per frame: zeroing two 160-byte
+/// arrays, copying the cell in and copying every pass back cost the mixed
+/// cells 5% of a Cortex frame in `memset` and `memcpy`, for six faces per
+/// cell of which a cell can touch at most three. A face every corner lies
+/// outside of on one plane is rejected before any buffer is written, and
+/// the four passes alternate between the two buffers so the result is in
+/// `polygon` without a copy. The arithmetic per vertex is unchanged.
+#[inline(always)]
+fn clip_cube_sky_cell(
+    cell: &[CubeSkyVertex; 4],
+    face: CubeFace,
+    polygon: &mut [CubeSkyVertex; 8],
+    scratch: &mut [CubeSkyVertex; 8],
+) -> usize {
+    let corner_distances = [
+        cube_face_plane_distances(cell[0].ray, face),
+        cube_face_plane_distances(cell[1].ray, face),
+        cube_face_plane_distances(cell[2].ray, face),
+        cube_face_plane_distances(cell[3].ray, face),
+    ];
+    let mut plane = 0usize;
+    while plane < 4 {
+        if corner_distances
+            .iter()
+            .all(|distances| distances[plane] < 0)
+        {
+            return 0;
         }
+        plane += 1;
+    }
+
+    #[inline(always)]
+    fn clip_pass(
+        input: &[CubeSkyVertex],
+        input_distances: impl Fn(usize) -> i32,
+        output: &mut [CubeSkyVertex; 8],
+    ) -> usize {
+        let input_count = input.len();
         let mut output_count = 0usize;
         let mut previous = input[input_count - 1];
-        let mut previous_distance = cube_face_plane_distance(previous.ray, face, plane);
+        let mut previous_distance = input_distances(input_count - 1);
         let mut previous_inside = previous_distance >= 0;
-        for current in input[..input_count].iter().copied() {
-            let current_distance = cube_face_plane_distance(current.ray, face, plane);
+        for (index, current) in input.iter().copied().enumerate() {
+            let current_distance = input_distances(index);
             let current_inside = current_distance >= 0;
             if current_inside != previous_inside {
                 debug_assert!(output_count < output.len());
@@ -325,10 +373,36 @@ fn clip_cube_sky_cell(cell: [CubeSkyVertex; 4], face: CubeFace) -> ([CubeSkyVert
             previous_distance = current_distance;
             previous_inside = current_inside;
         }
-        input[..output_count].copy_from_slice(&output[..output_count]);
-        input_count = output_count;
+        output_count
     }
-    (input, input_count)
+
+    // Pass 0 reads the cell and its precomputed distances; passes 1..4
+    // alternate scratch -> polygon -> scratch -> polygon.
+    let count = clip_pass(&cell[..], |index| corner_distances[index][0], scratch);
+    if count == 0 {
+        return 0;
+    }
+    let count = clip_pass(
+        &scratch[..count],
+        |index| cube_face_plane_distance(scratch[index].ray, face, 1),
+        polygon,
+    );
+    if count == 0 {
+        return 0;
+    }
+    let count = clip_pass(
+        &polygon[..count],
+        |index| cube_face_plane_distance(polygon[index].ray, face, 2),
+        scratch,
+    );
+    if count == 0 {
+        return 0;
+    }
+    clip_pass(
+        &scratch[..count],
+        |index| cube_face_plane_distance(scratch[index].ray, face, 3),
+        polygon,
+    )
 }
 
 #[inline]
@@ -772,6 +846,9 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
     // `top = bottom` copy: the corner cache made each row 364 bytes, and
     // copying it twelve times a frame showed up as `memcpy`.
     let mut grid = [[CubeSkyGridVertex::default(); CUBE_SKY_COLUMNS + 1]; 2];
+    let mut polygon = [CubeSkyVertex::default(); 8];
+    let mut scratch = [CubeSkyVertex::default(); 8];
+    let mut samples = [((0i16, 0i16), 0u16); 8];
     for (column, vertex) in grid[0].iter_mut().enumerate() {
         *vertex = vertex_at(column, 0);
     }
@@ -827,11 +904,10 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
             // one: materialising them for every cell cost 7% of the stage.
             let cell = corners.map(|corner| corner.vertex);
             for face in CubeFace::ALL {
-                let (polygon, count) = clip_cube_sky_cell(cell, face);
+                let count = clip_cube_sky_cell(&cell, face, &mut polygon, &mut scratch);
                 if count < 3 {
                     continue;
                 }
-                let mut samples = [((0i16, 0i16), 0u16); 8];
                 for (sample, vertex) in samples[..count]
                     .iter_mut()
                     .zip(polygon[..count].iter().copied())
