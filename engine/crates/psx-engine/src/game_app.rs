@@ -1299,6 +1299,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.cursor.menu_focus_motion_elapsed = MENU_FOCUS_MOTION_FRAMES;
         self.cursor.intro_timer = 0;
         if !self.current_tag().has_gameplay() {
+            let state = self.state_ref_at(state_index);
+            self.gameplay.on_flow_state_entered(state, ctx);
             return;
         }
         let option_values = self.option_values;
@@ -1319,6 +1321,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // first init), so a setting changed in a front-end menu before Play
         // takes effect this session.
         self.apply_option_values(&option_values, option_len);
+        let state = self.state_ref_at(state_index);
+        self.gameplay.on_flow_state_entered(state, ctx);
     }
 
     fn enter_or_load_flow_state(
@@ -1566,9 +1570,24 @@ impl<'a, S: Scene> GameApp<'a, S> {
             && self.nodes.get(focus).is_some_and(|node| {
                 ui::is_focusable(node.kind)
                     && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
             });
         if current_ok {
             return Some(focus);
+        }
+        if let Some(action) = self.gameplay.preferred_ui_focus_action() {
+            if let Some(preferred) = (first..end).find(|&index| {
+                self.nodes.get(index).is_some_and(|node| {
+                    ui::is_focusable(node.kind)
+                        && matches!(node.action, LevelUiAction::Game { id } if id == action)
+                        && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+                        && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
+                })
+            }) {
+                self.cursor.menu_focus = preferred as u16;
+                self.gameplay.game_ui_focus_changed(action);
+                return Some(preferred);
+            }
         }
         // Authored tab scenes describe their active category with the
         // `.selected` tag. Prefer it when a freshly entered scene seeds
@@ -1580,6 +1599,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 ui::is_focusable(node.kind)
                     && node.tag.ends_with(".selected")
                     && self.gameplay.ui_node_visible(node.tag)
+                    && self.gameplay.ui_node_focusable(node.tag)
             })
         }) {
             self.cursor.menu_focus = selected as u16;
@@ -1598,12 +1618,53 @@ impl<'a, S: Scene> GameApp<'a, S> {
             count,
             &mut rects,
             &mut node_indices,
-            &|node| node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag),
+            &|node| {
+                node.tag.is_empty()
+                    || (self.gameplay.ui_node_visible(node.tag)
+                        && self.gameplay.ui_node_focusable(node.tag))
+            },
         );
         let slot = first_focus(&rects[..n])?;
         let node_index = node_indices[slot];
         self.cursor.menu_focus = node_index as u16;
+        if let Some(LevelUiAction::Game { id }) = self.nodes.get(node_index).map(|node| node.action)
+        {
+            self.gameplay.game_ui_focus_changed(id);
+        }
         Some(node_index)
+    }
+
+    /// Move the cursor to gameplay's preferred opaque action after an in-place
+    /// domain UI transition. The source remains recorded so the existing
+    /// smooth cursor interpolation also covers programmatic pane changes.
+    fn focus_preferred_game_action(&mut self, first: usize, count: usize) -> bool {
+        let Some(action) = self.gameplay.preferred_ui_focus_action() else {
+            return false;
+        };
+        let end = first.saturating_add(count).min(self.nodes.len());
+        let Some(target) = (first..end).find(|&index| {
+            self.nodes.get(index).is_some_and(|node| {
+                ui::is_focusable(node.kind)
+                    && matches!(node.action, LevelUiAction::Game { id } if id == action)
+                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
+            })
+        }) else {
+            return false;
+        };
+        let current = self.cursor.focused_node();
+        if current != Some(target) {
+            self.cursor.menu_focus_from = current
+                .and_then(|index| u16::try_from(index).ok())
+                .unwrap_or(MENU_FOCUS_NONE);
+            self.cursor.menu_focus_motion_elapsed = 0;
+            self.cursor.menu_focus = target as u16;
+            if let Some(node) = self.nodes.get(target).copied() {
+                self.play_node_sfx_event(node, LevelUiSfxEvent::Focus);
+            }
+        }
+        self.gameplay.game_ui_focus_changed(action);
+        true
     }
 
     /// Offset from the destination control back toward the previous one.
@@ -1658,7 +1719,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
             count,
             &mut rects,
             &mut node_indices,
-            &|node| node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag),
+            &|node| {
+                node.tag.is_empty()
+                    || (self.gameplay.ui_node_visible(node.tag)
+                        && self.gameplay.ui_node_focusable(node.tag))
+            },
         );
         // Locate the current node's slot inside the focusable list the
         // resolver works over.
@@ -1676,6 +1741,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 self.cursor.menu_focus = next_node as u16;
                 if let Some(node) = self.nodes.get(next_node).copied() {
                     self.play_node_sfx_event(node, LevelUiSfxEvent::Focus);
+                    if let LevelUiAction::Game { id } = node.action {
+                        self.gameplay.game_ui_focus_changed(id);
+                    }
                 }
             } else {
                 self.cursor.menu_focus = next_node as u16;
@@ -1954,7 +2022,13 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelUiAction::SetOption { option, delta } => {
                 let _ = self.adjust_option(option, delta);
             }
-            LevelUiAction::Game { id } => self.gameplay.game_ui_action(id, ctx),
+            LevelUiAction::Game { id } => {
+                self.gameplay.game_ui_action(id, ctx);
+                if let Some(scene) = self.current_tag().ui_scene() {
+                    let (first, count) = self.scene_node_range(scene);
+                    let _ = self.focus_preferred_game_action(first, count);
+                }
+            }
         }
     }
 
@@ -2012,11 +2086,17 @@ impl<'a, S: Scene> GameApp<'a, S> {
             self.activate_focus(scene, first, count);
         } else if ctx.just_pressed(button::CIRCLE) {
             if self.current_tag().has_gameplay() {
-                let _ = self.gameplay.game_ui_cancel(ctx);
+                if self.gameplay.game_ui_cancel(ctx) {
+                    let _ = self.focus_preferred_game_action(first, count);
+                }
             } else if !self.activate_back_control(scene, first, count) {
                 // Legacy UI scenes without an authored Back control retain
                 // their historical immediate stack-pop behavior.
                 self.go_back(ctx);
+            }
+        } else if ctx.just_pressed(button::SQUARE) && self.current_tag().has_gameplay() {
+            if self.gameplay.game_ui_square(ctx) {
+                let _ = self.focus_preferred_game_action(first, count);
             }
         } else if ctx.just_pressed(button::START) {
             // START keeps its "confirm / jump to gameplay" shortcut so a
