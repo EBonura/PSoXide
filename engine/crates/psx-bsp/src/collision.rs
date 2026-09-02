@@ -6,7 +6,9 @@
 
 use core::mem::MaybeUninit;
 
-use crate::{ClipNode, CompactPlane, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32};
+use crate::{
+    ClipNode, CompactPlane, CookedRecord, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32,
+};
 use psx_engine::div_q12_i32;
 use psx_gte::math::Mat3I16;
 use psx_math::int32::{div_u64_by_u32, mul_q12_i32, mul_q12_i32_wide};
@@ -260,6 +262,31 @@ impl<'a> HullNodes<'a> {
         }
     }
 
+    /// [`Self::get`] after the caller checked `index < self.len()`. Render
+    /// node lumps are four-byte aligned with sixteen-byte records, so the
+    /// three head fields are two-byte aligned loads rather than the byte
+    /// gathers `get` performs.
+    ///
+    /// # Safety
+    /// `index` must be less than [`Self::len`].
+    #[inline(always)]
+    unsafe fn get_unchecked(&self, index: usize) -> ClipNode {
+        match self {
+            Self::Clip(nodes) => unsafe { *nodes.get_unchecked(index) },
+            Self::Render { nodes, .. } => unsafe {
+                let base = nodes.as_bytes().as_ptr().add(index * Node::SIZE);
+                debug_assert_eq!(base as usize & 1, 0);
+                ClipNode {
+                    plane: i16::from_le(core::ptr::read(base.cast::<i16>())),
+                    children: [
+                        i16::from_le(core::ptr::read(base.add(2).cast::<i16>())),
+                        i16::from_le(core::ptr::read(base.add(4).cast::<i16>())),
+                    ],
+                }
+            },
+        }
+    }
+
     /// Resolve a negative child to contents: clipnodes store contents
     /// directly, render nodes store `-(leaf + 1)`.
     #[inline(always)]
@@ -282,6 +309,49 @@ enum PlaneRecords<'a> {
 }
 
 impl PlaneRecords<'_> {
+    #[inline(always)]
+    fn len(self) -> usize {
+        match self {
+            Self::Packed(records) => records.len(),
+            Self::Compact(records) => records.len(),
+            Self::Decoded(records) => records.len(),
+        }
+    }
+
+    /// [`Self::distance`] after the caller checked `index < self.len()`.
+    ///
+    /// # Safety
+    /// `index` must be less than [`Self::len`].
+    #[inline(always)]
+    unsafe fn distance_unchecked(self, index: usize, point: Vec3I32) -> i32 {
+        match self {
+            Self::Packed(records) => unsafe {
+                let base = records.as_bytes().as_ptr().add(index * Plane::SIZE);
+                let byte = |offset: usize| *base.add(offset);
+                let distance = i32::from_le_bytes([byte(6), byte(7), byte(8), byte(9)]);
+                let kind = i32::from_le_bytes([byte(10), byte(11), byte(12), byte(13)]);
+                let dot = match kind {
+                    0 => point.x,
+                    1 => point.y,
+                    2 => point.z,
+                    _ => {
+                        let x = i16::from_le_bytes([byte(0), byte(1)]) as i32;
+                        let y = i16::from_le_bytes([byte(2), byte(3)]) as i32;
+                        let z = i16::from_le_bytes([byte(4), byte(5)]) as i32;
+                        mul_q12_i32_wide(point.x, x)
+                            .wrapping_add(mul_q12_i32_wide(point.y, y))
+                            .wrapping_add(mul_q12_i32_wide(point.z, z))
+                    }
+                };
+                dot.wrapping_sub(distance)
+            },
+            Self::Compact(records) => {
+                compact_plane_distance(unsafe { *records.get_unchecked(index) }, point)
+            }
+            Self::Decoded(records) => plane_distance(unsafe { *records.get_unchecked(index) }, point),
+        }
+    }
+
     #[inline(always)]
     fn get(self, index: usize) -> Option<Plane> {
         match self {
@@ -457,17 +527,22 @@ impl<'a> CollisionHull<'a> {
                     return false;
                 }
                 descent_budget -= 1;
-                let Some(node) = self.nodes.get(node_index as usize) else {
+                // One explicit range check each, then unchecked reads: the
+                // `Option` forms materialised the node and both distances
+                // on the stack at every step.
+                let index = node_index as usize;
+                if index >= self.nodes.len() {
                     return false;
-                };
-                let Some(start_distance) = self.planes.distance(node.plane as usize, segment_start)
-                else {
+                }
+                let node = unsafe { self.nodes.get_unchecked(index) };
+                let plane_index = node.plane as usize;
+                if plane_index >= self.planes.len() {
                     return false;
-                };
-                let Some(end_distance) = self.planes.distance(node.plane as usize, segment_end)
-                else {
-                    return false;
-                };
+                }
+                let start_distance =
+                    unsafe { self.planes.distance_unchecked(plane_index, segment_start) };
+                let end_distance =
+                    unsafe { self.planes.distance_unchecked(plane_index, segment_end) };
 
                 if start_distance >= 0 && end_distance >= 0 {
                     node_index = node.children[0];
@@ -592,8 +667,16 @@ impl<'a> CollisionHull<'a> {
                 return None;
             }
             descent_budget -= 1;
-            let node = self.nodes.get(node_index as usize)?;
-            let distance = self.planes.distance(node.plane as usize, *point)?;
+            let index = node_index as usize;
+            if index >= self.nodes.len() {
+                return None;
+            }
+            let node = unsafe { self.nodes.get_unchecked(index) };
+            let plane_index = node.plane as usize;
+            if plane_index >= self.planes.len() {
+                return None;
+            }
+            let distance = unsafe { self.planes.distance_unchecked(plane_index, *point) };
             node_index = node.children[(distance < 0) as usize];
         }
         self.nodes.contents(node_index)
