@@ -1900,6 +1900,11 @@ impl FaceRef {
 
     #[inline(always)]
     pub fn light_styles(self) -> [u8; 2] {
-        unsafe { [core::ptr::read(self.base.add(8)), core::ptr::read(self.base.add(9))] }
+        unsafe {
+            [
+                core::ptr::read(self.base.add(8)),
+                core::ptr::read(self.base.add(9)),
+            ]
+        }
     }
 }
