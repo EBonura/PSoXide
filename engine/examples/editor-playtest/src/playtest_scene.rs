@@ -471,7 +471,7 @@ impl Scene for Playtest {
             "inventory.item.2" => Some(boost_module_name(self.power_up_inventory.item_at(2))),
             "boost.assignment.prompt" => Some("CHOOSE A SOCKET"),
             "boost.control.primary" => Some(match self.inventory_ui_mode() {
-                INVENTORY_UI_MODULES => "SELECT",
+                INVENTORY_UI_MODULES => "ASSIGN",
                 INVENTORY_UI_ASSIGN => "ASSIGN",
                 _ => "MODULES",
             }),
@@ -631,8 +631,20 @@ impl Scene for Playtest {
             let module = self.power_up_inventory.item_at(item_index);
             if !module.is_none() {
                 self.set_inventory_module_cursor(item_index);
-                self.selected_power_up_item = module;
-                self.set_inventory_ui_mode(INVENTORY_UI_ASSIGN);
+                // The socket was chosen before entering the module list, so
+                // choosing the module completes the assignment: no third
+                // press back on the socket.
+                let slot = BoostSlotId::from_index(self.selected_power_up_slot);
+                if self
+                    .power_up_inventory
+                    .assign(&mut self.power_up_loadout, slot, module)
+                {
+                    self.selected_power_up_item = BoostModuleId::NONE;
+                    self.set_inventory_ui_mode(INVENTORY_UI_SOCKETS);
+                } else {
+                    self.selected_power_up_item = module;
+                    self.set_inventory_ui_mode(INVENTORY_UI_ASSIGN);
+                }
             }
             return;
         }
