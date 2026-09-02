@@ -197,11 +197,12 @@ The rotation fix gives back about half of the perf gain on this tape.
 The GTE op counts say the world pass itself did not grow (RTPT 913k vs
 924k, NCLIP equal), so the extra cycles are outside the world draw:
 `memcpy` and `memset` grew by 36M and 21M instructions and the scene
-render by 47M. The likely reader of the view is the gameplay side
-(visibility-driven activation of enemies and effects) reacting to the
-corrected camera, but that attribution is not proven yet; it is the
-first thing to pin down in the morning. It is a correctness change and
-stays.
+render by 47M. Per-tick cycle logs place the whole difference in one stretch
+of the route, tape frames 1750 to 2750 (+7% to +8% per 250-frame
+bucket), with every other bucket within +-1.5%: that stretch is the
+open hall with the item pickups, where a few degrees of yaw bring a lot
+more of the far wall into the frustum. The rest of the tape is neutral.
+It is a correctness change and stays.
 
 ## quake-psx
 
