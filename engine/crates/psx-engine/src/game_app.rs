@@ -789,6 +789,10 @@ pub struct GameApp<'a, S: Scene> {
     /// flow transitions because the gameplay state is already initialized
     /// behind the loading card; its midpoint only changes which side renders.
     loading_exit_transition: Option<FlowTransition>,
+    /// Boot reveal over a UI entry state: the first screen stays covered
+    /// until every streamed image it shows is resident, then dissolves in
+    /// as one composed frame instead of buttons first and artwork later.
+    boot_reveal: Option<FlowTransition>,
     /// Authored loading-screen UI scene (`UI_SCENE_NONE` = built-in
     /// fallback). See [`crate::app::Config::loading_ui_scene`].
     loading_scene: u16,
@@ -863,6 +867,40 @@ const LOADING_EXIT_FADE_FALLBACK: LevelTransition = LevelTransition {
 };
 
 impl<'a, S: Scene> GameApp<'a, S> {
+    /// Every image node of `scene` that names a texture resolves to a VRAM
+    /// slot. Streamed UI images resolve to `None` until their sectors land.
+    fn scene_images_resident(&self, scene: u16) -> bool {
+        let (first, count) = self.scene_node_range(scene);
+        let end = first.saturating_add(count).min(self.nodes.len());
+        self.nodes[first..end].iter().all(|node| {
+            !matches!(node.kind, LevelUiNodeKind::Image)
+                || node.texture_asset == psx_level::AssetId(u16::MAX)
+                || self.gameplay.ui_texture(node.texture_asset).is_some()
+        })
+    }
+
+    /// Hold the boot reveal at full coverage until the entry scene is
+    /// composed, then let it run out. Returns true while it still covers
+    /// the screen, so the menu takes no input before it is visible.
+    fn update_boot_reveal(&mut self) -> bool {
+        let Some(mut reveal) = self.boot_reveal else {
+            return false;
+        };
+        let composed = match self.current_tag().ui_scene() {
+            Some(scene) => self.scene_images_resident(scene),
+            None => true,
+        };
+        if composed {
+            reveal.elapsed = reveal.elapsed.saturating_add(1);
+        }
+        if reveal.elapsed >= reveal.frames() {
+            self.boot_reveal = None;
+            return false;
+        }
+        self.boot_reveal = Some(reveal);
+        true
+    }
+
     #[inline]
     fn loading_exit_transition_spec(&self) -> LevelTransition {
         if self.flow.transition.is_active() {
@@ -943,6 +981,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             transition: None,
             ui_activation: None,
             loading_exit_transition: None,
+            boot_reveal: None,
             loading_scene,
             loading_progress_q12: 0,
             loading_confirm_ready: false,
@@ -2445,8 +2484,23 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 255, 255), "11 OPTIONS BEGIN");
             self.apply_current_options();
             crate::app::boot_visual_checkpoint(&mut ctx.fb, (0, 255, 160), "12 OPTIONS OK");
+            // Park a fade at full coverage; `update` releases it once the
+            // entry scene's streamed images are all in VRAM. A scene with
+            // nothing left to stream composes on its first frame and needs
+            // no reveal.
+            let composed = match self.current_tag().ui_scene() {
+                Some(scene) => self.scene_images_resident(scene),
+                None => true,
+            };
+            if !composed {
+                let mut reveal = FlowTransition::new(entry, None, LOADING_EXIT_FADE_FALLBACK);
+                reveal.elapsed = reveal.switch_frame();
+                reveal.switched = true;
+                self.boot_reveal = Some(reveal);
+            }
         }
     }
+
 
     fn update(&mut self, ctx: &mut Ctx) {
         if self.loading_exit_transition.is_some() {
@@ -2529,6 +2583,11 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         if let Some(scene) = tag.ui_scene() {
             let state = self.state_ref_at(self.cursor.current);
             self.gameplay.update_ui_resources(state, ctx);
+            // The boot reveal holds input, not streaming: resources above
+            // keep loading while the screen stays covered.
+            if self.update_boot_reveal() {
+                return;
+            }
             if self.update_ui_activation(ctx) {
                 if let Some(active_scene) = self.current_tag().ui_scene() {
                     self.update_ui_music(active_scene, ctx);
@@ -2631,6 +2690,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         }
         if let Some(transition) = self.loading_exit_transition {
             render_transition_overlay(transition);
+        }
+        if let Some(reveal) = self.boot_reveal {
+            render_transition_overlay(reveal);
         }
     }
 }
