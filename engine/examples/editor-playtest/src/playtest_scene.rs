@@ -2031,8 +2031,8 @@ impl Scene for Playtest {
 
         // The target vitality stack follows the player HUD's two-ribbon
         // grammar and swap motion, but stays compact and omits the player's
-        // cooldown diamond. Anchor it just above the target's head so it does
-        // not mask the enemy's torso at close combat distance.
+        // cooldown diamond. Anchor its shared left edge to the right of the
+        // target rather than covering the model from above.
         if !self.inventory_overlay_active {
             if let (Some(font), Some(target_index)) =
                 (self.ui_fonts[0].as_ref(), self.combat_target_entity_index())
@@ -2060,8 +2060,8 @@ impl Scene for Playtest {
                         };
                         draw_enemy_vitality_hud(
                             font,
-                            projected.sx.clamp(42, SCREEN_W - 42),
-                            projected.sy.saturating_sub(20).clamp(33, SCREEN_H - 20),
+                            projected.sx.saturating_add(40).clamp(4, SCREEN_W - 80),
+                            projected.sy.clamp(4, SCREEN_H - 20),
                             active,
                             health_share(active),
                             health_share(active.other()),
