@@ -458,6 +458,12 @@ struct Playtest {
     /// when an attack action starts.
     // psx-numeric-allow-next-line: one-hit-per-swing bitmask over 64 entity records; bit ops only, two-word on R3000
     swing_hit_mask: u64,
+    /// Last `player_contents` answer keyed by the position and height it was
+    /// sampled at. The tick asks twice (locomotion modifier before the move,
+    /// hazard after it); while the player stands still both answers are the
+    /// same three point-hull descents, ~3.6% of an idle vblank. Zero-initialised
+    /// to `None` with the rest of the scene; cleared on gameplay entry.
+    player_contents_memo: Option<(RoomPoint, i32, psx_bsp::collision::LiquidContentsSample)>,
     /// Player skeleton/presentation state frozen after the latest fixed update.
     /// Body rendering, equipment sockets, and authored combat capsules all
     /// consume this same snapshot until the next simulation tick.
@@ -733,6 +739,7 @@ impl Playtest {
             *material = room_material_fallback();
         }
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        self.player_contents_memo = None;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
         // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
         // would mean no damage and no recovery at all, so it is set explicitly

@@ -18,7 +18,10 @@ use psx_bsp::pxbsp::{
     material_animation, material_blend, material_flags, PXBSP_MAX_VISIBILITY_BYTES,
 };
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
-use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
+use psx_bsp::render::{
+    load_pxbsp_view_rotation, Camera, FrustumPlanes, PxbspTextureBinding, Renderer,
+};
+use psx_engine::Mat3I16;
 use psx_bsp::{SliceReadError, Vec3I32};
 use psx_engine::{
     commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider,
@@ -636,10 +639,27 @@ impl BspRuntime {
     /// camera-to-bounds sample through the exact point collision hull.
     pub(super) fn visible_world_objects(
         &mut self,
-        observer: RoomPoint,
+        camera: WorldCamera,
         objects: &[LevelWorldObjectRecord],
         destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> WorldObjectVisibility {
+        let observer = RoomPoint::new(camera.position.x, camera.position.y, camera.position.z);
+        // The strict-occlusion samples below trace from the camera to each
+        // object across the whole level, up to seven long segments per
+        // object per frame, and on the Cortex whole-level tape they were
+        // most of the collision cost. An object outside the view frustum is
+        // never drawn, so it is not traced either. This is the world pass's
+        // own frustum, built the same way it builds it.
+        let frustum = {
+            let pxbsp = pxbsp_camera(camera);
+            let view = load_pxbsp_view_rotation(pxbsp.origin, pxbsp_view_rotation(camera));
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [pxbsp.origin.x >> 12, pxbsp.origin.y >> 12, pxbsp.origin.z >> 12],
+                self.renderer.view_projection(),
+            )
+        };
         let mut visibility = WorldObjectVisibility::NONE;
         let count = objects.len().min(psx_level::MAX_WORLD_OBJECTS);
         let mut first = 0usize;
@@ -658,6 +678,11 @@ impl BspRuntime {
                 let object = &objects[first + local];
                 if object.destructible != psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
                     && !destructibles.alive(usize::from(object.destructible))
+                {
+                    continue;
+                }
+                if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
+                    && frustum.box_surely_outside(object.bounds_min, object.bounds_max)
                 {
                     continue;
                 }
@@ -739,12 +764,40 @@ impl BspRuntime {
             [center[0], center[1], min[2]],
             [center[0], center[1], max[2]],
         ];
+        // A sample point whose leaf is not in the observer's potentially
+        // visible set cannot be seen from the observer, PVS being a superset
+        // of true visibility, so it is not worth a trace across the level.
+        // The observer's row is normally already resolved by the visibility
+        // pass; a gameplay caller with another observer resolves it here.
+        let pvs_ready = self.activation_row(observer).is_some();
+        let visible_leaves = self.activation_visible_leaves;
         for sample in samples {
             let endpoint = RoomPoint::new(
                 inset_toward(sample[0], observer.x),
                 inset_toward(sample[1], observer.y),
                 inset_toward(sample[2], observer.z),
             );
+            if pvs_ready {
+                let q12 = |value: i32| value.saturating_mul(4096);
+                let leaf = self.map.point_leaf_index(Vec3I32 {
+                    x: q12(endpoint.x),
+                    y: q12(endpoint.y),
+                    z: q12(endpoint.z),
+                });
+                let potentially_visible = match leaf {
+                    Some(leaf) if leaf != 0 && leaf <= visible_leaves => {
+                        let visible_index = leaf - 1;
+                        self.activation_visibility[visible_index >> 3] & (1 << (visible_index & 7))
+                            != 0
+                    }
+                    // Solid, out of range or unresolved: never visible.
+                    Some(_) => false,
+                    None => false,
+                };
+                if !potentially_visible {
+                    continue;
+                }
+            }
             if self
                 .trace_point_segment(observer, endpoint, &[], destructibles)
                 .is_ok_and(|trace| !trace.hit())
@@ -1422,8 +1475,9 @@ impl BspRuntime {
             PROJECTION.focal_length.clamp(1, i32::from(u16::MAX)) as u16
         );
         psx_gte::scene::set_avsz_weights(0x155, 0x100);
+        let view_rotation = pxbsp_view_rotation(camera);
         let camera = pxbsp_camera(camera);
-        let view = load_pxbsp_view(camera);
+        let view = load_pxbsp_view_rotation(camera.origin, view_rotation);
         let capacity = primitive_packets.remaining_words();
         let Some(mut reservation) = primitive_packets.reserve_packet_words(capacity) else {
             return false;
@@ -1634,6 +1688,22 @@ fn bsp_fragment_quad(
         }
     }
     quad
+}
+
+/// The world pass view rotation from the camera's exact Q12 trig, in the
+/// PXBSP convention [`pxbsp_camera`] derives its angles in: PXBSP yaw is
+/// the orbit yaw plus a quarter turn and PXBSP pitch the negated look
+/// pitch, so `sin(yaw + 90) = cos(yaw)`, `cos(yaw + 90) = -sin(yaw)`,
+/// `sin(-pitch) = -sin(pitch)`. No table, no angle recovery: the world
+/// rotates by exactly the camera the model pass renders with.
+pub(super) fn pxbsp_view_rotation(camera: WorldCamera) -> Mat3I16 {
+    let q12 = |value: i32| value.clamp(-0x1000, 0x1000) as i16;
+    psx_bsp::render::pxbsp_view_rotation(
+        q12(-camera.sin_pitch.raw()),
+        q12(camera.cos_pitch.raw()),
+        q12(camera.cos_yaw.raw()),
+        q12(-camera.sin_yaw.raw()),
+    )
 }
 
 pub(super) fn pxbsp_camera(camera: WorldCamera) -> Camera {

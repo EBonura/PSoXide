@@ -205,13 +205,20 @@ pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 /// Camera-depth range that maps ordinary world-pass packets onto the classic
 /// affine PXBSP renderer's staged OTZ convention.
 ///
-/// PXBSP installs ZSF3=0x155 and ZSF4=0x100, so a flat triangle/quad at view
-/// depth `z` lands at approximately `z / 4`. With the 2,046-slot world band,
-/// mapping `0..8192` reproduces the triangle formula exactly for equal-depth
-/// vertices: `z * 2046 / 8192 == z * 1023 / 4096`. Models, beacons and other
-/// runtime geometry must use this range when the resident BSP owns the static
-/// world or a nearer BSP wall can otherwise sort behind them.
-pub(super) const PXBSP_CLASSIC_DEPTH_RANGE: DepthRange = DepthRange::new(0, 8192);
+/// PXBSP installs ZSF3=0x155 and ZSF4=0x100, so a flat triangle/quad lands at
+/// `SZ / 4`, and its view transform carries a uniform 3.0 scale
+/// (`psx_bsp::render::XBSP_VIEW_SCALE_Q12`), so `SZ` is three times the true
+/// view depth: the world keys at `3 z / 4` and fills the 2,048-slot table by
+/// `z = 2731`. Mapping `0..=2731` onto the 2,046-slot world band reproduces
+/// the triangle formula to within a slot for equal-depth vertices. Models,
+/// beacons, effects and every other runtime draw must use this range when the
+/// resident BSP owns the static world; the previous `0..8192` keyed them at
+/// `z / 4`, one third of the world's key, so an actor at depth `z` sorted in
+/// front of every wall farther than `z / 3`.
+pub(super) const PXBSP_CLASSIC_DEPTH_RANGE: DepthRange = DepthRange::new(
+    0,
+    psx_bsp::render::pxbsp_classic_far_depth(OT_DEPTH as u16),
+);
 #[cfg(feature = "world-grid-visible")]
 pub(super) const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
 #[cfg(all(
@@ -259,12 +266,12 @@ pub(super) const ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES: bool = true;
 // ~26KB of .bss the 2MB budget cannot spare, while gameplay telemetry
 // peaks at 77 visible cells; the runtime degrades gracefully past the
 // cap (overflow guards fall back to uncached selection).
-pub(super) const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 192;
+pub(super) const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = if cfg!(playtest_pxbsp) { 1 } else { 192 };
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-pub(super) const MAX_ACTIVE_VISIBLE_CELLS: usize = 192;
+pub(super) const MAX_ACTIVE_VISIBLE_CELLS: usize = if cfg!(playtest_pxbsp) { 1 } else { 192 };
 
 pub(super) fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
     psx_game_runtime::world_cells::room_draw_distance(record, NEAR_Z)
@@ -337,11 +344,27 @@ pub(super) fn actor_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOpt
     room_surface_options(record).with_depth_bias(-clearance)
 }
 
+/// Camera-depth range every non-world draw in `record` maps through.
+///
+/// This is the one place that decides how runtime geometry (actors, props,
+/// beacons, decals, particles, projectiles) is keyed against the world it
+/// sorts with. A resident PXBSP keys its classic packets at `3 z / 4` (see
+/// [`PXBSP_CLASSIC_DEPTH_RANGE`]), so everything else must map through that
+/// same range or it sorts against walls at the wrong depth; grid rooms keep
+/// their draw-distance range.
+pub(super) fn world_depth_range(record: &LevelRoomRecord, uses_pxbsp: bool) -> DepthRange {
+    if uses_pxbsp {
+        PXBSP_CLASSIC_DEPTH_RANGE
+    } else {
+        room_depth_range(record)
+    }
+}
+
 /// Room options whose OT slots are directly comparable with resident PXBSP
 /// classic-affine packets already linked into the same ordering table.
 pub(super) fn pxbsp_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
     let mut options = room_surface_options(record);
-    options.depth_range = PXBSP_CLASSIC_DEPTH_RANGE;
+    options.depth_range = world_depth_range(record, true);
     options
 }
 
@@ -451,7 +474,12 @@ pub(super) const MAX_ROOM_MATERIALS: usize = psx_level::MAX_ROOM_MATERIALS;
 /// runtime window. The world-level resident room limit picks the effective
 /// count per cooked build; this cap only prevents the fixed arrays from
 /// growing past the editor-exposed maximum.
-pub(super) const MAX_ACTIVE_ROOMS: usize = 16;
+// A PXBSP world is one room record: the grid room window, portal
+// visibility and cell selector below are dead on that path (the same
+// `playtest_pxbsp` gate the prebuilt-quad arenas use), and at 16 rooms they
+// cost ~28 KB of `.bss` that the 0.4 tech demo needs for its UV-window face
+// splits and for an `emulator-telemetry` build to link at all.
+pub(super) const MAX_ACTIVE_ROOMS: usize = if cfg!(playtest_pxbsp) { 1 } else { 16 };
 /// Reachability draw model: the camera's room plus this many portal hops are the
 /// ACTIVE/DRAWN set, with no frustum or far-plane room cull (per-polygon
 /// backface + screen culling still applies). Side and behind rooms stay drawn.
@@ -460,9 +488,9 @@ pub(super) const RESIDENT_DRAW_DEPTH: u16 = 3;
 /// Resident radius = RESIDENT_DRAW_DEPTH + RESIDENT_PREFETCH_HOPS; since it
 /// covers the draw depth, resident is a superset of drawn by construction.
 pub(super) const RESIDENT_PREFETCH_HOPS: u16 = 2;
-pub(super) const MAX_PORTAL_FRUSTUMS: usize = 64;
-pub(super) const MAX_PORTAL_FRONTIER_ROOMS: usize = 32;
-pub(super) const MAX_PORTAL_ROOM_BOUNDS: usize = 256;
+pub(super) const MAX_PORTAL_FRUSTUMS: usize = if cfg!(playtest_pxbsp) { 1 } else { 64 };
+pub(super) const MAX_PORTAL_FRONTIER_ROOMS: usize = if cfg!(playtest_pxbsp) { 1 } else { 32 };
+pub(super) const MAX_PORTAL_ROOM_BOUNDS: usize = if cfg!(playtest_pxbsp) { 1 } else { 256 };
 pub(super) const PORTAL_ROOM_BOUNDS_MIN_Y: i32 = -4096;
 pub(super) const PORTAL_ROOM_BOUNDS_MAX_Y: i32 = 8192;
 pub(super) type RuntimePortalVisibility =
@@ -807,18 +835,35 @@ pub(super) const VISIBLE_CELL_TUNING: psx_game_runtime::world_cells::VisibleCell
 mod pxbsp_depth_order_tests {
     use super::*;
 
+    /// The classic path projects through a view scaled by
+    /// `XBSP_VIEW_SCALE_Q12`, so its `SZ` for a vertex at true view depth
+    /// `z` is `z * scale`; the runtime range must reproduce the OTZ that
+    /// follows from that, not from `z` itself.
     #[cfg(feature = "ot-2048")]
     #[test]
     fn dynamic_world_range_matches_classic_affine_triangle_otz() {
         assert_eq!(OT_DEPTH, 2048);
-        for depth in [0, 4, 32, 127, 256, 512, 1024, 4096, 8191, 8192] {
+        assert_eq!(PXBSP_CLASSIC_DEPTH_RANGE.far(), 2731);
+        let scale = psx_bsp::render::XBSP_VIEW_SCALE_Q12;
+        for depth in [0, 4, 32, 127, 256, 512, 1024, 2048, 2730, 2731] {
             let dynamic_slot = WORLD_BAND
                 .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, depth)
                 .index();
+            let sz = (depth * scale) >> 12;
             let classic_slot = usize::from(psx_gte::scene::classic_otz3_from_sum(
-                (depth as u32).saturating_mul(3),
+                (sz as u32).saturating_mul(3),
             ));
             assert_eq!(dynamic_slot, classic_slot, "view depth {depth}");
         }
+        // A few units past the far depth the world rejects the surface
+        // (OTZ >= 2048) while runtime draws clamp to the back of the band.
+        let sz = (2734 * scale) >> 12;
+        assert!(psx_gte::scene::classic_otz3_from_sum((sz as u32) * 3) >= 2048);
+        assert_eq!(
+            WORLD_BAND
+                .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, 2734)
+                .index(),
+            WORLD_BAND.back()
+        );
     }
 }
