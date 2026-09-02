@@ -96,25 +96,51 @@ fn set_packed_bit(bits: &mut [u8], index: usize) {
 fn collect_marked_faces_ascending(states: &[u8], face_count: usize, output: &mut Vec<u16>) -> bool {
     output.clear();
     let capacity = output.capacity();
-    for (byte_index, &packed) in states.iter().enumerate() {
-        if packed == 0 {
+    let mut written = 0usize;
+    let out = output.as_mut_ptr();
+    // Whole words first: an empty stretch of the face table costs one load
+    // per sixteen faces, and the marked faces are a small fraction of it.
+    // The table is a Vec<u8>, so the word view is byte-wise to stay aligned
+    // on any allocation; the compiler turns the four-byte compare into one
+    // load when the address is aligned.
+    let mut byte_index = 0usize;
+    let len = states.len();
+    while byte_index < len {
+        if byte_index + 4 <= len
+            && u32::from_ne_bytes([
+                states[byte_index],
+                states[byte_index + 1],
+                states[byte_index + 2],
+                states[byte_index + 3],
+            ]) == 0
+        {
+            byte_index += 4;
             continue;
         }
-        let base = byte_index << 2;
-        for slot in 0..4 {
-            if packed >> (slot << 1) & 3 == 0 {
-                continue;
+        let packed = states[byte_index];
+        if packed != 0 {
+            let base = byte_index << 2;
+            let mut slot = 0usize;
+            while slot < 4 {
+                if packed >> (slot << 1) & 3 != 0 {
+                    let face = base + slot;
+                    if face >= face_count {
+                        break;
+                    }
+                    if written == capacity {
+                        return false;
+                    }
+                    // `written < capacity`, and the length is set once below.
+                    unsafe { out.add(written).write(face as u16) };
+                    written += 1;
+                }
+                slot += 1;
             }
-            let face = base + slot;
-            if face >= face_count {
-                break;
-            }
-            if output.len() == capacity {
-                return false;
-            }
-            output.push(face as u16);
         }
+        byte_index += 1;
     }
+    // Every slot below `written` was initialised by the write above.
+    unsafe { output.set_len(written) };
     true
 }
 
