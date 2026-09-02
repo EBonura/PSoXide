@@ -2072,44 +2072,64 @@ impl Renderer {
             return None;
         }
         let source = unsafe { source_base.add(face.first_vertex()) };
+        // The plane constants live in the scratchpad behind a reference the
+        // compiler cannot prove disjoint from the vertex reads, so it
+        // reloaded all five per vertex; they are loop invariants.
+        let constants = [planes[0].1, planes[1].1, planes[2].1, planes[3].1, planes[4].1];
         // Bit p stays set while every vertex so far was surely outside p.
         let mut wholly_outside = clip_mask;
         let near_tested = clip_mask & NEAR != 0;
         let mut near_any_outside = false;
         let mut index = 0usize;
-        while index < count {
+        // Phase one: every masked plane is still undecided, so each vertex
+        // pays for the full plane set.
+        while index < count && wholly_outside != 0 {
             let base = unsafe { source.add(index).cast::<u32>() };
             let xy = unsafe { core::ptr::read(base) };
             let z = unsafe { core::ptr::read(base.add(1).cast::<i16>()) } as i32 as u32;
             let (d0, d1, d2) = unsafe { gte_dot3::<MVMVA_LLM_V0_SF0>(xy, z) };
             // The near band is zero, so that plane keeps its exact answers.
-            if d0.wrapping_add(planes[0].1) >= 0 {
+            if d0.wrapping_add(constants[0]) >= 0 {
                 wholly_outside &= !NEAR;
             } else {
                 near_any_outside = true;
             }
-            if d1.wrapping_add(planes[1].1) >= -side_error {
+            if d1.wrapping_add(constants[1]) >= -side_error {
                 wholly_outside &= !(1 << 1);
             }
-            if d2.wrapping_add(planes[2].1) >= -side_error {
+            if d2.wrapping_add(constants[2]) >= -side_error {
                 wholly_outside &= !(1 << 2);
             }
             if wholly_outside & 0x18 != 0 {
                 let (d3, d4, _) = unsafe { gte_dot3::<MVMVA_LCM_V0_SF0>(xy, z) };
-                if d3.wrapping_add(planes[3].1) >= -side_error {
+                if d3.wrapping_add(constants[3]) >= -side_error {
                     wholly_outside &= !(1 << 3);
                 }
-                if d4.wrapping_add(planes[4].1) >= -side_error {
+                if d4.wrapping_add(constants[4]) >= -side_error {
                     wholly_outside &= !(1 << 4);
                 }
-            }
-            if wholly_outside == 0 && (!near_tested || near_any_outside) {
-                break;
             }
             index += 1;
         }
         if wholly_outside != 0 {
             return None;
+        }
+        // Phase two: no plane can reject the face any more; only the near
+        // clip decision is open, which one dot per remaining vertex settles.
+        // Faces wholly in front of the near plane, the common case, used to
+        // pay the full five-plane set for every vertex here.
+        if near_tested && !near_any_outside {
+            while index < count {
+                let base = unsafe { source.add(index).cast::<u32>() };
+                let xy = unsafe { core::ptr::read(base) };
+                let z = unsafe { core::ptr::read(base.add(1).cast::<i16>()) } as i32 as u32;
+                let d0 = unsafe { gte_dot_one::<MVMVA_LLM_V0_SF0, MFC2_MAC1>(xy, z) };
+                if d0.wrapping_add(constants[0]) < 0 {
+                    near_any_outside = true;
+                    break;
+                }
+                index += 1;
+            }
         }
         Some(near_tested && near_any_outside)
     }
