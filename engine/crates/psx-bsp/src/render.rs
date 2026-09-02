@@ -2103,12 +2103,6 @@ impl Renderer {
             };
     }
 
-    /// Return `None` when every face vertex is outside any one frustum plane;
-    /// otherwise return whether the face crosses the near plane.
-    ///
-    /// # Safety
-    /// `source_base` must be the base of the map's vertex lump; see
-    /// [`Self::materialize_pxbsp_face`].
     /// [`Self::pxbsp_face_clip`] with the five plane dot products on the GTE.
     ///
     /// The CPU form is plane-major with three `mult`s per vertex per plane;
@@ -2205,6 +2199,12 @@ impl Renderer {
         Some(near_tested && near_any_outside)
     }
 
+    /// Return `None` when every face vertex is outside any one frustum plane;
+    /// otherwise return whether the face crosses the near plane.
+    ///
+    /// # Safety
+    /// `source_base` must be the base of the map's vertex lump; see
+    /// [`Self::materialize_pxbsp_face`].
     unsafe fn pxbsp_face_clip(
         source_base: *const ClassicAffineWordSourceVertex,
         face: FaceRef,
