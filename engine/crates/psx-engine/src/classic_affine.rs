@@ -3920,7 +3920,7 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
             let far = root_depth
                 .max(previous_ref.depth as u16)
                 .max(current_ref.depth as u16);
-            scene::classic_otz3_from_sum(u32::from(far) * 3)
+            scene::classic_otz3_from_sum(u32::from(far) * 3).min(profile.ot_depth - 1)
         } else {
             otz
         };
@@ -3961,12 +3961,13 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
                     #[cfg(not(feature = "classic-affine-relaxed-quad-pairing"))]
                     let quad_otz = otz;
                     let quad_otz = if profile.farthest_depth_key {
-                        (u32::from(
+                        ((u32::from(
                             root_depth
                                 .max(previous_ref.depth as u16)
                                 .max(current_ref.depth as u16)
                                 .max(next_ref.depth as u16),
-                        ) >> 2) as u16
+                        ) >> 2) as u16)
+                            .min(profile.ot_depth - 1)
                     } else {
                         quad_otz
                     };
@@ -4136,12 +4137,13 @@ unsafe fn submit_classic_affine_level0_fan_if_supported(
                     #[cfg(not(feature = "classic-affine-relaxed-quad-pairing"))]
                     let quad_otz = otz;
                     let quad_otz = if profile.farthest_depth_key {
-                        (u32::from(
+                        ((u32::from(
                             root_depth
                                 .max(previous_ref.depth as u16)
                                 .max(current_ref.depth as u16)
                                 .max(next_ref.depth as u16),
-                        ) >> 2) as u16
+                        ) >> 2) as u16)
+                            .min(profile.ot_depth - 1)
                     } else {
                         quad_otz
                     };
@@ -5114,7 +5116,7 @@ unsafe fn submit_quake_projected_fan_cold_adaptive(
             let far = root_depth
                 .max(previous_ref.depth as u16)
                 .max(current_ref.depth as u16);
-            scene::classic_otz3_from_sum(u32::from(far) * 3)
+            scene::classic_otz3_from_sum(u32::from(far) * 3).min(profile.ot_depth - 1)
         } else {
             otz
         };
@@ -5212,7 +5214,7 @@ unsafe fn submit_quake_projected_fan_cold_level2(
             let far = root_depth
                 .max(previous_ref.depth as u16)
                 .max(current_ref.depth as u16);
-            scene::classic_otz3_from_sum(u32::from(far) * 3)
+            scene::classic_otz3_from_sum(u32::from(far) * 3).min(profile.ot_depth - 1)
         } else {
             otz
         };
