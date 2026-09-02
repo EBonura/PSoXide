@@ -95,7 +95,9 @@ def scan(path):
             m = re.search(r"0x([0-9a-f]+)$", args)
             if m:
                 targets.append(int(m.group(1), 16))
-        if op != "j":
+        # A call returns to its fall-through much later and a plain jump never
+        # falls through; only conditional branches expose both paths.
+        if op not in ("j", "jal", "bal", "jalr", "bltzal", "bgezal"):
             targets.append(addr + 8)
         for target in targets:
             if target in listing and reads(*listing[target], rd):
