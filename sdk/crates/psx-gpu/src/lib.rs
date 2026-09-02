@@ -457,6 +457,27 @@ pub fn draw_quad_textured_material(
     write_gp0(pack_texcoord(uvs[3].0, uvs[3].1, 0));
 }
 
+/// Draw a textured triangle using a [`TextureMaterial`].
+///
+/// This immediate-mode counterpart to [`prim::TriTextured`] is useful for
+/// compact screen-space masks and UI effects that do not enter an ordering
+/// table. Vertex and UV indices correspond directly.
+pub fn draw_tri_textured_material(
+    verts: [(i16, i16); 3],
+    uvs: [(u8, u8); 3],
+    material: TextureMaterial,
+) {
+    wait_cmd_ready();
+    write_gp0(material.texture_window_word());
+    write_gp0(material.flat_textured_polygon_header(false));
+    write_gp0(pack_vertex(verts[0].0, verts[0].1));
+    write_gp0(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
+    write_gp0(pack_vertex(verts[1].0, verts[1].1));
+    write_gp0(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
+    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+    write_gp0(pack_texcoord(uvs[2].0, uvs[2].1, 0));
+}
+
 /// Draw a gouraud-shaded textured quad (GP0 0x3C, 12 words).
 ///
 /// Each vertex carries its own RGB; the GPU interpolates across
