@@ -53,10 +53,21 @@ impl Playtest {
         let Some(room_record) = ROOMS.get(self.room_index.to_usize()) else {
             return 0;
         };
+        // A beacon stands on the floor exactly like an actor, so it takes the
+        // actor clearance: keyed a little nearer than the world surface it
+        // rests on, or the floor polygon under it sorts in front and paints
+        // it out down to a sliver (and its perimeter line shows through as a
+        // stray red line).
+        // A beacon is a thin panel standing on the floor: its faces key a
+        // few units apart, so floor polygons keyed between them paint the
+        // front face out. Pull the whole prop well in front of the surface
+        // it stands on; a beacon is small enough that showing through a
+        // wall this close in front of it is rarer than being buried.
+        let clearance = i32::from(room_record.sector_size).saturating_mul(2);
         let options = if self.bsp.is_some() {
-            pxbsp_surface_options(room_record)
+            pxbsp_surface_options(room_record).with_depth_bias(-clearance)
         } else {
-            room_surface_options(room_record)
+            room_surface_options(room_record).with_depth_bias(-clearance)
         };
         let open_poi = self
             .poi_messages
