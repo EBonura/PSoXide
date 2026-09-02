@@ -295,11 +295,17 @@ impl Playtest {
                 u32::from(entity_stats.windup_enters),
             );
         }
+        if entity_stats.ranged_attack_enters > 0 {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileCharge);
+        }
         if entity_stats.attack_enters > 0 {
             telemetry::counter(
                 telemetry::counter::GAME_ENTITY_ATTACK_ENTERS,
                 u32::from(entity_stats.attack_enters),
             );
+        }
+        if entity_stats.melee_attack_enters > 0 {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyWeaponSwing);
         }
         let fired_total = self.logic.stats().fired;
         let fired_delta = fired_total.saturating_sub(self.logic_fired_reported);
@@ -1395,6 +1401,7 @@ impl Playtest {
                 .is_some_and(|character| character.action_clip(anim.action()).is_some());
             if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
                 telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
+                self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerWeaponSwing);
             }
             return true;
         }

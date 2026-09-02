@@ -3713,6 +3713,18 @@ fn render_gameplay_sfx_event(event: psx_level::LevelGameplaySfxEvent) -> &'stati
         psx_level::LevelGameplaySfxEvent::StanceSwapReady => {
             "LevelGameplaySfxEvent::StanceSwapReady"
         }
+        psx_level::LevelGameplaySfxEvent::PlayerWeaponSwing => {
+            "LevelGameplaySfxEvent::PlayerWeaponSwing"
+        }
+        psx_level::LevelGameplaySfxEvent::EnemyWeaponSwing => {
+            "LevelGameplaySfxEvent::EnemyWeaponSwing"
+        }
+        psx_level::LevelGameplaySfxEvent::ProjectileCharge => {
+            "LevelGameplaySfxEvent::ProjectileCharge"
+        }
+        psx_level::LevelGameplaySfxEvent::ProjectileLaunch => {
+            "LevelGameplaySfxEvent::ProjectileLaunch"
+        }
     }
 }
 

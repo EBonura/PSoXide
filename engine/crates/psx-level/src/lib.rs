@@ -2886,12 +2886,33 @@ pub enum LevelGameplaySfxEvent {
     EnemyDeath = 4,
     /// The stance-swap cooldown completed and is available again.
     StanceSwapReady = 5,
+    /// The player committed a weapon swing, independently of contact.
+    PlayerWeaponSwing = 6,
+    /// An enemy's melee attack entered its active swing window.
+    EnemyWeaponSwing = 7,
+    /// An enemy projectile attack entered its authored charge windup.
+    ProjectileCharge = 8,
+    /// An enemy projectile was successfully emitted into the runtime pool.
+    ProjectileLaunch = 9,
 }
 
 impl LevelGameplaySfxEvent {
     /// Compact event bit consumed once by the game-flow wrapper.
-    pub const fn bit(self) -> u8 {
+    pub const fn bit(self) -> u16 {
         1 << self as u8
+    }
+}
+
+#[cfg(test)]
+mod gameplay_sfx_event_tests {
+    use super::LevelGameplaySfxEvent;
+
+    #[test]
+    fn event_bits_cover_projectile_events_beyond_one_byte() {
+        assert_eq!(LevelGameplaySfxEvent::PlayerWeaponSwing.bit(), 1 << 6);
+        assert_eq!(LevelGameplaySfxEvent::EnemyWeaponSwing.bit(), 1 << 7);
+        assert_eq!(LevelGameplaySfxEvent::ProjectileCharge.bit(), 1 << 8);
+        assert_eq!(LevelGameplaySfxEvent::ProjectileLaunch.bit(), 1 << 9);
     }
 }
 

@@ -299,7 +299,7 @@ impl Scene for Playtest {
         RenderSubmission::Queued
     }
 
-    fn take_gameplay_sfx_events(&mut self) -> u8 {
+    fn take_gameplay_sfx_events(&mut self) -> u16 {
         core::mem::take(&mut self.gameplay_sfx_events)
     }
 
