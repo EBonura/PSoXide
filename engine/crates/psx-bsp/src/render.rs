@@ -330,16 +330,51 @@ pub fn load_view(camera: Camera) -> ViewTransform {
 /// mirrored, so characters faced the wrong way and the analog stick read
 /// mirrored).
 pub fn load_pxbsp_view(camera: Camera) -> ViewTransform {
-    load_view_with_coordinates(
-        camera,
-        Mat3I16 {
-            m: [
-                [0, 0, XBSP_VIEW_SCALE],
-                [0, -XBSP_VIEW_SCALE, 0],
-                [XBSP_VIEW_SCALE, 0, 0],
-            ],
-        },
-    )
+    load_view_with_coordinates(camera, PXBSP_COORDINATES)
+}
+
+/// PXBSP's axis remap: the map's `+X` forward, `+Y` up frame into the GTE's
+/// `+Z` forward, `-Y` up frame, carrying the view scale.
+const PXBSP_COORDINATES: Mat3I16 = Mat3I16 {
+    m: [
+        [0, 0, XBSP_VIEW_SCALE],
+        [0, -XBSP_VIEW_SCALE, 0],
+        [XBSP_VIEW_SCALE, 0, 0],
+    ],
+};
+
+/// The exact PXBSP view rotation for a camera whose pitch and yaw are known
+/// as Q12 sine and cosine pairs: `Rx(pitch) * Ry(yaw)`, the same product
+/// [`load_pxbsp_view`] forms from 256-step table angles.
+///
+/// A third-person engine camera carries full-precision trig and the model
+/// pass rotates with it. Quantising that camera to the 256-step table for
+/// the world pass rotated the world by up to 0.7 degrees against the
+/// actors standing in it, which at 250 units of depth is three units of
+/// floor: every actor looked a little above or below the ground depending
+/// on where the camera sat between two table steps.
+pub fn pxbsp_view_rotation(sin_pitch: i16, cos_pitch: i16, sin_yaw: i16, cos_yaw: i16) -> Mat3I16 {
+    let pitch = Mat3I16 {
+        m: [
+            [0x1000, 0, 0],
+            [0, cos_pitch, 0i16.wrapping_sub(sin_pitch)],
+            [0, sin_pitch, cos_pitch],
+        ],
+    };
+    let yaw = Mat3I16 {
+        m: [
+            [cos_yaw, 0, sin_yaw],
+            [0, 0x1000, 0],
+            [0i16.wrapping_sub(sin_yaw), 0, cos_yaw],
+        ],
+    };
+    pitch.mul(&yaw)
+}
+
+/// [`load_pxbsp_view`] with a caller-built view rotation such as
+/// [`pxbsp_view_rotation`]; `origin` is Q12 world units as in [`Camera`].
+pub fn load_pxbsp_view_rotation(origin: Vec3I32, view: Mat3I16) -> ViewTransform {
+    load_view_rotation_with_coordinates(origin, view, PXBSP_COORDINATES)
 }
 
 fn load_view_with_coordinates(camera: Camera, coordinates: Mat3I16) -> ViewTransform {
@@ -348,13 +383,21 @@ fn load_view_with_coordinates(camera: Camera, coordinates: Mat3I16) -> ViewTrans
         (camera.angles[1] as u16) >> 4,
         (camera.angles[2] as u16) >> 4,
     );
+    load_view_rotation_with_coordinates(camera.origin, view, coordinates)
+}
+
+fn load_view_rotation_with_coordinates(
+    origin: Vec3I32,
+    view: Mat3I16,
+    coordinates: Mat3I16,
+) -> ViewTransform {
     let rotation = scene::compose_rotation_scheduled(&view, &coordinates);
     scene::load_rotation(&rotation);
     scene::load_translation(GteVec3I32::ZERO);
     let translation = scene::transform_vertex_scheduled(GteVec3I16::new(
-        (camera.origin.x.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        (camera.origin.y.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        (camera.origin.z.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        (origin.x.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        (origin.y.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        (origin.z.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
     ));
     scene::load_translation(translation);
     ViewTransform {
@@ -3272,6 +3315,21 @@ fn scale_baked_color_q7(color: u32, scale_q7: u8) -> u32 {
 mod tests {
     use super::*;
     use crate::pxbsp::PxbspLumpKind;
+
+    #[test]
+    fn exact_view_rotation_matches_the_table_form_at_table_angles() {
+        // At angles the 256-step table represents exactly, the trig pairs
+        // are +-4096 / 0 and both constructions must agree cell for cell.
+        for (pitch_q12, yaw_q12) in [(0u16, 0u16), (0, 1024), (1024, 0), (3072, 2048), (2048, 3072)] {
+            let table = Mat3I16::rotate_xyz(pitch_q12 >> 4, yaw_q12 >> 4, 0);
+            let trig = |angle: u16| -> (i16, i16) {
+                (sin_q12(angle) as i16, cos_q12(angle) as i16)
+            };
+            let (sp, cp) = trig(pitch_q12);
+            let (sy, cy) = trig(yaw_q12);
+            assert_eq!(pxbsp_view_rotation(sp, cp, sy, cy).m, table.m, "pitch {pitch_q12} yaw {yaw_q12}");
+        }
+    }
     use crate::pxbsp_resident::tests::{valid_lumps, write_file};
     use crate::SliceReader;
     use alloc::boxed::Box;
