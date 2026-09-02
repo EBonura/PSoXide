@@ -864,7 +864,7 @@ fn draw_swap_cooldown_diamond(
     // Completion sends a second diamond out from the charge cell, echoing the
     // main-menu confirmation language without restoring circular decoration.
     if let Some(elapsed) = echo_elapsed {
-        let radius = 14 + ((elapsed.min(12) >> 1) as i16);
+        let radius = 13 + ((elapsed.min(12) >> 1) as i16);
         let echo_rgb = if elapsed < 6 {
             rgb
         } else {
@@ -876,11 +876,11 @@ fn draw_swap_cooldown_diamond(
     // One dark outer quad gives the cell a hard silhouette. During lockout a
     // brighter neutral grey advances clockwise over a darker grey remainder;
     // stance colour appears only when the swap is available again.
-    draw_diamond(cx, cy, 13, (18, 20, 23));
+    draw_diamond(cx, cy, 12, (18, 20, 23));
     if progress_q12 >= 4096 {
-        draw_diamond(cx, cy, 11, rgb);
+        draw_diamond(cx, cy, 10, rgb);
     } else {
-        draw_diamond(cx, cy, 11, (54, 54, 54));
+        draw_diamond(cx, cy, 10, (54, 54, 54));
         draw_clockwise_diamond_fill(cx, cy, (112, 112, 112), progress_q12);
     }
 }
@@ -890,23 +890,23 @@ fn draw_clockwise_diamond_fill(cx: i16, cy: i16, rgb: (u8, u8, u8), progress_q12
     // Four evenly spaced samples per edge keep the same smooth sixteen-step
     // clockwise read as the old dial while following the diamond silhouette.
     const SCREEN_RING: [(i16, i16); 17] = [
-        (0, -11),
-        (3, -8),
-        (6, -5),
-        (8, -3),
-        (11, 0),
-        (8, 3),
-        (6, 5),
-        (3, 8),
-        (0, 11),
-        (-3, 8),
-        (-6, 5),
-        (-8, 3),
-        (-11, 0),
-        (-8, -3),
-        (-6, -5),
-        (-3, -8),
-        (0, -11),
+        (0, -10),
+        (3, -7),
+        (5, -5),
+        (7, -3),
+        (10, 0),
+        (7, 3),
+        (5, 5),
+        (3, 7),
+        (0, 10),
+        (-3, 7),
+        (-5, 5),
+        (-7, 3),
+        (-10, 0),
+        (-7, -3),
+        (-5, -5),
+        (-3, -7),
+        (0, -10),
     ];
 
     let scaled = u32::from(progress_q12.min(4096)) * 16;
