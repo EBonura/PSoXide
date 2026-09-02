@@ -13,7 +13,9 @@ image is clean, whatever built it.
 
 Prints every hazard as `branch | delay-slot load | consumer` and exits 1 if
 any image has one. Needs mipsel-none-elf-objdump on PATH. Loads into $zero
-(cache probes) are ignored.
+(cache probes) are ignored, and so is anything within 16 words of a byte
+pattern that does not decode as an instruction: a PS-EXE carries its tables
+and assets in the same load, and those decode as random branches.
 """
 import re
 import subprocess
@@ -41,6 +43,15 @@ def disassemble(path):
         if m:
             listing[int(m.group(1), 16)] = (m.group(2), m.group(3))
     return listing
+
+
+def looks_like_code(listing, addr, words=16):
+    """No undecodable word within `words` instructions on either side."""
+    for offset in range(-words * 4, words * 4 + 4, 4):
+        entry = listing.get(addr + offset)
+        if entry is not None and entry[0] == ".word":
+            return False
+    return True
 
 
 def load_destination(op, args):
@@ -77,7 +88,7 @@ def scan(path):
             continue
         slot_op, slot_args = listing[addr + 4]
         rd = load_destination(slot_op, slot_args)
-        if rd is None:
+        if rd is None or not looks_like_code(listing, addr):
             continue
         targets = []
         if op not in ("jr", "jalr"):
