@@ -1379,11 +1379,13 @@ impl Playtest {
                     PlayerAnim::LightAttack,
                 ),
             };
+        // R1/R2 are the only attack buttons; the stance decides which pair
+        // they perform. The opposite stance's attacks are reached by
+        // swapping stance, not by a second shoulder pair.
+        let _ = (opposite_heavy, opposite_light);
         let attacks = [
             (ACTIVE_HEAVY_ATTACK_BUTTON, active_heavy),
             (ACTIVE_LIGHT_ATTACK_BUTTON, active_light),
-            (OPPOSITE_HEAVY_ATTACK_BUTTON, opposite_heavy),
-            (OPPOSITE_LIGHT_ATTACK_BUTTON, opposite_light),
         ];
         for (button, anim) in attacks {
             if !ctx.just_pressed(button) {
