@@ -102,17 +102,18 @@ def find_hazards(listing):
     found = []
     for addr in sorted(listing):
         op, args = listing[addr]
-        if op not in COND | JUMPS | LINKING | {"jr"} or addr + 4 not in listing:
+        # A register jump (jr/jalr) has no static target and never falls
+        # through, so nothing about its slot load can be checked here.
+        if op not in COND | JUMPS | LINKING or addr + 4 not in listing:
             continue
         slot_op, slot_args = listing[addr + 4]
         rd = load_destination(slot_op, slot_args)
         if rd is None or not looks_like_code(listing, addr):
             continue
         targets = []
-        if op not in ("jr", "jalr"):
-            m = re.search(r"0x([0-9a-f]+)$", args)
-            if m:
-                targets.append(int(m.group(1), 16))
+        m = re.search(r"0x([0-9a-f]+)$", args)
+        if m:
+            targets.append(int(m.group(1), 16))
         # A call returns to the fall-through much later; only its target can
         # consume the slot load early. An unconditional jump never falls through.
         if op not in JUMPS and op not in LINKING:
@@ -178,7 +179,22 @@ def main():
 
     nop = 0
     patched = 0
+    # Diagnostics: HAZARD_PATCH_SKIP="80012298,8008c30c" leaves those sites
+    # alone, HAZARD_PATCH_ONLY="..." patches nothing else. Both hex addresses.
+    import os
+    skip = {int(a, 16) for a in os.environ.get("HAZARD_PATCH_SKIP", "").split(",") if a}
+    only = {int(a, 16) for a in os.environ.get("HAZARD_PATCH_ONLY", "").split(",") if a}
+    # A conditional branch whose slot load is consumed on both paths is one
+    # site, not two: its trampoline already covers the target and the
+    # fall-through, and patching it twice would rewrite the first `j TRAMP`.
+    seen = set()
     for addr, op, args, slot_op, slot_args, consumer in hazards:
+        if addr in seen:
+            continue
+        seen.add(addr)
+        if addr in skip or (only and addr not in only):
+            print("left alone %08x (diagnostic request)" % addr)
+            continue
         rd = load_destination(slot_op, slot_args)
         if op in ("jr", "jalr", "bltzal", "bgezal", "bal"):
             print("cannot patch %08x: %s branches on a register or links inside the trampoline" % (addr, op))
@@ -211,6 +227,8 @@ def main():
     for h in remaining:
         print("still hazardous %08x: %s %s" % (h[0], h[1], h[2]))
     print("%d patched, %d remaining, %d/%d trampoline words used in %s" % (patched, len(remaining), cursor, capacity, path))
+    if skip or only:
+        return 0
     return 1 if remaining else 0
 
 
