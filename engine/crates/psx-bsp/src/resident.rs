@@ -46,6 +46,41 @@ const RESIDENT_LUMPS: [LumpKind; 13] = [
     LumpKind::Entities,
 ];
 
+const GAMEPLAY_CORE_LUMPS: [LumpKind; 7] = [
+    LumpKind::ModelData,
+    LumpKind::Leaves,
+    LumpKind::Nodes,
+    LumpKind::ClipNodes,
+    LumpKind::Models,
+    LumpKind::Strings,
+    LumpKind::Entities,
+];
+
+/// Resident data retained after loading a cooked map.
+///
+/// [`Self::Complete`] preserves the original whole-map contract. The
+/// renderer-owned [`Self::GameplayCore`] profile retains collision, entity,
+/// brush-model and alias-model data while leaving world vertices, planes,
+/// textures, faces, marks and visibility available only through
+/// [`ResidentMap::source_lump`]. A caller using the smaller profile must
+/// provide its own checked render representation and validate collision plane
+/// indices with [`ResidentMap::collision_plane_references_valid`].
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum ResidentMapProfile {
+    #[default]
+    Complete,
+    GameplayCore,
+}
+
+impl ResidentMapProfile {
+    const fn lumps(self) -> &'static [LumpKind] {
+        match self {
+            Self::Complete => &RESIDENT_LUMPS,
+            Self::GameplayCore => &GAMEPLAY_CORE_LUMPS,
+        }
+    }
+}
+
 /// Borrowed, validated PSB4 corner and shared-position arrays.
 #[derive(Copy, Clone, Debug)]
 pub struct IndexedVertices<'a> {
@@ -169,6 +204,7 @@ pub struct ResidentMap {
     indexed_corner_count: u16,
     indexed_position_count: u16,
     bytes: Vec<u8>,
+    resident_len: usize,
     ranges: [LumpRange; LUMP_COUNT],
     source_ranges: [LumpRange; LUMP_COUNT],
     source_file_len: u32,
@@ -189,6 +225,7 @@ impl ResidentMap {
             indexed_corner_count: 0,
             indexed_position_count: 0,
             bytes: Vec::with_capacity(capacity),
+            resident_len: 0,
             ranges: [LumpRange::EMPTY; LUMP_COUNT],
             source_ranges: [LumpRange::EMPTY; LUMP_COUNT],
             source_file_len: 0,
@@ -201,11 +238,21 @@ impl ResidentMap {
         map_id: u32,
         reader: &mut R,
     ) -> Result<(), MapLoadError<R::Error>> {
+        self.load_with_profile(map_id, reader, ResidentMapProfile::Complete)
+    }
+
+    /// Read one map using a caller-selected resident-data profile.
+    pub fn load_with_profile<R: ReadAt>(
+        &mut self,
+        map_id: u32,
+        reader: &mut R,
+        profile: ResidentMapProfile,
+    ) -> Result<(), MapLoadError<R::Error>> {
         self.clear_loaded_state();
         let index = PsbIndex::read(reader).map_err(MapLoadError::Index)?;
         validate_texture_data(&index)?;
 
-        let total = RESIDENT_LUMPS.iter().try_fold(0usize, |total, &kind| {
+        let total = profile.lumps().iter().try_fold(0usize, |total, &kind| {
             total
                 .checked_add(3)
                 .map(|value| value & !3)
@@ -226,7 +273,7 @@ impl ResidentMap {
 
         self.bytes.resize(total, 0);
         let mut destination = 0usize;
-        for kind in RESIDENT_LUMPS {
+        for &kind in profile.lumps() {
             destination = align_up_4(destination);
             let source = index.lump(kind);
             let resident_len = resident_lump_len(&index, kind);
@@ -276,7 +323,7 @@ impl ResidentMap {
             self.source_ranges[kind as usize] = index.lump(kind);
         }
         self.version = Some(index.version());
-        if index.version() == PsbVersion::IndexedV5 {
+        if index.version() == PsbVersion::IndexedV5 && profile == ResidentMapProfile::Complete {
             let Some((corner_count, position_count)) =
                 validate_indexed_vertices(self.vertex_data())
             else {
@@ -287,7 +334,12 @@ impl ResidentMap {
             self.indexed_position_count = position_count;
         }
         self.source_file_len = index.file_len();
-        if let Err(error) = self.validate_references() {
+        self.resident_len = total;
+        let validation = match profile {
+            ResidentMapProfile::Complete => self.validate_references(),
+            ResidentMapProfile::GameplayCore => self.validate_gameplay_core(),
+        };
+        if let Err(error) = validation {
             self.clear_loaded_state();
             return Err(error);
         }
@@ -311,6 +363,41 @@ impl ResidentMap {
         self.source_file_len
     }
 
+    /// Bytes occupied by immutable resident lumps before the reusable tail.
+    pub const fn resident_bytes_len(&self) -> usize {
+        self.resident_len
+    }
+
+    /// Total allocation available to resident lumps and the reusable tail.
+    pub fn arena_capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
+
+    /// Resize caller-owned storage after the immutable resident-lump prefix.
+    ///
+    /// Returns `false` without changing the current tail when the requested
+    /// length would exceed the arena capacity.
+    pub fn resize_arena_tail(&mut self, len: usize) -> bool {
+        let Some(total) = self.resident_len.checked_add(len) else {
+            return false;
+        };
+        if total > self.bytes.capacity() {
+            return false;
+        }
+        self.bytes.resize(total, 0);
+        true
+    }
+
+    /// Caller-owned storage after the immutable resident-lump prefix.
+    pub fn arena_tail(&self) -> &[u8] {
+        &self.bytes[self.resident_len..]
+    }
+
+    /// Mutable caller-owned storage after the immutable resident-lump prefix.
+    pub fn arena_tail_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes[self.resident_len..]
+    }
+
     /// Source-file range for caller-owned streaming such as textures or sound.
     pub const fn source_lump(&self, kind: LumpKind) -> LumpRange {
         self.source_ranges[kind as usize]
@@ -328,7 +415,9 @@ impl ResidentMap {
 
     /// Validated PSB4 indexed-corner and shared-position arrays.
     pub fn indexed_vertices(&self) -> Option<IndexedVertices<'_>> {
-        if self.version != Some(PsbVersion::IndexedV5) {
+        if self.version != Some(PsbVersion::IndexedV5)
+            || self.ranges[LumpKind::Vertices as usize].len == 0
+        {
             return None;
         }
         let bytes = self.vertex_data();
@@ -435,8 +524,8 @@ impl ResidentMap {
             if node_index < 0 {
                 return Some((-1i32 - node_index as i32) as usize);
             }
-            let node = unsafe { self.nodes().get_unchecked(node_index as usize) };
-            let plane = unsafe { self.planes().get_unchecked(node.plane as usize) };
+            let node = self.nodes().get(node_index as usize)?;
+            let plane = self.planes().get(node.plane as usize)?;
             let dot = match plane.kind {
                 0 => point.x,
                 1 => point.y,
@@ -449,12 +538,27 @@ impl ResidentMap {
         }
     }
 
+    /// Check collision BSP plane references against a caller-owned plane set.
+    ///
+    /// Complete maps already receive this check during loading. Render-owned
+    /// maps use it after decoding their separately retained collision planes.
+    pub fn collision_plane_references_valid(&self, plane_count: usize) -> bool {
+        self.nodes()
+            .iter()
+            .all(|node| (node.plane as usize) < plane_count)
+            && self
+                .clip_nodes()
+                .iter()
+                .all(|node| node.plane >= 0 && (node.plane as usize) < plane_count)
+    }
+
     fn clear_loaded_state(&mut self) {
         self.map_id = None;
         self.version = None;
         self.indexed_corner_count = 0;
         self.indexed_position_count = 0;
         self.bytes.clear();
+        self.resident_len = 0;
         self.ranges = [LumpRange::EMPTY; LUMP_COUNT];
         self.source_ranges = [LumpRange::EMPTY; LUMP_COUNT];
         self.source_file_len = 0;
@@ -563,6 +667,72 @@ impl ResidentMap {
             return Err(MapLoadError::MissingEntities);
         }
         let brush_models = self.brush_models();
+        for (index, entity) in entities.iter().enumerate() {
+            let bad_model =
+                entity.model < 0 && entity.model.saturating_neg() as usize >= brush_models.len();
+            if bad_model || self.string_at(entity.string).is_none() {
+                return Err(MapLoadError::BadEntity(index));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_gameplay_core<E>(&self) -> Result<(), MapLoadError<E>> {
+        let model_data = self.model_data();
+        if model_data.as_ptr() as usize & 3 != 0 || AliasModelTable::new(model_data).is_err() {
+            return Err(MapLoadError::BadAliasModels);
+        }
+
+        let leaves = self.leaves();
+        for (index, leaf) in leaves.iter().enumerate() {
+            if !valid_leaf_contents(leaf.contents) {
+                return Err(MapLoadError::BadLeaf(index));
+            }
+        }
+
+        let nodes = self.nodes();
+        for (index, node) in nodes.iter().enumerate() {
+            let bad_child = node.children.into_iter().any(|child| {
+                if child >= 0 {
+                    child as usize >= nodes.len()
+                } else {
+                    (-1i32 - child as i32) as usize >= leaves.len()
+                }
+            });
+            let bad_bounds =
+                node.mins.x > node.maxs.x || node.mins.y > node.maxs.y || node.mins.z > node.maxs.z;
+            if bad_child || bad_bounds {
+                return Err(MapLoadError::BadNode(index));
+            }
+        }
+
+        let clip_nodes = self.clip_nodes();
+        for (index, node) in clip_nodes.iter().enumerate() {
+            let bad_child = node
+                .children
+                .into_iter()
+                .any(|child| child >= 0 && child as usize >= clip_nodes.len());
+            if node.plane < 0 || bad_child {
+                return Err(MapLoadError::BadClipNode(index));
+            }
+        }
+
+        let brush_models = self.brush_models();
+        for (index, model) in brush_models.iter().enumerate() {
+            let bad_render_head =
+                model.head_nodes[0] < 0 || model.head_nodes[0] as usize >= nodes.len();
+            let bad_clip_head = model.head_nodes[1..]
+                .iter()
+                .any(|&head| head < 0 || head as usize >= clip_nodes.len());
+            if bad_render_head || bad_clip_head {
+                return Err(MapLoadError::BadBrushModel(index));
+            }
+        }
+
+        let entities = self.entities();
+        if entities.len() < 2 {
+            return Err(MapLoadError::MissingEntities);
+        }
         for (index, entity) in entities.iter().enumerate() {
             let bad_model =
                 entity.model < 0 && entity.model.saturating_neg() as usize >= brush_models.len();
@@ -709,6 +879,44 @@ const fn valid_leaf_contents(contents: i16) -> bool {
 mod tests {
     use super::*;
     use crate::Vec3I16;
+
+    #[test]
+    fn gameplay_core_omits_renderer_owned_lumps() {
+        assert_eq!(ResidentMapProfile::Complete.lumps(), &RESIDENT_LUMPS);
+        assert_eq!(
+            ResidentMapProfile::GameplayCore.lumps(),
+            &GAMEPLAY_CORE_LUMPS
+        );
+        for kind in [
+            LumpKind::Vertices,
+            LumpKind::Planes,
+            LumpKind::TextureInfo,
+            LumpKind::Faces,
+            LumpKind::MarkSurfaces,
+            LumpKind::Visibility,
+        ] {
+            assert!(!ResidentMapProfile::GameplayCore.lumps().contains(&kind));
+        }
+    }
+
+    #[test]
+    fn reusable_arena_tail_cannot_overwrite_resident_prefix() {
+        let mut map = ResidentMap::with_capacity(16);
+        map.bytes.extend_from_slice(&[1, 2, 3, 4]);
+        map.resident_len = map.bytes.len();
+
+        assert!(map.resize_arena_tail(8));
+        map.arena_tail_mut()
+            .copy_from_slice(&[5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(&map.bytes[..map.resident_bytes_len()], &[1, 2, 3, 4]);
+        assert_eq!(map.arena_tail(), &[5, 6, 7, 8, 9, 10, 11, 12]);
+
+        assert!(!map.resize_arena_tail(13));
+        assert_eq!(map.arena_tail(), &[5, 6, 7, 8, 9, 10, 11, 12]);
+        assert!(map.resize_arena_tail(2));
+        assert_eq!(map.arena_tail(), &[5, 6]);
+        assert_eq!(&map.bytes[..map.resident_bytes_len()], &[1, 2, 3, 4]);
+    }
 
     #[test]
     fn legacy_structural_records_compact_without_semantic_drift() {

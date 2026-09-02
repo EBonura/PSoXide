@@ -83,6 +83,31 @@ SECTIONS {
     .text : {
         __text_start = .;
         KEEP(*(.text._start));
+        /* Instruction-cache affinity: the R3000 I-cache is 4 KiB and
+           direct-mapped, so a hot leaf that happens to land 4 KiB below
+           its caller's inner loop evicts that loop on every call. A refill
+           profile of the Cortex whole-level tape (2026-09-02) showed
+           materialize_pxbsp_face and draw_pxbsp_faces evicting each other
+           for 10% of all refills, the animation pose sampler and the model
+           submitter for 9%, and the collision trace kernels for 4%. Placing
+           each caller directly before its leaves keeps those pairs in
+           disjoint cache sets. Name fragments match the mangled
+           function-section names regardless of crate hash; a renamed
+           function silently falls back to default placement, which is
+           safe. Shared engine code only, so every guest benefits. */
+        *(.text.*draw_pxbsp_faces*)
+        *(.text.*materialize_pxbsp_face*)
+        *(.text.*collect_marked_faces_ascending*)
+        *(.text.*submit_textured_model_geometry_impl*)
+        *(.text.*AnimationPoseSample*4pose*)
+        *(.text.*pose_looped_q12*)
+        *(.text.*flush_blended_model_vertex_chunk*)
+        *(.text.*shade_model_material_at_bounds*)
+        *(.text.*point_light_weight*)
+        *(.text.*CollisionHull*trace_into*)
+        *(.text.*point_contents_from*)
+        *(.text.*plane_contact*)
+        *(.text.*model_collision_hull*)
         *(.text .text.*);
         __text_end = .;
     } > RAM

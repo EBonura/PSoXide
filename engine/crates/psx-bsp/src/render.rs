@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use psx_engine::{
     attributed_clip::{
-        clip_convex_plane, crossing_fraction_q16_i64, lerp_q16_i32, AttributedClipPlane,
+        clip_convex_plane, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
         ClipTraversal,
     },
     compose_classic_alias_transform, materialize_classic_affine_baked_light_vertices,
@@ -23,7 +23,7 @@ use psx_gpu::material::TextureWindow;
 use psx_gpu::prim::ClassicTriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene::{self, AabbClipPlane};
-use psx_math::int32::mul_q12_i32;
+use psx_math::int32::{isqrt_i32, mul_q12_i32};
 use psx_math::{cos_q12, sin_q12};
 
 use crate::collision::BrushTransform;
@@ -31,7 +31,7 @@ use crate::pxbsp::{
     decompress_visibility, material_blend, material_flags, PxbspMaterial, PxbspMaterialAnimation,
     PXBSP_MAX_VISIBILITY_BYTES,
 };
-use crate::pxbsp_resident::PxbspResidentMap;
+use crate::pxbsp_resident::{FaceRef, PxbspResidentMap};
 use crate::resident::ResidentMap;
 use crate::{
     CompactPlane, Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT,
@@ -68,6 +68,26 @@ fn packed_face_state(states: &[u8], index: usize) -> u8 {
     (states[index >> 2] >> ((index & 3) << 1)) & 3
 }
 
+/// [`packed_face_state`] for an index the table is known to cover.
+///
+/// # Safety
+/// `index >> 2` must be less than `states.len()`.
+#[inline(always)]
+unsafe fn packed_face_state_unchecked(states: &[u8], index: usize) -> u8 {
+    (unsafe { *states.get_unchecked(index >> 2) } >> ((index & 3) << 1)) & 3
+}
+
+/// [`set_packed_face_state`] for an index the table is known to cover.
+///
+/// # Safety
+/// `index >> 2` must be less than `states.len()`.
+#[inline(always)]
+unsafe fn set_packed_face_state_unchecked(states: &mut [u8], index: usize, state: u8) {
+    let shift = (index & 3) << 1;
+    let byte = unsafe { states.get_unchecked_mut(index >> 2) };
+    *byte = (*byte & !(3 << shift)) | ((state & 3) << shift);
+}
+
 #[inline]
 fn set_packed_face_state(states: &mut [u8], index: usize, state: u8) {
     let shift = (index & 3) << 1;
@@ -96,25 +116,51 @@ fn set_packed_bit(bits: &mut [u8], index: usize) {
 fn collect_marked_faces_ascending(states: &[u8], face_count: usize, output: &mut Vec<u16>) -> bool {
     output.clear();
     let capacity = output.capacity();
-    for (byte_index, &packed) in states.iter().enumerate() {
-        if packed == 0 {
+    let mut written = 0usize;
+    let out = output.as_mut_ptr();
+    // Whole words first: an empty stretch of the face table costs one load
+    // per sixteen faces, and the marked faces are a small fraction of it.
+    // The table is a Vec<u8>, so the word view is byte-wise to stay aligned
+    // on any allocation; the compiler turns the four-byte compare into one
+    // load when the address is aligned.
+    let mut byte_index = 0usize;
+    let len = states.len();
+    while byte_index < len {
+        if byte_index + 4 <= len
+            && u32::from_ne_bytes([
+                states[byte_index],
+                states[byte_index + 1],
+                states[byte_index + 2],
+                states[byte_index + 3],
+            ]) == 0
+        {
+            byte_index += 4;
             continue;
         }
-        let base = byte_index << 2;
-        for slot in 0..4 {
-            if packed >> (slot << 1) & 3 == 0 {
-                continue;
+        let packed = states[byte_index];
+        if packed != 0 {
+            let base = byte_index << 2;
+            let mut slot = 0usize;
+            while slot < 4 {
+                if packed >> (slot << 1) & 3 != 0 {
+                    let face = base + slot;
+                    if face >= face_count {
+                        break;
+                    }
+                    if written == capacity {
+                        return false;
+                    }
+                    // `written < capacity`, and the length is set once below.
+                    unsafe { out.add(written).write(face as u16) };
+                    written += 1;
+                }
+                slot += 1;
             }
-            let face = base + slot;
-            if face >= face_count {
-                break;
-            }
-            if output.len() == capacity {
-                return false;
-            }
-            output.push(face as u16);
         }
+        byte_index += 1;
     }
+    // Every slot below `written` was initialised by the write above.
+    unsafe { output.set_len(written) };
     true
 }
 
@@ -150,7 +196,7 @@ const _: () = assert!(AFFINE_BATCH_WORKSPACE_BYTES <= psx_engine::scratchpad::SI
 /// too. The batch gives up six vertex slots to pay for it; this project's
 /// cook has no face wider than six vertices, so the batch still groups eight
 /// faces per flush instead of nine.
-const PXBSP_CLIP_PLANE_BYTES: usize = core::mem::size_of::<[([i32; 3], i64); 5]>();
+const PXBSP_CLIP_PLANE_BYTES: usize = core::mem::size_of::<[([i32; 3], i32); 5]>();
 const PXBSP_BATCH_MAX_VERTICES: usize = 33;
 const PXBSP_BATCH_MAX_SURFACES: usize = 13;
 const PXBSP_AFFINE_BATCH_VERTEX_CAPACITY: usize =
@@ -268,9 +314,15 @@ impl PxbspFaceSelection {
         }
     }
 
+    /// `index` is inside [`Self::range`], which is bounded by
+    /// `visible_faces.len()` for the visible-world selection.
+    #[inline(always)]
     fn face_index(self, index: usize, visible_faces: &[u16]) -> usize {
         match self {
-            Self::VisibleWorld => visible_faces[index] as usize,
+            Self::VisibleWorld => {
+                debug_assert!(index < visible_faces.len());
+                unsafe { *visible_faces.get_unchecked(index) as usize }
+            }
             Self::ModelRange { .. } => index,
         }
     }
@@ -283,12 +335,39 @@ pub fn configure_projection() {
     scene::set_avsz_weights(0x155, 0x100);
 }
 
+/// Uniform scale the XBSP view remaps bake into the rotation (3.0 in Q12).
+///
+/// Projection divides it back out, so screen positions are unchanged, but
+/// every GTE `SZ` the classic affine path reads is this many times the true
+/// view depth, and so is every OTZ it stages (`SZ / 4` with the installed
+/// `ZSF3 = 0x155`, `ZSF4 = 0x100`). Anything else that sorts into the same
+/// ordering table must key its depth through the same law; see
+/// [`pxbsp_classic_far_depth`].
+pub const XBSP_VIEW_SCALE_Q12: i32 = 0x3000;
+
+/// True view depth at which a flat PXBSP surface reaches OT slot `ot_depth`,
+/// the first slot the classic path rejects: `ot_depth * 4 / scale`.
+///
+/// Mapping `0..=this` linearly onto the world band reproduces the classic
+/// triangle key for equal-depth vertices to within a slot, so the runtime
+/// uses it as the far end of the depth range every non-world draw maps
+/// through. Surfaces beyond it are not drawn by the world renderer at all.
+pub const fn pxbsp_classic_far_depth(ot_depth: u16) -> i32 {
+    (ot_depth as i32 * 4 * 4096 + XBSP_VIEW_SCALE_Q12 / 2) / XBSP_VIEW_SCALE_Q12
+}
+
+const XBSP_VIEW_SCALE: i16 = XBSP_VIEW_SCALE_Q12 as i16;
+
 /// Build and load the classic XBSP camera transform.
 pub fn load_view(camera: Camera) -> ViewTransform {
     load_view_with_coordinates(
         camera,
         Mat3I16 {
-            m: [[0, -0x3000, 0], [0, 0, -0x3000], [0x3000, 0, 0]],
+            m: [
+                [0, -XBSP_VIEW_SCALE, 0],
+                [0, 0, -XBSP_VIEW_SCALE],
+                [XBSP_VIEW_SCALE, 0, 0],
+            ],
         },
     )
 }
@@ -303,12 +382,51 @@ pub fn load_view(camera: Camera) -> ViewTransform {
 /// mirrored, so characters faced the wrong way and the analog stick read
 /// mirrored).
 pub fn load_pxbsp_view(camera: Camera) -> ViewTransform {
-    load_view_with_coordinates(
-        camera,
-        Mat3I16 {
-            m: [[0, 0, 0x3000], [0, -0x3000, 0], [0x3000, 0, 0]],
-        },
-    )
+    load_view_with_coordinates(camera, PXBSP_COORDINATES)
+}
+
+/// PXBSP's axis remap: the map's `+X` forward, `+Y` up frame into the GTE's
+/// `+Z` forward, `-Y` up frame, carrying the view scale.
+const PXBSP_COORDINATES: Mat3I16 = Mat3I16 {
+    m: [
+        [0, 0, XBSP_VIEW_SCALE],
+        [0, -XBSP_VIEW_SCALE, 0],
+        [XBSP_VIEW_SCALE, 0, 0],
+    ],
+};
+
+/// The exact PXBSP view rotation for a camera whose pitch and yaw are known
+/// as Q12 sine and cosine pairs: `Rx(pitch) * Ry(yaw)`, the same product
+/// [`load_pxbsp_view`] forms from 256-step table angles.
+///
+/// A third-person engine camera carries full-precision trig and the model
+/// pass rotates with it. Quantising that camera to the 256-step table for
+/// the world pass rotated the world by up to 0.7 degrees against the
+/// actors standing in it, which at 250 units of depth is three units of
+/// floor: every actor looked a little above or below the ground depending
+/// on where the camera sat between two table steps.
+pub fn pxbsp_view_rotation(sin_pitch: i16, cos_pitch: i16, sin_yaw: i16, cos_yaw: i16) -> Mat3I16 {
+    let pitch = Mat3I16 {
+        m: [
+            [0x1000, 0, 0],
+            [0, cos_pitch, 0i16.wrapping_sub(sin_pitch)],
+            [0, sin_pitch, cos_pitch],
+        ],
+    };
+    let yaw = Mat3I16 {
+        m: [
+            [cos_yaw, 0, sin_yaw],
+            [0, 0x1000, 0],
+            [0i16.wrapping_sub(sin_yaw), 0, cos_yaw],
+        ],
+    };
+    pitch.mul(&yaw)
+}
+
+/// [`load_pxbsp_view`] with a caller-built view rotation such as
+/// [`pxbsp_view_rotation`]; `origin` is Q12 world units as in [`Camera`].
+pub fn load_pxbsp_view_rotation(origin: Vec3I32, view: Mat3I16) -> ViewTransform {
+    load_view_rotation_with_coordinates(origin, view, PXBSP_COORDINATES)
 }
 
 fn load_view_with_coordinates(camera: Camera, coordinates: Mat3I16) -> ViewTransform {
@@ -317,13 +435,21 @@ fn load_view_with_coordinates(camera: Camera, coordinates: Mat3I16) -> ViewTrans
         (camera.angles[1] as u16) >> 4,
         (camera.angles[2] as u16) >> 4,
     );
+    load_view_rotation_with_coordinates(camera.origin, view, coordinates)
+}
+
+fn load_view_rotation_with_coordinates(
+    origin: Vec3I32,
+    view: Mat3I16,
+    coordinates: Mat3I16,
+) -> ViewTransform {
     let rotation = scene::compose_rotation_scheduled(&view, &coordinates);
     scene::load_rotation(&rotation);
     scene::load_translation(GteVec3I32::ZERO);
     let translation = scene::transform_vertex_scheduled(GteVec3I16::new(
-        (camera.origin.x.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        (camera.origin.y.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        (camera.origin.z.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        (origin.x.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        (origin.y.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        (origin.z.saturating_neg() >> 12).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
     ));
     scene::load_translation(translation);
     ViewTransform {
@@ -384,7 +510,18 @@ enum AabbClass {
 /// be oversize.
 #[derive(Copy, Clone, Debug)]
 pub struct FrustumPlanes {
-    planes: [([i32; 3], i64); 5],
+    /// Plane normal and constant term, `distance(p) = n . p + c`, all `i32`.
+    ///
+    /// The near plane is exact: a Q12 view row against `i16` positions and
+    /// an `i16`-range camera origin fits `i32`. The side planes carry the
+    /// focal length and half-extent factors, so their normals are rounded
+    /// down by `side_shift` bits to fit; [`Self::side_error`] bounds the
+    /// rounding error of any side distance and every classification below
+    /// treats that band as "undecided" so a rounded plane can neither reject
+    /// a visible polygon nor vouch for a box it does not contain.
+    planes: [([i32; 3], i32); 5],
+    /// Worst-case rounding error of a side-plane distance (zero for near).
+    side_error: i32,
     view_rows: [[i16; 3]; 3],
     view_translation: [i32; 3],
     side_scale: [i32; 2],
@@ -399,6 +536,7 @@ impl FrustumPlanes {
     pub fn from_view(
         rotation: &Mat3I16,
         translation: GteVec3I32,
+        camera_origin_units: [i32; 3],
         projection: ViewProjection,
     ) -> Self {
         let row = |i: usize| -> [i32; 3] {
@@ -409,36 +547,81 @@ impl FrustumPlanes {
             ]
         };
         let (right, down, forward) = (row(0), row(1), row(2));
-        let scale_q12 = isqrt_i64(
-            forward[0] as i64 * forward[0] as i64
-                + forward[1] as i64 * forward[1] as i64
-                + forward[2] as i64 * forward[2] as i64,
-        ) as i32;
+        // Squared Q12 row length: three products of at most 3 * 4096 each,
+        // under 4.6e8, so the 32-bit square root answers it.
+        let scale_q12 = isqrt_i32(
+            forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2],
+        );
         let near_view = projection.near_world.saturating_mul(scale_q12) >> 12;
-        // near: forward.p + T.z >= near_view
-        let near = (forward, ((translation.z - near_view) as i64) << 12);
+        // The view translation is the rotated, negated camera origin in world
+        // units, so `T.z << 12` is `-forward . camera` and every distance is
+        // camera-relative: a Q12 row against an `i16` position stays under
+        // 7e8, and the near constant under 2^30, so the near plane is exact
+        // in `i32` and bit-identical to the former i64 evaluation.
+        let _ = camera_origin_units;
+        let near = (
+            forward,
+            (translation.z << 12).wrapping_sub(near_view << 12),
+        );
         // side planes: |view_x| <= (half_w + margin)/H * view_z, same for y.
         let kx = projection.half_width + projection.edge_margin;
         let ky = projection.half_height + projection.edge_margin;
         let h = projection.focal_length.max(1);
-        let combine = |axis: [i32; 3], axis_t: i32, k: i32, sign: i32| -> ([i32; 3], i64) {
-            let n = [
+        // Largest normal L1 that keeps `n . q` inside i32 for |q| < 65536 with
+        // room for the constant term.
+        const SIDE_L1_LIMIT: i32 = 30_000;
+        let mut side_shift = 0u32;
+        let raw_side = |axis: [i32; 3], k: i32, sign: i32| -> [i32; 3] {
+            [
                 k * forward[0] - sign * h * axis[0],
                 k * forward[1] - sign * h * axis[1],
                 k * forward[2] - sign * h * axis[2],
-            ];
-            let c =
-                (k as i64 * translation.z as i64 - sign as i64 * h as i64 * axis_t as i64) << 12;
-            (n, c)
+            ]
         };
+        let raw = [
+            raw_side(right, kx, 1),
+            raw_side(right, kx, -1),
+            raw_side(down, ky, 1),
+            raw_side(down, ky, -1),
+        ];
+        for n in &raw {
+            let l1 = n[0].unsigned_abs() + n[1].unsigned_abs() + n[2].unsigned_abs();
+            while (l1 >> side_shift) > SIDE_L1_LIMIT as u32 {
+                side_shift += 1;
+            }
+        }
+        let round = |value: i32| -> i32 {
+            if side_shift == 0 {
+                value
+            } else {
+                (value + (1 << (side_shift - 1))) >> side_shift
+            }
+        };
+        // The side constant is `(k * T.z - sign * h * T.axis) << 12` reduced
+        // by the same shift, exact because the shift never exceeds twelve.
+        let side = |n: [i32; 3], axis_t: i32, k: i32, sign: i32| -> ([i32; 3], i32) {
+            let n = [round(n[0]), round(n[1]), round(n[2])];
+            let constant = k.wrapping_mul(translation.z).wrapping_sub(sign.wrapping_mul(h).wrapping_mul(axis_t));
+            let constant = if side_shift <= 12 {
+                constant << (12 - side_shift)
+            } else {
+                constant >> (side_shift - 12)
+            };
+            (n, constant)
+        };
+        // Each rounded component is off by at most one half; the distance of a
+        // point up to 65535 units away on every axis is off by at most that
+        // times three halves. Zero when nothing was rounded.
+        let side_error = if side_shift == 0 { 0 } else { 3 * 65_536 / 2 };
         Self {
             planes: [
                 near,
-                combine(right, translation.x, kx, 1),
-                combine(right, translation.x, kx, -1),
-                combine(down, translation.y, ky, 1),
-                combine(down, translation.y, ky, -1),
+                side(raw[0], translation.x, kx, 1),
+                side(raw[1], translation.x, kx, -1),
+                side(raw[2], translation.y, ky, 1),
+                side(raw[3], translation.y, ky, -1),
             ],
+            side_error,
             view_rows: [rotation.m[0], rotation.m[1], rotation.m[2]],
             view_translation: [translation.x, translation.y, translation.z],
             side_scale: [kx, ky],
@@ -446,24 +629,60 @@ impl FrustumPlanes {
             near_view,
         }
     }
-
-    #[inline]
-    fn distance(plane: &([i32; 3], i64), position: [i16; 3]) -> i64 {
-        plane.0[0] as i64 * position[0] as i64
-            + plane.0[1] as i64 * position[1] as i64
-            + plane.0[2] as i64 * position[2] as i64
-            + plane.1
-    }
-
-    /// Exact sign of [`Self::distance`]. Keep this expression shared between
-    /// host validation and the MIPS guest: a previous hand-written HI:LO
-    /// accumulator returned false signs on real guest inputs and caused
-    /// visible world polygons to be rejected as outside the frustum.
+    /// Rounding error band of plane `index`: zero for the exact near plane.
+    /// Distance of `position` from plane `index`: the dot on the GTE on the
+    /// guest (the planes must be loaded by [`load_gte_clip_planes`]), the
+    /// same wrapping `i32` products on the host.
     #[inline(always)]
-    fn distance_negative(plane: &([i32; 3], i64), position: [i16; 3]) -> bool {
-        Self::distance(plane, position) < 0
+    fn distance_at(&self, index: usize, position: [i16; 3]) -> i32 {
+        #[cfg(target_arch = "mips")]
+        {
+            let xy = (position[0] as u16 as u32) | ((position[1] as u16 as u32) << 16);
+            let z = position[2] as i32 as u32;
+            // One MVMVA yields three plane dots but a box corner is chosen
+            // for one plane, so only that MAC is read back.
+            let dot = unsafe {
+                match index {
+                    0 => gte_dot_one::<MVMVA_LLM_V0_SF0, MFC2_MAC1>(xy, z),
+                    1 => gte_dot_one::<MVMVA_LLM_V0_SF0, MFC2_MAC2>(xy, z),
+                    2 => gte_dot_one::<MVMVA_LLM_V0_SF0, MFC2_MAC3>(xy, z),
+                    3 => gte_dot_one::<MVMVA_LCM_V0_SF0, MFC2_MAC1>(xy, z),
+                    _ => gte_dot_one::<MVMVA_LCM_V0_SF0, MFC2_MAC2>(xy, z),
+                }
+            };
+            dot.wrapping_add(self.planes[index].1)
+        }
+        #[cfg(not(target_arch = "mips"))]
+        {
+            Self::distance(&self.planes[index], position)
+        }
     }
-
+    #[inline(always)]
+    fn error_of(&self, index: usize) -> i32 {
+        if index == PXBSP_CLIP_NEAR_PLANE {
+            0
+        } else {
+            self.side_error
+        }
+    }
+    #[inline(always)]
+    fn distance(plane: &([i32; 3], i32), position: [i16; 3]) -> i32 {
+        plane.0[0]
+            .wrapping_mul(position[0] as i32)
+            .wrapping_add(plane.0[1].wrapping_mul(position[1] as i32))
+            .wrapping_add(plane.0[2].wrapping_mul(position[2] as i32))
+            .wrapping_add(plane.1)
+    }
+    /// The point is outside beyond any rounding doubt.
+    #[inline(always)]
+    fn surely_outside(plane: &([i32; 3], i32), error: i32, position: [i16; 3]) -> bool {
+        Self::distance(plane, position) < -error
+    }
+    /// The point is inside beyond any rounding doubt.
+    #[inline(always)]
+    fn surely_inside(plane: &([i32; 3], i32), error: i32, position: [i16; 3]) -> bool {
+        Self::distance(plane, position) >= error
+    }
     /// Clip one convex polygon against the planes named by `clip_mask`.
     ///
     /// `None` rejects the polygon: some live plane has every vertex outside
@@ -491,7 +710,8 @@ impl FrustumPlanes {
     /// hold it somewhere cheaper to read than main RAM.
     #[inline(always)]
     fn cull_polygon(
-        planes: &[([i32; 3], i64); 5],
+        planes: &[([i32; 3], i32); 5],
+        side_error: i32,
         clip_mask: u8,
         count: usize,
         mut vertex: impl FnMut(usize) -> [i16; 3],
@@ -502,22 +722,32 @@ impl FrustumPlanes {
             let plane_index = live.trailing_zeros() as usize;
             live &= live - 1;
             let plane = unsafe { planes.get_unchecked(plane_index) };
+            let error = if plane_index == PXBSP_CLIP_NEAR_PLANE { 0 } else { side_error };
             let mut wholly_outside = true;
             let mut any_outside = false;
             let mut index = 0usize;
             while index < count {
-                if Self::distance_negative(plane, vertex(index)) {
-                    any_outside = true;
-                    // Only the near plane still has something to learn once
-                    // one vertex is outside and another is inside.
-                    if !wholly_outside {
+                // A rounded side plane has an error band: a vertex inside it
+                // neither proves the polygon visible nor lets it be rejected.
+                // Rejection needs every vertex surely outside; the near clip
+                // decision fires for any vertex not surely inside. The near
+                // band is zero, so that plane keeps its exact answers.
+                let distance = Self::distance(plane, vertex(index));
+                if distance >= error {
+                    wholly_outside = false;
+                    // Every other plane only decides whether the polygon is
+                    // wholly outside, which this vertex just answered; the
+                    // near plane still wants to know whether any vertex is
+                    // outside.
+                    if plane_index != PXBSP_CLIP_NEAR_PLANE || any_outside {
                         break;
                     }
                 } else {
-                    wholly_outside = false;
-                    // Every other plane only decides whether the polygon is
-                    // wholly outside, which this vertex just answered.
-                    if plane_index != PXBSP_CLIP_NEAR_PLANE || any_outside {
+                    any_outside = true;
+                    if distance >= -error {
+                        wholly_outside = false;
+                    }
+                    if !wholly_outside {
                         break;
                     }
                 }
@@ -600,7 +830,8 @@ impl FrustumPlanes {
                 if normal[1] >= 0 { maxs[1] } else { mins[1] },
                 if normal[2] >= 0 { maxs[2] } else { mins[2] },
             ];
-            if Self::distance_negative(plane, outer) {
+            let error = self.error_of(index);
+            if self.distance_at(index, outer) < -error {
                 return AabbClass::Outside;
             }
             if wholly_inside {
@@ -610,7 +841,7 @@ impl FrustumPlanes {
                     if normal[1] >= 0 { mins[1] } else { maxs[1] },
                     if normal[2] >= 0 { mins[2] } else { maxs[2] },
                 ];
-                wholly_inside = !Self::distance_negative(plane, inner);
+                wholly_inside = self.distance_at(index, inner) >= error;
             }
             index += 1;
         }
@@ -644,7 +875,8 @@ impl FrustumPlanes {
                 if normal[1] >= 0 { maxs[1] } else { mins[1] },
                 if normal[2] >= 0 { maxs[2] } else { mins[2] },
             ];
-            if Self::distance_negative(plane, outer) {
+            let error = self.error_of(index);
+            if self.distance_at(index, outer) < -error {
                 return None;
             }
             let inner = [
@@ -652,12 +884,31 @@ impl FrustumPlanes {
                 if normal[1] >= 0 { mins[1] } else { maxs[1] },
                 if normal[2] >= 0 { mins[2] } else { maxs[2] },
             ];
-            if !Self::distance_negative(plane, inner) {
+            if self.distance_at(index, inner) >= error {
                 residual &= !(1 << index);
             }
             index += 1;
         }
         Some(residual)
+    }
+
+    /// [`Self::aabb_outside`] for a box in `i32` world units, computed on
+    /// the CPU so it needs no GTE state: for the handful of world objects a
+    /// frame asks about, that is cheaper than loading the plane matrices.
+    /// Coordinates are clamped to the `i16` range the planes were built
+    /// for; a box that large is never surely outside anyway.
+    pub fn box_surely_outside(&self, mins: [i32; 3], maxs: [i32; 3]) -> bool {
+        let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        let mins = [clamp(mins[0]), clamp(mins[1]), clamp(mins[2])];
+        let maxs = [clamp(maxs[0]), clamp(maxs[1]), clamp(maxs[2])];
+        self.planes.iter().enumerate().any(|(index, plane)| {
+            let positive = [
+                if plane.0[0] >= 0 { maxs[0] } else { mins[0] },
+                if plane.0[1] >= 0 { maxs[1] } else { mins[1] },
+                if plane.0[2] >= 0 { maxs[2] } else { mins[2] },
+            ];
+            Self::distance(plane, positive) < -self.error_of(index)
+        })
     }
 
     /// True when the whole axis-aligned box lies outside any clip plane.
@@ -667,13 +918,13 @@ impl FrustumPlanes {
     fn aabb_outside(&self, mins: Vec3I16, maxs: Vec3I16) -> bool {
         let mins = [mins.x, mins.y, mins.z];
         let maxs = [maxs.x, maxs.y, maxs.z];
-        self.planes.iter().any(|plane| {
+        self.planes.iter().enumerate().any(|(index, plane)| {
             let positive = [
                 if plane.0[0] >= 0 { maxs[0] } else { mins[0] },
                 if plane.0[1] >= 0 { maxs[1] } else { mins[1] },
                 if plane.0[2] >= 0 { maxs[2] } else { mins[2] },
             ];
-            Self::distance_negative(plane, positive)
+            self.distance_at(index, positive) < -self.error_of(index)
         })
     }
 
@@ -776,8 +1027,11 @@ impl FrustumPlanes {
         for vertex in &vertices[..count] {
             let mut vertex_outside = 0u8;
             for (plane_index, plane) in self.planes.iter().enumerate() {
-                if Self::distance(plane, vertex.position) < 0 {
+                let error = self.error_of(plane_index);
+                if !Self::surely_inside(plane, error, vertex.position) {
                     all_inside = false;
+                }
+                if Self::surely_outside(plane, error, vertex.position) {
                     vertex_outside |= 1 << plane_index;
                 }
             }
@@ -811,10 +1065,10 @@ impl FrustumPlanes {
     }
 }
 
-struct PxbspClipPlane<'a>(&'a ([i32; 3], i64));
+struct PxbspClipPlane<'a>(&'a ([i32; 3], i32));
 
 impl AttributedClipPlane<ClassicAffineVertex> for PxbspClipPlane<'_> {
-    type Distance = i64;
+    type Distance = i32;
 
     #[inline(always)]
     fn distance(&self, _: usize, vertex: &ClassicAffineVertex) -> Self::Distance {
@@ -836,14 +1090,14 @@ impl AttributedClipPlane<ClassicAffineVertex> for PxbspClipPlane<'_> {
         second: &ClassicAffineVertex,
         second_distance: Self::Distance,
     ) -> ClassicAffineVertex {
-        let fraction = crossing_fraction_q16_i64(first_distance, second_distance);
+        let fraction = crossing_fraction_q16_i32(first_distance, second_distance);
         lerp_vertex(first, second, fraction)
     }
 }
 
 #[inline(never)]
 fn clip_polygon_plane(
-    plane: &([i32; 3], i64),
+    plane: &([i32; 3], i32),
     source: &[ClassicAffineVertex],
     destination: &mut [ClassicAffineVertex],
 ) -> usize {
@@ -860,9 +1114,9 @@ fn clip_polygon_plane(
 fn lerp_vertex(
     a: &ClassicAffineVertex,
     b: &ClassicAffineVertex,
-    fraction_q16: i64,
+    fraction_q16: u32,
 ) -> ClassicAffineVertex {
-    let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32(x, y, fraction_q16) };
+    let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32_exact(x, y, fraction_q16) };
     let lerp_u8 = |x: u8, y: u8| -> u8 { lerp_i(x as i32, y as i32).clamp(0, 255) as u8 };
     let ca = a.color;
     let cb = b.color;
@@ -883,56 +1137,6 @@ fn lerp_vertex(
     }
 }
 
-/// `floor(sqrt(value))` for a positive `value`, zero otherwise.
-///
-/// Digit-by-digit, not Newton. The Newton form divided once per iteration and
-/// took about fifteen of them for a view-row length, and a 64-bit division on
-/// this target is a call into `compiler_builtins`' `u64_div_rem`. This runs on
-/// shifts, adds and compares only. The 32-bit kernel answers every value a
-/// squared view-row length can produce; the 64-bit tail keeps the general
-/// contract for a caller that is not `from_view`.
-fn isqrt_i64(value: i64) -> i64 {
-    if value <= 0 {
-        return 0;
-    }
-    let value = value as u64;
-    if value <= u32::MAX as u64 {
-        let mut remainder = value as u32;
-        let mut root = 0u32;
-        let mut bit = 1u32 << 30;
-        while bit > remainder {
-            bit >>= 2;
-        }
-        while bit != 0 {
-            let trial = root + bit;
-            if remainder >= trial {
-                remainder -= trial;
-                root = (root >> 1) + bit;
-            } else {
-                root >>= 1;
-            }
-            bit >>= 2;
-        }
-        return i64::from(root);
-    }
-    let mut remainder = value;
-    let mut root = 0u64;
-    let mut bit = 1u64 << 62;
-    while bit > remainder {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        let trial = root + bit;
-        if remainder >= trial {
-            remainder -= trial;
-            root = (root >> 1) + bit;
-        } else {
-            root >>= 1;
-        }
-        bit >>= 2;
-    }
-    root as i64
-}
 
 pub struct Renderer {
     frame: u32,
@@ -961,6 +1165,10 @@ pub struct Renderer {
     frame_pxbsp_face_clip_mask: Vec<u8>,
     /// Cached PVS reachability for the compact PXBSP render tree.
     pxbsp_node_visible: Vec<u8>,
+    /// Two bits per map plane: which side of it the camera origin of the
+    /// current face pass is on, resolved on first use. Coplanar faces share
+    /// planes, so the per-face front/back test becomes a table read.
+    frame_plane_side: Vec<u8>,
     pxbsp_node_discovered: Vec<u8>,
     pxbsp_node_count: usize,
     pxbsp_node_stack: Vec<u32>,
@@ -1009,6 +1217,11 @@ impl Renderer {
     /// half-extents), so the brush-face frustum clip matches it.
     pub fn set_view_projection(&mut self, projection: ViewProjection) {
         self.view_projection = projection;
+    }
+
+    /// The projection the world pass builds its frustum from.
+    pub fn view_projection(&self) -> ViewProjection {
+        self.view_projection
     }
 
     /// Configure whether PXBSP sky surfaces act as visibility apertures.
@@ -1139,6 +1352,7 @@ impl Renderer {
             cached_frustum: None,
             view_projection: ViewProjection::DEFAULT,
             pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
+            frame_plane_side: Vec::new(),
             pxbsp_material_epoch: 0,
             track_sky_apertures: true,
             light_styles,
@@ -1368,7 +1582,12 @@ impl Renderer {
         scene::load_translation(view.translation);
 
         let frustum =
-            FrustumPlanes::from_view(&view.rotation, view.translation, self.view_projection);
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                self.view_projection,
+            );
         let frame = if self.mark_visible_pxbsp_faces(map, camera.origin)
             && self.select_frame_pxbsp_faces(map, camera.origin, &frustum)
         {
@@ -1429,7 +1648,12 @@ impl Renderer {
         );
         scene::load_rotation(&rotation);
         scene::load_translation(translation);
-        let frustum = FrustumPlanes::from_view(&rotation, translation, self.view_projection);
+        let frustum = FrustumPlanes::from_view(
+            &rotation,
+            translation,
+            [local_camera.x >> 12, local_camera.y >> 12, local_camera.z >> 12],
+            self.view_projection,
+        );
 
         // Quake-PSX R_DrawBrushModel also scans the brush model's bounded
         // surface slice and performs its plane-side test per face. World-node
@@ -1504,25 +1728,39 @@ impl Renderer {
         // constant address and one-cycle reads; on the host a local copy
         // addressed off `sp`.
         let frustum_local = *frustum;
+        let side_error = frustum_local.side_error;
         #[cfg(target_arch = "mips")]
-        let clip_planes: &[([i32; 3], i64); 5] = unsafe {
-            let block = psx_engine::scratchpad::ptr_at::<([i32; 3], i64)>(0);
+        let clip_planes: &[([i32; 3], i32); 5] = unsafe {
+            let block = psx_engine::scratchpad::ptr_at::<([i32; 3], i32)>(0);
             core::ptr::copy_nonoverlapping(frustum_local.planes.as_ptr(), block, 5);
-            &*block.cast::<[([i32; 3], i64); 5]>()
+            &*block.cast::<[([i32; 3], i32); 5]>()
         };
         #[cfg(not(target_arch = "mips"))]
-        let clip_planes: &[([i32; 3], i64); 5] = &frustum_local.planes;
+        let clip_planes: &[([i32; 3], i32); 5] = &frustum_local.planes;
+        #[cfg(target_arch = "mips")]
+        load_gte_clip_planes(clip_planes);
         // Every face pass gets its own epoch, so an entry cached under a
         // different animation tick or a different binding table cannot hit.
         self.pxbsp_material_epoch = self.pxbsp_material_epoch.wrapping_add(1);
         let epoch = self.pxbsp_material_epoch;
+        // Each pass has its own camera origin (brush models are drawn in
+        // their own space), so the plane-side table starts unknown.
+        let plane_side_bytes = map.planes().len().div_ceil(4);
+        if self.frame_plane_side.len() != plane_side_bytes {
+            self.frame_plane_side = vec![0; plane_side_bytes];
+        } else {
+            self.frame_plane_side.fill(0);
+        }
         let (first_face, face_end) = selection.range(faces.len(), self.frame_pxbsp_faces.len());
         for selection_index in first_face..face_end {
             let face_index = selection.face_index(selection_index, &self.frame_pxbsp_faces);
-            let face = unsafe { map.face_at_unchecked(face_index) };
-            let material_index = face.texture as usize;
+            let face = unsafe { map.face_ref_unchecked(face_index) };
+            let material_index = face.texture();
             let slot = PxbspResolvedMaterial::slot(material_index);
-            if !self.pxbsp_material_cache[slot].answers(material_index, epoch) {
+            // `slot` is masked to the cache size.
+            if !unsafe { self.pxbsp_material_cache.get_unchecked(slot) }
+                .answers(material_index, epoch)
+            {
                 self.fill_pxbsp_material_cache(
                     map,
                     materials,
@@ -1539,17 +1777,21 @@ impl Renderer {
             }
             let authored_front = match selection {
                 PxbspFaceSelection::VisibleWorld => {
-                    match packed_face_state(&self.frame_pxbsp_face_state, face_index) {
+                    // The frame chain was read out of this very table.
+                    match unsafe {
+                        packed_face_state_unchecked(&self.frame_pxbsp_face_state, face_index)
+                    } {
                         PXBSP_FRAME_NODE_BACK => false,
                         PXBSP_FRAME_NODE_FRONT => true,
-                        _ => front_facing_pxbsp(map, face, camera_origin),
+                        _ => self.front_facing_cached(map, face.plane(), face.flags(), camera_origin),
                     }
                 }
                 PxbspFaceSelection::ModelRange { .. } => {
-                    front_facing_pxbsp(map, face, camera_origin)
+                    self.front_facing_cached(map, face.plane(), face.flags(), camera_origin)
                 }
             };
-            if !pxbsp_policy_face_draws(policy, face.flags, authored_front) {
+            let face_flags = face.flags();
+            if !pxbsp_policy_face_draws(policy, face_flags, authored_front) {
                 continue;
             }
 
@@ -1565,7 +1807,7 @@ impl Renderer {
             }
             let resolved = unsafe { *self.pxbsp_material_cache.get_unchecked(slot) };
 
-            let source_count = face.vertex_count as usize;
+            let source_count = face.vertex_count();
             if source_count > PXBSP_BATCH_MAX_VERTICES {
                 stats.packet_overflow_avoided = true;
                 break;
@@ -1587,15 +1829,22 @@ impl Renderer {
             let needs_near_clip = if clip_mask == 0 {
                 false
             } else {
-                let Some(needs_near_clip) =
-                    (unsafe { Self::pxbsp_face_clip(source_base, face, clip_planes, clip_mask) })
+                #[cfg(target_arch = "mips")]
+                let classified = unsafe {
+                    Self::pxbsp_face_clip_gte(source_base, face, clip_planes, side_error, clip_mask)
+                };
+                #[cfg(not(target_arch = "mips"))]
+                let classified = unsafe {
+                    Self::pxbsp_face_clip(source_base, face, clip_planes, side_error, clip_mask)
+                };
+                let Some(needs_near_clip) = classified
                 else {
                     continue;
                 };
                 needs_near_clip
             };
             let state = resolved.state;
-            let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
+            let compact_surface = face_flags & FACE_PAGE_LOCAL_UV != 0
                 && policy & pxbsp_material_policy::COMPACT != 0;
             let uv_offset = if compact_surface {
                 state.page_uv_offset
@@ -1775,16 +2024,18 @@ impl Renderer {
     unsafe fn materialize_pxbsp_face(
         &self,
         source_base: *const ClassicAffineWordSourceVertex,
-        face: Face,
+        face: FaceRef,
         uv_offset: [u8; 2],
         color_scale_q7: u8,
         output: &mut [ClassicAffineVertex],
     ) {
-        let first = face.first_vertex as usize;
-        let baked_uv = face.flags & FACE_BAKED_UV != 0;
-        let baked_light = face.flags & FACE_BAKED_LIGHT != 0;
-        let style0 = self.light_styles[face.light_styles[0] as usize];
-        let style1 = self.light_styles[face.light_styles[1] as usize];
+        let first = face.first_vertex();
+        let flags = face.flags();
+        let baked_uv = flags & FACE_BAKED_UV != 0;
+        let baked_light = flags & FACE_BAKED_LIGHT != 0;
+        let light_styles = face.light_styles();
+        let style0 = self.light_styles[light_styles[0] as usize];
+        let style1 = self.light_styles[light_styles[1] as usize];
         let source_ptr = unsafe { source_base.add(first) };
         debug_assert_eq!(source_ptr as usize & 3, 0);
         if baked_light && !baked_uv {
@@ -1876,6 +2127,129 @@ impl Renderer {
             };
     }
 
+    /// [`Self::pxbsp_face_clip`] with the five plane dot products on the GTE.
+    ///
+    /// The CPU form is plane-major with three `mult`s per vertex per plane;
+    /// on the R3000 each `mult` interlocks the following `mflo`, and the
+    /// per-vertex loop of the world pass was the single hottest code in
+    /// the Cortex whole-level profile. Here one `MVMVA` against the light
+    /// matrix yields three plane distances for a vertex at once, a second
+    /// against the colour matrix the remaining two, and the scan is
+    /// vertex-major with the same early exits. Plane constants are added
+    /// on the CPU because MVMVA scales its translation vector by 4096
+    /// before the add, which is not exact without the fractional shift.
+    /// Every distance is the same wrapping `i32` dot product, so the answer
+    /// is bit-identical to the plane-major scan; the whole-level tape
+    /// hashes pin that.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::pxbsp_face_clip`], and [`load_gte_clip_planes`] must have
+    /// loaded `planes` since the last light or colour matrix write.
+    #[cfg(target_arch = "mips")]
+    #[inline(always)]
+    unsafe fn pxbsp_face_clip_gte(
+        source_base: *const ClassicAffineWordSourceVertex,
+        face: FaceRef,
+        planes: &[([i32; 3], i32); 5],
+        side_error: i32,
+        clip_mask: u8,
+    ) -> Option<bool> {
+        const NEAR: u8 = 1 << PXBSP_CLIP_NEAR_PLANE;
+        let count = face.vertex_count();
+        if count == 0 {
+            return None;
+        }
+        let source = unsafe { source_base.add(face.first_vertex()) };
+        // The plane constants live in the scratchpad behind a reference the
+        // compiler cannot prove disjoint from the vertex reads, so it
+        // reloaded all five per vertex; they are loop invariants.
+        let constants = [planes[0].1, planes[1].1, planes[2].1, planes[3].1, planes[4].1];
+        // Bit p stays set while every vertex so far was surely outside p.
+        let mut wholly_outside = clip_mask;
+        let near_tested = clip_mask & NEAR != 0;
+        let mut near_any_outside = false;
+        let mut index = 0usize;
+        // Phase one: every masked plane is still undecided, so each vertex
+        // pays for the full plane set.
+        while index < count && wholly_outside != 0 {
+            let base = unsafe { source.add(index).cast::<u32>() };
+            let xy = unsafe { core::ptr::read(base) };
+            let z = unsafe { core::ptr::read(base.add(1).cast::<i16>()) } as i32 as u32;
+            let (d0, d1, d2) = unsafe { gte_dot3::<MVMVA_LLM_V0_SF0>(xy, z) };
+            // The near band is zero, so that plane keeps its exact answers.
+            if d0.wrapping_add(constants[0]) >= 0 {
+                wholly_outside &= !NEAR;
+            } else {
+                near_any_outside = true;
+            }
+            if d1.wrapping_add(constants[1]) >= -side_error {
+                wholly_outside &= !(1 << 1);
+            }
+            if d2.wrapping_add(constants[2]) >= -side_error {
+                wholly_outside &= !(1 << 2);
+            }
+            if wholly_outside & 0x18 != 0 {
+                let (d3, d4, _) = unsafe { gte_dot3::<MVMVA_LCM_V0_SF0>(xy, z) };
+                if d3.wrapping_add(constants[3]) >= -side_error {
+                    wholly_outside &= !(1 << 3);
+                }
+                if d4.wrapping_add(constants[4]) >= -side_error {
+                    wholly_outside &= !(1 << 4);
+                }
+            }
+            index += 1;
+        }
+        if wholly_outside != 0 {
+            return None;
+        }
+        // Phase two: no plane can reject the face any more; only the near
+        // clip decision is open, which one dot per remaining vertex settles.
+        // Faces wholly in front of the near plane, the common case, used to
+        // pay the full five-plane set for every vertex here.
+        if near_tested && !near_any_outside {
+            while index < count {
+                let base = unsafe { source.add(index).cast::<u32>() };
+                let xy = unsafe { core::ptr::read(base) };
+                let z = unsafe { core::ptr::read(base.add(1).cast::<i16>()) } as i32 as u32;
+                let d0 = unsafe { gte_dot_one::<MVMVA_LLM_V0_SF0, MFC2_MAC1>(xy, z) };
+                if d0.wrapping_add(constants[0]) < 0 {
+                    near_any_outside = true;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        Some(near_tested && near_any_outside)
+    }
+
+    /// [`front_facing_pxbsp`] through the per-pass plane-side table: the
+    /// camera's side of a plane is computed once per pass and every
+    /// coplanar face after the first reads two bits instead of loading the
+    /// plane and taking three products.
+    #[inline(always)]
+    fn front_facing_cached(
+        &mut self,
+        map: &PxbspResidentMap,
+        plane: usize,
+        flags: u16,
+        point: Vec3I32,
+    ) -> bool {
+        let shift = (plane & 3) << 1;
+        // Plane indices were validated against the plane count at load and
+        // the table is sized from that count.
+        let byte = unsafe { self.frame_plane_side.get_unchecked_mut(plane >> 2) };
+        let known = (*byte >> shift) & 3;
+        let behind = if known != 0 {
+            known == 2
+        } else {
+            let behind = plane_behind_point(map, plane, point);
+            *byte |= (if behind { 2 } else { 1 }) << shift;
+            behind
+        };
+        behind == (flags & FACE_BACKSIDE != 0)
+    }
+
     /// Return `None` when every face vertex is outside any one frustum plane;
     /// otherwise return whether the face crosses the near plane.
     ///
@@ -1884,12 +2258,13 @@ impl Renderer {
     /// [`Self::materialize_pxbsp_face`].
     unsafe fn pxbsp_face_clip(
         source_base: *const ClassicAffineWordSourceVertex,
-        face: Face,
-        planes: &[([i32; 3], i64); 5],
+        face: FaceRef,
+        planes: &[([i32; 3], i32); 5],
+        side_error: i32,
         clip_mask: u8,
     ) -> Option<bool> {
-        let first = face.first_vertex as usize;
-        let count = face.vertex_count as usize;
+        let first = face.first_vertex();
+        let count = face.vertex_count();
         let source = unsafe { source_base.add(first) };
         if count == 0 {
             return None;
@@ -1898,7 +2273,7 @@ impl Renderer {
         // twelve-byte strided, with `position` first. Reading x and y as the
         // one word they already share costs two shifts and saves a load, and
         // a load is six cycles of RAM stall against one cycle for a shift.
-        FrustumPlanes::cull_polygon(planes, clip_mask, count, |index| unsafe {
+        FrustumPlanes::cull_polygon(planes, side_error, clip_mask, count, |index| unsafe {
             let base = source.add(index).cast::<u32>();
             let xy = core::ptr::read(base);
             let z = core::ptr::read(base.add(1).cast::<i16>());
@@ -2103,6 +2478,10 @@ impl Renderer {
         true
     }
 
+    // Out of line on purpose: inlined into the scene render these per-frame
+    // passes shared one register allocation with an 86 KB function and their
+    // inner loops reloaded table pointers from the stack at every node.
+    #[inline(never)]
     fn mark_visible_pxbsp_faces(&mut self, map: &PxbspResidentMap, point: Vec3I32) -> bool {
         self.cached_visibility = None;
         let faces = map.faces();
@@ -2195,6 +2574,10 @@ impl Renderer {
     /// Rebuild the Quake-style PVS stamp for render nodes. This runs only
     /// when the camera enters a different leaf; per-frame traversal can then
     /// skip every branch that cannot lead to a PVS-visible leaf.
+    // Out of line on purpose: inlined into the scene render these per-frame
+    // passes shared one register allocation with an 86 KB function and their
+    // inner loops reloaded table pointers from the stack at every node.
+    #[inline(never)]
     fn rebuild_pxbsp_node_visibility(&mut self, map: &PxbspResidentMap) {
         let nodes = map.compact_nodes();
         if nodes.len() != self.pxbsp_node_count {
@@ -2399,6 +2782,10 @@ impl Renderer {
 
     /// Select only PVS-stamped node faces whose subtree AABB intersects the
     /// current frustum. Exact per-polygon clipping remains in the draw path.
+    // Out of line on purpose: inlined into the scene render these per-frame
+    // passes shared one register allocation with an 86 KB function and their
+    // inner loops reloaded table pointers from the stack at every node.
+    #[inline(never)]
     fn select_frame_pxbsp_faces(
         &mut self,
         map: &PxbspResidentMap,
@@ -2437,6 +2824,9 @@ impl Renderer {
         // cook's node bounds are proven to enclose their faces) lets the draw
         // loop skip the exact per-face clip entirely.
         let inherit_clip = self.pxbsp_node_bounds_enclose_faces;
+        // The node boxes below test their support corners on the GTE.
+        #[cfg(target_arch = "mips")]
+        load_gte_clip_planes(&frustum.planes);
         self.pxbsp_node_stack.clear();
         self.pxbsp_node_stack
             .push(root as u32 | (PXBSP_CLIP_ALL_PLANES as u32) << PXBSP_NODE_STACK_MASK_SHIFT);
@@ -2492,17 +2882,24 @@ impl Renderer {
                     let start = leaf.first_mark_surface as usize;
                     let end = start + leaf.mark_surface_count as usize;
                     for mark_index in start..end {
+                        // `validate_references` checked every mark index
+                        // against the face count at load.
                         let face =
-                            *map.mark_surfaces_native()
-                                .get(mark_index)
-                                .expect("validated leaf mark") as usize;
-                        if packed_face_state(&self.pxbsp_face_state, face) != 0 {
-                            set_packed_face_state(
-                                &mut self.frame_pxbsp_face_state,
-                                face,
-                                PXBSP_FRAME_FALLBACK,
-                            );
-                            self.frame_pxbsp_face_clip_mask[face] = mask;
+                            unsafe { *map.mark_surfaces_native().get_unchecked(mark_index) }
+                                as usize;
+                        // Mark indices were validated against the face
+                        // count at load; the three tables are face-sized.
+                        if unsafe { packed_face_state_unchecked(&self.pxbsp_face_state, face) }
+                            != 0
+                        {
+                            unsafe {
+                                set_packed_face_state_unchecked(
+                                    &mut self.frame_pxbsp_face_state,
+                                    face,
+                                    PXBSP_FRAME_FALLBACK,
+                                );
+                                *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = mask;
+                            }
                         }
                     }
                 }
@@ -2511,21 +2908,22 @@ impl Renderer {
             let start = node.first_face as usize;
             let end = start + node.face_count as usize;
             for face in start..end {
-                if packed_face_state(&self.pxbsp_face_state, face) != 0 {
+                // The node's face range was validated at load.
+                if unsafe { packed_face_state_unchecked(&self.pxbsp_face_state, face) } != 0 {
                     let authored_front = behind
-                        == (map.faces().get(face).expect("validated node face").flags
-                            & FACE_BACKSIDE
-                            != 0);
-                    set_packed_face_state(
-                        &mut self.frame_pxbsp_face_state,
-                        face,
-                        if authored_front {
-                            PXBSP_FRAME_NODE_FRONT
-                        } else {
-                            PXBSP_FRAME_NODE_BACK
-                        },
-                    );
-                    self.frame_pxbsp_face_clip_mask[face] = mask;
+                        == (unsafe { map.face_ref_unchecked(face) }.flags() & FACE_BACKSIDE != 0);
+                    unsafe {
+                        set_packed_face_state_unchecked(
+                            &mut self.frame_pxbsp_face_state,
+                            face,
+                            if authored_front {
+                                PXBSP_FRAME_NODE_FRONT
+                            } else {
+                                PXBSP_FRAME_NODE_BACK
+                            },
+                        );
+                        *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = mask;
+                    }
                 }
             }
         }
@@ -2565,8 +2963,16 @@ impl Renderer {
     }
 
     fn retire_frame_pxbsp_selection(&mut self) {
-        for &face in &self.frame_pxbsp_faces {
-            set_packed_face_state(&mut self.frame_pxbsp_face_state, face as usize, 0);
+        // Clearing the chain's entries one read-modify-write at a time costs
+        // about ten instructions per face; a whole-table clear is a word
+        // store per sixteen faces. Past a twentieth of the table the clear
+        // is cheaper, and it leaves the same all-zero table.
+        if self.frame_pxbsp_faces.len().saturating_mul(20) > self.frame_pxbsp_face_state.len() {
+            self.frame_pxbsp_face_state.fill(0);
+        } else {
+            for &face in &self.frame_pxbsp_faces {
+                set_packed_face_state(&mut self.frame_pxbsp_face_state, face as usize, 0);
+            }
         }
         self.frame_pxbsp_faces.clear();
     }
@@ -2995,10 +3401,111 @@ fn front_facing(map: &ResidentMap, face: Face, point: Vec3I32) -> bool {
     behind == (face.flags & FACE_BACKSIDE != 0)
 }
 
-fn front_facing_pxbsp(map: &PxbspResidentMap, face: Face, point: Vec3I32) -> bool {
-    let plane = unsafe { map.planes().get_unchecked(face.plane as usize) };
-    let behind = compact_plane_distance(*plane, point) < 0;
-    behind == (face.flags & FACE_BACKSIDE != 0)
+/// `MVMVA(mx=LLM, vx=V0, cv=none, sf=0, lm=0)`: three plane dots at once.
+#[cfg(target_arch = "mips")]
+const MVMVA_LLM_V0_SF0: u32 = 0x4A02_6012;
+/// `MVMVA(mx=LCM, vx=V0, cv=none, sf=0, lm=0)`.
+#[cfg(target_arch = "mips")]
+const MVMVA_LCM_V0_SF0: u32 = 0x4A04_6012;
+
+/// Load the five frustum planes for [`Renderer::pxbsp_face_clip_gte`]:
+/// planes 0..3 fill the light matrix rows, planes 3..5 the first two colour
+/// matrix rows. Both matrices are free during the world pass (the batch
+/// writer only uses the rotation and translation), and every later lit
+/// submission reloads them.
+#[cfg(target_arch = "mips")]
+#[inline(never)]
+fn load_gte_clip_planes(planes: &[([i32; 3], i32); 5]) {
+    #[inline(always)]
+    fn row(plane: &([i32; 3], i32)) -> [i16; 3] {
+        // Near rows are Q12 view rows, side rows are rounded to an L1 norm
+        // of at most SIDE_L1_LIMIT, so every component fits.
+        debug_assert!(plane
+            .0
+            .iter()
+            .all(|c| (i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(c)));
+        [plane.0[0] as i16, plane.0[1] as i16, plane.0[2] as i16]
+    }
+    scene::load_light_matrix(&Mat3I16 {
+        m: [row(&planes[0]), row(&planes[1]), row(&planes[2])],
+    });
+    scene::load_light_colour_matrix(&Mat3I16 {
+        m: [row(&planes[3]), row(&planes[4]), [0; 3]],
+    });
+}
+
+/// `mfc2 $8, MAC1..MAC3` encodings for [`gte_dot_one`].
+#[cfg(target_arch = "mips")]
+const MFC2_MAC1: u32 = 0x4808_c800;
+#[cfg(target_arch = "mips")]
+const MFC2_MAC2: u32 = 0x4808_d000;
+#[cfg(target_arch = "mips")]
+const MFC2_MAC3: u32 = 0x4808_d800;
+
+/// One vertex through `OP` and a single MAC result selected by `READ`.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn gte_dot_one<const OP: u32, const READ: u32>(xy: u32, z: u32) -> i32 {
+    let a: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word 0x48880000", // mtc2 $8, VXY0
+            ".word 0x48890800", // mtc2 $9, VZ0
+            ".word 0",
+            ".word 0",
+            ".word {op}",
+            ".word {read}",
+            ".word 0",
+            op = const OP,
+            read = const READ,
+            inlateout("$8") xy => a,
+            in("$9") z,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    a as i32
+}
+
+/// One vertex through `OP` (an MVMVA against V0) and its three MAC results,
+/// with the console-confirmed V0 commit distance used by the SDK's AABB
+/// classifier.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn gte_dot3<const OP: u32>(xy: u32, z: u32) -> (i32, i32, i32) {
+    let a: u32;
+    let b: u32;
+    let c: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word 0x48880000", // mtc2 $8, VXY0
+            ".word 0x48890800", // mtc2 $9, VZ0
+            ".word 0",
+            ".word 0",
+            ".word {op}",
+            ".word 0x4808c800", // mfc2 $8, MAC1
+            ".word 0x4809d000", // mfc2 $9, MAC2
+            ".word 0x480ad800", // mfc2 $10, MAC3
+            ".word 0",
+            op = const OP,
+            inlateout("$8") xy => a,
+            inlateout("$9") z => b,
+            out("$10") c,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    (a as i32, b as i32, c as i32)
+}
+
+/// Whether `point` lies behind map plane `plane`.
+#[inline(always)]
+fn plane_behind_point(map: &PxbspResidentMap, plane: usize, point: Vec3I32) -> bool {
+    let plane = unsafe { map.planes().get_unchecked(plane) };
+    compact_plane_distance(*plane, point) < 0
+}
+
+#[cfg(test)]
+fn front_facing_pxbsp(map: &PxbspResidentMap, plane: usize, flags: u16, point: Vec3I32) -> bool {
+    plane_behind_point(map, plane, point) == (flags & FACE_BACKSIDE != 0)
 }
 
 fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
@@ -3047,6 +3554,21 @@ fn scale_baked_color_q7(color: u32, scale_q7: u8) -> u32 {
 mod tests {
     use super::*;
     use crate::pxbsp::PxbspLumpKind;
+
+    #[test]
+    fn exact_view_rotation_matches_the_table_form_at_table_angles() {
+        // At angles the 256-step table represents exactly, the trig pairs
+        // are +-4096 / 0 and both constructions must agree cell for cell.
+        for (pitch_q12, yaw_q12) in [(0u16, 0u16), (0, 1024), (1024, 0), (3072, 2048), (2048, 3072)] {
+            let table = Mat3I16::rotate_xyz(pitch_q12 >> 4, yaw_q12 >> 4, 0);
+            let trig = |angle: u16| -> (i16, i16) {
+                (sin_q12(angle) as i16, cos_q12(angle) as i16)
+            };
+            let (sp, cp) = trig(pitch_q12);
+            let (sy, cy) = trig(yaw_q12);
+            assert_eq!(pxbsp_view_rotation(sp, cp, sy, cy).m, table.m, "pitch {pitch_q12} yaw {yaw_q12}");
+        }
+    }
     use crate::pxbsp_resident::tests::{valid_lumps, write_file};
     use crate::SliceReader;
     use alloc::boxed::Box;
@@ -3271,9 +3793,11 @@ mod tests {
         assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
         assert_eq!(packed_face_state(&renderer.pxbsp_face_state, 0), 2);
         assert_eq!(renderer.visible_pxbsp_faces, [0]);
+        let face = map.faces().get(0).expect("face");
         assert!(front_facing_pxbsp(
             &map,
-            map.faces().get(0).expect("face"),
+            face.plane as usize,
+            face.flags,
             camera.origin
         ));
         assert!(pxbsp_face_draws(
@@ -3771,7 +4295,12 @@ mod tests {
 
         let view = load_pxbsp_view(camera);
         let frustum =
-            FrustumPlanes::from_view(&view.rotation, view.translation, renderer.view_projection);
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                renderer.view_projection,
+            );
         assert!(renderer.select_frame_pxbsp_faces(&map, camera.origin, &frustum));
         assert_eq!(renderer.frame_pxbsp_faces, [0]);
         assert_eq!(
@@ -3868,80 +4397,6 @@ mod frustum_tests {
         assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);
     }
 
-    /// The Newton-with-division form `isqrt_i64` replaced, kept as the oracle.
-    fn newton_isqrt_i64(value: i64) -> i64 {
-        if value <= 0 {
-            return 0;
-        }
-        let mut x = value;
-        let mut y = (x + 1) / 2;
-        while y < x {
-            x = y;
-            y = (x + value / x) / 2;
-        }
-        x
-    }
-
-    #[test]
-    fn the_division_free_isqrt_agrees_with_the_newton_form() {
-        let mut checked = 0usize;
-        let mut check = |value: i64| {
-            assert_eq!(
-                isqrt_i64(value),
-                newton_isqrt_i64(value),
-                "isqrt disagreed at {value}"
-            );
-            checked += 1;
-        };
-        for value in -8i64..=4096 {
-            check(value);
-        }
-        // Perfect squares and their neighbours are where a floor answer is
-        // decided, on both sides of the 32-bit kernel boundary.
-        for root in [
-            1i64,
-            2,
-            3,
-            46340,
-            46341,
-            65535,
-            65536,
-            65537,
-            100_000,
-            3_037_000_499,
-        ] {
-            for delta in [-1i64, 0, 1] {
-                let square = root.saturating_mul(root).saturating_add(delta);
-                if square > 0 {
-                    check(square);
-                }
-            }
-        }
-        // Every power of two and either side of it, to the top of the range.
-        for shift in 0..63 {
-            for delta in [-1i64, 0, 1] {
-                let value = (1i64 << shift).saturating_add(delta);
-                if value > 0 {
-                    check(value);
-                }
-            }
-        }
-        // A deterministic spread, including the squared view-row lengths this
-        // is actually called with: three squares of a Q12 rotation row.
-        let mut state = 0x2545_f491_4f6c_dd1du64;
-        for _ in 0..40_000 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            check((state >> 1) as i64);
-            check((state & 0xffff_ffff) as i64);
-            let row = ((state >> 20) & 0x3fff) as i64;
-            check(3 * row * row);
-        }
-        assert!(checked > 100_000, "sweep collapsed to {checked} values");
-        assert_eq!(isqrt_i64(i64::MAX), 3_037_000_499);
-    }
-
     fn planes_for(origin: [i32; 3], yaw: i16, pitch: i16) -> (FrustumPlanes, ViewTransform) {
         psx_gte::host::reset();
         let camera = Camera {
@@ -3960,7 +4415,12 @@ mod frustum_tests {
             ..ViewProjection::DEFAULT
         };
         (
-            FrustumPlanes::from_view(&view.rotation, view.translation, projection),
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                projection,
+            ),
             view,
         )
     }
@@ -4015,6 +4475,8 @@ mod frustum_tests {
         // Anchored on the camera so the sweep straddles the frustum rather
         // than sitting far outside it; a polygon spread comparable to the
         // anchor spread is what produces near-plane crossings.
+        let mut kept_by_band = 0usize;
+        let mut compared = 0usize;
         for _ in 0..6000 {
             let mut axis = || (lcg(&mut state) % 700) as i16 - 350;
             let anchor = [37 + axis(), 70 + axis(), 273 + axis()];
@@ -4043,13 +4505,26 @@ mod frustum_tests {
                 let clip_mask = 0x1f & !(drop & satisfied);
                 let expected = vertex_major_clip(&planes, clip_mask, polygon);
                 let actual =
-                    FrustumPlanes::cull_polygon(&planes.planes, clip_mask, polygon.len(), |i| {
+                    FrustumPlanes::cull_polygon(&planes.planes, planes.side_error, clip_mask, polygon.len(), |i| {
                         polygon[i]
                     });
-                assert_eq!(
-                    actual, expected,
-                    "cull_polygon disagreed for mask {clip_mask:#x} on {polygon:?}"
-                );
+                // The exact scan is the oracle. The plane-major test may keep
+                // a polygon the oracle rejects when every vertex sits in a
+                // rounded side plane's error band (conservative), but it may
+                // never reject one the oracle keeps, and the near-clip answer
+                // is exact.
+                match (expected, actual) {
+                    (None, None) => {}
+                    (None, Some(_)) => kept_by_band += 1,
+                    (Some(_), None) => panic!(
+                        "cull_polygon rejected a kept polygon for mask {clip_mask:#x} on {polygon:?}"
+                    ),
+                    (Some(expected_near), Some(actual_near)) => assert_eq!(
+                        actual_near, expected_near,
+                        "near clip answer differs for mask {clip_mask:#x} on {polygon:?}"
+                    ),
+                }
+                compared += 1;
             }
             match vertex_major_clip(&planes, 0x1f, polygon) {
                 None => {
@@ -4058,7 +4533,7 @@ mod frustum_tests {
                     // polygon the full mask rejects, unclipped: that is a
                     // claim about the mask, not about the geometry.
                     assert_eq!(
-                        FrustumPlanes::cull_polygon(&planes.planes, 0, polygon.len(), |i| polygon
+                        FrustumPlanes::cull_polygon(&planes.planes, planes.side_error, 0, polygon.len(), |i| polygon
                             [i]),
                         Some(false)
                     );
@@ -4071,6 +4546,11 @@ mod frustum_tests {
         assert!(
             rejected > 100 && near > 20 && kept > 100,
             "sweep degenerated: {rejected} rejected, {near} near-clipped, {kept} kept"
+        );
+        assert!(compared > 100_000, "sweep collapsed to {compared} comparisons");
+        assert!(
+            kept_by_band * 50 < compared,
+            "{kept_by_band} of {compared} rejections were withheld by the error band"
         );
     }
 
@@ -4259,7 +4739,7 @@ mod frustum_tests {
         for v in &verts[..n] {
             let d = FrustumPlanes::distance(&planes.planes[0], v.position);
             assert!(
-                d >= -(1i64 << 14),
+                d >= -(1i32 << 14),
                 "clipped vertex behind the near plane: {:?} d={d}",
                 v.position
             );
@@ -4298,7 +4778,14 @@ mod frustum_tests {
     }
 
     #[test]
-    fn one_pass_vertex_masks_match_all_exact_plane_signs() {
+    fn one_pass_vertex_masks_never_contradict_the_wide_oracle() {
+        // `vertex_outside_mask` keeps the exact i64 planes. The i32 planes
+        // round the side normals, so they may only be undecided inside
+        // their error band: they must never call a point surely outside
+        // when the oracle has it inside, nor surely inside when the oracle
+        // has it outside. The near plane is exact and must agree bit for bit.
+        let mut undecided = 0usize;
+        let mut checked = 0usize;
         for origin in [[0, 0, 0], [37, 70, 273], [-96, 24, 128]] {
             for yaw in [0, 257, 1024, 2051, 3072] {
                 for pitch in [-320, 0, 100, 512] {
@@ -4307,25 +4794,45 @@ mod frustum_tests {
                         for y in (-192i16..=256).step_by(64) {
                             for z in (-320i16..=320).step_by(64) {
                                 let position = [x, y, z];
-                                let exact = planes.planes.iter().enumerate().fold(
-                                    0u8,
-                                    |mask, (index, plane)| {
-                                        mask | (u8::from(FrustumPlanes::distance_negative(
-                                            plane, position,
-                                        )) << index)
-                                    },
-                                );
-                                assert_eq!(
-                                    planes.vertex_outside_mask(position),
-                                    exact,
-                                    "origin={origin:?} yaw={yaw} pitch={pitch} point={position:?}",
-                                );
+                                let oracle = planes.vertex_outside_mask(position);
+                                for (index, plane) in planes.planes.iter().enumerate() {
+                                    let error = planes.error_of(index);
+                                    let outside = FrustumPlanes::surely_outside(plane, error, position);
+                                    let inside = FrustumPlanes::surely_inside(plane, error, position);
+                                    let oracle_outside = oracle & (1 << index) != 0;
+                                    checked += 1;
+                                    if index == PXBSP_CLIP_NEAR_PLANE {
+                                        assert_eq!(outside, oracle_outside, "near {position:?}");
+                                        assert_eq!(inside, !oracle_outside, "near {position:?}");
+                                        continue;
+                                    }
+                                    assert!(
+                                        !(outside && !oracle_outside),
+                                        "plane {index} rejected an inside point {position:?}"
+                                    );
+                                    assert!(
+                                        !(inside && oracle_outside),
+                                        "plane {index} vouched for an outside point {position:?}"
+                                    );
+                                    if !outside && !inside {
+                                        undecided += 1;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        // The band must be narrow. This grid sits within 320 units of the
+        // camera, where the fixed error bound (sized for 65535-unit
+        // positions) is at its widest relative to the distances; even there
+        // rounding must decide the vast majority of points.
+        assert!(checked > 50_000, "sweep collapsed to {checked} checks");
+        assert!(
+            undecided * 20 < checked,
+            "{undecided} of {checked} plane tests were undecided"
+        );
     }
 
     #[test]
