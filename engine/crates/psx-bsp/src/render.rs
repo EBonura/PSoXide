@@ -1186,6 +1186,11 @@ pub struct Renderer {
     /// the duration of `draw_pxbsp_world`, then detached before model scratch
     /// reuses these bytes. Null means both face chains are ordinary Vecs.
     external_frame_pxbsp_faces: *mut u16,
+    /// Alternate-frame selection reuse: the previous select frame's chain,
+    /// kept past the model pass that overwrites the frame chain's storage.
+    reuse_pxbsp_faces: Vec<u16>,
+    reuse_pxbsp_valid: bool,
+    selection_reuse: bool,
     visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     visible_leaf_count: usize,
     cached_visibility: Option<(u32, usize)>,
@@ -1308,6 +1313,13 @@ impl Renderer {
         renderer.pxbsp_face_state = vec![0; face_count.div_ceil(4)];
         renderer.pxbsp_face_count = face_count;
         renderer.visible_pxbsp_faces = visible_pxbsp_faces;
+        // The reuse copy has to outlive the model pass that reuses the frame
+        // chain's storage, so it is its own heap allocation of the same bound.
+        renderer.reuse_pxbsp_faces = Vec::with_capacity(
+            frame_pxbsp_faces
+                .capacity()
+                .max(renderer.visible_pxbsp_faces.capacity()),
+        );
         renderer.frame_pxbsp_faces = frame_pxbsp_faces;
         renderer.frame_pxbsp_face_state = vec![0; face_count.div_ceil(4)];
         renderer.frame_pxbsp_face_clip_mask = vec![PXBSP_CLIP_ALL_PLANES; face_count];
@@ -1343,6 +1355,9 @@ impl Renderer {
             pxbsp_node_bounds_enclose_faces: false,
             pxbsp_node_bounds_generation: None,
             external_frame_pxbsp_faces: core::ptr::null_mut(),
+            reuse_pxbsp_faces: Vec::new(),
+            reuse_pxbsp_valid: false,
+            selection_reuse: false,
             visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
             cached_visibility: None,
@@ -1588,9 +1603,37 @@ impl Renderer {
                 [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
                 self.view_projection,
             );
-        let frame = if self.mark_visible_pxbsp_faces(map, camera.origin)
-            && self.select_frame_pxbsp_faces(map, camera.origin, &frustum)
-        {
+        // Alternate-frame selection reuse: every other frame draws the chain
+        // the previous frame selected, with every face on the exact clip path
+        // (no inherited node proofs), so the PVS mark and the node walk run at
+        // half rate. A face that enters the frustum on a reuse frame appears
+        // one frame late at the screen edge.
+        let reuse = self.selection_reuse && self.reuse_pxbsp_valid && self.frame & 1 == 1;
+        let selected = if reuse {
+            self.frame_pxbsp_faces.clear();
+            self.frame_pxbsp_faces.extend_from_slice(&self.reuse_pxbsp_faces);
+            for &face in &self.frame_pxbsp_faces {
+                set_packed_face_state(
+                    &mut self.frame_pxbsp_face_state,
+                    face as usize,
+                    PXBSP_FRAME_FALLBACK,
+                );
+                self.frame_pxbsp_face_clip_mask[face as usize] = PXBSP_CLIP_ALL_PLANES;
+            }
+            true
+        } else {
+            let ok = self.mark_visible_pxbsp_faces(map, camera.origin)
+                && self.select_frame_pxbsp_faces(map, camera.origin, &frustum);
+            if self.selection_reuse {
+                self.reuse_pxbsp_faces.clear();
+                if ok {
+                    self.reuse_pxbsp_faces.extend_from_slice(&self.frame_pxbsp_faces);
+                }
+                self.reuse_pxbsp_valid = ok;
+            }
+            ok
+        };
+        let frame = if selected {
             self.draw_pxbsp_faces(
                 map,
                 camera.origin,
@@ -2963,6 +3006,12 @@ impl Renderer {
             return false;
         }
         true
+    }
+
+    /// Draw every other frame from the previous frame's selected chain.
+    pub fn set_selection_reuse(&mut self, enabled: bool) {
+        self.selection_reuse = enabled;
+        self.reuse_pxbsp_valid = false;
     }
 
     fn retire_frame_pxbsp_selection(&mut self) {
