@@ -587,19 +587,15 @@ impl FrustumPlanes {
         {
             let xy = (position[0] as u16 as u32) | ((position[1] as u16 as u32) << 16);
             let z = position[2] as i32 as u32;
-            let dot = if index < 3 {
-                let (d0, d1, d2) = unsafe { gte_dot3::<MVMVA_LLM_V0_SF0>(xy, z) };
+            // One MVMVA yields three plane dots but a box corner is chosen
+            // for one plane, so only that MAC is read back.
+            let dot = unsafe {
                 match index {
-                    0 => d0,
-                    1 => d1,
-                    _ => d2,
-                }
-            } else {
-                let (d3, d4, _) = unsafe { gte_dot3::<MVMVA_LCM_V0_SF0>(xy, z) };
-                if index == 3 {
-                    d3
-                } else {
-                    d4
+                    0 => gte_dot_one::<MVMVA_LLM_V0_SF0, MFC2_MAC1>(xy, z),
+                    1 => gte_dot_one::<MVMVA_LLM_V0_SF0, MFC2_MAC2>(xy, z),
+                    2 => gte_dot_one::<MVMVA_LLM_V0_SF0, MFC2_MAC3>(xy, z),
+                    3 => gte_dot_one::<MVMVA_LCM_V0_SF0, MFC2_MAC1>(xy, z),
+                    _ => gte_dot_one::<MVMVA_LCM_V0_SF0, MFC2_MAC2>(xy, z),
                 }
             };
             dot.wrapping_add(self.planes[index].1)
@@ -3265,6 +3261,38 @@ fn load_gte_clip_planes(planes: &[([i32; 3], i32); 5]) {
     scene::load_light_colour_matrix(&Mat3I16 {
         m: [row(&planes[3]), row(&planes[4]), [0; 3]],
     });
+}
+
+/// `mfc2 $8, MAC1..MAC3` encodings for [`gte_dot_one`].
+#[cfg(target_arch = "mips")]
+const MFC2_MAC1: u32 = 0x4808_c800;
+#[cfg(target_arch = "mips")]
+const MFC2_MAC2: u32 = 0x4808_d000;
+#[cfg(target_arch = "mips")]
+const MFC2_MAC3: u32 = 0x4808_d800;
+
+/// One vertex through `OP` and a single MAC result selected by `READ`.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+unsafe fn gte_dot_one<const OP: u32, const READ: u32>(xy: u32, z: u32) -> i32 {
+    let a: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word 0x48880000", // mtc2 $8, VXY0
+            ".word 0x48890800", // mtc2 $9, VZ0
+            ".word 0",
+            ".word 0",
+            ".word {op}",
+            ".word {read}",
+            ".word 0",
+            op = const OP,
+            read = const READ,
+            inlateout("$8") xy => a,
+            in("$9") z,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    a as i32
 }
 
 /// One vertex through `OP` (an MVMVA against V0) and its three MAC results,
