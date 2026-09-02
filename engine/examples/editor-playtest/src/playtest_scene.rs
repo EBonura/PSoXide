@@ -933,6 +933,7 @@ impl Scene for Playtest {
 
     fn render(&mut self, ctx: &mut Ctx) {
         let camera = self.render_camera;
+        self.resolve_poi_floors();
         self.advance_poi_presentation_frame();
         self.prepared_overlay_camera = camera;
         self.prepared_overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
