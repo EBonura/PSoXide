@@ -764,12 +764,40 @@ impl BspRuntime {
             [center[0], center[1], min[2]],
             [center[0], center[1], max[2]],
         ];
+        // A sample point whose leaf is not in the observer's potentially
+        // visible set cannot be seen from the observer, PVS being a superset
+        // of true visibility, so it is not worth a trace across the level.
+        // The observer's row is normally already resolved by the visibility
+        // pass; a gameplay caller with another observer resolves it here.
+        let pvs_ready = self.activation_row(observer).is_some();
+        let visible_leaves = self.activation_visible_leaves;
         for sample in samples {
             let endpoint = RoomPoint::new(
                 inset_toward(sample[0], observer.x),
                 inset_toward(sample[1], observer.y),
                 inset_toward(sample[2], observer.z),
             );
+            if pvs_ready {
+                let q12 = |value: i32| value.saturating_mul(4096);
+                let leaf = self.map.point_leaf_index(Vec3I32 {
+                    x: q12(endpoint.x),
+                    y: q12(endpoint.y),
+                    z: q12(endpoint.z),
+                });
+                let potentially_visible = match leaf {
+                    Some(leaf) if leaf != 0 && leaf <= visible_leaves => {
+                        let visible_index = leaf - 1;
+                        self.activation_visibility[visible_index >> 3] & (1 << (visible_index & 7))
+                            != 0
+                    }
+                    // Solid, out of range or unresolved: never visible.
+                    Some(_) => false,
+                    None => false,
+                };
+                if !potentially_visible {
+                    continue;
+                }
+            }
             if self
                 .trace_point_segment(observer, endpoint, &[], destructibles)
                 .is_ok_and(|trace| !trace.hit())
