@@ -1165,6 +1165,10 @@ pub struct Renderer {
     frame_pxbsp_face_clip_mask: Vec<u8>,
     /// Cached PVS reachability for the compact PXBSP render tree.
     pxbsp_node_visible: Vec<u8>,
+    /// Two bits per map plane: which side of it the camera origin of the
+    /// current face pass is on, resolved on first use. Coplanar faces share
+    /// planes, so the per-face front/back test becomes a table read.
+    frame_plane_side: Vec<u8>,
     pxbsp_node_discovered: Vec<u8>,
     pxbsp_node_count: usize,
     pxbsp_node_stack: Vec<u32>,
@@ -1348,6 +1352,7 @@ impl Renderer {
             cached_frustum: None,
             view_projection: ViewProjection::DEFAULT,
             pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
+            frame_plane_side: Vec::new(),
             pxbsp_material_epoch: 0,
             track_sky_apertures: true,
             light_styles,
@@ -1738,6 +1743,14 @@ impl Renderer {
         // different animation tick or a different binding table cannot hit.
         self.pxbsp_material_epoch = self.pxbsp_material_epoch.wrapping_add(1);
         let epoch = self.pxbsp_material_epoch;
+        // Each pass has its own camera origin (brush models are drawn in
+        // their own space), so the plane-side table starts unknown.
+        let plane_side_bytes = map.planes().len().div_ceil(4);
+        if self.frame_plane_side.len() != plane_side_bytes {
+            self.frame_plane_side = vec![0; plane_side_bytes];
+        } else {
+            self.frame_plane_side.fill(0);
+        }
         let (first_face, face_end) = selection.range(faces.len(), self.frame_pxbsp_faces.len());
         for selection_index in first_face..face_end {
             let face_index = selection.face_index(selection_index, &self.frame_pxbsp_faces);
@@ -1770,11 +1783,11 @@ impl Renderer {
                     } {
                         PXBSP_FRAME_NODE_BACK => false,
                         PXBSP_FRAME_NODE_FRONT => true,
-                        _ => front_facing_pxbsp(map, face.plane(), face.flags(), camera_origin),
+                        _ => self.front_facing_cached(map, face.plane(), face.flags(), camera_origin),
                     }
                 }
                 PxbspFaceSelection::ModelRange { .. } => {
-                    front_facing_pxbsp(map, face.plane(), face.flags(), camera_origin)
+                    self.front_facing_cached(map, face.plane(), face.flags(), camera_origin)
                 }
             };
             let face_flags = face.flags();
@@ -2208,6 +2221,34 @@ impl Renderer {
             }
         }
         Some(near_tested && near_any_outside)
+    }
+
+    /// [`front_facing_pxbsp`] through the per-pass plane-side table: the
+    /// camera's side of a plane is computed once per pass and every
+    /// coplanar face after the first reads two bits instead of loading the
+    /// plane and taking three products.
+    #[inline(always)]
+    fn front_facing_cached(
+        &mut self,
+        map: &PxbspResidentMap,
+        plane: usize,
+        flags: u16,
+        point: Vec3I32,
+    ) -> bool {
+        let shift = (plane & 3) << 1;
+        // Plane indices were validated against the plane count at load and
+        // the table is sized from that count.
+        let byte = unsafe { self.frame_plane_side.get_unchecked_mut(plane >> 2) };
+        let known = (*byte >> shift) & 3;
+        let behind = if known != 0 {
+            known == 2
+        } else {
+            let record = unsafe { map.planes().get_unchecked(plane) };
+            let behind = compact_plane_distance(*record, point) < 0;
+            *byte |= (if behind { 2 } else { 1 }) << shift;
+            behind
+        };
+        behind == (flags & FACE_BACKSIDE != 0)
     }
 
     /// Return `None` when every face vertex is outside any one frustum plane;
