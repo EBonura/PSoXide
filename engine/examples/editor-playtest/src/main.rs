@@ -88,8 +88,8 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
-    module_stat_bonus_q12, BoostInventory, BoostModuleId, BoostSlotId, CombatStance,
-    CombatStanceConfig, DualVitality, PowerUpLoadout, VitalityChannelId, VitalityModifiers,
+    BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig, DualVitality,
+    PowerUpLoadout, VitalityChannelId, VitalityModifiers,
 };
 use psx_game_runtime::vitality_circles::VitalityCircleState;
 use psx_game_runtime::{
