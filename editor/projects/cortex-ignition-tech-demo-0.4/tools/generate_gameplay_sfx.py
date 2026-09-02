@@ -44,16 +44,46 @@ def footstep(t, i, n, duration):
 
 
 def light_hit(t, i, n, duration):
-    env = math.exp(-28.0 * t)
-    ring = math.sin(2 * math.pi * 970 * t) + 0.42 * math.sin(2 * math.pi * 1430 * t)
-    return env * (0.38 * ring + 0.48 * n)
+    # A readable blade contact needs a body after the initial transient. The
+    # old 50 ms tick disappeared under music before the player registered it.
+    strike = math.exp(-46.0 * t) * n
+    body = math.exp(-15.0 * t) * math.sin(2 * math.pi * (510 - 150 * t / duration) * t)
+    ring = math.exp(-9.0 * t) * math.sin(2 * math.pi * 1280 * t)
+    return 0.62 * strike + 0.42 * body + 0.20 * ring
 
 
 def heavy_hit(t, i, n, duration):
-    env = math.exp(-18.0 * t)
-    metal = math.sin(2 * math.pi * (180 - 70 * t / duration) * t)
-    clang = math.sin(2 * math.pi * 690 * t) * math.exp(-12.0 * t)
-    return env * (0.62 * metal + 0.22 * clang + 0.3 * n)
+    strike = math.exp(-34.0 * t) * n
+    body = math.exp(-8.5 * t) * math.sin(2 * math.pi * (175 - 85 * t / duration) * t)
+    clang = math.exp(-7.0 * t) * math.sin(2 * math.pi * 610 * t)
+    return 0.72 * strike + 0.68 * body + 0.24 * clang
+
+
+def weapon_swing(t, i, n, duration):
+    # A short forward-moving air cut. Its peak arrives after a small rise so
+    # the attack reads as motion rather than another contact click.
+    phase = min(1.0, t / duration)
+    env = math.sin(math.pi * phase) ** 1.6
+    flutter = 0.72 + 0.28 * math.sin(2 * math.pi * (34 + 42 * phase) * t)
+    edge = math.sin(2 * math.pi * (920 - 610 * phase) * t)
+    return env * flutter * (0.70 * n + 0.18 * edge)
+
+
+def projectile_charge(t, i, n, duration):
+    phase = min(1.0, t / duration)
+    rise = math.sin(0.5 * math.pi * phase) ** 1.4
+    tail = min(1.0, (duration - t) * 28.0)
+    carrier = math.sin(2 * math.pi * (125 + 430 * phase * phase) * t)
+    harmonic = math.sin(2 * math.pi * (370 + 650 * phase) * t)
+    pulse = 0.70 + 0.30 * math.sin(2 * math.pi * (8 + 12 * phase) * t)
+    return rise * tail * pulse * (0.48 * carrier + 0.22 * harmonic + 0.10 * n)
+
+
+def projectile_launch(t, i, n, duration):
+    snap = math.exp(-48.0 * t) * n
+    fall = math.sin(2 * math.pi * (760 - 570 * t / duration) * t)
+    core = math.sin(2 * math.pi * (245 - 95 * t / duration) * t)
+    return 0.68 * snap + math.exp(-10.0 * t) * (0.44 * fall + 0.50 * core)
 
 
 def player_damage(t, i, n, duration):
@@ -71,8 +101,11 @@ def enemy_death(t, i, n, duration):
 
 def main():
     render("footstep.wav", 0.04, 0xF007, footstep)
-    render("light_hit.wav", 0.05, 0x117E, light_hit)
-    render("heavy_hit.wav", 0.075, 0x4EAD, heavy_hit)
+    render("light_hit.wav", 0.18, 0x117E, light_hit)
+    render("heavy_hit.wav", 0.22, 0x4EAD, heavy_hit)
+    render("weapon_swing.wav", 0.16, 0x5A17, weapon_swing)
+    render("projectile_charge.wav", 0.35, 0xC4A6, projectile_charge)
+    render("projectile_launch.wav", 0.18, 0xB017, projectile_launch)
     render("player_damage.wav", 0.06, 0xDA6E, player_damage)
     render("enemy_death.wav", 0.10, 0xDEAD, enemy_death)
 

@@ -518,6 +518,7 @@ impl Playtest {
                     };
                     if self.combat_projectiles.spawn(spawn).is_ok() {
                         telemetry::debug_log("enemy projectile:release");
+                        self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
                         let _ = self.game_entities.commit_deferred_attack(attack);
                     }
                 }

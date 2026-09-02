@@ -1073,14 +1073,18 @@ impl<'a, S: Scene> GameApp<'a, S> {
         }
     }
 
-    fn play_gameplay_sfx_events(&mut self, events: u8) {
-        const EVENTS: [LevelGameplaySfxEvent; 6] = [
+    fn play_gameplay_sfx_events(&mut self, events: u16) {
+        const EVENTS: [LevelGameplaySfxEvent; 10] = [
             LevelGameplaySfxEvent::Footstep,
             LevelGameplaySfxEvent::LightHit,
             LevelGameplaySfxEvent::HeavyHit,
             LevelGameplaySfxEvent::PlayerDamage,
             LevelGameplaySfxEvent::EnemyDeath,
             LevelGameplaySfxEvent::StanceSwapReady,
+            LevelGameplaySfxEvent::PlayerWeaponSwing,
+            LevelGameplaySfxEvent::EnemyWeaponSwing,
+            LevelGameplaySfxEvent::ProjectileCharge,
+            LevelGameplaySfxEvent::ProjectileLaunch,
         ];
         for event in EVENTS {
             if events & event.bit() == 0 {

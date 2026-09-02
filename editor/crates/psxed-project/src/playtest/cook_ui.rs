@@ -102,36 +102,68 @@ pub(crate) fn cook_ui_nodes(
     // directory is absent the project remains silent; once present, every
     // named cue is validated and cooked through the exact same deduplicating
     // resident sample path as UI audio.
-    for (path, event, volume) in [
+    for (path, event, volume, pitch_q12) in [
         (
             "assets/audio/gameplay/footstep.wav",
             psx_level::LevelGameplaySfxEvent::Footstep,
             48,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
-            "assets/audio/gameplay/light_hit.wav",
+            // One strong resident impact, pitched up/down for light/heavy,
+            // saves a second SPU allocation in RAM-tight PS1 projects.
+            "assets/audio/gameplay/heavy_hit.wav",
             psx_level::LevelGameplaySfxEvent::LightHit,
-            72,
+            90,
+            4_400,
         ),
         (
             "assets/audio/gameplay/heavy_hit.wav",
             psx_level::LevelGameplaySfxEvent::HeavyHit,
-            88,
+            96,
+            3_500,
         ),
         (
             "assets/audio/gameplay/player_damage.wav",
             psx_level::LevelGameplaySfxEvent::PlayerDamage,
             82,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
             "assets/audio/gameplay/enemy_death.wav",
             psx_level::LevelGameplaySfxEvent::EnemyDeath,
             90,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
             "assets/audio/ui/ui_confirm.wav",
             psx_level::LevelGameplaySfxEvent::StanceSwapReady,
             54,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
+            "assets/audio/gameplay/weapon_swing.wav",
+            psx_level::LevelGameplaySfxEvent::PlayerWeaponSwing,
+            72,
+            4_500,
+        ),
+        (
+            "assets/audio/gameplay/weapon_swing.wav",
+            psx_level::LevelGameplaySfxEvent::EnemyWeaponSwing,
+            82,
+            3_500,
+        ),
+        (
+            "assets/audio/gameplay/projectile_charge.wav",
+            psx_level::LevelGameplaySfxEvent::ProjectileCharge,
+            72,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
+            "assets/audio/gameplay/projectile_launch.wav",
+            psx_level::LevelGameplaySfxEvent::ProjectileLaunch,
+            88,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
     ] {
         if project_root.join(&path).is_file() {
@@ -146,7 +178,7 @@ pub(crate) fn cook_ui_nodes(
                     sample,
                     event,
                     volume_percent: volume,
-                    pitch_q12: crate::UI_SFX_PITCH_UNITY_Q12,
+                    pitch_q12,
                     flags: 0,
                 });
             }
