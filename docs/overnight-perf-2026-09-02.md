@@ -551,3 +551,14 @@ already show on this tape. The switch is the `world-selection-reuse` line in
 
 Negative: the aperture-bounded sky lattice rebased onto this base measured
 +4.19% bus cycles and was reverted.
+
+### hl-psx profile (night pass 2)
+
+Whole-ride PC profile of the trampolined build: `play` 16.8%, the packet
+emitters about 35% (quad corners 10.0, world loop tris 4.2, submodel faces
+3.5, flat CV 3.2, soft cells 2.7, patches 2.5, and a long tail), and 8.4% in
+the CD sector reader's wait loop. Re-profiled strictly inside the first
+moving segment (route ticks 1100 to 3321) the reader disappears: that spin
+is the five load gaps between segments, which the tram metric already
+excludes, not frame time. The moving frame is the emitter tail plus the game
+loop's own 17%; nothing there is a cheap cut.
