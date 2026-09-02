@@ -40,6 +40,25 @@ pub mod tty;
 #[cfg(feature = "alloc")]
 pub mod heap;
 
+/// Post-link home for R3000 load-delay hazard trampolines.
+///
+/// LLVM's MIPS delay-slot filler leaves loads in branch delay slots whose
+/// consumer runs one instruction later, inside the load delay, and so reads
+/// the stale register. `tools/hazard_patch.py` rewrites each such branch to
+/// jump through a short trampoline it writes here after the link (magic,
+/// capacity, then code words), which the staged guest build runs and verifies
+/// instead of disabling the filler's backward search at a cost of tens of
+/// kilobytes of nops. Every guest that links psx-rt therefore carries this
+/// 392-byte array in `.data`; nothing reads it at runtime except the CPU.
+#[no_mangle]
+#[used]
+pub static mut HAZARD_TRAMPOLINES: [u32; 2 + 96] = {
+    let mut words = [0u32; 2 + 96];
+    words[0] = 0x4841_5a54;
+    words[1] = 96;
+    words
+};
+
 // Symbols emitted by `psoxide.ld`.
 extern "C" {
     static mut __bss_start: u8;
