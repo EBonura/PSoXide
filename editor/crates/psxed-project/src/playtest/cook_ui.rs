@@ -280,6 +280,7 @@ pub(crate) fn cook_ui_scene_nodes(
         if let UiNodeKind::Image {
             rect,
             texture,
+            tag,
             tint,
             effect,
         } = &node.kind
@@ -289,6 +290,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 parent,
                 rect,
                 *texture,
+                tag,
                 *tint,
                 *effect,
                 project,
@@ -891,6 +893,7 @@ pub(crate) fn cook_ui_image_node(
     parent: Option<u16>,
     rect: &UiRect,
     texture: Option<ResourceId>,
+    tag: &str,
     tint: [u8; 3],
     effect: UiImageEffect,
     project: &ProjectDocument,
@@ -901,7 +904,7 @@ pub(crate) fn cook_ui_image_node(
     out: &mut Vec<PlaytestUiNode>,
 ) {
     let Some(texture_id) = texture else {
-        out.push(cooked_ui_image_node(parent, *rect, tint, effect, None));
+        out.push(cooked_ui_image_node(parent, *rect, tag, tint, effect, None));
         return;
     };
     let Some(cooked) = cook_ui_image_texture_asset(
@@ -913,13 +916,14 @@ pub(crate) fn cook_ui_image_node(
         assets,
         report,
     ) else {
-        out.push(cooked_ui_image_node(parent, *rect, tint, effect, None));
+        out.push(cooked_ui_image_node(parent, *rect, tag, tint, effect, None));
         return;
     };
     if cooked.fragments.len() <= 1 {
         out.push(cooked_ui_image_node(
             parent,
             *rect,
+            tag,
             tint,
             effect,
             cooked
@@ -952,6 +956,7 @@ pub(crate) fn cook_ui_image_node(
         out.push(cooked_ui_image_node(
             Some(group_index),
             child_rect,
+            tag,
             tint,
             effect,
             Some(fragment.asset_index),
@@ -1046,6 +1051,7 @@ pub(crate) fn cooked_ui_group_node(parent: Option<u16>, rect: UiRect) -> Playtes
 pub(crate) fn cooked_ui_image_node(
     parent: Option<u16>,
     rect: UiRect,
+    tag: &str,
     tint: [u8; 3],
     effect: UiImageEffect,
     texture_asset: Option<usize>,
@@ -1055,6 +1061,7 @@ pub(crate) fn cooked_ui_image_node(
         kind: UiNodeKind::Image {
             rect,
             texture: None,
+            tag: tag.to_string(),
             tint,
             effect,
         },
@@ -1073,7 +1080,7 @@ pub(crate) fn cooked_ui_image_node(
         texture_asset,
         image_effect: effect,
         text: String::new(),
-        tag: String::new(),
+        tag: tag.to_string(),
         action: PlaytestUiAction::default(),
         option: psx_level::UI_OPTION_NONE,
         rotation_degrees: rect.rotation_degrees,
