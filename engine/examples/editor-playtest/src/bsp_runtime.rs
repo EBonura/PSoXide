@@ -468,6 +468,7 @@ impl BspRuntime {
             pxbsp_visible_face_chain_arena(),
             pxbsp_frame_face_chain_arena(),
         );
+        renderer.set_selection_reuse(cfg!(feature = "world-selection-reuse"));
         crate::game_trace("editor-playtest: bsp renderer ok");
         // The frustum clip must match the projection this example renders
         // with (H and screen half-extents), or it clips too much or too little.
