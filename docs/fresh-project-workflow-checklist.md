@@ -123,8 +123,8 @@ progression counter to zero while PVS suppression keeps accruing, which is
 how the gate catches a build that quietly no-ops the souls runtime, and a
 second guest binary with a different code layout reproduces the identical
 simulation while presenting a different number of frames.
-`make combat-checkpoint` and `make editor-bsp-liquid-check` pin the combat
-and hazard halves separately.
+`make cortex-bench` (whole-level tape, hashes and counters) and
+`make editor-bsp-liquid-check` pin the combat and hazard halves separately.
 
 *Yours to confirm:* everything about how it reads and feels. Camera framing
 during the fight, whether the lock-on target is legible, whether the sword

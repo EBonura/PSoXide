@@ -970,9 +970,15 @@ impl<'a> Animation<'a> {
         playback_hz: u16,
         speed_q8: u16,
     ) -> u32 {
-        let scaled_step =
-            // psx-numeric-allow-next-line: phase-step scale widens through u64; one multu, no 64-bit division
-            ((self.phase_step_q12(playback_hz) as u64 * speed_q8 as u64) / 256) as u32;
+        // `step * speed_q8 / 256` in u32: the high byte of the step scales
+        // whole, the low byte contributes its floored share, and the sum
+        // equals the floor of the full product over 256 (wrapping like the
+        // former u64 form's `as u32`).
+        let step = self.phase_step_q12(playback_hz);
+        let speed = u32::from(speed_q8);
+        let scaled_step = (step >> 8)
+            .wrapping_mul(speed)
+            .wrapping_add(((step & 0xff) * speed) >> 8);
         playback_tick.wrapping_mul(scaled_step)
     }
 

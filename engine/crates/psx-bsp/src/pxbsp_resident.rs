@@ -349,6 +349,28 @@ impl PxbspResidentMap {
         }
     }
 
+    /// Borrow one face record in place. The hot face loop reads two or three
+    /// fields per face; decoding the whole record into a [`Face`] made the
+    /// compiler keep a ten-byte copy on the stack and reload it, which on a
+    /// cacheless R3000 is six RAM loads and nine stores per face before any
+    /// field is used. Each accessor here is one load at the moment of use.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be less than `self.faces().len()`.
+    #[cfg(target_endian = "little")]
+    #[inline(always)]
+    pub unsafe fn face_ref_unchecked(&self, index: usize) -> FaceRef {
+        unsafe {
+            let base = self
+                .lump_bytes(PxbspLumpKind::Faces)
+                .as_ptr()
+                .add(index * Face::SIZE);
+            debug_assert_eq!(base as usize & 1, 0);
+            FaceRef { base }
+        }
+    }
+
     /// Borrow the render-tree nodes in their wire layout.
     ///
     /// [`Self::nodes`] reconstructs the larger semantic [`Node`] aggregate,
@@ -1839,5 +1861,45 @@ pub(crate) mod tests {
             .load(17, &mut SliceReader::new(&bytes))
             .expect_err("too large");
         assert!(matches!(error, PxbspMapLoadError::TooLarge { .. }));
+    }
+}
+
+/// A face record borrowed in place; see [`PxbspResidentMap::face_ref_unchecked`].
+#[cfg(target_endian = "little")]
+#[derive(Clone, Copy)]
+pub struct FaceRef {
+    base: *const u8,
+}
+
+#[cfg(target_endian = "little")]
+impl FaceRef {
+    #[inline(always)]
+    pub fn plane(self) -> usize {
+        unsafe { core::ptr::read(self.base.cast::<u16>()) as usize }
+    }
+
+    #[inline(always)]
+    pub fn first_vertex(self) -> usize {
+        unsafe { core::ptr::read(self.base.add(2).cast::<u16>()) as usize }
+    }
+
+    #[inline(always)]
+    pub fn texture(self) -> usize {
+        unsafe { core::ptr::read(self.base.add(4).cast::<u16>()) as usize }
+    }
+
+    #[inline(always)]
+    pub fn flags(self) -> u16 {
+        unsafe { u16::from(core::ptr::read(self.base.add(6))) }
+    }
+
+    #[inline(always)]
+    pub fn vertex_count(self) -> usize {
+        unsafe { core::ptr::read(self.base.add(7)) as usize }
+    }
+
+    #[inline(always)]
+    pub fn light_styles(self) -> [u8; 2] {
+        unsafe { [core::ptr::read(self.base.add(8)), core::ptr::read(self.base.add(9))] }
     }
 }
