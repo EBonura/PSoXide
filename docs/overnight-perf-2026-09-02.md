@@ -569,3 +569,16 @@ but two-frame late faces at the edge (one line in `draw_pxbsp_world`,
 `self.frame % 3 != 0`); keeping the select frame's side-plane clip proofs on
 reuse frames is neutral (+0.10%, identical hashes), so the exact clip is not
 where the draw pass spends its time.
+
+### classic-affine writer variants on Cortex (2026-09-03)
+
+| Feature | Bus cycles vs selection-reuse build |
+|---|---|
+| classic-affine-compact-subdivision-emitters | +2.19% |
+| classic-affine-compact-subdivision-kernels | +2.13% |
+| classic-affine-compact-level2-kernel | +3.07% |
+| classic-affine-compact-world-level2-kernel | +1.20% |
+| classic-affine-speculative-level0 | identical |
+
+Quake's verdict holds on Cortex: the code-size variants lose to RAM traffic
+and the writer is at its floor.
