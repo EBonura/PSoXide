@@ -1,3 +1,4 @@
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![no_std]
 
 //! Checked, allocation-free readers for the XBSP cooked map format.
