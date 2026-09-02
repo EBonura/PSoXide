@@ -36,8 +36,8 @@ use psx_gpu::{
     prim::TriTextured,
 };
 use psx_level::{
-    find_asset_of_kind, sky_flags, world_object_flags, AssetId, AssetKind,
-    LevelWorldObjectRecord, MAX_ROOM_MATERIALS,
+    find_asset_of_kind, sky_flags, world_object_flags, AssetId, AssetKind, LevelWorldObjectRecord,
+    MAX_ROOM_MATERIALS,
 };
 use psx_math::{cos_q12, sin_q12};
 

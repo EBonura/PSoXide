@@ -29,6 +29,19 @@ fn boost_module_name(id: BoostModuleId) -> &'static str {
     boost_module(id).map_or("NONE", |module| module.name)
 }
 
+/// Socket buttons are only 63 pixels wide at the native 320x240 resolution.
+/// These compact names match the three authored Cortex modules; the analysis
+/// pane still presents each module's complete authored name.
+fn boost_module_socket_name(id: BoostModuleId) -> &'static str {
+    match id.index() {
+        Some(0) => "RUPTURE",
+        Some(1) => "ZENITH",
+        Some(2) => "SHELL",
+        Some(_) => "MODULE",
+        None => "NONE",
+    }
+}
+
 struct UiScratch<'a> {
     bytes: &'a mut [u8],
     len: usize,
@@ -182,22 +195,9 @@ impl Playtest {
     }
 }
 
-fn write_stat_line<'a>(
-    scratch: &'a mut [u8],
-    label: &str,
-    active_bonus_q12: i32,
-    module_bonus_q12: Option<i32>,
-) -> Option<&'a str> {
+fn write_stat_value(scratch: &mut [u8], bonus_q12: i32) -> Option<&str> {
     let mut out = UiScratch::new(scratch);
-    out.push_str(label);
-    out.push_str(" ");
-    out.push_signed_percent_q12(active_bonus_q12);
-    out.push_str(" / ");
-    if let Some(module_bonus_q12) = module_bonus_q12 {
-        out.push_signed_percent_q12(module_bonus_q12);
-    } else {
-        out.push_str("--");
-    }
+    out.push_signed_percent_q12(bonus_q12);
     out.finish()
 }
 
@@ -422,46 +422,71 @@ impl Scene for Playtest {
         let selected = BoostSlotId::from_index(self.selected_power_up_slot);
         let selected_item = self.selected_power_up_item;
         let slotted_item = self.power_up_loadout.module(selected);
-        let assigning = !selected_item.is_none();
-        let detail_item = if assigning {
-            selected_item
-        } else {
-            slotted_item
+        let inventory_mode = self.inventory_ui_mode();
+        let detail_item = match inventory_mode {
+            INVENTORY_UI_MODULES => self
+                .power_up_inventory
+                .item_at(self.inventory_module_cursor()),
+            INVENTORY_UI_ASSIGN => selected_item,
+            _ => slotted_item,
         };
         let detail = boost_module(detail_item);
-        let modifiers = self.vitality_modifiers();
+        let previewing_module =
+            matches!(inventory_mode, INVENTORY_UI_MODULES | INVENTORY_UI_ASSIGN)
+                && detail.is_some();
+        // The socket view reports the complete configured loadout, including
+        // the inactive stance. Otherwise assigning a Zenith module while in
+        // Horizon would misleadingly report +0% immediately after assignment.
+        let modifiers = self
+            .power_up_loadout
+            .modifiers(&self.player_vitality, BOOST_MODULES);
         let module_bonus = |stat| {
             detail
-                .map(|module| module_stat_bonus_q12(&self.player_vitality, selected, module, stat))
+                .and_then(|module| module.percentages.get(stat))
+                .map(|percent| i32::from(*percent).saturating_mul(4096) / 100)
+                .unwrap_or(0)
+        };
+        let stat_value = |stat, final_value| {
+            if previewing_module {
+                module_bonus(stat)
+            } else {
+                final_value
+            }
         };
         match tag {
-            "boost.horizon.empty" => Some(boost_module_name(
+            "boost.horizon.empty" => Some(boost_module_socket_name(
                 self.power_up_loadout.module(BoostSlotId::HorizonEmpty),
             )),
-            "boost.horizon.full" => Some(boost_module_name(
+            "boost.horizon.full" => Some(boost_module_socket_name(
                 self.power_up_loadout.module(BoostSlotId::HorizonFull),
             )),
-            "boost.zenith.empty" => Some(boost_module_name(
+            "boost.zenith.empty" => Some(boost_module_socket_name(
                 self.power_up_loadout.module(BoostSlotId::ZenithEmpty),
             )),
-            "boost.zenith.full" => Some(boost_module_name(
+            "boost.zenith.full" => Some(boost_module_socket_name(
                 self.power_up_loadout.module(BoostSlotId::ZenithFull),
             )),
             "inventory.item.0" => Some(boost_module_name(self.power_up_inventory.item_at(0))),
             "inventory.item.1" => Some(boost_module_name(self.power_up_inventory.item_at(1))),
             "inventory.item.2" => Some(boost_module_name(self.power_up_inventory.item_at(2))),
             "boost.assignment.prompt" => Some("CHOOSE A SOCKET"),
-            "boost.controls" => Some(match self.inventory_ui_mode() {
-                INVENTORY_UI_MODULES => "X SELECT   CIRCLE CLOSE",
-                INVENTORY_UI_ASSIGN => "X ASSIGN   [ ] REMOVE   O MODULES",
-                _ => "X MODULES   [ ] REMOVE   O CLOSE",
+            "boost.control.primary" => Some(match self.inventory_ui_mode() {
+                INVENTORY_UI_MODULES => "SELECT",
+                INVENTORY_UI_ASSIGN => "ASSIGN",
+                _ => "MODULES",
+            }),
+            "boost.control.remove" => Some("REMOVE"),
+            "boost.control.back" => Some(if self.inventory_ui_mode() == INVENTORY_UI_ASSIGN {
+                "MODULES"
+            } else {
+                "CLOSE"
             }),
             "boost.inventory.selected.name" => {
                 Some(detail.map_or("SELECT A MODULE", |module| module.name))
             }
             "boost.inventory.selected.stat" => Some(detail.map_or("", |module| module.description)),
             "boost.inventory.selected.count" => {
-                if assigning {
+                if previewing_module {
                     Some("COLLECTED")
                 } else if !detail_item.is_none() {
                     Some("EQUIPPED")
@@ -471,43 +496,45 @@ impl Scene for Playtest {
             }
             "boost.selected.name" => Some(detail.map_or("NONE", |module| module.name)),
             "boost.selected.effect" => Some(detail.map_or("", |module| module.effect_summary)),
-            "boost.selected.base" => {
-                let mut out = UiScratch::new(scratch);
-                if let Some(module) = detail {
-                    out.push_str("BASE // ");
-                    out.push_str(module.effect_summary);
-                }
-                out.finish()
-            }
-            "boost.stat.horizon" => write_stat_line(
+            "boost.selected.base" => Some(if previewing_module {
+                "MODULE EFFECT"
+            } else {
+                "FINAL STATS"
+            }),
+            "boost.stat.horizon" => write_stat_value(
                 scratch,
-                "HRZ ATK",
-                i32::from(modifiers.horizon_damage_q12) - 4096,
-                module_bonus(psx_level::boost_stat::HORIZON_ATTACK),
+                stat_value(
+                    psx_level::boost_stat::HORIZON_ATTACK,
+                    i32::from(modifiers.horizon_damage_q12) - 4096,
+                ),
             ),
-            "boost.stat.zenith" => write_stat_line(
+            "boost.stat.zenith" => write_stat_value(
                 scratch,
-                "ZTH ATK",
-                i32::from(modifiers.zenith_damage_q12) - 4096,
-                module_bonus(psx_level::boost_stat::ZENITH_ATTACK),
+                stat_value(
+                    psx_level::boost_stat::ZENITH_ATTACK,
+                    i32::from(modifiers.zenith_damage_q12) - 4096,
+                ),
             ),
-            "boost.stat.defence" => write_stat_line(
+            "boost.stat.defence" => write_stat_value(
                 scratch,
-                "DEFENCE",
-                4096 - i32::from(modifiers.incoming_damage_q12),
-                module_bonus(psx_level::boost_stat::DEFENCE),
+                stat_value(
+                    psx_level::boost_stat::DEFENCE,
+                    4096 - i32::from(modifiers.incoming_damage_q12),
+                ),
             ),
-            "boost.stat.movement" => write_stat_line(
+            "boost.stat.movement" => write_stat_value(
                 scratch,
-                "MOVE SPD",
-                i32::from(modifiers.movement_speed_q12) - 4096,
-                module_bonus(psx_level::boost_stat::MOVEMENT_SPEED),
+                stat_value(
+                    psx_level::boost_stat::MOVEMENT_SPEED,
+                    i32::from(modifiers.movement_speed_q12) - 4096,
+                ),
             ),
-            "boost.stat.attack_speed" => write_stat_line(
+            "boost.stat.attack_speed" => write_stat_value(
                 scratch,
-                "ATK SPD",
-                i32::from(modifiers.attack_speed_q12) - 4096,
-                module_bonus(psx_level::boost_stat::ATTACK_SPEED),
+                stat_value(
+                    psx_level::boost_stat::ATTACK_SPEED,
+                    i32::from(modifiers.attack_speed_q12) - 4096,
+                ),
             ),
             "boost.remove" => Some(if slotted_item.is_none() { "" } else { "REMOVE" }),
             "boost.selected.pole" => Some(match selected.pole() {
@@ -532,6 +559,7 @@ impl Scene for Playtest {
             "inventory.empty" => self.power_up_inventory.is_empty(),
             "boost.assignment.prompt" => !self.selected_power_up_item.is_none(),
             "boost.remove" => !self.power_up_loadout.module(selected).is_none(),
+            "boost.control.remove" => self.inventory_ui_mode() != INVENTORY_UI_MODULES,
             // The runtime overlay now owns the complete player HUD, including
             // the stance names inside its moving bars. Legacy authored labels
             // with these tags otherwise remain underneath the translucent dial
