@@ -40,7 +40,14 @@ fn main() {
         .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| project_relative("archive/fixtures/grounding-side-view"));
-    generate(&source, &output_dir);
+    // Optional yaw in degrees for every actor, so the camera settles at a
+    // non-cardinal angle and any disagreement between the world and model
+    // passes shows up as a sideways shift of the cubes against the actors.
+    let yaw_degrees = args
+        .next()
+        .and_then(|value| value.to_str().and_then(|value| value.parse::<f32>().ok()))
+        .unwrap_or(0.0);
+    generate(&source, &output_dir, yaw_degrees);
 }
 
 fn project_relative(relative: &str) -> PathBuf {
@@ -50,7 +57,7 @@ fn project_relative(relative: &str) -> PathBuf {
         .join(relative)
 }
 
-fn generate(source: &Path, output_dir: &Path) {
+fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
     let mut project = ProjectDocument::load_from_path(source).expect("load source project");
     let source_scene = project.active_scene().clone();
     let floor_material = first_textured_material(&project);
@@ -69,6 +76,7 @@ fn generate(source: &Path, output_dir: &Path) {
         let new_entity = scene.add_node(NodeId::ROOT, entity.name.clone(), NodeKind::Entity);
         scene.node_mut(new_entity).expect("entity").transform = Transform3 {
             translation: [ACTOR_X[index] as f32, (SLAB_TOP + 1) as f32, ACTOR_Z as f32],
+            rotation_degrees: [0.0, yaw_degrees, 0.0],
             ..Transform3::default()
         };
         for child_id in &entity.children {
