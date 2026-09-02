@@ -302,6 +302,80 @@ is tick-locked or re-recorded, the E1M1 fps number cannot be read from
 this bench and SDK repins should be judged by frame hashes on the fixed
 routes (the start route is one).
 
+## Harmonising the Cortex and Quake world passes (evaluation, 2026-09-02)
+
+Manny asked whether Cortex and quake-psx can be harmonised further so
+the day's world-pass wins reach Quake. The short answer: they cannot be
+bridged by sharing code as things stand, because Quake does not run the
+code that improved, and the biggest Quake win available is one Quake
+already has and does not ship.
+
+What each game runs today:
+
+| stage | Cortex 0.4 (`psx_bsp::render`, PXBSP path) | quake-psx (`game/src/renderer.rs`, 8.5k lines) |
+|---|---|---|
+| map format | PXBSP v5: nodes with quantised bounds, compact planes, PVS | classic Quake lumps through `ResidentMap` (the format psx-bsp was derived from) |
+| visibility | PVS re-marked every frame into packed face states | visible-face list rebuilt only when the camera leaf changes (`prepare_visibility`) |
+| frustum | node walk inheriting clip masks, node boxes on the GTE (today) | per-face GTE `aabb_outside_clip4`; 16-face block boxes and an exact-key selection cache exist behind feature flags |
+| face classify | five-plane vertex-major GTE scan (today) | near-plane flag per face, CPU or GTE behind a flag; attributed clip for near faces |
+| materialise/submit | `materialize_pxbsp_face` into the shared classic-affine mixed batch | own materialisers into `submit_quake_classic_affine_batch`, with subdivision caches |
+| sky | psx-bsp cube lattice (fixed today) | own lattice (`quake_core::sky`), already bounded |
+| shared today | `psx_engine::classic_affine`, `attributed_clip`, `psx_bsp::collision`, movers, formats | same |
+
+So of the morning's twelve landed changes, the ones inside
+`draw_pxbsp_faces`, `select_frame_pxbsp_faces`, `sky.rs` and the
+editor-playtest world-object pass reach quake-psx not at all. The
+1,000-frame start route confirms it: bit-identical and cycle-identical
+across the pins.
+
+Three ways to bridge, in order of return per effort:
+
+1. Ship Quake's own accepted work. `game/Cargo.toml` carries 62
+   `renderer-*` feature flags and `RENDERING.md` is a measured ledger of
+   them; the exact-key selection cache and the 16-face block gate are
+   marked accepted, `hoisted-indexed-world` is accepted, and the accepted
+   feature-gated build measured 23.856 fps against 21.857 for the original
+   renderer on the fixed E1M1 route. None of it ships: `default = []` and
+   `build_disc` refuses features for shipping provenance ("requires the
+   release profile with no guest features"). Promoting the accepted flags
+   into `default` is a quake-psx policy change, not engine work, and it is
+   worth roughly +7% to +9% on Quake's own ledger. It needs the E1M1 chain
+   harness made frame-time independent first, because that is the only
+   full-route gate and it currently desyncs on any timing change. The
+   ledger also warns that dormant flags were authored against older
+   stacks and may bypass later specialisations, so each one has to be
+   re-measured on the current pin, not switched on together.
+
+2. Port the four ideas that are format-independent into Quake's renderer:
+   the camera-side-of-plane table (Quake tried and rejected a
+   consecutive-same-plane cache, but not a per-plane table), the
+   word-scanned collector and whole-table retire (Quake keeps a cached
+   visible list instead, so this may not apply), the outlined per-frame
+   passes to cut spills (Quake's ledger says the frame is memory-bound
+   and names spills), and the vertex-major GTE near classification (Quake
+   has `renderer-gte-near-classification` behind a flag already). Each is
+   a day of work with Quake's own A/B, and each is single digits at best.
+
+3. Converge on one world pass: move quake-psx onto the PXBSP format and
+   `psx_bsp::render`. The formats already share a definition, the
+   collision hulls and movers are already shared, and psx-bsp still
+   carries the classic `ResidentMap` renderer Quake forked from. But
+   Quake's renderer is ahead of the PXBSP path in places (selection
+   cache, subdivision caches, liquid warps, water portals, sprites, brush
+   entities with their own transforms), so convergence means the shared
+   path has to absorb those first or Quake regresses. That is weeks, and
+   the payoff is maintenance, not frame rate: the two passes already do
+   comparable work per face.
+
+Recommendation: do 1 now (it is Manny's policy call and a harness fix),
+consider 2 opportunistically, and treat 3 as the long-term direction
+only after the demo.
+
+The reverse direction has one exact idea Cortex could borrow: Quake
+rebuilds its PVS face list only when the camera leaf changes, while
+Cortex re-marks every frame. In Cortex that mark pass is under 2% now,
+so it is not urgent.
+
 ## hl-psx
 
 Repinned to 8a40fa18 and then to the main tip 8ff8769a on the local
