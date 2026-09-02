@@ -68,6 +68,15 @@ fn packed_face_state(states: &[u8], index: usize) -> u8 {
     (states[index >> 2] >> ((index & 3) << 1)) & 3
 }
 
+/// [`packed_face_state`] for an index the table is known to cover.
+///
+/// # Safety
+/// `index >> 2` must be less than `states.len()`.
+#[inline(always)]
+unsafe fn packed_face_state_unchecked(states: &[u8], index: usize) -> u8 {
+    (unsafe { *states.get_unchecked(index >> 2) } >> ((index & 3) << 1)) & 3
+}
+
 #[inline]
 fn set_packed_face_state(states: &mut [u8], index: usize, state: u8) {
     let shift = (index & 3) << 1;
@@ -294,9 +303,15 @@ impl PxbspFaceSelection {
         }
     }
 
+    /// `index` is inside [`Self::range`], which is bounded by
+    /// `visible_faces.len()` for the visible-world selection.
+    #[inline(always)]
     fn face_index(self, index: usize, visible_faces: &[u16]) -> usize {
         match self {
-            Self::VisibleWorld => visible_faces[index] as usize,
+            Self::VisibleWorld => {
+                debug_assert!(index < visible_faces.len());
+                unsafe { *visible_faces.get_unchecked(index) as usize }
+            }
             Self::ModelRange { .. } => index,
         }
     }
@@ -1694,7 +1709,10 @@ impl Renderer {
             let face = unsafe { map.face_ref_unchecked(face_index) };
             let material_index = face.texture();
             let slot = PxbspResolvedMaterial::slot(material_index);
-            if !self.pxbsp_material_cache[slot].answers(material_index, epoch) {
+            // `slot` is masked to the cache size.
+            if !unsafe { self.pxbsp_material_cache.get_unchecked(slot) }
+                .answers(material_index, epoch)
+            {
                 self.fill_pxbsp_material_cache(
                     map,
                     materials,
@@ -1711,7 +1729,10 @@ impl Renderer {
             }
             let authored_front = match selection {
                 PxbspFaceSelection::VisibleWorld => {
-                    match packed_face_state(&self.frame_pxbsp_face_state, face_index) {
+                    // The frame chain was read out of this very table.
+                    match unsafe {
+                        packed_face_state_unchecked(&self.frame_pxbsp_face_state, face_index)
+                    } {
                         PXBSP_FRAME_NODE_BACK => false,
                         PXBSP_FRAME_NODE_FRONT => true,
                         _ => front_facing_pxbsp(map, face.plane(), face.flags(), camera_origin),
