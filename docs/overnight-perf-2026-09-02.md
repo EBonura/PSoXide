@@ -133,6 +133,73 @@ this particular route is different and, on this tape, larger. That is
 the correct view; the old one was drawing the world rotated against the
 actors. Tape-end pair: `pair-rot-tapeend.png`.
 
+### Morning session (2026-09-02, after the report was first written)
+
+Manny asked for the three leads to be taken and for more. Same bench,
+baseline now the end-of-night main (7,306,636,338 bus cycles).
+
+| step | commit | bus cycles | delta | visual |
+|---|---|---|---|---|
+| fan writer outlined (`#[inline(never)]`) and placed after the batch submitter | not landed | 7,475,722,196 | +2.31% | identical |
+| one MAC read per box-corner test | dc6d19b2 | 7,276,360,832 | -0.41% | identical |
+| near-clip second phase, one dot per vertex, hoisted constants | d8bd9684 | 7,284,929,369 | +0.12% cycles, -0.62% instructions | identical |
+| cube sky: reject faces early, ping-pong buffers, no per-cell zeroing | bf4f4903 | 6,966,750,918 | -4.65% cycles, -5.67% instructions | identical |
+| collision trace: check indices once, unchecked aligned reads | f674e611 | 6,969,607,100 | +0.04% cycles, -1.63% instructions | identical |
+| marked-face collector: word scan, unchecked chain write | 87e4ff53 | 6,955,326,200 | -0.21% | identical |
+| node boxes from sum and extent (4 GTE products instead of 10) | not landed | 7,004,452,499 | +0.54% cycles, -1.35% instructions | identical |
+| three per-face bounds checks dropped in the world draw head | 8f0dd05d | 6,925,050,691 | -0.44% | identical |
+| per-frame visibility passes kept out of line (fewer spills) | landed after 8f0dd05d | 6,894,775,185 | -0.87% | identical |
+| world objects outside the frustum skip their strict-occlusion traces | landed after d5836bff | 6,369,238,065 | -7.62% cycles, -8.10% instructions | identical (cadence shift) |
+| small node boxes take only the reject test (no mask clearing) | not landed | 6,381,234,020 | +0.19% cycles, -0.86% instructions | identical |
+| per-material policy byte before the material cache probe | not landed | 6,371,523,181 | +0.04% cycles, -0.54% instructions | identical |
+| long frame chains retired with one table clear | landed after 95e76c00 | 6,302,975,010 | -1.04% | identical (cadence shift) |
+| occlusion samples gated on the observer's PVS before tracing | landed after 095a2eee | 6,215,575,582 | -1.39% | identical |
+| mark loops without per-face bounds checks | 0533642b | 6,182,443,894 | -0.53% | identical |
+| camera side of each plane resolved once per face pass | 64f85a3a | 6,141,886,138 | -0.66% | identical |
+
+Morning session so far against the end-of-night main: 7,306,636,338 to
+6,141,886,138 bus cycles, -15.9%. Against the start of the night
+(7,569,976,132): -18.9%, with the grounding fix included.
+
+Manny's decision on the in-view occluded beacons: no rate limit; a
+beacon appearing late would confuse. Everything landed keeps every
+frame identical.
+
+The world-object finding deserves a line of its own. The three points of
+interest in 0.4 are cooked with direct brush occlusion, so every frame
+the runtime traced up to seven camera-to-object segments per object
+across the whole level to decide whether the beacon may draw; that was
+about nine long BSP traces per tick and most of `trace_into`'s 7%. An
+object the view frustum rejects is never drawn, so it is no longer
+traced. The remaining cost is the in-view, occluded case, which still
+pays seven traces a frame; rate-limiting that (re-testing an occluded
+object every few frames) would cut most of what is left but would let a
+beacon appear a few frames late, so it is Manny's call.
+
+Two negative results. The sum-and-extent box test replaces ten MVMVAs
+and thirty corner selects per node with four MVMVAs and three multiplies
+by the identity `2 n.outer = n.(min+max) + |n|.(max-min)`; it cuts
+instructions by 1.35% but costs 0.54% more cycles, because the ten
+products end up on the stack and the reloads outweigh the GTE work
+saved (unrolling did not change the generated code). Retried once the
+selection pass was its own function, in case the spills came from
+sharing the scene render's register allocation: still +0.66% cycles for
+-0.26% instructions, so the identity stays unused. Outlining the classic-affine fan writer to end
+the batch submitter's self-eviction made things slower, because the
+`PacketWriter` state then lives in memory on every packet instead of in
+registers; the refill count was a poor proxy for the cost of sequential
+refills. The submitter stays as it was.
+
+The sky result came from finally attributing `memcpy` and `memset`: the
+hot call sites all sat next to `psx_bsp::sky::cube_face_plane_distance`.
+Every mixed lattice cell was clipped against all six cube faces, and each
+clip zeroed two 160-byte buffers, copied the cell in, copied every pass
+back and zeroed the sample array, for a pass that emits a few dozen
+triangles. A face every corner lies outside of on one plane is now
+rejected before any buffer is touched, the four passes alternate between
+two caller-owned buffers, and the sample array lives once per frame; the
+per-vertex arithmetic is unchanged and the frames hash identically.
+
 ## Grounding: the floating actors
 
 Manny's instruction was to build a test level with a camera exactly side
@@ -206,31 +273,34 @@ It is a correctness change and stays.
 
 ## quake-psx
 
-Repinned to the PSoXide main tip on the local branch
-`repin/psoxide-8ff8769a` (not pushed). The E1M1 chain bench reports the
-chain incomplete at every pin from 41b968f2 (the B4/B5 32-bit frustum
-landing, before tonight) onwards, and complete at 891850b6 just before
-it. This is not a gameplay bug in the SDK. The two runs execute the same
-3,800 guest frames (the harness's budget, 3,807 pad polls each), but:
+Repinned locally (branches `repin/psoxide-8ff8769a` and, after the
+morning session, `repin/psoxide-16decb2c`; the demo disc carries
+4cdd4d7 at 1dce6e35). The E1M1 chain bench reports the chain incomplete
+at every pin from 41b968f2 (the B4/B5 landing, before this night)
+onwards and complete at 891850b6 just before it: the autopilot wedges
+near waypoint 17 at a slightly different position each run.
 
-| pin | bus cycles for 3,800 frames | vblanks | outcome |
-|---|---|---|---|
-| 891850b6 | 6,837,373,144 | 11,814 | chain complete, 22.486 fps |
-| 41b968f2 | 5,837,743,890 | 10,065 | stalls at waypoint 17 |
-| 8ff8769a (tonight's tip) | 7,054,418,969 for 4,800 frames | 12,194 | stalls at waypoint 17 |
+What that is and is not. quake-psx renders through its own
+`game/src/renderer.rs`, not through `psx_bsp::render`, so none of the
+world-pass work here reaches it; of the B4/B5 landing it links only the
+attributed-clip Q16 helpers and the sky scroll arithmetic, both
+rendering-side and both exact by their oracle tests. The 1,000-frame
+start route (`start-route-regress`) renders bit-identically at 891850b6
+and at 16decb2c and costs the same cycles to within 500 in 1.89 billion,
+so the SDK move did not change what quake draws or how fast it draws
+the start. The chain bench's own cycle totals differ between the two
+pins (6.84 billion against 5.84 billion for the same 3,800 guest frames),
+but that difference is the stalled route rendering cheaper frames while
+the player faces a wall, not a speed-up; an earlier draft of this report
+read it as one and was wrong.
 
-B4/B5 made quake-psx's frame about 15% cheaper (the frustum and clip
-work was the heaviest part of its world pass), and quake's movement
-integrates real frame time, so the autopilot now takes different steps
-through E1M1 and wedges near waypoint 17 (a different position every
-run: (657, 984, -344) and (647, 1069, -246)). A longer frame budget does
-not help; the route itself desyncs. The fix belongs in the harness or
-the autopilot (tick-locked physics for the regression route, or
-re-recorded waypoints), and until then the E1M1 fps number cannot be
-read from this bench. quake-psx does not use psx-bsp's movers, and the
-attributed-clip and sky helpers it links were changed to exact 32-bit
-forms with oracle tests, so no rendering change is expected either; a
-frame-by-frame hash comparison against the passing run was not done.
+The desync itself is therefore a harness sensitivity: quake integrates
+its movement with real frame time, so any change in how many vblanks a
+frame takes anywhere along the 3,800-frame chain moves the autopilot
+onto a different path, and this one wedges. Until the regression route
+is tick-locked or re-recorded, the E1M1 fps number cannot be read from
+this bench and SDK repins should be judged by frame hashes on the fixed
+routes (the start route is one).
 
 ## hl-psx
 
@@ -238,7 +308,8 @@ Repinned to 8a40fa18 and then to the main tip 8ff8769a on the local
 branch `repin/psoxide-8a40fa18` (not pushed) and rebuilt with the
 telemetry disc each time; the tram ride produced exactly the same frame
 hash (`0x955d28432f2aa63e`) and per-segment flip counts as at be93eb6b
-(segment 0: 16.60 fps, segment 2: 19.33 fps). hl-psx renders its world through its own
+(segment 0: 16.60 fps, segment 2: 19.33 fps). Re-run at 16decb2c after the
+morning session: still the same hash and the same segments. hl-psx renders its world through its own
 33k-line renderer and the classic affine writer, not through
 `draw_pxbsp_faces` or the node-visibility rebuild, so tonight's psx-bsp
 changes do not reach it, and the linker-script placement only moves
