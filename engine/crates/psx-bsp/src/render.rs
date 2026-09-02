@@ -1917,7 +1917,10 @@ impl Renderer {
                 // offset above, so the shared writer applies no second offset.
                 uv_offset: [0; 2],
                 compact: u8::from(compact_surface),
-                _padding: 0,
+                // Floors and ceilings key at their far edge so a beacon or an
+                // actor standing on a large floor polygon is not painted out
+                // by it (see ClassicAffineProfile::farthest_depth_key).
+                depth_law: u8::from(horizontal_face(map, face)),
                 texture_window_word: resolved.texture_window_word,
                 color_command_word: state.color_command_word,
             };
@@ -3030,6 +3033,15 @@ impl Default for Renderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A floor or ceiling: the face plane's normal is dominated by the map's
+/// up axis (`+Y`, which PXBSP_COORDINATES maps to the GTE's `-Y`).
+#[inline(always)]
+fn horizontal_face(map: &PxbspResidentMap, face: FaceRef) -> bool {
+    let plane = unsafe { map.planes().get_unchecked(face.plane()) };
+    let up = plane.normal.y.unsigned_abs();
+    up > plane.normal.x.unsigned_abs() && up > plane.normal.z.unsigned_abs()
 }
 
 fn view_frustum(camera: Camera) -> [AabbClipPlane; 4] {
