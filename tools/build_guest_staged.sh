@@ -162,6 +162,18 @@ RUSTFLAGS="$RUSTFLAGS_VALUE" \
 
 staged_exe="$STAGE/$EXE_RELATIVE"
 [ -f "$staged_exe" ] || { echo "[guest-build] staged build produced no $EXE_RELATIVE" >&2; exit 1; }
+# The delay-slot filler flag above is only a promise; prove the image has no
+# load-in-delay-slot hazard (see tools/hazard_scan.py). Skipped without the
+# MIPS binutils so a host without them still builds.
+if command -v mipsel-none-elf-objdump >/dev/null 2>&1; then
+    python3 "$ROOT/tools/hazard_scan.py" "$staged_exe" >"$STAGE/hazard-scan.txt" 2>&1 || {
+        cat "$STAGE/hazard-scan.txt" >&2
+        echo "[guest-build] load-delay hazards in $EXE_RELATIVE; refusing to stage it" >&2
+        exit 1
+    }
+else
+    echo "[guest-build] mipsel-none-elf-objdump missing; hazard scan skipped" >&2
+fi
 mkdir -p "$ROOT/$(dirname "$EXE_RELATIVE")"
 cp "$staged_exe" "$ROOT/$EXE_RELATIVE"
 echo "[guest-build] canonical stage $STAGE"
