@@ -306,6 +306,7 @@ pub(crate) fn draw_ui_scene_preview(
             UiNodeKind::Image {
                 rect,
                 texture,
+                tag: _,
                 tint,
                 effect,
             } => {
