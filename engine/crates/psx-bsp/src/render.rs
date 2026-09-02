@@ -2403,6 +2403,10 @@ impl Renderer {
         true
     }
 
+    // Out of line on purpose: inlined into the scene render these per-frame
+    // passes shared one register allocation with an 86 KB function and their
+    // inner loops reloaded table pointers from the stack at every node.
+    #[inline(never)]
     fn mark_visible_pxbsp_faces(&mut self, map: &PxbspResidentMap, point: Vec3I32) -> bool {
         self.cached_visibility = None;
         let faces = map.faces();
@@ -2495,6 +2499,10 @@ impl Renderer {
     /// Rebuild the Quake-style PVS stamp for render nodes. This runs only
     /// when the camera enters a different leaf; per-frame traversal can then
     /// skip every branch that cannot lead to a PVS-visible leaf.
+    // Out of line on purpose: inlined into the scene render these per-frame
+    // passes shared one register allocation with an 86 KB function and their
+    // inner loops reloaded table pointers from the stack at every node.
+    #[inline(never)]
     fn rebuild_pxbsp_node_visibility(&mut self, map: &PxbspResidentMap) {
         let nodes = map.compact_nodes();
         if nodes.len() != self.pxbsp_node_count {
@@ -2699,6 +2707,10 @@ impl Renderer {
 
     /// Select only PVS-stamped node faces whose subtree AABB intersects the
     /// current frustum. Exact per-polygon clipping remains in the draw path.
+    // Out of line on purpose: inlined into the scene render these per-frame
+    // passes shared one register allocation with an 86 KB function and their
+    // inner loops reloaded table pointers from the stack at every node.
+    #[inline(never)]
     fn select_frame_pxbsp_faces(
         &mut self,
         map: &PxbspResidentMap,
