@@ -616,17 +616,17 @@ pub(crate) fn draw_player_vitality_hud(
 /// bars and model-colour sweep communicate the stance change itself.
 pub(crate) fn draw_enemy_vitality_hud(
     font: &FontAtlas,
-    center_x: i16,
+    left_x: i16,
     top_y: i16,
     active: VitalityChannelId,
     active_fill_q12: u16,
     inactive_fill_q12: u16,
     swap_motion_progress_q12: u16,
 ) {
-    let (active_rgb, active_label) = vitality_channel_style(active);
-    let (inactive_rgb, inactive_label) = vitality_channel_style(active.other());
+    let (active_rgb, _) = vitality_channel_style(active);
+    let (inactive_rgb, _) = vitality_channel_style(active.other());
     let (incoming, outgoing) =
-        enemy_vitality_swap_geometry(center_x, top_y, swap_motion_progress_q12);
+        enemy_vitality_swap_geometry(left_x, top_y, swap_motion_progress_q12);
 
     if swap_motion_progress_q12 < 2048 {
         draw_vitality_bar(
@@ -635,7 +635,7 @@ pub(crate) fn draw_enemy_vitality_hud(
             incoming.cut,
             active_fill_q12,
             active_rgb,
-            active_label,
+            "",
         );
         draw_vitality_bar(
             font,
@@ -643,7 +643,7 @@ pub(crate) fn draw_enemy_vitality_hud(
             outgoing.cut,
             inactive_fill_q12,
             inactive_rgb,
-            inactive_label,
+            "",
         );
     } else {
         draw_vitality_bar(
@@ -652,7 +652,7 @@ pub(crate) fn draw_enemy_vitality_hud(
             outgoing.cut,
             inactive_fill_q12,
             inactive_rgb,
-            inactive_label,
+            "",
         );
         draw_vitality_bar(
             font,
@@ -660,7 +660,7 @@ pub(crate) fn draw_enemy_vitality_hud(
             incoming.cut,
             active_fill_q12,
             active_rgb,
-            active_label,
+            "",
         );
     }
 }
@@ -706,21 +706,21 @@ fn vitality_swap_geometry(progress_q12: u16) -> (VitalityBarGeometry, VitalityBa
     )
 }
 
-/// Resting enemy bars are centred on the target and touch at one edge. The
+/// Resting enemy bars share one left edge and touch at one horizontal edge. The
 /// active shell is one pixel taller above and below and appreciably wider,
 /// while the whole 76x18 cluster stays smaller than even the player's
 /// inactive 104x11 bar.
 #[inline(always)]
 fn enemy_vitality_resting_geometry(
-    center_x: i16,
+    left_x: i16,
     top_y: i16,
 ) -> (VitalityBarGeometry, VitalityBarGeometry) {
     let active = VitalityBarGeometry {
-        bounds: (center_x - 38, top_y, 76, 10),
+        bounds: (left_x, top_y, 76, 10),
         cut: 5,
     };
     let inactive = VitalityBarGeometry {
-        bounds: (center_x - 28, top_y + 10, 56, 8),
+        bounds: (left_x, top_y + 10, 56, 8),
         cut: 4,
     };
     (active, inactive)
@@ -728,11 +728,11 @@ fn enemy_vitality_resting_geometry(
 
 #[inline(always)]
 fn enemy_vitality_swap_geometry(
-    center_x: i16,
+    left_x: i16,
     top_y: i16,
     progress_q12: u16,
 ) -> (VitalityBarGeometry, VitalityBarGeometry) {
-    let (active, inactive) = enemy_vitality_resting_geometry(center_x, top_y);
+    let (active, inactive) = enemy_vitality_resting_geometry(left_x, top_y);
     vitality_swap_geometry_between(inactive, active, progress_q12, -2, 4)
 }
 
@@ -816,8 +816,11 @@ fn draw_vitality_bar(
     const LABEL_SLOT_W: i16 = 28;
     const LABEL_INK_H: i16 = 6;
     const LABEL_TOP_BEARING: i16 = 1;
-    let fill_x = x + LABEL_SLOT_W;
-    let fill_w = (w - 34).max(0);
+    // Enemy bars deliberately omit a redundant HRZ/ZTH legend. Give that
+    // space back to their health fill instead of leaving an unexplained gap.
+    let has_label = !label.is_empty();
+    let fill_x = x + if has_label { LABEL_SLOT_W } else { 5 };
+    let fill_w = (w - if has_label { 34 } else { 10 }).max(0);
     let fill_h = (h - 10).max(3);
     let fill_y = y + (h - fill_h) / 2;
     let filled = ((i32::from(fill_w) * i32::from(fill_q12.min(4096))) >> 12) as i16;
@@ -842,10 +845,12 @@ fn draw_vitality_bar(
     // These fixed three-letter uppercase labels use rows 1..=6 of the 5x8
     // atlas. Centre their visible ink rather than the atlas cell, whose blank
     // first and last rows made the compact inactive shell look bottom-heavy.
-    let label_w = font.text_width(label) as i16;
-    let label_x = x + (LABEL_SLOT_W - label_w + 1) / 2;
-    let label_y = y + (h - LABEL_INK_H) / 2 - LABEL_TOP_BEARING;
-    font.draw_text(label_x, label_y, label, (rgb.0, rgb.1, rgb.2));
+    if has_label {
+        let label_w = font.text_width(label) as i16;
+        let label_x = x + (LABEL_SLOT_W - label_w + 1) / 2;
+        let label_y = y + (h - LABEL_INK_H) / 2 - LABEL_TOP_BEARING;
+        font.draw_text(label_x, label_y, label, (rgb.0, rgb.1, rgb.2));
+    }
 }
 
 #[inline(never)]
@@ -1030,13 +1035,13 @@ mod vitality_hud_tests {
     }
 
     #[test]
-    fn enemy_bars_are_smaller_centered_and_edge_attached() {
+    fn enemy_bars_are_smaller_left_aligned_and_edge_attached() {
         let (active, inactive) = enemy_vitality_resting_geometry(160, 34);
         assert!(active.bounds.2 < INACTIVE_VITALITY_BAR.bounds.2);
         assert_eq!(active.bounds.3, inactive.bounds.3 + 2);
         assert_eq!(active.bounds.1 + active.bounds.3, inactive.bounds.1);
-        assert_eq!(active.bounds.0 + active.bounds.2 / 2, 160);
-        assert_eq!(inactive.bounds.0 + inactive.bounds.2 / 2, 160);
+        assert_eq!(active.bounds.0, 160);
+        assert_eq!(inactive.bounds.0, 160);
     }
 
     #[test]
