@@ -562,3 +562,10 @@ moving segment (route ticks 1100 to 3321) the reader disappears: that spin
 is the five load gaps between segments, which the tram metric already
 excludes, not frame time. The moving frame is the emitter tail plus the game
 loop's own 17%; nothing there is a cheap cut.
+
+Two follow-ups on selection reuse, measured and left out: selecting every
+third frame instead of every other is another -1.53% with a clean poll sheet
+but two-frame late faces at the edge (one line in `draw_pxbsp_world`,
+`self.frame % 3 != 0`); keeping the select frame's side-plane clip proofs on
+reuse frames is neutral (+0.10%, identical hashes), so the exact clip is not
+where the draw pass spends its time.
