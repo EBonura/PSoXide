@@ -432,6 +432,8 @@ impl Playtest {
         }
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
         self.selected_power_up_item = BoostModuleId::NONE;
+        self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
+        self.inventory_overlay_active = false;
         self.acquired_module = BoostModuleId::NONE;
         self.hazard_death_ticks_remaining = 0;
         self.death_by_combat = false;
