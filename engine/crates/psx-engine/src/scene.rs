@@ -495,6 +495,30 @@ pub trait Scene {
         true
     }
 
+    /// Resolve whether a visible tagged control participates in focus
+    /// navigation. This is separate from visibility so a modal sub-flow can
+    /// keep its surrounding controls on screen while temporarily constraining
+    /// the cursor to the active group.
+    #[inline]
+    fn ui_node_focusable(&self, _tag: &str) -> bool {
+        true
+    }
+
+    /// Preferred opaque `Game` action for UI focus. The flow driver consults
+    /// this when a scene first seeds focus and after a game-specific action or
+    /// cancel changes an in-place submenu. Returning `None` preserves ordinary
+    /// spatial navigation and selected-tab seeding.
+    #[inline]
+    fn preferred_ui_focus_action(&self) -> Option<u16> {
+        None
+    }
+
+    /// Notify gameplay that focus landed on an opaque `Game` action. Domain UI
+    /// can use this to keep a selected socket or list row synchronized with the
+    /// engine-owned cursor without duplicating navigation state.
+    #[inline]
+    fn game_ui_focus_changed(&mut self, _id: u16) {}
+
     /// Handle an authored game-specific UI action. The flow driver owns
     /// navigation actions; opaque `Game` ids are deliberately dispatched to
     /// the gameplay scene so projects can implement inventory assignment and
@@ -510,6 +534,20 @@ pub trait Scene {
     fn game_ui_cancel(&mut self, ctx: &mut Ctx) -> bool {
         false
     }
+
+    /// Handle Square while an authored gameplay overlay owns UI input.
+    /// Returning `true` consumes the press.
+    #[allow(unused_variables)]
+    fn game_ui_square(&mut self, ctx: &mut Ctx) -> bool {
+        false
+    }
+
+    /// Called on every completed flow-state entry, including transitions whose
+    /// incoming and outgoing states share one resource set. Resource lifecycle
+    /// hooks intentionally skip those transitions; lightweight UI mode state
+    /// still needs to observe them.
+    #[allow(unused_variables)]
+    fn on_flow_state_entered(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
 
     /// Receive the current project-option values. The flow driver calls this
     /// when a UI entry applies defaults, after front-end option edits, and each

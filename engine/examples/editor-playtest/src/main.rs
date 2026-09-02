@@ -98,7 +98,7 @@ use psx_game_runtime::{
     save::{SaveBlock, SavedPlayerPosition},
 };
 use psx_gpu::{
-    draw_quad_textured_material, draw_tri_flat_blended,
+    draw_line_mono, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
     prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
@@ -435,6 +435,13 @@ struct Playtest {
     selected_power_up_slot: u8,
     /// Collected item highlighted in the inventory browser.
     selected_power_up_item: BoostModuleId,
+    /// Packed inventory navigation state: low two bits are the active pane
+    /// (sockets/modules/assignment), high bits retain the module-list cursor.
+    /// Keeping both in one byte matters in the PS1 scene BSS.
+    inventory_ui_state: u8,
+    /// Suppresses the live gameplay vitality HUD while the inventory owns the
+    /// screen; the inventory has its own socket presentation.
+    inventory_overlay_active: bool,
     /// Remaining death-sequence ticks, shared by every death cause
     /// (combat damage, BSP liquid hazards, lethal water). Non-zero locks
     /// player input until the shared checkpoint/spawn respawn completes.
@@ -754,6 +761,8 @@ impl Playtest {
         self.overlay_poi_page_type_frame = 0;
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
         self.selected_power_up_item = BoostModuleId::NONE;
+        self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
+        self.inventory_overlay_active = false;
         self.acquired_module = BoostModuleId::NONE;
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
         self.anim_state = PlayerAnim::Idle;
