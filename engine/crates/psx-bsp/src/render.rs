@@ -2903,8 +2903,16 @@ impl Renderer {
     }
 
     fn retire_frame_pxbsp_selection(&mut self) {
-        for &face in &self.frame_pxbsp_faces {
-            set_packed_face_state(&mut self.frame_pxbsp_face_state, face as usize, 0);
+        // Clearing the chain's entries one read-modify-write at a time costs
+        // about ten instructions per face; a whole-table clear is a word
+        // store per sixteen faces. Past a twentieth of the table the clear
+        // is cheaper, and it leaves the same all-zero table.
+        if self.frame_pxbsp_faces.len().saturating_mul(20) > self.frame_pxbsp_face_state.len() {
+            self.frame_pxbsp_face_state.fill(0);
+        } else {
+            for &face in &self.frame_pxbsp_faces {
+                set_packed_face_state(&mut self.frame_pxbsp_face_state, face as usize, 0);
+            }
         }
         self.frame_pxbsp_faces.clear();
     }
