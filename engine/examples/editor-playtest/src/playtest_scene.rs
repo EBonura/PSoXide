@@ -834,7 +834,7 @@ impl Scene for Playtest {
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
             world_object_visibility = bsp.visible_world_objects(
-                RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
+                camera,
                 WORLD_OBJECTS,
                 &self.destructibles,
             );
