@@ -578,6 +578,37 @@ impl FrustumPlanes {
         }
     }
     /// Rounding error band of plane `index`: zero for the exact near plane.
+    /// Distance of `position` from plane `index`: the dot on the GTE on the
+    /// guest (the planes must be loaded by [`load_gte_clip_planes`]), the
+    /// same wrapping `i32` products on the host.
+    #[inline(always)]
+    fn distance_at(&self, index: usize, position: [i16; 3]) -> i32 {
+        #[cfg(target_arch = "mips")]
+        {
+            let xy = (position[0] as u16 as u32) | ((position[1] as u16 as u32) << 16);
+            let z = position[2] as i32 as u32;
+            let dot = if index < 3 {
+                let (d0, d1, d2) = unsafe { gte_dot3::<MVMVA_LLM_V0_SF0>(xy, z) };
+                match index {
+                    0 => d0,
+                    1 => d1,
+                    _ => d2,
+                }
+            } else {
+                let (d3, d4, _) = unsafe { gte_dot3::<MVMVA_LCM_V0_SF0>(xy, z) };
+                if index == 3 {
+                    d3
+                } else {
+                    d4
+                }
+            };
+            dot.wrapping_add(self.planes[index].1)
+        }
+        #[cfg(not(target_arch = "mips"))]
+        {
+            Self::distance(&self.planes[index], position)
+        }
+    }
     #[inline(always)]
     fn error_of(&self, index: usize) -> i32 {
         if index == PXBSP_CLIP_NEAR_PLANE {
@@ -752,7 +783,7 @@ impl FrustumPlanes {
                 if normal[2] >= 0 { maxs[2] } else { mins[2] },
             ];
             let error = self.error_of(index);
-            if Self::surely_outside(plane, error, outer) {
+            if self.distance_at(index, outer) < -error {
                 return AabbClass::Outside;
             }
             if wholly_inside {
@@ -762,7 +793,7 @@ impl FrustumPlanes {
                     if normal[1] >= 0 { mins[1] } else { maxs[1] },
                     if normal[2] >= 0 { mins[2] } else { maxs[2] },
                 ];
-                wholly_inside = Self::surely_inside(plane, error, inner);
+                wholly_inside = self.distance_at(index, inner) >= error;
             }
             index += 1;
         }
@@ -797,7 +828,7 @@ impl FrustumPlanes {
                 if normal[2] >= 0 { maxs[2] } else { mins[2] },
             ];
             let error = self.error_of(index);
-            if Self::surely_outside(plane, error, outer) {
+            if self.distance_at(index, outer) < -error {
                 return None;
             }
             let inner = [
@@ -805,7 +836,7 @@ impl FrustumPlanes {
                 if normal[1] >= 0 { mins[1] } else { maxs[1] },
                 if normal[2] >= 0 { mins[2] } else { maxs[2] },
             ];
-            if Self::surely_inside(plane, error, inner) {
+            if self.distance_at(index, inner) >= error {
                 residual &= !(1 << index);
             }
             index += 1;
@@ -826,7 +857,7 @@ impl FrustumPlanes {
                 if plane.0[1] >= 0 { maxs[1] } else { mins[1] },
                 if plane.0[2] >= 0 { maxs[2] } else { mins[2] },
             ];
-            Self::surely_outside(plane, self.error_of(index), positive)
+            self.distance_at(index, positive) < -self.error_of(index)
         })
     }
 
@@ -2643,6 +2674,9 @@ impl Renderer {
         // cook's node bounds are proven to enclose their faces) lets the draw
         // loop skip the exact per-face clip entirely.
         let inherit_clip = self.pxbsp_node_bounds_enclose_faces;
+        // The node boxes below test their support corners on the GTE.
+        #[cfg(target_arch = "mips")]
+        load_gte_clip_planes(&frustum.planes);
         self.pxbsp_node_stack.clear();
         self.pxbsp_node_stack
             .push(root as u32 | (PXBSP_CLIP_ALL_PLANES as u32) << PXBSP_NODE_STACK_MASK_SHIFT);
