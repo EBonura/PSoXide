@@ -1,0 +1,24 @@
+{
+  "instructions": 3428212963,
+  "bus_cycles": 7569976132,
+  "route_ticks": 13242,
+  "vram_hash": "0x7cf9c3b2c159df7b",
+  "display_hash": "0x95fd2862608129d6",
+  "flips": 2621,
+  "fps": 11.876,
+  "idle_instructions": 214679790,
+  "work_instructions": 3213533173,
+  "idle_percent": 6.26,
+  "cycle_shares": {
+    "issue": 45.29,
+    "ram_load_stall": 31.62,
+    "stack_ram_load_stall": 10.2,
+    "ram_store_stall": 2.88,
+    "mmio_stall": 5.2,
+    "icache_refill_stall": 8.91,
+    "gte_busy_stall": 0.0,
+    "muldiv_interlock_stall": 6.1
+  },
+  "symbol_gate": "FAIL",
+  "exe_sha256": "52578afc060bc7b917342bc1ee34d85e43f2e62c2ce515f6ba650fd6f837295b"
+}
