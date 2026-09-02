@@ -215,10 +215,8 @@ pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 /// resident BSP owns the static world; the previous `0..8192` keyed them at
 /// `z / 4`, one third of the world's key, so an actor at depth `z` sorted in
 /// front of every wall farther than `z / 3`.
-pub(super) const PXBSP_CLASSIC_DEPTH_RANGE: DepthRange = DepthRange::new(
-    0,
-    psx_bsp::render::pxbsp_classic_far_depth(OT_DEPTH as u16),
-);
+pub(super) const PXBSP_CLASSIC_DEPTH_RANGE: DepthRange =
+    DepthRange::new(0, psx_bsp::render::pxbsp_classic_far_depth(OT_DEPTH as u16));
 #[cfg(feature = "world-grid-visible")]
 pub(super) const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
 #[cfg(all(

@@ -85,7 +85,12 @@ pub fn lerp_q16_i32_exact(first: i32, second: i32, fraction_q16: u32) -> i32 {
     // delta * f / 2^16 == delta * (f >> 8) / 2^8 + delta * (f & 255) / 2^16,
     // and floor distributes here because the first term is exact after one
     // more shift: (delta * high + ((delta * low) >> 8)) >> 8.
-    first.wrapping_add((delta.wrapping_mul(high).wrapping_add((delta.wrapping_mul(low)) >> 8)) >> 8)
+    first.wrapping_add(
+        (delta
+            .wrapping_mul(high)
+            .wrapping_add((delta.wrapping_mul(low)) >> 8))
+            >> 8,
+    )
 }
 
 /// Bounded Q12 interpolation with truncation toward the lower fixed point.
@@ -120,7 +125,6 @@ pub fn lerp_q12_i32_wide(first: i32, second: i32, fraction: i32) -> i32 {
         .wrapping_add((delta / 4096).wrapping_mul(fraction))
         .wrapping_add(((delta % 4096).wrapping_mul(fraction)) >> 12)
 }
-
 
 /// Overflow-safe non-negative Q12 ratio, clamped to one.
 ///
@@ -511,7 +515,11 @@ mod tests {
             state
         };
         for iteration in 0..100_000u32 {
-            let span: i32 = if iteration % 3 == 0 { i32::MAX } else { 1 << 24 };
+            let span: i32 = if iteration % 3 == 0 {
+                i32::MAX
+            } else {
+                1 << 24
+            };
             let first = (next() as i32) % span;
             let second = (next() as i32) % span;
             if first == second {
