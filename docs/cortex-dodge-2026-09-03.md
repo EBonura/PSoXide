@@ -46,3 +46,21 @@ swing ends fires the dodge at frame 3392 after, nothing before.
 Not done: the wire timing and the i-frame window are two independent
 numbers (clip fraction vs motor frames); they match now by construction of
 the values, not by code. If the roll clip is retimed, re-check them.
+
+## Actor face reduction (same day)
+
+Manny asked whether the actors' face counts could come down. Blender's
+Decimate (collapse) on the source GLBs is the standard quadric algorithm,
+but re-importing a GLB rebuilds the model's palette layout (see
+`tools/derive_clawless_psx_model.py`), and the heavy enemy has no source
+GLB in the repo at all, so `tools/psmd_decimate.py` collapses short edges on
+the cooked PSMD instead: inside one rigid part only, never across a joint
+or a texture seam, palette banks and header untouched, so clips and colours
+keep working.
+
+At ratio 0.85: heavy enemy 756 to 656 faces, light enemy 484 to 449,
+Aletha 506 to 452 (`actor-decimation-ladder.png` shows 0.85 and 0.75 on the
+GLBs; `actor-decimation-ingame.png` the cooked result in game at 2x).
+Whole-level tape, lockstep, all three actors decimated: bus cycles -0.76%,
+18.481 to 18.623 fps. The actor cost is joints and vertex projection more
+than faces, so face reduction is a weak lever; not shipped, tool kept.
