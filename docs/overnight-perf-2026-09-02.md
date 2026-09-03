@@ -732,3 +732,87 @@ and was reverted rather than traded for a visual change. Alternate-frame
 selection reuse, the Cortex lever, was not attempted on quake: its
 selection is about 3% of the route behind the exact-key cache it already
 has, against 18% on Cortex, so the ceiling is not there.
+
+## hl-psx image quality: the tessellation mechanism (2026-09-03, 09:30 to 12:30)
+
+Manny's new focus: hl-psx tessellation, compared against quake and Cortex,
+measured rather than eyeballed. Everything here is a measurement or a
+before/after; the shipped tree is unchanged.
+
+### The three mechanisms
+
+quake-psx and Cortex go through psx-engine's classic-affine writer: every
+face inside a fixed depth band is split into a lattice, one level inside
+136 units (Cortex 272) and two inside 60 (Cortex 136), no per-face error
+test, no budget beyond the packet arena. It is uniform, stable from frame to
+frame, and it costs what it costs.
+
+hl-psx has its own two-stage system. The cooker pre-cuts "affine candidate"
+faces on a UV grid (`host/hl-bsp`, 128 to 256 texel cells, under a per-chunk
+added-triangle budget), so most of the tunnel rings arrive as small cells
+already. At runtime, `WORLD_CLASSIC_AFFINE_SELECTION` splits any patch quad
+whose per-edge error (`affine_edge_error`, in texels) exceeds
+`WORLD_AFFINE_SPLIT_ERROR_TEXELS` into a 2x2, routes patches above four
+texels to a screen-bounded quadtree (`emit_soft_cell`, leaves capped at 96
+px, at most 12 such routes a frame) and spends at most 352 extra packets a
+frame. Quads with a vertex inside 8 units are ineligible; near-plane
+crossers on the cooked-patch path take the quadtree, but on the ordinary
+loop-face path they fall to a raw clipped fan with no correction at all.
+
+### Instruments
+
+- `--features affine-heatmap,debug-map-boot` tints every world triangle by
+  predicted error (blue under 2 texels, green 2 to 4, yellow 4 to 8, magenta
+  above 8); `tools/affine_distortion.py` decodes a frame. Blind spot found
+  today: quadtree leaves and raw clipped fans carry no tint, so the metric
+  only sees the fast-path quads.
+- `--features seam-census` tints by emitter (red cooked patch quad, orange
+  patch fallback, blue loop face, magenta raw triangle).
+- Xash3D runs headless here: `SDL_VIDEODRIVER=dummy` with the software
+  renderer, a cfg that loads c0a0 at a fixed 20 Hz and calls `screenshot`
+  every 200 frames, from `~/Desktop/repos/hl-reference-runtime` (use the
+  `xash3d` client, not the `xash` dedicated server). The c0a0 intro ride
+  lines up with the hl-psx tram capture, so the same tunnel can be put next
+  to a perspective-correct reference.
+
+### Measurements on the tram ride (route ticks 1000 to 21000)
+
+| build | heatmap: share of tinted screen above 8 texels | tram fps (moving segments) |
+|---|---|---|
+| main (caaac51) | 29.7% (p90 78%) | 16.90 / 13.14 / 19.79 / 9.87 / 16.72 |
+| E1: threshold 1, quadtree cap 32, budget 512 | 32.3% | 15.68 / 12.40 / 18.66 / 9.42 / 15.68 |
+| E2: quadtree leaves 48 px instead of 96 | 29.4% (leaves untinted) | 14.62 / 11.17 / 17.88 / 9.36 / 14.63 |
+| E3: loop-face near crossers take the quadtree | 29.2% | 17.02 / 13.25 / 19.88 / 14.95 / 16.81 |
+
+E1 says the budgets are not the limiter: roughly 20 patches split per frame
+with budget to spare, and the frames look the same. E2 makes the near rock
+wall slightly finer at a 13% fps cost. E3 is the interesting one: the
+slowest segment jumped from 9.87 to 14.95 fps because the quadtree prunes
+the half of a near-crossing floor that lies behind the camera, which the
+raw clipped fan was paying for, and the frames look the same at every tick
+compared except one, where a one-pixel seam opens between the tunnel rim
+and the tram wall (tick 14000, `hl-e3-seam-14000.png`). Not shipped; the
+diff is `hl-loop-quadtree-e3.patch` and the seam needs a fix before it is.
+
+What the census and the heatmap agree on: the surfaces that stay above
+eight texels are the floor under the car and the wall beside it, which
+cross the near plane, and those are exactly what neither the error rule nor
+the budgets reach. The visible blockiness on the rock walls at ticks 8400
+and 9600 is texture magnification, not tessellation.
+
+Evidence: `hl-xash-vs-ps1-before.png` (Xash reference beside hl-psx main at
+four matching points), `hl-natural-main-e3-e2.png`, `hl-heatmap-base-e3-e1.png`,
+`hl-seam-census.png`.
+
+### Reducing actor faces (Manny's question)
+
+Yes: quadric edge collapse (Garland and Heckbert) is the standard mesh
+decimation; Blender's Decimate modifier in collapse mode is that algorithm
+and preserves UVs and vertex-group weights. Headless Blender on the source
+GLBs: rust_mantis 610 to 366 triangles and Aletha 609 to 364 at ratio 0.6,
+silhouettes intact at game distance (`cortex-decimation-trial.png`; the
+Aletha render is a silhouette because her material is not embedded in the
+GLB). Merging coplanar faces alone gains little on these meshes; collapse
+at 0.6 to 0.7 is the range to judge in game. The decimated GLBs are in the
+scratchpad; the next step is to cook one enemy through
+`import_glb_model` and put the frame and the fps next to the original.
