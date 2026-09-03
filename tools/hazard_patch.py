@@ -45,8 +45,14 @@ COND = {"beq", "bne", "beqz", "bnez", "blez", "bgtz", "bltz", "bgez", "b"}
 LINKING = {"jal", "bal", "bltzal", "bgezal", "jalr"}
 JUMPS = {"j", "jal"}
 STORES = {"sw", "sh", "sb", "swl", "swr", "swc2"}
+# Instructions whose every register operand is a source: stores, coprocessor
+# moves, register jumps, multiply/divide, and every conditional branch (a
+# `beqz a2, T` consumer reads a2 as its FIRST operand, so the generic
+# "destination first" rule below would miss it; this gap let a memcmp whose
+# entry tested a2 read a stale count for its whole life, 2026-09-04).
 READS_ALL = STORES | {"mtc0", "mtc2", "ctc2", "jr", "jalr", "mult", "multu", "div",
-                      "divu", "mthi", "mtlo"}
+                      "divu", "mthi", "mtlo", "beq", "bne", "beqz", "bnez", "blez",
+                      "bgtz", "bltz", "bgez", "bltzal", "bgezal", "beql", "bnel"}
 WRITES_ONLY = {"lui", "li", "mfhi", "mflo"}
 
 
@@ -97,18 +103,77 @@ def reads(op, args, reg):
     return False
 
 
-def find_hazards(listing):
-    """Every (branch address, op, args, slot op, slot args, consumer address)."""
+def jump_table(listing, jr_addr, word_at, image_end):
+    """Resolve the table a `jr rs` dispatches through: (entry address, target)
+    pairs. LLVM lowers a switch as `sll idx,idx,2 ; lui t,%hi(T) ; addu ;
+    lw rs,%lo(T)(...) ; jr rs`; the base is the last `lui` before that load
+    plus the load's offset. Entries run until a word stops being a code
+    address (the next table's entries are code addresses too, so a few extra
+    targets may be examined; a spurious match only costs one detour)."""
+    op, args = listing[jr_addr]
+    rs = args.strip()
+    load = None
+    for back in range(1, 12):
+        entry = listing.get(jr_addr - back * 4)
+        if entry is None:
+            break
+        m = re.match(r"(-?\d+)\(([a-z0-9]+)\)", entry[1].split(",")[-1].strip()) if entry[0] == "lw" else None
+        if m and entry[1].split(",")[0].strip() == rs:
+            load = (jr_addr - back * 4, int(m.group(1)))
+            break
+    if load is None:
+        return None
+    hi = None
+    for back in range(1, 12):
+        entry = listing.get(load[0] - back * 4)
+        if entry is None:
+            break
+        if entry[0] == "lui":
+            hi = int(entry[1].split(",")[1].strip(), 16)
+            break
+    if hi is None:
+        return None
+    base = ((hi << 16) + load[1]) & 0xFFFFFFFF
+    entries = []
+    for k in range(64):
+        addr = base + k * 4
+        if not LOAD_ADDR <= addr < image_end:
+            break
+        target = word_at(addr)
+        if target & 3 or not LOAD_ADDR <= target < image_end or target not in listing:
+            break
+        entries.append((addr, target))
+    return entries or None
+
+
+def find_hazards(listing, word_at=None, image_end=0):
+    """Every (branch address, op, args, slot op, slot args, consumer address,
+    table entry address). The entry address is the jump-table word that
+    names the consumer for a `jr` switch dispatch and None otherwise."""
     found = []
     for addr in sorted(listing):
         op, args = listing[addr]
-        # A register jump (jr/jalr) has no static target and never falls
-        # through, so nothing about its slot load can be checked here.
-        if op not in COND | JUMPS | LINKING or addr + 4 not in listing:
+        if addr + 4 not in listing:
+            continue
+        register_jump = op == "jr" and args.strip() != "ra"
+        if op not in COND | JUMPS | LINKING and not register_jump:
+            # jalr has no static callee and jr ra returns into the caller,
+            # so nothing about their slot loads can be checked here.
             continue
         slot_op, slot_args = listing[addr + 4]
         rd = load_destination(slot_op, slot_args)
         if rd is None or not looks_like_code(listing, addr):
+            continue
+        if register_jump:
+            # A switch dispatch: the table words are data, so an entry whose
+            # target consumes the slot load can be pointed at a trampoline.
+            entries = jump_table(listing, addr, word_at, image_end) if word_at else None
+            if entries is None:
+                print("warning %08x: jr %s | slot %s %s | table not resolved" % (addr, args, slot_op, slot_args))
+                continue
+            for entry, target in entries:
+                if reads(*listing[target], rd):
+                    found.append((addr, op, args, slot_op, slot_args, target, entry))
             continue
         targets = []
         m = re.search(r"0x([0-9a-f]+)$", args)
@@ -120,7 +185,7 @@ def find_hazards(listing):
             targets.append(addr + 8)
         for target in targets:
             if target in listing and reads(*listing[target], rd):
-                found.append((addr, op, args, slot_op, slot_args, target))
+                found.append((addr, op, args, slot_op, slot_args, target, None))
     return found
 
 
@@ -142,19 +207,22 @@ def main():
     path = argv[0]
     data = bytearray(open(path, "rb").read())
     listing = disassemble(path)
-    hazards = find_hazards(listing)
+    image_end = LOAD_ADDR + len(data) - HEADER
+
+    def word_at(addr):
+        off = addr - LOAD_ADDR + HEADER
+        return struct.unpack_from("<I", data, off)[0]
+
+    hazards = find_hazards(listing, word_at, image_end)
     for h in hazards:
-        print("hazard %08x: %s %s | slot %s %s | consumer %08x" % (h[0], h[1], h[2], h[3], h[4], h[5]))
+        via = " via table entry %08x" % h[6] if h[6] is not None else ""
+        print("hazard %08x: %s %s | slot %s %s | consumer %08x%s" % (h[0], h[1], h[2], h[3], h[4], h[5], via))
     if not hazards:
         print("0 hazards in %s" % path)
         return 0
     if check_only:
         print("%d hazards in %s" % (len(hazards), path))
         return 1
-
-    def word_at(addr):
-        off = addr - LOAD_ADDR + HEADER
-        return struct.unpack_from("<I", data, off)[0]
 
     def put_word(addr, value):
         off = addr - LOAD_ADDR + HEADER
@@ -188,7 +256,28 @@ def main():
     # site, not two: its trampoline already covers the target and the
     # fall-through, and patching it twice would rewrite the first `j TRAMP`.
     seen = set()
-    for addr, op, args, slot_op, slot_args, consumer in hazards:
+    # Table entries pointing at the same consumer share one trampoline.
+    table_trampolines = {}
+    for addr, op, args, slot_op, slot_args, consumer, entry in hazards:
+        if entry is not None:
+            if addr in skip or (only and addr not in only):
+                print("left alone %08x (diagnostic request)" % addr)
+                continue
+            tramp = table_trampolines.get(consumer)
+            if tramp is None:
+                tramp = base + cursor * 4
+                words = [nop, encode_j(consumer), nop]
+                if cursor + len(words) > capacity:
+                    print("trampoline array full at %08x (%d words)" % (addr, capacity))
+                    return 1
+                for i, w in enumerate(words):
+                    put_word(tramp + i * 4, w)
+                cursor += len(words)
+                table_trampolines[consumer] = tramp
+            put_word(entry, tramp)
+            patched += 1
+            print("patched table entry %08x (jr at %08x) -> trampoline %08x -> %08x" % (entry, addr, tramp, consumer))
+            continue
         if addr in seen:
             continue
         seen.add(addr)
@@ -223,7 +312,7 @@ def main():
         print("patched %08x -> trampoline %08x (%d words)" % (addr, tramp, len(words)))
 
     open(path, "wb").write(data)
-    remaining = find_hazards(disassemble(path))
+    remaining = find_hazards(disassemble(path), word_at, image_end)
     for h in remaining:
         print("still hazardous %08x: %s %s" % (h[0], h[1], h[2]))
     print("%d patched, %d remaining, %d/%d trampoline words used in %s" % (patched, len(remaining), cursor, capacity, path))
