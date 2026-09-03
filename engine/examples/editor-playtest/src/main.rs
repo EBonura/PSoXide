@@ -542,7 +542,7 @@ struct Playtest {
     player_moved_last_tick: bool,
     /// Edge-triggered gameplay audio bits consumed once by GameApp after this
     /// fixed update. A byte replaces five booleans and is zero-valid.
-    gameplay_sfx_events: u8,
+    gameplay_sfx_events: u16,
     /// True when the latest input frame is manually rotating the camera.
     camera_turning_last_tick: bool,
     /// Index into `MODEL_INSTANCES` for the current lock-on target.

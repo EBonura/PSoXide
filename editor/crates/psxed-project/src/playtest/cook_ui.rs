@@ -1,6 +1,19 @@
 use super::*;
 use crate::{UiShapeStyle, UiTransition, UiTransitionKind, UiVisibilityCondition};
 
+/// Tiny controller prompts are used by gameplay-owned UI as well as menus.
+/// Keeping these few-hundred-byte images resident avoids depending on the
+/// menu-only UI.PAK lifetime while leaving substantial backdrops streamed.
+const UI_RESIDENT_IMAGE_MAX_BYTES: usize = 512;
+
+fn ui_image_streamed_class(byte_len: usize) -> StreamedClass {
+    if byte_len <= UI_RESIDENT_IMAGE_MAX_BYTES {
+        StreamedClass::None
+    } else {
+        StreamedClass::UiImage
+    }
+}
+
 /// Cook every authored UI scene into one shared node pool plus a
 /// parallel scene table, and derive the default game flow.
 ///
@@ -89,36 +102,68 @@ pub(crate) fn cook_ui_nodes(
     // directory is absent the project remains silent; once present, every
     // named cue is validated and cooked through the exact same deduplicating
     // resident sample path as UI audio.
-    for (path, event, volume) in [
+    for (path, event, volume, pitch_q12) in [
         (
             "assets/audio/gameplay/footstep.wav",
             psx_level::LevelGameplaySfxEvent::Footstep,
             48,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
-            "assets/audio/gameplay/light_hit.wav",
+            // One strong resident impact, pitched up/down for light/heavy,
+            // saves a second SPU allocation in RAM-tight PS1 projects.
+            "assets/audio/gameplay/heavy_hit.wav",
             psx_level::LevelGameplaySfxEvent::LightHit,
-            72,
+            90,
+            4_400,
         ),
         (
             "assets/audio/gameplay/heavy_hit.wav",
             psx_level::LevelGameplaySfxEvent::HeavyHit,
-            88,
+            96,
+            3_500,
         ),
         (
             "assets/audio/gameplay/player_damage.wav",
             psx_level::LevelGameplaySfxEvent::PlayerDamage,
             82,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
             "assets/audio/gameplay/enemy_death.wav",
             psx_level::LevelGameplaySfxEvent::EnemyDeath,
             90,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
             "assets/audio/ui/ui_confirm.wav",
             psx_level::LevelGameplaySfxEvent::StanceSwapReady,
             54,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
+            "assets/audio/gameplay/weapon_swing.wav",
+            psx_level::LevelGameplaySfxEvent::PlayerWeaponSwing,
+            72,
+            4_500,
+        ),
+        (
+            "assets/audio/gameplay/weapon_swing.wav",
+            psx_level::LevelGameplaySfxEvent::EnemyWeaponSwing,
+            82,
+            3_500,
+        ),
+        (
+            "assets/audio/gameplay/projectile_charge.wav",
+            psx_level::LevelGameplaySfxEvent::ProjectileCharge,
+            72,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
+            "assets/audio/gameplay/projectile_launch.wav",
+            psx_level::LevelGameplaySfxEvent::ProjectileLaunch,
+            88,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
     ] {
         if project_root.join(&path).is_file() {
@@ -133,7 +178,7 @@ pub(crate) fn cook_ui_nodes(
                     sample,
                     event,
                     volume_percent: volume,
-                    pitch_q12: crate::UI_SFX_PITCH_UNITY_Q12,
+                    pitch_q12,
                     flags: 0,
                 });
             }
@@ -293,6 +338,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 tag,
                 *tint,
                 *effect,
+                node.visible_when,
                 project,
                 project_root,
                 ui_image_texture_for_path,
@@ -896,6 +942,7 @@ pub(crate) fn cook_ui_image_node(
     tag: &str,
     tint: [u8; 3],
     effect: UiImageEffect,
+    visible_when: UiVisibilityCondition,
     project: &ProjectDocument,
     project_root: &Path,
     ui_image_texture_for_path: &mut HashMap<String, CookedUiImageTexture>,
@@ -904,7 +951,15 @@ pub(crate) fn cook_ui_image_node(
     out: &mut Vec<PlaytestUiNode>,
 ) {
     let Some(texture_id) = texture else {
-        out.push(cooked_ui_image_node(parent, *rect, tag, tint, effect, None));
+        out.push(cooked_ui_image_node(
+            parent,
+            *rect,
+            tag,
+            tint,
+            effect,
+            visible_when,
+            None,
+        ));
         return;
     };
     let Some(cooked) = cook_ui_image_texture_asset(
@@ -916,7 +971,15 @@ pub(crate) fn cook_ui_image_node(
         assets,
         report,
     ) else {
-        out.push(cooked_ui_image_node(parent, *rect, tag, tint, effect, None));
+        out.push(cooked_ui_image_node(
+            parent,
+            *rect,
+            tag,
+            tint,
+            effect,
+            visible_when,
+            None,
+        ));
         return;
     };
     if cooked.fragments.len() <= 1 {
@@ -926,6 +989,7 @@ pub(crate) fn cook_ui_image_node(
             tag,
             tint,
             effect,
+            visible_when,
             cooked
                 .fragments
                 .first()
@@ -935,7 +999,7 @@ pub(crate) fn cook_ui_image_node(
     }
 
     let group_index = out.len().min(u16::MAX as usize) as u16;
-    out.push(cooked_ui_group_node(parent, *rect));
+    out.push(cooked_ui_group_node(parent, *rect, visible_when));
 
     let mut screen_x = 0u16;
     for (index, fragment) in cooked.fragments.iter().enumerate() {
@@ -959,6 +1023,7 @@ pub(crate) fn cook_ui_image_node(
             tag,
             tint,
             effect,
+            visible_when,
             Some(fragment.asset_index),
         ));
         screen_x = screen_x.saturating_add(screen_w);
@@ -1016,7 +1081,11 @@ pub(crate) fn cook_ui_shape_option(shape: Option<UiShapeStyle>, transparent: boo
     )
 }
 
-pub(crate) fn cooked_ui_group_node(parent: Option<u16>, rect: UiRect) -> PlaytestUiNode {
+pub(crate) fn cooked_ui_group_node(
+    parent: Option<u16>,
+    rect: UiRect,
+    visible_when: UiVisibilityCondition,
+) -> PlaytestUiNode {
     PlaytestUiNode {
         parent,
         kind: UiNodeKind::Group { rect },
@@ -1039,7 +1108,9 @@ pub(crate) fn cooked_ui_group_node(parent: Option<u16>, rect: UiRect) -> Playtes
         action: PlaytestUiAction::default(),
         option: psx_level::UI_OPTION_NONE,
         rotation_degrees: rect.rotation_degrees,
-        flags: ui_node_flags(rect.anchor, UiTextAlign::Left, false) | ui_rect_transform_flags(rect),
+        flags: ui_node_flags(rect.anchor, UiTextAlign::Left, false)
+            | ui_rect_transform_flags(rect)
+            | ui_visibility_flags(visible_when),
         sfx_first: psx_level::UI_SFX_NONE,
         sfx_count: 0,
         font: 0,
@@ -1054,6 +1125,7 @@ pub(crate) fn cooked_ui_image_node(
     tag: &str,
     tint: [u8; 3],
     effect: UiImageEffect,
+    visible_when: UiVisibilityCondition,
     texture_asset: Option<usize>,
 ) -> PlaytestUiNode {
     PlaytestUiNode {
@@ -1084,7 +1156,9 @@ pub(crate) fn cooked_ui_image_node(
         action: PlaytestUiAction::default(),
         option: psx_level::UI_OPTION_NONE,
         rotation_degrees: rect.rotation_degrees,
-        flags: ui_node_flags(rect.anchor, UiTextAlign::Left, false) | ui_rect_transform_flags(rect),
+        flags: ui_node_flags(rect.anchor, UiTextAlign::Left, false)
+            | ui_rect_transform_flags(rect)
+            | ui_visibility_flags(visible_when),
         sfx_first: psx_level::UI_SFX_NONE,
         sfx_count: 0,
         font: 0,
@@ -1169,6 +1243,7 @@ pub(crate) fn cook_ui_image_texture_asset(
         } else {
             encode_ui_image_fragment_psxt(&texture, source_x, width)?
         };
+        let streamed_class = ui_image_streamed_class(fragment_bytes.len());
         let asset_index = assets.len();
         assets.push(PlaytestAsset {
             kind: PlaytestAssetKind::Texture,
@@ -1184,9 +1259,9 @@ pub(crate) fn cook_ui_image_texture_asset(
                     fragment_count
                 )
             },
-            // UI image textures are CD-streamed: empty baked bytes plus
-            // a UI.PAK payload loaded on demand on menu entry.
-            streamed_class: StreamedClass::UiImage,
+            // Large UI artwork is CD-streamed on menu entry. Tiny prompts
+            // remain baked because gameplay overlays can outlive that stream.
+            streamed_class,
         });
         fragments.push(CookedUiImageFragment { asset_index, width });
         source_x = source_x.saturating_add(width);
@@ -1199,6 +1274,37 @@ pub(crate) fn cook_ui_image_texture_asset(
     };
     ui_image_texture_for_path.insert(texture_key, cooked.clone());
     Some(cooked)
+}
+
+#[cfg(test)]
+mod resident_image_tests {
+    use super::*;
+
+    #[test]
+    fn tiny_ui_images_remain_resident_for_gameplay_prompts() {
+        assert_eq!(ui_image_streamed_class(188), StreamedClass::None);
+        assert_eq!(ui_image_streamed_class(512), StreamedClass::None);
+        assert_eq!(ui_image_streamed_class(513), StreamedClass::UiImage);
+    }
+
+    #[test]
+    fn cooked_image_preserves_loading_complete_visibility() {
+        let node = cooked_ui_image_node(
+            None,
+            UiRect::new(0, 0, 16, 16),
+            "",
+            [128, 58, 34],
+            UiImageEffect::SoftPulse,
+            UiVisibilityCondition::LoadingComplete,
+            None,
+        );
+
+        assert_ne!(
+            node.flags & psx_level::ui_node_flags::LOADING_COMPLETE_ONLY,
+            0,
+            "image nodes must not lose authored visibility while cooking"
+        );
+    }
 }
 
 pub(crate) fn ui_image_fragment_count(width: u16) -> u16 {

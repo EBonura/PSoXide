@@ -299,7 +299,7 @@ impl Scene for Playtest {
         RenderSubmission::Queued
     }
 
-    fn take_gameplay_sfx_events(&mut self) -> u8 {
+    fn take_gameplay_sfx_events(&mut self) -> u16 {
         core::mem::take(&mut self.gameplay_sfx_events)
     }
 
@@ -471,7 +471,7 @@ impl Scene for Playtest {
             "inventory.item.2" => Some(boost_module_name(self.power_up_inventory.item_at(2))),
             "boost.assignment.prompt" => Some("CHOOSE A SOCKET"),
             "boost.control.primary" => Some(match self.inventory_ui_mode() {
-                INVENTORY_UI_MODULES => "ASSIGN",
+                INVENTORY_UI_MODULES => "SELECT",
                 INVENTORY_UI_ASSIGN => "ASSIGN",
                 _ => "MODULES",
             }),
@@ -560,12 +560,16 @@ impl Scene for Playtest {
             "boost.assignment.prompt" => !self.selected_power_up_item.is_none(),
             "boost.remove" => !self.power_up_loadout.module(selected).is_none(),
             "boost.control.remove" => self.inventory_ui_mode() != INVENTORY_UI_MODULES,
+            "prompt.cross.runtime" => false,
+            // The runtime draws the compact, target-anchored dual vitality
+            // stack. Keep the authored node as a font-order/editor preview
+            // anchor, but never layer its old large bars over gameplay.
+            "target.hud" => false,
             // The runtime overlay now owns the complete player HUD, including
             // the stance names inside its moving bars. Legacy authored labels
             // with these tags otherwise remain underneath the translucent dial
             // and leak through its hollow centre during a swap.
             "stance.horizon.active" | "stance.zenith.active" => false,
-            "target.hud" => self.combat_target_entity_index().is_some(),
             _ => true,
         }
     }
@@ -999,11 +1003,8 @@ impl Scene for Playtest {
         let mut world_object_visibility = WorldObjectVisibility::ALL;
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
-            world_object_visibility = bsp.visible_world_objects(
-                camera,
-                WORLD_OBJECTS,
-                &self.destructibles,
-            );
+            world_object_visibility =
+                bsp.visible_world_objects(camera, WORLD_OBJECTS, &self.destructibles);
             visible_sky_aperture = bsp.draw(
                 camera,
                 bsp_material_tick,
@@ -2040,6 +2041,49 @@ impl Scene for Playtest {
             let _drawn = self.damage_numbers.draw(&font, camera, room, overlay_tick);
         }
 
+        // The target vitality stack follows the player HUD's two-ribbon
+        // grammar and swap motion, but stays compact and omits the player's
+        // cooldown diamond. Anchor its shared left edge to the right of the
+        // target rather than covering the model from above.
+        if !self.inventory_overlay_active {
+            if let (Some(font), Some(target_index)) =
+                (self.ui_fonts[0].as_ref(), self.combat_target_entity_index())
+            {
+                if let Some(record) = GAME_ENTITIES.get(target_index) {
+                    let [x, y, z] = self.game_entities.position(target_index);
+                    let head = RoomPoint::new(x, y.saturating_add(i32::from(record.height)), z);
+                    if let Some(projected) = camera.project_world(head) {
+                        let active = self.game_entities.stance(target_index);
+                        let health_share = |channel| {
+                            let (current, maximum) = match channel {
+                                VitalityChannelId::One => {
+                                    (self.game_entities.health(target_index), record.max_health)
+                                }
+                                VitalityChannelId::Two => (
+                                    self.game_entities.health_secondary(target_index),
+                                    record.max_health_secondary,
+                                ),
+                            };
+                            if maximum == 0 {
+                                0
+                            } else {
+                                ((u32::from(current) * 4096) / u32::from(maximum)) as u16
+                            }
+                        };
+                        draw_enemy_vitality_hud(
+                            font,
+                            projected.sx.saturating_add(40).clamp(4, SCREEN_W - 80),
+                            projected.sy.clamp(4, SCREEN_H - 20),
+                            active,
+                            health_share(active),
+                            health_share(active.other()),
+                            self.game_entities.stance_swap_progress_q12(target_index),
+                        );
+                    }
+                }
+            }
+        }
+
         // One runtime-owned cluster draws the mutation charge and both health
         // pools. The previous implementation layered a moving rectangular bar
         // beneath an authored slanted bar, leaving both visible at rest.
@@ -2088,6 +2132,11 @@ impl Scene for Playtest {
             draw_fps_overlay(font, self.fps_display, self.fps_display_worst);
         }
 
+        let cross_prompt = UI_NODES
+            .iter()
+            .find(|node| node.tag == "prompt.cross.runtime")
+            .and_then(|node| self.ui_texture(node.texture_asset));
+
         if self.character.is_some() {
             // EXPLOSION PROBE (diagnostic): overlay the player's skinned-vertex
             // capture pages. Feature-gated -- probe builds only, never the
@@ -2110,6 +2159,7 @@ impl Scene for Playtest {
                     overlay_tick.as_u32() as u16,
                     self.overlay_poi_panel_frame,
                     self.overlay_poi_page_type_frame,
+                    cross_prompt,
                 );
             } else if let Some(message) = self.poi_messages.active() {
                 if let Some(page_text) = INTERACTABLE_MESSAGE_PAGES.get(message.page() as usize) {
@@ -2137,6 +2187,7 @@ impl Scene for Playtest {
                                 overlay_tick.as_u32() as u16,
                                 self.overlay_poi_panel_frame,
                                 self.overlay_poi_page_type_frame,
+                                cross_prompt,
                             );
                         }
                         psx_game_runtime::poi::MessageSource::World => draw_message_page(
@@ -2146,6 +2197,7 @@ impl Scene for Playtest {
                             page,
                             overlay_tick.as_u32() as u16,
                             self.overlay_poi_page_type_frame,
+                            cross_prompt,
                         ),
                     }
                 }
@@ -2155,6 +2207,7 @@ impl Scene for Playtest {
                     message.title,
                     message.body,
                     self.overlay_poi_page_type_frame,
+                    cross_prompt,
                 );
             } else if let Some(index) = self.active_interactable {
                 if let Some(interactable) = INTERACTABLES.get(index) {
@@ -2162,6 +2215,7 @@ impl Scene for Playtest {
                         font,
                         interactable.prompt,
                         overlay_tick.as_u32() as u16,
+                        cross_prompt,
                     );
                 }
             }

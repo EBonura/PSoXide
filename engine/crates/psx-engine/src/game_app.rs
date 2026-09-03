@@ -1112,14 +1112,18 @@ impl<'a, S: Scene> GameApp<'a, S> {
         }
     }
 
-    fn play_gameplay_sfx_events(&mut self, events: u8) {
-        const EVENTS: [LevelGameplaySfxEvent; 6] = [
+    fn play_gameplay_sfx_events(&mut self, events: u16) {
+        const EVENTS: [LevelGameplaySfxEvent; 10] = [
             LevelGameplaySfxEvent::Footstep,
             LevelGameplaySfxEvent::LightHit,
             LevelGameplaySfxEvent::HeavyHit,
             LevelGameplaySfxEvent::PlayerDamage,
             LevelGameplaySfxEvent::EnemyDeath,
             LevelGameplaySfxEvent::StanceSwapReady,
+            LevelGameplaySfxEvent::PlayerWeaponSwing,
+            LevelGameplaySfxEvent::EnemyWeaponSwing,
+            LevelGameplaySfxEvent::ProjectileCharge,
+            LevelGameplaySfxEvent::ProjectileLaunch,
         ];
         for event in EVENTS {
             if events & event.bit() == 0 {
@@ -1499,6 +1503,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
             if self.loading_confirm_ready && confirmed {
                 if self.loading_scene_active() {
                     if let Some(node_index) = self.loading_activation_node() {
+                        if let Some(node) = self.nodes.get(node_index).copied() {
+                            self.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
+                        }
                         self.begin_ui_activation(
                             self.loading_scene,
                             node_index,
@@ -3374,9 +3381,18 @@ mod tests {
             width: 128,
             height: 18,
             flags: ui_node_flags::LOADING_COMPLETE_ONLY,
+            sfx_first: 0,
+            sfx_count: 1,
             ..button(96, 179, LevelUiAction::Back)
         },
     ];
+    static AUTHORED_LOADING_CUES: &[LevelUiSfxCueRecord] = &[LevelUiSfxCueRecord {
+        sample: 0,
+        event: LevelUiSfxEvent::Activate,
+        volume_percent: 54,
+        pitch_q12: 4096,
+        flags: 0,
+    }];
     static AUTHORED_LOADING_SCENES: &[LevelUiScene] = &[
         LevelUiScene {
             id: 1,
@@ -3967,7 +3983,7 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
+            AUTHORED_LOADING_CUES,
             6,
             &mut scene,
         );
@@ -4020,8 +4036,13 @@ mod tests {
         // A fresh confirm begins the authored fade dissolve. Loading remains
         // visible through the cover half, then gameplay is swapped in only at
         // full coverage and revealed through the second half.
+        assert_eq!(app.ui_sfx_cursor, 0);
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        assert_eq!(
+            app.ui_sfx_cursor, 1,
+            "loading confirmation must play the authored activation cue"
+        );
         assert!(app.loading_pending());
         assert!(
             app.loading_exit_transition.is_none(),

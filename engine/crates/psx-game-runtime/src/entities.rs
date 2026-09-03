@@ -318,6 +318,10 @@ pub struct GameEntityTickStats {
     pub windup_enters: u16,
     /// Transitions INTO Attack this tick.
     pub attack_enters: u16,
+    /// Melee attacks among this tick's Attack transitions.
+    pub melee_attack_enters: u16,
+    /// Ranged attacks among this tick's Attack transitions.
+    pub ranged_attack_enters: u16,
     /// Times the combat director granted its shared attack slot.
     pub attack_grants: u16,
     /// Engaged enemies holding position this tick.
@@ -1580,6 +1584,11 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             GameEntityState::Windup => stats.windup_enters += 1,
             GameEntityState::Attack => {
                 stats.attack_enters += 1;
+                if self.selected_attack_is_ranged(index) {
+                    stats.ranged_attack_enters += 1;
+                } else {
+                    stats.melee_attack_enters += 1;
+                }
                 // A fresh swing gets one connection.
                 self.combat_flags[index] &= !GAME_ENTITY_ATTACK_CONNECTED;
                 self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
@@ -2632,6 +2641,13 @@ mod tests {
             close.selected_attack_action(&RANGED_ENEMY[0], 0),
             CharacterAnimationAction::RangedAttack
         );
+        let mut ranged_attack_enters = 0;
+        for _ in 0..RANGED_ENEMY[0].windup_ticks {
+            ranged_attack_enters += close
+                .tick(&RANGED_ENEMY, escaped_input, &mut NoClipMover)
+                .ranged_attack_enters;
+        }
+        assert_eq!(ranged_attack_enters, 1);
     }
 
     #[test]
@@ -2762,13 +2778,18 @@ mod tests {
         assert!(entities.yaw(0) != 0, "windup facing turns toward player");
         // Windup lasts windup_ticks (3).
         let mut attack_enters = 0;
+        let mut melee_attack_enters = 0;
+        let mut ranged_attack_enters = 0;
         for _ in 0..3 {
-            attack_enters += entities
-                .tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover)
-                .attack_enters;
+            let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+            attack_enters += stats.attack_enters;
+            melee_attack_enters += stats.melee_attack_enters;
+            ranged_attack_enters += stats.ranged_attack_enters;
         }
         assert_eq!(entities.state(0), GameEntityState::Attack);
         assert_eq!(attack_enters, 1);
+        assert_eq!(melee_attack_enters, 1);
+        assert_eq!(ranged_attack_enters, 0);
         // Attack window then recovery.
         let mut saw_attacking = false;
         for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {

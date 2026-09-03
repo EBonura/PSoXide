@@ -1111,7 +1111,12 @@ fn compile_model(
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
 ) -> Result<
-    (PackedBspGeometry, CompiledCollisionHulls, Vec<[i32; 3]>, UvWindowStats),
+    (
+        PackedBspGeometry,
+        CompiledCollisionHulls,
+        Vec<[i32; 3]>,
+        UvWindowStats,
+    ),
     BrushWorldCookError,
 > {
     let (topology_surfaces, render_surfaces) = compile_model_surfaces(brushes);
@@ -1151,7 +1156,8 @@ fn compile_model(
     let budgeted_faces = render_surfaces.len();
     let (render_surfaces, uv_window) =
         fit_surfaces_to_uv_window(render_surfaces, texture_dims, uv_window_skip);
-    if render_surfaces.len() > MAX_RESIDENT_WORLD_FACES && budgeted_faces <= MAX_RESIDENT_WORLD_FACES
+    if render_surfaces.len() > MAX_RESIDENT_WORLD_FACES
+        && budgeted_faces <= MAX_RESIDENT_WORLD_FACES
     {
         return Err(BrushWorldCookError::UvWindowFaceBudget {
             faces: render_surfaces.len(),
@@ -2403,21 +2409,31 @@ mod tests {
         let mut dims = std::collections::HashMap::new();
         dims.insert(None, [64u16, 64u16]);
         // 8192 units at 16 units per texel is a 512-texel span: wraps.
-        let (pieces, stats) = fit_surfaces_to_uv_window(vec![floor_surface(4096)], &dims, &Default::default());
+        let (pieces, stats) =
+            fit_surfaces_to_uv_window(vec![floor_surface(4096)], &dims, &Default::default());
         assert_eq!(stats.split_surfaces, 1);
         assert_eq!(stats.unfixable_surfaces, 0);
-        assert!(pieces.len() >= 4, "expected at least four pieces, got {}", pieces.len());
+        assert!(
+            pieces.len() >= 4,
+            "expected at least four pieces, got {}",
+            pieces.len()
+        );
         assert_eq!(stats.added_faces, pieces.len() - 1);
         for piece in &pieces {
             assert_eq!(surface_fits_uv_window(piece, dims.get(&None)), Some(true));
         }
         // 2048 units is a 128-texel span: untouched, byte-identical cook.
         let small = floor_surface(1024);
-        let (pieces, stats) = fit_surfaces_to_uv_window(vec![small.clone()], &dims, &Default::default());
+        let (pieces, stats) =
+            fit_surfaces_to_uv_window(vec![small.clone()], &dims, &Default::default());
         assert_eq!(stats, UvWindowStats::default());
         assert_eq!(pieces, vec![small]);
         // Unknown texture dimensions keep the historic wrap and are counted.
-        let (_, stats) = fit_surfaces_to_uv_window(vec![floor_surface(4096)], &Default::default(), &Default::default());
+        let (_, stats) = fit_surfaces_to_uv_window(
+            vec![floor_surface(4096)],
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(stats.unfixable_surfaces, 1);
         assert_eq!(stats.split_surfaces, 0);
     }
