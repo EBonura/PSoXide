@@ -916,8 +916,8 @@ impl ClassicAffineProfile {
     /// up, and 128-unit patches split only within ~80 units left ~100 px
     /// affine triangles underfoot that swim whenever the view pitches.
     pub const PXBSP_THIRD_PERSON: Self = Self {
-        subdivide_once_at: 272,
-        subdivide_twice_at: 136,
+        subdivide_once_at: 200,
+        subdivide_twice_at: 100,
         ..Self::QUAKE_REFERENCE
     };
 }
