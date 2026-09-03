@@ -1191,3 +1191,52 @@ measured together on one branch, each its own commit:
 On the 16.4 fps ladder that is roughly +1.8 fps, not 30. The bundle is
 what a content-neutral "bold" pass buys; anything beyond it is model
 decimation (the parallel session's A/B) and level geometry.
+
+## Cortex night pass (2026-09-03, 21:00 onward): the node grid, the two-sided faces, and the pillar hole
+
+Baseline for this pass: main 31fb6178 plus docs (the disc Manny burned),
+whole-level tape, lockstep, poll 5250: 4,720,079,733 bus cycles, 19.05 fps.
+
+| change | fps | bus cycles vs main | on screen |
+|---|---|---|---|
+| node bound codes on a 32-unit grid (cb93436a) | 21.26 | -10.40% | display and VRAM hashes identical |
+| two-sided faces front only (03c4a397), on top | 21.57 | -11.65% | railing dark triangles gone; no other still-frame change |
+| selection reuse two frames in three (branch, alone on main) | 19.37 | -1.65% | hashes identical; a late edge sliver on fast turns is the only risk |
+| subdivision bands 200/100 (branch, alone on the grid fix) | 21.96 | -3.17% on top of the grid | more affine swim on near cells; Manny to judge |
+| panorama sky (branch) | | -5.57% | the skybox goes; rejected by Manny |
+| far cull 1200 / 800 / 500 units (plumbing in, off) | 21.48 / 22.05 / 22.65 | -1.3% / -3.8% / -6.4% on top of the grid | distant walls pop to sky, no fog in the level |
+| nearest-vertex OT key for walls | 21.43 | +0.60% | no effect on the pillar hole; reverted |
+
+**The node grid.** PXBSP node bounds are signed 8-bit codes on an
+8-unit grid, so a box can only reach -1024..1016. Since the Quake-units
+migration the Cortex level spans -832..3120 on x and -1792..64 on z, and
+574 of its 983 nodes carried at least one saturated code (747 codes). A
+saturated box straddles every plane, so the node walk could neither reject
+nor prove anything below it and nearly every face went to the exact
+per-vertex clip, which is the 7.4% GTE plane scan the evening pass saw.
+On a 32-unit grid (-4096..4064) no code saturates, and from the hot-leaf
+anchor the frame selection drops from 1570 faces to 1353 with the frustum
+alone. Found by accident: a far-cull sweep at three draw distances
+returned three identical exe hashes, because the authored draw distance is
+divided by the world unit divisor (16) and then clamped to a 4096 floor
+that predates the migration, so every cook lands on 4096 and no far test
+ever fired. That clamp (`MIN_WORLD_DRAW_DISTANCE`) is an editor bug to fix
+on its own.
+
+**Two-sided faces.** The cook flags every face of a non-solid brush
+`FACE_TWO_SIDED` and the renderer drew both sides. The guardrail brushes
+are closed, so their unlit outer face (baked at the 0x202020 ambient)
+shared ordering-table slots with the lit inner face and won the tie on
+some frames: the "darker triangles" Manny saw along the railing at poll
+4800. Front only fixes it (`frontonly-railing-zoom.png`) and saves 1.66%.
+
+**The pillar blotch** at poll 3200 is not the bands, not the two-sided
+faces and not the OT key law: the draw dump at poll 3204 shows no pillar
+polygon covering those pixels at all, and the "blurred patch" is the
+hanging-lattice face behind the pillar seen through a hole. The pillar's
+near cell has a vertex projecting past the GPU's 1023-pixel limit and is
+dropped whole; the frames flicker because the camera drifts the vertex in
+and out of range (present at polls 3196 to 3199 and 3204, absent at 3201
+and 3202, on main too). The side planes were only ever used to reject
+faces, never to clip them; the fix under test clips near-crossing faces
+against the side planes the node walk could not prove.
