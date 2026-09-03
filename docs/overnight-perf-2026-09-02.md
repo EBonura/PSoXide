@@ -1024,3 +1024,52 @@ frame of the gain (16.84 / 13.16 / 19.84 / 9.86 / 16.67) while changing 342
 pixels of the wedge frame and no black count at the edge, so the recursion
 on those near slivers was the cost all along. The shipped fix draws each
 rerouted piece as one clipped triangle.
+
+## VoXide streaming: the chunk mesher (2026-09-03, 17:00 to 19:30)
+
+The standing-scene passes above left the frame at the mercy of streaming:
+every chunk that comes into range is generated, decoded from its 7-bit
+store, and greedy-meshed on the main thread, and on a moving player those
+spikes are what miss the 30 fps deadline. The benchmark for this is the
+`DEMO_PLAY` + `DEMO_MARCH` telemetry build (constants in `game/src/main.rs`):
+an obstacle-free flight around a large square, 2.5G instructions, stage
+cycles per frame from `tools/profile_report.py`. Three commits on voxide
+main, each proven exact by comparing the face pools, plane tables, AO and
+chunk stores in a RAM dump at poll 1200 against the previous build
+(`poolcmp.py` in the scratchpad; the display hash drifts with boot speed
+and is useless for this):
+
+| voxide | what |
+|---|---|
+| 9ab3599 | per-column u64 mesh/see masks: build_mask visits only candidate bits, no per-plane clears |
+| 09f80ec | seed scan from per-row cell bitmaps; y-plane test on u32 halves; skip y-planes with no candidate (epoch-tracked) |
+| fdab291 | decode eight blocks per seven-byte group, layer bit hoisted, light/plant checks behind a class bit; gen scratch memset once, unchecked band stores |
+
+Flight totals, frames 0..3000 of the same route (cycles):
+
+| build | streaming | loop body | wall |
+|---|---|---|---|
+| 9ab3599 (bits2 run) | 1,322,034,508 | 2,747,995,385 | 3,583,315,774 |
+| 09f80ec (bits3 run) | 1,040,789,895 | 2,502,235,523 | 3,336,541,959 |
+| fdab291 (dec run) | 926,787,342 | 2,326,525,012 | 3,152,032,417 |
+
+So the row bitmaps + y-plane skip took 21% off streaming and the decode
+another 11%; loop body -15% and wall time -12% over the flight for the
+two together. Deadline misses on the whole run went 20.4% -> 18.0% ->
+12.0%, but see the trap.
+
+Measurement trap, new today: the flight is driven by frame count, and the
+march route is time-scaled, so a build with different frame times parks at
+a different spot (HUD block x 502 vs 472 after the same 3000 frames) and
+the post-flight frames see different terrain (face cost 377k vs 595k per
+frame while parked). Whole-run means and "frames per instruction budget"
+mix that in. Compare aligned frame windows during the flight (the tables
+above), never end-state frames.
+
+Where streaming time goes now (flight attribution, pc-line sampling on the
+same build, before fdab291): greedy_plane 13%, stream_tick (decode) 10%,
+gen_columns 7.4%, pack_blocks 1.9%, with for_visible_faces 23% and the
+vsync wait 20% making up the render side. The next mesher lever is
+face_ao (per-face neighbour reads) and the greedy merge's width/height
+probes; the next generator lever is the cave band (one vnoise per four
+blocks per column) and pack_blocks.
