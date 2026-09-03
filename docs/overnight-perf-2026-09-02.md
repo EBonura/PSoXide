@@ -722,3 +722,13 @@ two fields; the candidates are the writer and `draw_frame` (22% together)
 and the alias models, none of which has a cheap exact cut left. hl-psx is
 1,200 cycles a quad through a straight-line emitter; that is a rewrite of
 the world emission path, not a setting.
+
+### Two quake follow-ups after the disc (2026-09-03, 06:40)
+
+The second subdivision band alone (`subdivide_twice_at` 60 to 40, the near
+band kept at 136 so no face outgrows the GPU clip) measured 24.798 fps
+against 24.694 on the same worktree SDK, inside the 0.122 fps noise band,
+and was reverted rather than traded for a visual change. Alternate-frame
+selection reuse, the Cortex lever, was not attempted on quake: its
+selection is about 3% of the route behind the exact-key cache it already
+has, against 18% on Cortex, so the ceiling is not there.
