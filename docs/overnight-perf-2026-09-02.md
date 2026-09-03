@@ -954,3 +954,32 @@ the exact wins. Evidence: `voxide-aerial-16-20-24.png`,
 `voxide-lod-tops-vs-skirts-aerial.png` (why the skirts exist),
 `voxide-spawn-16-vs-24-lod.png`.
 
+### Second pass on main (2026-09-03, 17:00 to 18:30), exact
+
+Two more wins measured on the same spawn scene with the telemetry build,
+both with the display hash of the shipping build unchanged
+(0xbab32d639647f0cd at pad poll 1200):
+
+| step | loop body | face loop | note |
+|---|---|---|---|
+| main e35323c (tint memo, static clip buffers) | 1,403,405 | 957,108 | |
+| plants and mob boxes pre-culled on the GTE (48cde9c) | 1,291,529 | 944,494 | world faces 1,136,286 to 1,032,675, mobs 81,083 to 72,779 |
+| clipper buffers in the scratchpad (77a67d0) | 1,254,356 | 907,011 | 912 of the 1,024 bytes |
+
+From the morning's 1,617,041 that is -22.4%; the 30 fps line is 1,142,476,
+so this scene is 112k cycles short of two fields. Plants behind the camera
+or off to the side were projected corner by corner and, with a corner in
+the GTE near band, handed to the software clipper; one MVMVA on the cell
+centre with the face loop's own sphere-vs-cone bound removes them before
+that, and the same test on each mob box centre removes a herd behind the
+player. The near-cell clipper's polygon buffers were main-RAM statics; the
+scratchpad makes every load and store in it one cycle.
+
+A measurement trap for whoever continues: `--stop-at-poll` bus cycles are
+wall cycles. VoXide vsyncs, so a frame costs whole fields and three
+different executables measured 2,044,981,625 to the digit; only the
+telemetry build's "loop body" is a work metric. The prepacked plant packet
+words measured "no change" that way for the same reason, and were reverted
+before anyone noticed; they are still worth re-measuring with the telemetry
+build.
+
