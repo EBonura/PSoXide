@@ -80,6 +80,35 @@ impl CubeFace {
     }
 }
 
+/// Rotation-keyed texel lattice of the layered sky (see
+/// [`submit_view_ray_layered_sky_to_slot`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LayeredSkySampleKey {
+    rotation: [[i16; 3]; 3],
+    screen_size: [i16; 2],
+    screen_center: [i16; 2],
+    projection: i16,
+    width: u8,
+}
+
+struct LayeredSkySampleCache {
+    key: LayeredSkySampleKey,
+    valid: bool,
+    samples: [[[i32; 2]; SKY_COLUMNS + 1]; SKY_ROWS + 1],
+}
+
+static mut LAYERED_SKY_SAMPLE_CACHE: LayeredSkySampleCache = LayeredSkySampleCache {
+    key: LayeredSkySampleKey {
+        rotation: [[0; 3]; 3],
+        screen_size: [0; 2],
+        screen_center: [0; 2],
+        projection: 0,
+        width: 0,
+    },
+    valid: false,
+    samples: [[[0; 2]; SKY_COLUMNS + 1]; SKY_ROWS + 1],
+};
+
 /// One staged GP0(E2) selector for a complete sky layer.
 #[repr(C, align(4))]
 struct SkyWindowPacket {
@@ -762,16 +791,35 @@ pub unsafe fn submit_view_ray_layered_sky_to_slot(
 
     let screen_width = screen_size[0].max(1);
     let screen_height = screen_size[1].max(1);
-    let mut samples = [[[0i32; 2]; SKY_COLUMNS + 1]; SKY_ROWS + 1];
-    for (row, sample_row) in samples.iter_mut().enumerate() {
-        let y = (row * screen_height as usize / SKY_ROWS) as i16;
-        for (column, sample) in sample_row.iter_mut().enumerate() {
-            let x = (column * screen_width as usize / SKY_COLUMNS) as i16;
-            let world_ray =
-                screen_view_ray([x, y], screen_center, projection.max(1), view_rotation.m);
-            *sample = directional_texel(quake_direction_from_y_up(world_ray), width);
+    // The texel lattice depends on the view rotation and the screen
+    // geometry alone; the scroll is added per cell below. A frame that keeps
+    // the previous rotation reuses the lattice instead of paying a square
+    // root and two divides per corner (143 corners at the default lattice).
+    // The guest is single-threaded and the host tests run this kernel from
+    // one thread at a time, so a plain static carries the cache.
+    let key = LayeredSkySampleKey {
+        rotation: view_rotation.m,
+        screen_size: [screen_width, screen_height],
+        screen_center,
+        projection,
+        width,
+    };
+    // SAFETY: single-threaded access, see above.
+    let cache = unsafe { &mut *core::ptr::addr_of_mut!(LAYERED_SKY_SAMPLE_CACHE) };
+    if !cache.valid || cache.key != key {
+        for (row, sample_row) in cache.samples.iter_mut().enumerate() {
+            let y = (row * screen_height as usize / SKY_ROWS) as i16;
+            for (column, sample) in sample_row.iter_mut().enumerate() {
+                let x = (column * screen_width as usize / SKY_COLUMNS) as i16;
+                let world_ray =
+                    screen_view_ray([x, y], screen_center, projection.max(1), view_rotation.m);
+                *sample = directional_texel(quake_direction_from_y_up(world_ray), width);
+            }
         }
+        cache.key = key;
+        cache.valid = true;
     }
+    let samples = &cache.samples;
 
     let mut next = output;
     // The tagged stream is linked by prepending packets. Stage the reset first
