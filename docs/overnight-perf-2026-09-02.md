@@ -1174,3 +1174,20 @@ faces (player and enemy models are 15 to 19% of the frame; decimation at
 session), and the +693 faces the UV-wrap cook fix added. Even all of them
 together land short of 30 fps on this level; the honest shape of a 30 fps
 Cortex is a lighter level or a lighter renderer, not a faster one.
+
+### The bold bundle (branch `perf/cortex-bold-bundle`, pushed, not landed)
+
+Manny's standing instruction for the non-exact levers is "show me a
+before/after so I can judge", so the three that need no new assets are
+measured together on one branch, each its own commit:
+
+| change | bus cycles vs main (lockstep, poll 5250) | what changes on screen |
+|---|---|---|
+| World sky `mode: Panorama` instead of the cube map | -5.57% | the foggy city cube map becomes the authored gradient sky (`cortex-sky-panorama-polls.png`) |
+| selection reuse two frames of three (was alternate frames) | | a face entering the frustum can appear up to two frames late at the screen edge |
+| subdivision bands 200/100 (was 272/136) | | slightly more affine swim on near floor patches |
+| all three | -9.72% cycles, -12.03% instructions, idle 8.28% -> 10.17% | `cortex-bundle-polls.png` |
+
+On the 16.4 fps ladder that is roughly +1.8 fps, not 30. The bundle is
+what a content-neutral "bold" pass buys; anything beyond it is model
+decimation (the parallel session's A/B) and level geometry.
