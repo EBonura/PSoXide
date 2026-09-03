@@ -28,6 +28,9 @@
 // Corrected signed 64-bit divide/mod (compiler-builtins' are broken here).
 #[cfg(target_arch = "mips")]
 mod builtins;
+// Hand-scheduled memcpy/memset/memcmp (compiler-builtins' are generic loops).
+#[cfg(target_arch = "mips")]
+mod mem;
 
 #[cfg(target_arch = "mips")]
 pub mod bios;
