@@ -857,10 +857,25 @@ a rebuild and a poll-bound dump:
 | every soft-path cull disabled | unchanged |
 
 So the missing leaf is never generated, and the degenerate one says the
-cell already had two coincident corners: the source quad, not the
-splitter. The next step is guest-side: log the four corners of every quad
-whose tree emits a degenerate leaf, in a telemetry build stopped at poll
-1013. The view-space facing verdict and the extent guard are kept as a
+cell already had two coincident corners.
+
+Guest-side logging (patch `hl-black-wedge-instrumentation.patch`, log
+`hl-black-wedge-poll1013-guest-log.txt`) then established: the quads whose
+trees emit degenerate leaves are cooked quads with three collinear
+corners, a triangle carrying a T-junction vertex on one edge (root
+`(17,99,-118) (17,83,554) (17,99,338) (17,99,554)`, all four corners on the
+wall plane x = 17); routing such quads through the triangle near-clip path
+removes every degenerate leaf but leaves the wedge; the leaves that should
+cover the wedge are emitted with sane UVs, colours around 80 and front
+windings, and no packet push fails in those frames. Yet the dumped frame's
+packet list has no triangle over the wedge. The dumped list is the last
+frame the GPU consumed, which lags the guest's emission by a frame or two,
+and in it the hub fan comes from the native 2x2 child path rather than the
+quadtree, so the two views of the frame were never the same frame. What
+is needed next is a harness that pins one guest frame: build with
+`emulator-telemetry`, stop on the frame counter rather than a poll, and
+dump packets and guest log for that same frame. Nothing from this
+investigation is shipped; hl main stays at 2152766. The view-space facing verdict and the extent guard are kept as a
 patch (`hl-view-space-facing-and-min-extent.patch`, tram fps unchanged)
 rather than shipped, since they do not fix what Manny sees. Evidence:
 `hl-black-wedges-census.png`, `hl-black-wedge-tick3684.png`.
