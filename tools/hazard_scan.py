@@ -27,8 +27,14 @@ LOADS = {"lw", "lh", "lhu", "lb", "lbu", "lwl", "lwr", "lwc2", "mfc0", "mfc2", "
 BRANCHES = {"beq", "bne", "beqz", "bnez", "blez", "bgtz", "bltz", "bgez", "bltzal",
             "bgezal", "j", "jal", "jr", "jalr", "b", "bal"}
 STORES = {"sw", "sh", "sb", "swl", "swr", "swc2"}
+# Instructions whose every register operand is a source: stores, coprocessor
+# moves, register jumps, multiply/divide, and every conditional branch (a
+# `beqz a2, T` consumer reads a2 as its FIRST operand, so the generic
+# "destination first" rule below would miss it; this gap let a memcmp whose
+# entry tested a2 read a stale count for its whole life, 2026-09-04).
 READS_ALL = STORES | {"mtc0", "mtc2", "ctc2", "jr", "jalr", "mult", "multu", "div",
-                      "divu", "mthi", "mtlo"}
+                      "divu", "mthi", "mtlo", "beq", "bne", "beqz", "bnez", "blez",
+                      "bgtz", "bltz", "bgez", "bltzal", "bgezal", "beql", "bnel"}
 WRITES_ONLY = {"lui", "li", "mfhi", "mflo"}
 
 
@@ -80,8 +86,57 @@ def reads(op, args, reg):
     return False
 
 
+def jump_table(listing, jr_addr, word_at, image_end):
+    """Resolve the table a `jr rs` dispatches through: (entry address, target)
+    pairs. LLVM lowers a switch as `sll idx,idx,2 ; lui t,%hi(T) ; addu ;
+    lw rs,%lo(T)(...) ; jr rs`; the base is the last `lui` before that load
+    plus the load's offset. Entries run until a word stops being a code
+    address (the next table's entries are code addresses too, so a few extra
+    targets may be examined; a spurious match only costs one detour)."""
+    op, args = listing[jr_addr]
+    rs = args.strip()
+    load = None
+    for back in range(1, 12):
+        entry = listing.get(jr_addr - back * 4)
+        if entry is None:
+            break
+        m = re.match(r"(-?\d+)\(([a-z0-9]+)\)", entry[1].split(",")[-1].strip()) if entry[0] == "lw" else None
+        if m and entry[1].split(",")[0].strip() == rs:
+            load = (jr_addr - back * 4, int(m.group(1)))
+            break
+    if load is None:
+        return None
+    hi = None
+    for back in range(1, 12):
+        entry = listing.get(load[0] - back * 4)
+        if entry is None:
+            break
+        if entry[0] == "lui":
+            hi = int(entry[1].split(",")[1].strip(), 16)
+            break
+    if hi is None:
+        return None
+    base = ((hi << 16) + load[1]) & 0xFFFFFFFF
+    entries = []
+    for k in range(64):
+        addr = base + k * 4
+        if not LOAD_ADDR <= addr < image_end:
+            break
+        target = word_at(addr)
+        if target & 3 or not LOAD_ADDR <= target < image_end or target not in listing:
+            break
+        entries.append((addr, target))
+    return entries or None
+
+
 def scan(path):
     listing = disassemble(path)
+    data = open(path, "rb").read()
+    image_end = LOAD_ADDR + len(data) - HEADER
+
+    def word_at(addr):
+        return int.from_bytes(data[addr - LOAD_ADDR + HEADER:][:4], "little")
+
     hazards = []
     for addr, (op, args) in listing.items():
         if op not in BRANCHES or addr + 4 not in listing:
@@ -91,13 +146,27 @@ def scan(path):
         if rd is None or not looks_like_code(listing, addr):
             continue
         targets = []
-        if op not in ("jr", "jalr"):
+        if op == "jr" and args.strip() != "ra":
+            # A switch dispatch: every table target is a possible consumer.
+            entries = jump_table(listing, addr, word_at, image_end)
+            if entries is None:
+                print(f"warning {addr:08x}: jr {args} | slot {slot_op} {slot_args}"
+                      " | table not resolved, targets unverified")
+            else:
+                targets.extend(target for _, target in entries)
+        elif op == "jalr":
+            # A register call: the callee is unknown, so an argument loaded
+            # in the slot cannot be proven safe here.
+            if rd in ("a0", "a1", "a2", "a3"):
+                print(f"warning {addr:08x}: jalr {args} | slot {slot_op} {slot_args}"
+                      " | callee unknown, argument unverified")
+        elif op != "jr":
             m = re.search(r"0x([0-9a-f]+)$", args)
             if m:
                 targets.append(int(m.group(1), 16))
         # A call returns to its fall-through much later and a plain jump never
         # falls through; only conditional branches expose both paths.
-        if op not in ("j", "jal", "bal", "jalr", "bltzal", "bgezal"):
+        if op not in ("j", "jal", "bal", "jr", "jalr", "bltzal", "bgezal"):
             targets.append(addr + 8)
         for target in targets:
             if target in listing and reads(*listing[target], rd):
