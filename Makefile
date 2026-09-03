@@ -418,7 +418,7 @@ DATA_DISC_EXAMPLES := \
 	hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
 	showcase-text game-pong game-breakout game-invaders \
 	showcase-3d showcase-model showcase-lights showcase-fog showcase-particles \
-	hello-engine hello-memcard hello-i64probe
+	hello-engine hello-memcard hello-i64probe hello-memprobe
 PUBLIC_EXAMPLE_DISCS := $(addsuffix -disc,$(DATA_DISC_EXAMPLES)) hello-cdda-disc hello-pack-disc game-magikaaaaaarp-pong-disc
 
 define build_data_disc
@@ -445,6 +445,11 @@ hello-memcard:
 # unsigned works -- see the example's docs).
 hello-i64probe:
 	cd sdk/examples/hello-i64probe && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+
+# psx-rt memcpy/memset/memcmp correctness probe (every size and alignment pair
+# against a reference loop; TTY prints MEMPROBE PASS / FAIL).
+hello-memprobe:
+	cd sdk/examples/hello-memprobe && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 # psx-pack CD-streaming smoke test: SectorReader + load_chunk stream WORLD.PAK
 # chunks off the disc (table straddle, FNV checksums, HLZC decompression).
