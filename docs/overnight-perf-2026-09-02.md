@@ -890,3 +890,61 @@ Note for anyone measuring hl-psx visually: two runs of the same build do
 not produce the same frames at the same tick (the tram route is
 timing-dependent), so before/after comparisons must be poll-bound dumps
 of one frame, never interval screenshots from two runs.
+
+## VoXide: renderer, world generation, draw distance (2026-09-03, 12:30 to 16:30)
+
+Manny's ask: push the VoXide renderer and world generation, and show more
+blocks. Bench protocol: the spawn meadow, standing (`make profile`'s scene;
+START pulse at tick 700, 900M steps) for per-stage cycles from the telemetry
+build, and a poll-bound run for whole-route bus cycles. The pinned frontend
+and the current one agree to the cycle. `--hold-forward` walks into a bush at
+spawn, so there is no real walking route yet (VoXide turns with the right
+stick only).
+
+### Shipped on main (voxide e35323c), exact
+
+- The tint table (`refresh_mat_ccmd`, 192 divides) was rebuilt every frame;
+  its inputs move a few times a minute. Keyed on them.
+- The near-cell clipper zeroed two 384-byte polygon buffers per call and
+  copied both on every clipped plane; memset was 3% of the frame. Static
+  scratch, swapped by reference.
+
+Spawn loop body 1,617,041 to 1,403,405 cycles (-13%); the walking route to
+pad poll 1200 went 2,596,795,601 to 2,044,981,625 bus cycles and its frames
+from four fields to three. Frames are pixel-identical apart from game-time
+drift.
+
+### Measured and dropped
+
+Prepacked plant packet words (no change: the builders were already folded);
+per-layer tiling of the cave noise in world generation (terrain hash
+identical, boot cycles unchanged: cave sampling is not where generation time
+goes; the streaming cost the README describes is chunk meshing, 90K plane
+cells per chunk). The remaining spawn profile is flat and load-bound: the
+face loop iterates about 1,260 faces to emit 291 quads, the near band spends
+80K instructions on 47 triangles, plants 9%, vsync wait 16%.
+
+### More blocks: a far LOD (branch `lod/far-tops`, 0f783fe, not on main)
+
+Raising the far plane alone does not work: 20 blocks costs +23% loop body,
+24 blocks +42%. The branch adds a real LOD for the outer ring of the 5x5:
+the column heightfield at two-block cells, ground blocks only, tops merged
+2D, plus a skirt face wherever a neighbour cell is lower so terraced hills
+keep their silhouette. A far chunk holds a few dozen faces instead of a 90K
+cell scan, so the wider ring adds little streaming load, and far chunks
+publish no plants. Far plane 24 blocks, near-ring sides still 16.
+
+| pose | release tree (16 blocks) | far LOD (24 blocks) |
+|---|---|---|
+| spawn, standing | 1,403,405 (20 fps) | 1,633,378 (20 fps) |
+| ground, yaw 0x0C00 (bushes, hill) | 1,616,044 (20 fps) | 1,881,283 (15 fps) |
+| aerial (VISTA_AERIAL) | 785,048 (30 fps, all haze) | 1,464,373 (20 fps) |
+
+Loop-body cycles, telemetry builds. The same renderer at 24 blocks without
+the LOD measured 1,987,221 at the spawn. So: half again the draw distance at
+the release's frame time in the spawn view, a 20 to 15 drop on the heaviest
+ground pose, and a landscape where the release shows fog from the air.
+Manny judges whether that trade ships; the branch is pushed, main keeps only
+the exact wins. Evidence: `voxide-aerial-16-20-24.png`,
+`voxide-lod-tops-vs-skirts-aerial.png` (why the skirts exist),
+`voxide-spawn-16-vs-24-lod.png`.
