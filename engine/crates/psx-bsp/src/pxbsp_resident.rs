@@ -525,12 +525,16 @@ impl PxbspResidentMap {
             // Quake hull 0: point traces walk the render BSP (balanced,
             // leaf contents from the leaf records) instead of the cooked
             // per-brush clipnode chain.
-            return Some(CollisionHull::from_render_bsp(
-                self.planes(),
-                self.nodes(),
-                self.leaves(),
-                self.model_head_node(model_index, 0)?,
-            ));
+            // SAFETY: validate_references range-checked every node's plane,
+            // children and leaf children and every model head node at load.
+            return Some(unsafe {
+                CollisionHull::from_render_bsp(
+                    self.planes(),
+                    self.nodes(),
+                    self.leaves(),
+                    self.model_head_node(model_index, 0)?,
+                )
+            });
         }
         let slot = hull_index.checked_add(1)?;
         if slot >= 4 {
@@ -547,11 +551,9 @@ impl PxbspResidentMap {
                 records.len(),
             )
         };
-        Some(CollisionHull::from_native_clip_nodes(
-            self.planes(),
-            nodes,
-            head_node,
-        ))
+        // SAFETY: validate_references range-checked every clip node's plane
+        // and children and every model head node at load.
+        Some(unsafe { CollisionHull::from_native_clip_nodes(self.planes(), nodes, head_node) })
     }
 
     /// Borrow one checked zero-terminated value from the cooked string table.
