@@ -1246,10 +1246,7 @@ impl Playtest {
                     index += 1;
                     continue;
                 }
-                (
-                    camera,
-                    self.effect_depth_range(projectile.room),
-                )
+                (camera, self.effect_depth_range(projectile.room))
             } else {
                 let Some(active) = self
                     .window
@@ -1293,10 +1290,7 @@ impl Playtest {
                     impact_index += 1;
                     continue;
                 }
-                (
-                    camera,
-                    self.effect_depth_range(impact.room),
-                )
+                (camera, self.effect_depth_range(impact.room))
             } else {
                 let Some(active) = self
                     .window
