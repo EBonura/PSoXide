@@ -88,8 +88,8 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_game_runtime::vitality::{
-    module_stat_bonus_q12, BoostInventory, BoostModuleId, BoostSlotId, CombatStance,
-    CombatStanceConfig, DualVitality, PowerUpLoadout, VitalityChannelId, VitalityModifiers,
+    BoostInventory, BoostModuleId, BoostSlotId, CombatStance, CombatStanceConfig, DualVitality,
+    PowerUpLoadout, VitalityChannelId, VitalityModifiers,
 };
 use psx_game_runtime::vitality_circles::VitalityCircleState;
 use psx_game_runtime::{
@@ -98,7 +98,7 @@ use psx_game_runtime::{
     save::{SaveBlock, SavedPlayerPosition},
 };
 use psx_gpu::{
-    draw_quad_textured_material, draw_tri_flat_blended,
+    draw_line_mono, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
     prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
@@ -435,6 +435,13 @@ struct Playtest {
     selected_power_up_slot: u8,
     /// Collected item highlighted in the inventory browser.
     selected_power_up_item: BoostModuleId,
+    /// Packed inventory navigation state: low two bits are the active pane
+    /// (sockets/modules/assignment), high bits retain the module-list cursor.
+    /// Keeping both in one byte matters in the PS1 scene BSS.
+    inventory_ui_state: u8,
+    /// Suppresses the live gameplay vitality HUD while the inventory owns the
+    /// screen; the inventory has its own socket presentation.
+    inventory_overlay_active: bool,
     /// Remaining death-sequence ticks, shared by every death cause
     /// (combat damage, BSP liquid hazards, lethal water). Non-zero locks
     /// player input until the shared checkpoint/spawn respawn completes.
@@ -535,7 +542,7 @@ struct Playtest {
     player_moved_last_tick: bool,
     /// Edge-triggered gameplay audio bits consumed once by GameApp after this
     /// fixed update. A byte replaces five booleans and is zero-valid.
-    gameplay_sfx_events: u8,
+    gameplay_sfx_events: u16,
     /// True when the latest input frame is manually rotating the camera.
     camera_turning_last_tick: bool,
     /// Index into `MODEL_INSTANCES` for the current lock-on target.
@@ -759,6 +766,8 @@ impl Playtest {
         self.overlay_poi_page_type_frame = 0;
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
         self.selected_power_up_item = BoostModuleId::NONE;
+        self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
+        self.inventory_overlay_active = false;
         self.acquired_module = BoostModuleId::NONE;
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
         self.anim_state = PlayerAnim::Idle;

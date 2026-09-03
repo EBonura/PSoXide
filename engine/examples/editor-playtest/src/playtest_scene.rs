@@ -1,6 +1,14 @@
 use super::*;
 
 const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
+const INVENTORY_UI_MODE_MASK: u8 = 0x03;
+const INVENTORY_UI_MODULE_SHIFT: u8 = 2;
+pub(crate) const INVENTORY_UI_SOCKETS: u8 = 0;
+const INVENTORY_UI_MODULES: u8 = 1;
+const INVENTORY_UI_ASSIGN: u8 = 2;
+const INVENTORY_ITEM_COUNT: u8 = 3;
+const GAMEPLAY_SCENE_STATE_NAME: &str = "Gameplay";
+const INVENTORY_SCENE_STATE_NAME: &str = "Inventory Overlay";
 
 /// Find the authored Basic 8x8 atlas used by HUD feedback. Cooked font slots
 /// are ordered by first use, so a hard-coded index would change whenever an
@@ -19,6 +27,19 @@ fn boost_module(id: BoostModuleId) -> Option<&'static psx_level::BoostModuleReco
 
 fn boost_module_name(id: BoostModuleId) -> &'static str {
     boost_module(id).map_or("NONE", |module| module.name)
+}
+
+/// Socket buttons are only 63 pixels wide at the native 320x240 resolution.
+/// These compact names match the three authored Cortex modules; the analysis
+/// pane still presents each module's complete authored name.
+fn boost_module_socket_name(id: BoostModuleId) -> &'static str {
+    match id.index() {
+        Some(0) => "RUPTURE",
+        Some(1) => "ZENITH",
+        Some(2) => "SHELL",
+        Some(_) => "MODULE",
+        None => "NONE",
+    }
 }
 
 struct UiScratch<'a> {
@@ -104,6 +125,42 @@ impl<'a> UiScratch<'a> {
 }
 
 impl Playtest {
+    #[inline]
+    fn inventory_ui_mode(&self) -> u8 {
+        self.inventory_ui_state & INVENTORY_UI_MODE_MASK
+    }
+
+    #[inline]
+    fn inventory_module_cursor(&self) -> u8 {
+        (self.inventory_ui_state >> INVENTORY_UI_MODULE_SHIFT)
+            .min(INVENTORY_ITEM_COUNT.saturating_sub(1))
+    }
+
+    #[inline]
+    fn set_inventory_ui_mode(&mut self, mode: u8) {
+        self.inventory_ui_state =
+            (self.inventory_ui_state & !INVENTORY_UI_MODE_MASK) | (mode & INVENTORY_UI_MODE_MASK);
+    }
+
+    #[inline]
+    fn set_inventory_module_cursor(&mut self, index: u8) {
+        self.inventory_ui_state = (self.inventory_ui_state & INVENTORY_UI_MODE_MASK)
+            | (index.min(INVENTORY_ITEM_COUNT.saturating_sub(1)) << INVENTORY_UI_MODULE_SHIFT);
+    }
+
+    fn first_inventory_item_index(&self) -> Option<u8> {
+        (0..INVENTORY_ITEM_COUNT).find(|index| !self.power_up_inventory.item_at(*index).is_none())
+    }
+
+    fn requested_gameplay_state(&self, ctx: &mut Ctx) {
+        if let Some(state) = crate::generated::SCENE_STATES
+            .iter()
+            .find(|state| state.name == GAMEPLAY_SCENE_STATE_NAME)
+        {
+            ctx.request_scene_state(state.id);
+        }
+    }
+
     /// Answer one `souls.` text tag. `tag` arrives with the namespace already
     /// stripped, so this is a two-arm compare on the remainder.
     ///
@@ -138,22 +195,9 @@ impl Playtest {
     }
 }
 
-fn write_stat_line<'a>(
-    scratch: &'a mut [u8],
-    label: &str,
-    active_bonus_q12: i32,
-    module_bonus_q12: Option<i32>,
-) -> Option<&'a str> {
+fn write_stat_value(scratch: &mut [u8], bonus_q12: i32) -> Option<&str> {
     let mut out = UiScratch::new(scratch);
-    out.push_str(label);
-    out.push_str(" ");
-    out.push_signed_percent_q12(active_bonus_q12);
-    out.push_str(" / ");
-    if let Some(module_bonus_q12) = module_bonus_q12 {
-        out.push_signed_percent_q12(module_bonus_q12);
-    } else {
-        out.push_str("--");
-    }
+    out.push_signed_percent_q12(bonus_q12);
     out.finish()
 }
 
@@ -255,7 +299,7 @@ impl Scene for Playtest {
         RenderSubmission::Queued
     }
 
-    fn take_gameplay_sfx_events(&mut self) -> u8 {
+    fn take_gameplay_sfx_events(&mut self) -> u16 {
         core::mem::take(&mut self.gameplay_sfx_events)
     }
 
@@ -378,43 +422,71 @@ impl Scene for Playtest {
         let selected = BoostSlotId::from_index(self.selected_power_up_slot);
         let selected_item = self.selected_power_up_item;
         let slotted_item = self.power_up_loadout.module(selected);
-        let assigning = !selected_item.is_none();
-        let detail_item = if assigning {
-            selected_item
-        } else {
-            slotted_item
+        let inventory_mode = self.inventory_ui_mode();
+        let detail_item = match inventory_mode {
+            INVENTORY_UI_MODULES => self
+                .power_up_inventory
+                .item_at(self.inventory_module_cursor()),
+            INVENTORY_UI_ASSIGN => selected_item,
+            _ => slotted_item,
         };
         let detail = boost_module(detail_item);
-        let modifiers = self.vitality_modifiers();
+        let previewing_module =
+            matches!(inventory_mode, INVENTORY_UI_MODULES | INVENTORY_UI_ASSIGN)
+                && detail.is_some();
+        // The socket view reports the complete configured loadout, including
+        // the inactive stance. Otherwise assigning a Zenith module while in
+        // Horizon would misleadingly report +0% immediately after assignment.
+        let modifiers = self
+            .power_up_loadout
+            .modifiers(&self.player_vitality, BOOST_MODULES);
         let module_bonus = |stat| {
             detail
-                .map(|module| module_stat_bonus_q12(&self.player_vitality, selected, module, stat))
+                .and_then(|module| module.percentages.get(stat))
+                .map(|percent| i32::from(*percent).saturating_mul(4096) / 100)
+                .unwrap_or(0)
+        };
+        let stat_value = |stat, final_value| {
+            if previewing_module {
+                module_bonus(stat)
+            } else {
+                final_value
+            }
         };
         match tag {
-            "boost.horizon.empty" => Some(boost_module_name(
+            "boost.horizon.empty" => Some(boost_module_socket_name(
                 self.power_up_loadout.module(BoostSlotId::HorizonEmpty),
             )),
-            "boost.horizon.full" => Some(boost_module_name(
+            "boost.horizon.full" => Some(boost_module_socket_name(
                 self.power_up_loadout.module(BoostSlotId::HorizonFull),
             )),
-            "boost.zenith.empty" => Some(boost_module_name(
+            "boost.zenith.empty" => Some(boost_module_socket_name(
                 self.power_up_loadout.module(BoostSlotId::ZenithEmpty),
             )),
-            "boost.zenith.full" => Some(boost_module_name(
+            "boost.zenith.full" => Some(boost_module_socket_name(
                 self.power_up_loadout.module(BoostSlotId::ZenithFull),
             )),
             "inventory.item.0" => Some(boost_module_name(self.power_up_inventory.item_at(0))),
             "inventory.item.1" => Some(boost_module_name(self.power_up_inventory.item_at(1))),
             "inventory.item.2" => Some(boost_module_name(self.power_up_inventory.item_at(2))),
-            "boost.assignment.prompt" => {
-                Some(boost_module(selected_item).map_or("", |module| module.assignment_label))
-            }
+            "boost.assignment.prompt" => Some("CHOOSE A SOCKET"),
+            "boost.control.primary" => Some(match self.inventory_ui_mode() {
+                INVENTORY_UI_MODULES => "SELECT",
+                INVENTORY_UI_ASSIGN => "ASSIGN",
+                _ => "MODULES",
+            }),
+            "boost.control.remove" => Some("REMOVE"),
+            "boost.control.back" => Some(if self.inventory_ui_mode() == INVENTORY_UI_ASSIGN {
+                "MODULES"
+            } else {
+                "CLOSE"
+            }),
             "boost.inventory.selected.name" => {
                 Some(detail.map_or("SELECT A MODULE", |module| module.name))
             }
             "boost.inventory.selected.stat" => Some(detail.map_or("", |module| module.description)),
             "boost.inventory.selected.count" => {
-                if assigning {
+                if previewing_module {
                     Some("COLLECTED")
                 } else if !detail_item.is_none() {
                     Some("EQUIPPED")
@@ -424,43 +496,45 @@ impl Scene for Playtest {
             }
             "boost.selected.name" => Some(detail.map_or("NONE", |module| module.name)),
             "boost.selected.effect" => Some(detail.map_or("", |module| module.effect_summary)),
-            "boost.selected.base" => {
-                let mut out = UiScratch::new(scratch);
-                if let Some(module) = detail {
-                    out.push_str("BASE // ");
-                    out.push_str(module.effect_summary);
-                }
-                out.finish()
-            }
-            "boost.stat.horizon" => write_stat_line(
+            "boost.selected.base" => Some(if previewing_module {
+                "MODULE EFFECT"
+            } else {
+                "FINAL STATS"
+            }),
+            "boost.stat.horizon" => write_stat_value(
                 scratch,
-                "HRZ ATK",
-                i32::from(modifiers.horizon_damage_q12) - 4096,
-                module_bonus(psx_level::boost_stat::HORIZON_ATTACK),
+                stat_value(
+                    psx_level::boost_stat::HORIZON_ATTACK,
+                    i32::from(modifiers.horizon_damage_q12) - 4096,
+                ),
             ),
-            "boost.stat.zenith" => write_stat_line(
+            "boost.stat.zenith" => write_stat_value(
                 scratch,
-                "ZTH ATK",
-                i32::from(modifiers.zenith_damage_q12) - 4096,
-                module_bonus(psx_level::boost_stat::ZENITH_ATTACK),
+                stat_value(
+                    psx_level::boost_stat::ZENITH_ATTACK,
+                    i32::from(modifiers.zenith_damage_q12) - 4096,
+                ),
             ),
-            "boost.stat.defence" => write_stat_line(
+            "boost.stat.defence" => write_stat_value(
                 scratch,
-                "DEFENCE",
-                4096 - i32::from(modifiers.incoming_damage_q12),
-                module_bonus(psx_level::boost_stat::DEFENCE),
+                stat_value(
+                    psx_level::boost_stat::DEFENCE,
+                    4096 - i32::from(modifiers.incoming_damage_q12),
+                ),
             ),
-            "boost.stat.movement" => write_stat_line(
+            "boost.stat.movement" => write_stat_value(
                 scratch,
-                "MOVE SPD",
-                i32::from(modifiers.movement_speed_q12) - 4096,
-                module_bonus(psx_level::boost_stat::MOVEMENT_SPEED),
+                stat_value(
+                    psx_level::boost_stat::MOVEMENT_SPEED,
+                    i32::from(modifiers.movement_speed_q12) - 4096,
+                ),
             ),
-            "boost.stat.attack_speed" => write_stat_line(
+            "boost.stat.attack_speed" => write_stat_value(
                 scratch,
-                "ATK SPD",
-                i32::from(modifiers.attack_speed_q12) - 4096,
-                module_bonus(psx_level::boost_stat::ATTACK_SPEED),
+                stat_value(
+                    psx_level::boost_stat::ATTACK_SPEED,
+                    i32::from(modifiers.attack_speed_q12) - 4096,
+                ),
             ),
             "boost.remove" => Some(if slotted_item.is_none() { "" } else { "REMOVE" }),
             "boost.selected.pole" => Some(match selected.pole() {
@@ -485,17 +559,62 @@ impl Scene for Playtest {
             "inventory.empty" => self.power_up_inventory.is_empty(),
             "boost.assignment.prompt" => !self.selected_power_up_item.is_none(),
             "boost.remove" => !self.power_up_loadout.module(selected).is_none(),
-            // The HUD keeps each channel's own name beside its bar while the
-            // bars themselves stay put: the active one is always the large top
-            // bar. Four labels, two shown, so HRZ and ZTH trade places on a
-            // swap without duplicating the bars or their dividers.
-            // The bars themselves are drawn by the overlay, which owns their
-            // geometry so a swap has somewhere to animate. Only the names are
-            // authored, and each channel's name shows beside its own bar.
-            "stance.horizon.active" => self.player_stance.active() == VitalityChannelId::One,
-            "stance.zenith.active" => self.player_stance.active() == VitalityChannelId::Two,
-            "target.hud" => self.combat_target_entity_index().is_some(),
+            "boost.control.remove" => self.inventory_ui_mode() != INVENTORY_UI_MODULES,
+            "prompt.cross.runtime" => false,
+            // The runtime draws the compact, target-anchored dual vitality
+            // stack. Keep the authored node as a font-order/editor preview
+            // anchor, but never layer its old large bars over gameplay.
+            "target.hud" => false,
+            // The runtime overlay now owns the complete player HUD, including
+            // the stance names inside its moving bars. Legacy authored labels
+            // with these tags otherwise remain underneath the translucent dial
+            // and leak through its hollow centre during a swap.
+            "stance.horizon.active" | "stance.zenith.active" => false,
             _ => true,
+        }
+    }
+
+    fn ui_node_focusable(&self, tag: &str) -> bool {
+        if !self.inventory_overlay_active {
+            return true;
+        }
+        match tag {
+            "boost.horizon.empty"
+            | "boost.horizon.full"
+            | "boost.zenith.empty"
+            | "boost.zenith.full" => self.inventory_ui_mode() != INVENTORY_UI_MODULES,
+            "inventory.item.0" | "inventory.item.1" | "inventory.item.2" => {
+                self.inventory_ui_mode() == INVENTORY_UI_MODULES
+            }
+            // Tabs remain shoulder-button destinations, but do not steal the
+            // d-pad cursor from the two-stage socket/module flow.
+            "tab.player.selected" | "tab.system" | "boost.remove" => false,
+            _ => true,
+        }
+    }
+
+    fn preferred_ui_focus_action(&self) -> Option<u16> {
+        if !self.inventory_overlay_active {
+            return None;
+        }
+        if self.inventory_ui_mode() == INVENTORY_UI_MODULES {
+            let requested = self.inventory_module_cursor();
+            let index = if self.power_up_inventory.item_at(requested).is_none() {
+                self.first_inventory_item_index()?
+            } else {
+                requested
+            };
+            Some(210 + u16::from(index))
+        } else {
+            Some(200 + u16::from(self.selected_power_up_slot.min(3)))
+        }
+    }
+
+    fn game_ui_focus_changed(&mut self, id: u16) {
+        match id {
+            200..=203 => self.selected_power_up_slot = (id - 200) as u8,
+            210..=212 => self.set_inventory_module_cursor((id - 210) as u8),
+            _ => {}
         }
     }
 
@@ -510,13 +629,26 @@ impl Scene for Playtest {
             212 => Some(2),
             _ => None,
         } {
+            if self.inventory_ui_mode() != INVENTORY_UI_MODULES {
+                return;
+            }
             let module = self.power_up_inventory.item_at(item_index);
             if !module.is_none() {
-                self.selected_power_up_item = if self.selected_power_up_item == module {
-                    BoostModuleId::NONE
+                self.set_inventory_module_cursor(item_index);
+                // The socket was chosen before entering the module list, so
+                // choosing the module completes the assignment: no third
+                // press back on the socket.
+                let slot = BoostSlotId::from_index(self.selected_power_up_slot);
+                if self
+                    .power_up_inventory
+                    .assign(&mut self.power_up_loadout, slot, module)
+                {
+                    self.selected_power_up_item = BoostModuleId::NONE;
+                    self.set_inventory_ui_mode(INVENTORY_UI_SOCKETS);
                 } else {
-                    module
-                };
+                    self.selected_power_up_item = module;
+                    self.set_inventory_ui_mode(INVENTORY_UI_ASSIGN);
+                }
             }
             return;
         }
@@ -541,7 +673,8 @@ impl Scene for Playtest {
         };
         if let Some(slot) = slot {
             self.selected_power_up_slot = slot as u8;
-            if !self.selected_power_up_item.is_none()
+            if self.inventory_ui_mode() == INVENTORY_UI_ASSIGN
+                && !self.selected_power_up_item.is_none()
                 && self.power_up_inventory.assign(
                     &mut self.power_up_loadout,
                     slot,
@@ -549,13 +682,49 @@ impl Scene for Playtest {
                 )
             {
                 self.selected_power_up_item = BoostModuleId::NONE;
+                self.set_inventory_ui_mode(INVENTORY_UI_SOCKETS);
+            } else if self.inventory_ui_mode() == INVENTORY_UI_SOCKETS
+                && self.first_inventory_item_index().is_some()
+            {
+                self.set_inventory_ui_mode(INVENTORY_UI_MODULES);
             }
         }
     }
 
-    fn game_ui_cancel(&mut self, _ctx: &mut Ctx) -> bool {
-        self.selected_power_up_item = BoostModuleId::NONE;
+    fn game_ui_cancel(&mut self, ctx: &mut Ctx) -> bool {
+        if !self.inventory_overlay_active {
+            return false;
+        }
+        if self.inventory_ui_mode() == INVENTORY_UI_ASSIGN {
+            self.selected_power_up_item = BoostModuleId::NONE;
+            self.set_inventory_ui_mode(INVENTORY_UI_MODULES);
+        } else {
+            self.selected_power_up_item = BoostModuleId::NONE;
+            self.set_inventory_ui_mode(INVENTORY_UI_SOCKETS);
+            self.requested_gameplay_state(ctx);
+        }
         true
+    }
+
+    fn game_ui_square(&mut self, _ctx: &mut Ctx) -> bool {
+        if !self.inventory_overlay_active || self.inventory_ui_mode() == INVENTORY_UI_MODULES {
+            return false;
+        }
+        let slot = BoostSlotId::from_index(self.selected_power_up_slot);
+        let _ =
+            self.power_up_inventory
+                .assign(&mut self.power_up_loadout, slot, BoostModuleId::NONE);
+        true
+    }
+
+    fn on_flow_state_entered(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
+        self.inventory_overlay_active = crate::generated::SCENE_STATES.iter().any(|candidate| {
+            candidate.id == state.id && candidate.name == INVENTORY_SCENE_STATE_NAME
+        });
+        if self.inventory_overlay_active {
+            self.selected_power_up_item = BoostModuleId::NONE;
+            self.set_inventory_ui_mode(INVENTORY_UI_SOCKETS);
+        }
     }
 
     /// Gameplay and each UI scene use distinct resource-set keys so the flow
@@ -834,11 +1003,8 @@ impl Scene for Playtest {
         let mut world_object_visibility = WorldObjectVisibility::ALL;
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
-            world_object_visibility = bsp.visible_world_objects(
-                camera,
-                WORLD_OBJECTS,
-                &self.destructibles,
-            );
+            world_object_visibility =
+                bsp.visible_world_objects(camera, WORLD_OBJECTS, &self.destructibles);
             visible_sky_aperture = bsp.draw(
                 camera,
                 bsp_material_tick,
@@ -1875,58 +2041,101 @@ impl Scene for Playtest {
             let _drawn = self.damage_numbers.draw(&font, camera, room, overlay_tick);
         }
 
+        // The target vitality stack follows the player HUD's two-ribbon
+        // grammar and swap motion, but stays compact and omits the player's
+        // cooldown diamond. Anchor its shared left edge to the right of the
+        // target rather than covering the model from above.
+        if !self.inventory_overlay_active {
+            if let (Some(font), Some(target_index)) =
+                (self.ui_fonts[0].as_ref(), self.combat_target_entity_index())
+            {
+                if let Some(record) = GAME_ENTITIES.get(target_index) {
+                    let [x, y, z] = self.game_entities.position(target_index);
+                    let head = RoomPoint::new(x, y.saturating_add(i32::from(record.height)), z);
+                    if let Some(projected) = camera.project_world(head) {
+                        let active = self.game_entities.stance(target_index);
+                        let health_share = |channel| {
+                            let (current, maximum) = match channel {
+                                VitalityChannelId::One => {
+                                    (self.game_entities.health(target_index), record.max_health)
+                                }
+                                VitalityChannelId::Two => (
+                                    self.game_entities.health_secondary(target_index),
+                                    record.max_health_secondary,
+                                ),
+                            };
+                            if maximum == 0 {
+                                0
+                            } else {
+                                ((u32::from(current) * 4096) / u32::from(maximum)) as u16
+                            }
+                        };
+                        draw_enemy_vitality_hud(
+                            font,
+                            projected.sx.saturating_add(40).clamp(4, SCREEN_W - 80),
+                            projected.sy.clamp(4, SCREEN_H - 20),
+                            active,
+                            health_share(active),
+                            health_share(active.other()),
+                            self.game_entities.stance_swap_progress_q12(target_index),
+                        );
+                    }
+                }
+            }
+        }
+
         // One runtime-owned cluster draws the mutation charge and both health
         // pools. The previous implementation layered a moving rectangular bar
         // beneath an authored slanted bar, leaving both visible at rest.
-        if let Some(font) = self.ui_fonts[0].as_ref() {
-            const VITALITY_Q12_ONE: u16 = 4096;
-            let config = self.player_stance_config;
-            let active = self.player_stance.active();
-            let share = |channel| {
-                let pool = self.player_vitality.pool(channel);
-                if pool.maximum() == 0 {
-                    0
+        if !self.inventory_overlay_active {
+            if let Some(font) = self.ui_fonts[0].as_ref() {
+                const VITALITY_Q12_ONE: u16 = 4096;
+                let config = self.player_stance_config;
+                let active = self.player_stance.active();
+                let share = |channel| {
+                    let pool = self.player_vitality.pool(channel);
+                    if pool.maximum() == 0 {
+                        0
+                    } else {
+                        ((u32::from(pool.current()) * u32::from(VITALITY_Q12_ONE))
+                            / u32::from(pool.maximum())) as u16
+                    }
+                };
+                let elapsed = self.player_stance.swap_elapsed_ticks();
+                let cooldown_remaining = self.player_stance.swap_cooldown();
+                let cooldown_progress_q12 = swap_cooldown_display_progress_q12(
+                    config.swap_cooldown_ticks,
+                    cooldown_remaining,
+                );
+                let echo_elapsed = if elapsed != u16::MAX
+                    && elapsed >= config.swap_cooldown_ticks
+                    && elapsed < config.swap_cooldown_ticks.saturating_add(13)
+                {
+                    Some(elapsed - config.swap_cooldown_ticks)
                 } else {
-                    ((u32::from(pool.current()) * u32::from(VITALITY_Q12_ONE))
-                        / u32::from(pool.maximum())) as u16
-                }
-            };
-            let elapsed = self.player_stance.swap_elapsed_ticks();
-            let cooldown_remaining = self.player_stance.swap_cooldown();
-            let cooldown_progress_q12 = if config.swap_cooldown_ticks == 0 {
-                VITALITY_Q12_ONE
-            } else {
-                ((u32::from(
-                    config
-                        .swap_cooldown_ticks
-                        .saturating_sub(cooldown_remaining),
-                ) * u32::from(VITALITY_Q12_ONE))
-                    / u32::from(config.swap_cooldown_ticks)) as u16
-            };
-            let echo_elapsed = if elapsed != u16::MAX
-                && elapsed >= config.swap_cooldown_ticks
-                && elapsed < config.swap_cooldown_ticks.saturating_add(13)
-            {
-                Some(elapsed - config.swap_cooldown_ticks)
-            } else {
-                None
-            };
-            draw_player_vitality_hud(
-                font,
-                self.vitality_circle_material,
-                active,
-                share(active),
-                share(active.other()),
-                self.player_stance.swap_progress_q12(&config),
-                cooldown_progress_q12,
-                echo_elapsed,
-            );
+                    None
+                };
+                draw_player_vitality_hud(
+                    font,
+                    active,
+                    share(active),
+                    share(active.other()),
+                    self.player_stance.swap_progress_q12(&config),
+                    cooldown_progress_q12,
+                    echo_elapsed,
+                );
+            }
         }
 
         #[cfg(feature = "fps-overlay")]
         if let Some(font) = self.ui_fonts[0].as_ref() {
             draw_fps_overlay(font, self.fps_display, self.fps_display_worst);
         }
+
+        let cross_prompt = UI_NODES
+            .iter()
+            .find(|node| node.tag == "prompt.cross.runtime")
+            .and_then(|node| self.ui_texture(node.texture_asset));
 
         if self.character.is_some() {
             // EXPLOSION PROBE (diagnostic): overlay the player's skinned-vertex
@@ -1950,6 +2159,7 @@ impl Scene for Playtest {
                     overlay_tick.as_u32() as u16,
                     self.overlay_poi_panel_frame,
                     self.overlay_poi_page_type_frame,
+                    cross_prompt,
                 );
             } else if let Some(message) = self.poi_messages.active() {
                 if let Some(page_text) = INTERACTABLE_MESSAGE_PAGES.get(message.page() as usize) {
@@ -1977,6 +2187,7 @@ impl Scene for Playtest {
                                 overlay_tick.as_u32() as u16,
                                 self.overlay_poi_panel_frame,
                                 self.overlay_poi_page_type_frame,
+                                cross_prompt,
                             );
                         }
                         psx_game_runtime::poi::MessageSource::World => draw_message_page(
@@ -1986,6 +2197,7 @@ impl Scene for Playtest {
                             page,
                             overlay_tick.as_u32() as u16,
                             self.overlay_poi_page_type_frame,
+                            cross_prompt,
                         ),
                     }
                 }
@@ -1995,6 +2207,7 @@ impl Scene for Playtest {
                     message.title,
                     message.body,
                     self.overlay_poi_page_type_frame,
+                    cross_prompt,
                 );
             } else if let Some(index) = self.active_interactable {
                 if let Some(interactable) = INTERACTABLES.get(index) {
@@ -2002,6 +2215,7 @@ impl Scene for Playtest {
                         font,
                         interactable.prompt,
                         overlay_tick.as_u32() as u16,
+                        cross_prompt,
                     );
                 }
             }

@@ -789,6 +789,10 @@ pub struct GameApp<'a, S: Scene> {
     /// flow transitions because the gameplay state is already initialized
     /// behind the loading card; its midpoint only changes which side renders.
     loading_exit_transition: Option<FlowTransition>,
+    /// Boot reveal over a UI entry state: the first screen stays covered
+    /// until every streamed image it shows is resident, then dissolves in
+    /// as one composed frame instead of buttons first and artwork later.
+    boot_reveal: Option<FlowTransition>,
     /// Authored loading-screen UI scene (`UI_SCENE_NONE` = built-in
     /// fallback). See [`crate::app::Config::loading_ui_scene`].
     loading_scene: u16,
@@ -863,6 +867,40 @@ const LOADING_EXIT_FADE_FALLBACK: LevelTransition = LevelTransition {
 };
 
 impl<'a, S: Scene> GameApp<'a, S> {
+    /// Every image node of `scene` that names a texture resolves to a VRAM
+    /// slot. Streamed UI images resolve to `None` until their sectors land.
+    fn scene_images_resident(&self, scene: u16) -> bool {
+        let (first, count) = self.scene_node_range(scene);
+        let end = first.saturating_add(count).min(self.nodes.len());
+        self.nodes[first..end].iter().all(|node| {
+            !matches!(node.kind, LevelUiNodeKind::Image)
+                || node.texture_asset == psx_level::AssetId(u16::MAX)
+                || self.gameplay.ui_texture(node.texture_asset).is_some()
+        })
+    }
+
+    /// Hold the boot reveal at full coverage until the entry scene is
+    /// composed, then let it run out. Returns true while it still covers
+    /// the screen, so the menu takes no input before it is visible.
+    fn update_boot_reveal(&mut self) -> bool {
+        let Some(mut reveal) = self.boot_reveal else {
+            return false;
+        };
+        let composed = match self.current_tag().ui_scene() {
+            Some(scene) => self.scene_images_resident(scene),
+            None => true,
+        };
+        if composed {
+            reveal.elapsed = reveal.elapsed.saturating_add(1);
+        }
+        if reveal.elapsed >= reveal.frames() {
+            self.boot_reveal = None;
+            return false;
+        }
+        self.boot_reveal = Some(reveal);
+        true
+    }
+
     #[inline]
     fn loading_exit_transition_spec(&self) -> LevelTransition {
         if self.flow.transition.is_active() {
@@ -943,6 +981,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             transition: None,
             ui_activation: None,
             loading_exit_transition: None,
+            boot_reveal: None,
             loading_scene,
             loading_progress_q12: 0,
             loading_confirm_ready: false,
@@ -1073,13 +1112,18 @@ impl<'a, S: Scene> GameApp<'a, S> {
         }
     }
 
-    fn play_gameplay_sfx_events(&mut self, events: u8) {
-        const EVENTS: [LevelGameplaySfxEvent; 5] = [
+    fn play_gameplay_sfx_events(&mut self, events: u16) {
+        const EVENTS: [LevelGameplaySfxEvent; 10] = [
             LevelGameplaySfxEvent::Footstep,
             LevelGameplaySfxEvent::LightHit,
             LevelGameplaySfxEvent::HeavyHit,
             LevelGameplaySfxEvent::PlayerDamage,
             LevelGameplaySfxEvent::EnemyDeath,
+            LevelGameplaySfxEvent::StanceSwapReady,
+            LevelGameplaySfxEvent::PlayerWeaponSwing,
+            LevelGameplaySfxEvent::EnemyWeaponSwing,
+            LevelGameplaySfxEvent::ProjectileCharge,
+            LevelGameplaySfxEvent::ProjectileLaunch,
         ];
         for event in EVENTS {
             if events & event.bit() == 0 {
@@ -1298,6 +1342,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.cursor.menu_focus_motion_elapsed = MENU_FOCUS_MOTION_FRAMES;
         self.cursor.intro_timer = 0;
         if !self.current_tag().has_gameplay() {
+            let state = self.state_ref_at(state_index);
+            self.gameplay.on_flow_state_entered(state, ctx);
             return;
         }
         let option_values = self.option_values;
@@ -1318,6 +1364,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // first init), so a setting changed in a front-end menu before Play
         // takes effect this session.
         self.apply_option_values(&option_values, option_len);
+        let state = self.state_ref_at(state_index);
+        self.gameplay.on_flow_state_entered(state, ctx);
     }
 
     fn enter_or_load_flow_state(
@@ -1455,6 +1503,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
             if self.loading_confirm_ready && confirmed {
                 if self.loading_scene_active() {
                     if let Some(node_index) = self.loading_activation_node() {
+                        if let Some(node) = self.nodes.get(node_index).copied() {
+                            self.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
+                        }
                         self.begin_ui_activation(
                             self.loading_scene,
                             node_index,
@@ -1565,9 +1616,24 @@ impl<'a, S: Scene> GameApp<'a, S> {
             && self.nodes.get(focus).is_some_and(|node| {
                 ui::is_focusable(node.kind)
                     && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
             });
         if current_ok {
             return Some(focus);
+        }
+        if let Some(action) = self.gameplay.preferred_ui_focus_action() {
+            if let Some(preferred) = (first..end).find(|&index| {
+                self.nodes.get(index).is_some_and(|node| {
+                    ui::is_focusable(node.kind)
+                        && matches!(node.action, LevelUiAction::Game { id } if id == action)
+                        && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+                        && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
+                })
+            }) {
+                self.cursor.menu_focus = preferred as u16;
+                self.gameplay.game_ui_focus_changed(action);
+                return Some(preferred);
+            }
         }
         // Authored tab scenes describe their active category with the
         // `.selected` tag. Prefer it when a freshly entered scene seeds
@@ -1579,6 +1645,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 ui::is_focusable(node.kind)
                     && node.tag.ends_with(".selected")
                     && self.gameplay.ui_node_visible(node.tag)
+                    && self.gameplay.ui_node_focusable(node.tag)
             })
         }) {
             self.cursor.menu_focus = selected as u16;
@@ -1597,12 +1664,53 @@ impl<'a, S: Scene> GameApp<'a, S> {
             count,
             &mut rects,
             &mut node_indices,
-            &|node| node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag),
+            &|node| {
+                node.tag.is_empty()
+                    || (self.gameplay.ui_node_visible(node.tag)
+                        && self.gameplay.ui_node_focusable(node.tag))
+            },
         );
         let slot = first_focus(&rects[..n])?;
         let node_index = node_indices[slot];
         self.cursor.menu_focus = node_index as u16;
+        if let Some(LevelUiAction::Game { id }) = self.nodes.get(node_index).map(|node| node.action)
+        {
+            self.gameplay.game_ui_focus_changed(id);
+        }
         Some(node_index)
+    }
+
+    /// Move the cursor to gameplay's preferred opaque action after an in-place
+    /// domain UI transition. The source remains recorded so the existing
+    /// smooth cursor interpolation also covers programmatic pane changes.
+    fn focus_preferred_game_action(&mut self, first: usize, count: usize) -> bool {
+        let Some(action) = self.gameplay.preferred_ui_focus_action() else {
+            return false;
+        };
+        let end = first.saturating_add(count).min(self.nodes.len());
+        let Some(target) = (first..end).find(|&index| {
+            self.nodes.get(index).is_some_and(|node| {
+                ui::is_focusable(node.kind)
+                    && matches!(node.action, LevelUiAction::Game { id } if id == action)
+                    && (node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag))
+                    && (node.tag.is_empty() || self.gameplay.ui_node_focusable(node.tag))
+            })
+        }) else {
+            return false;
+        };
+        let current = self.cursor.focused_node();
+        if current != Some(target) {
+            self.cursor.menu_focus_from = current
+                .and_then(|index| u16::try_from(index).ok())
+                .unwrap_or(MENU_FOCUS_NONE);
+            self.cursor.menu_focus_motion_elapsed = 0;
+            self.cursor.menu_focus = target as u16;
+            if let Some(node) = self.nodes.get(target).copied() {
+                self.play_node_sfx_event(node, LevelUiSfxEvent::Focus);
+            }
+        }
+        self.gameplay.game_ui_focus_changed(action);
+        true
     }
 
     /// Offset from the destination control back toward the previous one.
@@ -1657,7 +1765,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
             count,
             &mut rects,
             &mut node_indices,
-            &|node| node.tag.is_empty() || self.gameplay.ui_node_visible(node.tag),
+            &|node| {
+                node.tag.is_empty()
+                    || (self.gameplay.ui_node_visible(node.tag)
+                        && self.gameplay.ui_node_focusable(node.tag))
+            },
         );
         // Locate the current node's slot inside the focusable list the
         // resolver works over.
@@ -1675,6 +1787,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 self.cursor.menu_focus = next_node as u16;
                 if let Some(node) = self.nodes.get(next_node).copied() {
                     self.play_node_sfx_event(node, LevelUiSfxEvent::Focus);
+                    if let LevelUiAction::Game { id } = node.action {
+                        self.gameplay.game_ui_focus_changed(id);
+                    }
                 }
             } else {
                 self.cursor.menu_focus = next_node as u16;
@@ -1953,7 +2068,13 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelUiAction::SetOption { option, delta } => {
                 let _ = self.adjust_option(option, delta);
             }
-            LevelUiAction::Game { id } => self.gameplay.game_ui_action(id, ctx),
+            LevelUiAction::Game { id } => {
+                self.gameplay.game_ui_action(id, ctx);
+                if let Some(scene) = self.current_tag().ui_scene() {
+                    let (first, count) = self.scene_node_range(scene);
+                    let _ = self.focus_preferred_game_action(first, count);
+                }
+            }
         }
     }
 
@@ -2011,11 +2132,17 @@ impl<'a, S: Scene> GameApp<'a, S> {
             self.activate_focus(scene, first, count);
         } else if ctx.just_pressed(button::CIRCLE) {
             if self.current_tag().has_gameplay() {
-                let _ = self.gameplay.game_ui_cancel(ctx);
+                if self.gameplay.game_ui_cancel(ctx) {
+                    let _ = self.focus_preferred_game_action(first, count);
+                }
             } else if !self.activate_back_control(scene, first, count) {
                 // Legacy UI scenes without an authored Back control retain
                 // their historical immediate stack-pop behavior.
                 self.go_back(ctx);
+            }
+        } else if ctx.just_pressed(button::SQUARE) && self.current_tag().has_gameplay() {
+            if self.gameplay.game_ui_square(ctx) {
+                let _ = self.focus_preferred_game_action(first, count);
             }
         } else if ctx.just_pressed(button::START) {
             // START keeps its "confirm / jump to gameplay" shortcut so a
@@ -2364,8 +2491,23 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 255, 255), "11 OPTIONS BEGIN");
             self.apply_current_options();
             crate::app::boot_visual_checkpoint(&mut ctx.fb, (0, 255, 160), "12 OPTIONS OK");
+            // Park a fade at full coverage; `update` releases it once the
+            // entry scene's streamed images are all in VRAM. A scene with
+            // nothing left to stream composes on its first frame and needs
+            // no reveal.
+            let composed = match self.current_tag().ui_scene() {
+                Some(scene) => self.scene_images_resident(scene),
+                None => true,
+            };
+            if !composed {
+                let mut reveal = FlowTransition::new(entry, None, LOADING_EXIT_FADE_FALLBACK);
+                reveal.elapsed = reveal.switch_frame();
+                reveal.switched = true;
+                self.boot_reveal = Some(reveal);
+            }
         }
     }
+
 
     fn update(&mut self, ctx: &mut Ctx) {
         if self.loading_exit_transition.is_some() {
@@ -2448,6 +2590,11 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         if let Some(scene) = tag.ui_scene() {
             let state = self.state_ref_at(self.cursor.current);
             self.gameplay.update_ui_resources(state, ctx);
+            // The boot reveal holds input, not streaming: resources above
+            // keep loading while the screen stays covered.
+            if self.update_boot_reveal() {
+                return;
+            }
             if self.update_ui_activation(ctx) {
                 if let Some(active_scene) = self.current_tag().ui_scene() {
                     self.update_ui_music(active_scene, ctx);
@@ -2551,6 +2698,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         if let Some(transition) = self.loading_exit_transition {
             render_transition_overlay(transition);
         }
+        if let Some(reveal) = self.boot_reveal {
+            render_transition_overlay(reveal);
+        }
     }
 }
 
@@ -2578,6 +2728,13 @@ mod tests {
                 pitch_q12: 4096,
                 flags: 0,
             },
+            LevelGameplaySfxCueRecord {
+                sample: 1,
+                event: LevelGameplaySfxEvent::StanceSwapReady,
+                volume_percent: 54,
+                pitch_q12: 4096,
+                flags: 0,
+            },
         ];
         assert_eq!(
             gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::HeavyHit)
@@ -2585,6 +2742,11 @@ mod tests {
             Some(9)
         );
         assert!(gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::EnemyDeath).is_none());
+        assert_eq!(
+            gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::StanceSwapReady)
+                .map(|cue| cue.sample),
+            Some(1)
+        );
     }
 
     #[test]
@@ -3219,9 +3381,18 @@ mod tests {
             width: 128,
             height: 18,
             flags: ui_node_flags::LOADING_COMPLETE_ONLY,
+            sfx_first: 0,
+            sfx_count: 1,
             ..button(96, 179, LevelUiAction::Back)
         },
     ];
+    static AUTHORED_LOADING_CUES: &[LevelUiSfxCueRecord] = &[LevelUiSfxCueRecord {
+        sample: 0,
+        event: LevelUiSfxEvent::Activate,
+        volume_percent: 54,
+        pitch_q12: 4096,
+        flags: 0,
+    }];
     static AUTHORED_LOADING_SCENES: &[LevelUiScene] = &[
         LevelUiScene {
             id: 1,
@@ -3812,7 +3983,7 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
+            AUTHORED_LOADING_CUES,
             6,
             &mut scene,
         );
@@ -3865,8 +4036,13 @@ mod tests {
         // A fresh confirm begins the authored fade dissolve. Loading remains
         // visible through the cover half, then gameplay is swapped in only at
         // full coverage and revealed through the second half.
+        assert_eq!(app.ui_sfx_cursor, 0);
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        assert_eq!(
+            app.ui_sfx_cursor, 1,
+            "loading confirmation must play the authored activation cue"
+        );
         assert!(app.loading_pending());
         assert!(
             app.loading_exit_transition.is_none(),

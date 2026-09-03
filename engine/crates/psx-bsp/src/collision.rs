@@ -331,7 +331,9 @@ impl PlaneRecords<'_> {
             Self::Compact(records) => {
                 compact_plane_distance(unsafe { *records.get_unchecked(index) }, point)
             }
-            Self::Decoded(records) => plane_distance(unsafe { *records.get_unchecked(index) }, point),
+            Self::Decoded(records) => {
+                plane_distance(unsafe { *records.get_unchecked(index) }, point)
+            }
         }
     }
 
@@ -343,7 +345,6 @@ impl PlaneRecords<'_> {
             Self::Decoded(records) => records.get(index).copied(),
         }
     }
-
 }
 
 #[derive(Copy, Clone)]
@@ -906,13 +907,25 @@ mod tests {
         for iteration in 0..50_000u32 {
             // Mix map-scale segments (the reachable regime) with full-range
             // coordinates so every branch of both forms is exercised.
-            let span: i32 = if iteration % 4 == 0 { i32::MAX } else { 1 << 24 };
+            let span: i32 = if iteration % 4 == 0 {
+                i32::MAX
+            } else {
+                1 << 24
+            };
             let mut values = [0i32; 7];
             for value in &mut values {
                 *value = (next() as i32) % span;
             }
-            let start = Vec3I32 { x: values[0], y: values[1], z: values[2] };
-            let end = Vec3I32 { x: values[3], y: values[4], z: values[5] };
+            let start = Vec3I32 {
+                x: values[0],
+                y: values[1],
+                z: values[2],
+            };
+            let end = Vec3I32 {
+                x: values[3],
+                y: values[4],
+                z: values[5],
+            };
             let kind = (next() % 4) as i32;
             let normal = [next() as i16, next() as i16, next() as i16];
             let plane = Plane {
