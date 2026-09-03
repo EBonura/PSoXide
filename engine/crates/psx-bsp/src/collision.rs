@@ -233,11 +233,17 @@ enum HullNodes<'a> {
     },
 }
 
+/// Where a hull's planes live.
+///
+/// Guests only ever trace resident, load-validated hulls, so on the target
+/// this has the one compact variant and the walker is instantiated once per
+/// node layout. The cooker-layout variant exists for host tools and tests,
+/// which also exercise the malformed-data paths.
 #[derive(Copy, Clone)]
 enum PlaneRecords<'a> {
-    Packed(RecordSlice<'a, Plane>),
     Compact(&'a [CompactPlane]),
-    Decoded(&'a [Plane]),
+    #[cfg(not(target_arch = "mips"))]
+    Packed(RecordSlice<'a, Plane>),
 }
 
 /// One node representation, resolved at compile time.
@@ -331,6 +337,11 @@ impl NodeSource for RenderNodes<'_> {
 
 /// One plane representation, resolved at compile time. See [`NodeSource`].
 trait PlaneSource: Copy {
+    /// Whether the walker must range-check node and plane indices. Compact
+    /// planes only ever come with load-validated node lumps (see
+    /// [`CollisionHull::from_native_clip_nodes`]), so their walk trusts every
+    /// index; cooker-layout records are checked and fail closed.
+    const CHECKED: bool;
     fn len(self) -> usize;
     /// Signed Q20.12 distances of two points from splitter `index`.
     ///
@@ -380,6 +391,8 @@ fn axial_or_general(
 }
 
 impl PlaneSource for &[CompactPlane] {
+    const CHECKED: bool = false;
+
     #[inline(always)]
     fn len(self) -> usize {
         <[CompactPlane]>::len(self)
@@ -403,34 +416,13 @@ impl PlaneSource for &[CompactPlane] {
     }
 }
 
-impl PlaneSource for &[Plane] {
-    #[inline(always)]
-    fn len(self) -> usize {
-        <[Plane]>::len(self)
-    }
-
-    #[inline(always)]
-    unsafe fn distances_unchecked(self, index: usize, a: &[i32; 3], b: &[i32; 3]) -> (i32, i32) {
-        let plane = unsafe { self.get_unchecked(index) };
-        axial_or_general(
-            plane.kind as u32 as usize,
-            || [plane.normal.x as i32, plane.normal.y as i32, plane.normal.z as i32],
-            plane.distance,
-            a,
-            b,
-        )
-    }
-
-    #[inline(always)]
-    fn get(self, index: usize) -> Option<Plane> {
-        <[Plane]>::get(self, index).copied()
-    }
-}
-
 /// Cooker-layout plane records (fourteen bytes, byte aligned): the distance
 /// and kind are gathered a byte at a time, and the normal only for the
 /// general kind, as Quake's walker does.
+#[cfg(not(target_arch = "mips"))]
 impl PlaneSource for RecordSlice<'_, Plane> {
+    const CHECKED: bool = true;
+
     #[inline(always)]
     fn len(self) -> usize {
         RecordSlice::len(self)
@@ -474,12 +466,9 @@ macro_rules! with_sources {
                 let $nodes = RenderNodes { nodes, leaves };
                 $body
             }
-            (PlaneRecords::Decoded($planes), HullNodes::Clip($nodes)) => $body,
-            (PlaneRecords::Decoded($planes), HullNodes::Render { nodes, leaves }) => {
-                let $nodes = RenderNodes { nodes, leaves };
-                $body
-            }
+            #[cfg(not(target_arch = "mips"))]
             (PlaneRecords::Packed($planes), HullNodes::Clip($nodes)) => $body,
+            #[cfg(not(target_arch = "mips"))]
             (PlaneRecords::Packed($planes), HullNodes::Render { nodes, leaves }) => {
                 let $nodes = RenderNodes { nodes, leaves };
                 $body
@@ -505,7 +494,9 @@ impl<'a> CollisionHull<'a> {
     /// satisfy the native little-endian layout. Cooker and host-side callers
     /// use this compatibility entry point; the resident runtime validates the
     /// same alignment once at map load and calls [`Self::from_native_clip_nodes`]
-    /// directly.
+    /// directly. This hull range-checks every index it follows and fails
+    /// closed on malformed data.
+    #[cfg(not(target_arch = "mips"))]
     pub fn new(
         planes: RecordSlice<'a, Plane>,
         nodes: RecordSlice<'a, ClipNode>,
@@ -521,9 +512,17 @@ impl<'a> CollisionHull<'a> {
 
     /// Construct a collision hull over validated, native-layout clip nodes.
     ///
-    /// Resident maps validate the clip-node lump alignment once during load,
-    /// so the trace hot path can borrow Quake-style node records directly.
-    pub const fn from_native_clip_nodes(
+    /// Resident maps validate the clip-node lump once during load, so the
+    /// trace hot path borrows Quake-style node records directly and follows
+    /// plane and child indices without range checks.
+    ///
+    /// # Safety
+    /// Every node's plane index must be below `planes.len()` and every
+    /// non-negative child below `nodes.len()`, and `head_node` must be
+    /// negative or below `nodes.len()`: exactly what
+    /// `PxbspResidentMap::validate_references` proves for a resident map.
+    /// Cycles are tolerated (the walk is bounded by the node count).
+    pub const unsafe fn from_native_clip_nodes(
         planes: &'a [CompactPlane],
         nodes: &'a [ClipNode],
         head_node: i16,
@@ -537,7 +536,12 @@ impl<'a> CollisionHull<'a> {
 
     /// A point hull served by the render BSP (Quake's hull 0): balanced
     /// tree, leaf contents from the leaf records.
-    pub const fn from_render_bsp(
+    ///
+    /// # Safety
+    /// As [`Self::from_native_clip_nodes`]: node plane indices below
+    /// `planes.len()`, children below `nodes.len()`, leaf children below
+    /// `leaves.len()`, `head_node` negative or below `nodes.len()`.
+    pub const unsafe fn from_render_bsp(
         planes: &'a [CompactPlane],
         nodes: RecordSlice<'a, Node>,
         leaves: RecordSlice<'a, Leaf>,
@@ -546,17 +550,6 @@ impl<'a> CollisionHull<'a> {
         Self {
             planes: PlaneRecords::Compact(planes),
             nodes: HullNodes::Render { nodes, leaves },
-            head_node,
-        }
-    }
-
-    /// Construct a collision hull over records decoded once by the map owner.
-    /// This removes packed-record decoding from every traversal step while
-    /// retaining the same validated collision implementation.
-    pub const fn new_decoded(planes: &'a [Plane], nodes: &'a [ClipNode], head_node: i16) -> Self {
-        Self {
-            planes: PlaneRecords::Decoded(planes),
-            nodes: HullNodes::Clip(nodes),
             head_node,
         }
     }
@@ -649,11 +642,11 @@ fn point_contents_walk<P: PlaneSource, N: NodeSource>(
         }
         descent_budget -= 1;
         let index = node_index as usize;
-        if index >= nodes.len() {
+        if P::CHECKED && index >= nodes.len() {
             return None;
         }
         let plane_index = unsafe { nodes.plane_unchecked(index) };
-        if plane_index >= planes.len() {
+        if P::CHECKED && plane_index >= planes.len() {
             return None;
         }
         let (distance, _) = unsafe { planes.distances_unchecked(plane_index, point, point) };
@@ -689,15 +682,14 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
                 return false;
             }
             descent_budget -= 1;
-            // One explicit range check each, then unchecked reads: the
-            // `Option` forms materialised the node and both distances
-            // on the stack at every step.
+            // Cooker-layout hulls range-check each index and fail closed;
+            // resident hulls were validated at load and trust them.
             let index = node_index as usize;
-            if index >= nodes.len() {
+            if P::CHECKED && index >= nodes.len() {
                 return false;
             }
             let plane_index = unsafe { nodes.plane_unchecked(index) };
-            if plane_index >= planes.len() {
+            if P::CHECKED && plane_index >= planes.len() {
                 return false;
             }
             let (start_distance, end_distance) = unsafe {
@@ -1510,13 +1502,22 @@ mod tests {
     }
 
     #[test]
-    fn decoded_working_set_matches_packed_collision() {
+    fn compact_working_set_matches_packed_collision() {
         let plane_bytes = axial_x_plane();
         let node_bytes = one_node();
         let packed = hull(&plane_bytes, &node_bytes);
-        let decoded_planes = [Plane::decode(&plane_bytes)];
-        let decoded_nodes = [ClipNode::decode(&node_bytes)];
-        let decoded = CollisionHull::new_decoded(&decoded_planes, &decoded_nodes, 0);
+        let plane = Plane::decode(&plane_bytes);
+        let compact_planes = [CompactPlane {
+            normal: plane.normal,
+            kind: plane.kind as u8,
+            sign_bits: 0,
+            distance: plane.distance,
+        }];
+        let compact_nodes = [ClipNode::decode(&node_bytes)];
+        // SAFETY: one node whose plane is index 0 and whose children are
+        // both contents.
+        let decoded =
+            unsafe { CollisionHull::from_native_clip_nodes(&compact_planes, &compact_nodes, 0) };
         let start = Vec3I32 {
             x: Q12_ONE,
             y: 0,
