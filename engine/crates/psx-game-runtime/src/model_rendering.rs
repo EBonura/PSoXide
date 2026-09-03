@@ -1384,7 +1384,10 @@ fn submit_model_wireframe<const OT_DEPTH: usize>(
         return 0;
     }
     for (face_index, face) in faces.iter().enumerate() {
-        if face_index & 3 != 0 {
+        // Every second face rather than every fourth: at a quarter the cage
+        // read as a handful of loose sticks, not a body (measured on the
+        // 506-face player at 320x240); at half it keeps the silhouette.
+        if face_index & 1 != 0 {
             continue;
         }
         let indices = face.vertex_indices();

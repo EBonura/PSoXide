@@ -688,17 +688,57 @@ impl Playtest {
         let lock_facing_yaw = self
             .lock_target_position()
             .and_then(|target| psx_engine::yaw_to_point(self.motor.position(), target));
+        // The stick is read every tick, locked or not, so the evade latch
+        // below always sees the direction the player is holding.
+        let stick_input = motor_input(
+            ctx,
+            self.camera.yaw(),
+            self.analog_deadzone,
+            circle.sprint,
+            circle.evade,
+            lock_facing_yaw,
+        );
+        let stick_deflected = stick_input.move_x.raw() != 0 || stick_input.move_z.raw() != 0;
+        if ctx.just_pressed(EVADE_RUN_BUTTON)
+            || (ctx.is_held(EVADE_RUN_BUTTON) && stick_deflected)
+        {
+            self.evade_latched_move = (stick_input.move_x, stick_input.move_z);
+        }
+        let actor_free = !action_locked && self.motor.action().is_idle();
+        let evade = if circle.evade && !actor_free {
+            // Recovery cancel: a tap during the last stretch of an attack,
+            // hit reaction or dodge fires the moment the actor is free. A tap
+            // earlier than the cap expires instead of surprising the player
+            // with a roll a second later.
+            let lock_left = self.anim_lock_until_tick.saturating_sub(now).saturating_add(2);
+            self.evade_buffer_vblanks = lock_left
+                .min(u32::from(EVADE_BUFFER_LOCK_CAP_VBLANKS))
+                .max(u32::from(EVADE_BUFFER_VBLANKS)) as u8;
+            false
+        } else if circle.evade {
+            self.evade_buffer_vblanks = 0;
+            true
+        } else if self.evade_buffer_vblanks != 0 && actor_free {
+            self.evade_buffer_vblanks = 0;
+            true
+        } else {
+            self.evade_buffer_vblanks = self
+                .evade_buffer_vblanks
+                .saturating_sub(delta_vblanks.min(u8::MAX as u16) as u8);
+            false
+        };
         let mut input = if action_locked {
             CharacterMotorInput::default()
         } else {
-            motor_input(
-                ctx,
-                self.camera.yaw(),
-                self.analog_deadzone,
-                circle.sprint,
-                circle.evade,
-                lock_facing_yaw,
-            )
+            let mut input = stick_input;
+            input.evade = evade;
+            if evade && !stick_deflected {
+                // A tap let go of the stick before the release: dodge the
+                // way the press pointed, not straight ahead.
+                input.move_x = self.evade_latched_move.0;
+                input.move_z = self.evade_latched_move.1;
+            }
+            input
         };
         // Route-capture instrumentation for a model-less BSP debug body:
         // Square+D-pad supplies exact world-cardinal intent. Ordinary editor
