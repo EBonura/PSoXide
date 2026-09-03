@@ -170,7 +170,11 @@ pub(super) const FALLBACK_PLAYER_SPEED: i32 = 2 << 8;
 pub(super) const PLAYER_SPEED_SCALE_NUM: i32 = 3;
 pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 pub(super) const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
-pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
+pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 16;
+/// How long a Circle tap that arrives while the actor is busy is kept.
+pub(super) const EVADE_BUFFER_VBLANKS: u8 = 12;
+/// A tap during a locked action is kept until the lock ends, up to this.
+pub(super) const EVADE_BUFFER_LOCK_CAP_VBLANKS: u8 = 48;
 pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
 /// R1/R2 are the attack buttons and always address the active stance; the
 /// stance swap chooses which pair of attacks they perform. L1/L2 carry no
