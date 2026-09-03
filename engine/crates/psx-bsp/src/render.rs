@@ -1609,7 +1609,7 @@ impl Renderer {
         // (no inherited node proofs), so the PVS mark and the node walk run at
         // half rate. A face that enters the frustum on a reuse frame appears
         // one frame late at the screen edge.
-        let reuse = self.selection_reuse && self.reuse_pxbsp_valid && self.frame & 1 == 1;
+        let reuse = self.selection_reuse && self.reuse_pxbsp_valid && self.frame % 3 != 0;
         let selected = if reuse {
             self.frame_pxbsp_faces.clear();
             self.frame_pxbsp_faces.extend_from_slice(&self.reuse_pxbsp_faces);
@@ -4489,8 +4489,8 @@ mod frustum_tests {
             PXBSP_RENDER_PROFILE,
             ClassicAffineProfile::PXBSP_THIRD_PERSON
         );
-        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_once_at, 272);
-        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_twice_at, 136);
+        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_once_at, 200);
+        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_twice_at, 100);
         assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);
     }
 
