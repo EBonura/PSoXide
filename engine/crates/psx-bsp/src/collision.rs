@@ -175,8 +175,8 @@ struct TraceContinuation {
     side: u8,
     middle_fraction: i32,
     end_fraction: i32,
-    middle: Vec3I32,
-    end: Vec3I32,
+    middle: [i32; 3],
+    end: [i32; 3],
 }
 
 /// Caller-owned workspace for one allocation-free BSP hull trace.
@@ -233,54 +233,6 @@ enum HullNodes<'a> {
     },
 }
 
-impl<'a> HullNodes<'a> {
-    #[inline(always)]
-    fn len(&self) -> usize {
-        match self {
-            Self::Clip(nodes) => nodes.len(),
-            Self::Render { nodes, .. } => nodes.len(),
-        }
-    }
-
-    /// Splitter plane and children of one node after the caller checked
-    /// `index < self.len()`. Render node lumps are four-byte aligned with sixteen-byte records, so the
-    /// three head fields are two-byte aligned loads rather than the byte
-    /// gathers `get` performs.
-    ///
-    /// # Safety
-    /// `index` must be less than [`Self::len`].
-    #[inline(always)]
-    unsafe fn get_unchecked(&self, index: usize) -> ClipNode {
-        match self {
-            Self::Clip(nodes) => unsafe { *nodes.get_unchecked(index) },
-            Self::Render { nodes, .. } => unsafe {
-                let base = nodes.as_bytes().as_ptr().add(index * Node::SIZE);
-                debug_assert_eq!(base as usize & 1, 0);
-                ClipNode {
-                    plane: i16::from_le(core::ptr::read(base.cast::<i16>())),
-                    children: [
-                        i16::from_le(core::ptr::read(base.add(2).cast::<i16>())),
-                        i16::from_le(core::ptr::read(base.add(4).cast::<i16>())),
-                    ],
-                }
-            },
-        }
-    }
-
-    /// Resolve a negative child to contents: clipnodes store contents
-    /// directly, render nodes store `-(leaf + 1)`.
-    #[inline(always)]
-    fn contents(&self, child: i16) -> Option<i16> {
-        match self {
-            Self::Clip(_) => Some(child),
-            Self::Render { leaves, .. } => {
-                let leaf = (-1i32 - child as i32) as usize;
-                leaves.get(leaf).map(|leaf| leaf.contents)
-            }
-        }
-    }
-}
-
 #[derive(Copy, Clone)]
 enum PlaneRecords<'a> {
     Packed(RecordSlice<'a, Plane>),
@@ -288,63 +240,257 @@ enum PlaneRecords<'a> {
     Decoded(&'a [Plane]),
 }
 
-impl PlaneRecords<'_> {
+/// One node representation, resolved at compile time.
+///
+/// The walker is generic over this and [`PlaneSource`] so each hull layout a
+/// binary uses gets its own copy of the descent loop with no per-node
+/// dispatch: the enum form paid two representation branches, a stack round
+/// trip for the six-byte node and three more for the plane on every visit
+/// (about 50 instructions a node against 25 here).
+trait NodeSource: Copy {
+    fn len(self) -> usize;
+    /// Splitter plane index of node `index`.
+    ///
+    /// # Safety
+    /// `index < self.len()`.
+    unsafe fn plane_unchecked(self, index: usize) -> usize;
+    /// Child `side` (0 front, 1 back) of node `index`.
+    ///
+    /// # Safety
+    /// `index < self.len()`, `side < 2`.
+    unsafe fn child_unchecked(self, index: usize, side: usize) -> i16;
+    /// Resolve a negative child to contents.
+    fn contents(self, child: i16) -> Option<i16>;
+}
+
+impl NodeSource for &[ClipNode] {
     #[inline(always)]
     fn len(self) -> usize {
-        match self {
-            Self::Packed(records) => records.len(),
-            Self::Compact(records) => records.len(),
-            Self::Decoded(records) => records.len(),
+        <[ClipNode]>::len(self)
+    }
+
+    #[inline(always)]
+    unsafe fn plane_unchecked(self, index: usize) -> usize {
+        unsafe { self.get_unchecked(index).plane as u16 as usize }
+    }
+
+    #[inline(always)]
+    unsafe fn child_unchecked(self, index: usize, side: usize) -> i16 {
+        unsafe { *self.get_unchecked(index).children.get_unchecked(side) }
+    }
+
+    /// Clipnodes store contents directly.
+    #[inline(always)]
+    fn contents(self, child: i16) -> Option<i16> {
+        Some(child)
+    }
+}
+
+/// Render BSP nodes: sixteen-byte records whose first three halfwords are
+/// the plane and the two children, with leaf contents in the leaf lump.
+#[derive(Copy, Clone)]
+struct RenderNodes<'a> {
+    nodes: RecordSlice<'a, Node>,
+    leaves: RecordSlice<'a, Leaf>,
+}
+
+impl NodeSource for RenderNodes<'_> {
+    #[inline(always)]
+    fn len(self) -> usize {
+        self.nodes.len()
+    }
+
+    #[inline(always)]
+    unsafe fn plane_unchecked(self, index: usize) -> usize {
+        // Record lumps are four-byte aligned with sixteen-byte records, so
+        // these are aligned halfword loads.
+        unsafe {
+            let base = self.nodes.as_bytes().as_ptr().add(index * Node::SIZE);
+            u16::from_le(core::ptr::read(base.cast::<u16>())) as usize
         }
     }
 
-    /// Distance to one splitter after the caller checked `index < self.len()`,
-    /// without reconstructing fields that axial planes never consume: Quake's
-    /// hull walker loads only the authored axis and distance for plane kinds
-    /// zero through two.
+    #[inline(always)]
+    unsafe fn child_unchecked(self, index: usize, side: usize) -> i16 {
+        unsafe {
+            let base = self.nodes.as_bytes().as_ptr().add(index * Node::SIZE + 2 + side * 2);
+            i16::from_le(core::ptr::read(base.cast::<i16>()))
+        }
+    }
+
+    /// Render nodes store `-(leaf + 1)`; the leaf's contents byte leads its
+    /// record.
+    #[inline(always)]
+    fn contents(self, child: i16) -> Option<i16> {
+        let leaf = (-1i32 - child as i32) as usize;
+        self.leaves
+            .record_bytes(leaf)
+            .map(|bytes| bytes[0] as i8 as i16)
+    }
+}
+
+/// One plane representation, resolved at compile time. See [`NodeSource`].
+trait PlaneSource: Copy {
+    fn len(self) -> usize;
+    /// Signed Q20.12 distances of two points from splitter `index`.
+    ///
+    /// Axial planes (kinds 0..3, the vast majority in a brush level) index
+    /// the point directly; only the general kind pays the three multiplies.
     ///
     /// # Safety
-    /// `index` must be less than [`Self::len`].
-    #[inline(always)]
-    unsafe fn distance_unchecked(self, index: usize, point: Vec3I32) -> i32 {
-        match self {
-            Self::Packed(records) => unsafe {
-                let base = records.as_bytes().as_ptr().add(index * Plane::SIZE);
-                let byte = |offset: usize| *base.add(offset);
-                let distance = i32::from_le_bytes([byte(6), byte(7), byte(8), byte(9)]);
-                let kind = i32::from_le_bytes([byte(10), byte(11), byte(12), byte(13)]);
-                let dot = match kind {
-                    0 => point.x,
-                    1 => point.y,
-                    2 => point.z,
-                    _ => {
-                        let x = i16::from_le_bytes([byte(0), byte(1)]) as i32;
-                        let y = i16::from_le_bytes([byte(2), byte(3)]) as i32;
-                        let z = i16::from_le_bytes([byte(4), byte(5)]) as i32;
-                        mul_q12_i32_wide(point.x, x)
-                            .wrapping_add(mul_q12_i32_wide(point.y, y))
-                            .wrapping_add(mul_q12_i32_wide(point.z, z))
-                    }
-                };
-                dot.wrapping_sub(distance)
-            },
-            Self::Compact(records) => {
-                compact_plane_distance(unsafe { *records.get_unchecked(index) }, point)
-            }
-            Self::Decoded(records) => {
-                plane_distance(unsafe { *records.get_unchecked(index) }, point)
-            }
+    /// `index < self.len()`.
+    unsafe fn distances_unchecked(self, index: usize, a: &[i32; 3], b: &[i32; 3]) -> (i32, i32);
+    fn get(self, index: usize) -> Option<Plane>;
+}
+
+/// `dot(normal, point) - distance` for a general plane; Q20.12 points against
+/// Q3.12 unit normals keep every product and the sum inside `i32` on
+/// validated hulls, so the wide multiply and wrapping adds are exact.
+#[inline(always)]
+fn general_distance(normal: [i32; 3], distance: i32, point: &[i32; 3]) -> i32 {
+    mul_q12_i32_wide(point[0], normal[0])
+        .wrapping_add(mul_q12_i32_wide(point[1], normal[1]))
+        .wrapping_add(mul_q12_i32_wide(point[2], normal[2]))
+        .wrapping_sub(distance)
+}
+
+#[inline(always)]
+fn axial_or_general(
+    kind: usize,
+    normal: impl FnOnce() -> [i32; 3],
+    distance: i32,
+    a: &[i32; 3],
+    b: &[i32; 3],
+) -> (i32, i32) {
+    if kind < 3 {
+        // `kind < 3` was just tested.
+        unsafe {
+            (
+                a.get_unchecked(kind).wrapping_sub(distance),
+                b.get_unchecked(kind).wrapping_sub(distance),
+            )
         }
+    } else {
+        let normal = normal();
+        (
+            general_distance(normal, distance, a),
+            general_distance(normal, distance, b),
+        )
+    }
+}
+
+impl PlaneSource for &[CompactPlane] {
+    #[inline(always)]
+    fn len(self) -> usize {
+        <[CompactPlane]>::len(self)
+    }
+
+    #[inline(always)]
+    unsafe fn distances_unchecked(self, index: usize, a: &[i32; 3], b: &[i32; 3]) -> (i32, i32) {
+        let plane = unsafe { self.get_unchecked(index) };
+        axial_or_general(
+            plane.kind as usize,
+            || [plane.normal.x as i32, plane.normal.y as i32, plane.normal.z as i32],
+            plane.distance,
+            a,
+            b,
+        )
     }
 
     #[inline(always)]
     fn get(self, index: usize) -> Option<Plane> {
-        match self {
-            Self::Packed(records) => records.get(index),
-            Self::Compact(records) => records.get(index).copied().map(CompactPlane::decoded),
-            Self::Decoded(records) => records.get(index).copied(),
-        }
+        <[CompactPlane]>::get(self, index).copied().map(CompactPlane::decoded)
     }
+}
+
+impl PlaneSource for &[Plane] {
+    #[inline(always)]
+    fn len(self) -> usize {
+        <[Plane]>::len(self)
+    }
+
+    #[inline(always)]
+    unsafe fn distances_unchecked(self, index: usize, a: &[i32; 3], b: &[i32; 3]) -> (i32, i32) {
+        let plane = unsafe { self.get_unchecked(index) };
+        axial_or_general(
+            plane.kind as u32 as usize,
+            || [plane.normal.x as i32, plane.normal.y as i32, plane.normal.z as i32],
+            plane.distance,
+            a,
+            b,
+        )
+    }
+
+    #[inline(always)]
+    fn get(self, index: usize) -> Option<Plane> {
+        <[Plane]>::get(self, index).copied()
+    }
+}
+
+/// Cooker-layout plane records (fourteen bytes, byte aligned): the distance
+/// and kind are gathered a byte at a time, and the normal only for the
+/// general kind, as Quake's walker does.
+impl PlaneSource for RecordSlice<'_, Plane> {
+    #[inline(always)]
+    fn len(self) -> usize {
+        RecordSlice::len(self)
+    }
+
+    #[inline(always)]
+    unsafe fn distances_unchecked(self, index: usize, a: &[i32; 3], b: &[i32; 3]) -> (i32, i32) {
+        let base = unsafe { self.as_bytes().as_ptr().add(index * Plane::SIZE) };
+        let byte = |offset: usize| unsafe { *base.add(offset) };
+        let distance = i32::from_le_bytes([byte(6), byte(7), byte(8), byte(9)]);
+        let kind = i32::from_le_bytes([byte(10), byte(11), byte(12), byte(13)]);
+        axial_or_general(
+            kind as u32 as usize,
+            || {
+                [
+                    i16::from_le_bytes([byte(0), byte(1)]) as i32,
+                    i16::from_le_bytes([byte(2), byte(3)]) as i32,
+                    i16::from_le_bytes([byte(4), byte(5)]) as i32,
+                ]
+            },
+            distance,
+            a,
+            b,
+        )
+    }
+
+    #[inline(always)]
+    fn get(self, index: usize) -> Option<Plane> {
+        RecordSlice::get(self, index)
+    }
+}
+
+/// Run `$body` with `planes` and `nodes` bound to the concrete sources of
+/// `$hull`, so a generic walker is instantiated once per layout the binary
+/// actually uses.
+macro_rules! with_sources {
+    ($hull:expr, |$planes:ident, $nodes:ident| $body:expr) => {
+        match ($hull.planes, $hull.nodes) {
+            (PlaneRecords::Compact($planes), HullNodes::Clip($nodes)) => $body,
+            (PlaneRecords::Compact($planes), HullNodes::Render { nodes, leaves }) => {
+                let $nodes = RenderNodes { nodes, leaves };
+                $body
+            }
+            (PlaneRecords::Decoded($planes), HullNodes::Clip($nodes)) => $body,
+            (PlaneRecords::Decoded($planes), HullNodes::Render { nodes, leaves }) => {
+                let $nodes = RenderNodes { nodes, leaves };
+                $body
+            }
+            (PlaneRecords::Packed($planes), HullNodes::Clip($nodes)) => $body,
+            (PlaneRecords::Packed($planes), HullNodes::Render { nodes, leaves }) => {
+                let $nodes = RenderNodes { nodes, leaves };
+                $body
+            }
+        }
+    };
+}
+
+#[inline(always)]
+const fn array(point: Vec3I32) -> [i32; 3] {
+    [point.x, point.y, point.z]
 }
 
 #[derive(Copy, Clone)]
@@ -459,144 +605,15 @@ impl<'a> CollisionHull<'a> {
         scratch: &mut TraceScratch,
         output: &mut Trace,
     ) -> bool {
-        let mut trace = Trace::unobstructed(*end);
-        let mut continuation_count = 0usize;
-        let mut node_index = self.head_node;
-        let mut start_fraction: i32 = 0;
-        let mut end_fraction: i32 = Q12_ONE;
-        let mut segment_start = *start;
-        let mut segment_end = *end;
-
-        loop {
-            let mut descent_budget = self.nodes.len();
-            while node_index >= 0 {
-                if descent_budget == 0 {
-                    return false;
-                }
-                descent_budget -= 1;
-                // One explicit range check each, then unchecked reads: the
-                // `Option` forms materialised the node and both distances
-                // on the stack at every step.
-                let index = node_index as usize;
-                if index >= self.nodes.len() {
-                    return false;
-                }
-                let node = unsafe { self.nodes.get_unchecked(index) };
-                let plane_index = node.plane as usize;
-                if plane_index >= self.planes.len() {
-                    return false;
-                }
-                let start_distance =
-                    unsafe { self.planes.distance_unchecked(plane_index, segment_start) };
-                let end_distance =
-                    unsafe { self.planes.distance_unchecked(plane_index, segment_end) };
-
-                if start_distance >= 0 && end_distance >= 0 {
-                    node_index = node.children[0];
-                    continue;
-                }
-                if start_distance < 0 && end_distance < 0 {
-                    node_index = node.children[1];
-                    continue;
-                }
-
-                let numerator = if start_distance < 0 {
-                    start_distance.saturating_add(TRACE_PLANE_EPSILON_Q12)
-                } else {
-                    start_distance.saturating_sub(TRACE_PLANE_EPSILON_Q12)
-                };
-                let fraction = div_q12_i32(numerator, start_distance.saturating_sub(end_distance))
-                    .clamp(0, Q12_ONE);
-                let middle_fraction = start_fraction.saturating_add(mul_q12_i32(
-                    end_fraction.saturating_sub(start_fraction),
-                    fraction,
-                ));
-                let middle = interpolate(segment_start, segment_end, fraction);
-                let side = usize::from(start_distance < 0);
-                if continuation_count == TRACE_STACK_CAPACITY {
-                    return false;
-                }
-                scratch.continuations[continuation_count].write(TraceContinuation {
-                    far_child: node.children[side ^ 1],
-                    plane_index: node.plane,
-                    side: side as u8,
-                    middle_fraction,
-                    end_fraction,
-                    middle,
-                    end: segment_end,
-                });
-                continuation_count += 1;
-                node_index = node.children[side];
-                end_fraction = middle_fraction;
-                segment_end = middle;
-            }
-
-            let Some(contents) = self.nodes.contents(node_index) else {
-                return false;
-            };
-            if contents != CONTENTS_SOLID {
-                trace.all_solid = TraceFlag::CLEAR;
-                if contents == CONTENTS_EMPTY {
-                    trace.in_open = TraceFlag::SET;
-                } else {
-                    trace.in_water = TraceFlag::SET;
-                }
-            } else {
-                trace.start_solid = TraceFlag::SET;
-            }
-
-            if continuation_count == 0 {
-                *output = trace;
-                return true;
-            }
-            continuation_count -= 1;
-            // This slot was written when it was pushed above, and stack order
-            // guarantees it is popped only after that write.
-            let continuation =
-                unsafe { scratch.continuations[continuation_count].assume_init_read() };
-            let Some(far_contents) =
-                self.point_contents_from(continuation.far_child, &continuation.middle)
-            else {
-                return false;
-            };
-            if far_contents != CONTENTS_SOLID {
-                node_index = continuation.far_child;
-                start_fraction = continuation.middle_fraction;
-                end_fraction = continuation.end_fraction;
-                segment_start = continuation.middle;
-                segment_end = continuation.end;
-                continue;
-            }
-            if trace.all_solid.is_set() {
-                *output = trace;
-                return true;
-            }
-
-            let Some(plane) = self.planes.get(continuation.plane_index as usize) else {
-                return false;
-            };
-            if continuation.side == 0 {
-                trace.normal = plane.normal;
-                trace.plane_distance = plane.distance;
-            } else {
-                trace.normal = Vec3I16 {
-                    x: plane.normal.x.saturating_neg(),
-                    y: plane.normal.y.saturating_neg(),
-                    z: plane.normal.z.saturating_neg(),
-                };
-                trace.plane_distance = plane.distance.saturating_neg();
-            }
-            // Re-solve the hit against the original segment and plane. The
-            // traversal's Q0.12 middle fraction is precise enough to choose
-            // children, but over a 32K-unit floor probe one fraction step is
-            // eight world units. Interpolating that coarse fraction made feet
-            // hover above the floor. The exact ratio keeps the endpoint on
-            // the epsilon-offset contact plane and is independent of how many
-            // other BSP nodes shortened the traversal segment first.
-            (trace.fraction, trace.end) = plane_contact(*start, *end, plane, continuation.side);
-            *output = trace;
-            return true;
-        }
+        with_sources!(self, |planes, nodes| trace_segment(
+            planes,
+            nodes,
+            self.head_node,
+            start,
+            end,
+            scratch,
+            output
+        ))
     }
 
     /// Apply one mover transform while retaining this model-local hull.
@@ -607,26 +624,192 @@ impl<'a> CollisionHull<'a> {
         }
     }
 
-    fn point_contents_from(&self, mut node_index: i16, point: &Vec3I32) -> Option<i16> {
-        let mut descent_budget = self.nodes.len();
+    fn point_contents_from(&self, node_index: i16, point: &Vec3I32) -> Option<i16> {
+        with_sources!(self, |planes, nodes| point_contents_walk(
+            planes,
+            nodes,
+            node_index,
+            &array(*point)
+        ))
+    }
+}
+
+/// Descend from `node_index` to the leaf holding `point`.
+#[inline(never)]
+fn point_contents_walk<P: PlaneSource, N: NodeSource>(
+    planes: P,
+    nodes: N,
+    mut node_index: i16,
+    point: &[i32; 3],
+) -> Option<i16> {
+    let mut descent_budget = nodes.len();
+    while node_index >= 0 {
+        if descent_budget == 0 {
+            return None;
+        }
+        descent_budget -= 1;
+        let index = node_index as usize;
+        if index >= nodes.len() {
+            return None;
+        }
+        let plane_index = unsafe { nodes.plane_unchecked(index) };
+        if plane_index >= planes.len() {
+            return None;
+        }
+        let (distance, _) = unsafe { planes.distances_unchecked(plane_index, point, point) };
+        node_index = unsafe { nodes.child_unchecked(index, (distance < 0) as usize) };
+    }
+    nodes.contents(node_index)
+}
+
+/// The segment walker behind [`CollisionHull::trace_into`]; one copy per
+/// hull layout the binary uses.
+#[inline(never)]
+fn trace_segment<P: PlaneSource, N: NodeSource>(
+    planes: P,
+    nodes: N,
+    head_node: i16,
+    start: &Vec3I32,
+    end: &Vec3I32,
+    scratch: &mut TraceScratch,
+    output: &mut Trace,
+) -> bool {
+    let mut trace = Trace::unobstructed(*end);
+    let mut continuation_count = 0usize;
+    let mut node_index = head_node;
+    let mut start_fraction: i32 = 0;
+    let mut end_fraction: i32 = Q12_ONE;
+    let mut segment_start = array(*start);
+    let mut segment_end = array(*end);
+
+    loop {
+        let mut descent_budget = nodes.len();
         while node_index >= 0 {
             if descent_budget == 0 {
-                return None;
+                return false;
             }
             descent_budget -= 1;
+            // One explicit range check each, then unchecked reads: the
+            // `Option` forms materialised the node and both distances
+            // on the stack at every step.
             let index = node_index as usize;
-            if index >= self.nodes.len() {
-                return None;
+            if index >= nodes.len() {
+                return false;
             }
-            let node = unsafe { self.nodes.get_unchecked(index) };
-            let plane_index = node.plane as usize;
-            if plane_index >= self.planes.len() {
-                return None;
+            let plane_index = unsafe { nodes.plane_unchecked(index) };
+            if plane_index >= planes.len() {
+                return false;
             }
-            let distance = unsafe { self.planes.distance_unchecked(plane_index, *point) };
-            node_index = node.children[(distance < 0) as usize];
+            let (start_distance, end_distance) = unsafe {
+                planes.distances_unchecked(plane_index, &segment_start, &segment_end)
+            };
+
+            // Both in front (sign bits clear) or both behind (sign bits set).
+            if start_distance | end_distance >= 0 {
+                node_index = unsafe { nodes.child_unchecked(index, 0) };
+                continue;
+            }
+            if start_distance & end_distance < 0 {
+                node_index = unsafe { nodes.child_unchecked(index, 1) };
+                continue;
+            }
+
+            let numerator = if start_distance < 0 {
+                start_distance.saturating_add(TRACE_PLANE_EPSILON_Q12)
+            } else {
+                start_distance.saturating_sub(TRACE_PLANE_EPSILON_Q12)
+            };
+            let fraction = div_q12_i32(numerator, start_distance.saturating_sub(end_distance))
+                .clamp(0, Q12_ONE);
+            let middle_fraction = start_fraction.saturating_add(mul_q12_i32(
+                end_fraction.saturating_sub(start_fraction),
+                fraction,
+            ));
+            let middle = interpolate(segment_start, segment_end, fraction);
+            let side = usize::from(start_distance < 0);
+            if continuation_count == TRACE_STACK_CAPACITY {
+                return false;
+            }
+            scratch.continuations[continuation_count].write(TraceContinuation {
+                far_child: unsafe { nodes.child_unchecked(index, side ^ 1) },
+                plane_index: plane_index as i16,
+                side: side as u8,
+                middle_fraction,
+                end_fraction,
+                middle,
+                end: segment_end,
+            });
+            continuation_count += 1;
+            node_index = unsafe { nodes.child_unchecked(index, side) };
+            end_fraction = middle_fraction;
+            segment_end = middle;
         }
-        self.nodes.contents(node_index)
+
+        let Some(contents) = nodes.contents(node_index) else {
+            return false;
+        };
+        if contents != CONTENTS_SOLID {
+            trace.all_solid = TraceFlag::CLEAR;
+            if contents == CONTENTS_EMPTY {
+                trace.in_open = TraceFlag::SET;
+            } else {
+                trace.in_water = TraceFlag::SET;
+            }
+        } else {
+            trace.start_solid = TraceFlag::SET;
+        }
+
+        if continuation_count == 0 {
+            *output = trace;
+            return true;
+        }
+        continuation_count -= 1;
+        // This slot was written when it was pushed above, and stack order
+        // guarantees it is popped only after that write.
+        let continuation =
+            unsafe { scratch.continuations[continuation_count].assume_init_read() };
+        let Some(far_contents) =
+            point_contents_walk(planes, nodes, continuation.far_child, &continuation.middle)
+        else {
+            return false;
+        };
+        if far_contents != CONTENTS_SOLID {
+            node_index = continuation.far_child;
+            start_fraction = continuation.middle_fraction;
+            end_fraction = continuation.end_fraction;
+            segment_start = continuation.middle;
+            segment_end = continuation.end;
+            continue;
+        }
+        if trace.all_solid.is_set() {
+            *output = trace;
+            return true;
+        }
+
+        let Some(plane) = planes.get(continuation.plane_index as usize) else {
+            return false;
+        };
+        if continuation.side == 0 {
+            trace.normal = plane.normal;
+            trace.plane_distance = plane.distance;
+        } else {
+            trace.normal = Vec3I16 {
+                x: plane.normal.x.saturating_neg(),
+                y: plane.normal.y.saturating_neg(),
+                z: plane.normal.z.saturating_neg(),
+            };
+            trace.plane_distance = plane.distance.saturating_neg();
+        }
+        // Re-solve the hit against the original segment and plane. The
+        // traversal's Q0.12 middle fraction is precise enough to choose
+        // children, but over a 32K-unit floor probe one fraction step is
+        // eight world units. Interpolating that coarse fraction made feet
+        // hover above the floor. The exact ratio keeps the endpoint on
+        // the epsilon-offset contact plane and is independent of how many
+        // other BSP nodes shortened the traversal segment first.
+        (trace.fraction, trace.end) = plane_contact(*start, *end, plane, continuation.side);
+        *output = trace;
+        return true;
     }
 }
 
@@ -692,19 +875,6 @@ fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
     dot.wrapping_sub(plane.distance)
 }
 
-#[inline(always)]
-fn compact_plane_distance(plane: CompactPlane, point: Vec3I32) -> i32 {
-    let dot = match plane.kind {
-        0 => point.x,
-        1 => point.y,
-        2 => point.z,
-        _ => mul_q12_i32_wide(point.x, plane.normal.x as i32)
-            .wrapping_add(mul_q12_i32_wide(point.y, plane.normal.y as i32))
-            .wrapping_add(mul_q12_i32_wide(point.z, plane.normal.z as i32)),
-    };
-    dot.wrapping_sub(plane.distance)
-}
-
 const fn liquid_precedence(contents: i16) -> u8 {
     match contents {
         CONTENTS_LAVA => 3,
@@ -714,16 +884,16 @@ const fn liquid_precedence(contents: i16) -> u8 {
     }
 }
 
-fn interpolate(start: Vec3I32, end: Vec3I32, fraction: i32) -> Vec3I32 {
+fn interpolate(start: [i32; 3], end: [i32; 3], fraction: i32) -> [i32; 3] {
     // Segment deltas are Q20.12 world spans against a Q0.12 fraction: bounded
     // like the plane math above, so the wide multiply is exact here too.
     let along =
         |from: i32, to: i32| from.wrapping_add(mul_q12_i32_wide(to.wrapping_sub(from), fraction));
-    Vec3I32 {
-        x: along(start.x, end.x),
-        y: along(start.y, end.y),
-        z: along(start.z, end.z),
-    }
+    [
+        along(start[0], end[0]),
+        along(start[1], end[1]),
+        along(start[2], end[2]),
+    ]
 }
 
 /// Return the public Q0.12 fraction and a high-precision Q20.12 endpoint for
