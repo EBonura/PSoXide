@@ -307,6 +307,118 @@ fn interpolate_cube_sky_vertex(
     }
 }
 
+/// Index of the `face_a` edge plane that separates it from the adjacent
+/// `face_b`, or `None` when the two faces are opposite (no shared edge).
+///
+/// `face_b`'s axis direction lies outside exactly one of `face_a`'s four
+/// planes when the faces share an edge, and outside all four when they are
+/// opposite.
+#[inline(always)]
+fn cube_face_shared_edge_plane(face_a: CubeFace, face_b: CubeFace) -> Option<usize> {
+    let axis = match face_b {
+        CubeFace::PositiveX => [4096, 0, 0],
+        CubeFace::NegativeX => [-4096, 0, 0],
+        CubeFace::PositiveY => [0, 4096, 0],
+        CubeFace::NegativeY => [0, -4096, 0],
+        CubeFace::PositiveZ => [0, 0, 4096],
+        CubeFace::NegativeZ => [0, 0, -4096],
+    };
+    let distances = cube_face_plane_distances(axis, face_a);
+    let mut plane = None;
+    let mut index = 0usize;
+    while index < 4 {
+        if distances[index] < 0 {
+            if plane.is_some() {
+                return None;
+            }
+            plane = Some(index);
+        }
+        index += 1;
+    }
+    plane
+}
+
+/// Split one lattice cell whose corners lie on exactly two adjacent cube
+/// faces along the edge they share, in a single pass.
+///
+/// The six-face clipper reaches the same two polygons by clipping the cell
+/// against each face's four planes in turn, of which only the shared edge
+/// plane ever cuts: a convex cell whose vertices all sit inside a face is
+/// inside that face. The one plane clipped here is that edge plane, with
+/// the same distance function and the same interpolation, so the vertices
+/// are the ones the six-face path produces. When an edge point classifies
+/// to a third face the cell reaches past the shared edge (a cube corner is
+/// near) and the caller falls back to the full clipper; the split is exact
+/// whenever it returns `Some`.
+///
+/// Corner samples reuse the texel each corner already resolved on its own
+/// face; only the two edge points project afresh, once per side.
+#[inline(always)]
+fn split_cube_sky_cell_on_edge(
+    corners: &[CubeSkyGridVertex; 4],
+    face_a: CubeFace,
+    face_b: CubeFace,
+    samples_a: &mut [((i16, i16), u16); 6],
+    samples_b: &mut [((i16, i16), u16); 6],
+) -> Option<(usize, usize)> {
+    let plane = cube_face_shared_edge_plane(face_a, face_b)?;
+    let distances = [
+        cube_face_plane_distance(corners[0].vertex.ray, face_a, plane),
+        cube_face_plane_distance(corners[1].vertex.ray, face_a, plane),
+        cube_face_plane_distance(corners[2].vertex.ray, face_a, plane),
+        cube_face_plane_distance(corners[3].vertex.ray, face_a, plane),
+    ];
+    // A corner classified to the other face by an exact tie (`cube_face`
+    // breaks ties toward X, then Y) can still land on this side of the
+    // plane; it projects afresh onto the side's face like an edge point.
+    let corner_sample = |corner: CubeSkyGridVertex, face: CubeFace| {
+        if corner.face != face {
+            return cube_sky_packet_vertex(corner.vertex, face);
+        }
+        let screen = (
+            ((corner.vertex.screen_q12[0] + 2048) >> 12).clamp(0, i32::from(i16::MAX)) as i16,
+            ((corner.vertex.screen_q12[1] + 2048) >> 12).clamp(0, i32::from(i16::MAX)) as i16,
+        );
+        (screen, corner.uv)
+    };
+    let mut count_a = 0usize;
+    let mut count_b = 0usize;
+    let mut previous = corners[3];
+    let mut previous_distance = distances[3];
+    let mut index = 0usize;
+    while index < 4 {
+        let current = corners[index];
+        let current_distance = distances[index];
+        if (current_distance >= 0) != (previous_distance >= 0) {
+            let edge = interpolate_cube_sky_vertex(
+                previous.vertex,
+                current.vertex,
+                previous_distance,
+                current_distance,
+            );
+            let edge_face = cube_face(edge.ray);
+            if edge_face != face_a && edge_face != face_b {
+                return None;
+            }
+            samples_a[count_a] = cube_sky_packet_vertex(edge, face_a);
+            count_a += 1;
+            samples_b[count_b] = cube_sky_packet_vertex(edge, face_b);
+            count_b += 1;
+        }
+        if current_distance >= 0 {
+            samples_a[count_a] = corner_sample(current, face_a);
+            count_a += 1;
+        } else {
+            samples_b[count_b] = corner_sample(current, face_b);
+            count_b += 1;
+        }
+        previous = current;
+        previous_distance = current_distance;
+        index += 1;
+    }
+    Some((count_a, count_b))
+}
+
 /// Clip one lattice cell to `face`. The polygon lands in `polygon` and its
 /// vertex count is returned; `scratch` is the other Sutherland-Hodgman
 /// buffer. Both are the caller's, sized once per frame: zeroing two 160-byte
@@ -900,6 +1012,67 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
                 hardware_triangles = hardware_triangles.wrapping_add(2);
                 continue;
             }
+            // The common mixed cell straddles one cube edge: split it on that
+            // edge in one pass and fan each side. Three-face cells (a cube
+            // corner inside the cell) and cells the split cannot prove exact
+            // take the six-face clipper below.
+            let face_a = corners[0].face;
+            let mut face_b = None;
+            let mut third_face = false;
+            for corner in &corners[1..] {
+                if corner.face != face_a {
+                    match face_b {
+                        None => face_b = Some(corner.face),
+                        Some(face) if face != corner.face => third_face = true,
+                        Some(_) => {}
+                    }
+                }
+            }
+            if let (Some(face_b), false) = (face_b, third_face) {
+                let mut samples_a = [((0i16, 0i16), 0u16); 6];
+                let mut samples_b = [((0i16, 0i16), 0u16); 6];
+                if let Some((count_a, count_b)) = split_cube_sky_cell_on_edge(
+                    &corners,
+                    face_a,
+                    face_b,
+                    &mut samples_a,
+                    &mut samples_b,
+                ) {
+                    for (face, samples, count) in [
+                        (face_a, &samples_a, count_a),
+                        (face_b, &samples_b, count_b),
+                    ] {
+                        if count < 3 {
+                            continue;
+                        }
+                        for index in 1..count - 1 {
+                            if packet_words + SKY_TRI_WORDS > CUBE_SKY_PACKET_BUDGET_WORDS {
+                                debug_assert!(false, "directional sky packet envelope exhausted");
+                                break 'rows;
+                            }
+                            let vertices = [samples[0].0, samples[index].0, samples[index + 1].0];
+                            let uv_words = [samples[0].1, samples[index].1, samples[index + 1].1];
+                            unsafe {
+                                next.cast::<ClassicTriTextured>().write(
+                                    ClassicTriTextured::with_staged_slot(
+                                        vertices,
+                                        uv_words,
+                                        0x0080_8080,
+                                        cube_face_clut(clut, face),
+                                        texture_page.wrapping_add(face.texture_page_offset()),
+                                        ot_slot,
+                                    ),
+                                );
+                                next = next.add(SKY_TRI_WORDS);
+                            }
+                            packet_words += SKY_TRI_WORDS;
+                            packets = packets.wrapping_add(1);
+                            hardware_triangles = hardware_triangles.wrapping_add(1);
+                        }
+                    }
+                    continue;
+                }
+            }
             // Only the mixed branch needs the bare vertices, and it is the rare
             // one: materialising them for every cell cost 7% of the stage.
             let cell = corners.map(|corner| corner.vertex);
@@ -967,6 +1140,192 @@ mod tests {
         CubeFace, CUBE_SKY_ATLAS_SIZE, VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS,
     };
     use psx_gte::math::Mat3I16;
+
+    #[test]
+    fn edge_split_matches_the_six_face_clip_on_two_face_cells() {
+        // For every lattice cell whose corners lie on exactly two faces and
+        // whose split is accepted, each face's vertex set must equal what
+        // the six-face clipper produces for that face, and no third face
+        // may receive a polygon from the clipper.
+        use super::{
+            clip_cube_sky_cell, cube_face_page_local_uv, cube_sky_packet_vertex,
+            split_cube_sky_cell_on_edge, CubeSkyGridVertex, CubeSkyVertex, CUBE_SKY_COLUMNS,
+            CUBE_SKY_ROWS,
+        };
+        use alloc::vec::Vec;
+        let (width, height, cx, cy, projection) = (320i16, 240i16, 160i16, 120i16, 320i16);
+        let mut checked = 0usize;
+        let mut fallbacks = 0usize;
+        let mut exact = 0usize;
+        let mut near = 0usize;
+        for rx in (0..256u32).step_by(8) {
+            for ry in (0..256u32).step_by(4) {
+                let rotation = Mat3I16::rotate_xyz(rx as u16, ry as u16, 0).m;
+                let corner = |column: usize, row: usize| {
+                    let sx = (column * width as usize / CUBE_SKY_COLUMNS) as i16;
+                    let sy = (row * height as usize / CUBE_SKY_ROWS) as i16;
+                    let ray = screen_view_ray([sx, sy], [cx, cy], projection, rotation);
+                    let vertex = CubeSkyVertex {
+                        screen_q12: [i32::from(sx) << 12, i32::from(sy) << 12],
+                        ray,
+                    };
+                    let face = cube_face(ray);
+                    let [u, v] = cube_face_page_local_uv(ray, face);
+                    CubeSkyGridVertex {
+                        vertex,
+                        face,
+                        uv: u16::from(u) | (u16::from(v) << 8),
+                    }
+                };
+                for row in 0..CUBE_SKY_ROWS {
+                    for column in 0..CUBE_SKY_COLUMNS {
+                        let corners = [
+                            corner(column, row),
+                            corner(column + 1, row),
+                            corner(column + 1, row + 1),
+                            corner(column, row + 1),
+                        ];
+                        let face_a = corners[0].face;
+                        let mut face_b = None;
+                        let mut third = false;
+                        for c in &corners[1..] {
+                            if c.face != face_a {
+                                match face_b {
+                                    None => face_b = Some(c.face),
+                                    Some(f) if f != c.face => third = true,
+                                    Some(_) => {}
+                                }
+                            }
+                        }
+                        let Some(face_b) = face_b else { continue };
+                        if third {
+                            continue;
+                        }
+                        let mut samples_a = [((0i16, 0i16), 0u16); 6];
+                        let mut samples_b = [((0i16, 0i16), 0u16); 6];
+                        let Some((count_a, count_b)) = split_cube_sky_cell_on_edge(
+                            &corners,
+                            face_a,
+                            face_b,
+                            &mut samples_a,
+                            &mut samples_b,
+                        ) else {
+                            fallbacks += 1;
+                            continue;
+                        };
+                        let cell = corners.map(|c| c.vertex);
+                        let mut polygon = [CubeSkyVertex::default(); 8];
+                        let mut scratch = [CubeSkyVertex::default(); 8];
+                        // A polygon of zero screen area rasterizes nothing, so
+                        // either side may drop it: a cell edge lying exactly on
+                        // the cube edge plane gives the clipper a collinear sliver.
+                        let area = |points: &[((i16, i16), u16)]| -> i64 {
+                            let n = points.len();
+                            (0..n)
+                                .map(|i| {
+                                    let (a, b) = (points[i].0, points[(i + 1) % n].0);
+                                    i64::from(a.0) * i64::from(b.1) - i64::from(b.0) * i64::from(a.1)
+                                })
+                                .sum()
+                        };
+                        // Squared distance from a point to a polygon's
+                        // boundary is at most four pixels.
+                        let within = |point: (i16, i16), polygon: &[((i16, i16), u16)]| {
+                            let n = polygon.len();
+                            (0..n).any(|i| {
+                                let (a, b) = (polygon[i].0, polygon[(i + 1) % n].0);
+                                let (px, py) = (f64::from(point.0), f64::from(point.1));
+                                let (ax, ay) = (f64::from(a.0), f64::from(a.1));
+                                let (bx, by) = (f64::from(b.0), f64::from(b.1));
+                                let (dx, dy) = (bx - ax, by - ay);
+                                let len2 = dx * dx + dy * dy;
+                                let t = if len2 == 0.0 {
+                                    0.0
+                                } else {
+                                    (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+                                };
+                                let (cx, cy) = (ax + t * dx - px, ay + t * dy - py);
+                                cx * cx + cy * cy <= 4.0
+                            })
+                        };
+                        let got_a: Vec<_> = samples_a[..count_a].to_vec();
+                        let got_b: Vec<_> = samples_b[..count_b].to_vec();
+                        for (face, samples, count) in
+                            [(face_a, &samples_a, count_a), (face_b, &samples_b, count_b)]
+                        {
+                            let n = clip_cube_sky_cell(&cell, face, &mut polygon, &mut scratch);
+                            let mut expect: Vec<_> = polygon[..n]
+                                .iter()
+                                .map(|v| cube_sky_packet_vertex(*v, face))
+                                .collect();
+                            let mut got: Vec<_> = samples[..count].to_vec();
+                            let (expect_area, got_area) = (area(&expect), area(&got));
+                            if expect_area == 0 {
+                                expect.clear();
+                            }
+                            if got_area == 0 {
+                                got.clear();
+                            }
+                            // The clipper repeats a vertex that sits exactly
+                            // on the plane (its interpolation lands on the
+                            // vertex itself); compare as vertex sets.
+                            expect.sort();
+                            expect.dedup();
+                            got.sort();
+                            got.dedup();
+                            if got == expect {
+                                exact += 1;
+                                continue;
+                            }
+                            // The clipper interpolates rays along already
+                            // rounded polygon edges, so after two cuts its
+                            // vertices drift by about a pixel; a corner cut
+                            // then shows up as a pixel-wide wedge along an
+                            // edge. The split cuts the exact corners once.
+                            // Accept when every vertex of either polygon is
+                            // within two pixels of the other's boundary.
+                            let expect_order: Vec<_> = polygon[..n]
+                                .iter()
+                                .map(|v| cube_sky_packet_vertex(*v, face))
+                                .collect();
+                            let got_order: Vec<_> = samples[..count].to_vec();
+                            assert!(
+                                got_order.iter().all(|g| within(g.0, &expect_order))
+                                    && expect_order.iter().all(|e| within(e.0, &got_order)),
+                                "rx {rx} ry {ry} cell {column},{row} face {face:?}: {got:?} ({got_area}) vs {expect:?} ({expect_area})"
+                            );
+                            near += 1;
+                        }
+                        for face in CubeFace::ALL {
+                            if face == face_a || face == face_b {
+                                continue;
+                            }
+                            let n = clip_cube_sky_cell(&cell, face, &mut polygon, &mut scratch);
+                            let drawn: Vec<_> = polygon[..n]
+                                .iter()
+                                .map(|v| cube_sky_packet_vertex(*v, face))
+                                .collect();
+                            // The same drift can hand the clipper a pixel-wide
+                            // wedge on a third face along one of the split's
+                            // edges; anything further from them is a real miss.
+                            assert!(
+                                n < 3
+                                    || area(&drawn) == 0
+                                    || drawn
+                                        .iter()
+                                        .all(|v| within(v.0, &got_a) || within(v.0, &got_b)),
+                                "rx {rx} ry {ry} cell {column},{row}: six-face clip drew {face:?} {drawn:?}"
+                            );
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000, "checked {checked}");
+        assert!(fallbacks < checked / 20, "fallbacks {fallbacks} of {checked}");
+        assert!(near < exact / 20, "near {near} exact {exact} fallbacks {fallbacks}");
+    }
 
     #[test]
     fn the_separated_lattice_ray_matches_screen_view_ray() {
