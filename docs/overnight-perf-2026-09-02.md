@@ -1010,3 +1010,10 @@ through the existing view-space display-frustum clipper (`emit_cv_clipped`)
 instead of being clamped. On the pinned frame the sector is now covered by
 (319, 211)-(320, 180)-(259, 157) and its neighbours and the collapsed
 leaves are gone (`hl-black-wedge-fixed-poll1013.png`).
+
+Shipping build of that one change, tram ride: 20.04 / 13.16 / 20.02 /
+16.86 / 21.02 fps against 16.90 / 13.14 / 19.79 / 9.87 / 16.72, because
+the collapsed triangles were also handed to the GPU-size splitter, which
+recursed six levels on 4,000-pixel spans every frame; the view-space clip
+yields a handful of triangles instead. The interval capture no longer
+shows the wall wedges at ticks 3680 to 3688 or 4000.
