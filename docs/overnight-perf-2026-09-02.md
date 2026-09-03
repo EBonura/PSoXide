@@ -1119,7 +1119,7 @@ no crossers. Its first form failed the regression suite like E3 (the
 Hazard Course yaw scenario drained the arena under the shared twelve-route
 cap); shipped with its own cap of four routes a frame and a 700-slot arena
 floor, at 20.08 / 13.11 / 20.04 / 16.90 / 21.03 fps and regress green bar
-the known ladder failure (hl 8b0d2e9 or later, see the HL pressing pin). E5b on top (quadtree leaves at 64 px instead of 96,
+the known ladder failure (hl a70d4af). E5b on top (quadtree leaves at 64 px instead of 96,
 towards quake's ~50-px near cells) reads 18.88 / 12.17 / 19.28 / 17.16 /
 20.07 for a subtle change on the near rock wall; not shipped.
 
