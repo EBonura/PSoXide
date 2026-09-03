@@ -1313,6 +1313,9 @@ pub enum UiNodeKind {
         /// Optional Texture resource.
         #[serde(default)]
         texture: Option<ResourceId>,
+        /// Optional runtime lookup tag for game-controlled visibility.
+        #[serde(default)]
+        tag: String,
         /// Texture tint.
         #[serde(default = "default_ui_image_tint")]
         tint: [u8; 3],
