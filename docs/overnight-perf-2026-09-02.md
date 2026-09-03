@@ -591,3 +591,134 @@ tried. It engaged on 2,994 of 3,796 frames and measured 23.06 fps against
 24.29: unsubdivided near faces exceed what the GPU polygon clip may take and
 fall back to the CPU clipper, which costs more than the lattice it saved.
 Reverted.
+
+## Morning pass (2026-09-03, 05:00 onward): the sky, and where the rest is
+
+Manny's brief for this stretch: keep going, a table breakdown, and
+fundamental rendering changes are fine as long as the game still looks
+right. The whole-level tape, lockstep, bus cycles:
+
+| step | commit | bus cycles | vs previous | fps on the tape | hashes |
+|---|---|---|---|---|---|
+| selection reuse (end of night pass 2) | 6c73bfe5 | 5,660,905,451 | | 15.885 | |
+| rotation-keyed cube-sky packet cache | e7f6a55b | 5,522,666,319 | -2.44% | 16.283 | identical |
+| two-face sky cells split on the shared edge | e5eccb83 | 5,475,824,970 | -0.85% | 16.42 | identical |
+
+Frames at three fields or fewer (20 fps or better) went from 12% of the
+tape at the start of the night to 39% after the sky cache; the modal frame
+is now three to four fields instead of four to five.
+
+### The cube sky
+
+The cube sky is a 12x9 screen lattice whose cells project onto the six
+cube faces; cells that straddle a cube edge were clipped against every
+face's four planes. Its packets carry staged OT slot tags rather than
+addresses, and the stream depends on nothing but the view rotation and the
+sky's VRAM slot, so a frame that keeps the previous rotation now copies the
+last stream (9.2 KB of .bss) instead of walking the lattice. The telemetry
+build puts a miss at about 185k cycles and a hit at 26k; on this tape 46% of
+gameplay frames miss because the third-person camera eases its yaw on most
+frames, which is why the cache took 2.4% rather than the 5% a 76% hit rate
+would have given.
+
+The miss itself was three quarters mixed cells, so those now split once on
+the plane of the shared cube edge (the only plane of either face that can
+cut a convex cell whose corners all lie on the two faces), reuse the texels
+each corner already resolved, and fan each side. Cells whose corners reach
+three faces, or whose edge point classifies to a third face, keep the full
+clipper. A sweep over 2,048 rotations checks every split polygon against
+the six-face clipper's: identical up to the clipper's own rounding drift
+(it interpolates along already-rounded polygon edges after the first cut,
+so its vertices wander by a pixel), which the test bounds at two pixels of
+boundary distance. Bench hashes are identical.
+
+### What bounds Cortex now
+
+The telemetry build (profiler overhead of roughly 17k cycles per stage
+included) puts the median gameplay frame at 1.78M cycles: room 49% (about
+840k, selection plus draw for some 700 faces), the player model 16.5%
+(about 300k for Aletha's 26 joints, 265 vertices and 220 submitted
+triangles), the other model instances 11%, sky 5.5%, update 5%. The cooked
+models are Aletha 506 faces plus a 94-face sword, the light enemy 530, the
+heavy enemy 756: at 320x240 that is a PS1 hero-model budget for every actor
+on screen. The release cook already runs the full Quake portal-flow vis and
+the hot leaves still see 282 of 347 leaves, so the open elevated map, not
+the PVS, is why 700 faces reach the draw pass. Across the whole run 40% of
+bus cycles are RAM load stalls (31.5% data, 8.9% stack) and 9.6% icache
+refills: the R3000 has no data cache and this code is load-bound, which is
+why the code-size writer variants lose and why each remaining trim is a
+few percent. Levers that need Manny's decision rather than more profiling:
+the every-third-frame selection (-1.5%, two-frame late edge faces), cooking
+Aletha with a single bind per vertex (the CPU-blended seam vertices are
+2.7% of instructions; joints would show at the seams), and the enemy
+polygon counts.
+
+### quake-psx
+
+`renderer-screen-frustum` had been accepted in RENDERING.md but never added
+to the default feature list; it is in now (quake b5681e2): 24.440 fps on
+the E1M1 chain bench against 24.314, VRAM and display hashes identical.
+The chain bench also writes `quake-psx.map` beside its disc so the PC-line
+histogram can be attributed.
+
+A fresh profile of that build on the chain route: the vblank spin in
+`gpu_end_frame` is 22% of instructions and 72% of frames take three fields
+(21% take two), so the work inside a three-field frame is about 2.3 fields;
+30 fps on this route is roughly a 15% cut away. The rest: the Quake
+classic-affine writer 11.2%, `draw_frame` 10.7%, the CD sector reader 9.9%
+(load gaps, outside the fps metric), `materialize_surface` 4.8%, the liquid
+warp 4.8%, alias models 4.6%, collision 4.6%, the layered sky's per-corner
+texel math 3.2%.
+
+The layered sky's texel lattice depends on the rotation alone, so psx-bsp
+now caches it (0170baa9). Built against this worktree the chain bench reads
+24.410 against 24.440 on the pin, inside the 0.122 fps layout-noise band
+with identical hashes: the autopilot turns on nearly every frame of this
+route, so the cache does not engage there. Kept because it is exact and
+free, but it is not a reason to repin quake.
+
+The liquid warp resamples every visible 64x64 tile each frame because the
+turbulence phase advances every three ticks, one frame at the fixed cadence.
+`renderer-liquid-half-rate` quantises the tick to six so the phase advances
+two steps every second frame (same speed, half the resamples).
+On the same worktree SDK build the chain bench reads 24.694 fps against
+24.410; on the pinned shipping SDK (16decb2c) the new default stack is
+24.749 fps against the 24.314 that shipped yesterday, display hash
+identical, VRAM hash moved by the water phase alone. It is the default
+now (quake d8c5580). Water animates at ten updates a second, which is what
+a PS1 of the period did with animated textures; if it reads as choppy on
+the CRT the feature is one line to drop.
+
+### hl-psx
+
+The tram profile is a wide, flat emitter tail with no single hot spot:
+`try_emit_quad_corners` is 11% of instructions spread evenly over a
+1,300-instruction straight-line body, about 1,200 cycles per cooked quad.
+The one rendering knob that is a judgement rather than a rewrite is the
+runtime affine refinement threshold, `WORLD_AFFINE_SPLIT_ERROR_TEXELS`,
+which was 1 with the comment "performance is deliberately secondary". At 2
+the moving tram segments read 16.90 / 13.14 / 19.79 / 9.87 / 16.72 fps
+against 16.67 / 13.05 / 19.38 / 9.76 / 16.49, and captures at the same
+route ticks differ by 50 to 600 pixels (a floor edge, a rail sliver), so the
+cooker's UV-grid cuts were already carrying the correction. Shipped (hl
+caaac51); the gain is small because the runtime pass was already small.
+The lossless RAM recovery Manny asked for is the trampoline patcher from the
+night pass; nothing further was taken from hl tonight.
+
+### Where the three games stand
+
+| game | shipped this session | route metric | before | after |
+|---|---|---|---|---|
+| Cortex Ignition 0.4 | sky packet cache, edge-split sky cells | whole-level tape fps | 15.885 (night pass 2) / 14.338 (start of night) | 16.42 |
+| quake-psx | screen frustum default, liquid half rate | E1M1 chain bench fps | 24.314 | 24.749 |
+| hl-psx | two-texel runtime refinement | tram moving segments fps | 16.67 / 13.05 / 19.38 / 9.76 / 16.49 | 16.90 / 13.14 / 19.79 / 9.87 / 16.72 |
+
+What 30 fps would take, per game, from the profiles: Cortex needs half its
+CPU work removed and the profile is flat and load-bound, so the levers
+left are content (actor polygon counts, the open map) and Manny's two
+visual calls above. Quake's work per three-field frame is about 2.3
+fields, so a further 15% of CPU work would put most of the chain route on
+two fields; the candidates are the writer and `draw_frame` (22% together)
+and the alias models, none of which has a cheap exact cut left. hl-psx is
+1,200 cycles a quad through a straight-line emitter; that is a rewrite of
+the world emission path, not a setting.
