@@ -690,6 +690,10 @@ impl ResidentMap {
             }
         }
 
+        // The collision walker trusts every plane and child index of a
+        // resident hull (`CollisionHull::from_native_clip_nodes`), so this
+        // profile must prove them too, not only the complete one.
+        let plane_count = self.planes().len();
         let nodes = self.nodes();
         for (index, node) in nodes.iter().enumerate() {
             let bad_child = node.children.into_iter().any(|child| {
@@ -701,7 +705,7 @@ impl ResidentMap {
             });
             let bad_bounds =
                 node.mins.x > node.maxs.x || node.mins.y > node.maxs.y || node.mins.z > node.maxs.z;
-            if bad_child || bad_bounds {
+            if node.plane as usize >= plane_count || bad_child || bad_bounds {
                 return Err(MapLoadError::BadNode(index));
             }
         }
@@ -712,7 +716,7 @@ impl ResidentMap {
                 .children
                 .into_iter()
                 .any(|child| child >= 0 && child as usize >= clip_nodes.len());
-            if node.plane < 0 || bad_child {
+            if node.plane < 0 || node.plane as usize >= plane_count || bad_child {
                 return Err(MapLoadError::BadClipNode(index));
             }
         }
