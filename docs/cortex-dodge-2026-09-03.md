@@ -64,3 +64,15 @@ GLBs; `actor-decimation-ingame.png` the cooked result in game at 2x).
 Whole-level tape, lockstep, all three actors decimated: bus cycles -0.76%,
 18.481 to 18.623 fps. The actor cost is joints and vertex projection more
 than faces, so face reduction is a weak lever; not shipped, tool kept.
+
+## Aletha's two-bone vertices (same day, shipped)
+
+The expensive part of the actors is not their faces. Aletha had 153 of 265
+vertices on the CPU two-bone blend path (the enemies have 35 and 38), and
+121 of those carried a secondary weight of 25% or less. `tools/psmd_decimate.py
+--blend-threshold 64` snaps those to their primary bone on the cooked model;
+the 32 heavy seam vertices stay blended. Whole-level tape, lockstep: bus
+cycles -1.55%, 18.481 to 18.772 fps, and the frames at four tape polls are
+the same to the eye (`aletha-blend-threshold-ingame.png`). Shipped as the
+cooked `aletha_delivered.psxmdl`; the source GLB and the cooker are
+untouched, so a re-cook from the GLB would need the pass run again.
