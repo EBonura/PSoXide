@@ -76,3 +76,14 @@ cycles -1.55%, 18.481 to 18.772 fps, and the frames at four tape polls are
 the same to the eye (`aletha-blend-threshold-ingame.png`). Shipped as the
 cooked `aletha_delivered.psxmdl`; the source GLB and the cooker are
 untouched, so a re-cook from the GLB would need the pass run again.
+
+## Actor sizes (same day, shipped)
+
+Manny's intended proportions: Aletha 100, light enemy 120, heavy 170.
+Rendered height is bind-pose extent times the cooked quantisation scale
+times the Model Renderer's `visual_scale_q8`: Aletha 992 x 360/256 = 1,395
+units, light enemy 1,027 x 512/256 = 2,054 (1.47x), heavy 1,481 x 416/256 =
+2,406 (1.72x). The heavy was right; the light enemy's three renderers go
+from 512 to 417 (1.20x). `light-enemy-scale.png` shows tape polls 2800 and
+2000 before and after. Collision heights already encoded the intended
+ratios (1,024 / 1,229 / 1,741).
