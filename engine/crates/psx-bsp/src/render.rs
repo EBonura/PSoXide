@@ -535,6 +535,11 @@ pub struct FrustumPlanes {
     near_view: i32,
     /// Far cull depth in view units, `i32::MAX` when disabled.
     far_view: i32,
+    /// Bit `3 * plane + axis` set when that plane normal's component is
+    /// negative, so a box's farthest corner along the normal takes its
+    /// minimum on that axis. Held in one register through the node walk
+    /// instead of six normal loads per plane per node.
+    outer_bits: u16,
 }
 
 /// Clip-mask bit carried through the node walk for the far cull; never
@@ -628,15 +633,25 @@ impl FrustumPlanes {
         // point up to 65535 units away on every axis is off by at most that
         // times three halves. Zero when nothing was rounded.
         let side_error = if side_shift == 0 { 0 } else { 3 * 65_536 / 2 };
+        let planes = [
+            near,
+            side(raw[0], translation.x, kx, 1),
+            side(raw[1], translation.x, kx, -1),
+            side(raw[2], translation.y, ky, 1),
+            side(raw[3], translation.y, ky, -1),
+        ];
+        let mut outer_bits = 0u16;
+        for (index, plane) in planes.iter().enumerate() {
+            for axis in 0..3 {
+                if plane.0[axis] < 0 {
+                    outer_bits |= 1 << (3 * index + axis);
+                }
+            }
+        }
         Self {
-            planes: [
-                near,
-                side(raw[0], translation.x, kx, 1),
-                side(raw[1], translation.x, kx, -1),
-                side(raw[2], translation.y, ky, 1),
-                side(raw[3], translation.y, ky, -1),
-            ],
+            planes,
             side_error,
+            outer_bits,
             view_rows: [rotation.m[0], rotation.m[1], rotation.m[2]],
             view_translation: [translation.x, translation.y, translation.z],
             side_scale: [kx, ky],
@@ -911,37 +926,45 @@ impl FrustumPlanes {
     /// already proven satisfied by an ancestor box. Returns `None` when the box
     /// is wholly outside one of the masked planes, otherwise the residual mask
     /// for the subtree, with every plane this box proves cleared.
+    ///
+    /// Unrolled per plane so every plane index is a constant: the runtime
+    /// loop form dispatched the GTE read through a jump table and reloaded
+    /// three normal components from RAM for each corner, per plane, per
+    /// node. The corner selectors come from [`Self::outer_bits`].
     fn cull_aabb(&self, mins: Vec3I16, maxs: Vec3I16, mask: u8) -> Option<u8> {
-        let mins = [mins.x, mins.y, mins.z];
-        let maxs = [maxs.x, maxs.y, maxs.z];
+        let lo = [mins.x, mins.y, mins.z];
+        let hi = [maxs.x, maxs.y, maxs.z];
+        let bits = self.outer_bits;
+        let side_error = self.side_error;
         let mut residual = mask;
-        let mut index = 0usize;
-        while index < 5 {
-            if mask & (1 << index) == 0 {
-                index += 1;
-                continue;
-            }
-            let plane = &self.planes[index];
-            let normal = plane.0;
-            let outer = [
-                if normal[0] >= 0 { maxs[0] } else { mins[0] },
-                if normal[1] >= 0 { maxs[1] } else { mins[1] },
-                if normal[2] >= 0 { maxs[2] } else { mins[2] },
-            ];
-            let error = self.error_of(index);
-            if self.distance_at(index, outer) < -error {
-                return None;
-            }
-            let inner = [
-                if normal[0] >= 0 { mins[0] } else { maxs[0] },
-                if normal[1] >= 0 { mins[1] } else { maxs[1] },
-                if normal[2] >= 0 { mins[2] } else { maxs[2] },
-            ];
-            if self.distance_at(index, inner) >= error {
-                residual &= !(1 << index);
-            }
-            index += 1;
+        macro_rules! plane {
+            ($index:literal) => {
+                if mask & (1 << $index) != 0 {
+                    let outer = [
+                        if bits & (1 << (3 * $index)) != 0 { lo[0] } else { hi[0] },
+                        if bits & (1 << (3 * $index + 1)) != 0 { lo[1] } else { hi[1] },
+                        if bits & (1 << (3 * $index + 2)) != 0 { lo[2] } else { hi[2] },
+                    ];
+                    let error = if $index == PXBSP_CLIP_NEAR_PLANE { 0 } else { side_error };
+                    if self.distance_at($index, outer) < -error {
+                        return None;
+                    }
+                    let inner = [
+                        if bits & (1 << (3 * $index)) != 0 { hi[0] } else { lo[0] },
+                        if bits & (1 << (3 * $index + 1)) != 0 { hi[1] } else { lo[1] },
+                        if bits & (1 << (3 * $index + 2)) != 0 { hi[2] } else { lo[2] },
+                    ];
+                    if self.distance_at($index, inner) >= error {
+                        residual &= !(1 << $index);
+                    }
+                }
+            };
         }
+        plane!(0);
+        plane!(1);
+        plane!(2);
+        plane!(3);
+        plane!(4);
         Some(residual)
     }
 
@@ -969,16 +992,29 @@ impl FrustumPlanes {
     /// conservative hierarchical reject; intersecting nodes still reach the
     /// exact polygon clip below.
     fn aabb_outside(&self, mins: Vec3I16, maxs: Vec3I16) -> bool {
-        let mins = [mins.x, mins.y, mins.z];
-        let maxs = [maxs.x, maxs.y, maxs.z];
-        self.planes.iter().enumerate().any(|(index, plane)| {
-            let positive = [
-                if plane.0[0] >= 0 { maxs[0] } else { mins[0] },
-                if plane.0[1] >= 0 { maxs[1] } else { mins[1] },
-                if plane.0[2] >= 0 { maxs[2] } else { mins[2] },
-            ];
-            self.distance_at(index, positive) < -self.error_of(index)
-        })
+        let lo = [mins.x, mins.y, mins.z];
+        let hi = [maxs.x, maxs.y, maxs.z];
+        let bits = self.outer_bits;
+        let side_error = self.side_error;
+        macro_rules! plane {
+            ($index:literal) => {{
+                let outer = [
+                    if bits & (1 << (3 * $index)) != 0 { lo[0] } else { hi[0] },
+                    if bits & (1 << (3 * $index + 1)) != 0 { lo[1] } else { hi[1] },
+                    if bits & (1 << (3 * $index + 2)) != 0 { lo[2] } else { hi[2] },
+                ];
+                let error = if $index == PXBSP_CLIP_NEAR_PLANE { 0 } else { side_error };
+                if self.distance_at($index, outer) < -error {
+                    return true;
+                }
+            }};
+        }
+        plane!(0);
+        plane!(1);
+        plane!(2);
+        plane!(3);
+        plane!(4);
+        false
     }
 
     /// Cheaply prove that a point is inside every plane using only 32-bit
