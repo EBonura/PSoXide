@@ -6,7 +6,7 @@ scale and flags are untouched, so the model's clips, atlas and colours keep
 working. Meant for the in-game before/after Manny asked for; a proper tool
 would weigh error with quadrics.
 
-Usage: psmd_decimate.py in.psxmdl out.psxmdl --ratio 0.85 [--uv-tolerance 6]
+Usage: psmd_decimate.py in.psxmdl out.psxmdl [--ratio 0.85] [--uv-tolerance 6] [--blend-threshold 64]
 """
 import argparse, math, struct, sys
 from pathlib import Path
@@ -27,6 +27,8 @@ def main():
     ap.add_argument("output", type=Path)
     ap.add_argument("--ratio", type=float, default=0.85, help="target faces per part as a fraction")
     ap.add_argument("--uv-tolerance", type=int, default=6, help="max texel distance between merged corners")
+    ap.add_argument("--blend-threshold", type=int, default=0,
+                    help="snap vertices whose secondary-bone weight (0..255) is at or below this to a single bone")
     a = ap.parse_args()
     data = bytearray(a.source.read_bytes())
     if data[:4] != b"PSMD":
@@ -51,6 +53,12 @@ def main():
     def face_uv(f): return ((f[1], f[2]), (f[4], f[5]), (f[7], f[8]))
 
     total_before = sum(p[4] for p in parts)
+    blended_before = sum(1 for v in verts if v[4] != 0 and v[3] != 255)
+    if a.blend_threshold:
+        for v in verts:
+            if v[4] != 0 and v[3] != 255 and v[4] <= a.blend_threshold:
+                v[3], v[4] = 255, 0
+    blended_after = sum(1 for v in verts if v[4] != 0 and v[3] != 255)
     # Skinned models let a part's faces reach seam vertices owned by another
     # part, so positions live in one global table; only vertices a part owns
     # (same joint, same blend record) may collapse into each other.
@@ -138,7 +146,7 @@ def main():
     out += body
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_bytes(out)
-    print(f"{a.source.name}: faces {total_before} -> {len(new_faces)}, vertices {vc} -> {len(new_verts)} (ratio {a.ratio})")
+    print(f"{a.source.name}: faces {total_before} -> {len(new_faces)}, vertices {vc} -> {len(new_verts)} (ratio {a.ratio}), blended vertices {blended_before} -> {blended_after} (threshold {a.blend_threshold})")
 
 
 if __name__ == "__main__":
