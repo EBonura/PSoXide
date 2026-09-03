@@ -795,7 +795,13 @@ pub struct Node {
 /// outside the finite i8 range expand to the corresponding i16 extreme, so
 /// large maps remain conservatively culled while ordinary brush worlds keep
 /// bounds tight enough for hierarchical frustum classification.
-pub const NODE_BOUND_GRID: i16 = 8;
+///
+/// Eight units covered only -1024..1016, and the Quake-units Cortex level
+/// spans -1792..3120: 574 of its 983 nodes had a saturated code, so those
+/// boxes straddled every frustum plane and hierarchical culling was off for
+/// most of the tree. Thirty-two units cover -4096..4064 and cost nothing but
+/// a coarser (still conservative) box.
+pub const NODE_BOUND_GRID: i16 = 32;
 const NODE_BOUND_GRID_SHIFT: u32 = NODE_BOUND_GRID.trailing_zeros();
 
 /// Quantize a node minimum outward toward negative infinity.
@@ -1826,15 +1832,15 @@ mod tests {
             node.mins,
             Vec3I16 {
                 x: i16::MIN,
-                y: -16,
-                z: 24
+                y: -64,
+                z: 96
             }
         );
         assert_eq!(
             node.maxs,
             Vec3I16 {
                 x: 0,
-                y: 32,
+                y: 128,
                 z: i16::MAX
             }
         );

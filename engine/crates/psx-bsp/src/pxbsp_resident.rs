@@ -1508,17 +1508,17 @@ pub(crate) mod tests {
         assert_eq!(
             node.mins,
             Vec3I16 {
-                x: -8,
-                y: -8,
-                z: -8
+                x: -32,
+                y: -32,
+                z: -32
             }
         );
         assert_eq!(
             node.maxs,
             Vec3I16 {
-                x: 16,
-                y: 16,
-                z: 16
+                x: 32,
+                y: 32,
+                z: 32
             }
         );
         assert_eq!(node.surface_mins, Vec3I16::default());
