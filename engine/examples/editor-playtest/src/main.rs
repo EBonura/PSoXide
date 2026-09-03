@@ -484,6 +484,16 @@ struct Playtest {
     /// the threshold becomes evade; holding past it becomes sprint.
     evade_run_hold_ticks: u8,
     evade_run_hold_consumed: bool,
+    /// Camera-relative stick vector captured when Circle went down (and
+    /// refreshed while it stays deflected during the hold). The evade fires
+    /// on release, by which time a quick tap has often let the stick go, so
+    /// the direction the player expressed at the press is what the dodge
+    /// takes.
+    evade_latched_move: (Q12, Q12),
+    /// Vblanks left on a buffered evade: a Circle tap that lands during an
+    /// attack, a hit reaction, or the previous dodge waits here and fires
+    /// on the first tick the actor is free again instead of being dropped.
+    evade_buffer_vblanks: u8,
     /// `true` toggles a free-orbit camera around the spawn for
     /// debug inspection. Default = follow.
     free_orbit: bool,
