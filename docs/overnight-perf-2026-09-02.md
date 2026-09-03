@@ -791,8 +791,11 @@ slowest segment jumped from 9.87 to 14.95 fps because the quadtree prunes
 the half of a near-crossing floor that lies behind the camera, which the
 raw clipped fan was paying for, and the frames look the same at every tick
 compared except one, where a one-pixel seam opens between the tunnel rim
-and the tram wall (tick 14000, `hl-e3-seam-14000.png`). Not shipped; the
-diff is `hl-loop-quadtree-e3.patch` and the seam needs a fix before it is.
+and the tram wall (tick 14000, `hl-e3-seam-14000.png`). Not shipped: besides that
+seam, the regression suite's `hazard-ordering-yaw` scenario exhausts the
+world primitive arena with E3 (the quadtree fans out on a close Hazard
+Course wall), so the loop-quad route needs the same per-frame cap the
+cooked-patch route has. The diff is `hl-loop-quadtree-e3.patch`.
 
 What the census and the heatmap agree on: the surfaces that stay above
 eight texels are the floor under the car and the wall beside it, which
