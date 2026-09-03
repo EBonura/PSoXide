@@ -1094,3 +1094,43 @@ Second trap of the evening: the scratch worktree used for A/B builds had
 DEMO_PLAY left on from an earlier run, so its "standing" profile was a
 walking route (1339 frames, 902k body, half the mobs). Check
 `git status` in a scratch worktree before trusting a build from it.
+
+## hl-psx: quads versus triangles, and the texture finding (2026-09-03 night)
+
+Manny's read was that quake tessellates quads into quads while hl-psx is
+triangle-bound. What the code says: quake's cooker leaves world faces
+whole (it only subdivides liquids) and its runtime lattices every face
+nearer than 544 units 2x2 and nearer than 240 units 4x4, unconditionally
+(its OT key is average depth over four, so "136/60" are those distances).
+hl-psx cooks triangle records, pairs consecutive fan triangles back into
+quads at runtime when the pair is safe, and only those quads can enter the
+2x2 lattice; near-plane crossers on the ordinary loop-face path fell to a
+raw triangle fan with no lattice at all. So the triangle problem is
+concentrated in the near-crosser path, and that is the nearest geometry
+in every tram frame.
+
+E5a routes those loop-face near crossers through the view-space quadtree
+the cooked-patch path already uses, under the same twelve-per-frame cap
+that keeps the Hazard Course arena from overflowing (this morning's E3
+without its seam, which was the clamp bug fixed earlier tonight). Tram
+20.08 / 13.14 / 20.16 / 17.39 / 21.12 fps against the wedge-fix build's
+20.04 / 13.16 / 20.02 / 16.86 / 21.02, frames byte-identical at ticks with
+no crossers. Shipped. E5b on top (quadtree leaves at 64 px instead of 96,
+towards quake's ~50-px near cells) reads 18.88 / 12.17 / 19.28 / 17.16 /
+20.07 for a subtle change on the near rock wall; not shipped.
+
+The bigger finding is in the bake, as Manny suspected, but it is texture
+resolution rather than geometry: `host/hl-bsp` cooks every miptex to a
+power of two no larger than 64 with a 16-colour CLUT (`MAX_TEX = 64`),
+because one 704 KB VRAM band of 64x64 4bpp slots holds a whole map.
+GoldSrc walls are mostly 128x128 or larger (44 of the 77 textures in c0a0
+exceed 64), so every near wall is drawn at half resolution with sixteen
+colours; quake's textures are native 64x64 with a 256-colour palette. The
+blocky near walls in the tram captures are this, not affine error. Sizing
+from the BSPs: the intro maps at a 128 cap would cook to 233 to 329 KB per
+map, every campaign map stays under 540 KB, and only four multiplayer maps
+that do not ship exceed 600 KB, so it fits VRAM. It needs the cooker cap,
+the VRAM slot allocator (64-texel slots, sixteen per page) and the
+WORLD.PAK texture chunks (about 2.5x larger per map) to follow; RAM
+staging goes through the shared world arena. Evidence:
+`hl-four-way-xash-main-fix-e5a.png`, `hl-near-wall-zoom-fix-e5a-e5b.png`.
