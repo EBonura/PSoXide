@@ -1,0 +1,204 @@
+diff --git a/game/src/main.rs b/game/src/main.rs
+index 797e233..7818ee8 100644
+--- a/game/src/main.rs
++++ b/game/src/main.rs
+@@ -3370,6 +3370,12 @@ unsafe fn note_render_packet_drop(model: bool) {
+         if model {
+             MODEL_PACKET_DROPS = MODEL_PACKET_DROPS.saturating_add(1);
+         }
++        if DBG_FRAME >= 640 {
++            telemetry::debug_log_words(
++                "DROP frame,model,total:",
++                &[DBG_FRAME as i32, model as i32, RENDER_PACKET_DROPS as i32],
++            );
++        }
+     }
+     #[cfg(not(any(feature = "emulator-telemetry", feature = "performance-telemetry")))]
+     let _ = model;
+@@ -3522,6 +3528,8 @@ static mut WORLD_AFFINE_ACTIVE_CAP: u8 = AFFINE_CANDIDATE_CAP as u8;
+ /// the native-patch walker, which then splits the quad rather than dropping to
+ /// two independent triangles.
+ static mut WORLD_QUAD_NEEDS_SOFT_SPLIT: bool = false;
++static mut SOFT_DEGEN_SEEN: bool = false; // diagnostic: a soft leaf had coincident corners
++static mut DBG_FRAME: u16 = 0; // diagnostic: visual frame counter for gated logs
+ /// Set by the native affine emitter when a split-worthy patch measures SEVERE
+ /// error (second classic band): the caller runs the recursive quadtree on the
+ /// original corners instead of the flat 2x2. Cleared by the consumer.
+@@ -21329,7 +21337,39 @@ unsafe fn emit_soft_quad_split(
+     let mat = emit_packet_of(slot, tex);
+     // Screen-space LOD tree over the quad: leaves approach a uniform on-screen
+     // cell size, so the level count rises directly with proximity.
++    // A cooked quad with three collinear corners (a triangle carrying a
++    // T-junction vertex on one edge, so one of its four corner triples has
++    // zero area)
++    // folds the u/v parameterisation of the tree below, and its leaves come
++    // out with coincident corners and leave part of the triangle uncovered
++    // (the black wedges on the tram's near walls, root quads like
++    // (17,99,-118) (17,83,554) (17,99,338) (17,99,554)). Send such a quad's
++    // two hardware triangles through the triangle near-clip route instead.
++    {
++        let cross2 = |a: &render::CVert, b: &render::CVert, c: &render::CVert| -> i64 {
++            let (ux, uy, uz) = ((b.v[0] - a.v[0]) as i64, (b.v[1] - a.v[1]) as i64, (b.v[2] - a.v[2]) as i64);
++            let (vx, vy, vz) = ((c.v[0] - a.v[0]) as i64, (c.v[1] - a.v[1]) as i64, (c.v[2] - a.v[2]) as i64);
++            let (nx, ny, nz) = (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
++            nx * nx + ny * ny + nz * nz
++        };
++        if cross2(&q[0], &q[1], &q[2]) == 0
++            || cross2(&q[1], &q[3], &q[2]) == 0
++            || cross2(&q[0], &q[2], &q[3]) == 0
++            || cross2(&q[0], &q[1], &q[3]) == 0
++        {
++            emit_cv_split_route(packets, [&q[0], &q[1], &q[2]], mat, slot.backdrop, np);
++            emit_cv_split_route(packets, [&q[1], &q[3], &q[2]], mat, slot.backdrop, np);
++            return true;
++        }
++    }
++    SOFT_DEGEN_SEEN = false;
+     emit_soft_cell(packets, [&q[0], &q[1], &q[2], &q[3]], mat, 0, np);
++    if SOFT_DEGEN_SEEN {
++        telemetry::debug_log_words(
++            "DEGEN root tex,idx0..3,q0..3:",
++            &[tex as i32, idx[0] as i32, idx[1] as i32, idx[2] as i32, idx[3] as i32, q[0].v[0], q[0].v[1], q[0].v[2], q[1].v[0], q[1].v[1], q[1].v[2], q[2].v[0], q[2].v[1], q[2].v[2], q[3].v[0], q[3].v[1], q[3].v[2]],
++        );
++    }
+     // Crack backstop: neighbouring cells at different levels leave
+     // T-junctions whose rounding pinholes otherwise expose the clear colour.
+     // Re-emit the whole quad behind its own refinement -- its conservative
+@@ -21454,6 +21494,16 @@ unsafe fn emit_soft_cell(
+         return;
+     }
+     // The two hardware triangles of a GT4 (v0,v1,v2) and (v1,v3,v2).
++    {
++        let same = |a: &render::CVert, b: &render::CVert| a.v == b.v;
++        if same(c[0], c[1]) || same(c[0], c[2]) || same(c[1], c[3]) || same(c[2], c[3]) || same(c[0], c[3]) || same(c[1], c[2]) {
++            SOFT_DEGEN_SEEN = true;
++            telemetry::debug_log_words(
++                "DEGEN leaf depth,c0,c1,c2,c3:",
++                &[depth as i32, c[0].v[0], c[0].v[1], c[0].v[2], c[1].v[0], c[1].v[1], c[1].v[2], c[2].v[0], c[2].v[1], c[2].v[2], c[3].v[0], c[3].v[1], c[3].v[2]],
++            );
++        }
++    }
+     emit_cv_flat(packets, [c[0], c[1], c[2]], mat, np);
+     emit_cv_flat(packets, [c[1], c[3], c[2]], mat, np);
+ }
+@@ -21484,6 +21534,7 @@ unsafe fn emit_cv_split_route(
+     let cached_cv = SOFT_CACHED_CV;
+     SOFT_CACHED_SCREEN = [None; 3];
+     let nc = render::near_clip(&[*cv[0], *cv[1], *cv[2]], &mut CLIP_CV);
++    dbg_hub_tri("HUB split-route nc=", cv, nc as i32);
+     if nc < 3 {
+         return;
+     }
+@@ -21622,6 +21673,35 @@ unsafe fn emit_cv_near(
+ 
+ /// As `emit_cv_near`, but the caller has already fixed the topology, so a
+ /// clipped child must not decide to become four more children.
++/// Diagnostic: log a view-space triangle whose projection touches the hub
++/// vertex of the poll-1013 wedge, once the frame counter is near it.
++#[cfg(feature = "emulator-telemetry")]
++unsafe fn dbg_hub_tri(label: &str, cv: [&render::CVert; 3], extra: i32) {
++    if DBG_FRAME < 640 {
++        return;
++    }
++    let p = [
++        render::project_soft(cv[0]),
++        render::project_soft(cv[1]),
++        render::project_soft(cv[2]),
++    ];
++    let near_hub = |q: &render::SVert| (q.x - 259).abs() <= 14 && (q.y - 157).abs() <= 14;
++    if near_hub(&p[0]) || near_hub(&p[1]) || near_hub(&p[2]) {
++        telemetry::debug_log_words(
++            label,
++            &[
++                extra, DBG_FRAME as i32,
++                cv[0].v[0], cv[0].v[1], cv[0].v[2], p[0].x, p[0].y, cv[0].uv.0, cv[0].uv.1, cv[0].rgb.0, cv[0].rgb.1, cv[0].rgb.2,
++                cv[1].v[0], cv[1].v[1], cv[1].v[2], p[1].x, p[1].y, cv[1].uv.0, cv[1].uv.1, cv[1].rgb.0, cv[1].rgb.1, cv[1].rgb.2,
++                cv[2].v[0], cv[2].v[1], cv[2].v[2], p[2].x, p[2].y, cv[2].uv.0, cv[2].uv.1, cv[2].rgb.0, cv[2].rgb.1, cv[2].rgb.2,
++            ],
++        );
++    }
++}
++#[cfg(not(feature = "emulator-telemetry"))]
++#[inline(always)]
++unsafe fn dbg_hub_tri(_label: &str, _cv: [&render::CVert; 3], _extra: i32) {}
++
+ unsafe fn emit_cv_flat(
+     packets: &mut PrimitivePacketArena<'_>,
+     cv: [&render::CVert; 3],
+@@ -21634,6 +21714,7 @@ unsafe fn emit_cv_flat(
+     // clip only ever existed to stop SUBDIVISION wasting children off-screen;
+     // a leaf that stays in front of the near plane and inside the guard band
+     // pushes the identical projected triangle the clipped path would fan.
++    dbg_hub_tri("HUB flat-in", cv, 0);
+     if SOFT_CACHED_SCREEN.iter().all(Option::is_none)
+         && cv[0].v[2] >= render::NEAR_Z
+         && cv[1].v[2] >= render::NEAR_Z
+@@ -21679,6 +21760,7 @@ unsafe fn emit_cv_clipped(
+     let cached_scr = SOFT_CACHED_SCREEN;
+     let cached_cv = SOFT_CACHED_CV;
+     SOFT_CACHED_SCREEN = [None; 3];
++    dbg_hub_tri("HUB clipped n=", cv, n as i32);
+     if n < 3 {
+         return;
+     }
+@@ -21774,6 +21856,7 @@ unsafe fn emit_cv_clipped(
+                 kk += 1;
+             }
+             if verdict >= 0 {
++                dbg_hub_tri("HUB culled verdict", cv, verdict.clamp(-1_000_000, 1_000_000) as i32);
+                 return; // back-facing (or fully degenerate: nothing to draw)
+             }
+         }
+@@ -31497,6 +31580,7 @@ fn play(
+         }
+ 
+         frame_no = frame_no.wrapping_add(1);
++        unsafe { DBG_FRAME = frame_no; }
+         if frame_no == 0 {
+             frame_no = 1; // sway/anim phase counter; the proj cache has its own token
+         }
+diff --git a/game/src/telemetry.rs b/game/src/telemetry.rs
+index a4c20d6..49825dd 100644
+--- a/game/src/telemetry.rs
++++ b/game/src/telemetry.rs
+@@ -115,6 +115,40 @@ pub fn debug_log(message: &str) {
+     debug_byte(b'\n');
+ }
+ 
++/// Diagnostic: one line of `label` followed by decimal `words`.
++#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
++#[inline(never)]
++pub fn debug_log_words(label: &str, words: &[i32]) {
++    debug_bytes(label.as_bytes());
++    for &w in words {
++        debug_byte(b' ');
++        let mut v = w;
++        if v < 0 {
++            debug_byte(b'-');
++            v = -v;
++        }
++        let mut digits = [0u8; 11];
++        let mut n = 0usize;
++        loop {
++            digits[n] = b'0' + (v % 10) as u8;
++            n += 1;
++            v /= 10;
++            if v == 0 {
++                break;
++            }
++        }
++        while n > 0 {
++            n -= 1;
++            debug_byte(digits[n]);
++        }
++    }
++    debug_byte(b'\n');
++}
++
++#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
++#[inline(always)]
++pub fn debug_log_words(_label: &str, _words: &[i32]) {}
++
+ // In shipping and host builds every call still compiles away completely.
+ #[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
+ #[inline(always)]
