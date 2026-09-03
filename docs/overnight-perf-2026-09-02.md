@@ -819,3 +819,53 @@ GLB). Merging coplanar faces alone gains little on these meshes; collapse
 at 0.6 to 0.7 is the range to judge in game. The decimated GLBs are in the
 scratchpad; the next step is to cook one enemy through
 `import_glb_model` and put the frame and the fps next to the original.
+
+## Afternoon (2026-09-03): Manny's emulator pass, the merged disc, and the hl black triangles
+
+Manny's verdicts on the morning disc: quake "unbelievably smooth", Cortex
+great but missing his latest HUD and sounds, Half-Life smoother but with
+black triangles popping and severe warping. Done in response:
+
+- His `fix/cortex-boss-theme` branch (14 local commits) and his uncommitted
+  project, cook_ui and gameplay-sound edits were merged onto the play
+  branch and then, at his request, the play branch into main (PSoXide
+  086eee6d). The disc's runtime and Cortex entry now pin main; the HL
+  pressing was rebuilt with fresh carousel shots (title menu, heavy-enemy
+  combat with the new HUD) and both headless checks green (psx-demo-disc
+  5940e76). Both images sit loose at the top of `~/Downloads/ps1 games/`.
+- hl-psx was repinned to PSoXide b7b7b95b and lost its private
+  `HAZARD_TRAMPOLINES` (hl 2152766): the runtime pin's psx-rt already
+  exports one and the HL pressing had failed to link.
+
+### The black triangles
+
+Per-frame captures of the tram (`--route-screenshot-interval 4`) plus the
+seam census locate them: holes inside near-plane-crossing wall quads that
+take the view-space quadtree, touching the screen edges. A GP0 dump of one
+such frame (`--stop-at-poll 1013 --dump-hw --dump-draws`, tick 3684) proves
+the wedge is uncovered by any primitive; its two neighbours share the hub
+vertex (259,157), and the frame also contains a degenerate leaf
+`(260,157) (450,373) (450,373)`. Four experiments on that exact frame, each
+a rebuild and a poll-bound dump:
+
+| change | wedge at poll 1013 |
+|---|---|
+| per-leaf cull skipped when the parent quad is front in view space | unchanged (removed a left-edge wedge at tick 3680) |
+| all three raw-path culls moved to a view-space determinant (`culled_view`) | unchanged |
+| minimum two-unit extent before a cell halves | unchanged |
+| cell prune (lateral and vertical) disabled | unchanged |
+| every soft-path cull disabled | unchanged |
+
+So the missing leaf is never generated, and the degenerate one says the
+cell already had two coincident corners: the source quad, not the
+splitter. The next step is guest-side: log the four corners of every quad
+whose tree emits a degenerate leaf, in a telemetry build stopped at poll
+1013. The view-space facing verdict and the extent guard are kept as a
+patch (`hl-view-space-facing-and-min-extent.patch`, tram fps unchanged)
+rather than shipped, since they do not fix what Manny sees. Evidence:
+`hl-black-wedges-census.png`, `hl-black-wedge-tick3684.png`.
+
+Note for anyone measuring hl-psx visually: two runs of the same build do
+not produce the same frames at the same tick (the tram route is
+timing-dependent), so before/after comparisons must be poll-bound dumps
+of one frame, never interval screenshots from two runs.
