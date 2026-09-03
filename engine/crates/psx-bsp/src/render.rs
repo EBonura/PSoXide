@@ -470,6 +470,11 @@ pub struct ViewProjection {
     pub half_height: i32,
     pub edge_margin: i32,
     pub near_world: i32,
+    /// Far cull distance in world units along the view axis; `i32::MAX`
+    /// disables it. Node boxes wholly beyond it are skipped in the frame
+    /// selection; faces of a straddling node draw whole, so this is a
+    /// cull, not a clip.
+    pub far_world: i32,
 }
 
 impl ViewProjection {
@@ -482,6 +487,7 @@ impl ViewProjection {
         half_height: 120,
         edge_margin: 16,
         near_world: 8,
+        far_world: i32::MAX,
     };
 }
 
@@ -527,7 +533,13 @@ pub struct FrustumPlanes {
     side_scale: [i32; 2],
     focal_length: i32,
     near_view: i32,
+    /// Far cull depth in view units, `i32::MAX` when disabled.
+    far_view: i32,
 }
+
+/// Clip-mask bit carried through the node walk for the far cull; never
+/// stored in a face clip mask (the per-vertex scan knows five planes).
+const PXBSP_CLIP_FAR: u8 = 0x20;
 
 impl FrustumPlanes {
     /// Build from the view rotation/translation currently loaded in the GTE.
@@ -552,6 +564,11 @@ impl FrustumPlanes {
         let scale_q12 =
             isqrt_i32(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
         let near_view = projection.near_world.saturating_mul(scale_q12) >> 12;
+        let far_view = if projection.far_world == i32::MAX {
+            i32::MAX
+        } else {
+            projection.far_world.saturating_mul(scale_q12) >> 12
+        };
         // The view translation is the rotated, negated camera origin in world
         // units, so `T.z << 12` is `-forward . camera` and every distance is
         // camera-relative: a Q12 row against an `i16` position stays under
@@ -625,7 +642,41 @@ impl FrustumPlanes {
             side_scale: [kx, ky],
             focal_length: h,
             near_view,
+            far_view,
         }
+    }
+
+    /// Far cull of a box: `Some(true)` when its nearest corner is beyond the
+    /// far depth, `Some(false)` when its farthest corner is within it, `None`
+    /// when it straddles. View depth as in [`Self::point_definitely_inside`].
+    #[inline]
+    fn aabb_far_class(&self, mins: Vec3I16, maxs: Vec3I16) -> Option<bool> {
+        let row = self.view_rows[2];
+        let mins = [mins.x, mins.y, mins.z];
+        let maxs = [maxs.x, maxs.y, maxs.z];
+        let depth = |p: [i16; 3]| -> i32 {
+            let dot = row[0] as i32 * p[0] as i32
+                + row[1] as i32 * p[1] as i32
+                + row[2] as i32 * p[2] as i32;
+            (dot >> 12).saturating_add(self.view_translation[2])
+        };
+        let nearest = [
+            if row[0] >= 0 { mins[0] } else { maxs[0] },
+            if row[1] >= 0 { mins[1] } else { maxs[1] },
+            if row[2] >= 0 { mins[2] } else { maxs[2] },
+        ];
+        if depth(nearest) > self.far_view {
+            return Some(true);
+        }
+        let farthest = [
+            if row[0] >= 0 { maxs[0] } else { mins[0] },
+            if row[1] >= 0 { maxs[1] } else { mins[1] },
+            if row[2] >= 0 { maxs[2] } else { mins[2] },
+        ];
+        if depth(farthest) <= self.far_view {
+            return Some(false);
+        }
+        None
     }
     /// Rounding error band of plane `index`: zero for the exact near plane.
     /// Distance of `position` from plane `index`: the dot on the GTE on the
@@ -2900,8 +2951,13 @@ impl Renderer {
         #[cfg(target_arch = "mips")]
         load_gte_clip_planes(&frustum.planes);
         self.pxbsp_node_stack.clear();
+        let root_mask = if frustum.far_view == i32::MAX {
+            PXBSP_CLIP_ALL_PLANES
+        } else {
+            PXBSP_CLIP_ALL_PLANES | PXBSP_CLIP_FAR
+        };
         self.pxbsp_node_stack
-            .push(root as u32 | (PXBSP_CLIP_ALL_PLANES as u32) << PXBSP_NODE_STACK_MASK_SHIFT);
+            .push(root as u32 | (root_mask as u32) << PXBSP_NODE_STACK_MASK_SHIFT);
         while let Some(entry) = self.pxbsp_node_stack.pop() {
             let index = (entry & PXBSP_NODE_STACK_INDEX) as usize;
             if !packed_bit(&self.pxbsp_node_visible, index) {
@@ -2923,18 +2979,32 @@ impl Renderer {
                     y: crate::decode_node_bound_max(node.maxs[1]),
                     z: crate::decode_node_bound_max(node.maxs[2]),
                 };
-                if !inherit_clip {
-                    if frustum.aabb_outside(mins, maxs) {
-                        continue;
+                if mask & PXBSP_CLIP_FAR != 0 {
+                    match frustum.aabb_far_class(mins, maxs) {
+                        Some(true) => continue,
+                        Some(false) => mask &= !PXBSP_CLIP_FAR,
+                        None => {}
                     }
-                } else {
-                    let Some(residual) = frustum.cull_aabb(mins, maxs, mask) else {
-                        continue;
-                    };
-                    mask = residual;
+                }
+                if mask & PXBSP_CLIP_ALL_PLANES != 0 {
+                    if !inherit_clip {
+                        if frustum.aabb_outside(mins, maxs) {
+                            continue;
+                        }
+                    } else {
+                        let Some(residual) =
+                            frustum.cull_aabb(mins, maxs, mask & PXBSP_CLIP_ALL_PLANES)
+                        else {
+                            continue;
+                        };
+                        mask = residual | (mask & PXBSP_CLIP_FAR);
+                    }
                 }
             }
             let child_tag = (mask as u32) << PXBSP_NODE_STACK_MASK_SHIFT;
+            // Faces only ever see the five clip planes; the far bit stays in
+            // the walk.
+            let face_mask = mask & PXBSP_CLIP_ALL_PLANES;
 
             let plane = planes
                 .get(node.plane as usize)
@@ -2968,7 +3038,7 @@ impl Renderer {
                                     face,
                                     PXBSP_FRAME_FALLBACK,
                                 );
-                                *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = mask;
+                                *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = face_mask;
                             }
                         }
                     }
@@ -2992,7 +3062,7 @@ impl Renderer {
                                 PXBSP_FRAME_NODE_BACK
                             },
                         );
-                        *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = mask;
+                        *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = face_mask;
                     }
                 }
             }
@@ -3410,12 +3480,15 @@ fn pxbsp_face_draws(material: PxbspMaterial, face_flags: u16, authored_front: bo
 /// by construction.
 #[inline(always)]
 fn pxbsp_policy_face_draws(policy: u8, face_flags: u16, authored_front: bool) -> bool {
-    if face_flags & FACE_TWO_SIDED != 0 {
-        return true;
-    }
+    // A brush is closed, so the back of a two-sided (cutout) face is always
+    // another face of the same brush with its own bake. Drawing both sides
+    // put the unlit outer face of the Cortex guardrails and pillar lattices
+    // in the same ordering-table slots as the lit inner face, and the dark
+    // one won the tie on some frames (dark triangles along the railing, a
+    // flickering blotch on a pillar corner). Front only, both flavours.
+    let _ = face_flags & FACE_TWO_SIDED;
     match u16::from(policy & pxbsp_material_policy::FACE_MASK) {
         material_flags::FACE_BACK => !authored_front,
-        material_flags::FACE_BOTH => true,
         _ => authored_front,
     }
 }
@@ -3838,9 +3911,9 @@ mod tests {
         assert!(!pxbsp_face_draws(back, 0, true));
         assert!(pxbsp_face_draws(back, 0, false));
         assert!(pxbsp_face_draws(both, 0, true));
-        assert!(pxbsp_face_draws(both, 0, false));
+        assert!(!pxbsp_face_draws(both, 0, false));
         assert!(pxbsp_face_draws(front, FACE_TWO_SIDED, true));
-        assert!(pxbsp_face_draws(front, FACE_TWO_SIDED, false));
+        assert!(!pxbsp_face_draws(front, FACE_TWO_SIDED, false));
     }
 
     #[test]
@@ -4404,6 +4477,44 @@ mod tests {
             packed_face_state(&renderer.frame_pxbsp_face_state, 0),
             PXBSP_FRAME_FALLBACK
         );
+    }
+
+    #[test]
+    fn far_cull_classifies_boxes_by_view_depth() {
+        // Camera at the origin looking down the map's +X axis.
+        let camera = Camera {
+            origin: Vec3I32 { x: 0, y: 0, z: 0 },
+            angles: [0; 3],
+        };
+        let view = load_pxbsp_view(camera);
+        let frustum = |far_world: i32| {
+            FrustumPlanes::from_view(
+                &view.rotation,
+                view.translation,
+                [0, 0, 0],
+                ViewProjection {
+                    far_world,
+                    ..ViewProjection::DEFAULT
+                },
+            )
+        };
+        let boxed = |x0: i16, x1: i16| {
+            (
+                Vec3I16 { x: x0, y: -50, z: -50 },
+                Vec3I16 { x: x1, y: 50, z: 50 },
+            )
+        };
+        let far = frustum(1000);
+        let (mins, maxs) = boxed(2000, 2100);
+        assert_eq!(far.aabb_far_class(mins, maxs), Some(true), "beyond");
+        let (mins, maxs) = boxed(100, 200);
+        assert_eq!(far.aabb_far_class(mins, maxs), Some(false), "within");
+        let (mins, maxs) = boxed(900, 1100);
+        assert_eq!(far.aabb_far_class(mins, maxs), None, "straddling");
+        let off = frustum(i32::MAX);
+        assert_eq!(off.far_view, i32::MAX);
+        let (mins, maxs) = boxed(20000, 30000);
+        assert_eq!(off.aabb_far_class(mins, maxs), Some(false), "disabled");
     }
 
     #[test]
