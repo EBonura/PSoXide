@@ -948,3 +948,25 @@ Manny judges whether that trade ships; the branch is pushed, main keeps only
 the exact wins. Evidence: `voxide-aerial-16-20-24.png`,
 `voxide-lod-tops-vs-skirts-aerial.png` (why the skirts exist),
 `voxide-spawn-16-vs-24-lod.png`.
+
+### hl-psx black triangles (2026-09-03 afternoon)
+
+Per-frame captures of the tram ride (every 4 route ticks) catch them: black
+wedges touching the screen edge on the near tunnel walls at ticks 3680 to
+3688, intermittent between runs. The seam census puts them inside the
+orange "patch fallback" regions, the near-plane-crossing quads. The raw
+near paths (`emit_cv`, `emit_cv_split_route`, the subdivided site) and the
+clipped-fan path decide facing from the integer screen winding of the
+first non-degenerate triangle of the clipped polygon; on an edge-clipped
+sliver that sign flips and the whole polygon is dropped. The change in
+`hl-view-space-facing.patch` decides facing once per quad in view space
+(the determinant of the three positions, whose sign matches the projected
+winding, verified numerically) and lets the quadtree leaves skip the
+per-polygon cull. Its first half (leaves only) removed the left-edge wedge
+at 3680 but not the right-edge one at 3684, so the raw-path half is needed
+too; the combined build was not measured because another session was
+editing `hl-psx/game/src/main.rs` at the same time (an `affine_child_safe`
+change: refined 2x2 children whose near-clamped midpoints reach the GPU as
+oversize or self-crossing quads, which also draws holes). Both mechanisms
+are plausible for the same symptom; the patch is left here for whoever
+finishes hl-psx rather than applied over the other session's work.
