@@ -3032,11 +3032,15 @@ mod tests {
                 .clip_nodes()
                 .as_native_clip_nodes()
                 .expect("validated native clipnodes");
-            let sentinel = psx_bsp::collision::CollisionHull::from_native_clip_nodes(
-                map.planes(),
-                clipnodes,
-                model.head_nodes[1],
-            );
+            // SAFETY: `map` is a loaded resident map, whose validation
+            // range-checked every clip node and model head node.
+            let sentinel = unsafe {
+                psx_bsp::collision::CollisionHull::from_native_clip_nodes(
+                    map.planes(),
+                    clipnodes,
+                    model.head_nodes[1],
+                )
+            };
             let (mut checked, mut solid) = (0usize, 0usize);
             let mut y = model.mins.y as i32 + 1;
             while y < model.maxs.y as i32 {
