@@ -983,3 +983,30 @@ words measured "no change" that way for the same reason, and were reverted
 before anyone noticed; they are still worth re-measuring with the telemetry
 build.
 
+
+### The black wedge, found (2026-09-03 evening)
+
+The frame-pinned harness is a poll-bound dump of the wedge frame
+(`--stop-at-poll 1013`, route tick 3684) with the same run's guest log,
+plus a log at the one choke point every GT3 packet passes
+(`push_tri_uv_words_packed`) carrying the seam-census emitter id. Two
+traps on the way: the diagnostic `DBG_FRAME` counter restarts on every
+intro map load, so the `>= 640` gate on the earlier hub loggers only fired
+by luck; and neither the tram packet cache, the view-space facing verdict,
+nor the unchecked-children guard changed a single pushed triangle, which is
+what finally said the missing triangle is never generated rather than
+culled.
+
+The emitter is the patch walker's fallback (`emit_cv_split_route`). The
+wall is a grazing plane at view x = 221. Its triangle T3 has two corners
+behind the camera and the hub vertex at z = 357; the near clip leaves the
+hub plus two points on the near plane at z = 8, which project to
+(4580, 1780) and (4580, 4740). The route then clamps projected vertices to
+plus or minus 1023, both land on (1023, 1023), the triangle is a line, and
+its midpoint chain is exactly the degenerate leaves in the dump
+((641, 590) then (450, 373)). The sector T3 should have covered is the
+wedge. Fix: a fan triangle whose projection leaves the guard band is sent
+through the existing view-space display-frustum clipper (`emit_cv_clipped`)
+instead of being clamped. On the pinned frame the sector is now covered by
+(319, 211)-(320, 180)-(259, 157) and its neighbours and the collapsed
+leaves are gone (`hl-black-wedge-fixed-poll1013.png`).
