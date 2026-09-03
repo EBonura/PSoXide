@@ -875,7 +875,13 @@ quadtree, so the two views of the frame were never the same frame. What
 is needed next is a harness that pins one guest frame: build with
 `emulator-telemetry`, stop on the frame counter rather than a poll, and
 dump packets and guest log for that same frame. Nothing from this
-investigation is shipped; hl main stays at 2152766. The view-space facing verdict and the extent guard are kept as a
+investigation is shipped; hl main stays at 2152766. First suspect for
+that harness: the shipping 2x2 child path (`emit_affine_quad_children`)
+pushes its four GT4 children unchecked, while the bow-tie, near-plane and
+guard-band `safe` test with a triangle fallback exists only on the
+tram-grid policy; a near child whose re-projected midpoints clamp to
++-1023 becomes an oversize or self-crossing quad the GPU silently drops,
+which is a hole bounded by the fan's own edges that moves with the camera. The view-space facing verdict and the extent guard are kept as a
 patch (`hl-view-space-facing-and-min-extent.patch`, tram fps unchanged)
 rather than shipped, since they do not fix what Manny sees. Evidence:
 `hl-black-wedges-census.png`, `hl-black-wedge-tick3684.png`.
