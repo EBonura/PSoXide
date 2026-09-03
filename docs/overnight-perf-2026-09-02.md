@@ -886,6 +886,11 @@ patch (`hl-view-space-facing-and-min-extent.patch`, tram fps unchanged)
 rather than shipped, since they do not fix what Manny sees. Evidence:
 `hl-black-wedges-census.png`, `hl-black-wedge-tick3684.png`.
 
+Measured 17:30: that suspect built (`affine_child_safe` on every 2x2
+child, triangle fallback otherwise) leaves the wedge in place at polls
+1012, 1013 and 1014. Not shipped either; the edit stays uncommitted in the
+hl-psx tree. The frame-pinned harness is the next step, not another guess.
+
 Note for anyone measuring hl-psx visually: two runs of the same build do
 not produce the same frames at the same tick (the tram route is
 timing-dependent), so before/after comparisons must be poll-bound dumps
