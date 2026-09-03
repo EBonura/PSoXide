@@ -4,6 +4,7 @@
 //! the old call-site signatures.
 
 use super::*;
+use psx_engine::classic_affine::ClassicAffineSubmit;
 use psx_bsp::sky::{
     submit_view_ray_cube_sky, submit_view_ray_layered_sky, VIEW_RAY_CUBE_SKY_PACKET_WORDS,
     VIEW_RAY_SKY_PACKET_WORDS,
@@ -30,6 +31,33 @@ pub(super) fn draw_sky_panorama(
         ot,
     );
 }
+
+/// Rotation-keyed copy of the last cube-sky packet stream.
+///
+/// The cube sky depends on the view rotation and the sky's VRAM slot alone:
+/// the lattice is fixed on screen and its packets carry staged OT slot tags,
+/// not addresses. A frame that keeps the previous rotation therefore replays
+/// the stream with one copy instead of walking the lattice and clipping the
+/// mixed cells against six cube faces, which was 7% of the whole-level tape.
+struct CubeSkyPacketCache {
+    rotation: [[i16; 3]; 3],
+    tpage_word: u16,
+    clut_word: u16,
+    valid: bool,
+    words: usize,
+    packets: u32,
+    stream: [u32; VIEW_RAY_CUBE_SKY_PACKET_WORDS],
+}
+
+static mut CUBE_SKY_PACKET_CACHE: CubeSkyPacketCache = CubeSkyPacketCache {
+    rotation: [[0; 3]; 3],
+    tpage_word: 0,
+    clut_word: 0,
+    valid: false,
+    words: 0,
+    packets: 0,
+    stream: [0; VIEW_RAY_CUBE_SKY_PACKET_WORDS],
+};
 
 /// Draw the World node's one sky definition. Projection-specific packet
 /// kernels remain specialized, while selection, visibility and residency are
@@ -102,15 +130,41 @@ pub(super) fn draw_scene_sky(
                     output,
                 )
             }
-            SkyTextureKind::Cube => submit_view_ray_cube_sky(
-                slot.tpage_word,
-                slot.clut_word,
-                view.rotation,
-                [SCREEN_W as i16, SCREEN_H as i16],
-                [SCREEN_W as i16 / 2, SCREEN_H as i16 / 2],
-                FOCAL as i16,
-                output,
-            ),
+            SkyTextureKind::Cube => {
+                // Single-threaded guest; the cache is touched only here.
+                let cache = &mut *core::ptr::addr_of_mut!(CUBE_SKY_PACKET_CACHE);
+                if cache.valid
+                    && cache.rotation == view.rotation.m
+                    && cache.tpage_word == slot.tpage_word
+                    && cache.clut_word == slot.clut_word
+                {
+                    core::ptr::copy_nonoverlapping(cache.stream.as_ptr(), output, cache.words);
+                    ClassicAffineSubmit {
+                        next_packet: output.add(cache.words),
+                        packets: cache.packets,
+                        hardware_triangles: 0,
+                    }
+                } else {
+                    let submitted = submit_view_ray_cube_sky(
+                        slot.tpage_word,
+                        slot.clut_word,
+                        view.rotation,
+                        [SCREEN_W as i16, SCREEN_H as i16],
+                        [SCREEN_W as i16 / 2, SCREEN_H as i16 / 2],
+                        FOCAL as i16,
+                        output,
+                    );
+                    let words = submitted.next_packet.offset_from(output).max(0) as usize;
+                    core::ptr::copy_nonoverlapping(output, cache.stream.as_mut_ptr(), words);
+                    cache.rotation = view.rotation.m;
+                    cache.tpage_word = slot.tpage_word;
+                    cache.clut_word = slot.clut_word;
+                    cache.words = words;
+                    cache.packets = submitted.packets;
+                    cache.valid = true;
+                    submitted
+                }
+            }
             SkyTextureKind::Panorama => unreachable!(),
         }
     };
