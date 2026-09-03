@@ -1134,3 +1134,39 @@ the VRAM slot allocator (64-texel slots, sixteen per page) and the
 WORLD.PAK texture chunks (about 2.5x larger per map) to follow; RAM
 staging goes through the shared world arena. Evidence:
 `hl-four-way-xash-main-fix-e5a.png`, `hl-near-wall-zoom-fix-e5a-e5b.png`.
+
+## Cortex evening pass (2026-09-03, 19:00 to 20:00): where the exact work stops
+
+Fresh baseline on main (`de2dff9c`, whole-level tape, lockstep, poll 5250):
+4,864,602,464 bus cycles, 2,041,576,717 instructions, idle 8.28%, 2620
+flips, RAM load stalls 31.4% of cycles. Instruction shares: draw_pxbsp_faces
+18.5% (its per-vertex GTE plane scan 7.4%, the per-candidate loop head 3.7%),
+model submit 14.9% (NCLIP backface loop 4.6%), classic-affine mixed batch
+10.0%, selection 8.4%, vblank spin 8.3%, Playtest::render self 5.7%,
+collision 3.7%, memcpy 2.3%, materialize 1.8%, CD stream reads 3.1% (bench
+feature), visible_bounds_mask 1.5%.
+
+Tried and reverted: World sky `visibility: ThroughSkySurfaces` (skip the
+cube sky when no aperture face is in the selection): +2.03% bus cycles,
+identical tape-end hashes, poll sheet identical at 5 of 6. The level has an
+aperture in view nearly always and whatever the cook does with sky faces
+under that mode costs more than the skipped passes save.
+
+Checked and found already done, so not leads: the per-vertex frustum scan
+already exits after the first vertex that clears every plane (phase one)
+and pays a single near dot per remaining vertex (phase two); the collision
+trace is already explicit-stack (quake's RENDERING.md still lists an
+explicit-stack hull trace as untried; that note is stale for the shared
+crate). A per-face AABB pre-test would only speed up rejected faces and
+needs 55 to 72 KB of face bounds against 47 KB of heap.
+
+What this means for 30 fps: the frame is 1.70M work cycles against a
+1.13M budget (-34% needed) and every exact lever left measures at 2% or
+less. The remaining levers are content decisions, each with a before/after
+in this report or the ledger: selection every third frame (-1.53%,
+one-frame latency), the cube sky (7.4% of the frame, its price), model
+faces (player and enemy models are 15 to 19% of the frame; decimation at
+0.6 halves their triangles, in-game frames pending from the parallel
+session), and the +693 faces the UV-wrap cook fix added. Even all of them
+together land short of 30 fps on this level; the honest shape of a 30 fps
+Cortex is a lighter level or a lighter renderer, not a faster one.
