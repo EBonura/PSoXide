@@ -73,8 +73,6 @@ pub(super) const GAMEPLAY_RESOURCE_KEY: u32 = 3;
 pub(super) static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
 pub(super) static VITALITY_CIRCLE_GLYPH_BLOB: &[u8] =
     include_bytes!("../assets/vitality_circle_machine_glyph_64.psxt");
-pub(super) static VITALITY_HUD_DIAL_BLOB: &[u8] =
-    include_bytes!("../assets/vitality_hud_dial_32.psxt");
 pub(super) const SCREEN_W: i16 = 320;
 pub(super) const SCREEN_H: i16 = 240;
 pub(super) const SCREEN_CX: i16 = 160;
@@ -174,13 +172,11 @@ pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 pub(super) const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
 pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
 pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
-/// R1/R2 always address the active stance; L1/L2 retain the opposite stance.
-/// This keeps all four attacks reachable without a chord or input delay while
-/// making the primary shoulder pair follow the player's defensive state.
+/// R1/R2 are the attack buttons and always address the active stance; the
+/// stance swap chooses which pair of attacks they perform. L1/L2 carry no
+/// attack.
 pub(super) const ACTIVE_LIGHT_ATTACK_BUTTON: u16 = button::R1;
 pub(super) const ACTIVE_HEAVY_ATTACK_BUTTON: u16 = button::R2;
-pub(super) const OPPOSITE_LIGHT_ATTACK_BUTTON: u16 = button::L1;
-pub(super) const OPPOSITE_HEAVY_ATTACK_BUTTON: u16 = button::L2;
 /// Player health pool at gameplay init (the phase-3 combat slice's
 /// sane cooked default -- the Character record carries no health
 /// field yet; authoring it is a future editor slice). Death/respawn
@@ -217,10 +213,8 @@ pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 /// resident BSP owns the static world; the previous `0..8192` keyed them at
 /// `z / 4`, one third of the world's key, so an actor at depth `z` sorted in
 /// front of every wall farther than `z / 3`.
-pub(super) const PXBSP_CLASSIC_DEPTH_RANGE: DepthRange = DepthRange::new(
-    0,
-    psx_bsp::render::pxbsp_classic_far_depth(OT_DEPTH as u16),
-);
+pub(super) const PXBSP_CLASSIC_DEPTH_RANGE: DepthRange =
+    DepthRange::new(0, psx_bsp::render::pxbsp_classic_far_depth(OT_DEPTH as u16));
 #[cfg(feature = "world-grid-visible")]
 pub(super) const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
 #[cfg(all(

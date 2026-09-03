@@ -108,6 +108,80 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
         let cube_x = ACTOR_X[index] + 384;
         let mut cube = Brush::cuboid(
             [cube_x, SLAB_TOP, ACTOR_Z - CUBE_DEPTH / 2],
+            [
+                cube_x + CUBE_SIZE,
+                SLAB_TOP + CUBE_HEIGHT,
+                ACTOR_Z + CUBE_DEPTH / 2,
+            ],
+        );
+        paint(&mut cube, floor_material);
+        scene.brushes.push(cube);
+    }
+
+    // One Point of Interest beacon beside the player, cloned node-for-node,
+    // with its own reference cube: the beacon is runtime geometry projected on
+    // the CPU, so it measures the world pass against that path as well.
+    if let Some(poi) = source_scene.nodes().iter().find(|node| {
+        matches!(node.kind, NodeKind::Entity)
+            && node.children.iter().any(|child| {
+                matches!(
+                    source_scene.node(*child).map(|n| &n.kind),
+                    Some(NodeKind::PointOfInterest { .. })
+                )
+            })
+    }) {
+        let poi_x = 1408;
+        let new_entity = scene.add_node(NodeId::ROOT, poi.name.clone(), NodeKind::Entity);
+        scene.node_mut(new_entity).expect("poi entity").transform = Transform3 {
+            translation: [poi_x as f32, (SLAB_TOP + 1) as f32, ACTOR_Z as f32],
+            rotation_degrees: [0.0, yaw_degrees, 0.0],
+            ..Transform3::default()
+        };
+        for child_id in &poi.children {
+            let child = source_scene.node(*child_id).expect("poi child");
+            let new_child = scene.add_node(new_entity, child.name.clone(), child.kind.clone());
+            scene.node_mut(new_child).expect("poi child").transform = child.transform.clone();
+        }
+        let cube_x = poi_x + 192;
+        let mut cube = Brush::cuboid(
+            [cube_x, SLAB_TOP, ACTOR_Z - CUBE_DEPTH / 2],
+            [
+                cube_x + CUBE_SIZE,
+                SLAB_TOP + CUBE_HEIGHT,
+                ACTOR_Z + CUBE_DEPTH / 2,
+            ],
+        );
+        paint(&mut cube, floor_material);
+        scene.brushes.push(cube);
+    }
+
+    // One Point of Interest beacon beside the player, cloned node-for-node,
+    // with its own reference cube: the beacon is runtime geometry projected on
+    // the CPU, so it measures the world pass against that path as well.
+    if let Some(poi) = source_scene.nodes().iter().find(|node| {
+        matches!(node.kind, NodeKind::Entity)
+            && node.children.iter().any(|child| {
+                matches!(
+                    source_scene.node(*child).map(|n| &n.kind),
+                    Some(NodeKind::PointOfInterest { .. })
+                )
+            })
+    }) {
+        let poi_x = 1408;
+        let new_entity = scene.add_node(NodeId::ROOT, poi.name.clone(), NodeKind::Entity);
+        scene.node_mut(new_entity).expect("poi entity").transform = Transform3 {
+            translation: [poi_x as f32, (SLAB_TOP + 1) as f32, ACTOR_Z as f32],
+            rotation_degrees: [0.0, yaw_degrees, 0.0],
+            ..Transform3::default()
+        };
+        for child_id in &poi.children {
+            let child = source_scene.node(*child_id).expect("poi child");
+            let new_child = scene.add_node(new_entity, child.name.clone(), child.kind.clone());
+            scene.node_mut(new_child).expect("poi child").transform = child.transform.clone();
+        }
+        let cube_x = poi_x + 192;
+        let mut cube = Brush::cuboid(
+            [cube_x, SLAB_TOP, ACTOR_Z - CUBE_DEPTH / 2],
             [cube_x + CUBE_SIZE, SLAB_TOP + CUBE_HEIGHT, ACTOR_Z + CUBE_DEPTH / 2],
         );
         paint(&mut cube, floor_material);
@@ -185,7 +259,9 @@ fn paint(brush: &mut Brush, material: ResourceId) {
 
 /// `target` relative to `base`, both taken as directories under the same root.
 fn pathdiff(target: &Path, base: &Path) -> PathBuf {
-    let target = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+    let target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
     let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
     let target: Vec<_> = target.components().collect();
     let base: Vec<_> = base.components().collect();

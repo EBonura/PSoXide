@@ -3724,6 +3724,7 @@ pub fn draw_message_panel(
     page: MessagePageMeta,
     frame: u16,
     typewriter_frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
 ) {
     let layout = message_panel_layout(variant);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
@@ -3738,10 +3739,11 @@ pub fn draw_message_panel(
         page,
         UiPaint::Solid((114, 96, 92)),
         visible_text.len() == page_text.len(),
+        cross_prompt,
     );
 }
 
-/// Morph the compact `X - action` prompt into the full bottom Archive panel.
+/// Morph the compact controller-icon/action prompt into the full bottom Archive panel.
 ///
 /// The prompt and message share their centre and bottom edge, so the chrome,
 /// clipped corners, translucent fill, and scanner are visibly the same object
@@ -3755,8 +3757,9 @@ pub fn draw_expanding_message_panel(
     frame: u16,
     transition_frame: u16,
     typewriter_frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
 ) {
-    let prompt = interaction_prompt_layout(font, action);
+    let prompt = interaction_prompt_layout(font, action, cross_prompt.is_some());
     let target = message_panel_layout(MessagePanelVariant::PointOfInterest);
     let layout = message_panel_transition_layout(prompt, target, transition_frame);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
@@ -3778,6 +3781,7 @@ pub fn draw_expanding_message_panel(
         page,
         UiPaint::Solid((114, 96, 92)),
         visible_text.len() == page_text.len(),
+        cross_prompt,
     );
 }
 
@@ -3790,6 +3794,7 @@ pub fn draw_item_acquired_panel(
     frame: u16,
     transition_frame: u16,
     typewriter_frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
 ) {
     const PREFIX: &str = "ITEM ACQUIRED - ";
     const TARGET: MessagePanelLayout = MessagePanelLayout {
@@ -3841,7 +3846,7 @@ pub fn draw_item_acquired_panel(
         UiPaint::Solid((202, 154, 136)),
     );
     if visible_name.len() == item_name.len() {
-        draw_message_dismiss_hint(font, layout);
+        draw_message_dismiss_hint(font, layout, cross_prompt);
     }
 }
 
@@ -3865,6 +3870,7 @@ fn draw_message_panel_body(
     page: MessagePageMeta,
     text_paint: UiPaint,
     show_page_pips: bool,
+    cross_prompt: Option<UiTextureSlot>,
 ) {
     const TEXT_INSET_X: u16 = 10;
 
@@ -3917,14 +3923,17 @@ fn draw_message_panel_body(
         let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
         draw_message_page_pips(resolved, MessagePageMeta::new(page.index, page.count));
     }
-    draw_message_dismiss_hint(font, layout);
+    draw_message_dismiss_hint(font, layout, cross_prompt);
 }
 
 /// Keep the close control visible for the entire readable phase. Cross may
 /// first complete the typewriter or advance a paged message, but it is always
 /// the control that ultimately dismisses the open panel.
-fn draw_message_dismiss_hint(font: &FontAtlas, layout: MessagePanelLayout) {
-    const PREFIX: &str = "X - ";
+fn draw_message_dismiss_hint(
+    font: &FontAtlas,
+    layout: MessagePanelLayout,
+    cross_prompt: Option<UiTextureSlot>,
+) {
     const ACTION: &str = "DISMISS";
     const INSET_X: i16 = 10;
     const INSET_BOTTOM: u16 = 3;
@@ -3937,18 +3946,10 @@ fn draw_message_dismiss_hint(font: &FontAtlas, layout: MessagePanelLayout) {
             .saturating_sub(INSET_BOTTOM) as i16,
     );
     let text_x = layout.x.saturating_add(INSET_X);
+    let action_x = draw_controller_prompt_prefix(font, cross_prompt, text_x, text_y);
     draw_scaled_text_paint(
         font,
-        text_x,
-        text_y,
-        PREFIX,
-        UI_FONT_SCALE_ONE_Q8,
-        0,
-        UiPaint::Solid((124, 64, 54)),
-    );
-    draw_scaled_text_paint(
-        font,
-        text_x.saturating_add(font.text_width(PREFIX) as i16),
+        action_x,
         text_y,
         ACTION,
         UI_FONT_SCALE_ONE_Q8,
@@ -3960,17 +3961,29 @@ fn draw_message_dismiss_hint(font: &FontAtlas, layout: MessagePanelLayout) {
 /// Draw the compact proximity prompt used beneath an Archive Beacon.
 ///
 /// `action` is the verb only (normally `"READ"`); the control prefix is kept
-/// in the shared visual so every POI consistently presents `X - action`.
-pub fn draw_interaction_prompt_panel(font: &FontAtlas, action: &str, frame: u16) {
-    let layout = interaction_prompt_layout(font, action);
+/// in the shared visual so every POI consistently presents the same control.
+pub fn draw_interaction_prompt_panel(
+    font: &FontAtlas,
+    action: &str,
+    frame: u16,
+    cross_prompt: Option<UiTextureSlot>,
+) {
+    let layout = interaction_prompt_layout(font, action, cross_prompt.is_some());
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
     draw_archive_panel_chrome(resolved, frame);
-    draw_interaction_prompt_text(font, action, layout);
+    draw_interaction_prompt_text(font, action, layout, cross_prompt);
 }
 
-fn interaction_prompt_layout(font: &FontAtlas, action: &str) -> MessagePanelLayout {
-    const PREFIX: &str = "X - ";
-    let prefix_width = font.text_width(PREFIX) as i16;
+fn interaction_prompt_layout(
+    font: &FontAtlas,
+    action: &str,
+    has_cross_prompt: bool,
+) -> MessagePanelLayout {
+    let prefix_width = if has_cross_prompt {
+        CONTROLLER_PROMPT_ICON_SIZE as i16 + CONTROLLER_PROMPT_GAP
+    } else {
+        0
+    };
     let action_width = font.text_width(action) as i16;
     let text_width = prefix_width.saturating_add(action_width);
     let box_width = text_width
@@ -3986,9 +3999,13 @@ fn interaction_prompt_layout(font: &FontAtlas, action: &str) -> MessagePanelLayo
     }
 }
 
-fn draw_interaction_prompt_text(font: &FontAtlas, action: &str, layout: MessagePanelLayout) {
-    const PREFIX: &str = "X - ";
-    let prefix_width = font.text_width(PREFIX) as i16;
+fn draw_interaction_prompt_text(
+    font: &FontAtlas,
+    action: &str,
+    layout: MessagePanelLayout,
+    cross_prompt: Option<UiTextureSlot>,
+) {
+    let prefix_width = controller_prompt_prefix_width(cross_prompt.is_some());
     let action_width = font.text_width(action) as i16;
     let text_width = prefix_width.saturating_add(action_width);
     let text_x = layout
@@ -3999,24 +4016,58 @@ fn draw_interaction_prompt_text(font: &FontAtlas, action: &str, layout: MessageP
             .max(0)
             / 2) as i16,
     );
+    let action_x = draw_controller_prompt_prefix(font, cross_prompt, text_x, text_y);
     draw_scaled_text_paint(
         font,
-        text_x,
-        text_y,
-        PREFIX,
-        UI_FONT_SCALE_ONE_Q8,
-        0,
-        UiPaint::Solid((124, 64, 54)),
-    );
-    draw_scaled_text_paint(
-        font,
-        text_x.saturating_add(prefix_width),
+        action_x,
         text_y,
         action,
         UI_FONT_SCALE_ONE_Q8,
         0,
         UiPaint::Solid((114, 96, 92)),
     );
+}
+
+const CONTROLLER_PROMPT_ICON_SIZE: u16 = 14;
+const CONTROLLER_PROMPT_GAP: i16 = 4;
+
+fn controller_prompt_prefix_width(has_prompt: bool) -> i16 {
+    if has_prompt {
+        CONTROLLER_PROMPT_ICON_SIZE as i16 + CONTROLLER_PROMPT_GAP
+    } else {
+        0
+    }
+}
+
+fn draw_controller_prompt_prefix(
+    font: &FontAtlas,
+    prompt: Option<UiTextureSlot>,
+    x: i16,
+    text_y: i16,
+) -> i16 {
+    let Some(slot) = prompt else {
+        return x;
+    };
+
+    let line_height = scaled_line_height(font, UI_FONT_SCALE_ONE_Q8) as i16;
+    let icon_y =
+        text_y.saturating_sub((CONTROLLER_PROMPT_ICON_SIZE as i16 - line_height).max(0) / 2);
+    let resolved = screen_resolved_node(
+        x,
+        icon_y,
+        CONTROLLER_PROMPT_ICON_SIZE,
+        CONTROLLER_PROMPT_ICON_SIZE,
+    );
+    let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb([128, 58, 34]))
+        .with_texture_window(slot.texture_window);
+    let u1 = texture_size_u8(slot.texture_width).saturating_sub(1);
+    let v1 = texture_size_u8(slot.texture_height).saturating_sub(1);
+    draw_quad_textured_material(
+        resolved.verts,
+        [(0, 0), (u1, 0), (0, v1), (u1, v1)],
+        material,
+    );
+    x.saturating_add(CONTROLLER_PROMPT_ICON_SIZE as i16 + CONTROLLER_PROMPT_GAP)
 }
 
 fn message_panel_transition_layout(

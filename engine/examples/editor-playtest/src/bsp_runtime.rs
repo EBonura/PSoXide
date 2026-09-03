@@ -21,8 +21,8 @@ use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{
     load_pxbsp_view_rotation, Camera, FrustumPlanes, PxbspTextureBinding, Renderer,
 };
-use psx_engine::Mat3I16;
 use psx_bsp::{SliceReadError, Vec3I32};
+use psx_engine::Mat3I16;
 use psx_engine::{
     commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider,
     trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
@@ -39,8 +39,8 @@ use psx_gpu::{
     prim::TriTextured,
 };
 use psx_level::{
-    find_asset_of_kind, sky_flags, world_object_flags, AssetId, AssetKind,
-    LevelWorldObjectRecord, MAX_ROOM_MATERIALS,
+    find_asset_of_kind, sky_flags, world_object_flags, AssetId, AssetKind, LevelWorldObjectRecord,
+    MAX_ROOM_MATERIALS,
 };
 use psx_math::{cos_q12, sin_q12};
 
@@ -657,7 +657,11 @@ impl BspRuntime {
             FrustumPlanes::from_view(
                 &view.rotation,
                 view.translation,
-                [pxbsp.origin.x >> 12, pxbsp.origin.y >> 12, pxbsp.origin.z >> 12],
+                [
+                    pxbsp.origin.x >> 12,
+                    pxbsp.origin.y >> 12,
+                    pxbsp.origin.z >> 12,
+                ],
                 self.renderer.view_projection(),
             )
         };
