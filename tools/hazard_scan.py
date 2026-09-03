@@ -138,6 +138,22 @@ def scan(path):
         return int.from_bytes(data[addr - LOAD_ADDR + HEADER:][:4], "little")
 
     hazards = []
+    # Straight-line load-use pairs: a load whose destination the very next
+    # instruction reads, outside any delay slot. LLVM's MIPS-I scheduler
+    # keeps these apart; a register allocator or scheduler switch that
+    # breaks that (-regalloc=pbqp did, 2026-09-04) shows up here first.
+    straight = 0
+    for addr, (op, args) in listing.items():
+        rd = load_destination(op, args)
+        if rd is None or addr + 4 not in listing or not looks_like_code(listing, addr):
+            continue
+        prev = listing.get(addr - 4)
+        if prev is not None and prev[0] in BRANCHES:
+            continue  # a delay-slot load is the branch case below
+        if reads(*listing[addr + 4], rd):
+            straight += 1
+    if straight:
+        print(f"warning: {straight} straight-line load-use pairs (next instruction reads the loaded register)")
     for addr, (op, args) in listing.items():
         if op not in BRANCHES or addr + 4 not in listing:
             continue
