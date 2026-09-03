@@ -582,3 +582,12 @@ where the draw pass spends its time.
 
 Quake's verdict holds on Cortex: the code-size variants lose to RAM traffic
 and the writer is at its floor.
+
+### Quake: subdivision load governor (2026-09-03)
+
+The heavy-frame tail is geometry, so a governor that subdivides less on the
+frame after a three-field frame (depth bands 96/40 instead of 136/60) was
+tried. It engaged on 2,994 of 3,796 frames and measured 23.06 fps against
+24.29: unsubdivided near faces exceed what the GPU polygon clip may take and
+fall back to the CPU clipper, which costs more than the lattice it saved.
+Reverted.
