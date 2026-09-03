@@ -549,9 +549,8 @@ impl FrustumPlanes {
         let (right, down, forward) = (row(0), row(1), row(2));
         // Squared Q12 row length: three products of at most 3 * 4096 each,
         // under 4.6e8, so the 32-bit square root answers it.
-        let scale_q12 = isqrt_i32(
-            forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2],
-        );
+        let scale_q12 =
+            isqrt_i32(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
         let near_view = projection.near_world.saturating_mul(scale_q12) >> 12;
         // The view translation is the rotated, negated camera origin in world
         // units, so `T.z << 12` is `-forward . camera` and every distance is
@@ -559,10 +558,7 @@ impl FrustumPlanes {
         // 7e8, and the near constant under 2^30, so the near plane is exact
         // in `i32` and bit-identical to the former i64 evaluation.
         let _ = camera_origin_units;
-        let near = (
-            forward,
-            (translation.z << 12).wrapping_sub(near_view << 12),
-        );
+        let near = (forward, (translation.z << 12).wrapping_sub(near_view << 12));
         // side planes: |view_x| <= (half_w + margin)/H * view_z, same for y.
         let kx = projection.half_width + projection.edge_margin;
         let ky = projection.half_height + projection.edge_margin;
@@ -601,7 +597,9 @@ impl FrustumPlanes {
         // by the same shift, exact because the shift never exceeds twelve.
         let side = |n: [i32; 3], axis_t: i32, k: i32, sign: i32| -> ([i32; 3], i32) {
             let n = [round(n[0]), round(n[1]), round(n[2])];
-            let constant = k.wrapping_mul(translation.z).wrapping_sub(sign.wrapping_mul(h).wrapping_mul(axis_t));
+            let constant = k
+                .wrapping_mul(translation.z)
+                .wrapping_sub(sign.wrapping_mul(h).wrapping_mul(axis_t));
             let constant = if side_shift <= 12 {
                 constant << (12 - side_shift)
             } else {
@@ -722,7 +720,11 @@ impl FrustumPlanes {
             let plane_index = live.trailing_zeros() as usize;
             live &= live - 1;
             let plane = unsafe { planes.get_unchecked(plane_index) };
-            let error = if plane_index == PXBSP_CLIP_NEAR_PLANE { 0 } else { side_error };
+            let error = if plane_index == PXBSP_CLIP_NEAR_PLANE {
+                0
+            } else {
+                side_error
+            };
             let mut wholly_outside = true;
             let mut any_outside = false;
             let mut index = 0usize;
@@ -1136,7 +1138,6 @@ fn lerp_vertex(
         depth: 0,
     }
 }
-
 
 pub struct Renderer {
     frame: u32,
@@ -1694,7 +1695,11 @@ impl Renderer {
         let frustum = FrustumPlanes::from_view(
             &rotation,
             translation,
-            [local_camera.x >> 12, local_camera.y >> 12, local_camera.z >> 12],
+            [
+                local_camera.x >> 12,
+                local_camera.y >> 12,
+                local_camera.z >> 12,
+            ],
             self.view_projection,
         );
 
@@ -1826,7 +1831,9 @@ impl Renderer {
                     } {
                         PXBSP_FRAME_NODE_BACK => false,
                         PXBSP_FRAME_NODE_FRONT => true,
-                        _ => self.front_facing_cached(map, face.plane(), face.flags(), camera_origin),
+                        _ => {
+                            self.front_facing_cached(map, face.plane(), face.flags(), camera_origin)
+                        }
                     }
                 }
                 PxbspFaceSelection::ModelRange { .. } => {
@@ -1880,8 +1887,7 @@ impl Renderer {
                 let classified = unsafe {
                     Self::pxbsp_face_clip(source_base, face, clip_planes, side_error, clip_mask)
                 };
-                let Some(needs_near_clip) = classified
-                else {
+                let Some(needs_near_clip) = classified else {
                     continue;
                 };
                 needs_near_clip
@@ -2224,7 +2230,13 @@ impl Renderer {
         // The plane constants live in the scratchpad behind a reference the
         // compiler cannot prove disjoint from the vertex reads, so it
         // reloaded all five per vertex; they are loop invariants.
-        let constants = [planes[0].1, planes[1].1, planes[2].1, planes[3].1, planes[4].1];
+        let constants = [
+            planes[0].1,
+            planes[1].1,
+            planes[2].1,
+            planes[3].1,
+            planes[4].1,
+        ];
         // Bit p stays set while every vertex so far was surely outside p.
         let mut wholly_outside = clip_mask;
         let near_tested = clip_mask & NEAR != 0;
@@ -2944,13 +2956,11 @@ impl Renderer {
                     for mark_index in start..end {
                         // `validate_references` checked every mark index
                         // against the face count at load.
-                        let face =
-                            unsafe { *map.mark_surfaces_native().get_unchecked(mark_index) }
-                                as usize;
+                        let face = unsafe { *map.mark_surfaces_native().get_unchecked(mark_index) }
+                            as usize;
                         // Mark indices were validated against the face
                         // count at load; the three tables are face-sized.
-                        if unsafe { packed_face_state_unchecked(&self.pxbsp_face_state, face) }
-                            != 0
+                        if unsafe { packed_face_state_unchecked(&self.pxbsp_face_state, face) } != 0
                         {
                             unsafe {
                                 set_packed_face_state_unchecked(
@@ -3634,14 +3644,23 @@ mod tests {
     fn exact_view_rotation_matches_the_table_form_at_table_angles() {
         // At angles the 256-step table represents exactly, the trig pairs
         // are +-4096 / 0 and both constructions must agree cell for cell.
-        for (pitch_q12, yaw_q12) in [(0u16, 0u16), (0, 1024), (1024, 0), (3072, 2048), (2048, 3072)] {
+        for (pitch_q12, yaw_q12) in [
+            (0u16, 0u16),
+            (0, 1024),
+            (1024, 0),
+            (3072, 2048),
+            (2048, 3072),
+        ] {
             let table = Mat3I16::rotate_xyz(pitch_q12 >> 4, yaw_q12 >> 4, 0);
-            let trig = |angle: u16| -> (i16, i16) {
-                (sin_q12(angle) as i16, cos_q12(angle) as i16)
-            };
+            let trig =
+                |angle: u16| -> (i16, i16) { (sin_q12(angle) as i16, cos_q12(angle) as i16) };
             let (sp, cp) = trig(pitch_q12);
             let (sy, cy) = trig(yaw_q12);
-            assert_eq!(pxbsp_view_rotation(sp, cp, sy, cy).m, table.m, "pitch {pitch_q12} yaw {yaw_q12}");
+            assert_eq!(
+                pxbsp_view_rotation(sp, cp, sy, cy).m,
+                table.m,
+                "pitch {pitch_q12} yaw {yaw_q12}"
+            );
         }
     }
     use crate::pxbsp_resident::tests::{valid_lumps, write_file};
@@ -4369,13 +4388,16 @@ mod tests {
         assert!(renderer.pxbsp_node_leaf_marks);
 
         let view = load_pxbsp_view(camera);
-        let frustum =
-            FrustumPlanes::from_view(
-                &view.rotation,
-                view.translation,
-                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
-                renderer.view_projection,
-            );
+        let frustum = FrustumPlanes::from_view(
+            &view.rotation,
+            view.translation,
+            [
+                camera.origin.x >> 12,
+                camera.origin.y >> 12,
+                camera.origin.z >> 12,
+            ],
+            renderer.view_projection,
+        );
         assert!(renderer.select_frame_pxbsp_faces(&map, camera.origin, &frustum));
         assert_eq!(renderer.frame_pxbsp_faces, [0]);
         assert_eq!(
@@ -4493,7 +4515,11 @@ mod frustum_tests {
             FrustumPlanes::from_view(
                 &view.rotation,
                 view.translation,
-                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
+                [
+                    camera.origin.x >> 12,
+                    camera.origin.y >> 12,
+                    camera.origin.z >> 12,
+                ],
                 projection,
             ),
             view,
@@ -4579,10 +4605,13 @@ mod frustum_tests {
             for drop in 0..32u8 {
                 let clip_mask = 0x1f & !(drop & satisfied);
                 let expected = vertex_major_clip(&planes, clip_mask, polygon);
-                let actual =
-                    FrustumPlanes::cull_polygon(&planes.planes, planes.side_error, clip_mask, polygon.len(), |i| {
-                        polygon[i]
-                    });
+                let actual = FrustumPlanes::cull_polygon(
+                    &planes.planes,
+                    planes.side_error,
+                    clip_mask,
+                    polygon.len(),
+                    |i| polygon[i],
+                );
                 // The exact scan is the oracle. The plane-major test may keep
                 // a polygon the oracle rejects when every vertex sits in a
                 // rounded side plane's error band (conservative), but it may
@@ -4608,8 +4637,13 @@ mod frustum_tests {
                     // polygon the full mask rejects, unclipped: that is a
                     // claim about the mask, not about the geometry.
                     assert_eq!(
-                        FrustumPlanes::cull_polygon(&planes.planes, planes.side_error, 0, polygon.len(), |i| polygon
-                            [i]),
+                        FrustumPlanes::cull_polygon(
+                            &planes.planes,
+                            planes.side_error,
+                            0,
+                            polygon.len(),
+                            |i| polygon[i]
+                        ),
                         Some(false)
                     );
                     rejected += 1;
@@ -4622,7 +4656,10 @@ mod frustum_tests {
             rejected > 100 && near > 20 && kept > 100,
             "sweep degenerated: {rejected} rejected, {near} near-clipped, {kept} kept"
         );
-        assert!(compared > 100_000, "sweep collapsed to {compared} comparisons");
+        assert!(
+            compared > 100_000,
+            "sweep collapsed to {compared} comparisons"
+        );
         assert!(
             kept_by_band * 50 < compared,
             "{kept_by_band} of {compared} rejections were withheld by the error band"
@@ -4872,8 +4909,10 @@ mod frustum_tests {
                                 let oracle = planes.vertex_outside_mask(position);
                                 for (index, plane) in planes.planes.iter().enumerate() {
                                     let error = planes.error_of(index);
-                                    let outside = FrustumPlanes::surely_outside(plane, error, position);
-                                    let inside = FrustumPlanes::surely_inside(plane, error, position);
+                                    let outside =
+                                        FrustumPlanes::surely_outside(plane, error, position);
+                                    let inside =
+                                        FrustumPlanes::surely_inside(plane, error, position);
                                     let oracle_outside = oracle & (1 << index) != 0;
                                     checked += 1;
                                     if index == PXBSP_CLIP_NEAR_PLANE {
