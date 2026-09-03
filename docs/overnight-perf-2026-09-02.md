@@ -1017,3 +1017,10 @@ the collapsed triangles were also handed to the GPU-size splitter, which
 recursed six levels on 4,000-pixel spans every frame; the view-space clip
 yields a handful of triangles instead. The interval capture no longer
 shows the wall wedges at ticks 3680 to 3688 or 4000.
+
+Follow-up measured and dropped: running the rerouted, display-clipped fan
+through the GPU-size splitter for perspective correction gives back every
+frame of the gain (16.84 / 13.16 / 19.84 / 9.86 / 16.67) while changing 342
+pixels of the wedge frame and no black count at the edge, so the recursion
+on those near slivers was the cost all along. The shipped fix draws each
+rerouted piece as one clipped triangle.
