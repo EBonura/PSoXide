@@ -472,10 +472,19 @@ impl BspRuntime {
         crate::game_trace("editor-playtest: bsp renderer ok");
         // The frustum clip must match the projection this example renders
         // with (H and screen half-extents), or it clips too much or too little.
+        // Far cull in world units, off by default. The authored room draw
+        // distance cannot drive it yet: the editor divides it by the world
+        // unit divisor and then clamps to a 4096 floor that predates the
+        // Quake-units migration, so every cook lands on 4096, beyond the
+        // whole Cortex level. Measured on the whole-level tape over the
+        // 32-unit node grid: 1200 units -1.3% cycles, 800 -3.8%, 500 -6.4%,
+        // all with visible pops since the level has no fog.
+        const FAR_CULL_WORLD: Option<i32> = None;
         renderer.set_view_projection(psx_bsp::render::ViewProjection {
             focal_length: PROJECTION.focal_length,
             half_width: i32::from(PROJECTION.screen_x),
             half_height: i32::from(PROJECTION.screen_y),
+            far_world: FAR_CULL_WORLD.unwrap_or(i32::MAX),
             ..psx_bsp::render::ViewProjection::DEFAULT
         });
         renderer.set_track_sky_apertures(
