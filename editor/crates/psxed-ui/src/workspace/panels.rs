@@ -1289,6 +1289,7 @@ impl EditorWorkspace {
             UiNodeKind::Image {
                 rect,
                 texture,
+                tag,
                 tint,
                 effect,
             } => {
@@ -1327,6 +1328,19 @@ impl EditorWorkspace {
                         }
                     });
                 });
+                inspector_section(
+                    ui,
+                    "ui-image-runtime",
+                    icons::WAYPOINT,
+                    "Runtime",
+                    true,
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Tag");
+                            changed |= ui.text_edit_singleline(tag).changed();
+                        });
+                    },
+                );
                 inspector_section(
                     ui,
                     "ui-image-appearance",

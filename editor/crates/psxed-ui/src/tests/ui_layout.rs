@@ -9,6 +9,7 @@ fn ui_resize_handles_remain_hittable_outside_canvas_for_border_images() {
         UiNodeKind::Image {
             rect: UiRect::new(0, 0, 64, 64),
             texture: None,
+            tag: String::new(),
             tint: [128, 128, 128],
             effect: UiImageEffect::None,
         },

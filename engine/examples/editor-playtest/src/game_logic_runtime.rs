@@ -518,6 +518,7 @@ impl Playtest {
                     };
                     if self.combat_projectiles.spawn(spawn).is_ok() {
                         telemetry::debug_log("enemy projectile:release");
+                        self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
                         let _ = self.game_entities.commit_deferred_attack(attack);
                     }
                 }
@@ -1460,7 +1461,7 @@ impl Playtest {
             },
         };
         self.message_overlay = Some(RuntimeMessageOverlay { title, body });
-        self.poi_page_type_frame = 0;
+        self.set_poi_page_type_frame(0);
     }
 
     /// Push every DOOR record's current open state onto its linked

@@ -1088,6 +1088,7 @@ pub(crate) fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
             UiNodeKind::Image {
                 rect: UiRect::new(24, 24, 64, 64),
                 texture: None,
+                tag: String::new(),
                 tint: [128, 128, 128],
                 effect: UiImageEffect::None,
             },
