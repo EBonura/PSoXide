@@ -1073,3 +1073,24 @@ vsync wait 20% making up the render side. The next mesher lever is
 face_ao (per-face neighbour reads) and the greedy merge's width/height
 probes; the next generator lever is the cave band (one vnoise per four
 blocks per column) and pack_blocks.
+
+Standing at spawn (the release scene, 900M steps) the loop body on fdab291
+is 1,240,381 cycles against 1,234,805 before the mesher work: streaming is
+idle there, so nothing moved, as expected. Still three fields per frame.
+
+Negative result, reverted: moving the per-face cull walk out of
+for_visible_faces into its own function with mask-selected sphere offsets
+(instead of the per-face `match dir` jump table). The pc-line attribution
+at poll 1200 says the compiler did worse with it: 335.2M instructions in
+the face walk against 303.1M inline (+10.6%), and the standing loop body
+went 1,240,381 -> 1,334,823 (+7.6%). The new function got a 912-byte
+frame with the selection masks and the pool base on the stack, and the PS1
+has no data cache, so every one of those reloads is a main-RAM access.
+The face walk stays as it is; the remaining lever there is fewer iterated
+faces (77% of them are culled per face), which needs per-plane sub-range
+bounds that do not fit the ~13 KB of RAM headroom.
+
+Second trap of the evening: the scratch worktree used for A/B builds had
+DEMO_PLAY left on from an earlier run, so its "standing" profile was a
+walking route (1339 frames, 902k body, half the mobs). Check
+`git status` in a scratch worktree before trusting a build from it.
