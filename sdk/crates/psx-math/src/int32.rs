@@ -129,12 +129,14 @@ pub fn mul_q12_i32_wide(value: i32, q12: i32) -> i32 {
 /// compiler-builtins `u64_div_rem` it replaces was 1,412 bytes of branchy
 /// code and the only 64-bit divide reachable from runtime code.
 #[inline]
-pub fn div_u64_by_u32(hi: u32, lo: u32, divisor: u32) -> u32 {
+pub const fn div_u64_by_u32(hi: u32, lo: u32, divisor: u32) -> u32 {
     debug_assert!(divisor != 0 && hi < divisor);
     let mut remainder = hi;
     let mut low = lo;
     let mut quotient = 0u32;
-    for _ in 0..32 {
+    let mut step = 0;
+    while step < 32 {
+        step += 1;
         // The remainder stays below the divisor, so doubling it plus one
         // incoming bit stays below 2^33: a carry out of bit 31 means the
         // true value exceeds any 32-bit divisor and the subtraction's
@@ -151,9 +153,101 @@ pub fn div_u64_by_u32(hi: u32, lo: u32, divisor: u32) -> u32 {
     quotient
 }
 
+/// Exact `n / d` for `0 <= n < 2^31` by one `multu` and a shift, for a
+/// divisor that is fixed across many dividends.
+///
+/// Granlund and Montgomery, "Division by invariant integers using
+/// multiplication" (1994), theorem 4.2 with `N = 31`: for `l = ceil(log2 d)`
+/// and `m = floor(2^(31+l) / d) + 1`, `floor(m * n / 2^(31+l))` equals
+/// `floor(n / d)` for every `n < 2^31`, and `m` fits 32 bits. The R3000A's
+/// `div` interlocks the pipeline for about 35 cycles and `multu` for about
+/// 12 (fewer for small operands), so a per-model depth-slot divide that ran
+/// once per drawn face pays for its `new` after a handful of faces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvariantDivisor31 {
+    magic: u32,
+    /// `l - 1`; `u32::MAX` marks a divisor of one (the product path would
+    /// need a 33-bit magic there).
+    shift: u32,
+}
+
+impl InvariantDivisor31 {
+    /// Prepare `divisor`, which must be at least one. This is the 32-step
+    /// software divide, so prepare once where the divisor is decided (a
+    /// depth range, a table size), not per use.
+    #[inline]
+    pub const fn new(divisor: u32) -> Self {
+        debug_assert!(divisor != 0);
+        if divisor <= 1 {
+            return Self {
+                magic: 0,
+                shift: u32::MAX,
+            };
+        }
+        // ceil(log2 d) for d >= 2, so 2^(l-1) < d <= 2^l and the 64-by-32
+        // divide below has hi < divisor as it requires.
+        let l = 32 - (divisor - 1).leading_zeros();
+        let magic = div_u64_by_u32(1 << (l - 1), 0, divisor).wrapping_add(1);
+        Self {
+            magic,
+            shift: l - 1,
+        }
+    }
+
+    /// `n / divisor` for `n < 2^31`.
+    #[inline(always)]
+    pub fn divide(self, n: u32) -> u32 {
+        debug_assert!(n < 1 << 31);
+        if self.shift == u32::MAX {
+            return n;
+        }
+        // psx-numeric-allow-next-line: the high word of R3000 MULTU, no wide divide
+        let high = ((u64::from(self.magic) * u64::from(n)) >> 32) as u32;
+        high >> self.shift
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invariant_divisor_31_is_exact() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut check = |n: u32, d: u32| {
+            assert_eq!(InvariantDivisor31::new(d).divide(n), n / d, "n={n} d={d}");
+        };
+        for d in 1..=70u32 {
+            for n in 0..2048u32 {
+                check(n, d);
+            }
+            let top = (1u32 << 31) - 1;
+            for n in [top, top - 1, top - d, d, d - 1, d + 1, d * 3 - 1, d * 3] {
+                check(n, d);
+            }
+        }
+        for shift in 1..31u32 {
+            let d = 1u32 << shift;
+            for n in [0, 1, d - 1, d, d + 1, (1u32 << 31) - 1] {
+                check(n, d);
+                check(n, d - 1);
+                check(n, d + 1);
+            }
+        }
+        for _ in 0..200_000 {
+            let d = (next() as u32 >> (next() % 32) as u32).max(1);
+            let n = next() as u32 >> 1;
+            check(n, d);
+            check(n % d, d);
+            check(n - n % d, d);
+        }
+    }
 
     #[test]
     fn div_u64_by_u32_matches_the_wide_reference() {
