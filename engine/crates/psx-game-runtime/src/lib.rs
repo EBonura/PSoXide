@@ -21,6 +21,7 @@ pub mod box_props;
 pub mod cd_stream;
 pub mod character;
 pub mod combat;
+pub mod combat_feedback;
 pub mod cylinder_props;
 pub mod destructibles;
 pub mod entities;

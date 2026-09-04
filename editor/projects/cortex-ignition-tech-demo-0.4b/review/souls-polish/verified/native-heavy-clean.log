@@ -1,0 +1,11 @@
+[cli] loaded poll-bound input tape /tmp/cortex-polish/respawn-probe.csv (2400 polls, starting at poll 0)
+[frontend] embedded Play disc fast-booted /tmp/cortex-polish/heavy-probe-project/baked/heavy_probe.cue via PSX.EXE;1 entry=0x80010000 payload=1134592B
+[cli] mounted cue-backed disc /tmp/cortex-polish/heavy-probe-project/baked/heavy_probe.cue
+combat music:on
+[guest f777 c637702231] enemy projectile:release
+[guest f1029 c781540078] player poise:break
+[guest f1281 c924503424] player poise:break
+[guest f1549 c1079226841] player poise:break
+tick=464776509  cycles=1163564408  pc=0x8001d2d4  stopped-at=464776509
+route-ticks=2035  port1-polls=1701
+[cli] CPU display → /tmp/cortex-polish/heavy-clean-native/final.ppm (320x240)

@@ -121,7 +121,7 @@ fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
 impl Playtest {
     /// Depth range for effects in `room`: they sort against whichever world
     /// renderer owns the room, see [`world_depth_range`].
-    fn effect_depth_range(&self, room: RoomIndex) -> DepthRange {
+    pub(super) fn effect_depth_range(&self, room: RoomIndex) -> DepthRange {
         ROOMS
             .get(room.to_usize())
             .map(|record| world_depth_range(record, self.bsp.is_some()))
@@ -613,6 +613,27 @@ impl Playtest {
         telemetry::counter(telemetry::counter::PLAYER_DEATHS, 1);
     }
 
+    /// Start a fresh combat life without changing checkpoints or collected items.
+    /// In-flight shots and queued inputs belong to the old life, not the spawn.
+    fn reset_life_combat(&mut self) {
+        self.player_vitality.refill();
+        self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.combat_projectiles.clear();
+        self.combat_projectile_impacts.clear();
+        self.deferred_enemy_attacks.clear();
+        self.dash_wake = psx_game_runtime::combat_feedback::DashWake::EMPTY;
+        self.attack_buffer.clear();
+        self.evade_buffer_vblanks = 0;
+        self.swing_hit_mask = 0;
+        self.camera_recenter_requested = false;
+        self.player_actor_pose = None;
+        self.previous_player_actor_pose = None;
+        self.player_contents_memo = None;
+        self.motor.interrupt_action();
+        self.loco = LocoPhase::Idle;
+    }
+
     /// Respawn after ANY completed death sequence (combat or hazard).
     ///
     /// Persistence policy (the souls rule: the world resets, the
@@ -642,8 +663,7 @@ impl Playtest {
             yaw
         };
         self.motor.snap_to(position, motor_yaw);
-        self.player_vitality.refill();
-        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.reset_life_combat();
         self.hazard_death_ticks_remaining = 0;
         self.anim_state = PlayerAnim::Idle;
         self.anim_blend_from = None;
@@ -657,7 +677,8 @@ impl Playtest {
         // as this life's PLAYER_WEAPON_ATTACHMENTS event.
         self.weapon_attach_reported = false;
         self.game_entities.spawn_from_records(GAME_ENTITIES);
-        self.game_entities.set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
+        self.game_entities
+            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.logic.init_from_records(LOGIC);
         // The logic runtime restarts its rolling fired total with the
         // records; restart the reported watermark with it or the
@@ -792,23 +813,59 @@ impl Playtest {
         true
     }
 
-    pub(super) fn interrupt_player_on_poise_break(&mut self, damage: u16, armored: bool, ctx: &Ctx) {
+    pub(super) fn interrupt_player_on_poise_break(
+        &mut self,
+        damage: u16,
+        armored: bool,
+        ctx: &Ctx,
+    ) -> bool {
         if self.hazard_death_ticks_remaining != 0 || !self.player_poise.hit(damage, 20, armored) {
-            return;
+            return false;
         }
         self.motor.interrupt_action();
+        self.attack_buffer.clear();
         self.evade_buffer_vblanks = 0;
         self.loco = LocoPhase::Idle;
         let now = self.gameplay_tick(ctx.sim_tick);
         let has_reaction = self.start_player_anim_action(PlayerAnim::HitReact, now, ctx.video_hz);
         let recovery = if has_reaction {
             self.anim_lock_until_tick.saturating_sub(now).clamp(18, 48)
-        } else { 18 };
+        } else {
+            18
+        };
         // Missing hit-react assets still interrupt gameplay safely.
         self.switch_player_anim(PlayerAnim::HitReact, now, ctx.video_hz);
         self.anim_lock_until_tick = now.saturating_add(recovery);
         self.anim_blend_from = None;
         telemetry::debug_log("player poise:break");
+        true
+    }
+
+    pub(super) fn spawn_combat_hit_sparks(
+        &mut self,
+        position: [i32; 3],
+        height: u16,
+        room: RoomIndex,
+        zenith: bool,
+        staggered: bool,
+        defeated: bool,
+    ) {
+        let _ = self.combat_projectile_impacts.spawn_effect(
+            [
+                position[0],
+                position[1].saturating_add(i32::from(height) / 2),
+                position[2],
+            ],
+            room,
+            if defeated {
+                16
+            } else if staggered {
+                10
+            } else {
+                6
+            },
+            psx_game_runtime::combat_feedback::melee_impact_style(zenith, staggered, defeated),
+        );
     }
 
     pub(super) fn lock_player_anim_action(
@@ -1828,9 +1885,7 @@ impl Playtest {
         let position = self.target_position(index)?;
         let height = MODELS
             .get(target.model.to_usize())
-            .map(|model| {
-                i32::from(model.world_height) * i32::from(target.visual_scale_q8) / 256
-            })
+            .map(|model| i32::from(model.world_height) * i32::from(target.visual_scale_q8) / 256)
             .unwrap_or(1024);
         Some(RoomPoint::new(
             position.x,
@@ -2011,5 +2066,79 @@ pub(super) fn live_action_speed_q8(
         modifiers.attack_speed_q8(authored)
     } else {
         authored
+    }
+}
+
+#[cfg(test)]
+mod life_reset_tests {
+    use super::*;
+    use psx_game_runtime::projectiles::{CombatTeam, ProjectileSpawn};
+
+    #[test]
+    fn respawn_discards_old_projectiles_broken_guard_and_queued_actions() {
+        // Use the production validity initializer on heap storage: the scene
+        // contains non-zero Option niches and is too large for the test stack.
+        let layout = std::alloc::Layout::new::<Playtest>();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+        assert!(!raw.is_null());
+        unsafe {
+            Playtest::init_zeroed(raw);
+        }
+        let mut storage = unsafe { std::boxed::Box::from_raw(raw) };
+        let scene = &mut *storage;
+        let config = scene.player_stance_config;
+        let first = scene.player_stance.apply_damage(
+            &mut scene.player_vitality,
+            VitalityChannelId::One,
+            u16::MAX,
+            &config,
+        );
+        assert!(first.forced_swap);
+        assert!(scene.player_stance.is_broken(VitalityChannelId::One));
+        scene.attack_buffer.request(1, 100);
+        scene.evade_buffer_vblanks = 8;
+        scene.swing_hit_mask = 3;
+        scene.camera_recenter_requested = true;
+        scene
+            .combat_projectiles
+            .spawn(ProjectileSpawn {
+                position: [0; 3],
+                velocity: [1, 0, 0],
+                radius: 2,
+                damage: 50,
+                poise_damage: 50,
+                lifetime_ticks: 100,
+                room: RoomIndex::ZERO,
+                team: CombatTeam::Enemy,
+                owner: 0,
+                tint_rgb: [255; 3],
+                damage_channel: psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon,
+                visual: psx_game_runtime::projectiles::ProjectileVisualStyle::EMPTY,
+            })
+            .unwrap();
+        assert_eq!(scene.combat_projectiles.len(), 1);
+        scene.souls.award(50, 100);
+        scene.reset_life_combat();
+        assert_eq!(scene.combat_projectiles.len(), 0);
+        assert_eq!(scene.attack_buffer.take(101), None);
+        assert_eq!(scene.evade_buffer_vblanks, 0);
+        assert_eq!(scene.swing_hit_mask, 0);
+        assert!(!scene.camera_recenter_requested);
+        assert_eq!(scene.player_stance.active(), VitalityChannelId::One);
+        assert!(scene.player_stance.can_swap());
+        assert!(!scene.player_stance.is_broken(VitalityChannelId::One));
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::One).current(),
+            PLAYER_MAX_HEALTH
+        );
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::Two).current(),
+            PLAYER_MAX_HEALTH
+        );
+        assert_eq!(
+            scene.souls.total(),
+            50,
+            "progress survives a new combat life"
+        );
     }
 }

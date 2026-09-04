@@ -549,19 +549,15 @@ pub(super) const fn clamp_streamed_room_slot_count(raw: usize) -> usize {
 pub(super) use psx_game_runtime::room_cache::INVALID_ROOM_INDEX;
 
 /// Per-frame projected-vertex scratch for the model renderer.
-/// Sized to the largest part vertex count we expect; instances
-/// over this cap drop their over-budget triangles graceful.
-pub(super) const MODEL_VERTEX_CAP: usize = 1024;
+/// Sized by the cooker to the largest complete model vertex count.
+pub(super) const MODEL_VERTEX_CAP: usize = crate::generated::MODEL_PROJECTED_VERTEX_CAPACITY;
 /// Predecoded face records shared by runtime model assets. The pool must hold
-/// every simultaneously loaded model, not merely the largest one. Cortex 0.1
-/// currently needs 1,947 records for both enemies, Aletha, and both swords.
-/// Keep a power-of-two ceiling above that complete scene requirement.
-pub(super) const MAX_RUNTIME_MODEL_FACES: usize = 2048;
+/// every cooked model, not merely the largest one.
+pub(super) const MAX_RUNTIME_MODEL_FACES: usize = crate::generated::MODEL_FACE_CAPACITY;
 /// Predecoded part records shared by runtime model assets.
-pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = 128;
-/// Predecoded vertices shared by every runtime model. Cortex 0.1 needs 1,433
-/// records when both enemies, Aletha, and both swords are resident.
-pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = 1536;
+pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = crate::generated::MODEL_PART_CAPACITY;
+/// Predecoded vertices shared by every cooked model.
+pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = crate::generated::MODEL_DECODED_VERTEX_CAPACITY;
 /// Projected edge threshold used to subdivide close model triangles.
 pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Joint-transform scratch -- all biped rigs we currently cook

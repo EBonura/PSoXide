@@ -582,6 +582,7 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// Wrapping identity of each entity's current swing. Deferred tokens use
     /// it to reject a contact retained across a later attack.
     attack_sequence: [u16; MAX_ENTITIES],
+    projectile_release_mask: [u16; MAX_ENTITIES],
     /// Packed selected swing plus next close-range alternation bit.
     attack_mode: [u8; MAX_ENTITIES],
     /// Free-movement combat choice ([`GameEntityIntent`] as raw u8).
@@ -764,6 +765,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         move_tried: [0; MAX_ENTITIES],
         combat_flags: [0; MAX_ENTITIES],
         attack_sequence: [0; MAX_ENTITIES],
+        projectile_release_mask: [0; MAX_ENTITIES],
         attack_mode: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
         attack_cooldown: [0; MAX_ENTITIES],
@@ -819,6 +821,25 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// Live entity count.
     pub fn count(&self) -> usize {
         usize::from(self.count)
+    }
+
+    /// All enabled enemies were defeated. Empty/disabled-only encounters and
+    /// truncated spawns cannot report success.
+    pub fn encounter_cleared(&self, records: &[LevelGameEntityRecord]) -> bool {
+        if self.overflow != 0 || self.count() < records.len() {
+            return false;
+        }
+        let mut any = false;
+        for (index, record) in records.iter().enumerate() {
+            if record.flags & game_entity_flags::ENABLED == 0 {
+                continue;
+            }
+            any = true;
+            if self.state(index) != GameEntityState::Dead {
+                return false;
+            }
+        }
+        any
     }
 
     /// Configure from the player's cooked stance record after spawning.
@@ -1502,6 +1523,26 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             && self.combat_flags[index] & GAME_ENTITY_ATTACK_CONNECTED == 0
     }
 
+    /// Per-emitter release latches for a valid ranged attack. A stagger, death,
+    /// new swing or new entity tick invalidates the old token.
+    pub fn deferred_projectile_release_mask(&self, attack: DeferredGameEntityAttack) -> Option<u16> {
+        (attack.is_ranged() && self.deferred_attack_can_connect(attack))
+            .then(|| self.projectile_release_mask[attack.entity()])
+    }
+
+    /// Consume only this emitter after spawning its shot. Other authored
+    /// release markers remain available, but no marker can fire twice.
+    pub fn commit_deferred_projectile(&mut self, attack: DeferredGameEntityAttack, emitter: u8) -> bool {
+        let Some(mask) = self.deferred_projectile_release_mask(attack) else {
+            return false;
+        };
+        if emitter >= 16 || mask & (1u16 << emitter) != 0 {
+            return false;
+        }
+        self.projectile_release_mask[attack.entity()] = mask | (1u16 << emitter);
+        true
+    }
+
     /// Test the explicitly legacy Character-radius/front-arc contact policy for
     /// a deferred token. Games should call this only when authored attacker
     /// hitboxes or defender hurtboxes are absent; an authored inactive frame or
@@ -1698,7 +1739,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 } else {
                     stats.melee_attack_enters += 1;
                 }
-                // A fresh swing gets one connection.
+                // A fresh melee swing gets one connection; ranged attacks
+                // get one release per authored emitter.
+                self.projectile_release_mask[index] = 0;
                 self.combat_flags[index] &= !GAME_ENTITY_ATTACK_CONNECTED;
                 self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
             }
@@ -4414,6 +4457,51 @@ mod tests {
         );
         assert_eq!(stats.attacking, 0);
         assert!(attacks.is_empty());
+    }
+
+    #[test]
+    fn encounter_clear_requires_every_enabled_enemy_and_resets_on_respawn() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        assert!(!entities.encounter_cleared(&[]));
+        entities.spawn_from_records(&IDLE_ENEMY);
+        assert!(!entities.encounter_cleared(&IDLE_ENEMY));
+        entities.state[0] = GameEntityState::Dead as u8;
+        assert!(entities.encounter_cleared(&IDLE_ENEMY));
+        entities.spawn_from_records(&IDLE_ENEMY);
+        assert!(!entities.encounter_cleared(&IDLE_ENEMY));
+        let mut disabled = IDLE_ENEMY;
+        disabled[0].flags &= !game_entity_flags::ENABLED;
+        assert!(!entities.encounter_cleared(&disabled));
+        entities.state[0] = GameEntityState::Dead as u8;
+        entities.overflow = 1;
+        assert!(!entities.encounter_cleared(&IDLE_ENEMY));
+    }
+
+    #[test]
+    fn ranged_volley_latches_each_emitter_and_interrupts_cancel_pending_shots() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        entities.attack_mode[0] = GAME_ENTITY_ATTACK_RANGED;
+        let mut stats = GameEntityTickStats::default();
+        entities.enter_state(0, GameEntityState::Attack, &mut stats);
+        let token = entities.deferred_attack(&IDLE_ENEMY[0], 0);
+        assert_eq!(entities.deferred_projectile_release_mask(token), Some(0));
+        assert!(entities.commit_deferred_projectile(token, 1));
+        assert!(!entities.commit_deferred_projectile(token, 1));
+        assert!(!entities.commit_deferred_projectile(token, 16));
+        assert!(entities.commit_deferred_projectile(token, 3));
+        assert_eq!(entities.deferred_projectile_release_mask(token), Some(10));
+        entities.enter_state(0, GameEntityState::Staggered, &mut stats);
+        assert!(!entities.commit_deferred_projectile(token, 4));
+        entities.enter_state(0, GameEntityState::Attack, &mut stats);
+        let fresh = entities.deferred_attack(&IDLE_ENEMY[0], 0);
+        assert_eq!(entities.deferred_projectile_release_mask(fresh), Some(0));
+        assert!(!entities.commit_deferred_projectile(token, 4));
+        entities.enter_state(0, GameEntityState::Dead, &mut stats);
+        assert!(!entities.commit_deferred_projectile(fresh, 4));
+        let mut melee = fresh;
+        melee.ranged = false;
+        assert_eq!(entities.deferred_projectile_release_mask(melee), None);
     }
 
     #[test]

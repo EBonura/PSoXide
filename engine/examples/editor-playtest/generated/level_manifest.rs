@@ -33,6 +33,12 @@ pub const UI_PACK_START_LBA: u32 = 1024;
 pub static UI_PACK_TOC: &[LevelWorldPackEntryRecord] = &[];
 
 pub const BOX_PROP_STATE_COUNT: usize = 1;
+pub const MODEL_PROJECTED_VERTEX_CAPACITY: usize = 1;
+pub const MODEL_FACE_CAPACITY: usize = 1;
+pub const MODEL_PART_CAPACITY: usize = 1;
+pub const MODEL_DECODED_VERTEX_CAPACITY: usize = 1;
+pub static INTERACTABLE_MESSAGE_PAGES_IT: &[&str] = &[];
+pub static BOOST_MODULES_IT: &[(&str, &str)] = &[];
 pub const PERSISTENT_ASSET_PAGE_COUNT: usize = 1;
 pub const CACHED_ROOM_DEPTH_MODE: u8 = 2;
 pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;

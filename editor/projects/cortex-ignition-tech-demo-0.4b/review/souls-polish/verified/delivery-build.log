@@ -1,0 +1,515 @@
+   Compiling psxed-project v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/crates/psxed-project)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.51s
+     Running `target/debug/examples/cook_cortex_polish /Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/projects/cortex-ignition-tech-demo-0.4b`
+[brush-qbsp] filled 206 unreachable exterior leaves
+[brush-vis] Quake portal flow: 347 visible leaves, 1888 directed portals, 8 workers
+[brush-vis] portal flow 1024/1888 (0.3s)
+[brush-vis] portal flow 1888/1888 (1.7s)
+[brush-vis] portal flow complete in 1.7s
+[cook] resampled Light Enemy / Artigli / Light Enemy / Hit React: 12 -> 11 Hz, 15 -> 14 frames, 5300 -> 6180 B, 1166 -> 1181 ms (+1.3%)
+[cook] resampled Heavy Enemy Model / Heavy Enemy / Idle: 12 -> 5 Hz, 49 -> 21 frames, 21188 -> 11360 B, 4000 -> 4000 ms (+0.0%)
+[cook] resampled Heavy Enemy Model / Heavy Enemy / Strafe Left: 12 -> 10 Hz, 25 -> 21 frames, 10820 -> 11360 B, 2000 -> 2000 ms (+0.0%)
+[cook] resampled Heavy Enemy Model / Heavy Enemy / Strafe Right: 12 -> 10 Hz, 25 -> 21 frames, 10820 -> 11360 B, 2000 -> 2000 ms (+0.0%)
+[cook] resampled Aletha Delivered / gen_walk_fwd_winddown_mirror: 15 -> 1 Hz, 8 -> 2 frames, 3348 -> 852 B, 466 -> 1000 ms (+114.6%)
+[cook] resampled Aletha Delivered / gen_run_fwd_winddown_mirror: 15 -> 1 Hz, 8 -> 2 frames, 3348 -> 852 B, 466 -> 1000 ms (+114.6%)
+[cook] resampled Aletha Delivered / aletha_idle: 12 -> 6 Hz, 86 -> 44 frames, 35796 -> 22900 B, 7083 -> 7166 ms (+1.2%)
+warning: Character 'Aletha' has no turn clip
+   Compiling psx-iso v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide-cortex-polish/crates/psx-iso)
+   Compiling lz4_flex v0.11.6
+   Compiling mkisopsx v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide-cortex-polish/tools/mkisopsx)
+    Finished `release` profile [optimized] target(s) in 2.99s
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+   Compiling editor-playtest v0.1.0 (/private/tmp/cortex-polish/guest-build/stage/engine/examples/editor-playtest)
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: MIPS-I support is experimental
+warning: associated function `cull_polygon` is never used
+   --> /private/tmp/cortex-polish/guest-build/stage/engine/crates/psx-bsp/src/render.rs:776:8
+    |
+549 | impl FrustumPlanes {
+    | ------------------ associated function in this implementation
+...
+776 |     fn cull_polygon(
+    |        ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `pxbsp_face_clip` is never used
+    --> /private/tmp/cortex-polish/guest-build/stage/engine/crates/psx-bsp/src/render.rs:2446:15
+     |
+1310 | impl Renderer {
+     | ------------- associated function in this implementation
+...
+2446 |     unsafe fn pxbsp_face_clip(
+     |               ^^^^^^^^^^^^^^^
+
+warning: `psx-bsp` (lib) generated 2 warnings
+warning: MIPS-I support is experimental
+warning: unused import: `draw_quad_flat`
+   --> src/main.rs:101:21
+    |
+101 |     draw_line_mono, draw_quad_flat, draw_tri_flat_blended,
+    |                     ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `INTERACTABLE_MESSAGE_PAGES`
+   --> src/main.rs:207:5
+    |
+207 |     INTERACTABLE_MESSAGE_PAGES, LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `fps_window_start`, `fps_window_frames`, `fps_last_tick`, `fps_worst_gap`, `fps_display`, and `fps_display_worst` are never read
+   --> src/main.rs:539:5
+    |
+298 | struct Playtest {
+    |        -------- fields in this struct
+...
+539 |     fps_window_start: u32,
+    |     ^^^^^^^^^^^^^^^^
+540 |     fps_window_frames: u8,
+    |     ^^^^^^^^^^^^^^^^^
+541 |     fps_last_tick: u32,
+    |     ^^^^^^^^^^^^^
+542 |     fps_worst_gap: u8,
+    |     ^^^^^^^^^^^^^
+543 |     fps_display: u8,
+    |     ^^^^^^^^^^^
+544 |     fps_display_worst: u8,
+    |     ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `mark_visible_room_unbuilt` is never used
+   --> src/active_rooms.rs:344:19
+    |
+ 39 | impl Playtest {
+    | ------------- method in this implementation
+...
+344 |     pub(super) fn mark_visible_room_unbuilt(&mut self, index: RoomIndex) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `draw_interaction_prompt` is never used
+  --> src/overlay.rs:46:15
+   |
+46 | pub(crate) fn draw_interaction_prompt(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `check_run_complete` is never used
+    --> src/playtest_update.rs:1165:8
+     |
+  57 | impl Playtest {
+     | ------------- method in this implementation
+...
+1165 |     fn check_run_complete(&mut self, ctx: &mut Ctx) {
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: constant `ENDING_SCENE_STATE_NAME` is never used
+    --> src/playtest_update.rs:1226:7
+     |
+1226 | const ENDING_SCENE_STATE_NAME: &str = "Ending";
+     |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `current_room_surface_options` is never used
+   --> src/runtime_config.rs:394:15
+    |
+394 | pub(super) fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `room_visibility_radius` is never used
+   --> src/runtime_config.rs:426:15
+    |
+426 | pub(super) fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:5
+  |
+1 |     lw $1, 0($2)
+  |        ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:4:11
+  |
+4 | andi $fp, $1, 16383
+  |           ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:5
+  |
+1 |     lw $1, 0($20)
+  |        ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:4:11
+  |
+4 | andi $22, $1, 16383
+  |           ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:5
+  |
+1 |     lw $1, 0($21)
+  |        ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:5
+  |
+1 |     lw $1, 0($10)
+  |        ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:4:11
+  |
+4 | andi $ra, $1, 16383
+  |           ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $4, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:2:7
+  |
+2 | sltiu $1, $1, 1
+  |       ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:2:11
+  |
+2 | sltiu $1, $1, 1
+  |           ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:5:5
+  |
+5 | sll $1, $1, 1
+  |     ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:5:9
+  |
+5 | sll $1, $1, 1
+  |         ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:14
+  |
+6 | addu $4, $4, $1
+  |              ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $9, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:14
+  |
+6 | addu $9, $9, $1
+  |              ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $7, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:14
+  |
+6 | addu $7, $7, $1
+  |              ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $3, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:14
+  |
+6 | addu $3, $3, $1
+  |              ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $25, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $25, $25, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $15, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $15, $15, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $gp, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $gp, $gp, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $18, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $18, $18, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $5, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:14
+  |
+6 | addu $5, $5, $1
+  |              ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $17, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $17, $17, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $10, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $10, $10, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $6, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:14
+  |
+6 | addu $6, $6, $1
+  |              ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $13, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $13, $13, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $14, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $14, $14, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $8, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:14
+  |
+6 | addu $8, $8, $1
+  |              ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $11, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $11, $11, $1
+  |                ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:1:7
+  |
+1 |     xori $1, $24, 0x07ff
+  |          ^
+
+warning: used $at (currently $1) without ".set noat"
+  |
+note: instantiated into assembly here
+ --> <inline asm>:6:16
+  |
+6 | addu $24, $24, $1
+  |                ^
+
+warning: `editor-playtest` (bin "editor-playtest") generated 119 warnings (65 duplicates) (run `cargo fix --bin "editor-playtest" -p editor-playtest` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 8.72s
+[guest-build] canonical stage /tmp/cortex-polish/guest-build/stage
+[guest-build] b3e20142b248fe0ec94b5a71b67da5effbbcc1efa6eeef759c01f1f505979d2c  build/examples/mipsel-sony-psx/release/editor-playtest.exe
+wrote /Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue
+wrote /Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.bin (28445088 bytes = 12094 sectors, raw .bin) from /Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.exe
+0 hazards in /Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.exe
+b3e20142b248fe0ec94b5a71b67da5effbbcc1efa6eeef759c01f1f505979d2c  /Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.exe
+e8a11053f84b375b25ec3909643f8bd94e150a1974841d7fac89e96587221bf3  /Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.bin
+51a73fbd3e150909d2f881328a6588bf37f635ce8e5d2a9a4c29f112c30c3214  /Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue

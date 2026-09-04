@@ -1,0 +1,7 @@
+   Compiling psxed-project v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide-cortex-polish/editor/crates/psxed-project)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running `target/debug/examples/cook_cortex_heavy_motion editor/projects/cortex-ignition-tech-demo-0.4b`
+MODEL alert: existing joints=27 scale=200 vertices=618 generated joints=27 scale=200 vertices=618
+CLIP alert 7796 bytes
+MODEL turn: existing joints=27 scale=200 vertices=618 generated joints=27 scale=200 vertices=618
+CLIP turn 5636 bytes

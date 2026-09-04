@@ -399,6 +399,26 @@ pub(crate) use draw_project_cached_room;
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
+    // Reserve exact model tables and the largest single-model projection
+    // scratch. Worst-case unused slots otherwise consume tens of KB on PS1.
+    let mut model_capacities = [0usize; 4];
+    for model in &package.models {
+        let Some(mesh) = package.assets.get(model.mesh_asset_index)
+            .and_then(|asset| psx_asset::Model::from_bytes(&asset.bytes).ok()) else {
+            // Invalid packages still produce diagnostics with conservative
+            // budgets; the cooker reports their asset errors separately.
+            model_capacities = [1024, 2048, 128, 1536];
+            break;
+        };
+        model_capacities[0] = model_capacities[0].max(usize::from(mesh.vertex_count()));
+        model_capacities[1] += usize::from(mesh.face_count());
+        model_capacities[2] += usize::from(mesh.part_count());
+        model_capacities[3] += usize::from(mesh.vertex_count());
+    }
+    for (name, capacity) in ["MODEL_PROJECTED_VERTEX_CAPACITY", "MODEL_FACE_CAPACITY",
+        "MODEL_PART_CAPACITY", "MODEL_DECODED_VERTEX_CAPACITY"].into_iter().zip(model_capacities) {
+        let _ = writeln!(out, "pub const {name}: usize = {};", capacity.max(1));
+    }
     let _ = writeln!(
         out,
         "pub const BSP_COOK_IS_RELEASE: bool = {};\n",
