@@ -419,6 +419,7 @@ struct Playtest {
     /// death sequence arms; legacy untyped damage drains Horizon first and
     /// spills its excess into Zenith.
     player_vitality: DualVitality,
+    player_poise: psx_game_runtime::poise::Poise,
     /// Which pool is active. Only the active pool takes damage and only the
     /// inactive one recovers, so swapping is how the player heals.
     player_stance: CombatStance,
@@ -559,6 +560,7 @@ struct Playtest {
     /// Only live gameplay entities participate; scenery model instances
     /// never enter the combat target set.
     lock_target: Option<usize>,
+    camera_recenter_requested: bool,
     lock_switch_stick_held: bool,
     /// Consecutive ticks where the hard-lock target is outside break range.
     /// Dead/despawned targets still release immediately.
@@ -700,6 +702,7 @@ impl Playtest {
         addr_of_mut!((*scene).player_actor_pose).write(None);
         addr_of_mut!((*scene).previous_player_actor_pose).write(None);
         addr_of_mut!((*scene).lock_target).write(None);
+        addr_of_mut!((*scene).camera_recenter_requested).write(false);
         addr_of_mut!((*scene).soft_lock_target).write(None);
         addr_of_mut!((*scene).active_interactable).write(None);
         addr_of_mut!((*scene).checkpoint).write(None);
@@ -762,6 +765,7 @@ impl Playtest {
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         self.player_contents_memo = None;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
         // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
         // would mean no damage and no recovery at all, so it is set explicitly
         // on every reset rather than relying on the zero pattern.

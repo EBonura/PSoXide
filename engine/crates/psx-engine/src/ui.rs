@@ -3942,7 +3942,7 @@ fn draw_message_dismiss_hint(
     action: &str,
 ) {
     const INSET_X: i16 = 10;
-    const INSET_BOTTOM: u16 = 3;
+    const INSET_BOTTOM: u16 = 5;
 
     let line_height = scaled_line_height(font, UI_FONT_SCALE_ONE_Q8).max(0) as u16;
     let text_y = layout.y.saturating_add(
@@ -3951,7 +3951,11 @@ fn draw_message_dismiss_hint(
             .saturating_sub(line_height)
             .saturating_sub(INSET_BOTTOM) as i16,
     );
-    let text_x = layout.x.saturating_add(INSET_X);
+    let control_width = controller_prompt_prefix_width(cross_prompt.is_some())
+        .saturating_add(font.text_width(action) as i16);
+    let text_x = layout.x.saturating_add(
+        (layout.width as i16 - INSET_X - control_width).max(INSET_X),
+    );
     let action_x = draw_controller_prompt_prefix(font, cross_prompt, text_x, text_y);
     draw_scaled_text_paint(
         font,
