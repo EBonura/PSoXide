@@ -4,11 +4,18 @@ use psx_gpu::material::BlendMode;
 use psx_gpu::prim::{LineMono, QuadGouraudBlended, TriGouraud};
 use psx_gte::lighting::ProjectedLit;
 
-const TARGET_LOCK_OUTER: i32 = 25;
-const TARGET_LOCK_INNER: i32 = 13;
-const TARGET_LOCK_TRI_HALF_WIDTH: i32 = 8;
-const TARGET_LOCK_RED: (u8, u8, u8) = (225, 18, 24);
-const TARGET_LOCK_ROTATION_FRAMES: u32 = 360;
+const TARGET_LOCK_OUTER_RADIUS: i32 = 25;
+const TARGET_LOCK_OUTER_CORNER: i32 = 17;
+const TARGET_LOCK_OUTER_STEM_END: i32 = 7;
+const TARGET_LOCK_INNER_RADIUS: i32 = 20;
+const TARGET_LOCK_INNER_CORNER: i32 = 14;
+const TARGET_LOCK_INNER_STEM_END: i32 = 6;
+const TARGET_LOCK_SPOKE_INNER: i32 = 7;
+const TARGET_LOCK_SPOKE_OUTER: i32 = 12;
+const TARGET_LOCK_CENTER_HALF: i32 = 2;
+const TARGET_LOCK_WHITE: (u8, u8, u8) = (224, 240, 244);
+const TARGET_LOCK_CYAN: (u8, u8, u8) = (32, 220, 224);
+const TARGET_LOCK_PULSE_FRAMES: u32 = 72;
 
 /// Marker visualization tuning. Markers are debug stubs -- keep
 /// them visible at orbit-camera scales without dominating the
@@ -823,51 +830,141 @@ pub(super) fn draw_lock_target_indicator(
         return;
     };
 
-    let outer = TARGET_LOCK_OUTER;
-    let inner = TARGET_LOCK_INNER;
-    let half_width = TARGET_LOCK_TRI_HALF_WIDTH;
-    let angle = Angle::per_frames(TARGET_LOCK_ROTATION_FRAMES).mul_tick(elapsed_tick);
-    let triangles = [
-        [
-            target_screen_vertex(center, 0, -inner, angle),
-            target_screen_vertex(center, -half_width, -outer, angle),
-            target_screen_vertex(center, half_width, -outer, angle),
-        ],
-        [
-            target_screen_vertex(center, 0, inner, angle),
-            target_screen_vertex(center, half_width, outer, angle),
-            target_screen_vertex(center, -half_width, outer, angle),
-        ],
-        [
-            target_screen_vertex(center, -inner, 0, angle),
-            target_screen_vertex(center, -outer, half_width, angle),
-            target_screen_vertex(center, -outer, -half_width, angle),
-        ],
-        [
-            target_screen_vertex(center, inner, 0, angle),
-            target_screen_vertex(center, outer, -half_width, angle),
-            target_screen_vertex(center, outer, half_width, angle),
-        ],
-    ];
+    let (breath, brightness) = target_lock_pulse(elapsed_tick);
+    let white = target_lock_color(TARGET_LOCK_WHITE, brightness);
+    let cyan = target_lock_color(TARGET_LOCK_CYAN, brightness);
 
-    for triangle in triangles {
-        draw_tri_flat_blended(
-            triangle,
-            TARGET_LOCK_RED.0,
-            TARGET_LOCK_RED.1,
-            TARGET_LOCK_RED.2,
-            BlendMode::Average,
+    // Each quadrant is an octagonal white bracket, a smaller cyan bracket,
+    // and one diagonal spoke aimed at the centre. Keeping the parts separate
+    // lets the whole reticle breathe without rotating like the old triangles.
+    for (sx, sy) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+        let outer_radius = TARGET_LOCK_OUTER_RADIUS + breath;
+        let outer_corner = TARGET_LOCK_OUTER_CORNER + breath;
+        draw_target_lock_line(
+            center,
+            (sx * outer_corner, sy * outer_radius),
+            (sx * outer_radius, sy * outer_corner),
+            white,
         );
+        draw_target_lock_line(
+            center,
+            (sx * outer_radius, sy * outer_corner),
+            (sx * outer_radius, sy * TARGET_LOCK_OUTER_STEM_END),
+            white,
+        );
+
+        let inner_radius = TARGET_LOCK_INNER_RADIUS + breath;
+        let inner_corner = TARGET_LOCK_INNER_CORNER + breath;
+        draw_target_lock_line(
+            center,
+            (sx * inner_corner, sy * inner_radius),
+            (sx * inner_radius, sy * inner_corner),
+            cyan,
+        );
+        draw_target_lock_line(
+            center,
+            (sx * inner_radius, sy * inner_corner),
+            (sx * inner_radius, sy * TARGET_LOCK_INNER_STEM_END),
+            cyan,
+        );
+
+        draw_target_lock_line(
+            center,
+            (sx * TARGET_LOCK_SPOKE_INNER, sy * TARGET_LOCK_SPOKE_INNER),
+            (sx * TARGET_LOCK_SPOKE_OUTER, sy * TARGET_LOCK_SPOKE_OUTER),
+            cyan,
+        );
+    }
+
+    let half = TARGET_LOCK_CENTER_HALF;
+    let left = clamp_i16(i32::from(center.sx).saturating_sub(half));
+    let top = clamp_i16(i32::from(center.sy).saturating_sub(half));
+    let right = clamp_i16(i32::from(center.sx).saturating_add(half + 1));
+    let bottom = clamp_i16(i32::from(center.sy).saturating_add(half + 1));
+    draw_quad_flat(
+        [(left, top), (right, top), (left, bottom), (right, bottom)],
+        cyan.0,
+        cyan.1,
+        cyan.2,
+    );
+}
+
+/// One slow triangle wave drives both the two-pixel radial breath and a mild
+/// brightness pulse. Values depend only on the prepared overlay tick, so the
+/// deferred overlay remains deterministic when render cadence changes.
+fn target_lock_pulse(elapsed_tick: SimTick) -> (i32, u8) {
+    let phase = elapsed_tick.as_u32() % TARGET_LOCK_PULSE_FRAMES;
+    let half = TARGET_LOCK_PULSE_FRAMES / 2;
+    let wave = if phase <= half {
+        phase
+    } else {
+        TARGET_LOCK_PULSE_FRAMES - phase
+    };
+    let breath = (wave * 2 / half) as i32;
+    let brightness = (208 + wave * 47 / half) as u8;
+    (breath, brightness)
+}
+
+fn target_lock_color(color: (u8, u8, u8), brightness: u8) -> (u8, u8, u8) {
+    let scale = |channel: u8| ((u16::from(channel) * u16::from(brightness)) / 255) as u8;
+    (scale(color.0), scale(color.1), scale(color.2))
+}
+
+/// Draw a two-pixel screen-space line. The second raster line is offset away
+/// from the centre on the minor axis, keeping mirrored parts symmetrical and
+/// giving horizontal, vertical, and diagonal pieces even weight at 320x240.
+fn draw_target_lock_line(
+    center: ProjectedVertex,
+    from: (i32, i32),
+    to: (i32, i32),
+    color: (u8, u8, u8),
+) {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let second_pixel = if dx.abs() >= dy.abs() {
+        (0, (from.1 + to.1).signum())
+    } else {
+        ((from.0 + to.0).signum(), 0)
+    };
+    for offset in [(0, 0), second_pixel] {
+        let x0 = clamp_i16(
+            i32::from(center.sx)
+                .saturating_add(from.0)
+                .saturating_add(offset.0),
+        );
+        let y0 = clamp_i16(
+            i32::from(center.sy)
+                .saturating_add(from.1)
+                .saturating_add(offset.1),
+        );
+        let x1 = clamp_i16(
+            i32::from(center.sx)
+                .saturating_add(to.0)
+                .saturating_add(offset.0),
+        );
+        let y1 = clamp_i16(
+            i32::from(center.sy)
+                .saturating_add(to.1)
+                .saturating_add(offset.1),
+        );
+        draw_line_mono(x0, y0, x1, y1, color.0, color.1, color.2);
     }
 }
 
-fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle) -> (i16, i16) {
-    let sin = angle.sin_q12();
-    let cos = angle.cos_q12();
-    let rx = ((ox.saturating_mul(cos)).saturating_sub(oy.saturating_mul(sin))) >> 12;
-    let ry = ((ox.saturating_mul(sin)).saturating_add(oy.saturating_mul(cos))) >> 12;
-    (
-        clamp_i16((center.sx as i32).saturating_add(rx)),
-        clamp_i16((center.sy as i32).saturating_add(ry)),
-    )
+#[cfg(test)]
+mod target_lock_tests {
+    use super::*;
+
+    #[test]
+    fn pulse_reaches_the_authored_extremes() {
+        assert_eq!(target_lock_pulse(SimTick::ZERO), (0, 208));
+        assert_eq!(
+            target_lock_pulse(SimTick::from_u32(TARGET_LOCK_PULSE_FRAMES / 2)),
+            (2, 255)
+        );
+        assert_eq!(
+            target_lock_pulse(SimTick::from_u32(TARGET_LOCK_PULSE_FRAMES)),
+            (0, 208)
+        );
+    }
 }
