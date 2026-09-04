@@ -1881,7 +1881,7 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
     let mut actual = [ProjectedVertex::default(); SEAM_VERTS];
     let mut all_in_front = true;
     let mut all_inside = true;
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (i16::MAX, i16::MIN, i16::MAX, i16::MIN);
+    let mut extent_code = 0u32;
     scene::load_rotation(&primary.rotation);
     scene::load_translation(primary.translation);
     let indices: [u16; SEAM_VERTS] = core::array::from_fn(|i| i as u16);
@@ -1912,15 +1912,14 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
                 &mut actual,
                 &mut all_in_front,
                 &mut all_inside,
-                &mut min_x,
-                &mut max_x,
-                &mut min_y,
-                &mut max_y,
+                &mut extent_code,
             );
         }
     }
 
     assert_eq!(actual, expected);
+    assert_eq!(extent_code, expected.iter().fold(0, |code, p|
+        code | crate::projection::gpu_extent_box_code([p.sx, p.sy])));
     // The seam fixture sits in front of the near plane and on-screen, so
     // the fold flags must agree with a direct per-vertex evaluation.
     for &projected in &expected {

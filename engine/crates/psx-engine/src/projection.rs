@@ -119,6 +119,19 @@ pub fn classic_quad_screen_rejected(points: [[i16; 2]; 4], right: i32, bottom: i
     (c2 & c3) != 0 && (c3 & c0) != 0 && (c1 & c3) != 0
 }
 
+/// A cheap sufficient proof that a set of vertices fits GPU polygon extents.
+///
+/// The fixed rectangle [-352, 671] x [-136, 375] includes a 320x240 viewport
+/// and spans exactly 1023 x 511 pixels. OR the codes of every vertex: zero
+/// proves that every triangle formed from them fits those hardware limits.
+/// A nonzero code requires the caller's ordinary exact extent test; it never
+/// authorizes rejection or a change in tessellation.
+#[inline(always)]
+pub fn gpu_extent_box_code(screen: [i16; 2]) -> u32 {
+    (((screen[0] as i32 + 352) as u32) & !1023)
+        | (((screen[1] as i32 + 136) as u32) & !511)
+}
+
 /// Pack five signed half-space distances into an outcode.
 ///
 /// Renderers choose the planes and their order. This helper only standardises
@@ -156,6 +169,16 @@ mod tests {
                     && (x&z)!=0 && (y&w)!=0);
             }
         }}}
+    }
+
+    #[test]
+    fn extent_box_proof_covers_exactly_the_safe_rectangle() {
+        for coordinate in i16::MIN..=i16::MAX {
+            assert_eq!(gpu_extent_box_code([coordinate, 0]) == 0,
+                (-352..=671).contains(&coordinate));
+            assert_eq!(gpu_extent_box_code([0, coordinate]) == 0,
+                (-136..=375).contains(&coordinate));
+        }
     }
 
     #[test]
