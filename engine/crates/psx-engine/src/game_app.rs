@@ -253,6 +253,9 @@ struct CddaPlayer {
     requested: MusicCue,
     current_track: u8,
     current_volume_percent: u8,
+    target_volume_percent: u8,
+    fade_ticks_left: u16,
+    fade_out_stop: bool,
     step: CddaStartStep,
     next_retry_tick: u32,
     next_status_tick: u32,
@@ -335,6 +338,10 @@ impl FlowTransition {
     }
 }
 
+/// Combat music ramps: one second in, two seconds out (60 Hz ticks).
+const COMBAT_MUSIC_FADE_IN_TICKS: u16 = 60;
+const COMBAT_MUSIC_FADE_OUT_TICKS: u16 = 120;
+
 impl CddaPlayer {
     const fn new() -> Self {
         Self {
@@ -346,6 +353,63 @@ impl CddaPlayer {
             next_status_tick: 0,
             routed: false,
             stopped_polls: 0,
+            target_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
+            fade_ticks_left: 0,
+            fade_out_stop: false,
+        }
+    }
+
+    /// Start `cue` from silence and ramp to its volume over `fade_ticks`.
+    fn start_faded(&mut self, cue: MusicCue, tick: u32, fade_ticks: u16) {
+        let cue = cue.normalized();
+        self.fade_out_stop = false;
+        self.request(
+            MusicCue {
+                volume_percent: 0,
+                ..cue
+            },
+            tick,
+        );
+        self.requested = cue;
+        self.current_volume_percent = 0;
+        self.target_volume_percent = cue.volume_percent;
+        self.fade_ticks_left = fade_ticks.max(1);
+        if self.routed {
+            cdda_set_volume(0);
+        }
+    }
+
+    /// Ramp to silence over `fade_ticks`, then stop and release the drive.
+    fn fade_out_and_stop(&mut self, fade_ticks: u16) {
+        if self.requested.track == 0 {
+            return;
+        }
+        self.target_volume_percent = 0;
+        self.fade_ticks_left = fade_ticks.max(1);
+        self.fade_out_stop = true;
+    }
+
+    fn fading_out(&self) -> bool {
+        self.fade_out_stop
+    }
+
+    /// One tick of the volume ramp; SPU CD volume is a register write.
+    fn tick_fade(&mut self, tick: u32) {
+        if self.current_volume_percent == self.target_volume_percent {
+            if self.fade_out_stop {
+                self.fade_out_stop = false;
+                self.release_for_data_reads(tick);
+            }
+            return;
+        }
+        let remaining = i32::from(self.fade_ticks_left.max(1));
+        let delta = i32::from(self.target_volume_percent) - i32::from(self.current_volume_percent);
+        let step = (delta.abs() + remaining - 1) / remaining;
+        let next = i32::from(self.current_volume_percent) + step.min(delta.abs()) * delta.signum();
+        self.current_volume_percent = next.clamp(0, 100) as u8;
+        self.fade_ticks_left = self.fade_ticks_left.saturating_sub(1);
+        if self.routed {
+            cdda_set_volume(self.current_volume_percent);
         }
     }
 
@@ -363,6 +427,9 @@ impl CddaPlayer {
             return;
         }
 
+        self.target_volume_percent = cue.volume_percent;
+        self.fade_ticks_left = 0;
+        self.fade_out_stop = false;
         if self.routed && self.current_volume_percent != cue.volume_percent {
             cdda_set_volume(cue.volume_percent);
             self.current_volume_percent = cue.volume_percent;
@@ -390,6 +457,10 @@ impl CddaPlayer {
         if self.requested.track == 0 {
             return;
         }
+        self.tick_fade(tick);
+        if self.requested.track == 0 {
+            return;
+        }
         if self.current_track == self.requested.track {
             self.maybe_loop(tick);
             return;
@@ -398,8 +469,11 @@ impl CddaPlayer {
             return;
         }
         if !self.routed {
-            cdda_route_audio(self.requested.volume_percent);
-            self.current_volume_percent = self.requested.volume_percent;
+            // A faded start routes at the ramp's current level (0), not the cue's.
+            if self.fade_ticks_left == 0 {
+                self.current_volume_percent = self.requested.volume_percent;
+            }
+            cdda_route_audio(self.current_volume_percent);
             self.routed = true;
         }
         if cdda_issue_step(self.step, self.requested.track) {
@@ -769,6 +843,8 @@ pub struct GameApp<'a, S: Scene> {
     option_len: usize,
     /// Nonblocking CD-DA menu music driver.
     cdda: CddaPlayer,
+    /// Combat music currently requested (edge-detected against the scene).
+    combat_music_engaged: bool,
     /// Uploaded UI SFX sample metadata, capped for no-alloc runtime lookup.
     #[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
     ui_sfx_runtime_samples: [UiSfxRuntimeSample; MAX_UI_SFX_SAMPLES],
@@ -974,6 +1050,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             option_values,
             option_len,
             cdda: CddaPlayer::new(),
+            combat_music_engaged: false,
             ui_sfx_runtime_samples: [UiSfxRuntimeSample::EMPTY; MAX_UI_SFX_SAMPLES],
             ui_sfx_runtime_len: 0,
             ui_sfx_cursor: 0,
@@ -1568,11 +1645,30 @@ impl<'a, S: Scene> GameApp<'a, S> {
                     && node.option != UI_OPTION_NONE
                     && node.option <= 99
                     && node.option != 0
+                    && node.flags & psx_level::ui_node_flags::MUSIC_TRIGGER_COMBAT == 0
             })
             .map(|node| {
                 music_cue_from_node(node, self.options, &self.option_values, self.option_len)
             })
             .unwrap_or(MusicCue::SILENT)
+    }
+
+    /// The scene's combat-trigger Music node, if it authored one.
+    fn scene_combat_music_cue(&self, scene_id: u16) -> Option<MusicCue> {
+        let (first, count) = self.scene_node_range(scene_id);
+        let end = first.saturating_add(count).min(self.nodes.len());
+        self.nodes[first..end]
+            .iter()
+            .find(|node| {
+                matches!(node.kind, LevelUiNodeKind::Music)
+                    && node.option != UI_OPTION_NONE
+                    && node.option <= 99
+                    && node.option != 0
+                    && node.flags & psx_level::ui_node_flags::MUSIC_TRIGGER_COMBAT != 0
+            })
+            .map(|node| {
+                music_cue_from_node(node, self.options, &self.option_values, self.option_len)
+            })
     }
 
     /// Index into [`GameFlow::states`] of the first `UiScene` state
@@ -2207,8 +2303,22 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // assets are cached, the menu issues no more CD reads, so CD-DA plays
         // uninterrupted while the player navigates intro/menu/settings.
         if self.gameplay.front_end_assets_ready() {
-            let music_cue = self.scene_music_cue(scene);
-            self.cdda.request(music_cue, ctx.sim_tick.as_u32());
+            let tick = ctx.sim_tick.as_u32();
+            let combat_cue = self.scene_combat_music_cue(scene);
+            let combat = combat_cue.is_some() && self.gameplay.combat_music_active();
+            if combat != self.combat_music_engaged {
+                self.combat_music_engaged = combat;
+                match combat_cue {
+                    Some(cue) if combat => {
+                        self.cdda.start_faded(cue, tick, COMBAT_MUSIC_FADE_IN_TICKS)
+                    }
+                    _ => self.cdda.fade_out_and_stop(COMBAT_MUSIC_FADE_OUT_TICKS),
+                }
+            }
+            if !self.combat_music_engaged && !self.cdda.fading_out() {
+                let music_cue = self.scene_music_cue(scene);
+                self.cdda.request(music_cue, tick);
+            }
         }
         self.cdda.update(ctx.sim_tick.as_u32());
     }
@@ -2507,7 +2617,6 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             }
         }
     }
-
 
     fn update(&mut self, ctx: &mut Ctx) {
         if self.loading_exit_transition.is_some() {
