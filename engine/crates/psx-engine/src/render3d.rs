@@ -3395,19 +3395,13 @@ fn commit_projected_triple(
     near_z: i32,
     out: &mut [ProjectedVertex],
     all_in_front: &mut bool,
-    min_x: &mut i16,
-    max_x: &mut i16,
-    min_y: &mut i16,
-    max_y: &mut i16,
+    extent_code: &mut u32,
 ) {
     let mut k = 0usize;
     while k < 3 {
         let p = triple[k];
         *all_in_front &= (p.sz as i32) >= near_z;
-        *min_x = (*min_x).min(p.sx);
-        *max_x = (*max_x).max(p.sx);
-        *min_y = (*min_y).min(p.sy);
-        *max_y = (*max_y).max(p.sy);
+        *extent_code |= crate::projection::gpu_extent_box_code([p.sx, p.sy]);
         out[base + k] = ProjectedVertex::new(p.sx, p.sy, p.sz as i32);
         k += 1;
     }
@@ -3585,10 +3579,7 @@ unsafe fn flush_blended_model_vertex_chunk(
     projected_vertices: &mut [ProjectedVertex],
     all_in_front: &mut bool,
     all_inside_hw_bounds: &mut bool,
-    min_x: &mut i16,
-    max_x: &mut i16,
-    min_y: &mut i16,
-    max_y: &mut i16,
+    extent_code: &mut u32,
 ) {
     let chunk_len = chunk_len.min(BLENDED_VERTEX_CHUNK);
     // Phase 1: secondary transforms, reloading only on joint1 change.
@@ -3622,7 +3613,7 @@ unsafe fn flush_blended_model_vertex_chunk(
         );
         *all_in_front &= projected_model_vertex_in_front(projected, near_z);
         *all_inside_hw_bounds &= projected_model_vertex_inside_hw_bounds(projected);
-        track_projected_model_bounds(projected, min_x, max_x, min_y, max_y);
+        *extent_code |= crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
         unsafe {
             *projected_vertices.get_unchecked_mut(vertex_index) = projected;
         }
