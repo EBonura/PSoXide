@@ -128,8 +128,7 @@ pub fn classic_quad_screen_rejected(points: [[i16; 2]; 4], right: i32, bottom: i
 /// authorizes rejection or a change in tessellation.
 #[inline(always)]
 pub fn gpu_extent_box_code(screen: [i16; 2]) -> u32 {
-    (((screen[0] as i32 + 352) as u32) & !1023)
-        | (((screen[1] as i32 + 136) as u32) & !511)
+    (((screen[0] as i32 + 352) as u32) & !1023) | (((screen[1] as i32 + 136) as u32) & !511)
 }
 
 /// Pack five signed half-space distances into an outcode.
@@ -152,32 +151,62 @@ mod tests {
     #[test]
     fn early_rejection_matches_all_historical_corner_combinations() {
         // Every side/corner code, inclusive edges, and the inside region.
-        let positions = [[-1,-1], [0,-1], [320,-1], [-1,0], [0,0],
-            [320,0], [-1,240], [0,240], [320,240], [319,239]];
-        for a in positions { for b in positions { for c in positions {
-            let codes = [a,b,c].map(|p| zero_origin_screen_outcode(p,319,239));
-            let [x,y,z] = codes;
-            assert_eq!(classic_triangle_screen_rejected([a,b,c],319,239),
-                (x&y)!=0 && (y&z)!=0 && (z&x)!=0);
-            assert_eq!(triangle_outside_common_plane(
-                [a,b,c].map(|p| [p[0] as i32,p[1] as i32]),
-                ScreenClipBounds::new(0,319,0,239)), (x&y&z)!=0);
-            for d in positions {
-                let w = zero_origin_screen_outcode(d,319,239);
-                assert_eq!(classic_quad_screen_rejected([a,b,c,d],319,239),
-                    (x&y)!=0 && (y&z)!=0 && (z&w)!=0 && (w&x)!=0
-                    && (x&z)!=0 && (y&w)!=0);
+        let positions = [
+            [-1, -1],
+            [0, -1],
+            [320, -1],
+            [-1, 0],
+            [0, 0],
+            [320, 0],
+            [-1, 240],
+            [0, 240],
+            [320, 240],
+            [319, 239],
+        ];
+        for a in positions {
+            for b in positions {
+                for c in positions {
+                    let codes = [a, b, c].map(|p| zero_origin_screen_outcode(p, 319, 239));
+                    let [x, y, z] = codes;
+                    assert_eq!(
+                        classic_triangle_screen_rejected([a, b, c], 319, 239),
+                        (x & y) != 0 && (y & z) != 0 && (z & x) != 0
+                    );
+                    assert_eq!(
+                        triangle_outside_common_plane(
+                            [a, b, c].map(|p| [p[0] as i32, p[1] as i32]),
+                            ScreenClipBounds::new(0, 319, 0, 239)
+                        ),
+                        (x & y & z) != 0
+                    );
+                    for d in positions {
+                        let w = zero_origin_screen_outcode(d, 319, 239);
+                        assert_eq!(
+                            classic_quad_screen_rejected([a, b, c, d], 319, 239),
+                            (x & y) != 0
+                                && (y & z) != 0
+                                && (z & w) != 0
+                                && (w & x) != 0
+                                && (x & z) != 0
+                                && (y & w) != 0
+                        );
+                    }
+                }
             }
-        }}}
+        }
     }
 
     #[test]
     fn extent_box_proof_covers_exactly_the_safe_rectangle() {
         for coordinate in i16::MIN..=i16::MAX {
-            assert_eq!(gpu_extent_box_code([coordinate, 0]) == 0,
-                (-352..=671).contains(&coordinate));
-            assert_eq!(gpu_extent_box_code([0, coordinate]) == 0,
-                (-136..=375).contains(&coordinate));
+            assert_eq!(
+                gpu_extent_box_code([coordinate, 0]) == 0,
+                (-352..=671).contains(&coordinate)
+            );
+            assert_eq!(
+                gpu_extent_box_code([0, coordinate]) == 0,
+                (-136..=375).contains(&coordinate)
+            );
         }
     }
 
