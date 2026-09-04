@@ -31,6 +31,37 @@ use psx_game_runtime::projectiles::{
 
 const PLAYER_PROJECTILE_TARGET: u16 = u16::MAX - 1;
 
+/// Combat-music gate: engaged on the first tick any enemy is hostile, released
+/// after three quiet seconds so a Custodian flickering at the edge of its
+/// aggro radius does not pump the track.
+#[derive(Copy, Clone, Default)]
+pub(super) struct CombatMusicState {
+    pub(super) engaged: bool,
+    quiet_ticks: u16,
+}
+
+impl CombatMusicState {
+    const QUIET_TICKS: u16 = 180;
+
+    pub(super) fn tick(&mut self, hostile: bool) -> Option<bool> {
+        if hostile {
+            self.quiet_ticks = 0;
+            if !self.engaged {
+                self.engaged = true;
+                return Some(true);
+            }
+        } else if self.engaged {
+            self.quiet_ticks = self.quiet_ticks.saturating_add(1);
+            if self.quiet_ticks >= Self::QUIET_TICKS {
+                self.engaged = false;
+                self.quiet_ticks = 0;
+                return Some(false);
+            }
+        }
+        None
+    }
+}
+
 struct SceneProjectileWorldTracer<'a> {
     bsp: Option<&'a mut BspRuntime>,
     destructibles: &'a RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,

@@ -420,6 +420,9 @@ pub mod ui_node_flags {
     pub const TEXT_RANDOM_MESSAGE: u16 = 1 << 12;
     /// Node is only visible once an authored loading screen can be confirmed.
     pub const LOADING_COMPLETE_ONLY: u16 = 1 << 13;
+    /// Music node that plays only while the scene reports combat; the
+    /// runtime fades it in and out instead of playing it on scene entry.
+    pub const MUSIC_TRIGGER_COMBAT: u16 = 1 << 14;
     /// Timer node fires early on CROSS when the scene has no focusable
     /// control.
     pub const TIMER_SKIPPABLE: u16 = 1 << 14;
