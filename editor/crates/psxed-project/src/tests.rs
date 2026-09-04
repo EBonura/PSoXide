@@ -2376,6 +2376,7 @@ fn point_of_interest_world_message_and_boost_module_roundtrip() {
             "The cortex stirs.".to_string(),
             "Ignition follows.".to_string(),
         ],
+        pages_it: Vec::new(),
     });
     let host = scene.add_node(root, "Archive Beacon", NodeKind::Entity);
     scene.add_node(
@@ -2383,6 +2384,7 @@ fn point_of_interest_world_message_and_boost_module_roundtrip() {
         "Archive Beacon",
         NodeKind::PointOfInterest {
             pages: vec!["Recovered protocol.".to_string()],
+            pages_it: vec!["Protocollo recuperato.".to_string()],
             prompt: "READ".to_string(),
             radius: 576,
             marker_height: 192,
@@ -2393,6 +2395,8 @@ fn point_of_interest_world_message_and_boost_module_roundtrip() {
                 quantity: 1,
                 item_name: "Kinetic Relay".to_string(),
                 description: "Amplifies Horizon attack output.".to_string(),
+                item_name_it: "Rele' Cinetico".to_string(),
+                description_it: "Amplifica l'attacco Orizzonte.".to_string(),
                 modifiers: vec![BoostStatModifier {
                     stat: BoostStatKind::HorizonAttack,
                     percent: 15,
@@ -2437,6 +2441,7 @@ fn deleting_boost_module_clears_point_of_interest_reward_reference() {
         "Beacon",
         NodeKind::PointOfInterest {
             pages: default_message_pages(),
+            pages_it: Vec::new(),
             prompt: default_point_of_interest_prompt(),
             radius: default_point_of_interest_radius(),
             marker_height: default_point_of_interest_marker_height(),

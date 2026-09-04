@@ -110,6 +110,7 @@ fn duplicating_point_of_interest_component_copies_its_complete_host() {
         "Point of Interest",
         NodeKind::PointOfInterest {
             pages: vec!["FIRST PAGE".to_string(), "SECOND PAGE".to_string()],
+            pages_it: Vec::new(),
             prompt: "READ".to_string(),
             radius: 640,
             marker_height: 160,
