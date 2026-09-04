@@ -74,3 +74,11 @@ Raw builds, maps, disassembly, rejected patches and replays are retained under
 /tmp/astra-architecture-pass-20260904. The source baseline is SDK 26698622,
 Quake 60190c78 and HL de51288. Experiments use isolated worktrees and fresh
 Cortex guest stage roots. Benchmark features are not shipping features.
+
+Intermediate display pixels and VRAM hashes agree at requested polls 1600,
+2800 and 5000. The 4000 request stopped at adjacent presentation states:
+the candidate exactly matches control at 3999; both agree at the next request
+4001 (actual poll 4002). All corresponding display bytes match. This is a
+stop/presentation phase difference, not changed rendered geometry. Both full
+replays still agree at final poll 5250. Raw checkpoint logs retain actual poll
+counts, so requested poll numbers must not be treated as exact stop counts.
