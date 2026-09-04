@@ -39,7 +39,7 @@ use psx_gpu::{
     prim::TriTextured,
 };
 use psx_level::{
-    find_asset_of_kind, sky_flags, world_object_flags, AssetId, AssetKind, LevelWorldObjectRecord,
+    find_asset_of_kind, sky_flags, world_object_flags, AssetId, AssetKind,
     MAX_ROOM_MATERIALS,
 };
 use psx_math::{cos_q12, sin_q12};
@@ -342,6 +342,9 @@ pub(super) struct BspRuntime {
     activation_observer: Option<RoomPoint>,
     activation_observer_leaf: Option<usize>,
     bounds_visibility_cache: [BspBoundsVisibilityCacheEntry; BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
+    /// Static registry PVS results, valid for the observer leaf only.
+    world_object_pvs_leaf: Option<usize>,
+    world_object_pvs: WorldObjectVisibility,
     fragment_events: [BspDestructibleFragmentEvent; MAX_BSP_DESTRUCTIBLES],
 }
 
@@ -508,6 +511,8 @@ impl BspRuntime {
             activation_observer_leaf: None,
             bounds_visibility_cache: [BspBoundsVisibilityCacheEntry::EMPTY;
                 BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
+            world_object_pvs_leaf: None,
+            world_object_pvs: WorldObjectVisibility::NONE,
             fragment_events: [BspDestructibleFragmentEvent::EMPTY; MAX_BSP_DESTRUCTIBLES],
         })
     }
@@ -650,10 +655,16 @@ impl BspRuntime {
     pub(super) fn visible_world_objects(
         &mut self,
         camera: WorldCamera,
-        objects: &[LevelWorldObjectRecord],
         destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
     ) -> WorldObjectVisibility {
+        let objects = WORLD_OBJECTS;
         let observer = RoomPoint::new(camera.position.x, camera.position.y, camera.position.z);
+        let Some(leaf) = self.activation_row(observer) else {
+            return WorldObjectVisibility::NONE;
+        };
+        if self.world_object_pvs_leaf != Some(leaf) {
+            self.refresh_world_object_pvs(observer, leaf);
+        }
         // The strict-occlusion samples below trace from the camera to each
         // object across the whole level, up to seven long segments per
         // object per frame, and on the Cortex whole-level tape they were
@@ -676,45 +687,62 @@ impl BspRuntime {
         };
         let mut visibility = WorldObjectVisibility::NONE;
         let count = objects.len().min(psx_level::MAX_WORLD_OBJECTS);
-        let mut first = 0usize;
+        for index in 0..count {
+            if !self.world_object_pvs.contains(index) {
+                continue;
+            }
+            let object = &objects[index];
+            if object.destructible != psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
+                && !destructibles.alive(usize::from(object.destructible))
+            {
+                continue;
+            }
+            if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
+                && frustum.box_surely_outside(object.bounds_min, object.bounds_max)
+            {
+                continue;
+            }
+            if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
+                && !self.world_object_directly_visible(
+                    observer,
+                    object.bounds_min,
+                    object.bounds_max,
+                    destructibles,
+                )
+            {
+                continue;
+            }
+            visibility.set(index);
+        }
+        visibility
+    }
+
+    /// The cooked object registry and the resident map never change during
+    /// this runtime's lifetime. Their bounds-to-PVS result therefore changes
+    /// only when the observer enters another leaf. Door/destructible state and
+    /// exact brush occlusion still run for every frame after this static gate.
+    #[inline(never)]
+    fn refresh_world_object_pvs(&mut self, observer: RoomPoint, leaf: usize) {
+        let count = WORLD_OBJECTS.len().min(psx_level::MAX_WORLD_OBJECTS);
+        let mut visibility = WorldObjectVisibility::NONE;
+        let mut first = 0;
         while first < count {
             let chunk_count = (count - first).min(u64::BITS as usize);
             let mut bounds = [BspVisibilityBounds::EMPTY; u64::BITS as usize];
             for local in 0..chunk_count {
-                let object = &objects[first + local];
+                let object = &WORLD_OBJECTS[first + local];
                 bounds[local] = BspVisibilityBounds::aabb(object.bounds_min, object.bounds_max);
             }
             let pvs = self.visible_bounds_mask(observer, &bounds[..chunk_count]);
             for local in 0..chunk_count {
-                if pvs & (1u64 << local) == 0 {
-                    continue;
+                if pvs & (1u64 << local) != 0 {
+                    visibility.set(first + local);
                 }
-                let object = &objects[first + local];
-                if object.destructible != psx_level::WORLD_OBJECT_DESTRUCTIBLE_NONE
-                    && !destructibles.alive(usize::from(object.destructible))
-                {
-                    continue;
-                }
-                if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
-                    && frustum.box_surely_outside(object.bounds_min, object.bounds_max)
-                {
-                    continue;
-                }
-                if object.flags & world_object_flags::DIRECT_BRUSH_OCCLUSION != 0
-                    && !self.world_object_directly_visible(
-                        observer,
-                        object.bounds_min,
-                        object.bounds_max,
-                        destructibles,
-                    )
-                {
-                    continue;
-                }
-                visibility.set(first + local);
             }
             first += chunk_count;
         }
-        visibility
+        self.world_object_pvs = visibility;
+        self.world_object_pvs_leaf = Some(leaf);
     }
 
     /// Direct brush visibility for gameplay queries such as interaction
