@@ -1,0 +1,2 @@
+# Preserve generated motion data and tool receipts verbatim.
+review/souls-polish/** -whitespace

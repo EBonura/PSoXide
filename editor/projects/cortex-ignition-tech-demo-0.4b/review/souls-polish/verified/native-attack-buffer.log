@@ -1,0 +1,13 @@
+[cli] loaded poll-bound input tape /tmp/cortex-polish/attack-buffer-proof.csv (1900 polls, starting at poll 0)
+[frontend] embedded Play disc fast-booted editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue via PSX.EXE;1 entry=0x80010000 payload=1134592B
+[cli] mounted cue-backed disc editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue
+[guest f1002 c764907518] player roll:start
+[guest f1152 c850609417] player roll:start
+[guest f1352 c964961046] player roll:start
+[guest f1552 c1079209236] player roll:start
+[guest f1619 c1117325642] player attack:start
+[guest f1697 c1161882019] player attack:start
+tick=492966930  cycles=1248678563  pc=0x8001d2d4  stopped-at=492966930
+route-ticks=2185  port1-polls=1850
+[cli] CPU display → /tmp/cortex-polish/final-native/final.ppm (320x240)
+[cli] main RAM → /tmp/cortex-polish/final-native/ram.bin (2097152 bytes)
