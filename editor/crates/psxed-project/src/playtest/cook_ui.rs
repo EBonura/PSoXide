@@ -114,14 +114,14 @@ pub(crate) fn cook_ui_nodes(
             // saves a second SPU allocation in RAM-tight PS1 projects.
             "assets/audio/gameplay/heavy_hit.wav",
             psx_level::LevelGameplaySfxEvent::LightHit,
-            90,
-            4_400,
+            96,
+            4_250,
         ),
         (
             "assets/audio/gameplay/heavy_hit.wav",
             psx_level::LevelGameplaySfxEvent::HeavyHit,
-            96,
-            3_500,
+            100,
+            3_350,
         ),
         (
             "assets/audio/gameplay/player_damage.wav",
@@ -144,26 +144,26 @@ pub(crate) fn cook_ui_nodes(
         (
             "assets/audio/gameplay/weapon_swing.wav",
             psx_level::LevelGameplaySfxEvent::PlayerWeaponSwing,
-            72,
-            4_500,
+            84,
+            4_000,
         ),
         (
             "assets/audio/gameplay/weapon_swing.wav",
             psx_level::LevelGameplaySfxEvent::EnemyWeaponSwing,
-            82,
-            3_500,
+            92,
+            3_250,
         ),
         (
             "assets/audio/gameplay/projectile_charge.wav",
             psx_level::LevelGameplaySfxEvent::ProjectileCharge,
-            72,
+            86,
             crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
             "assets/audio/gameplay/projectile_launch.wav",
             psx_level::LevelGameplaySfxEvent::ProjectileLaunch,
-            88,
-            crate::UI_SFX_PITCH_UNITY_Q12,
+            100,
+            3_700,
         ),
     ] {
         if project_root.join(&path).is_file() {
