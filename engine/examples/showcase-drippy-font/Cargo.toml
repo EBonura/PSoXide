@@ -1,0 +1,22 @@
+[package]
+name = "showcase-drippy-font"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "showcase-drippy-font"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-engine = { path = "../../crates/psx-engine" }
+psx-font   = { path = "../../../sdk/crates/psx-font" }
+psx-rt     = { path = "../../../sdk/crates/psx-rt" }
+psx-vram   = { path = "../../../sdk/crates/psx-vram" }
