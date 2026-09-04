@@ -774,6 +774,9 @@ impl ModelPart {
 pub const NO_JOINT8: u8 = psxed_format::model::NO_JOINT8;
 
 /// Decoded textured model vertex.
+/// Word alignment lets the GTE projection path load XY in one MIPS load.
+/// These are decoded records, not a view into the cooked byte format.
+#[repr(C, align(4))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ModelVertex {
     /// Model-local position. The cooked importer may use a much denser
@@ -787,6 +790,9 @@ pub struct ModelVertex {
     /// signals the renderer to stay on the single-bone GTE fast path.
     pub blend: u8,
 }
+
+// Alignment must not grow the resident vertex pools.
+const _: () = assert!(core::mem::size_of::<ModelVertex>() == 8);
 
 impl ModelVertex {
     /// Empty vertex record used by fixed-size runtime decode pools.
