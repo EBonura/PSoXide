@@ -2399,3 +2399,32 @@ fn a_corrupted_parking_block_self_loops_and_sounds() {
         "the loop must sustain, tail peak was {tail_peak}"
     );
 }
+
+#[test]
+fn sampled_one_shot_survives_delayed_waveform_attack_and_releases_quickly() {
+    fn voice_with(envelope: psx_spu::Adsr) -> Voice {
+        let mut spu = Spu::new();
+        spu.write16(VOICE_BASE + voice_offset::ADSR_LO, envelope.lower);
+        spu.write16(VOICE_BASE + voice_offset::ADSR_HI, envelope.upper);
+        spu.voices[0].phase = AdsrPhase::Attack;
+        spu.voices[0].clone()
+    }
+    let mut sustained = voice_with(psx_spu::Adsr::sample_one_shot());
+    let mut percussive = voice_with(psx_spu::Adsr::percussive());
+    // Cortex's swing reaches its audible attack at 40 ms. The old
+    // percussive sustain has already silenced it by then.
+    for _ in 0..1764 {
+        sustained.step_envelope();
+        percussive.step_envelope();
+    }
+    assert!(sustained.envelope > 32000);
+    assert_eq!(percussive.envelope, 0);
+    sustained.phase = AdsrPhase::Release;
+    for _ in 0..4410 {
+        sustained.step_envelope();
+    }
+    assert_eq!(
+        sustained.envelope, 0,
+        "END/key-off must not leave an infinite release"
+    );
+}

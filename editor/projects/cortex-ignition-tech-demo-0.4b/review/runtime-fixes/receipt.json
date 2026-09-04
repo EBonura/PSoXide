@@ -1,0 +1,23 @@
+{
+  "tracks": {
+    "2": {
+      "source": "cortex_boss.wav",
+      "pcm_sha256": "0749ad7dae5026c3dbe8aa5ff3e90413e75959d0c64e0bfee165bf7e9a9b3106",
+      "cooked_pcm_matches": true
+    },
+    "3": {
+      "source": "menu2.wav",
+      "pcm_sha256": "ba6d1c8ae3adb468dd6b76f0ec0a4085119004ced3241469f94fad49fa0db541",
+      "cooked_pcm_matches": true
+    }
+  },
+  "artifacts": {
+    "project.ron": "0c6b0709b9baa12374067c5f5303aa7abdaed7bbc0acc8b1426cf22738454713",
+    "baked/cortex_ignition_tech_demo_0_4b.cue": "4255295c77a412cd691380a7a5d8acb239bab7f645e622ce1d862b9cc0407b48",
+    "baked/cortex_ignition_tech_demo_0_4b.bin": "e21860e8d7594fa61eb1fbd33b8cecc530f80626d971152888b8efeb448306ad",
+    "baked/cortex_ignition_tech_demo_0_4b.exe": "b6eb3d9df1de3e463f7fd559d9877907cf58773d38efde4173a2326cac88b5db",
+    "baked/generated/brush_world.pxbsp": "7d9c8a3b81a21e7e22e8c7e355eee85d148a59775829091651e856cfab2c57bc"
+  },
+  "baked_light_vertices_matching_authored": 8928,
+  "physical_console_tested": false
+}

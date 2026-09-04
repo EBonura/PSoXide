@@ -1,0 +1,20 @@
+   Compiling psx-spu v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide/sdk/crates/psx-spu)
+   Compiling psx-sfx v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide/sdk/crates/psx-sfx)
+   Compiling psx-engine v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide/engine/crates/psx-engine)
+   Compiling psx-bsp v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide/engine/crates/psx-bsp)
+   Compiling psxed-project v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide/editor/crates/psxed-project)
+   Compiling psxed-ui v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide/editor/crates/psxed-ui)
+warning: method `pick_brush_face_at_2d` is never used
+    --> editor/crates/psxed-ui/src/workspace/tools.rs:4457:19
+     |
+ 434 | impl EditorWorkspace {
+     | -------------------- method in this implementation
+...
+4457 |     pub(crate) fn pick_brush_face_at_2d(&self, world: [f32; 2]) -> Option<(usize, usize)> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `psxed-ui` (lib) generated 1 warning
+   Compiling frontend v0.1.0 (/Users/ebonura/Desktop/repos/PSoXide/emu/crates/frontend)
+    Finished `release` profile [optimized] target(s) in 2m 33s

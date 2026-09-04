@@ -276,14 +276,14 @@ mod tests {
         }
     }
 
-    /// The fonts cover printable ASCII only. An accented byte draws as a hole,
-    /// so catch it here rather than on a screenshot.
+    /// The fonts cover printable ASCII; newline is handled by text layout.
+    /// An accented byte draws as a hole, so catch it before rendering.
     #[test]
     fn italian_copy_is_printable_ascii() {
         for (key, text) in ITALIAN {
             for byte in text.bytes() {
                 assert!(
-                    (0x20..0x80).contains(&byte),
+                    (0x20..0x7f).contains(&byte) || byte == b'\n',
                     "{key}: {text:?} has non-printable-ASCII byte {byte:#04x}"
                 );
             }

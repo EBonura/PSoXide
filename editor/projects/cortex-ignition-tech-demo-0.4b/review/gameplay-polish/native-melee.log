@@ -1,0 +1,8 @@
+[cli] loaded poll-bound input tape /tmp/cortex04b-debug/new-lock.csv (2923 polls, starting at poll 177)
+[frontend] embedded Play disc fast-booted editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue via PSX.EXE;1 entry=0x80010000 payload=1126400B
+[cli] mounted cue-backed disc editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue
+combat music:on
+tick=761304603  cycles=1847905129  pc=0x8001d2b8  stopped-at=761304603
+route-ticks=3233  port1-polls=2901
+[cli] audio → /tmp/cortex04b-debug/new-lock/audio.wav (2406126 stereo samples, 54.56s @ 44.1kHz)
+[cli] CPU display → /tmp/cortex04b-debug/new-lock/final.ppm (320x240)

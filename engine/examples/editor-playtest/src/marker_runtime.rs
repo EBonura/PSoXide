@@ -164,6 +164,17 @@ where
     submitted
 }
 
+fn archive_beacon_surface_options(
+    record: &LevelRoomRecord,
+    uses_pxbsp: bool,
+) -> WorldSurfaceOptions {
+    if uses_pxbsp {
+        pxbsp_actor_surface_options(record)
+    } else {
+        actor_surface_options(record)
+    }
+}
+
 impl Playtest {
     /// Submit every visible Archive Beacon in the current room into the same
     /// world ordering table as BSP/grid surfaces and actors. Unlike the former
@@ -205,25 +216,12 @@ impl Playtest {
     where
         T: PrimitiveSink<TriGouraud> + PrimitiveSink<LineMono> + PrimitiveSink<QuadGouraudBlended>,
     {
-        let Some(room_record) = ROOMS.get(self.room_index.to_usize()) else {
+        // Markers and actors must use the same floor clearance. A larger
+        // marker-only bias pulls a beacon behind the player over her body.
+        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
             return 0;
         };
-        // A beacon stands on the floor exactly like an actor, so it takes the
-        // actor clearance: keyed a little nearer than the world surface it
-        // rests on, or the floor polygon under it sorts in front and paints
-        // it out down to a sliver (and its perimeter line shows through as a
-        // stray red line).
-        // A beacon is a thin panel standing on the floor: its faces key a
-        // few units apart, so floor polygons keyed between them paint the
-        // front face out. Pull the whole prop well in front of the surface
-        // it stands on; a beacon is small enough that showing through a
-        // wall this close in front of it is rarer than being buried.
-        let clearance = i32::from(room_record.sector_size).saturating_mul(2);
-        let options = if self.bsp.is_some() {
-            pxbsp_surface_options(room_record).with_depth_bias(-clearance)
-        } else {
-            room_surface_options(room_record).with_depth_bias(-clearance)
-        };
+        let options = archive_beacon_surface_options(record, self.bsp.is_some());
         let open_poi = self
             .poi_messages
             .active()
@@ -338,7 +336,7 @@ where
     let body_options = options
         .with_cull_mode(CullMode::None)
         .with_render_layer(WorldRenderLayer::Opaque);
-    let line_options = body_options.with_depth_bias(-2);
+    let line_options = body_options.with_depth_bias(body_options.depth_bias.saturating_sub(2));
     let face_colors = archive_beacon_face_colors(state, pulse, outer_local, half)
         .map(|c| archive_beacon_tint(kind, c));
     let frame_color = archive_beacon_tint(kind, archive_beacon_frame_color(state, pulse));
@@ -829,9 +827,13 @@ pub(super) fn draw_lock_target_indicator(
     elapsed_tick: SimTick,
     stance: psx_game_runtime::vitality::VitalityChannelId,
 ) {
-    let Some(center) = camera.project_world(target) else {
+    let Some(mut center) = camera.project_world(target) else {
         return;
     };
+    // Optical correction for the character's asymmetric weapon/torso pose.
+    // Height follows the instance scale in target_indicator_position.
+    center.sx = center.sx.saturating_sub(4);
+    center.sy = center.sy.saturating_sub(2);
 
     let (breath, brightness) = target_lock_pulse(elapsed_tick);
     let white = target_lock_color(TARGET_LOCK_WHITE, brightness);
@@ -892,12 +894,12 @@ pub(super) fn draw_lock_target_indicator(
     let top = clamp_i16(i32::from(center.sy).saturating_sub(half));
     let right = clamp_i16(i32::from(center.sx).saturating_add(half + 1));
     let bottom = clamp_i16(i32::from(center.sy).saturating_add(half + 1));
-    draw_quad_flat(
-        [(left, top), (right, top), (left, bottom), (right, bottom)],
-        cyan.0,
-        cyan.1,
-        cyan.2,
-    );
+    for verts in [
+        [(left, top), (right, top), (left, bottom)],
+        [(right, top), (right, bottom), (left, bottom)],
+    ] {
+        draw_tri_flat_blended(verts, cyan.0, cyan.1, cyan.2, BlendMode::Average);
+    }
 }
 
 /// One slow triangle wave drives both the two-pixel radial breath and a mild
@@ -958,7 +960,7 @@ fn draw_target_lock_line(
                 .saturating_add(to.1)
                 .saturating_add(offset.1),
         );
-        draw_line_mono(x0, y0, x1, y1, color.0, color.1, color.2);
+        psx_gpu::draw_line_mono_blended((x0, y0), (x1, y1), color, BlendMode::Average);
     }
 }
 
@@ -977,5 +979,38 @@ mod target_lock_tests {
             target_lock_pulse(SimTick::from_u32(TARGET_LOCK_PULSE_FRAMES)),
             (0, 208)
         );
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    #[test]
+    fn beacon_behind_actor_stays_behind_in_both_world_formats() {
+        let mut record = ROOMS[0];
+        record.sector_size = 64;
+        for bsp in [false, true] {
+            let actor = if bsp {
+                pxbsp_actor_surface_options(&record)
+            } else {
+                actor_surface_options(&record)
+            };
+            let beacon = archive_beacon_surface_options(&record, bsp);
+            // At a 16-unit separation the old 2-sector marker clearance
+            // overtook the actor's half-sector clearance by 80 units.
+            for actor_z in [128, 256, 512] {
+                let actor_key = actor_z + actor.depth_bias;
+                let marker_key = actor_z + 16 + beacon.depth_bias;
+                assert!(
+                    marker_key > actor_key,
+                    "far marker must not overtake player"
+                );
+                assert!(
+                    marker_key - 2 > actor_key,
+                    "frame outline must retain the body's clearance"
+                );
+            }
+        }
     }
 }

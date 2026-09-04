@@ -914,6 +914,13 @@ static LIT_CACHE: OnceLock<Mutex<PreviewLitCache>> = OnceLock::new();
 /// geometry and materials, the per-face tint the shade resolves to,
 /// and the (hidden-filtered) light set. Face UV transforms are
 /// deliberately absent: they steer texels, never colours or patches.
+fn bsp_preview_patch_extent(project: &ProjectDocument) -> i32 {
+    match &project.active_scene().node(NodeId::ROOT).unwrap().kind {
+        NodeKind::World { culling, .. } => culling.normalized().bsp_patch_extent,
+        _ => 2048,
+    }
+}
+
 fn lit_preview_key(
     project: &ProjectDocument,
     textures: &EditorTextures,
@@ -922,6 +929,7 @@ fn lit_preview_key(
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bsp_preview_patch_extent(project).hash(&mut hasher);
     for brush in &project.active_scene().brushes {
         brush_group_hidden(project.active_scene(), hidden_scene_nodes, brush).hash(&mut hasher);
         brush.contents.label().hash(&mut hasher);
@@ -1009,7 +1017,7 @@ fn rebuild_lit_surfaces(
                     // preview==cook invariant breaks.
                     let patches = psxed_project::brush_compile::subdivide_polygon_for_lighting(
                         surface.vertices.clone(),
-                        psxed_project::brush_compile::SURFACE_EXTENT_UNITS,
+                        bsp_preview_patch_extent(project) as f64,
                         &[([0.0; 3], f64::INFINITY)],
                     )
                     .into_iter()

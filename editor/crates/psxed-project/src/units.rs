@@ -177,6 +177,7 @@ fn scale_node(node: &mut SceneNode) {
             camera.target_height = div_i32(camera.target_height);
             camera.min_floor_clearance = div_i32(camera.min_floor_clearance);
             culling.draw_distance = div_i32_min1(culling.draw_distance);
+            culling.bsp_patch_extent = div_i32_min1(culling.bsp_patch_extent);
             physics.gravity_per_tick = div_i32_min1(physics.gravity_per_tick);
         }
         NodeKind::ImageProp {
@@ -545,6 +546,55 @@ pub fn scale_animation_blob_to_engine_units(bytes: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scaled_world_sector_preserves_point_light_reach() {
+        use crate::{
+            brush_light::{lit_point_color, BrushPointLight},
+            NodeId,
+        };
+        let mut project = ProjectDocument::starter();
+        let scene = project.active_scene_mut();
+        scene
+            .brushes
+            .push(Brush::cuboid([0, -128, 0], [4096, 0, 4096]));
+        if let NodeKind::World { sector_size, .. } = &mut scene.node_mut(NodeId::ROOT).unwrap().kind
+        {
+            *sector_size = 1024;
+        }
+        let sector = scene.world_sector_size_for_node(NodeId::ROOT).unwrap();
+        let authored = BrushPointLight {
+            position: [0., 1024., 0.],
+            radius: sector as f64 * 2.,
+            intensity_q8: 256,
+            color: [58, 177, 167],
+        };
+        scale_project_to_engine_units(&mut project);
+        let cooked_sector = project
+            .active_scene()
+            .world_sector_size_for_node(NodeId::ROOT)
+            .unwrap();
+        assert_eq!(cooked_sector, 64);
+        let cooked = BrushPointLight {
+            position: authored.position.map(|x| x / 16.),
+            radius: cooked_sector as f64 * 2.,
+            ..authored
+        };
+        for point in [[0., 0., 0.], [1500., 0., 0.], [2500., 0., 0.]] {
+            assert_eq!(
+                lit_point_color(point, [0., 1., 0.], [128; 3], [32; 3], &[authored], &[]),
+                lit_point_color(
+                    point.map(|x| x / 16.),
+                    [0., 1., 0.],
+                    [128; 3],
+                    [32; 3],
+                    &[cooked],
+                    &[]
+                ),
+                "light reach must survive authored-to-engine normalization"
+            );
+        }
+    }
 
     #[test]
     fn rounding_is_symmetric_and_preserves_coincidence() {

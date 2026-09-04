@@ -368,6 +368,24 @@ pub fn draw_line_mono(x0: i16, y0: i16, x1: i16, y1: i16, r: u8, g: u8, b: u8) {
     write_gp0(pack_vertex(x1, y1));
 }
 
+/// Draw a line using the native PS1 semi-transparency equation.
+pub fn draw_line_mono_blended(
+    from: (i16, i16),
+    to: (i16, i16),
+    color: (u8, u8, u8),
+    blend_mode: BlendMode,
+) {
+    if !blend_mode.is_translucent() {
+        draw_line_mono(from.0, from.1, to.0, to.1, color.0, color.1, color.2);
+        return;
+    }
+    TextureMaterial::blended(0, 0, color, blend_mode).apply_draw_mode();
+    wait_cmd_ready();
+    write_gp0(0x4200_0000 | pack_color(color.0, color.1, color.2));
+    write_gp0(pack_vertex(from.0, from.1));
+    write_gp0(pack_vertex(to.0, to.1));
+}
+
 /// Draw a Gouraud-shaded line from `(x0, y0, c0)` to `(x1, y1, c1)`.
 /// The GPU interpolates RGB across the segment. Packet (GP0 0x50,
 /// 4 words): `[cmd+c0, v0, c1, v1]`.
