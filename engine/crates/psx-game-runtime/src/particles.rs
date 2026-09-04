@@ -35,6 +35,57 @@ const PARTICLE_MAX_SCREEN_SIZE: i16 = 18;
 const WATER_SPLASH_PARTICLES: u32 = 3;
 const WATER_SPLASH_LIFETIME: u32 = 16;
 
+/// Draw one retained dash sample: three body-height ion filaments or an
+/// expanding ground pulse. World projection/depth keeps walls authoritative.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_dash_sample<const OT_DEPTH: usize>(
+    sample: crate::combat_feedback::DashSample,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let project = |p: [i32; 3]| {
+        let vertex = WorldVertex::new(p[0], p[1], p[2]);
+        if let Some(projector) = projector { projector.project_world(vertex) }
+        else { camera.project_world(vertex) }
+    };
+    let fade = u16::from(12u8.saturating_sub(sample.age));
+    let accent = if sample.zenith { [36, 150, 176] } else { [160, 72, 30] };
+    let material = particle_material.with_blend_mode(BlendMode::Add)
+        .with_tint(rgb_tuple(scale_rgb(accent, fade, 12)));
+    let mut submitted = 0;
+    if sample.pulse {
+        // An eight-sided floor ring, rather than a camera-facing halo.
+        const RING: [(i32, i32); 9] = [(4,0),(3,3),(0,4),(-3,3),(-4,0),(-3,-3),(0,-4),(3,-3),(4,0)];
+        let radius = i32::from(sample.height) / 6 + i32::from(sample.age) * 2;
+        for edge in RING.windows(2) {
+            let p = |v: (i32,i32)| [sample.to[0] + v.0 * radius / 4,
+                sample.to[1] + 3, sample.to[2] + v.1 * radius / 4];
+            if let (Some(a), Some(b)) = (project(p(edge[0])), project(p(edge[1]))) {
+                let slot = depth_range.slot::<OT_DEPTH>((a.sz + b.sz) / 2);
+                submitted += draw_projectile_segment(a, b, 1, material, slot, ot, primitive_packets);
+            }
+        }
+    } else {
+        for band in [1, 2, 3] {
+            let lift = i32::from(sample.height) * band / 5;
+            let mut from = sample.from;
+            let mut to = sample.to;
+            from[1] += lift;
+            to[1] += lift;
+            if let (Some(a), Some(b)) = (project(from), project(to)) {
+                let half = (camera.projection.focal_length / b.sz.max(1)).clamp(1, 2) as i16;
+                submitted += draw_projectile_segment(a, b, half, material,
+                    depth_range.slot::<OT_DEPTH>((a.sz + b.sz) / 2), ot, primitive_packets);
+            }
+        }
+    }
+    submitted
+}
+
 /// Draw one authored particle emitter's steady-state population as
 /// camera-facing textured quads. Returns the submitted quad count.
 pub fn draw_particle_emitter<const OT_DEPTH: usize>(

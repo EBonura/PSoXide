@@ -128,6 +128,7 @@ mod bsp_runtime;
 #[cfg(feature = "cd-stream-benchmark")]
 use psx_game_runtime::cd_stream;
 mod character_runtime;
+mod combat_input;
 mod damage_numbers;
 mod debug_runtime;
 mod game_logic_runtime;
@@ -401,6 +402,8 @@ struct Playtest {
     combat_projectiles: RuntimeCombatProjectiles,
     /// Fixed-capacity visual aftermath for stopped combat projectiles.
     combat_projectile_impacts: RuntimeProjectileImpactEffects,
+    dash_wake: psx_game_runtime::combat_feedback::DashWake,
+    attack_buffer: combat_input::AttackBuffer,
     /// Floating damage numbers for hits dealt and taken. Purely
     /// presentational: spawned from the damage sites, expired by their
     /// own clock, and read only by the overlay pass. All-zero is a

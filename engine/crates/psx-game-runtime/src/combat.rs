@@ -149,13 +149,29 @@ pub fn authored_projectile_release(
     action: CharacterAnimationAction,
     pose: Option<ActorPoseSnapshot>,
 ) -> Option<AuthoredProjectileRelease> {
+    authored_projectile_release_pending(capsules, action, pose, 0).map(|(_, release)| release)
+}
+
+/// Find an eligible emitter that has not fired in this attack. The returned
+/// index is relative to the actor's capsule slice and fits a sixteen-bit mask.
+/// The caller marks it only after successful insertion into the projectile pool.
+pub fn authored_projectile_release_pending(
+    capsules: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    pose: Option<ActorPoseSnapshot>,
+    released_mask: u16,
+) -> Option<(u8, AuthoredProjectileRelease)> {
     let pose = pose?;
     let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
     let action = action.to_index() as u8;
     capsules
         .iter()
         .take(MAX_CHARACTER_COMBAT_CAPSULES)
-        .find_map(|record| {
+        .enumerate()
+        .find_map(|(index, record)| {
+            if released_mask & (1u16 << index) != 0 {
+                return None;
+            }
             let exact_event_crossed = record.active_start_frame == record.active_end_frame
                 && frame >= record.active_start_frame;
             let inside_window =
@@ -167,7 +183,7 @@ pub fn authored_projectile_release(
                 return None;
             }
             let muzzle = transform_actor_combat_capsule(record, pose)?;
-            Some(AuthoredProjectileRelease {
+            Some((index as u8, AuthoredProjectileRelease {
                 position: muzzle.start,
                 radius: muzzle.radius,
                 speed: record.projectile_speed,
@@ -179,7 +195,7 @@ pub fn authored_projectile_release(
                 tint_rgb: record.projectile_tint_rgb,
                 damage_channel: ProjectileDamageChannel::from_raw(record.projectile_damage_channel),
                 visual: projectile_visual(record),
-            })
+            }))
         })
 }
 
@@ -1319,6 +1335,31 @@ mod tests {
                 ),
                 None
             );
+        }
+
+        #[test]
+        fn volley_markers_release_once_and_survive_skipped_pose_frames() {
+            let mut first = capsule_record(0, combat_capsule_flags::PROJECTILE_EMITTER, ATTACK);
+            first.active_start_frame = 3;
+            first.active_end_frame = 3;
+            let mut second = first;
+            second.active_start_frame = 9;
+            second.active_end_frame = 9;
+            second.start = [30, 0, 0];
+            let emitters = [first, second];
+            let query = |frame: u32, mask| authored_projectile_release_pending(
+                &emitters, ATTACK, Some(pose_at([0; 3], frame << 12)), mask);
+            assert!(query(2, 0).is_none());
+            assert_eq!(query(4, 0).unwrap().0, 0);
+            assert_eq!(query(4, 0).unwrap().0, 0, "pool-full retry keeps its marker");
+            assert!(query(8, 1).is_none(), "second shot cannot fire early");
+            let (index, release) = query(10, 1).unwrap();
+            assert_eq!(index, 1);
+            assert_eq!(release.position, [30, 0, 0]);
+            assert!(query(12, 3).is_none(), "all shots consumed");
+            // A slow update crossing both markers drains them in authored order.
+            assert_eq!(query(12, 0).unwrap().0, 0);
+            assert_eq!(query(12, 1).unwrap().0, 1);
         }
 
         #[test]

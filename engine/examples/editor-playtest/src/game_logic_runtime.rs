@@ -519,10 +519,13 @@ impl Playtest {
                 .flatten()
                 .map(|snapshot| snapshot.pose());
             if attack.is_ranged() {
-                if let Some(release) = combat::authored_projectile_release(
+                let mut released = self.game_entities
+                    .deferred_projectile_release_mask(attack).unwrap_or(u16::MAX);
+                while let Some((emitter, release)) = combat::authored_projectile_release_pending(
                     attacker_capsules,
                     attack.action(),
                     attacker_pose,
+                    released,
                 ) {
                     let velocity = self.game_entities.ranged_velocity(
                         attack.entity(), release.position, release.speed,
@@ -544,7 +547,12 @@ impl Playtest {
                     if self.combat_projectiles.spawn(spawn).is_ok() {
                         telemetry::debug_log("enemy projectile:release");
                         self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
-                        let _ = self.game_entities.commit_deferred_attack(attack);
+                        let _ = self.game_entities.commit_deferred_projectile(attack, emitter);
+                        released |= 1u16 << emitter;
+                    } else {
+                        // Retry on a later retained pose; never consume a shot
+                        // that the bounded pool could not hold.
+                        break;
                     }
                 }
                 // An authored ranged attack never falls through to the legacy
@@ -755,7 +763,10 @@ impl Playtest {
                             && frame >= capsule.active_start_frame && frame <= capsule.active_end_frame
                     })
                 });
-            self.interrupt_player_on_poise_break(poise_total, armored, ctx);
+            let staggered = self.interrupt_player_on_poise_break(poise_total, armored, ctx);
+            self.spawn_combat_hit_sparks(player_position, player_height.max(0) as u16,
+                self.room_index, self.player_stance.active() == VitalityChannelId::Two,
+                staggered, self.hazard_death_ticks_remaining != 0);
         }
     }
 
@@ -944,6 +955,12 @@ impl Playtest {
                 channel,
                 now,
             );
+            let state = self.game_entities.state(entity);
+            self.spawn_combat_hit_sparks(self.game_entities.position(entity),
+                GAME_ENTITIES[entity].height, GAME_ENTITIES[entity].room,
+                channel == DamageNumberChannel::Zenith,
+                state == psx_game_runtime::entities::GameEntityState::Staggered,
+                state == psx_game_runtime::entities::GameEntityState::Dead);
         }
     }
 
@@ -1299,6 +1316,8 @@ impl Playtest {
                         damage_number_channel,
                         now,
                     );
+                    self.spawn_combat_hit_sparks(position, entity_record.height, entity_record.room,
+                        vitality_channel == VitalityChannelId::Two, outcome.staggered, outcome.died);
                 }
                 if outcome.died {
                     // The authored-capsule path knows exactly which entity

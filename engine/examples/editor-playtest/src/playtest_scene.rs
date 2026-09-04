@@ -972,6 +972,7 @@ impl Scene for Playtest {
 
     fn update(&mut self, ctx: &mut Ctx) {
         self.player_poise.tick(1);
+        self.dash_wake.tick();
         self.update_gameplay(ctx);
         // This tail runs after every intentional early return in
         // `update_gameplay`: freeze final actor state once, then run combat
@@ -2015,6 +2016,13 @@ impl Scene for Playtest {
             &mut primitive_packets,
         );
         let _ = self.draw_combat_projectiles(camera, &mut ot, &mut primitive_packets);
+        if let Some(material) = self.particle_material {
+            let projector = PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
+            for sample in self.dash_wake.samples().filter(|s| s.room == self.room_index) {
+                let _ = psx_game_runtime::particles::draw_dash_sample(sample, camera, projector,
+                    self.effect_depth_range(sample.room), material, &mut ot, &mut primitive_packets);
+            }
+        }
         let _ = self.draw_player_water_wade_splash(
             camera,
             self.gameplay_tick(ctx.sim_tick),
@@ -2163,6 +2171,16 @@ impl Scene for Playtest {
                     cooldown_progress_q12,
                     echo_elapsed,
                 );
+                if self.hazard_death_ticks_remaining == 0
+                    && self.game_entities.encounter_cleared(GAME_ENTITIES)
+                {
+                    let label = match crate::loc::language() {
+                        crate::loc::Language::English => "SECTOR CLEARED",
+                        crate::loc::Language::Italian => "SETTORE LIBERATO",
+                    };
+                    font.draw_text((SCREEN_W - font.text_width(label) as i16) / 2,
+                        SCREEN_H - 18, label, (116, 214, 196));
+                }
             }
         }
 

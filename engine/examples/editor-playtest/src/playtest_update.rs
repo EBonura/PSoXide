@@ -472,6 +472,8 @@ impl Playtest {
         self.deferred_enemy_attacks.clear();
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
+        self.dash_wake = psx_game_runtime::combat_feedback::DashWake::EMPTY;
+        self.attack_buffer.clear();
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
@@ -613,6 +615,7 @@ impl Playtest {
         if ctx.just_pressed(button::TRIANGLE) && !circle_locks_stance {
             let config = self.player_stance_config;
             if self.player_stance.request_swap(&config).is_some() {
+                self.attack_buffer.clear();
                 telemetry::debug_log("player stance:swap");
             }
         }
@@ -842,7 +845,10 @@ impl Playtest {
         }
         // Each shoulder button addresses one attack directly. See
         // `update_attack_input` for the Horizon/Zenith mapping.
-        if self.update_attack_input(ctx, now, action_locked) {
+        if input.evade {
+            // An explicit dodge wins over a remembered attack.
+            self.attack_buffer.clear();
+        } else if self.update_attack_input(ctx, now, action_locked) {
             input = CharacterMotorInput::default();
         }
         // Three-part walk: ramp the stick during the windup, glide on the
@@ -852,6 +858,7 @@ impl Playtest {
         if !action_locked {
             input = self.walk_transition_input(input, stick_active, now, ctx.video_hz);
         }
+        let movement_start = self.motor.position();
         let mut config = self.motor_config();
         let bsp_contents = self.player_contents_memo(config.height);
         if bsp_contents.is_some_and(|sample| sample.water_level > 0) {
@@ -981,6 +988,13 @@ impl Playtest {
         };
         telemetry::stage_end(telemetry::stage::SIM_SOLVE);
         self.player_moved_last_tick = motor_frame.moved;
+        self.dash_wake.observe(
+            [movement_start.x, movement_start.y, movement_start.z],
+            [motor_frame.position.x, motor_frame.position.y, motor_frame.position.z],
+            self.room_index, config.height.max(0).min(i32::from(u16::MAX)) as u16,
+            !motor_frame.action.is_idle() && !motor_frame.recovery,
+            self.player_stance.active() == VitalityChannelId::Two,
+        );
         telemetry::stage_begin(telemetry::stage::SIM_ROOM_TRACK);
         if !self.update_current_room_from_player() {
             self.refresh_active_room_window_if_needed();
@@ -1489,49 +1503,36 @@ impl Playtest {
         }
     }
 
-    /// Stance-relative four-button attack layout. R1/R2 are the active
-    /// channel's light/heavy attacks; L1/L2 retain the opposite channel. A
-    /// missing clip leaves only that one input unavailable. Heavy bindings
-    /// are checked first so pressing both buttons on one shoulder in the same
-    /// tick resolves predictably.
+    /// R1/R2 select the active stance's light/heavy attack. Remember one
+    /// press for 12 ticks, allowing a late input to chain out of recovery.
+    /// Capture its stance at press time; a later swap cannot change intent.
     ///
     /// Returns true while an attack owns the player's input.
     fn update_attack_input(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
-        if action_locked || !self.motor.action().is_idle() {
+        if self.hazard_death_ticks_remaining != 0 {
+            self.attack_buffer.clear();
             return false;
         }
-        let (active_heavy, active_light, opposite_heavy, opposite_light) =
-            match self.player_stance.active() {
-                VitalityChannelId::One => (
-                    PlayerAnim::HeavyAttack,
-                    PlayerAnim::LightAttack,
-                    PlayerAnim::VertHeavyAttack,
-                    PlayerAnim::VertLightAttack,
-                ),
-                VitalityChannelId::Two => (
-                    PlayerAnim::VertHeavyAttack,
-                    PlayerAnim::VertLightAttack,
-                    PlayerAnim::HeavyAttack,
-                    PlayerAnim::LightAttack,
-                ),
+        let stance_offset = if self.player_stance.active() == VitalityChannelId::Two { 2 } else { 0 };
+        if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) {
+            self.attack_buffer.request(2 + stance_offset, now.as_u32());
+        } else if ctx.just_pressed(ACTIVE_LIGHT_ATTACK_BUTTON) {
+            self.attack_buffer.request(1 + stance_offset, now.as_u32());
+        }
+        if action_locked || !self.motor.action().is_idle() { return false; }
+        if let Some(tag) = self.attack_buffer.take(now.as_u32()) {
+            let anim = match tag {
+                1 => PlayerAnim::LightAttack,
+                2 => PlayerAnim::HeavyAttack,
+                3 => PlayerAnim::VertLightAttack,
+                _ => PlayerAnim::VertHeavyAttack,
             };
-        // R1/R2 are the only attack buttons; the stance decides which pair
-        // they perform. The opposite stance's attacks are reached by
-        // swapping stance, not by a second shoulder pair.
-        let _ = (opposite_heavy, opposite_light);
-        let attacks = [
-            (ACTIVE_HEAVY_ATTACK_BUTTON, active_heavy),
-            (ACTIVE_LIGHT_ATTACK_BUTTON, active_light),
-        ];
-        for (button, anim) in attacks {
-            if !ctx.just_pressed(button) {
-                continue;
-            }
             let bound = self
                 .character
                 .as_ref()
                 .is_some_and(|character| character.action_clip(anim.action()).is_some());
             if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
+                telemetry::debug_log("player attack:start");
                 telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
                 self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerWeaponSwing);
             }
