@@ -508,6 +508,10 @@ pub struct WorldCullingSettings {
     /// Camera-space far plane used for world, actor, and prop drawing.
     #[serde(default = "default_world_draw_distance")]
     pub draw_distance: i32,
+    /// Maximum authored BSP render-patch extent before the resident face budget fallback.
+    /// Smaller patches resolve vertex lighting and near-plane clipping more finely.
+    #[serde(default = "default_bsp_patch_extent")]
+    pub bsp_patch_extent: i32,
     /// Radius around the current room/player used to keep chunks active.
     #[serde(default = "default_world_chunk_activation_radius_sectors")]
     pub chunk_activation_radius_sectors: i32,
@@ -516,10 +520,15 @@ pub struct WorldCullingSettings {
     pub visibility_radius: u16,
 }
 
+fn default_bsp_patch_extent() -> i32 {
+    2048
+}
+
 impl WorldCullingSettings {
     /// Clamp authored values to runtime-safe ranges.
     pub fn normalized(self) -> Self {
         Self {
+            bsp_patch_extent: self.bsp_patch_extent.clamp(1024, 4096),
             draw_distance: self
                 .draw_distance
                 .clamp(MIN_WORLD_DRAW_DISTANCE, MAX_WORLD_DRAW_DISTANCE),
@@ -538,6 +547,7 @@ impl Default for WorldCullingSettings {
     fn default() -> Self {
         Self {
             draw_distance: default_world_draw_distance(),
+            bsp_patch_extent: default_bsp_patch_extent(),
             chunk_activation_radius_sectors: default_world_chunk_activation_radius_sectors(),
             visibility_radius: default_world_visibility_radius(),
         }

@@ -519,6 +519,17 @@ impl Adsr {
         }
     }
 
+    /// Preserve a one-shot sample's own attack and decay until ADPCM END.
+    /// Unlike `percussive`, this does not fade during a sample's lead-in.
+    /// Release is fast and exponential; configure the repeat address to the
+    /// silence block (as `Voice::configure_sample` does) for END handling.
+    pub const fn sample_one_shot() -> Self {
+        Self {
+            lower: 0x000F,
+            upper: 0x0025,
+        }
+    }
+
     /// Full-level envelope for sampled playback that a caller will end
     /// itself (looped holds, streams). NOT for fire-and-forget one-shots:
     /// on real hardware the ADPCM END+mute terminator does not silence

@@ -34,6 +34,8 @@ pub enum PlayerAnim {
     /// First-spawn intro, played once with control locked out.
     Intro,
     Death,
+    /// A poise break interrupts the previous action until hit recovery ends.
+    HitReact,
     /// Idle-to-walk transition, one shot; Walk begins where it ends.
     WalkWindup,
     /// Walk-to-idle transition, one shot, over the motor's deceleration.
@@ -69,6 +71,7 @@ impl PlayerAnim {
             Self::VertHeavyAttack => CharacterAnimationAction::VertHeavyAttack,
             Self::Intro => CharacterAnimationAction::Intro,
             Self::Death => CharacterAnimationAction::Death,
+            Self::HitReact => CharacterAnimationAction::HitReact,
             Self::WalkWindup => CharacterAnimationAction::WalkWindup,
             Self::WalkWinddown => CharacterAnimationAction::WalkWinddown,
             Self::WalkWinddownAlt => CharacterAnimationAction::WalkWinddownAlt,

@@ -3743,6 +3743,8 @@ fn render_gameplay_sfx_event(event: psx_level::LevelGameplaySfxEvent) -> &'stati
         psx_level::LevelGameplaySfxEvent::ProjectileLaunch => {
             "LevelGameplaySfxEvent::ProjectileLaunch"
         }
+        psx_level::LevelGameplaySfxEvent::EnemyFootstep => "LevelGameplaySfxEvent::EnemyFootstep",
+        psx_level::LevelGameplaySfxEvent::EnemyIdle => "LevelGameplaySfxEvent::EnemyIdle",
     }
 }
 

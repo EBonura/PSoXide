@@ -1205,7 +1205,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn play_gameplay_sfx_events(&mut self, events: u16) {
-        const EVENTS: [LevelGameplaySfxEvent; 10] = [
+        const EVENTS: [LevelGameplaySfxEvent; 12] = [
+            LevelGameplaySfxEvent::EnemyFootstep,
+            LevelGameplaySfxEvent::EnemyIdle,
             LevelGameplaySfxEvent::Footstep,
             LevelGameplaySfxEvent::LightHit,
             LevelGameplaySfxEvent::HeavyHit,
@@ -1246,10 +1248,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
             psx_sfx::Sample::resident(psx_spu::SpuAddr::new(sample.addr_bytes), 44_100, 0);
         psx_sfx::OneShot::new(resident, volume)
             .with_pitch(pitch)
-            // Adsr::sample has an infinite release on real silicon after END.
-            // Percussive terminates this event voice and is safe for resident
-            // one-shots that have no scheduled length cutoff.
-            .with_adsr(psx_spu::Adsr::percussive())
+            // Keep the waveform's authored envelope: the percussive sustain
+            // fades away before delayed-onset swings/charges become audible.
+            // END still has a fast release and configure_sample points the
+            // repeat address at silence, rather than another sound.
+            .with_adsr(psx_spu::Adsr::sample_one_shot())
             .play(psx_spu::Voice::new(voice_index));
     }
 

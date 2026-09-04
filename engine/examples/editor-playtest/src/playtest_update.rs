@@ -47,6 +47,13 @@ fn gait_footstep_crossed(
     local_tick / beat != previous / beat
 }
 
+fn enemy_idle_cue_due(now: u32, delta_ticks: u16, index: usize) -> bool {
+    // A short servo vocal every six seconds, staggered between actors. Edge
+    // detection supports both the 30 Hz and 60 Hz NPC update cadences.
+    let phase = now.wrapping_add((index as u32).wrapping_mul(71));
+    phase / 360 != phase.saturating_sub(u32::from(delta_ticks)) / 360
+}
+
 impl Playtest {
     /// Phase-3 gameplay layer tick: entity state machines (moved
     /// through the engine motor's collision by [`SceneEntityMover`]),
@@ -261,6 +268,47 @@ impl Playtest {
         } else {
             psx_game_runtime::entities::GameEntityTickStats::default()
         };
+        if npc_tick_due {
+            for index in 0..entity_count {
+                let record = &GAME_ENTITIES[index];
+                let position = self.game_entities.position(index);
+                let audible_range = record.aggro_radius.saturating_mul(2);
+                if record.room != self.room_index
+                    || position[1].saturating_sub(player.y).saturating_abs() > i32::from(audible_range)
+                    || psx_game_runtime::poi::xz_distance_squared_within_radius(
+                        [player.x, player.z], [position[0], position[2]], audible_range,
+                    ).is_none()
+                {
+                    continue;
+                }
+                let state = self.game_entities.state(index);
+                let moved = position[0] != entity_positions[index][0]
+                    || position[2] != entity_positions[index][2];
+                if moved && matches!(state,
+                    psx_game_runtime::entities::GameEntityState::Patrol
+                    | psx_game_runtime::entities::GameEntityState::Aggro)
+                {
+                    let clip = self.game_entities.clip_for_state(GAME_ENTITIES, index);
+                    let animation = MODEL_INSTANCES.get(usize::from(record.model_instance))
+                        .and_then(|instance| self.models.get(instance.model.to_usize()))
+                        .copied().flatten()
+                        .and_then(|model| model.clip(&self.clips, ModelClipIndex(clip.clip)));
+                    if let Some(animation) = animation {
+                        let cycle = (u32::from(animation.frame_count()) * ctx.video_hz.as_nonzero_u32())
+                            .div_ceil(u32::from(animation.sample_rate_hz()).max(1));
+                        if !clip.one_shot && gait_footstep_crossed(
+                            true, true, u32::from(clip.phase_ticks), npc_delta_ticks, cycle,
+                        ) {
+                            self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyFootstep);
+                        }
+                    }
+                } else if state == psx_game_runtime::entities::GameEntityState::Idle
+                    && enemy_idle_cue_due(now, npc_delta_ticks, index)
+                {
+                    self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyIdle);
+                }
+            }
+        }
         self.logic.tick(
             LOGIC,
             psx_game_runtime::logic::LogicTickInput {
@@ -353,6 +401,7 @@ impl Playtest {
         // for spawn + character; fall back to the bare
         // PLAYER_SPAWN for placeholder manifests. The spawn room
         // may be a manual portal room rather than room zero.
+        self.player_stance_config = CombatStanceConfig::DEFAULT;
         let (spawn, character) = match PLAYER_CONTROLLER {
             Some(pc) => {
                 let record = CHARACTERS.get(pc.character.to_usize());
@@ -419,18 +468,20 @@ impl Playtest {
         // initial door states onto their box props (START_ON doors
         // begin open without a fire event).
         self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.game_entities.set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.deferred_enemy_attacks.clear();
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.camera_recenter_requested = false;
         // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
         // would mean no damage and no recovery at all, so it is set explicitly
         // on every reset rather than relying on the zero pattern.
         self.player_stance = CombatStance::new(VitalityChannelId::One);
         self.vitality_circles = VitalityCircleState::EMPTY;
-        self.player_stance_config = CombatStanceConfig::DEFAULT;
         self.power_up_loadout = PowerUpLoadout::DEFAULT;
         self.power_up_inventory = BoostInventory::EMPTY;
         if self.poi_save_loaded {
@@ -583,6 +634,7 @@ impl Playtest {
                 self.lock_target = None;
             } else {
                 self.lock_target = self.find_best_lock_target(LOCK_RANGE);
+                self.camera_recenter_requested = self.lock_target.is_none();
             }
             if self.is_locked() {
                 telemetry::debug_log("player lock:on");
@@ -1124,7 +1176,20 @@ impl Playtest {
 
 #[cfg(test)]
 mod gameplay_audio_tests {
-    use super::gait_footstep_crossed;
+    use super::{gait_footstep_crossed, enemy_idle_cue_due};
+
+    #[test]
+    fn enemy_idle_is_staggered_and_independent_of_npc_cadence() {
+        for delta in [1, 2] {
+            for index in 0..4 {
+                let cues = (delta..=1080).step_by(usize::from(delta))
+                    .filter(|now| enemy_idle_cue_due(u32::from(*now), delta, index)).count();
+                assert_eq!(cues, 3);
+            }
+        }
+        assert!(enemy_idle_cue_due(360, 2, 0));
+        assert!(!enemy_idle_cue_due(360, 2, 1));
+    }
 
     #[test]
     fn footstep_is_edge_triggered_at_half_cycle() {

@@ -111,7 +111,7 @@ impl ThirdPersonCameraConfig {
             manual_cooldown_frames: 42,
             auto_align_step: Angle::from_q12(18),
             auto_align_when_moving: false,
-            lock_on_align_step: Angle::from_q12(128),
+            lock_on_align_step: Angle::from_q12(64),
             position_lag_shift: 2,
             focus_lag_shift: 2,
             distance_lag_shift: 3,
@@ -178,6 +178,7 @@ pub struct ThirdPersonCameraState {
     position: RoomPoint,
     focus: RoomPoint,
     manual_cooldown: u8,
+    recenter_active: bool,
     collision_release_delay: u8,
     initialized: bool,
     last_pull_in: bool,
@@ -199,6 +200,7 @@ impl ThirdPersonCameraState {
             position: RoomPoint::ZERO,
             focus: RoomPoint::ZERO,
             manual_cooldown: 0,
+            recenter_active: false,
             collision_release_delay: 0,
             initialized: false,
             last_pull_in: false,
@@ -233,6 +235,7 @@ impl ThirdPersonCameraState {
     ) {
         let config = normalize_config(config);
         self.yaw = yaw;
+        self.recenter_active = false;
         self.distance = config
             .distance
             .clamp(config.min_distance, config.max_distance);
@@ -417,7 +420,11 @@ impl ThirdPersonCameraState {
 
         let focus_goal = camera_focus_goal(target, config);
 
+        if input.recenter { self.recenter_active = true; }
+        if target.lock_target.is_some() { self.recenter_active = false; }
+
         if input.yaw_delta_q12 != 0 || input.pitch_delta_q12 != 0 {
+            self.recenter_active = false;
             self.yaw = self.yaw.add_signed_q12(input.yaw_delta_q12);
             self.pitch_q12 = self
                 .pitch_q12
@@ -430,24 +437,32 @@ impl ThirdPersonCameraState {
 
         let player_back_yaw = target.player_yaw.add(Angle::HALF);
         let (desired_yaw, yaw_step) = if let Some(lock) = target.lock_target {
-            (
-                yaw_to_point(target.player, lock).add(Angle::HALF),
-                config.lock_on_align_step,
-            )
-        } else if input.recenter
+            let dx = lock.x.saturating_sub(target.player.x).saturating_abs();
+            let dz = lock.z.saturating_sub(target.player.z).saturating_abs();
+            let close_radius = (config.distance / 6).max(8);
+            // At body contact the target bearing becomes unstable and flips
+            // by 180 degrees when it crosses the player. Keep the orbit steady
+            // in that small zone; focus still follows both actors.
+            let bearing = if dx.max(dz) < close_radius { self.yaw }
+                else { yaw_to_point(target.player, lock).add(Angle::HALF) };
+            (bearing, config.lock_on_align_step)
+        } else if self.recenter_active
             || (config.auto_align_when_moving && target.moving && self.manual_cooldown == 0)
         {
-            (player_back_yaw, config.auto_align_step)
+            (player_back_yaw, if self.recenter_active { config.lock_on_align_step } else { config.auto_align_step })
         } else {
             (self.yaw, config.auto_align_step)
         };
         self.yaw = self.yaw.approach_q12(desired_yaw, yaw_step.as_q12());
-        if input.recenter {
+        if self.recenter_active {
             self.pitch_q12 = approach_i16(
                 self.pitch_q12,
                 default_pitch_q12(config),
-                config.auto_align_step.as_q12() as i16,
+                config.lock_on_align_step.as_q12() as i16,
             );
+            if self.yaw == player_back_yaw && self.pitch_q12 == default_pitch_q12(config) {
+                self.recenter_active = false;
+            }
         }
 
         self.focus = approach_vertex_shift(self.focus, focus_goal, config.focus_lag_shift);
@@ -479,7 +494,7 @@ impl ThirdPersonCameraState {
         let solve_now = self.solve_phase == 0
             || input.yaw_delta_q12 != 0
             || input.pitch_delta_q12 != 0
-            || input.recenter
+            || input.recenter || self.recenter_active
             || target.lock_target.is_some();
         self.solve_phase = self.solve_phase.saturating_add(1);
         if self.solve_phase >= config.collision_solve_interval.max(1) {
@@ -2088,7 +2103,18 @@ mod tests {
             config,
         );
 
-        assert_eq!(frame.yaw, Angle::QUARTER.add(config.auto_align_step));
+        assert_eq!(frame.yaw, Angle::QUARTER.add(config.lock_on_align_step));
+        // A single press completes the turn after release.
+        for _ in 0..32 {
+            camera.update(WorldProjection::new(160, 120, 320, 64), None,
+                target, ThirdPersonCameraInput::default(), config);
+        }
+        assert_eq!(camera.yaw(), Angle::HALF);
+        assert!(!camera.recenter_active);
+        camera.recenter_active = true;
+        camera.update(WorldProjection::new(160, 120, 320, 64), None,
+            target, ThirdPersonCameraInput { yaw_delta_q12: 20, ..ThirdPersonCameraInput::default() }, config);
+        assert!(!camera.recenter_active, "manual orbit must cancel recentering");
     }
 
     #[test]
@@ -2465,6 +2491,24 @@ mod tests {
         }
 
         assert_eq!(frame.focus.y, config.target_height);
+    }
+
+    #[test]
+    fn close_target_crossing_player_does_not_spin_the_camera() {
+        let config = ThirdPersonCameraConfig::character(240, 120, 50);
+        let projection = WorldProjection::new(160, 120, 320, 8);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO, player_yaw: Angle::ZERO, moving: false,
+            lock_target: Some(RoomPoint::new(0, 0, 200)),
+        };
+        camera.update(projection, None, target, ThirdPersonCameraInput::default(), config);
+        let yaw = camera.yaw();
+        for point in [RoomPoint::new(10, 0, 10), RoomPoint::new(-10, 0, -10)] {
+            target.lock_target = Some(point);
+            let frame = camera.update(projection, None, target, ThirdPersonCameraInput::default(), config);
+            assert_eq!(frame.yaw, yaw);
+        }
     }
 
     #[test]

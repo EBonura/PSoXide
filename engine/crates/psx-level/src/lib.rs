@@ -2897,6 +2897,10 @@ pub enum LevelGameplaySfxEvent {
     ProjectileCharge = 8,
     /// An enemy projectile was successfully emitted into the runtime pool.
     ProjectileLaunch = 9,
+    /// A nearby enemy's moving gait crossed a foot-down phase.
+    EnemyFootstep = 10,
+    /// A nearby idle enemy emitted a short mechanical vocalization.
+    EnemyIdle = 11,
 }
 
 impl LevelGameplaySfxEvent {

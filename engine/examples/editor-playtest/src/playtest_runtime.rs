@@ -607,6 +607,7 @@ impl Playtest {
         self.switch_player_anim(PlayerAnim::Death, now, video_hz);
         self.anim_lock_until_tick = now.saturating_add(u32::from(delay_ticks));
         self.lock_target = None;
+        self.camera_recenter_requested = false;
         self.soft_lock_target = None;
         self.active_interactable = None;
         telemetry::counter(telemetry::counter::PLAYER_DEATHS, 1);
@@ -642,6 +643,7 @@ impl Playtest {
         };
         self.motor.snap_to(position, motor_yaw);
         self.player_vitality.refill();
+        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
         self.hazard_death_ticks_remaining = 0;
         self.anim_state = PlayerAnim::Idle;
         self.anim_blend_from = None;
@@ -655,6 +657,7 @@ impl Playtest {
         // as this life's PLAYER_WEAPON_ATTACHMENTS event.
         self.weapon_attach_reported = false;
         self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.game_entities.set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.logic.init_from_records(LOGIC);
         // The logic runtime restarts its rolling fired total with the
         // records; restart the reported watermark with it or the
@@ -787,6 +790,25 @@ impl Playtest {
             self.destructibles.begin_swing();
         }
         true
+    }
+
+    pub(super) fn interrupt_player_on_poise_break(&mut self, damage: u16, armored: bool, ctx: &Ctx) {
+        if self.hazard_death_ticks_remaining != 0 || !self.player_poise.hit(damage, 20, armored) {
+            return;
+        }
+        self.motor.interrupt_action();
+        self.evade_buffer_vblanks = 0;
+        self.loco = LocoPhase::Idle;
+        let now = self.gameplay_tick(ctx.sim_tick);
+        let has_reaction = self.start_player_anim_action(PlayerAnim::HitReact, now, ctx.video_hz);
+        let recovery = if has_reaction {
+            self.anim_lock_until_tick.saturating_sub(now).clamp(18, 48)
+        } else { 18 };
+        // Missing hit-react assets still interrupt gameplay safely.
+        self.switch_player_anim(PlayerAnim::HitReact, now, ctx.video_hz);
+        self.anim_lock_until_tick = now.saturating_add(recovery);
+        self.anim_blend_from = None;
+        telemetry::debug_log("player poise:break");
     }
 
     pub(super) fn lock_player_anim_action(
@@ -1501,7 +1523,7 @@ impl Playtest {
     }
 
     pub(super) fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
-        let input = if self.is_locked() {
+        let mut input = if self.is_locked() {
             ThirdPersonCameraInput {
                 yaw_delta_q12: 0,
                 pitch_delta_q12: 0,
@@ -1512,6 +1534,7 @@ impl Playtest {
         } else {
             camera_input(ctx, self.camera_orbit_speed_level(), self.analog_deadzone)
         };
+        input.recenter |= core::mem::take(&mut self.camera_recenter_requested);
         let lock_target = self
             .lock_target_position()
             .or_else(|| self.soft_lock_target_position());
@@ -1805,7 +1828,9 @@ impl Playtest {
         let position = self.target_position(index)?;
         let height = MODELS
             .get(target.model.to_usize())
-            .map(|model| model.world_height as i32)
+            .map(|model| {
+                i32::from(model.world_height) * i32::from(target.visual_scale_q8) / 256
+            })
             .unwrap_or(1024);
         Some(RoomPoint::new(
             position.x,

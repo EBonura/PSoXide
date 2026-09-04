@@ -494,6 +494,7 @@ impl Playtest {
                 .is_some();
         let mut hits = 0u16;
         let mut damage_total = 0u16;
+        let mut poise_total = 0u16;
         let mut attack_index = 0usize;
         while attack_index < self.deferred_enemy_attacks.len() {
             let Some(attack) = self.deferred_enemy_attacks.get(attack_index) else {
@@ -523,15 +524,8 @@ impl Playtest {
                     attack.action(),
                     attacker_pose,
                 ) {
-                    let aim = [
-                        player_position[0],
-                        player_position[1].saturating_add(player_height.max(0) / 2),
-                        player_position[2],
-                    ];
-                    let velocity = psx_game_runtime::projectiles::velocity_toward(
-                        release.position,
-                        aim,
-                        release.speed,
+                    let velocity = self.game_entities.ranged_velocity(
+                        attack.entity(), release.position, release.speed,
                     );
                     let spawn = ProjectileSpawn {
                         position: release.position,
@@ -571,8 +565,8 @@ impl Playtest {
             let damage = match contact {
                 combat::AuthoredActorContact::Hit {
                     damage,
-                    poise_damage: _,
-                } => Some(damage),
+                    poise_damage,
+                } => Some((damage, poise_damage)),
                 combat::AuthoredActorContact::Miss => None,
                 combat::AuthoredActorContact::FallbackRequired => self
                     .game_entities
@@ -583,9 +577,9 @@ impl Playtest {
                         self.room_index,
                         player_radius,
                     )
-                    .then_some(entity.touch_damage),
+                    .then_some((entity.touch_damage, entity.touch_damage.max(20))),
             };
-            let Some(damage) = damage else {
+            let Some((damage, poise_damage)) = damage else {
                 continue;
             };
             // World occlusion is authoritative for BOTH the authored capsule
@@ -609,6 +603,7 @@ impl Playtest {
             if self.game_entities.connect_deferred_attack(attack) {
                 hits = hits.saturating_add(1);
                 damage_total = damage_total.saturating_add(damage);
+                poise_total = poise_total.saturating_add(poise_damage);
             }
         }
         let mut projectile_targets = psx_engine::FixedScratch::<
@@ -678,6 +673,7 @@ impl Playtest {
                 })
             {
                 hits = hits.saturating_add(1);
+                poise_total = poise_total.saturating_add(impact.poise_damage);
                 match impact.damage_channel {
                     psx_game_runtime::projectiles::ProjectileDamageChannel::Horizon => {
                         horizon_projectile_damage =
@@ -749,6 +745,17 @@ impl Playtest {
         }
         if hits > 0 {
             telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(hits));
+            let action = self.anim_state.action();
+            let armored = matches!(self.anim_state, PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack)
+                && player_pose.is_some_and(|pose| {
+                    let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+                    player_capsules.iter().any(|capsule| {
+                        capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                            && capsule.action == action.to_index() as u8
+                            && frame >= capsule.active_start_frame && frame <= capsule.active_end_frame
+                    })
+                });
+            self.interrupt_player_on_poise_break(poise_total, armored, ctx);
         }
     }
 
@@ -1362,6 +1369,7 @@ impl Playtest {
             self.queue_gameplay_sfx(event);
         }
         if stats.staggers > 0 {
+            telemetry::debug_log("enemy poise:break");
             telemetry::counter(
                 telemetry::counter::GAME_ENTITY_STAGGER_ENTERS,
                 u32::from(stats.staggers),

@@ -540,6 +540,10 @@ pub fn compile_brush_world(
     let material_tints = material_tints(project);
     let texture_dims = brush_texture_dims(project, scene, &options);
     let uv_window_skip = sky_aperture_materials(project);
+    let patch_extent = match &scene.node(NodeId::ROOT).unwrap().kind {
+        NodeKind::World { culling, .. } => culling.bsp_patch_extent.clamp(64, 256) as f64,
+        _ => ENGINE_SURFACE_EXTENT_UNITS,
+    };
     let occupant_points = player_occupant_points(scene);
     let (mut world_geometry, world_collision, leak_path, mut uv_window) = compile_model(
         &static_brushes,
@@ -550,6 +554,7 @@ pub fn compile_brush_world(
         &material_tints,
         &texture_dims,
         &uv_window_skip,
+        patch_extent,
         options.mode,
         options.ambient,
         &collision_hulls,
@@ -637,6 +642,7 @@ pub fn compile_brush_world(
             &material_tints,
             &texture_dims,
             &uv_window_skip,
+            patch_extent,
             options.mode,
             options.ambient,
             &collision_hulls,
@@ -1098,6 +1104,134 @@ pub fn diagnose_brush_world_leak(
     })
 }
 
+/// Rejoin CSG rectangles along complete shared edges before render subdivision.
+/// Topology/collision retain the original CSG. Only identical plane orientation,
+/// contents, material and UV mapping may merge; gaps and L shapes remain split.
+fn merge_render_rectangles(surfaces: Vec<CompiledSurface>) -> Vec<CompiledSurface> {
+    use std::collections::BTreeMap;
+    let mut groups = BTreeMap::new();
+    let mut result = Vec::new();
+    for surface in surfaces {
+        let normal = surface.plane.normal;
+        let Some(axis) =
+            (0..3).find(|&a| normal[a] != 0 && (0..3).all(|b| b == a || normal[b] == 0))
+        else {
+            result.push(surface);
+            continue;
+        };
+        let u = (axis + 1) % 3;
+        let v = (axis + 2) % 3;
+        let min = [u, v].map(|a| {
+            surface
+                .vertices
+                .iter()
+                .map(|p| p[a])
+                .fold(f64::INFINITY, f64::min)
+        });
+        let max = [u, v].map(|a| {
+            surface
+                .vertices
+                .iter()
+                .map(|p| p[a])
+                .fold(f64::NEG_INFINITY, f64::max)
+        });
+        let corners: std::collections::BTreeSet<_> = surface
+            .vertices
+            .iter()
+            .map(|p| ((p[u] - min[0]).abs() < 1e-6, (p[v] - min[1]).abs() < 1e-6))
+            .collect();
+        let rectangular = surface.vertices.len() == 4
+            && corners.len() == 4
+            && surface.vertices.iter().all(|p| {
+                [u, v]
+                    .iter()
+                    .enumerate()
+                    .all(|(i, &a)| (p[a] - min[i]).abs() < 1e-6 || (p[a] - max[i]).abs() < 1e-6)
+            });
+        if !rectangular {
+            result.push(surface);
+            continue;
+        }
+        let key = (
+            axis,
+            (surface.plane.dist as f64 / normal[axis] as f64).to_bits(),
+            normal[axis].signum(),
+            surface.material.map(|id| id.0),
+            surface.uv.offset_texels,
+            surface.uv.rotation_deg,
+            surface.uv.scale_q8,
+            surface.contents as u8,
+        );
+        groups
+            .entry(key)
+            .or_insert_with(Vec::new)
+            .push((min, max, surface));
+    }
+    for ((axis, ..), mut rectangles) in groups {
+        loop {
+            let before = rectangles.len();
+            for along in 0..2 {
+                let across = 1 - along;
+                rectangles.sort_by(|a, b| {
+                    a.0[across]
+                        .total_cmp(&b.0[across])
+                        .then(a.1[across].total_cmp(&b.1[across]))
+                        .then(a.0[along].total_cmp(&b.0[along]))
+                });
+                let mut joined: Vec<([f64; 2], [f64; 2], CompiledSurface)> = Vec::new();
+                for rectangle in rectangles {
+                    if let Some(last) = joined.last_mut() {
+                        if (last.0[across] - rectangle.0[across]).abs() < 1e-6
+                            && (last.1[across] - rectangle.1[across]).abs() < 1e-6
+                            && (last.1[along] - rectangle.0[along]).abs() < 1e-6
+                        {
+                            let world_axis = (axis + along + 1) % 3;
+                            let old_end = last.1[along];
+                            last.1[along] = rectangle.1[along];
+                            for vertex in &mut last.2.vertices {
+                                if (vertex[world_axis] - old_end).abs() < 1e-6 {
+                                    vertex[world_axis] = last.1[along];
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    joined.push(rectangle);
+                }
+                rectangles = joined;
+            }
+            if rectangles.len() == before {
+                break;
+            }
+        }
+        result.extend(rectangles.into_iter().map(|(_, _, s)| s));
+    }
+    result
+}
+
+// Sky apertures participate in topology and PVS, but never emit polygons.
+// Preserve their original CSG surfaces instead of spending the resident face
+// budget on light/GTE patches whose vertices the renderer never projects.
+fn subdivide_drawable_surfaces(
+    surfaces: Vec<CompiledSurface>,
+    sky_materials: &std::collections::HashSet<Option<ResourceId>>,
+    fine_extent: f64,
+    max_faces: usize,
+    lights: &[([f64; 3], f64)],
+) -> Vec<CompiledSurface> {
+    let (sky, drawable): (Vec<_>, Vec<_>) = surfaces
+        .into_iter()
+        .partition(|surface| sky_materials.contains(&surface.material));
+    let mut result = subdivide_surfaces_to_budget(
+        &drawable,
+        fine_extent,
+        max_faces.saturating_sub(sky.len()),
+        lights,
+    );
+    result.extend(sky);
+    result
+}
+
 fn compile_model(
     brushes: &[Brush],
     light_occluders: &[Brush],
@@ -1107,6 +1241,7 @@ fn compile_model(
     material_tints: &[BrushMaterialTint],
     texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
     uv_window_skip: &std::collections::HashSet<Option<ResourceId>>,
+    patch_extent: f64,
     mode: BrushWorldCookMode,
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
@@ -1122,7 +1257,7 @@ fn compile_model(
     let (topology_surfaces, render_surfaces) = compile_model_surfaces(brushes);
     let (mut bsp, portals, leak_diagnostic) =
         compile_model_topology(&topology_surfaces, brushes, occupant_points, true);
-    // qbsp parity: EVERY final face is capped to SURFACE_EXTENT_UNITS,
+    // qbsp parity: every drawable face is capped to SURFACE_EXTENT_UNITS,
     // lights or not. Build exact leaves from the unsplit CSG surfaces, then
     // keep the PS1-sized render surfaces as single-owner records referenced
     // by leaf marks; partition fragments are visibility construction data,
@@ -1139,9 +1274,10 @@ fn compile_model(
         .iter()
         .map(|light| (light.position, light.radius))
         .collect();
-    let render_surfaces = subdivide_surfaces_to_budget(
-        &render_surfaces,
-        ENGINE_SURFACE_EXTENT_UNITS,
+    let render_surfaces = subdivide_drawable_surfaces(
+        merge_render_rectangles(render_surfaces),
+        uv_window_skip,
+        patch_extent,
         MAX_RESIDENT_WORLD_FACES,
         &light_spheres,
     );
@@ -2402,6 +2538,84 @@ mod tests {
             source_brush: 0,
             source_face: 0,
         }
+    }
+
+    #[test]
+    fn rectangle_merge_preserves_holes_mapping_and_winding() {
+        let a = floor_surface(64);
+        let mut b = a.clone();
+        for p in &mut b.vertices {
+            p[0] += 128.;
+        }
+        let merged = merge_render_rectangles(vec![a.clone(), b.clone()]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].vertices,
+            vec![
+                [-64., 0., -64.],
+                [192., 0., -64.],
+                [192., 0., 64.],
+                [-64., 0., 64.]
+            ]
+        );
+        let mut corner = b.clone();
+        for p in &mut corner.vertices {
+            p[2] += 128.;
+        }
+        assert_eq!(
+            merge_render_rectangles(vec![a.clone(), b.clone(), corner.clone()]).len(),
+            2
+        );
+        assert_eq!(merge_render_rectangles(vec![a.clone(), corner]).len(), 2);
+        let mut shifted = b.clone();
+        shifted.uv.offset_texels[0] = 1;
+        assert_eq!(merge_render_rectangles(vec![a.clone(), shifted]).len(), 2);
+        let mut different = b.clone();
+        different.material = Some(ResourceId(777));
+        assert_eq!(merge_render_rectangles(vec![a.clone(), different]).len(), 2);
+        let mut gap = b;
+        for p in &mut gap.vertices {
+            p[0] += 1.;
+        }
+        assert_eq!(merge_render_rectangles(vec![a, gap]).len(), 2);
+    }
+
+    #[test]
+    fn sky_apertures_do_not_force_drawable_faces_to_coarsen() {
+        let floor = floor_surface(256);
+        let mut sky = floor_surface(4096);
+        sky.material = Some(ResourceId(987));
+        let pieces = subdivide_drawable_surfaces(
+            vec![floor.clone(), sky.clone()],
+            &std::collections::HashSet::from([sky.material]),
+            128.0,
+            17,
+            &[],
+        );
+        assert_eq!(pieces.len(), 17);
+        assert_eq!(pieces.last(), Some(&sky));
+        for patch in &pieces[..16] {
+            assert_eq!(patch.material, floor.material);
+            for axis in 0..3 {
+                let lo = patch
+                    .vertices
+                    .iter()
+                    .map(|v| v[axis])
+                    .fold(f64::INFINITY, f64::min);
+                let hi = patch
+                    .vertices
+                    .iter()
+                    .map(|v| v[axis])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                assert!(hi - lo <= 128.0);
+            }
+        }
+        let regular =
+            subdivide_drawable_surfaces(vec![floor.clone()], &Default::default(), 128.0, 16, &[]);
+        assert_eq!(
+            regular,
+            subdivide_surfaces_to_budget(&[floor], 128.0, 16, &[])
+        );
     }
 
     #[test]
