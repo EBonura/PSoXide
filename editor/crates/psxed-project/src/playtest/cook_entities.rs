@@ -1141,6 +1141,42 @@ pub(crate) fn cook_player_character(
             "Character '{character_name}' has no roll clip -- runtime will fall back to run/walk",
         ));
     }
+    // A character that authors any hit volume means its damage to come from
+    // those volumes, yet an attack action with none falls back to the legacy
+    // arc, which for the player is live on every frame of the clip. That is
+    // exactly how the Zenith attacks shipped hitting on their first tick.
+    let capsule_action = |role: &crate::CombatCapsuleRole| match role {
+        crate::CombatCapsuleRole::Hitbox { action, .. }
+        | crate::CombatCapsuleRole::ProjectileEmitter { action, .. } => Some(*action),
+        crate::CombatCapsuleRole::Hurtbox => None,
+    };
+    let has_hit_volume = character
+        .combat_capsules
+        .iter()
+        .any(|volume| capsule_action(&volume.role).is_some());
+    if has_hit_volume {
+        for action in [
+            CharacterAnimationAction::LightAttack,
+            CharacterAnimationAction::HeavyAttack,
+            CharacterAnimationAction::ComboAttack,
+            CharacterAnimationAction::VertLightAttack,
+            CharacterAnimationAction::VertHeavyAttack,
+            CharacterAnimationAction::RangedAttack,
+        ] {
+            if action_clips[action.to_index()] == CHARACTER_CLIP_NONE {
+                continue;
+            }
+            let covered = character
+                .combat_capsules
+                .iter()
+                .any(|volume| capsule_action(&volume.role) == Some(action));
+            if !covered {
+                report.warn(format!(
+                    "Character '{character_name}' action {action:?} has a clip but no hitbox or projectile emitter -- the runtime falls back to the unarmed arc, which hits on every frame",
+                ));
+            }
+        }
+    }
     let character_index = u16::try_from(characters.len()).unwrap_or(u16::MAX);
     characters.push(PlaytestCharacter {
         source_resource: character_id.unwrap_or(model_resource_id),

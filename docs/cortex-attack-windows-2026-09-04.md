@@ -38,9 +38,12 @@ clip's frame 0. The editor timeline shows source-clip frames. Editor frame =
 runtime frame + `frame_start` (Light 26, Heavy 9, Zenith light 3, Zenith
 heavy 6). The hit checks themselves are consistent; only the data was off.
 
-## Open smell
+## Cook warning
 
 An attack action with authored hitboxes on *other* actions but none on its
-own silently gets the unarmed arc. A cook warning (or treating a character
-with any authored hitbox as authoritative for all its attacks) would have
-flagged the Zenith attacks. Not changed here.
+own used to get the unarmed arc silently. The player-character cook now
+warns per action ("action VertLightAttack has a clip but no hitbox or
+projectile emitter -- the runtime falls back to the unarmed arc, which hits
+on every frame"). Checked on the pre-fix data: both Zenith attacks warn; on
+the fixed data nothing does. Characters with no hit volumes at all (the
+Heavy Enemy) keep the arc without noise.
