@@ -13,6 +13,7 @@ use psx_gpu::{
         RectFlat, Sprite, TriFlat, TriGouraud, TriTextured, TriTexturedGouraud,
     },
 };
+use psx_math::int32::InvariantDivisor31;
 
 /// GPU primitive packet that can be inserted into an ordering table.
 ///
@@ -150,6 +151,9 @@ impl DepthSlot {
 pub struct DepthRange {
     near: CameraDepth,
     far: CameraDepth,
+    /// `1 / (far - near)` prepared here, once, so the per-primitive slot
+    /// mapping is a `multu` rather than a `div` (see [`Self::span_divisor`]).
+    span_divisor: InvariantDivisor31,
 }
 
 impl DepthRange {
@@ -164,7 +168,23 @@ impl DepthRange {
 
     /// Create from typed camera-space depths.
     pub const fn from_depths(near: CameraDepth, far: CameraDepth) -> Self {
-        Self { near, far }
+        let span = if far.raw() > near.raw() {
+            far.raw() - near.raw()
+        } else {
+            // Degenerate ranges answer the front slot before dividing.
+            1
+        };
+        Self {
+            near,
+            far,
+            span_divisor: InvariantDivisor31::new(span as u32),
+        }
+    }
+
+    /// Exact `x / (far - near)` for `x < 2^31`, prepared when the range was
+    /// built. For a degenerate range (`far <= near`) it divides by one.
+    pub const fn span_divisor(self) -> InvariantDivisor31 {
+        self.span_divisor
     }
 
     /// Front depth.
@@ -266,10 +286,13 @@ impl DepthBand {
             return DepthSlot::new(back);
         }
 
-        let span = far - near;
+        // `far > near` here, so the range's prepared divisor is exactly
+        // `1 / (far - near)`; the positive saturating product stays below
+        // 2^31, its exact domain.
         let offset = depth - near;
         let band_slots = (back - front) as i32;
-        DepthSlot::new(front + ((offset.saturating_mul(band_slots)) / span) as usize)
+        let scaled = offset.saturating_mul(band_slots) as u32;
+        DepthSlot::new(front + range.span_divisor.divide(scaled) as usize)
     }
 }
 

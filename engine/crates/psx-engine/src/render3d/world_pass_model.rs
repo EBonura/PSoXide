@@ -1,4 +1,5 @@
 use super::*;
+use psx_math::int32::InvariantDivisor31;
 
 /// Four prepacked opaque-crystal colors for one model draw.
 ///
@@ -159,7 +160,9 @@ struct PreparedModelDepthSlots {
     back: usize,
     near: i32,
     far: i32,
-    span: i32,
+    /// `1 / span` prepared once per model: the per-face slot is then a
+    /// `multu` instead of a `div` (about 35 interlocked cycles each).
+    span: InvariantDivisor31,
     band_slots: i32,
     exact_power_of_two_shift: u8,
 }
@@ -173,6 +176,10 @@ impl PreparedModelDepthSlots {
         let near = options.depth_range.near();
         let far = options.depth_range.far();
         let span = if far > near { far - near } else { 0 };
+        debug_assert_eq!(
+            options.depth_range.span_divisor(),
+            InvariantDivisor31::new(span.max(1) as u32)
+        );
         let band_slots = back.saturating_sub(front) as i32;
         let exact_power_of_two_shift = if back > front && far > near && band_slots > 0 {
             let quantum = span / band_slots;
@@ -197,7 +204,7 @@ impl PreparedModelDepthSlots {
             back,
             near: if degenerate { i32::MAX } else { near },
             far: if degenerate { i32::MAX } else { far },
-            span,
+            span: options.depth_range.span_divisor(),
             band_slots,
             exact_power_of_two_shift,
         }
@@ -215,7 +222,9 @@ impl PreparedModelDepthSlots {
         if self.exact_power_of_two_shift != u8::MAX {
             return self.front + ((offset as usize) >> self.exact_power_of_two_shift);
         }
-        self.front + ((offset.saturating_mul(self.band_slots)) / self.span) as usize
+        // `offset` is positive here and `band_slots` too, so the saturating
+        // product stays below 2^31, the divisor's exact domain.
+        self.front + self.span.divide(offset.saturating_mul(self.band_slots) as u32) as usize
     }
 }
 
