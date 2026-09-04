@@ -2302,8 +2302,13 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // UI image and play a CD-DA track at once). Once every front-end scene's
         // assets are cached, the menu issues no more CD reads, so CD-DA plays
         // uninterrupted while the player navigates intro/menu/settings.
-        if self.gameplay.front_end_assets_ready() {
-            let tick = ctx.sim_tick.as_u32();
+        let tick = ctx.sim_tick.as_u32();
+        // Combat music is gated on the world being resident, not on the menu
+        // cache: `front_end_assets_ready` goes false once gameplay takes the
+        // VRAM, and gating on it would make gameplay permanently silent.
+        // Cortex's level is fully resident after loading, so no CD read can
+        // collide with the track.
+        if !self.loading_pending() {
             let combat_cue = self.scene_combat_music_cue(scene);
             let combat = combat_cue.is_some() && self.gameplay.combat_music_active();
             if combat != self.combat_music_engaged {
@@ -2315,12 +2320,15 @@ impl<'a, S: Scene> GameApp<'a, S> {
                     _ => self.cdda.fade_out_and_stop(COMBAT_MUSIC_FADE_OUT_TICKS),
                 }
             }
-            if !self.combat_music_engaged && !self.cdda.fading_out() {
-                let music_cue = self.scene_music_cue(scene);
-                self.cdda.request(music_cue, tick);
-            }
         }
-        self.cdda.update(ctx.sim_tick.as_u32());
+        if self.gameplay.front_end_assets_ready()
+            && !self.combat_music_engaged
+            && !self.cdda.fading_out()
+        {
+            let music_cue = self.scene_music_cue(scene);
+            self.cdda.request(music_cue, tick);
+        }
+        self.cdda.update(tick);
     }
 
     fn render_ui_scene(&mut self, scene: u16, ctx: &mut Ctx) {
