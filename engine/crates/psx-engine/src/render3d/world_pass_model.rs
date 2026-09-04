@@ -224,7 +224,10 @@ impl PreparedModelDepthSlots {
         }
         // `offset` is positive here and `band_slots` too, so the saturating
         // product stays below 2^31, the divisor's exact domain.
-        self.front + self.span.divide(offset.saturating_mul(self.band_slots) as u32) as usize
+        self.front
+            + self
+                .span
+                .divide(offset.saturating_mul(self.band_slots) as u32) as usize
     }
 }
 
@@ -237,15 +240,23 @@ fn projected_part_bounds(
     count: usize,
     joint_count: usize,
 ) -> (i16, i16, i16, i16) {
-    let (mut min_x, mut max_x, mut min_y, mut max_y) =
-        (i16::MAX, i16::MIN, i16::MAX, i16::MIN);
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (i16::MAX, i16::MIN, i16::MAX, i16::MIN);
     for part in parts {
-        if part.joint_index() as usize >= joint_count { continue; }
+        if part.joint_index() as usize >= joint_count {
+            continue;
+        }
         let first = part.first_vertex() as usize;
-        let end = first.saturating_add(part.vertex_count() as usize).min(count);
+        let end = first
+            .saturating_add(part.vertex_count() as usize)
+            .min(count);
         for index in first..end {
-            track_projected_model_bounds(projected[index], &mut min_x, &mut max_x,
-                &mut min_y, &mut max_y);
+            track_projected_model_bounds(
+                projected[index],
+                &mut min_x,
+                &mut max_x,
+                &mut min_y,
+                &mut max_y,
+            );
         }
     }
     (min_x, max_x, min_y, max_y)
@@ -765,13 +776,20 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let part_end = global_index
                 .saturating_add(part.vertex_count() as usize)
                 .min(project_count);
+            // Empty authored ranges cannot establish nonempty bounds. Force
+            // the exact fallback, which retains the old empty-set result.
+            if global_index >= part_end {
+                projected_extent_code = u32::MAX;
+            }
             while global_index < part_end {
                 if blend_vertices
                     && model_vertex_uses_cpu_blend(vertices[global_index], joint_count)
                 {
                     stats.cpu_blended_vertices = stats.cpu_blended_vertices.wrapping_add(1);
                     #[cfg(feature = "vert-debug")]
-                    { probe_model_blended += 1; }
+                    {
+                        probe_model_blended += 1;
+                    }
                     #[cfg(feature = "vert-debug")]
                     {
                         let vertex = vertices[global_index];
@@ -785,7 +803,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             projected_model_vertex_in_front(projected, near_z);
                         all_projected_vertices_inside_hw_bounds &=
                             projected_model_vertex_inside_hw_bounds(projected);
-                        projected_extent_code |= crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
+                        projected_extent_code |=
+                            crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
                         projected_vertices[global_index] = projected;
                     }
                     #[cfg(not(feature = "vert-debug"))]
@@ -888,7 +907,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     let projected = project_gte_model_vertex(vertices[global_index]);
                     all_projected_vertices_in_front &=
                         projected_model_vertex_in_front(projected, near_z);
-                    projected_extent_code |= crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
+                    projected_extent_code |=
+                        crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
                     projected_vertices[global_index] = projected;
                     global_index += 1;
                 }
@@ -923,7 +943,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // overlay can split blended-only vs mesh-wide widening.
         #[cfg(feature = "vert-debug")]
         if probe_model_blended > 0 {
-            let bounds = projected_part_bounds(parts, projected_vertices, project_count, joint_count);
+            let bounds =
+                projected_part_bounds(parts, projected_vertices, project_count, joint_count);
             super::player_vert_debug::merge_all_x(bounds.0, bounds.1);
         }
 
@@ -963,7 +984,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             && all_projected_vertices_inside_hw_bounds
             && (options.cull_mode == CullMode::Back || options.cull_mode == CullMode::None);
         let packed_average_unclamped_extent_safe_faces = packed_average_unclamped_faces
-            && project_count != 0 && model_part_count != 0
+            && project_count != 0
+            && model_part_count != 0
             && (projected_extent_code == 0 || {
                 let (min_x, max_x, min_y, max_y) =
                     projected_part_bounds(parts, projected_vertices, project_count, joint_count);
