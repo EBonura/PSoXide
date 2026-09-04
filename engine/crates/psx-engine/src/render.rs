@@ -584,6 +584,12 @@ pub trait PrimitiveSink<T> {
         unsafe { self.push(prim).unwrap_unchecked() }
     }
 
+    /// Reserve fixed packet slots for a loop whose maximum output is known.
+    /// Unsupported sinks keep the ordinary per-packet path.
+    fn reserve_batch(&mut self, _capacity: usize) -> Option<PrimitivePacketBatch<'_, T>> {
+        None
+    }
+
     /// True if no primitives have been written.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -592,6 +598,52 @@ pub trait PrimitiveSink<T> {
     /// Remaining primitive slots or packet-sized equivalents.
     fn remaining(&self) -> usize {
         self.capacity().saturating_sub(self.len())
+    }
+}
+
+/// A bounded packet writer that commits arena counters once on drop.
+///
+/// Packet addresses and fixed-slot spacing match ordinary typed pushes.
+/// Only the written prefix is consumed, including on an early return.
+pub struct PrimitivePacketBatch<'a, T> {
+    next: *mut PrimitivePacketSlot,
+    used_slots: &'a mut usize,
+    packet_count: &'a mut usize,
+    written: usize,
+    capacity: usize,
+    marker: core::marker::PhantomData<T>,
+}
+
+impl<T> PrimitiveSink<T> for PrimitivePacketBatch<'_, T> {
+    #[inline(always)]
+    fn len(&self) -> usize { self.written }
+
+    #[inline(always)]
+    fn capacity(&self) -> usize { self.capacity }
+
+    #[inline(always)]
+    fn push(&mut self, prim: T) -> Option<&mut T> {
+        if self.written == self.capacity { return None; }
+        // SAFETY: reserve_batch validated the packet layout and this check
+        // proves that the next slot is inside its exclusive reservation.
+        Some(unsafe { self.push_unchecked(prim) })
+    }
+
+    #[inline(always)]
+    unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
+        debug_assert!(self.written < self.capacity);
+        let packet = self.next.cast::<T>();
+        self.next = unsafe { self.next.add(1) };
+        self.written += 1;
+        unsafe { packet.write(prim); &mut *packet }
+    }
+}
+
+impl<T> Drop for PrimitivePacketBatch<'_, T> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        *self.used_slots += self.written;
+        *self.packet_count += self.written;
     }
 }
 
@@ -1030,6 +1082,28 @@ impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
         self.push_packet(prim)
     }
 
+    #[inline(always)]
+    fn reserve_batch(&mut self, capacity: usize) -> Option<PrimitivePacketBatch<'_, T>> {
+        if core::mem::size_of::<T>() == 0
+            || core::mem::size_of::<T>() > core::mem::size_of::<PrimitivePacketSlot>()
+            || core::mem::align_of::<T>() > core::mem::align_of::<PrimitivePacketSlot>()
+            || capacity > self.remaining()
+        {
+            return None;
+        }
+        // SAFETY: remaining() bounds the entire reservation. The mutable
+        // counter borrows keep this arena exclusively borrowed until drop.
+        let next = unsafe { self.storage.as_mut_ptr().add(self.used_slots) };
+        Some(PrimitivePacketBatch {
+            next,
+            used_slots: &mut self.used_slots,
+            packet_count: &mut self.packet_count,
+            written: 0,
+            capacity,
+            marker: core::marker::PhantomData,
+        })
+    }
+
     unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
         debug_assert!(core::mem::size_of::<T>() > 0);
         debug_assert!(core::mem::size_of::<T>() <= core::mem::size_of::<PrimitivePacketSlot>());
@@ -1053,6 +1127,31 @@ impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_batch_commits_only_written_slots_and_preserves_addresses() {
+        let mut storage = PrimitivePacketScratch::<4>::ZERO;
+        let base = storage.slots.as_mut_ptr();
+        let mut arena = PrimitivePacketArena::new(&mut storage);
+        {
+            let mut batch = <PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 3).unwrap();
+            assert_eq!(batch.push(11).unwrap() as *mut u32, base.cast::<u32>());
+            assert_eq!(batch.push(22).unwrap() as *mut u32, unsafe { base.add(1).cast::<u32>() });
+            assert_eq!(batch.remaining(), 1);
+        }
+        assert_eq!(arena.len(), 2);
+        assert_eq!(arena.remaining(), 2);
+        assert!(<PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 3).is_none());
+        let next = arena.push_packet(33u32).unwrap() as *mut u32;
+        assert_eq!(next, unsafe { base.add(2).cast::<u32>() });
+        {
+            let mut batch = <PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 1).unwrap();
+            assert!(batch.push(44).is_some());
+            assert!(batch.push(55).is_none());
+        }
+        assert_eq!(arena.len(), 4);
+        assert_eq!(arena.remaining(), 0);
+    }
 
     #[test]
     fn depth_range_clamps_and_scales() {
