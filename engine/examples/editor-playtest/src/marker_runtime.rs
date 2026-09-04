@@ -1,6 +1,7 @@
 use super::*;
 use psx_engine::{CullMode, WorldRenderLayer};
-use psx_gpu::prim::{LineMono, TriGouraud};
+use psx_gpu::material::BlendMode;
+use psx_gpu::prim::{LineMono, QuadGouraudBlended, TriGouraud};
 use psx_gte::lighting::ProjectedLit;
 
 const TARGET_LOCK_OUTER: i32 = 25;
@@ -36,8 +37,9 @@ pub(super) enum ArchiveBeaconVisualState {
 }
 
 /// What reading the beacon yields. Message beacons keep the ember red of the
-/// Archive panel; item beacons swap to a cold cyan so a pickup reads as loot
-/// from across the room.
+/// Archive panel; item beacons turn gold and raise a light shaft (Souls
+/// style) so a pickup reads as loot from across the room, even when the panel
+/// itself is behind a railing.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum ArchiveBeaconKind {
     Message,
@@ -55,12 +57,102 @@ impl ArchiveBeaconKind {
 }
 
 /// Re-hue an ember colour for the beacon kind. The warm palette is (R, R/10,
-/// R/14); the item palette turns the same brightness cyan.
+/// R/14); the item palette turns the same brightness gold.
 fn archive_beacon_tint(kind: ArchiveBeaconKind, warm: (u8, u8, u8)) -> (u8, u8, u8) {
     match kind {
         ArchiveBeaconKind::Message => warm,
-        ArchiveBeaconKind::Item => (warm.2, ((u16::from(warm.0) * 3) / 4) as u8, warm.0),
+        ArchiveBeaconKind::Item => (warm.0, ((u16::from(warm.0) * 3) / 4) as u8, warm.0 / 8),
     }
+}
+
+/// Shaft height as a multiple of the panel height: shin-high panel, roughly
+/// head-high column.
+const ARCHIVE_BEACON_SHAFT_HEIGHT_MUL: i32 = 6;
+
+/// Draw the beacon's light shaft: two additive Gouraud quads rising from the
+/// floor under the panel, a wide soft column and a narrow bright core, in the
+/// beacon's own hue at the base fading to black (invisible under additive
+/// blending) at the top. The quads face the screen: their width is taken in
+/// screen space from the projected panel, so no extra projection or billboard
+/// maths is needed. A depleted beacon (item taken, one-shot message read) has
+/// no shaft.
+fn submit_archive_beacon_shaft<T>(
+    position: RoomPoint,
+    height: i32,
+    kind: ArchiveBeaconKind,
+    panel_half_width_px: i32,
+    pulse: u8,
+    state: ArchiveBeaconVisualState,
+    camera: WorldCamera,
+    options: WorldSurfaceOptions,
+    packets: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> usize
+where
+    T: PrimitiveSink<QuadGouraudBlended>,
+{
+    // The panel hangs `height` below its anchor (see resolve_poi_floors), so
+    // the floor is one panel height under the anchor.
+    let floor_y = position.y.saturating_sub(height);
+    let base = WorldVertex::new(position.x, floor_y, position.z);
+    let top = WorldVertex::new(
+        position.x,
+        floor_y.saturating_add(height.saturating_mul(ARCHIVE_BEACON_SHAFT_HEIGHT_MUL)),
+        position.z,
+    );
+    let (Some(base), Some(top)) = (camera.project_world(base), camera.project_world(top)) else {
+        return 0;
+    };
+    let strength = match state {
+        ArchiveBeaconVisualState::Active => 150i32,
+        ArchiveBeaconVisualState::Interactable => 220,
+        ArchiveBeaconVisualState::Depleted => return 0,
+    };
+    let level = (strength + i32::from(pulse) / 4).clamp(0, 255) as u8;
+    let column = archive_beacon_tint(kind, (level, level / 10, level / 14));
+    let core = archive_beacon_tint(kind, (level, level / 3, level / 4));
+    let black = (0u8, 0u8, 0u8);
+    let mut submitted = 0usize;
+    for (half, color) in [
+        (panel_half_width_px.max(2), column),
+        ((panel_half_width_px / 3).max(1), core),
+    ] {
+        let half = half as i16;
+        let verts = [
+            projected_lit(
+                ProjectedVertex {
+                    sx: top.sx.saturating_sub(half),
+                    ..top
+                },
+                black,
+            ),
+            projected_lit(
+                ProjectedVertex {
+                    sx: top.sx.saturating_add(half),
+                    ..top
+                },
+                black,
+            ),
+            projected_lit(
+                ProjectedVertex {
+                    sx: base.sx.saturating_sub(half),
+                    ..base
+                },
+                color,
+            ),
+            projected_lit(
+                ProjectedVertex {
+                    sx: base.sx.saturating_add(half),
+                    ..base
+                },
+                color,
+            ),
+        ];
+        submitted += world
+            .submit_blended_gouraud_quad(packets, verts, BlendMode::Add, options)
+            .submitted_triangles as usize;
+    }
+    submitted
 }
 
 impl Playtest {
@@ -102,7 +194,7 @@ impl Playtest {
         world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     ) -> usize
     where
-        T: PrimitiveSink<TriGouraud> + PrimitiveSink<LineMono>,
+        T: PrimitiveSink<TriGouraud> + PrimitiveSink<LineMono> + PrimitiveSink<QuadGouraudBlended>,
     {
         let Some(room_record) = ROOMS.get(self.room_index.to_usize()) else {
             return 0;
@@ -197,7 +289,7 @@ pub(super) fn draw_archive_beacon_world<T>(
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> usize
 where
-    T: PrimitiveSink<TriGouraud> + PrimitiveSink<LineMono>,
+    T: PrimitiveSink<TriGouraud> + PrimitiveSink<LineMono> + PrimitiveSink<QuadGouraudBlended>,
 {
     let rotation = match state {
         ArchiveBeaconVisualState::Active => {
@@ -273,6 +365,26 @@ where
         packets,
         world,
     );
+    {
+        let (mut min_x, mut max_x) = (i16::MAX, i16::MIN);
+        for point in visible_face {
+            min_x = min_x.min(point.sx);
+            max_x = max_x.max(point.sx);
+        }
+        let panel_half_width_px = i32::from(max_x.saturating_sub(min_x)) / 2;
+        submitted += submit_archive_beacon_shaft(
+            position,
+            height,
+            kind,
+            panel_half_width_px,
+            pulse,
+            state,
+            camera,
+            body_options,
+            packets,
+            world,
+        );
+    }
     submitted
 }
 
