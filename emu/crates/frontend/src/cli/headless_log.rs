@@ -108,7 +108,7 @@ impl CounterLog {
         let mut writer = BufWriter::new(file);
         writeln!(
             writer,
-            "guest_frame,cpu_tick,bus_cycles,resident_mask,active_mask,drawn_mask,visible_mask,cam_x_biased,cam_y_biased,cam_z_biased,current_room,player_x_biased,player_z_biased,player_facing_yaw_q12,view_yaw_q12,cam_local_x_biased,cam_local_z_biased,render_fwd_x_q12_biased,render_fwd_z_q12_biased,player_anim_action,player_y_biased,cam_local_y_biased,view_sin_yaw,view_cos_yaw,view_sin_pitch,view_cos_pitch,player_anim_phase_q12"
+            "guest_frame,cpu_tick,bus_cycles,resident_mask,active_mask,drawn_mask,visible_mask,cam_x_biased,cam_y_biased,cam_z_biased,current_room,player_x_biased,player_z_biased,player_facing_yaw_q12,view_yaw_q12,cam_local_x_biased,cam_local_z_biased,render_fwd_x_q12_biased,render_fwd_z_q12_biased,player_anim_action,player_y_biased,cam_local_y_biased,view_sin_yaw,view_cos_yaw,view_sin_pitch,view_cos_pitch,player_anim_phase_q12,player_attack_starts_total,player_melee_hits_total"
         )
         .map_err(|e| format!("write {}: {e}", path.display()))?;
         Ok(Self {
@@ -128,9 +128,13 @@ impl CounterLog {
         };
         use telemetry::counter as c;
         let g = |id| bus.telemetry.counter_latest_value(id);
+        // Hit and attack-start counters are emitted as +1 increments, so the
+        // running total is the only per-frame reading that means anything.
+        let totals = bus.telemetry.counter_totals();
+        let t = |id: u16| totals[id as usize];
         writeln!(
             writer,
-            "{guest_frame},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{guest_frame},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             g(c::ROOM_STREAM_RESIDENT_MASK_LO),
             g(c::ROOM_ACTIVE_CHUNK_MASK_LO),
             g(c::ROOM_DRAWN_CHUNK_MASK_LO),
@@ -155,6 +159,8 @@ impl CounterLog {
             g(c::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED),
             g(c::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED),
             g(c::PLAYER_ANIM_PHASE_Q12),
+            t(c::PLAYER_ATTACK_STARTS),
+            t(c::PLAYER_MELEE_HITS),
         )
         .map_err(|e| format!("write counter log: {e}"))
     }
