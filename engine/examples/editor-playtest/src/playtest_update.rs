@@ -586,7 +586,11 @@ impl Playtest {
         }
 
         if self.message_overlay.is_some() {
-            if ctx.just_pressed(INTERACT_BUTTON) || ctx.just_pressed(button::CIRCLE) {
+            // A press consumed by the paged message above (it may have just
+            // opened this overlay) must not dismiss the overlay in the same tick.
+            if !poi_interaction_consumed
+                && (ctx.just_pressed(INTERACT_BUTTON) || ctx.just_pressed(button::CIRCLE))
+            {
                 if !self.complete_legacy_message_reveal() {
                     self.message_overlay = None;
                 }
@@ -699,8 +703,7 @@ impl Playtest {
             lock_facing_yaw,
         );
         let stick_deflected = stick_input.move_x.raw() != 0 || stick_input.move_z.raw() != 0;
-        if ctx.just_pressed(EVADE_RUN_BUTTON)
-            || (ctx.is_held(EVADE_RUN_BUTTON) && stick_deflected)
+        if ctx.just_pressed(EVADE_RUN_BUTTON) || (ctx.is_held(EVADE_RUN_BUTTON) && stick_deflected)
         {
             self.evade_latched_move = (stick_input.move_x, stick_input.move_z);
         }
@@ -710,7 +713,10 @@ impl Playtest {
             // hit reaction or dodge fires the moment the actor is free. A tap
             // earlier than the cap expires instead of surprising the player
             // with a roll a second later.
-            let lock_left = self.anim_lock_until_tick.saturating_sub(now).saturating_add(2);
+            let lock_left = self
+                .anim_lock_until_tick
+                .saturating_sub(now)
+                .saturating_add(2);
             self.evade_buffer_vblanks = lock_left
                 .min(u32::from(EVADE_BUFFER_LOCK_CAP_VBLANKS))
                 .max(u32::from(EVADE_BUFFER_VBLANKS)) as u8;
