@@ -537,7 +537,8 @@ impl Playtest {
                 )
             });
             if let Some(engaged) = self.combat_music.tick(hostile) {
-                telemetry::debug_log(if engaged {
+                #[cfg(target_arch = "mips")]
+                psx_rt::tty::println(if engaged {
                     "combat music:on"
                 } else {
                     "combat music:off"

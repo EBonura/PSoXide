@@ -15,6 +15,8 @@ const TARGET_LOCK_SPOKE_OUTER: i32 = 12;
 const TARGET_LOCK_CENTER_HALF: i32 = 2;
 const TARGET_LOCK_WHITE: (u8, u8, u8) = (224, 240, 244);
 const TARGET_LOCK_CYAN: (u8, u8, u8) = (32, 220, 224);
+/// Horizon's ember, matching the HUD stance diamond.
+const TARGET_LOCK_EMBER: (u8, u8, u8) = (236, 88, 52);
 const TARGET_LOCK_PULSE_FRAMES: u32 = 72;
 
 /// Marker visualization tuning. Markers are debug stubs -- keep
@@ -825,6 +827,7 @@ pub(super) fn draw_lock_target_indicator(
     target: RoomPoint,
     camera: WorldCamera,
     elapsed_tick: SimTick,
+    stance: psx_game_runtime::vitality::VitalityChannelId,
 ) {
     let Some(center) = camera.project_world(target) else {
         return;
@@ -832,7 +835,15 @@ pub(super) fn draw_lock_target_indicator(
 
     let (breath, brightness) = target_lock_pulse(elapsed_tick);
     let white = target_lock_color(TARGET_LOCK_WHITE, brightness);
-    let cyan = target_lock_color(TARGET_LOCK_CYAN, brightness);
+    // The inner bracket carries the active stance, so the reticle says which
+    // pair R1/R2 will throw without the player leaving the target.
+    let cyan = target_lock_color(
+        match stance {
+            psx_game_runtime::vitality::VitalityChannelId::One => TARGET_LOCK_EMBER,
+            psx_game_runtime::vitality::VitalityChannelId::Two => TARGET_LOCK_CYAN,
+        },
+        brightness,
+    );
 
     // Each quadrant is an octagonal white bracket, a smaller cyan bracket,
     // and one diagonal spoke aimed at the centre. Keeping the parts separate
