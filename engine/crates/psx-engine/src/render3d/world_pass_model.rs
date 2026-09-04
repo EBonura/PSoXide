@@ -1783,6 +1783,31 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats: &mut TexturedModelRenderStats,
         faces_considered: &mut u32,
     ) {
+        if let Some(mut batch) = triangles.reserve_batch(faces.len()) {
+            self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch_sink::<CULL_BACK, CRYSTAL>(
+                &mut batch, projected_vertices, faces, packet_material, camera_crystal_materials, palette_banks, options, stats, faces_considered);
+            return;
+        }
+        self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch_sink::<CULL_BACK, CRYSTAL>(
+            triangles, projected_vertices, faces, packet_material, camera_crystal_materials, palette_banks, options, stats, faces_considered);
+    }
+
+    #[inline(always)]
+    fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch_sink<
+        const CULL_BACK: bool,
+        const CRYSTAL: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        camera_crystal_materials: Option<CameraCrystalPacketMaterials>,
+        palette_banks: bool,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) {
         debug_assert!(matches!(self.ordering, WorldCommandOrdering::Bucketed));
         debug_assert!(faces.len() <= triangles.remaining());
         debug_assert!(faces.len() <= self.commands.len().saturating_sub(self.command_len));
