@@ -107,6 +107,6 @@ The audit covers every game, including those sharing or appending no tracks.
 Runtime/Quake SDK use `b1ee0fd5`; Cortex uses `eee3aa93`; Quake uses `c2329be`.
 Both pressings pass all nine independent-program routes and deterministic
 Quake chain-load checks. The release-critical Cortex, HL, Hardware Tests and
-Quake battery passes; the final Cortex check sustains 466 gameplay frames.
+Quake battery passes; the staged Cortex check sustains 466 gameplay frames.
 See demo-disc `docs/comicon-audio-2026-09-04.md` for reproducible commands,
 track-by-track evidence and final image receipts. Console testing is separate.
