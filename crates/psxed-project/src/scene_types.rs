@@ -1215,7 +1215,10 @@ impl Scene {
         while let Some(node_id) = current {
             let node = self.node(node_id)?;
             if let NodeKind::World { sector_size, .. } = &node.kind {
-                return Some(snap_world_sector_size(*sector_size));
+                // Loaded/authored projects are snapped by normalization and the
+                // editor setter. Cooked clones already hold engine units;
+                // snapping here would enlarge their sectors and light radii.
+                return Some((*sector_size).max(1));
             }
             current = node.parent;
         }
