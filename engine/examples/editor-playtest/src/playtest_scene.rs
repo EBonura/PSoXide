@@ -1037,7 +1037,7 @@ impl Scene for Playtest {
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
             world_object_visibility =
-                bsp.visible_world_objects(camera, WORLD_OBJECTS, &self.destructibles);
+                bsp.visible_world_objects(camera, &self.destructibles);
             visible_sky_aperture = bsp.draw(
                 camera,
                 bsp_material_tick,
