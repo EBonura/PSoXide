@@ -1636,7 +1636,20 @@ impl EditorWorkspace {
                 volume_option,
                 playback_speed_q12,
                 loop_track,
+                trigger,
             } => {
+                let mut combat_only = *trigger == psxed_project::MusicTrigger::Combat;
+                if ui
+                    .checkbox(&mut combat_only, "Play only during combat (fades in and out)")
+                    .changed()
+                {
+                    *trigger = if combat_only {
+                        psxed_project::MusicTrigger::Combat
+                    } else {
+                        psxed_project::MusicTrigger::Always
+                    };
+                    changed = true;
+                }
                 inspector_section(
                     ui,
                     "ui-music-playback",
