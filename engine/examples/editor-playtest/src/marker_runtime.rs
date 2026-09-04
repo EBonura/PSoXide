@@ -35,6 +35,34 @@ pub(super) enum ArchiveBeaconVisualState {
     Depleted,
 }
 
+/// What reading the beacon yields. Message beacons keep the ember red of the
+/// Archive panel; item beacons swap to a cold cyan so a pickup reads as loot
+/// from across the room.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum ArchiveBeaconKind {
+    Message,
+    Item,
+}
+
+impl ArchiveBeaconKind {
+    fn of(interactable: &InteractableRecord) -> Self {
+        if interactable.reward_resource == psx_level::POI_REWARD_NONE {
+            Self::Message
+        } else {
+            Self::Item
+        }
+    }
+}
+
+/// Re-hue an ember colour for the beacon kind. The warm palette is (R, R/10,
+/// R/14); the item palette turns the same brightness cyan.
+fn archive_beacon_tint(kind: ArchiveBeaconKind, warm: (u8, u8, u8)) -> (u8, u8, u8) {
+    match kind {
+        ArchiveBeaconKind::Message => warm,
+        ArchiveBeaconKind::Item => (warm.2, ((u16::from(warm.0) * 3) / 4) as u8, warm.0),
+    }
+}
+
 impl Playtest {
     /// Submit every visible Archive Beacon in the current room into the same
     /// world ordering table as BSP/grid surfaces and actors. Unlike the former
@@ -136,6 +164,7 @@ impl Playtest {
                 Angle::from_q12(interactable.yaw as u16),
                 interactable.marker_height,
                 state,
+                ArchiveBeaconKind::of(interactable),
                 elapsed_tick,
                 camera,
                 options,
@@ -151,7 +180,8 @@ impl Playtest {
 ///
 /// The authored floor point owns a short central spindle. Above it sits a
 /// shallow square extrusion with the same opposing TL/BR cuts as the Archive
-/// message panel. The whole shell is ember red, including its edge-on faces.
+/// message panel. The whole shell is ember red (cyan for an item beacon),
+/// including its edge-on faces.
 /// Only the nearer face receives a perimeter so rear line packets cannot sort
 /// across the front face while the prop rotates on PS1's painter renderer.
 pub(super) fn draw_archive_beacon_world<T>(
@@ -159,6 +189,7 @@ pub(super) fn draw_archive_beacon_world<T>(
     yaw: Angle,
     cooked_scale: u16,
     state: ArchiveBeaconVisualState,
+    kind: ArchiveBeaconKind,
     elapsed_tick: SimTick,
     camera: WorldCamera,
     options: WorldSurfaceOptions,
@@ -207,8 +238,9 @@ where
         .with_cull_mode(CullMode::None)
         .with_render_layer(WorldRenderLayer::Opaque);
     let line_options = body_options.with_depth_bias(-2);
-    let face_colors = archive_beacon_face_colors(state, pulse, outer_local, half);
-    let frame_color = archive_beacon_frame_color(state, pulse);
+    let face_colors = archive_beacon_face_colors(state, pulse, outer_local, half)
+        .map(|c| archive_beacon_tint(kind, c));
+    let frame_color = archive_beacon_tint(kind, archive_beacon_frame_color(state, pulse));
     let visible_face =
         if archive_beacon_face_depth(&outer_front) <= archive_beacon_face_depth(&outer_back) {
             outer_front
@@ -223,6 +255,7 @@ where
         outer_front,
         outer_back,
         state,
+        kind,
         pulse,
         body_options,
         packets,
@@ -435,6 +468,7 @@ fn submit_archive_beacon_sides<T>(
     front: [ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES],
     back: [ProjectedVertex; ARCHIVE_BEACON_FACE_VERTICES],
     state: ArchiveBeaconVisualState,
+    kind: ArchiveBeaconKind,
     pulse: u8,
     options: WorldSurfaceOptions,
     packets: &mut T,
@@ -447,7 +481,7 @@ where
     let mut edge = 0usize;
     while edge < ARCHIVE_BEACON_FACE_VERTICES {
         let next = (edge + 1) % ARCHIVE_BEACON_FACE_VERTICES;
-        let color = archive_beacon_side_color(state, pulse, edge);
+        let color = archive_beacon_tint(kind, archive_beacon_side_color(state, pulse, edge));
         submitted += world
             .submit_gouraud_triangle(
                 packets,
