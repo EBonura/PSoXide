@@ -372,6 +372,14 @@ pub trait Scene {
         true
     }
 
+    /// Whether the scene is in combat right now. While true, the current UI
+    /// scene's combat-trigger Music node (if any) plays, faded in; when it
+    /// turns false the track fades out and stops. Default: never.
+    #[inline]
+    fn combat_music_active(&self) -> bool {
+        false
+    }
+
     /// Live world-load progress in Q12 (0..=4096) while
     /// [`loading_update`](Scene::loading_update) streams the next
     /// state's world. Feeds UI nodes bound to

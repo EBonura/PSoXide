@@ -1150,6 +1150,7 @@ pub(crate) fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 volume_option: None,
                 playback_speed_q12: psxed_project::UI_MUSIC_PLAYBACK_SPEED_UNITY_Q12,
                 loop_track: false,
+                trigger: psxed_project::MusicTrigger::Always,
             },
         ),
         (

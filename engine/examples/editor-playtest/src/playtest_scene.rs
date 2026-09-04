@@ -962,6 +962,10 @@ impl Scene for Playtest {
 
     /// Hold the menu CD-DA until every front-end UI image is resident, so the
     /// front-end (intro/menu/settings) never reads the CD while music plays.
+    fn combat_music_active(&self) -> bool {
+        self.combat_music.engaged
+    }
+
     fn front_end_assets_ready(&self) -> bool {
         menu_ui_cache_ready()
     }

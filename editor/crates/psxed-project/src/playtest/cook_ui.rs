@@ -666,6 +666,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 volume_option,
                 playback_speed_q12,
                 loop_track,
+                trigger,
             } => (
                 0,
                 0,
@@ -693,11 +694,15 @@ pub(crate) fn cook_ui_scene_nodes(
                     cdda_track_for_wav,
                     report,
                 ),
-                if *loop_track {
+                (if *loop_track {
                     psx_level::ui_node_flags::MUSIC_LOOP
                 } else {
                     0
-                },
+                }) | (if *trigger == crate::MusicTrigger::Combat {
+                    psx_level::ui_node_flags::MUSIC_TRIGGER_COMBAT
+                } else {
+                    0
+                }),
                 0,
                 default_ui_font_scale(),
                 default_ui_letter_spacing(),

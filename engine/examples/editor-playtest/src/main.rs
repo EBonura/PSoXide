@@ -575,6 +575,8 @@ struct Playtest {
     checkpoint: Option<RuntimeCheckpoint>,
     /// Simple modal message overlay opened by an interactable.
     message_overlay: Option<RuntimeMessageOverlay>,
+    /// Combat-music gate fed by the enemy states each fixed tick.
+    combat_music: CombatMusicState,
     /// The one-time "socket your modules" hint has been shown this launch.
     /// It opens after the first item pickup's acquired panel closes.
     socket_hint_shown: bool,
@@ -703,6 +705,7 @@ impl Playtest {
         addr_of_mut!((*scene).checkpoint).write(None);
         addr_of_mut!((*scene).message_overlay).write(None);
         addr_of_mut!((*scene).socket_hint_shown).write(false);
+        addr_of_mut!((*scene).combat_music).write(CombatMusicState::default());
         addr_of_mut!((*scene).poi_messages).write(MessageController::new());
         addr_of_mut!((*scene).shadow_material).write(None);
         addr_of_mut!((*scene).vitality_circle_material).write(None);

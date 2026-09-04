@@ -1461,6 +1461,10 @@ pub enum UiNodeKind {
         /// Restart the track when the CD-ROM reports playback has ended.
         #[serde(default)]
         loop_track: bool,
+        /// When the track plays: always while the scene is open, or only
+        /// while the scene reports combat (the runtime fades it in and out).
+        #[serde(default)]
+        trigger: MusicTrigger,
     },
 
     /// Non-visual auto-advance timer: fires its action once per scene
@@ -1567,6 +1571,14 @@ pub(crate) fn default_ui_slider_fill() -> [u8; 3] {
 
 pub(crate) fn default_ui_slider_knob() -> [u8; 3] {
     [210, 218, 232]
+}
+
+/// Music node trigger, see [`UiNodeKind::Music`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MusicTrigger {
+    #[default]
+    Always,
+    Combat,
 }
 
 pub(crate) fn default_ui_music_volume() -> u8 {

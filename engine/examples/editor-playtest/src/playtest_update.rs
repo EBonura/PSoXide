@@ -440,6 +440,7 @@ impl Playtest {
         self.selected_power_up_item = BoostModuleId::NONE;
         self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
         self.inventory_overlay_active = false;
+        self.combat_music = CombatMusicState::default();
         self.acquired_module = BoostModuleId::NONE;
         self.hazard_death_ticks_remaining = 0;
         self.death_by_combat = false;
@@ -525,6 +526,23 @@ impl Playtest {
         self.tick_gameplay_layer(ctx);
         if let Some(bsp) = self.bsp.as_mut() {
             bsp.tick_doors();
+        }
+        {
+            use psx_game_runtime::entities::GameEntityState;
+            let count = self.game_entities.count().min(GAME_ENTITIES.len());
+            let hostile = (0..count).any(|entity| {
+                !matches!(
+                    self.game_entities.state(entity),
+                    GameEntityState::Idle | GameEntityState::Patrol | GameEntityState::Dead
+                )
+            });
+            if let Some(engaged) = self.combat_music.tick(hostile) {
+                telemetry::debug_log(if engaged {
+                    "combat music:on"
+                } else {
+                    "combat music:off"
+                });
+            }
         }
 
         // Swap the active vitality state. Only the active pool takes damage and
