@@ -71,16 +71,16 @@ pub(super) fn walk_point_of_interest_beacons(
 }
 
 impl PoiPreviewStyle {
-    /// Item beacons re-hue the ember palette to cyan, matching the in-game
+    /// Item beacons re-hue the ember palette to gold, matching the in-game
     /// renderer (`marker_runtime::archive_beacon_tint`).
     fn tinted(self, item: bool) -> Self {
         if !item {
             return self;
         }
-        let cyan = |(r, _g, b): (u8, u8, u8)| (b, ((u16::from(r) * 3) / 4) as u8, r);
+        let gold = |(r, _g, _b): (u8, u8, u8)| (r, ((u16::from(r) * 3) / 4) as u8, r / 8);
         Self {
-            face: cyan(self.face),
-            side: cyan(self.side),
+            face: gold(self.face),
+            side: gold(self.side),
         }
     }
 }

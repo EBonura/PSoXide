@@ -6,6 +6,9 @@ enum PoiSaveLoad {
     Retry,
 }
 
+/// Body of the one-time hint shown after the first item pickup.
+const SOCKET_HINT_BODY: &str = "SOCKET RECOVERED MODULES\nFROM THE INVENTORY.";
+
 fn load_poi_save_from_card() -> PoiSaveLoad {
     let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
     let mut bytes = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
@@ -287,6 +290,17 @@ impl Playtest {
             }
             self.acquired_module = BoostModuleId::NONE;
             self.set_poi_presentation_frames(0, 0);
+            // Souls-style one-time tutorial: the first pickup explains where
+            // the module goes. Runtime-only copy through the legacy overlay,
+            // so it needs no cooked page and no save flag.
+            if !self.socket_hint_shown {
+                self.socket_hint_shown = true;
+                self.message_overlay = Some(RuntimeMessageOverlay {
+                    title: "",
+                    body: SOCKET_HINT_BODY,
+                });
+                self.set_poi_page_type_frame(0);
+            }
             return;
         }
         if self.complete_active_message_reveal() {
