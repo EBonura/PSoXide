@@ -1295,6 +1295,12 @@ pub struct Renderer {
     /// Bumped on entry to every face pass, so a cached entry from an earlier
     /// pass (different animation tick, different binding table) never hits.
     pxbsp_material_epoch: u32,
+    /// `(vertex lump base, vertex lump length, overflow present)` for the last
+    /// PXBSP map drawn: whether any baked vertex colour carries the legacy
+    /// grayscale-overflow marker in its high byte. Probed once per map, so a
+    /// clean cook (every current one: the cooker masks colours to RGB24)
+    /// skips the per-vertex saturation walk in every face materialisation.
+    pxbsp_baked_overflow: (usize, usize, bool),
     /// Whether sky faces must survive sidedness testing to report visible
     /// apertures. Always-visible skies disable this so their non-rendering BSP
     /// faces leave the hot path before plane-side and clip work.
@@ -1457,6 +1463,7 @@ impl Renderer {
             pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
             frame_plane_side: Vec::new(),
             pxbsp_material_epoch: 0,
+            pxbsp_baked_overflow: (0, 0, false),
             track_sky_apertures: true,
             light_styles,
         }
@@ -1856,6 +1863,7 @@ impl Renderer {
             .vertex_data()
             .as_ptr()
             .cast::<ClassicAffineWordSourceVertex>();
+        let baked_overflow = self.pxbsp_baked_overflow(map);
         // Own the clip planes for the duration of the loop. Reaching them
         // through the caller's reference made every plane test reload a
         // spilled pointer from this frame before it could load the plane.
@@ -1994,6 +2002,7 @@ impl Renderer {
                         face,
                         uv_offset,
                         state.color_scale_q7,
+                        baked_overflow,
                         &mut face_vertices[..source_count],
                     );
                 }
@@ -2070,6 +2079,7 @@ impl Renderer {
                         face,
                         uv_offset,
                         state.color_scale_q7,
+                        baked_overflow,
                         &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
                     );
                 }
@@ -2153,6 +2163,23 @@ impl Renderer {
         }
     }
 
+    /// Whether this map's baked vertex colours carry the legacy overflow
+    /// marker (see [`normalize_baked_color`]). One scan of the vertex lump
+    /// the first time a map is drawn; the answer is cached on the lump's
+    /// address and length.
+    fn pxbsp_baked_overflow(&mut self, map: &PxbspResidentMap) -> bool {
+        let data = map.vertex_data();
+        let key = (data.as_ptr() as usize, data.len());
+        if (self.pxbsp_baked_overflow.0, self.pxbsp_baked_overflow.1) != key {
+            const STRIDE: usize = core::mem::size_of::<ClassicAffineWordSourceVertex>();
+            let overflow = data
+                .chunks_exact(STRIDE)
+                .any(|vertex| vertex[STRIDE - 1] != 0);
+            self.pxbsp_baked_overflow = (key.0, key.1, overflow);
+        }
+        self.pxbsp_baked_overflow.2
+    }
+
     /// `source_base` is the map's vertex lump, resolved once per face pass.
     ///
     /// # Safety
@@ -2166,6 +2193,7 @@ impl Renderer {
         face: FaceRef,
         uv_offset: [u8; 2],
         color_scale_q7: u8,
+        baked_overflow: bool,
         output: &mut [ClassicAffineVertex],
     ) {
         let first = face.first_vertex();
@@ -2204,7 +2232,7 @@ impl Renderer {
         // saturation flag in the high byte. Skip the second pass over the
         // vertices unless something actually changes a word.
         if color_scale_q7 == 128 {
-            if baked_light {
+            if baked_light && baked_overflow {
                 for vertex in output {
                     if vertex.color & 0xff00_0000 != 0 {
                         vertex.color = 0x00ff_ffff;
@@ -2214,7 +2242,7 @@ impl Renderer {
             return;
         }
         for vertex in output {
-            let color = if baked_light {
+            let color = if baked_light && baked_overflow {
                 normalize_baked_color(vertex.color)
             } else {
                 vertex.color
