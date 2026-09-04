@@ -2005,6 +2005,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Italian column of INTERACTABLE_MESSAGE_PAGES; \"\" falls back to English.\n");
+    out.push_str("pub static INTERACTABLE_MESSAGE_PAGES_IT: &[&str] = &[\n");
+    for page in &package.interactable_message_pages_it {
+        let _ = writeln!(out, "    {:?},", page);
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Optional per-scene message shown once per game launch.\n");
     match &package.world_message {
         Some(message) => {
@@ -2046,6 +2053,17 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             module.assignment_label,
             module.remove_label,
             module.percentages,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Italian (name, description) per BOOST_MODULES entry; \"\" keeps English.\n");
+    out.push_str("pub static BOOST_MODULES_IT: &[(&str, &str)] = &[\n");
+    for module in &package.boost_modules {
+        let _ = writeln!(
+            out,
+            "    ({:?}, {:?}),",
+            module.name_it, module.description_it
         );
     }
     out.push_str("];\n\n");

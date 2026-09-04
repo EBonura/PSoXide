@@ -101,6 +101,53 @@ pub(crate) const KEY_PREFIX: &str = "ui.";
 ///
 /// English is deliberately absent: see the module docs.
 static ITALIAN: &[(&str, &str)] = &[
+    ("ui.credits.artist", "ARTISTA 3D"),
+    ("ui.credits.by", "UN GIOCO DI"),
+    ("ui.credits.director", "DIRETTORE E LEAD PROGRAMMER"),
+    ("ui.credits.music", "MUSICA E SFX"),
+    ("ui.credits.title", "CREDITI"),
+    ("ui.ending.back", "  MENU PRINCIPALE"),
+    ("ui.ending.body", "RESTA SINTONIZZATO PER NUOVI AGGIORNAMENTI."),
+    ("ui.ending.head", "GRAZIE PER AVER GIOCATO"),
+    ("ui.ending.subject", "DEMO TECNICA CORTEX IGNITION"),
+    (
+        "ui.hint.sockets",
+        "INNESTA I MODULI RECUPERATI\nDALL'INVENTARIO.",
+    ),
+    ("ui.inventory.assign", "ASSEGNA"),
+    ("ui.inventory.atk_spd", "VEL ATK"),
+    ("ui.inventory.choose_socket", "SCEGLI UN INNESTO"),
+    ("ui.inventory.close", "CHIUDI"),
+    ("ui.inventory.collected", "RACCOLTO"),
+    ("ui.inventory.defence", "DIFESA"),
+    ("ui.inventory.equipped", "EQUIPAGGIATO"),
+    ("ui.inventory.final_stats", "VALORI FINALI"),
+    ("ui.inventory.horizon", "ORIZZONTE"),
+    ("ui.inventory.module_effect", "EFFETTO MODULO"),
+    ("ui.inventory.modules", "MODULI"),
+    ("ui.inventory.move_spd", "VEL MOV"),
+    ("ui.inventory.no_modules", "NESSUN MODULO"),
+    ("ui.inventory.none", "NESSUNO"),
+    ("ui.inventory.remove", "RIMUOVI"),
+    ("ui.inventory.select", "SELEZIONA"),
+    ("ui.inventory.select_module", "SCEGLI UN MODULO"),
+    ("ui.inventory.target_high_gain", "MIRA // ALTO GUADAGNO"),
+    ("ui.inventory.target_stable", "MIRA // STABILE"),
+    ("ui.inventory.zenith", "ZENIT"),
+    ("ui.item_acquired", "OGGETTO OTTENUTO - "),
+    ("ui.loading.continue", "CONTINUA"),
+    ("ui.loading.status", "SINCRONIZZAZIONE PROIEZIONE"),
+    ("ui.loading.wait", "ATTENDERE"),
+    ("ui.menu.credits", "  CREDITI"),
+    ("ui.menu.new_game", "  NUOVA PARTITA"),
+    ("ui.menu.system", "  SISTEMA"),
+    ("ui.module.short.module", "MODULO"),
+    ("ui.module.short.rupture", "ROTTURA"),
+    ("ui.module.short.shell", "GUSCIO"),
+    ("ui.module.short.zenith", "ZENIT"),
+    ("ui.prompt.dismiss", "CHIUDI"),
+    ("ui.prompt.read", "LEGGI"),
+    ("ui.prompt.take", "PRENDI"),
     ("ui.settings.back", "  INDIETRO"),
     ("ui.settings.brightness", "LUMINOSITA'"),
     // "ZONA MORTA STICK" is the literal translation and measures 140px in a
@@ -114,7 +161,80 @@ static ITALIAN: &[(&str, &str)] = &[
     ("ui.settings.screen_y", "SCHERMO Y"),
     ("ui.settings.sfx_volume", "VOLUME EFFETTI"),
     ("ui.settings.title", "IMPOSTAZIONI"),
+    ("ui.system.deadzone", "ZONA MORTA"),
+    ("ui.system.music", "MUSICA"),
+    ("ui.system.return", "TORNA AL TITOLO"),
+    ("ui.system.title", "SISTEMA"),
+    ("ui.title.tech_demo", "DEMO TECNICA"),
 ];
+
+/// Runtime copy: the live-language string for `key`, or `english` when the
+/// language has no column or the key is not filled in. The gameplay code's
+/// hard-coded verbs and labels go through here, so English stays the literal
+/// in the source and Italian is one table row.
+#[inline]
+pub(crate) fn tr(key: &str, english: &'static str) -> &'static str {
+    translate(key).unwrap_or(english)
+}
+
+/// The Archive panel's close verb.
+pub(crate) fn dismiss_action() -> &'static str {
+    tr("ui.prompt.dismiss", "DISMISS")
+}
+
+/// Prefix of the compact acquisition panel, trailing separator included.
+pub(crate) fn item_acquired_prefix() -> &'static str {
+    tr("ui.item_acquired", "ITEM ACQUIRED - ")
+}
+
+/// A beacon's cooked interaction verb (`READ`, `TAKE`) in the live language.
+/// Unknown verbs stay as authored.
+pub(crate) fn prompt_verb(verb: &'static str) -> &'static str {
+    match verb {
+        "READ" => tr("ui.prompt.read", verb),
+        "TAKE" => tr("ui.prompt.take", verb),
+        _ => verb,
+    }
+}
+
+/// Cooked message page `index` in the live language: the Italian column when
+/// it was authored, the English page otherwise.
+pub(crate) fn page_text(index: usize) -> Option<&'static str> {
+    use crate::generated::{INTERACTABLE_MESSAGE_PAGES, INTERACTABLE_MESSAGE_PAGES_IT};
+    let english = INTERACTABLE_MESSAGE_PAGES.get(index).copied()?;
+    if language() == Language::English {
+        return Some(english);
+    }
+    match INTERACTABLE_MESSAGE_PAGES_IT.get(index) {
+        Some(italian) if !italian.is_empty() => Some(italian),
+        _ => Some(english),
+    }
+}
+
+/// Module `index`'s name in the live language, English when no Italian was
+/// authored.
+pub(crate) fn module_name(index: usize, english: &'static str) -> &'static str {
+    module_column(index, english, |(name, _)| name)
+}
+
+/// Module `index`'s description in the live language.
+pub(crate) fn module_description(index: usize, english: &'static str) -> &'static str {
+    module_column(index, english, |(_, description)| description)
+}
+
+fn module_column(
+    index: usize,
+    english: &'static str,
+    pick: fn(&(&'static str, &'static str)) -> &'static str,
+) -> &'static str {
+    if language() == Language::English {
+        return english;
+    }
+    match crate::generated::BOOST_MODULES_IT.get(index).map(pick) {
+        Some(italian) if !italian.is_empty() => italian,
+        _ => english,
+    }
+}
 
 /// Resolve `tag` in the live language, or `None` to keep the authored English.
 ///

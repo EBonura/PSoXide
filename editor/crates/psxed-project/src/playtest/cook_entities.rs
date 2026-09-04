@@ -3398,6 +3398,7 @@ pub(crate) struct InteractableComponent<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct PointOfInterestComponent<'a> {
     pub(crate) pages: &'a [String],
+    pub(crate) pages_it: &'a [String],
     pub(crate) prompt: &'a str,
     pub(crate) radius: u16,
     pub(crate) marker_height: u16,
@@ -3543,6 +3544,7 @@ pub(crate) fn component_point_of_interest<'a>(
     component_children(scene, host).find_map(|node| match &node.kind {
         NodeKind::PointOfInterest {
             pages,
+            pages_it,
             prompt,
             radius,
             marker_height,
@@ -3552,6 +3554,7 @@ pub(crate) fn component_point_of_interest<'a>(
             enabled,
         } => Some(PointOfInterestComponent {
             pages,
+            pages_it,
             prompt,
             radius: *radius,
             marker_height: *marker_height,

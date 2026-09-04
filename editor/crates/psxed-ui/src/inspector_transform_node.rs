@@ -137,6 +137,9 @@ pub(crate) fn draw_world_settings(
                         .color(STUDIO_TEXT_WEAK),
                 );
                 changed |= draw_message_pages_editor(ui, "world-message", &mut message.pages, 3);
+                ui.label(RichText::new("Italian").small().color(STUDIO_TEXT_WEAK));
+                changed |=
+                    draw_message_pages_editor(ui, "world-message-it", &mut message.pages_it, 3);
             }
         });
     egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Physics"))
@@ -3781,6 +3784,7 @@ pub(crate) fn draw_node_kind_editor(
         }
         NodeKind::PointOfInterest {
             pages,
+            pages_it,
             prompt,
             radius,
             marker_height,
@@ -3837,6 +3841,13 @@ pub(crate) fn draw_node_kind_editor(
             ui.separator();
             ui.label(RichText::new("Message").color(STUDIO_TEXT_WEAK));
             changed |= draw_message_pages_editor(ui, "point-of-interest", pages, 2);
+            ui.label(RichText::new("Message (Italian)").color(STUDIO_TEXT_WEAK));
+            ui.label(
+                RichText::new("One page per English page. Leave every page empty to show English.")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            );
+            changed |= draw_message_pages_editor(ui, "point-of-interest-it", pages_it, 2);
             ui.separator();
             let mut has_reward = reward.is_some();
             if ui.checkbox(&mut has_reward, "Grant item").changed() {
@@ -3852,6 +3863,18 @@ pub(crate) fn draw_node_kind_editor(
                 changed |= ui
                     .add(
                         egui::TextEdit::multiline(&mut reward.description)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .changed();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Item name (Italian)").color(STUDIO_TEXT_WEAK));
+                    changed |= ui.text_edit_singleline(&mut reward.item_name_it).changed();
+                });
+                ui.label(RichText::new("Description (Italian)").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::TextEdit::multiline(&mut reward.description_it)
                             .desired_rows(2)
                             .desired_width(f32::INFINITY),
                     )

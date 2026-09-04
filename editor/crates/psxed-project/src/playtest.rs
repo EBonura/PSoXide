@@ -821,6 +821,7 @@ pub fn build_package(
     let mut particle_emitters: Vec<PlaytestParticleEmitter> = Vec::new();
     let mut interactable_messages: Vec<PlaytestInteractableMessage> = Vec::new();
     let mut interactable_message_pages: Vec<String> = Vec::new();
+    let mut interactable_message_pages_it: Vec<String> = Vec::new();
     let mut interactables: Vec<PlaytestInteractable> = Vec::new();
     let mut vitality_circles: Vec<PlaytestVitalityCircle> = Vec::new();
     let mut destructibles: Vec<PlaytestDestructible> = Vec::new();
@@ -923,8 +924,19 @@ pub fn build_package(
                 report.error("World message page table exceeds 65535 entries");
                 return (None, report);
             }
+            let Some(pages_it) = italian_pages(
+                "World message",
+                &message.pages,
+                &message.pages_it,
+                3,
+                runtime_message_font(project),
+                &mut report,
+            ) else {
+                return (None, report);
+            };
             let page_first = interactable_message_pages.len() as u16;
             interactable_message_pages.extend(message.pages.iter().cloned());
+            interactable_message_pages_it.extend(pages_it);
             Some(PlaytestInteractableMessage {
                 title: String::new(),
                 body: message.pages[0].clone(),
@@ -1413,6 +1425,7 @@ pub fn build_package(
                             &mut names,
                             &mut interactable_messages,
                             &mut interactable_message_pages,
+                            &mut interactable_message_pages_it,
                             &mut interactables,
                             &mut logic,
                             report,
@@ -1483,6 +1496,7 @@ pub fn build_package(
                             reward_flag,
                             &mut interactable_messages,
                             &mut interactable_message_pages,
+                            &mut interactable_message_pages_it,
                             &mut interactables,
                             &mut boost_modules,
                             report,
@@ -2501,6 +2515,7 @@ pub fn build_package(
             particle_emitters,
             interactable_messages,
             interactable_message_pages,
+            interactable_message_pages_it,
             world_message,
             persistent_flag_count,
             boost_modules,

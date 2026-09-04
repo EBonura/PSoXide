@@ -1650,6 +1650,9 @@ pub struct PlaytestVitalityCircle {
 pub struct PlaytestBoostModule {
     pub name: String,
     pub description: String,
+    /// Italian name and description; empty keeps the English strings.
+    pub name_it: String,
+    pub description_it: String,
     pub effect_summary: String,
     pub assignment_label: String,
     pub remove_label: String,
@@ -2138,6 +2141,9 @@ pub struct PlaytestPackage {
     pub interactable_messages: Vec<PlaytestInteractableMessage>,
     /// Flat body-page table sliced by [`Self::interactable_messages`].
     pub interactable_message_pages: Vec<String>,
+    /// Italian column of [`Self::interactable_message_pages`], same length;
+    /// an empty entry means "show the English page".
+    pub interactable_message_pages_it: Vec<String>,
     /// Optional per-scene message shown once when gameplay first becomes active.
     pub world_message: Option<PlaytestInteractableMessage>,
     /// Number of persistent flag bits assigned by this cook.

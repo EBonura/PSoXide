@@ -98,6 +98,7 @@ pub(crate) fn draw_message_page(
         frame,
         typewriter_frame,
         cross_prompt,
+        crate::loc::dismiss_action(),
     );
 }
 
@@ -122,6 +123,7 @@ pub(crate) fn draw_expanding_poi_message(
         transition_frame,
         typewriter_frame,
         cross_prompt,
+        crate::loc::dismiss_action(),
     );
 }
 
@@ -140,6 +142,8 @@ pub(crate) fn draw_acquired_module(
         transition_frame,
         typewriter_frame,
         cross_prompt,
+        crate::loc::item_acquired_prefix(),
+        crate::loc::dismiss_action(),
     );
 }
 

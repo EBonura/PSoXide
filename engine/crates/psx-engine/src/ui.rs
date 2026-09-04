@@ -3725,6 +3725,7 @@ pub fn draw_message_panel(
     frame: u16,
     typewriter_frame: u16,
     cross_prompt: Option<UiTextureSlot>,
+    dismiss_action: &str,
 ) {
     let layout = message_panel_layout(variant);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
@@ -3740,6 +3741,7 @@ pub fn draw_message_panel(
         UiPaint::Solid((114, 96, 92)),
         visible_text.len() == page_text.len(),
         cross_prompt,
+        dismiss_action,
     );
 }
 
@@ -3758,6 +3760,7 @@ pub fn draw_expanding_message_panel(
     transition_frame: u16,
     typewriter_frame: u16,
     cross_prompt: Option<UiTextureSlot>,
+    dismiss_action: &str,
 ) {
     let prompt = interaction_prompt_layout(font, action, cross_prompt.is_some());
     let target = message_panel_layout(MessagePanelVariant::PointOfInterest);
@@ -3782,6 +3785,7 @@ pub fn draw_expanding_message_panel(
         UiPaint::Solid((114, 96, 92)),
         visible_text.len() == page_text.len(),
         cross_prompt,
+        dismiss_action,
     );
 }
 
@@ -3795,8 +3799,9 @@ pub fn draw_item_acquired_panel(
     transition_frame: u16,
     typewriter_frame: u16,
     cross_prompt: Option<UiTextureSlot>,
+    prefix: &str,
+    dismiss_action: &str,
 ) {
-    const PREFIX: &str = "ITEM ACQUIRED - ";
     const TARGET: MessagePanelLayout = MessagePanelLayout {
         x: 55,
         y: 196,
@@ -3813,12 +3818,12 @@ pub fn draw_item_acquired_panel(
     }
 
     let visible_characters = usize::from(typewriter_frame / MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
-    let prefix_chars = PREFIX.chars().count();
-    let visible_prefix = text_prefix_chars(PREFIX, visible_characters.min(prefix_chars));
+    let prefix_chars = prefix.chars().count();
+    let visible_prefix = text_prefix_chars(prefix, visible_characters.min(prefix_chars));
     let visible_name =
         text_prefix_chars(item_name, visible_characters.saturating_sub(prefix_chars));
     let total_width = font
-        .text_width(PREFIX)
+        .text_width(prefix)
         .saturating_add(font.text_width(item_name)) as i16;
     let text_x = layout.x.saturating_add(
         (i32::from(layout.width)
@@ -3838,7 +3843,7 @@ pub fn draw_item_acquired_panel(
     );
     draw_scaled_text_paint(
         font,
-        text_x.saturating_add(font.text_width(PREFIX) as i16),
+        text_x.saturating_add(font.text_width(prefix) as i16),
         text_y,
         visible_name,
         UI_FONT_SCALE_ONE_Q8,
@@ -3846,7 +3851,7 @@ pub fn draw_item_acquired_panel(
         UiPaint::Solid((202, 154, 136)),
     );
     if visible_name.len() == item_name.len() {
-        draw_message_dismiss_hint(font, layout, cross_prompt);
+        draw_message_dismiss_hint(font, layout, cross_prompt, dismiss_action);
     }
 }
 
@@ -3871,6 +3876,7 @@ fn draw_message_panel_body(
     text_paint: UiPaint,
     show_page_pips: bool,
     cross_prompt: Option<UiTextureSlot>,
+    dismiss_action: &str,
 ) {
     const TEXT_INSET_X: u16 = 10;
 
@@ -3923,7 +3929,7 @@ fn draw_message_panel_body(
         let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
         draw_message_page_pips(resolved, MessagePageMeta::new(page.index, page.count));
     }
-    draw_message_dismiss_hint(font, layout, cross_prompt);
+    draw_message_dismiss_hint(font, layout, cross_prompt, dismiss_action);
 }
 
 /// Keep the close control visible for the entire readable phase. Cross may
@@ -3933,8 +3939,8 @@ fn draw_message_dismiss_hint(
     font: &FontAtlas,
     layout: MessagePanelLayout,
     cross_prompt: Option<UiTextureSlot>,
+    action: &str,
 ) {
-    const ACTION: &str = "DISMISS";
     const INSET_X: i16 = 10;
     const INSET_BOTTOM: u16 = 3;
 
@@ -3951,7 +3957,7 @@ fn draw_message_dismiss_hint(
         font,
         action_x,
         text_y,
-        ACTION,
+        action,
         UI_FONT_SCALE_ONE_Q8,
         0,
         UiPaint::Solid((114, 96, 92)),
