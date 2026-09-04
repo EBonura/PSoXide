@@ -34,12 +34,15 @@ pub(super) fn walk_point_of_interest_beacons(
         let Some(host) = scene.node(bounds.node) else {
             continue;
         };
-        let Some((component, pages, enabled)) = host.children.iter().find_map(|child| {
+        let Some((component, pages, enabled, item)) = host.children.iter().find_map(|child| {
             let component = scene.node(*child)?;
             match &component.kind {
-                NodeKind::PointOfInterest { pages, enabled, .. } => {
-                    Some((component.id, pages.as_slice(), *enabled))
-                }
+                NodeKind::PointOfInterest {
+                    pages,
+                    enabled,
+                    reward,
+                    ..
+                } => Some((component.id, pages.as_slice(), *enabled, reward.is_some())),
                 _ => None,
             }
         }) else {
@@ -62,8 +65,23 @@ pub(super) fn walk_point_of_interest_beacons(
             preview_reference_selected(hovered, bounds.node, Some(component), None, None)
         });
         let incomplete = pages.is_empty() || pages.iter().any(|page| page.trim().is_empty());
-        let style = poi_preview_style(enabled, incomplete, selected, hovered);
+        let style = poi_preview_style(enabled, incomplete, selected, hovered).tinted(item);
         push_point_of_interest_beacon(bounds, tick, style, scratch);
+    }
+}
+
+impl PoiPreviewStyle {
+    /// Item beacons re-hue the ember palette to cyan, matching the in-game
+    /// renderer (`marker_runtime::archive_beacon_tint`).
+    fn tinted(self, item: bool) -> Self {
+        if !item {
+            return self;
+        }
+        let cyan = |(r, _g, b): (u8, u8, u8)| (b, ((u16::from(r) * 3) / 4) as u8, r);
+        Self {
+            face: cyan(self.face),
+            side: cyan(self.side),
+        }
     }
 }
 
