@@ -616,14 +616,20 @@ pub struct PrimitivePacketBatch<'a, T> {
 
 impl<T> PrimitiveSink<T> for PrimitivePacketBatch<'_, T> {
     #[inline(always)]
-    fn len(&self) -> usize { self.written }
+    fn len(&self) -> usize {
+        self.written
+    }
 
     #[inline(always)]
-    fn capacity(&self) -> usize { self.capacity }
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
 
     #[inline(always)]
     fn push(&mut self, prim: T) -> Option<&mut T> {
-        if self.written == self.capacity { return None; }
+        if self.written == self.capacity {
+            return None;
+        }
         // SAFETY: reserve_batch validated the packet layout and this check
         // proves that the next slot is inside its exclusive reservation.
         Some(unsafe { self.push_unchecked(prim) })
@@ -635,7 +641,10 @@ impl<T> PrimitiveSink<T> for PrimitivePacketBatch<'_, T> {
         let packet = self.next.cast::<T>();
         self.next = unsafe { self.next.add(1) };
         self.written += 1;
-        unsafe { packet.write(prim); &mut *packet }
+        unsafe {
+            packet.write(prim);
+            &mut *packet
+        }
     }
 }
 
@@ -1134,18 +1143,27 @@ mod tests {
         let base = storage.slots.as_mut_ptr();
         let mut arena = PrimitivePacketArena::new(&mut storage);
         {
-            let mut batch = <PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 3).unwrap();
+            let mut batch =
+                <PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 3)
+                    .unwrap();
             assert_eq!(batch.push(11).unwrap() as *mut u32, base.cast::<u32>());
-            assert_eq!(batch.push(22).unwrap() as *mut u32, unsafe { base.add(1).cast::<u32>() });
+            assert_eq!(batch.push(22).unwrap() as *mut u32, unsafe {
+                base.add(1).cast::<u32>()
+            });
             assert_eq!(batch.remaining(), 1);
         }
         assert_eq!(arena.len(), 2);
         assert_eq!(arena.remaining(), 2);
-        assert!(<PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 3).is_none());
+        assert!(
+            <PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 3)
+                .is_none()
+        );
         let next = arena.push_packet(33u32).unwrap() as *mut u32;
         assert_eq!(next, unsafe { base.add(2).cast::<u32>() });
         {
-            let mut batch = <PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 1).unwrap();
+            let mut batch =
+                <PrimitivePacketArena<'_> as PrimitiveSink<u32>>::reserve_batch(&mut arena, 1)
+                    .unwrap();
             assert!(batch.push(44).is_some());
             assert!(batch.push(55).is_none());
         }
