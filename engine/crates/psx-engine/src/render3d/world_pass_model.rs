@@ -1,6 +1,62 @@
 use super::*;
 use psx_math::int32::InvariantDivisor31;
 
+// Gather the independent face words before decoding any index. LLVM's
+// ordinary field loads interleave each load with its dependent index math,
+// inserting an R3000 load-delay NOP three times per face.
+/// # Safety
+/// Every masked face index must address an initialized projected vertex.
+#[inline(always)]
+unsafe fn model_face_addresses_scheduled(
+    face: &TexturedModelRenderFace,
+    projected: *const ProjectedVertex,
+) -> (TexturedModelRenderFace, [*const ProjectedVertex; 3]) {
+    const _: () = assert!(core::mem::size_of::<ProjectedVertex>() == 8);
+    #[cfg(target_arch = "mips")]
+    {
+        let (a, b, c, pa, pb, pc): (
+            u32,
+            u32,
+            u32,
+            *const ProjectedVertex,
+            *const ProjectedVertex,
+            *const ProjectedVertex,
+        );
+        unsafe {
+            core::arch::asm!(
+                "lw {a}, 0({face})", "lw {b}, 4({face})", "lw {c}, 8({face})",
+                "andi {pa}, {a}, 16383", "andi {pb}, {b}, 16383", "andi {pc}, {c}, 16383",
+                "sll {pa}, {pa}, 3", "sll {pb}, {pb}, 3", "sll {pc}, {pc}, 3",
+                "addu {pa}, {base}, {pa}", "addu {pb}, {base}, {pb}", "addu {pc}, {base}, {pc}",
+                face = in(reg) face as *const TexturedModelRenderFace, base = in(reg) projected,
+                a = out(reg) a, b = out(reg) b, c = out(reg) c,
+                pa = out(reg) pa, pb = out(reg) pb, pc = out(reg) pc,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        (
+            TexturedModelRenderFace {
+                corner_words: [a, b, c],
+            },
+            [pa, pb, pc],
+        )
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        let [a, b, c] = face.vertex_indices();
+        unsafe {
+            (
+                *face,
+                [
+                    projected.add(a as usize),
+                    projected.add(b as usize),
+                    projected.add(c as usize),
+                ],
+            )
+        }
+    }
+}
+
 /// Four prepacked opaque-crystal colors for one model draw.
 ///
 /// The bands are built once per model. The hot face walker selects a band
@@ -1841,17 +1897,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let mut submitted_triangles = 0usize;
         let mut face_index = 0usize;
         while face_index < faces.len() {
-            let face = faces[face_index];
-            let [ia, ib, ic] = face.vertex_indices();
-            let projected = unsafe {
-                // SAFETY: decoded faces were validated against the completely
-                // projected model vertex slice before entering this batch.
-                [
-                    *projected_vertices.get_unchecked(ia as usize),
-                    *projected_vertices.get_unchecked(ib as usize),
-                    *projected_vertices.get_unchecked(ic as usize),
-                ]
+            let (face, addresses) = unsafe {
+                model_face_addresses_scheduled(&faces[face_index], projected_vertices.as_ptr())
             };
+            let projected = unsafe { [*addresses[0], *addresses[1], *addresses[2]] };
             let (area, uv_words, palette_bank) = if CULL_BACK || CRYSTAL {
                 psx_gte::scene::screen_area_and_unpack_model_face_scheduled(
                     [
