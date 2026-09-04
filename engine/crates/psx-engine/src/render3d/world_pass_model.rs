@@ -228,6 +228,29 @@ impl PreparedModelDepthSlots {
     }
 }
 
+// Outside the inexpensive proof rectangle, recover precisely the old bounds.
+// Walk authored part ranges, not unrelated or unprojected cache entries.
+#[inline(never)]
+fn projected_part_bounds(
+    parts: &[ModelPart],
+    projected: &[ProjectedVertex],
+    count: usize,
+    joint_count: usize,
+) -> (i16, i16, i16, i16) {
+    let (mut min_x, mut max_x, mut min_y, mut max_y) =
+        (i16::MAX, i16::MIN, i16::MAX, i16::MIN);
+    for part in parts {
+        if part.joint_index() as usize >= joint_count { continue; }
+        let first = part.first_vertex() as usize;
+        let end = first.saturating_add(part.vertex_count() as usize).min(count);
+        for index in first..end {
+            track_projected_model_bounds(projected[index], &mut min_x, &mut max_x,
+                &mut min_y, &mut max_y);
+        }
+    }
+    (min_x, max_x, min_y, max_y)
+}
+
 impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Submit a textured triangle in camera space.
     ///
@@ -688,13 +711,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let near_z = camera.projection.near_z;
         let mut all_projected_vertices_in_front = true;
         let mut all_projected_vertices_inside_hw_bounds = project_count == model_vertex_count;
-        let mut projected_min_x = i16::MAX;
-        let mut projected_max_x = i16::MIN;
-        let mut projected_min_y = i16::MAX;
-        let mut projected_max_y = i16::MIN;
+        let mut projected_extent_code = 0u32;
         // EXPLOSION PROBE (diagnostic): blended-vertex count for THIS model,
         // so the all-path projected-X bounds below are merged only for the
         // skinned player model, not every textured prop.
+        #[cfg(feature = "vert-debug")]
         let mut probe_model_blended = 0u32;
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         let parts = &geometry.parts[..model_part_count as usize];
@@ -749,7 +770,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     && model_vertex_uses_cpu_blend(vertices[global_index], joint_count)
                 {
                     stats.cpu_blended_vertices = stats.cpu_blended_vertices.wrapping_add(1);
-                    probe_model_blended += 1;
+                    #[cfg(feature = "vert-debug")]
+                    { probe_model_blended += 1; }
                     #[cfg(feature = "vert-debug")]
                     {
                         let vertex = vertices[global_index];
@@ -763,13 +785,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             projected_model_vertex_in_front(projected, near_z);
                         all_projected_vertices_inside_hw_bounds &=
                             projected_model_vertex_inside_hw_bounds(projected);
-                        track_projected_model_bounds(
-                            projected,
-                            &mut projected_min_x,
-                            &mut projected_max_x,
-                            &mut projected_min_y,
-                            &mut projected_max_y,
-                        );
+                        projected_extent_code |= crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
                         projected_vertices[global_index] = projected;
                     }
                     #[cfg(not(feature = "vert-debug"))]
@@ -808,10 +824,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                                     projected_vertices,
                                     &mut all_projected_vertices_in_front,
                                     &mut all_projected_vertices_inside_hw_bounds,
-                                    &mut projected_min_x,
-                                    &mut projected_max_x,
-                                    &mut projected_min_y,
-                                    &mut projected_max_y,
+                                    &mut projected_extent_code,
                                 );
                             }
                             blended_len = 0;
@@ -855,10 +868,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             near_z,
                             projected_vertices,
                             &mut all_projected_vertices_in_front,
-                            &mut projected_min_x,
-                            &mut projected_max_x,
-                            &mut projected_min_y,
-                            &mut projected_max_y,
+                            &mut projected_extent_code,
                         );
                     }
                     pending = Some((global_index, kicked.read()));
@@ -871,23 +881,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         near_z,
                         projected_vertices,
                         &mut all_projected_vertices_in_front,
-                        &mut projected_min_x,
-                        &mut projected_max_x,
-                        &mut projected_min_y,
-                        &mut projected_max_y,
+                        &mut projected_extent_code,
                     );
                 }
                 while global_index < run_end {
                     let projected = project_gte_model_vertex(vertices[global_index]);
                     all_projected_vertices_in_front &=
                         projected_model_vertex_in_front(projected, near_z);
-                    track_projected_model_bounds(
-                        projected,
-                        &mut projected_min_x,
-                        &mut projected_max_x,
-                        &mut projected_min_y,
-                        &mut projected_max_y,
-                    );
+                    projected_extent_code |= crate::projection::gpu_extent_box_code([projected.sx, projected.sy]);
                     projected_vertices[global_index] = projected;
                     global_index += 1;
                 }
@@ -912,10 +913,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices,
                     &mut all_projected_vertices_in_front,
                     &mut all_projected_vertices_inside_hw_bounds,
-                    &mut projected_min_x,
-                    &mut projected_max_x,
-                    &mut projected_min_y,
-                    &mut projected_max_y,
+                    &mut projected_extent_code,
                 );
             }
         }
@@ -923,8 +921,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // EXPLOSION PROBE (diagnostic): for the skinned player model, surface
         // the ALL-path projected X bounds (blended + batch + remainder) so the
         // overlay can split blended-only vs mesh-wide widening.
+        #[cfg(feature = "vert-debug")]
         if probe_model_blended > 0 {
-            super::player_vert_debug::merge_all_x(projected_min_x, projected_max_x);
+            let bounds = projected_part_bounds(parts, projected_vertices, project_count, joint_count);
+            super::player_vert_debug::merge_all_x(bounds.0, bounds.1);
         }
 
         let mut faces_considered = 0u32;
@@ -963,12 +963,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             && all_projected_vertices_inside_hw_bounds
             && (options.cull_mode == CullMode::Back || options.cull_mode == CullMode::None);
         let packed_average_unclamped_extent_safe_faces = packed_average_unclamped_faces
-            && projected_model_bounds_hw_extent_safe(
-                projected_min_x,
-                projected_max_x,
-                projected_min_y,
-                projected_max_y,
-            );
+            && project_count != 0 && model_part_count != 0
+            && (projected_extent_code == 0 || {
+                let (min_x, max_x, min_y, max_y) =
+                    projected_part_bounds(parts, projected_vertices, project_count, joint_count);
+                projected_model_bounds_hw_extent_safe(min_x, max_x, min_y, max_y)
+            });
         // The bucketed renderer is the shipping/editor-play default. A layered
         // model used to traverse, validate, cull, and depth every face twice.
         // When the complete model bounds prove the direct packet path safe,
