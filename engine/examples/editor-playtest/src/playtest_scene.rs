@@ -2056,7 +2056,12 @@ impl Scene for Playtest {
         }
 
         if let Some(target) = self.lock_target_indicator_position() {
-            draw_lock_target_indicator(target, camera, overlay_tick);
+            draw_lock_target_indicator(
+                target,
+                camera,
+                overlay_tick,
+                self.player_stance.active(),
+            );
         }
 
         // Damage numbers sit above the world and below the panels: they
