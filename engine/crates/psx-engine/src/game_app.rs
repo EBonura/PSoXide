@@ -254,6 +254,8 @@ struct CddaPlayer {
     current_track: u8,
     current_volume_percent: u8,
     target_volume_percent: u8,
+    fade_start_volume_percent: u8,
+    fade_ticks_total: u16,
     fade_ticks_left: u16,
     fade_out_stop: bool,
     step: CddaStartStep,
@@ -354,6 +356,8 @@ impl CddaPlayer {
             routed: false,
             stopped_polls: 0,
             target_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
+            fade_start_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
+            fade_ticks_total: 0,
             fade_ticks_left: 0,
             fade_out_stop: false,
         }
@@ -373,6 +377,8 @@ impl CddaPlayer {
         self.requested = cue;
         self.current_volume_percent = 0;
         self.target_volume_percent = cue.volume_percent;
+        self.fade_start_volume_percent = 0;
+        self.fade_ticks_total = fade_ticks.max(1);
         self.fade_ticks_left = fade_ticks.max(1);
         if self.routed {
             cdda_set_volume(0);
@@ -385,6 +391,8 @@ impl CddaPlayer {
             return;
         }
         self.target_volume_percent = 0;
+        self.fade_start_volume_percent = self.current_volume_percent;
+        self.fade_ticks_total = fade_ticks.max(1);
         self.fade_ticks_left = fade_ticks.max(1);
         self.fade_out_stop = true;
     }
@@ -395,21 +403,26 @@ impl CddaPlayer {
 
     /// One tick of the volume ramp; SPU CD volume is a register write.
     fn tick_fade(&mut self, tick: u32) {
-        if self.current_volume_percent == self.target_volume_percent {
-            if self.fade_out_stop {
-                self.fade_out_stop = false;
-                self.release_for_data_reads(tick);
-            }
+        if self.fade_ticks_left == 0 {
             return;
         }
-        let remaining = i32::from(self.fade_ticks_left.max(1));
-        let delta = i32::from(self.target_volume_percent) - i32::from(self.current_volume_percent);
-        let step = (delta.abs() + remaining - 1) / remaining;
-        let next = i32::from(self.current_volume_percent) + step.min(delta.abs()) * delta.signum();
-        self.current_volume_percent = next.clamp(0, 100) as u8;
-        self.fade_ticks_left = self.fade_ticks_left.saturating_sub(1);
-        if self.routed {
-            cdda_set_volume(self.current_volume_percent);
+        self.fade_ticks_left -= 1;
+        // Interpolate from the original level, retaining sub-percent progress
+        // until the final division. Rounding each tick's step up shortens low
+        // volume fades and makes even a full-volume ramp nonlinear.
+        // Both levels are at most 100 and duration is u16, so i32 suffices.
+        let elapsed = i32::from(self.fade_ticks_total - self.fade_ticks_left);
+        let start = i32::from(self.fade_start_volume_percent);
+        let delta = i32::from(self.target_volume_percent) - start;
+        let next = (start + delta * elapsed / i32::from(self.fade_ticks_total)) as u8;
+        if self.current_volume_percent != next {
+            self.current_volume_percent = next;
+            if self.routed {
+                cdda_set_volume(next);
+            }
+        }
+        if self.fade_ticks_left == 0 && self.fade_out_stop {
+            self.release_for_data_reads(tick);
         }
     }
 
@@ -450,6 +463,8 @@ impl CddaPlayer {
         self.next_retry_tick = tick;
         self.next_status_tick = 0;
         self.routed = false;
+        self.fade_ticks_left = 0;
+        self.fade_out_stop = false;
         cdda_release_for_data_reads();
     }
 
@@ -4925,6 +4940,87 @@ mod tests {
         assert_eq!(
             CDDA_PLAYBACK_MODE,
             psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE
+        );
+    }
+
+    #[test]
+    fn cdda_fades_keep_their_duration_at_every_music_volume() {
+        for volume in [1, 40, 80, 100] {
+            let mut player = CddaPlayer::new();
+            let cue = MusicCue {
+                track: 2,
+                volume_percent: volume,
+                loop_track: true,
+            };
+            player.start_faded(cue, 0, 60);
+            for tick in 1..60 {
+                player.tick_fade(tick);
+                assert!(
+                    player.current_volume_percent < volume,
+                    "fade-in ended early at volume {volume}"
+                );
+            }
+            player.tick_fade(60);
+            assert_eq!(player.current_volume_percent, volume);
+            player.fade_out_and_stop(120);
+            for tick in 61..180 {
+                player.tick_fade(tick);
+                assert!(
+                    player.current_volume_percent > 0,
+                    "fade-out ended early at volume {volume}"
+                );
+                assert_eq!(player.requested.track, 2);
+            }
+            player.tick_fade(180);
+            assert_eq!(player.current_volume_percent, 0);
+            assert_eq!(player.requested, MusicCue::SILENT);
+            assert!(!player.fading_out());
+        }
+    }
+
+    #[test]
+    fn cdda_fades_are_linear_and_can_reverse_before_finishing() {
+        let mut player = CddaPlayer::new();
+        let cue = MusicCue {
+            track: 2,
+            volume_percent: 80,
+            loop_track: true,
+        };
+        player.start_faded(cue, 0, 60);
+        for tick in 1..=30 {
+            player.tick_fade(tick);
+        }
+        assert_eq!(player.current_volume_percent, 40);
+        player.fade_out_and_stop(120);
+        for tick in 31..=90 {
+            player.tick_fade(tick);
+        }
+        assert_eq!(player.current_volume_percent, 20);
+        player.start_faded(cue, 90, 60);
+        for tick in 91..=150 {
+            player.tick_fade(tick);
+        }
+        assert_eq!(player.current_volume_percent, 80);
+        assert_eq!(player.requested, cue);
+        assert!(!player.fading_out());
+    }
+
+    #[test]
+    fn cdda_data_read_handoff_cancels_a_pending_fade_stop() {
+        let mut player = CddaPlayer::new();
+        player.request(
+            MusicCue {
+                track: 2,
+                volume_percent: 80,
+                loop_track: true,
+            },
+            0,
+        );
+        player.fade_out_and_stop(120);
+        player.release_for_data_reads(1);
+        assert!(
+            !player.fading_out(),
+            "a loading transition must not suppress later menu music"
         );
     }
 
