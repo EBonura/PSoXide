@@ -6,9 +6,6 @@ enum PoiSaveLoad {
     Retry,
 }
 
-/// Body of the one-time hint shown after the first item pickup.
-const SOCKET_HINT_BODY: &str = "SOCKET RECOVERED MODULES\nFROM THE INVENTORY.";
-
 fn load_poi_save_from_card() -> PoiSaveLoad {
     let mut card = psx_mc::Card::new(psx_mc::HardwareCard::new(psx_mc::Slot::One));
     let mut bytes = [0u8; psx_game_runtime::save::SAVE_BLOCK_BYTES];
@@ -297,7 +294,10 @@ impl Playtest {
                 self.socket_hint_shown = true;
                 self.message_overlay = Some(RuntimeMessageOverlay {
                     title: "",
-                    body: SOCKET_HINT_BODY,
+                    body: crate::loc::tr(
+                        "ui.hint.sockets",
+                        "SOCKET RECOVERED MODULES\nFROM THE INVENTORY.",
+                    ),
                 });
                 self.set_poi_page_type_frame(0);
             }
@@ -326,7 +326,6 @@ impl Playtest {
     }
 
     fn complete_acquired_item_reveal(&mut self) -> bool {
-        const PREFIX: &str = "ITEM ACQUIRED - ";
         let Some(module) = self
             .acquired_module
             .index()
@@ -335,7 +334,11 @@ impl Playtest {
             return false;
         };
         let required_panel = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
-        let required_type = u16::try_from(PREFIX.chars().count() + module.name.chars().count())
+        let name = self.acquired_module.index().map_or(module.name, |index| {
+            crate::loc::module_name(index, module.name)
+        });
+        let prefix = crate::loc::item_acquired_prefix();
+        let required_type = u16::try_from(prefix.chars().count() + name.chars().count())
             .unwrap_or(u16::MAX)
             .saturating_mul(psx_engine::ui::MESSAGE_PANEL_TYPE_TICKS_PER_CHAR);
         if self.poi_panel_frame >= required_panel && self.poi_page_type_frame >= required_type {
@@ -352,7 +355,7 @@ impl Playtest {
         let Some(message) = self.poi_messages.active() else {
             return false;
         };
-        let Some(page_text) = INTERACTABLE_MESSAGE_PAGES.get(message.page() as usize) else {
+        let Some(page_text) = crate::loc::page_text(message.page() as usize) else {
             return false;
         };
         let required_panel = if matches!(

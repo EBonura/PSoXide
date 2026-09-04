@@ -26,19 +26,23 @@ fn boost_module(id: BoostModuleId) -> Option<&'static psx_level::BoostModuleReco
 }
 
 fn boost_module_name(id: BoostModuleId) -> &'static str {
-    boost_module(id).map_or("NONE", |module| module.name)
+    match (id.index(), boost_module(id)) {
+        (Some(index), Some(module)) => crate::loc::module_name(index, module.name),
+        _ => crate::loc::tr("ui.inventory.none", "NONE"),
+    }
 }
 
 /// Socket buttons are only 63 pixels wide at the native 320x240 resolution.
 /// These compact names match the three authored Cortex modules; the analysis
 /// pane still presents each module's complete authored name.
 fn boost_module_socket_name(id: BoostModuleId) -> &'static str {
+    use crate::loc::tr;
     match id.index() {
-        Some(0) => "RUPTURE",
-        Some(1) => "ZENITH",
-        Some(2) => "SHELL",
-        Some(_) => "MODULE",
-        None => "NONE",
+        Some(0) => tr("ui.module.short.rupture", "RUPTURE"),
+        Some(1) => tr("ui.module.short.zenith", "ZENITH"),
+        Some(2) => tr("ui.module.short.shell", "SHELL"),
+        Some(_) => tr("ui.module.short.module", "MODULE"),
+        None => tr("ui.inventory.none", "NONE"),
     }
 }
 
@@ -412,6 +416,7 @@ impl Scene for Playtest {
         if let Some(translated) = crate::loc::translate(tag) {
             return Some(translated);
         }
+        use crate::loc::tr;
         // Souls answers ahead of the boost-menu setup below, which resolves a
         // loadout slot and the whole vitality modifier stack before it reaches
         // its match. A HUD label is drawn every frame; it must not pay the
@@ -469,37 +474,53 @@ impl Scene for Playtest {
             "inventory.item.0" => Some(boost_module_name(self.power_up_inventory.item_at(0))),
             "inventory.item.1" => Some(boost_module_name(self.power_up_inventory.item_at(1))),
             "inventory.item.2" => Some(boost_module_name(self.power_up_inventory.item_at(2))),
-            "boost.assignment.prompt" => Some("CHOOSE A SOCKET"),
+            "inventory.empty" => Some(tr("ui.inventory.no_modules", "NO MODULES")),
+            "boost.assignment.prompt" => Some(tr("ui.inventory.choose_socket", "CHOOSE A SOCKET")),
             "boost.control.primary" => Some(match self.inventory_ui_mode() {
-                INVENTORY_UI_MODULES => "SELECT",
-                INVENTORY_UI_ASSIGN => "ASSIGN",
-                _ => "MODULES",
+                INVENTORY_UI_MODULES => tr("ui.inventory.select", "SELECT"),
+                INVENTORY_UI_ASSIGN => tr("ui.inventory.assign", "ASSIGN"),
+                _ => tr("ui.inventory.modules", "MODULES"),
             }),
-            "boost.control.remove" => Some("REMOVE"),
+            "boost.control.remove" => Some(tr("ui.inventory.remove", "REMOVE")),
             "boost.control.back" => Some(if self.inventory_ui_mode() == INVENTORY_UI_ASSIGN {
-                "MODULES"
+                tr("ui.inventory.modules", "MODULES")
             } else {
-                "CLOSE"
+                tr("ui.inventory.close", "CLOSE")
             }),
-            "boost.inventory.selected.name" => {
-                Some(detail.map_or("SELECT A MODULE", |module| module.name))
-            }
-            "boost.inventory.selected.stat" => Some(detail.map_or("", |module| module.description)),
+            "boost.inventory.selected.name" => Some(detail_item.index().zip(detail).map_or(
+                tr("ui.inventory.select_module", "SELECT A MODULE"),
+                |(index, module)| crate::loc::module_name(index, module.name),
+            )),
+            "boost.inventory.selected.stat" => Some(
+                detail_item
+                    .index()
+                    .zip(detail)
+                    .map_or("", |(index, module)| {
+                        crate::loc::module_description(index, module.description)
+                    }),
+            ),
             "boost.inventory.selected.count" => {
                 if previewing_module {
-                    Some("COLLECTED")
+                    Some(tr("ui.inventory.collected", "COLLECTED"))
                 } else if !detail_item.is_none() {
-                    Some("EQUIPPED")
+                    Some(tr("ui.inventory.equipped", "EQUIPPED"))
                 } else {
                     Some("")
                 }
             }
-            "boost.selected.name" => Some(detail.map_or("NONE", |module| module.name)),
+            "boost.selected.name" => Some(
+                detail_item
+                    .index()
+                    .zip(detail)
+                    .map_or(tr("ui.inventory.none", "NONE"), |(index, module)| {
+                        crate::loc::module_name(index, module.name)
+                    }),
+            ),
             "boost.selected.effect" => Some(detail.map_or("", |module| module.effect_summary)),
             "boost.selected.base" => Some(if previewing_module {
-                "MODULE EFFECT"
+                tr("ui.inventory.module_effect", "MODULE EFFECT")
             } else {
-                "FINAL STATS"
+                tr("ui.inventory.final_stats", "FINAL STATS")
             }),
             "boost.stat.horizon" => write_stat_value(
                 scratch,
@@ -536,10 +557,18 @@ impl Scene for Playtest {
                     i32::from(modifiers.attack_speed_q12) - 4096,
                 ),
             ),
-            "boost.remove" => Some(if slotted_item.is_none() { "" } else { "REMOVE" }),
+            "boost.remove" => Some(if slotted_item.is_none() {
+                ""
+            } else {
+                tr("ui.inventory.remove", "REMOVE")
+            }),
             "boost.selected.pole" => Some(match selected.pole() {
-                psx_game_runtime::vitality::VitalityPole::Empty => "TARGET // HIGH GAIN",
-                psx_game_runtime::vitality::VitalityPole::Full => "TARGET // STABLE",
+                psx_game_runtime::vitality::VitalityPole::Empty => {
+                    tr("ui.inventory.target_high_gain", "TARGET // HIGH GAIN")
+                }
+                psx_game_runtime::vitality::VitalityPole::Full => {
+                    tr("ui.inventory.target_stable", "TARGET // STABLE")
+                }
             }),
             _ => None,
         }
@@ -2155,14 +2184,16 @@ impl Scene for Playtest {
             {
                 draw_acquired_module(
                     font,
-                    module.name,
+                    self.acquired_module.index().map_or(module.name, |index| {
+                        crate::loc::module_name(index, module.name)
+                    }),
                     overlay_tick.as_u32() as u16,
                     self.overlay_poi_panel_frame,
                     self.overlay_poi_page_type_frame,
                     cross_prompt,
                 );
             } else if let Some(message) = self.poi_messages.active() {
-                if let Some(page_text) = INTERACTABLE_MESSAGE_PAGES.get(message.page() as usize) {
+                if let Some(page_text) = crate::loc::page_text(message.page() as usize) {
                     let variant = match message.source() {
                         psx_game_runtime::poi::MessageSource::PointOfInterest(_) => {
                             MessagePanelVariant::PointOfInterest
@@ -2175,10 +2206,12 @@ impl Scene for Playtest {
                     );
                     match message.source() {
                         psx_game_runtime::poi::MessageSource::PointOfInterest(index) => {
-                            let action = INTERACTABLES
-                                .get(usize::from(index))
-                                .map(|interactable| interactable.prompt)
-                                .unwrap_or("READ");
+                            let action = crate::loc::prompt_verb(
+                                INTERACTABLES
+                                    .get(usize::from(index))
+                                    .map(|interactable| interactable.prompt)
+                                    .unwrap_or("READ"),
+                            );
                             draw_expanding_poi_message(
                                 font,
                                 action,
@@ -2213,7 +2246,7 @@ impl Scene for Playtest {
                 if let Some(interactable) = INTERACTABLES.get(index) {
                     draw_interaction_prompt_animated(
                         font,
-                        interactable.prompt,
+                        crate::loc::prompt_verb(interactable.prompt),
                         overlay_tick.as_u32() as u16,
                         cross_prompt,
                     );

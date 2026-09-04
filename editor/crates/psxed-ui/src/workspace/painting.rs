@@ -975,6 +975,7 @@ impl EditorWorkspace {
                 "Point of Interest",
                 NodeKind::PointOfInterest {
                     pages: psxed_project::default_point_of_interest_pages(),
+                    pages_it: Vec::new(),
                     prompt: psxed_project::default_point_of_interest_prompt(),
                     radius: psxed_project::default_point_of_interest_radius(),
                     marker_height: psxed_project::default_point_of_interest_marker_height(),

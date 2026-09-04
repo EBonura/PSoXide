@@ -358,6 +358,10 @@ pub enum NodeKind {
         /// it with the final message in the inspector.
         #[serde(default = "default_point_of_interest_pages")]
         pages: Vec<String>,
+        /// Italian pages, one per English page, or empty to show the English
+        /// copy in Italian too. Validated by the cook like `pages`.
+        #[serde(default)]
+        pages_it: Vec<String>,
         /// Short prompt shown while the player is inside the radius.
         #[serde(default = "default_point_of_interest_prompt")]
         prompt: String,
@@ -590,12 +594,16 @@ pub struct WorldMessage {
     /// lines per page; line wrapping is a runtime concern.
     #[serde(default = "default_message_pages")]
     pub pages: Vec<String>,
+    /// Italian pages, one per English page, or empty to fall back to English.
+    #[serde(default)]
+    pub pages_it: Vec<String>,
 }
 
 impl Default for WorldMessage {
     fn default() -> Self {
         Self {
             pages: default_message_pages(),
+            pages_it: Vec::new(),
         }
     }
 }
@@ -616,6 +624,12 @@ pub struct PointOfInterestReward {
     /// Short inventory description.
     #[serde(default)]
     pub description: String,
+    /// Italian item name, or empty to keep the English name in Italian.
+    #[serde(default)]
+    pub item_name_it: String,
+    /// Italian description, or empty to keep the English one.
+    #[serde(default)]
+    pub description_it: String,
     /// Signed percentage modifiers. Multiple entries may target the same stat
     /// and are added together by the cooker.
     #[serde(default)]
@@ -629,6 +643,8 @@ impl Default for PointOfInterestReward {
             quantity: 1,
             item_name: "NEW MODULE".to_string(),
             description: "Recovered boost module.".to_string(),
+            item_name_it: String::new(),
+            description_it: String::new(),
             modifiers: vec![crate::BoostStatModifier::default()],
         }
     }

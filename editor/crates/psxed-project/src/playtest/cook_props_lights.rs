@@ -1289,6 +1289,7 @@ pub(crate) fn push_interactable(
     names: &mut NameInterner,
     messages: &mut Vec<PlaytestInteractableMessage>,
     message_pages: &mut Vec<String>,
+    message_pages_it: &mut Vec<String>,
     interactables: &mut Vec<PlaytestInteractable>,
     logic: &mut Vec<PlaytestLogic>,
     report: &mut PlaytestValidationReport,
@@ -1327,6 +1328,7 @@ pub(crate) fn push_interactable(
     let message = messages.len().min(u16::MAX as usize) as u16;
     let page_first = message_pages.len().min(u16::MAX as usize) as u16;
     message_pages.push(body.clone());
+    message_pages_it.push(String::new());
     messages.push(PlaytestInteractableMessage {
         title,
         body,
@@ -1408,6 +1410,7 @@ pub(crate) fn push_point_of_interest(
     reward_flag: u16,
     messages: &mut Vec<PlaytestInteractableMessage>,
     message_pages: &mut Vec<String>,
+    message_pages_it: &mut Vec<String>,
     interactables: &mut Vec<PlaytestInteractable>,
     boost_modules: &mut Vec<PlaytestBoostModule>,
     report: &mut PlaytestValidationReport,
@@ -1437,6 +1440,16 @@ pub(crate) fn push_point_of_interest(
         report.error("Point-of-interest message page table exceeds 65535 entries");
         return false;
     }
+    let Some(pages_it) = italian_pages(
+        &format!("Point of Interest on '{node_name}'"),
+        component.pages,
+        component.pages_it,
+        2,
+        runtime_message_font(project),
+        report,
+    ) else {
+        return false;
+    };
 
     let (reward_resource, reward_quantity) = match component.reward {
         None => (psx_level::POI_REWARD_NONE, 0),
@@ -1539,6 +1552,8 @@ pub(crate) fn push_point_of_interest(
                 remove_label: format!("REMOVE {name}"),
                 name,
                 description,
+                name_it: reward.item_name_it.trim().to_string(),
+                description_it: reward.description_it.trim().to_string(),
                 effect_summary,
                 percentages,
             });
@@ -1549,6 +1564,7 @@ pub(crate) fn push_point_of_interest(
     let message = messages.len().min(u16::MAX as usize) as u16;
     let page_first = message_pages.len() as u16;
     message_pages.extend(component.pages.iter().cloned());
+    message_pages_it.extend(pages_it);
     let page_count = component.pages.len() as u16;
     messages.push(PlaytestInteractableMessage {
         title: String::new(),
@@ -1647,11 +1663,47 @@ pub(crate) fn runtime_message_font(project: &ProjectDocument) -> UiFontChoice {
 /// `X - X - READ` at runtime.
 fn point_of_interest_action_verb(prompt: &str) -> &str {
     let prompt = non_empty_or(prompt, "READ").trim();
-    prompt
-        .strip_prefix("X - ")
-        .map(str::trim)
-        .filter(|verb| !verb.is_empty())
-        .unwrap_or("READ")
+    let verb = prompt.strip_prefix("X -").map(str::trim).unwrap_or(prompt);
+    if verb.is_empty() {
+        "READ"
+    } else {
+        verb
+    }
+}
+
+/// The Italian column for one message: one page per English page, each
+/// validated like the English copy, or all-empty entries when no Italian was
+/// authored (an editor-created list of blank pages counts as none). `None`
+/// means the report already carries the error.
+pub(crate) fn italian_pages(
+    label: &str,
+    pages: &[String],
+    pages_it: &[String],
+    max_lines: usize,
+    font: UiFontChoice,
+    report: &mut PlaytestValidationReport,
+) -> Option<Vec<String>> {
+    if pages_it.iter().all(|page| page.trim().is_empty()) {
+        return Some(vec![String::new(); pages.len()]);
+    }
+    if pages_it.len() != pages.len() {
+        report.error(format!(
+            "{label} has {} Italian pages for {} English pages; they must match one to one",
+            pages_it.len(),
+            pages.len()
+        ));
+        return None;
+    }
+    if !validate_message_pages(
+        &format!("{label} (Italian)"),
+        pages_it,
+        max_lines,
+        font,
+        report,
+    ) {
+        return None;
+    }
+    Some(pages_it.to_vec())
 }
 
 /// Validate authored pagination against the native 320x240 Archive panel.
@@ -2292,6 +2344,8 @@ mod message_page_tests {
     #[test]
     fn point_of_interest_prompt_is_always_a_verb() {
         assert_eq!(point_of_interest_action_verb("READ"), "READ");
+        assert_eq!(point_of_interest_action_verb("TAKE"), "TAKE");
+        assert_eq!(point_of_interest_action_verb("X - TAKE"), "TAKE");
         assert_eq!(point_of_interest_action_verb(" X - READ "), "READ");
         assert_eq!(point_of_interest_action_verb("X - "), "READ");
         assert_eq!(point_of_interest_action_verb("  "), "READ");

@@ -277,6 +277,7 @@ mod tests {
             "Point of Interest",
             NodeKind::PointOfInterest {
                 pages: vec!["Recovered protocol.".to_owned()],
+                pages_it: Vec::new(),
                 prompt: "READ".to_owned(),
                 radius: 576,
                 marker_height: 192,

@@ -1183,8 +1183,11 @@ mod tests {
             .clip_nodes()
             .as_native_clip_nodes()
             .expect("validated native clipnodes");
-        let door_hull =
-            CollisionHull::from_native_clip_nodes(map.planes(), clipnodes, door.head_nodes[1]);
+        // SAFETY: `map` is a loaded resident map, whose validation
+        // range-checked every clip node and model head node.
+        let door_hull = unsafe {
+            CollisionHull::from_native_clip_nodes(map.planes(), clipnodes, door.head_nodes[1])
+        };
         let trace = trace(
             &door_hull,
             Vec3I32 {
