@@ -504,41 +504,44 @@ impl<const N: usize> OrderingTable<N> {
         #[cfg(all(target_arch = "mips", not(feature = "ot-window-insert-coalescing")))]
         {
             let entries = self.entries.as_mut_ptr();
+            // Sixteen instructions per packet, two RAM loads. Every OT slot
+            // already holds a 24-bit address with a zero top byte (`clear`,
+            // `insert_unchecked*` and this loop all store masked packet
+            // addresses), so the old head needs no mask before the packet's
+            // word count is OR-ed in.
             unsafe {
                 core::arch::asm!(
                     ".set noreorder",
-                    // Persistent constants: low-24-bit DMA address mask and
-                    // the screen-packet sentinel staged by retained callers.
+                    // Persistent constants: low-24-bit DMA address mask, the
+                    // screen-packet sentinel staged by retained callers, and
+                    // the word-count byte mask.
                     "lui $15, 0x00ff",
                     "ori $15, $15, 0xffff",
                     "ori $17, $0, 0xffff",
+                    "lui $18, 0xff00",
                     "2:",
                     "lw $9, 0($8)",
-                    "nop",
+                    // The packet's 24-bit address fills the tag load delay.
+                    "and $11, $8, $15",
                     // tag>>22 is the packet byte count excluding its tag;
                     // add four bytes while filling the sentinel branch slot.
                     "srl $10, $9, 22",
-                    "andi $11, $9, 0xffff",
+                    "andi $13, $9, 0xffff",
                     "addu $10, $8, $10",
-                    "beq $11, $17, 3f",
+                    "beq $13, $17, 3f",
                     "addiu $10, $10, 4",
-                    // Prepend the packet to its already-bounded OT slot. The
-                    // packet-address shifts fill the OT-head load delay.
-                    "sll $13, $11, 2",
+                    // Prepend the packet to its already-bounded OT slot; the
+                    // word-count mask fills the OT-head load delay.
+                    "sll $13, $13, 2",
                     "addu $13, $12, $13",
                     "lw $14, 0($13)",
-                    "sll $11, $8, 8",
-                    "srl $9, $9, 24",
-                    "and $14, $14, $15",
-                    "sll $9, $9, 24",
+                    "and $9, $9, $18",
                     "or $14, $14, $9",
                     "sw $14, 0($8)",
-                    "srl $11, $11, 8",
                     "sw $11, 0($13)",
                     "3:",
+                    "bne $10, $16, 2b",
                     "move $8, $10",
-                    "bne $8, $16, 2b",
-                    "nop",
                     ".set reorder",
                     inout("$8") first => _,
                     in("$12") entries,
@@ -550,6 +553,7 @@ impl<const N: usize> OrderingTable<N> {
                     lateout("$14") _,
                     lateout("$15") _,
                     lateout("$17") _,
+                    lateout("$18") _,
                     options(nostack),
                 );
             }
@@ -750,36 +754,34 @@ impl<const N: usize> OrderingTable<N> {
         #[cfg(target_arch = "mips")]
         {
             let entries = self.entries.as_mut_ptr();
+            // The `insert_tagged_packet_stream_unchecked` loop with the slot
+            // shift after the sentinel test.
             unsafe {
                 core::arch::asm!(
                     ".set noreorder",
                     "lui $15, 0x00ff",
                     "ori $15, $15, 0xffff",
                     "ori $17, $0, 0xffff",
+                    "lui $18, 0xff00",
                     "2:",
                     "lw $9, 0($8)",
-                    "nop",
+                    "and $11, $8, $15",
                     "srl $10, $9, 22",
-                    "andi $11, $9, 0xffff",
+                    "andi $13, $9, 0xffff",
                     "addu $10, $8, $10",
-                    "beq $11, $17, 3f",
+                    "beq $13, $17, 3f",
                     "addiu $10, $10, 4",
-                    "srl $11, $11, {slot_shift}",
-                    "sll $13, $11, 2",
+                    "srl $13, $13, {slot_shift}",
+                    "sll $13, $13, 2",
                     "addu $13, $12, $13",
                     "lw $14, 0($13)",
-                    "sll $11, $8, 8",
-                    "srl $9, $9, 24",
-                    "and $14, $14, $15",
-                    "sll $9, $9, 24",
+                    "and $9, $9, $18",
                     "or $14, $14, $9",
                     "sw $14, 0($8)",
-                    "srl $11, $11, 8",
                     "sw $11, 0($13)",
                     "3:",
+                    "bne $10, $16, 2b",
                     "move $8, $10",
-                    "bne $8, $16, 2b",
-                    "nop",
                     ".set reorder",
                     slot_shift = const SLOT_SHIFT,
                     inout("$8") first => _,
@@ -792,6 +794,7 @@ impl<const N: usize> OrderingTable<N> {
                     lateout("$14") _,
                     lateout("$15") _,
                     lateout("$17") _,
+                    lateout("$18") _,
                     options(nostack),
                 );
             }
