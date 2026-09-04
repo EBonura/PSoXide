@@ -567,8 +567,8 @@ pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Joint-transform scratch -- all biped rigs we currently cook
 /// fit comfortably in 32.
 pub(super) const JOINT_CAP: usize = 32;
-/// Cap on placed model instances rendered per frame.
-pub(super) const MAX_MODEL_INSTANCES: usize = 16;
+/// Reserve only the cooked instances; unused worst-case slots consume PS1 RAM.
+pub(super) const MAX_MODEL_INSTANCES: usize = cooked_capacity(MODEL_INSTANCES.len());
 /// Cap on cooked CylinderProps contributing one radial blocker apiece.
 pub(super) const MAX_CYLINDER_PROP_BLOCKERS: usize = 32;
 /// Shared fixed collision buffer for actor/model and CylinderProp blockers.
@@ -589,14 +589,14 @@ pub(super) const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
 pub(super) const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
 /// Cap on attached weapon/equipment visuals rendered per frame.
 pub(super) const MAX_EQUIPMENT_DRAWS: usize = 8;
-/// Runtime model cache capacity. The current playtest package only
-/// needs one player model, but this keeps a little headroom for
-/// lightweight NPC experiments without introducing heap allocation.
-pub(super) const MAX_RUNTIME_MODELS: usize = 8;
-/// Runtime animation cache capacity. Demo-scale character sets can
-/// easily carry player + several enemy clip banks; keep this aligned
-/// with the residency table rather than the old single-character cap.
-pub(super) const MAX_RUNTIME_MODEL_CLIPS: usize = 128;
+/// Assets are fixed at cook time, so their tables determine cache capacity.
+pub(super) const MAX_RUNTIME_MODELS: usize = cooked_capacity(MODELS.len());
+pub(super) const MAX_RUNTIME_MODEL_CLIPS: usize = cooked_capacity(MODEL_CLIPS.len());
+
+/// Keep a sentinel slot for the empty editor placeholder manifest.
+const fn cooked_capacity(count: usize) -> usize {
+    if count == 0 { 1 } else { count }
+}
 pub(super) const MODEL_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_MODELS").is_some();
 pub(super) const MODEL_BOUNDS_CULLING_ENABLED: bool =
     option_env!("PSXO_BENCH_DISABLE_MODEL_BOUNDS_CULL").is_none();
@@ -769,12 +769,10 @@ pub(super) type RuntimeModelDrawScratch =
 pub(super) type RuntimeCachedRoomProjection =
     psx_game_runtime::room_cache::CachedRoomProjection<MAX_CACHED_ROOM_VERTICES>;
 
-/// Phase-3 gameplay capacities (docs/game-runtime-plan.md, "Phase 3
-/// budget"). The record caps are the psx-level cook<->runtime
-/// contract (the cook rejects over-cap content), so the SoA arrays
-/// here can never silently drop a cooked record.
-pub(super) const MAX_GAME_ENTITIES: usize = psx_level::MAX_GAME_ENTITY_RECORDS;
-/// See [`MAX_GAME_ENTITIES`].
+/// The cooker enforces the record limit; runtime storage fits every authored
+/// entity without reserving state for actors absent from this level.
+pub(super) const MAX_GAME_ENTITIES: usize = cooked_capacity(GAME_ENTITIES.len());
+/// Logic record ceiling from the cook/runtime contract.
 pub(super) const MAX_LOGIC_RECORDS: usize = psx_level::MAX_LOGIC_RECORDS;
 /// Fired-bitset words for the logic runtime (the BoxProps
 /// broken-words pattern).

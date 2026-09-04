@@ -971,6 +971,7 @@ impl Scene for Playtest {
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        self.player_poise.tick(1);
         self.update_gameplay(ctx);
         // This tail runs after every intentional early return in
         // `update_gameplay`: freeze final actor state once, then run combat

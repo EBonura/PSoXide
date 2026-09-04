@@ -549,6 +549,12 @@ pub(crate) fn draw_world_settings(
                     .changed();
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
             });
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("BSP Patch Extent").color(STUDIO_TEXT_WEAK));
+        changed |= ui.add(egui::DragValue::new(&mut culling.bsp_patch_extent)
+            .speed(256.0).range(1024..=4096)).on_hover_text(
+                "Smaller patches improve vertex-light detail and near-plane clipping; larger patches use less resident RAM. Requires recooking.").changed();
+    });
         });
     egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Far Vista"))
         .default_open(true)

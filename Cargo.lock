@@ -1257,6 +1257,7 @@ dependencies = [
  "psx-gte-core",
  "psx-hw",
  "psx-iso",
+ "psx-spu",
  "psx-telemetry",
  "psx-trace",
  "serde",

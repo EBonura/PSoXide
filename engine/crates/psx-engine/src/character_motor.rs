@@ -795,6 +795,16 @@ impl CharacterMotorState {
         self.remainder_z_q8 = 0;
     }
 
+    /// Interrupt a fixed action without refunding stamina or changing gravity.
+    pub fn interrupt_action(&mut self) {
+        self.action = CharacterMotorAction::Idle;
+        self.action_frame = 0;
+        self.action_yaw = self.yaw;
+        self.sprint_latched = false;
+        self.remainder_x_q8 = 0;
+        self.remainder_z_q8 = 0;
+    }
+
     /// Move the motor to another coordinate space while preserving
     /// yaw, stamina, and any in-progress action. Used by streaming
     /// room transitions where the same physical player position is
@@ -3369,6 +3379,20 @@ fn cylinder_overlaps_aabb(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn interruption_keeps_position_stamina_and_falling_velocity() {
+        let mut motor = super::CharacterMotorState::new(super::RoomPoint::new(1, 2, 3), super::Angle::ZERO);
+        motor.action = super::CharacterMotorAction::Roll;
+        motor.action_frame = 7;
+        motor.stamina_q12 = 1234;
+        motor.velocity_y = -20;
+        motor.interrupt_action();
+        assert!(motor.action.is_idle());
+        assert_eq!(motor.action_frame, 0);
+        assert_eq!(motor.stamina_q12, 1234);
+        assert_eq!(motor.velocity_y, -20);
+        assert_eq!(motor.position, super::RoomPoint::new(1, 2, 3));
+    }
     use super::*;
     use crate::RuntimeRoom;
 

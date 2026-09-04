@@ -1,0 +1,18 @@
+{
+  "disc_sha256": "9b793c34ab6a27fa72f74b1a33503ca39dd4dfd81f2e68aedcbdfffb84685c0a",
+  "swap_cooldown_ticks": 900,
+  "enemy_audio": {
+    "enemy_footstep": {
+      "rate": 8000,
+      "samples": 960,
+      "channels": 1
+    },
+    "enemy_idle": {
+      "rate": 8000,
+      "samples": 2400,
+      "channels": 1
+    }
+  },
+  "native_replay_stop_poll": 5250,
+  "physical_console_tested": false
+}

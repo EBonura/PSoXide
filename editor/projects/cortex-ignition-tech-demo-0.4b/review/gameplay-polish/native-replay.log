@@ -1,0 +1,159 @@
+[cli] loaded poll-bound input tape /tmp/cortex04b-debug/new-ui-route.csv (5083 polls, starting at poll 177)
+[frontend] embedded Play disc fast-booted editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue via PSX.EXE;1 entry=0x80010000 payload=1126400B
+[cli] mounted cue-backed disc editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue
+[cdda] play track bcd=0x03 (decimal 3)
+combat music:on
+[cdda] play track bcd=0x02 (decimal 2)
+combat music:off
+combat music:on
+combat music:off
+tick=1341718540  cycles=3189738500  pc=0x8001d2b8  stopped-at=1341718540
+route-ticks=5581  port1-polls=5250
+guest_profile_frames=5248
+guest_profile_frame_meaning=frame_begin_markers
+guest_profile_pacing:
+  sim_ticks=5248
+  visual_frames=1931
+  visual_skipped_vblanks=2624
+  visual_deadline_misses=642
+  visual_interval_vblanks=2
+  visual_max_lateness_vblanks=24
+  update_cycles_per_sim_tick=133876
+  render_cycles_per_visual_frame=1099478
+  visual_budget_cycles=1128960  vblanks=2.00  cycles_per_vblank=564480
+  visual_budget_status=pass
+  cadence_status=missed_or_late
+guest_profile_render_breakdown:
+  sky                pct=  4.6 per_render=25264 cycles=97646812
+  far vista          pct=  0.0 per_render=1 cycles=3396
+  room               pct= 48.9 per_render=268750 cycles=1038720165
+  markers            pct=  0.0 per_render=1 cycles=5094
+  image props        pct=  0.0 per_render=44 cycles=170864
+  models             pct=  8.0 per_render=44100 cycles=170446735
+  player             pct= 20.2 per_render=110836 cycles=428380098
+  equipment          pct=  2.3 per_render=12705 cycles=49106732
+  flush/sort         pct=  1.1 per_render=5826 cycles=22518858
+  ot submit          pct=  0.0 per_render=30 cycles=117170
+  ot wait            pct=  0.0 per_render=142 cycles=550146
+  other              pct= 14.9 per_render=81611 cycles=315426355
+guest_profile_tasks:
+  visual render      total=2118232036 per_hit=1095826 max_hit=8463422 hits=1933
+guest_profile_stages:
+  update             total=702583242  per_frame=133876 per_hit=133876 max_hit=69108918 hits=5248
+  frame clear        total=171360     per_frame=33 per_hit=89 max_hit=117 hits=1932
+  render total       total=2123092425 per_frame=404553 per_hit=549312 max_hit=8462665 hits=3865
+  present/wait       total=286118862  per_frame=54520 per_hit=78864 max_hit=450810 hits=3628
+  camera             total=77571302   per_frame=14781 per_hit=16400 max_hit=27611 hits=4730
+  room               total=1038720165 per_frame=197927 per_hit=611732 max_hit=8250383 hits=1698
+  entity markers     total=5094       per_frame=1 per_hit=3 max_hit=3 hits=1698
+  model instances    total=170446735  per_frame=32478 per_hit=100381 max_hit=640558 hits=1698
+  player             total=428380098  per_frame=81627 per_hit=252285 max_hit=723380 hits=1698
+  world flush/sort   total=22518858   per_frame=4291 per_hit=13262 max_hit=24410 hits=1698
+  ot submit (kick)   total=117170     per_frame=22 per_hit=69 max_hit=77 hits=1697
+  equipment          total=49106732   per_frame=9357 per_hit=14460 max_hit=389566 hits=3396
+  model bounds       total=1600230    per_frame=305 per_hit=1117 max_hit=1310 hits=1433
+  model draw         total=143581825  per_frame=27359 per_hit=210531 max_hit=613164 hits=682
+  player bounds      total=2484696    per_frame=473 per_hit=1463 max_hit=1578 hits=1698
+  player draw        total=381957266  per_frame=72781 per_hit=225078 max_hit=691902 hits=1697
+  mdl joints         total=150100906  per_frame=28602 per_hit=55327 max_hit=130753 hits=2713
+  mdl project        total=104755759  per_frame=19961 per_hit=38613 max_hit=64303 hits=2713
+  mdl faces          total=264911183  per_frame=50479 per_hit=97645 max_hit=523642 hits=2713
+  vram upload        total=37195426   per_frame=7088 per_hit=845351 max_hit=33440331 hits=44
+  cd room chunk load total=108340423  per_frame=20644 per_hit=1259772 max_hit=7128230 hits=86
+  sky                total=97646812   per_frame=18606 per_hit=57507 max_hit=187554 hits=1698
+  far vista          total=3396       per_frame=1 per_hit=2 max_hit=2 hits=1698
+  image props        total=170864     per_frame=33 per_hit=101 max_hit=203 hits=1698
+  sim collision      total=3821067    per_frame=728 per_hit=808 max_hit=945 hits=4730
+  sim room track     total=33409      per_frame=6 per_hit=7 max_hit=16 hits=4730
+  sim solve          total=116404002  per_frame=22181 per_hit=24610 max_hit=142322 hits=4730
+  ot wait (gpu/dma)  total=550146     per_frame=105 per_hit=152 max_hit=27075 hits=3629
+  update actor       total=26681188   per_frame=5084 per_hit=5641 max_hit=21847 hits=4730
+  update window      total=9460       per_frame=2 per_hit=2 max_hit=2 hits=4730
+  game logic         total=106936005  per_frame=20377 per_hit=22608 max_hit=91498 hits=4730
+guest_profile_counters:
+  tri prims          total=1341734    per_frame=256 latest=1000
+  world commands     total=577518     per_frame=110 latest=238
+  model draws        total=682        per_frame=0 latest=0
+  model verts        total=308918     per_frame=59 latest=0
+  model tris         total=154558     per_frame=29 latest=0
+  model culled       total=208640     per_frame=40 latest=0
+  model dropped      total=70         per_frame=0 latest=0
+  player verts       total=449705     per_frame=86 latest=265
+  player tris        total=376445     per_frame=72 latest=204
+  player culled      total=477570     per_frame=91 latest=302
+  player dropped     total=4667       per_frame=1 latest=0
+  equipment draws    total=431        per_frame=0 latest=0
+  equipment verts    total=16470      per_frame=3 latest=0
+  equipment tris     total=12601      per_frame=2 latest=0
+  equipment culled   total=14581      per_frame=3 latest=0
+  model bound tests  total=1433       per_frame=0 latest=1
+  model bound culled total=751        per_frame=0 latest=1
+  player bound tests total=1698       per_frame=0 latest=1
+  mdl joints         total=59500      per_frame=11 latest=26
+  mdl parts          total=59436      per_frame=11 latest=26
+  mdl verts          total=775093     per_frame=148 latest=265
+  mdl faces          total=1247604    per_frame=238 latest=506
+  tri slots free     total=1404927    per_frame=268 latest=659
+  room texture uploads total=18         per_frame=0 latest=1
+  model atlas uploads total=3          per_frame=0 latest=1
+  sim ticks          total=5248       per_frame=1 latest=1
+  visual frames      total=1931       per_frame=0 latest=1
+  visual skipped vblanks total=2624       per_frame=0 latest=1
+  visual deadline misses total=642        per_frame=0 latest=1
+  visual interval vblanks total=10496      per_frame=2 latest=2
+  visual max lateness vblanks total=689        per_frame=0 latest=1
+  cd room chunk bytes total=650848     per_frame=124 latest=650848
+  cd room chunk sectors total=343        per_frame=0 latest=7
+  cd room chunk loads total=47         per_frame=0 latest=47
+  player local x     total=1698991384 per_frame=323741 latest=1000618
+  player local z     total=1695734034 per_frame=323120 latest=998931
+  player view yaw q12 total=4152495    per_frame=791 latest=1158
+  camera local x     total=1698915831 per_frame=323726 latest=1000828
+  camera local z     total=1695840659 per_frame=323140 latest=998876
+  camera view sin yaw q12 biased total=5451486    per_frame=1039 latest=8059
+  camera view cos yaw q12 biased total=9039143    per_frame=1722 latest=3058
+  camera local y     total=1698432609 per_frame=323634 latest=1000223
+  camera view sin pitch q12 biased total=5811212    per_frame=1107 latest=3262
+  camera view cos pitch q12 biased total=13783055   per_frame=2626 latest=8117
+  camera global x    total=1698000000 per_frame=323552 latest=1000000
+  camera global y    total=1698000000 per_frame=323552 latest=1000000
+  camera global z    total=1698000000 per_frame=323552 latest=1000000
+  mdl cpu blend verts total=78198      per_frame=15 latest=32
+  mdl packed faces   total=1247604    per_frame=238 latest=506
+  mdl packed unclamped faces total=1233364    per_frame=235 latest=506
+  mdl packed general faces total=14240      per_frame=3 latest=506
+  mdl near drops     total=4737       per_frame=1 latest=4
+  mdl fast tris      total=542076     per_frame=103 latest=204
+  mdl cpu blend submits total=2379       per_frame=0 latest=1
+  mdl primary joint submits total=334        per_frame=0 latest=1
+  mdl all front submits total=2685       per_frame=1 latest=1
+  mdl all hw bounds submits total=2713       per_frame=1 latest=1
+  mdl packed unclamped eligible total=2685       per_frame=1 latest=1
+  mdl packed general eligible total=28         per_frame=0 latest=1
+  vram slots freed   total=7          per_frame=0 latest=1
+  game entities thought total=2015       per_frame=0 latest=0
+  game entity patrol enters total=7          per_frame=0 latest=1
+  game entity aggro enters total=10         per_frame=0 latest=1
+  game entity windup enters total=7          per_frame=0 latest=1
+  game entity attack enters total=7          per_frame=0 latest=1
+  player hits taken  total=4          per_frame=0 latest=1
+  player attack starts total=9          per_frame=0 latest=1
+  player weapon attachments total=1          per_frame=0 latest=1
+  game entity pvs suppressions total=14887      per_frame=3 latest=3
+  player facing yaw q12 total=2912297    per_frame=555 latest=3223
+  player render forward x q12 biased total=7151305    per_frame=1363 latest=110
+  player render forward z q12 biased total=5825291    per_frame=1110 latest=5035
+  player anim action total=41658      per_frame=8 latest=0
+  player local y biased total=1698290848 per_frame=323607 latest=1000128
+  unknown            total=272263419  per_frame=51879 latest=7969
+gte_profile:
+  ops=6023707  per_guest_frame=1148
+  estimated_cycles=57292698  per_guest_frame=10917
+  estimated_cycles_per_visual_frame=29669  (2.6% of the 1128960-cycle render budget, ~97.4% GTE headroom)
+  opcodes:
+    0x01 RTPS   count=206626     per_guest_frame=39
+    0x06 NCLIP  count=1211078    per_guest_frame=231
+    0x12 MVMVA  count=4095559    per_guest_frame=780
+    0x30 RTPT   count=510444     per_guest_frame=97
+[cli] audio → /tmp/cortex04b-debug/new-native/audio.wav (4153305 stereo samples, 94.18s @ 44.1kHz)
+[cli] CPU display → /tmp/cortex04b-debug/new-native/final.ppm (320x240)
