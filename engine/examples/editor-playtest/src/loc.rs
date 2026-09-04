@@ -104,7 +104,7 @@ static ITALIAN: &[(&str, &str)] = &[
     ("ui.credits.artist", "ARTISTA 3D"),
     ("ui.credits.by", "UN GIOCO DI"),
     ("ui.credits.director", "DIRETTORE E LEAD PROGRAMMER"),
-    ("ui.credits.music", "MUSICA E SFX"),
+    ("ui.credits.music", "MUSICA"),
     ("ui.credits.title", "CREDITI"),
     ("ui.ending.back", "  MENU PRINCIPALE"),
     ("ui.ending.body", "RESTA SINTONIZZATO PER NUOVI AGGIORNAMENTI."),
@@ -122,7 +122,6 @@ static ITALIAN: &[(&str, &str)] = &[
     ("ui.inventory.defence", "DIFESA"),
     ("ui.inventory.equipped", "EQUIPAGGIATO"),
     ("ui.inventory.final_stats", "VALORI FINALI"),
-    ("ui.inventory.horizon", "ORIZZONTE"),
     ("ui.inventory.module_effect", "EFFETTO MODULO"),
     ("ui.inventory.modules", "MODULI"),
     ("ui.inventory.move_spd", "VEL MOV"),
@@ -133,7 +132,6 @@ static ITALIAN: &[(&str, &str)] = &[
     ("ui.inventory.select_module", "SCEGLI UN MODULO"),
     ("ui.inventory.target_high_gain", "MIRA // ALTO GUADAGNO"),
     ("ui.inventory.target_stable", "MIRA // STABILE"),
-    ("ui.inventory.zenith", "ZENIT"),
     ("ui.item_acquired", "OGGETTO OTTENUTO - "),
     ("ui.loading.continue", "CONTINUA"),
     ("ui.loading.status", "SINCRONIZZAZIONE PROIEZIONE"),
@@ -141,10 +139,6 @@ static ITALIAN: &[(&str, &str)] = &[
     ("ui.menu.credits", "  CREDITI"),
     ("ui.menu.new_game", "  NUOVA PARTITA"),
     ("ui.menu.system", "  SISTEMA"),
-    ("ui.module.short.module", "MODULO"),
-    ("ui.module.short.rupture", "ROTTURA"),
-    ("ui.module.short.shell", "GUSCIO"),
-    ("ui.module.short.zenith", "ZENIT"),
     ("ui.prompt.dismiss", "CHIUDI"),
     ("ui.prompt.read", "LEGGI"),
     ("ui.prompt.take", "PRENDI"),
@@ -165,7 +159,6 @@ static ITALIAN: &[(&str, &str)] = &[
     ("ui.system.music", "MUSICA"),
     ("ui.system.return", "TORNA AL TITOLO"),
     ("ui.system.title", "SISTEMA"),
-    ("ui.title.tech_demo", "DEMO TECNICA"),
 ];
 
 /// Runtime copy: the live-language string for `key`, or `english` when the
