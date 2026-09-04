@@ -1895,10 +1895,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
         let mut culled_triangles = 0u16;
         let mut submitted_triangles = 0usize;
-        let mut face_index = 0usize;
-        while face_index < faces.len() {
+        for source_face in faces {
             let (face, addresses) = unsafe {
-                model_face_addresses_scheduled(&faces[face_index], projected_vertices.as_ptr())
+                model_face_addresses_scheduled(source_face, projected_vertices.as_ptr())
             };
             let projected = unsafe { [*addresses[0], *addresses[1], *addresses[2]] };
             let (area, uv_words, palette_bank) = if CULL_BACK || CRYSTAL {
@@ -1915,7 +1914,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             };
             if CULL_BACK && area <= 0 {
                 culled_triangles = culled_triangles.wrapping_add(1);
-                face_index += 1;
                 continue;
             }
             // Band onto the walker's own packet material rather than the
@@ -1949,7 +1947,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let slot = depth_slots.slot(depth);
             unsafe {
                 // SAFETY: the command preflight reserves one slot per input
-                // face and `submitted_triangles <= face_index`.
+                // face and the emitted prefix never exceeds the input face count.
                 compact_commands
                     .add(command_start + submitted_triangles)
                     .write(BucketedWorldCommand::new(
@@ -1959,7 +1957,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     ));
             }
             submitted_triangles += 1;
-            face_index += 1;
         }
         self.command_len = command_start + submitted_triangles;
 
