@@ -1474,7 +1474,9 @@ impl<'a> AliasModelTable<'a> {
 
     pub fn get(self, id: i16) -> Option<AliasModelView<'a>> {
         (0..self.count)
-            .find(|&index| self.header_at(index).id == id)
+            // Only the two-byte key is needed while searching. Decoding all
+            // 68 bytes here forced a full header copy for every missed ID.
+            .find(|&index| i16_at(self.bytes, 4 + index * AliasModelHeader::SIZE + 2) == id)
             .map(|index| self.model_at(index).expect("model index came from table"))
     }
 
@@ -1935,6 +1937,38 @@ mod tests {
         );
         assert!(model.triangles(1).is_none());
         assert!(model.frame_vertices(1).is_none());
+    }
+
+    #[test]
+    fn alias_id_lookup_matches_indexed_headers_and_missing_ids() {
+        let source = one_alias_model();
+        let header_end = 4 + AliasModelHeader::SIZE;
+        let payload = &source[header_end..];
+        let ids = [0x49i16, 3, 0x18];
+        let mut bytes = (ids.len() as u32).to_le_bytes().to_vec();
+        for (index, id) in ids.iter().enumerate() {
+            let mut header = source[4..header_end].to_vec();
+            header[2..4].copy_from_slice(&id.to_le_bytes());
+            let offset = (index * 24) as u32;
+            header[60..64].copy_from_slice(&offset.to_le_bytes());
+            header[64..68].copy_from_slice(&(offset + AliasModelTriangle::SIZE as u32).to_le_bytes());
+            bytes.extend_from_slice(&header);
+        }
+        for index in 0..ids.len() {
+            bytes.extend_from_slice(payload);
+            if index + 1 < ids.len() { bytes.extend_from_slice(&[0; 3]); }
+        }
+        let table = AliasModelTable::new(&bytes).unwrap();
+        for (index, id) in ids.into_iter().enumerate() {
+            let found = table.get(id).unwrap();
+            let indexed = table.model_at(index).unwrap();
+            assert_eq!(found.header(), indexed.header());
+            assert_eq!(found.frame_bytes(0), indexed.frame_bytes(0));
+            assert_eq!(found.triangle_bytes(0), indexed.triangle_bytes(0));
+        }
+        for absent in [i16::MIN, -1, 0, 4, i16::MAX] {
+            assert!(table.get(absent).is_none());
+        }
     }
 
     #[test]
