@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 edition    = "2021"
 license    = "GPL-2.0-or-later"
-repository = "https://github.com/EBonura/PSoXide"
+repository = "https://github.com/EBonura/PSoXide-editor"
 
 [workspace.lints.rust]
 missing_docs = "warn"
