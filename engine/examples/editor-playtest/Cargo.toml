@@ -157,4 +157,4 @@ psx-mc     = { path = "../../../sdk/crates/psx-mc" }
 psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["alloc"] }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
-psxed-format = { path = "../../../editor/crates/psxed-format" }
+psxed-format = { path = "../../../crates/psxed-format" }

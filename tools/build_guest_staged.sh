@@ -73,7 +73,7 @@ fi
 # --delete so a removed source file cannot survive in the stage.
 CLOSURE="rust-toolchain.toml
 crates/psx-hw
-editor/crates/psxed-format
+crates/psxed-format
 sdk/psoxide.ld
 sdk/Cargo.toml
 sdk/crates
@@ -142,7 +142,7 @@ start = text.index("members = [")
 end = text.index("]", start) + 1
 staged = (
     text[:start]
-    + 'members = [\n    "crates/psx-hw",\n    "editor/crates/psxed-format",\n]'
+    + 'members = [\n    "crates/psx-hw",\n    "crates/psxed-format",\n]'
     + text[end:]
 )
 try:
