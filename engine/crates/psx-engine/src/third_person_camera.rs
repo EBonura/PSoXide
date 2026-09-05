@@ -418,7 +418,7 @@ impl ThirdPersonCameraState {
             self.snap_to_player(target, config);
         }
 
-        let focus_goal = camera_focus_goal(target, config);
+        let focus_goal = camera_focus_goal(target, config, self.distance);
 
         if input.recenter {
             self.recenter_active = true;
@@ -822,6 +822,7 @@ fn player_focus(player: RoomPoint, target_height: i32) -> RoomPoint {
 fn camera_focus_goal(
     target: ThirdPersonCameraTarget,
     config: ThirdPersonCameraConfig,
+    arm_distance: i32,
 ) -> RoomPoint {
     let player = player_focus(target.player, config.target_height);
     let Some(lock) = target.lock_target else {
@@ -833,9 +834,11 @@ fn camera_focus_goal(
     // camera-orbit adjustment, and must never drag the player down and out of
     // frame. Cap the horizontal offset relative to spring-arm length so a
     // distant target cannot drag the player out of frame during break grace.
+    // Use the shortened arm: a full-distance offset can put the camera
+    // between the player and target when a wall pushes it forward.
     let target_focus = player_focus(lock, config.target_height);
     let blended = lerp_vertex(player, target_focus, 1, 4);
-    let max_offset = (config.distance / 3).max(1);
+    let max_offset = (arm_distance.min(config.distance) / 3).max(0);
     RoomPoint::new(
         player.x.saturating_add(
             blended
@@ -2313,11 +2316,40 @@ mod tests {
         );
 
         let player = player_focus(target.player, config.target_height);
-        assert_eq!(frame.focus, camera_focus_goal(target, config));
+        assert_eq!(
+            frame.focus,
+            camera_focus_goal(target, config, config.distance)
+        );
         assert_ne!(frame.focus, player);
         assert!(frame.focus.x > player.x);
         assert_eq!(frame.focus.y, player.y);
         assert!(frame.focus.z > player.z);
+    }
+
+    #[test]
+    fn shortened_arm_keeps_locked_player_behind_focus() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut config = ThirdPersonCameraConfig::character(2000, 1000, 850);
+        config.focus_lag_shift = 0;
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: Some(RoomPoint::new(0, 0, 4000)),
+        };
+        camera.snap_to_player(target, config);
+        camera.distance = 240;
+        camera.collision_release_delay = 8;
+        let frame = camera.update(
+            WorldProjection::new(160, 120, 320, 64),
+            None,
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
+        assert!(frame.focus.z > target.player.z);
+        assert!(frame.focus.z - target.player.z < frame.distance / 2);
+        assert_eq!(frame.focus.y, config.target_height);
     }
 
     #[test]
