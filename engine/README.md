@@ -1,6 +1,6 @@
 # `engine/` (PSX runtime engine)
 
-The engine layer that sits on top of the [SDK](../sdk): a Scene/App
+The engine layer that sits on top of the [SDK](https://github.com/EBonura/PSoXide/tree/main/sdk): a Scene/App
 framework, BSP renderer, gameplay runtime and shared data contracts. The
 crates target PS1 hardware and also support host-side cooking, preview and
 tests. Authored games and the editor-playtest runtime build on this layer.
@@ -50,5 +50,6 @@ PSX target flags independently.
 
 ## See also
 
-- [Root README](../README.md). Example gallery with screenshots.
+- [Root README](../README.md). Bootstrap and build instructions.
+- [PSoXide Arcade](https://github.com/EBonura/psoxide-arcade). Canonical collection releases for Breakout, Invaders and Magikarp Pong.
 - [`docs/world-grid-architecture.md`](../docs/world-grid-architecture.md), [`docs/level-residency.md`](../docs/level-residency.md). Room/level runtime model.
