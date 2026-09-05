@@ -1,0 +1,4 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running `target/debug/examples/cook_cortex_motion editor/projects/cortex-ignition-tech-demo-0.4b`
+MODEL existing joints=22 scale=113 vertices=451 generated joints=22 scale=113 vertices=451
+CLIP animation 17268 bytes

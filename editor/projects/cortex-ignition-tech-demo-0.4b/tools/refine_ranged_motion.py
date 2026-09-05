@@ -45,7 +45,7 @@ for b in rig.data.bones:
 for obj in aim_objects:
     bpy.data.objects.remove(obj, do_unlink=True)
 # Keep generated torso/legs; settle both arms into the proven forward pose.
-action = bpy.data.actions.new('Mantis Charge Volley')
+action = bpy.data.actions.new('Mantis Charged Shot')
 rig.animation_data.action = action
 arm_names = {'LeftShoulder','LeftArm','LeftForeArm','LeftHand','RightShoulder','RightArm','RightForeArm','RightHand'}
 for f, pose in enumerate(source_poses, 1):
@@ -63,7 +63,7 @@ for f, pose in enumerate(source_poses, 1):
             before_basis = rest
         if name in arm_names and name in aim:
             world = rig.matrix_world.to_quaternion()
-            kick = max((max(0.0, 1.0-abs(f-(shot+3))/3.0) for shot in (37,55)), default=0.0)
+            kick = max((max(0.0, 1.0-abs(f-(shot+3))/3.0) for shot in (55,)), default=0.0)
             recoil = Quaternion((1,0,0), -0.10*kick) if name in {'RightArm','RightForeArm','RightHand'} else Quaternion()
             desired = world.inverted() @ recoil @ aim[name] @ world @ rest
             target = before_basis.inverted() @ desired

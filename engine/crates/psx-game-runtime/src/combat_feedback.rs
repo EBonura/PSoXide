@@ -1,6 +1,6 @@
 //! Bounded visual feedback driven by successful gameplay actions.
-//! Samples retain world positions, so a dash wake stays behind when the actor
-//! stops. No allocation, collision query, animation resampling or random state.
+//! Ground rings retain their world positions at dash launch and settle.
+//! No movement streaks, allocation, collision query or animation resampling.
 
 use crate::projectiles::ProjectileVisualStyle;
 use psx_level::RoomIndex;
@@ -8,9 +8,7 @@ use psx_level::RoomIndex;
 /// One retained piece of a dash wake.
 #[derive(Clone, Copy, Debug)]
 pub struct DashSample {
-    /// Start of the actual collision-resolved movement.
-    pub from: [i32; 3],
-    /// End of the movement, or the center of a launch/settle pulse.
+    /// Center of a launch/settle ground pulse.
     pub to: [i32; 3],
     /// Room-local coordinate space.
     pub room: RoomIndex,
@@ -20,20 +18,16 @@ pub struct DashSample {
     pub age: u8,
     /// Captured stance color; later stance changes do not recolor old samples.
     pub zenith: bool,
-    /// Ground pulse instead of a body-height wake.
-    pub pulse: bool,
     live: bool,
 }
 
 impl DashSample {
     const EMPTY: Self = Self {
-        from: [0; 3],
         to: [0; 3],
         room: RoomIndex::ZERO,
         height: 0,
         age: 0,
         zenith: false,
-        pulse: false,
         live: false,
     };
 }
@@ -63,9 +57,9 @@ impl DashWake {
         }
     }
 
-    /// Feed actual motor movement. Blocked/refused evades create no trail.
+    /// Feed actual motor movement. Blocked/refused evades create no pulse.
     /// Entering a different coordinate space discards old points, avoiding a
-    /// ribbon across a portal or checkpoint teleport.
+    /// ring in the wrong room after a portal or checkpoint teleport.
     pub fn observe(
         &mut self,
         from: [i32; 3],
@@ -85,35 +79,21 @@ impl DashWake {
         if dashing && moved {
             if !self.active {
                 self.insert(DashSample {
-                    from,
                     to: from,
                     room,
                     height,
                     age: 0,
                     zenith,
-                    pulse: true,
                     live: true,
                 });
             }
-            self.insert(DashSample {
-                from,
-                to,
-                room,
-                height,
-                age: 0,
-                zenith,
-                pulse: false,
-                live: true,
-            });
         } else if self.active {
             self.insert(DashSample {
-                from: to,
                 to,
                 room,
                 height,
                 age: 0,
                 zenith,
-                pulse: true,
                 live: true,
             });
         }
@@ -136,7 +116,7 @@ impl DashWake {
         self.samples[index] = sample;
     }
 
-    /// Retained samples, oldest/newest order is resolved by the world depth table.
+    /// Retained ground pulses, sorted by the world depth table.
     pub fn samples(&self) -> impl Iterator<Item = DashSample> + '_ {
         self.samples.iter().copied().filter(|s| s.live)
     }
@@ -181,13 +161,13 @@ mod tests {
         wake.observe([0; 3], [0; 3], RoomIndex::ZERO, 64, true, false);
         assert_eq!(wake.samples().count(), 0, "blocked dash creates no wake");
         wake.observe([0; 3], [8, 0, 0], RoomIndex::ZERO, 64, true, false);
-        assert_eq!(wake.samples().count(), 2);
+        assert_eq!(wake.samples().count(), 1);
         wake.tick();
         wake.observe([8, 0, 0], [8, 0, 0], RoomIndex::ZERO, 64, false, true);
-        assert_eq!(wake.samples().filter(|s| s.pulse).count(), 2);
-        let trail = wake.samples().find(|s| !s.pulse).unwrap();
-        assert_eq!(trail.to, [8, 0, 0]);
-        assert!(!trail.zenith);
+        assert_eq!(wake.samples().count(), 2);
+        let launch = wake.samples().find(|s| s.to == [0; 3]).unwrap();
+        assert!(!launch.zenith);
+        assert!(wake.samples().any(|s| s.to == [8, 0, 0]));
         for _ in 0..12 {
             wake.tick();
         }
