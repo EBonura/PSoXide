@@ -155,11 +155,7 @@ pub use classic_affine::{
     ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
     ClassicAliasProjectedVertex, ClassicAliasVertex,
 };
-#[cfg(feature = "classic-affine-subdivision-cache")]
-pub use classic_affine::{
-    submit_classic_affine_cached_subdivision_batch, ClassicAffineSubdivisionCacheSink,
-    ClassicAffineSubdivisionRootSlot,
-};
+
 pub use collision_query::{
     trace_collision, CollisionQueryError, CollisionTrace, CollisionTraceProvider,
     CollisionTraceQuery, CollisionTraceShape, COLLISION_FRACTION_ONE_Q12,
