@@ -58,6 +58,15 @@ const MARKER: &str = ".psoxide-source";
 /// frontend's default features pull psxed-ui and psxed-project in by path, so
 /// dropping it breaks `make run` in every game that has one.
 fn skip(relative: &Path) -> bool {
+    // Game dependencies need the engine and cookers, but not authored Cortex
+    // projects. The default project is embedded by psxed-project, so retain it.
+    if let Ok(project) = relative.strip_prefix("editor/projects") {
+        if let Some(name) = project.components().next() {
+            if name.as_os_str() != "default" && name.as_os_str() != ".gitignore" {
+                return true;
+            }
+        }
+    }
     let mut components = relative.components();
     let top = components.next().and_then(|c| c.as_os_str().to_str());
     matches!(
@@ -232,6 +241,10 @@ mod tests {
         // 583 MB of the SDK's own compiled examples, once per game.
         assert!(skip(Path::new("build")));
         assert!(skip(Path::new("engine/examples/.git")));
+        assert!(skip(Path::new(
+            "editor/projects/cortex-ignition-tech-demo-0.4b"
+        )));
+        assert!(!skip(Path::new("editor/projects/default/project.ron")));
     }
 
     #[test]
