@@ -1,7 +1,7 @@
 # Asset and Media Provenance
 
-This document records the source, author, and license for every
-tracked binary asset that ships in this repository. PSoXide's *code*
+This document records sources, authors, and licenses for the assets covered
+by the June 2026 audit. It is not a complete inventory of later project assets. PSoXide's *code*
 is licensed under GPL-2.0-or-later (see [`LICENSE`](../LICENSE)), but
 binary assets each carry their own provenance and license, recorded
 here.

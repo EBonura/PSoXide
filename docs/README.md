@@ -6,6 +6,17 @@ the [root README](../README.md) and the per-area READMEs
 ([`sdk/`](../sdk), [`engine/`](../engine), [`editor/`](../editor),
 [`emu/`](../emu)).
 
+## Start here
+
+- [Build and contribute](../CONTRIBUTING.md)
+- [Repository architecture and crate boundaries](repository-architecture.md)
+- [SDK extraction proposal](sdk-separation.md)
+- [Current repository review](repository-review-2026-09-05.md)
+- [Cortex Ignition 0.4b](../editor/projects/cortex-ignition-tech-demo-0.4b/)
+
+Dated investigations and acceptance reports describe the revision they tested.
+They are historical evidence, not the current release status or setup guide.
+
 ## Architecture
 
 | Doc | Topic |
@@ -50,7 +61,7 @@ Per-subsystem behavioural notes backing the emulator, in [`hardware-refs/`](hard
 
 | Doc | Topic |
 |-----|-------|
-| [comicon-playable-beta-handoff-2026-08-13.md](comicon-playable-beta-handoff-2026-08-13.md) | Authoritative playable-beta freeze, exact evidence, WIP recovery, promotion, and adversarial-resume instructions. |
+| [comicon-playable-beta-handoff-2026-08-13.md](comicon-playable-beta-handoff-2026-08-13.md) | Historical August playable-beta freeze and validation evidence. |
 | [souls-slice-acceptance.md](souls-slice-acceptance.md) | Owner acceptance pass on the tracked souls slice. |
 | [fresh-project-workflow-checklist.md](fresh-project-workflow-checklist.md) | Owner acceptance pass on a newly created project. |
 | [asset-provenance.md](asset-provenance.md) | Asset and media provenance. |

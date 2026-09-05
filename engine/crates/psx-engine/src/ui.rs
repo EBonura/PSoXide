@@ -3953,9 +3953,9 @@ fn draw_message_dismiss_hint(
     );
     let control_width = controller_prompt_prefix_width(cross_prompt.is_some())
         .saturating_add(font.text_width(action) as i16);
-    let text_x = layout.x.saturating_add(
-        (layout.width as i16 - INSET_X - control_width).max(INSET_X),
-    );
+    let text_x = layout
+        .x
+        .saturating_add((layout.width as i16 - INSET_X - control_width).max(INSET_X));
     let action_x = draw_controller_prompt_prefix(font, cross_prompt, text_x, text_y);
     draw_scaled_text_paint(
         font,

@@ -1640,7 +1640,10 @@ impl EditorWorkspace {
             } => {
                 let mut combat_only = *trigger == psxed_project::MusicTrigger::Combat;
                 if ui
-                    .checkbox(&mut combat_only, "Play only during combat (fades in and out)")
+                    .checkbox(
+                        &mut combat_only,
+                        "Play only during combat (fades in and out)",
+                    )
                     .changed()
                 {
                     *trigger = if combat_only {
