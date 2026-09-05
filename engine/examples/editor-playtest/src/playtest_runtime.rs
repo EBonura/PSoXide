@@ -1639,7 +1639,11 @@ impl Playtest {
                 self.camera.focus(),
             );
         }
-        if let Some(bsp) = self.bsp.as_mut() {
+        // The cooked world backend cannot change during this scene. A
+        // compile-time branch excludes the grid spring-arm implementation
+        // from a BSP disc while keeping it available to grid projects.
+        if USES_PXBSP {
+            let bsp = self.bsp.as_mut().expect("resident BSP camera backend");
             return bsp
                 .update_camera(
                     &mut self.camera,

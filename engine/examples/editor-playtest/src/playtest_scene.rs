@@ -1080,7 +1080,7 @@ impl Scene for Playtest {
             telemetry::stage_end(telemetry::stage::FAR_VISTA);
         }
 
-        if self.current_collision_room.is_some() || self.bsp.is_some() {
+        if self.current_collision_room.is_some() || USES_PXBSP {
             let mut total_instance_stats = ModelInstanceDrawStats::default();
             let mut room_active_chunks = 0u32;
             let mut room_cached_draws = 0u32;
@@ -1130,7 +1130,7 @@ impl Scene for Playtest {
             // render/collision payloads. Draw the singleton metadata room's
             // ordinary gameplay content directly in world space while the BSP
             // renderer above owns only static brush surfaces.
-            if self.bsp.is_some() {
+            if USES_PXBSP {
                 if let (Some(room_record), Some(lighting)) =
                     (room_record, self.current_room_lighting(camera))
                 {
@@ -1160,6 +1160,9 @@ impl Scene for Playtest {
                 }
             }
 
+            // Resident BSP scenes have no streamed grid rooms. Keep both grid
+            // passes out of the cooked BSP executable, including their shaders.
+            #[cfg(not(playtest_pxbsp))]
             let active_draw_order = active_room_draw_order(
                 &self.window.rooms,
                 camera,
@@ -1167,6 +1170,7 @@ impl Scene for Playtest {
                 self.room_index,
                 cached_room_draw_order_mode(),
             );
+            #[cfg(not(playtest_pxbsp))]
             for &active_slot in &active_draw_order {
                 if active_slot == INVALID_ACTIVE_ROOM_SLOT {
                     continue;
@@ -1222,7 +1226,7 @@ impl Scene for Playtest {
                 #[cfg(feature = "room-surface-profile")]
                 let room_command_start = world.command_len();
                 telemetry::stage_begin(telemetry::stage::ROOM);
-                if self.bsp.is_none() {
+                if !USES_PXBSP {
                     #[cfg(feature = "world-grid-visible")]
                     {
                         #[cfg(feature = "vis-full-active-chunks")]
@@ -1632,7 +1636,7 @@ impl Scene for Playtest {
                 let player = self.motor.position();
                 let player_lighting = self.current_room_lighting(camera);
                 let actor_options =
-                    current_actor_surface_options(self.room_index, self.bsp.is_some());
+                    current_actor_surface_options(self.room_index, USES_PXBSP);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
                 #[cfg(feature = "actor-shadows-projected")]
                 {
@@ -1757,7 +1761,7 @@ impl Scene for Playtest {
 
             if self.character.is_some() {
                 let mut instance_equipment_remaining = MAX_EQUIPMENT_DRAWS;
-                if self.bsp.is_some() {
+                if USES_PXBSP {
                     if let (Some(room_record), Some(lighting)) =
                         (room_record, self.current_room_lighting(camera))
                     {
@@ -1789,6 +1793,7 @@ impl Scene for Playtest {
                         telemetry::stage_end(telemetry::stage::EQUIPMENT);
                     }
                 }
+                #[cfg(not(playtest_pxbsp))]
                 for &active_slot in &active_draw_order {
                     if active_slot == INVALID_ACTIVE_ROOM_SLOT {
                         continue;
@@ -2461,7 +2466,7 @@ impl Playtest {
                 &self.instance_actor_poses,
                 camera,
                 actor_options,
-                if self.bsp.is_some() {
+                if USES_PXBSP {
                     // psx-numeric-allow-next-line: per-instance visibility bitmask, see the parameter
                     u64::from(self.bsp_instance_visible_mask)
                 } else {
@@ -2485,7 +2490,7 @@ impl Playtest {
                     shadow_material,
                     &self.models,
                     entity_poses,
-                    if self.bsp.is_some() {
+                    if USES_PXBSP {
                         // psx-numeric-allow-next-line: per-instance visibility bitmask, see the parameter
                         u64::from(self.bsp_instance_visible_mask)
                     } else {
