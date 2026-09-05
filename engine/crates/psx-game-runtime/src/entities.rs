@@ -285,6 +285,8 @@ pub struct GameEntityTickInput<'a> {
     /// Player body height, used to trace sight at torso height instead of
     /// along the floor.
     pub player_height: i32,
+    /// Current movement noise radius, in world units. Zero means silent.
+    pub player_noise_radius: i32,
     /// True while the player's motor action grants i-frames (roll /
     /// active roll invulnerability). Entity attacks resolve no
     /// contact against an invulnerable player -- the swing stays
@@ -1414,7 +1416,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
             let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
             let activation_allows = if self.spatial_activation_enabled {
-                spatially_active
+                // PVS is a rendering broad phase, not a perception verdict.
+                // Nearby actors must still test sight/hearing around corners.
+                spatially_active || self.player_in_notice_range(record, index, input)
             } else {
                 room_is_active(record.room, input.active_rooms)
             };
@@ -1833,10 +1837,20 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
     }
 
-    /// Aggro notice test: distance AND same room. Cooked positions
-    /// are room-local, so a raw distance compare aliases across
-    /// rooms; cross-room notice (portal line-of-sight) is the nav
-    /// slice's work.
+    fn player_in_notice_range(
+        &self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        input: GameEntityTickInput<'_>,
+    ) -> bool {
+        input.player_room == record.room
+            && psx_math::int32::abs_i32(self.y[index].saturating_sub(input.player[1]))
+                <= i32::from(record.height).max(input.player_height).saturating_mul(2)
+            && self.player_within(index, input, i32::from(record.aggro_radius))
+    }
+
+    // Shared by idle and patrol; keep one copy in the RAM-limited guest.
+    #[inline(never)]
     fn player_noticed(
         &self,
         record: &LevelGameEntityRecord,
@@ -1844,12 +1858,29 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
     ) -> bool {
-        if input.player_room != record.room
-            || !self.player_within(index, input, i32::from(record.aggro_radius))
-        {
+        if !self.player_in_notice_range(record, index, input) {
             return false;
         }
-        self.player_in_line_of_sight(record, index, input, mover)
+        let clear = self.player_in_line_of_sight(record, index, input, mover);
+        // Omni-directional short-range hearing, attenuated through cover.
+        // Hearing wakes the normal alert/pursuit state; it never bypasses the
+        // separate line-of-sight check required to commit an attack.
+        let hearing = if clear { input.player_noise_radius } else { input.player_noise_radius / 3 };
+        if hearing > 0 && self.player_within(index, input, hearing) {
+            return true;
+        }
+        if !clear {
+            return false;
+        }
+        // Close peripheral awareness prevents touching an idle enemy unseen.
+        let close = i32::from(record.height).max(input.player_height);
+        if self.player_within(index, input, close) {
+            return true;
+        }
+        let dx = input.player[0].saturating_sub(self.x[index]);
+        let dz = input.player[2].saturating_sub(self.z[index]);
+        let yaw = psx_engine::Angle::from_q12(self.yaw[index] as u16);
+        yaw.sin().mul_i32(dx).saturating_add(yaw.cos().mul_i32(dz)) >= 0
     }
 
     fn player_in_line_of_sight(
@@ -2636,6 +2667,7 @@ mod tests {
             player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
+            player_noise_radius: 0,
             player_invulnerable: false,
             active_rooms,
         }
@@ -2647,6 +2679,7 @@ mod tests {
             player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
+            player_noise_radius: 0,
             player_invulnerable: false,
             active_rooms,
         }
@@ -3111,6 +3144,7 @@ mod tests {
             player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
+            player_noise_radius: 0,
             player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
@@ -3430,6 +3464,7 @@ mod tests {
             player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
+            player_noise_radius: 0,
             player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
@@ -3460,6 +3495,7 @@ mod tests {
             player_room: RoomIndex(0),
             player_radius: 192,
             player_height: 1024,
+            player_noise_radius: 0,
             player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
@@ -3586,6 +3622,7 @@ mod tests {
             player_room: RoomIndex(7),
             player_radius: 192,
             player_height: 1024,
+            player_noise_radius: 0,
             player_invulnerable: false,
             active_rooms: rooms,
         };
@@ -3606,26 +3643,30 @@ mod tests {
     }
 
     #[test]
-    fn owner_spatial_mask_replaces_room_gating_without_sleeping_combat() {
+    fn owner_spatial_mask_keeps_nearby_perception_and_engaged_combat_awake() {
         static ROOM_7: [RoomIndex; 1] = [RoomIndex(7)];
         let input = GameEntityTickInput {
             player: [1200, 0, 1000],
             player_room: RoomIndex(7),
             player_radius: 192,
             player_height: 1024,
+            player_noise_radius: 0,
             player_invulnerable: false,
             active_rooms: &ROOM_7,
         };
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&FAR_ROOM_ENEMY);
         entities.set_spatial_active_mask(Some(0));
-        let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
+        let far = GameEntityTickInput { player: [12000, 0, 1000], ..input };
+        let stats = entities.tick(&FAR_ROOM_ENEMY, far, &mut NoClipMover);
         assert_eq!((stats.thought, stats.gated), (0, 1));
+        let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
+        assert_eq!(stats.thought, 1, "nearby perception runs outside PVS");
 
         entities.set_spatial_active_mask(Some(1));
         let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
         assert_eq!(stats.thought, 1);
-        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        assert_eq!(entities.state(0), GameEntityState::Windup);
 
         entities.set_spatial_active_mask(Some(0));
         let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
@@ -3643,6 +3684,7 @@ mod tests {
             player_room: RoomIndex(3),
             player_radius: 192,
             player_height: 1024,
+            player_noise_radius: 0,
             player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
@@ -3680,6 +3722,67 @@ mod tests {
         sight.clear = true;
         entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut sight);
         assert_eq!(entities.state(0), GameEntityState::Windup);
+    }
+
+    #[test]
+    fn perception_distinguishes_front_sight_rear_hearing_and_silence() {
+        static ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
+            x: 0, y: 0, z: 0, patrol_x: 0, patrol_y: 0, patrol_z: 0,
+            height: 64, radius: 12, aggro_radius: 352,
+            ..IDLE_ENEMY[0]
+        }];
+        let base = GameEntityTickInput {
+            player: [0, 0, -180], player_height: 64, player_radius: 12,
+            ..near_input(&ACTIVE)
+        };
+        for delta in [1, 2] {
+            let mut entities = GameEntities::<8>::EMPTY;
+            entities.spawn_from_records(&ENEMY);
+            entities.set_spatial_active_mask(Some(0));
+            entities.tick_delta(&ENEMY, base, &mut NoClipMover, delta);
+            assert_eq!(entities.state(0), GameEntityState::Idle, "silent rear approach");
+            let walking = GameEntityTickInput { player_noise_radius: 128, ..base };
+            entities.tick_delta(&ENEMY, walking, &mut NoClipMover, delta);
+            assert_eq!(entities.state(0), GameEntityState::Idle, "outside walking earshot");
+            let running = GameEntityTickInput { player_noise_radius: 256, ..base };
+            entities.tick_delta(&ENEMY, running, &mut NoClipMover, delta);
+            assert_eq!(entities.state(0), GameEntityState::Aggro, "hears running behind");
+            entities.spawn_from_records(&ENEMY);
+            let front = GameEntityTickInput { player: [0, 0, 300], ..base };
+            entities.tick_delta(&ENEMY, front, &mut NoClipMover, delta);
+            assert_eq!(entities.state(0), GameEntityState::Aggro, "sees ahead without noise");
+            entities.spawn_from_records(&ENEMY);
+            let close = GameEntityTickInput { player: [0, 0, -90], ..walking };
+            entities.tick_delta(&ENEMY, close, &mut NoClipMover, delta);
+            assert_eq!(entities.state(0), GameEntityState::Aggro, "hears walking behind");
+        }
+    }
+
+    #[test]
+    fn cover_attenuates_hearing_and_still_blocks_attack_commitment() {
+        static ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
+            x: 0, y: 0, z: 0, patrol_x: 0, patrol_y: 0, patrol_z: 0,
+            height: 64, radius: 12, aggro_radius: 352,
+            ..IDLE_ENEMY[0]
+        }];
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&ENEMY);
+        let mut blocked = SightMover::default();
+        let input = GameEntityTickInput {
+            player: [0, 0, -120], player_height: 64, player_radius: 12,
+            player_noise_radius: 256, ..near_input(&ACTIVE)
+        };
+        entities.tick(&ENEMY, input, &mut blocked);
+        assert_eq!(entities.state(0), GameEntityState::Idle);
+        let close = GameEntityTickInput { player: [0, 0, -40], ..input };
+        entities.tick(&ENEMY, close, &mut blocked);
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        for _ in 0..10 { entities.tick(&ENEMY, close, &mut blocked); }
+        assert_eq!(entities.state(0), GameEntityState::Aggro, "cannot attack through cover");
+        entities.spawn_from_records(&ENEMY);
+        let upstairs = GameEntityTickInput { player: [0, 512, -40], ..input };
+        entities.tick(&ENEMY, upstairs, &mut blocked);
+        assert_eq!(entities.state(0), GameEntityState::Idle);
     }
 
     #[test]
