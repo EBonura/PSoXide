@@ -11,9 +11,9 @@
 
 extern crate psx_rt;
 
-use psx_font::FontAtlas;
 #[cfg(target_arch = "mips")]
 use psx_font::fonts::BASIC;
+use psx_font::FontAtlas;
 #[cfg(target_arch = "mips")]
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_mc::{
