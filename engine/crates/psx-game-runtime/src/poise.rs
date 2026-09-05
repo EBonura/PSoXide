@@ -53,11 +53,13 @@ mod tests {
     use super::*;
     #[test]
     fn light_hits_interrupt_and_heavy_posture_needs_a_combo() {
-        assert!(Poise::EMPTY.hit(25, 25, false));
+        let mut light = Poise::EMPTY;
+        assert!(light.hit(25, 25, false));
         let mut heavy = Poise::EMPTY;
         assert!(!heavy.hit(25, 50, false));
         assert!(heavy.hit(25, 50, false));
-        assert!(Poise::EMPTY.hit(50, 50, false));
+        let mut fresh_heavy = Poise::EMPTY;
+        assert!(fresh_heavy.hit(50, 50, false));
     }
     #[test]
     fn heavy_active_armor_is_finite_and_quiet_time_resets_posture() {

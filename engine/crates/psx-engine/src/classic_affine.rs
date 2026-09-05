@@ -4137,12 +4137,11 @@ unsafe fn submit_classic_affine_level0_fan_if_supported(
                     #[cfg(not(feature = "classic-affine-relaxed-quad-pairing"))]
                     let quad_otz = otz;
                     let quad_otz = if profile.farthest_depth_key {
-                        ((u32::from(
-                            root_depth
-                                .max(previous_ref.depth as u16)
-                                .max(current_ref.depth as u16)
-                                .max(next_ref.depth as u16),
-                        ) >> 2) as u16)
+                        ((root_depth
+                            .max(u32::from(previous_ref.depth as u16))
+                            .max(u32::from(current_ref.depth as u16))
+                            .max(u32::from(next_ref.depth as u16))
+                            >> 2) as u16)
                             .min(profile.ot_depth - 1)
                     } else {
                         quad_otz
@@ -5110,16 +5109,6 @@ unsafe fn submit_quake_projected_fan_cold_adaptive(
             previous_ref.depth as u16,
             current_ref.depth as u16,
         );
-        // The packet key: the average, or the farthest vertex on the same
-        // law (three equal depths give the same slot either way).
-        let key_otz = if profile.farthest_depth_key {
-            let far = root_depth
-                .max(previous_ref.depth as u16)
-                .max(current_ref.depth as u16);
-            scene::classic_otz3_from_sum(u32::from(far) * 3).min(profile.ot_depth - 1)
-        } else {
-            otz
-        };
         if otz > 0 && otz < profile.ot_depth {
             if otz >= profile.subdivide_once_at {
                 let next = unsafe { current.add(1) };
@@ -5208,16 +5197,6 @@ unsafe fn submit_quake_projected_fan_cold_level2(
             previous_ref.depth as u16,
             current_ref.depth as u16,
         );
-        // The packet key: the average, or the farthest vertex on the same
-        // law (three equal depths give the same slot either way).
-        let key_otz = if profile.farthest_depth_key {
-            let far = root_depth
-                .max(previous_ref.depth as u16)
-                .max(current_ref.depth as u16);
-            scene::classic_otz3_from_sum(u32::from(far) * 3).min(profile.ot_depth - 1)
-        } else {
-            otz
-        };
         if otz > 0 && otz < profile.ot_depth {
             if otz >= profile.subdivide_once_at {
                 let next = unsafe { current.add(1) };
