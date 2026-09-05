@@ -581,8 +581,10 @@ pub(super) const MAX_STATIC_PROP_AABB_BLOCKERS: usize = psx_level::MAX_STATIC_PR
 /// no-heap runtime.
 pub(super) const MAX_BOX_PROP_STATE: usize = BOX_PROP_STATE_COUNT;
 pub(super) const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
-/// Active baked break bursts retained after a prop is marked broken.
-pub(super) const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
+/// A prop can break once; reserve no event slots for nonexistent props.
+pub(super) const MAX_BOX_PROP_BREAK_EVENTS: usize = if MAX_BOX_PROP_STATE < 16 {
+    MAX_BOX_PROP_STATE
+} else { 16 };
 /// Cap on attached weapon/equipment visuals rendered per frame.
 pub(super) const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// Assets are fixed at cook time, so their tables determine cache capacity.
@@ -768,15 +770,15 @@ pub(super) type RuntimeCachedRoomProjection =
 /// The cooker enforces the record limit; runtime storage fits every authored
 /// entity without reserving state for actors absent from this level.
 pub(super) const MAX_GAME_ENTITIES: usize = cooked_capacity(GAME_ENTITIES.len());
-/// Logic record ceiling from the cook/runtime contract.
-pub(super) const MAX_LOGIC_RECORDS: usize = psx_level::MAX_LOGIC_RECORDS;
+/// Retain every cooked logic record, without unused worst-case state.
+pub(super) const MAX_LOGIC_RECORDS: usize = cooked_capacity(LOGIC.len());
 /// Fired-bitset words for the logic runtime (the BoxProps
 /// broken-words pattern).
 pub(super) const LOGIC_FIRED_WORDS: usize = MAX_LOGIC_RECORDS.div_ceil(32);
 /// In-flight delayed logic events (budget line: hl-psx ships 64 for
 /// full HL campaign maps; one 8-room cortex level gets 32 plus an
 /// overflow counter).
-pub(super) const MAX_LOGIC_EVENTS: usize = 32;
+pub(super) const MAX_LOGIC_EVENTS: usize = if LOGIC.is_empty() { 0 } else { 32 };
 
 /// The crate souls-like entity state instantiated with this example's
 /// entity cap.

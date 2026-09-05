@@ -2191,16 +2191,7 @@ impl Scene for Playtest {
                     cooldown_progress_q12,
                     echo_elapsed,
                 );
-                if self.hazard_death_ticks_remaining == 0
-                    && self.game_entities.encounter_cleared(GAME_ENTITIES)
-                {
-                    let label = match crate::loc::language() {
-                        crate::loc::Language::English => "SECTOR CLEARED",
-                        crate::loc::Language::Italian => "SETTORE LIBERATO",
-                    };
-                    font.draw_text((SCREEN_W - font.text_width(label) as i16) / 2,
-                        SCREEN_H - 18, label, (116, 214, 196));
-                }
+
             }
         }
 

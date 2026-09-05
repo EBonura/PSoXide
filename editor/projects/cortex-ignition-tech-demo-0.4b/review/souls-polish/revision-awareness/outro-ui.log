@@ -1,0 +1,7 @@
+[cli] loaded poll-bound input tape /tmp/cortex-polish/outro-preview/outro.csv (3201 polls, starting at poll 0)
+[frontend] embedded Play disc fast-booted /tmp/cortex-polish/outro-preview/outro_preview.cue via PSX.EXE;1 entry=0x80010000 payload=1136640B
+[cli] mounted cue-backed disc /tmp/cortex-polish/outro-preview/outro_preview.cue
+tick=805643432  cycles=1962723559  pc=0x8001d2d4  stopped-at=805643432
+route-ticks=3435  port1-polls=3100
+[cli] CPU display → /tmp/cortex-polish/outro-preview/final.ppm (320x240)
+[cli] main RAM → /tmp/cortex-polish/outro-preview/ram.bin (2097152 bytes)
