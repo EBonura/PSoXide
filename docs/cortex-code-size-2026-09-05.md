@@ -1,5 +1,9 @@
 # Cortex Ignition 0.4b code-size pass — 2026-09-05
 
+The 64-bit division issue identified here is resolved in the
+[arithmetic follow-up](cortex-arithmetic-2026-09-05.md). The measurements below
+record the preceding backend-pruning pass.
+
 Baseline: `61b4c7b1` on `codex/cortex-04b-souls-polish`. This is the normal
 v0.4b spawn, assets and scheduler, not a diagnostic gameplay build.
 

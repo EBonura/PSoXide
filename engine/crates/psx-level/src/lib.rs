@@ -2113,17 +2113,7 @@ impl LevelMaterialUvMotion {
             return [self.phase_u, self.phase_v];
         }
         let resolve = |speed_q8: i16, phase: u8| {
-            // speed_q8 (i16) * tick (u32) leaves i32 range after ~18 minutes
-            // of play; the product is taken wide and narrowed after the wrap
-            // into byte UV space.
-            let travelled_q8 =
-                // psx-numeric-allow-next-line: UV scroll accumulator, see above
-                i64::from(speed_q8).saturating_mul(i64::from(tick)) / i64::from(ticks_per_second);
-            // Truncate sub-texel motion toward zero so opposite directions
-            // advance symmetrically before wrapping into byte UV space.
-            // psx-numeric-allow-next-line: UV scroll accumulator
-            let texels = travelled_q8 / 256 + i64::from(phase);
-            texels.rem_euclid(256) as u8
+            psx_math::int32::scroll_q8_wrapped(speed_q8, phase, 256, tick, ticks_per_second)
         };
         [
             resolve(self.speed_u_q8, self.phase_u),
@@ -4485,6 +4475,17 @@ mod tests {
     fn next_focus_out_of_range_current_is_none() {
         assert_eq!(next_focus(&COLUMN, 99, NavDir::Down), None);
         assert_eq!(next_focus(&[], 0, NavDir::Up), None);
+    }
+
+    #[test]
+    fn material_uv_motion_preserves_phase_when_disabled_or_rate_is_zero() {
+        let motion = LevelMaterialUvMotion {
+            enabled: false, speed_u_q8: i16::MIN, speed_v_q8: i16::MAX,
+            phase_u: 253, phase_v: 129,
+        };
+        assert_eq!(motion.offset_at_tick(u32::MAX, 60), [253, 129]);
+        assert_eq!(LevelMaterialUvMotion { enabled: true, ..motion }
+            .offset_at_tick(u32::MAX, 0), [253, 129]);
     }
 
     #[test]

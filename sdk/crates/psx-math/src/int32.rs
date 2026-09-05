@@ -153,6 +153,47 @@ pub const fn div_u64_by_u32(hi: u32, lo: u32, divisor: u32) -> u32 {
     quotient
 }
 
+/// Exact `floor(a * b / divisor)` when the quotient fits `u32`.
+///
+/// Requires a nonzero divisor. R3000 MULTU supplies both product words;
+/// ordinary products use native 32-bit DIVU, and only overflowing products
+/// need the two-word restoring division. No compiler wide-division helper.
+#[inline]
+pub fn mul_div_u32(a: u32, b: u32, divisor: u32) -> u32 {
+    // psx-numeric-allow-next-line: native R3000 MULTU high/low product, no wide division
+    let product = u64::from(a) * u64::from(b);
+    let hi = (product >> 32) as u32;
+    let lo = product as u32;
+    debug_assert!(divisor != 0 && hi < divisor);
+    if hi == 0 {
+        lo / divisor
+    } else {
+        div_u64_by_u32(hi, lo, divisor)
+    }
+}
+
+/// Signed Q8 texels/second, truncated toward zero and wrapped to a texture.
+/// `period` must be in `1..=256`; a zero tick rate leaves only the phase.
+#[inline]
+pub fn scroll_q8_wrapped(speed: i16, phase: u8, period: u16, tick: u32, hz: u16) -> u8 {
+    debug_assert!(period > 0 && period <= 256);
+    let period = u32::from(period);
+    if speed == 0 || hz == 0 {
+        return (u32::from(phase) % period) as u8;
+    }
+    // Truncating by hz then 256 equals truncating by their product. Dropping
+    // an entire (hz * 256 * period)-tick cycle changes the result by exactly
+    // speed * period texels, so wrapping is unchanged even at u32::MAX ticks.
+    // The tick modulus fits u32 at the maximum hz=65535 and period=256.
+    let divisor = u32::from(hz) << 8;
+    let wrap_ticks = divisor * period;
+    let tick = if tick >= wrap_ticks { tick % wrap_ticks } else { tick };
+    // The reduced quotient is < abs(speed) * period <= 2^23, hence fits i32.
+    let distance = mul_div_u32(u32::from(speed.unsigned_abs()), tick, divisor) as i32;
+    let distance = if speed < 0 { -distance } else { distance };
+    (distance + i32::from(phase)).rem_euclid(period as i32) as u8
+}
+
 /// Exact `n / d` for `0 <= n < 2^31` by one `multu` and a shift, for a
 /// divisor that is fixed across many dividends.
 ///
@@ -210,6 +251,81 @@ impl InvariantDivisor31 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mul_div_u32_preserves_full_width_animation_phases() {
+        let check = |a: u32, b: u32, d: u32| {
+            let expected = u64::from(a) * u64::from(b) / u64::from(d);
+            assert!(expected <= u64::from(u32::MAX));
+            assert_eq!(u64::from(mul_div_u32(a, b, d)), expected, "{a} * {b} / {d}");
+        };
+        let edges = [1, 2, 59, 60, 65535, 65536, 65537, 1 << 31, u32::MAX];
+        for d in edges {
+            for b in edges {
+                for a in [0, 1, d / 2, d - 1, d] {
+                    check(a, b, d);
+                }
+            }
+        }
+        check(u32::MAX, 1, 1);
+        check(65536, 65536, 2);
+        let mut seed = 0x5817_9513u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for _ in 0..100_000 {
+            let d = next().max(1);
+            check(next() % d, next(), d);
+        }
+    }
+
+    #[test]
+    fn wrapped_scroll_matches_wide_oracle_at_wrap_and_tick_boundaries() {
+        let check = |speed: i16, phase: u8, period: u16, tick: u32, hz: u16| {
+            let distance = if hz == 0 { 0 } else {
+                i64::from(speed) * i64::from(tick) / i64::from(hz) / 256
+            };
+            let expected = (distance + i64::from(phase)).rem_euclid(i64::from(period)) as u8;
+            assert_eq!(scroll_q8_wrapped(speed, phase, period, tick, hz), expected,
+                "speed={speed} phase={phase} period={period} tick={tick} hz={hz}");
+        };
+        // Every signed speed, including MIN (whose absolute value is 32768).
+        for speed in i16::MIN..=i16::MAX {
+            for tick in [0, 1, 59, 60, 15359, 15360, u32::MAX] {
+                check(speed, 255, 63, tick, 60);
+            }
+        }
+        // Arbitrary periods, byte wrapping, PAL/NTSC and the full rate domain.
+        for period in 1..=256 {
+            for hz in [1u16, 50, 60, 256, 512, 65535] {
+                let cycle = (u32::from(hz) << 8) * u32::from(period);
+                for tick in [0, 1, cycle - 1, cycle, cycle + 1, u32::MAX - 1, u32::MAX] {
+                    for speed in [i16::MIN, -32767, -257, -1, 0, 1, 257, i16::MAX] {
+                        for phase in [0, 127, 255] {
+                            check(speed, phase, period, tick, hz);
+                        }
+                    }
+                }
+            }
+        }
+        for phase in [0, 127, 255] {
+            check(i16::MIN, phase, 63, u32::MAX, 0);
+        }
+        let mut seed = 0x3211_8a53u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for _ in 0..100_000 {
+            check(next() as i16, next() as u8, (next() % 256 + 1) as u16,
+                next(), next() as u16);
+        }
+    }
 
     #[test]
     fn invariant_divisor_31_is_exact() {
