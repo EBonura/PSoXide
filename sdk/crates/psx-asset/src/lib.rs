@@ -1608,12 +1608,15 @@ fn decode_q11_element_wide(raw: u16) -> i32 {
     unsafe {
         let decoded: u32;
         core::arch::asm!(
+            ".set push",
+            ".set noat",
             "xori {scratch}, {decoded}, 0x07ff",
             "sltiu {scratch}, {scratch}, 1",
             "sll {decoded}, {decoded}, 20",
             "sra {decoded}, {decoded}, 19",
             "sll {scratch}, {scratch}, 1",
             "addu {decoded}, {decoded}, {scratch}",
+            ".set pop",
             decoded = inlateout(reg) raw as u32 => decoded,
             scratch = lateout(reg) _,
             options(nomem, nostack, preserves_flags),
