@@ -47,6 +47,16 @@ fn gait_footstep_crossed(
     local_tick / beat != previous / beat
 }
 
+/// Movement noise is independent of the audio mix/volume. Blocked movement
+/// and idle animations are silent. Sprinting/dodging carries farther.
+fn player_noise_radius(moved: bool, animation: PlayerAnim, height: i32) -> i32 {
+    if !moved { return 0; }
+    let loud = matches!(animation, PlayerAnim::Run | PlayerAnim::RunWindup
+        | PlayerAnim::RunWinddown | PlayerAnim::RunWinddownAlt | PlayerAnim::Roll
+        | PlayerAnim::Quickstep | PlayerAnim::DashLeft | PlayerAnim::DashRight);
+    height.max(0).saturating_mul(if loud { 4 } else { 2 })
+}
+
 fn enemy_idle_cue_due(now: u32, delta_ticks: u16, index: usize) -> bool {
     // A short servo vocal every six seconds, staggered between actors. Edge
     // detection supports both the 30 Hz and 60 Hz NPC update cadences.
@@ -84,6 +94,7 @@ impl Playtest {
                 active_count += 1;
             }
         }
+        self.open_demo_outro_once();
         let player = self.motor.position();
         let player_pos = [player.x, player.y, player.z];
         let (player_radius, player_height) = match &self.character {
@@ -257,6 +268,8 @@ impl Playtest {
                     player_radius,
                     player_height,
                     player_invulnerable,
+                    player_noise_radius: player_noise_radius(
+                        self.player_moved_last_tick, self.anim_state, player_height),
                     // SAFETY: every active-room entry below `active_count` was
                     // initialized while walking the resident window above.
                     active_rooms: unsafe { initialized_prefix(&active_rooms, active_count) },
@@ -1190,7 +1203,15 @@ impl Playtest {
 
 #[cfg(test)]
 mod gameplay_audio_tests {
-    use super::{gait_footstep_crossed, enemy_idle_cue_due};
+    use super::{gait_footstep_crossed, enemy_idle_cue_due, player_noise_radius, PlayerAnim};
+
+    #[test]
+    fn movement_noise_requires_displacement_and_running_carries_farther() {
+        assert_eq!(player_noise_radius(false, PlayerAnim::Run, 64), 0);
+        assert_eq!(player_noise_radius(true, PlayerAnim::Walk, 64), 128);
+        assert_eq!(player_noise_radius(true, PlayerAnim::Run, 64), 256);
+        assert_eq!(player_noise_radius(true, PlayerAnim::Roll, 64), 256);
+    }
 
     #[test]
     fn enemy_idle_is_staggered_and_independent_of_npc_cadence() {
