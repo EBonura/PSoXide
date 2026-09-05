@@ -43,7 +43,7 @@ outside `sdk/`.
 
 Bare-metal programs in [`examples/`](examples), each its own workspace.
 Build and run them via the top-level `Makefile` (see the
-[root README](../README.md#examples)).
+[root README](../README.md#build-a-triangle)).
 
 | Example | Shows |
 |---------|-------|
