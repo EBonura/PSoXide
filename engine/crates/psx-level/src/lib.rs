@@ -4480,12 +4480,21 @@ mod tests {
     #[test]
     fn material_uv_motion_preserves_phase_when_disabled_or_rate_is_zero() {
         let motion = LevelMaterialUvMotion {
-            enabled: false, speed_u_q8: i16::MIN, speed_v_q8: i16::MAX,
-            phase_u: 253, phase_v: 129,
+            enabled: false,
+            speed_u_q8: i16::MIN,
+            speed_v_q8: i16::MAX,
+            phase_u: 253,
+            phase_v: 129,
         };
         assert_eq!(motion.offset_at_tick(u32::MAX, 60), [253, 129]);
-        assert_eq!(LevelMaterialUvMotion { enabled: true, ..motion }
-            .offset_at_tick(u32::MAX, 0), [253, 129]);
+        assert_eq!(
+            LevelMaterialUvMotion {
+                enabled: true,
+                ..motion
+            }
+            .offset_at_tick(u32::MAX, 0),
+            [253, 129]
+        );
     }
 
     #[test]
