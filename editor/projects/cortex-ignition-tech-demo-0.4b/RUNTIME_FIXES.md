@@ -84,3 +84,16 @@ The first native build exposed a heap exhaustion during loading. Runtime entity,
 - The final disc passes the structural check with WORLD.PAK, UI.PAK and both CD-DA tracks; the executable scan reports zero load-delay hazards.
 
 Build logs, tests, native captures, cooldown tape and checksums are in `review/combat-state-machine/`. Physical-console validation and subjective combat/camera tuning remain outstanding.
+
+## Menu music replacement, 5 September 2026
+
+Imported the updated `Cortex Intro.wav` delivery as `assets/audio/cdda/menu2.wav`.
+All three existing menu Music nodes keep their path, volume, loop and trigger
+settings. Combat music is unchanged. The new file contains 2,607,580 stereo
+frames of 44.1 kHz, 16-bit PCM, exactly the previous sample count (4,435 padded
+CD audio sectors). This replacement does not change the audio-track layout.
+
+Source WAV SHA256: `a5355af0d22dfe89e0d267a63f23178053b6a3a61fbf4a372e7c277749acbce1`.
+PCM SHA256: `13de7c3e60ba3e26bd6b60f11ea9f2bd24276d446d1bc0b75b93322233229fbd`.
+The earlier runtime-fixes receipt records the previous music; rebuild cooked
+discs to include this replacement.
