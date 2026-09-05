@@ -66,3 +66,8 @@ Code remains [GPL-2.0-or-later](LICENSE). Preserve existing attribution and
 provenance; extraction does not change licensing. Example assets have their
 own [provenance records](docs/asset-provenance.md). See
 [downstream licensing](docs/downstream-licensing.md) before distribution.
+
+## Recent changes
+
+Source snapshot **2026.09.05**: Split the SDK from the editor and emulator; existing Git revisions still resolve.
+See the [changelog](CHANGELOG.md) for the remaining changes.
