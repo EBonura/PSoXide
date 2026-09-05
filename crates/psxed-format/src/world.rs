@@ -76,7 +76,7 @@ pub const VERSION_V4: u16 = 4;
 /// Current world format revision.
 pub const VERSION: u16 = 5;
 
-/// Canonical/default engine units per grid sector.
+/// Default engine units per grid sector.
 pub const SECTOR_SIZE: i32 = 1024;
 
 /// Material sentinel used by missing optional floor/ceiling records.
