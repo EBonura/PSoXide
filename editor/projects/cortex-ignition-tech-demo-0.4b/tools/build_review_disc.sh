@@ -29,6 +29,7 @@ PSOXIDE_GUEST_LINK_MAP="$OUT.map" \
 sh "$SRC/tools/build_guest_staged.sh" --target mipsel-sony-psx -Zjson-target-spec \
   -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
   --features 'cd-stream-bench emulator-telemetry'
+sh "$REPO/tools/guest_symbol_gate.sh" "$OUT.map"
 cp "$SRC/build/examples/mipsel-sony-psx/release/editor-playtest.exe" "$OUT.exe"
 "${CARGO_TARGET_DIR:-$REPO/target}/release/mkisopsx" --exe "$OUT.exe" --out "$OUT.bin" --volume CORTEX04B \
   --world-pack-rooms-dir "$PROJECT/baked/generated/stream_chunks" \
