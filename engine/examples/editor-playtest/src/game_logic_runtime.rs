@@ -265,7 +265,9 @@ impl SceneEntityMover<'_> {
         let mut aabbs =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
-        if let Some(bsp) = self.bsp.as_deref_mut() {
+        // Backend selection is cooked, not a per-actor fallback decision.
+        if USES_PXBSP {
+            let bsp = self.bsp.as_deref_mut().expect("resident BSP entity backend");
             let Some(_) = self
                 .box_props
                 .collect_collision_blockers_checked_into(BOX_PROPS, room, &mut aabbs)
