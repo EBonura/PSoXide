@@ -15,10 +15,16 @@ before moving Git history, starting with the SDK.
 | SDK | Bare-metal crates, linker/runtime, shared hardware and cooked-format contracts, small examples, standalone bootstrap and disc tools |
 | Emulator | Emulator core, standalone frontend, renderer, debugging and profiling; consumes shared SDK contracts |
 | Editor + engine + Cortex | Authoring UI, cookers, engine/gameplay runtime, Cortex and its assets, New Project template and integration fixtures; pins SDK and emulator |
-| Existing game repositories | Remain separate; migrate their SDK bootstrap deliberately |
+| Demo disc | Existing integration/release repository: launcher, loader, packer, component/game locks and complete-disc validation |
+| Existing game repositories | Remain separate; consume the SDK plus engine/cookers/emulator components they actually use |
 
 These names describe ownership, not repository creation instructions. A
 separate repository for every crate would create unnecessary versioning work.
+
+The [disc-wide dependency audit](demo-disc-dependencies.md) covers every
+game, the hardware suite and the demo build itself. The engine and host
+cookers must be distributable from the editor repository without bundling
+Cortex assets into every downstream SDK cache.
 
 ## Why this helps
 
@@ -73,7 +79,9 @@ and [workspace reference](https://doc.rust-lang.org/cargo/reference/workspaces.h
    output sections/RAM budgets, symbol/hazard checks, deterministic gameplay
    replay, audio offsets and performance. Investigate differences instead of
    assuming a file move is harmless to a bare-metal build.
-5. Migrate the remaining consumers and demo-disc provenance checks. Record
+5. Migrate every consumer in the [demo-disc matrix](demo-disc-dependencies.md),
+   including game cookers and emulator-linked tools. Extend disc provenance
+   and test both editions, every game entry and relocated CDDA mapping. Record
    SDK, emulator and editor/runtime revisions. Retain Cortex with the editor;
    archive historical captures and duplicate project versions separately when
    their regression value and asset provenance are established.

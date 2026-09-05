@@ -11,6 +11,7 @@ the [root README](../README.md) and the per-area READMEs
 - [Build and contribute](../CONTRIBUTING.md)
 - [Repository architecture and crate boundaries](repository-architecture.md)
 - [SDK extraction proposal](sdk-separation.md)
+- [Demo-disc consumer matrix and migration checks](demo-disc-dependencies.md)
 - [Current repository review](repository-review-2026-09-05.md)
 - [Cortex Ignition 0.4b](../editor/projects/cortex-ignition-tech-demo-0.4b/)
 
