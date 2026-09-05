@@ -37,7 +37,9 @@ fn describe(label: &str, bytes: &[u8]) -> Vec<u8> {
     );
     let mut parents = Vec::new();
     for joint in 0..model.joint_count() {
-        let record = model.joint(joint).unwrap_or_else(|| fail(format!("{label}: joint {joint}")));
+        let record = model
+            .joint(joint)
+            .unwrap_or_else(|| fail(format!("{label}: joint {joint}")));
         parents.push(record.parent().map_or(0xff, |p| p as u8));
     }
     parents
@@ -94,7 +96,10 @@ fn main() {
             Vec::new()
         },
     };
-    let output_name = format!("{}_probe", Path::new(&args[2]).file_stem().unwrap().to_string_lossy());
+    let output_name = format!(
+        "{}_probe",
+        Path::new(&args[2]).file_stem().unwrap().to_string_lossy()
+    );
     let id = import_model_with_animation_sources(
         &mut project,
         &replacement,
@@ -107,7 +112,9 @@ fn main() {
     let probe_path = project
         .resource(id)
         .and_then(|resource| match &resource.data {
-            ResourceData::Model(model) => Some(resolve_path(&model.model_path, Some(&project_root))),
+            ResourceData::Model(model) => {
+                Some(resolve_path(&model.model_path, Some(&project_root)))
+            }
             _ => None,
         })
         .unwrap_or_else(|| fail("probe resource missing".into()));

@@ -187,7 +187,11 @@ pub fn scroll_q8_wrapped(speed: i16, phase: u8, period: u16, tick: u32, hz: u16)
     // The tick modulus fits u32 at the maximum hz=65535 and period=256.
     let divisor = u32::from(hz) << 8;
     let wrap_ticks = divisor * period;
-    let tick = if tick >= wrap_ticks { tick % wrap_ticks } else { tick };
+    let tick = if tick >= wrap_ticks {
+        tick % wrap_ticks
+    } else {
+        tick
+    };
     // The reduced quotient is < abs(speed) * period <= 2^23, hence fits i32.
     let distance = mul_div_u32(u32::from(speed.unsigned_abs()), tick, divisor) as i32;
     let distance = if speed < 0 { -distance } else { distance };
@@ -285,12 +289,17 @@ mod tests {
     #[test]
     fn wrapped_scroll_matches_wide_oracle_at_wrap_and_tick_boundaries() {
         let check = |speed: i16, phase: u8, period: u16, tick: u32, hz: u16| {
-            let distance = if hz == 0 { 0 } else {
+            let distance = if hz == 0 {
+                0
+            } else {
                 i64::from(speed) * i64::from(tick) / i64::from(hz) / 256
             };
             let expected = (distance + i64::from(phase)).rem_euclid(i64::from(period)) as u8;
-            assert_eq!(scroll_q8_wrapped(speed, phase, period, tick, hz), expected,
-                "speed={speed} phase={phase} period={period} tick={tick} hz={hz}");
+            assert_eq!(
+                scroll_q8_wrapped(speed, phase, period, tick, hz),
+                expected,
+                "speed={speed} phase={phase} period={period} tick={tick} hz={hz}"
+            );
         };
         // Every signed speed, including MIN (whose absolute value is 32768).
         for speed in i16::MIN..=i16::MAX {
@@ -322,8 +331,13 @@ mod tests {
             seed
         };
         for _ in 0..100_000 {
-            check(next() as i16, next() as u8, (next() % 256 + 1) as u16,
-                next(), next() as u16);
+            check(
+                next() as i16,
+                next() as u8,
+                (next() % 256 + 1) as u16,
+                next(),
+                next() as u16,
+            );
         }
     }
 

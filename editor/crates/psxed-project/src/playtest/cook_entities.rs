@@ -3589,33 +3589,56 @@ mod socket_anchor_tests {
     fn idle_action_binding_wins_when_a_new_attack_changes_model_clip_order() {
         use super::*;
         let mut project = ProjectDocument::new("idle binding");
-        let model_data: ResourceData = ron::from_str(
-            r#"Model((model_path: "model.psxmdl", skeleton: Some((900))))"#).unwrap();
+        let model_data: ResourceData =
+            ron::from_str(r#"Model((model_path: "model.psxmdl", skeleton: Some((900))))"#).unwrap();
         let model_id = project.add_resource("model", model_data);
         let attack: crate::AnimationClipResource = ron::from_str(&format!(
             r#"(psxanim_path: "attack.psxanim", skeleton: Some((900)), target_model: Some(({})))"#,
-            model_id.raw())).unwrap();
+            model_id.raw()
+        ))
+        .unwrap();
         project.add_resource("attack", ResourceData::AnimationClip(attack));
-        let idle: crate::AnimationClipResource = ron::from_str(
-            r#"(psxanim_path: "idle.psxanim", skeleton: Some((900)))"#).unwrap();
+        let idle: crate::AnimationClipResource =
+            ron::from_str(r#"(psxanim_path: "idle.psxanim", skeleton: Some((900)))"#).unwrap();
         let idle_id = project.add_resource("idle", ResourceData::AnimationClip(idle));
         let mut set = crate::AnimationSetResource::defaults();
         set.set_action_clip(CharacterAnimationAction::Idle, Some(idle_id));
-        assert!(set.idle_clip.is_none(), "modern action binding clears legacy role");
+        assert!(
+            set.idle_clip.is_none(),
+            "modern action binding clears legacy role"
+        );
         let set_id = project.add_resource("set", ResourceData::AnimationSet(set));
         let mut character = crate::CharacterResource::defaults();
         character.model = Some(model_id);
         character.animation_set = Some(set_id);
         let model = PlaytestModel {
-            name: "model".into(), source_resource: model_id, mesh_asset_index: 0,
-            texture_asset_index: None, clip_first: 0, clip_count: 2, default_clip: 0,
-            socket_first: 0, socket_count: 0, world_height: 1024, collision_radius: 100,
+            name: "model".into(),
+            source_resource: model_id,
+            mesh_asset_index: 0,
+            texture_asset_index: None,
+            clip_first: 0,
+            clip_count: 2,
+            default_clip: 0,
+            socket_first: 0,
+            socket_count: 0,
+            world_height: 1024,
+            collision_radius: 100,
         };
         let mut remaps = HashMap::new();
         remaps.insert(model_id, vec![Some(0), Some(1)]);
         let mut report = PlaytestValidationReport::default();
-        assert_eq!(character_idle_clip_for_model_instance(&project, "enemy", &character,
-            model_id, &model, &remaps, &mut report), Some(1));
+        assert_eq!(
+            character_idle_clip_for_model_instance(
+                &project,
+                "enemy",
+                &character,
+                model_id,
+                &model,
+                &remaps,
+                &mut report
+            ),
+            Some(1)
+        );
         assert!(report.errors.is_empty());
     }
 

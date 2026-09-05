@@ -22,27 +22,37 @@ converging by copy-paste.
   tools/                 host-side cookers/extractors (own workspaces)
   docs/                  design notes, feasibility, screenshots
   dist/                  build output (gitignored)
-  third_party/PSoXide    submodule (consumption mode A only)
+  psoxide-pin/           host bootstrap crate + committed Cargo.lock
+  .psoxide/             generated source cache (gitignored)
 ```
 
-## Consuming PSoXide: two modes, pick ONE
+## Consuming PSoXide
 
-**A. Pinned submodule** (default; anything shippable or shelvable):
-`third_party/PSoXide` with `branch = main` in `.gitmodules`, path deps
-`../third_party/PSoXide/...`. Bump the pin deliberately and record what the
-bump brings. Keep `make bootstrap` = `git submodule update --init --recursive`;
-avoid `--remote` in that target (it silently advances past the tested pin).
+For new projects, use a **Cargo-pinned bootstrap**. A small host crate (commonly
+`psoxide-pin/`) depends on `psoxide-link` at a full Git revision and commits its
+`Cargo.lock`. Before building guest crates, it calls
+`psoxide_link::hydrate_pinned` to populate a local `.psoxide/` source cache.
+Guest manifests then use paths into that cache. The manifest revision,
+bootstrap revision argument and lockfile must agree.
 
-**B. Sibling checkout** (active co-development with the SDK/engine):
-no submodule at all; path deps `../../PSoXide/...` resolve to the sibling
-clone at `repos/PSoXide`. Make it explicit and overridable the way voxide
-does: a `PSOXIDE ?= $(abspath $(ROOT)/../PSoXide)` Makefile var honored by
-`build.rs` too, plus a `psoxide-check` target that fails early with a clear
-message when the sibling is missing.
+The implementation is in [psoxide-link](../tools/psoxide-link/src/lib.rs).
+[Half-Life](https://github.com/EBonura/hl-psx) and
+[VoXide](https://github.com/EBonura/voxide) are downstream examples of this
+workflow. Inspect their current Makefiles before adopting game-specific paths.
 
-Never both: a submodule that exists while the build uses the sibling (the
-state hl-psx was audited in) advertises a pin the binary does not contain.
-Delete the submodule or switch the deps; either mode is fine, the mix is not.
+For co-development, the game's `PSOXIDE_FROM` override can hydrate a local
+checkout instead. This is also how the demo disc builds its ordinary programs
+against one tested SDK revision. Local overrides must be explicit; record
+which source was actually used when comparing or distributing builds.
+
+A pinned Git submodule remains valid for existing consumers. Initialize the
+recorded commit, never advance it implicitly with `git submodule update
+--remote` during a release build. Do not advertise a submodule pin while
+silently compiling against a different sibling checkout.
+
+Bootstrap is a separate step because Cargo resolves path dependencies before
+running `build.rs`. Keep `.psoxide/` ignored and do not manually edit it: the
+next hydration may replace it.
 
 ## The `game/` crate
 
@@ -86,10 +96,10 @@ Same names everywhere, so muscle memory transfers between projects:
 | Verb | Does |
 | --- | --- |
 | `help` | list targets (default goal or first target) |
-| `bootstrap` | submodule init (mode A) or `psoxide-check` (mode B) |
+| `bootstrap` | resolve and hydrate the pinned SDK, or the explicit local override |
 | `build` | cargo build the game EXE |
 | `disc` | `build` + mkisopsx pack into `dist/<game>.bin/.cue` |
-| `install` | copy the disc into the PSoXide game library (`$HOME/Downloads/ps1 games/<Title>/`, dir overridable) |
+| `install` | copy the disc into the PSoXide game library (`$HOME/Downloads/ps1 games/`, destination overridable) |
 | `run` | `install` + boot in the PSoXide frontend (or alias of install) |
 | `clean` | remove build output; do NOT also delete capture archives |
 | `release` | see "Releasing" |
@@ -99,7 +109,10 @@ mkisopsx runs from the PSoXide checkout
 --volume <VOLUME>`), plus `--world-pack-rooms-dir` / `--cdda-track-list` /
 `--world-pack-compress-rooms` as the game needs.
 
-## Releasing (the pico8-psx pipeline)
+## Releasing (historical pico8-psx example)
+
+This describes the earlier committed-artifact workflow. Check the target
+repository's current release instructions before adopting it.
 
 The one released project's flow, reusable as-is:
 
@@ -121,6 +134,7 @@ the shipped binary is reproducible.
 
 ```gitignore
 /dist/
+/.psoxide/
 /game/target/
 /captures/
 .DS_Store

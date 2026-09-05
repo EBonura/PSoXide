@@ -1,14 +1,18 @@
-# `tools/` (standalone utilities)
+# Build and validation tools
 
-Small host-side command-line utilities used by the build and disc-mastering
-flow. Each is its own workspace.
+The Rust command-line tools below belong to the root host workspace and share
+its lockfile. Run them from the repository root with `cargo run -p <name> --`.
 
 | Tool | Purpose |
-|------|---------|
-| [`mkisopsx`](mkisopsx) | Wrap a PSX-EXE into a bootable PS1 disc image (BIN/CUE). Used by the example and project-disc build targets. |
-| [`psx-exe-pack`](psx-exe-pack) | `psx-exe-info`: validate a PSX-EXE and print its header. The linker script already emits a PSX-EXE header; this verifies it. |
+| --- | --- |
+| [`mkisopsx`](mkisopsx) | Pack a PSX-EXE and optional assets/audio into a bootable BIN/CUE disc. |
+| [`psoxide-link`](psoxide-link) | Hydrate a pinned source tree or an explicit local override for downstream games. |
+| [`psoxide-dev`](psoxide-dev) | Repository checks, numeric policy, profiling reports and asset-generation helpers. |
 
-## See also
+The Python and shell utilities cover MIPS instruction hazards, guest symbol
+checks, hardware capture analysis and web delivery. Use their `--help` where
+provided, or the calling target in the [Makefile](../Makefile).
 
-- [Root README](../README.md#quick-start). Build and run flow.
-- [`crates/psx-iso`](../crates/psx-iso). The BIN/CUE / ISO9660 parsing these build on.
+- [Downstream project setup](../docs/downstream-projects.md)
+- [Contributor checks](../CONTRIBUTING.md)
+- [Disc and executable formats](../crates/psx-iso)

@@ -1918,8 +1918,11 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
     }
 
     assert_eq!(actual, expected);
-    assert_eq!(extent_code, expected.iter().fold(0, |code, p|
-        code | crate::projection::gpu_extent_box_code([p.sx, p.sy])));
+    assert_eq!(
+        extent_code,
+        expected.iter().fold(0, |code, p| code
+            | crate::projection::gpu_extent_box_code([p.sx, p.sy]))
+    );
     // The seam fixture sits in front of the near plane and on-screen, so
     // the fold flags must agree with a direct per-vertex evaluation.
     for &projected in &expected {

@@ -1086,10 +1086,9 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
                     &mut samples_a,
                     &mut samples_b,
                 ) {
-                    for (face, samples, count) in [
-                        (face_a, &samples_a, count_a),
-                        (face_b, &samples_b, count_b),
-                    ] {
+                    for (face, samples, count) in
+                        [(face_a, &samples_a, count_a), (face_b, &samples_b, count_b)]
+                    {
                         if count < 3 {
                             continue;
                         }
@@ -1272,7 +1271,8 @@ mod tests {
                             (0..n)
                                 .map(|i| {
                                     let (a, b) = (points[i].0, points[(i + 1) % n].0);
-                                    i64::from(a.0) * i64::from(b.1) - i64::from(b.0) * i64::from(a.1)
+                                    i64::from(a.0) * i64::from(b.1)
+                                        - i64::from(b.0) * i64::from(a.1)
                                 })
                                 .sum()
                         };
@@ -1371,8 +1371,14 @@ mod tests {
             }
         }
         assert!(checked > 1000, "checked {checked}");
-        assert!(fallbacks < checked / 20, "fallbacks {fallbacks} of {checked}");
-        assert!(near < exact / 20, "near {near} exact {exact} fallbacks {fallbacks}");
+        assert!(
+            fallbacks < checked / 20,
+            "fallbacks {fallbacks} of {checked}"
+        );
+        assert!(
+            near < exact / 20,
+            "near {near} exact {exact} fallbacks {fallbacks}"
+        );
     }
 
     #[test]

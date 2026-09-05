@@ -2,27 +2,48 @@ use super::*;
 
 #[test]
 fn model_storage_fits_all_meshes_and_projection_fits_the_largest() {
-    let bytes = std::fs::read(crate::default_project_dir()
-        .join("assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl"))
-        .expect("starter tank model exists");
+    let bytes = std::fs::read(
+        crate::default_project_dir()
+            .join("assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl"),
+    )
+    .expect("starter tank model exists");
     let mesh = psx_asset::Model::from_bytes(&bytes).unwrap();
     let (vertices, faces, parts) = (mesh.vertex_count(), mesh.face_count(), mesh.part_count());
     let model = PlaytestModel {
-        name: "capacity fixture".into(), source_resource: ResourceId(1),
-        mesh_asset_index: 0, texture_asset_index: None, clip_first: 0, clip_count: 0,
-        default_clip: 0, socket_first: 0, socket_count: 0, world_height: 64, collision_radius: 8,
+        name: "capacity fixture".into(),
+        source_resource: ResourceId(1),
+        mesh_asset_index: 0,
+        texture_asset_index: None,
+        clip_first: 0,
+        clip_count: 0,
+        default_clip: 0,
+        socket_first: 0,
+        socket_count: 0,
+        world_height: 64,
+        collision_radius: 8,
     };
     let package = PlaytestPackage {
-        assets: vec![PlaytestAsset { kind: PlaytestAssetKind::ModelMesh, bytes,
-            filename: "fixture.psxmdl".into(), source_label: "fixture".into(), streamed_class: StreamedClass::None }],
-        models: vec![model.clone(), model], ..PlaytestPackage::default()
+        assets: vec![PlaytestAsset {
+            kind: PlaytestAssetKind::ModelMesh,
+            bytes,
+            filename: "fixture.psxmdl".into(),
+            source_label: "fixture".into(),
+            streamed_class: StreamedClass::None,
+        }],
+        models: vec![model.clone(), model],
+        ..PlaytestPackage::default()
     };
     let source = render_manifest_source(&package);
-    for (name, count) in [("MODEL_PROJECTED_VERTEX_CAPACITY", usize::from(vertices)),
+    for (name, count) in [
+        ("MODEL_PROJECTED_VERTEX_CAPACITY", usize::from(vertices)),
         ("MODEL_FACE_CAPACITY", usize::from(faces) * 2),
         ("MODEL_PART_CAPACITY", usize::from(parts) * 2),
-        ("MODEL_DECODED_VERTEX_CAPACITY", usize::from(vertices) * 2)] {
-        assert!(source.contains(&format!("pub const {name}: usize = {count};")), "{name}");
+        ("MODEL_DECODED_VERTEX_CAPACITY", usize::from(vertices) * 2),
+    ] {
+        assert!(
+            source.contains(&format!("pub const {name}: usize = {count};")),
+            "{name}"
+        );
     }
     let empty = render_manifest_source(&PlaytestPackage::default());
     assert!(empty.contains("pub const MODEL_PROJECTED_VERTEX_CAPACITY: usize = 1;"));
