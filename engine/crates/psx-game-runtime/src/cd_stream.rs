@@ -916,7 +916,7 @@ pub fn read_chunk_banded(
 
     #[cfg(not(target_arch = "mips"))]
     {
-        let _ = (cd, pack_lba, &mut on_bytes);
+        let _ = (cd, pack_lba, &mut on_bytes, entry);
         result.status = STATUS_UNSUPPORTED;
         result
     }

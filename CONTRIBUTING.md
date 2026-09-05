@@ -56,8 +56,8 @@ images, commercial game data or credentials to an issue.
 
 Keep build outputs, local captures and downloaded game data out of source
 commits. Small fixtures needed for a regression are welcome when their source
-and regeneration steps are documented. Large game assets and historical
-captures belong with the game or release evidence, rather than in SDK crates.
+and regeneration steps are documented. Cortex assets stay with the editor as integration content. Historical captures
+belong with release evidence, and neither belongs in standalone SDK crates.
 
 Preserve source provenance and attribution. See [LICENSE](LICENSE),
 [downstream licensing](docs/downstream-licensing.md), and the
