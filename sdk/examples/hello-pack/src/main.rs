@@ -159,13 +159,13 @@ fn run() -> Report {
     if !rep.check("LOAD 84", loaded == Some(RAW_LEN)) {
         return rep;
     }
-    if !rep.check("FNV 84", fnv1a32(&dst_bytes(dst)[..RAW_LEN]) == e84.checksum) {
+    if !rep.check(
+        "FNV 84",
+        fnv1a32(&dst_bytes(dst)[..RAW_LEN]) == e84.checksum,
+    ) {
         return rep;
     }
-    if !rep.check(
-        "DATA 84",
-        bytes_match(&dst_bytes(dst)[..RAW_LEN], raw_byte),
-    ) {
+    if !rep.check("DATA 84", bytes_match(&dst_bytes(dst)[..RAW_LEN], raw_byte)) {
         return rep;
     }
 

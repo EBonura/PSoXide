@@ -119,19 +119,6 @@ enum Wait {
     Timeout,
 }
 
-/// Blocking, polled CD-ROM sector reader.
-///
-/// Owns the state hl-psx kept in module-level `static mut`s: the
-/// "first prepare has drained boot-time IRQs" flag and a one-sector bounce
-/// buffer that unexpected `DataReady` IRQs are DMA-drained into (the data
-/// FIFO must be emptied before the ack or the controller wedges). Create one
-/// reader and reuse it for the program's lifetime; a fresh reader merely
-/// repeats the harmless first-time drain.
-///
-/// Typical use is not these raw methods but [`load_chunk`] /
-/// [`load_chunk_decompressed`] on top. The raw sequence is:
-/// `prepare()` then `start_read(lba)` then N x `read_sector(&mut buf)` then
-/// `stop()`.
 /// `diag()` cause byte: the drive raised INT5; the snapshot carries the
 /// error response's status and error-code bytes.
 #[cfg(target_arch = "mips")]
@@ -148,6 +135,19 @@ pub const DIAG_PARAM_STUCK: u8 = 0xFE;
 #[cfg(target_arch = "mips")]
 pub const DIAG_SITE_READ: u8 = 0xD0;
 
+/// Blocking, polled CD-ROM sector reader.
+///
+/// Owns the state hl-psx kept in module-level `static mut`s: the
+/// "first prepare has drained boot-time IRQs" flag and a one-sector bounce
+/// buffer that unexpected `DataReady` IRQs are DMA-drained into (the data
+/// FIFO must be emptied before the ack or the controller wedges). Create one
+/// reader and reuse it for the program's lifetime; a fresh reader merely
+/// repeats the harmless first-time drain.
+///
+/// Typical use is not these raw methods but [`load_chunk`] /
+/// [`load_chunk_decompressed`] on top. The raw sequence is:
+/// `prepare()` then `start_read(lba)` then N x `read_sector(&mut buf)` then
+/// `stop()`.
 #[cfg(target_arch = "mips")]
 pub struct SectorReader {
     prepared: bool,

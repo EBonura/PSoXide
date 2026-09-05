@@ -22,7 +22,7 @@
 
 extern crate psx_rt;
 
-use psx_io::{read8, write8, write32};
+use psx_io::{read8, write32, write8};
 use psx_rt::tty;
 
 const CD_BASE: u32 = 0x1F80_1800;

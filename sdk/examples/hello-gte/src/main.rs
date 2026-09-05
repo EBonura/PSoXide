@@ -17,7 +17,7 @@
 
 extern crate psx_rt;
 
-use psx_gpu::{self as gpu, Resolution, VideoMode, framebuf::FrameBuffer};
+use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene;
 use psx_rt::tty;
@@ -38,9 +38,18 @@ const CUBE_VERTS: [Vec3I16; 8] = [
 /// Index pairs that form cube edges. Four back-face edges, four
 /// front-face edges, four connectors.
 const CUBE_EDGES: [(usize, usize); 12] = [
-    (0, 1), (1, 2), (2, 3), (3, 0),
-    (4, 5), (5, 6), (6, 7), (7, 4),
-    (0, 4), (1, 5), (2, 6), (3, 7),
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
 ];
 
 /// Angle step per frame (256 = one full revolution). 4 → 64 frames

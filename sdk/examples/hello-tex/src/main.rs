@@ -30,11 +30,11 @@
 extern crate psx_rt;
 
 use psx_asset::Texture;
-use psx_gpu::{self as gpu, Resolution, VideoMode, framebuf::FrameBuffer};
+use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_hw::gpu::{pack_color, pack_texcoord, pack_vertex, pack_xy};
 use psx_io::gpu::{wait_cmd_ready, write_gp0};
 use psx_math::sincos;
-use psx_vram::{Clut, TexDepth, Tpage, VramRect, upload_bytes};
+use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
 
 /// Wall (brick) -- cooked by `make assets` from
 /// `vendor/brick-wall.jpg`.
@@ -86,8 +86,7 @@ fn main() {
         brick.height(),
     );
     upload_bytes(brick_pix_rect, brick.pixel_bytes());
-    let brick_clut_rect =
-        VramRect::new(BRICK_CLUT.x(), BRICK_CLUT.y(), brick.clut_entries(), 1);
+    let brick_clut_rect = VramRect::new(BRICK_CLUT.x(), BRICK_CLUT.y(), brick.clut_entries(), 1);
     upload_bytes(brick_clut_rect, brick.clut_bytes());
 
     // Floor slotted right next to the brick, still in the same
@@ -99,8 +98,7 @@ fn main() {
         floor.height(),
     );
     upload_bytes(floor_pix_rect, floor.pixel_bytes());
-    let floor_clut_rect =
-        VramRect::new(FLOOR_CLUT.x(), FLOOR_CLUT.y(), floor.clut_entries(), 1);
+    let floor_clut_rect = VramRect::new(FLOOR_CLUT.x(), FLOOR_CLUT.y(), floor.clut_entries(), 1);
     upload_bytes(floor_clut_rect, floor.clut_bytes());
 
     // --- Pre-encode the per-texture UV words ---
