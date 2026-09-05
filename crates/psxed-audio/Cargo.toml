@@ -9,7 +9,7 @@ description = "Host-side WAV to PSoXide PS1 SPU ADPCM audio cooker."
 [dependencies]
 # Explicit deps so emu/ can pull psxed-audio in without inheriting
 # editor-workspace `workspace = true` values it does not have.
-psxed-format = { path = "../psxed-format" }
+psxed-format = { path = "../../../crates/psxed-format" }
 serde        = { version = "1.0", features = ["derive"] }
 serde_json   = "1.0"
 sha2         = "0.10"

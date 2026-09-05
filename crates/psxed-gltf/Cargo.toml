@@ -12,7 +12,7 @@ description = "glTF/GLB mesh importer for PSoXide's content pipeline. Cooks scen
 # and psxed-project itself is consumed by the emu frontend).
 [dependencies]
 gltf         = "1"
-psxed-format = { path = "../psxed-format" }
+psxed-format = { path = "../../../crates/psxed-format" }
 psxed-obj    = { path = "../psxed-obj" }
 psxed-tex    = { path = "../psxed-tex" }
 ufbx         = "0.10"

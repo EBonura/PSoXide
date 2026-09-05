@@ -7,7 +7,7 @@ repository = "https://github.com/EBonura/PSoXide"
 description = "PSoXide editor project model: scenes, nodes, resources, and PS1-facing authoring metadata."
 
 [dependencies]
-psxed-format = { path = "../psxed-format" }
+psxed-format = { path = "../../../crates/psxed-format" }
 psxed-audio  = { path = "../psxed-audio" }
 psxed-gltf   = { path = "../psxed-gltf" }
 psxed-tex    = { path = "../psxed-tex" }
