@@ -115,10 +115,6 @@ pub(crate) fn stick_to_pitch_delta(axis: InputAxis, orbit_speed_level: u8, deadz
     )
 }
 
-pub(crate) fn stick_to_radius_delta(axis: InputAxis, deadzone: i16) -> i32 {
-    stick_axis_delta(axis, CAMERA_RADIUS_STEP as i16, deadzone) as i32
-}
-
 pub(crate) fn stick_axis_delta(axis: InputAxis, max_step: i16, deadzone: i16) -> i16 {
     axis.scaled_step(axis_profile(deadzone), max_step)
 }
@@ -132,10 +128,6 @@ pub(crate) fn scaled_camera_step(base: i16, orbit_speed_level: u8) -> i16 {
 pub(crate) fn scale_i16_by_vblanks(value: i16, delta_vblanks: u16) -> i16 {
     let scaled = (value as i32).saturating_mul(delta_vblanks.max(1) as i32);
     clamp_i16(scaled)
-}
-
-pub(crate) fn scale_i32_by_vblanks(value: i32, delta_vblanks: u16) -> i32 {
-    value.saturating_mul(delta_vblanks.max(1) as i32)
 }
 
 fn axis_profile(deadzone: i16) -> InputAxisProfile {

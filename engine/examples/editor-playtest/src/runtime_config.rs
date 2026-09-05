@@ -109,9 +109,7 @@ pub(super) const CAMERA_Y_OFFSET: i32 = 69;
 pub(super) const CAMERA_START_RADIUS: i32 = 150;
 pub(super) const CAMERA_RADIUS_MIN: i32 = 50;
 pub(super) const CAMERA_RADIUS_MAX: i32 = 325;
-pub(super) const CAMERA_RADIUS_STEP: i32 = 4;
 pub(super) const CAMERA_START_YAW: Angle = Angle::from_q12(220);
-pub(super) const CAMERA_YAW_STEP: Angle = Angle::from_q12(12);
 pub(super) const CAMERA_SWEEP_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP").is_some();
 /// Run the follow camera's spring-arm collision sweep every Nth tick
 /// (1 = every tick, the old behavior). The sweep is ~40k of the camera's

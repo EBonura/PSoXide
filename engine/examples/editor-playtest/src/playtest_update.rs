@@ -495,58 +495,7 @@ impl Playtest {
         };
         self.motor.snap_to(self.spawn, spawn_motor_yaw);
         self.room_index = spawn.room;
-        self.anim_state = PlayerAnim::Idle;
-        self.anim_start_tick = SimTick::ZERO;
-        self.anim_blend_from = None;
-        self.anim_lock_until_tick = SimTick::ZERO;
-        self.loco = LocoPhase::Idle;
-        self.active_interactable = None;
-        self.checkpoint = None;
-        self.message_overlay = None;
-        self.box_props.reset_dynamic_state();
-        // Phase-3 gameplay layer: spawn entity/logic state 1:1 from
-        // the cooked tables (empty tables leave both inert; the same
-        // calls re-run on future checkpoint respawns), then push the
-        // initial door states onto their box props (START_ON doors
-        // begin open without a fire event).
-        self.game_entities.spawn_from_records(GAME_ENTITIES);
-        self.game_entities
-            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
-        self.deferred_enemy_attacks.clear();
-        self.combat_projectiles.clear();
-        self.combat_projectile_impacts.clear();
-        self.dash_wake = psx_game_runtime::combat_feedback::DashWake::EMPTY;
-        self.attack_buffer.clear();
-        self.logic.init_from_records(LOGIC);
-        self.logic_fired_reported = 0;
-        self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
-        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
-        self.camera_recenter_requested = false;
-        // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
-        // would mean no damage and no recovery at all, so it is set explicitly
-        // on every reset rather than relying on the zero pattern.
-        self.player_stance = CombatStance::new(VitalityChannelId::One);
-        self.vitality_circles = VitalityCircleState::EMPTY;
-        self.power_up_loadout = PowerUpLoadout::DEFAULT;
-        self.power_up_inventory = BoostInventory::EMPTY;
-        if self.poi_save_loaded {
-            self.restore_claimed_poi_rewards();
-        }
-        self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
-        self.selected_power_up_item = BoostModuleId::NONE;
-        self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
-        self.inventory_overlay_active = false;
-        self.combat_music = CombatMusicState::default();
-        self.acquired_module = BoostModuleId::NONE;
-        self.hazard_death_ticks_remaining = 0;
-        self.death_by_combat = false;
-        self.weapon_attach_reported = false;
-        self.swing_hit_mask = 0;
-        self.destructibles.reset();
-        if self.poi_save_loaded {
-            self.restore_persistent_destructibles();
-        }
-        self.clear_actor_pose_snapshots();
+        self.reset_new_game();
         self.sync_door_box_props();
         // Start the camera behind the AUTHORED spawn facing so the
         // SpawnPoint's editor rotation is honoured in Play (movement is
@@ -716,9 +665,6 @@ impl Playtest {
             return;
         }
 
-        if ctx.just_pressed(button::SELECT) {
-            self.free_orbit = !self.free_orbit;
-        }
         let delta_vblanks = 1u16;
         telemetry::stage_begin(telemetry::stage::UPDATE_ACTOR);
         self.advance_box_prop_break_events(delta_vblanks);
@@ -729,54 +675,6 @@ impl Playtest {
         if CAMERA_SWEEP_ENABLED {
             telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
             self.update_camera_sweep(delta_vblanks);
-            return;
-        }
-        if self.free_orbit {
-            let (right_x, right_y) = camera_stick_axes(ctx, self.analog_deadzone);
-            self.camera_turning_last_tick = right_x != 0 || right_y != 0;
-            self.orbit_yaw = self.orbit_yaw.add_signed_q12(scale_i16_by_vblanks(
-                stick_to_yaw_delta(
-                    psx_engine::InputAxis::new(right_x.saturating_neg()),
-                    self.camera_orbit_speed_level(),
-                    0,
-                ),
-                delta_vblanks,
-            ));
-            self.orbit_radius = (self.orbit_radius
-                + scale_i32_by_vblanks(
-                    stick_to_radius_delta(psx_engine::InputAxis::new(right_y), 0),
-                    delta_vblanks,
-                ))
-            .clamp(CAMERA_RADIUS_MIN, CAMERA_RADIUS_MAX);
-            let button_yaw_step =
-                scale_i16_by_vblanks(CAMERA_YAW_STEP.as_q12() as i16, delta_vblanks);
-            let button_radius_step = scale_i32_by_vblanks(CAMERA_RADIUS_STEP, delta_vblanks);
-            if ctx.is_held(button::RIGHT) {
-                self.orbit_yaw = self.orbit_yaw.add_signed_q12(button_yaw_step);
-            }
-            if ctx.is_held(button::LEFT) {
-                self.orbit_yaw = self
-                    .orbit_yaw
-                    .add_signed_q12(button_yaw_step.saturating_neg());
-            }
-            if ctx.is_held(button::UP) {
-                self.orbit_radius = (self.orbit_radius - button_radius_step).max(CAMERA_RADIUS_MIN);
-            }
-            if ctx.is_held(button::DOWN) {
-                self.orbit_radius = (self.orbit_radius + button_radius_step).min(CAMERA_RADIUS_MAX);
-            }
-            self.player_moved_last_tick = false;
-            self.active_interactable = None;
-            telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
-            telemetry::stage_begin(telemetry::stage::CAMERA);
-            self.render_camera = self.free_orbit_camera();
-            telemetry::stage_end(telemetry::stage::CAMERA);
-            self.refresh_active_room_window_if_needed();
-            #[cfg(all(
-                feature = "world-grid-visible",
-                not(feature = "vis-full-active-chunks")
-            ))]
-            self.prewarm_visible_cell_caches();
             return;
         }
 

@@ -695,7 +695,7 @@ pub struct FlowCursor {
     current: u16,
     /// One-deep "return to this state" slot, or `None`.
     return_to: Option<u16>,
-    /// Whether `gameplay.init` has run yet. Gameplay init is deferred
+    /// Whether `gameplay.init` has run for the current session. Init is deferred
     /// until the first transition into a `Gameplay` state so a flow
     /// that opens on a title screen does not pay gameplay boot cost
     /// until the player starts.
@@ -1416,12 +1416,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.flow_index_for_scene_state(target)
     }
 
-    /// Move the cursor onto `state_index`, running gameplay init exactly
-    /// once if the target state carries a gameplay/world layer.
-    ///
-    /// This is the transition funnel. Today it preserves the old "start
-    /// gameplay" semantics; future loading/unloading phases belong here
-    /// because every state handoff now resolves through one path.
+    /// Move the cursor onto `state_index`, initialising the session if the
+    /// target carries gameplay and the session has not been loaded yet.
     fn enter_flow_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
         // Acquire/release scene resources before the cursor moves and before
         // any gameplay init below reads them.
@@ -1503,6 +1499,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn request_gameplay(&mut self, index: u16, ctx: &mut Ctx) {
+        self.prepare_gameplay_start();
         let return_to = self.cursor.return_to;
         self.request_flow_state(index, return_to, ctx);
     }
@@ -1513,8 +1510,17 @@ impl<'a, S: Scene> GameApp<'a, S> {
         transition: LevelTransition,
         ctx: &mut Ctx,
     ) {
+        self.prepare_gameplay_start();
         let return_to = self.cursor.return_to;
         self.request_flow_state_transition(index, return_to, transition, ctx);
+    }
+
+    fn prepare_gameplay_start(&mut self) {
+        // Starting from the title begins a new session. Gameplay-backed menus
+        // use the same shortcut to resume, and must keep the current session.
+        if !self.current_tag().has_gameplay() {
+            self.cursor.gameplay_inited = false;
+        }
     }
 
     fn update_transition(&mut self, ctx: &mut Ctx) -> bool {
@@ -4520,6 +4526,45 @@ mod tests {
         app.update(&mut ctx);
         assert_eq!(app.gameplay.inits, 1);
         assert_eq!(app.gameplay.updates, 1);
+    }
+
+    #[test]
+    fn title_new_game_reloads_each_session_and_keeps_options() {
+        for action in [
+            LevelUiAction::StartGameplay,
+            LevelUiAction::StartGameplayTransition {
+                transition: TEST_MENU_FADE,
+            },
+        ] {
+            let mut scene = CountingScene::default();
+            let mut app = GameApp::new(
+                &MENU_FLOW,
+                MENU_SCENES,
+                MENU_NODES,
+                &[],
+                OPTIONS,
+                &[],
+                &[],
+                psx_level::UI_SCENE_NONE,
+                &mut scene,
+            );
+            let mut ctx = test_ctx();
+            app.init(&mut ctx);
+            for session in 1..=3 {
+                app.option_values[0] = 6;
+                app.perform_action(action, &mut ctx);
+                while app.transition.is_some() {
+                    app.update_transition(&mut ctx);
+                }
+                assert!(app.loading_pending(), "every New Game loads a new world");
+                assert_eq!(app.gameplay.inits, session - 1);
+                complete_loading(&mut app, &mut ctx);
+                assert_eq!(app.gameplay.inits, session);
+                assert_eq!(app.gameplay.last_option_value, 6);
+                assert_eq!(app.option_values[0], 6);
+                app.enter_flow_state(0, None, &mut ctx);
+            }
+        }
     }
 
     #[test]

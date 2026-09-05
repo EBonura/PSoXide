@@ -19,7 +19,7 @@
 //! the room's material slice, and renders. No hardcoded starter
 //! textures -- the asset table is the source of truth.
 //!
-//! Controls (free-orbit toggled with SELECT):
+//! Controls:
 //! * Left stick / D-pad -- camera-relative movement.
 //! * Right stick        -- camera yaw; vertical adjusts camera height.
 //! * CIRCLE tap        -- directional roll; lock-on remains active.
@@ -502,9 +502,6 @@ struct Playtest {
     /// attack, a hit reaction, or the previous dodge waits here and fires
     /// on the first tick the actor is free again instead of being dropped.
     evade_buffer_vblanks: u8,
-    /// `true` toggles a free-orbit camera around the spawn for
-    /// debug inspection. Default = follow.
-    free_orbit: bool,
     orbit_yaw: Angle,
     orbit_radius: i32,
     /// Runtime third-person camera rig. Updated at simulation cadence

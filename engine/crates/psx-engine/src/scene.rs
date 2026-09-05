@@ -319,9 +319,10 @@ pub trait Scene {
     #[allow(unused_variables)]
     fn load_shared_assets(&mut self, ctx: &mut Ctx) {}
 
-    /// Called once, before the main loop starts. Use for asset
-    /// uploads (font atlas, textures), SPU sample loads, state
-    /// initialisation. Default is a no-op.
+    /// Initialise a gameplay session, after its resources are acquired.
+    /// A front-end StartGameplay action calls this again for a new game;
+    /// returning from a gameplay overlay does not. Shared boot-only assets
+    /// belong in [`load_shared_assets`](Scene::load_shared_assets).
     #[allow(unused_variables)]
     fn init(&mut self, ctx: &mut Ctx) {}
 

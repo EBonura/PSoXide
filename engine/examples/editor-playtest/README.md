@@ -41,7 +41,7 @@ The player starts at `generated::PLAYER_SPAWN`. Left stick
 drives camera-relative movement, with D-pad as a fallback.
 Keyboard defaults map arrow keys to left stick and I/J/K/L to
 right stick once DualShock analog mode is enabled. Circle held
-while moving runs. SELECT toggles a free-orbit debug camera. The
+while moving runs. The
 third-person camera and coarse room collision consume the cooked
 grid so the play view matches the editor's authored room.
 

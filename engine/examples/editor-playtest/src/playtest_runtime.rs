@@ -653,6 +653,79 @@ impl Playtest {
         telemetry::counter(telemetry::counter::PLAYER_DEATHS, 1);
     }
 
+    /// Clear run progress while keeping front-end settings and loaded assets.
+    pub(super) fn reset_new_game(&mut self) {
+        // New Game must not reload a previous run from the card, including
+        // when a card was absent at boot and becomes available later.
+        self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
+        self.poi_save_loaded = true;
+        self.poi_save_load_attempted = true;
+        self.poi_save_dirty = true;
+        self.poi_messages = MessageController::new();
+        self.set_poi_presentation_frames(0, 0);
+        self.socket_hint_shown = false;
+        self.souls = SoulsWallet::EMPTY;
+        self.damage_numbers = DamageNumbers::default();
+        self.gameplay_epoch_set = false;
+        self.player_contents_memo = None;
+        self.gameplay_sfx_events = 0;
+        self.lock_target = None;
+        self.soft_lock_target = None;
+        self.lock_switch_stick_held = false;
+        self.lock_invalid_ticks = 0;
+        self.soft_lock_suppressed = false;
+        self.evade_run_hold_ticks = 0;
+        self.evade_run_hold_consumed = false;
+        self.evade_latched_move = (Q12::ZERO, Q12::ZERO);
+        self.evade_buffer_vblanks = 0;
+        self.anim_state = PlayerAnim::Idle;
+        self.anim_start_tick = SimTick::ZERO;
+        self.anim_blend_from = None;
+        self.anim_lock_until_tick = SimTick::ZERO;
+        self.loco = LocoPhase::Idle;
+        self.active_interactable = None;
+        self.checkpoint = None;
+        self.message_overlay = None;
+        self.box_props.reset_dynamic_state();
+        // Phase-3 gameplay layer: spawn entity/logic state 1:1 from
+        // the cooked tables (empty tables leave both inert; the same
+        // calls re-run on future checkpoint respawns), then push the
+        // initial door states onto their box props (START_ON doors
+        // begin open without a fire event).
+        self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.game_entities
+            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
+        self.deferred_enemy_attacks.clear();
+        self.combat_projectiles.clear();
+        self.combat_projectile_impacts.clear();
+        self.dash_wake = psx_game_runtime::combat_feedback::DashWake::EMPTY;
+        self.attack_buffer.clear();
+        self.logic.init_from_records(LOGIC);
+        self.logic_fired_reported = 0;
+        self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        self.player_poise = psx_game_runtime::poise::Poise::EMPTY;
+        self.camera_recenter_requested = false;
+        // Playtest lives in a zeroed MaybeUninit, and a zeroed stance config
+        // would mean no damage and no recovery at all, so it is set explicitly
+        // on every reset rather than relying on the zero pattern.
+        self.player_stance = CombatStance::new(VitalityChannelId::One);
+        self.vitality_circles = VitalityCircleState::EMPTY;
+        self.power_up_loadout = PowerUpLoadout::DEFAULT;
+        self.power_up_inventory = BoostInventory::EMPTY;
+        self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
+        self.selected_power_up_item = BoostModuleId::NONE;
+        self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;
+        self.inventory_overlay_active = false;
+        self.combat_music = CombatMusicState::default();
+        self.acquired_module = BoostModuleId::NONE;
+        self.hazard_death_ticks_remaining = 0;
+        self.death_by_combat = false;
+        self.weapon_attach_reported = false;
+        self.swing_hit_mask = 0;
+        self.destructibles.reset();
+        self.clear_actor_pose_snapshots();
+    }
+
     /// Start a fresh combat life without changing checkpoints or collected items.
     /// In-flight shots and queued inputs belong to the old life, not the spawn.
     fn reset_life_combat(&mut self) {
@@ -2114,6 +2187,98 @@ pub(super) fn live_action_speed_q8(
 mod life_reset_tests {
     use super::*;
     use psx_game_runtime::projectiles::{CombatTeam, ProjectileSpawn};
+
+    #[test]
+    fn new_game_discards_progress_and_messages_but_preserves_settings() {
+        let layout = std::alloc::Layout::new::<Playtest>();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+        assert!(!raw.is_null());
+        unsafe { Playtest::init_zeroed(raw) };
+        let mut scene = unsafe { std::boxed::Box::from_raw(raw) };
+        scene.poi_save.set_flag(0);
+        scene.poi_save.set_resume_position(SavedPlayerPosition {
+            room: 0,
+            x: 1,
+            y: 2,
+            z: 3,
+            yaw: 4,
+        });
+        scene
+            .poi_messages
+            .open_world(0, psx_game_runtime::poi::MessagePageSpan::new(0, 1));
+        scene.socket_hint_shown = true;
+        scene.souls.award(200, 100);
+        scene.lock_target = Some(1);
+        scene.soft_lock_target = Some(1);
+        scene.attack_buffer.request(1, 100);
+        scene.evade_buffer_vblanks = 8;
+        scene.gameplay_epoch_set = true;
+        scene.hazard_death_ticks_remaining = 10;
+        scene.checkpoint = Some(RuntimeCheckpoint {
+            room: RoomIndex::ZERO,
+            position: RoomPoint::new(1, 2, 3),
+            yaw: Angle::ZERO,
+            checkpoint_id: "old run",
+        });
+        assert!(scene.power_up_inventory.add(BoostModuleId(1)));
+        scene.game_entities.spawn_from_records(GAME_ENTITIES);
+        let enemy = GAME_ENTITIES
+            .iter()
+            .position(|record| record.flags & psx_level::game_entity_flags::ENABLED != 0);
+        if let Some(index) = enemy {
+            scene.game_entities.apply_hit(
+                GAME_ENTITIES,
+                index,
+                VitalityChannelId::One,
+                u16::MAX,
+                u16::MAX,
+            );
+            assert_eq!(
+                scene.game_entities.state(index),
+                psx_game_runtime::entities::GameEntityState::Dead
+            );
+        }
+        scene.brightness_level = 3;
+        scene.analog_deadzone = 27;
+
+        scene.reset_new_game();
+
+        assert_eq!(
+            scene.poi_save,
+            SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT)
+        );
+        assert!(scene.poi_save_loaded && scene.poi_save_load_attempted);
+        assert!(scene.poi_save_dirty, "next save replaces the old run");
+        assert!(scene.poi_messages.active().is_none());
+        assert!(!scene.poi_messages.world_message_shown(0));
+        assert!(!scene.socket_hint_shown);
+        assert_eq!(scene.souls.total(), 0);
+        assert!(scene.lock_target.is_none() && scene.soft_lock_target.is_none());
+        assert_eq!(scene.attack_buffer.take(101), None);
+        assert_eq!(scene.evade_buffer_vblanks, 0);
+        assert!(!scene.gameplay_epoch_set);
+        assert_eq!(scene.hazard_death_ticks_remaining, 0);
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::One).current(),
+            PLAYER_MAX_HEALTH
+        );
+        assert_eq!(
+            scene.player_vitality.pool(VitalityChannelId::Two).current(),
+            PLAYER_MAX_HEALTH
+        );
+        assert!(scene.power_up_inventory.is_empty());
+        assert!(scene.checkpoint.is_none());
+        assert_eq!(scene.game_entities.count(), GAME_ENTITIES.len());
+        if let Some(index) = enemy {
+            assert_ne!(
+                scene.game_entities.state(index),
+                psx_game_runtime::entities::GameEntityState::Dead
+            );
+            assert!(scene.game_entities.health(index) > 0);
+        }
+        assert_eq!(scene.brightness_level, 3);
+        assert_eq!(scene.analog_deadzone, 27);
+    }
 
     #[test]
     fn respawn_discards_old_projectiles_broken_guard_and_queued_actions() {
