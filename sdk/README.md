@@ -3,7 +3,7 @@
 Bare-metal PlayStation 1 SDK: typed wrappers over the hardware with no
 engine framework on top. This is the layer you use to write a PS1 program
 directly (`_start`, GPU/SPU/GTE access, controller polling) without the
-Scene/App machinery in [`engine/`](../engine).
+Scene/App machinery in the separate engine component.
 
 The SDK is its own Cargo workspace (`sdk/Cargo.toml`). Code here targets
 MIPS (`mipsel-sony-psx`); the GTE crates additionally build for the host so
@@ -35,7 +35,7 @@ the editor and emulator share one simulation.
 
 There is no umbrella crate: games depend on the subsystem crates they use.
 The workspace currently has 19 crates. A standalone game should use the
-[pinned bootstrap workflow](../docs/downstream-projects.md), rather than
+pinned bootstrap workflow described in the root README, rather than
 copying SDK directories by hand; several shared dependencies still live
 outside `sdk/`.
 
@@ -57,6 +57,6 @@ Build and run them via the top-level `Makefile` (see the
 
 ## See also
 
-- [Root README](../README.md). Project overview and build instructions.
-- [`engine/`](../engine). The Scene/App framework built on top of this SDK.
-- [`docs/hardware-refs/`](../docs/hardware-refs). Per-subsystem hardware notes (gpu, spu, dma, irq, timers).
+- [Root README](../README.md): builds, example discs and downstream use.
+- [Editor, engine and Cortex](https://github.com/EBonura/PSoXide-editor).
+- [Emulator](https://github.com/EBonura/PSoXide-emulator).

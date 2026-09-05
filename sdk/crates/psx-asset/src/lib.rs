@@ -1681,7 +1681,7 @@ const V4_CROSS_LIMIT: i32 = 2 * 4096 * 4096;
 /// because the two arms are small enough that LLVM fills the delay slots.
 #[inline(always)]
 fn cross_round_q12(value: i32) -> i32 {
-    debug_assert!(value >= -V4_CROSS_LIMIT && value <= V4_CROSS_LIMIT);
+    debug_assert!((-V4_CROSS_LIMIT..=V4_CROSS_LIMIT).contains(&value));
     if value >= 0 {
         (value + (1 << 11)) >> 12
     } else {

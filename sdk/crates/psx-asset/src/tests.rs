@@ -1027,9 +1027,9 @@ mod pre_change {
         let a = joint_pose(a, shift);
         let b = joint_pose(b, shift);
         let mut matrix = [[0i16; 3]; 3];
-        for col in 0..3 {
-            for row in 0..3 {
-                matrix[col][row] = lerp_i16_q12(a.matrix[col][row], b.matrix[col][row], alpha_q12);
+        for (col, column) in matrix.iter_mut().enumerate() {
+            for (row, cell) in column.iter_mut().enumerate() {
+                *cell = lerp_i16_q12(a.matrix[col][row], b.matrix[col][row], alpha_q12);
             }
         }
         JointPose {

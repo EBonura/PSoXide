@@ -18,6 +18,7 @@ pattern that does not decode as an instruction: a PS-EXE carries its tables
 and assets in the same load, and those decode as random branches.
 """
 import re
+import os
 import subprocess
 import sys
 
@@ -40,7 +41,7 @@ WRITES_ONLY = {"lui", "li", "mfhi", "mflo"}
 
 def disassemble(path):
     out = subprocess.run(
-        ["mipsel-none-elf-objdump", "-D", "-b", "binary", "-m", "mips:3000", "-EL",
+        [os.environ.get("OBJDUMP", "mipsel-none-elf-objdump"), "-D", "-b", "binary", "-m", "mips:3000", "-EL",
          f"--adjust-vma={LOAD_ADDR - HEADER:#x}", path],
         capture_output=True, text=True, check=True).stdout
     listing = {}

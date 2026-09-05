@@ -1,9 +1,0 @@
-frontend SHA-256: 1be21734c7299a47221e949c66ad57e80ca4131e139c4c745c3a527832a3854d
-cue SHA-256: f558bf637a01b35b686a4d9b17c1911627cc211bca1148e1a2d25d5e08947fb6
-bin SHA-256: 96b3f48493ffa299b3109e70925bdb4fbd4fa3c3f68f75a3cf20399c1b866344
-menu (11): CORTEX IGNITION, HALF-LIFE, VOXIDE, NITROXIDE, CELESTE COLLECTION, PSXCEL, GH-PSX, PSOXIDE ARCADE, HARDWARE TESTS, QUAKE SHAREWARE, CREDITS
-CORTEX IGNITION: PASS route=1000:cross:12,1400:cross:12,1800:cross:12,2200:cross:12,2600:cross:12,3000:cross:12,3400:cross:12 version=new-76d344b EXE-LBA=847 image-LBA=825 payload-FNV=0x29b74dd2 PC=0x8004ff64 samples=38874 CD=377 runtime-read=2339 VRAM=0xcc05d4a73dfc03db display=0xe88d1b55054d8901 gameplay=467/467 hashes=467 geometry-edge=225permille
-HALF-LIFE: PASS route=400:left:8,1000:cross:12,1400:cross:12,1800:cross:12,2200:cross:12,2600:cross:12,3000:cross:12,3400:cross:12 version=0.2.0 EXE-LBA=2421 image-LBA=2399 payload-FNV=0x4432018a PC=0x80042bd0 samples=40502 CD=186 runtime-read=3423 VRAM=0xfb3304951bce1124 display=0x82182f7575cce634 gameplay=31/31 hashes=31 geometry-edge=0permille
-HARDWARE TESTS: PASS route=400:right:8,600:right:8,800:right:8,1200:cross:12 version=1.20 EXE-LBA=42023 image-LBA=42001 payload-FNV=0xadf29aaf PC=0x8006c640 samples=39512 CD=135 runtime-read=None VRAM=0x57129f545720186b display=0x839ef6872a349af1 gameplay=0/0 hashes=0 geometry-edge=0permille
-QUAKE SHAREWARE: PASS route=400:right:8,600:right:8,1000:cross:12 version=qf036850 EXE-LBA=43047 image-LBA=43025 payload-FNV=0x73fb9f89 PC=0x80066f00 samples=41005 CD=441 runtime-read=44049 VRAM=0x7793d238c7e0f6f2 display=0x039c617e0fa7517c gameplay=0/0 hashes=0 geometry-edge=0permille
-all release-critical chain-load replays are byte-deterministic
