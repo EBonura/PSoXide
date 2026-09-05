@@ -2058,17 +2058,20 @@ impl Scene for Playtest {
                 );
             }
         }
-        // Enemy claws are part of the body mesh. Their damage capsules define
-        // the blade edges, so editing a swing window also retimes its trail.
+        // The same authored blade capsules own enemy trails and damage.
         for (index, entity) in GAME_ENTITIES.iter().enumerate() {
-            if entity.room != self.room_index
-                || self.game_entities.state(index)
-                    != psx_game_runtime::entities::GameEntityState::Attack
-                || self.game_entities.clip_for_state(GAME_ENTITIES, index).clip
-                    != entity.attack_clip
-            {
+            if entity.room != self.room_index {
                 continue;
             }
+            let Some(attack) = self
+                .deferred_enemy_attacks
+                .as_slice()
+                .iter()
+                .copied()
+                .find(|attack| attack.entity() == index && !attack.is_ranged())
+            else {
+                continue;
+            };
             let Some(pose) = self
                 .instance_actor_poses
                 .get(entity.model_instance as usize)
@@ -2090,7 +2093,7 @@ impl Scene for Playtest {
             {
                 let _ = psx_game_runtime::particles::draw_melee_window_trail(
                     capsule,
-                    CharacterAnimationAction::LightAttack,
+                    attack.action(),
                     pose.pose(),
                     self.game_entities.stance(index) == VitalityChannelId::Two,
                     camera,

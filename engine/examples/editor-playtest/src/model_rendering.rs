@@ -573,9 +573,7 @@ impl Playtest {
             );
         }
 
-        for pose in self.instance_actor_poses.iter_mut() {
-            *pose = None;
-        }
+        self.player_swing_sound();
         let mut overrides =
             psx_engine::FixedScratch::<ModelInstancePoseOverride, MAX_GAME_ENTITIES>::new();
         self.game_entity_pose_overrides(&mut overrides);
@@ -593,6 +591,7 @@ impl Playtest {
                 index += 1;
                 continue;
             }
+            let previous = self.instance_actor_poses[index];
             self.instance_actor_poses[index] = mr::resolve_instance_actor_pose(
                 model_tables(),
                 &self.models,
@@ -602,8 +601,10 @@ impl Playtest {
                 elapsed_tick,
                 ctx.video_hz,
             );
+            self.enemy_swing_sound(index, previous, self.instance_actor_poses[index]);
             index += 1;
         }
+        self.instance_actor_poses[count..].fill(None);
     }
 
     pub(super) fn clear_actor_pose_snapshots(&mut self) {

@@ -366,6 +366,45 @@ pub fn resolve_authored_actor_contact_pending(
     (AuthoredActorContact::Miss, 0)
 }
 
+/// Whether this pose interval begins an authored melee swing. Overlapping
+/// blades with the same start produce one cue; separated starts produce new
+/// cues even if the attack animation stays the same.
+pub fn melee_window_started(
+    records: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    previous_phase: Option<u32>,
+    phase: u32,
+) -> bool {
+    let previous = previous_phase.filter(|old| *old <= phase);
+    records.iter().any(|record| {
+        let start = u32::from(record.active_start_frame) << 12;
+        record.flags & combat_capsule_flags::HITBOX != 0
+            && record.action == action.to_index() as u8
+            && phase >= start
+            && previous.map_or(phase >> 12 <= u32::from(record.active_end_frame), |old| {
+                old < start
+            })
+    })
+}
+
+/// Aim through the charge, then leave two sampled frames of committed aim
+/// before the first release. Released projectiles never consult this helper.
+pub fn ranged_charge_tracks(
+    records: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    phase: u32,
+) -> bool {
+    records
+        .iter()
+        .filter(|record| {
+            record.flags & combat_capsule_flags::PROJECTILE_EMITTER != 0
+                && record.action == action.to_index() as u8
+        })
+        .map(|record| record.active_start_frame)
+        .min()
+        .is_some_and(|release| phase < (u32::from(release.saturating_sub(2)) << 12))
+}
+
 /// Four blade-edge samples, clamped to one authored damage window. The trail
 /// disappears in gaps and cannot bridge from one swing into the next.
 pub fn melee_trail_phases(
@@ -1428,6 +1467,50 @@ mod tests {
             // A slow update crossing both markers drains them in authored order.
             assert_eq!(query(12, 0).unwrap().0, 0);
             assert_eq!(query(12, 1).unwrap().0, 1);
+        }
+
+        #[test]
+        fn swing_cues_cross_each_window_once_at_both_cadences() {
+            let mut swings = [capsule_record(0, combat_capsule_flags::HITBOX, ATTACK); 3];
+            for (record, start) in swings.iter_mut().zip([13, 28, 40]) {
+                record.active_start_frame = start;
+                record.active_end_frame = start + 5;
+            }
+            for step in [2048, 4096, 6144] {
+                let mut previous = None;
+                let mut cues = 0;
+                for phase in (0..50 * 4096).step_by(step) {
+                    cues += usize::from(melee_window_started(&swings, ATTACK, previous, phase));
+                    assert!(!melee_window_started(&swings, ATTACK, Some(phase), phase));
+                    previous = Some(phase);
+                }
+                assert_eq!(cues, 3);
+            }
+            assert!(!melee_window_started(
+                &swings,
+                CharacterAnimationAction::HeavyAttack,
+                None,
+                14 << 12
+            ));
+            assert!(melee_window_started(
+                &swings,
+                ATTACK,
+                Some(45 << 12),
+                14 << 12
+            ));
+        }
+
+        #[test]
+        fn ranged_charge_tracks_until_two_frames_before_single_release() {
+            let mut emitter = capsule_record(0, combat_capsule_flags::PROJECTILE_EMITTER, ATTACK);
+            emitter.active_start_frame = 27;
+            emitter.active_end_frame = 27;
+            assert!(ranged_charge_tracks(&[emitter], ATTACK, 24 << 12));
+            assert!(!ranged_charge_tracks(&[emitter], ATTACK, 25 << 12));
+            assert!(!ranged_charge_tracks(&[emitter], ATTACK, 28 << 12));
+            let pose = Some(pose_at([0; 3], 28 << 12));
+            assert!(authored_projectile_release_pending(&[emitter], ATTACK, pose, 0).is_some());
+            assert!(authored_projectile_release_pending(&[emitter], ATTACK, pose, 1).is_none());
         }
 
         #[test]

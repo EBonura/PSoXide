@@ -24,6 +24,7 @@ use super::*;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
 use psx_game_runtime::destructibles::{DamageChannel, DamageOutcome};
 use psx_game_runtime::entities::MeleeArcStats;
+use psx_game_runtime::model_rendering as mr;
 use psx_game_runtime::projectiles::{
     CombatTeam, ProjectileImpactKind, ProjectileImpacts, ProjectileSpawn, ProjectileTarget,
     ProjectileVisualStyle, ProjectileWorldTrace, ProjectileWorldTracer,
@@ -795,6 +796,125 @@ impl Playtest {
                 staggered,
                 self.hazard_death_ticks_remaining != 0,
             );
+        }
+    }
+
+    pub(super) fn track_enemy_charge(&mut self, index: usize, ctx: &Ctx, delta: u16) {
+        let Some(attack) = self
+            .deferred_enemy_attacks
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|attack| attack.entity() == index && attack.is_ranged())
+        else {
+            return;
+        };
+        let Some(entity) = GAME_ENTITIES.get(index) else {
+            return;
+        };
+        let clip = attack.clip();
+        let Some(animation) = MODEL_INSTANCES
+            .get(usize::from(entity.model_instance))
+            .and_then(|instance| self.models.get(instance.model.to_usize()))
+            .copied()
+            .flatten()
+            .and_then(|model| model.clip(&self.clips, ModelClipIndex(clip.clip)))
+        else {
+            return;
+        };
+        let phase = mr::animation_phase_at_tick_q12(
+            animation,
+            u32::from(clip.phase_ticks),
+            ctx.video_hz,
+            !clip.one_shot,
+            clip.speed_q8,
+            clip.frame_range,
+        );
+        let first = entity.combat_capsule_first.to_usize();
+        let end = first + usize::from(entity.combat_capsule_count);
+        if combat::ranged_charge_tracks(
+            COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
+            attack.action(),
+            phase,
+        ) {
+            let player = self.motor.position();
+            let height = self
+                .character
+                .as_ref()
+                .map_or(BSP_PLAYER_HEIGHT, |character| character.height);
+            self.game_entities.track_authored_ranged_charge(
+                index,
+                [player.x, player.y, player.z],
+                height,
+                delta,
+            );
+        }
+    }
+
+    pub(super) fn player_swing_sound(&mut self) {
+        if !player_anim_is_attack(self.anim_state) {
+            return;
+        }
+        let (Some(character), Some(pose)) = (self.character.as_ref(), self.player_actor_pose)
+        else {
+            return;
+        };
+        let first = character.combat_capsule_first.to_usize();
+        let end = first + usize::from(character.combat_capsule_count);
+        let previous = self
+            .previous_player_actor_pose
+            .filter(|old| old.clip_local() == pose.clip_local())
+            .map(|old| old.pose().phase_q12());
+        if combat::melee_window_started(
+            COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
+            self.anim_state.action(),
+            previous,
+            pose.pose().phase_q12(),
+        ) {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerWeaponSwing);
+            self.swing_hit_mask = 0;
+            self.destructibles.begin_swing();
+            telemetry::debug_log("player swing:active");
+        }
+    }
+
+    pub(super) fn enemy_swing_sound(
+        &mut self,
+        instance: usize,
+        previous: Option<InstanceActorPoseSnapshot>,
+        current: Option<InstanceActorPoseSnapshot>,
+    ) {
+        let Some(pose) = current else {
+            return;
+        };
+        let Some(attack) = self
+            .deferred_enemy_attacks
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|attack| {
+                !attack.is_ranged()
+                    && GAME_ENTITIES
+                        .get(attack.entity())
+                        .is_some_and(|entity| usize::from(entity.model_instance) == instance)
+            })
+        else {
+            return;
+        };
+        let entity = &GAME_ENTITIES[attack.entity()];
+        let first = entity.combat_capsule_first.to_usize();
+        let end = first + usize::from(entity.combat_capsule_count);
+        let previous = previous
+            .filter(|old| old.clip_local() == pose.clip_local())
+            .map(|old| old.pose().phase_q12());
+        if combat::melee_window_started(
+            COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
+            attack.action(),
+            previous,
+            pose.pose().phase_q12(),
+        ) {
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyWeaponSwing);
+            telemetry::debug_log("enemy swing:active");
         }
     }
 

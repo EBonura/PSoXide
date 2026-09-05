@@ -1059,6 +1059,39 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         self.capture_ranged_aim(index, input);
     }
 
+    /// Track the visible charge until the caller's authored release cutoff.
+    /// An interruption or a released shot closes tracking permanently for
+    /// this attack. The spawned projectile keeps its captured velocity.
+    pub fn track_authored_ranged_charge(
+        &mut self,
+        index: usize,
+        player: [i32; 3],
+        player_height: i32,
+        delta: u16,
+    ) {
+        if index >= self.count()
+            || self.state(index) != GameEntityState::Attack
+            || !self.selected_attack_is_ranged(index)
+            || self.authored_connection_mask[index] != 0
+        {
+            return;
+        }
+        let dx = player[0].saturating_sub(self.x[index]);
+        let dz = player[2].saturating_sub(self.z[index]);
+        if dx != 0 || dz != 0 {
+            self.yaw[index] = psx_engine::Angle::from_q12(self.yaw[index] as u16)
+                .approach_q12(
+                    psx_engine::Angle::from_q12(atan2_q12(dx, dz)),
+                    48u16.saturating_mul(delta),
+                )
+                .as_q12() as i16;
+        }
+        self.ranged_aim_distance[index] =
+            psx_math::int32::isqrt_i32(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)))
+                .max(1);
+        self.ranged_aim_y[index] = player[1].saturating_add(player_height.max(0) / 2);
+    }
+
     /// Straight shot along the committed body bearing. Only the saved aim
     /// elevation is used; the player's release-time position is never read.
     pub fn ranged_velocity(&self, index: usize, muzzle: [i32; 3], speed: u16) -> [i32; 3] {
@@ -4070,6 +4103,38 @@ mod tests {
             e.tick(&ENEMY, input, &mut NoClipMover);
         }
         assert_eq!(e.yaw(0), yaw);
+        assert_eq!(e.ranged_velocity(0, [1000, 500, 1000], 160), velocity);
+    }
+
+    #[test]
+    fn authored_charge_tracks_late_but_release_and_stagger_close_it() {
+        let mut e = GameEntities::<8>::EMPTY;
+        e.spawn_from_records(&RANGED_ENEMY);
+        let input = GameEntityTickInput {
+            player: [2500, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+        for _ in 0..40 {
+            e.tick(&RANGED_ENEMY, input, &mut NoClipMover);
+            if e.state(0) == GameEntityState::Attack {
+                break;
+            }
+        }
+        assert_eq!(e.state(0), GameEntityState::Attack);
+        let initial = e.yaw(0);
+        e.track_authored_ranged_charge(0, [2000, 0, 1800], 1024, 2);
+        assert_ne!(e.yaw(0), initial);
+        let shot = e.deferred_attack(&RANGED_ENEMY[0], 0);
+        assert!(e.commit_deferred_projectile(shot, 0));
+        let velocity = e.ranged_velocity(0, [1000, 500, 1000], 160);
+        e.track_authored_ranged_charge(0, [0, 0, 0], 1024, 2);
+        assert_eq!(e.ranged_velocity(0, [1000, 500, 1000], 160), velocity);
+        e.enter_state(
+            0,
+            GameEntityState::Staggered,
+            &mut GameEntityTickStats::default(),
+        );
+        e.track_authored_ranged_charge(0, [0, 0, 0], 1024, 2);
         assert_eq!(e.ranged_velocity(0, [1000, 500, 1000], 160), velocity);
     }
 

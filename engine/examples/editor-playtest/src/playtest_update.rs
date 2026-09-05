@@ -297,6 +297,7 @@ impl Playtest {
         if npc_tick_due {
             for index in 0..entity_count {
                 let record = &GAME_ENTITIES[index];
+                self.track_enemy_charge(index, ctx, npc_delta_ticks);
                 let position = self.game_entities.position(index);
                 let audible_range = record.aggro_radius.saturating_mul(2);
                 if record.room != self.room_index
@@ -393,9 +394,6 @@ impl Playtest {
                 telemetry::counter::GAME_ENTITY_ATTACK_ENTERS,
                 u32::from(entity_stats.attack_enters),
             );
-        }
-        if entity_stats.melee_attack_enters > 0 {
-            self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyWeaponSwing);
         }
         let fired_total = self.logic.stats().fired;
         let fired_delta = fired_total.saturating_sub(self.logic_fired_reported);
@@ -1445,7 +1443,6 @@ impl Playtest {
             if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
                 telemetry::debug_log("player attack:start");
                 telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
-                self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerWeaponSwing);
             }
             return true;
         }
