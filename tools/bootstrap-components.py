@@ -37,6 +37,7 @@ def verify(root, receipt):
 
 
 def materialize(root, sources, check=False):
+    root = root.resolve()
     lock_path = root / "components.lock.json"
     lock_bytes = lock_path.read_bytes()
     lock = json.loads(lock_bytes)
@@ -68,6 +69,7 @@ def materialize(root, sources, check=False):
                 data = response.read()
             strip = True
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+            found = set()
             for member in archive:
                 filename = member.name.split("/", 1)[1] if strip and "/" in member.name else member.name
                 if not any(filename == path or filename.startswith(path + "/") for path in paths):
@@ -77,9 +79,13 @@ def materialize(root, sources, check=False):
                 if not member.isfile():
                     raise ValueError(f"Unsupported component entry: {filename}")
                 filename = relative(filename)
+                found.update(path for path in paths if filename == path or filename.startswith(path + "/"))
                 if filename in incoming:
                     raise ValueError(f"Components overlap: {filename}")
                 incoming[filename] = (archive.extractfile(member).read(), member.mode & 0o777)
+            missing = set(paths) - found
+            if missing:
+                raise ValueError(f"{name}: locked source paths missing: {sorted(missing)}")
         print(f"Resolved {name} at {rev}")
 
     # Validate every collision before changing any files.
@@ -88,7 +94,7 @@ def materialize(root, sources, check=False):
         path = root / name
         if name in tracked or (path.exists() and name not in previous.get("files", {})):
             raise RuntimeError(f"Refusing to replace an owned file: {name}")
-        if any(parent.is_symlink() for parent in path.parents if parent != root.parent):
+        if any(parent.is_symlink() for parent in path.parents if parent.is_relative_to(root)):
             raise RuntimeError(f"Refusing a symlink parent: {name}")
     receipt = {"schema": 1, "lock_sha256": digest(lock_bytes), "components": lock["components"], "files": {}}
     for name, (data, mode) in incoming.items():
