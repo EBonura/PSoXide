@@ -36,9 +36,11 @@ def verify(root, receipt):
             raise RuntimeError(f"Imported file changed or missing: {path}. Preserve your edits before refreshing components.")
 
 
-def materialize(root, sources, check=False):
+def materialize(root, sources, check=False, lock_path=None):
     root = root.resolve()
-    lock_path = root / "components.lock.json"
+    if not check:
+        root.mkdir(parents=True, exist_ok=True)
+    lock_path = Path(lock_path) if lock_path else root / "components.lock.json"
     lock_bytes = lock_path.read_bytes()
     lock = json.loads(lock_bytes)
     if lock.get("schema") != 1:
@@ -120,9 +122,10 @@ def main():
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--source", action="append", default=[], metavar="NAME=GIT_CHECKOUT")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--lock", type=Path, help="Lock outside an ignored generated source tree")
     args = parser.parse_args()
     sources = dict(item.split("=", 1) for item in args.source)
-    materialize(args.root.resolve(), sources, args.check)
+    materialize(args.root.resolve(), sources, args.check, args.lock)
 
 
 if __name__ == "__main__":
