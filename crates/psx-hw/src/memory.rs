@@ -104,7 +104,7 @@ pub mod bios {
     pub const BASE: u32 = 0x1FC0_0000;
     /// Size in bytes (512 KiB).
     pub const SIZE: usize = 512 * 1024;
-    /// Canonical reset vector: KSEG1 view of BIOS base.
+    /// Reset vector: KSEG1 view of BIOS base.
     pub const RESET_VECTOR: u32 = 0xBFC0_0000;
 }
 
