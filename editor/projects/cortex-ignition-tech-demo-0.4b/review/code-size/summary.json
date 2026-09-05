@@ -1,0 +1,372 @@
+{
+  "baseline_commit": "61b4c7b1",
+  "compiler": "opt-level=2, LTO, codegen-units=1; unchanged",
+  "features": "defaults + cd-stream-bench emulator-telemetry; normal cadence",
+  "tests": {
+    "runtime": 206,
+    "bsp_playtest": 58,
+    "grid_playtest": 58
+  },
+  "hazards": 0,
+  "preburn": "passed; DATA + 2 AUDIO tracks",
+  "builds": {
+    "baseline": {
+      "exe_sha256": "fc842b725f25dd582ec9decff68c8b647f7f06519066e55d61eac60cdb241f83",
+      "exe_bytes": 1138688,
+      "sections": {
+        ".text": 750808,
+        ".data": 385824,
+        ".bss": 851204
+      },
+      "replays": {
+        "dash": {
+          "route_ticks": 2135,
+          "polls": 1800,
+          "instructions_including_idle": 480194160,
+          "bus_cycles_including_idle": 1220116759,
+          "gameplay_updates": 1130,
+          "profile_filter": "camera > 0; positive samples per stage, cycles",
+          "stages": {
+            "visual_render_task": {
+              "samples": 557,
+              "median": 602548,
+              "p95": 803648,
+              "max": 8479251
+            },
+            "camera": {
+              "samples": 1130,
+              "median": 15587.0,
+              "p95": 22050,
+              "max": 22123
+            },
+            "sim_solve": {
+              "samples": 1130,
+              "median": 2487.0,
+              "p95": 22761,
+              "max": 66783
+            },
+            "update": {
+              "samples": 1130,
+              "median": 57863.0,
+              "p95": 82773,
+              "max": 457938
+            }
+          },
+          "late_gameplay_updates": 2,
+          "worst_lateness_vblanks": 7,
+          "faults": 0,
+          "heap_free_bytes": 2128,
+          "rgb_sha256": "2247d2199a020de52a4aba3fa17bddc576648ef4dcf5701c6878ccdb2944d9e2",
+          "final_state": {
+            "current_room": 0,
+            "player_x_biased": 999463,
+            "player_y_biased": 1000032,
+            "player_z_biased": 998516,
+            "player_facing_yaw_q12": 1024,
+            "view_yaw_q12": 0,
+            "cam_local_x_biased": 999463,
+            "cam_local_y_biased": 1000142,
+            "cam_local_z_biased": 998720,
+            "player_anim_action": 0,
+            "player_attack_starts_total": 0,
+            "player_melee_hits_total": 0
+          },
+          "enemy_projectile_releases": 0
+        },
+        "combat": {
+          "route_ticks": 3648,
+          "polls": 3312,
+          "instructions_including_idle": 861818396,
+          "bus_cycles_including_idle": 2084968064,
+          "gameplay_updates": 2791,
+          "profile_filter": "camera > 0; positive samples per stage, cycles",
+          "stages": {
+            "visual_render_task": {
+              "samples": 889,
+              "median": 1231989,
+              "p95": 2128646,
+              "max": 8479204
+            },
+            "camera": {
+              "samples": 2791,
+              "median": 17457,
+              "p95": 22602,
+              "max": 26588
+            },
+            "sim_solve": {
+              "samples": 2791,
+              "median": 23755,
+              "p95": 102050,
+              "max": 178787
+            },
+            "update": {
+              "samples": 2791,
+              "median": 95060,
+              "p95": 176037,
+              "max": 457918
+            }
+          },
+          "late_gameplay_updates": 449,
+          "worst_lateness_vblanks": 7,
+          "faults": 0,
+          "heap_free_bytes": 2128,
+          "rgb_sha256": "99d8848bafa8f9111cbddfc20afea76cb93bdf3841312881aa17681a49273db7",
+          "final_state": {
+            "current_room": 0,
+            "player_x_biased": 1001383,
+            "player_y_biased": 1000224,
+            "player_z_biased": 998894,
+            "player_facing_yaw_q12": 2917,
+            "view_yaw_q12": 950,
+            "cam_local_x_biased": 1001578,
+            "cam_local_y_biased": 1000351,
+            "cam_local_z_biased": 998922,
+            "player_anim_action": 0,
+            "player_attack_starts_total": 0,
+            "player_melee_hits_total": 0
+          },
+          "enemy_projectile_releases": 3
+        },
+        "route": {
+          "route_ticks": 5583,
+          "polls": 5250,
+          "instructions_including_idle": 1339371858,
+          "bus_cycles_including_idle": 3190880971,
+          "gameplay_updates": 4730,
+          "profile_filter": "camera > 0; positive samples per stage, cycles",
+          "stages": {
+            "visual_render_task": {
+              "samples": 1777,
+              "median": 1087269,
+              "p95": 1702204,
+              "max": 8479204
+            },
+            "camera": {
+              "samples": 4730,
+              "median": 16051.5,
+              "p95": 22515,
+              "max": 26588
+            },
+            "sim_solve": {
+              "samples": 4730,
+              "median": 21181.0,
+              "p95": 82035,
+              "max": 125681
+            },
+            "update": {
+              "samples": 4730,
+              "median": 84246.5,
+              "p95": 138906,
+              "max": 457918
+            }
+          },
+          "late_gameplay_updates": 564,
+          "worst_lateness_vblanks": 7,
+          "faults": 0,
+          "heap_free_bytes": 2128,
+          "rgb_sha256": "d5e559d5f8d95685c471da01a70d98a8fed07ca857864e05d0a51b91904cf294",
+          "final_state": {
+            "current_room": 0,
+            "player_x_biased": 1001391,
+            "player_y_biased": 1000224,
+            "player_z_biased": 999049,
+            "player_facing_yaw_q12": 0,
+            "view_yaw_q12": 1988,
+            "cam_local_x_biased": 1001414,
+            "cam_local_y_biased": 1000366,
+            "cam_local_z_biased": 998853,
+            "player_anim_action": 0,
+            "player_attack_starts_total": 9,
+            "player_melee_hits_total": 6
+          },
+          "enemy_projectile_releases": 0
+        }
+      }
+    },
+    "final": {
+      "exe_sha256": "5e44a68ffa06e89fca195f661b9828c754b0faa40838faf4ca0c6f19b4a79a97",
+      "exe_bytes": 1099776,
+      "sections": {
+        ".text": 712032,
+        ".data": 385696,
+        ".bss": 851204
+      },
+      "replays": {
+        "dash": {
+          "route_ticks": 2135,
+          "polls": 1800,
+          "instructions_including_idle": 481444212,
+          "bus_cycles_including_idle": 1220116761,
+          "gameplay_updates": 1130,
+          "profile_filter": "camera > 0; positive samples per stage, cycles",
+          "stages": {
+            "visual_render_task": {
+              "samples": 557,
+              "median": 598196,
+              "p95": 790719,
+              "max": 8478043
+            },
+            "camera": {
+              "samples": 1130,
+              "median": 14983.0,
+              "p95": 21546,
+              "max": 21584
+            },
+            "sim_solve": {
+              "samples": 1130,
+              "median": 2447.0,
+              "p95": 22865,
+              "max": 65643
+            },
+            "update": {
+              "samples": 1130,
+              "median": 57032.0,
+              "p95": 82046,
+              "max": 457298
+            }
+          },
+          "late_gameplay_updates": 2,
+          "worst_lateness_vblanks": 7,
+          "faults": 0,
+          "heap_free_bytes": 41040,
+          "rgb_sha256": "2247d2199a020de52a4aba3fa17bddc576648ef4dcf5701c6878ccdb2944d9e2",
+          "final_state": {
+            "current_room": 0,
+            "player_x_biased": 999463,
+            "player_y_biased": 1000032,
+            "player_z_biased": 998516,
+            "player_facing_yaw_q12": 1024,
+            "view_yaw_q12": 0,
+            "cam_local_x_biased": 999463,
+            "cam_local_y_biased": 1000142,
+            "cam_local_z_biased": 998720,
+            "player_anim_action": 0,
+            "player_attack_starts_total": 0,
+            "player_melee_hits_total": 0
+          },
+          "enemy_projectile_releases": 0
+        },
+        "combat": {
+          "route_ticks": 3649,
+          "polls": 3314,
+          "instructions_including_idle": 864315073,
+          "bus_cycles_including_idle": 2085539328,
+          "gameplay_updates": 2793,
+          "profile_filter": "camera > 0; positive samples per stage, cycles",
+          "stages": {
+            "visual_render_task": {
+              "samples": 896,
+              "median": 1227105.0,
+              "p95": 2103277,
+              "max": 8478688
+            },
+            "camera": {
+              "samples": 2793,
+              "median": 16999,
+              "p95": 22062,
+              "max": 26237
+            },
+            "sim_solve": {
+              "samples": 2793,
+              "median": 23644,
+              "p95": 101862,
+              "max": 178672
+            },
+            "update": {
+              "samples": 2793,
+              "median": 94734,
+              "p95": 175368,
+              "max": 457317
+            }
+          },
+          "late_gameplay_updates": 447,
+          "worst_lateness_vblanks": 7,
+          "faults": 0,
+          "heap_free_bytes": 41040,
+          "rgb_sha256": "6ce295ee28179808894d0e1ebe19b5ba50b943b7671d0cd55df0c4b53dc89403",
+          "final_state": {
+            "current_room": 0,
+            "player_x_biased": 1001383,
+            "player_y_biased": 1000224,
+            "player_z_biased": 998894,
+            "player_facing_yaw_q12": 2917,
+            "view_yaw_q12": 950,
+            "cam_local_x_biased": 1001578,
+            "cam_local_y_biased": 1000351,
+            "cam_local_z_biased": 998922,
+            "player_anim_action": 0,
+            "player_attack_starts_total": 0,
+            "player_melee_hits_total": 0
+          },
+          "enemy_projectile_releases": 3
+        },
+        "route": {
+          "route_ticks": 5583,
+          "polls": 5250,
+          "instructions_including_idle": 1342188524,
+          "bus_cycles_including_idle": 3190880965,
+          "gameplay_updates": 4730,
+          "profile_filter": "camera > 0; positive samples per stage, cycles",
+          "stages": {
+            "visual_render_task": {
+              "samples": 1785,
+              "median": 1084985,
+              "p95": 1666420,
+              "max": 8478688
+            },
+            "camera": {
+              "samples": 4730,
+              "median": 15394.0,
+              "p95": 22011,
+              "max": 26237
+            },
+            "sim_solve": {
+              "samples": 4730,
+              "median": 20994.0,
+              "p95": 80422,
+              "max": 125266
+            },
+            "update": {
+              "samples": 4730,
+              "median": 83313.0,
+              "p95": 136553,
+              "max": 457317
+            }
+          },
+          "late_gameplay_updates": 559,
+          "worst_lateness_vblanks": 7,
+          "faults": 0,
+          "heap_free_bytes": 41040,
+          "rgb_sha256": "d5e559d5f8d95685c471da01a70d98a8fed07ca857864e05d0a51b91904cf294",
+          "final_state": {
+            "current_room": 0,
+            "player_x_biased": 1001391,
+            "player_y_biased": 1000224,
+            "player_z_biased": 999049,
+            "player_facing_yaw_q12": 0,
+            "view_yaw_q12": 1988,
+            "cam_local_x_biased": 1001414,
+            "cam_local_y_biased": 1000366,
+            "cam_local_z_biased": 998853,
+            "player_anim_action": 0,
+            "player_attack_starts_total": 9,
+            "player_melee_hits_total": 6
+          },
+          "enemy_projectile_releases": 0
+        }
+      }
+    }
+  },
+  "guest_symbol_gate": {
+    "baseline": "fail",
+    "final": "fail",
+    "inherited_helpers": [
+      "__divdi3",
+      "__moddi3",
+      "__udivdi3",
+      "__umoddi3",
+      "compiler_builtins::int::specialized_div_rem::u64_div_rem"
+    ],
+    "helper_text_bytes": 1820
+  }
+}
