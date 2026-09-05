@@ -135,6 +135,7 @@ impl Playtest {
     /// Conservative component-wise union of every clipped portal path that
     /// reaches `room`. Never return the first aperture alone: rooms may be
     /// visible through multiple disjoint paths.
+    #[cfg(not(playtest_pxbsp))]
     pub(super) fn portal_cell_window(&self, room: RoomIndex) -> Option<PortalCellWindow> {
         if room == self.visibility.root {
             return None;

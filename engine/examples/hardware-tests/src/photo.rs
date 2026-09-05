@@ -156,8 +156,8 @@ impl PhotoCapture {
 
         out.push_bytes(b"PX8B");
         out.push_u8(4); // transport schema version
-        // Suite version: what the record ids MEAN, as distinct from how the
-        // bytes are laid out. Lets the host refuse a cross-version diff.
+                        // Suite version: what the record ids MEAN, as distinct from how the
+                        // bytes are laid out. Lets the host refuse a cross-version diff.
         out.push_u8(crate::SUITE_VERSION_MAJOR);
         out.push_u8(crate::SUITE_VERSION_MINOR);
         out.push_u8(flags);
@@ -265,7 +265,6 @@ impl PhotoCapture {
     pub(crate) fn page_count(&self) -> usize {
         (self.page_count as usize).max(1)
     }
-
 
     /// Re-render an already-encoded capture at a different page.
     ///
@@ -396,12 +395,7 @@ pub(crate) fn draw_capture_page(font: &FontAtlas, capture: &PhotoCapture, page: 
     font.draw_text(208, 0, "PAGE", (140, 160, 190));
     font.draw_text(248, 0, hex2((page + 1) as u8).as_str(), (232, 236, 244));
     font.draw_text(264, 0, "/", (140, 160, 190));
-    font.draw_text(
-        272,
-        0,
-        hex2(capture.page_count).as_str(),
-        (232, 236, 244),
-    );
+    font.draw_text(272, 0, hex2(capture.page_count).as_str(), (232, 236, 244));
     // Labels are abbreviated so the navigation hint fits on the same line.
     // START opening the menu has to be visible somewhere the operator is
     // already looking, and this screen is where they spend the whole capture.

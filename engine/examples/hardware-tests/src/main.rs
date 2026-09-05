@@ -32,9 +32,9 @@ use psx_spu::SpuAddr;
 use psx_vram::{Clut, TexDepth, Tpage};
 
 mod audio_link;
+mod audio_probe;
 mod cd_chain_probe;
 mod controller_test;
-mod audio_probe;
 mod cpu_tests;
 mod handoff_probe;
 mod photo;
@@ -45,17 +45,17 @@ mod spu_probe;
 mod transition_probe;
 mod voice_probe;
 use audio_probe::AudioProbe;
-use cpu_tests::*;
 use cd_chain_probe::CdChainProbe;
 use controller_test::ControllerTest;
+use cpu_tests::*;
 use handoff_probe::HandoffProbe;
 use photo::PhotoCapture;
 use reverb_probe::{ReverbProbe, ReverbSnapshot};
 use ring_probe::RingProbe;
-use transition_probe::TransitionProbe;
-use voice_probe::VoiceProbe;
 use sample_probe::SampleProbe;
 use spu_probe::SpuProbe;
+use transition_probe::TransitionProbe;
+use voice_probe::VoiceProbe;
 
 // A complete 4 KiB direct-mapped PS1 I-cache footprint. The custom return
 // register lets inline timing assembly call it without clobbering Rust's $ra.
@@ -204,9 +204,7 @@ const PROBE_VARIANT_COUNT: usize = 5;
 /// a delay after asserting the select line; `interbyte_spins` is a fixed gap
 /// after each byte. Both are bounded STAT reads, no `/ACK`/CTRL machinery.
 /// Setup-delay values swept by records 0xD0.., in SIO spin units.
-const SIO_SETUP_SWEEP: [u32; 12] = [
-    0, 64, 128, 192, 256, 320, 448, 512, 640, 896, 1024, 1536,
-];
+const SIO_SETUP_SWEEP: [u32; 12] = [0, 64, 128, 192, 256, 320, 448, 512, 640, 896, 1024, 1536];
 
 const PROBE_VARIANTS: [(&str, u32, u32); PROBE_VARIANT_COUNT] = [
     ("SETUP 0", 0, 0),
@@ -721,14 +719,23 @@ const ROOT_MENU: [(&str, MenuAction); 11] = [
         "CONTROLLER TEST (P1 + P2)",
         MenuAction::Open(Mode::ControllerTest),
     ),
-    ("MEMORY CARD (AT OWN RISK)", MenuAction::Open(Mode::MemoryCard)),
-    ("VIEW CAPTURE (QR PAGES)", MenuAction::Open(Mode::TimingScan)),
+    (
+        "MEMORY CARD (AT OWN RISK)",
+        MenuAction::Open(Mode::MemoryCard),
+    ),
+    (
+        "VIEW CAPTURE (QR PAGES)",
+        MenuAction::Open(Mode::TimingScan),
+    ),
     ("RESULTS BY SECTION", MenuAction::Submenu(MenuPage::Results)),
     ("HARDWARE SCANS", MenuAction::Submenu(MenuPage::Scans)),
     ("TARGETED PROBES", MenuAction::Submenu(MenuPage::Probes)),
     // Root, not a submenu: this one is aimed at the capture rig rather than
     // at the console, so an operator setting up a recording finds it first.
-    ("VIDEO LEVELS (TV/CAPTURE)", MenuAction::Open(Mode::VideoLevels)),
+    (
+        "VIDEO LEVELS (TV/CAPTURE)",
+        MenuAction::Open(Mode::VideoLevels),
+    ),
     // Listed, not just bound to SQUARE: an operator cannot discover a hidden
     // button, and this is the control they need while recording.
     ("AUDIO READOUT", MenuAction::CycleAudio),
@@ -764,12 +771,27 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
 const PROBES_MENU: [(&str, MenuAction); 11] = [
     ("SPU DIAGNOSTIC (SB2)", MenuAction::Open(Mode::SpuProbe)),
     ("CAPTURE RINGS (SB4)", MenuAction::Open(Mode::RingProbe)),
-    ("UI SAMPLE END/LOOP (SB1)", MenuAction::Open(Mode::SampleProbe)),
-    ("CD READ MECHANISM (CL2)", MenuAction::Open(Mode::CdChainProbe)),
-    ("CONTROLLER SIO TIMING", MenuAction::Open(Mode::ControllerProbe)),
+    (
+        "UI SAMPLE END/LOOP (SB1)",
+        MenuAction::Open(Mode::SampleProbe),
+    ),
+    (
+        "CD READ MECHANISM (CL2)",
+        MenuAction::Open(Mode::CdChainProbe),
+    ),
+    (
+        "CONTROLLER SIO TIMING",
+        MenuAction::Open(Mode::ControllerProbe),
+    ),
     ("HL REVERB STATE (PA5)", MenuAction::Open(Mode::ReverbProbe)),
-    ("HL VOICE HANDOFF (PA4)", MenuAction::Open(Mode::HandoffProbe)),
-    ("HL BANK TRANSITION (PA3)", MenuAction::Open(Mode::TransitionProbe)),
+    (
+        "HL VOICE HANDOFF (PA4)",
+        MenuAction::Open(Mode::HandoffProbe),
+    ),
+    (
+        "HL BANK TRANSITION (PA3)",
+        MenuAction::Open(Mode::TransitionProbe),
+    ),
     ("HL VOICE BANK (PA2)", MenuAction::Open(Mode::VoiceProbe)),
     ("CD/SPU AUDIO (PA1)", MenuAction::Open(Mode::AudioProbe)),
     ("BACK", MenuAction::Back),
@@ -792,7 +814,6 @@ const fn menu_title(page: MenuPage) -> &'static str {
         MenuPage::Probes => "TARGETED PROBES",
     }
 }
-
 
 #[derive(Copy, Clone)]
 struct TimingRecord {
@@ -2502,9 +2523,7 @@ impl Scene for HardwareTests {
                 // blow through a risk gate.
                 if ctx.just_pressed(button::CIRCLE) {
                     self.memcard_armed = true;
-                } else if ctx.just_pressed(button::START)
-                    || ctx.just_pressed(button::TRIANGLE)
-                {
+                } else if ctx.just_pressed(button::START) || ctx.just_pressed(button::TRIANGLE) {
                     self.open_menu_page(MenuPage::Root);
                 }
                 return;
@@ -2839,7 +2858,12 @@ fn draw_summary(font: &FontAtlas, suite: &HardwareTests) {
 
 fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 8, "PS1 HARDWARE TESTS", (232, 236, 244));
-    font.draw_text(320 - 8 - SUITE_VERSION.len() as i16 * 8, 8, SUITE_VERSION, (112, 136, 170));
+    font.draw_text(
+        320 - 8 - SUITE_VERSION.len() as i16 * 8,
+        8,
+        SUITE_VERSION,
+        (112, 136, 170),
+    );
     font.draw_text(8, 18, "SECTION", (140, 160, 190));
     font.draw_text(72, 18, suite.mode.label(), (255, 232, 128));
     font.draw_text(216, 18, "START MENU", (140, 160, 190));
@@ -2856,7 +2880,12 @@ const MENU_ROW_PITCH: i16 = 11;
 
 fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 6, "PS1 HARDWARE TESTS", (232, 236, 244));
-    font.draw_text(320 - 8 - SUITE_VERSION.len() as i16 * 8, 6, SUITE_VERSION, (112, 136, 170));
+    font.draw_text(
+        320 - 8 - SUITE_VERSION.len() as i16 * 8,
+        6,
+        SUITE_VERSION,
+        (112, 136, 170),
+    );
     font.draw_text(8, 20, menu_title(suite.menu_page), (255, 232, 128));
 
     let entries = menu_entries(suite.menu_page);
@@ -2895,7 +2924,12 @@ fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
                 font.draw_text(150, y, "OFF", (176, 190, 210));
             } else {
                 font.draw_text(150, y, "ON  RATE", (96, 240, 128));
-                font.draw_text(214, y, hex2((suite.audio_rate - 1) as u8).as_str(), (96, 240, 128));
+                font.draw_text(
+                    214,
+                    y,
+                    hex2((suite.audio_rate - 1) as u8).as_str(),
+                    (96, 240, 128),
+                );
             }
         }
         y += MENU_ROW_PITCH;
@@ -2960,9 +2994,19 @@ fn draw_memcard_warning(font: &FontAtlas) {
         font.draw_text(8, y, line, (232, 236, 244));
         y += 14;
     }
-    font.draw_text(8, y + 8, "IF YOU HAVE A SPARE CARD, USE IT.", (255, 216, 96));
+    font.draw_text(
+        8,
+        y + 8,
+        "IF YOU HAVE A SPARE CARD, USE IT.",
+        (255, 216, 96),
+    );
     font.draw_text(8, y + 36, "CIRCLE = I ACCEPT THE RISK", (96, 240, 128));
-    font.draw_text(8, y + 50, "TRIANGLE OR START = BACK TO MENU", (150, 170, 200));
+    font.draw_text(
+        8,
+        y + 50,
+        "TRIANGLE OR START = BACK TO MENU",
+        (150, 170, 200),
+    );
 }
 
 fn draw_scan_report(font: &FontAtlas, mode: Mode, report: ScanReport) {
@@ -4046,7 +4090,11 @@ fn run_timing_scan() -> TimingReport {
         &mut next,
         sample_timing(0x9C, 8, || cd_read_with_audio(false, 8)),
     );
-    push_timing_record(&mut records, &mut next, sample_timing(0x9D, 1, cd_play_start));
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x9D, 1, cd_play_start),
+    );
     // Seek sweep. Four distances proved too few to model: the console measured
     // +128 slower than +512, and no monotonic fit came within 2x of the middle
     // points. Ten distances with the same five repeats each make an outlier
@@ -4124,21 +4172,45 @@ fn run_timing_scan() -> TimingReport {
         &mut records,
         &mut next,
         sample_timing(0xA2, 16, || {
-            timed_fill_batch(16, 0x2400_80FF, 32, FillKind::Textured { tpage: 0, span: 32 }, false)
+            timed_fill_batch(
+                16,
+                0x2400_80FF,
+                32,
+                FillKind::Textured { tpage: 0, span: 32 },
+                false,
+            )
         }),
     );
     push_timing_record(
         &mut records,
         &mut next,
         sample_timing(0xA3, 16, || {
-            timed_fill_batch(16, 0x2400_80FF, 32, FillKind::Textured { tpage: 0x40, span: 32 }, false)
+            timed_fill_batch(
+                16,
+                0x2400_80FF,
+                32,
+                FillKind::Textured {
+                    tpage: 0x40,
+                    span: 32,
+                },
+                false,
+            )
         }),
     );
     push_timing_record(
         &mut records,
         &mut next,
         sample_timing(0xA4, 16, || {
-            timed_fill_batch(16, 0x2400_80FF, 32, FillKind::Textured { tpage: 0x80, span: 32 }, false)
+            timed_fill_batch(
+                16,
+                0x2400_80FF,
+                32,
+                FillKind::Textured {
+                    tpage: 0x80,
+                    span: 32,
+                },
+                false,
+            )
         }),
     );
     push_timing_record(
@@ -4159,7 +4231,13 @@ fn run_timing_scan() -> TimingReport {
         &mut records,
         &mut next,
         sample_timing(0xA7, 16, || {
-            timed_fill_batch(16, 0x2C00_80FF, 32, FillKind::Textured { tpage: 0, span: 32 }, false)
+            timed_fill_batch(
+                16,
+                0x2C00_80FF,
+                32,
+                FillKind::Textured { tpage: 0, span: 32 },
+                false,
+            )
         }),
     );
     push_timing_record(
@@ -4196,14 +4274,29 @@ fn run_timing_scan() -> TimingReport {
         &mut records,
         &mut next,
         sample_timing(0xAC, 16, || {
-            timed_fill_batch(16, 0x2C00_80FF, 32, FillKind::Textured { tpage: 0, span: 255 }, false)
+            timed_fill_batch(
+                16,
+                0x2C00_80FF,
+                32,
+                FillKind::Textured {
+                    tpage: 0,
+                    span: 255,
+                },
+                false,
+            )
         }),
     );
     push_timing_record(
         &mut records,
         &mut next,
         sample_timing(0xAD, 16, || {
-            timed_fill_batch(16, 0x2C00_80FF, 32, FillKind::Textured { tpage: 0, span: 8 }, false)
+            timed_fill_batch(
+                16,
+                0x2C00_80FF,
+                32,
+                FillKind::Textured { tpage: 0, span: 8 },
+                false,
+            )
         }),
     );
     push_timing_record(
@@ -4219,7 +4312,13 @@ fn run_timing_scan() -> TimingReport {
         sample_timing(0xAF, 16, || {
             // GP0 0x64: the 8bpp-CLUT textured rect path that renders black in
             // both backends and has never been measured on silicon.
-            timed_fill_batch(16, 0x6400_80FF, 32, FillKind::TexturedRect { clut: 0 }, false)
+            timed_fill_batch(
+                16,
+                0x6400_80FF,
+                32,
+                FillKind::TexturedRect { clut: 0 },
+                false,
+            )
         }),
     );
     // MDEC. No coverage at all before now. Command number lives in bits 31..29:
@@ -4263,22 +4362,30 @@ fn run_timing_scan() -> TimingReport {
     push_timing_record(
         &mut records,
         &mut next,
-        sample_timing(0xB6, 1, || timed_pad_poll(PROBE_VARIANTS[0].1, PROBE_VARIANTS[0].2)),
+        sample_timing(0xB6, 1, || {
+            timed_pad_poll(PROBE_VARIANTS[0].1, PROBE_VARIANTS[0].2)
+        }),
     );
     push_timing_record(
         &mut records,
         &mut next,
-        sample_timing(0xB7, 1, || timed_pad_poll(PROBE_VARIANTS[1].1, PROBE_VARIANTS[1].2)),
+        sample_timing(0xB7, 1, || {
+            timed_pad_poll(PROBE_VARIANTS[1].1, PROBE_VARIANTS[1].2)
+        }),
     );
     push_timing_record(
         &mut records,
         &mut next,
-        sample_timing(0xB8, 1, || timed_pad_poll(PROBE_VARIANTS[2].1, PROBE_VARIANTS[2].2)),
+        sample_timing(0xB8, 1, || {
+            timed_pad_poll(PROBE_VARIANTS[2].1, PROBE_VARIANTS[2].2)
+        }),
     );
     push_timing_record(
         &mut records,
         &mut next,
-        sample_timing(0xB9, 1, || timed_pad_poll(PROBE_VARIANTS[3].1, PROBE_VARIANTS[3].2)),
+        sample_timing(0xB9, 1, || {
+            timed_pad_poll(PROBE_VARIANTS[3].1, PROBE_VARIANTS[3].2)
+        }),
     );
     // Setup-delay sweep. The console answered at setup 0, gave NO reply at 128,
     // and answered again at 384: non-monotonic, so the threshold cannot be read
@@ -5099,9 +5206,8 @@ fn cd_getlocp_during_playback() -> u16 {
     }
     cd_clock_reset();
     while timers::counter(timers::Timer::Timer1) < 1_000 {}
-    let elapsed = cd_timed(|| {
-        cdrom::try_get_loc_p(CD_SPINS).is_some_and(|response| !response.is_empty())
-    });
+    let elapsed =
+        cd_timed(|| cdrom::try_get_loc_p(CD_SPINS).is_some_and(|response| !response.is_empty()));
     cd_clock_reset();
     let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
     let _ = cdrom::try_mute(CD_SPINS);
@@ -5381,7 +5487,6 @@ fn timed_mdec(command: u32, payload_words: u16) -> u16 {
         0xFFFF
     }
 }
-
 
 /// One minimal MDEC block, packed as the two halfwords the decoder consumes.
 ///
@@ -7744,7 +7849,11 @@ fn test_spu_upload_small_blocks() -> TestResult {
     }
     let mut back = [0u32; 16];
     spu_dma_read(dest, &mut back);
-    expect_eq(fnv32_words(&src), fnv32_words(&back), "spu upload 4x4 blocks")
+    expect_eq(
+        fnv32_words(&src),
+        fnv32_words(&back),
+        "spu upload 4x4 blocks",
+    )
 }
 
 /// Read the uploaded SPLEEN atlas straight back out of VRAM and hash it.
@@ -7756,7 +7865,11 @@ fn test_spu_upload_small_blocks() -> TestResult {
 /// 8-texel cells (32 glyphs per row, three rows).
 fn test_gpu_glyph_atlas_readback() -> TestResult {
     let _ = spleen_replica();
-    expect_eq(0x7D60_40C4, gpu_hash_rect(448, 0, 64, 24), "spleen atlas VRAM")
+    expect_eq(
+        0x7D60_40C4,
+        gpu_hash_rect(448, 0, 64, 24),
+        "spleen atlas VRAM",
+    )
 }
 
 fn test_gpu_glyph_f() -> TestResult {
@@ -8598,9 +8711,9 @@ fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
         psx_io::write16(TRANSFER_CTRL, 0x0004);
         let spucnt = psx_io::read16(SPUCNT) & !0x0030;
         psx_io::write16(SPUCNT, spucnt | 0x0010); // transfer mode = Manual Write
-        // The SPUCNT low-6-bit SPUSTAT mirror takes 24-27 polls to settle on
-        // silicon; FIFO halfwords pushed before Manual-Write mode is active
-        // are dropped -- the very bug this test exists to catch.
+                                                  // The SPUCNT low-6-bit SPUSTAT mirror takes 24-27 polls to settle on
+                                                  // silicon; FIFO halfwords pushed before Manual-Write mode is active
+                                                  // are dropped -- the very bug this test exists to catch.
         let mut settle = 0u32;
         while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0010) & 0x003F && settle < 0xFFFF {
             settle += 1;
@@ -8614,8 +8727,8 @@ fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
             drain += 1;
         }
         psx_io::write16(SPUCNT, spucnt); // back to Stop
-        // Leave the transfer type NORMAL (0004h): parking it at 0 poisons all
-        // later sample-RAM access on silicon (SB2 finding, 2026-08-02).
+                                         // Leave the transfer type NORMAL (0004h): parking it at 0 poisons all
+                                         // later sample-RAM access on silicon (SB2 finding, 2026-08-02).
         psx_io::write16(TRANSFER_CTRL, 0x0004);
     }
     spin(4000); // let the FIFO drain to SPU RAM on hardware
@@ -8719,10 +8832,7 @@ fn raster_hashes() -> [u32; 22] {
         index += 1;
     }
     // Gouraud triangles: interpolation and dither interact here.
-    for corners in [
-        [(8, 8), (88, 16), (40, 88)],
-        [(2, 2), (94, 4), (48, 94)],
-    ] {
+    for corners in [[(8, 8), (88, 16), (40, 88)], [(2, 2), (94, 4), (48, 94)]] {
         let tri = TriGouraud::new(corners, [(0xFF, 0, 0), (0, 0xFF, 0), (0, 0, 0xFF)]);
         out[index] = gpu_draw_and_hash(&tri, TriGouraud::WORDS);
         index += 1;

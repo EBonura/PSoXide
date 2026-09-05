@@ -24,10 +24,12 @@ unsafe fn model_face_addresses_scheduled(
         );
         unsafe {
             core::arch::asm!(
+                ".set push", ".set noat",
                 "lw {a}, 0({face})", "lw {b}, 4({face})", "lw {c}, 8({face})",
                 "andi {pa}, {a}, 16383", "andi {pb}, {b}, 16383", "andi {pc}, {c}, 16383",
                 "sll {pa}, {pa}, 3", "sll {pb}, {pb}, 3", "sll {pc}, {pc}, 3",
                 "addu {pa}, {base}, {pa}", "addu {pb}, {base}, {pb}", "addu {pc}, {base}, {pc}",
+                ".set pop",
                 face = in(reg) face as *const TexturedModelRenderFace, base = in(reg) projected,
                 a = out(reg) a, b = out(reg) b, c = out(reg) c,
                 pa = out(reg) pa, pb = out(reg) pb, pc = out(reg) pc,
@@ -305,14 +307,8 @@ fn projected_part_bounds(
         let end = first
             .saturating_add(part.vertex_count() as usize)
             .min(count);
-        for index in first..end {
-            track_projected_model_bounds(
-                projected[index],
-                &mut min_x,
-                &mut max_x,
-                &mut min_y,
-                &mut max_y,
-            );
+        for &vertex in projected.iter().take(end).skip(first) {
+            track_projected_model_bounds(vertex, &mut min_x, &mut max_x, &mut min_y, &mut max_y);
         }
     }
     (min_x, max_x, min_y, max_y)

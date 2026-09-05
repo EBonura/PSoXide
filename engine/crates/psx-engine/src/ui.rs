@@ -4059,7 +4059,7 @@ fn draw_controller_prompt_prefix(
         return x;
     };
 
-    let line_height = scaled_line_height(font, UI_FONT_SCALE_ONE_Q8) as i16;
+    let line_height = scaled_line_height(font, UI_FONT_SCALE_ONE_Q8);
     let icon_y =
         text_y.saturating_sub((CONTROLLER_PROMPT_ICON_SIZE as i16 - line_height).max(0) / 2);
     let resolved = screen_resolved_node(

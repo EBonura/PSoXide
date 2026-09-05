@@ -341,10 +341,6 @@ impl Playtest {
         unresolved
     }
 
-    pub(super) fn mark_visible_room_unbuilt(&mut self, index: RoomIndex) {
-        mark_visible_room_unbuilt(&mut self.visibility, index);
-    }
-
     pub(super) fn rebuild_active_room_window(&mut self, update_streaming: bool) {
         #[cfg(not(feature = "cd-stream-bench"))]
         let _ = update_streaming;

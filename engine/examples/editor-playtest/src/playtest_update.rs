@@ -50,10 +50,20 @@ fn gait_footstep_crossed(
 /// Movement noise is independent of the audio mix/volume. Blocked movement
 /// and idle animations are silent. Sprinting/dodging carries farther.
 fn player_noise_radius(moved: bool, animation: PlayerAnim, height: i32) -> i32 {
-    if !moved { return 0; }
-    let loud = matches!(animation, PlayerAnim::Run | PlayerAnim::RunWindup
-        | PlayerAnim::RunWinddown | PlayerAnim::RunWinddownAlt | PlayerAnim::Roll
-        | PlayerAnim::Quickstep | PlayerAnim::DashLeft | PlayerAnim::DashRight);
+    if !moved {
+        return 0;
+    }
+    let loud = matches!(
+        animation,
+        PlayerAnim::Run
+            | PlayerAnim::RunWindup
+            | PlayerAnim::RunWinddown
+            | PlayerAnim::RunWinddownAlt
+            | PlayerAnim::Roll
+            | PlayerAnim::Quickstep
+            | PlayerAnim::DashLeft
+            | PlayerAnim::DashRight
+    );
     height.max(0).saturating_mul(if loud { 4 } else { 2 })
 }
 
@@ -269,7 +279,10 @@ impl Playtest {
                     player_height,
                     player_invulnerable,
                     player_noise_radius: player_noise_radius(
-                        self.player_moved_last_tick, self.anim_state, player_height),
+                        self.player_moved_last_tick,
+                        self.anim_state,
+                        player_height,
+                    ),
                     // SAFETY: every active-room entry below `active_count` was
                     // initialized while walking the resident window above.
                     active_rooms: unsafe { initialized_prefix(&active_rooms, active_count) },
@@ -287,31 +300,47 @@ impl Playtest {
                 let position = self.game_entities.position(index);
                 let audible_range = record.aggro_radius.saturating_mul(2);
                 if record.room != self.room_index
-                    || position[1].saturating_sub(player.y).saturating_abs() > i32::from(audible_range)
+                    || position[1].saturating_sub(player.y).saturating_abs()
+                        > i32::from(audible_range)
                     || psx_game_runtime::poi::xz_distance_squared_within_radius(
-                        [player.x, player.z], [position[0], position[2]], audible_range,
-                    ).is_none()
+                        [player.x, player.z],
+                        [position[0], position[2]],
+                        audible_range,
+                    )
+                    .is_none()
                 {
                     continue;
                 }
                 let state = self.game_entities.state(index);
                 let moved = position[0] != entity_positions[index][0]
                     || position[2] != entity_positions[index][2];
-                if moved && matches!(state,
-                    psx_game_runtime::entities::GameEntityState::Patrol
-                    | psx_game_runtime::entities::GameEntityState::Aggro)
+                if moved
+                    && matches!(
+                        state,
+                        psx_game_runtime::entities::GameEntityState::Patrol
+                            | psx_game_runtime::entities::GameEntityState::Aggro
+                    )
                 {
                     let clip = self.game_entities.clip_for_state(GAME_ENTITIES, index);
-                    let animation = MODEL_INSTANCES.get(usize::from(record.model_instance))
+                    let animation = MODEL_INSTANCES
+                        .get(usize::from(record.model_instance))
                         .and_then(|instance| self.models.get(instance.model.to_usize()))
-                        .copied().flatten()
+                        .copied()
+                        .flatten()
                         .and_then(|model| model.clip(&self.clips, ModelClipIndex(clip.clip)));
                     if let Some(animation) = animation {
-                        let cycle = (u32::from(animation.frame_count()) * ctx.video_hz.as_nonzero_u32())
-                            .div_ceil(u32::from(animation.sample_rate_hz()).max(1));
-                        if !clip.one_shot && gait_footstep_crossed(
-                            true, true, u32::from(clip.phase_ticks), npc_delta_ticks, cycle,
-                        ) {
+                        let cycle = (u32::from(animation.frame_count())
+                            * ctx.video_hz.as_nonzero_u32())
+                        .div_ceil(u32::from(animation.sample_rate_hz()).max(1));
+                        if !clip.one_shot
+                            && gait_footstep_crossed(
+                                true,
+                                true,
+                                u32::from(clip.phase_ticks),
+                                npc_delta_ticks,
+                                cycle,
+                            )
+                        {
                             self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyFootstep);
                         }
                     }
@@ -481,7 +510,8 @@ impl Playtest {
         // initial door states onto their box props (START_ON doors
         // begin open without a fire event).
         self.game_entities.spawn_from_records(GAME_ENTITIES);
-        self.game_entities.set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
+        self.game_entities
+            .set_stance_swap_delay(self.player_stance_config.swap_cooldown_ticks);
         self.deferred_enemy_attacks.clear();
         self.combat_projectiles.clear();
         self.combat_projectile_impacts.clear();
@@ -602,9 +632,9 @@ impl Playtest {
                     GameEntityState::Idle | GameEntityState::Patrol | GameEntityState::Dead
                 )
             });
-            if let Some(engaged) = self.combat_music.tick(hostile) {
+            if let Some(_engaged) = self.combat_music.tick(hostile) {
                 #[cfg(target_arch = "mips")]
-                psx_rt::tty::println(if engaged {
+                psx_rt::tty::println(if _engaged {
                     "combat music:on"
                 } else {
                     "combat music:off"
@@ -1003,8 +1033,13 @@ impl Playtest {
         self.player_moved_last_tick = motor_frame.moved;
         self.dash_wake.observe(
             [movement_start.x, movement_start.y, movement_start.z],
-            [motor_frame.position.x, motor_frame.position.y, motor_frame.position.z],
-            self.room_index, config.height.max(0).min(i32::from(u16::MAX)) as u16,
+            [
+                motor_frame.position.x,
+                motor_frame.position.y,
+                motor_frame.position.z,
+            ],
+            self.room_index,
+            config.height.max(0).min(i32::from(u16::MAX)) as u16,
             !motor_frame.action.is_idle() && !motor_frame.recovery,
             self.player_stance.active() == VitalityChannelId::Two,
         );
@@ -1149,7 +1184,7 @@ impl Playtest {
 
 #[cfg(test)]
 mod gameplay_audio_tests {
-    use super::{gait_footstep_crossed, enemy_idle_cue_due, player_noise_radius, PlayerAnim};
+    use super::{enemy_idle_cue_due, gait_footstep_crossed, player_noise_radius, PlayerAnim};
 
     #[test]
     fn movement_noise_requires_displacement_and_running_carries_farther() {
@@ -1163,8 +1198,10 @@ mod gameplay_audio_tests {
     fn enemy_idle_is_staggered_and_independent_of_npc_cadence() {
         for delta in [1, 2] {
             for index in 0..4 {
-                let cues = (delta..=1080).step_by(usize::from(delta))
-                    .filter(|now| enemy_idle_cue_due(u32::from(*now), delta, index)).count();
+                let cues = (delta..=1080)
+                    .step_by(usize::from(delta))
+                    .filter(|now| enemy_idle_cue_due(u32::from(*now), delta, index))
+                    .count();
                 assert_eq!(cues, 3);
             }
         }
@@ -1476,13 +1513,19 @@ impl Playtest {
             self.attack_buffer.clear();
             return false;
         }
-        let stance_offset = if self.player_stance.active() == VitalityChannelId::Two { 2 } else { 0 };
+        let stance_offset = if self.player_stance.active() == VitalityChannelId::Two {
+            2
+        } else {
+            0
+        };
         if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) {
             self.attack_buffer.request(2 + stance_offset, now.as_u32());
         } else if ctx.just_pressed(ACTIVE_LIGHT_ATTACK_BUTTON) {
             self.attack_buffer.request(1 + stance_offset, now.as_u32());
         }
-        if action_locked || !self.motor.action().is_idle() { return false; }
+        if action_locked || !self.motor.action().is_idle() {
+            return false;
+        }
         if let Some(tag) = self.attack_buffer.take(now.as_u32()) {
             let anim = match tag {
                 1 => PlayerAnim::LightAttack,

@@ -322,7 +322,7 @@ fn interpolate_cube_sky_vertex(
         (from_distance << 12) / denominator
     }
     .clamp(0, 4096);
-    let interpolate = |from: i32, to: i32| from + ((to - from) * t_q12 >> 12);
+    let interpolate = |from: i32, to: i32| from + (((to - from) * t_q12) >> 12);
     CubeSkyVertex {
         screen_q12: [
             interpolate(from.screen_q12[0], to.screen_q12[0]),

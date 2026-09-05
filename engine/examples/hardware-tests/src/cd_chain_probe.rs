@@ -52,7 +52,6 @@ const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
 static mut LOW_BUFFER: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 
-
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Variant {
     /// SectorReader exactly as the SDK ships it (with the BFRD purge).
@@ -114,7 +113,6 @@ impl VariantRecord {
         }
     }
 }
-
 
 pub(crate) struct CdChainProbe {
     next_variant: usize,
@@ -198,7 +196,6 @@ impl CdChainProbe {
         self.qr_modules[bit / 8] & (1 << (bit & 7)) != 0
     }
 
-
     fn encode_qr(&mut self) {
         let mut binary = [0u8; BINARY_LEN];
         let mut out = BinaryBuffer::new(&mut binary);
@@ -208,7 +205,11 @@ impl CdChainProbe {
         self.binary_crc = crc;
 
         let mut payload = [0u8; BASE64_LEN];
-        assert_eq!(base64_encode(&binary, &mut payload), BASE64_LEN, "CL2 Base64");
+        assert_eq!(
+            base64_encode(&binary, &mut payload),
+            BASE64_LEN,
+            "CL2 Base64"
+        );
         let mut text = [0u8; QR_TEXT_MAX];
         let mut text_len = 0usize;
         append(&mut text, &mut text_len, b"CL1/");
@@ -291,7 +292,12 @@ impl CdChainProbe {
             }
             if self.next_variant < VARIANT_COUNT {
                 let y = 24 + self.next_variant as i16 * 12;
-                font.draw_text(8, y, Variant::ALL[self.next_variant].short(), (255, 216, 96));
+                font.draw_text(
+                    8,
+                    y,
+                    Variant::ALL[self.next_variant].short(),
+                    (255, 216, 96),
+                );
                 font.draw_text(56, y, "RUNNING", (255, 216, 96));
             }
             return;
@@ -507,7 +513,11 @@ enum Transfer {
 
 /// One full raw read of `CDTEST_LBA` into `buffer`. Returns
 /// (ok_bits, chcr_kick, chcr_late, extra).
-fn raw_read(purge: bool, transfer: Transfer, buffer: *mut [u32; SECTOR_WORDS]) -> (u32, u32, u32, u32) {
+fn raw_read(
+    purge: bool,
+    transfer: Transfer,
+    buffer: *mut [u32; SECTOR_WORDS],
+) -> (u32, u32, u32, u32) {
     let mut ok = 0u32;
     if raw_prepare(purge) {
         ok |= 1;
@@ -529,7 +539,10 @@ fn raw_read(purge: bool, transfer: Transfer, buffer: *mut [u32; SECTOR_WORDS]) -
     let mut chcr_late = 0u32;
     let mut extra = 0u32;
     match transfer {
-        Transfer::Dma { wait_fifo, probe_chcr } => {
+        Transfer::Dma {
+            wait_fifo,
+            probe_chcr,
+        } => {
             // Arm BFRD, optionally wait until the FIFO reports data.
             wr_index(0);
             unsafe { psx_io::write8(CD_IRQ_REG, 0x80) };
@@ -545,9 +558,7 @@ fn raw_read(purge: bool, transfer: Transfer, buffer: *mut [u32; SECTOR_WORDS]) -
             psx_io::dma::set_bcr_manual(psx_io::dma::Channel::Cdrom, SECTOR_WORDS as u16);
             psx_io::dma::set_chcr(psx_io::dma::Channel::Cdrom, 0x1140_0100);
             if probe_chcr {
-                chcr_kick = unsafe {
-                    psx_io::read32(psx_io::dma::Channel::Cdrom.base() + 0x8)
-                };
+                chcr_kick = unsafe { psx_io::read32(psx_io::dma::Channel::Cdrom.base() + 0x8) };
             }
             let mut busy_seen = false;
             let mut spins = 0u32;
@@ -556,9 +567,7 @@ fn raw_read(purge: bool, transfer: Transfer, buffer: *mut [u32; SECTOR_WORDS]) -
                 spins += 1;
             }
             if probe_chcr {
-                chcr_late = unsafe {
-                    psx_io::read32(psx_io::dma::Channel::Cdrom.base() + 0x8)
-                };
+                chcr_late = unsafe { psx_io::read32(psx_io::dma::Channel::Cdrom.base() + 0x8) };
                 extra |= (busy_seen as u32) << 31;
             }
             psx_io::irq::ack(1 << psx_io::irq::source::DMA);
@@ -616,12 +625,40 @@ fn run_variant(variant: Variant, run: u8) -> VariantRecord {
                 0,
             )
         }
-        Variant::RawNoPurge => raw_read(false, Transfer::Dma { wait_fifo: false, probe_chcr: false }, buffer),
-        Variant::RawPurge => raw_read(true, Transfer::Dma { wait_fifo: false, probe_chcr: false }, buffer),
-        Variant::RawWaitFifo => raw_read(false, Transfer::Dma { wait_fifo: true, probe_chcr: false }, buffer),
+        Variant::RawNoPurge => raw_read(
+            false,
+            Transfer::Dma {
+                wait_fifo: false,
+                probe_chcr: false,
+            },
+            buffer,
+        ),
+        Variant::RawPurge => raw_read(
+            true,
+            Transfer::Dma {
+                wait_fifo: false,
+                probe_chcr: false,
+            },
+            buffer,
+        ),
+        Variant::RawWaitFifo => raw_read(
+            false,
+            Transfer::Dma {
+                wait_fifo: true,
+                probe_chcr: false,
+            },
+            buffer,
+        ),
         Variant::PioNoPurge => raw_read(false, Transfer::Pio, buffer),
         Variant::PioPurge => raw_read(true, Transfer::Pio, buffer),
-        Variant::ChcrProbe => raw_read(false, Transfer::Dma { wait_fifo: false, probe_chcr: true }, buffer),
+        Variant::ChcrProbe => raw_read(
+            false,
+            Transfer::Dma {
+                wait_fifo: false,
+                probe_chcr: true,
+            },
+            buffer,
+        ),
     };
 
     let words = unsafe { &*buffer };
@@ -653,7 +690,6 @@ fn drive_state() -> u32 {
         .unwrap_or(0xEE);
     ((hw_status as u32) << 24) | ((irq_flag as u32) << 16) | ((stat as u32) << 8)
 }
-
 
 const fn expected_byte(index: usize) -> u8 {
     const MAGIC: [u8; 8] = *b"PSOXSTRM";

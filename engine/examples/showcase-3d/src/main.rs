@@ -553,4 +553,3 @@ fn render_particles<const N: usize, const OT_N: usize>(
     }
     written
 }
-

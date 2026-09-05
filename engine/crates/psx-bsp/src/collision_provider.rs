@@ -283,7 +283,6 @@ fn point_to_q12(point: RoomPoint) -> Vec3I32 {
 /// keeps a clean contact on an integer plane where it is, because the traces
 /// already back off a hair from the plane they hit and a bare ceiling would
 /// promote an exact hit on x=2 to 3.
-
 fn quantise_out_of_surface(value_q12: i32, normal_q12: i16) -> i32 {
     if normal_q12 > 0 {
         // The surface faces the positive axis, so the body must not end below

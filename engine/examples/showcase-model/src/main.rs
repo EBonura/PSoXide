@@ -19,9 +19,9 @@ use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 use psx_engine::{
     button, Angle, App, Config, Ctx, CullMode, DepthBand, DepthPolicy, DepthRange,
     JointViewTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, OtDepth, OtFrame,
-    PrimitiveArena, ProjectedVertex, Scene, SimTick, TexturedModelGeometry, TexturedModelRenderFace,
-    WorldCamera, WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
-    WorldVertex,
+    PrimitiveArena, ProjectedVertex, Scene, SimTick, TexturedModelGeometry,
+    TexturedModelRenderFace, WorldCamera, WorldProjection, WorldRenderPass, WorldSurfaceOptions,
+    WorldTriCommand, WorldVertex,
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{material::TextureMaterial, ot::OrderingTable, prim::TriTextured};

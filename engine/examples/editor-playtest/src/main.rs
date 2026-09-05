@@ -53,9 +53,12 @@ use psx_asset::{Animation, ModelPart, ModelVertex};
 // no-anchor fallback (a far room with no usable portal anchor draws
 // every cell through the cached path).
 #[cfg(feature = "world-grid-visible")]
+#[cfg(not(playtest_pxbsp))]
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
+#[cfg(not(playtest_pxbsp))]
 use psx_engine::draw_room_vertex_lit;
 use psx_engine::ui::UiTextureSlot;
+#[cfg(not(playtest_pxbsp))]
 use psx_engine::world_render::PortalCellWindow;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
@@ -68,21 +71,21 @@ use psx_engine::GridVisibilityStats;
 use psx_engine::GridVisibleCell;
 use psx_engine::{
     button, horizontal_view_coordinates, prewarm_indexed_cached_room_quads, telemetry,
-    AdaptiveSubdivisionKindMask, Angle, App, CachedRoomCell, CachedRoomDepthMode,
-    CachedRoomSubdivisionMode, CachedRoomSurface, CharacterCollision, CharacterCollisionAabb,
-    CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAnim, CharacterMotorConfig,
-    CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand, DepthRange,
-    LoadedWorldCameraGte, OtFrame, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink,
-    ProjectedVertex, RenderSubmission, Rgb8, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Scene,
-    SceneStateRef, SchedulerConfig, SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing,
-    WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions,
-    WorldTriCommand, WorldVertex, Q12,
+    AdaptiveSubdivisionKindMask, Angle, App, CachedRoomCell, CachedRoomSurface, CharacterCollision,
+    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAnim,
+    CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand,
+    DepthRange, LoadedWorldCameraGte, OtFrame, PrimitivePacketArena, PrimitivePacketScratch,
+    PrimitiveSink, ProjectedVertex, RenderSubmission, Rgb8, RoomPoint, RuntimeCollisionRoom,
+    RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick, TexturedModelRenderFace,
+    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex, Q12,
 };
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
+#[cfg(not(playtest_pxbsp))]
 use psx_engine::{
     draw_indexed_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit_visible_cells,
 };
@@ -98,7 +101,7 @@ use psx_game_runtime::{
     save::{SaveBlock, SavedPlayerPosition},
 };
 use psx_gpu::{
-    draw_line_mono, draw_quad_flat, draw_tri_flat_blended,
+    draw_line_mono, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
     prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
@@ -177,6 +180,7 @@ use runtime_schedule::RUNTIME_SCHEDULE;
 use sky_runtime::*;
 use souls::SoulsWallet;
 use visibility_runtime::*;
+#[cfg(not(playtest_pxbsp))]
 use visible_cell_runtime::*;
 use vram_runtime::*;
 use water_runtime::*;
@@ -200,18 +204,18 @@ pub(crate) const USES_PXBSP: bool = generated::PLAYTEST_USES_PXBSP;
 
 use generated::{
     ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOOST_MODULES, BOX_PROPS,
-    BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
-    CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS,
-    COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT,
-    GAMEPLAY_SFX_CUES, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES,
-    INTERACTABLE_MESSAGE_PAGES, LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
-    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT,
-    PLAYER_CONTROLLER, PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME,
-    PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES,
-    ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS,
-    ROOM_REFLECTION_PROBES, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS,
-    UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, VITALITY_CIRCLES,
-    WATER_CELLS, WEAPONS, WEAPON_APPEARANCES, WEAPON_HITBOXES, WORLD_MESSAGE, WORLD_OBJECTS,
+    BOX_PROP_STATE_COUNT, BOX_PROP_SURFACES, CACHED_ROOM_DRAW_ORDER_MODE,
+    CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CHARACTERS, COMBAT_CAPSULES, CYLINDER_PROPS,
+    CYLINDER_PROP_SURFACES, DESTRUCTIBLES, ENTITIES, EQUIPMENT, GAMEPLAY_SFX_CUES, GAME_ENTITIES,
+    IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC, MATERIALS, MODELS,
+    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS,
+    PARTICLE_EMITTERS, PERSISTENT_FLAG_COUNT, PLAYER_CONTROLLER, PLAYER_SPAWN,
+    PLAYTEST_PACKET_CAPACITY, PROJECT_SAVE_NAME, PROJECT_SAVE_TITLE, PXBSP_AMBIENT_RGB, ROOMS,
+    ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
+    ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES, ROOM_RESIDENCY,
+    ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES,
+    UI_SFX_SAMPLES, VISIBILITY_CELLS, VITALITY_CIRCLES, WATER_CELLS, WEAPONS, WEAPON_APPEARANCES,
+    WEAPON_HITBOXES, WORLD_MESSAGE, WORLD_OBJECTS,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -536,11 +540,17 @@ struct Playtest {
     gameplay_epoch_set: bool,
     /// fps-overlay counter state (burn builds): presented frames and
     /// worst inter-frame gap over a rolling ~1s gameplay-tick window.
+    #[cfg(feature = "fps-overlay")]
     fps_window_start: u32,
+    #[cfg(feature = "fps-overlay")]
     fps_window_frames: u8,
+    #[cfg(feature = "fps-overlay")]
     fps_last_tick: u32,
+    #[cfg(feature = "fps-overlay")]
     fps_worst_gap: u8,
+    #[cfg(feature = "fps-overlay")]
     fps_display: u8,
+    #[cfg(feature = "fps-overlay")]
     fps_display_worst: u8,
     /// Cached camera collision-room set: the follow camera's per-tick
     /// room gather cost ~half of its 50k tick budget and the set only
@@ -1262,3 +1272,8 @@ fn main() -> ! {
         scene,
     );
 }
+
+#[cfg(not(playtest_pxbsp))]
+use generated::{CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_TEXTURE_SPLIT_MODE};
+#[cfg(not(playtest_pxbsp))]
+use psx_engine::{CachedRoomDepthMode, CachedRoomSubdivisionMode};

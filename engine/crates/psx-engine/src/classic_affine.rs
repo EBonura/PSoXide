@@ -4184,7 +4184,16 @@ unsafe fn submit_classic_affine_projected_fan_slow(
 /// fans twice. A failed speculation only dirties words beyond the restored
 /// cursor; the complete writer immediately overwrites the live prefix and no
 /// DMA tag has been linked yet.
-#[cfg(feature = "classic-affine-speculative-level0")]
+#[cfg(any(
+    all(test, feature = "classic-affine-speculative-level0"),
+    all(
+        feature = "classic-affine-speculative-level0",
+        not(feature = "classic-affine-level0-fast-path"),
+        not(feature = "classic-affine-fixed-fan-quads"),
+        not(feature = "classic-affine-fixed-fan-guarded"),
+        not(feature = "classic-affine-fixed-fan-level2")
+    )
+))]
 #[inline(always)]
 unsafe fn submit_classic_affine_speculative_level0_fan(
     vertices: *mut ClassicAffineVertex,
@@ -4294,7 +4303,13 @@ unsafe fn submit_classic_affine_speculative_level0_fan(
 /// visual-parity mode: it deliberately removes the runtime affine lattice and
 /// uses each quad's natural four-corner depth key, like the recovered Quake II
 /// PSX brush packets.
-#[cfg(feature = "classic-affine-fixed-fan-quads")]
+#[cfg(all(
+    feature = "classic-affine-fixed-fan-quads",
+    not(feature = "classic-affine-level0-fast-path"),
+    not(feature = "classic-affine-speculative-level0"),
+    not(feature = "classic-affine-fixed-fan-guarded"),
+    not(feature = "classic-affine-fixed-fan-level2")
+))]
 #[inline(always)]
 unsafe fn submit_classic_affine_fixed_fan_quads(
     vertices: *mut ClassicAffineVertex,
@@ -4319,8 +4334,20 @@ unsafe fn submit_classic_affine_fixed_fan_quads(
 /// one side of the viewport. Keeping the clip walk out of this body lets the
 /// guarded path classify and submit a face in one pass.
 #[cfg(any(
-    feature = "classic-affine-fixed-fan-quads",
-    feature = "classic-affine-fixed-fan-guarded"
+    all(
+        feature = "classic-affine-fixed-fan-quads",
+        not(feature = "classic-affine-level0-fast-path"),
+        not(feature = "classic-affine-speculative-level0"),
+        not(feature = "classic-affine-fixed-fan-guarded"),
+        not(feature = "classic-affine-fixed-fan-level2")
+    ),
+    all(
+        feature = "classic-affine-fixed-fan-guarded",
+        not(feature = "classic-affine-level0-fast-path"),
+        not(feature = "classic-affine-speculative-level0"),
+        not(feature = "classic-affine-fixed-fan-quads"),
+        not(feature = "classic-affine-fixed-fan-level2")
+    )
 ))]
 #[inline(always)]
 unsafe fn submit_classic_affine_fixed_fan_quads_visible(
@@ -4376,7 +4403,13 @@ unsafe fn submit_classic_affine_fixed_fan_quads_visible(
 /// near-camera affine texture distortion. This intentionally avoids a broad
 /// per-face screen bounding box: the GTE saturation boundary is both cheaper
 /// to classify and more directly tied to the projection failure mode.
-#[cfg(feature = "classic-affine-fixed-fan-guarded")]
+#[cfg(all(
+    feature = "classic-affine-fixed-fan-guarded",
+    not(feature = "classic-affine-level0-fast-path"),
+    not(feature = "classic-affine-speculative-level0"),
+    not(feature = "classic-affine-fixed-fan-quads"),
+    not(feature = "classic-affine-fixed-fan-level2")
+))]
 #[inline(always)]
 unsafe fn submit_classic_affine_fixed_fan_guarded(
     vertices: *mut ClassicAffineVertex,
@@ -4425,7 +4458,13 @@ unsafe fn submit_classic_affine_fixed_fan_guarded(
 /// flattened and may pair with adjacent level-zero or level-one roots. A
 /// level-two root retains the reference sixteen-triangle lattice and crack
 /// underdraw, preventing the most conspicuous near-camera affine distortion.
-#[cfg(feature = "classic-affine-fixed-fan-level2")]
+#[cfg(all(
+    feature = "classic-affine-fixed-fan-level2",
+    not(feature = "classic-affine-level0-fast-path"),
+    not(feature = "classic-affine-speculative-level0"),
+    not(feature = "classic-affine-fixed-fan-quads"),
+    not(feature = "classic-affine-fixed-fan-guarded")
+))]
 #[inline(always)]
 unsafe fn submit_classic_affine_fixed_fan_level2(
     vertices: *mut ClassicAffineVertex,
@@ -4974,8 +5013,9 @@ unsafe fn submit_quake_level0_run(
                 let next_ref = unsafe { &*next };
                 let next_otz =
                     average3_depths(root_depth, current_ref.depth as u16, next_ref.depth as u16);
-                if next_otz >= ClassicAffineProfile::QUAKE_REFERENCE.subdivide_once_at
-                    && next_otz < ClassicAffineProfile::QUAKE_REFERENCE.ot_depth
+                if (ClassicAffineProfile::QUAKE_REFERENCE.subdivide_once_at
+                    ..ClassicAffineProfile::QUAKE_REFERENCE.ot_depth)
+                    .contains(&next_otz)
                     && next_otz == otz
                 {
                     let quad = [previous_ref, current_ref, root_ref, next_ref];
@@ -6932,7 +6972,16 @@ fn classic_clip_code(screen: [i16; 2], profile: ClassicAffineProfile) -> u8 {
     )
 }
 
-#[cfg(feature = "classic-affine-fixed-fan-guarded")]
+#[cfg(any(
+    all(test, feature = "classic-affine-fixed-fan-guarded"),
+    all(
+        feature = "classic-affine-fixed-fan-guarded",
+        not(feature = "classic-affine-level0-fast-path"),
+        not(feature = "classic-affine-speculative-level0"),
+        not(feature = "classic-affine-fixed-fan-quads"),
+        not(feature = "classic-affine-fixed-fan-level2")
+    )
+))]
 #[inline(always)]
 fn classic_gte_screen_saturated(screen: [i16; 2]) -> bool {
     screen[0] <= -1024 || screen[0] >= 1023 || screen[1] <= -1024 || screen[1] >= 1023
@@ -7731,7 +7780,13 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "classic-affine-fixed-fan-quads")]
+    #[cfg(all(
+        feature = "classic-affine-fixed-fan-quads",
+        not(feature = "classic-affine-level0-fast-path"),
+        not(feature = "classic-affine-speculative-level0"),
+        not(feature = "classic-affine-fixed-fan-guarded"),
+        not(feature = "classic-affine-fixed-fan-level2")
+    ))]
     #[test]
     fn fixed_fan_path_emits_gt4_pairs_without_subdivision() {
         psx_gte::host::reset();

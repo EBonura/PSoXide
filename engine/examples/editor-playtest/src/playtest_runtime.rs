@@ -445,23 +445,37 @@ impl Playtest {
         const OUTRO_SCENE: u8 = 1;
         if self.poi_messages.world_message_shown(OUTRO_SCENE)
             || self.hazard_death_ticks_remaining != 0
-            || self.message_overlay.is_some() || !self.acquired_module.is_none()
-            || self.inventory_overlay_active {
+            || self.message_overlay.is_some()
+            || !self.acquired_module.is_none()
+            || self.inventory_overlay_active
+        {
             return;
         }
         // This demo's authored boss model opts into the closing message.
         // Disabled actors begin Dead and must never complete the demo.
         let boss_defeated = GAME_ENTITIES.iter().enumerate().any(|(index, record)| {
             record.flags & psx_level::game_entity_flags::ENABLED != 0
-                && MODEL_INSTANCES.get(usize::from(record.model_instance))
+                && MODEL_INSTANCES
+                    .get(usize::from(record.model_instance))
                     .and_then(|instance| MODELS.get(instance.model.to_usize()))
                     .is_some_and(|model| model.name == "Heavy Enemy Model")
-                && self.game_entities.state(index) == psx_game_runtime::entities::GameEntityState::Dead
-                && self.game_entities.clip_for_state(GAME_ENTITIES, index).phase_ticks >= 90
+                && self.game_entities.state(index)
+                    == psx_game_runtime::entities::GameEntityState::Dead
+                && self
+                    .game_entities
+                    .clip_for_state(GAME_ENTITIES, index)
+                    .phase_ticks
+                    >= 90
         });
-        if boss_defeated && self.poi_messages.open_world(OUTRO_SCENE,
-            psx_game_runtime::poi::MessagePageSpan::new(
-                crate::loc::DEMO_OUTRO_FIRST, crate::loc::DEMO_OUTRO_COUNT)) {
+        if boss_defeated
+            && self.poi_messages.open_world(
+                OUTRO_SCENE,
+                psx_game_runtime::poi::MessagePageSpan::new(
+                    crate::loc::DEMO_OUTRO_FIRST,
+                    crate::loc::DEMO_OUTRO_COUNT,
+                ),
+            )
+        {
             self.set_poi_presentation_frames(psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES, 0);
         }
     }

@@ -4,11 +4,11 @@
 //! the old call-site signatures.
 
 use super::*;
-use psx_engine::classic_affine::ClassicAffineSubmit;
 use psx_bsp::sky::{
     submit_view_ray_cube_sky, submit_view_ray_layered_sky, VIEW_RAY_CUBE_SKY_PACKET_WORDS,
     VIEW_RAY_SKY_PACKET_WORDS,
 };
+use psx_engine::classic_affine::ClassicAffineSubmit;
 
 /// Draw the room's cooked sky panorama through the arena-owned
 /// [`psx_game_runtime::sky::SkyCyclorama`] cache.

@@ -667,6 +667,7 @@ pub(super) fn debug_log_portal_visibility_snapshot(
     }
 }
 
+#[cfg(not(playtest_pxbsp))]
 fn active_room_cache_status_debug_code(status: ActiveRoomCacheStatus) -> u32 {
     match status {
         ActiveRoomCacheStatus::Ready => 0,
@@ -700,6 +701,7 @@ pub(super) fn debug_log_post_cross_render_start(
     line.emit();
 }
 
+#[cfg(not(playtest_pxbsp))]
 pub(super) fn debug_log_post_cross_render_room(
     slot: usize,
     active: ActiveRuntimeRoom,

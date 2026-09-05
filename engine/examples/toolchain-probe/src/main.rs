@@ -21,7 +21,9 @@ use psx_gpu::{Resolution, VideoMode};
 #[repr(align(4))]
 struct Aligned<T: ?Sized>(T);
 
-static MAP: &Aligned<[u8]> = &Aligned(*include_bytes!("../../editor-playtest/generated/brush_world.pxbsp"));
+static MAP: &Aligned<[u8]> = &Aligned(*include_bytes!(
+    "../../editor-playtest/generated/brush_world.pxbsp"
+));
 
 /// Cell width in pixels. Anything below 16 has to be drawn as a polygon:
 /// GP0(02h), the VRAM fill, snaps its X to a 16-pixel boundary and rounds

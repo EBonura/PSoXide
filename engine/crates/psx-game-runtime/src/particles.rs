@@ -141,7 +141,7 @@ pub fn draw_melee_window_trail<const OT_DEPTH: usize>(
             edges[segment + 1][0],
             edges[segment + 1][1],
         ];
-        if points.iter().any(|p| *p == ProjectedVertex::INVALID) {
+        if points.contains(&ProjectedVertex::INVALID) {
             continue;
         }
         let colors = [root, tip, root, tip]

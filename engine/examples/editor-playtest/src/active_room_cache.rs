@@ -9,9 +9,7 @@
 use super::*;
 use psx_game_runtime::room_cache;
 
-pub(super) use psx_game_runtime::room_cache::{
-    active_surface_cache_failed, ActiveRoomCacheStatus, ActiveRoomSurfaceCache, ActiveRuntimeRoom,
-};
+pub(super) use psx_game_runtime::room_cache::{ActiveRoomSurfaceCache, ActiveRuntimeRoom};
 
 /// The crate window-job record instantiated with this example's window
 /// capacity.
@@ -354,3 +352,6 @@ fn streamed_room_surface_cache_slices(
         cache,
     )
 }
+
+#[cfg(not(playtest_pxbsp))]
+pub(super) use psx_game_runtime::room_cache::{active_surface_cache_failed, ActiveRoomCacheStatus};

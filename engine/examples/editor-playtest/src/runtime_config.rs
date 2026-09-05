@@ -7,6 +7,7 @@ use psx_game_runtime::room_streaming::{RoomStreamScheduler, StreamedRoomPages};
 use psx_game_runtime::vram::UiImageCache;
 use psx_game_runtime::vram::{FontPackScratch, VramRuntime, FONT_ATLAS_MAX_ROWS};
 
+#[cfg(not(playtest_pxbsp))]
 pub(super) const fn cached_room_depth_mode() -> CachedRoomDepthMode {
     match CACHED_ROOM_DEPTH_MODE {
         0 => CachedRoomDepthMode::FixedCell,
@@ -16,6 +17,7 @@ pub(super) const fn cached_room_depth_mode() -> CachedRoomDepthMode {
     }
 }
 
+#[cfg(not(playtest_pxbsp))]
 pub(super) const fn cached_room_subdivision_mode() -> CachedRoomSubdivisionMode {
     match CACHED_ROOM_TEXTURE_SPLIT_MODE {
         1 => CachedRoomSubdivisionMode::DepthSorted,
@@ -391,13 +393,6 @@ pub(super) fn current_actor_surface_options(
         .unwrap_or_else(fallback_surface_options)
 }
 
-pub(super) fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
-    ROOMS
-        .get(room_index.to_usize())
-        .map(room_surface_options)
-        .unwrap_or_else(fallback_surface_options)
-}
-
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
     usize::from(record.resident_chunk_limit.max(1)).min(MAX_RUNTIME_RESIDENT_CHUNKS)
@@ -419,13 +414,6 @@ pub(super) fn room_active_chunk_limit(record: &LevelRoomRecord) -> usize {
     }
 }
 
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-pub(super) fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
-    record.visibility_radius.max(1)
-}
 /// Per-frame projected scratch for one generated grid-room surface cache.
 /// Rooms that exceed this vertex budget fall back to the uncached draw.
 /// A PXBSP project never enters that renderer, so retain only a sentinel
@@ -557,7 +545,8 @@ pub(super) const MAX_RUNTIME_MODEL_FACES: usize = crate::generated::MODEL_FACE_C
 /// Predecoded part records shared by runtime model assets.
 pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = crate::generated::MODEL_PART_CAPACITY;
 /// Predecoded vertices shared by every cooked model.
-pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = crate::generated::MODEL_DECODED_VERTEX_CAPACITY;
+pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize =
+    crate::generated::MODEL_DECODED_VERTEX_CAPACITY;
 /// Projected edge threshold used to subdivide close model triangles.
 pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Joint-transform scratch -- all biped rigs we currently cook
@@ -584,7 +573,9 @@ pub(super) const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
 /// A prop can break once; reserve no event slots for nonexistent props.
 pub(super) const MAX_BOX_PROP_BREAK_EVENTS: usize = if MAX_BOX_PROP_STATE < 16 {
     MAX_BOX_PROP_STATE
-} else { 16 };
+} else {
+    16
+};
 /// Cap on attached weapon/equipment visuals rendered per frame.
 pub(super) const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// Assets are fixed at cook time, so their tables determine cache capacity.
@@ -593,7 +584,11 @@ pub(super) const MAX_RUNTIME_MODEL_CLIPS: usize = cooked_capacity(MODEL_CLIPS.le
 
 /// Keep a sentinel slot for the empty editor placeholder manifest.
 const fn cooked_capacity(count: usize) -> usize {
-    if count == 0 { 1 } else { count }
+    if count == 0 {
+        1
+    } else {
+        count
+    }
 }
 pub(super) const MODEL_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_MODELS").is_some();
 pub(super) const MODEL_BOUNDS_CULLING_ENABLED: bool =

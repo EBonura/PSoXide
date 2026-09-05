@@ -9,6 +9,7 @@
 use super::*;
 
 #[cfg(feature = "world-grid-visible")]
+#[cfg(not(playtest_pxbsp))]
 pub(super) use psx_game_runtime::world_cells::accumulate_grid_visibility_stats;
 
 #[cfg(all(

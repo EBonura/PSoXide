@@ -267,7 +267,10 @@ impl SceneEntityMover<'_> {
             );
         // Backend selection is cooked, not a per-actor fallback decision.
         if USES_PXBSP {
-            let bsp = self.bsp.as_deref_mut().expect("resident BSP entity backend");
+            let bsp = self
+                .bsp
+                .as_deref_mut()
+                .expect("resident BSP entity backend");
             let Some(_) = self
                 .box_props
                 .collect_collision_blockers_checked_into(BOX_PROPS, room, &mut aabbs)
@@ -521,8 +524,10 @@ impl Playtest {
                 .flatten()
                 .map(|snapshot| snapshot.pose());
             if attack.is_ranged() {
-                let mut released = self.game_entities
-                    .deferred_projectile_release_mask(attack).unwrap_or(u16::MAX);
+                let mut released = self
+                    .game_entities
+                    .deferred_projectile_release_mask(attack)
+                    .unwrap_or(u16::MAX);
                 while let Some((emitter, release)) = combat::authored_projectile_release_pending(
                     attacker_capsules,
                     attack.action(),
@@ -530,7 +535,9 @@ impl Playtest {
                     released,
                 ) {
                     let velocity = self.game_entities.ranged_velocity(
-                        attack.entity(), release.position, release.speed,
+                        attack.entity(),
+                        release.position,
+                        release.speed,
                     );
                     let spawn = ProjectileSpawn {
                         position: release.position,
@@ -549,7 +556,9 @@ impl Playtest {
                     if self.combat_projectiles.spawn(spawn).is_ok() {
                         telemetry::debug_log("enemy projectile:release");
                         self.queue_gameplay_sfx(LevelGameplaySfxEvent::ProjectileLaunch);
-                        let _ = self.game_entities.commit_deferred_projectile(attack, emitter);
+                        let _ = self
+                            .game_entities
+                            .commit_deferred_projectile(attack, emitter);
                         released |= 1u16 << emitter;
                     } else {
                         // Retry on a later retained pose; never consume a shot
@@ -571,7 +580,9 @@ impl Playtest {
                 attacker_pose,
                 player_capsules,
                 player_pose,
-                self.game_entities.deferred_melee_hit_mask(attack).unwrap_or(u16::MAX),
+                self.game_entities
+                    .deferred_melee_hit_mask(attack)
+                    .unwrap_or(u16::MAX),
             );
             let damage = match contact {
                 combat::AuthoredActorContact::Hit {
@@ -614,7 +625,8 @@ impl Playtest {
             let connected = if window_mask == 0 {
                 self.game_entities.connect_deferred_attack(attack)
             } else {
-                self.game_entities.connect_deferred_melee_window(attack, window_mask)
+                self.game_entities
+                    .connect_deferred_melee_window(attack, window_mask)
             };
             if connected {
                 hits = hits.saturating_add(1);
@@ -762,19 +774,27 @@ impl Playtest {
         if hits > 0 {
             telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(hits));
             let action = self.anim_state.action();
-            let armored = matches!(self.anim_state, PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack)
-                && player_pose.is_some_and(|pose| {
-                    let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
-                    player_capsules.iter().any(|capsule| {
-                        capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
-                            && capsule.action == action.to_index() as u8
-                            && frame >= capsule.active_start_frame && frame <= capsule.active_end_frame
-                    })
-                });
+            let armored = matches!(
+                self.anim_state,
+                PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack
+            ) && player_pose.is_some_and(|pose| {
+                let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+                player_capsules.iter().any(|capsule| {
+                    capsule.flags & psx_level::combat_capsule_flags::HITBOX != 0
+                        && capsule.action == action.to_index() as u8
+                        && frame >= capsule.active_start_frame
+                        && frame <= capsule.active_end_frame
+                })
+            });
             let staggered = self.interrupt_player_on_poise_break(poise_total, armored, ctx);
-            self.spawn_combat_hit_sparks(player_position, player_height.max(0) as u16,
-                self.room_index, self.player_stance.active() == VitalityChannelId::Two,
-                staggered, self.hazard_death_ticks_remaining != 0);
+            self.spawn_combat_hit_sparks(
+                player_position,
+                player_height.max(0) as u16,
+                self.room_index,
+                self.player_stance.active() == VitalityChannelId::Two,
+                staggered,
+                self.hazard_death_ticks_remaining != 0,
+            );
         }
     }
 
@@ -964,11 +984,14 @@ impl Playtest {
                 now,
             );
             let state = self.game_entities.state(entity);
-            self.spawn_combat_hit_sparks(self.game_entities.position(entity),
-                GAME_ENTITIES[entity].height, GAME_ENTITIES[entity].room,
+            self.spawn_combat_hit_sparks(
+                self.game_entities.position(entity),
+                GAME_ENTITIES[entity].height,
+                GAME_ENTITIES[entity].room,
                 channel == DamageNumberChannel::Zenith,
                 state == psx_game_runtime::entities::GameEntityState::Staggered,
-                state == psx_game_runtime::entities::GameEntityState::Dead);
+                state == psx_game_runtime::entities::GameEntityState::Dead,
+            );
         }
     }
 
@@ -1324,8 +1347,14 @@ impl Playtest {
                         damage_number_channel,
                         now,
                     );
-                    self.spawn_combat_hit_sparks(position, entity_record.height, entity_record.room,
-                        vitality_channel == VitalityChannelId::Two, outcome.staggered, outcome.died);
+                    self.spawn_combat_hit_sparks(
+                        position,
+                        entity_record.height,
+                        entity_record.room,
+                        vitality_channel == VitalityChannelId::Two,
+                        outcome.staggered,
+                        outcome.died,
+                    );
                 }
                 if outcome.died {
                     // The authored-capsule path knows exactly which entity

@@ -247,8 +247,18 @@ impl SampleProbe {
         match self.stage {
             0 => self.audit(),
             1 | 2 | 3 => self.key(BEEP_VOICE, self.beep_addr, self.beep_rate, Adsr::sample()),
-            4 => self.key(BEEP_VOICE, self.beep_addr, self.beep_rate, Adsr::percussive()),
-            5 => self.key(BEEP_VOICE, self.beep_addr, self.beep_rate, Adsr::default_tone()),
+            4 => self.key(
+                BEEP_VOICE,
+                self.beep_addr,
+                self.beep_rate,
+                Adsr::percussive(),
+            ),
+            5 => self.key(
+                BEEP_VOICE,
+                self.beep_addr,
+                self.beep_rate,
+                Adsr::default_tone(),
+            ),
             _ => unreachable!(),
         }
         tty::print("hardware-tests: sb1 stage=");

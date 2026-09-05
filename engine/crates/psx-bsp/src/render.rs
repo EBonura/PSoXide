@@ -773,6 +773,7 @@ impl FrustumPlanes {
     /// `planes` is the caller's own copy of [`Self::planes`], so the guest can
     /// hold it somewhere cheaper to read than main RAM.
     #[inline(always)]
+    #[cfg(any(test, not(target_arch = "mips")))]
     fn cull_polygon(
         planes: &[([i32; 3], i32); 5],
         side_error: i32,
@@ -2492,6 +2493,7 @@ impl Renderer {
     /// # Safety
     /// `source_base` must be the base of the map's vertex lump; see
     /// [`Self::materialize_pxbsp_face`].
+    #[cfg(not(target_arch = "mips"))]
     unsafe fn pxbsp_face_clip(
         source_base: *const ClassicAffineWordSourceVertex,
         face: FaceRef,
@@ -5171,7 +5173,7 @@ mod frustum_tests {
                                         continue;
                                     }
                                     assert!(
-                                        !(outside && !oracle_outside),
+                                        !outside || oracle_outside,
                                         "plane {index} rejected an inside point {position:?}"
                                     );
                                     assert!(

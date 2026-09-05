@@ -1011,6 +1011,7 @@ impl Scene for Playtest {
             }
         }
         let post_cross_debug = POST_CROSS_RENDER_DEBUG_LOGS && self.post_cross_debug_frames != 0;
+        #[cfg(not(playtest_pxbsp))]
         let post_cross_detail = post_cross_debug
             && self.post_cross_debug_frames == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
         let mut post_cross_logged_end = false;
@@ -1038,8 +1039,7 @@ impl Scene for Playtest {
         let mut world_object_visibility = WorldObjectVisibility::ALL;
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
-            world_object_visibility =
-                bsp.visible_world_objects(camera, &self.destructibles);
+            world_object_visibility = bsp.visible_world_objects(camera, &self.destructibles);
             visible_sky_aperture = bsp.draw(
                 camera,
                 bsp_material_tick,
@@ -1082,37 +1082,50 @@ impl Scene for Playtest {
 
         if self.current_collision_room.is_some() || USES_PXBSP {
             let mut total_instance_stats = ModelInstanceDrawStats::default();
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_active_chunks = 0u32;
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_cached_draws = 0u32;
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_uncached_draws = 0u32;
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_cache_cells = 0u32;
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_cache_vertices = 0u32;
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_cache_surfaces = 0u32;
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_cache_fallback_draws = 0u32;
             #[cfg(all(
                 feature = "world-grid-visible",
                 not(feature = "vis-full-active-chunks")
             ))]
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_visibility_fallback_draws = 0u32;
             #[cfg(not(all(
                 feature = "world-grid-visible",
                 not(feature = "vis-full-active-chunks")
             )))]
             let room_visibility_fallback_draws = 0u32;
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_active_chunk_mask = RuntimeDebugMask::EMPTY;
             // This mask describes streamed grid chunks, not the resident BSP.
             // BSP draw proof remains the shared primitive/GPU command counters.
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_drawn_chunk_mask = RuntimeDebugMask::EMPTY;
             #[cfg(feature = "world-grid-visible")]
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_visible_cells = 0u32;
             #[cfg(all(
                 feature = "world-grid-visible",
                 not(feature = "vis-full-active-chunks")
             ))]
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_range_culled_cells = 0u32;
             #[cfg(all(feature = "world-grid-visible", feature = "vis-full-active-chunks"))]
             let room_range_culled_cells = 0u32;
             #[cfg(feature = "world-grid-visible")]
+            #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
             let mut room_stats_total = GridVisibilityStats::default();
             #[cfg(feature = "room-surface-profile")]
             let mut room_surface_packets = 0u32;
@@ -1635,8 +1648,7 @@ impl Scene for Playtest {
                 }
                 let player = self.motor.position();
                 let player_lighting = self.current_room_lighting(camera);
-                let actor_options =
-                    current_actor_surface_options(self.room_index, USES_PXBSP);
+                let actor_options = current_actor_surface_options(self.room_index, USES_PXBSP);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
                 #[cfg(feature = "actor-shadows-projected")]
                 {
@@ -1760,6 +1772,7 @@ impl Scene for Playtest {
             }
 
             if self.character.is_some() {
+                #[cfg_attr(playtest_pxbsp, allow(unused_mut))]
                 let mut instance_equipment_remaining = MAX_EQUIPMENT_DRAWS;
                 if USES_PXBSP {
                     if let (Some(room_record), Some(lighting)) =
@@ -1788,8 +1801,13 @@ impl Scene for Playtest {
                             &mut primitive_packets,
                             &mut world,
                         );
-                        instance_equipment_remaining = instance_equipment_remaining
-                            .saturating_sub(equipment_stats.draws as usize);
+                        #[cfg(not(playtest_pxbsp))]
+                        {
+                            instance_equipment_remaining = instance_equipment_remaining
+                                .saturating_sub(equipment_stats.draws as usize);
+                        }
+                        #[cfg(playtest_pxbsp)]
+                        let _ = equipment_stats;
                         telemetry::stage_end(telemetry::stage::EQUIPMENT);
                     }
                 }
@@ -2022,30 +2040,65 @@ impl Scene for Playtest {
         );
         let _ = self.draw_combat_projectiles(camera, &mut ot, &mut primitive_packets);
         if let Some(material) = self.particle_material {
-            let projector = PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
-            for sample in self.dash_wake.samples().filter(|s| s.room == self.room_index) {
-                let _ = psx_game_runtime::particles::draw_dash_sample(sample, camera, projector,
-                    self.effect_depth_range(sample.room), material, &mut ot, &mut primitive_packets);
+            let projector =
+                PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
+            for sample in self
+                .dash_wake
+                .samples()
+                .filter(|s| s.room == self.room_index)
+            {
+                let _ = psx_game_runtime::particles::draw_dash_sample(
+                    sample,
+                    camera,
+                    projector,
+                    self.effect_depth_range(sample.room),
+                    material,
+                    &mut ot,
+                    &mut primitive_packets,
+                );
             }
         }
         // Enemy claws are part of the body mesh. Their damage capsules define
         // the blade edges, so editing a swing window also retimes its trail.
         for (index, entity) in GAME_ENTITIES.iter().enumerate() {
             if entity.room != self.room_index
-                || self.game_entities.state(index) != psx_game_runtime::entities::GameEntityState::Attack
-                || self.game_entities.clip_for_state(GAME_ENTITIES, index).clip != entity.attack_clip {
+                || self.game_entities.state(index)
+                    != psx_game_runtime::entities::GameEntityState::Attack
+                || self.game_entities.clip_for_state(GAME_ENTITIES, index).clip
+                    != entity.attack_clip
+            {
                 continue;
             }
-            let Some(pose) = self.instance_actor_poses.get(entity.model_instance as usize).copied().flatten() else { continue; };
+            let Some(pose) = self
+                .instance_actor_poses
+                .get(entity.model_instance as usize)
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
             let first = entity.combat_capsule_first.to_usize();
             let end = first + usize::from(entity.combat_capsule_count);
-            let Some(capsules) = COMBAT_CAPSULES.get(first..end) else { continue; };
-            let projector = PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
-            for capsule in capsules.iter().take(psx_level::MAX_CHARACTER_COMBAT_CAPSULES) {
-                let _ = psx_game_runtime::particles::draw_melee_window_trail(capsule,
-                    CharacterAnimationAction::LightAttack, pose.pose(),
+            let Some(capsules) = COMBAT_CAPSULES.get(first..end) else {
+                continue;
+            };
+            let projector =
+                PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
+            for capsule in capsules
+                .iter()
+                .take(psx_level::MAX_CHARACTER_COMBAT_CAPSULES)
+            {
+                let _ = psx_game_runtime::particles::draw_melee_window_trail(
+                    capsule,
+                    CharacterAnimationAction::LightAttack,
+                    pose.pose(),
                     self.game_entities.stance(index) == VitalityChannelId::Two,
-                    camera, projector, self.effect_depth_range(entity.room), &mut ot, &mut primitive_packets);
+                    camera,
+                    projector,
+                    self.effect_depth_range(entity.room),
+                    &mut ot,
+                    &mut primitive_packets,
+                );
             }
         }
         let _ = self.draw_player_water_wade_splash(
@@ -2094,12 +2147,7 @@ impl Scene for Playtest {
         }
 
         if let Some(target) = self.lock_target_indicator_position() {
-            draw_lock_target_indicator(
-                target,
-                camera,
-                overlay_tick,
-                self.player_stance.active(),
-            );
+            draw_lock_target_indicator(target, camera, overlay_tick, self.player_stance.active());
         }
 
         // Damage numbers sit above the world and below the panels: they
@@ -2196,7 +2244,6 @@ impl Scene for Playtest {
                     cooldown_progress_q12,
                     echo_elapsed,
                 );
-
             }
         }
 

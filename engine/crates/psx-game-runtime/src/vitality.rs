@@ -455,9 +455,8 @@ impl PowerUpLoadout {
             let Some(module) = module_id.index().and_then(|index| modules.get(index)) else {
                 continue;
             };
-            for index in 0..psx_level::boost_stat::COUNT {
-                bonuses_q12[index] = bonuses_q12[index]
-                    .saturating_add(module_stat_bonus_q12(vitality, slot, module, index));
+            for (index, bonus) in bonuses_q12.iter_mut().enumerate() {
+                *bonus = bonus.saturating_add(module_stat_bonus_q12(vitality, slot, module, index));
             }
         }
 

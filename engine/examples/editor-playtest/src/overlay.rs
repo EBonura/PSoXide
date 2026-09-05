@@ -43,14 +43,6 @@ pub(crate) fn draw_brightness_overlay(level: u8) {
     );
 }
 
-pub(crate) fn draw_interaction_prompt(
-    font: &FontAtlas,
-    prompt: &str,
-    cross_prompt: Option<UiTextureSlot>,
-) {
-    draw_interaction_prompt_animated(font, prompt, 0, cross_prompt);
-}
-
 /// Animated proximity prompt. `prompt` is the action verb; the shared engine
 /// chrome adds the matching Cross icon.
 pub(crate) fn draw_interaction_prompt_animated(

@@ -166,7 +166,10 @@ const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 /// build, not the burn.
 const QR_BYTE_CAPACITY: usize = 711;
 const _: () = assert!(QR_TEXT_MAX <= QR_BYTE_CAPACITY, "SB2 QR payload too big");
-const _: () = assert!((QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE <= 240, "SB2 QR too tall");
+const _: () = assert!(
+    (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE <= 240,
+    "SB2 QR too tall"
+);
 
 pub(crate) struct SpuProbe {
     /// 0..RAM_STAGES = pass 1, then pass 2 segments, then done.
@@ -238,7 +241,11 @@ impl SpuProbe {
         }
 
         let segment = step;
-        let tone_frames = if segment == 8 { HOLD_TONE_FRAMES } else { TONE_FRAMES };
+        let tone_frames = if segment == 8 {
+            HOLD_TONE_FRAMES
+        } else {
+            TONE_FRAMES
+        };
         match segment {
             // SYNC: three 10-frame bursts, for finding t=0 in the audio.
             0 => match self.frame {
@@ -354,9 +361,8 @@ impl SpuProbe {
                 }
                 if self.frame == 30 {
                     let small = unsafe { &*core::ptr::addr_of!(SOURCE) };
-                    let bytes = unsafe {
-                        core::slice::from_raw_parts(small.as_ptr() as *const u8, 512)
-                    };
+                    let bytes =
+                        unsafe { core::slice::from_raw_parts(small.as_ptr() as *const u8, 512) };
                     spu::upload_adpcm(SpuAddr::new(ADDR_HIGH), bytes);
                 }
             }
@@ -446,7 +452,7 @@ impl SpuProbe {
         Voice::key_off(all_voices_mask());
         Voice::set_noise_mask(0);
         match segment {
-            0 => {}                                                    // SYNC keys itself
+            0 => {} // SYNC keys itself
             s @ 1..=7 => key_voice(VOICE, PITCH_LADDER[s - 1], SPU_TABLE_ADDR),
             8..=11 => key_voice(VOICE, UNITY_PITCH, SPU_TABLE_ADDR),
             12 => {
@@ -571,7 +577,11 @@ impl SpuProbe {
         append(&mut text, &mut len, b"SB2/");
         append(&mut text, &mut len, &payload);
         append(&mut text, &mut len, b"/C:");
-        append(&mut text, &mut len, hex8(self.binary_crc).digits().as_bytes());
+        append(
+            &mut text,
+            &mut len,
+            hex8(self.binary_crc).digits().as_bytes(),
+        );
         let encoded = unsafe { core::str::from_utf8_unchecked(&text[..len]) };
         let mut temp = [0u8; QR_BUFFER_LEN];
         let mut output = [0u8; QR_BUFFER_LEN];
@@ -683,7 +693,11 @@ impl SpuProbe {
         font.draw_text(8, top, "SPU RAM BAD WORDS", (140, 160, 190));
         for stage in 0..RAM_STAGES {
             let bad = self.words[TONE_SEGMENTS * TONE_FIELDS + stage * RAM_FIELDS + 3];
-            let colour = if bad == 0 { (96, 240, 128) } else { (255, 96, 96) };
+            let colour = if bad == 0 {
+                (96, 240, 128)
+            } else {
+                (255, 96, 96)
+            };
             let y = top + 14 + stage as i16 * 12;
             font.draw_text(8, y, ram_label(stage as u8), (200, 208, 220));
             font.draw_text(88, y, hex8(bad).digits(), colour);
@@ -768,9 +782,17 @@ fn upload_tables() {
         small[at + 1] = if block == 0 { 0x04 } else { 0x03 };
         for sample in 0..28 {
             let index = block * 28 + sample;
-            let nibble = if (index % 28) * 2 < 28 { HIGH_NIBBLE } else { LOW_NIBBLE };
+            let nibble = if (index % 28) * 2 < 28 {
+                HIGH_NIBBLE
+            } else {
+                LOW_NIBBLE
+            };
             let byte = at + 2 + sample / 2;
-            if sample % 2 == 0 { small[byte] |= nibble } else { small[byte] |= nibble << 4 }
+            if sample % 2 == 0 {
+                small[byte] |= nibble
+            } else {
+                small[byte] |= nibble << 4
+            }
         }
     }
     spu::upload_adpcm(SpuAddr::new(SPU_SMALL_ADDR), &small);
@@ -783,10 +805,10 @@ fn build_square(table: &mut [u8], half_period_blocks: usize) {
     for block in 0..TABLE_BLOCKS {
         let at = block * 16;
         table[at] = TONE_SHIFT; // filter 0
-        // Loop-start on the first block, END+REPEAT on the LAST, nothing
-        // in between. With only two blocks "not first" and "last" were
-        // the same thing; at 64 they are not, and marking every middle
-        // block as END would have ended the sample after one of them.
+                                // Loop-start on the first block, END+REPEAT on the LAST, nothing
+                                // in between. With only two blocks "not first" and "last" were
+                                // the same thing; at 64 they are not, and marking every middle
+                                // block as END would have ended the sample after one of them.
         table[at + 1] = if block == 0 {
             0x04
         } else if block == TABLE_BLOCKS - 1 {

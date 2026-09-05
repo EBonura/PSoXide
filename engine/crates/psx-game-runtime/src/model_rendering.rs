@@ -1295,7 +1295,7 @@ fn dash_wire_visual(
     }
     let local_q8 = phase_q12.saturating_sub(start_phase).saturating_mul(256) / range_phase;
     let from_left = action == CharacterAnimationAction::DashLeft;
-    if local_q8 < DASH_CONVERT_START_Q8 || local_q8 > DASH_RESTORE_END_Q8 {
+    if !(DASH_CONVERT_START_Q8..=DASH_RESTORE_END_Q8).contains(&local_q8) {
         DashWireVisual::Solid
     } else if local_q8 < DASH_WIRE_START_Q8 {
         DashWireVisual::Converting {

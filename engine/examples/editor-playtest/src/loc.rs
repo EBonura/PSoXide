@@ -107,7 +107,10 @@ static ITALIAN: &[(&str, &str)] = &[
     ("ui.credits.music", "MUSICA"),
     ("ui.credits.title", "CREDITI"),
     ("ui.ending.back", "  MENU PRINCIPALE"),
-    ("ui.ending.body", "RESTA SINTONIZZATO PER NUOVI AGGIORNAMENTI."),
+    (
+        "ui.ending.body",
+        "RESTA SINTONIZZATO PER NUOVI AGGIORNAMENTI.",
+    ),
     ("ui.ending.head", "GRAZIE PER AVER GIOCATO"),
     ("ui.ending.subject", "DEMO TECNICA CORTEX IGNITION"),
     (
@@ -206,12 +209,16 @@ pub(crate) fn page_text(index: usize) -> Option<&'static str> {
                 "THANKS FOR PLAYING THE\nCORTEX IGNITION TECH DEMO.",
                 "FOLLOW BONNIE STUDIOS\nFOR DEVELOPMENT UPDATES.",
                 "FEEL FREE TO KEEP EXPLORING\nOR RETURN TO THE MAIN MENU\nFROM THE PAUSE MENU.",
-            ].get(page).copied(),
+            ]
+            .get(page)
+            .copied(),
             Language::Italian => [
                 "GRAZIE PER AVER GIOCATO ALLA\nDEMO TECNICA DI CORTEX IGNITION.",
                 "SEGUI BONNIE STUDIOS\nPER AGGIORNAMENTI SULLO SVILUPPO.",
                 "PUOI CONTINUARE A ESPLORARE\nO TORNARE AL MENU PRINCIPALE\nDAL MENU DI PAUSA.",
-            ].get(page).copied(),
+            ]
+            .get(page)
+            .copied(),
         };
     }
     let english = INTERACTABLE_MESSAGE_PAGES.get(index).copied()?;

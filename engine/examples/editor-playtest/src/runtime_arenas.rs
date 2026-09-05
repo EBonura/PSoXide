@@ -83,7 +83,7 @@ pub(super) struct GridWorldArenas {
     pub(super) prebuilt_quads: RuntimePrebuiltRoomQuads,
     /// Per-frame projected-vertex scratch for cached-room draws.
     #[cfg(not(feature = "cd-stream-bench"))]
-    pub(super) room_projection: RuntimeCachedRoomProjection,
+    pub(super) _room_projection: RuntimeCachedRoomProjection,
 }
 
 /// Session-lifetime overlay between the mutually exclusive spatial backends.
@@ -161,7 +161,7 @@ pub(super) union LoadRenderOverlay {
 pub(super) struct GameplayAssetArenas {
     pub(super) persistent_assets: RuntimePersistentAssetStreamer,
     pub(super) prebuilt_quads: RuntimePrebuiltRoomQuads,
-    pub(super) room_projection: RuntimeCachedRoomProjection,
+    pub(super) _room_projection: RuntimeCachedRoomProjection,
 }
 
 /// RAM union of the streamed front-end UI-image cache and every gameplay-only
@@ -202,7 +202,7 @@ impl RuntimeArenas {
             gameplay: core::mem::ManuallyDrop::new(GameplayAssetArenas {
                 persistent_assets: RuntimePersistentAssetStreamer::zeroed(),
                 prebuilt_quads: RuntimePrebuiltRoomQuads::zeroed(),
-                room_projection: RuntimeCachedRoomProjection::zeroed(),
+                _room_projection: RuntimeCachedRoomProjection::zeroed(),
             }),
         },
         // Both variants are all-zero images. Select the PXBSP side here so
@@ -465,17 +465,18 @@ pub(super) fn debris_cache_arena() -> &'static mut RuntimeDebrisCache {
 }
 
 /// Exclusive borrow of the cached-room projection scratch.
+#[cfg(not(playtest_pxbsp))]
 pub(super) fn room_projection_arena() -> &'static mut RuntimeCachedRoomProjection {
     // SAFETY: see `vram_arena` + the `FrontEndGameplayOverlay` contract.
     #[cfg(feature = "cd-stream-bench")]
     unsafe {
         let gameplay =
             core::ptr::addr_of_mut!((*arenas_ptr()).overlay.gameplay).cast::<GameplayAssetArenas>();
-        &mut (*gameplay).room_projection
+        &mut (*gameplay)._room_projection
     }
     #[cfg(not(feature = "cd-stream-bench"))]
     unsafe {
-        &mut (*grid_world_ptr()).room_projection
+        &mut (*grid_world_ptr())._room_projection
     }
 }
 

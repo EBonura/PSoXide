@@ -583,4 +583,3 @@ fn main() -> ! {
     };
     App::run(config, &mut scene);
 }
-

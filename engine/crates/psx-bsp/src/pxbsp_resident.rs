@@ -1416,12 +1416,8 @@ pub(crate) mod tests {
             let native = map.mark_surfaces_native();
             assert_eq!(native.len(), records.len());
             assert!(!native.is_empty(), "fixture has no mark surfaces");
-            for index in 0..records.len() {
-                assert_eq!(
-                    native[index],
-                    records.get(index).expect("mark"),
-                    "mark {index}"
-                );
+            for (index, &mark) in native.iter().enumerate() {
+                assert_eq!(mark, records.get(index).expect("mark"), "mark {index}");
             }
         }
     }
