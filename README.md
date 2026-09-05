@@ -42,6 +42,17 @@ retail BIOS.
 > editor workflows can still change. Native release binaries have not been cut
 > yet; build from source or use the web version.
 
+## Start here
+
+| I want to… | Read |
+| --- | --- |
+| Try the emulator | [Web player](https://bonnie-studios.itch.io/psoxide) or [build from source](#quick-start) |
+| Write a PS1 game in Rust | [SDK](sdk/README.md) and [downstream build setup](docs/downstream-projects.md) |
+| Author a level | [Editor quickstart](editor/README.md#bsp-level-quickstart) |
+| Understand the codebase | [Repository architecture](docs/repository-architecture.md) |
+| Contribute or report a bug | [Contributing](CONTRIBUTING.md) |
+| Find technical references | [Documentation index](docs/README.md) |
+
 ## What PSoXide powers
 
 The projects do not all use the same amount of the stack. A small game can use
@@ -51,7 +62,7 @@ entity code.
 
 | Project | What it is | PSoXide's role |
 | --- | --- | --- |
-| [Cortex Ignition Tech Demo 0.1](editor/projects/default/) | The flagship third-person action-RPG test: authored BSP level, player, enemy and boss | Editor, cooker, engine, animation, combat, asset streaming, emulator and disc build |
+| [Cortex Ignition Tech Demo 0.4b](editor/projects/cortex-ignition-tech-demo-0.4b/) | The flagship third-person action-RPG test: authored BSP level, player, enemy and boss | Editor, cooker, engine, animation, combat, asset streaming, emulator and disc build |
 | [Quake PSX](https://github.com/EBonura/quake-psx) | Quake shareware Start and Episode 1 for the original PlayStation | SDK, fixed-point/GTE rendering, audio, input, disc I/O, profiling and shared runtime work |
 | [HL-PSX](https://github.com/EBonura/hl-psx) | A bring-your-own-assets Half-Life port targeting the original PlayStation | SDK, renderer/runtime primitives, content pipeline, streaming, emulator regression and profiling |
 | [Voxide](https://github.com/EBonura/voxide) | A Minecraft-style survival sandbox | SDK, runtime, input, audio, world data and disc pipeline |
@@ -141,8 +152,9 @@ make run                               # launch the frontend/editor
 make run-release                       # fully optimized frontend
 ```
 
-Open **Cortex Ignition Tech Demo 0.1** from the editor project browser and use
-**Play** to cook, compile, master and boot it in the embedded viewport.
+Open **Cortex Ignition Tech Demo 0.4b** from the editor project browser and use
+**Play** to cook, compile, master and boot it in the embedded viewport. For a
+small starting point, use **File → New Project** instead of copying the demo.
 
 If you are starting a separate game repository, read
 [Downstream game projects](docs/downstream-projects.md) before copying a

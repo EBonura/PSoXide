@@ -84,20 +84,17 @@ jobs:
             build/release-target/aarch64-apple-darwin/${{ steps.profile.outputs.name }}/frontend
           lipo -info dist/PSoXide/psoxide
 
-      # The sample is committed already miniaturised rather than stripped here.
-      # cortex_v1 itself is not in the repo -- it is a local 295 MB working
-      # project -- so an earlier version of this step failed on CI with "no such
-      # file". `sample_cortex_v1` is its miniaturise-project output: 45 files,
-      # 1.0 MB, verified to cook byte-identically to the full project.
+      # Use the same small tracked courtyard as File > New Project. The old
+      # editor/samples/cortex_v1 path was removed during project reorganization.
       - name: Stage the sample project
         run: |
+          test -f editor/archive/fixtures/brush-open-courtyard/project.ron
           mkdir -p dist/PSoXide/projects
-          cp -R editor/samples/cortex_v1 dist/PSoXide/projects/cortex_v1
-          du -sh dist/PSoXide/projects/cortex_v1
+          cp -R editor/archive/fixtures/brush-open-courtyard dist/PSoXide/projects/brush-open-courtyard
 
       - name: Stage the archive
         run: |
-          cp README.md dist/PSoXide/ 2>/dev/null || true
+          cp README.md LICENSE dist/PSoXide/
           cd dist && zip -r psoxide-macos-universal.zip PSoXide
           shasum -a 256 psoxide-macos-universal.zip
 
@@ -133,7 +130,10 @@ jobs:
 
             ### Notes
 
-            - No BIOS is included and none can be; supply your own.
-            - A sample project ships under `projects/`. Your own projects live
-              in `~/Library/Application Support/com.psoxide.PSoXide/projects`.
+            - Homebrew can use the built-in HLE BIOS. Retail games need your own BIOS and game data.
+            - Open the courtyard sample under `projects/brush-open-courtyard/`.
+            - Cooking and building PS1 games still require the source checkout
+              and pinned Rust toolchain; this archive is not a standalone SDK.
+            - User projects normally live in
+              `~/Library/Application Support/com.psoxide.PSoXide/projects`.
             - Windows and Linux builds are not published yet.

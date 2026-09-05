@@ -319,7 +319,11 @@ impl NodeSource for RenderNodes<'_> {
     #[inline(always)]
     unsafe fn child_unchecked(self, index: usize, side: usize) -> i16 {
         unsafe {
-            let base = self.nodes.as_bytes().as_ptr().add(index * Node::SIZE + 2 + side * 2);
+            let base = self
+                .nodes
+                .as_bytes()
+                .as_ptr()
+                .add(index * Node::SIZE + 2 + side * 2);
             i16::from_le(core::ptr::read(base.cast::<i16>()))
         }
     }
@@ -403,7 +407,13 @@ impl PlaneSource for &[CompactPlane] {
         let plane = unsafe { self.get_unchecked(index) };
         axial_or_general(
             plane.kind as usize,
-            || [plane.normal.x as i32, plane.normal.y as i32, plane.normal.z as i32],
+            || {
+                [
+                    plane.normal.x as i32,
+                    plane.normal.y as i32,
+                    plane.normal.z as i32,
+                ]
+            },
             plane.distance,
             a,
             b,
@@ -412,7 +422,9 @@ impl PlaneSource for &[CompactPlane] {
 
     #[inline(always)]
     fn get(self, index: usize) -> Option<Plane> {
-        <[CompactPlane]>::get(self, index).copied().map(CompactPlane::decoded)
+        <[CompactPlane]>::get(self, index)
+            .copied()
+            .map(CompactPlane::decoded)
     }
 }
 
@@ -692,9 +704,8 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
             if P::CHECKED && plane_index >= planes.len() {
                 return false;
             }
-            let (start_distance, end_distance) = unsafe {
-                planes.distances_unchecked(plane_index, &segment_start, &segment_end)
-            };
+            let (start_distance, end_distance) =
+                unsafe { planes.distances_unchecked(plane_index, &segment_start, &segment_end) };
 
             // Both in front (sign bits clear) or both behind (sign bits set).
             if start_distance | end_distance >= 0 {
@@ -758,8 +769,7 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
         continuation_count -= 1;
         // This slot was written when it was pushed above, and stack order
         // guarantees it is popped only after that write.
-        let continuation =
-            unsafe { scratch.continuations[continuation_count].assume_init_read() };
+        let continuation = unsafe { scratch.continuations[continuation_count].assume_init_read() };
         let Some(far_contents) =
             point_contents_walk(planes, nodes, continuation.far_child, &continuation.middle)
         else {

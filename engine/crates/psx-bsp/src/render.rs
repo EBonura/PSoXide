@@ -941,18 +941,46 @@ impl FrustumPlanes {
             ($index:literal) => {
                 if mask & (1 << $index) != 0 {
                     let outer = [
-                        if bits & (1 << (3 * $index)) != 0 { lo[0] } else { hi[0] },
-                        if bits & (1 << (3 * $index + 1)) != 0 { lo[1] } else { hi[1] },
-                        if bits & (1 << (3 * $index + 2)) != 0 { lo[2] } else { hi[2] },
+                        if bits & (1 << (3 * $index)) != 0 {
+                            lo[0]
+                        } else {
+                            hi[0]
+                        },
+                        if bits & (1 << (3 * $index + 1)) != 0 {
+                            lo[1]
+                        } else {
+                            hi[1]
+                        },
+                        if bits & (1 << (3 * $index + 2)) != 0 {
+                            lo[2]
+                        } else {
+                            hi[2]
+                        },
                     ];
-                    let error = if $index == PXBSP_CLIP_NEAR_PLANE { 0 } else { side_error };
+                    let error = if $index == PXBSP_CLIP_NEAR_PLANE {
+                        0
+                    } else {
+                        side_error
+                    };
                     if self.distance_at($index, outer) < -error {
                         return None;
                     }
                     let inner = [
-                        if bits & (1 << (3 * $index)) != 0 { hi[0] } else { lo[0] },
-                        if bits & (1 << (3 * $index + 1)) != 0 { hi[1] } else { lo[1] },
-                        if bits & (1 << (3 * $index + 2)) != 0 { hi[2] } else { lo[2] },
+                        if bits & (1 << (3 * $index)) != 0 {
+                            hi[0]
+                        } else {
+                            lo[0]
+                        },
+                        if bits & (1 << (3 * $index + 1)) != 0 {
+                            hi[1]
+                        } else {
+                            lo[1]
+                        },
+                        if bits & (1 << (3 * $index + 2)) != 0 {
+                            hi[2]
+                        } else {
+                            lo[2]
+                        },
                     ];
                     if self.distance_at($index, inner) >= error {
                         residual &= !(1 << $index);
@@ -999,11 +1027,27 @@ impl FrustumPlanes {
         macro_rules! plane {
             ($index:literal) => {{
                 let outer = [
-                    if bits & (1 << (3 * $index)) != 0 { lo[0] } else { hi[0] },
-                    if bits & (1 << (3 * $index + 1)) != 0 { lo[1] } else { hi[1] },
-                    if bits & (1 << (3 * $index + 2)) != 0 { lo[2] } else { hi[2] },
+                    if bits & (1 << (3 * $index)) != 0 {
+                        lo[0]
+                    } else {
+                        hi[0]
+                    },
+                    if bits & (1 << (3 * $index + 1)) != 0 {
+                        lo[1]
+                    } else {
+                        hi[1]
+                    },
+                    if bits & (1 << (3 * $index + 2)) != 0 {
+                        lo[2]
+                    } else {
+                        hi[2]
+                    },
                 ];
-                let error = if $index == PXBSP_CLIP_NEAR_PLANE { 0 } else { side_error };
+                let error = if $index == PXBSP_CLIP_NEAR_PLANE {
+                    0
+                } else {
+                    side_error
+                };
                 if self.distance_at($index, outer) < -error {
                     return true;
                 }
@@ -1691,13 +1735,16 @@ impl Renderer {
         scene::load_rotation(&view.rotation);
         scene::load_translation(view.translation);
 
-        let frustum =
-            FrustumPlanes::from_view(
-                &view.rotation,
-                view.translation,
-                [camera.origin.x >> 12, camera.origin.y >> 12, camera.origin.z >> 12],
-                self.view_projection,
-            );
+        let frustum = FrustumPlanes::from_view(
+            &view.rotation,
+            view.translation,
+            [
+                camera.origin.x >> 12,
+                camera.origin.y >> 12,
+                camera.origin.z >> 12,
+            ],
+            self.view_projection,
+        );
         // Alternate-frame selection reuse: every other frame draws the chain
         // the previous frame selected, with every face on the exact clip path
         // (no inherited node proofs), so the PVS mark and the node walk run at
@@ -1706,7 +1753,8 @@ impl Renderer {
         let reuse = self.selection_reuse && self.reuse_pxbsp_valid && self.frame & 1 == 1;
         let selected = if reuse {
             self.frame_pxbsp_faces.clear();
-            self.frame_pxbsp_faces.extend_from_slice(&self.reuse_pxbsp_faces);
+            self.frame_pxbsp_faces
+                .extend_from_slice(&self.reuse_pxbsp_faces);
             for &face in &self.frame_pxbsp_faces {
                 set_packed_face_state(
                     &mut self.frame_pxbsp_face_state,
@@ -1722,7 +1770,8 @@ impl Renderer {
             if self.selection_reuse {
                 self.reuse_pxbsp_faces.clear();
                 if ok {
-                    self.reuse_pxbsp_faces.extend_from_slice(&self.frame_pxbsp_faces);
+                    self.reuse_pxbsp_faces
+                        .extend_from_slice(&self.frame_pxbsp_faces);
                 }
                 self.reuse_pxbsp_valid = ok;
             }
@@ -3102,7 +3151,8 @@ impl Renderer {
                                     face,
                                     PXBSP_FRAME_FALLBACK,
                                 );
-                                *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) = face_mask;
+                                *self.frame_pxbsp_face_clip_mask.get_unchecked_mut(face) =
+                                    face_mask;
                             }
                         }
                     }
@@ -3526,7 +3576,11 @@ fn pxbsp_animation_offset(
 
 fn pxbsp_scroll_axis(speed_q8: i16, phase: u8, period: u8, tick: u32) -> u8 {
     psx_math::int32::scroll_q8_wrapped(
-        speed_q8, phase, u16::from(period.max(1)), tick, PXBSP_MATERIAL_TICKS_PER_SECOND,
+        speed_q8,
+        phase,
+        u16::from(period.max(1)),
+        tick,
+        PXBSP_MATERIAL_TICKS_PER_SECOND,
     )
 }
 
@@ -4577,8 +4631,16 @@ mod tests {
         };
         let boxed = |x0: i16, x1: i16| {
             (
-                Vec3I16 { x: x0, y: -50, z: -50 },
-                Vec3I16 { x: x1, y: 50, z: 50 },
+                Vec3I16 {
+                    x: x0,
+                    y: -50,
+                    z: -50,
+                },
+                Vec3I16 {
+                    x: x1,
+                    y: 50,
+                    z: 50,
+                },
             )
         };
         let far = frustum(1000);

@@ -3381,7 +3381,8 @@ fn cylinder_overlaps_aabb(
 mod tests {
     #[test]
     fn interruption_keeps_position_stamina_and_falling_velocity() {
-        let mut motor = super::CharacterMotorState::new(super::RoomPoint::new(1, 2, 3), super::Angle::ZERO);
+        let mut motor =
+            super::CharacterMotorState::new(super::RoomPoint::new(1, 2, 3), super::Angle::ZERO);
         motor.action = super::CharacterMotorAction::Roll;
         motor.action_frame = 7;
         motor.stamina_q12 = 1234;

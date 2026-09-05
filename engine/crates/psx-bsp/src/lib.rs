@@ -1951,12 +1951,15 @@ mod tests {
             header[2..4].copy_from_slice(&id.to_le_bytes());
             let offset = (index * 24) as u32;
             header[60..64].copy_from_slice(&offset.to_le_bytes());
-            header[64..68].copy_from_slice(&(offset + AliasModelTriangle::SIZE as u32).to_le_bytes());
+            header[64..68]
+                .copy_from_slice(&(offset + AliasModelTriangle::SIZE as u32).to_le_bytes());
             bytes.extend_from_slice(&header);
         }
         for index in 0..ids.len() {
             bytes.extend_from_slice(payload);
-            if index + 1 < ids.len() { bytes.extend_from_slice(&[0; 3]); }
+            if index + 1 < ids.len() {
+                bytes.extend_from_slice(&[0; 3]);
+            }
         }
         let table = AliasModelTable::new(&bytes).unwrap();
         for (index, id) in ids.into_iter().enumerate() {

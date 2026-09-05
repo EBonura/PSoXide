@@ -18,6 +18,8 @@ the editor and emulator share one simulation.
 | [`psx-gpu`](crates/psx-gpu) | High-level GPU API: init, primitives, framebuffers, display-window shifting. |
 | [`psx-vram`](crates/psx-vram) | Typed VRAM layout primitives: color, rect, tpage, CLUT, upload helpers. |
 | [`psx-spu`](crates/psx-spu) | High-level SPU API: typed voices, volume, pitch, ADSR, ADPCM upload, key-on/off, loop chaining, noise. |
+| [`psx-sfx`](crates/psx-sfx) | One-shot sample banks, voice allocation and playback cutoff for SPU effects. |
+| [`psx-settings`](crates/psx-settings) | Versioned game preferences with optional memory-card persistence. |
 | [`psx-gte`](crates/psx-gte) | GTE (COP2) wrappers. MIPS emits inline-asm coprocessor ops; host routes through `psx-gte-core`. |
 | [`psx-gte-core`](crates/psx-gte-core) | Pure-Rust GTE state machine and fixed-point math. Shared by `psx-gte` and the emulator; bit-exact against a real-console conformance corpus. |
 | [`psx-math`](crates/psx-math) | Fixed-point math: Q0.12 angles + sin/cos/atan2, int32 helpers, decimal text formatting. |
@@ -31,9 +33,11 @@ the editor and emulator share one simulation.
 | [`psx-pack`](crates/psx-pack) | Guest-side WORLD.PAK parsing + in-place HLZC/LZ4 decompression (reader half of `psx-iso`). |
 | [`psx-telemetry`](crates/psx-telemetry) | Shared guest/host telemetry id tables for the emulator profiling hooks. |
 
-There is deliberately no umbrella crate: games depend on the subsystem
-crates they use (the removed `psx-sdk` re-exported 6 of 16 crates and every
-consumer ended up mixing it with direct dependencies anyway).
+There is no umbrella crate: games depend on the subsystem crates they use.
+The workspace currently has 19 crates. A standalone game should use the
+[pinned bootstrap workflow](../docs/downstream-projects.md), rather than
+copying SDK directories by hand; several shared dependencies still live
+outside `sdk/`.
 
 ## Examples
 

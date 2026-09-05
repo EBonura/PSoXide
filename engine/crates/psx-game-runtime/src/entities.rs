@@ -1530,14 +1530,21 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
 
     /// Per-emitter release latches for a valid ranged attack. A stagger, death,
     /// new swing or new entity tick invalidates the old token.
-    pub fn deferred_projectile_release_mask(&self, attack: DeferredGameEntityAttack) -> Option<u16> {
+    pub fn deferred_projectile_release_mask(
+        &self,
+        attack: DeferredGameEntityAttack,
+    ) -> Option<u16> {
         (attack.is_ranged() && self.deferred_attack_can_connect(attack))
             .then(|| self.authored_connection_mask[attack.entity()])
     }
 
     /// Consume only this emitter after spawning its shot. Other authored
     /// release markers remain available, but no marker can fire twice.
-    pub fn commit_deferred_projectile(&mut self, attack: DeferredGameEntityAttack, emitter: u8) -> bool {
+    pub fn commit_deferred_projectile(
+        &mut self,
+        attack: DeferredGameEntityAttack,
+        emitter: u8,
+    ) -> bool {
         let Some(mask) = self.deferred_projectile_release_mask(attack) else {
             return false;
         };
@@ -1556,9 +1563,17 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
 
     /// Consume all simultaneously active hitboxes as one verified contact.
     /// Later non-overlapping windows remain available in the same animation.
-    pub fn connect_deferred_melee_window(&mut self, attack: DeferredGameEntityAttack, window: u16) -> bool {
-        let Some(used) = self.deferred_melee_hit_mask(attack) else { return false; };
-        if window == 0 || used & window != 0 { return false; }
+    pub fn connect_deferred_melee_window(
+        &mut self,
+        attack: DeferredGameEntityAttack,
+        window: u16,
+    ) -> bool {
+        let Some(used) = self.deferred_melee_hit_mask(attack) else {
+            return false;
+        };
+        if window == 0 || used & window != 0 {
+            return false;
+        }
         self.authored_connection_mask[attack.entity()] = used | window;
         true
     }
@@ -1845,7 +1860,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     ) -> bool {
         input.player_room == record.room
             && psx_math::int32::abs_i32(self.y[index].saturating_sub(input.player[1]))
-                <= i32::from(record.height).max(input.player_height).saturating_mul(2)
+                <= i32::from(record.height)
+                    .max(input.player_height)
+                    .saturating_mul(2)
             && self.player_within(index, input, i32::from(record.aggro_radius))
     }
 
@@ -1865,7 +1882,11 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         // Omni-directional short-range hearing, attenuated through cover.
         // Hearing wakes the normal alert/pursuit state; it never bypasses the
         // separate line-of-sight check required to commit an attack.
-        let hearing = if clear { input.player_noise_radius } else { input.player_noise_radius / 3 };
+        let hearing = if clear {
+            input.player_noise_radius
+        } else {
+            input.player_noise_radius / 3
+        };
         if hearing > 0 && self.player_within(index, input, hearing) {
             return true;
         }
@@ -3657,7 +3678,10 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&FAR_ROOM_ENEMY);
         entities.set_spatial_active_mask(Some(0));
-        let far = GameEntityTickInput { player: [12000, 0, 1000], ..input };
+        let far = GameEntityTickInput {
+            player: [12000, 0, 1000],
+            ..input
+        };
         let stats = entities.tick(&FAR_ROOM_ENEMY, far, &mut NoClipMover);
         assert_eq!((stats.thought, stats.gated), (0, 1));
         let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
@@ -3727,12 +3751,21 @@ mod tests {
     #[test]
     fn perception_distinguishes_front_sight_rear_hearing_and_silence() {
         static ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
-            x: 0, y: 0, z: 0, patrol_x: 0, patrol_y: 0, patrol_z: 0,
-            height: 64, radius: 12, aggro_radius: 352,
+            x: 0,
+            y: 0,
+            z: 0,
+            patrol_x: 0,
+            patrol_y: 0,
+            patrol_z: 0,
+            height: 64,
+            radius: 12,
+            aggro_radius: 352,
             ..IDLE_ENEMY[0]
         }];
         let base = GameEntityTickInput {
-            player: [0, 0, -180], player_height: 64, player_radius: 12,
+            player: [0, 0, -180],
+            player_height: 64,
+            player_radius: 12,
             ..near_input(&ACTIVE)
         };
         for delta in [1, 2] {
@@ -3740,47 +3773,101 @@ mod tests {
             entities.spawn_from_records(&ENEMY);
             entities.set_spatial_active_mask(Some(0));
             entities.tick_delta(&ENEMY, base, &mut NoClipMover, delta);
-            assert_eq!(entities.state(0), GameEntityState::Idle, "silent rear approach");
-            let walking = GameEntityTickInput { player_noise_radius: 128, ..base };
+            assert_eq!(
+                entities.state(0),
+                GameEntityState::Idle,
+                "silent rear approach"
+            );
+            let walking = GameEntityTickInput {
+                player_noise_radius: 128,
+                ..base
+            };
             entities.tick_delta(&ENEMY, walking, &mut NoClipMover, delta);
-            assert_eq!(entities.state(0), GameEntityState::Idle, "outside walking earshot");
-            let running = GameEntityTickInput { player_noise_radius: 256, ..base };
+            assert_eq!(
+                entities.state(0),
+                GameEntityState::Idle,
+                "outside walking earshot"
+            );
+            let running = GameEntityTickInput {
+                player_noise_radius: 256,
+                ..base
+            };
             entities.tick_delta(&ENEMY, running, &mut NoClipMover, delta);
-            assert_eq!(entities.state(0), GameEntityState::Aggro, "hears running behind");
+            assert_eq!(
+                entities.state(0),
+                GameEntityState::Aggro,
+                "hears running behind"
+            );
             entities.spawn_from_records(&ENEMY);
-            let front = GameEntityTickInput { player: [0, 0, 300], ..base };
+            let front = GameEntityTickInput {
+                player: [0, 0, 300],
+                ..base
+            };
             entities.tick_delta(&ENEMY, front, &mut NoClipMover, delta);
-            assert_eq!(entities.state(0), GameEntityState::Aggro, "sees ahead without noise");
+            assert_eq!(
+                entities.state(0),
+                GameEntityState::Aggro,
+                "sees ahead without noise"
+            );
             entities.spawn_from_records(&ENEMY);
-            let close = GameEntityTickInput { player: [0, 0, -90], ..walking };
+            let close = GameEntityTickInput {
+                player: [0, 0, -90],
+                ..walking
+            };
             entities.tick_delta(&ENEMY, close, &mut NoClipMover, delta);
-            assert_eq!(entities.state(0), GameEntityState::Aggro, "hears walking behind");
+            assert_eq!(
+                entities.state(0),
+                GameEntityState::Aggro,
+                "hears walking behind"
+            );
         }
     }
 
     #[test]
     fn cover_attenuates_hearing_and_still_blocks_attack_commitment() {
         static ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
-            x: 0, y: 0, z: 0, patrol_x: 0, patrol_y: 0, patrol_z: 0,
-            height: 64, radius: 12, aggro_radius: 352,
+            x: 0,
+            y: 0,
+            z: 0,
+            patrol_x: 0,
+            patrol_y: 0,
+            patrol_z: 0,
+            height: 64,
+            radius: 12,
+            aggro_radius: 352,
             ..IDLE_ENEMY[0]
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&ENEMY);
         let mut blocked = SightMover::default();
         let input = GameEntityTickInput {
-            player: [0, 0, -120], player_height: 64, player_radius: 12,
-            player_noise_radius: 256, ..near_input(&ACTIVE)
+            player: [0, 0, -120],
+            player_height: 64,
+            player_radius: 12,
+            player_noise_radius: 256,
+            ..near_input(&ACTIVE)
         };
         entities.tick(&ENEMY, input, &mut blocked);
         assert_eq!(entities.state(0), GameEntityState::Idle);
-        let close = GameEntityTickInput { player: [0, 0, -40], ..input };
+        let close = GameEntityTickInput {
+            player: [0, 0, -40],
+            ..input
+        };
         entities.tick(&ENEMY, close, &mut blocked);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
-        for _ in 0..10 { entities.tick(&ENEMY, close, &mut blocked); }
-        assert_eq!(entities.state(0), GameEntityState::Aggro, "cannot attack through cover");
+        for _ in 0..10 {
+            entities.tick(&ENEMY, close, &mut blocked);
+        }
+        assert_eq!(
+            entities.state(0),
+            GameEntityState::Aggro,
+            "cannot attack through cover"
+        );
         entities.spawn_from_records(&ENEMY);
-        let upstairs = GameEntityTickInput { player: [0, 512, -40], ..input };
+        let upstairs = GameEntityTickInput {
+            player: [0, 512, -40],
+            ..input
+        };
         entities.tick(&ENEMY, upstairs, &mut blocked);
         assert_eq!(entities.state(0), GameEntityState::Idle);
     }

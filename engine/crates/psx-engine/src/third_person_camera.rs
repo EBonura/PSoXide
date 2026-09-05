@@ -420,8 +420,12 @@ impl ThirdPersonCameraState {
 
         let focus_goal = camera_focus_goal(target, config);
 
-        if input.recenter { self.recenter_active = true; }
-        if target.lock_target.is_some() { self.recenter_active = false; }
+        if input.recenter {
+            self.recenter_active = true;
+        }
+        if target.lock_target.is_some() {
+            self.recenter_active = false;
+        }
 
         if input.yaw_delta_q12 != 0 || input.pitch_delta_q12 != 0 {
             self.recenter_active = false;
@@ -443,13 +447,23 @@ impl ThirdPersonCameraState {
             // At body contact the target bearing becomes unstable and flips
             // by 180 degrees when it crosses the player. Keep the orbit steady
             // in that small zone; focus still follows both actors.
-            let bearing = if dx.max(dz) < close_radius { self.yaw }
-                else { yaw_to_point(target.player, lock).add(Angle::HALF) };
+            let bearing = if dx.max(dz) < close_radius {
+                self.yaw
+            } else {
+                yaw_to_point(target.player, lock).add(Angle::HALF)
+            };
             (bearing, config.lock_on_align_step)
         } else if self.recenter_active
             || (config.auto_align_when_moving && target.moving && self.manual_cooldown == 0)
         {
-            (player_back_yaw, if self.recenter_active { config.lock_on_align_step } else { config.auto_align_step })
+            (
+                player_back_yaw,
+                if self.recenter_active {
+                    config.lock_on_align_step
+                } else {
+                    config.auto_align_step
+                },
+            )
         } else {
             (self.yaw, config.auto_align_step)
         };
@@ -494,7 +508,8 @@ impl ThirdPersonCameraState {
         let solve_now = self.solve_phase == 0
             || input.yaw_delta_q12 != 0
             || input.pitch_delta_q12 != 0
-            || input.recenter || self.recenter_active
+            || input.recenter
+            || self.recenter_active
             || target.lock_target.is_some();
         self.solve_phase = self.solve_phase.saturating_add(1);
         if self.solve_phase >= config.collision_solve_interval.max(1) {
@@ -2106,15 +2121,31 @@ mod tests {
         assert_eq!(frame.yaw, Angle::QUARTER.add(config.lock_on_align_step));
         // A single press completes the turn after release.
         for _ in 0..32 {
-            camera.update(WorldProjection::new(160, 120, 320, 64), None,
-                target, ThirdPersonCameraInput::default(), config);
+            camera.update(
+                WorldProjection::new(160, 120, 320, 64),
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
         }
         assert_eq!(camera.yaw(), Angle::HALF);
         assert!(!camera.recenter_active);
         camera.recenter_active = true;
-        camera.update(WorldProjection::new(160, 120, 320, 64), None,
-            target, ThirdPersonCameraInput { yaw_delta_q12: 20, ..ThirdPersonCameraInput::default() }, config);
-        assert!(!camera.recenter_active, "manual orbit must cancel recentering");
+        camera.update(
+            WorldProjection::new(160, 120, 320, 64),
+            None,
+            target,
+            ThirdPersonCameraInput {
+                yaw_delta_q12: 20,
+                ..ThirdPersonCameraInput::default()
+            },
+            config,
+        );
+        assert!(
+            !camera.recenter_active,
+            "manual orbit must cancel recentering"
+        );
     }
 
     #[test]
@@ -2499,14 +2530,28 @@ mod tests {
         let projection = WorldProjection::new(160, 120, 320, 8);
         let mut camera = ThirdPersonCameraState::new(Angle::HALF);
         let mut target = ThirdPersonCameraTarget {
-            player: RoomPoint::ZERO, player_yaw: Angle::ZERO, moving: false,
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
             lock_target: Some(RoomPoint::new(0, 0, 200)),
         };
-        camera.update(projection, None, target, ThirdPersonCameraInput::default(), config);
+        camera.update(
+            projection,
+            None,
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
         let yaw = camera.yaw();
         for point in [RoomPoint::new(10, 0, 10), RoomPoint::new(-10, 0, -10)] {
             target.lock_target = Some(point);
-            let frame = camera.update(projection, None, target, ThirdPersonCameraInput::default(), config);
+            let frame = camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
             assert_eq!(frame.yaw, yaw);
         }
     }

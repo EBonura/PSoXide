@@ -1896,9 +1896,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let mut culled_triangles = 0u16;
         let mut submitted_triangles = 0usize;
         for source_face in faces {
-            let (face, addresses) = unsafe {
-                model_face_addresses_scheduled(source_face, projected_vertices.as_ptr())
-            };
+            let (face, addresses) =
+                unsafe { model_face_addresses_scheduled(source_face, projected_vertices.as_ptr()) };
             let projected = unsafe { [*addresses[0], *addresses[1], *addresses[2]] };
             let (area, uv_words, palette_bank) = if CULL_BACK || CRYSTAL {
                 psx_gte::scene::screen_area_and_unpack_model_face_scheduled(

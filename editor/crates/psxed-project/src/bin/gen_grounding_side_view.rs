@@ -182,7 +182,11 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
         let cube_x = poi_x + 192;
         let mut cube = Brush::cuboid(
             [cube_x, SLAB_TOP, ACTOR_Z - CUBE_DEPTH / 2],
-            [cube_x + CUBE_SIZE, SLAB_TOP + CUBE_HEIGHT, ACTOR_Z + CUBE_DEPTH / 2],
+            [
+                cube_x + CUBE_SIZE,
+                SLAB_TOP + CUBE_HEIGHT,
+                ACTOR_Z + CUBE_DEPTH / 2,
+            ],
         );
         paint(&mut cube, floor_material);
         scene.brushes.push(cube);
@@ -215,7 +219,11 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
         let cube_x = poi_x + 192;
         let mut cube = Brush::cuboid(
             [cube_x, SLAB_TOP, ACTOR_Z - CUBE_DEPTH / 2],
-            [cube_x + CUBE_SIZE, SLAB_TOP + CUBE_HEIGHT, ACTOR_Z + CUBE_DEPTH / 2],
+            [
+                cube_x + CUBE_SIZE,
+                SLAB_TOP + CUBE_HEIGHT,
+                ACTOR_Z + CUBE_DEPTH / 2,
+            ],
         );
         paint(&mut cube, floor_material);
         scene.brushes.push(cube);
