@@ -350,7 +350,7 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let mut check = |n: u32, d: u32| {
+        let check = |n: u32, d: u32| {
             assert_eq!(InvariantDivisor31::new(d).divide(n), n / d, "n={n} d={d}");
         };
         for d in 1..=70u32 {

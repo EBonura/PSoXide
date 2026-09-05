@@ -1,46 +1,11 @@
 [workspace]
 resolver = "2"
-# The HOST workspace: everything that runs on the development machine --
-# shared PSX primitives, the emulator + frontend, the editor stack, and
-# the disc/EXE tools. One lockfile, one rust-analyzer session.
-#
-# The DEVICE side (sdk/, engine/: no_std, mipsel-sony-psx, -Zbuild-std)
-# keeps its own workspaces -- host and bare-metal builds genuinely cannot
-# share one cargo invocation. Device crates consume host-workspace members
-# (and vice versa) through plain path dependencies.
-members = [
-    "crates/psx-hw",
-    "crates/psx-iso",
-    "crates/psx-trace",
-    "emu/crates/emulator-core",
-    "emu/crates/frontend",
-    "emu/crates/psoxide-settings",
-    "emu/crates/psoxide-validation",
-    "emu/crates/psx-gpu-render",
-    "editor/crates/psxed",
-    "editor/crates/psxed-audio",
-    "editor/crates/psxed-format",
-    "editor/crates/psxed-gltf",
-    "editor/crates/psxed-obj",
-    "editor/crates/psxed-project",
-    "editor/crates/psxed-tex",
-    "editor/crates/psxed-ui",
-    "tools/mkisopsx",
-    "tools/psoxide-link",
-    "tools/psoxide-dev",
-]
-# The device-side workspaces live inside this directory tree; cargo
-# requires nested workspace roots to be excluded explicitly.
-exclude = ["sdk", "engine", "build"]
+members = ["crates/psx-hw", "crates/psx-iso", "crates/psx-trace", "crates/psxed-format", "tools/mkisopsx", "tools/psoxide-link"]
+exclude = ["sdk", "build"]
 
 [workspace.package]
 edition = "2021"
-# The declared 1.75 had not been true for a while: emulator-core already
-# uses `iter::repeat_n` (1.82) and `is_multiple_of` (1.87), and clippy was
-# reporting each use against the stale floor. Nothing builds this tree on
-# 1.75 anyway -- rust-toolchain.toml pins a nightly because the
-# mipsel-sony-psx target needs one -- so state the real floor instead of
-# rewriting working code to defend a number nobody relies on.
+# Host tooling floor; device builds use the pinned nightly.
 rust-version = "1.87"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/EBonura/PSoXide"
@@ -57,131 +22,10 @@ todo = "deny"
 too_many_arguments = "allow"
 
 [workspace.dependencies]
-# ---- Workspace-internal path deps (relative to the repo root) ----------
-psx-hw       = { path = "crates/psx-hw" }
-psx-iso      = { path = "crates/psx-iso" }
-psx-trace    = { path = "crates/psx-trace" }
-emulator-core      = { path = "emu/crates/emulator-core" }
-psoxide-settings   = { path = "emu/crates/psoxide-settings" }
-psoxide-validation = { path = "emu/crates/psoxide-validation" }
-psx-gpu-render     = { path = "emu/crates/psx-gpu-render" }
-psxed-audio   = { path = "editor/crates/psxed-audio" }
-psxed-format  = { path = "editor/crates/psxed-format" }
-psxed-gltf    = { path = "editor/crates/psxed-gltf" }
-psxed-obj     = { path = "editor/crates/psxed-obj" }
-psxed-project = { path = "editor/crates/psxed-project" }
-psxed-tex     = { path = "editor/crates/psxed-tex" }
-psxed-ui      = { path = "editor/crates/psxed-ui" }
+bitflags = { version = "2.6", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_json = "1.0"
 
-# ---- Cross-workspace path deps into the DEVICE side --------------------
-psx-asset     = { path = "sdk/crates/psx-asset" }
-psx-gpu       = { path = "sdk/crates/psx-gpu" }
-psx-vram      = { path = "sdk/crates/psx-vram" }
-psx-gte       = { path = "sdk/crates/psx-gte" }
-psx-gte-core  = { path = "sdk/crates/psx-gte-core" }
-psx-telemetry = { path = "sdk/crates/psx-telemetry" }
-psx-bsp       = { path = "engine/crates/psx-bsp" }
-psx-engine    = { path = "engine/crates/psx-engine" }
-
-# ---- External deps ------------------------------------------------------
-bitflags   = { version = "2.6", default-features = false }
-# default-features = false so the no_std PSX primitives stay no_std; host
-# crates get serde/std transitively through serde_json / ron, and members
-# add features additively (`workspace = true, features = [...]`) as needed.
-serde      = { version = "1.0", default-features = false, features = ["derive"] }
-serde_json = { version = "1.0" }
-thiserror  = "1.0"
-sha2       = "0.10"
-tempfile   = "3.10"
-zip        = { version = "2", default-features = false, features = ["deflate"] }
-# Rust-native config + save-state formats. RON for human-editable
-# config (settings.ron, library.ron) -- tagged enums round-trip
-# losslessly; postcard for binary savestates (compact, serde-native).
-ron         = "0.8"
-postcard    = { version = "1.0", features = ["alloc"] }
-# Compact (de)serialization for large `[u8]` buffers (save-state RAM/IO
-# snapshots) -- postcard varint-encodes each element of a plain `Vec<u8>`,
-# which balloons a multi-MB RAM dump; serde_bytes forwards to
-# `serialize_bytes`/`deserialize_bytes` instead.
-serde_bytes = "0.11"
-directories = "5.0"
-clap        = { version = "4.5", features = ["derive"] }
-
-# Frontend stack. Locked-in versions that PSoXide-1/-2 both converged on;
-# bumping is a deliberate decision, not a drift.
-winit       = "0.30"
-wgpu        = "24"
-egui        = "0.31"
-egui-wgpu   = "0.31"
-egui-winit  = "0.31"
-image       = { version = "0.25", default-features = false, features = ["png"] }
-pollster    = "0.3"
-cpal        = "0.15"
-gilrs       = "0.11"
-rfd         = "0.15"
-
-# Host-only tuning (the MIPS device workspaces under sdk/ and engine/ are
-# excluded above and keep their own profiles). Measured on the headless
-# 500M-instruction ALTTP benchmark: fat LTO + codegen-units=1 is speed-
-# neutral vs stock release (the hot interpreter already lives in one
-# crate), and thin LTO was ~3% slower. Fat is kept anyway for the whole-
-# program optimisation and the smaller artifacts -- the wasm build ships
-# to browsers, where binary size is user-facing. Release links get
-# slower; day-to-day iteration uses the tuned dev profile below.
 [profile.release]
 lto = "fat"
 codegen-units = 1
-
-# Packaging smoke tests. Same code as `release`, without the two settings that
-# dominate a cold build: `lto = "fat"` re-optimises the whole dependency graph
-# at link time, and `codegen-units = 1` forbids parallel codegen, so the final
-# link is effectively single-threaded. Together they put a two-architecture CI
-# build at roughly eleven minutes. A dispatch run exercising the archive does
-# not need a maximally optimised binary; a tagged release still builds
-# `release`.
-[profile.dist]
-inherits = "release"
-lto = "thin"
-codegen-units = 16
-
-# Optimize the emulator's hot code at -O3 even in debug builds so `cargo run` /
-# `trunk serve` run near release speed, while the crate under edit (frontend)
-# stays at opt-level 0 for fast incremental rebuilds.
-#
-# `"*"` covers third-party deps only -- Cargo deliberately excludes workspace
-# members -- so emulator-core (the host interpreter + GPU/SPU emulation) and
-# psx-gte-core (the per-vertex GTE math), where ~all emulation time goes, need
-# explicit entries to actually run fast.
-[profile.dev.package."*"]
-opt-level = 3
-[profile.dev.package.emulator-core]
-opt-level = 3
-[profile.dev.package.psx-gte-core]
-opt-level = 3
-
-# The desktop editor's full-map preview also lives in workspace crates, so the
-# wildcard above does not reach it. At opt-level 0 E1M1 navigation spends over
-# 45 ms per frame in `make run`, while the same path is under 4 ms in release.
-# Keep debug assertions and incremental compilation, but compile the three
-# host editor crates with enough optimisation for the development executable
-# to remain interactive on production-sized levels.
-[profile.dev.package.frontend]
-opt-level = 2
-[profile.dev.package.psxed-ui]
-opt-level = 2
-[profile.dev.package.psxed-project]
-opt-level = 2
-
-# Fast edit-and-run profile for host editor development. This keeps the tuned
-# dev settings for third-party dependencies and emulator hot paths, but avoids
-# optimising the large crates that change during normal editor work. Artifacts
-# live separately from `dev`, so switching profiles does not evict either cache.
-[profile.run-fast]
-inherits = "dev"
-
-[profile.run-fast.package.frontend]
-opt-level = 0
-[profile.run-fast.package.psxed-ui]
-opt-level = 0
-[profile.run-fast.package.psxed-project]
-opt-level = 0

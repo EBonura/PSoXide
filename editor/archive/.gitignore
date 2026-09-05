@@ -1,9 +1,0 @@
-# Tracked reference projects (test fixtures, gate slices, the New Project
-# template) live in fixtures/. legacy-grid/ is a LOCAL-ONLY archive of the
-# pre-BSP grid content (cortex_v1, demos, benchmarks); only its README is
-# committed, exactly as before the move.
-legacy-grid/*
-!legacy-grid/README.md
-**/cooked/
-**/baked/
-**/logs/

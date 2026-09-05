@@ -1,6 +1,0 @@
-[cli] loaded poll-bound input tape /tmp/cortex04b-debug/idle.csv (1900 polls, starting at poll 0)
-[frontend] embedded Play disc fast-booted /tmp/cortex04b-debug/marker-probe/baked/probe.cue via PSX.EXE;1 entry=0x80010000 payload=1122304B
-[cli] mounted cue-backed disc /tmp/cortex04b-debug/marker-probe/baked/probe.cue
-tick=269972279  cycles=734566174  pc=0x8001d2b8  stopped-at=269972279
-route-ticks=1285  port1-polls=951
-[cli] CPU display → /tmp/cortex04b-debug/marker-probe/final.ppm (320x240)

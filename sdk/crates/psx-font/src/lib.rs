@@ -552,7 +552,9 @@ fn plan_font_pack(
         let (_, _, height, width) = font_atlas_dims(fonts[index]);
 
         let mut chosen = None;
-        for page in 0..=page_count {
+        // Include one new page; allocations below may grow page_count.
+        let available_pages = page_count;
+        for page in 0..=available_pages {
             if page == page_count && page_count >= 16 {
                 break;
             }

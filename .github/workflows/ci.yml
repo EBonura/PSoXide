@@ -1,87 +1,18 @@
-name: CI
-
-# Host-side CI for PSoXide.
-#
-# Both jobs gate.
-#   - deps: dependency license + source policy via cargo-deny.
-#   - build-test: formatting, build, tests, and lint.
-#
-# build-test was continue-on-error for as long as the pin floated, and it
-# stayed that way after rust-toolchain.toml was dated. By then the tree had
-# drifted behind the advisory job in every direction at once: rustfmt
-# rewrote forty files, `make lint` died in the runtime numeric guard before
-# clippy ever ran, clippy had 246 findings behind that, and eight starter
-# project tests had been failing since Aletha replaced the Crimson Cross
-# Knight. None of it was visible, because a job that cannot fail is a job
-# nobody reads.
-#
-# All four are green now, so the job gates. Run the same checks locally
-# with `make fmt`, `make check`, `make test`, `make lint`. If a deliberate
-# nightly bump re-drifts formatting, run `make fmt` in the same commit
-# rather than restoring continue-on-error.
-
-on:
-  push:
-  pull_request:
-
+name: SDK
+on: [push, pull_request]
 jobs:
-  deps:
-    name: Dependency policy (gating)
+  sdk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install pinned toolchain (from rust-toolchain.toml)
-        run: rustup show
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          # Pinned: this job GATES merges, so its tool must not float.
-          # (Unpinned, the 2026-07-11 cargo-deny release changed the
-          # `check ... --config` CLI and broke every branch overnight
-          # while main sat green from two days earlier.) Bump
-          # deliberately, together with the command syntax below.
-          tool: cargo-deny@0.19.4
-      - name: cargo-deny (licenses + sources, all workspaces)
-        run: |
-          root="$(git rev-parse --show-toplevel)"
-          for ws in . sdk engine; do
-            (cd "$ws" && cargo deny --manifest-path Cargo.toml check licenses sources --config "$root/deny.toml")
-          done
-
-  build-test:
-    name: Build, test, lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test itch.io publisher contract
-        run: .github/actions/itch-publish/tests/test.sh
-      - name: Test web delivery and deployment contracts
+      - run: rustup show
+      - run: sudo apt-get update && sudo apt-get install -y binutils-mipsel-linux-gnu
+      - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path sdk/Cargo.toml --all -- --check
+      - run: make check
+      - run: make test
+      - run: make lint
+      - name: Build a PS1 executable without editor or emulator sources
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 -m unittest tools/test_verify_web_dist.py
-          python3 tools/audit-itch-deployments.py --root EBonura/PSoXide=.
-      - name: Install pinned toolchain (from rust-toolchain.toml)
-        run: rustup show
-      - name: Install Linux native deps for the desktop frontend
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential make pkg-config \
-            libasound2-dev libudev-dev libx11-dev libxi-dev libxrandr-dev \
-            libxinerama-dev libxcursor-dev libxkbcommon-dev libwayland-dev \
-            mesa-vulkan-drivers
-      - name: cargo fmt --check
-        run: |
-          cargo fmt --all -- --check
-          (cd engine && cargo fmt --all -- --check)
-          (cd sdk && cargo fmt --all -- --check)
-      - name: mfc0 load-delay hazard check (gating; this bug shipped twice)
-        run: python3 tools/check_mfc0.py sdk engine emu
-      - name: make check
-        run: make check
-      - name: Cook editor-playtest test fixtures
-        run: make cook-playtest
-      - name: make test
-        run: make test
-      - name: make lint
-        run: make lint
+          OBJDUMP: mipsel-linux-gnu-objdump
+        run: make hello-tri

@@ -1,8 +1,0 @@
-[toolchain]
-# Nightly required: `mipsel-sony-psx` target, `build-std`, and
-# `asm_experimental_arch` (psx-rt's BIOS trampolines). rustfmt +
-# clippy nightlies are installed alongside for the host workspace.
-# Date-pinned so releases rebuild reproducibly; bump deliberately and
-# update the downstream game repos' toolchain files with it.
-channel    = "nightly-2026-03-25"
-components = ["rustfmt", "clippy", "rust-src", "llvm-tools"]
