@@ -5,16 +5,16 @@ or package paths have been moved by this review.
 
 ## Recommendation
 
-Separate the SDK and games, but establish the build boundaries before moving
-Git history. Initially keep the engine, editor and emulator in PSoXide: their
-preview, cooking and runtime interfaces still change together. Keep the
-emulator core independently buildable within that tools repository.
+Keep **Cortex and the editor together**. Cortex is the reference game that
+exercises authoring, cooking, runtime and playtesting, so changes to those
+systems should still land in one commit. Establish the build boundaries
+before moving Git history, starting with the SDK.
 
 | Proposed repository | Contents |
 | --- | --- |
-| PSoXide SDK | Bare-metal crates, linker/runtime, shared hardware and cooked-format contracts, small examples, standalone bootstrap and disc tools |
-| PSoXide | Emulator, frontend, editor, cookers and engine; consumes a tested SDK revision |
-| Cortex Ignition | Current authored game, source assets, cooked inputs and game-specific review evidence; pins compatible tools/runtime |
+| SDK | Bare-metal crates, linker/runtime, shared hardware and cooked-format contracts, small examples, standalone bootstrap and disc tools |
+| Emulator | Emulator core, standalone frontend, renderer, debugging and profiling; consumes shared SDK contracts |
+| Editor + engine + Cortex | Authoring UI, cookers, engine/gameplay runtime, Cortex and its assets, New Project template and integration fixtures; pins SDK and emulator |
 | Existing game repositories | Remain separate; migrate their SDK bootstrap deliberately |
 
 These names describe ownership, not repository creation instructions. A
@@ -49,8 +49,9 @@ Moving files does not remove them from existing Git history.
    a clean SDK-only checkout. Engine-dependent games additionally need a
    pinned engine/runtime, not a hidden dependency on the tools' working tree.
 5. Give editor Play an explicit tools/runtime location and compatibility
-   check. Keep the small New Project template with the tools; move the full
-   Cortex game and historical asset variants to its own project repository.
+   check. Keep Cortex and the New Project template with the editor. Expose a
+   pinned emulator-core integration for the embedded Play viewport and keep
+   the standalone emulator frontend free of editor/game dependencies.
 
 Cargo already supports explicit Git revisions and records them in lockfiles.
 That is sufficient for the first extraction; publishing every crate to a
@@ -73,10 +74,13 @@ and [workspace reference](https://doc.rust-lang.org/cargo/reference/workspaces.h
    replay, audio offsets and performance. Investigate differences instead of
    assuming a file move is harmless to a bare-metal build.
 5. Migrate the remaining consumers and demo-disc provenance checks. Record
-   both SDK and tools/runtime revisions. Then move Cortex's assets out of the
-   tools checkout and retain only small, attributed regression fixtures.
+   SDK, emulator and editor/runtime revisions. Retain Cortex with the editor;
+   archive historical captures and duplicate project versions separately when
+   their regression value and asset provenance are established.
 
-A future emulator-only repository is possible, but the frontend's default
-editor feature and shared preview/format dependencies make it a second step.
+The emulator extraction is the second step: its current frontend defaults to
+the editor feature and also has unconditional engine/format dependencies.
+Separate its application shell from the editor's embedded viewport before
+moving it, while preserving shared emulation code and conformance tests.
 The first useful deliverable is an independently usable SDK, not a set of
 repositories that still require the original layout to build.
