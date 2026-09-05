@@ -1205,7 +1205,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn play_gameplay_sfx_events(&mut self, events: u16) {
-        const EVENTS: [LevelGameplaySfxEvent; 12] = [
+        const EVENTS: [LevelGameplaySfxEvent; 14] = [
             LevelGameplaySfxEvent::EnemyFootstep,
             LevelGameplaySfxEvent::EnemyIdle,
             LevelGameplaySfxEvent::Footstep,
@@ -1218,6 +1218,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelGameplaySfxEvent::EnemyWeaponSwing,
             LevelGameplaySfxEvent::ProjectileCharge,
             LevelGameplaySfxEvent::ProjectileLaunch,
+            LevelGameplaySfxEvent::ItemAcquired,
+            LevelGameplaySfxEvent::GameplayEnter,
         ];
         for event in EVENTS {
             if events & event.bit() == 0 {
@@ -1361,6 +1363,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
         if next_key == self.cursor.active_resource_key {
             return;
         }
+        if self.current_tag().has_gameplay() || next.world == LevelWorldLayer::Gameplay {
+            // A different world resource set may read the disc. A live
+            // inventory shares its key and returns above without stopping it.
+            self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
+            self.combat_music_engaged = false;
+        }
         if self.cursor.active_resource_key != RESOURCE_KEY_NONE {
             let prev = self.state_ref_at(self.cursor.current);
             self.gameplay.on_exit_state(prev, ctx);
@@ -1439,8 +1447,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
         }
         let option_values = self.option_values;
         let option_len = self.option_len;
-        self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
         if !self.cursor.gameplay_inited {
+            self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
+            self.combat_music_engaged = false;
             self.gameplay.init(ctx);
             self.cursor.gameplay_inited = true;
             // Deferred gameplay init runs after front-end option previews have
@@ -1693,6 +1702,19 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .map(|node| {
                 music_cue_from_node(node, self.options, &self.option_values, self.option_len)
             })
+    }
+
+    fn active_combat_music_cue(&self, scene_id: u16) -> Option<MusicCue> {
+        if !self.current_tag().has_gameplay() {
+            return None;
+        }
+        self.scene_combat_music_cue(scene_id).or_else(|| {
+            // Inventory and system overlays share the running world. Their
+            // UI scene need not duplicate the gameplay HUD's combat track.
+            self.first_gameplay_index()
+                .and_then(|index| self.tag_at(index).ui_scene())
+                .and_then(|scene| self.scene_combat_music_cue(scene))
+        })
     }
 
     /// Index into [`GameFlow::states`] of the first `UiScene` state
@@ -2333,7 +2355,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // Cortex's level is fully resident after loading, so no CD read can
         // collide with the track.
         if !self.loading_pending() {
-            let combat_cue = self.scene_combat_music_cue(scene);
+            let combat_cue = self.active_combat_music_cue(scene);
             let combat = combat_cue.is_some() && self.gameplay.combat_music_active();
             if combat != self.combat_music_engaged {
                 self.combat_music_engaged = combat;
@@ -2946,6 +2968,7 @@ mod tests {
         /// When `Some`, `update` asks the flow for this scene state, the way a
         /// world raises its own win/lose condition.
         request_state: Option<u16>,
+        combat_active: bool,
     }
 
     impl Scene for CountingScene {
@@ -2991,6 +3014,9 @@ mod tests {
         }
         fn state_resource_key(&self, state: SceneStateRef) -> u32 {
             self.shared_resource_key.unwrap_or(state.id as u32)
+        }
+        fn combat_music_active(&self) -> bool {
+            self.combat_active
         }
     }
 
@@ -4926,6 +4952,98 @@ mod tests {
     };
 
     const VOL_ID: u16 = 9;
+    #[test]
+    fn live_inventory_keeps_the_world_combat_track_until_combat_ends() {
+        extern crate std;
+        static STATES: &[LevelSceneState] = &[
+            LevelSceneState {
+                id: 42,
+                name: "world",
+                world: LevelWorldLayer::Gameplay,
+                ui_scene: 9,
+                flags: 0,
+                start_state: 43,
+            },
+            LevelSceneState {
+                id: 43,
+                name: "inventory",
+                world: LevelWorldLayer::Gameplay,
+                ui_scene: 10,
+                flags: scene_state_flags::UI_INPUT,
+                start_state: 42,
+            },
+            LevelSceneState {
+                id: 44,
+                name: "title",
+                world: LevelWorldLayer::None,
+                ui_scene: 9,
+                flags: scene_state_flags::UI_INPUT,
+                start_state: UI_SCENE_NONE,
+            },
+        ];
+        static FLOW: GameFlow = GameFlow {
+            states: &[
+                FlowState::SceneState { state: 42 },
+                FlowState::SceneState { state: 43 },
+                FlowState::SceneState { state: 44 },
+            ],
+            scene_states: STATES,
+            entry: 0,
+            transition: LevelTransition::NONE,
+        };
+        let mut nodes = MUSIC_NODES.to_vec();
+        nodes[1].flags |= psx_level::ui_node_flags::MUSIC_TRIGGER_COMBAT;
+        let nodes = std::boxed::Box::leak(nodes.into_boxed_slice());
+        let mut scene = CountingScene {
+            combat_active: true,
+            shared_resource_key: Some(7),
+            ..Default::default()
+        };
+        let mut app = GameApp::new(
+            &FLOW,
+            MUSIC_SCENES,
+            nodes,
+            &[],
+            MUSIC_OPTIONS,
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        complete_loading(&mut app, &mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert!(app.combat_music_engaged);
+        assert_eq!(app.cdda.requested.track, 2);
+
+        press(&mut ctx, button::START);
+        app.update(&mut ctx);
+        let updates = app.gameplay.updates;
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 1);
+        assert!(
+            app.gameplay.updates > updates,
+            "inventory must keep combat simulating"
+        );
+        assert!(app.combat_music_engaged);
+        assert_eq!(app.cdda.requested.track, 2);
+        assert!(!app.cdda.fading_out());
+
+        app.gameplay.combat_active = false;
+        idle_tick(&mut app, &mut ctx);
+        assert!(!app.combat_music_engaged);
+        assert!(app.cdda.fading_out());
+        app.gameplay.combat_active = true;
+        idle_tick(&mut app, &mut ctx);
+        assert!(app.combat_music_engaged);
+        app.request_flow_state(2, None, &mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert!(
+            !app.combat_music_engaged,
+            "the title must not inherit combat music"
+        );
+    }
     static MUSIC_OPTIONS: &[LevelOptionDef] = &[LevelOptionDef {
         id: VOL_ID,
         min: 0,

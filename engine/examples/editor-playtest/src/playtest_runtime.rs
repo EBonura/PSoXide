@@ -276,15 +276,49 @@ impl Playtest {
         if persistence.mark_reward_claimed(&mut self.poi_save) {
             self.poi_save_dirty = true;
         }
+        self.queue_gameplay_sfx(LevelGameplaySfxEvent::ItemAcquired);
         Some(module)
     }
 
     pub(super) fn advance_poi_message(&mut self) {
+        if self.poi_closing {
+            return;
+        }
+        if !self.acquired_module.is_none() {
+            if !self.complete_acquired_item_reveal() {
+                self.begin_message_close();
+            }
+            return;
+        }
+        if self.complete_active_message_reveal() {
+            return;
+        }
+        if let Some(message) = self.poi_messages.active() {
+            if message.page_offset() + 1 < message.page_count() {
+                self.finish_poi_message();
+            } else {
+                self.begin_message_close();
+            }
+        }
+    }
+
+    fn begin_message_close(&mut self) {
+        self.poi_closing = true;
+        self.set_poi_presentation_frames(
+            psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES,
+            self.poi_page_type_frame,
+        );
+    }
+
+    pub(super) fn dismiss_legacy_message(&mut self) {
+        if !self.poi_closing && !self.complete_legacy_message_reveal() {
+            self.begin_message_close();
+        }
+    }
+
+    fn finish_poi_message(&mut self) {
         use psx_game_runtime::poi::{MessageAdvance, MessageSource};
         if !self.acquired_module.is_none() {
-            if self.complete_acquired_item_reveal() {
-                return;
-            }
             self.acquired_module = BoostModuleId::NONE;
             self.set_poi_presentation_frames(0, 0);
             // Souls-style one-time tutorial: the first pickup explains where
@@ -296,14 +330,11 @@ impl Playtest {
                     title: "",
                     body: crate::loc::tr(
                         "ui.hint.sockets",
-                        "SOCKET RECOVERED MODULES\nFROM THE INVENTORY.",
+                        "START: OPENS INVENTORY\nEQUIP RECOVERED MODULES.",
                     ),
                 });
                 self.set_poi_page_type_frame(0);
             }
-            return;
-        }
-        if self.complete_active_message_reveal() {
             return;
         }
         match self.poi_messages.advance() {
@@ -415,6 +446,18 @@ impl Playtest {
     /// prepared. This preserves visible intermediate geometry when the fixed
     /// simulation gets several ticks ahead of displayed PS1 frames.
     pub(super) fn advance_poi_presentation_frame(&mut self) {
+        if self.poi_closing {
+            self.poi_panel_frame = self.poi_panel_frame.saturating_sub(1);
+            if self.poi_panel_frame == 0 {
+                self.poi_closing = false;
+                if !self.acquired_module.is_none() || self.poi_messages.active().is_some() {
+                    self.finish_poi_message();
+                } else {
+                    self.message_overlay = None;
+                }
+            }
+            return;
+        }
         if !self.acquired_module.is_none() {
             if self.poi_panel_frame < psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
                 self.poi_panel_frame = self.poi_panel_frame.saturating_add(1);
@@ -662,6 +705,7 @@ impl Playtest {
         self.poi_save_load_attempted = true;
         self.poi_save_dirty = true;
         self.poi_messages = MessageController::new();
+        self.poi_closing = false;
         self.set_poi_presentation_frames(0, 0);
         self.socket_hint_shown = false;
         self.souls = SoulsWallet::EMPTY;
@@ -2188,6 +2232,78 @@ mod life_reset_tests {
     use super::*;
     use psx_game_runtime::projectiles::{CombatTeam, ProjectileSpawn};
 
+    fn test_scene() -> std::boxed::Box<Playtest> {
+        let layout = std::alloc::Layout::new::<Playtest>();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+        assert!(!raw.is_null());
+        unsafe { Playtest::init_zeroed(raw) };
+        unsafe { std::boxed::Box::from_raw(raw) }
+    }
+
+    #[test]
+    fn legacy_dismiss_finishes_copy_then_contracts_over_presented_frames() {
+        let mut scene = test_scene();
+        scene.message_overlay = Some(RuntimeMessageOverlay {
+            title: "",
+            body: "RECOVERED",
+        });
+        scene.dismiss_legacy_message();
+        assert!(!scene.poi_closing, "first press completes unfinished copy");
+        scene.dismiss_legacy_message();
+        assert!(scene.poi_closing);
+        let duration = psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES;
+        for remaining in (1..duration).rev() {
+            scene.dismiss_legacy_message(); // repeated input must not restart/cancel contraction
+            scene.advance_poi_presentation_frame();
+            assert_eq!(scene.poi_panel_frame, remaining);
+            assert!(scene.message_overlay.is_some());
+        }
+        scene.advance_poi_presentation_frame();
+        assert!(!scene.poi_closing);
+        assert!(scene.message_overlay.is_none());
+    }
+
+    #[test]
+    fn pickup_dismiss_shows_inventory_hint_only_after_contraction() {
+        let mut scene = test_scene();
+        scene.acquired_module = BoostModuleId(1);
+        scene.set_poi_presentation_frames(u16::MAX, u16::MAX);
+        scene.advance_poi_message();
+        assert!(scene.poi_closing);
+        for _ in 1..psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+            scene.advance_poi_presentation_frame();
+            assert!(scene.message_overlay.is_none());
+            assert!(!scene.acquired_module.is_none());
+        }
+        scene.advance_poi_presentation_frame();
+        assert!(scene.acquired_module.is_none());
+        assert!(scene.socket_hint_shown);
+        assert_eq!(
+            scene.message_overlay.unwrap().body,
+            "START: OPENS INVENTORY\nEQUIP RECOVERED MODULES."
+        );
+        assert_eq!(scene.poi_page_type_frame, 0, "hint starts with unread copy");
+    }
+
+    #[test]
+    fn only_the_last_page_dismisses_the_message_panel() {
+        let mut scene = test_scene();
+        scene
+            .poi_messages
+            .open_world(0, psx_game_runtime::poi::MessagePageSpan::new(0, 2));
+        scene.set_poi_presentation_frames(u16::MAX, u16::MAX);
+        scene.advance_poi_message();
+        assert!(!scene.poi_closing);
+        assert_eq!(scene.poi_messages.active().unwrap().page_offset(), 1);
+        scene.set_poi_page_type_frame(u16::MAX);
+        scene.advance_poi_message();
+        assert!(scene.poi_closing);
+        for _ in 0..psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+            scene.advance_poi_presentation_frame();
+        }
+        assert!(scene.poi_messages.active().is_none());
+    }
+
     #[test]
     fn new_game_discards_progress_and_messages_but_preserves_settings() {
         let layout = std::alloc::Layout::new::<Playtest>();
@@ -2207,6 +2323,7 @@ mod life_reset_tests {
             .poi_messages
             .open_world(0, psx_game_runtime::poi::MessagePageSpan::new(0, 1));
         scene.socket_hint_shown = true;
+        scene.poi_closing = true;
         scene.souls.award(200, 100);
         scene.lock_target = Some(1);
         scene.soft_lock_target = Some(1);
@@ -2252,6 +2369,7 @@ mod life_reset_tests {
         assert!(scene.poi_messages.active().is_none());
         assert!(!scene.poi_messages.world_message_shown(0));
         assert!(!scene.socket_hint_shown);
+        assert!(!scene.poi_closing);
         assert_eq!(scene.souls.total(), 0);
         assert!(scene.lock_target.is_none() && scene.soft_lock_target.is_none());
         assert_eq!(scene.attack_buffer.take(101), None);

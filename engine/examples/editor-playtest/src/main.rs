@@ -602,6 +602,8 @@ struct Playtest {
     /// Presented-frame progress for the active POI panel and page type-on.
     /// Prepared/overlay copies keep deferred UI matched to its world frame.
     poi_panel_frame: u16,
+    /// Keep the current content alive until its reverse transition finishes.
+    poi_closing: bool,
     poi_page_type_frame: u16,
     prepared_poi_panel_frame: u16,
     prepared_poi_page_type_frame: u16,
@@ -790,6 +792,7 @@ impl Playtest {
         self.poi_save_dirty = false;
         self.poi_floor_y = [i32::MIN; INTERACTABLES.len()];
         self.poi_panel_frame = 0;
+        self.poi_closing = false;
         self.poi_page_type_frame = 0;
         self.prepared_poi_panel_frame = 0;
         self.prepared_poi_page_type_frame = 0;

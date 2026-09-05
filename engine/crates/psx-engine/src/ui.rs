@@ -3669,12 +3669,19 @@ struct MessagePanelLayout {
 
 /// Number of presented frames used to morph the compact interaction prompt
 /// into the full two-line Archive panel.
-pub const MESSAGE_PANEL_EXPAND_FRAMES: u16 = 6;
+pub const MESSAGE_PANEL_EXPAND_FRAMES: u16 = 5;
 /// Presented frames elapsed between newly revealed characters.
 pub const MESSAGE_PANEL_TYPE_TICKS_PER_CHAR: u16 = 1;
 const ARCHIVE_PROMPT_Y: i16 = 209;
 const ARCHIVE_PROMPT_HEIGHT: u16 = 17;
 const ARCHIVE_PROMPT_PAD_X: i16 = 10;
+const ITEM_ACQUIRED_LAYOUT: MessagePanelLayout = MessagePanelLayout {
+    x: 55,
+    y: 196,
+    width: 210,
+    height: 30,
+    max_lines: 1,
+};
 
 const fn message_panel_layout(variant: MessagePanelVariant) -> MessagePanelLayout {
     match variant {
@@ -3789,6 +3796,41 @@ pub fn draw_expanding_message_panel(
     );
 }
 
+/// Reverse the message's chrome transition after dismissal. Content stays
+/// owned by the caller until the final presented frame, but copy is hidden
+/// while the panel contracts, just as it is during expansion.
+pub fn draw_dismissing_message_panel(
+    font: &FontAtlas,
+    variant: MessagePanelVariant,
+    acquired_item: bool,
+    action: &str,
+    frame: u16,
+    remaining_frames: u16,
+    cross_prompt: Option<UiTextureSlot>,
+) {
+    let target = if acquired_item {
+        ITEM_ACQUIRED_LAYOUT
+    } else {
+        message_panel_layout(variant)
+    };
+    let collapsed = if matches!(variant, MessagePanelVariant::PointOfInterest) {
+        interaction_prompt_layout(font, action, cross_prompt.is_some())
+    } else {
+        MessagePanelLayout {
+            x: target.x + target.width as i16 / 2,
+            y: target.y + target.height as i16 / 2,
+            width: 1,
+            height: 1,
+            max_lines: 0,
+        }
+    };
+    let layout = message_panel_transition_layout(collapsed, target, remaining_frames);
+    draw_archive_panel_chrome(
+        screen_resolved_node(layout.x, layout.y, layout.width, layout.height),
+        frame,
+    );
+}
+
 /// Morph a completed POI message into the compact unique-item acquisition
 /// panel. The geometry shrinks in place with no copy during motion; the exact
 /// acquired item then types on and remains explicitly dismissible with Cross.
@@ -3802,15 +3844,8 @@ pub fn draw_item_acquired_panel(
     prefix: &str,
     dismiss_action: &str,
 ) {
-    const TARGET: MessagePanelLayout = MessagePanelLayout {
-        x: 55,
-        y: 196,
-        width: 210,
-        height: 30,
-        max_lines: 1,
-    };
     let source = message_panel_layout(MessagePanelVariant::PointOfInterest);
-    let layout = message_panel_transition_layout(source, TARGET, transition_frame);
+    let layout = message_panel_transition_layout(source, ITEM_ACQUIRED_LAYOUT, transition_frame);
     let resolved = screen_resolved_node(layout.x, layout.y, layout.width, layout.height);
     draw_archive_panel_chrome(resolved, frame);
     if transition_frame < MESSAGE_PANEL_EXPAND_FRAMES {

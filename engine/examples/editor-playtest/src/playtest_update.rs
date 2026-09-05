@@ -556,6 +556,7 @@ impl Playtest {
             self.open_world_message_once();
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
+            self.queue_gameplay_sfx(LevelGameplaySfxEvent::GameplayEnter);
             // First spawn plays the intro with control locked out for the
             // clip's length. This has to arm HERE rather than in
             // `init_gameplay`: the streaming load sits between the two, and
@@ -657,9 +658,7 @@ impl Playtest {
             if !poi_interaction_consumed
                 && (ctx.just_pressed(INTERACT_BUTTON) || ctx.just_pressed(button::CIRCLE))
             {
-                if !self.complete_legacy_message_reveal() {
-                    self.message_overlay = None;
-                }
+                self.dismiss_legacy_message();
             }
             self.camera_turning_last_tick = false;
             return;

@@ -2268,7 +2268,31 @@ impl Scene for Playtest {
         }
 
         if let Some(font) = self.ui_fonts[0].as_ref() {
-            if let Some(module) = self
+            if self.poi_closing {
+                let variant = match self.poi_messages.active().map(|message| message.source()) {
+                    Some(psx_game_runtime::poi::MessageSource::World) => MessagePanelVariant::World,
+                    _ => MessagePanelVariant::PointOfInterest,
+                };
+                let source = match self.poi_messages.active().map(|message| message.source()) {
+                    Some(psx_game_runtime::poi::MessageSource::PointOfInterest(index)) => {
+                        Some(usize::from(index))
+                    }
+                    _ => self.active_interactable,
+                };
+                let action = source
+                    .and_then(|index| INTERACTABLES.get(index))
+                    .map(|interactable| crate::loc::prompt_verb(interactable.prompt))
+                    .unwrap_or("READ");
+                psx_engine::ui::draw_dismissing_message_panel(
+                    font,
+                    variant,
+                    !self.acquired_module.is_none(),
+                    action,
+                    overlay_tick.as_u32() as u16,
+                    self.overlay_poi_panel_frame,
+                    cross_prompt,
+                );
+            } else if let Some(module) = self
                 .acquired_module
                 .index()
                 .and_then(|index| BOOST_MODULES.get(index))

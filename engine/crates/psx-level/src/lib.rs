@@ -2891,6 +2891,10 @@ pub enum LevelGameplaySfxEvent {
     EnemyFootstep = 10,
     /// A nearby idle enemy emitted a short mechanical vocalization.
     EnemyIdle = 11,
+    /// A recovered module's pickup message opened.
+    ItemAcquired = 12,
+    /// A newly loaded run became playable.
+    GameplayEnter = 13,
 }
 
 impl LevelGameplaySfxEvent {

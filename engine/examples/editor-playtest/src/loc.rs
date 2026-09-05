@@ -115,7 +115,7 @@ static ITALIAN: &[(&str, &str)] = &[
     ("ui.ending.subject", "DEMO TECNICA CORTEX IGNITION"),
     (
         "ui.hint.sockets",
-        "INNESTA I MODULI RECUPERATI\nDALL'INVENTARIO.",
+        "START: APRI L'INVENTARIO\nEQUIPAGGIA I MODULI RECUPERATI.",
     ),
     ("ui.inventory.assign", "ASSEGNA"),
     ("ui.inventory.atk_spd", "VEL ATK"),
