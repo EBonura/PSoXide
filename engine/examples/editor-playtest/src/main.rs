@@ -484,6 +484,8 @@ struct Playtest {
     /// table index is the `MODEL_INSTANCES` index, covering both live game
     /// entities and static placed actors without render-time resampling.
     instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
+    /// Previous retained instance poses, used only for consecutive melee sweeps.
+    previous_instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     /// PXBSP PVS result for cooked model instances. Grid worlds leave this at
     /// all-visible and continue using their room window.
     bsp_instance_visible_mask: u16,
@@ -736,6 +738,7 @@ impl Playtest {
         }
         for slot in 0..MAX_MODEL_INSTANCES {
             addr_of_mut!((*scene).instance_actor_poses[slot]).write(None);
+            addr_of_mut!((*scene).previous_instance_actor_poses[slot]).write(None);
         }
         for slot in 0..MAX_ACTIVE_ROOMS {
             addr_of_mut!((*scene).window.rooms[slot]).write(None);

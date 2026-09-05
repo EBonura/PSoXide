@@ -518,11 +518,21 @@ impl Playtest {
             let first = entity.combat_capsule_first.to_usize();
             let end = first.saturating_add(usize::from(entity.combat_capsule_count));
             let attacker_capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
-            let attacker_pose = self
+            let attacker_snapshot = self
                 .instance_actor_poses
                 .get(entity.model_instance as usize)
                 .copied()
+                .flatten();
+            let attacker_pose = attacker_snapshot.map(|snapshot| snapshot.pose());
+            let previous_attacker_pose = self
+                .previous_instance_actor_poses
+                .get(entity.model_instance as usize)
+                .copied()
                 .flatten()
+                .filter(|old| {
+                    attacker_snapshot
+                        .is_some_and(|current| old.clip_local() == current.clip_local())
+                })
                 .map(|snapshot| snapshot.pose());
             if attack.is_ranged() {
                 let mut released = self
@@ -575,10 +585,11 @@ impl Playtest {
             if player_invulnerable {
                 continue;
             }
-            let (contact, window_mask) = combat::resolve_authored_actor_contact_pending(
+            let (contact, window_mask) = combat::resolve_authored_actor_contact_swept_pending(
                 attacker_capsules,
                 attack.action(),
                 attacker_pose,
+                previous_attacker_pose,
                 player_capsules,
                 player_pose,
                 self.game_entities
@@ -799,13 +810,13 @@ impl Playtest {
         }
     }
 
-    pub(super) fn track_enemy_charge(&mut self, index: usize, ctx: &Ctx, delta: u16) {
+    pub(super) fn track_enemy_tell(&mut self, index: usize, ctx: &Ctx, delta: u16) {
         let Some(attack) = self
             .deferred_enemy_attacks
             .as_slice()
             .iter()
             .copied()
-            .find(|attack| attack.entity() == index && attack.is_ranged())
+            .find(|attack| attack.entity() == index)
         else {
             return;
         };
@@ -832,12 +843,19 @@ impl Playtest {
         );
         let first = entity.combat_capsule_first.to_usize();
         let end = first + usize::from(entity.combat_capsule_count);
-        if combat::ranged_charge_tracks(
-            COMBAT_CAPSULES.get(first..end).unwrap_or(&[]),
-            attack.action(),
-            phase,
-        ) {
-            let player = self.motor.position();
+        let capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
+        let player = self.motor.position();
+        if !attack.is_ranged() {
+            if combat::melee_tell_tracks(capsules, attack.action(), phase) {
+                self.game_entities.track_authored_melee_tell(
+                    index,
+                    [player.x, player.y, player.z],
+                    delta,
+                );
+            }
+            return;
+        }
+        if combat::ranged_charge_tracks(capsules, attack.action(), phase) {
             let height = self
                 .character
                 .as_ref()
@@ -1331,20 +1349,15 @@ impl Playtest {
             ) else {
                 continue;
             };
-            let Some(capsule) = combat::transform_actor_combat_capsule(
+            let Some((capsule, previous_capsule)) = combat::transform_actor_combat_capsule_sweep(
                 record,
-                player_pose.pose().with_phase_q12(sweep_end_phase),
+                previous_pose,
+                player_pose.pose(),
+                sweep_start_phase,
+                sweep_end_phase,
             ) else {
                 continue;
             };
-            let previous_capsule = previous_pose
-                .filter(|_| sweep_start_phase < sweep_end_phase)
-                .and_then(|previous_pose| {
-                    combat::transform_actor_combat_capsule(
-                        record,
-                        previous_pose.with_phase_q12(sweep_start_phase),
-                    )
-                });
             active[active_count] = ActivePlayerCapsule {
                 capsule,
                 previous_capsule,

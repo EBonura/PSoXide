@@ -1059,6 +1059,29 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         self.capture_ranged_aim(index, input);
     }
 
+    /// The authored melee tell may turn slowly before its first active frame.
+    /// Callers stop invoking this at the authored cutoff; contact and stagger
+    /// also close it, so a combo never pivots after connecting.
+    pub fn track_authored_melee_tell(&mut self, index: usize, player: [i32; 3], delta: u16) {
+        if index >= self.count()
+            || self.state(index) != GameEntityState::Attack
+            || self.selected_attack_is_ranged(index)
+            || self.authored_connection_mask[index] != 0
+        {
+            return;
+        }
+        let dx = player[0].saturating_sub(self.x[index]);
+        let dz = player[2].saturating_sub(self.z[index]);
+        if dx != 0 || dz != 0 {
+            self.yaw[index] = psx_engine::Angle::from_q12(self.yaw[index] as u16)
+                .approach_q12(
+                    psx_engine::Angle::from_q12(atan2_q12(dx, dz)),
+                    16u16.saturating_mul(delta),
+                )
+                .as_q12() as i16;
+        }
+    }
+
     /// Track the visible charge until the caller's authored release cutoff.
     /// An interruption or a released shot closes tracking permanently for
     /// this attack. The spawned projectile keeps its captured velocity.
@@ -4673,6 +4696,24 @@ mod tests {
         // The Windup -> Attack transition tick runs the Windup arm; the
         // first token appears on the first ACTIVE tick, not here.
         assert!(attacks.is_empty());
+    }
+
+    #[test]
+    fn authored_melee_tell_turns_at_bounded_speed_and_stops_after_contact_or_stagger() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        advance_into_attack_deferred(&mut entities, &mut attacks);
+        entities.yaw[0] = 0;
+        entities.track_authored_melee_tell(0, [2000, 0, 1000], 2);
+        assert_eq!(entities.yaw[0], 32);
+        entities.authored_connection_mask[0] = 1;
+        entities.track_authored_melee_tell(0, [2000, 0, 1000], 2);
+        assert_eq!(entities.yaw[0], 32);
+        entities.authored_connection_mask[0] = 0;
+        entities.state[0] = GameEntityState::Staggered as u8;
+        entities.track_authored_melee_tell(0, [2000, 0, 1000], 2);
+        assert_eq!(entities.yaw[0], 32);
     }
 
     #[test]

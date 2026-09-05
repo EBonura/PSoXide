@@ -480,7 +480,18 @@ impl ThirdPersonCameraState {
         }
 
         let previous_focus = self.focus;
-        self.focus = approach_vertex_shift(self.focus, focus_goal, config.focus_lag_shift);
+        let proposed_focus = approach_vertex_shift(self.focus, focus_goal, config.focus_lag_shift);
+        // Lock bias and follow lag can put the look-at point through a pillar.
+        // Start below the look-at height, which may sit above the player's
+        // collision body and enter a low ceiling.
+        let anchor_height = (config.target_height / 2)
+            .max(config.min_floor_clearance)
+            .min(config.target_height);
+        self.focus = collision.constrain_segment(
+            player_focus(target.player, anchor_height),
+            proposed_focus,
+            config,
+        )?;
         // Translation follows the focus; lag smooths changes to the orbit.
         // Otherwise a slow camera can remain behind a moving player while
         // its look-at point moves ahead and puts the body outside the frame.
@@ -599,19 +610,46 @@ impl ThirdPersonCameraState {
         let lock_lift =
             self.lock_height_offset.saturating_mul(self.distance) / config.distance.max(1);
         self.position.y = self.base_position_y.saturating_add(lock_lift);
+        let before_floor = self.position;
         self.position = collision.clamp_to_floor(self.position, config.min_floor_clearance)?;
+        let mut endpoint_clamped = false;
+        if !solve_now || !collision_solve.pull_in || self.position != before_floor {
+            // Easing between two clear orbit endpoints can cut through their
+            // shared corner. A cached shortened boom also needs validation
+            // after the player moves. Validate the rendered position.
+            let safe = collision.constrain_segment(self.focus, self.position, config)?;
+            if safe != self.position {
+                self.position = safe;
+                self.base_position_y = safe.y.saturating_sub(lock_lift);
+                let dx = safe.x.saturating_sub(self.focus.x);
+                let dz = safe.z.saturating_sub(self.focus.z);
+                let horizontal =
+                    isqrt_i32(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)));
+                // `distance` is the boom length: the orbit applies cos(pitch)
+                // to obtain its horizontal radius. Storing the radius here
+                // would apply that shortening a second time on the next tick.
+                let cos_pitch = signed_q12_angle(self.pitch_q12)
+                    .cos()
+                    .raw()
+                    .saturating_abs();
+                self.distance = div_q12_i32(horizontal, cos_pitch.max(1)).min(self.distance);
+                self.collision_release_delay = config.collision_release_delay_frames;
+                self.solve_phase = 0;
+                endpoint_clamped = true;
+            }
+        }
         self.frame_pitch_q12 = self
             .pitch_q12
             .saturating_add(lock_pitch_offset_q12(config, self.lock_height_offset));
 
-        self.last_pull_in = collision_solve.pull_in;
+        self.last_pull_in = collision_solve.pull_in || endpoint_clamped;
         self.last_rotated = false;
         Ok(())
     }
 
     fn current_frame(&self, projection: WorldProjection) -> ThirdPersonCameraFrame {
         ThirdPersonCameraFrame {
-            camera: camera_from_position_focus(projection, self.position, self.focus),
+            camera: camera_from_position_focus(projection, self.position, self.focus, self.yaw),
             focus: self.focus,
             yaw: self.yaw,
             pitch_q12: self.frame_pitch_q12,
@@ -669,6 +707,13 @@ enum CameraCollision<'room, 'room_ref, 'rooms> {
 }
 
 trait CameraCollisionBackend {
+    fn constrain_segment(
+        &mut self,
+        start: RoomPoint,
+        end: RoomPoint,
+        config: ThirdPersonCameraConfig,
+    ) -> Result<RoomPoint, CollisionQueryError>;
+
     fn solve(
         &mut self,
         focus: RoomPoint,
@@ -690,6 +735,29 @@ struct GridCameraCollision<'room, 'room_ref, 'rooms> {
 }
 
 impl CameraCollisionBackend for GridCameraCollision<'_, '_, '_> {
+    fn constrain_segment(
+        &mut self,
+        start: RoomPoint,
+        end: RoomPoint,
+        mut config: ThirdPersonCameraConfig,
+    ) -> Result<RoomPoint, CollisionQueryError> {
+        let span = segment_span(start, end);
+        if span == 0 {
+            return Ok(end);
+        }
+        config.distance = span;
+        let clear = match self.collision {
+            CameraCollision::Single(Some(room)) => {
+                probe_clear_distance(room, start, end, span, config)
+            }
+            CameraCollision::Single(None) => span,
+            CameraCollision::Rooms(rooms) => {
+                probe_clear_distance_rooms(rooms, start, end, span, config)
+            }
+        };
+        Ok(lerp_clear_segment(start, end, clear, span))
+    }
+
     fn solve(
         &mut self,
         focus: RoomPoint,
@@ -726,6 +794,29 @@ struct TraceCameraCollision<'provider, P: ?Sized> {
 }
 
 impl<P: CollisionTraceProvider + ?Sized> CameraCollisionBackend for TraceCameraCollision<'_, P> {
+    fn constrain_segment(
+        &mut self,
+        start: RoomPoint,
+        end: RoomPoint,
+        config: ThirdPersonCameraConfig,
+    ) -> Result<RoomPoint, CollisionQueryError> {
+        let span = segment_span(start, end);
+        if span == 0 {
+            return Ok(end);
+        }
+        let trace = trace_collision(self.provider, CollisionTraceQuery::point(start, end))?;
+        if trace.start_solid || trace.all_solid {
+            return Ok(start);
+        }
+        if !trace.hit() {
+            return Ok(end);
+        }
+        let clear = mul_q12_i32(span, trace.fraction_q12)
+            .saturating_sub(config.collision_margin)
+            .max(0);
+        Ok(lerp_clear_segment(start, end, clear, span))
+    }
+
     fn solve(
         &mut self,
         focus: RoomPoint,
@@ -819,6 +910,32 @@ fn player_focus(player: RoomPoint, target_height: i32) -> RoomPoint {
     RoomPoint::new(player.x, player.y.saturating_add(target_height), player.z)
 }
 
+fn lerp_clear_segment(start: RoomPoint, end: RoomPoint, clear: i32, span: i32) -> RoomPoint {
+    if clear >= span {
+        return end;
+    }
+    let fraction = div_q12_i32(clear.max(0), span);
+    RoomPoint::new(
+        start
+            .x
+            .saturating_add(mul_q12_i32(end.x.saturating_sub(start.x), fraction)),
+        start
+            .y
+            .saturating_add(mul_q12_i32(end.y.saturating_sub(start.y), fraction)),
+        start
+            .z
+            .saturating_add(mul_q12_i32(end.z.saturating_sub(start.z), fraction)),
+    )
+}
+
+fn segment_span(start: RoomPoint, end: RoomPoint) -> i32 {
+    end.x
+        .saturating_sub(start.x)
+        .saturating_abs()
+        .max(end.y.saturating_sub(start.y).saturating_abs())
+        .max(end.z.saturating_sub(start.z).saturating_abs())
+}
+
 fn camera_focus_goal(
     target: ThirdPersonCameraTarget,
     config: ThirdPersonCameraConfig,
@@ -894,6 +1011,12 @@ fn solve_camera_collision_trace<P: CollisionTraceProvider + ?Sized>(
 ) -> Result<CollisionSolve, CollisionQueryError> {
     let desired = camera_position_at_height(focus, config.distance, yaw, pitch_q12, camera_y);
     let trace = trace_collision(provider, CollisionTraceQuery::point(focus, desired))?;
+    if !trace.hit() && !trace.all_solid {
+        return Ok(CollisionSolve {
+            distance: config.distance,
+            pull_in: false,
+        });
+    }
     let fraction = trace.fraction_q12.clamp(0, COLLISION_FRACTION_ONE_Q12);
     let clear = if trace.start_solid || trace.all_solid {
         0
@@ -1128,9 +1251,13 @@ fn probe_clear_distance(
         i += 1;
     }
 
-    nearest
-        .saturating_sub(config.collision_margin)
-        .clamp(0, config.distance)
+    if last_clear_distance == max_distance {
+        max_distance
+    } else {
+        nearest
+            .saturating_sub(config.collision_margin)
+            .clamp(0, config.distance)
+    }
 }
 
 fn probe_clear_distance_rooms(
@@ -1175,9 +1302,13 @@ fn probe_clear_distance_rooms(
         i += 1;
     }
 
-    nearest
-        .saturating_sub(config.collision_margin)
-        .clamp(0, config.distance)
+    if last_clear_distance == max_distance {
+        max_distance
+    } else {
+        nearest
+            .saturating_sub(config.collision_margin)
+            .clamp(0, config.distance)
+    }
 }
 
 fn first_collision_room_sector_size(rooms: &[CharacterCollisionRoom<'_>]) -> Option<i32> {
@@ -1526,6 +1657,7 @@ fn camera_from_position_focus(
     projection: WorldProjection,
     position: RoomPoint,
     focus: RoomPoint,
+    fallback_yaw: Angle,
 ) -> WorldCamera {
     let dx = position.x.saturating_sub(focus.x);
     let dz = position.z.saturating_sub(focus.z);
@@ -1537,11 +1669,18 @@ fn camera_from_position_focus(
             .saturating_add(target_dy.saturating_mul(target_dy)),
     )
     .max(1);
+    // A wall can shorten the arm to zero. Keep an orthonormal view at that
+    // position instead of producing a zero yaw basis and a blank world.
+    let (sin_yaw, cos_yaw) = if dx == 0 && dz == 0 {
+        (fallback_yaw.sin(), fallback_yaw.cos())
+    } else {
+        (Q12::from_ratio(dx, radius), Q12::from_ratio(dz, radius))
+    };
     WorldCamera {
         position,
         projection,
-        sin_yaw: Q12::from_ratio(dx, radius),
-        cos_yaw: Q12::from_ratio(dz, radius),
+        sin_yaw,
+        cos_yaw,
         sin_pitch: Q12::from_ratio(target_dy, pitch_len),
         cos_pitch: Q12::from_ratio(radius, pitch_len),
     }
@@ -1736,6 +1875,33 @@ mod tests {
     }
 
     #[test]
+    fn clear_trace_keeps_full_boom_and_allows_position_smoothing() {
+        let config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        let solve = solve_camera_collision_trace(
+            &mut ClearTraceProvider,
+            RoomPoint::ZERO,
+            Angle::HALF,
+            0,
+            700,
+            config,
+        )
+        .unwrap();
+        assert_eq!(solve.distance, 1400);
+        assert!(!solve.pull_in);
+    }
+
+    #[test]
+    fn constrained_long_segment_does_not_overflow() {
+        let start = RoomPoint::new(-50000, 0, 0);
+        let end = RoomPoint::new(50000, 0, 0);
+        assert_eq!(
+            lerp_clear_segment(start, end, 50000, 100000),
+            RoomPoint::ZERO
+        );
+        assert_eq!(lerp_clear_segment(start, end, 100000, 100000), end);
+    }
+
+    #[test]
     fn trace_provider_shortens_camera_spring_arm() {
         let mut camera = ThirdPersonCameraState::new(Angle::HALF);
         let mut provider = HalfDistanceTraceProvider {
@@ -1822,6 +1988,261 @@ mod tests {
             .expect("prop-blocked camera update");
         assert!(blocked.collision_pull_in);
         assert!(blocked.distance < clear.distance);
+    }
+
+    #[test]
+    fn lock_focus_cannot_cross_a_pillar_before_the_arm_sweep() {
+        let mut config = ThirdPersonCameraConfig::character(1400, 500, 400);
+        config.focus_lag_shift = 0;
+        let mut target = trace_target();
+        target.lock_target = Some(RoomPoint::new(1000, 0, 0));
+        let blockers = [CharacterCollisionAabb::new(
+            RoomPoint::new(80, 0, -200),
+            RoomPoint::new(300, 1000, 200),
+        )];
+        let mut world = ClearTraceProvider;
+        let mut props = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &blockers);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        for _ in 0..120 {
+            let frame = camera
+                .update_vblanks_with_trace_provider(
+                    WorldProjection::new(160, 120, 320, 64),
+                    &mut props,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                    1,
+                )
+                .unwrap();
+            assert!(
+                frame.focus.x < 80,
+                "focus entered the pillar: {:?}",
+                frame.focus
+            );
+            assert!(frame.distance > 0, "solid focus collapsed the camera arm");
+        }
+    }
+
+    #[test]
+    fn collapsed_arm_retains_a_valid_view_orientation() {
+        for yaw in [Angle::ZERO, Angle::QUARTER, Angle::HALF] {
+            let position = RoomPoint::new(938, 297, -1216);
+            let view = camera_from_position_focus(
+                WorldProjection::new(160, 120, 320, 64),
+                position,
+                position,
+                yaw,
+            );
+            assert_eq!(view.position, position);
+            assert_eq!(view.sin_yaw, yaw.sin());
+            assert_eq!(view.cos_yaw, yaw.cos());
+            assert_eq!(view.cos_pitch, Q12::from_ratio(1, 1));
+        }
+    }
+
+    #[test]
+    fn low_ceiling_cannot_contain_the_camera_focus() {
+        let mut config = ThirdPersonCameraConfig::character(400, 120, 100);
+        config.focus_lag_shift = 0;
+        config.collision_margin = 4;
+        let blockers = [CharacterCollisionAabb::new(
+            RoomPoint::new(-1000, 80, -1000),
+            RoomPoint::new(1000, 200, 1000),
+        )];
+        let mut world = ClearTraceProvider;
+        let mut props = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &blockers);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        for _ in 0..30 {
+            let frame = camera
+                .update_vblanks_with_trace_provider(
+                    WorldProjection::new(160, 120, 320, 64),
+                    &mut props,
+                    trace_target(),
+                    ThirdPersonCameraInput::default(),
+                    config,
+                    1,
+                )
+                .unwrap();
+            assert!(frame.focus.y < 80);
+            assert!(frame.distance > 0);
+            assert!(frame.camera.position.y < 80);
+        }
+    }
+
+    #[test]
+    fn orbit_easing_cannot_cut_through_a_clear_goals_corner() {
+        let mut config = ThirdPersonCameraConfig::character(500, 400, 400);
+        config.position_lag_shift = 3;
+        config.lock_height_boost = 0;
+        let target = trace_target();
+        let blockers = [CharacterCollisionAabb::new(
+            RoomPoint::new(60, 0, -180),
+            RoomPoint::new(100, 1000, -20),
+        )];
+        let mut world = ClearTraceProvider;
+        let mut props = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &blockers);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+        camera.position = RoomPoint::new(200, 400, -100);
+        let frame = camera
+            .update_vblanks_with_trace_provider(
+                WorldProjection::new(160, 120, 320, 64),
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .unwrap();
+        let visibility = trace_collision(
+            &mut props,
+            CollisionTraceQuery::point(frame.focus, frame.camera.position),
+        )
+        .unwrap();
+        assert!(
+            !visibility.hit(),
+            "smoothed camera crossed the pillar: {:?}",
+            frame.camera.position
+        );
+        assert!(frame.camera.position.x < 60);
+    }
+
+    #[test]
+    fn cached_shortened_arm_rechecks_the_ray_after_player_translation() {
+        let mut config = ThirdPersonCameraConfig::character(1000, 400, 400);
+        config.collision_solve_interval = 2;
+        config.focus_lag_shift = 0;
+        config.lock_height_boost = 0;
+        let blockers = [
+            CharacterCollisionAabb::new(
+                RoomPoint::new(-1000, 0, -620),
+                RoomPoint::new(1000, 1000, -600),
+            ),
+            CharacterCollisionAabb::new(
+                RoomPoint::new(80, 0, -400),
+                RoomPoint::new(120, 1000, -300),
+            ),
+        ];
+        let mut world = ClearTraceProvider;
+        let mut props = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &blockers);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut target = trace_target();
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let first = camera
+            .update_vblanks_with_trace_provider(
+                projection,
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .unwrap();
+        assert!(first.camera.position.z < -500);
+        assert_eq!(camera.solve_phase, 1);
+        target.player.x = 100;
+        let moved = camera
+            .update_vblanks_with_trace_provider(
+                projection,
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .unwrap();
+        let ray = trace_collision(
+            &mut props,
+            CollisionTraceQuery::point(moved.focus, moved.camera.position),
+        )
+        .unwrap();
+        assert!(
+            !ray.hit(),
+            "cached boom passed through a nearer wall after moving sideways"
+        );
+        assert!(moved.camera.position.z > -300);
+    }
+
+    #[test]
+    fn steep_pitch_corner_clamp_retains_boom_length_not_horizontal_radius() {
+        let mut config = ThirdPersonCameraConfig::character(500, 400, 400);
+        config.position_lag_shift = 3;
+        config.lock_height_boost = 0;
+        config.pitch_min_q12 = 682;
+        config.pitch_max_q12 = 682;
+        let target = trace_target();
+        let blockers = [CharacterCollisionAabb::new(
+            RoomPoint::new(60, 0, -180),
+            RoomPoint::new(100, 1000, -20),
+        )];
+        let mut world = ClearTraceProvider;
+        let mut props = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &blockers);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+        camera.position = RoomPoint::new(200, 400, -100);
+        let frame = camera
+            .update_vblanks_with_trace_provider(
+                WorldProjection::new(160, 120, 320, 64),
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .unwrap();
+        assert!(frame.collision_pull_in);
+        let dx = frame.camera.position.x - frame.focus.x;
+        let dz = frame.camera.position.z - frame.focus.z;
+        let horizontal = isqrt_i32(dx * dx + dz * dz);
+        assert!(horizontal > 0);
+        assert!(frame.distance > horizontal * 18 / 10,
+            "60-degree boom stored horizontal radius and would shorten twice: distance={}, horizontal={}", frame.distance, horizontal);
+    }
+
+    #[test]
+    fn floor_lift_cannot_push_a_shortened_arm_into_an_overhang() {
+        let mut config = ThirdPersonCameraConfig::character(1000, 3, 3);
+        config.min_floor_clearance = 64;
+        config.pitch_min_q12 = 0;
+        config.pitch_max_q12 = 0;
+        let blockers = [
+            CharacterCollisionAabb::new(
+                RoomPoint::new(-1024, -2, -1024),
+                RoomPoint::new(1024, 2, 1024),
+            ),
+            CharacterCollisionAabb::new(
+                RoomPoint::new(-1024, 0, -800),
+                RoomPoint::new(1024, 1000, -600),
+            ),
+            CharacterCollisionAabb::new(
+                RoomPoint::new(-1024, 40, -600),
+                RoomPoint::new(1024, 100, -200),
+            ),
+        ];
+        let mut world = ClearTraceProvider;
+        let mut props = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &blockers);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let frame = camera
+            .update_vblanks_with_trace_provider(
+                WorldProjection::new(160, 120, 320, 64),
+                &mut props,
+                trace_target(),
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .unwrap();
+        assert!(frame.collision_pull_in);
+        let visibility = trace_collision(
+            &mut props,
+            CollisionTraceQuery::point(frame.focus, frame.camera.position),
+        )
+        .unwrap();
+        assert!(
+            !visibility.hit(),
+            "floor clearance put the camera in the overhang"
+        );
+        assert!(frame.camera.position.y > 2);
     }
 
     #[test]

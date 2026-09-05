@@ -588,10 +588,12 @@ impl Playtest {
             // tables, which makes the skip output-identical.
             if bsp_resident && self.bsp_instance_visible_mask & (1u16 << index) == 0 {
                 self.instance_actor_poses[index] = None;
+                self.previous_instance_actor_poses[index] = None;
                 index += 1;
                 continue;
             }
             let previous = self.instance_actor_poses[index];
+            self.previous_instance_actor_poses[index] = previous;
             self.instance_actor_poses[index] = mr::resolve_instance_actor_pose(
                 model_tables(),
                 &self.models,
@@ -605,11 +607,13 @@ impl Playtest {
             index += 1;
         }
         self.instance_actor_poses[count..].fill(None);
+        self.previous_instance_actor_poses[count..].fill(None);
     }
 
     pub(super) fn clear_actor_pose_snapshots(&mut self) {
         self.player_actor_pose = None;
         self.previous_player_actor_pose = None;
+        self.previous_instance_actor_poses.fill(None);
         for pose in self.instance_actor_poses.iter_mut() {
             *pose = None;
         }

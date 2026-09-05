@@ -297,7 +297,7 @@ impl Playtest {
         if npc_tick_due {
             for index in 0..entity_count {
                 let record = &GAME_ENTITIES[index];
-                self.track_enemy_charge(index, ctx, npc_delta_ticks);
+                self.track_enemy_tell(index, ctx, npc_delta_ticks);
                 let position = self.game_entities.position(index);
                 let audible_range = record.aggro_radius.saturating_mul(2);
                 if record.room != self.room_index

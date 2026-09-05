@@ -1,25 +1,11 @@
-//! Souls-like melee-combat resolution (the phase-3 combat slice of
-//! docs/game-runtime-plan.md): a flat XZ ARC in front of an attacker
-//! tested against hurtbox cylinders. Grid-native and integer-only --
-//! per-axis early-outs, one exact squared compare, and one octant
-//! `atan2` on the survivors -- so a whiffed swing costs a handful of
-//! loads and a connected one stays deep inside the budget's 10k-cycle
-//! combat line. Deliberately NOT weapon-shape hitboxes: capsule/point
-//! vs arc is the phase-3 shape, and rig-attached
-//! [`CombatCapsuleRecord`]s are the authored upgrade path. The cooked
-//! grip-local `WeaponHitShapeRecord` geometry is authoring-only data
-//! today: nothing at runtime reads the shapes (only the hitbox
-//! records' active frame windows, below).
+//! Animation-timed melee capsules and projectile release markers sampled from
+//! the same retained actor poses as rendering. Melee sweeps cover the active
+//! portion of consecutive poses; per-window masks prevent duplicate damage.
+//! Unauthored actors fall back to a facing arc against cylindrical hurtboxes.
 //!
-//! The player's arc parameters and ACTIVE window come from the cooked
-//! contract: the first PLAYER-flagged [`EquipmentRecord`] resolves a
-//! [`LevelWeaponRecord`] whose `arc_*`/`damage` fields size the arc
-//! and whose hitbox `active_start_frame`/`active_end_frame` windows
-//! (character attack-clip animation frames) bound the hit window --
-//! windup before, recovery after. An unarmed player falls back to the
-//! [`UNARMED`] spec with the whole swing active.
-//!
-//! [`WeaponHitShapeRecord`]: psx_level::WeaponHitShapeRecord
+//! Capsule overlap uses bounded 32-bit integer projections and an AABB broad
+//! phase, keeping fast weapon motion reliable without heap allocation or wide
+//! arithmetic on PlayStation.
 
 use psx_engine::{JointWorldTransform, WorldVertex};
 use psx_level::{
@@ -79,6 +65,54 @@ pub fn transform_actor_combat_capsule(
         record,
         pose.joint_world_transform(u16::from(record.joint))?,
     ))
+}
+
+/// Sample the endpoints of an active part of a retained-pose interval. Both
+/// animation phase and actor translation are clipped, so movement during an
+/// inactive tell or recovery cannot become part of the damaging blade path.
+/// The previous pose must belong to the same consecutive action as `current`.
+pub fn transform_actor_combat_capsule_sweep(
+    record: &CombatCapsuleRecord,
+    previous: Option<ActorPoseSnapshot>,
+    current: ActorPoseSnapshot,
+    start_phase: u32,
+    end_phase: u32,
+) -> Option<(WorldCombatCapsule, Option<WorldCombatCapsule>)> {
+    let sample = |pose: ActorPoseSnapshot, phase| {
+        let mut capsule = transform_actor_combat_capsule(record, pose.with_phase_q12(phase))?;
+        if let Some(previous) = previous {
+            let from = previous.origin();
+            let to = current.origin();
+            if from != to && current.phase_q12() > previous.phase_q12() {
+                let fraction = ratio_q12(
+                    phase
+                        .saturating_sub(previous.phase_q12())
+                        .min(i32::MAX as u32) as i32,
+                    current
+                        .phase_q12()
+                        .saturating_sub(previous.phase_q12())
+                        .min(i32::MAX as u32) as i32,
+                ) as u16;
+                let origin =
+                    interpolate3_q12([from.x, from.y, from.z], [to.x, to.y, to.z], fraction);
+                let sampled_origin = pose.origin();
+                let offset = sub3(
+                    origin,
+                    [sampled_origin.x, sampled_origin.y, sampled_origin.z],
+                );
+                for axis in 0..3 {
+                    capsule.start[axis] = capsule.start[axis].saturating_add(offset[axis]);
+                    capsule.end[axis] = capsule.end[axis].saturating_add(offset[axis]);
+                }
+            }
+        }
+        Some(capsule)
+    };
+    let end = sample(current, end_phase)?;
+    let start = previous
+        .filter(|_| start_phase < end_phase)
+        .and_then(|previous| sample(previous, start_phase));
+    Some((end, start))
 }
 
 /// Animation-timed rig attachment which releases one projectile.
@@ -298,6 +332,31 @@ pub fn resolve_authored_actor_contact_pending(
     defender_pose: Option<ActorPoseSnapshot>,
     connected_mask: u16,
 ) -> (AuthoredActorContact, u16) {
+    resolve_authored_actor_contact_swept_pending(
+        attacker_capsules,
+        action,
+        attacker_pose,
+        None,
+        defender_capsules,
+        defender_pose,
+        connected_mask,
+    )
+}
+
+/// Resolve enemy blade motion between consecutive retained poses, clipped to
+/// each authored strike window. The caller must discard the previous pose on a
+/// clip change; stale ticks and phase resets are rejected here as well. Only
+/// commit the returned mask after invulnerability and world occlusion checks.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_authored_actor_contact_swept_pending(
+    attacker_capsules: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    attacker_pose: Option<ActorPoseSnapshot>,
+    previous_attacker_pose: Option<ActorPoseSnapshot>,
+    defender_capsules: &[CombatCapsuleRecord],
+    defender_pose: Option<ActorPoseSnapshot>,
+    connected_mask: u16,
+) -> (AuthoredActorContact, u16) {
     let action = action.to_index() as u8;
     let has_attack_hitbox = attacker_capsules
         .iter()
@@ -311,12 +370,13 @@ pub fn resolve_authored_actor_contact_pending(
     let (Some(attacker_pose), Some(defender_pose)) = (attacker_pose, defender_pose) else {
         return (AuthoredActorContact::Miss, 0);
     };
-    let frame = (attacker_pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
-    let mut active = [WorldCombatCapsule::EMPTY; MAX_CHARACTER_COMBAT_CAPSULES];
-    let mut damage = [0u16; MAX_CHARACTER_COMBAT_CAPSULES];
-    let mut poise_damage = [0u16; MAX_CHARACTER_COMBAT_CAPSULES];
-    let mut active_count = 0usize;
-    let mut window_mask = 0u16;
+    let phase = attacker_pose.phase_q12();
+    let previous = previous_attacker_pose.filter(|old| {
+        attacker_pose.tick().wrapping_sub(old.tick()) == 1 && old.phase_q12() <= phase
+    });
+    let mut hurtboxes = [WorldCombatCapsule::EMPTY; MAX_CHARACTER_COMBAT_CAPSULES];
+    let mut hurtbox_count = 0;
+    let mut hurtboxes_sampled = false;
     for (index, record) in attacker_capsules
         .iter()
         .take(MAX_CHARACTER_COMBAT_CAPSULES)
@@ -325,42 +385,65 @@ pub fn resolve_authored_actor_contact_pending(
         if connected_mask & (1u16 << index) != 0
             || record.flags & combat_capsule_flags::HITBOX == 0
             || record.action != action
-            || frame < record.active_start_frame
-            || frame > record.active_end_frame
         {
             continue;
         }
-        let Some(capsule) = transform_actor_combat_capsule(record, attacker_pose) else {
+        let Some((start, end)) = active_frame_sweep_phase_range(
+            previous.map(|pose| pose.phase_q12()),
+            phase,
+            record.active_start_frame,
+            record.active_end_frame,
+        ) else {
             continue;
         };
-        window_mask |= 1u16 << index;
-        active[active_count] = capsule;
-        damage[active_count] = record.damage;
-        poise_damage[active_count] = record.poise_damage;
-        active_count += 1;
-    }
-    if active_count == 0 {
-        return (AuthoredActorContact::Miss, 0);
-    }
-    for hurtbox in defender_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES) {
-        if hurtbox.flags & combat_capsule_flags::HURTBOX == 0 {
-            continue;
-        }
-        let Some(hurtbox) = transform_actor_combat_capsule(hurtbox, defender_pose) else {
+        let Some((capsule, previous_capsule)) =
+            transform_actor_combat_capsule_sweep(record, previous, attacker_pose, start, end)
+        else {
             continue;
         };
-        let mut hit = 0usize;
-        while hit < active_count {
-            if combat_capsules_overlap(&active[hit], &hurtbox) {
-                return (
-                    AuthoredActorContact::Hit {
-                        damage: damage[hit],
-                        poise_damage: poise_damage[hit],
-                    },
-                    window_mask,
-                );
+        if !hurtboxes_sampled {
+            for hurtbox in defender_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES) {
+                if hurtbox.flags & combat_capsule_flags::HURTBOX == 0 {
+                    continue;
+                }
+                if let Some(capsule) = transform_actor_combat_capsule(hurtbox, defender_pose) {
+                    hurtboxes[hurtbox_count] = capsule;
+                    hurtbox_count += 1;
+                }
             }
-            hit += 1;
+            hurtboxes_sampled = true;
+        }
+        let hit = hurtboxes[..hurtbox_count].iter().any(|hurtbox| {
+            previous_capsule.map_or_else(
+                || combat_capsules_overlap(&capsule, hurtbox),
+                |old| combat_capsule_motion_overlaps(&old, &capsule, hurtbox),
+            )
+        });
+        if hit {
+            // Several blade volumes may describe one strike. Consume only
+            // windows overlapping this strike, never a separate later swing
+            // which happens to be crossed by the same retained-pose interval.
+            let mut window_mask = 0u16;
+            for (other_index, other) in attacker_capsules
+                .iter()
+                .take(MAX_CHARACTER_COMBAT_CAPSULES)
+                .enumerate()
+            {
+                if other.flags & combat_capsule_flags::HITBOX != 0
+                    && other.action == action
+                    && other.active_start_frame <= record.active_end_frame
+                    && record.active_start_frame <= other.active_end_frame
+                {
+                    window_mask |= 1u16 << other_index;
+                }
+            }
+            return (
+                AuthoredActorContact::Hit {
+                    damage: record.damage,
+                    poise_damage: record.poise_damage,
+                },
+                window_mask,
+            );
         }
     }
     (AuthoredActorContact::Miss, 0)
@@ -385,6 +468,25 @@ pub fn melee_window_started(
                 old < start
             })
     })
+}
+
+/// Follow the target during the first melee tell, then commit before contact.
+/// Using the first window also prevents turning back toward a dodging player
+/// between strikes of an already committed combo.
+pub fn melee_tell_tracks(
+    records: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    phase: u32,
+) -> bool {
+    records
+        .iter()
+        .filter(|record| {
+            record.flags & combat_capsule_flags::HITBOX != 0
+                && record.action == action.to_index() as u8
+        })
+        .map(|record| record.active_start_frame)
+        .min()
+        .is_some_and(|strike| phase < (u32::from(strike.saturating_sub(2)) << 12))
 }
 
 /// Aim through the charge, then leave two sampled frames of committed aim
@@ -1501,6 +1603,23 @@ mod tests {
         }
 
         #[test]
+        fn melee_tell_commits_before_first_swing_and_stays_committed_between_swings() {
+            let mut swings = [capsule_record(0, combat_capsule_flags::HITBOX, ATTACK); 2];
+            swings[0].active_start_frame = 14;
+            swings[1].active_start_frame = 24;
+            assert!(melee_tell_tracks(&swings, ATTACK, 11 << 12));
+            for frame in [12, 14, 20, 24, 30] {
+                assert!(!melee_tell_tracks(&swings, ATTACK, frame << 12));
+            }
+            assert!(!melee_tell_tracks(&[], ATTACK, 0));
+            assert!(!melee_tell_tracks(
+                &swings,
+                CharacterAnimationAction::HeavyAttack,
+                0
+            ));
+        }
+
+        #[test]
         fn ranged_charge_tracks_until_two_frames_before_single_release() {
             let mut emitter = capsule_record(0, combat_capsule_flags::PROJECTILE_EMITTER, ATTACK);
             emitter.active_start_frame = 27;
@@ -1567,6 +1686,178 @@ mod tests {
                 0,
             );
             assert_eq!(window, 3);
+        }
+
+        fn retained_pose(tick: u32, x: i32, phase: u32) -> ActorPoseSnapshot {
+            ActorPoseSnapshot::new(
+                SimTick::from_u32(tick),
+                static_one_joint_animation(),
+                phase,
+                None,
+                WorldVertex::new(x, 0, 0),
+                Mat3I16::IDENTITY,
+                LocalToWorldScale::IDENTITY,
+                ModelPoseTranslation { x: 0, y: 0, z: 0 },
+            )
+        }
+
+        #[test]
+        fn enemy_sweep_catches_crossing_and_a_fully_skipped_strike() {
+            let defender = Some(pose_at([0; 3], 0));
+            let previous = retained_pose(1, -400, 1 << 12);
+            let current = retained_pose(2, 400, 6 << 12);
+            // Both retained samples are outside the active window and clear
+            // of the defender. The active portion crosses the defender.
+            assert_eq!(
+                resolve_authored_actor_contact_pending(
+                    &HITBOXES,
+                    ATTACK,
+                    Some(current),
+                    &HURTBOXES,
+                    defender,
+                    0,
+                ),
+                (AuthoredActorContact::Miss, 0)
+            );
+            let query = |mask| {
+                resolve_authored_actor_contact_swept_pending(
+                    &HITBOXES,
+                    ATTACK,
+                    Some(current),
+                    Some(previous),
+                    &HURTBOXES,
+                    defender,
+                    mask,
+                )
+            };
+            assert_eq!(
+                query(0),
+                (
+                    AuthoredActorContact::Hit {
+                        damage: 25,
+                        poise_damage: 35
+                    },
+                    1
+                )
+            );
+            assert_eq!(query(1), (AuthoredActorContact::Miss, 0));
+            assert_eq!(
+                resolve_authored_actor_contact_swept_pending(
+                    &HITBOXES,
+                    ATTACK,
+                    Some(current),
+                    Some(previous),
+                    &HURTBOXES,
+                    Some(pose_at([0, 0, 500], 0)),
+                    0,
+                ),
+                (AuthoredActorContact::Miss, 0)
+            );
+        }
+
+        #[test]
+        fn enemy_sweep_does_not_cross_inactive_gaps_or_consume_another_window() {
+            let mut swings = [HITBOXES[0]; 3];
+            // Two volumes for the first strike, one for the later strike.
+            swings[2].active_start_frame = 8;
+            swings[2].active_end_frame = 10;
+            let defender = Some(pose_at([0; 3], 0));
+            let query = |old, current, mask| {
+                resolve_authored_actor_contact_swept_pending(
+                    &swings,
+                    ATTACK,
+                    Some(current),
+                    Some(old),
+                    &HURTBOXES,
+                    defender,
+                    mask,
+                )
+            };
+            let first = query(
+                retained_pose(1, -400, 1 << 12),
+                retained_pose(2, 400, 6 << 12),
+                0,
+            );
+            assert_eq!(first.1, 3);
+            assert_eq!(
+                query(
+                    retained_pose(2, -400, 6 << 12),
+                    retained_pose(3, 400, 7 << 12),
+                    0
+                ),
+                (AuthoredActorContact::Miss, 0)
+            );
+            let second = query(
+                retained_pose(3, -400, 7 << 12),
+                retained_pose(4, 400, 11 << 12),
+                first.1,
+            );
+            assert!(matches!(second.0, AuthoredActorContact::Hit { .. }));
+            assert_eq!(second.1, 4);
+        }
+
+        #[test]
+        fn clipped_sweep_excludes_root_travel_outside_the_damage_window() {
+            let previous = retained_pose(1, -400, 0);
+            let current = retained_pose(2, 400, 10 << 12);
+            let mut hitbox = HITBOXES[0];
+            for (start, end, valid_target) in [(0, 1, -320), (8, 9, 320)] {
+                hitbox.active_start_frame = start;
+                hitbox.active_end_frame = end;
+                let query = |x| {
+                    resolve_authored_actor_contact_swept_pending(
+                        &[hitbox],
+                        ATTACK,
+                        Some(current),
+                        Some(previous),
+                        &HURTBOXES,
+                        Some(pose_at([x, 0, 0], 0)),
+                        0,
+                    )
+                };
+                // The full origin chord crosses zero, but only while the
+                // weapon is inactive. Contact inside the clipped part remains.
+                assert_eq!(query(0), (AuthoredActorContact::Miss, 0));
+                assert!(matches!(
+                    query(valid_target).0,
+                    AuthoredActorContact::Hit { .. }
+                ));
+            }
+        }
+
+        #[test]
+        fn enemy_sweep_rejects_stale_interrupted_and_restarted_poses() {
+            let defender = Some(pose_at([0; 3], 0));
+            let query = |old, current| {
+                resolve_authored_actor_contact_swept_pending(
+                    &HITBOXES,
+                    ATTACK,
+                    Some(current),
+                    old,
+                    &HURTBOXES,
+                    defender,
+                    0,
+                )
+            };
+            let current = retained_pose(5, 400, 3 << 12);
+            // Missing/changed clips are filtered by the caller. A stale pose
+            // or a reset phase must not draw a damaging chord into a new action.
+            for old in [
+                None,
+                Some(retained_pose(1, -400, 2 << 12)),
+                Some(retained_pose(4, -400, 9 << 12)),
+            ] {
+                assert_eq!(query(old, current), (AuthoredActorContact::Miss, 0));
+            }
+            // A new action may still deal a legitimate current-pose hit.
+            assert!(matches!(
+                query(
+                    Some(retained_pose(4, -400, 9 << 12)),
+                    retained_pose(5, 0, 3 << 12)
+                )
+                .0,
+                AuthoredActorContact::Hit { .. }
+            ));
         }
 
         #[test]
