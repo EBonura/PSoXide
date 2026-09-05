@@ -227,7 +227,7 @@ const WATER_PHASE_PER_TEXEL_Q12: u32 = 326;
 const WATER_PHASE_PER_FRAME_Q12: u32 = 22;
 const WATER_AMPLITUDE_TEXELS: i32 = 2;
 const ALIAS_MODEL_ROTATES: u8 = 8;
-const PXBSP_MATERIAL_TICKS_PER_SECOND: i64 = 60;
+const PXBSP_MATERIAL_TICKS_PER_SECOND: u16 = 60;
 const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
 const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
 /// The third-person camera exposes large, oblique floor polygons much farther
@@ -3525,9 +3525,9 @@ fn pxbsp_animation_offset(
 }
 
 fn pxbsp_scroll_axis(speed_q8: i16, phase: u8, period: u8, tick: u32) -> u8 {
-    let travelled_q8 =
-        i64::from(speed_q8).saturating_mul(i64::from(tick)) / PXBSP_MATERIAL_TICKS_PER_SECOND;
-    (travelled_q8 / 256 + i64::from(phase)).rem_euclid(i64::from(period.max(1))) as u8
+    psx_math::int32::scroll_q8_wrapped(
+        speed_q8, phase, u16::from(period.max(1)), tick, PXBSP_MATERIAL_TICKS_PER_SECOND,
+    )
 }
 
 #[cfg(test)]
@@ -3904,6 +3904,19 @@ mod tests {
         assert_eq!(state.color_command_word, 0x3600_0000);
         assert_eq!(state.uv_offset, [16, 24]);
         assert_eq!(state.page_uv_offset, [48, 88]);
+    }
+
+    #[test]
+    fn bsp_scroll_preserves_tiny_and_non_power_of_two_texture_periods() {
+        for period in [0u8, 1, 3, 32, 63, 128, 255] {
+            for speed in [i16::MIN, -257, -1, 0, 1, 257, i16::MAX] {
+                for tick in [0, 59, 60, 15360, u32::MAX] {
+                    let old = ((i64::from(speed) * i64::from(tick) / 60 / 256) + 255)
+                        .rem_euclid(i64::from(period.max(1))) as u8;
+                    assert_eq!(pxbsp_scroll_axis(speed, 255, period, tick), old);
+                }
+            }
+        }
     }
 
     #[test]
