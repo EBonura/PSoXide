@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "component": "sdk",
+  "source_repository": "https://github.com/EBonura/PSoXide",
+  "split_from": "ed1ad4247d173ce7b4783f654ceaacef4320c364",
+  "guest_workspace": "sdk",
+  "linker_script": "sdk/psoxide.ld",
+  "format_crate": "crates/psxed-format"
+}

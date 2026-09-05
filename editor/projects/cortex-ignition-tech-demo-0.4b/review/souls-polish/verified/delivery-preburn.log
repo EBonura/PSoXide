@@ -1,7 +1,0 @@
-preburn structural check ok
-  cue:       editor/projects/cortex-ignition-tech-demo-0.4b/baked/cortex_ignition_tech_demo_0_4b.cue
-  sectors:   12094
-  volume:    CORTEX04B
-  tracks:    01:DATA, 02:AUDIO, 03:AUDIO
-  boot:      PSX.EXE;1
-  root:      SYSTEM.CNF;1, PSX.EXE;1, WORLD.PAK;1, UI.PAK;1
