@@ -582,7 +582,7 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// Wrapping identity of each entity's current swing. Deferred tokens use
     /// it to reject a contact retained across a later attack.
     attack_sequence: [u16; MAX_ENTITIES],
-    projectile_release_mask: [u16; MAX_ENTITIES],
+    authored_connection_mask: [u16; MAX_ENTITIES],
     /// Packed selected swing plus next close-range alternation bit.
     attack_mode: [u8; MAX_ENTITIES],
     /// Free-movement combat choice ([`GameEntityIntent`] as raw u8).
@@ -765,7 +765,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         move_tried: [0; MAX_ENTITIES],
         combat_flags: [0; MAX_ENTITIES],
         attack_sequence: [0; MAX_ENTITIES],
-        projectile_release_mask: [0; MAX_ENTITIES],
+        authored_connection_mask: [0; MAX_ENTITIES],
         attack_mode: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
         attack_cooldown: [0; MAX_ENTITIES],
@@ -1366,7 +1366,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// the exact attack clip/phase and transform sampled before any
     /// Attack-to-Recover transition. The caller resolves body/equipment poses,
     /// evaluates authored combat capsules, and latches a connection with
-    /// [`Self::connect_deferred_attack`]. `player_hits` and `player_damage` in
+    /// [`Self::connect_deferred_melee_window`] (or the legacy one-hit API).
+    /// `player_hits` and `player_damage` in
     /// the returned stats are therefore zero; the caller reports those after
     /// pose-backed contact resolution.
     pub fn tick_delta_deferred<const MAX_ATTACKS: usize>(
@@ -1527,7 +1528,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// new swing or new entity tick invalidates the old token.
     pub fn deferred_projectile_release_mask(&self, attack: DeferredGameEntityAttack) -> Option<u16> {
         (attack.is_ranged() && self.deferred_attack_can_connect(attack))
-            .then(|| self.projectile_release_mask[attack.entity()])
+            .then(|| self.authored_connection_mask[attack.entity()])
     }
 
     /// Consume only this emitter after spawning its shot. Other authored
@@ -1539,7 +1540,22 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if emitter >= 16 || mask & (1u16 << emitter) != 0 {
             return false;
         }
-        self.projectile_release_mask[attack.entity()] = mask | (1u16 << emitter);
+        self.authored_connection_mask[attack.entity()] = mask | (1u16 << emitter);
+        true
+    }
+
+    /// Per-window melee contacts, sharing storage with ranged emitter latches.
+    pub fn deferred_melee_hit_mask(&self, attack: DeferredGameEntityAttack) -> Option<u16> {
+        (!attack.is_ranged() && self.deferred_attack_can_connect(attack))
+            .then(|| self.authored_connection_mask[attack.entity()])
+    }
+
+    /// Consume all simultaneously active hitboxes as one verified contact.
+    /// Later non-overlapping windows remain available in the same animation.
+    pub fn connect_deferred_melee_window(&mut self, attack: DeferredGameEntityAttack, window: u16) -> bool {
+        let Some(used) = self.deferred_melee_hit_mask(attack) else { return false; };
+        if window == 0 || used & window != 0 { return false; }
+        self.authored_connection_mask[attack.entity()] = used | window;
         true
     }
 
@@ -1739,9 +1755,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 } else {
                     stats.melee_attack_enters += 1;
                 }
-                // A fresh melee swing gets one connection; ranged attacks
-                // get one release per authored emitter.
-                self.projectile_release_mask[index] = 0;
+                // A fresh animation gets independent authored melee-window or
+                // projectile-emitter latches. Legacy arcs still connect once.
+                self.authored_connection_mask[index] = 0;
                 self.combat_flags[index] &= !GAME_ENTITY_ATTACK_CONNECTED;
                 self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
             }
@@ -4475,6 +4491,31 @@ mod tests {
         entities.state[0] = GameEntityState::Dead as u8;
         entities.overflow = 1;
         assert!(!entities.encounter_cleared(&IDLE_ENEMY));
+    }
+
+    #[test]
+    fn melee_combo_windows_are_independent_and_interruptible() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        let mut stats = GameEntityTickStats::default();
+        entities.enter_state(0, GameEntityState::Attack, &mut stats);
+        let token = entities.deferred_attack(&IDLE_ENEMY[0], 0);
+        assert_eq!(entities.deferred_melee_hit_mask(token), Some(0));
+        assert!(entities.connect_deferred_melee_window(token, 1));
+        assert!(!entities.connect_deferred_melee_window(token, 1));
+        assert!(entities.connect_deferred_melee_window(token, 2));
+        assert!(entities.connect_deferred_melee_window(token, 4));
+        assert_eq!(entities.deferred_melee_hit_mask(token), Some(7));
+        assert!(!entities.connect_deferred_melee_window(token, 0));
+        entities.enter_state(0, GameEntityState::Staggered, &mut stats);
+        assert!(!entities.connect_deferred_melee_window(token, 8));
+        entities.enter_state(0, GameEntityState::Attack, &mut stats);
+        let fresh = entities.deferred_attack(&IDLE_ENEMY[0], 0);
+        assert_eq!(entities.deferred_melee_hit_mask(fresh), Some(0));
+        assert!(!entities.connect_deferred_melee_window(token, 8));
+        assert!(entities.connect_deferred_melee_window(fresh, 1));
+        entities.enter_state(0, GameEntityState::Dead, &mut stats);
+        assert!(!entities.connect_deferred_melee_window(fresh, 2));
     }
 
     #[test]

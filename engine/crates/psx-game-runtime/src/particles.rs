@@ -35,8 +35,7 @@ const PARTICLE_MAX_SCREEN_SIZE: i16 = 18;
 const WATER_SPLASH_PARTICLES: u32 = 3;
 const WATER_SPLASH_LIFETIME: u32 = 16;
 
-/// Draw one retained dash sample: three body-height ion filaments or an
-/// expanding ground pulse. World projection/depth keeps walls authoritative.
+/// Draw a retained dash ground pulse. World projection/depth keeps walls authoritative.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_dash_sample<const OT_DEPTH: usize>(
     sample: crate::combat_feedback::DashSample,
@@ -57,7 +56,6 @@ pub fn draw_dash_sample<const OT_DEPTH: usize>(
     let material = particle_material.with_blend_mode(BlendMode::Add)
         .with_tint(rgb_tuple(scale_rgb(accent, fade, 12)));
     let mut submitted = 0;
-    if sample.pulse {
         // An eight-sided floor ring, rather than a camera-facing halo.
         const RING: [(i32, i32); 9] = [(4,0),(3,3),(0,4),(-3,3),(-4,0),(-3,-3),(0,-4),(3,-3),(4,0)];
         let radius = i32::from(sample.height) / 6 + i32::from(sample.age) * 2;
@@ -69,19 +67,44 @@ pub fn draw_dash_sample<const OT_DEPTH: usize>(
                 submitted += draw_projectile_segment(a, b, 1, material, slot, ot, primitive_packets);
             }
         }
-    } else {
-        for band in [1, 2, 3] {
-            let lift = i32::from(sample.height) * band / 5;
-            let mut from = sample.from;
-            let mut to = sample.to;
-            from[1] += lift;
-            to[1] += lift;
-            if let (Some(a), Some(b)) = (project(from), project(to)) {
-                let half = (camera.projection.focal_length / b.sz.max(1)).clamp(1, 2) as i16;
-                submitted += draw_projectile_segment(a, b, half, material,
-                    depth_range.slot::<OT_DEPTH>((a.sz + b.sz) / 2), ot, primitive_packets);
-            }
+    submitted
+}
+
+/// A short translucent blade ribbon, driven by the same three editor-authored
+/// damage windows as combat. Uses no retained history or heap allocation.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_melee_window_trail<const OT_DEPTH: usize>(
+    record: &psx_level::CombatCapsuleRecord,
+    action: psx_level::CharacterAnimationAction,
+    pose: crate::actor_pose::ActorPoseSnapshot,
+    zenith: bool,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let Some(phases) = crate::combat::melee_trail_phases(record, action, pose.phase_q12()) else { return 0; };
+    let mut edges = [[ProjectedVertex::INVALID; 2]; 4];
+    for (i, phase) in phases.into_iter().enumerate() {
+        let Some(capsule) = crate::combat::transform_actor_combat_capsule(record, pose.with_phase_q12(phase)) else { return 0; };
+        for (j, point) in [capsule.start, capsule.end].into_iter().enumerate() {
+            let point = WorldVertex::new(point[0], point[1], point[2]);
+            edges[i][j] = if let Some(projector) = projector { projector.project_world(point) }
+                else { camera.project_world(point) }.unwrap_or(ProjectedVertex::INVALID);
         }
+    }
+    let root = if zenith { [16, 64, 62] } else { [64, 22, 8] };
+    let tip = if zenith { [100, 216, 196] } else { [232, 136, 48] };
+    let mut submitted = 0;
+    for segment in 0..3 {
+        let points = [edges[segment][0], edges[segment][1], edges[segment+1][0], edges[segment+1][1]];
+        if points.iter().any(|p| *p == ProjectedVertex::INVALID) { continue; }
+        let colors = [root, tip, root, tip].map(|color| rgb_tuple(scale_rgb(color, (3-segment) as u16, 3)));
+        let quad = psx_gpu::prim::QuadGouraudBlended::new(points.map(|p| (p.sx,p.sy)), colors, BlendMode::AddQuarter);
+        let Some(packet) = packets.push(quad) else { break; };
+        ot.add_slot(depth_range.slot::<OT_DEPTH>(points.iter().map(|p| p.sz).sum::<i32>() / 4), packet, psx_gpu::prim::QuadGouraudBlended::WORDS);
+        submitted += 1;
     }
     submitted
 }

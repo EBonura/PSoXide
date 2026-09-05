@@ -2023,6 +2023,26 @@ impl Scene for Playtest {
                     self.effect_depth_range(sample.room), material, &mut ot, &mut primitive_packets);
             }
         }
+        // Enemy claws are part of the body mesh. Their damage capsules define
+        // the blade edges, so editing a swing window also retimes its trail.
+        for (index, entity) in GAME_ENTITIES.iter().enumerate() {
+            if entity.room != self.room_index
+                || self.game_entities.state(index) != psx_game_runtime::entities::GameEntityState::Attack
+                || self.game_entities.clip_for_state(GAME_ENTITIES, index).clip != entity.attack_clip {
+                continue;
+            }
+            let Some(pose) = self.instance_actor_poses.get(entity.model_instance as usize).copied().flatten() else { continue; };
+            let first = entity.combat_capsule_first.to_usize();
+            let end = first + usize::from(entity.combat_capsule_count);
+            let Some(capsules) = COMBAT_CAPSULES.get(first..end) else { continue; };
+            let projector = PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
+            for capsule in capsules.iter().take(psx_level::MAX_CHARACTER_COMBAT_CAPSULES) {
+                let _ = psx_game_runtime::particles::draw_melee_window_trail(capsule,
+                    CharacterAnimationAction::LightAttack, pose.pose(),
+                    self.game_entities.stance(index) == VitalityChannelId::Two,
+                    camera, projector, self.effect_depth_range(entity.room), &mut ot, &mut primitive_packets);
+            }
+        }
         let _ = self.draw_player_water_wade_splash(
             camera,
             self.gameplay_tick(ctx.sim_tick),
