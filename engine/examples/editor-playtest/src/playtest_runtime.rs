@@ -784,12 +784,9 @@ impl Playtest {
             return 0;
         };
         let local = now.saturating_sub(self.anim_start_tick) % out_cycle;
-        // Same fraction of the incoming cycle, in integer math. Both cycles
-        // are cooked u32 tick counts, so the product needs the wider
-        // accumulator; narrowing would wrap a long clip's phase to a wrong
-        // frame. Once per animation transition, never per vertex.
-        // psx-numeric-allow-next-line: cross-multiplied phase rescale, see above
-        ((u64::from(local) * u64::from(in_cycle)) / u64::from(out_cycle)) as u32
+        // local < out_cycle guarantees the exact quotient is < in_cycle,
+        // even when the intermediate product needs both MULTU result words.
+        psx_math::int32::mul_div_u32(local, in_cycle, out_cycle)
     }
 
     /// Resolve the active crossfade for this render tick, if any.
