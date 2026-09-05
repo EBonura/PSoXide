@@ -1106,13 +1106,11 @@ impl Playtest {
                 .saturating_add(delta_vblanks.min(u8::MAX as u16) as u8);
             if self.evade_run_hold_ticks >= EVADE_RUN_HOLD_VBLANKS {
                 self.evade_run_hold_consumed = true;
-                return EvadeRunIntent {
-                    sprint: true,
-                    evade: false,
-                };
             }
             return EvadeRunIntent {
-                sprint: false,
+                // Movement responds immediately; the hold threshold only
+                // decides whether release means evade or stop sprinting.
+                sprint: true,
                 evade: false,
             };
         }

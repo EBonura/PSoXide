@@ -479,12 +479,25 @@ impl ThirdPersonCameraState {
             }
         }
 
+        let previous_focus = self.focus;
         self.focus = approach_vertex_shift(self.focus, focus_goal, config.focus_lag_shift);
+        // Translation follows the focus; lag smooths changes to the orbit.
+        // Otherwise a slow camera can remain behind a moving player while
+        // its look-at point moves ahead and puts the body outside the frame.
+        self.position.x = self
+            .position
+            .x
+            .saturating_add(self.focus.x.saturating_sub(previous_focus.x));
+        self.position.z = self
+            .position
+            .z
+            .saturating_add(self.focus.z.saturating_sub(previous_focus.z));
+        self.base_position_y = self
+            .base_position_y
+            .saturating_add(self.focus.y.saturating_sub(previous_focus.y));
 
-        // Lock-on height is an authored world-space lift, not an orbit-pitch
-        // hint. Ease that lift once, independently of position lag and the
-        // collision-shortened spring arm, so it converges to the exact
-        // requested camera height without changing the player focus.
+        // Ease toward the authored lock-on height. The complete arm,
+        // including this lift, shortens along the collision-tested ray.
         let lock_height_goal = if target.lock_target.is_some() {
             config.lock_height_boost
         } else {
@@ -546,7 +559,7 @@ impl ThirdPersonCameraState {
         // direction toward the focus, so the height comes down with the
         // distance and the pitch holds. Holding the full height while the arm
         // collapses parks the camera almost directly above the player,
-        // looking straight down. The lock-on boost stays additive on top.
+        // looking straight down. Scale the lock-on lift along that same ray.
         let base_camera_y_goal = if self.distance < config.distance {
             let above_focus = base_camera_y_goal.saturating_sub(self.focus.y);
             self.focus
@@ -583,7 +596,9 @@ impl ThirdPersonCameraState {
                 config.position_lag_shift,
             );
         }
-        self.position.y = self.base_position_y.saturating_add(self.lock_height_offset);
+        let lock_lift =
+            self.lock_height_offset.saturating_mul(self.distance) / config.distance.max(1);
+        self.position.y = self.base_position_y.saturating_add(lock_lift);
         self.position = collision.clamp_to_floor(self.position, config.min_floor_clearance)?;
         self.frame_pitch_q12 = self
             .pitch_q12
@@ -2392,7 +2407,37 @@ mod tests {
     }
 
     #[test]
-    fn collision_shortening_does_not_reduce_lock_height() {
+    fn player_translation_does_not_collapse_the_camera_arm() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut config = ThirdPersonCameraConfig::character(2000, 1000, 850);
+        config.position_lag_shift = 6;
+        config.focus_lag_shift = 2;
+        let mut target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: true,
+            lock_target: None,
+        };
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        camera.snap_to_player(target, config);
+        let initial = camera.current_frame(projection);
+        let offset = initial.camera.position.z - initial.focus.z;
+        for _ in 0..120 {
+            target.player.z -= 64;
+            let frame = camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+            assert_eq!(frame.camera.position.z - frame.focus.z, offset);
+            assert!((frame.focus.z - target.player.z).abs() < 256);
+        }
+    }
+
+    #[test]
+    fn collision_shortening_keeps_lock_height_on_the_arm() {
         let bytes = flat_floor_world();
         let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
         let projection = WorldProjection::new(160, 120, 320, 64);
@@ -2422,8 +2467,7 @@ mod tests {
 
         assert!(frame.distance < config.distance);
         // The shortened arm slides the camera toward the focus (spring arm),
-        // so the base height scales with the distance; the lock boost stays
-        // additive on top of that.
+        // so both base height and lock lift scale with its distance.
         let focus_y = frame.focus.y;
         let slid_base = focus_y
             + ((target.player.y + config.height - focus_y) as i64 * frame.distance as i64
@@ -2431,7 +2475,7 @@ mod tests {
         assert!(frame.camera.position.y < target.player.y + config.height);
         assert_eq!(
             frame.camera.position.y,
-            slid_base + config.lock_height_boost
+            slid_base + config.lock_height_boost * frame.distance / config.distance
         );
     }
 

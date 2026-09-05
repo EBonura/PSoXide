@@ -1223,6 +1223,9 @@ impl Playtest {
         if stick_active {
             self.loco_glide = (input.move_x, input.move_z);
         }
+        if input.sprint && stick_active {
+            return input;
+        }
         let elapsed = now.as_u32().saturating_sub(self.loco_start_tick.as_u32());
         match self.loco {
             LocoPhase::Windup => {
@@ -1263,6 +1266,11 @@ impl Playtest {
         now: SimTick,
         video_hz: VideoHz,
     ) -> PlayerAnim {
+        if motor_anim == PlayerAnim::Run && stick_active {
+            self.loco = LocoPhase::Cruise;
+            self.loco_gait = RUN_GAIT;
+            return PlayerAnim::Run;
+        }
         let elapsed = now.as_u32().saturating_sub(self.loco_start_tick.as_u32());
         let motor_gait = gait_of(motor_anim);
         // Sprint pressed or released mid-move swaps the gait under the phase.

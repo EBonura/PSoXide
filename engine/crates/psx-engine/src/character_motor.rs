@@ -4797,6 +4797,41 @@ mod tests {
     }
 
     #[test]
+    fn shorter_evade_keeps_its_direction_and_invulnerability_window() {
+        let travel = |speed| {
+            let mut config = config();
+            config.roll_speed = speed << 8;
+            config.roll_active_frames = 22;
+            config.roll_recovery_frames = 13;
+            config.roll_invulnerable_frames = 10;
+            let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+            let mut invulnerable = 0;
+            for tick in 0..35 {
+                let frame = motor.update(
+                    None,
+                    CharacterMotorInput {
+                        move_x: if tick == 0 { Q12::ONE } else { Q12::NEG_ONE },
+                        move_z: Q12::ZERO,
+                        facing_yaw: Some(if tick == 0 { Angle::ZERO } else { Angle::HALF }),
+                        evade: tick == 0,
+                        ..CharacterMotorInput::default()
+                    },
+                    config,
+                );
+                invulnerable += usize::from(frame.invulnerable);
+                assert_eq!(frame.position.z, 0);
+                assert!(
+                    frame.position.x >= 0,
+                    "later input must not turn the active evade"
+                );
+            }
+            (motor.position().x, invulnerable)
+        };
+        assert_eq!(travel(191), (191 * 22, 10));
+        assert_eq!(travel(112), (112 * 22, 10));
+    }
+
+    #[test]
     fn neutral_locked_evade_rolls_toward_target() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::HALF);
         let frame = motor.update(
