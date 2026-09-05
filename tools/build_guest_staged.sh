@@ -61,6 +61,7 @@ RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../.
 # without changing the output image, so an exact profiled binary can be
 # attributed instead of rebuilt through a layout-changing diagnostic path.
 if [ -n "${PSOXIDE_GUEST_LINK_MAP:-}" ]; then
+    mkdir -p "$(dirname "$PSOXIDE_GUEST_LINK_MAP")"
     RUSTFLAGS_VALUE="$RUSTFLAGS_VALUE -Clink-arg=-Map=$PSOXIDE_GUEST_LINK_MAP"
 fi
 # Extra rustc flags for layout experiments (symbol ordering files, linker
