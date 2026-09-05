@@ -543,6 +543,56 @@ pub fn scale_animation_blob_to_engine_units(bytes: &mut [u8]) {
     }
 }
 
+/// Cut an animation blob down to `start..=end` frames, rebasing nothing else.
+///
+/// The pose table is `frame_count * joint_count` fixed-size records in frame
+/// order, so a window is a contiguous slice of it. The caller is responsible
+/// for subtracting `start` from every frame index it emits for this clip; this
+/// only moves bytes.
+///
+/// Returns the frames kept, or `None` when the blob is malformed or the window
+/// already covers it.
+pub fn trim_animation_blob_to_window(bytes: &[u8], start: u16, end: u16) -> Option<(Vec<u8>, u16)> {
+    use psxed_format::animation::{
+        AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
+        POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4,
+    };
+    let payload = psxed_format::AssetHeader::SIZE;
+    if bytes.len() < payload + AnimationHeader::SIZE || bytes[..4] != MAGIC {
+        return None;
+    }
+    let record_size = match read_u16(bytes, 4) {
+        VERSION_V1 => POSE_RECORD_SIZE_V1,
+        VERSION => POSE_RECORD_SIZE,
+        VERSION_V3 => POSE_RECORD_SIZE_V3,
+        VERSION_V4 => POSE_RECORD_SIZE_V4,
+        _ => return None,
+    };
+    let joints = read_u16(bytes, payload) as usize;
+    let frames = read_u16(bytes, payload + 2) as usize;
+    let first = payload + AnimationHeader::SIZE;
+    if joints == 0 || frames == 0 || bytes.len() < first + frames * joints * record_size {
+        return None;
+    }
+    let start = start as usize;
+    let end = (end as usize).min(frames.saturating_sub(1));
+    if start > end || (start == 0 && end + 1 >= frames) {
+        return None;
+    }
+    let kept = end - start + 1;
+
+    let stride = joints * record_size;
+    let mut out = Vec::with_capacity(first + kept * stride);
+    out.extend_from_slice(&bytes[..first]);
+    out.extend_from_slice(&bytes[first + start * stride..first + (end + 1) * stride]);
+
+    let payload_len = (AnimationHeader::SIZE + kept * stride) as u32;
+    out[8..12].copy_from_slice(&payload_len.to_le_bytes());
+    let kept_u16 = u16::try_from(kept).ok()?;
+    out[payload + 2..payload + 4].copy_from_slice(&kept_u16.to_le_bytes());
+    Some((out, kept_u16))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,7 +711,7 @@ mod tests {
                         payload.extend_from_slice(&axis.to_le_bytes());
                     }
                 }
-                2 | 3 | 4 => {
+                2..=4 => {
                     let rotation = if version == 2 {
                         POSE_RECORD_SIZE - 6
                     } else if version == 3 {
@@ -690,7 +740,7 @@ mod tests {
         }
         for frame in 0..frames {
             for joint in 0..joints {
-                payload.extend_from_slice(&vec![0; POSE_RECORD_SIZE_V4 - 6]);
+                payload.extend_from_slice(&[0; POSE_RECORD_SIZE_V4 - 6]);
                 payload.extend_from_slice(&frame.to_le_bytes());
                 payload.extend_from_slice(&joint.to_le_bytes());
                 payload.extend_from_slice(&0u16.to_le_bytes());
@@ -773,54 +823,4 @@ mod tests {
         scale_animation_blob_to_engine_units(&mut blob);
         assert_eq!(decoded_translations(&blob), vec![[4096, -4096, 2]]);
     }
-}
-
-/// Cut an animation blob down to `start..=end` frames, rebasing nothing else.
-///
-/// The pose table is `frame_count * joint_count` fixed-size records in frame
-/// order, so a window is a contiguous slice of it. The caller is responsible
-/// for subtracting `start` from every frame index it emits for this clip; this
-/// only moves bytes.
-///
-/// Returns the frames kept, or `None` when the blob is malformed or the window
-/// already covers it.
-pub fn trim_animation_blob_to_window(bytes: &[u8], start: u16, end: u16) -> Option<(Vec<u8>, u16)> {
-    use psxed_format::animation::{
-        AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
-        POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4,
-    };
-    let payload = psxed_format::AssetHeader::SIZE;
-    if bytes.len() < payload + AnimationHeader::SIZE || bytes[..4] != MAGIC {
-        return None;
-    }
-    let record_size = match read_u16(bytes, 4) {
-        VERSION_V1 => POSE_RECORD_SIZE_V1,
-        VERSION => POSE_RECORD_SIZE,
-        VERSION_V3 => POSE_RECORD_SIZE_V3,
-        VERSION_V4 => POSE_RECORD_SIZE_V4,
-        _ => return None,
-    };
-    let joints = read_u16(bytes, payload) as usize;
-    let frames = read_u16(bytes, payload + 2) as usize;
-    let first = payload + AnimationHeader::SIZE;
-    if joints == 0 || frames == 0 || bytes.len() < first + frames * joints * record_size {
-        return None;
-    }
-    let start = start as usize;
-    let end = (end as usize).min(frames.saturating_sub(1));
-    if start > end || (start == 0 && end + 1 >= frames) {
-        return None;
-    }
-    let kept = end - start + 1;
-
-    let stride = joints * record_size;
-    let mut out = Vec::with_capacity(first + kept * stride);
-    out.extend_from_slice(&bytes[..first]);
-    out.extend_from_slice(&bytes[first + start * stride..first + (end + 1) * stride]);
-
-    let payload_len = (AnimationHeader::SIZE + kept * stride) as u32;
-    out[8..12].copy_from_slice(&payload_len.to_le_bytes());
-    let kept_u16 = u16::try_from(kept).ok()?;
-    out[payload + 2..payload + 4].copy_from_slice(&kept_u16.to_le_bytes());
-    Some((out, kept_u16))
 }

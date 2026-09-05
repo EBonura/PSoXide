@@ -11,6 +11,8 @@ pub const POINT_LIGHT_RADIUS_MAX_WORLD_UNITS: f32 = u16::MAX as f32;
 /// Hierarchy convention for level authoring:
 /// `World (scene root) -> Room (sector grid) -> portal/entity nodes`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// Keep the serialized authoring model inline; boxing changes the public construction API.
+#[allow(clippy::large_enum_variant)]
 pub enum NodeKind {
     /// Plain organisational node.
     Node,

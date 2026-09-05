@@ -156,7 +156,7 @@ fn main() {
         rows.push((saved, resource.name.clone(), frames, keep));
     }
 
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|b| std::cmp::Reverse(b.0));
     println!("{:>8}  {:>12}  clip", "bytes", "frames");
     for (saved, name, frames, keep) in &rows {
         println!("{saved:>8}  {frames:>5} -> {keep:<4}  {name}");

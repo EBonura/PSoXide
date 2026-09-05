@@ -2316,7 +2316,6 @@ pub fn build_package(
         return (None, report);
     }
 
-    let mut lights = lights;
     let room_floor_links = Vec::new();
     let room_overlapped_rooms = Vec::new();
     let (

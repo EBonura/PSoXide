@@ -619,9 +619,7 @@ impl MaterialFlipbook {
         } else {
             self.columns
         };
-        let rows = if two_material_sources {
-            1
-        } else if self.rows == 0 {
+        let rows = if two_material_sources || self.rows == 0 {
             1
         } else {
             self.rows

@@ -178,7 +178,7 @@ pub(crate) fn cook_ui_nodes(
             3_700,
         ),
     ] {
-        if project_root.join(&path).is_file() {
+        if project_root.join(path).is_file() {
             if let Some(sample) = cook_ui_sfx_sample_index(
                 path,
                 project_root,
@@ -1293,37 +1293,6 @@ pub(crate) fn cook_ui_image_texture_asset(
     Some(cooked)
 }
 
-#[cfg(test)]
-mod resident_image_tests {
-    use super::*;
-
-    #[test]
-    fn tiny_ui_images_remain_resident_for_gameplay_prompts() {
-        assert_eq!(ui_image_streamed_class(188), StreamedClass::None);
-        assert_eq!(ui_image_streamed_class(512), StreamedClass::None);
-        assert_eq!(ui_image_streamed_class(513), StreamedClass::UiImage);
-    }
-
-    #[test]
-    fn cooked_image_preserves_loading_complete_visibility() {
-        let node = cooked_ui_image_node(
-            None,
-            UiRect::new(0, 0, 16, 16),
-            "",
-            [128, 58, 34],
-            UiImageEffect::SoftPulse,
-            UiVisibilityCondition::LoadingComplete,
-            None,
-        );
-
-        assert_ne!(
-            node.flags & psx_level::ui_node_flags::LOADING_COMPLETE_ONLY,
-            0,
-            "image nodes must not lose authored visibility while cooking"
-        );
-    }
-}
-
 pub(crate) fn ui_image_fragment_count(width: u16) -> u16 {
     if width <= UI_LARGE_IMAGE_MAX_DIMENSION {
         1
@@ -1734,4 +1703,35 @@ pub(crate) fn cook_options(project: &ProjectDocument) -> Vec<PlaytestOption> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod resident_image_tests {
+    use super::*;
+
+    #[test]
+    fn tiny_ui_images_remain_resident_for_gameplay_prompts() {
+        assert_eq!(ui_image_streamed_class(188), StreamedClass::None);
+        assert_eq!(ui_image_streamed_class(512), StreamedClass::None);
+        assert_eq!(ui_image_streamed_class(513), StreamedClass::UiImage);
+    }
+
+    #[test]
+    fn cooked_image_preserves_loading_complete_visibility() {
+        let node = cooked_ui_image_node(
+            None,
+            UiRect::new(0, 0, 16, 16),
+            "",
+            [128, 58, 34],
+            UiImageEffect::SoftPulse,
+            UiVisibilityCondition::LoadingComplete,
+            None,
+        );
+
+        assert_ne!(
+            node.flags & psx_level::ui_node_flags::LOADING_COMPLETE_ONLY,
+            0,
+            "image nodes must not lose authored visibility while cooking"
+        );
+    }
 }

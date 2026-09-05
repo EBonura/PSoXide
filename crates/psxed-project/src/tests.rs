@@ -3233,7 +3233,8 @@ fn default_project_system_overlay_matches_inventory_language_and_exposes_options
         .iter()
         .all(|node| !node.name.contains("Session")));
 
-    for (name, expected_rect) in [("System Inset Rail", (15, 49, 290, 22))] {
+    {
+        let (name, expected_rect) = ("System Inset Rail", (15, 49, 290, 22));
         let (rect, shape) = system_scene
             .nodes()
             .iter()

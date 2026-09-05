@@ -1280,6 +1280,8 @@ pub(crate) fn push_particle_emitter(
     true
 }
 
+// Borrow the existing cook tables without allocating an intermediate context.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_interactable(
     node_name: &str,
     room_index: u16,

@@ -102,7 +102,7 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
                 _ => {}
             }
             let new_child = scene.add_node(new_entity, child.name.clone(), kind);
-            scene.node_mut(new_child).expect("child").transform = child.transform.clone();
+            scene.node_mut(new_child).expect("child").transform = child.transform;
         }
 
         let cube_x = ACTOR_X[index] + 384;
@@ -140,7 +140,7 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
         for child_id in &poi.children {
             let child = source_scene.node(*child_id).expect("poi child");
             let new_child = scene.add_node(new_entity, child.name.clone(), child.kind.clone());
-            scene.node_mut(new_child).expect("poi child").transform = child.transform.clone();
+            scene.node_mut(new_child).expect("poi child").transform = child.transform;
         }
         let cube_x = poi_x + 192;
         let mut cube = Brush::cuboid(
@@ -177,7 +177,7 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
         for child_id in &poi.children {
             let child = source_scene.node(*child_id).expect("poi child");
             let new_child = scene.add_node(new_entity, child.name.clone(), child.kind.clone());
-            scene.node_mut(new_child).expect("poi child").transform = child.transform.clone();
+            scene.node_mut(new_child).expect("poi child").transform = child.transform;
         }
         let cube_x = poi_x + 192;
         let mut cube = Brush::cuboid(
@@ -214,7 +214,7 @@ fn generate(source: &Path, output_dir: &Path, yaw_degrees: f32) {
         for child_id in &poi.children {
             let child = source_scene.node(*child_id).expect("poi child");
             let new_child = scene.add_node(new_entity, child.name.clone(), child.kind.clone());
-            scene.node_mut(new_child).expect("poi child").transform = child.transform.clone();
+            scene.node_mut(new_child).expect("poi child").transform = child.transform;
         }
         let cube_x = poi_x + 192;
         let mut cube = Brush::cuboid(

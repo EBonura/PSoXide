@@ -1232,6 +1232,15 @@ fn subdivide_drawable_surfaces(
     result
 }
 
+type CompiledModel = (
+    PackedBspGeometry,
+    CompiledCollisionHulls,
+    Vec<[i32; 3]>,
+    UvWindowStats,
+);
+
+// Keep the cook-stage inputs explicit; they borrow independent source tables.
+#[allow(clippy::too_many_arguments)]
 fn compile_model(
     brushes: &[Brush],
     light_occluders: &[Brush],
@@ -1245,15 +1254,7 @@ fn compile_model(
     mode: BrushWorldCookMode,
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
-) -> Result<
-    (
-        PackedBspGeometry,
-        CompiledCollisionHulls,
-        Vec<[i32; 3]>,
-        UvWindowStats,
-    ),
-    BrushWorldCookError,
-> {
+) -> Result<CompiledModel, BrushWorldCookError> {
     let (topology_surfaces, render_surfaces) = compile_model_surfaces(brushes);
     let (mut bsp, portals, leak_diagnostic) =
         compile_model_topology(&topology_surfaces, brushes, occupant_points, true);
@@ -1393,7 +1394,7 @@ fn compile_model_topology(
     Vec<CompiledPortal>,
     BrushWorldLeakDiagnostic,
 ) {
-    let mut bsp = build_surface_bsp(&topology_surfaces);
+    let mut bsp = build_surface_bsp(topology_surfaces);
     let portals = portalize_surface_bsp(&bsp);
     classify_bsp_leaves(&mut bsp, &portals, brushes);
     let mut leak_diagnostic = BrushWorldLeakDiagnostic::default();
@@ -1614,7 +1615,7 @@ fn portal_component_outer_boundary(
                 .enumerate()
                 .filter_map(|(index, &point)| {
                     let t = dot_f64(subtract(point, edge_a), direction) / length_squared;
-                    if t < -EPSILON || t > 1.0 + EPSILON {
+                    if !(-EPSILON..=1.0 + EPSILON).contains(&t) {
                         return None;
                     }
                     let nearest = add_f64(edge_a, scale_f64(direction, t));

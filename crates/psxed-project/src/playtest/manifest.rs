@@ -354,6 +354,7 @@ impl psx_engine::WorldSurfaceLighting for ProjectCachedRoomLighting<'_> {
     }
 }
 
+#[cfg(not(playtest_pxbsp))]
 macro_rules! draw_project_cached_room {
     (
         $lighting:expr,
@@ -365,6 +366,7 @@ macro_rules! draw_project_cached_room {
         $draw($($before,)* &cached_lighting, true, $($after,)*)
     }};
 }
+#[cfg(not(playtest_pxbsp))]
 pub(crate) use draw_project_cached_room;
 
 "#;
@@ -379,6 +381,7 @@ pub(crate) use draw_project_cached_room;
     } else {
         out.push_str(
             r#"
+#[cfg(not(playtest_pxbsp))]
 macro_rules! draw_project_cached_room {
     (
         $lighting:expr,
@@ -389,6 +392,7 @@ macro_rules! draw_project_cached_room {
         $draw($($before,)* $lighting, false, $($after,)*)
     };
 }
+#[cfg(not(playtest_pxbsp))]
 pub(crate) use draw_project_cached_room;
 
 "#,
