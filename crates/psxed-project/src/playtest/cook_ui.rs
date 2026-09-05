@@ -104,6 +104,18 @@ pub(crate) fn cook_ui_nodes(
     // resident sample path as UI audio.
     for (path, event, volume, pitch_q12) in [
         (
+            "assets/audio/ui/ui_socket.wav",
+            psx_level::LevelGameplaySfxEvent::ItemAcquired,
+            72,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
+            "assets/audio/ui/ui_confirm.wav",
+            psx_level::LevelGameplaySfxEvent::GameplayEnter,
+            68,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
             "assets/audio/gameplay/enemy_footstep.wav",
             psx_level::LevelGameplaySfxEvent::EnemyFootstep,
             48,
