@@ -1,3 +1,4 @@
+.DEFAULT_GOAL := help
 include tools/sdk-examples.mk
 
 .PHONY: help check test fmt lint example disc hello-tri hello-tri-disc run-tri
