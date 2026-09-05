@@ -6,6 +6,44 @@ remain the basis. The original working checkout belongs to the separate
 performance task. Commit `42f493ea` records the inherited working baseline;
 the subsequent feature commit contains this pass.
 
+## Camera, awareness and closing message (5 September)
+
+- The enabled Heavy Enemy Model's actual Dead state, after 90 death-animation
+  ticks, opens three localized world-message pages. They use the intro renderer,
+  type-on and Cross dismissal, wait for existing panels, and show once per launch.
+  The player can continue exploring or return through the pause menu. The old
+  Sector Cleared banner has been removed.
+- Effective Camera component: distance 3500, height 1800, target height 1160,
+  position lag shift 2, lock rise 10%. The previous values were 3700/2150/800,
+  lag 6 and rise 25%. The player sits lower with a shallower downward view and
+  faster positional follow. Geometry and camera collision are unchanged.
+- Light notice radius is now 5632 authored units (352 cooked), heavy 6144 (384).
+  Front-half sight requires a clear torso-height BSP segment; close clear-space
+  awareness covers all directions. Moving players produce hearing radii of two
+  body heights walking, four running/dodging; cover reduces hearing to one third.
+  Hearing enters the normal alert/pursuit state. Attacks still need clear sight.
+  Idle, blocked movement, other rooms and large vertical separations do not
+  produce remote hearing. Near actors run perception even outside the PVS;
+  distant dormant actors remain gated.
+- Removed unused logic and break-event capacity using cooked record counts.
+  This retains all authored content while restoring PS1 allocation headroom.
+
+Reference screenshots inspected directly:
+[Dark Souls III](https://www.jeuxvideo.com/wikis-soluce-astuces/471278/ressources-de-combat.htm)
+and [Bloodborne](https://wccftech.com/bloodborne-game-details-playtime-revealed-screenshots/).
+The lower-body composition is an interpretation of those captures, not a claim
+about either game's internal camera constants.
+
+[Same-input before/after camera capture](review/souls-polish/revision-awareness/camera-comparison.png).
+Current validation and exact hashes are in
+`review/souls-polish/revision-awareness/receipt.json`: 206 runtime + 58 playtest
+unit tests, 1800-poll dash and 3312-poll combat replays, zero guest faults and zero
+load-delay hazards. Both normal replays have 2128 heap bytes free. WORLD.PAK,
+UI.PAK and audio tracks pass structural checks. The 3100-poll outro UI preview
+forces only the boss-defeated predicate in a separate temporary build; it verifies
+paging and dismissal, not a complete boss kill. It is not the delivered disc.
+Physical-console behavior remains for hands-on testing.
+
 ## Latest revision (5 September)
 
 Following the video review:
@@ -70,8 +108,7 @@ music tracks. Diagnostic spawn/death probes are separate and are not shipped.
 - **Idle binding fix:** an explicit AnimationSet Idle action now wins over the
   legacy fallback, which could otherwise pick the new attack as idle.
 - **Guidance and ending:** English/Italian pages explain swap delay, poise,
-  chaining, ranged patterns and R3 recenter. Defeating every enabled enemy shows
-  a localized Sector Cleared label; empty or truncated encounters cannot win.
+  chaining, ranged patterns and R3 recenter. The boss defeat now opens the intro-style closing pages described above.
 - **Respawn fix:** clears old projectiles, impact effects, queued actions, retained
   poses and broken-stance flags, restores both pools and resets enemies. Currency,
   checkpoints and collected items persist.

@@ -190,10 +190,30 @@ pub(crate) fn prompt_verb(verb: &'static str) -> &'static str {
     }
 }
 
+// Runtime demo outro pages share the intro's paging/type-on renderer.
+// They live outside the cooked POI table, so existing saved page IDs are stable.
+pub(crate) const DEMO_OUTRO_FIRST: u16 = u16::MAX - 2;
+pub(crate) const DEMO_OUTRO_COUNT: u16 = 3;
+
 /// Cooked message page `index` in the live language: the Italian column when
 /// it was authored, the English page otherwise.
 pub(crate) fn page_text(index: usize) -> Option<&'static str> {
     use crate::generated::{INTERACTABLE_MESSAGE_PAGES, INTERACTABLE_MESSAGE_PAGES_IT};
+    if index >= usize::from(DEMO_OUTRO_FIRST) {
+        let page = index - usize::from(DEMO_OUTRO_FIRST);
+        return match language() {
+            Language::English => [
+                "THANKS FOR PLAYING THE\nCORTEX IGNITION TECH DEMO.",
+                "FOLLOW BONNIE STUDIOS\nFOR DEVELOPMENT UPDATES.",
+                "FEEL FREE TO KEEP EXPLORING\nOR RETURN TO THE MAIN MENU\nFROM THE PAUSE MENU.",
+            ].get(page).copied(),
+            Language::Italian => [
+                "GRAZIE PER AVER GIOCATO ALLA\nDEMO TECNICA DI CORTEX IGNITION.",
+                "SEGUI BONNIE STUDIOS\nPER AGGIORNAMENTI SULLO SVILUPPO.",
+                "PUOI CONTINUARE A ESPLORARE\nO TORNARE AL MENU PRINCIPALE\nDAL MENU DI PAUSA.",
+            ].get(page).copied(),
+        };
+    }
     let english = INTERACTABLE_MESSAGE_PAGES.get(index).copied()?;
     if language() == Language::English {
         return Some(english);
