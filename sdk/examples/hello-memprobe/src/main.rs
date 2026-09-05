@@ -59,12 +59,23 @@ fn fill_pattern(buf: &mut [u8], seed: u8) {
 /// One memcpy of `n` bytes from `src + so` to `dst + do_`; returns the count
 /// of wrong bytes (copied region and one guard word on each side).
 fn check_memcpy(so: usize, do_: usize, n: usize) -> u32 {
-    let (src, dst) = unsafe { (&mut *core::ptr::addr_of_mut!(SRC), &mut *core::ptr::addr_of_mut!(DST)) };
+    let (src, dst) = unsafe {
+        (
+            &mut *core::ptr::addr_of_mut!(SRC),
+            &mut *core::ptr::addr_of_mut!(DST),
+        )
+    };
     fill_pattern(src, (so + n) as u8);
     for b in dst.iter_mut() {
         *b = GUARD;
     }
-    let ret = unsafe { memcpy(dst.as_mut_ptr().add(do_), src.as_ptr().add(so), black_box(n)) };
+    let ret = unsafe {
+        memcpy(
+            dst.as_mut_ptr().add(do_),
+            src.as_ptr().add(so),
+            black_box(n),
+        )
+    };
     let mut bad = 0u32;
     if ret != unsafe { dst.as_mut_ptr().add(do_) } {
         bad += 1;
@@ -129,7 +140,12 @@ fn reference_memcmp(a: &[u8], b: &[u8]) -> i32 {
 /// Compare `n` bytes at offsets `ao`/`bo`; `differ_at` (if < n) flips one
 /// byte of `b` so the sign and position handling is exercised.
 fn check_memcmp(ao: usize, bo: usize, n: usize, differ_at: usize, up: bool) -> u32 {
-    let (a, b) = unsafe { (&mut *core::ptr::addr_of_mut!(SRC), &mut *core::ptr::addr_of_mut!(DST)) };
+    let (a, b) = unsafe {
+        (
+            &mut *core::ptr::addr_of_mut!(SRC),
+            &mut *core::ptr::addr_of_mut!(DST),
+        )
+    };
     fill_pattern(a, (n + differ_at) as u8);
     b.copy_from_slice(a);
     // Shift b so the two views hold the same bytes at different alignments.
@@ -137,7 +153,11 @@ fn check_memcmp(ao: usize, bo: usize, n: usize, differ_at: usize, up: bool) -> u
         b[bo + i] = a[ao + i];
     }
     if differ_at < n {
-        b[bo + differ_at] = if up { a[ao + differ_at].wrapping_add(1) } else { a[ao + differ_at].wrapping_sub(1) };
+        b[bo + differ_at] = if up {
+            a[ao + differ_at].wrapping_add(1)
+        } else {
+            a[ao + differ_at].wrapping_sub(1)
+        };
         // Keep the reference honest when the wrap changed the sign.
     }
     let got = unsafe { memcmp(a.as_ptr().add(ao), b.as_ptr().add(bo), black_box(n)) };
@@ -146,8 +166,17 @@ fn check_memcmp(ao: usize, bo: usize, n: usize, differ_at: usize, up: bool) -> u
     if same_sign {
         0
     } else {
-        let bytes = ((a[ao] as usize) << 24) | ((b[bo] as usize) << 16) | ((a[ao + n - 1] as usize) << 8) | (b[bo + n - 1] as usize);
-        log_failure(4, got as u32 as usize, want as u32 as usize, bytes, (differ_at as u32) << 1 | u32::from(up));
+        let bytes = ((a[ao] as usize) << 24)
+            | ((b[bo] as usize) << 16)
+            | ((a[ao + n - 1] as usize) << 8)
+            | (b[bo + n - 1] as usize);
+        log_failure(
+            4,
+            got as u32 as usize,
+            want as u32 as usize,
+            bytes,
+            (differ_at as u32) << 1 | u32::from(up),
+        );
         1
     }
 }
@@ -155,7 +184,9 @@ fn check_memcmp(ao: usize, bo: usize, n: usize, differ_at: usize, up: bool) -> u
 fn run_all() -> (u32, u32) {
     let mut cases = 0u32;
     let mut failures = 0u32;
-    let sizes: [usize; 22] = [0, 1, 2, 3, 4, 5, 7, 8, 12, 15, 16, 17, 20, 31, 32, 33, 47, 48, 63, 64, 100, 257];
+    let sizes: [usize; 22] = [
+        0, 1, 2, 3, 4, 5, 7, 8, 12, 15, 16, 17, 20, 31, 32, 33, 47, 48, 63, 64, 100, 257,
+    ];
     for &n in sizes.iter() {
         for so in 0..4 {
             for do_ in 0..4 {
@@ -251,7 +282,11 @@ fn main() {
     loop {
         fb.clear(10, 12, 20);
         font.draw_text(8, 6, "MEM PROBE (memcpy/memset/memcmp)", (220, 220, 230));
-        let (banner, tint) = if failures == 0 { ("ALL PASS", GREEN) } else { ("FAIL", RED) };
+        let (banner, tint) = if failures == 0 {
+            ("ALL PASS", GREEN)
+        } else {
+            ("FAIL", RED)
+        };
         font.draw_text(8, 30, banner, tint);
         gpu::draw_sync();
         psx_rt::interrupts::wait_vblank();

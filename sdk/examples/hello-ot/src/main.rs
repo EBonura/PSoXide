@@ -100,11 +100,7 @@ fn main() {
         // which `FrameBuffer::swap` keeps pointing at the current
         // back buffer for us.
         let red = TriGouraud::new(
-            [
-                (120 + red_dx, 60),
-                (40 + red_dx, 160),
-                (200 + red_dx, 160),
-            ],
+            [(120 + red_dx, 60), (40 + red_dx, 160), (200 + red_dx, 160)],
             [(220, 80, 80), (80, 220, 80), (80, 80, 220)],
         );
         let green = TriGouraud::new(
