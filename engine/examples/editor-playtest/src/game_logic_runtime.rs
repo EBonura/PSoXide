@@ -563,12 +563,13 @@ impl Playtest {
             if player_invulnerable {
                 continue;
             }
-            let contact = combat::resolve_authored_actor_contact(
+            let (contact, window_mask) = combat::resolve_authored_actor_contact_pending(
                 attacker_capsules,
                 attack.action(),
                 attacker_pose,
                 player_capsules,
                 player_pose,
+                self.game_entities.deferred_melee_hit_mask(attack).unwrap_or(u16::MAX),
             );
             let damage = match contact {
                 combat::AuthoredActorContact::Hit {
@@ -608,7 +609,12 @@ impl Playtest {
                     continue;
                 }
             }
-            if self.game_entities.connect_deferred_attack(attack) {
+            let connected = if window_mask == 0 {
+                self.game_entities.connect_deferred_attack(attack)
+            } else {
+                self.game_entities.connect_deferred_melee_window(attack, window_mask)
+            };
+            if connected {
                 hits = hits.saturating_add(1);
                 damage_total = damage_total.saturating_add(damage);
                 poise_total = poise_total.saturating_add(poise_damage);

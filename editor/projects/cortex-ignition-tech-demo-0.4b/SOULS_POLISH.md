@@ -6,6 +6,23 @@ remain the basis. The original working checkout belongs to the separate
 performance task. Commit `42f493ea` records the inherited working baseline;
 the subsequent feature commit contains this pass.
 
+## Latest revision (5 September)
+
+Following the video review:
+
+- Removed dash movement streaks; retained launch and settle ground rings.
+- Every light enemy charges and fires one shot. Removed the early recoil beat.
+- Light melee has three independently latched damage/trail windows, named
+  `Claw Combo / Swing 1`, `Swing 2`, `Swing 3`: **13-18, 28-33, 40-45** in the
+  source animation timeline. Edit these hitboxes in the animation editor to
+  retime both damage and the matching claw trail. Each swing can hit once;
+  overlapping volumes in one window cannot multiply damage. Stagger cancels
+  the remaining swings. Heavy animations are unchanged.
+
+The original dash/volley videos and first-pass captures below are historical;
+they show the version that prompted this revision. Current receipts are under
+`review/souls-polish/revision-single-shot/`.
+
 ## Play and review
 
 Open `baked/cortex_ignition_tech_demo_0_4b.cue` in the emulator, or open
@@ -34,16 +51,19 @@ music tracks. Diagnostic spawn/death probes are separate and are not shipped.
 - **Attack buffering:** one late R1/R2 press can chain out of recovery for 12 ticks
   (0.2 seconds). New presses replace old ones. Dodge, successful stance swap,
   stagger and respawn clear the buffer; expired inputs cannot fire later.
-- **Dash effects:** eight short-lived world-space samples add launch/settle rings
-  and thin amber/teal streaks behind actual collision-resolved movement. Blocked
-  dashes create no wake. Teleports/room changes clear it. Storage is under 300 bytes.
+- **Dash effects:** short-lived amber/teal ground rings mark launch and settle.
+  Blocked dashes create no pulse. Teleports/room changes clear retained rings.
+  The rejected movement streaks have been removed.
 - **Hit feedback:** metal sparks distinguish ordinary hits, poise breaks and
   defeats, reusing the bounded impact pool instead of another allocation.
-- **Ranged patterns:** the light enemy's generated charge volley releases two
-  12-damage/25-poise bolts 36 ticks apart. One enemy in the paired encounter uses
-  a longer tell and a single 28-damage/35-poise bolt. Both share one resident clip.
-  Each authored emitter fires once per attack; skipped animation frames retain
-  events, a full projectile pool retries, and stagger cancels unreleased shots.
+- **Charged shot:** each light enemy charges to source frame 27, then fires once.
+  The standard bolt deals 20 damage/25 poise damage; the existing stronger
+  variant deals 28/35. The animation has one recoil. Projectile velocity remains
+  fixed after release, and stagger before release cancels the shot.
+- **Three-swing melee:** separate authored hitbox windows each connect once and
+  drive a short translucent claw ribbon. Trails stop in the gaps and their
+  history cannot bridge into another swing. Uses the existing per-entity mask
+  storage, without another history buffer or heap allocation.
 - **Missing animation bindings:** generated heavy alert (1.4 seconds) and turning
   foot adjustment (1 second) replace idle fallbacks. Heavy first-notice delay is
   84 ticks to accommodate the alert. The walking pursuit is intentional.
@@ -68,7 +88,7 @@ remain included. See RUNTIME_FIXES.md for the detailed earlier audit.
 Used the already-installed free local MoMask model; no paid service or new weights.
 Three light candidates used seed 260904; candidate 2 supplied the selected body
 motion. Upward-aiming and spinning alternatives were rejected. The refinement
-blends the original forward cannon pose in world space and adds two recoil beats.
+blends the original forward cannon pose in world space and adds a single recoil beat.
 The cannon is the rig's RightArm. Two heavy candidates used seed 260905; selected
 sections were trimmed and retimed. Actual generated lengths differed from the
 prompt's requested lengths, so the retained BVHs are the source of truth.
@@ -99,7 +119,7 @@ result. It requires the repository Rust toolchain, Python 3, rsync and MIPS binu
 `cd-stream-bench` enables the runtime's persistent streamed-model loading;
 `emulator-telemetry` provides review diagnostics. Neither changes the map spawn.
 
-## Validation and limits
+## First-pass validation and limits (historical)
 
 - 202 runtime, 444 project and 57 playtest tests pass. Includes independent volley
   latches, interrupted/stale attacks, skipped-frame events, bounded dash storage,

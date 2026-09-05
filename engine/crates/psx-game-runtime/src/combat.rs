@@ -271,6 +271,21 @@ pub fn resolve_authored_actor_contact(
     defender_capsules: &[CombatCapsuleRecord],
     defender_pose: Option<ActorPoseSnapshot>,
 ) -> AuthoredActorContact {
+    resolve_authored_actor_contact_pending(attacker_capsules, action, attacker_pose,
+        defender_capsules, defender_pose, 0).0
+}
+
+/// Resolve an unconsumed melee window. Simultaneously active hitboxes share
+/// one contact; later separated windows can each connect once. Only commit
+/// the returned mask after invulnerability and world occlusion checks pass.
+pub fn resolve_authored_actor_contact_pending(
+    attacker_capsules: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    attacker_pose: Option<ActorPoseSnapshot>,
+    defender_capsules: &[CombatCapsuleRecord],
+    defender_pose: Option<ActorPoseSnapshot>,
+    connected_mask: u16,
+) -> (AuthoredActorContact, u16) {
     let action = action.to_index() as u8;
     let has_attack_hitbox = attacker_capsules
         .iter()
@@ -279,18 +294,20 @@ pub fn resolve_authored_actor_contact(
         .iter()
         .any(|record| record.flags & combat_capsule_flags::HURTBOX != 0);
     if !has_attack_hitbox || !has_defender_hurtbox {
-        return AuthoredActorContact::FallbackRequired;
+        return (AuthoredActorContact::FallbackRequired, 0);
     }
     let (Some(attacker_pose), Some(defender_pose)) = (attacker_pose, defender_pose) else {
-        return AuthoredActorContact::Miss;
+        return (AuthoredActorContact::Miss, 0);
     };
     let frame = (attacker_pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
     let mut active = [WorldCombatCapsule::EMPTY; MAX_CHARACTER_COMBAT_CAPSULES];
     let mut damage = [0u16; MAX_CHARACTER_COMBAT_CAPSULES];
     let mut poise_damage = [0u16; MAX_CHARACTER_COMBAT_CAPSULES];
     let mut active_count = 0usize;
-    for record in attacker_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES) {
-        if record.flags & combat_capsule_flags::HITBOX == 0
+    let mut window_mask = 0u16;
+    for (index, record) in attacker_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES).enumerate() {
+        if connected_mask & (1u16 << index) != 0
+            || record.flags & combat_capsule_flags::HITBOX == 0
             || record.action != action
             || frame < record.active_start_frame
             || frame > record.active_end_frame
@@ -300,13 +317,14 @@ pub fn resolve_authored_actor_contact(
         let Some(capsule) = transform_actor_combat_capsule(record, attacker_pose) else {
             continue;
         };
+        window_mask |= 1u16 << index;
         active[active_count] = capsule;
         damage[active_count] = record.damage;
         poise_damage[active_count] = record.poise_damage;
         active_count += 1;
     }
     if active_count == 0 {
-        return AuthoredActorContact::Miss;
+        return (AuthoredActorContact::Miss, 0);
     }
     for hurtbox in defender_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES) {
         if hurtbox.flags & combat_capsule_flags::HURTBOX == 0 {
@@ -318,15 +336,27 @@ pub fn resolve_authored_actor_contact(
         let mut hit = 0usize;
         while hit < active_count {
             if combat_capsules_overlap(&active[hit], &hurtbox) {
-                return AuthoredActorContact::Hit {
+                return (AuthoredActorContact::Hit {
                     damage: damage[hit],
                     poise_damage: poise_damage[hit],
-                };
+                }, window_mask);
             }
             hit += 1;
         }
     }
-    AuthoredActorContact::Miss
+    (AuthoredActorContact::Miss, 0)
+}
+
+/// Four blade-edge samples, clamped to one authored damage window. The trail
+/// disappears in gaps and cannot bridge from one swing into the next.
+pub fn melee_trail_phases(record: &CombatCapsuleRecord, action: CharacterAnimationAction, phase: u32) -> Option<[u32; 4]> {
+    let start = u32::from(record.active_start_frame) << 12;
+    let end = (u32::from(record.active_end_frame) + 1) << 12;
+    if record.flags & combat_capsule_flags::HITBOX == 0
+        || record.action != action.to_index() as u8 || phase < start || phase >= end {
+        return None;
+    }
+    Some(core::array::from_fn(|i| phase.saturating_sub((2 << 12) * i as u32 / 3).max(start)))
 }
 
 fn transform_joint_local_point(joint: JointWorldTransform, local: [i16; 3]) -> [i32; 3] {
@@ -1360,6 +1390,38 @@ mod tests {
             // A slow update crossing both markers drains them in authored order.
             assert_eq!(query(12, 0).unwrap().0, 0);
             assert_eq!(query(12, 1).unwrap().0, 1);
+        }
+
+        #[test]
+        fn separated_melee_windows_hit_once_each_and_trails_never_bridge_gaps() {
+            let mut swings = [capsule_record(0, combat_capsule_flags::HITBOX, ATTACK); 3];
+            for (i, record) in swings.iter_mut().enumerate() {
+                record.active_start_frame = 3 + i as u16 * 6;
+                record.active_end_frame = 5 + i as u16 * 6;
+            }
+            let defender = Some(pose_at([0; 3], 0));
+            let mut used = 0;
+            for (i, frame) in [4u32, 10, 16].into_iter().enumerate() {
+                let query = |mask| resolve_authored_actor_contact_pending(
+                    &swings, ATTACK, Some(pose_at([0; 3], frame << 12)), &HURTBOXES, defender, mask);
+                let (hit, window) = query(used);
+                assert!(matches!(hit, AuthoredActorContact::Hit { .. }));
+                assert_eq!(window, 1 << i);
+                used |= window;
+                assert_eq!(query(used), (AuthoredActorContact::Miss, 0));
+                let phases = melee_trail_phases(&swings[i], ATTACK, frame << 12).unwrap();
+                assert!(phases.iter().all(|p| *p >= u32::from(swings[i].active_start_frame) << 12));
+                let gap = frame + 2;
+                assert!(melee_trail_phases(&swings[i], ATTACK, gap << 12).is_none());
+                assert_eq!(resolve_authored_actor_contact_pending(&swings, ATTACK,
+                    Some(pose_at([0; 3], gap << 12)), &HURTBOXES, defender, used),
+                    (AuthoredActorContact::Miss, 0));
+            }
+            // Multiple volumes within one swing must not multiply its damage.
+            let copies = [swings[0]; 2];
+            let (_, window) = resolve_authored_actor_contact_pending(&copies, ATTACK,
+                Some(pose_at([0; 3], 4 << 12)), &HURTBOXES, defender, 0);
+            assert_eq!(window, 3);
         }
 
         #[test]
