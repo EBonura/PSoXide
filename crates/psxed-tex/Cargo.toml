@@ -3,7 +3,7 @@ name    = "psxed-tex"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/EBonura/PSoXide"
+repository = "https://github.com/EBonura/PSoXide-editor"
 description = "PNG/JPG → PSXT texture cooker for PSoXide's content pipeline. Crops, resamples, quantises to 4/8-bit CLUT, packs for VRAM upload."
 
 # Explicit path so this crate resolves cleanly when consumed

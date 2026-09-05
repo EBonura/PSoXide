@@ -3,7 +3,7 @@ name = "psxed-project"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/EBonura/PSoXide"
+repository = "https://github.com/EBonura/PSoXide-editor"
 description = "PSoXide editor project model: scenes, nodes, resources, and PS1-facing authoring metadata."
 
 [dependencies]

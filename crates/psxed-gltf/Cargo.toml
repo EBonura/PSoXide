@@ -3,7 +3,7 @@ name    = "psxed-gltf"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/EBonura/PSoXide"
+repository = "https://github.com/EBonura/PSoXide-editor"
 description = "glTF/GLB mesh importer for PSoXide's content pipeline. Cooks scene meshes into PSXM blobs."
 
 # Explicit paths rather than `workspace = true` so this crate

@@ -3,7 +3,7 @@ name    = "psxed-obj"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/EBonura/PSoXide"
+repository = "https://github.com/EBonura/PSoXide-editor"
 description = "OBJ parser + vertex-cluster decimator for PSoXide's content pipeline. Emits PSXM-format blobs matching the psxed-format layout."
 
 # Explicit path so this crate resolves cleanly when consumed
