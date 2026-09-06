@@ -710,6 +710,8 @@ impl Playtest {
     }
 
     /// Clear run progress while keeping front-end settings and loaded assets.
+    // Initial load and the menu share the full reset; keep one copy in RAM.
+    #[inline(never)]
     pub(super) fn reset_new_game(&mut self) {
         // New Game must not reload a previous run from the card, including
         // when a card was absent at boot and becomes available later.

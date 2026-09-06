@@ -534,7 +534,9 @@ pub struct MeleeArcStats {
 /// SoA runtime state for cooked game entities. Entity `i` mirrors
 /// `records[i]` (spawn is 1:1, clamped to `MAX_ENTITIES`), so links
 /// like `model_instance` stay index-stable.
-pub struct GameEntities<const MAX_ENTITIES: usize> {
+/// `STANCE_BOUND_ATTACKS` selects stance-locked combat at compile time.
+/// The default retains the distance-only behavior for games without stances.
+pub struct GameEntities<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool = false> {
     /// Live entity count = `min(records.len(), MAX_ENTITIES)`.
     count: u16,
     /// Cooked records past `MAX_ENTITIES` that could not spawn.
@@ -608,7 +610,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     spatial_active_mask: u64,
 }
 
-impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
+impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
+    GameEntities<MAX_ENTITIES, STANCE_BOUND_ATTACKS>
+{
     fn can_run(record: &LevelGameEntityRecord) -> bool {
         record.flags & game_entity_flags::CAN_RUN != 0
     }
@@ -675,7 +679,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
     }
 
-    /// Update the hybrid attack stance with hysteresis. Enter melee chase at
+    /// Choose the attack family from the committed stance when enabled.
+    /// Other hybrids use distance with hysteresis. Enter melee chase at
     /// the outer edge of the authored preferred band (never inside the projectile minimum),
     /// but do not return to ranged until the player has also crossed the
     /// authored spacing tolerance.
@@ -688,7 +693,11 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if !Self::has_ranged_attack(record) {
             return true;
         }
-        let was_melee = self.attack_mode[index] & GAME_ENTITY_ATTACK_MELEE_CHASE != 0;
+        let was_melee = if STANCE_BOUND_ATTACKS {
+            self.stance(index) == VitalityChannelId::One
+        } else {
+            self.attack_mode[index] & GAME_ENTITY_ATTACK_MELEE_CHASE != 0
+        };
         // Spacing can stop at preferred + tolerance. Enter at that outer
         // edge too, or a hybrid can sit just outside melee forever.
         let melee_entry = i32::from(record.preferred_distance.max(record.attack_min_range))
@@ -699,10 +708,12 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             melee_entry
         };
         let melee = self.player_within(index, input, limit);
-        if melee {
-            self.attack_mode[index] |= GAME_ENTITY_ATTACK_MELEE_CHASE;
-        } else {
-            self.attack_mode[index] &= !GAME_ENTITY_ATTACK_MELEE_CHASE;
+        if !STANCE_BOUND_ATTACKS {
+            if melee {
+                self.attack_mode[index] |= GAME_ENTITY_ATTACK_MELEE_CHASE;
+            } else {
+                self.attack_mode[index] &= !GAME_ENTITY_ATTACK_MELEE_CHASE;
+            }
         }
         melee
     }
@@ -786,6 +797,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// [`Self::overflow_count`]; records without
     /// `game_entity_flags::ENABLED` spawn [`GameEntityState::Dead`]
     /// so indices stay stable.
+    // Shared by initial load, New Game and respawn; keep one copy on PS1.
+    #[inline(never)]
     pub fn spawn_from_records(&mut self, records: &'static [LevelGameEntityRecord]) {
         *self = Self::EMPTY;
         let count = records.len().min(MAX_ENTITIES);
@@ -1836,9 +1849,6 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 self.combat_flags[index] &= !GAME_ENTITY_ATTACK_CONNECTED;
                 self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
             }
-            // Recover is the player's punish window, so rotate the guard here:
-            // the twelve-tick colour sweep reads before another attack grant.
-            GameEntityState::Recover => self.mutate_stance(index),
             _ => {}
         }
     }
@@ -2054,11 +2064,53 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             return;
         }
 
+        let wants_melee = self.update_melee_chase(record, index, input);
+        if STANCE_BOUND_ATTACKS {
+            let desired = if wants_melee {
+                VitalityChannelId::One
+            } else {
+                VitalityChannelId::Two
+            };
+            if desired != self.stance(index)
+                && self.stance_swap_cooldown[index] == 0
+                && self.player_in_line_of_sight(record, index, input, mover)
+            {
+                self.mutate_stance(index);
+            }
+            if self.stance_swap_in_progress(index) {
+                self.set_intent(index, GameEntityIntent::Hold);
+                self.face_toward(index, input.player);
+                stats.holding = stats.holding.saturating_add(1);
+                return;
+            }
+            if self.stance(index) == VitalityChannelId::Two
+                && self.player_within(index, input, i32::from(record.attack_min_range))
+            {
+                // A Zenith enemy caught up close creates firing room instead
+                // of cheating the stance restriction with a melee attack.
+                self.set_intent(index, GameEntityIntent::Retreat);
+                self.step_relative_to_player(
+                    record,
+                    index,
+                    input,
+                    GAME_ENTITY_HALF_TURN,
+                    record.walk_speed.saturating_mul(i32::from(delta_ticks)),
+                    mover,
+                );
+                stats.retreating = stats.retreating.saturating_add(1);
+                return;
+            }
+        }
+
         // Stance selection is independent of the shared attack token. An
         // enemy that has entered close combat must continue following the
         // player while another actor owns the swing, rather than falling back
         // to the ranged standoff ring until its turn arrives.
-        let melee_chase = self.update_melee_chase(record, index, input);
+        let melee_chase = if STANCE_BOUND_ATTACKS {
+            self.stance(index) == VitalityChannelId::One
+        } else {
+            wants_melee
+        };
 
         if self.attack_owner() == Some(index) {
             self.set_intent(index, GameEntityIntent::Approach);
@@ -2175,6 +2227,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// Move at a yaw offset from the direction to the player, then restore
     /// player-facing. This gives circle/retreat movement without requiring a
     /// navigation allocation or a second target point.
+    // Chase, retreat and circling share collision movement; avoid duplicating
+    // the full movement path inside each AI branch on the PS1.
+    #[inline(never)]
     fn step_relative_to_player(
         &mut self,
         record: &LevelGameEntityRecord,
@@ -2933,6 +2988,153 @@ mod tests {
                 melee > 0,
                 "enemy must advance and switch to melee at {delta}-tick cadence"
             );
+        }
+    }
+
+    #[test]
+    fn distance_selects_stance_and_cooldown_preserves_its_attack_family() {
+        for delta in [1, 2] {
+            let mut e = GameEntities::<8, true>::EMPTY;
+            e.spawn_from_records(&RANGED_ENEMY);
+            e.set_stance_swap_delay(300);
+            let far = GameEntityTickInput {
+                player: [2550, 0, 1000],
+                ..near_input(&ACTIVE)
+            };
+            let near = near_input(&ACTIVE);
+            e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, delta);
+            e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, delta);
+            assert_eq!(e.stance(0), VitalityChannelId::Two);
+            assert_eq!(e.stance_swap_cooldown(0), 300);
+            let mut shots = 0;
+            for elapsed in (delta..300).step_by(usize::from(delta)) {
+                // Let one shot commit, then rush inside melee distance.
+                let input = if elapsed < 70 { far } else { near };
+                let stats = e.tick_delta(&RANGED_ENEMY, input, &mut BlockedMover, delta);
+                shots += stats.ranged_attack_enters;
+                assert_eq!(
+                    e.stance(0),
+                    VitalityChannelId::Two,
+                    "early swap at {elapsed}"
+                );
+                if matches!(
+                    e.state(0),
+                    GameEntityState::Windup | GameEntityState::Attack
+                ) {
+                    assert!(e.selected_attack_is_ranged(0), "Zenith cannot melee");
+                }
+            }
+            assert!(shots > 0);
+            e.tick_delta(&RANGED_ENEMY, near, &mut BlockedMover, delta);
+            assert_eq!(e.stance(0), VitalityChannelId::One);
+            assert_eq!(e.stance_swap_cooldown(0), 300);
+            let mut melee = 0;
+            for elapsed in (delta..300).step_by(usize::from(delta)) {
+                let input = if elapsed < 70 { near } else { far };
+                let stats = e.tick_delta(&RANGED_ENEMY, input, &mut BlockedMover, delta);
+                melee += stats.attack_enters;
+                assert_eq!(e.stance(0), VitalityChannelId::One);
+                if matches!(
+                    e.state(0),
+                    GameEntityState::Windup | GameEntityState::Attack
+                ) {
+                    assert!(!e.selected_attack_is_ranged(0), "Horizon cannot shoot");
+                }
+            }
+            assert!(melee > 0);
+            e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, delta);
+            assert_eq!(e.stance(0), VitalityChannelId::Two);
+        }
+    }
+
+    #[test]
+    fn a_locked_stance_changes_spacing_instead_of_using_the_wrong_attack() {
+        let mut e = GameEntities::<8, true>::EMPTY;
+        e.spawn_from_records(&RANGED_ENEMY);
+        e.set_stance_swap_delay(300);
+        e.mutate_stance(0);
+        e.advance_stance_swap(0, 12);
+        e.enter_state(
+            0,
+            GameEntityState::Aggro,
+            &mut GameEntityTickStats::default(),
+        );
+        e.tick(&RANGED_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(e.stance(0), VitalityChannelId::Two);
+        assert_eq!(e.intent(0), GameEntityIntent::Retreat);
+        assert!(e.position(0)[0] < 1000);
+        e.stance_swap_cooldown[0] = 0;
+        e.mutate_stance(0);
+        e.advance_stance_swap(0, 12);
+        let before = e.position(0);
+        let far = GameEntityTickInput {
+            player: [2550, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+        e.tick(&RANGED_ENEMY, far, &mut NoClipMover);
+        assert_eq!(e.stance(0), VitalityChannelId::One);
+        assert_eq!(e.intent(0), GameEntityIntent::Approach);
+        assert!(e.position(0)[0] > before[0]);
+    }
+
+    #[test]
+    fn stance_distance_hysteresis_and_sight_prevent_unfair_swaps() {
+        let mut e = GameEntities::<8, true>::EMPTY;
+        e.spawn_from_records(&RANGED_ENEMY);
+        e.enter_state(
+            0,
+            GameEntityState::Aggro,
+            &mut GameEntityTickStats::default(),
+        );
+        let band = GameEntityTickInput {
+            player: [2350, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+        let far = GameEntityTickInput {
+            player: [2550, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+        e.tick_delta(&RANGED_ENEMY, band, &mut BlockedMover, 1);
+        assert_eq!(
+            e.stance(0),
+            VitalityChannelId::One,
+            "stay melee inside the exit margin"
+        );
+        e.tick_delta(&RANGED_ENEMY, far, &mut SightMover::default(), 1);
+        assert_eq!(
+            e.stance(0),
+            VitalityChannelId::One,
+            "cannot judge distance through a wall"
+        );
+        e.tick_delta(&RANGED_ENEMY, far, &mut BlockedMover, 1);
+        assert_eq!(e.stance(0), VitalityChannelId::Two);
+        e.stance_swap_cooldown[0] = 0;
+        e.advance_stance_swap(0, 12);
+        e.tick_delta(&RANGED_ENEMY, band, &mut BlockedMover, 1);
+        assert_eq!(
+            e.stance(0),
+            VitalityChannelId::Two,
+            "stay ranged outside the entry margin"
+        );
+    }
+
+    #[test]
+    fn committed_attacks_do_not_swap_even_with_an_expired_cooldown() {
+        for state in [
+            GameEntityState::Windup,
+            GameEntityState::Attack,
+            GameEntityState::Recover,
+        ] {
+            let mut e = GameEntities::<8, true>::EMPTY;
+            e.spawn_from_records(&RANGED_ENEMY);
+            e.select_attack(0, false);
+            e.enter_state(0, state, &mut GameEntityTickStats::default());
+            let input = GameEntityTickInput {
+                player: [2550, 0, 1000],
+                ..near_input(&ACTIVE)
+            };
+            e.tick_delta(&RANGED_ENEMY, input, &mut BlockedMover, 1);
+            assert_eq!(e.stance(0), VitalityChannelId::One, "swap during {state:?}");
         }
     }
 
@@ -4179,7 +4381,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_rotates_enemy_guard_and_reports_a_twelve_tick_tell() {
+    fn deliberate_stance_swap_reports_a_twelve_tick_tell() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&DUAL_ENEMY);
         assert_eq!(entities.stance(0), VitalityChannelId::One);
@@ -4190,6 +4392,12 @@ mod tests {
             GameEntityState::Recover,
             &mut GameEntityTickStats::default(),
         );
+        assert_eq!(
+            entities.stance(0),
+            VitalityChannelId::One,
+            "recovery does not swap automatically"
+        );
+        entities.mutate_stance(0);
         assert_eq!(entities.stance(0), VitalityChannelId::Two);
         assert_eq!(entities.stance_swap_progress_q12(0), 0);
         assert!(entities.stance_swap_in_progress(0));

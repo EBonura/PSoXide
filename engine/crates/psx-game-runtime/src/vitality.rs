@@ -478,10 +478,8 @@ impl PowerUpLoadout {
                 as u16,
             movement_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::MOVEMENT_SPEED]),
             attack_speed_q12: multiplier(bonuses_q12[psx_level::boost_stat::ATTACK_SPEED]),
-            // Regeneration is an additive rate, not a multiplier: a module
-            // reading "+10" adds that much recovery rather than scaling a base
-            // the player cannot see. Negative stacking floors at zero so a
-            // trade-off can cancel recovery but never drain the pool.
+            // Keep the percentage bonus separate from the base recovery rate.
+            // Opposing module effects can cancel the bonus, never drain health.
             regeneration_q12: bonuses_q12[psx_level::boost_stat::REGENERATION]
                 .clamp(0, i32::from(u16::MAX)) as u16,
         }
@@ -637,8 +635,8 @@ pub struct VitalityModifiers {
     pub movement_speed_q12: u16,
     /// Whole attack-timeline speed multiplier (`4096 = 1.0x`).
     pub attack_speed_q12: u16,
-    /// Extra recovery for the inactive pool, Q12 per tick, from the active
-    /// state's Regeneration modules. Added to the authored base rate.
+    /// Percentage recovery bonus for the inactive pool from the active state's
+    /// Regeneration modules (`4096` adds 100% of the authored base rate).
     pub regeneration_q12: u16,
 }
 
@@ -1217,7 +1215,8 @@ impl CombatStance {
     /// Advance one fixed tick: cooldowns, then recovery on the inactive pool.
     ///
     /// `regen_bonus_q12` is the Regeneration boon's contribution, which comes
-    /// from the *active* state's boons and heals the inactive pool.
+    /// from the *active* state's boons and heals the inactive pool. It is a
+    /// percentage of the authored rate: 4096 adds another 100%.
     pub fn tick(
         &mut self,
         vitality: &mut DualVitality,
@@ -1238,7 +1237,11 @@ impl CombatStance {
         if pool.current() >= pool.maximum() {
             return;
         }
-        let rate = config.regen_per_tick_q12.saturating_add(regen_bonus_q12);
+        // Module bonuses are percentages of the authored recovery rate, not
+        // flat health per tick; slowing the base must also slow boosted recovery.
+        let bonus = ((u32::from(config.regen_per_tick_q12) * u32::from(regen_bonus_q12)) >> 12)
+            .min(u32::from(u16::MAX)) as u16;
+        let rate = config.regen_per_tick_q12.saturating_add(bonus);
         let carried = self.regen_fraction_q12[index].saturating_add(rate);
         let whole = carried / VITALITY_Q12_ONE;
         self.regen_fraction_q12[index] = carried % VITALITY_Q12_ONE;
@@ -1400,6 +1403,26 @@ mod stance_tests {
             58,
             "the boon doubles the authored rate here"
         );
+    }
+
+    #[test]
+    fn slow_recovery_and_percentage_bonuses_keep_the_authored_rate() {
+        let mut config = config();
+        config.regen_per_tick_q12 = 256;
+        config.regen_delay_ticks = 0;
+        for (bonus, recovered) in [(0, 15), (4096, 30), (328, 16)] {
+            let mut vitality =
+                DualVitality::from_pools(VitalityPool::at(20, 100), VitalityPool::at(50, 100));
+            let mut stance = CombatStance::new(VitalityChannelId::Two);
+            for _ in 0..240 {
+                stance.tick(&mut vitality, &config, bonus);
+            }
+            assert_eq!(
+                vitality.pool(VitalityChannelId::One).current(),
+                20 + recovered
+            );
+            assert_eq!(vitality.pool(VitalityChannelId::Two).current(), 50);
+        }
     }
 
     #[test]

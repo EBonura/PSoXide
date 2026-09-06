@@ -218,6 +218,11 @@ impl StateTag {
 enum CddaStartStep {
     SetMode,
     Demute,
+    TrackCount,
+    TrackStart,
+    TrackEnd,
+    SetLocation,
+    PlayLocation,
     Play,
 }
 
@@ -259,6 +264,11 @@ struct CddaPlayer {
     fade_ticks_left: u16,
     fade_out_stop: bool,
     step: CddaStartStep,
+    random_start: bool,
+    random_state: u32,
+    last_track: u8,
+    track_start_second: u32,
+    seek_second: u32,
     next_retry_tick: u32,
     next_status_tick: u32,
     routed: bool,
@@ -351,6 +361,11 @@ impl CddaPlayer {
             current_track: 0,
             current_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
             step: CddaStartStep::SetMode,
+            random_start: false,
+            random_state: 0x6d2b79f5,
+            last_track: 0,
+            track_start_second: 0,
+            seek_second: 0,
             next_retry_tick: 0,
             next_status_tick: 0,
             routed: false,
@@ -375,6 +390,11 @@ impl CddaPlayer {
             tick,
         );
         self.requested = cue;
+        if self.current_track == 0 {
+            self.random_start = true;
+            self.random_state ^= tick;
+            self.random_state = self.random_state.wrapping_mul(109).wrapping_add(1);
+        }
         self.current_volume_percent = 0;
         self.target_volume_percent = cue.volume_percent;
         self.fade_start_volume_percent = 0;
@@ -450,6 +470,7 @@ impl CddaPlayer {
 
         if track_changed || self.current_track != cue.track {
             self.current_track = 0;
+            self.random_start = false;
             self.step = CddaStartStep::SetMode;
             self.next_retry_tick = tick;
             self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
@@ -458,6 +479,7 @@ impl CddaPlayer {
 
     fn release_for_data_reads(&mut self, tick: u32) {
         self.requested = MusicCue::SILENT;
+        self.random_start = false;
         self.current_track = 0;
         self.step = CddaStartStep::SetMode;
         self.next_retry_tick = tick;
@@ -468,6 +490,7 @@ impl CddaPlayer {
         cdda_release_for_data_reads();
     }
 
+    #[inline(never)]
     fn update(&mut self, tick: u32) {
         if self.requested.track == 0 {
             return;
@@ -491,19 +514,53 @@ impl CddaPlayer {
             cdda_route_audio(self.current_volume_percent);
             self.routed = true;
         }
-        if cdda_issue_step(self.step, self.requested.track) {
+        let track = if self.step == CddaStartStep::TrackEnd {
+            if cdda_physical_track(self.requested.track) < self.last_track {
+                self.requested.track.wrapping_add(1)
+            } else {
+                0 // GetTD(0) addresses the lead-out, never a relocated track.
+            }
+        } else {
+            self.requested.track
+        };
+        if let Some(value) = cdda_issue_step(self.step, track, self.seek_second) {
             match self.step {
                 CddaStartStep::SetMode => {
                     self.step = CddaStartStep::Demute;
                     self.next_retry_tick = tick.saturating_add(2);
                 }
                 CddaStartStep::Demute => {
-                    self.step = CddaStartStep::Play;
+                    self.step = if self.random_start {
+                        CddaStartStep::TrackCount
+                    } else {
+                        CddaStartStep::Play
+                    };
                     self.next_retry_tick = tick.saturating_add(2);
                 }
-                CddaStartStep::Play => {
+                CddaStartStep::TrackCount => {
+                    self.last_track = value as u8;
+                    self.step = CddaStartStep::TrackStart;
+                }
+                CddaStartStep::TrackStart => {
+                    self.track_start_second = value;
+                    self.step = CddaStartStep::TrackEnd;
+                }
+                CddaStartStep::TrackEnd => {
+                    self.step = if let Some(second) =
+                        random_cdda_second(self.track_start_second, value, self.random_state)
+                    {
+                        self.seek_second = second;
+                        CddaStartStep::SetLocation
+                    } else {
+                        CddaStartStep::Play
+                    };
+                }
+                CddaStartStep::SetLocation => {
+                    self.step = CddaStartStep::PlayLocation;
+                }
+                CddaStartStep::Play | CddaStartStep::PlayLocation => {
+                    self.random_start = false;
                     self.current_track = self.requested.track;
-                    self.step = CddaStartStep::SetMode;
                     self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
                 }
             }
@@ -525,7 +582,11 @@ impl CddaPlayer {
         // MODE_AUTO_PAUSE halts it at the track boundary. Restarting on a single
         // missed/late read would reseek the laser mid-song and kill the audio on
         // real hardware (the exact failure this whole path is fixing).
-        match cdda_drive_stopped() {
+        self.handle_drive_status(cdda_drive_stopped(), tick);
+    }
+
+    fn handle_drive_status(&mut self, stopped: Option<bool>, tick: u32) {
+        match stopped {
             Some(true) => {
                 self.stopped_polls = self.stopped_polls.saturating_add(1);
                 if self.stopped_polls >= CDDA_STOPPED_CONFIRMATIONS {
@@ -610,38 +671,83 @@ fn cdda_set_volume(volume_percent: u8) {
 #[cfg(not(target_arch = "mips"))]
 fn cdda_set_volume(_volume_percent: u8) {}
 
-#[cfg(all(target_arch = "mips", feature = "boot-trace"))]
-#[inline(always)]
-fn cdda_trace(message: &str) {
-    psx_rt::tty::println(message);
+// GetTD rounds track starts down to a second. Stay one second inside the
+// selected track and three seconds before the next index (including its pregap).
+fn random_cdda_second(start: u32, end: u32, seed: u32) -> Option<u32> {
+    let span = end.checked_sub(start)?.checked_sub(4)?;
+    if span == 0 {
+        return None;
+    }
+    Some(start + 1 + seed % span)
 }
 
-#[cfg(all(target_arch = "mips", not(feature = "boot-trace")))]
-#[inline(always)]
-fn cdda_trace(_message: &str) {}
+fn cdda_physical_track(track: u8) -> u8 {
+    if track == 0 {
+        0
+    } else {
+        psx_io::disc_base::shift_track(track)
+    }
+}
+
+#[cfg(any(target_arch = "mips", test))]
+fn cdda_toc_second(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 3
+        || bytes[0] & 1 != 0
+        || bytes[1] & 15 > 9
+        || bytes[1] >> 4 > 9
+        || bytes[2] & 15 > 9
+        || bytes[2] >> 4 > 5
+    {
+        return None;
+    }
+    let minutes = u32::from(psx_io::cdrom::bcd_to_bin(bytes[1]));
+    let seconds = u32::from(psx_io::cdrom::bcd_to_bin(bytes[2]));
+    Some(minutes * 60 + seconds)
+}
 
 #[cfg(target_arch = "mips")]
-fn cdda_issue_step(step: CddaStartStep, track: u8) -> bool {
-    let ok = match step {
+fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
+    use psx_io::cdrom;
+    let mut params = [0; 3];
+    let (command, count) = match step {
         CddaStartStep::SetMode => {
-            psx_io::cdrom::try_set_mode(CDDA_PLAYBACK_MODE, CDDA_COMMAND_SPINS).is_some()
+            params[0] = CDDA_PLAYBACK_MODE;
+            (cdrom::CMD_SETMODE, 1)
         }
-        CddaStartStep::Demute => psx_io::cdrom::try_demute(CDDA_COMMAND_SPINS).is_some(),
-        CddaStartStep::Play => psx_io::cdrom::try_play_track(track, CDDA_COMMAND_SPINS).is_some(),
+        CddaStartStep::Demute => (cdrom::CMD_DEMUTE, 0),
+        CddaStartStep::TrackCount => (0x13, 0),
+        CddaStartStep::TrackStart | CddaStartStep::TrackEnd => {
+            params[0] = cdrom::bin_to_bcd(cdda_physical_track(track));
+            (0x14, 1)
+        }
+        CddaStartStep::SetLocation => {
+            params[0] = cdrom::bin_to_bcd((second / 60) as u8);
+            params[1] = cdrom::bin_to_bcd((second % 60) as u8);
+            (cdrom::CMD_SETLOC, 3)
+        }
+        CddaStartStep::PlayLocation => (cdrom::CMD_PLAY, 0),
+        CddaStartStep::Play => {
+            params[0] = cdrom::bin_to_bcd(cdda_physical_track(track));
+            (cdrom::CMD_PLAY, 1)
+        }
     };
-    if ok {
-        match step {
-            CddaStartStep::SetMode => cdda_trace("psx-engine: cdda setmode ok"),
-            CddaStartStep::Demute => cdda_trace("psx-engine: cdda demute ok"),
-            CddaStartStep::Play => cdda_trace("psx-engine: cdda play ok"),
-        }
+    let response = cdrom::try_command(command, &params[..count], CDDA_COMMAND_SPINS)?;
+    let bytes = response.bytes();
+    if bytes.first().is_none_or(|status| status & 1 != 0) {
+        return None;
     }
-    ok
+    match step {
+        CddaStartStep::TrackCount => bytes
+            .get(2)
+            .map(|value| u32::from(cdrom::bcd_to_bin(*value))),
+        CddaStartStep::TrackStart | CddaStartStep::TrackEnd => cdda_toc_second(bytes),
+        _ => Some(0),
+    }
 }
 
 #[cfg(not(target_arch = "mips"))]
-fn cdda_issue_step(_step: CddaStartStep, _track: u8) -> bool {
-    true
+fn cdda_issue_step(_step: CddaStartStep, _track: u8, _second: u32) -> Option<u32> {
+    Some(0)
 }
 
 #[cfg(all(target_arch = "mips", feature = "boot-trace"))]
@@ -5107,6 +5213,105 @@ mod tests {
             CDDA_PLAYBACK_MODE,
             psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE
         );
+    }
+
+    #[test]
+    fn random_music_start_stays_inside_the_selected_track() {
+        let mut distinct = [0; 4];
+        for (i, seed) in [0, 12345, 987654, u32::MAX].into_iter().enumerate() {
+            let second = random_cdda_second(100, 300, seed).unwrap();
+            assert!((101..297).contains(&second));
+            distinct[i] = second;
+        }
+        assert!(distinct.windows(2).all(|pair| pair[0] != pair[1]));
+        assert_eq!(random_cdda_second(100, 104, 123), None);
+        assert_eq!(random_cdda_second(400, 100, 123), None);
+        assert_eq!(random_cdda_second(u32::MAX, u32::MAX, 123), None);
+        assert_eq!(
+            cdda_physical_track(0),
+            0,
+            "lead-out is not a relocatable track"
+        );
+    }
+
+    #[test]
+    fn music_track_positions_decode_absolute_bcd_and_reject_bad_responses() {
+        assert_eq!(cdda_toc_second(&[2, 0x01, 0x32]), Some(92));
+        assert_eq!(cdda_toc_second(&[2, 0x00, 0x02]), Some(2));
+        for bad in [
+            &[2, 0x00, 0x6a][..],
+            &[3, 1, 0x32],
+            &[2, 1, 0x60],
+            &[2, 0x1a, 0],
+            &[2],
+        ] {
+            assert_eq!(cdda_toc_second(bad), None);
+        }
+    }
+
+    #[test]
+    fn a_new_fight_randomizes_but_a_running_song_does_not_reseek() {
+        let cue = MusicCue {
+            track: 2,
+            volume_percent: 80,
+            loop_track: true,
+        };
+        let mut player = CddaPlayer::new();
+        player.request(cue, 0);
+        assert!(!player.random_start, "ordinary menu music starts normally");
+        player.start_faded(cue, 100, 60);
+        assert!(player.random_start);
+        let first_seed = player.random_state;
+        player.current_track = cue.track;
+        player.random_start = false;
+        player.fade_out_and_stop(120);
+        player.start_faded(cue, 130, 60);
+        assert!(
+            !player.random_start,
+            "re-engaging before fade-out finishes keeps playback"
+        );
+        assert_eq!(player.random_state, first_seed);
+        player.release_for_data_reads(200);
+        player.start_faded(cue, 500, 60);
+        assert!(player.random_start);
+        assert_ne!(player.random_state, first_seed);
+        assert!(player.requested.loop_track);
+    }
+
+    #[test]
+    fn a_random_start_loops_at_the_track_boundary_without_randomizing_again() {
+        let mut player = CddaPlayer::new();
+        let cue = MusicCue {
+            track: 2,
+            volume_percent: 80,
+            loop_track: true,
+        };
+        player.start_faded(cue, 100, 60);
+        player.step = CddaStartStep::PlayLocation;
+        player.update(101);
+        assert_eq!(player.current_track, 2);
+        assert!(!player.random_start);
+        let seed = player.random_state;
+        player.handle_drive_status(Some(true), 200);
+        player.handle_drive_status(None, 230);
+        assert_eq!(
+            player.stopped_polls, 0,
+            "an inconclusive poll cannot restart a song"
+        );
+        for i in 0..CDDA_STOPPED_CONFIRMATIONS {
+            player.handle_drive_status(Some(true), 260 + u32::from(i) * 30);
+        }
+        assert_eq!(player.current_track, 0);
+        player.update(500);
+        player.update(502);
+        assert_eq!(
+            player.step,
+            CddaStartStep::Play,
+            "loop from the track start, not another seek"
+        );
+        player.update(504);
+        assert_eq!(player.current_track, 2);
+        assert_eq!(player.random_state, seed);
     }
 
     #[test]
