@@ -789,9 +789,7 @@ impl Playtest {
         } else if self.update_attack_input(ctx, now, action_locked) {
             input = CharacterMotorInput::default();
         }
-        // Three-part walk: ramp the stick during the windup, glide on the
-        // held vector during the winddown (the clips are in place; the
-        // motor's speed envelope has to match their foot speed).
+        // Ramp walking startup, but let released input stop the motor immediately.
         let stick_active = input.move_x.raw() != 0 || input.move_z.raw() != 0;
         if !action_locked {
             input = self.walk_transition_input(input, stick_active, now, ctx.video_hz);
@@ -1128,9 +1126,6 @@ pub(crate) enum LocoPhase {
     Idle = 0,
     Windup,
     Cruise,
-    /// Stick released while cruising: keep walking at full speed until the
-    /// stride reaches a phase a winddown clip starts from, then stop.
-    StopPending,
     Winddown,
 }
 
@@ -1208,9 +1203,7 @@ impl Playtest {
         )
     }
 
-    /// Shape the motor input for the current walk phase: windup ramps the
-    /// stick from zero, winddown keeps moving along the last stick vector
-    /// while its clip fades out. Also records the glide vector.
+    /// Ramp walking startup. Stop clips settle the pose without adding movement.
     fn walk_transition_input(
         &mut self,
         mut input: CharacterMotorInput,
@@ -1218,9 +1211,6 @@ impl Playtest {
         now: SimTick,
         video_hz: VideoHz,
     ) -> CharacterMotorInput {
-        if stick_active {
-            self.loco_glide = (input.move_x, input.move_z);
-        }
         if input.sprint && stick_active {
             return input;
         }
@@ -1231,21 +1221,6 @@ impl Playtest {
                     let ramp = smoothstep_q12(elapsed, duration);
                     input.move_x = input.move_x.mul_q12(ramp);
                     input.move_z = input.move_z.mul_q12(ramp);
-                }
-            }
-            LocoPhase::StopPending if !stick_active => {
-                input.move_x = self.loco_glide.0;
-                input.move_z = self.loco_glide.1;
-                input.walk = 0;
-                input.sprint = false;
-            }
-            LocoPhase::Winddown if !stick_active => {
-                if let Some(duration) = self.walk_transition_ticks(self.loco_stop_anim, video_hz) {
-                    let fade = Q12::from_raw(Q12::SCALE - smoothstep_q12(elapsed, duration).raw());
-                    input.move_x = self.loco_glide.0.mul_q12(fade);
-                    input.move_z = self.loco_glide.1.mul_q12(fade);
-                    input.walk = 0;
-                    input.sprint = false;
                 }
             }
             _ => {}
@@ -1324,38 +1299,21 @@ impl Playtest {
                 }
             }
             LocoPhase::Cruise => {
-                if stepping {
+                if released && !other && winddown(self).is_some() {
+                    self.begin_nearest_winddown(now, video_hz)
+                } else if stepping {
                     gait.cruise
                 } else if switched {
                     // Walk <-> run at speed: no transition clip exists between
                     // the two cycles, so the cruise swaps directly.
                     self.loco_gait = gait_of(motor_anim).unwrap_or(WALK_GAIT);
                     motor_anim
-                } else if released && winddown(self).is_some() {
-                    self.loco = LocoPhase::StopPending;
-                    self.loco_start_tick = now;
-                    self.stop_if_in_phase(now, video_hz)
                 } else if motor_anim == PlayerAnim::Idle && !released {
                     // blocked while holding the stick
                     PlayerAnim::Idle
                 } else {
                     self.loco = LocoPhase::Idle;
                     motor_anim
-                }
-            }
-            LocoPhase::StopPending => {
-                if stick_active && stepping {
-                    self.loco = LocoPhase::Cruise;
-                    gait.cruise
-                } else if stick_active && switched {
-                    self.loco = LocoPhase::Cruise;
-                    self.loco_gait = gait_of(motor_anim).unwrap_or(WALK_GAIT);
-                    motor_anim
-                } else if other {
-                    self.loco = LocoPhase::Idle;
-                    motor_anim
-                } else {
-                    self.stop_if_in_phase(now, video_hz)
                 }
             }
             LocoPhase::Winddown => {
@@ -1456,11 +1414,9 @@ impl Playtest {
         anim
     }
 
-    /// While a stop is pending: keep the walk cycle until it reaches the
-    /// stride start (winddown clip) or, when the mirrored clip is bound, the
-    /// half stride (its mirror). Falls back to an immediate stop when the walk
-    /// clip's cycle length cannot be resolved.
-    fn stop_if_in_phase(&mut self, now: SimTick, video_hz: VideoHz) -> PlayerAnim {
+    /// Pick the closest planted-foot pose on release, without waiting for
+    /// another stride. The animation crossfade bridges the remaining mismatch.
+    fn begin_nearest_winddown(&mut self, now: SimTick, video_hz: VideoHz) -> PlayerAnim {
         let gait = self.gait();
         let Some(cycle) = self.walk_transition_ticks(gait.cruise, video_hz) else {
             return self.begin_winddown(gait.winddown, now);
@@ -1471,12 +1427,87 @@ impl Playtest {
             .is_some_and(|c| c.action_clip(gait.winddown_alt.action()).is_some());
         // Ticks since the Walk clip started (its frame 0 is the stride start).
         let position = now.as_u32().saturating_sub(self.anim_start_tick.as_u32()) % cycle;
-        if position <= 1 || position + 1 >= cycle {
-            self.begin_winddown(gait.winddown, now)
-        } else if alt_bound && position.abs_diff(cycle / 2) <= 1 {
-            self.begin_winddown(gait.winddown_alt, now)
+        let anim = if alt_bound && nearest_stop_uses_mirror(position, cycle) {
+            gait.winddown_alt
         } else {
-            gait.cruise
+            gait.winddown
+        };
+        self.begin_winddown(anim, now)
+    }
+}
+
+/// Choose the closer of the stride start and its half-cycle mirror.
+fn nearest_stop_uses_mirror(position: u32, cycle: u32) -> bool {
+    let position = position % cycle.max(1);
+    position.abs_diff(cycle / 2) < position.min(cycle.saturating_sub(position))
+}
+
+#[cfg(test)]
+mod locomotion_stop_tests {
+    use super::*;
+
+    #[test]
+    fn released_input_stays_still_through_every_locomotion_phase() {
+        let layout = std::alloc::Layout::new::<Playtest>();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) as *mut Playtest };
+        assert!(!raw.is_null());
+        unsafe { Playtest::init_zeroed(raw) };
+        let mut scene = unsafe { std::boxed::Box::from_raw(raw) };
+        for phase in [
+            LocoPhase::Idle,
+            LocoPhase::Windup,
+            LocoPhase::Cruise,
+            LocoPhase::Winddown,
+        ] {
+            scene.loco = phase;
+            let input = scene.walk_transition_input(
+                CharacterMotorInput::default(),
+                false,
+                SimTick::from_u32(100),
+                VideoHz::NTSC,
+            );
+            assert_eq!(input.move_x.raw(), 0);
+            assert_eq!(input.move_z.raw(), 0);
+            assert_eq!(input.walk, 0);
         }
+        scene.loco = LocoPhase::Winddown;
+        scene.loco_gait = WALK_GAIT;
+        assert_eq!(
+            scene.walk_transition_state(
+                PlayerAnim::Walk,
+                true,
+                SimTick::from_u32(101),
+                VideoHz::NTSC
+            ),
+            PlayerAnim::Walk
+        );
+        assert_eq!(scene.loco, LocoPhase::Cruise);
+        scene.loco = LocoPhase::Winddown;
+        assert_eq!(
+            scene.walk_transition_state(
+                PlayerAnim::Run,
+                true,
+                SimTick::from_u32(102),
+                VideoHz::NTSC
+            ),
+            PlayerAnim::Run
+        );
+        assert_eq!(scene.loco, LocoPhase::Cruise);
+    }
+
+    #[test]
+    fn stop_foot_is_selected_immediately_on_either_half_of_a_stride() {
+        for cycle in [20, 31, 60] {
+            assert!(!nearest_stop_uses_mirror(0, cycle));
+            assert!(nearest_stop_uses_mirror(cycle / 2, cycle));
+            assert!(!nearest_stop_uses_mirror(cycle - 1, cycle));
+            for position in 0..cycle {
+                assert_eq!(
+                    nearest_stop_uses_mirror(position, cycle),
+                    nearest_stop_uses_mirror(position + cycle, cycle)
+                );
+            }
+        }
+        assert!(!nearest_stop_uses_mirror(0, 0));
     }
 }

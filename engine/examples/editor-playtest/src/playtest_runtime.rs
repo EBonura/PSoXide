@@ -105,7 +105,9 @@ const _: () = {
 /// must start crisply but settle slowly, and a gait change can afford a long
 /// fade only because the clips are phase-matched.
 fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
-    if player_anim_is_attack(to) || to.is_motor_fixed_action() {
+    if player_anim_is_stop(to) && from.is_gait() {
+        4
+    } else if player_anim_is_attack(to) || to.is_motor_fixed_action() {
         // Entering a committed action: its first frames carry the read.
         PLAYER_ANIM_BLEND_ACTION_TICKS
     } else if player_anim_is_attack(from) || matches!(from, PlayerAnim::Intro) {
@@ -116,6 +118,17 @@ fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
     } else {
         PLAYER_ANIM_BLEND_LOCOMOTION_TICKS
     }
+}
+
+fn player_anim_is_stop(anim: PlayerAnim) -> bool {
+    matches!(
+        anim,
+        PlayerAnim::Idle
+            | PlayerAnim::WalkWinddown
+            | PlayerAnim::WalkWinddownAlt
+            | PlayerAnim::RunWinddown
+            | PlayerAnim::RunWinddownAlt
+    )
 }
 
 impl Playtest {
@@ -925,13 +938,8 @@ impl Playtest {
     /// Alpha ramps linearly over the window; attacks use the short
     /// window so combat stays snappy while locomotion soft-blends.
     ///
-    /// The outgoing clip KEEPS PLAYING through the window: its local
-    /// tick advances with elapsed time rather than staying pinned to
-    /// the switch moment. Holding it still made a released walk freeze
-    /// mid-stride and slide into idle, because the fade was lerping
-    /// toward a static pose instead of one that was still moving.
-    /// Non-looping outgoing clips are safe to advance -- the phase
-    /// helper clamps them at their last frame.
+    /// Keep outgoing clips advancing except when a gait stops: continuing
+    /// that stride would show extra steps after the motor is already still.
     pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<PlayerAnimBlend> {
         let (anim, local_tick, switch_tick) = self.anim_blend_from?;
         let duration = player_blend_ticks(anim, self.anim_state);
@@ -941,7 +949,11 @@ impl Playtest {
         }
         Some(PlayerAnimBlend {
             anim,
-            local_tick: local_tick.saturating_add(elapsed),
+            local_tick: if anim.is_gait() && player_anim_is_stop(self.anim_state) {
+                local_tick
+            } else {
+                local_tick.saturating_add(elapsed)
+            },
             alpha_q12: ((elapsed << 12) / duration.max(1)) as u16,
         })
     }
@@ -2238,6 +2250,45 @@ mod life_reset_tests {
         assert!(!raw.is_null());
         unsafe { Playtest::init_zeroed(raw) };
         unsafe { std::boxed::Box::from_raw(raw) }
+    }
+
+    #[test]
+    fn stopping_a_gait_blends_from_the_release_pose_without_more_steps() {
+        let mut scene = test_scene();
+        for gait in [
+            PlayerAnim::Walk,
+            PlayerAnim::Run,
+            PlayerAnim::StrafeLeft,
+            PlayerAnim::WalkBackward,
+        ] {
+            for stop in [
+                PlayerAnim::Idle,
+                PlayerAnim::WalkWinddown,
+                PlayerAnim::WalkWinddownAlt,
+                PlayerAnim::RunWinddown,
+                PlayerAnim::RunWinddownAlt,
+            ] {
+                scene.anim_state = stop;
+                scene.anim_blend_from = Some((gait, 17, SimTick::from_u32(100)));
+                for elapsed in 0..4 {
+                    let blend = scene
+                        .player_anim_blend(SimTick::from_u32(100 + elapsed))
+                        .unwrap();
+                    assert_eq!(blend.local_tick, 17);
+                    assert_eq!(blend.alpha_q12, (elapsed * 1024) as u16);
+                }
+                assert!(scene.player_anim_blend(SimTick::from_u32(104)).is_none());
+            }
+        }
+        scene.anim_state = PlayerAnim::Run;
+        scene.anim_blend_from = Some((PlayerAnim::Walk, 17, SimTick::from_u32(100)));
+        assert_eq!(
+            scene
+                .player_anim_blend(SimTick::from_u32(102))
+                .unwrap()
+                .local_tick,
+            19
+        );
     }
 
     #[test]

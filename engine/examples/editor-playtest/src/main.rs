@@ -376,9 +376,6 @@ struct Playtest {
     loco_gait: Gait,
     /// Tick the current locomotion phase began.
     loco_start_tick: SimTick,
-    /// Last analog move vector while the stick was active; the winddown
-    /// glides along it while the clip settles.
-    loco_glide: (Q12, Q12),
     /// Winddown variant chosen for the current stop (the gait's winddown from
     /// the stride start, its mirror from the half stride).
     loco_stop_anim: PlayerAnim,
