@@ -111,6 +111,12 @@ fn main() {
                         ..
                     } => (action, active_end_frame),
                 };
+                let last = capsule
+                    .hit_windows()
+                    .map(|window| window.end)
+                    .max()
+                    .unwrap_or(last)
+                    .max(last);
                 if let Some(&(_, clip)) = action_clip
                     .iter()
                     .find(|(index, _)| *index == action.to_index())

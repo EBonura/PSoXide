@@ -745,7 +745,7 @@ pub(crate) fn cook_character_combat_capsules(
             ));
             return None;
         }
-        cooked.push(PlaytestCombatCapsule {
+        let record = PlaytestCombatCapsule {
             joint,
             flags,
             action,
@@ -771,7 +771,26 @@ pub(crate) fn cook_character_combat_capsules(
             projectile_charge_start_frame,
             projectile_glow_scale_q8,
             projectile_impact_lifetime_ticks,
-        });
+        };
+        if matches!(volume.role, crate::CombatCapsuleRole::Hitbox { .. }) {
+            for window in volume.hit_windows() {
+                if window.end < window.start {
+                    report.error(format!("Character '{character_name}' combat volume '{}' has a damage section ending before it starts", volume.name));
+                    return None;
+                }
+                cooked.push(PlaytestCombatCapsule {
+                    active_start_frame: window.start,
+                    active_end_frame: window.end,
+                    ..record
+                });
+            }
+        } else {
+            cooked.push(record);
+        }
+        if cooked.len() > psx_level::MAX_CHARACTER_COMBAT_CAPSULES {
+            report.error(format!("Character '{character_name}' needs {} combat records including damage sections; the PS1 runtime cap is {}", cooked.len(), psx_level::MAX_CHARACTER_COMBAT_CAPSULES));
+            return None;
+        }
     }
     let count = u8::try_from(cooked.len()).ok()?;
     combat_capsules.extend(cooked);

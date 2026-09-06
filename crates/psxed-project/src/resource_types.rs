@@ -1554,6 +1554,15 @@ pub enum CombatCapsuleRole {
     },
 }
 
+/// An inclusive interval in the source animation's frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombatHitWindow {
+    /// First frame that deals damage.
+    pub start: u16,
+    /// Last frame that deals damage.
+    pub end: u16,
+}
+
 /// One visually authored capsule attached to a character rig joint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharacterCombatCapsule {
@@ -1574,6 +1583,10 @@ pub struct CharacterCombatCapsule {
     /// Whether this volume receives or deals damage.
     #[serde(default)]
     pub role: CombatCapsuleRole,
+    /// Extra swings using the same geometry and damage as the first hit window.
+    /// The first window stays in `role` so existing projects keep their timing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_hit_windows: Vec<CombatHitWindow>,
 }
 
 fn is_zero_q12_rotation(rotation: &[i16; 3]) -> bool {
@@ -1588,7 +1601,31 @@ impl Default for CharacterCombatCapsule {
             capsule: JointCapsule::default(),
             projectile_preview_rotation_q12: [0; 3],
             role: CombatCapsuleRole::Hurtbox,
+            additional_hit_windows: Vec::new(),
         }
+    }
+}
+
+impl CharacterCombatCapsule {
+    /// Active melee sections in authoring order. Hurtboxes and emitters have none.
+    pub fn hit_windows(&self) -> impl Iterator<Item = CombatHitWindow> + '_ {
+        let first = match self.role {
+            CombatCapsuleRole::Hitbox {
+                active_start_frame,
+                active_end_frame,
+                ..
+            } => Some(CombatHitWindow {
+                start: active_start_frame,
+                end: active_end_frame,
+            }),
+            _ => None,
+        };
+        first.into_iter().chain(
+            self.additional_hit_windows
+                .iter()
+                .copied()
+                .filter(move |_| first.is_some()),
+        )
     }
 }
 

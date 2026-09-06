@@ -146,6 +146,7 @@ fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
     let mut character = CharacterResource::defaults();
     character.combat_capsules = vec![
         CharacterCombatCapsule {
+            additional_hit_windows: Vec::new(),
             name: "Torso".to_string(),
             joint: 3,
             capsule: JointCapsule {
@@ -157,6 +158,7 @@ fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
             role: CombatCapsuleRole::Hurtbox,
         },
         CharacterCombatCapsule {
+            additional_hit_windows: Vec::new(),
             name: "Right Fist".to_string(),
             joint: 14,
             capsule: JointCapsule {
@@ -174,6 +176,7 @@ fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
             },
         },
         CharacterCombatCapsule {
+            additional_hit_windows: Vec::new(),
             name: "Right Palm Bolt".to_string(),
             joint: 14,
             capsule: JointCapsule {

@@ -145,7 +145,7 @@ pub fn clip_windows(project: &ProjectDocument) -> HashMap<ResourceId, ClipWindow
                 continue;
             }
             for volume in &character.combat_capsules {
-                let (action, low, high) = match volume.role {
+                let (action, mut low, mut high) = match volume.role {
                     CombatCapsuleRole::Hurtbox => continue,
                     CombatCapsuleRole::Hitbox {
                         action,
@@ -165,6 +165,10 @@ pub fn clip_windows(project: &ProjectDocument) -> HashMap<ResourceId, ClipWindow
                         active_end_frame,
                     ),
                 };
+                for window in volume.hit_windows() {
+                    low = low.min(window.start);
+                    high = high.max(window.end);
+                }
                 let Some(clip) = clip_for(action) else {
                     continue;
                 };
@@ -394,6 +398,10 @@ impl ClipTrim {
                             } => {
                                 *active_start_frame = active_start_frame.saturating_sub(offset);
                                 *active_end_frame = active_end_frame.saturating_sub(offset);
+                                for window in &mut volume.additional_hit_windows {
+                                    window.start = window.start.saturating_sub(offset);
+                                    window.end = window.end.saturating_sub(offset);
+                                }
                             }
                             CombatCapsuleRole::ProjectileEmitter {
                                 charge_start_frame,
