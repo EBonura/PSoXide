@@ -6,7 +6,7 @@ use psx_engine::{ViewVertex, WorldProjection, WorldRenderStats};
 const BURST_TICKS: u16 = 12;
 const FLIGHT_TICKS: u16 = 18;
 const HOLD_TICKS: u16 = 6;
-const RESTORE_TICKS: u16 = 6;
+const RESTORE_TICKS: u16 = 30;
 
 /// Timing and colour for rebuilding the player from feet to head.
 #[derive(Copy, Clone)]
@@ -61,16 +61,62 @@ impl ModelPhaseAssembly {
         (age, remaining * remaining >> 8)
     }
 
-    fn tint(self, base: (u8, u8, u8)) -> (u8, u8, u8) {
+    /// Once assembled, draw the ordinary shaded model and fade its packets.
+    pub const fn is_assembled(self) -> bool {
+        self.elapsed >= self.duration
+    }
+
+    fn finish_strength_q8(self) -> i32 {
         let restore = self
             .elapsed
             .saturating_sub(self.duration.saturating_add(HOLD_TICKS));
-        let strength = 256 - i32::from(restore.min(RESTORE_TICKS)) * 256 / i32::from(RESTORE_TICKS);
+        let t = i32::from(restore.min(RESTORE_TICKS)) * 256 / i32::from(RESTORE_TICKS);
+        256 - (((t * t) >> 8) * (768 - 2 * t) >> 8)
+    }
+
+    fn tint(self, base: (u8, u8, u8)) -> (u8, u8, u8) {
+        let strength = self.finish_strength_q8();
         (
             lerp_tint_channel(base.0, self.color.0, strength),
             lerp_tint_channel(base.1, self.color.1, strength),
             lerp_tint_channel(base.2, self.color.2, strength),
         )
+    }
+
+    /// Fade into each face's original lighting and material response, rather
+    /// than a uniform approximation that changes again when the effect ends.
+    ///
+    /// # Safety
+    /// Every slot from `first_slot` to the arena cursor must be a `TriTextured`
+    /// emitted by the completed, solid player body. Call before equipment or
+    /// any other packet type is submitted; dash wireframes must be excluded.
+    pub unsafe fn apply_finish_to_model_packets(
+        self,
+        arena: &mut PrimitivePacketArena<'_>,
+        first_slot: usize,
+    ) -> bool {
+        debug_assert!(self.is_assembled());
+        let end_slot = arena.used_slots();
+        let strength = self.finish_strength_q8();
+        // SAFETY: the caller supplies the immediately preceding body range.
+        unsafe {
+            arena.mutate_typed_slots::<TriTextured>(first_slot, end_slot, |triangle| {
+                let base = (
+                    triangle.color_cmd as u8,
+                    (triangle.color_cmd >> 8) as u8,
+                    (triangle.color_cmd >> 16) as u8,
+                );
+                let tint = (
+                    lerp_tint_channel(base.0, self.color.0, strength),
+                    lerp_tint_channel(base.1, self.color.1, strength),
+                    lerp_tint_channel(base.2, self.color.2, strength),
+                );
+                triangle.color_cmd = (triangle.color_cmd & 0xff00_0000)
+                    | u32::from(tint.0)
+                    | (u32::from(tint.1) << 8)
+                    | (u32::from(tint.2) << 16);
+            })
+        }
     }
 
     pub(super) fn wire_color(self) -> (u8, u8, u8) {
@@ -437,7 +483,45 @@ mod tests {
                 effect.color
             );
         }
-        assert!(ModelPhaseAssembly::new(84, 72, effect.color, 0, 90).is_none());
+        assert!(ModelPhaseAssembly::new(108, 72, effect.color, 0, 90).is_none());
+    }
+
+    #[test]
+    fn finish_eases_into_each_faces_own_shading_without_a_final_colour_step() {
+        let effect = ModelPhaseAssembly::new(78, 72, (255, 100, 40), 0, 90).unwrap();
+        assert_eq!(effect.finish_strength_q8(), 256);
+        assert_eq!(
+            ModelPhaseAssembly {
+                elapsed: 93,
+                ..effect
+            }
+            .finish_strength_q8(),
+            128
+        );
+        let mut previous = 256;
+        for elapsed in 78..=108 {
+            let strength = ModelPhaseAssembly { elapsed, ..effect }.finish_strength_q8();
+            assert!(strength <= previous);
+            previous = strength;
+        }
+        for base in [(40, 75, 110), (110, 140, 170)] {
+            let last = ModelPhaseAssembly {
+                elapsed: 107,
+                ..effect
+            }
+            .tint(base);
+            for (a, b) in [(last.0, base.0), (last.1, base.1), (last.2, base.2)] {
+                assert!(a.abs_diff(b) <= 1);
+            }
+            assert_eq!(
+                ModelPhaseAssembly {
+                    elapsed: 108,
+                    ..effect
+                }
+                .tint(base),
+                base
+            );
+        }
     }
 
     #[test]

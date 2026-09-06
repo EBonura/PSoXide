@@ -635,7 +635,15 @@ pub(super) fn draw_player(
     triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
-    mr::draw_player_from_pose::<
+    let phase_assembly = phase_assembly.filter(|_| {
+        matches!(
+            mr::player_dash_wire_visual(character, player_pose),
+            mr::DashWireVisual::Solid
+        )
+    });
+    let finish = phase_assembly.filter(|effect| effect.is_assembled());
+    let first_slot = triangles.used_slots();
+    let stats = mr::draw_player_from_pose::<
         MODEL_VERTEX_CAP,
         JOINT_CAP,
         OT_DEPTH,
@@ -657,10 +665,16 @@ pub(super) fn draw_player(
         lighting,
         room_reflection_probe_slot(current_room),
         &mut model_texture_slot,
-        phase_assembly,
+        phase_assembly.filter(|effect| !effect.is_assembled()),
         triangles,
         world,
-    )
+    );
+    if let Some(finish) = finish {
+        // SAFETY: the solid body submit above emits only TriTextured packets.
+        // Dash line phases are excluded, and equipment has not been submitted.
+        let _ = unsafe { finish.apply_finish_to_model_packets(triangles, first_slot) };
+    }
+    stats
 }
 
 /// Draw non-player equipment riding its bound model instances (the
