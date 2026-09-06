@@ -69,10 +69,18 @@ fn horizon_skin() -> Option<mr::EquipmentMaterializationSkin> {
     Some(mr::EquipmentMaterializationSkin::opaque((r, g, b)))
 }
 
-/// Build the player's stance-change colour sweep from the same projected
-/// floor/head span the current camera sees. The destination stance becomes
-/// active as soon as the swap is accepted, so its colour is also the colour
-/// visibly rising over the actor.
+/// Cover the visible model, including its scale, rather than the body collider.
+pub(super) fn player_phase_height(character: &RuntimeCharacter) -> i32 {
+    MODELS
+        .get(character.model.to_usize())
+        .map_or(character.height, |model| {
+            i32::from(model.world_height).saturating_mul(i32::from(character.visual_scale_q8)) / 256
+        })
+        .max(1)
+}
+
+/// Build the player's stance-change colour sweep over the projected floor/head
+/// span. Its destination colour rises with the world-space glyph.
 pub(super) fn player_stance_tint_sweep(
     stance: CombatStance,
     config: &CombatStanceConfig,

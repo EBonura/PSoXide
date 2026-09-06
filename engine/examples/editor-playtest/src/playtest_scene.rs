@@ -1686,7 +1686,7 @@ impl Scene for Playtest {
                             self.player_stance,
                             &self.player_stance_config,
                             player,
-                            character.height,
+                            player_phase_height(&character),
                             &camera,
                         );
                         draw_player(
@@ -1878,6 +1878,7 @@ impl Scene for Playtest {
                 &mut primitive_packets,
                 &mut world,
             );
+            self.draw_phase_change_ring(camera, &mut primitive_packets, &mut world);
 
             telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_active_chunks);
             emit_room_chunk_mask(
