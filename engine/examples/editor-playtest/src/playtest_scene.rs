@@ -1877,7 +1877,6 @@ impl Scene for Playtest {
                 &mut primitive_packets,
                 &mut world,
             );
-            self.draw_phase_change_ring(camera, &mut primitive_packets, &mut world);
 
             telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_active_chunks);
             emit_room_chunk_mask(

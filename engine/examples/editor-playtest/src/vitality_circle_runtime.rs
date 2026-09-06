@@ -1,5 +1,4 @@
 use super::*;
-use psx_engine::{CullMode, DepthPolicy};
 
 const OCTAGON_Q12: [(i32, i32); 8] = [
     (4096, 0),
@@ -13,95 +12,6 @@ const OCTAGON_Q12: [(i32, i32); 8] = [
 ];
 
 impl Playtest {
-    /// A horizontal glyph follows the actor while the new phase rises through
-    /// the body. Small tiles let its far and near edges sort around the mesh.
-    pub(super) fn draw_phase_change_ring(
-        &self,
-        camera: WorldCamera,
-        packets: &mut PrimitivePacketArena<'_>,
-        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-    ) {
-        let (Some(material), Some(character)) =
-            (self.vitality_circle_material, self.character.as_ref())
-        else {
-            return;
-        };
-        let elapsed = self.player_stance.swap_elapsed_ticks();
-        let duration = self.player_stance_config.swap_duration_ticks;
-        let lifetime = duration.saturating_add(12);
-        if duration == 0 || elapsed >= lifetime {
-            return;
-        }
-        let progress = i32::from(
-            self.player_stance
-                .swap_progress_q12(&self.player_stance_config),
-        );
-        let position = self.motor.position();
-        let height = player_phase_height(character);
-        let y = position
-            .y
-            .saturating_add(2 + ((height + 6) * progress >> 12))
-            .saturating_add(i32::from(elapsed.saturating_sub(duration)) * 2);
-        let radius = (character.radius * 3).max(character.height / 2);
-        let radius = radius * i32::from(elapsed.min(4) + 4) / 8;
-        let fade_in = i32::from(elapsed.min(6)) * 256 / 6;
-        let fade_out = i32::from((lifetime - elapsed).min(12)) * 256 / 12;
-        let fade = fade_in.min(fade_out);
-        // Smoothstep eases both ends without dimming the sweep through the body.
-        let fade = ((fade * fade) >> 8) * (768 - 2 * fade) >> 8;
-        let (r, g, b) = vitality_circle_tint(self.player_stance.active().index() as u8, true);
-        let material = material
-            .with_raw_texture(false)
-            .with_tint((
-                (i32::from(r) * fade >> 8) as u8,
-                (i32::from(g) * fade >> 8) as u8,
-                (i32::from(b) * fade >> 8) as u8,
-            ))
-            .with_blend_mode(BlendMode::Add);
-        let options = current_actor_surface_options(self.room_index, self.bsp.is_some())
-            .with_depth_policy(DepthPolicy::Average)
-            .with_cull_mode(CullMode::None)
-            .with_material_layer(material);
-        let u = psx_game_runtime::vram::VITALITY_CIRCLE_TEXEL_U;
-        let v = psx_game_runtime::vram::VITALITY_CIRCLE_TEXEL_V;
-        let rotation = Angle::from_q12(elapsed.wrapping_mul(24));
-        let sin = rotation.sin_q12();
-        let cos = rotation.cos_q12();
-        let mut vertices = [WorldVertex::new(0, y, 0); 25];
-        for row in 0..5 {
-            for column in 0..5 {
-                let x = radius * (column as i32 - 2) / 2;
-                let z = radius * (row as i32 - 2) / 2;
-                vertices[row * 5 + column] = WorldVertex::new(
-                    position.x + ((x * cos + z * sin) >> 12),
-                    y,
-                    position.z + ((z * cos - x * sin) >> 12),
-                );
-            }
-        }
-        for row in 0..4 {
-            for column in 0..4 {
-                let u0 = u + (column * 63 / 4) as u8;
-                let u1 = u + ((column + 1) * 63 / 4) as u8;
-                let v0 = v + (row * 63 / 4) as u8;
-                let v1 = v + ((row + 1) * 63 / 4) as u8;
-                let _ = world.submit_textured_world_quad(
-                    packets,
-                    camera,
-                    [
-                        vertices[row * 5 + column],
-                        vertices[row * 5 + column + 1],
-                        vertices[(row + 1) * 5 + column + 1],
-                        vertices[(row + 1) * 5 + column],
-                    ],
-                    [(u0, v0), (u1, v0), (u1, v1), (u0, v1)],
-                    material,
-                    options,
-                );
-            }
-        }
-    }
-
     /// Draw each field as two machine-glyph decals plus a sparse moving line
     /// cage. The 64x64 texture carries the detail; the bounded line count only
     /// communicates activity and direction.
