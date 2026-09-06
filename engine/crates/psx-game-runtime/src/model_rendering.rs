@@ -39,7 +39,9 @@ use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 mod equipment;
 pub use equipment::ASSEMBLED_Q12;
 mod instances;
+mod phase_assembly;
 mod shadows;
+pub use phase_assembly::ModelPhaseAssembly;
 
 pub use self::shadows::{
     draw_actor_projected_shadow, draw_model_instance_projected_shadows, projected_shadow_material,
@@ -1499,7 +1501,9 @@ pub fn draw_player<
     lighting: &RuntimeRoomLighting,
     room_reflection_probe: Option<VramSlot>,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
-    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
+    triangles: &mut (impl PrimitiveSink<TriTextured>
+              + PrimitiveSink<LineMono>
+              + PrimitiveSink<QuadGouraudBlended>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
     let Some(player_pose) = resolve_player_actor_pose(
@@ -1538,6 +1542,7 @@ pub fn draw_player<
         lighting,
         room_reflection_probe,
         resolve_override_texture,
+        None,
         triangles,
         world,
     )
@@ -1570,7 +1575,10 @@ pub fn draw_player_from_pose<
     lighting: &RuntimeRoomLighting,
     room_reflection_probe: Option<VramSlot>,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
-    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
+    phase_assembly: Option<ModelPhaseAssembly>,
+    triangles: &mut (impl PrimitiveSink<TriTextured>
+              + PrimitiveSink<LineMono>
+              + PrimitiveSink<QuadGouraudBlended>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
     let runtime_model = player_pose.model();
@@ -1618,6 +1626,7 @@ pub fn draw_player_from_pose<
     // in the scene (`textured_model_joints` +26%) purely from instantiating
     // that function a second time, so it stays untouched.
     let dash_visual = dash_wire_visual(character, player_pose.action(), anim, phase);
+    let phase_assembly = phase_assembly.filter(|_| matches!(dash_visual, DashWireVisual::Solid));
     if matches!(dash_visual, DashWireVisual::Wire) {
         telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
@@ -1743,12 +1752,28 @@ pub fn draw_player_from_pose<
         material,
         secondary_material,
         model_options,
-        faces,
+        if phase_assembly.is_some() { &[] } else { faces },
         model_parts,
         model_vertices,
         PROFILE,
         scratch,
     );
+    if let Some(assembly) = phase_assembly {
+        let projected = &scratch.vertices[..usize::from(stats.projected_vertices)];
+        let assembly_stats = phase_assembly::draw(
+            assembly,
+            projected,
+            faces,
+            *camera,
+            material,
+            model_options,
+            triangles,
+            world,
+        );
+        stats.submitted_triangles = assembly_stats.submitted_triangles;
+        stats.culled_triangles = assembly_stats.culled_triangles;
+        stats.dropped_triangles = assembly_stats.dropped_triangles;
+    }
     if matches!(
         dash_visual,
         DashWireVisual::Converting { .. } | DashWireVisual::Restoring { .. }

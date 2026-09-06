@@ -79,30 +79,20 @@ pub(super) fn player_phase_height(character: &RuntimeCharacter) -> i32 {
         .max(1)
 }
 
-/// Build the player's stance-change colour sweep over the projected floor/head
-/// span. Its destination colour rises with the world-space glyph.
-pub(super) fn player_stance_tint_sweep(
+/// Rebuild the player's mesh over a wireframe, following the stance clock.
+pub(super) fn player_phase_assembly(
     stance: CombatStance,
     config: &CombatStanceConfig,
     position: RoomPoint,
     height: i32,
-    camera: &WorldCamera,
-) -> Option<ModelTintSweep> {
-    if !stance.swap_in_progress(config) {
-        return None;
-    }
-    let floor = camera.project_world(WorldVertex::new(position.x, position.y, position.z))?;
-    let head = camera.project_world(WorldVertex::new(
-        position.x,
-        position.y.saturating_add(height),
-        position.z,
-    ))?;
-    Some(ModelTintSweep::rising(
+) -> Option<mr::ModelPhaseAssembly> {
+    mr::ModelPhaseAssembly::new(
+        stance.swap_elapsed_ticks(),
+        config.swap_duration_ticks,
         stance_rgb(stance.active()),
-        stance.swap_progress_q12(config),
-        head.sy,
-        floor.sy,
-    ))
+        position.y,
+        height,
+    )
 }
 
 /// Resolve the same colour tell for one entity-owned model instance. Static
@@ -641,14 +631,11 @@ pub(super) fn draw_player(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    tint_sweep: Option<ModelTintSweep>,
+    phase_assembly: Option<mr::ModelPhaseAssembly>,
     triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
-    let dash_visual = mr::player_dash_wire_visual(character, player_pose);
-    let tint_sweep = tint_sweep.filter(|_| matches!(dash_visual, mr::DashWireVisual::Solid));
-    let first_slot = triangles.used_slots();
-    let stats = mr::draw_player_from_pose::<
+    mr::draw_player_from_pose::<
         MODEL_VERTEX_CAP,
         JOINT_CAP,
         OT_DEPTH,
@@ -670,16 +657,10 @@ pub(super) fn draw_player(
         lighting,
         room_reflection_probe_slot(current_room),
         &mut model_texture_slot,
+        phase_assembly,
         triangles,
         world,
-    );
-    if let Some(sweep) = tint_sweep {
-        // SAFETY: `draw_player_from_pose` emits only TriTextured packets into
-        // this arena range. The sweep runs immediately, before equipment or
-        // any other packet type is submitted.
-        let _ = unsafe { sweep.apply_to_model_packets(triangles, first_slot) };
-    }
-    stats
+    )
 }
 
 /// Draw non-player equipment riding its bound model instances (the

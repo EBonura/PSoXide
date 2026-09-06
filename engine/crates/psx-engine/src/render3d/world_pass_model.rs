@@ -399,6 +399,66 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    /// Submit a subset of an already projected opaque model, preserving its
+    /// packed face path. Used when assembly reveals faces without posing the
+    /// skeleton a second time. Unsupported surfaces use the regular submitter.
+    pub fn submit_projected_model_faces(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> TexturedModelRenderStats {
+        let mut stats = TexturedModelRenderStats::default();
+        let safe = faces.iter().all(|face| {
+            let indices = face.vertex_indices().map(usize::from);
+            indices.iter().all(|&i| i < projected.len())
+                && indices
+                    .iter()
+                    .all(|&i| projected[i] != ProjectedVertex::INVALID && projected[i].sz > 0)
+                && projected_triangle_hw_safe(indices.map(|i| projected[i]))
+        });
+        if safe
+            && !material.is_translucent()
+            && options.cull_mode == CullMode::Back
+            && options.depth_policy == DepthPolicy::Average
+        {
+            self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                triangles,
+                projected,
+                faces,
+                material.textured_packet_material(),
+                None,
+                ModelUvOffset::default(),
+                true,
+                options,
+                &mut stats,
+                &mut 0,
+            );
+        } else {
+            for face in faces {
+                let indices = face.vertex_indices().map(usize::from);
+                if indices
+                    .iter()
+                    .any(|&i| i >= projected.len() || projected[i] == ProjectedVertex::INVALID)
+                {
+                    stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
+                    continue;
+                }
+                let next = self.submit_textured_triangle(
+                    triangles,
+                    indices.map(|i| projected[i]),
+                    face.uvs(),
+                    material.with_clut_bank(face.palette_bank()),
+                    options,
+                );
+                merge_textured_model_stats(&mut stats, next);
+            }
+        }
+        stats
+    }
+
     /// Transform and submit a textured world-space triangle through
     /// `camera`.
     pub fn submit_textured_world_triangle(
@@ -2965,6 +3025,46 @@ mod camera_crystal_route_tests {
             *slot = packet.color_cmd;
         }
         colors
+    }
+
+    #[test]
+    fn projected_subset_keeps_palette_banks_and_skips_invalid_faces() {
+        let (vertices, faces) = fixture();
+        let selected = TexturedModelRenderFace::new_with_palette_bank(
+            faces[1].vertex_indices(),
+            faces[1].uvs(),
+            2,
+        );
+        let invalid = TexturedModelRenderFace::new([999, 0, 1], [(0, 0); 3]);
+        let mut output = [ZERO_TRI; 2];
+        for (index, input) in [&[selected][..], &[selected, invalid][..]]
+            .into_iter()
+            .enumerate()
+        {
+            let mut storage = OrderingTable::<8>::new();
+            let mut ot = OtFrame::begin(&mut storage);
+            let mut commands = [WorldTriCommand::EMPTY; 4];
+            let mut packets = [ZERO_TRI; 4];
+            let mut arena = PrimitiveArena::new(&mut packets);
+            let mut world = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+            let stats = world.submit_projected_model_faces(
+                &mut arena,
+                &vertices,
+                input,
+                MATERIAL,
+                options().with_depth_policy(DepthPolicy::Average),
+            );
+            assert_eq!(stats.submitted_triangles, 1);
+            assert_eq!(usize::from(stats.skipped_triangles), index);
+            assert!(!stats.primitive_overflow && !stats.command_overflow);
+            output[index] = core::mem::replace(&mut packets[0], ZERO_TRI);
+        }
+        assert_eq!(output[0].v0, output[1].v0);
+        assert_eq!(output[0].v1, output[1].v1);
+        assert_eq!(output[0].v2, output[1].v2);
+        assert_eq!(output[0].color_cmd, output[1].color_cmd);
+        assert_eq!(output[0].uv0_clut, output[1].uv0_clut);
+        assert_eq!(output[0].uv0_clut >> 16, 2);
     }
 
     fn model_bounds(vertices: &[ProjectedVertex]) -> (i16, i16, i16, i16) {

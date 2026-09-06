@@ -1682,12 +1682,11 @@ impl Scene for Playtest {
                 }
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
-                        let tint_sweep = player_stance_tint_sweep(
+                        let phase_assembly = player_phase_assembly(
                             self.player_stance,
                             &self.player_stance_config,
                             player,
                             player_phase_height(&character),
-                            &camera,
                         );
                         draw_player(
                             self.room_index,
@@ -1701,7 +1700,7 @@ impl Scene for Playtest {
                             &camera,
                             actor_options,
                             &lighting,
-                            tint_sweep,
+                            phase_assembly,
                             &mut primitive_packets,
                             &mut world,
                         )
