@@ -3,6 +3,7 @@
 use super::*;
 use psx_engine::{ViewVertex, WorldProjection, WorldRenderStats};
 
+const BURST_TICKS: u16 = 12;
 const FLIGHT_TICKS: u16 = 18;
 const HOLD_TICKS: u16 = 6;
 const RESTORE_TICKS: u16 = 6;
@@ -26,7 +27,8 @@ impl ModelPhaseAssembly {
         floor_y: i32,
         height: i32,
     ) -> Option<Self> {
-        if duration < FLIGHT_TICKS || elapsed >= duration.saturating_add(HOLD_TICKS + RESTORE_TICKS)
+        if duration < BURST_TICKS + FLIGHT_TICKS
+            || elapsed >= duration.saturating_add(HOLD_TICKS + RESTORE_TICKS)
         {
             return None;
         }
@@ -40,9 +42,11 @@ impl ModelPhaseAssembly {
     }
 
     fn arrival(self, height_q12: u16) -> u16 {
-        FLIGHT_TICKS
-            + ((u32::from(height_q12.min(4096)) * u32::from(self.duration - FLIGHT_TICKS)) >> 12)
-                as u16
+        BURST_TICKS
+            + FLIGHT_TICKS
+            + ((u32::from(height_q12.min(4096))
+                * u32::from(self.duration - BURST_TICKS - FLIGHT_TICKS))
+                >> 12) as u16
     }
 
     fn flight(self, height_q12: u16) -> (u16, i32) {
@@ -100,6 +104,46 @@ fn displace(
     Some(ProjectedVertex::new(sx as i16, sy as i16, z))
 }
 
+fn burst_triangle(
+    target: [ProjectedVertex; 3],
+    offset: ViewVertex,
+    progress: i32,
+    projection: WorldProjection,
+) -> Option<[ProjectedVertex; 3]> {
+    let center = ProjectedVertex::new(
+        ((i32::from(target[0].sx) + i32::from(target[1].sx) + i32::from(target[2].sx)) / 3) as i16,
+        ((i32::from(target[0].sy) + i32::from(target[1].sy) + i32::from(target[2].sy)) / 3) as i16,
+        (target[0].sz + target[1].sz + target[2].sz) / 3,
+    );
+    if target.iter().any(|p| p.sz + offset.z < projection.near_z) {
+        return None;
+    }
+    let displaced = displace(center, offset, projection)?;
+    // Treat each small fragment as a rigid plane: project its centre once,
+    // then scale its corners for depth and dissolution.
+    let scale = (256 - (progress * progress >> 8)) * center.sz / displaced.sz;
+    let points = target.map(|p| {
+        ProjectedVertex::new(
+            clamp_i16(
+                i32::from(displaced.sx) + ((i32::from(p.sx) - i32::from(center.sx)) * scale >> 8),
+            ),
+            clamp_i16(
+                i32::from(displaced.sy) + ((i32::from(p.sy) - i32::from(center.sy)) * scale >> 8),
+            ),
+            p.sz + offset.z,
+        )
+    });
+    if points
+        .iter()
+        .any(|p| !(-1023..=1023).contains(&p.sx) || !(-1023..=1023).contains(&p.sy))
+        || points.iter().map(|p| p.sx).max()? - points.iter().map(|p| p.sx).min()? > 1023
+        || points.iter().map(|p| p.sy).max()? - points.iter().map(|p| p.sy).min()? > 511
+    {
+        return None;
+    }
+    Some(points)
+}
+
 fn height_q12(
     assembly: ModelPhaseAssembly,
     points: [ProjectedVertex; 3],
@@ -133,10 +177,37 @@ pub(super) fn draw<const OT_DEPTH: usize>(
     let wire_options = options.with_depth_bias(options.depth_bias.saturating_add(2));
     let wire_color = assembly.wire_color();
     let tint = assembly.tint(material.tint());
-    let attached_material = material
-        .with_raw_texture(false)
-        .with_tint(tint)
-        .with_blend_mode(BlendMode::Opaque);
+    let bursting = assembly.elapsed < BURST_TICKS;
+    let burst_progress =
+        i32::from(assembly.elapsed.min(BURST_TICKS)) * 256 / i32::from(BURST_TICKS);
+    let burst_fade = 256 - burst_progress;
+    let burst_material = material.with_raw_texture(false).with_tint((
+        (i32::from(material.tint().0) * burst_fade >> 8) as u8,
+        (i32::from(material.tint().1) * burst_fade >> 8) as u8,
+        (i32::from(material.tint().2) * burst_fade >> 8) as u8,
+    ));
+    let attached_material = if bursting {
+        burst_material
+    } else {
+        material
+            .with_raw_texture(false)
+            .with_tint(tint)
+            .with_blend_mode(BlendMode::Opaque)
+    };
+    let mut burst_vertices = [ProjectedVertex::INVALID; 96];
+    let mut burst_offsets = [ViewVertex::ZERO; 8];
+    if bursting {
+        let radius = assembly.height * burst_progress / 384;
+        for (index, offset) in burst_offsets.iter_mut().enumerate() {
+            let angle = Angle::from_q12(index as u16 * 512);
+            let vector = camera.view_vertex(WorldVertex::new(
+                angle.sin_q12() * radius >> 12,
+                (index as i32 % 3 - 1) * radius / 2,
+                angle.cos_q12() * radius >> 12,
+            ));
+            *offset = ViewVertex::new(vector.x - zero.x, vector.y - zero.y, vector.z - zero.z);
+        }
+    }
     let mut attached = [TexturedModelRenderFace::ZERO; 32];
     let mut attached_count = 0;
     for (index, face) in faces.iter().enumerate() {
@@ -157,7 +228,9 @@ pub(super) fn draw<const OT_DEPTH: usize>(
         {
             continue;
         }
-        let (age, remaining) = if assembly.elapsed >= assembly.duration {
+        let (age, remaining) = if bursting {
+            (0, 256)
+        } else if assembly.elapsed >= assembly.duration {
             (FLIGHT_TICKS, 0)
         } else {
             assembly.flight(height_q12(assembly, target, camera))
@@ -178,18 +251,36 @@ pub(super) fn draw<const OT_DEPTH: usize>(
         // The intact body's wireframe remains visible before this piece starts.
         // A few larger travelling facets announce each band of the mesh;
         // its remaining small faces fill in when the same band lands.
-        if age == 0 || (age < FLIGHT_TICKS && index & 3 != 0) {
+        if !bursting && (age == 0 || (age < FLIGHT_TICKS && index & 3 != 0)) {
             continue;
         }
-        if age == FLIGHT_TICKS {
-            attached[attached_count] = *face;
+        if bursting || age == FLIGHT_TICKS {
+            attached[attached_count] = if bursting {
+                let Some(points) = burst_triangle(
+                    target,
+                    burst_offsets[index & 7],
+                    burst_progress,
+                    camera.projection,
+                ) else {
+                    continue;
+                };
+                let base = attached_count * 3;
+                burst_vertices[base..base + 3].copy_from_slice(&points);
+                TexturedModelRenderFace::new_with_palette_bank(
+                    [base as u16, base as u16 + 1, base as u16 + 2],
+                    face.uvs(),
+                    face.palette_bank(),
+                )
+            } else {
+                *face
+            };
             attached_count += 1;
             if attached_count == attached.len() {
                 merge_attached(
                     &mut stats,
                     world.submit_projected_model_faces(
                         triangles,
-                        projected,
+                        if bursting { &burst_vertices } else { projected },
                         &attached,
                         attached_material,
                         options,
@@ -275,7 +366,7 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             &mut stats,
             world.submit_projected_model_faces(
                 triangles,
-                projected,
+                if bursting { &burst_vertices } else { projected },
                 &attached[..attached_count],
                 attached_material,
                 options,
@@ -303,12 +394,12 @@ mod tests {
 
     #[test]
     fn feet_land_before_head_and_all_pieces_finish_on_time() {
-        let effect = ModelPhaseAssembly::new(0, 60, (255, 100, 40), 0, 90).unwrap();
-        assert_eq!(effect.arrival(0), 18);
-        assert_eq!(effect.arrival(4096), 60);
+        let effect = ModelPhaseAssembly::new(0, 72, (255, 100, 40), 0, 90).unwrap();
+        assert_eq!(effect.arrival(0), 30);
+        assert_eq!(effect.arrival(4096), 72);
         for height in (0..=4096).step_by(32) {
             let completed = ModelPhaseAssembly {
-                elapsed: 60,
+                elapsed: 72,
                 ..effect
             };
             assert_eq!(completed.flight(height), (FLIGHT_TICKS, 0));
@@ -316,15 +407,37 @@ mod tests {
     }
 
     #[test]
+    fn the_old_mesh_bursts_before_any_new_faces_start_arriving() {
+        let effect = ModelPhaseAssembly::new(0, 72, (255, 100, 40), 0, 90).unwrap();
+        for elapsed in 0..=BURST_TICKS {
+            for height in [0, 2048, 4096] {
+                assert_eq!(ModelPhaseAssembly { elapsed, ..effect }.flight(height).0, 0);
+            }
+        }
+        let target = [
+            ProjectedVertex::new(140, 100, 256),
+            ProjectedVertex::new(160, 100, 256),
+            ProjectedVertex::new(150, 120, 256),
+        ];
+        let projection = WorldProjection::new(160, 120, 256, 8);
+        assert_eq!(
+            burst_triangle(target, ViewVertex::ZERO, 0, projection),
+            Some(target)
+        );
+        let moved = burst_triangle(target, ViewVertex::new(40, 0, 0), 128, projection).unwrap();
+        assert!(moved.iter().zip(target).all(|(a, b)| a.sx > b.sx));
+    }
+
+    #[test]
     fn attached_colour_holds_until_every_piece_has_completed() {
-        let effect = ModelPhaseAssembly::new(0, 60, (255, 100, 40), 0, 90).unwrap();
-        for elapsed in 18..=66 {
+        let effect = ModelPhaseAssembly::new(0, 72, (255, 100, 40), 0, 90).unwrap();
+        for elapsed in 30..=78 {
             assert_eq!(
                 ModelPhaseAssembly { elapsed, ..effect }.tint((80, 90, 100)),
                 effect.color
             );
         }
-        assert!(ModelPhaseAssembly::new(72, 60, effect.color, 0, 90).is_none());
+        assert!(ModelPhaseAssembly::new(84, 72, effect.color, 0, 90).is_none());
     }
 
     #[test]
