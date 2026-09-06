@@ -28,7 +28,7 @@ impl Playtest {
         };
         let elapsed = self.player_stance.swap_elapsed_ticks();
         let duration = self.player_stance_config.swap_duration_ticks;
-        let lifetime = duration.saturating_add(8);
+        let lifetime = duration.saturating_add(12);
         if duration == 0 || elapsed >= lifetime {
             return;
         }
@@ -44,14 +44,18 @@ impl Playtest {
             .saturating_add(i32::from(elapsed.saturating_sub(duration)) * 2);
         let radius = (character.radius * 3).max(character.height / 2);
         let radius = radius * i32::from(elapsed.min(4) + 4) / 8;
-        let fade = i32::from((lifetime - elapsed).min(8));
+        let fade_in = i32::from(elapsed.min(6)) * 256 / 6;
+        let fade_out = i32::from((lifetime - elapsed).min(12)) * 256 / 12;
+        let fade = fade_in.min(fade_out);
+        // Smoothstep eases both ends without dimming the sweep through the body.
+        let fade = ((fade * fade) >> 8) * (768 - 2 * fade) >> 8;
         let (r, g, b) = vitality_circle_tint(self.player_stance.active().index() as u8, true);
         let material = material
             .with_raw_texture(false)
             .with_tint((
-                (i32::from(r) * fade / 8) as u8,
-                (i32::from(g) * fade / 8) as u8,
-                (i32::from(b) * fade / 8) as u8,
+                (i32::from(r) * fade >> 8) as u8,
+                (i32::from(g) * fade >> 8) as u8,
+                (i32::from(b) * fade >> 8) as u8,
             ))
             .with_blend_mode(BlendMode::Add);
         let options = current_actor_surface_options(self.room_index, self.bsp.is_some())
@@ -60,12 +64,23 @@ impl Playtest {
             .with_material_layer(material);
         let u = psx_game_runtime::vram::VITALITY_CIRCLE_TEXEL_U;
         let v = psx_game_runtime::vram::VITALITY_CIRCLE_TEXEL_V;
+        let rotation = Angle::from_q12(elapsed.wrapping_mul(24));
+        let sin = rotation.sin_q12();
+        let cos = rotation.cos_q12();
+        let mut vertices = [WorldVertex::new(0, y, 0); 25];
+        for row in 0..5 {
+            for column in 0..5 {
+                let x = radius * (column as i32 - 2) / 2;
+                let z = radius * (row as i32 - 2) / 2;
+                vertices[row * 5 + column] = WorldVertex::new(
+                    position.x + ((x * cos + z * sin) >> 12),
+                    y,
+                    position.z + ((z * cos - x * sin) >> 12),
+                );
+            }
+        }
         for row in 0..4 {
             for column in 0..4 {
-                let x0 = position.x + radius * (column - 2) / 2;
-                let x1 = position.x + radius * (column - 1) / 2;
-                let z0 = position.z + radius * (row - 2) / 2;
-                let z1 = position.z + radius * (row - 1) / 2;
                 let u0 = u + (column * 63 / 4) as u8;
                 let u1 = u + ((column + 1) * 63 / 4) as u8;
                 let v0 = v + (row * 63 / 4) as u8;
@@ -74,10 +89,10 @@ impl Playtest {
                     packets,
                     camera,
                     [
-                        WorldVertex::new(x0, y, z0),
-                        WorldVertex::new(x1, y, z0),
-                        WorldVertex::new(x1, y, z1),
-                        WorldVertex::new(x0, y, z1),
+                        vertices[row * 5 + column],
+                        vertices[row * 5 + column + 1],
+                        vertices[(row + 1) * 5 + column + 1],
+                        vertices[(row + 1) * 5 + column],
                     ],
                     [(u0, v0), (u1, v0), (u1, v1), (u0, v1)],
                     material,
