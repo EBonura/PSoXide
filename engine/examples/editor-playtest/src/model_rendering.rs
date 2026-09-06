@@ -565,6 +565,7 @@ impl Playtest {
         // Where rendering samples the phase is where it is worth measuring:
         // this is the number that says which cooked frame is on screen.
         if let Some(pose) = self.player_actor_pose {
+            self.player_dash_assembly.observe(pose);
             telemetry::counter(
                 telemetry::counter::PLAYER_ANIM_PHASE_Q12,
                 pose.pose().phase_q12(),
@@ -610,6 +611,7 @@ impl Playtest {
 
     pub(super) fn clear_actor_pose_snapshots(&mut self) {
         self.player_actor_pose = None;
+        self.player_dash_assembly = mr::PlayerDashAssembly::new();
         self.previous_player_actor_pose = None;
         self.previous_instance_actor_poses.fill(None);
         for pose in self.instance_actor_poses.iter_mut() {
@@ -632,18 +634,19 @@ pub(super) fn draw_player(
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
     phase_assembly: Option<mr::ModelPhaseAssembly>,
+    dash_assembly: &mut mr::PlayerDashAssembly,
     triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
     let phase_assembly = phase_assembly.filter(|_| {
         matches!(
-            mr::player_dash_wire_visual(character, player_pose),
+            dash_assembly.visual(elapsed_tick),
             mr::DashWireVisual::Solid
         )
     });
     let finish = phase_assembly.filter(|effect| effect.is_assembled());
     let first_slot = triangles.used_slots();
-    let stats = mr::draw_player_from_pose::<
+    let mut stats = mr::draw_player_from_pose::<
         MODEL_VERTEX_CAP,
         JOINT_CAP,
         OT_DEPTH,
@@ -666,6 +669,7 @@ pub(super) fn draw_player(
         room_reflection_probe_slot(current_room),
         &mut model_texture_slot,
         phase_assembly.filter(|effect| !effect.is_assembled()),
+        Some(dash_assembly),
         triangles,
         world,
     );
@@ -674,6 +678,17 @@ pub(super) fn draw_player(
         // Dash line phases are excluded, and equipment has not been submitted.
         let _ = unsafe { finish.apply_finish_to_model_packets(triangles, first_slot) };
     }
+    stats.stats.submitted_triangles =
+        stats
+            .stats
+            .submitted_triangles
+            .saturating_add(dash_assembly.draw_departure(
+                elapsed_tick,
+                *camera,
+                options,
+                triangles,
+                world,
+            ));
     stats
 }
 

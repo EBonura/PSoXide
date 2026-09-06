@@ -473,6 +473,7 @@ struct Playtest {
     /// Body rendering, equipment sockets, and authored combat capsules all
     /// consume this same snapshot until the next simulation tick.
     player_actor_pose: Option<PlayerActorPoseSnapshot>,
+    player_dash_assembly: psx_game_runtime::model_rendering::PlayerDashAssembly,
     /// Previous consecutive player pose. Active sword hitboxes sweep from
     /// this pose into `player_actor_pose`, preventing fast animation motion
     /// from tunnelling through an enemy between retained samples.
@@ -711,6 +712,8 @@ impl Playtest {
         addr_of_mut!((*scene).current_collision_room).write(None);
         addr_of_mut!((*scene).character).write(None);
         addr_of_mut!((*scene).player_actor_pose).write(None);
+        addr_of_mut!((*scene).player_dash_assembly)
+            .write(psx_game_runtime::model_rendering::PlayerDashAssembly::new());
         addr_of_mut!((*scene).previous_player_actor_pose).write(None);
         addr_of_mut!((*scene).lock_target).write(None);
         addr_of_mut!((*scene).camera_recenter_requested).write(false);

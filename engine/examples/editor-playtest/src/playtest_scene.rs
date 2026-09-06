@@ -1701,6 +1701,7 @@ impl Scene for Playtest {
                             actor_options,
                             &lighting,
                             phase_assembly,
+                            &mut self.player_dash_assembly,
                             &mut primitive_packets,
                             &mut world,
                         )

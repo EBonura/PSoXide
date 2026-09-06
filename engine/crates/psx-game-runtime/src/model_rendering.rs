@@ -39,6 +39,7 @@ use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 mod equipment;
 pub use equipment::ASSEMBLED_Q12;
 mod dash_assembly;
+pub use dash_assembly::PlayerDashAssembly;
 mod instances;
 mod phase_assembly;
 mod shadows;
@@ -1443,6 +1444,7 @@ pub fn draw_player<
         room_reflection_probe,
         resolve_override_texture,
         None,
+        None,
         triangles,
         world,
     )
@@ -1476,6 +1478,7 @@ pub fn draw_player_from_pose<
     room_reflection_probe: Option<VramSlot>,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     phase_assembly: Option<ModelPhaseAssembly>,
+    mut dash_assembly: Option<&mut PlayerDashAssembly>,
     triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
@@ -1512,9 +1515,8 @@ pub fn draw_player_from_pose<
         };
     }
 
-    // The dash is the one action that shows the player as an energy cage
-    // instead of a body. Keyed off the clip the pose is already playing, so no
-    // gameplay state has to be threaded down to the renderer.
+    // Departure fragments retain their world positions while the live pose
+    // travels as wireframe. Reconstruction can outlast the motor's recovery.
     //
     // The cage rides the ORDINARY model submit with an empty face list: that
     // poses the skeleton and projects the vertices through exactly the shipping
@@ -1523,9 +1525,15 @@ pub fn draw_player_from_pose<
     // itself to draw edges was measured at -2.0% frame rate across every model
     // in the scene (`textured_model_joints` +26%) purely from instantiating
     // that function a second time, so it stays untouched.
-    let dash_visual = player_dash_wire_visual(character, player_pose);
+    let dash_visual = dash_assembly.as_ref().map_or_else(
+        || player_dash_wire_visual(character, player_pose),
+        |effect| effect.visual(elapsed_tick),
+    );
+    let capture_departure = dash_assembly
+        .as_ref()
+        .is_some_and(|effect| effect.needs_capture());
     let phase_assembly = phase_assembly.filter(|_| matches!(dash_visual, DashWireVisual::Solid));
-    if matches!(dash_visual, DashWireVisual::Wire) {
+    if matches!(dash_visual, DashWireVisual::Wire) && !capture_departure {
         telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
         let mut stats = match runtime_model_geometry(runtime_model, model_parts, model_vertices) {
@@ -1656,6 +1664,25 @@ pub fn draw_player_from_pose<
         PROFILE,
         scratch,
     );
+    if capture_departure {
+        if let Some(effect) = dash_assembly.as_mut() {
+            effect.capture(
+                &scratch.vertices[..usize::from(stats.projected_vertices)],
+                faces,
+                *camera,
+                material,
+            );
+        }
+        let end = triangles.used_slots();
+        // SAFETY: only the fresh body occupies these textured packet slots.
+        // Its fragments now live in the departure cloud; retain the DMA chain.
+        unsafe {
+            triangles.mutate_typed_slots::<TriTextured>(first_body_slot, end, |triangle| {
+                triangle.v1 = triangle.v0;
+                triangle.v2 = triangle.v0;
+            });
+        }
+    }
     if let Some(assembly) = phase_assembly {
         let projected = &scratch.vertices[..usize::from(stats.projected_vertices)];
         let assembly_stats = phase_assembly::draw(
@@ -1675,7 +1702,8 @@ pub fn draw_player_from_pose<
     if matches!(
         dash_visual,
         DashWireVisual::Converting { .. } | DashWireVisual::Restoring { .. }
-    ) {
+    ) || capture_departure
+    {
         let projected = &scratch.vertices[..usize::from(stats.projected_vertices)];
         // SAFETY: only the ordinary body's textured triangles occupy this range.
         // Preserve their palette, UVs, crystal lighting and ordering-table tags.
