@@ -2879,10 +2879,10 @@ pub enum LevelGameplaySfxEvent {
     EnemyDeath = 4,
     /// The stance-swap cooldown completed and is available again.
     StanceSwapReady = 5,
-    /// The player committed a weapon swing, independently of contact.
-    PlayerWeaponSwing = 6,
-    /// An enemy's melee attack entered its active swing window.
-    EnemyWeaponSwing = 7,
+    /// A light melee attack entered an active swing window.
+    LightWeaponSwing = 6,
+    /// A heavy melee attack entered an active swing window.
+    HeavyWeaponSwing = 7,
     /// An enemy projectile attack entered its authored charge windup.
     ProjectileCharge = 8,
     /// An enemy projectile was successfully emitted into the runtime pool.
@@ -2897,11 +2897,17 @@ pub enum LevelGameplaySfxEvent {
     GameplayEnter = 13,
     /// A new shot in the opening cinematic began.
     IntroShot = 14,
+    /// The first hostile enemy started a new encounter.
+    CombatStart = 15,
+    /// The player began an accepted evade.
+    Dash = 16,
+    /// The player successfully began switching stance.
+    StanceSwap = 17,
 }
 
 impl LevelGameplaySfxEvent {
     /// Compact event bit consumed once by the game-flow wrapper.
-    pub const fn bit(self) -> u16 {
+    pub const fn bit(self) -> u32 {
         1 << self as u8
     }
 }
@@ -2912,10 +2918,13 @@ mod gameplay_sfx_event_tests {
 
     #[test]
     fn event_bits_cover_projectile_events_beyond_one_byte() {
-        assert_eq!(LevelGameplaySfxEvent::PlayerWeaponSwing.bit(), 1 << 6);
-        assert_eq!(LevelGameplaySfxEvent::EnemyWeaponSwing.bit(), 1 << 7);
+        assert_eq!(LevelGameplaySfxEvent::LightWeaponSwing.bit(), 1 << 6);
+        assert_eq!(LevelGameplaySfxEvent::HeavyWeaponSwing.bit(), 1 << 7);
         assert_eq!(LevelGameplaySfxEvent::ProjectileCharge.bit(), 1 << 8);
         assert_eq!(LevelGameplaySfxEvent::ProjectileLaunch.bit(), 1 << 9);
+        assert_eq!(LevelGameplaySfxEvent::CombatStart.bit(), 1 << 15);
+        assert_eq!(LevelGameplaySfxEvent::Dash.bit(), 1 << 16);
+        assert_eq!(LevelGameplaySfxEvent::StanceSwap.bit(), 1 << 17);
     }
 }
 

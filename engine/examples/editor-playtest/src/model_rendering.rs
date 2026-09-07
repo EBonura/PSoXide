@@ -590,7 +590,39 @@ impl Playtest {
             // The visibility mask discards the pose after resolving it, so
             // test it first. `resolve_instance_actor_pose` reads only shared
             // tables, which makes the skip output-identical.
-            if bsp_resident && self.bsp_instance_visible_mask & (1u16 << index) == 0 {
+            let corpse_gone = GAME_ENTITIES
+                .iter()
+                .enumerate()
+                .find(|(_, r)| usize::from(r.model_instance) == index)
+                .is_some_and(|(entity, record)| {
+                    if record.flags & psx_level::game_entity_flags::ENABLED == 0 {
+                        return true;
+                    }
+                    if self.game_entities.state(entity)
+                        != psx_game_runtime::entities::GameEntityState::Dead
+                    {
+                        return false;
+                    }
+                    self.models
+                        .get(MODEL_INSTANCES[index].model.to_usize())
+                        .copied()
+                        .flatten()
+                        .and_then(|model| {
+                            model.clip(&self.clips, psx_level::ModelClipIndex(record.death_clip))
+                        })
+                        .and_then(|animation| {
+                            enemy_death_dissolve(
+                                &self.game_entities,
+                                index,
+                                animation,
+                                ctx.video_hz,
+                            )
+                        })
+                        .is_some_and(|effect| effect.finished())
+                });
+            if corpse_gone
+                || (bsp_resident && self.bsp_instance_visible_mask & (1u16 << index) == 0)
+            {
                 self.instance_actor_poses[index] = None;
                 self.previous_instance_actor_poses[index] = None;
                 index += 1;
@@ -845,6 +877,28 @@ pub(super) fn draw_player_equipment(
     out
 }
 
+/// The entity timer keeps running offscreen, so culled corpses cannot restart.
+#[inline(never)]
+fn enemy_death_dissolve(
+    entities: &RuntimeGameEntities,
+    instance: usize,
+    animation: Animation<'static>,
+    video_hz: VideoHz,
+) -> Option<mr::ModelDeathDissolve> {
+    let index = GAME_ENTITIES
+        .iter()
+        .position(|r| usize::from(r.model_instance) == instance)?;
+    if entities.state(index) != psx_game_runtime::entities::GameEntityState::Dead {
+        return None;
+    }
+    mr::ModelDeathDissolve::after_death(
+        entities.clip_for_state(GAME_ENTITIES, index).phase_ticks,
+        animation.frame_count(),
+        animation.sample_rate_hz(),
+        video_hz,
+    )
+}
+
 /// Animate + draw the placed model instances of `current_room` through
 /// the crate policy.
 pub(super) fn draw_model_instances(
@@ -882,6 +936,12 @@ pub(super) fn draw_model_instances(
             model_scratch_arena(),
             current_room,
             pose,
+            enemy_death_dissolve(
+                entities,
+                pose.instance_index(),
+                pose.pose().animation(),
+                video_hz,
+            ),
             elapsed_tick,
             video_hz,
             camera,
@@ -923,6 +983,7 @@ pub(super) fn draw_model_instance_shadows(
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     pose_overrides: &[ModelInstancePoseOverride],
+    instance_poses: &[Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     // psx-numeric-allow-next-line: one bit per model instance; the width IS the instance capacity
     visible_instance_mask: u64,
     triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
@@ -938,7 +999,17 @@ pub(super) fn draw_model_instance_shadows(
         material,
         models,
         pose_overrides,
-        visible_instance_mask,
+        visible_instance_mask
+            & instance_poses
+                .iter()
+                .enumerate()
+                .fold(0, |mask, (i, pose)| {
+                    if pose.is_some() {
+                        mask | (1 << i)
+                    } else {
+                        mask
+                    }
+                }),
         triangles,
         world,
     );

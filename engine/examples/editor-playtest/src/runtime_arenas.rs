@@ -29,6 +29,24 @@
 use super::*;
 use crate::generated::PXBSP_FACE_CHAIN_CAPACITY;
 
+// A cube-only project never draws a panorama. Keep its unused packet cache
+// out of PS1 RAM; mixed-sky projects still retain the ordinary panorama path.
+const PANORAMA_CACHE_COUNT: usize = {
+    let mut index = 0;
+    let mut needed = 0;
+    while index < ROOMS.len() {
+        let flags = ROOMS[index].sky.flags;
+        let projection = flags & psx_level::sky_flags::PROJECTION_MASK;
+        if flags & psx_level::sky_flags::ENABLED != 0
+            && (projection == 0 || projection == psx_level::sky_flags::PANORAMA)
+        {
+            needed = 1;
+        }
+        index += 1;
+    }
+    needed
+};
+
 /// Every mutable runtime arena, owned as one struct so the whole
 /// mutable-state budget reads in one place (the scene's other state
 /// lives on [`Playtest`]; this is the part its `const fn new` cannot
@@ -48,7 +66,7 @@ pub(super) struct RuntimeArenas {
     /// be selected by the cooked manifest.
     pub(super) world_backend: PersistentWorldBackendOverlay,
     /// Rotation-keyed sky-cyclorama packet cache (phase-2 sky carve).
-    pub(super) sky: psx_game_runtime::sky::SkyCyclorama,
+    pub(super) sky: [psx_game_runtime::sky::SkyCyclorama; PANORAMA_CACHE_COUNT],
     /// Accepted-cell draw scratch for the cached-room draw paths
     /// (phase-2 visible-cell carve).
     #[cfg(feature = "world-grid-visible")]
@@ -213,7 +231,7 @@ impl RuntimeArenas {
         },
         // Zero state = invalid cache key, so the first draw rebuilds;
         // no init stamping needed.
-        sky: psx_game_runtime::sky::SkyCyclorama::zeroed(),
+        sky: [const { psx_game_runtime::sky::SkyCyclorama::zeroed() }; PANORAMA_CACHE_COUNT],
         #[cfg(feature = "world-grid-visible")]
         cell_scratch: RuntimeCellDrawScratch::zeroed(),
         frame_backend: FrameWorldBackendOverlay {
@@ -409,9 +427,9 @@ pub(super) fn prebuilt_quads_arena() -> &'static mut RuntimePrebuiltRoomQuads {
 }
 
 /// Exclusive borrow of the sky-cyclorama packet cache.
-pub(super) fn sky_arena() -> &'static mut psx_game_runtime::sky::SkyCyclorama {
+pub(super) fn sky_arena() -> Option<&'static mut psx_game_runtime::sky::SkyCyclorama> {
     // SAFETY: see `vram_arena`.
-    unsafe { &mut (*arenas_ptr()).sky }
+    unsafe { (*arenas_ptr()).sky.get_mut(0) }
 }
 
 /// Exclusive borrow of the accepted-cell draw scratch.

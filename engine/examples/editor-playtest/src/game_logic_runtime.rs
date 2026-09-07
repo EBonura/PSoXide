@@ -32,6 +32,22 @@ use psx_game_runtime::projectiles::{
 
 const PLAYER_PROJECTILE_TARGET: u16 = u16::MAX - 1;
 
+fn weapon_swing_sfx(action: psx_level::CharacterAnimationAction) -> Option<LevelGameplaySfxEvent> {
+    use psx_level::CharacterAnimationAction as Action;
+    match action {
+        Action::LightAttack | Action::VertLightAttack | Action::AltLightAttack => {
+            Some(LevelGameplaySfxEvent::LightWeaponSwing)
+        }
+        Action::HeavyAttack
+        | Action::VertHeavyAttack
+        | Action::AltHeavyAttack
+        | Action::ComboAttack
+        | Action::VertComboAttack
+        | Action::AltComboAttack => Some(LevelGameplaySfxEvent::HeavyWeaponSwing),
+        _ => None,
+    }
+}
+
 /// Combat-music gate: engaged on the first tick any enemy is hostile, released
 /// after three quiet seconds so a Custodian flickering at the edge of its
 /// aggro radius does not pump the track.
@@ -889,7 +905,9 @@ impl Playtest {
             previous,
             pose.pose().phase_q12(),
         ) {
-            self.queue_gameplay_sfx(LevelGameplaySfxEvent::PlayerWeaponSwing);
+            if let Some(event) = weapon_swing_sfx(self.anim_state.action()) {
+                self.queue_gameplay_sfx(event);
+            }
             self.swing_hit_mask = 0;
             self.destructibles.begin_swing();
             telemetry::debug_log("player swing:active");
@@ -931,7 +949,9 @@ impl Playtest {
             previous,
             pose.pose().phase_q12(),
         ) {
-            self.queue_gameplay_sfx(LevelGameplaySfxEvent::EnemyWeaponSwing);
+            if let Some(event) = weapon_swing_sfx(attack.action()) {
+                self.queue_gameplay_sfx(event);
+            }
             telemetry::debug_log("enemy swing:active");
         }
     }
@@ -1742,4 +1762,60 @@ pub(super) fn interactable_for_logic(logic_index: usize) -> Option<&'static Inte
     INTERACTABLES
         .iter()
         .find(|interactable| interactable.logic == logic_index)
+}
+
+#[cfg(test)]
+mod encounter_audio_tests {
+    use super::{weapon_swing_sfx, CombatMusicState, LevelGameplaySfxEvent};
+
+    #[test]
+    fn swing_cues_follow_attack_weight_for_both_stances_and_enemies() {
+        use psx_level::CharacterAnimationAction as Action;
+        for action in [
+            Action::LightAttack,
+            Action::VertLightAttack,
+            Action::AltLightAttack,
+        ] {
+            assert_eq!(
+                weapon_swing_sfx(action),
+                Some(LevelGameplaySfxEvent::LightWeaponSwing)
+            );
+        }
+        for action in [
+            Action::HeavyAttack,
+            Action::VertHeavyAttack,
+            Action::AltHeavyAttack,
+            Action::ComboAttack,
+            Action::VertComboAttack,
+            Action::AltComboAttack,
+        ] {
+            assert_eq!(
+                weapon_swing_sfx(action),
+                Some(LevelGameplaySfxEvent::HeavyWeaponSwing)
+            );
+        }
+        for action in [Action::Idle, Action::Walk, Action::RangedAttack] {
+            assert_eq!(weapon_swing_sfx(action), None);
+        }
+    }
+
+    #[test]
+    fn encounter_start_is_once_per_fight_despite_brief_losses_of_aggro() {
+        let mut gate = CombatMusicState::default();
+        assert_eq!(gate.tick(false), None);
+        assert_eq!(gate.tick(true), Some(true));
+        for _ in 0..600 {
+            assert_eq!(gate.tick(true), None);
+        }
+        for _ in 0..179 {
+            assert_eq!(gate.tick(false), None);
+        }
+        assert_eq!(gate.tick(true), None);
+        for _ in 0..179 {
+            assert_eq!(gate.tick(false), None);
+        }
+        assert_eq!(gate.tick(false), Some(false));
+        assert_eq!(gate.tick(false), None);
+        assert_eq!(gate.tick(true), Some(true));
+    }
 }

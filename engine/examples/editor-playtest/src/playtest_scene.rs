@@ -303,7 +303,7 @@ impl Scene for Playtest {
         RenderSubmission::Queued
     }
 
-    fn take_gameplay_sfx_events(&mut self) -> u16 {
+    fn take_gameplay_sfx_events(&mut self) -> u32 {
         core::mem::take(&mut self.gameplay_sfx_events)
     }
 
@@ -2590,6 +2590,7 @@ impl Playtest {
                     shadow_material,
                     &self.models,
                     entity_poses,
+                    &self.instance_actor_poses,
                     if USES_PXBSP {
                         // psx-numeric-allow-next-line: per-instance visibility bitmask, see the parameter
                         u64::from(self.bsp_instance_visible_mask)

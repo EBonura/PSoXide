@@ -593,6 +593,9 @@ impl Playtest {
                 )
             });
             if let Some(_engaged) = self.combat_music.tick(hostile) {
+                if _engaged {
+                    self.queue_gameplay_sfx(LevelGameplaySfxEvent::CombatStart);
+                }
                 #[cfg(target_arch = "mips")]
                 psx_rt::tty::println(if _engaged {
                     "combat music:on"
@@ -619,6 +622,7 @@ impl Playtest {
             let config = self.player_stance_config;
             if self.player_stance.request_swap(&config).is_some() {
                 self.attack_buffer.clear();
+                self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwap);
                 telemetry::debug_log("player stance:swap");
             }
         }
@@ -1014,6 +1018,7 @@ impl Playtest {
                 telemetry::debug_log("player roll:start");
             }
             if new_state.is_motor_fixed_action() {
+                self.queue_gameplay_sfx(LevelGameplaySfxEvent::Dash);
                 if let Some(character) = self.character {
                     self.lock_player_anim_action(&character, new_state, now, ctx.video_hz);
                 }

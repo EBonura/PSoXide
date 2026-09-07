@@ -17,7 +17,10 @@ pub(super) fn draw_sky_panorama(
     camera: WorldCamera,
     ot: &mut OtFrame<'_, OT_DEPTH>,
 ) {
-    sky_arena().draw_panorama(
+    let Some(cache) = sky_arena() else {
+        return;
+    };
+    cache.draw_panorama(
         sky,
         camera,
         ASSETS,

@@ -118,29 +118,19 @@ const UI_SFX_VOICE_COUNT: u8 = 4;
 #[cfg(target_arch = "mips")]
 const GAMEPLAY_SFX_VOICE_BASE: u8 = 16;
 #[cfg(target_arch = "mips")]
-const GAMEPLAY_SFX_VOICE_COUNT: u8 = 4;
+const GAMEPLAY_SFX_VOICE_COUNT: u8 = 3;
+#[cfg(target_arch = "mips")]
+const COMBAT_VOICE: u8 = 19;
 const CDDA_RETRY_TICKS: u32 = 60;
 const CDDA_STATUS_TICKS: u32 = 30;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
 #[cfg(any(target_arch = "mips", test))]
 const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE;
 #[cfg(target_arch = "mips")]
-const CDDA_STATUS_PLAYING: u8 = 1 << 7;
-/// Set while the head is still travelling. Play is a seek followed by
-/// playback and the two bits are mutually exclusive, so a drive that has
-/// accepted Play and not yet arrived reports neither. Reading that as
-/// "finished" is how a track restarts itself for as long as the seek lasts.
-#[cfg(target_arch = "mips")]
-const CDDA_STATUS_SEEKING: u8 = 1 << 6;
-#[cfg(target_arch = "mips")]
 const CDDA_COMMAND_SPINS: u32 = 131_072;
-/// Spin budget for the in-playback loop-status poll. Tiny on purpose: a CD
-/// controller busy streaming CD-DA is slow to answer, so a generous budget here
-/// would spin the whole menu loop for milliseconds every poll. With a small
-/// budget the poll simply returns "couldn't tell" mid-playback (we keep playing)
-/// and only reads a definite answer once the drive has auto-paused at track end.
-#[cfg(target_arch = "mips")]
-const CDDA_STATUS_SPINS: u32 = 1_024;
+// GetStat is asynchronous: allow a full second for its response without
+// spinning or discarding a late reply when the next frame arrives.
+const CDDA_STATUS_TIMEOUT_TICKS: u32 = 60;
 /// Consecutive definite "stopped" reads required before we treat the track as
 /// finished and loop it. Guards against one stray/garbled status read triggering
 /// a mid-playback reseek (which kills the audio on real hardware). Used by
@@ -273,9 +263,10 @@ struct CddaPlayer {
     next_status_tick: u32,
     routed: bool,
     /// Consecutive definite "stopped" status reads seen by the loop poll. Reset
-    /// on any "playing"/inconclusive read; a track is only re-played once this
+    /// on a playing or invalid response; a track is only re-played once this
     /// reaches [`CDDA_STOPPED_CONFIRMATIONS`].
     stopped_polls: u8,
+    status_irq_enable: Option<u8>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -370,6 +361,7 @@ impl CddaPlayer {
             next_status_tick: 0,
             routed: false,
             stopped_polls: 0,
+            status_irq_enable: None,
             target_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
             fade_start_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
             fade_ticks_total: 0,
@@ -469,6 +461,8 @@ impl CddaPlayer {
         }
 
         if track_changed || self.current_track != cue.track {
+            self.cancel_status_query();
+            self.stopped_polls = 0;
             self.current_track = 0;
             self.random_start = false;
             self.step = CddaStartStep::SetMode;
@@ -478,6 +472,8 @@ impl CddaPlayer {
     }
 
     fn release_for_data_reads(&mut self, tick: u32) {
+        self.cancel_status_query();
+        self.stopped_polls = 0;
         self.requested = MusicCue::SILENT;
         self.random_start = false;
         self.current_track = 0;
@@ -569,20 +565,53 @@ impl CddaPlayer {
         }
     }
 
+    fn cancel_status_query(&mut self) {
+        if self.status_irq_enable.take().is_some() {
+            cdda_cancel_status();
+        }
+    }
+
     fn maybe_loop(&mut self, tick: u32) {
-        if !self.requested.loop_track || tick < self.next_status_tick {
+        self.maybe_loop_with(
+            tick,
+            cdda_begin_status,
+            cdda_finish_status,
+            cdda_cancel_status,
+        );
+    }
+
+    fn maybe_loop_with(
+        &mut self,
+        tick: u32,
+        mut begin: impl FnMut() -> Option<u8>,
+        mut finish: impl FnMut(u8) -> Option<Option<bool>>,
+        mut cancel: impl FnMut(),
+    ) {
+        if !self.requested.loop_track {
+            if self.status_irq_enable.take().is_some() {
+                cancel();
+            }
             return;
         }
-        self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
-        // Non-blocking, restart-averse loop check. `cdda_drive_stopped` polls
-        // GetStat with a tiny spin budget, so mid-playback -- when the busy
-        // controller is slow to answer -- it returns `None` and we just keep
-        // playing, never stalling the menu loop. Only a run of definite
-        // "stopped" reads loops the track; the drive gives those cleanly once
-        // MODE_AUTO_PAUSE halts it at the track boundary. Restarting on a single
-        // missed/late read would reseek the laser mid-song and kill the audio on
-        // real hardware (the exact failure this whole path is fixing).
-        self.handle_drive_status(cdda_drive_stopped(), tick);
+        if let Some(irq_enable) = self.status_irq_enable {
+            if let Some(stopped) = finish(irq_enable) {
+                self.status_irq_enable = None;
+                self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
+                self.handle_drive_status(stopped, tick);
+            } else if tick >= self.next_status_tick {
+                cancel();
+                self.status_irq_enable = None;
+                self.stopped_polls = 0;
+                self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
+            }
+        } else if tick >= self.next_status_tick {
+            self.status_irq_enable = begin();
+            self.next_status_tick = tick.saturating_add(if self.status_irq_enable.is_some() {
+                CDDA_STATUS_TIMEOUT_TICKS
+            } else {
+                CDDA_STATUS_TICKS
+            });
+        }
     }
 
     fn handle_drive_status(&mut self, stopped: Option<bool>, tick: u32) {
@@ -596,7 +625,7 @@ impl CddaPlayer {
                     self.next_retry_tick = tick;
                 }
             }
-            // Playing, or could not tell within the tiny budget: keep playing.
+            // Playing or an invalid completed response: keep playing.
             _ => self.stopped_polls = 0,
         }
     }
@@ -646,11 +675,19 @@ fn scaled_pitch(base_q12: u16, multiplier_q12: u16) -> psx_spu::Pitch {
 }
 
 #[inline]
-fn gameplay_sfx_cue_for_event(
+fn gameplay_sfx_cue_variant(
     cues: &[LevelGameplaySfxCueRecord],
     event: LevelGameplaySfxEvent,
+    variant: u8,
 ) -> Option<LevelGameplaySfxCueRecord> {
-    cues.iter().copied().find(|cue| cue.event == event)
+    let count = cues.iter().filter(|cue| cue.event == event).count();
+    if count == 0 {
+        return None;
+    }
+    cues.iter()
+        .copied()
+        .filter(|cue| cue.event == event)
+        .nth(variant as usize % count)
 }
 
 #[cfg(target_arch = "mips")]
@@ -760,24 +797,74 @@ fn flow_trace(message: &str) {
 #[inline(always)]
 fn flow_trace(_message: &str) {}
 
-/// Poll the drive's play state WITHOUT blocking the menu loop. Returns
-/// `Some(true)` if it definitely reports stopped (neither playing nor seeking),
-/// `Some(false)` if it reports playing, and `None` if it could not answer
-/// within the tiny [`CDDA_STATUS_SPINS`] budget (the controller busy streaming
-/// audio). The caller must read `None` as "assume still playing", never as
-/// "stopped", or a busy answer would falsely loop-restart the track.
 #[cfg(target_arch = "mips")]
-fn cdda_drive_stopped() -> Option<bool> {
-    psx_io::cdrom::try_get_stat(CDDA_STATUS_SPINS)
-        .and_then(|response| response.bytes().first().copied())
-        .map(|status| status & (CDDA_STATUS_PLAYING | CDDA_STATUS_SEEKING) == 0)
+fn cdda_begin_status() -> Option<u8> {
+    psx_io::cdrom::dispatch_command(psx_io::cdrom::CMD_GETSTAT, &[], 0)
 }
 
 #[cfg(not(target_arch = "mips"))]
-fn cdda_drive_stopped() -> Option<bool> {
-    // No real drive off-target: report "playing" so the loop never restarts.
-    Some(false)
+fn cdda_begin_status() -> Option<u8> {
+    Some(0)
 }
+
+#[cfg(any(target_arch = "mips", test))]
+fn cdda_status_stopped(status: u8) -> Option<bool> {
+    use psx_io::cdrom::{STAT_PLAYING, STAT_READING, STAT_SEEKING};
+    if status & 0x11 != 0 {
+        // Error or open lid is not a confirmed track boundary.
+        None
+    } else {
+        Some(status & (STAT_PLAYING | STAT_SEEKING | STAT_READING) == 0)
+    }
+}
+
+/// None means the dispatched command is still pending. Some(None) consumes
+/// an error response without interpreting it as the end of the song.
+#[cfg(target_arch = "mips")]
+fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
+    use psx_io::cdrom;
+    let irq = cdrom::irq_flag_value();
+    if irq == 0 {
+        return None;
+    }
+    if irq != 3 && irq != 5 {
+        // Auto-pause can deliver INT4 before the outstanding GetStat ACK.
+        cdrom::discard_response();
+        cdrom::acknowledge_irq(irq);
+        return None;
+    }
+    // GetStat has one response byte. Select the response FIFO, read it once,
+    // then let the SDK drain/ack and restore the saved interrupt mask.
+    let status = unsafe {
+        core::ptr::write_volatile(0x1f80_1800 as *mut u8, 0);
+        if core::ptr::read_volatile(0x1f80_1800 as *const u8) & 0x20 != 0 {
+            Some(core::ptr::read_volatile(0x1f80_1801 as *const u8))
+        } else {
+            None
+        }
+    };
+    cdrom::restore_irq_output(irq_enable);
+    Some(if irq == 3 {
+        status.and_then(cdda_status_stopped)
+    } else {
+        None
+    })
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn cdda_finish_status(_irq_enable: u8) -> Option<Option<bool>> {
+    Some(Some(false))
+}
+
+#[cfg(target_arch = "mips")]
+fn cdda_cancel_status() {
+    // A cancelled command may still ACK later. Keep IRQ output masked, like
+    // the SDK's timed-out polled commands, until the next CD command takes over.
+    psx_io::cdrom::restore_irq_output(0);
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn cdda_cancel_status() {}
 
 #[cfg(target_arch = "mips")]
 fn cdda_release_for_data_reads() {
@@ -976,6 +1063,8 @@ pub struct GameApp<'a, S: Scene> {
     /// Round-robin gameplay voice cursor. Kept separate from UI voices so a
     /// world impact cannot steal a menu confirmation.
     gameplay_sfx_cursor: u8,
+    /// Alternates encounter dialogue independently of footsteps and attacks.
+    combat_start_variant: u8,
     /// Active full-screen transition, if a button-triggered flow change is
     /// delaying the cursor switch.
     transition: Option<FlowTransition>,
@@ -1176,6 +1265,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             ui_sfx_runtime_len: 0,
             ui_sfx_cursor: 0,
             gameplay_sfx_cursor: 0,
+            combat_start_variant: 0,
             transition: None,
             ui_activation: None,
             loading_exit_transition: None,
@@ -1310,8 +1400,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
         }
     }
 
-    fn play_gameplay_sfx_events(&mut self, events: u16) {
-        const EVENTS: [LevelGameplaySfxEvent; 15] = [
+    fn play_gameplay_sfx_events(&mut self, events: u32) {
+        const EVENTS: [LevelGameplaySfxEvent; 18] = [
             LevelGameplaySfxEvent::EnemyFootstep,
             LevelGameplaySfxEvent::EnemyIdle,
             LevelGameplaySfxEvent::Footstep,
@@ -1320,19 +1410,29 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelGameplaySfxEvent::PlayerDamage,
             LevelGameplaySfxEvent::EnemyDeath,
             LevelGameplaySfxEvent::StanceSwapReady,
-            LevelGameplaySfxEvent::PlayerWeaponSwing,
-            LevelGameplaySfxEvent::EnemyWeaponSwing,
+            LevelGameplaySfxEvent::LightWeaponSwing,
+            LevelGameplaySfxEvent::HeavyWeaponSwing,
             LevelGameplaySfxEvent::ProjectileCharge,
             LevelGameplaySfxEvent::ProjectileLaunch,
             LevelGameplaySfxEvent::ItemAcquired,
             LevelGameplaySfxEvent::GameplayEnter,
             LevelGameplaySfxEvent::IntroShot,
+            LevelGameplaySfxEvent::CombatStart,
+            LevelGameplaySfxEvent::Dash,
+            LevelGameplaySfxEvent::StanceSwap,
         ];
         for event in EVENTS {
             if events & event.bit() == 0 {
                 continue;
             }
-            if let Some(cue) = gameplay_sfx_cue_for_event(self.gameplay_sfx_cues, event) {
+            let variant = if event == LevelGameplaySfxEvent::CombatStart {
+                let variant = self.combat_start_variant;
+                self.combat_start_variant = variant.wrapping_add(1);
+                variant
+            } else {
+                0
+            };
+            if let Some(cue) = gameplay_sfx_cue_variant(self.gameplay_sfx_cues, event, variant) {
                 self.play_gameplay_sfx_cue(cue);
             }
         }
@@ -1348,8 +1448,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
         else {
             return;
         };
-        let voice_index =
-            GAMEPLAY_SFX_VOICE_BASE + (self.gameplay_sfx_cursor % GAMEPLAY_SFX_VOICE_COUNT);
+        // Dialogue must finish even when movement and attacks fill the SFX pool.
+        let voice_index = if cue.event == LevelGameplaySfxEvent::CombatStart {
+            COMBAT_VOICE
+        } else {
+            GAMEPLAY_SFX_VOICE_BASE + (self.gameplay_sfx_cursor % GAMEPLAY_SFX_VOICE_COUNT)
+        };
         self.gameplay_sfx_cursor = self.gameplay_sfx_cursor.wrapping_add(1);
         let pitch = scaled_pitch(sample.base_pitch_q12, cue.pitch_q12);
         let volume = psx_spu::Volume::linear(cue.volume_percent.min(100) as u16, 100);
@@ -2993,6 +3097,35 @@ mod tests {
     use psx_pad::ButtonState;
 
     #[test]
+    fn encounter_voice_variants_alternate_without_replaying_other_cues() {
+        let cue = LevelGameplaySfxCueRecord {
+            sample: 4,
+            event: LevelGameplaySfxEvent::CombatStart,
+            volume_percent: 90,
+            pitch_q12: 4096,
+            flags: 0,
+        };
+        let cues = [cue, LevelGameplaySfxCueRecord { sample: 7, ..cue }];
+        for (variant, expected) in [(0, 4), (1, 7), (2, 4), (3, 7), (255, 7)] {
+            assert_eq!(
+                gameplay_sfx_cue_variant(&cues, LevelGameplaySfxEvent::CombatStart, variant)
+                    .unwrap()
+                    .sample,
+                expected
+            );
+        }
+        assert!(
+            gameplay_sfx_cue_variant(&cues, LevelGameplaySfxEvent::ProjectileLaunch, 0).is_none()
+        );
+        assert_eq!(
+            gameplay_sfx_cue_variant(&cues[..1], LevelGameplaySfxEvent::CombatStart, 9)
+                .unwrap()
+                .sample,
+            4
+        );
+    }
+
+    #[test]
     fn gameplay_sfx_routes_only_the_requested_confirmed_event() {
         let cues = [
             LevelGameplaySfxCueRecord {
@@ -3018,13 +3151,13 @@ mod tests {
             },
         ];
         assert_eq!(
-            gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::HeavyHit)
+            gameplay_sfx_cue_variant(&cues, LevelGameplaySfxEvent::HeavyHit, 0)
                 .map(|cue| cue.sample),
             Some(9)
         );
-        assert!(gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::EnemyDeath).is_none());
+        assert!(gameplay_sfx_cue_variant(&cues, LevelGameplaySfxEvent::EnemyDeath, 0).is_none());
         assert_eq!(
-            gameplay_sfx_cue_for_event(&cues, LevelGameplaySfxEvent::StanceSwapReady)
+            gameplay_sfx_cue_variant(&cues, LevelGameplaySfxEvent::StanceSwapReady, 0)
                 .map(|cue| cue.sample),
             Some(1)
         );
@@ -5381,6 +5514,124 @@ mod tests {
         player.update(504);
         assert_eq!(player.current_track, 2);
         assert_eq!(player.random_state, seed);
+    }
+
+    #[test]
+    fn delayed_drive_replies_survive_across_frames_and_loop_once() {
+        let mut player = CddaPlayer::new();
+        player.request(
+            MusicCue {
+                track: 2,
+                volume_percent: 80,
+                loop_track: true,
+            },
+            0,
+        );
+        player.current_track = 2;
+        player.next_status_tick = 0;
+        let mut commands = 0;
+        for tick in 0..=50 {
+            player.maybe_loop_with(
+                tick,
+                || {
+                    commands += 1;
+                    Some(7)
+                },
+                |saved| {
+                    assert_eq!(saved, 7);
+                    // Each response takes ten frames, far beyond a spin poll.
+                    if tick == 10 || tick == 50 {
+                        Some(Some(true))
+                    } else {
+                        None
+                    }
+                },
+                || panic!("a late response within the deadline must not be cancelled"),
+            );
+            if tick < 50 {
+                assert_eq!(player.current_track, 2);
+            }
+        }
+        assert_eq!(
+            commands, 2,
+            "do not reissue GetStat while its response is pending"
+        );
+        assert_eq!(player.current_track, 0);
+        assert_eq!(player.step, CddaStartStep::SetMode);
+        assert_eq!(player.status_irq_enable, None);
+    }
+
+    #[test]
+    fn missing_drive_reply_retries_without_restarting_music() {
+        let mut player = CddaPlayer::new();
+        player.request(
+            MusicCue {
+                track: 2,
+                volume_percent: 80,
+                loop_track: true,
+            },
+            0,
+        );
+        player.current_track = 2;
+        player.next_status_tick = 0;
+        let mut commands = 0;
+        let mut cancellations = 0;
+        for tick in 0..=CDDA_STATUS_TIMEOUT_TICKS + CDDA_STATUS_TICKS {
+            player.maybe_loop_with(
+                tick,
+                || {
+                    commands += 1;
+                    Some(0)
+                },
+                |_| None,
+                || cancellations += 1,
+            );
+            assert_eq!(player.current_track, 2);
+        }
+        assert_eq!(commands, 2);
+        assert_eq!(cancellations, 1);
+        assert_eq!(player.stopped_polls, 0);
+    }
+
+    #[test]
+    fn track_changes_discard_pending_status_and_stopped_confirmations() {
+        let mut player = CddaPlayer::new();
+        player.request(
+            MusicCue {
+                track: 2,
+                volume_percent: 80,
+                loop_track: true,
+            },
+            0,
+        );
+        player.status_irq_enable = Some(7);
+        player.stopped_polls = 1;
+        player.request(
+            MusicCue {
+                track: 3,
+                volume_percent: 80,
+                loop_track: true,
+            },
+            100,
+        );
+        assert_eq!(player.status_irq_enable, None);
+        assert_eq!(player.stopped_polls, 0);
+        player.status_irq_enable = Some(7);
+        player.stopped_polls = 1;
+        player.release_for_data_reads(110);
+        assert_eq!(player.status_irq_enable, None);
+        assert_eq!(player.stopped_polls, 0);
+    }
+
+    #[test]
+    fn only_an_idle_healthy_drive_confirms_a_track_boundary() {
+        assert_eq!(cdda_status_stopped(0x02), Some(true));
+        for status in [0x82, 0x42, 0x22] {
+            assert_eq!(cdda_status_stopped(status), Some(false));
+        }
+        for status in [0x03, 0x12, 0x13] {
+            assert_eq!(cdda_status_stopped(status), None);
+        }
     }
 
     #[test]

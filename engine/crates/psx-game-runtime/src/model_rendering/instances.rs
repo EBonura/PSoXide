@@ -537,6 +537,7 @@ pub fn draw_model_instance_from_pose<
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     current_room: RoomIndex,
     instance_pose: InstanceActorPoseSnapshot,
+    dissolve: Option<ModelDeathDissolve>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -551,7 +552,7 @@ pub fn draw_model_instance_from_pose<
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
     let mut out = ModelInstanceDrawStats::default();
-    if knobs.max_model_instances == 0 {
+    if knobs.max_model_instances == 0 || dissolve.is_some_and(|effect| effect.finished()) {
         return out;
     }
     let Some(inst) = tables.model_instances.get(instance_pose.instance_index()) else {
@@ -575,7 +576,7 @@ pub fn draw_model_instance_from_pose<
     telemetry::stage_begin(telemetry::stage::MODEL_BOUNDS);
     out.bounds_tests = 1;
     let visible = match bounds {
-        Some(bounds) if BOUNDS_CULL => model_bounds_visible(
+        Some(bounds) if BOUNDS_CULL && dissolve.is_none() => model_bounds_visible(
             camera,
             options,
             bounds_origin,
@@ -645,7 +646,7 @@ pub fn draw_model_instance_from_pose<
             );
             layer
         });
-    let stats = submit_runtime_model_predecoded(
+    let mut stats = submit_runtime_model_predecoded(
         world,
         triangles,
         runtime_model,
@@ -660,12 +661,25 @@ pub fn draw_model_instance_from_pose<
         material,
         secondary_material,
         model_options,
-        faces,
+        if dissolve.is_some() { &[] } else { faces },
         model_parts,
         model_vertices,
         PROFILE,
         scratch,
     );
+    if let Some(effect) = dissolve {
+        let fragments = death_dissolve::draw(
+            effect,
+            &scratch.vertices[..usize::from(stats.projected_vertices)],
+            faces,
+            *camera,
+            material,
+            model_options,
+            triangles,
+            world,
+        );
+        accumulate_model_stats(&mut stats, fragments);
+    }
     telemetry::stage_end(telemetry::stage::MODEL_DRAW);
     accumulate_model_stats(&mut out.stats, stats);
     if !stats.primitive_overflow && !stats.command_overflow {
@@ -735,6 +749,7 @@ pub fn draw_model_instances<
             scratch,
             current_room,
             instance_pose,
+            None,
             elapsed_tick,
             video_hz,
             camera,

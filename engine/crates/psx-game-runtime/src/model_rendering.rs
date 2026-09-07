@@ -38,6 +38,8 @@ use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 
 mod equipment;
 pub use equipment::ASSEMBLED_Q12;
+mod death_dissolve;
+pub use death_dissolve::ModelDeathDissolve;
 mod dash_assembly;
 pub use dash_assembly::PlayerDashAssembly;
 mod instances;

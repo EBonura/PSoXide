@@ -9,15 +9,25 @@ const FRAGMENT_CAP: usize = 64;
 
 #[derive(Copy, Clone)]
 struct DepartureFragment {
-    vertices: [WorldVertex; 3],
+    vertices: [[i16; 3]; 3],
     face: TexturedModelRenderFace,
 }
 
 impl DepartureFragment {
     const EMPTY: Self = Self {
-        vertices: [WorldVertex::ZERO; 3],
+        vertices: [[0; 3]; 3],
         face: TexturedModelRenderFace::ZERO,
     };
+
+    fn world_vertices(self, origin: WorldVertex) -> [WorldVertex; 3] {
+        self.vertices.map(|v| {
+            WorldVertex::new(
+                origin.x + i32::from(v[0]),
+                origin.y + i32::from(v[1]),
+                origin.z + i32::from(v[2]),
+            )
+        })
+    }
 }
 
 /// One bounded cloud of departing mesh pieces, anchored in the level.
@@ -31,6 +41,7 @@ pub struct PlayerDashAssembly {
     interrupted: bool,
     fragment_count: usize,
     fragments: [DepartureFragment; FRAGMENT_CAP],
+    fragment_origin: WorldVertex,
     material: TextureMaterial,
 }
 
@@ -46,6 +57,7 @@ impl PlayerDashAssembly {
             interrupted: false,
             fragment_count: 0,
             fragments: [DepartureFragment::EMPTY; FRAGMENT_CAP],
+            fragment_origin: WorldVertex::ZERO,
             material: TextureMaterial::new(0, 0),
         }
     }
@@ -145,6 +157,7 @@ impl PlayerDashAssembly {
         }
         self.capture_pending = false;
         self.material = material;
+        self.fragment_origin = camera.position;
         let step = faces.len().div_ceil(FRAGMENT_CAP).max(1);
         for face in faces.iter().step_by(step) {
             let indices = face.vertex_indices().map(usize::from);
@@ -155,8 +168,25 @@ impl PlayerDashAssembly {
                 continue;
             }
             let points = indices.map(|i| projected[i]);
+            // Visible fragments are near the camera. Relative i16 coordinates
+            // retain their exact integer positions with half the coordinate RAM.
+            let vertices = points.map(|p| {
+                let v = unproject(p, camera);
+                [
+                    v.x - camera.position.x,
+                    v.y - camera.position.y,
+                    v.z - camera.position.z,
+                ]
+            });
+            if vertices
+                .iter()
+                .flatten()
+                .any(|v| i16::try_from(*v).is_err())
+            {
+                continue;
+            }
             self.fragments[self.fragment_count] = DepartureFragment {
-                vertices: points.map(|p| unproject(p, camera)),
+                vertices: vertices.map(|v| v.map(|c| c as i16)),
                 face: *face,
             };
             self.fragment_count += 1;
@@ -197,7 +227,8 @@ impl PlayerDashAssembly {
             .with_textured_triangle_splitting(false);
         let mut submitted = 0u16;
         for (index, fragment) in self.fragments[..self.fragment_count].iter().enumerate() {
-            let vertices = departure_vertices(fragment.vertices, index, age);
+            let vertices =
+                departure_vertices(fragment.world_vertices(self.fragment_origin), index, age);
             let stats = world.submit_textured_world_triangle(
                 triangles,
                 camera,
@@ -221,7 +252,7 @@ impl Default for PlayerDashAssembly {
     }
 }
 
-fn unproject(p: ProjectedVertex, camera: WorldCamera) -> WorldVertex {
+pub(super) fn unproject(p: ProjectedVertex, camera: WorldCamera) -> WorldVertex {
     let x = (i32::from(p.sx) - i32::from(camera.projection.screen_x)) * p.sz
         / camera.projection.focal_length.max(1);
     let y = (i32::from(camera.projection.screen_y) - i32::from(p.sy)) * p.sz
@@ -437,7 +468,7 @@ mod tests {
             TexturedModelRenderFace::new_with_palette_bank([0, 1, 2], [(0, 0), (8, 0), (4, 8)], 2);
         effect.capture(&points, &[face], camera, TextureMaterial::new(0, 0));
         assert_eq!(effect.fragment_count, 1);
-        let captured = effect.fragments[0].vertices;
+        let captured = effect.fragments[0].world_vertices(effect.fragment_origin);
         for (world, screen) in captured.into_iter().zip(points) {
             let roundtrip = camera.project_world(world).unwrap();
             assert!((i32::from(roundtrip.sx) - i32::from(screen.sx)).abs() <= 2);
@@ -447,7 +478,8 @@ mod tests {
         moved_camera.position.x += 100;
         effect.capture(&points, &[face], moved_camera, TextureMaterial::new(1, 1));
         assert_eq!(
-            effect.fragments[0].vertices, captured,
+            effect.fragments[0].world_vertices(effect.fragment_origin),
+            captured,
             "subsequent camera movement cannot recapture the cloud"
         );
         assert_eq!(effect.fragments[0].face.palette_bank(), 2);

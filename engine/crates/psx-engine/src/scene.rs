@@ -347,7 +347,7 @@ pub trait Scene {
     /// wrapper consumes the mask once, after simulation, so held input and
     /// render retries cannot replay a sound.
     #[inline]
-    fn take_gameplay_sfx_events(&mut self) -> u16 {
+    fn take_gameplay_sfx_events(&mut self) -> u32 {
         0
     }
 
