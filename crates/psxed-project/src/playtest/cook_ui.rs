@@ -104,6 +104,18 @@ pub(crate) fn cook_ui_nodes(
     // resident sample path as UI audio.
     for (path, event, volume, pitch_q12) in [
         (
+            "assets/audio/gameplay/combat_start_anomaly.wav",
+            psx_level::LevelGameplaySfxEvent::CombatStart,
+            90,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
+            "assets/audio/gameplay/combat_start_outside.wav",
+            psx_level::LevelGameplaySfxEvent::CombatStart,
+            90,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
             "assets/audio/gameplay/intro_shot.wav",
             psx_level::LevelGameplaySfxEvent::IntroShot,
             68,
@@ -172,16 +184,28 @@ pub(crate) fn cook_ui_nodes(
             crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
-            "assets/audio/gameplay/weapon_swing.wav",
-            psx_level::LevelGameplaySfxEvent::PlayerWeaponSwing,
-            84,
-            4_000,
+            "assets/audio/gameplay/phase_change.wav",
+            psx_level::LevelGameplaySfxEvent::StanceSwap,
+            90,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
-            "assets/audio/gameplay/weapon_swing.wav",
-            psx_level::LevelGameplaySfxEvent::EnemyWeaponSwing,
+            "assets/audio/gameplay/warp.wav",
+            psx_level::LevelGameplaySfxEvent::Dash,
+            90,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
+            "assets/audio/gameplay/weapon_swing_light.wav",
+            psx_level::LevelGameplaySfxEvent::LightWeaponSwing,
+            84,
+            crate::UI_SFX_PITCH_UNITY_Q12,
+        ),
+        (
+            "assets/audio/gameplay/weapon_swing_heavy.wav",
+            psx_level::LevelGameplaySfxEvent::HeavyWeaponSwing,
             92,
-            3_250,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
         (
             "assets/audio/gameplay/projectile_charge.wav",
@@ -193,7 +217,7 @@ pub(crate) fn cook_ui_nodes(
             "assets/audio/gameplay/projectile_launch.wav",
             psx_level::LevelGameplaySfxEvent::ProjectileLaunch,
             100,
-            3_700,
+            crate::UI_SFX_PITCH_UNITY_Q12,
         ),
     ] {
         if project_root.join(path).is_file() {

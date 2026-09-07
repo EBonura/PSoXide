@@ -3765,11 +3765,11 @@ fn render_gameplay_sfx_event(event: psx_level::LevelGameplaySfxEvent) -> &'stati
         psx_level::LevelGameplaySfxEvent::StanceSwapReady => {
             "LevelGameplaySfxEvent::StanceSwapReady"
         }
-        psx_level::LevelGameplaySfxEvent::PlayerWeaponSwing => {
-            "LevelGameplaySfxEvent::PlayerWeaponSwing"
+        psx_level::LevelGameplaySfxEvent::LightWeaponSwing => {
+            "LevelGameplaySfxEvent::LightWeaponSwing"
         }
-        psx_level::LevelGameplaySfxEvent::EnemyWeaponSwing => {
-            "LevelGameplaySfxEvent::EnemyWeaponSwing"
+        psx_level::LevelGameplaySfxEvent::HeavyWeaponSwing => {
+            "LevelGameplaySfxEvent::HeavyWeaponSwing"
         }
         psx_level::LevelGameplaySfxEvent::ProjectileCharge => {
             "LevelGameplaySfxEvent::ProjectileCharge"
@@ -3782,6 +3782,9 @@ fn render_gameplay_sfx_event(event: psx_level::LevelGameplaySfxEvent) -> &'stati
         psx_level::LevelGameplaySfxEvent::ItemAcquired => "LevelGameplaySfxEvent::ItemAcquired",
         psx_level::LevelGameplaySfxEvent::GameplayEnter => "LevelGameplaySfxEvent::GameplayEnter",
         psx_level::LevelGameplaySfxEvent::IntroShot => "LevelGameplaySfxEvent::IntroShot",
+        psx_level::LevelGameplaySfxEvent::CombatStart => "LevelGameplaySfxEvent::CombatStart",
+        psx_level::LevelGameplaySfxEvent::Dash => "LevelGameplaySfxEvent::Dash",
+        psx_level::LevelGameplaySfxEvent::StanceSwap => "LevelGameplaySfxEvent::StanceSwap",
     }
 }
 
