@@ -380,6 +380,13 @@ pub trait Scene {
         false
     }
 
+    /// Keep Start from opening a gameplay menu while the scene owns input.
+    /// Unlike a cinematic, a tutorial can retain its HUD and music.
+    #[inline]
+    fn gameplay_menu_blocked(&self) -> bool {
+        self.cinematic_active()
+    }
+
     /// Whether the scene is in combat right now. While true, the current UI
     /// scene's combat-trigger Music node (if any) plays, faded in; when it
     /// turns false the track fades out and stops. Default: never.

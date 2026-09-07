@@ -536,6 +536,15 @@ impl Playtest {
         }
     }
 
+    pub(super) fn initial_world_message_active(&self) -> bool {
+        let (Some(active), Some(welcome)) = (self.poi_messages.active(), WORLD_MESSAGE) else {
+            return false;
+        };
+        active.source() == psx_game_runtime::poi::MessageSource::World
+            && active.page() - active.page_offset() == welcome.page_first
+            && active.page_count() == welcome.page_count
+    }
+
     pub(super) fn open_world_message_once(&mut self) {
         let Some(message) = WORLD_MESSAGE else {
             return;
@@ -2291,6 +2300,57 @@ mod life_reset_tests {
                 .unwrap()
                 .local_tick,
             19
+        );
+    }
+
+    #[test]
+    fn only_initial_world_pages_lock_controls_through_the_closing_animation() {
+        use psx_game_runtime::poi::MessagePageSpan;
+        let mut scene = test_scene();
+        let welcome = WORLD_MESSAGE.expect("test project has a welcome message");
+        assert!(!scene.initial_world_message_active());
+        scene.open_world_message_once();
+        for page in 0..welcome.page_count {
+            assert!(scene.initial_world_message_active());
+            assert!(scene.gameplay_menu_blocked());
+            assert!(
+                !scene.cinematic_active(),
+                "welcome keeps the normal HUD and music"
+            );
+            assert_eq!(scene.poi_messages.active().unwrap().page_offset(), page);
+            scene.set_poi_presentation_frames(u16::MAX, u16::MAX);
+            scene.advance_poi_message();
+        }
+        assert!(scene.poi_closing);
+        for _ in 0..psx_engine::ui::MESSAGE_PANEL_EXPAND_FRAMES {
+            assert!(scene.initial_world_message_active());
+            scene.advance_poi_presentation_frame();
+        }
+        assert!(!scene.initial_world_message_active());
+        assert!(!scene.gameplay_menu_blocked());
+        scene.open_world_message_once();
+        assert!(
+            !scene.initial_world_message_active(),
+            "welcome stays dismissed"
+        );
+        assert!(scene.poi_messages.open_world(
+            1,
+            MessagePageSpan::new(crate::loc::DEMO_OUTRO_FIRST, crate::loc::DEMO_OUTRO_COUNT,)
+        ));
+        assert!(
+            !scene.initial_world_message_active(),
+            "outro stays interactive"
+        );
+        while scene.poi_messages.active().is_some() {
+            scene.poi_messages.advance();
+        }
+        assert!(scene.poi_messages.open_poi(
+            0,
+            MessagePageSpan::new(welcome.page_first, welcome.page_count)
+        ));
+        assert!(
+            !scene.initial_world_message_active(),
+            "POI source never locks controls"
         );
     }
 

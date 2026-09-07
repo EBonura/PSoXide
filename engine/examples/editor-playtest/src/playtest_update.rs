@@ -572,6 +572,13 @@ impl Playtest {
         self.retry_poi_card_load(ctx.sim_tick.as_u32());
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
+        if self.initial_world_message_active() {
+            if ctx.just_pressed(INTERACT_BUTTON) {
+                self.advance_poi_message();
+            }
+            self.camera_turning_last_tick = false;
+            return;
+        }
         self.tick_gameplay_layer(ctx);
         if let Some(bsp) = self.bsp.as_mut() {
             bsp.tick_doors();

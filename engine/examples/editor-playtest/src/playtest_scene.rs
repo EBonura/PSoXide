@@ -967,6 +967,10 @@ impl Scene for Playtest {
         self.opening.active()
     }
 
+    fn gameplay_menu_blocked(&self) -> bool {
+        self.opening.active() || self.initial_world_message_active()
+    }
+
     fn combat_music_active(&self) -> bool {
         self.combat_music.engaged
     }
@@ -983,7 +987,7 @@ impl Scene for Playtest {
         // `update_gameplay`: freeze final actor state once, then run combat
         // from the same snapshots the next body/equipment render consumes.
         self.refresh_actor_pose_snapshots(ctx);
-        if !self.opening.active() {
+        if !self.opening.active() && !self.initial_world_message_active() {
             self.resolve_enemy_melee(ctx);
             self.resolve_player_melee(ctx);
         }

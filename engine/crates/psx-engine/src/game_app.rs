@@ -2818,7 +2818,7 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // input. States without a binding retain the title-screen START shortcut
         // in `update_ui_scene` below.
         if self.ui_activation.is_none()
-            && !self.gameplay.cinematic_active()
+            && !self.gameplay.gameplay_menu_blocked()
             && ctx.just_pressed(button::START)
         {
             if let Some(target) = self.current_start_state_index() {
@@ -3088,6 +3088,7 @@ mod tests {
         request_state: Option<u16>,
         combat_active: bool,
         cinematic: bool,
+        menu_blocked: bool,
     }
 
     impl Scene for CountingScene {
@@ -3136,6 +3137,10 @@ mod tests {
         }
         fn cinematic_active(&self) -> bool {
             self.cinematic
+        }
+
+        fn gameplay_menu_blocked(&self) -> bool {
+            self.cinematic || self.menu_blocked
         }
 
         fn combat_music_active(&self) -> bool {
@@ -5178,6 +5183,13 @@ mod tests {
             "a cinematic owns Start as well as gameplay input"
         );
         app.gameplay.cinematic = false;
+        app.gameplay.menu_blocked = true;
+        idle_tick(&mut app, &mut ctx);
+        press(&mut ctx, button::START);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 0, "the welcome message owns Start");
+        assert!(app.combat_music_engaged, "a message must not mute music");
+        app.gameplay.menu_blocked = false;
         idle_tick(&mut app, &mut ctx);
 
         press(&mut ctx, button::START);
