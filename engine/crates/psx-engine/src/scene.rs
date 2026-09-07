@@ -373,6 +373,13 @@ pub trait Scene {
         true
     }
 
+    /// A world cinematic owns input and hides the gameplay UI.
+    /// Front-end and combat music stay silent until it finishes.
+    #[inline]
+    fn cinematic_active(&self) -> bool {
+        false
+    }
+
     /// Whether the scene is in combat right now. While true, the current UI
     /// scene's combat-trigger Music node (if any) plays, faded in; when it
     /// turns false the track fades out and stops. Default: never.

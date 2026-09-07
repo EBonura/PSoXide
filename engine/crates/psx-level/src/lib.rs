@@ -2895,6 +2895,8 @@ pub enum LevelGameplaySfxEvent {
     ItemAcquired = 12,
     /// A newly loaded run became playable.
     GameplayEnter = 13,
+    /// A new shot in the opening cinematic began.
+    IntroShot = 14,
 }
 
 impl LevelGameplaySfxEvent {

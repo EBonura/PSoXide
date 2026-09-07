@@ -1495,6 +1495,7 @@ impl BspRuntime {
     pub(super) fn draw<const DEPTH: usize>(
         &mut self,
         camera: WorldCamera,
+        visibility_origin: Option<RoomPoint>,
         material_tick: u32,
         destructibles: &RuntimeDestructibles<{ psx_level::MAX_DESTRUCTIBLES }>,
         primitive_packets: &mut PrimitivePacketArena<'_>,
@@ -1525,9 +1526,14 @@ impl BspRuntime {
         };
         let (used_words, packet_count, visible_sky_apertures) = {
             let packets = reservation.words_mut();
-            let world = self.renderer.draw_pxbsp_world(
+            let world = self.renderer.draw_pxbsp_world_from_visibility_origin(
                 &self.map,
                 camera,
+                visibility_origin.map_or(camera.origin, |point| Vec3I32 {
+                    x: point.x.saturating_mul(4096),
+                    y: point.y.saturating_mul(4096),
+                    z: point.z.saturating_mul(4096),
+                }),
                 view,
                 &self.materials,
                 material_tick,

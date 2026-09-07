@@ -25,6 +25,7 @@ impl DepartureFragment {
 pub struct PlayerDashAssembly {
     started: u32,
     seen_dash: bool,
+    explicit_burst: bool,
     active: bool,
     capture_pending: bool,
     interrupted: bool,
@@ -39,6 +40,7 @@ impl PlayerDashAssembly {
         Self {
             started: 0,
             seen_dash: false,
+            explicit_burst: false,
             active: false,
             capture_pending: false,
             interrupted: false,
@@ -46,6 +48,32 @@ impl PlayerDashAssembly {
             fragments: [DepartureFragment::EMPTY; FRAGMENT_CAP],
             material: TextureMaterial::new(0, 0),
         }
+    }
+
+    fn start(&mut self, started: u32) {
+        self.started = started;
+        self.seen_dash = true;
+        self.explicit_burst = false;
+        self.active = true;
+        self.capture_pending = true;
+        self.interrupted = false;
+        self.fragment_count = 0;
+    }
+
+    /// Play the same breakup and reconstruction for a cinematic impact.
+    /// This changes presentation only, without starting a motor action.
+    pub fn burst(&mut self, now: SimTick) {
+        self.start(now.as_u32());
+        self.explicit_burst = true;
+        self.seen_dash = false;
+    }
+
+    /// Discard particles and restore the solid body at a cinematic handoff.
+    pub fn cancel(&mut self) {
+        self.active = false;
+        self.capture_pending = false;
+        self.explicit_burst = false;
+        self.seen_dash = false;
     }
 
     /// Track a new evade without tying reconstruction to its animation clip.
@@ -62,12 +90,7 @@ impl PlayerDashAssembly {
                 | CharacterAnimationAction::DashRight
         ) {
             if !self.seen_dash || started != self.started {
-                self.started = started;
-                self.seen_dash = true;
-                self.active = true;
-                self.capture_pending = true;
-                self.interrupted = false;
-                self.fragment_count = 0;
+                self.start(started);
             }
         } else if matches!(
             action,
@@ -77,8 +100,8 @@ impl PlayerDashAssembly {
                 | CharacterAnimationAction::HeavyAttack
                 | CharacterAnimationAction::VertLightAttack
                 | CharacterAnimationAction::VertHeavyAttack
-                | CharacterAnimationAction::Intro
-        ) {
+        ) || (action == CharacterAnimationAction::Intro && !self.explicit_burst)
+        {
             // Combat feedback must immediately show the actual hit/attack pose.
             self.interrupted = true;
             self.capture_pending = false;
@@ -365,6 +388,32 @@ mod tests {
         effect.observe_action(CharacterAnimationAction::Idle, 185, 198);
         assert_eq!(effect.visual(SimTick::from_u32(198)), DashWireVisual::Solid);
         assert!(!effect.needs_capture());
+    }
+
+    #[test]
+    fn explicit_intro_burst_survives_observation_and_cancels_cleanly() {
+        let mut effect = PlayerDashAssembly::new();
+        effect.burst(SimTick::from_u32(100));
+        effect.observe_action(CharacterAnimationAction::Intro, 0, 101);
+        assert!(effect.needs_capture());
+        assert_eq!(effect.visual(SimTick::from_u32(101)), DashWireVisual::Wire);
+        effect.observe_action(CharacterAnimationAction::Intro, 0, 130);
+        assert!(matches!(
+            effect.visual(SimTick::from_u32(130)),
+            DashWireVisual::Restoring { .. }
+        ));
+        effect.cancel();
+        assert!(!effect.active);
+        assert!(!effect.needs_capture());
+        assert_eq!(effect.visual(SimTick::from_u32(131)), DashWireVisual::Solid);
+        effect.observe_action(CharacterAnimationAction::Roll, 140, 140);
+        assert!(effect.needs_capture());
+        effect.observe_action(CharacterAnimationAction::Intro, 150, 150);
+        assert_eq!(effect.visual(SimTick::from_u32(150)), DashWireVisual::Solid);
+        effect.burst(SimTick::from_u32(200));
+        effect.observe_action(CharacterAnimationAction::Intro, 0, 248);
+        assert!(!effect.active);
+        assert_eq!(effect.visual(SimTick::from_u32(248)), DashWireVisual::Solid);
     }
 
     #[test]

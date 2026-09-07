@@ -551,18 +551,23 @@ impl Playtest {
             // the loading burst is re-queued into the freed space.
             release_ui_images();
             self.room_materials_unresolved = true;
-            self.open_world_message_once();
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
-            self.queue_gameplay_sfx(LevelGameplaySfxEvent::GameplayEnter);
-            // First spawn plays the intro with control locked out for the
-            // clip's length. This has to arm HERE rather than in
-            // `init_gameplay`: the streaming load sits between the two, and
-            // a lock armed against tick zero has already expired by the time
-            // the first gameplay tick runs. `start_player_anim_action` is a
-            // no-op when no Intro clip is bound, so a character without one
-            // starts in Idle exactly as before.
-            self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz);
+            if self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz) {
+                self.ground_opening_player();
+                self.opening = opening_sequence::OpeningSequence::start(
+                    self.anim_lock_until_tick.saturating_sub(ctx.sim_tick),
+                );
+                self.anim_blend_from = None;
+            } else {
+                self.open_world_message_once();
+                self.queue_gameplay_sfx(LevelGameplaySfxEvent::GameplayEnter);
+            }
+        }
+        if self.opening.active() {
+            self.step_streaming_jobs(ctx);
+            self.update_opening(ctx);
+            return;
         }
         self.retry_poi_card_load(ctx.sim_tick.as_u32());
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);

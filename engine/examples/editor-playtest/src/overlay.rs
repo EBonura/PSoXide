@@ -1050,3 +1050,69 @@ mod vitality_hud_tests {
         );
     }
 }
+
+pub(crate) fn draw_opening_skip(font: &FontAtlas, progress: u8) {
+    font.draw_text(192, 216, "HOLD X TO SKIP", (180, 195, 190));
+    draw_rect(192, 229, 112, 2, (38, 51, 48));
+    draw_rect(192, 229, i16::from(progress) * 112 / 30, 2, (156, 219, 207));
+}
+
+/// Dim the composed framebuffer rather than clipping dark colours with subtraction.
+/// Exact 1:1 texture coordinates make the read/write pass safe within each pixel;
+/// clear the texture cache before sampling this frame's newly drawn image.
+pub(crate) fn draw_opening_fade(fb: &psx_gpu::framebuf::FrameBuffer, amount: u8) {
+    use psx_gpu::material::TextureMaterial;
+    use psx_gpu::{draw_quad_textured_material, draw_sprite_material};
+    use psx_io::gpu::{wait_cmd_ready, write_gp0};
+    if amount == 0 {
+        return;
+    }
+    if amount == 255 {
+        draw_quad_flat(
+            [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
+            0,
+            0,
+            0,
+        );
+        return;
+    }
+    let tint = ((255 - u16::from(amount)) * 128 / 255) as u8;
+    wait_cmd_ready();
+    write_gp0(0x0100_0000); // Clear GPU texture cache after world rendering.
+    let base_y = fb.buffer_y(fb.drawing);
+    let mut y = 0u16;
+    while y < fb.height {
+        let source_y = base_y + y;
+        let v = (source_y & 255) as u8;
+        let h = (fb.height - y).min(128).min(255 - u16::from(v));
+        let row_height = h.max(1);
+        let mut x = 0u16;
+        while x < fb.width {
+            let w = (fb.width - x).min(128);
+            let tpage = (x / 64) | ((source_y / 256) << 4) | (2 << 7);
+            let material = TextureMaterial::opaque(0, tpage, (tint, tint, tint)).with_dither(true);
+            material.apply_draw_mode();
+            if h == 0 {
+                draw_sprite_material(x as i16, y as i16, w, 1, (0, v), material);
+            } else {
+                draw_quad_textured_material(
+                    [
+                        (x as i16, y as i16),
+                        ((x + w) as i16, y as i16),
+                        (x as i16, (y + h) as i16),
+                        ((x + w) as i16, (y + h) as i16),
+                    ],
+                    [
+                        (0, v),
+                        (w as u8, v),
+                        (0, v + h as u8),
+                        (w as u8, v + h as u8),
+                    ],
+                    material,
+                );
+            }
+            x += w;
+        }
+        y += row_height;
+    }
+}

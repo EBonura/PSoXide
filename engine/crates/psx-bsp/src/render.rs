@@ -1732,6 +1732,29 @@ impl Renderer {
         material_tick: u32,
         packet_storage: &mut [u32],
     ) -> RenderFrame {
+        self.draw_pxbsp_world_from_visibility_origin(
+            map,
+            camera,
+            camera.origin,
+            view,
+            materials,
+            material_tick,
+            packet_storage,
+        )
+    }
+
+    /// Render an authored view from outside the BSP using an interior PVS origin.
+    /// Frustum and face-side culling still use the actual camera.
+    pub fn draw_pxbsp_world_from_visibility_origin(
+        &mut self,
+        map: &PxbspResidentMap,
+        camera: Camera,
+        visibility_origin: Vec3I32,
+        view: ViewTransform,
+        materials: &[Option<PxbspTextureBinding>],
+        material_tick: u32,
+        packet_storage: &mut [u32],
+    ) -> RenderFrame {
         self.attach_external_frame_pxbsp_faces();
         scene::load_rotation(&view.rotation);
         scene::load_translation(view.translation);
@@ -1766,7 +1789,7 @@ impl Renderer {
             }
             true
         } else {
-            let ok = self.mark_visible_pxbsp_faces(map, camera.origin)
+            let ok = self.mark_visible_pxbsp_faces(map, visibility_origin)
                 && self.select_frame_pxbsp_faces(map, camera.origin, &frustum);
             if self.selection_reuse {
                 self.reuse_pxbsp_faces.clear();
@@ -4143,6 +4166,45 @@ mod tests {
         }
         assert_eq!(offset, frame.packet_words);
         assert_eq!(packet_count, frame.stats.packets);
+
+        // An authored camera can be outside the playable leaf while its
+        // subject remains inside. Only PVS selection should use the subject.
+        let exterior = Camera {
+            origin: Vec3I32 {
+                x: -4096,
+                y: 0,
+                z: 0,
+            },
+            ..camera
+        };
+        assert_eq!(map.point_leaf_index(exterior.origin), Some(0));
+        let hidden = renderer.draw_pxbsp_world(
+            &map,
+            exterior,
+            load_pxbsp_view(exterior),
+            &[Some(binding)],
+            0,
+            &mut packets,
+        );
+        assert_eq!(hidden.stats.packets, 0);
+        let visible = renderer.draw_pxbsp_world_from_visibility_origin(
+            &map,
+            exterior,
+            camera.origin,
+            load_pxbsp_view(exterior),
+            &[Some(binding)],
+            0,
+            &mut packets,
+        );
+        assert_eq!(
+            renderer.cached_pxbsp_visibility,
+            Some((map.generation(), 1))
+        );
+        assert_eq!(renderer.visible_pxbsp_faces, [0]);
+        assert_eq!(
+            visible.stats.packets, 0,
+            "the exterior still sees the back of this face"
+        );
     }
 
     #[test]

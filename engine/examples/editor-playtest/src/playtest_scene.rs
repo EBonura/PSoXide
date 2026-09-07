@@ -861,8 +861,9 @@ impl Scene for Playtest {
         }
     }
 
-    fn render_post_process(&mut self, _ctx: &mut Ctx) {
+    fn render_post_process(&mut self, ctx: &mut Ctx) {
         draw_brightness_overlay(self.brightness_level);
+        draw_opening_fade(&ctx.fb, self.opening.fade());
     }
 
     fn init(&mut self, _ctx: &mut Ctx) {
@@ -962,6 +963,10 @@ impl Scene for Playtest {
 
     /// Hold the menu CD-DA until every front-end UI image is resident, so the
     /// front-end (intro/menu/settings) never reads the CD while music plays.
+    fn cinematic_active(&self) -> bool {
+        self.opening.active()
+    }
+
     fn combat_music_active(&self) -> bool {
         self.combat_music.engaged
     }
@@ -978,8 +983,10 @@ impl Scene for Playtest {
         // `update_gameplay`: freeze final actor state once, then run combat
         // from the same snapshots the next body/equipment render consumes.
         self.refresh_actor_pose_snapshots(ctx);
-        self.resolve_enemy_melee(ctx);
-        self.resolve_player_melee(ctx);
+        if !self.opening.active() {
+            self.resolve_enemy_melee(ctx);
+            self.resolve_player_melee(ctx);
+        }
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
@@ -1040,8 +1047,14 @@ impl Scene for Playtest {
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
             world_object_visibility = bsp.visible_world_objects(camera, &self.destructibles);
+            let cinematic_visibility = (self.opening.active() && !self.opening.gameplay_camera())
+                .then(|| {
+                    let player = self.motor.position();
+                    RoomPoint::new(player.x, player.y + 32, player.z)
+                });
             visible_sky_aperture = bsp.draw(
                 camera,
+                cinematic_visibility,
                 bsp_material_tick,
                 &self.destructibles,
                 &mut primitive_packets,
@@ -2142,6 +2155,15 @@ impl Scene for Playtest {
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
             draw_room_atmosphere_overlay(room_record, overlay_tick);
+        }
+
+        if self.opening.active() {
+            if !self.opening.gameplay_camera() {
+                if let Some(font) = self.ui_fonts[0].as_ref() {
+                    draw_opening_skip(font, self.opening.skip_progress());
+                }
+            }
+            return;
         }
 
         #[cfg(feature = "collision-debug-overlay")]

@@ -1311,7 +1311,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn play_gameplay_sfx_events(&mut self, events: u16) {
-        const EVENTS: [LevelGameplaySfxEvent; 14] = [
+        const EVENTS: [LevelGameplaySfxEvent; 15] = [
             LevelGameplaySfxEvent::EnemyFootstep,
             LevelGameplaySfxEvent::EnemyIdle,
             LevelGameplaySfxEvent::Footstep,
@@ -1326,6 +1326,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelGameplaySfxEvent::ProjectileLaunch,
             LevelGameplaySfxEvent::ItemAcquired,
             LevelGameplaySfxEvent::GameplayEnter,
+            LevelGameplaySfxEvent::IntroShot,
         ];
         for event in EVENTS {
             if events & event.bit() == 0 {
@@ -2455,6 +2456,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // assets are cached, the menu issues no more CD reads, so CD-DA plays
         // uninterrupted while the player navigates intro/menu/settings.
         let tick = ctx.sim_tick.as_u32();
+        if !self.loading_pending() && self.gameplay.cinematic_active() {
+            self.combat_music_engaged = false;
+            self.cdda.request(MusicCue::SILENT, tick);
+            self.cdda.update(tick);
+            return;
+        }
         // Combat music is gated on the world being resident, not on the menu
         // cache: `front_end_assets_ready` goes false once gameplay takes the
         // VRAM, and gating on it would make gameplay permanently silent.
@@ -2810,7 +2817,10 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // open a paused gameplay+menu state even though its HUD does not capture
         // input. States without a binding retain the title-screen START shortcut
         // in `update_ui_scene` below.
-        if self.ui_activation.is_none() && ctx.just_pressed(button::START) {
+        if self.ui_activation.is_none()
+            && !self.gameplay.cinematic_active()
+            && ctx.just_pressed(button::START)
+        {
             if let Some(target) = self.current_start_state_index() {
                 if self.current_tag().has_gameplay() && self.current_tag().ui_accepts_input() {
                     let _ = self.gameplay.game_ui_cancel(ctx);
@@ -2956,8 +2966,10 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             // Pause/options UI over the live gameplay frame. UI-only
             // states draw their scene in render(); only the
             // over-gameplay composite moves here, behind the DMA drain.
-            if let Some(scene) = tag.ui_scene() {
-                self.render_ui_scene(scene, ctx);
+            if !self.gameplay.cinematic_active() {
+                if let Some(scene) = tag.ui_scene() {
+                    self.render_ui_scene(scene, ctx);
+                }
             }
         }
         self.gameplay.render_post_process(ctx);
@@ -3075,6 +3087,7 @@ mod tests {
         /// world raises its own win/lose condition.
         request_state: Option<u16>,
         combat_active: bool,
+        cinematic: bool,
     }
 
     impl Scene for CountingScene {
@@ -3121,6 +3134,10 @@ mod tests {
         fn state_resource_key(&self, state: SceneStateRef) -> u32 {
             self.shared_resource_key.unwrap_or(state.id as u32)
         }
+        fn cinematic_active(&self) -> bool {
+            self.cinematic
+        }
+
         fn combat_music_active(&self) -> bool {
             self.combat_active
         }
@@ -5057,6 +5074,36 @@ mod tests {
         transition: LevelTransition::NONE,
     };
 
+    #[test]
+    fn cinematic_stops_menu_music() {
+        let mut scene = CountingScene {
+            cinematic: true,
+            ..Default::default()
+        };
+        let mut app = GameApp::new(
+            &MUSIC_FLOW,
+            MUSIC_SCENES,
+            MUSIC_NODES,
+            &[],
+            MUSIC_OPTIONS,
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.cdda.request(
+            MusicCue {
+                track: 2,
+                ..MusicCue::SILENT
+            },
+            0,
+        );
+        app.update_ui_music(9, &mut ctx);
+        assert_eq!(app.cdda.requested.track, 0);
+        assert!(!app.combat_music_engaged);
+    }
+
     const VOL_ID: u16 = 9;
     #[test]
     fn live_inventory_keeps_the_world_combat_track_until_combat_ends() {
@@ -5122,6 +5169,16 @@ mod tests {
         idle_tick(&mut app, &mut ctx);
         assert!(app.combat_music_engaged);
         assert_eq!(app.cdda.requested.track, 2);
+
+        app.gameplay.cinematic = true;
+        press(&mut ctx, button::START);
+        app.update(&mut ctx);
+        assert_eq!(
+            app.cursor.current, 0,
+            "a cinematic owns Start as well as gameplay input"
+        );
+        app.gameplay.cinematic = false;
+        idle_tick(&mut app, &mut ctx);
 
         press(&mut ctx, button::START);
         app.update(&mut ctx);

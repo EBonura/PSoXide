@@ -566,6 +566,11 @@ impl Playtest {
         // this is the number that says which cooked frame is on screen.
         if let Some(pose) = self.player_actor_pose {
             self.player_dash_assembly.observe(pose);
+            if pose.action() == CharacterAnimationAction::Intro
+                && self.opening.take_punch(pose.pose().phase_q12())
+            {
+                self.player_dash_assembly.burst(ctx.sim_tick);
+            }
             telemetry::counter(
                 telemetry::counter::PLAYER_ANIM_PHASE_Q12,
                 pose.pose().phase_q12(),

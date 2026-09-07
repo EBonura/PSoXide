@@ -299,7 +299,10 @@ const PLAYER_ANIM_BLEND_ACTION_OUT_TICKS: u32 = 14;
 /// averaging opposite halves of a stride.
 const PLAYER_ANIM_BLEND_GAIT_TICKS: u32 = 10;
 
+mod opening_sequence;
+
 struct Playtest {
+    opening: opening_sequence::OpeningSequence,
     /// Active room. `None` until `init` runs and only `Some`
     /// when the manifest had at least one room and its bytes
     /// parsed.

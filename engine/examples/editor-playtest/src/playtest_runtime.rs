@@ -713,6 +713,7 @@ impl Playtest {
     // Initial load and the menu share the full reset; keep one copy in RAM.
     #[inline(never)]
     pub(super) fn reset_new_game(&mut self) {
+        self.opening = opening_sequence::OpeningSequence::default();
         // New Game must not reload a previous run from the card, including
         // when a card was absent at boot and becomes available later.
         self.poi_save = SaveBlock::new(PLAYER_MAX_HEALTH, PERSISTENT_FLAG_COUNT);
