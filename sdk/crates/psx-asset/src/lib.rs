@@ -829,6 +829,7 @@ pub struct ModelFace {
 /// caller's cooked `.psxanim` blob.
 #[derive(Copy, Clone, Debug)]
 pub struct Animation<'a> {
+    pose_indices: &'a [u8],
     poses: &'a [u8],
     joint_count: u16,
     frame_count: u16,
@@ -842,7 +843,7 @@ impl<'a> Animation<'a> {
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::animation::{
             AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
-            POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4,
+            POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4, VERSION_V5,
         };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
@@ -857,7 +858,7 @@ impl<'a> Animation<'a> {
             VERSION => POSE_RECORD_SIZE,
             VERSION_V1 => POSE_RECORD_SIZE_V1,
             VERSION_V3 => POSE_RECORD_SIZE_V3,
-            VERSION_V4 => POSE_RECORD_SIZE_V4,
+            VERSION_V4 | VERSION_V5 => POSE_RECORD_SIZE_V4,
             _ => {
                 return Err(ParseError::UnsupportedVersion(version));
             }
@@ -879,16 +880,19 @@ impl<'a> Animation<'a> {
         let joint_count = read_u16(ah, 0);
         let frame_count = read_u16(ah, 2);
         let sample_rate_hz = read_u16(ah, 4);
-        let translation_shift =
-            if version == VERSION || version == VERSION_V3 || version == VERSION_V4 {
-                let shift = read_u16(ah, 6);
-                if shift > 15 {
-                    return Err(ParseError::InvalidAnimationLayout);
-                }
-                shift as u8
-            } else {
-                0
-            };
+        let translation_shift = if version == VERSION
+            || version == VERSION_V3
+            || version == VERSION_V4
+            || version == VERSION_V5
+        {
+            let shift = read_u16(ah, 6);
+            if shift > 15 {
+                return Err(ParseError::InvalidAnimationLayout);
+            }
+            shift as u8
+        } else {
+            0
+        };
         if joint_count == 0 || frame_count == 0 || sample_rate_hz == 0 {
             return Err(ParseError::InvalidAnimationLayout);
         }
@@ -897,15 +901,34 @@ impl<'a> Animation<'a> {
         let pose_count = (joint_count as usize)
             .checked_mul(frame_count as usize)
             .ok_or(ParseError::TableOverflow)?;
-        let pose_bytes = pose_count
-            .checked_mul(pose_record_size)
-            .ok_or(ParseError::TableOverflow)?;
-        let poses = take_table(bytes, &mut off, pose_bytes)?;
-        if off != bytes.len() {
-            return Err(ParseError::InvalidAnimationLayout);
-        }
+        let (pose_indices, poses) = if version == VERSION_V5 {
+            let index_bytes = pose_count.checked_mul(2).ok_or(ParseError::TableOverflow)?;
+            let indices = take_table(bytes, &mut off, index_bytes)?;
+            off = (off + 3) & !3;
+            let poses = bytes.get(off..).ok_or(ParseError::Truncated)?;
+            if poses.is_empty() || poses.len() % POSE_RECORD_SIZE_V4 != 0 {
+                return Err(ParseError::InvalidAnimationLayout);
+            }
+            let records = poses.len() / POSE_RECORD_SIZE_V4;
+            for index in indices.chunks_exact(2) {
+                if read_u16(index, 0) as usize >= records {
+                    return Err(ParseError::InvalidAnimationLayout);
+                }
+            }
+            (indices, poses)
+        } else {
+            let pose_bytes = pose_count
+                .checked_mul(pose_record_size)
+                .ok_or(ParseError::TableOverflow)?;
+            let poses = take_table(bytes, &mut off, pose_bytes)?;
+            if off != bytes.len() {
+                return Err(ParseError::InvalidAnimationLayout);
+            }
+            (&[][..], poses)
+        };
 
         Ok(Self {
+            pose_indices,
             poses,
             joint_count,
             frame_count,
@@ -1000,12 +1023,23 @@ impl<'a> Animation<'a> {
     }
 
     #[inline]
+    fn record_offset(&self, logical_offset: usize) -> usize {
+        if self.pose_indices.is_empty() {
+            logical_offset
+        } else {
+            // Dictionary clips use 16-byte records. The parser checked every
+            // index before any unchecked pose sampling can reach this table.
+            usize::from(read_u16(self.pose_indices, logical_offset >> 3)) << 4
+        }
+    }
+
+    #[inline]
     unsafe fn pose_at_frame_offset_unchecked(
         &self,
         frame_offset: usize,
         joint_index: u16,
     ) -> JointPose {
-        let base = frame_offset + joint_index as usize * self.pose_record_size;
+        let base = self.record_offset(frame_offset + joint_index as usize * self.pose_record_size);
         if self.poses.as_ptr() as usize & 1 != 0 {
             return unsafe { self.pose_at_byte_offset_unaligned(base) };
         }
@@ -1161,6 +1195,7 @@ impl<'a> Animation<'a> {
             return None;
         }
         let base = frame_offset.checked_add(joint_index as usize * self.pose_record_size)?;
+        let base = self.record_offset(base);
         let bytes = self.poses.get(base..base + self.pose_record_size)?;
         if v4 {
             let (matrix, translation) = if bytes.as_ptr() as usize & 3 == 0 {
@@ -1308,8 +1343,14 @@ impl AnimationPoseSample<'_> {
                 // aligned and both offsets are multiples of the 16-byte record.
                 return Some(unsafe {
                     lerp_v4_pair_word_aligned(
-                        pool.add(self.base_frame_offset + joint_offset),
-                        pool.add(self.next_frame_offset + joint_offset),
+                        pool.add(
+                            self.animation
+                                .record_offset(self.base_frame_offset + joint_offset),
+                        ),
+                        pool.add(
+                            self.animation
+                                .record_offset(self.next_frame_offset + joint_offset),
+                        ),
                         self.animation.translation_shift,
                         self.alpha_q12,
                     )
