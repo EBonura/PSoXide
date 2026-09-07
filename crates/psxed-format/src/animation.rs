@@ -11,7 +11,7 @@
 //! ```text
 //!   AssetHeader (12 bytes)
 //!     magic       = b"PSXA"
-//!     version     = VERSION_V1, VERSION, VERSION_V3, or VERSION_V4
+//!     version     = VERSION_V1, VERSION, VERSION_V3, VERSION_V4, or VERSION_V5
 //!     flags       = reserved
 //!     payload_len = everything after this header
 //!
@@ -25,6 +25,7 @@
 //!     v2: 24 bytes, i16[9] Q3.12 matrix + shifted i16[3] translation
 //!     v3: 20 bytes, nine packed Q11 matrix elements + translation
 //!     v4: 16 bytes, six packed Q11 elements + correction + translation
+//!     v5: frame/joint u16 indices, padded to 4 bytes, then distinct v4 records
 //! ```
 //!
 //! The pose matrix maps model-space vertices into the sampled animated
@@ -54,6 +55,11 @@ pub const VERSION_V3: u16 = 3;
 /// six Q11 codes; the third is reconstructed with a fixed-point cross product
 /// plus one compact correction. Shifted translations remain three `i16`s.
 pub const VERSION_V4: u16 = 4;
+
+/// Lossless dictionary of v4 poses. After the usual header, one little-endian
+/// u16 per frame/joint selects a record. Pad the index table to four bytes;
+/// the remaining payload is the word-aligned dictionary of 16-byte v4 poses.
+pub const VERSION_V5: u16 = 5;
 
 /// Byte layout of the animation payload header.
 #[repr(C, packed)]
