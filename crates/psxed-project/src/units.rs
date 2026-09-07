@@ -492,7 +492,7 @@ pub fn scale_model_blob_to_engine_units(bytes: &mut [u8]) {
 pub fn scale_animation_blob_to_engine_units(bytes: &mut [u8]) {
     use psxed_format::animation::{
         AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
-        POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4,
+        POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4, VERSION_V5,
     };
     let payload = psxed_format::AssetHeader::SIZE;
     if bytes.len() < payload + AnimationHeader::SIZE || bytes[..4] != MAGIC {
@@ -503,12 +503,23 @@ pub fn scale_animation_blob_to_engine_units(bytes: &mut [u8]) {
         VERSION_V1 => (POSE_RECORD_SIZE_V1, 18),
         VERSION => (POSE_RECORD_SIZE, 18),
         VERSION_V3 => (POSE_RECORD_SIZE_V3, 14),
-        VERSION_V4 => (POSE_RECORD_SIZE_V4, 10),
+        VERSION_V4 | VERSION_V5 => (POSE_RECORD_SIZE_V4, 10),
         _ => return,
     };
     let pose_count = read_u16(bytes, payload) as usize * read_u16(bytes, payload + 2) as usize;
-    let first_pose = payload + AnimationHeader::SIZE;
-    let end = first_pose + pose_count * record_size;
+    let first_pose = if version == VERSION_V5 {
+        if psx_asset::Animation::from_bytes(bytes).is_err() {
+            return;
+        }
+        (payload + AnimationHeader::SIZE + pose_count * 2 + 3) & !3
+    } else {
+        payload + AnimationHeader::SIZE
+    };
+    let end = if version == VERSION_V5 {
+        bytes.len()
+    } else {
+        first_pose + pose_count * record_size
+    };
     if bytes.len() < end {
         return;
     }
@@ -555,11 +566,32 @@ pub fn scale_animation_blob_to_engine_units(bytes: &mut [u8]) {
 pub fn trim_animation_blob_to_window(bytes: &[u8], start: u16, end: u16) -> Option<(Vec<u8>, u16)> {
     use psxed_format::animation::{
         AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
-        POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4,
+        POSE_RECORD_SIZE_V4, VERSION, VERSION_V1, VERSION_V3, VERSION_V4, VERSION_V5,
     };
     let payload = psxed_format::AssetHeader::SIZE;
     if bytes.len() < payload + AnimationHeader::SIZE || bytes[..4] != MAGIC {
         return None;
+    }
+    if read_u16(bytes, 4) == VERSION_V5 {
+        let animation = psx_asset::Animation::from_bytes(bytes).ok()?;
+        let frames = usize::from(animation.frame_count());
+        let joints = usize::from(animation.joint_count());
+        let start = usize::from(start);
+        let end = usize::from(end).min(frames - 1);
+        if start > end || (start == 0 && end + 1 == frames) {
+            return None;
+        }
+        let kept = end - start + 1;
+        let first = payload + AnimationHeader::SIZE;
+        let dictionary = (first + frames * joints * 2 + 3) & !3;
+        let mut out = bytes[..first].to_vec();
+        out.extend_from_slice(&bytes[first + start * joints * 2..first + (end + 1) * joints * 2]);
+        out.resize(out.len().next_multiple_of(4), 0);
+        out.extend_from_slice(&bytes[dictionary..]);
+        let length = out.len() as u32 - payload as u32;
+        out[8..12].copy_from_slice(&length.to_le_bytes());
+        out[14..16].copy_from_slice(&(kept as u16).to_le_bytes());
+        return Some((out, kept as u16));
     }
     let record_size = match read_u16(bytes, 4) {
         VERSION_V1 => POSE_RECORD_SIZE_V1,

@@ -3781,6 +3781,7 @@ fn render_gameplay_sfx_event(event: psx_level::LevelGameplaySfxEvent) -> &'stati
         psx_level::LevelGameplaySfxEvent::EnemyIdle => "LevelGameplaySfxEvent::EnemyIdle",
         psx_level::LevelGameplaySfxEvent::ItemAcquired => "LevelGameplaySfxEvent::ItemAcquired",
         psx_level::LevelGameplaySfxEvent::GameplayEnter => "LevelGameplaySfxEvent::GameplayEnter",
+        psx_level::LevelGameplaySfxEvent::IntroShot => "LevelGameplaySfxEvent::IntroShot",
     }
 }
 

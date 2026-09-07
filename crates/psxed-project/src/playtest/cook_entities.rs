@@ -2049,6 +2049,43 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
         frame += 1;
     }
 
+    dictionary_animation_bytes(out)
+}
+
+/// Intern byte-identical rigid poses; interpolation and timing stay exact.
+fn dictionary_animation_bytes(flat: Vec<u8>) -> Vec<u8> {
+    use psxed_format::animation::{VERSION_V4, VERSION_V5};
+    if u16::from_le_bytes([flat[4], flat[5]]) != VERSION_V4 {
+        return flat;
+    }
+    let mut dictionary = Vec::new();
+    let mut indices = Vec::new();
+    let mut lookup = HashMap::<[u8; 16], u16>::new();
+    for record in flat[20..].chunks_exact(16) {
+        let key: [u8; 16] = record.try_into().unwrap();
+        let index = match lookup.get(&key) {
+            Some(index) => *index,
+            None => {
+                let Ok(index) = u16::try_from(lookup.len()) else {
+                    return flat;
+                };
+                lookup.insert(key, index);
+                dictionary.extend_from_slice(record);
+                index
+            }
+        };
+        indices.extend_from_slice(&index.to_le_bytes());
+    }
+    indices.resize(indices.len().next_multiple_of(4), 0);
+    if 20 + indices.len() + dictionary.len() >= flat.len() {
+        return flat;
+    }
+    let mut out = flat[..20].to_vec();
+    out[4..6].copy_from_slice(&VERSION_V5.to_le_bytes());
+    let payload = 8 + indices.len() + dictionary.len();
+    out[8..12].copy_from_slice(&(payload as u32).to_le_bytes());
+    out.extend_from_slice(&indices);
+    out.extend_from_slice(&dictionary);
     out
 }
 
@@ -3702,6 +3739,73 @@ mod socket_anchor_tests {
         let compacted =
             psx_asset::Animation::from_bytes(&compacted_bytes).expect("compacted animation");
         (version, compacted.pose(0, 0).expect("compacted pose"))
+    }
+
+    #[test]
+    fn dictionary_poses_preserve_every_frame_and_interpolation() {
+        let pose = one_pose_animation([4096, 0, 0, 0, 4096, 0, 0, 0, 4096]);
+        let a = compact_animation_bytes(&psx_asset::Animation::from_bytes(&pose).unwrap());
+        let mut b = a[20..].to_vec();
+        b[10..12].copy_from_slice(&123i16.to_le_bytes());
+        let mut flat = a[..20].to_vec();
+        for index in 0..12 {
+            flat.extend_from_slice(if index % 3 == 0 { &b } else { &a[20..] });
+        }
+        flat[12..14].copy_from_slice(&2u16.to_le_bytes());
+        flat[14..16].copy_from_slice(&6u16.to_le_bytes());
+        let payload = flat.len() as u32 - 12;
+        flat[8..12].copy_from_slice(&payload.to_le_bytes());
+        let packed = super::dictionary_animation_bytes(flat.clone());
+        assert!(packed.len() < flat.len());
+        assert_eq!(
+            u16::from_le_bytes([packed[4], packed[5]]),
+            psxed_format::animation::VERSION_V5
+        );
+        let expected = psx_asset::Animation::from_bytes(&flat).unwrap();
+        let mut unaligned = vec![0u8];
+        unaligned.extend_from_slice(&packed);
+        for bytes in [packed.as_slice(), &unaligned[1..]] {
+            let actual = psx_asset::Animation::from_bytes(bytes).unwrap();
+            for joint in 0..2 {
+                for frame in 0..6 {
+                    assert_eq!(actual.pose(frame, joint), expected.pose(frame, joint));
+                }
+                for phase in (0..6 * 4096).step_by(257) {
+                    assert_eq!(
+                        actual.pose_looped_q12(phase, joint),
+                        expected.pose_looped_q12(phase, joint)
+                    );
+                }
+            }
+        }
+        let (trimmed, kept) = crate::units::trim_animation_blob_to_window(&packed, 1, 3).unwrap();
+        assert_eq!(kept, 3);
+        let trimmed = psx_asset::Animation::from_bytes(&trimmed).unwrap();
+        for frame in 0..3 {
+            for joint in 0..2 {
+                assert_eq!(trimmed.pose(frame, joint), expected.pose(frame + 1, joint));
+            }
+        }
+        let mut scaled_flat = flat.clone();
+        let mut scaled_packed = packed.clone();
+        crate::units::scale_animation_blob_to_engine_units(&mut scaled_flat);
+        crate::units::scale_animation_blob_to_engine_units(&mut scaled_packed);
+        let scaled_flat = psx_asset::Animation::from_bytes(&scaled_flat).unwrap();
+        let scaled_packed = psx_asset::Animation::from_bytes(&scaled_packed).unwrap();
+        for frame in 0..6 {
+            for joint in 0..2 {
+                assert_eq!(
+                    scaled_flat.pose(frame, joint),
+                    scaled_packed.pose(frame, joint)
+                );
+            }
+        }
+        let mut invalid = packed.clone();
+        invalid[20..22].copy_from_slice(&65535u16.to_le_bytes());
+        assert!(psx_asset::Animation::from_bytes(&invalid).is_err());
+        for length in 0..packed.len() {
+            assert!(psx_asset::Animation::from_bytes(&packed[..length]).is_err());
+        }
     }
 
     #[test]
