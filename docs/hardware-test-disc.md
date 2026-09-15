@@ -126,13 +126,14 @@ reverb register block remained otherwise unchanged. This proves that the noise
 was stale BIOS reverb output, not a voice, CD audio, DMA corruption, or a bad
 map-bank upload.
 
-PSoXide's normal real-BIOS fast boot now recreates this measured handoff state.
-Its SPU continues reverb reads, APF processing, and wet output while the reverb
-master-write bit is clear, matching the hardware probe; only feedback writes
+The historical firmware-boot regression recreated this measured handoff state.
+External firmware boot was removed on 2026-09-15; the current built-in launch
+path does not reproduce that firmware handoff. PSoXide's SPU continues reverb
+reads, APF processing, and wet output while the reverb master-write bit is clear, matching the hardware probe; only feedback writes
 are gated. The SDK now zeros both wet-output depth registers during `spu::init`,
-before game banks can reuse SPU RAM. The old PA5 executable reproduces the
-fault under CONTROL and is digitally silent under DEPTH0 in PSoXide, while a
-newly linked Half-Life build remains digitally silent through its first eight
+before game banks can reuse SPU RAM. In the historical regression, the old PA5
+executable reproduced the fault under CONTROL and was digitally silent under DEPTH0 in PSoXide, while a
+newly linked Half-Life build remained digitally silent through its first eight
 seconds under the same hostile handoff profile.
 
 ## Isolating the stale-menu-voice handoff (`PA4`)
