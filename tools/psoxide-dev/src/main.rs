@@ -51,11 +51,11 @@ fn help() -> String {
        lint-policy-guard\n\
        runtime-numeric-guard\n\
        bake-spectrum <input.wav> -o <output.bin> [--fps N] [--bands N] [--seconds S]\n\
-       duckstation-harness --cue <disc.cue> [--expect TEXT] [--bios-boot]\n\
+       duckstation-harness --cue <disc.cue> [--expect TEXT]\n\
        emulator-inventory [--require NAME]\n\
-       external-emulator-smoke --emulator mednafen|retroarch|ares --cue <disc.cue> [--bios BIOS] [--fail-on TEXT] [--screenshot PNG]\n\
+       external-emulator-smoke --emulator mednafen|retroarch|ares --cue <disc.cue> [--fail-on TEXT] [--screenshot PNG]\n\
        cortex-bringup-report [--out REPORT.md] [--fail-on-warn]\n\
-       cortex-stream-guard [--profile profile.csv] [--cdda-log cdda.log] [--boot-flow-log boot.log]\n\
+       cortex-stream-guard [--profile profile.csv] [--cdda-log cdda.log]\n\
        vblank-chart --in <profile.csv> --out <chart.html> [--title TITLE]\n\
        gen-tones\n\
        gen-fonts"
@@ -805,7 +805,7 @@ fn emulator_inventory_rows() -> Vec<EmulatorInventoryRow> {
             label: "PCSX-Redux",
             binary: discover_pcsx_redux(None).ok(),
             core: None,
-            coverage: "parity-oracle BIOS smoke",
+            coverage: "external execution smoke",
             install_hint: "install PCSX-Redux.app or set PSOXIDE_REDUX_BIN",
         },
         EmulatorInventoryRow {
@@ -813,7 +813,7 @@ fn emulator_inventory_rows() -> Vec<EmulatorInventoryRow> {
             label: "Mednafen",
             binary: discover_mednafen(None).ok(),
             core: None,
-            coverage: "optional BIOS/TOC launch smoke",
+            coverage: "optional disc launch smoke",
             install_hint: "brew install mednafen or set MEDNAFEN_BIN",
         },
         EmulatorInventoryRow {
@@ -838,7 +838,6 @@ fn emulator_inventory_rows() -> Vec<EmulatorInventoryRow> {
 fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
     let mut emulator = None;
     let mut cue = None;
-    let mut bios = env::var("PSOXIDE_BIOS").ok();
     let mut timeout = 12.0f64;
     let mut log = Some("build/external-emulator-smoke/emulator.log".to_string());
     let mut fail_on = Vec::new();
@@ -854,10 +853,6 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
             "--cue" => {
                 i += 1;
                 cue = args.get(i).cloned();
-            }
-            "--bios" => {
-                i += 1;
-                bios = args.get(i).cloned();
             }
             "--timeout" => {
                 i += 1;
@@ -908,14 +903,9 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
     }
 
     let mut command = match emulator.as_str() {
-        "mednafen" => mednafen_command(&cue, bios.as_deref())?,
-        "retroarch" => retroarch_command(
-            &cue,
-            bios.as_deref(),
-            screenshot_path.as_deref(),
-            screenshot_frames,
-        )?,
-        "ares" => ares_command(&cue, bios.as_deref())?,
+        "mednafen" => mednafen_command(&cue)?,
+        "retroarch" => retroarch_command(&cue, screenshot_path.as_deref(), screenshot_frames)?,
+        "ares" => ares_command(&cue)?,
         other => {
             return Err(format!(
                 "external-emulator-smoke does not know how to launch `{other}`"
@@ -1035,7 +1025,6 @@ fn matching_pattern<'a>(line: &str, patterns: &'a [String]) -> Option<&'a str> {
 fn cortex_stream_guard(args: &[String]) -> Result<(), String> {
     let mut profile = Some("build/preburn/cortex_ignition_v1/profile.csv".to_string());
     let mut cdda_log = Some("build/preburn/cortex_ignition_v1/cdda-probe.log".to_string());
-    let mut boot_flow_log = Some("build/preburn/cortex_ignition_v1/boot-flow.log".to_string());
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -1046,10 +1035,6 @@ fn cortex_stream_guard(args: &[String]) -> Result<(), String> {
             "--cdda-log" => {
                 i += 1;
                 cdda_log = args.get(i).cloned();
-            }
-            "--boot-flow-log" => {
-                i += 1;
-                boot_flow_log = args.get(i).cloned();
             }
             other => return Err(format!("unknown cortex-stream-guard arg `{other}`")),
         }
@@ -1065,11 +1050,6 @@ fn cortex_stream_guard(args: &[String]) -> Result<(), String> {
         cdda_log
             .as_deref()
             .unwrap_or("build/preburn/cortex_ignition_v1/cdda-probe.log"),
-    );
-    let boot_flow_log = resolve_from_cwd(
-        boot_flow_log
-            .as_deref()
-            .unwrap_or("build/preburn/cortex_ignition_v1/boot-flow.log"),
     );
 
     let mut failures = Vec::new();
@@ -1091,31 +1071,6 @@ fn cortex_stream_guard(args: &[String]) -> Result<(), String> {
         None => failures.push(format!(
             "failure: CD-DA probe log missing: {}",
             cdda_log.display()
-        )),
-    }
-
-    match read_optional_log(&boot_flow_log)? {
-        Some(text) if log_status(Some(&text), &["fifo pops:", "audio:", "Play"]) == "PASS" => {
-            signals.push(format!(
-                "boot-flow log: {}",
-                summarize_matching_lines(&text, &["display:", "fifo pops:", "audio:", "Play"], 5)
-            ));
-        }
-        Some(text) if text.contains("skip BIOS boot-flow probe:") => {
-            signals.push(format!(
-                "boot-flow log: {}",
-                summarize_matching_lines(&text, &["skip BIOS boot-flow probe:"], 1)
-            ));
-        }
-        Some(text) => {
-            failures.push(format!(
-                "failure: BIOS boot-flow log lacks CD data plus CD-DA signal ({})",
-                summarize_matching_lines(&text, &["display:", "fifo pops:", "audio:", "Play"], 5)
-            ));
-        }
-        None => failures.push(format!(
-            "failure: BIOS boot-flow log missing: {}",
-            boot_flow_log.display()
         )),
     }
 
@@ -1294,8 +1249,7 @@ fn csv_field_u64(fields: &[&str], index: Option<usize>) -> u64 {
 fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
     let mut out = Some("build/preburn/cortex_ignition_v1/BRINGUP_REPORT.md".to_string());
     let mut preburn_dir = Some("build/preburn/cortex_ignition_v1".to_string());
-    let mut duckstation_log =
-        Some("build/duckstation-harness/cortex_ignition_v1-bios.log".to_string());
+    let mut duckstation_log = Some("build/duckstation-harness/cortex_ignition_v1.log".to_string());
     let mut external_dir = Some("build/external-emulator-smoke".to_string());
     let mut fail_on_warn = false;
     let mut i = 0usize;
@@ -1337,7 +1291,7 @@ fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
     let duckstation_log = resolve_from_cwd(
         duckstation_log
             .as_deref()
-            .unwrap_or("build/duckstation-harness/cortex_ignition_v1-bios.log"),
+            .unwrap_or("build/duckstation-harness/cortex_ignition_v1.log"),
     );
     let external_dir = resolve_from_cwd(
         external_dir
@@ -1392,50 +1346,6 @@ fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
         "Pin these hashes when a hardware-visible checkpoint changes unexpectedly.",
     )?;
 
-    let bios_cdrom = read_optional_log(&preburn_dir.join("bios-cdrom-probe.log"))?;
-    report_row(
-        &mut report,
-        "BIOS CD-ROM command flow",
-        &preburn_dir.join("bios-cdrom-probe.log"),
-        log_status(bios_cdrom.as_deref(), &["ReadTOC", "ReadN", "Pause"]),
-        bios_cdrom
-            .as_deref()
-            .map(|text| {
-                if text.contains("skip BIOS CD-ROM probe:") {
-                    summarize_matching_lines(text, &["skip BIOS CD-ROM probe:"], 1)
-                } else {
-                    summarize_command_names(
-                        text,
-                        &[
-                            "Test", "GetID", "ReadTOC", "SetLoc", "SeekL", "SetMode", "ReadN",
-                            "Pause",
-                        ],
-                    )
-                }
-            })
-            .unwrap_or_else(|| "log missing".to_string()),
-        "Use command-order deltas here to improve emulator CD-ROM timing and BIOS boot behavior.",
-    )?;
-
-    let boot_flow = read_optional_log(&preburn_dir.join("boot-flow.log"))?;
-    report_row(
-        &mut report,
-        "BIOS boot flow, CD data, CD-DA",
-        &preburn_dir.join("boot-flow.log"),
-        log_status(boot_flow.as_deref(), &["fifo pops:", "audio:", "Play"]),
-        boot_flow
-            .as_deref()
-            .map(|text| {
-                if text.contains("skip BIOS boot-flow probe:") {
-                    summarize_matching_lines(text, &["skip BIOS boot-flow probe:"], 1)
-                } else {
-                    summarize_matching_lines(text, &["display:", "fifo pops:", "audio:", "Play"], 5)
-                }
-            })
-            .unwrap_or_else(|| "log missing".to_string()),
-        "This is the closest local proxy for the real CD path; failures should become emulator or engine fixes.",
-    )?;
-
     let cdda = read_optional_log(&preburn_dir.join("cdda-probe.log"))?;
     report_row(
         &mut report,
@@ -1478,7 +1388,7 @@ fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
     ];
     report_row(
         &mut report,
-        "DuckStation BIOS TTY markers",
+        "DuckStation guest TTY markers",
         &duckstation_log,
         log_status(duck.as_deref(), &duck_markers),
         duck.as_deref()
@@ -1495,12 +1405,12 @@ fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
 
     external_report_row(
         &mut report,
-        "Mednafen BIOS/TOC smoke",
+        "Mednafen disc smoke",
         &external_dir.join("cortex_ignition_v1-mednafen.log"),
         &["Using module: psx", "Region:"],
         &[],
         "OBSERVED",
-        "BIOS core selection and disc TOC are visible, but there is still no semantic boot-progress assertion.",
+        "Core selection and disc TOC are visible; semantic boot progress still needs an assertion.",
     )?;
     external_report_row(
         &mut report,
@@ -1509,7 +1419,7 @@ fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
         &["[INFO]", "Audio"],
         &["Firmware is missing", "Failed to load content"],
         "OBSERVED",
-        "A missing firmware warning invalidates the signal; configure BIOS before using this row as coverage.",
+        "External emulator launch errors invalidate this signal.",
     )?;
     let retroarch_screenshot = external_dir.join("cortex_ignition_v1-retroarch.png");
     report_row(
@@ -1684,19 +1594,6 @@ fn summarize_matching_lines(text: &str, needles: &[&str], max_lines: usize) -> S
     }
 }
 
-fn summarize_command_names(text: &str, names: &[&str]) -> String {
-    let found: Vec<_> = names
-        .iter()
-        .filter(|name| text.contains(**name))
-        .copied()
-        .collect();
-    if found.is_empty() {
-        "no command names found".to_string()
-    } else {
-        found.join(", ")
-    }
-}
-
 fn count_matching_needles(text: &str, needles: &[&str]) -> usize {
     needles
         .iter()
@@ -1704,29 +1601,15 @@ fn count_matching_needles(text: &str, needles: &[&str]) -> usize {
         .count()
 }
 
-fn mednafen_command(cue: &Path, bios: Option<&str>) -> Result<Command, String> {
+fn mednafen_command(cue: &Path) -> Result<Command, String> {
     let binary = discover_mednafen(None)?;
     let mut command = Command::new(binary);
-    if let Some(bios) = bios.filter(|s| !s.is_empty()) {
-        let bios = resolve_from_cwd(bios);
-        if bios.is_file() {
-            let bios = bios.to_string_lossy().to_string();
-            command
-                .arg("-psx.bios_na")
-                .arg(&bios)
-                .arg("-psx.bios_jp")
-                .arg(&bios)
-                .arg("-psx.bios_eu")
-                .arg(&bios);
-        }
-    }
     command.arg("-force_module").arg("psx").arg(cue);
     Ok(command)
 }
 
 fn retroarch_command(
     cue: &Path,
-    bios: Option<&str>,
     screenshot: Option<&Path>,
     screenshot_frames: u64,
 ) -> Result<Command, String> {
@@ -1736,9 +1619,6 @@ fn retroarch_command(
     )?;
     let mut command = Command::new(binary);
     command.arg("--verbose");
-    if let Some(config) = retroarch_bios_append_config(bios)? {
-        command.arg(format!("--appendconfig={}", config.display()));
-    }
     if let Some(screenshot) = screenshot {
         command
             .arg(format!("--max-frames={screenshot_frames}"))
@@ -1749,53 +1629,13 @@ fn retroarch_command(
     Ok(command)
 }
 
-fn retroarch_bios_append_config(bios: Option<&str>) -> Result<Option<PathBuf>, String> {
-    let Some(bios) = bios.filter(|s| !s.is_empty()) else {
-        return Ok(None);
-    };
-    let bios = resolve_from_cwd(bios);
-    let system_dir = if bios.is_dir() {
-        bios
-    } else if bios.is_file() {
-        bios.parent()
-            .ok_or_else(|| format!("BIOS has no parent directory: {}", bios.display()))?
-            .to_path_buf()
-    } else {
-        return Ok(None);
-    };
-    let config = repo_root().join("build/external-emulator-smoke/retroarch-system.cfg");
-    if let Some(parent) = config.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
-    let system_dir = retroarch_config_string(&system_dir.to_string_lossy());
-    fs::write(&config, format!("system_directory = {system_dir}\n"))
-        .map_err(|e| format!("{}: {e}", config.display()))?;
-    Ok(Some(config))
-}
-
-fn retroarch_config_string(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
-}
-
-fn ares_command(cue: &Path, bios: Option<&str>) -> Result<Command, String> {
+fn ares_command(cue: &Path) -> Result<Command, String> {
     let binary = discover_ares(None)?;
     let mut command = Command::new(binary);
     command
         .arg("--system")
         .arg("PlayStation")
         .arg("--no-file-prompt");
-    if let Some(bios) = bios.filter(|s| !s.is_empty()) {
-        let bios = resolve_from_cwd(bios);
-        if bios.is_file() {
-            let bios = bios.to_string_lossy().to_string();
-            for region in ["BIOS.US", "BIOS.Japan", "BIOS.Europe"] {
-                command
-                    .arg("--setting")
-                    .arg(format!("PlayStation/Firmware/{region}={bios}"));
-            }
-        }
-    }
     command.arg(cue);
     Ok(command)
 }
@@ -1980,7 +1820,6 @@ fn duckstation_harness(args: &[String]) -> Result<(), String> {
     let mut expects = Vec::new();
     let mut no_default_expect = false;
     let mut gui = false;
-    let mut bios_boot = false;
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -2010,7 +1849,6 @@ fn duckstation_harness(args: &[String]) -> Result<(), String> {
             }
             "--no-default-expect" => no_default_expect = true,
             "--gui" => gui = true,
-            "--bios-boot" => bios_boot = true,
             other => return Err(format!("unknown duckstation-harness arg `{other}`")),
         }
         i += 1;
@@ -2052,7 +1890,7 @@ fn duckstation_harness(args: &[String]) -> Result<(), String> {
         .arg("-batch")
         .arg("-nofullscreen")
         .arg("-earlyconsole")
-        .arg(if bios_boot { "-slowboot" } else { "-fastboot" });
+        .arg("-fastboot");
     if !gui {
         command.arg("-nogui");
     }
