@@ -71,3 +71,9 @@ own [provenance records](docs/asset-provenance.md). See
 
 Source snapshot **2026.09.05**: Split the SDK from the editor and emulator; existing Git revisions still resolve.
 See the [changelog](CHANGELOG.md) for the remaining changes.
+
+## Firmware policy
+
+PSoXide does not bundle or load external console firmware. Homebrew runs
+through the built-in emulator runtime. See the [cleanup audit](docs/firmware-cleanup.md)
+for the source, binary-header and history checks.
