@@ -5,6 +5,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: python3 tools/test_sony_material_audit.py
+      - run: python3 tools/sony-material-audit.py
       - run: rustup show
       - run: sudo apt-get update && sudo apt-get install -y binutils-mipsel-linux-gnu
       - run: cargo fmt --all -- --check
