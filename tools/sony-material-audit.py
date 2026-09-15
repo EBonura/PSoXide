@@ -23,6 +23,8 @@ def reasons(path, size, header):
         found.append("512 KiB blob; inspect its provenance")
     if header.startswith(b"PS-X EXE") and VENDOR in header[0x4c:0x800].lower():
         found.append("vendor text in homebrew executable header")
+    if header.startswith(b"PS-X EXE") and b"sony bios" in header.lower():
+        found.append("vendor firmware prompt in homebrew executable")
     return found
 
 
@@ -38,7 +40,7 @@ def scan_working(repo):
         if path.is_symlink() or not path.is_file():
             continue
         with path.open("rb") as stream:
-            header = stream.read(2048)
+            header = stream.read(4 * 1024 * 1024 if name.lower().endswith(".exe") else 2048)
         yield name, path.stat().st_size, header
 
 
@@ -58,9 +60,11 @@ def scan_history(repo):
         process = subprocess.Popen(["git", "-C", str(repo), "cat-file", "blob", oid.decode()], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) if name.lower().endswith(".exe") else None
         header = b""
         if process:
-            header = process.stdout.read(2048)
+            header = process.stdout.read(4 * 1024 * 1024)
             process.stdout.close()
-            process.wait()
+            result = process.wait()
+            if result not in (0, -13, 141):
+                raise RuntimeError(f"cannot inspect object {oid.decode()}")
         yield name, size, header
 
 

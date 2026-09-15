@@ -23,8 +23,10 @@ The `mipsel-sony-psx` target name is the compiler's platform identifier.
 Attribution and trademark notices remain intact.
 
 Twenty bundled homebrew EXEs in each player repository had stale vendor text
-in the optional header area at 0x4c. That area is now zero-filled; bytes before
-0x4c and the entire executable payload at 0x800 onward are unchanged. The SDK
+in the optional header area at 0x4c. That area is now zero-filled; executable
+header fields before 0x4c remain unchanged. Nineteen payloads are byte-identical.
+The memory-card example also replaces its old vendor-BIOS prompt with the
+same-length "CHECK CARD MENU" text; all other payload bytes remain unchanged. The SDK
 linker discards legacy `.region` input sections so old object files cannot
 reintroduce a vendor marker.
 
