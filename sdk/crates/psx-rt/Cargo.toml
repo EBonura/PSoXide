@@ -17,6 +17,10 @@ default = []
 alloc = []
 # Emit coarse boot breadcrumbs over the BIOS TTY channel.
 boot-trace = []
+# Reserve 256 trampoline words for the post-link load-delay hazard patcher
+# instead of 96 (+640 bytes of `.data`). Opt in only when a guest's linked
+# exe reports "trampoline array full".
+hazard-trampolines-256 = []
 
 [lints.rust]
 missing_docs = "warn"

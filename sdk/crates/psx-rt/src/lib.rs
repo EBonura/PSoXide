@@ -52,15 +52,22 @@ pub mod heap;
 /// capacity, then code words), which the staged guest build runs and verifies
 /// instead of disabling the filler's backward search at a cost of tens of
 /// kilobytes of nops. Every guest that links psx-rt therefore carries this
-/// 392-byte array in `.data`; nothing reads it at runtime except the CPU.
+/// 392-byte array in `.data` (1,032 bytes with `hazard-trampolines-256`); nothing reads it at runtime except the CPU.
 #[no_mangle]
 #[used]
-pub static mut HAZARD_TRAMPOLINES: [u32; 2 + 96] = {
-    let mut words = [0u32; 2 + 96];
+pub static mut HAZARD_TRAMPOLINES: [u32; 2 + HAZARD_TRAMPOLINE_WORDS] = {
+    let mut words = [0u32; 2 + HAZARD_TRAMPOLINE_WORDS];
     words[0] = 0x4841_5a54;
-    words[1] = 96;
+    words[1] = HAZARD_TRAMPOLINE_WORDS as u32;
     words
 };
+// Code words available to the patcher. The default suits every shipped
+// guest; a large exe whose link reports "trampoline array full" enables the
+// `hazard-trampolines-256` feature and pays 640 more bytes of `.data`.
+#[cfg(feature = "hazard-trampolines-256")]
+const HAZARD_TRAMPOLINE_WORDS: usize = 256;
+#[cfg(not(feature = "hazard-trampolines-256"))]
+const HAZARD_TRAMPOLINE_WORDS: usize = 96;
 
 // Symbols emitted by `psoxide.ld`.
 extern "C" {
