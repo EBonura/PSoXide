@@ -16,7 +16,7 @@
 //!   30h      initial SP base (`$r29` high bits)
 //!   34h      initial SP offset added to the base
 //!   38h-4Bh  reserved
-//!   4Ch-7FFh ASCII region marker ("Sony Computer Entertainment Inc.")
+//!   4Ch-7FFh reserved region text (zero-filled by PSoXide)
 //!   800h-..  payload bytes; loaded verbatim to `t_addr`
 //! ```
 //!

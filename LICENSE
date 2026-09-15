@@ -424,12 +424,7 @@ source code from them is included or derived in this repository:
   scene-tree and resource authoring model. PSoXide does not embed or
   fork Godot.
 
-PlayStation BIOS images, commercial game disc images, and PCSX-Redux
-binaries or source trees are not included in this repository and are
-not redistributed by this project. Users must supply their own legally
-obtained copies.
-
-Ignored tests (canaries, commercial guards) may require:
-
-- PSOXIDE_BIOS=/path/to/bios.bin
-- local game images you legally own
+PlayStation firmware images and commercial game assets are not included or
+redistributed. PSoXide boots homebrew through its independently implemented
+runtime and does not load external firmware. Hardware interface descriptions
+and third-party attribution above identify provenance and compatibility.
