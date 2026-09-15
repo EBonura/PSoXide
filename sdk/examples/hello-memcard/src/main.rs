@@ -615,7 +615,7 @@ fn draw_summary(font: &FontAtlas, app: &Diagnostic) {
                 b.dec(generation);
                 line(font, y, b.as_str(), GREEN);
                 y += 14;
-                line(font, y, "POWER OFF, CHECK SONY BIOS", AMBER);
+                line(font, y, "POWER OFF, CHECK CARD MENU", AMBER);
             }
             WriteResult::CardChanged => line(font, y, "REFUSED: CARD CONTENTS CHANGED", RED),
             WriteResult::SafetyRefused(e) => {
