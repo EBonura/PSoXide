@@ -71,8 +71,7 @@ SECTIONS {
         QUAD(0);
         LONG(0);
 
-        /* Region marker; keep if present, else zero-fill via ALIGN. */
-        KEEP(*(.region));
+        /* Homebrew header padding is zero-filled; no vendor region marker. */
 
         /* Pad to exactly HEADER_SIZE. */
         . = ALIGN(HEADER_SIZE);
@@ -140,6 +139,7 @@ SECTIONS {
 
     /* Discard MIPS ABI glue not needed on bare metal. */
     /DISCARD/ : {
+        *(.region); /* Discard legacy vendor markers from older object files. */
         *(.MIPS.abiflags)
         *(.reginfo)
         *(.eh_frame_hdr)
