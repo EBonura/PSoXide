@@ -25,14 +25,11 @@
 //!
 //! Marker ids 32 and up belong to this file (see the scheme in main.rs).
 
+use crate::regs::{CACHE_CONTROL, RAM_SIZE};
 use crate::{__hwtest_icache_alias_b, __hwtest_icache_entry_w1, __hwtest_perf_loads};
 use crate::{__hwtest_icache_block, __hwtest_icache_entry_w0, TIMING_RECORD_COUNT};
 use crate::{flush_icache_without_irq, push_timing_record, sample_timing, TimingRecord};
 
-/// 0x1F801060. Bit 7: "delay on simultaneous CODE+DATA fetch from RAM".
-pub(crate) const RAM_SIZE: u32 = 0x1F80_1060;
-/// 0xFFFE0130. Bits 12-17 are only "supposedly" documented.
-pub(crate) const CACHE_CONTROL: u32 = 0xFFFE_0130;
 const SCRATCHPAD: u32 = 0x1F80_0000;
 
 static mut PERF_WORD: u32 = 0;

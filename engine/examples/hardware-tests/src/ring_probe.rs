@@ -45,12 +45,11 @@
 //! zero samples before the first envelope step.
 
 use psx_font::FontAtlas;
-use psx_gpu as gpu;
 use psx_rt::tty;
 use psx_spu::{self as spu, Adsr, Pitch, SpuAddr, Voice, Volume};
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
-use crate::photo::crc32;
+use crate::payload::{base64_encode, crc32, draw_qr, QR_QUIET};
 use crate::{hex2, hex8, spu_dma_read};
 
 // ---- Rings ---------------------------------------------------------------
@@ -129,7 +128,6 @@ const QR_VERSION: Version = Version::new(QR_VERSION_NUM);
 const QR_SIZE: usize = 4 * QR_VERSION_NUM as usize + 17;
 const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
 const QR_SCALE: i16 = 2;
-const QR_QUIET: i16 = 4;
 /// Byte-mode capacity at ECC Medium for version 19, from the ISO table. The
 /// assert is what stops a new segment being discovered on a burn.
 const QR_BYTE_CAPACITY: usize = 624;
@@ -336,11 +334,6 @@ impl RingProbe {
         tty::println(hex8(self.binary_crc).digits());
     }
 
-    fn qr_module(&self, x: usize, y: usize) -> bool {
-        let bit = y * QR_SIZE + x;
-        self.qr_modules[bit / 8] & (1 << (bit & 7)) != 0
-    }
-
     pub(crate) fn draw(&self, font: &FontAtlas) {
         if !self.complete {
             font.draw_text(8, 30, "CAPTURE-RING READBACK", (150, 170, 200));
@@ -370,35 +363,7 @@ impl RingProbe {
             font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
             return;
         }
-        let total = (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE;
-        let left = (320 - total) / 2;
-        let top = 44;
-        gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
-        let data_left = left + QR_QUIET * QR_SCALE;
-        let data_top = top + QR_QUIET * QR_SCALE;
-        for y in 0..QR_SIZE {
-            let mut x = 0usize;
-            while x < QR_SIZE {
-                while x < QR_SIZE && !self.qr_module(x, y) {
-                    x += 1;
-                }
-                let first = x;
-                while x < QR_SIZE && self.qr_module(x, y) {
-                    x += 1;
-                }
-                if first < x {
-                    gpu::draw_rect_flat(
-                        data_left + first as i16 * QR_SCALE,
-                        data_top + y as i16 * QR_SCALE,
-                        ((x - first) as i16 * QR_SCALE) as u16,
-                        QR_SCALE as u16,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-            }
-        }
+        draw_qr(&self.qr_modules, QR_SIZE, QR_SIZE, 44, QR_SCALE);
     }
 }
 
@@ -604,40 +569,4 @@ fn append(target: &mut [u8], len: &mut usize, bytes: &[u8]) {
     let take = end - *len;
     target[*len..end].copy_from_slice(&bytes[..take]);
     *len = end;
-}
-
-const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn base64_encode(input: &[u8], output: &mut [u8]) -> usize {
-    let mut out = 0usize;
-    let mut index = 0usize;
-    while index < input.len() {
-        let b0 = input[index] as u32;
-        let b1 = if index + 1 < input.len() {
-            input[index + 1] as u32
-        } else {
-            0
-        };
-        let b2 = if index + 2 < input.len() {
-            input[index + 2] as u32
-        } else {
-            0
-        };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        output[out] = BASE64[(triple >> 18) as usize & 63];
-        output[out + 1] = BASE64[(triple >> 12) as usize & 63];
-        output[out + 2] = if index + 1 < input.len() {
-            BASE64[(triple >> 6) as usize & 63]
-        } else {
-            b'='
-        };
-        output[out + 3] = if index + 2 < input.len() {
-            BASE64[triple as usize & 63]
-        } else {
-            b'='
-        };
-        out += 4;
-        index += 3;
-    }
-    out
 }

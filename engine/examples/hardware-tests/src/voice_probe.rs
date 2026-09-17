@@ -8,12 +8,14 @@
 
 use psx_asset::Audio;
 use psx_font::FontAtlas;
-use psx_gpu as gpu;
 use psx_io::dma;
 use psx_rt::tty;
 use psx_spu::{self as spu, Adsr, Pitch, SpuAddr, Voice, Volume};
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
+use crate::payload::{
+    append, base64_encode, crc32, draw_qr, fnv16_bytes, fnv32_words, BinaryBuffer,
+};
 use crate::{hex2, hex8, spu_dma_read};
 
 include!(concat!(env!("OUT_DIR"), "/pa2_meta.rs"));
@@ -40,7 +42,6 @@ const QR_VERSION: Version = Version::new(15);
 const QR_SIZE: usize = 77;
 const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
 const QR_SCALE: i16 = 2;
-const QR_QUIET: i16 = 4;
 const BINARY_LEN: usize = 264;
 const BASE64_LEN: usize = 352;
 const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
@@ -419,40 +420,7 @@ impl VoiceProbe {
             font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
             return;
         }
-        let total = (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE;
-        let left = (320 - total) / 2;
-        let top = 50;
-        gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
-        let data_left = left + QR_QUIET * QR_SCALE;
-        let data_top = top + QR_QUIET * QR_SCALE;
-        for y in 0..QR_SIZE {
-            let mut x = 0usize;
-            while x < QR_SIZE {
-                while x < QR_SIZE && !self.qr_module(x, y) {
-                    x += 1;
-                }
-                let first = x;
-                while x < QR_SIZE && self.qr_module(x, y) {
-                    x += 1;
-                }
-                if first < x {
-                    gpu::draw_rect_flat(
-                        data_left + first as i16 * QR_SCALE,
-                        data_top + y as i16 * QR_SCALE,
-                        ((x - first) as i16 * QR_SCALE) as u16,
-                        QR_SCALE as u16,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-            }
-        }
-    }
-
-    fn qr_module(&self, x: usize, y: usize) -> bool {
-        let bit = y * QR_SIZE + x;
-        self.qr_modules[bit / 8] & (1 << (bit & 7)) != 0
+        draw_qr(&self.qr_modules, QR_SIZE, QR_SIZE, 50, QR_SCALE);
     }
 }
 
@@ -553,24 +521,6 @@ fn target_bytes(pack: &[u8]) -> Option<&[u8]> {
     Some(audio.adpcm_bytes())
 }
 
-fn fnv16_bytes(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811C_9DC5u32;
-    for pair in bytes.chunks_exact(2) {
-        let value = u16::from_le_bytes([pair[0], pair[1]]);
-        hash = (hash ^ value as u32).wrapping_mul(0x0100_0193);
-    }
-    hash
-}
-
-fn fnv32_words(words: &[u32]) -> u32 {
-    let mut hash = 0x811C_9DC5u32;
-    for &word in words {
-        hash = (hash ^ (word & 0xFFFF)).wrapping_mul(0x0100_0193);
-        hash = (hash ^ (word >> 16)).wrapping_mul(0x0100_0193);
-    }
-    hash
-}
-
 /// Experimental comparison path.  It differs from the production SDK upload
 /// only by waiting for SPUSTAT's delayed mode mirror before arming DMA and by
 /// allowing the final FIFO words to drain before returning to Stop mode.
@@ -667,83 +617,4 @@ fn stage_color(stage: u8) -> (u8, u8, u8) {
         4 | 5 => (96, 240, 128),
         _ => (255, 216, 96),
     }
-}
-
-fn append(target: &mut [u8], len: &mut usize, bytes: &[u8]) {
-    let end = *len + bytes.len();
-    target[*len..end].copy_from_slice(bytes);
-    *len = end;
-}
-
-struct BinaryBuffer<'a> {
-    bytes: &'a mut [u8],
-    len: usize,
-}
-
-impl<'a> BinaryBuffer<'a> {
-    fn new(bytes: &'a mut [u8]) -> Self {
-        Self { bytes, len: 0 }
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
-
-    fn push_u8(&mut self, value: u8) {
-        self.bytes[self.len] = value;
-        self.len += 1;
-    }
-
-    fn push_u32(&mut self, value: u32) {
-        self.push_bytes(&value.to_le_bytes());
-    }
-
-    fn push_bytes(&mut self, values: &[u8]) {
-        let end = self.len + values.len();
-        self.bytes[self.len..end].copy_from_slice(values);
-        self.len = end;
-    }
-}
-
-fn base64_encode(input: &[u8], output: &mut [u8]) -> usize {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut source = 0usize;
-    let mut target = 0usize;
-    while source < input.len() {
-        let remaining = input.len() - source;
-        let a = input[source];
-        let b = if remaining > 1 { input[source + 1] } else { 0 };
-        let c = if remaining > 2 { input[source + 2] } else { 0 };
-        output[target] = ALPHABET[(a >> 2) as usize];
-        output[target + 1] = ALPHABET[(((a & 3) << 4) | (b >> 4)) as usize];
-        output[target + 2] = if remaining > 1 {
-            ALPHABET[(((b & 0x0F) << 2) | (c >> 6)) as usize]
-        } else {
-            b'='
-        };
-        output[target + 3] = if remaining > 2 {
-            ALPHABET[(c & 0x3F) as usize]
-        } else {
-            b'='
-        };
-        source += remaining.min(3);
-        target += 4;
-    }
-    target
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in bytes {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
 }

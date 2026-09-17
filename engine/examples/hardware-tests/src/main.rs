@@ -37,8 +37,10 @@ mod cd_chain_probe;
 mod controller_test;
 mod cpu_tests;
 mod handoff_probe;
+mod payload;
 mod perf_probes;
 mod photo;
+mod regs;
 mod reverb_probe;
 mod ring_probe;
 mod sample_probe;
@@ -50,7 +52,9 @@ use cd_chain_probe::CdChainProbe;
 use controller_test::ControllerTest;
 use cpu_tests::*;
 use handoff_probe::HandoffProbe;
+use payload::fnv32_words;
 use photo::PhotoCapture;
+use regs::SPU_DELAY;
 use reverb_probe::{ReverbProbe, ReverbSnapshot};
 use ring_probe::RingProbe;
 use sample_probe::SampleProbe;
@@ -341,7 +345,7 @@ impl Mode {
             Self::VoiceProbe => "HL BANK DMA + VOICE 15 END GUARD QR",
             Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
             Self::SampleProbe => "UI BLIP END/LOOP FLAGS + ENVELOPE TRACE QR (SB1)",
-            Self::SpuProbe => "SPU RAM + TONES + TERMINATION QR (SB3)",
+            Self::SpuProbe => "SPU RAM + TONES + TERMINATION QR (SB2)",
             Self::RingProbe => "VOICE 1/3 RING SNAPSHOTS QR (SB4)",
             Self::ControllerTest => "BUTTON HISTORY + ANALOG CENTRE/DRIFT TEST",
             Self::ControllerProbe => "RAW PAD HANDSHAKE: NO-WAIT VS ACK-WAIT",
@@ -646,8 +650,8 @@ const MEMORY_CONTROL_REGISTERS: [u32; 11] = [
     0x1F80_1018,
     0x1F80_101C,
     0x1F80_1020,
-    perf_probes::RAM_SIZE,
-    perf_probes::CACHE_CONTROL,
+    regs::RAM_SIZE,
+    regs::CACHE_CONTROL,
 ];
 const PRECISION_VALUE_COUNT: usize = 192;
 
@@ -8561,15 +8565,6 @@ fn test_spu_voice_reg_readback() -> TestResult {
 
 /// FNV-1a over a slice of 32-bit words (low halfword first), matching
 /// [`gpu_hash_scratch`]'s mixing so expected hashes are comparable.
-fn fnv32_words(words: &[u32]) -> u32 {
-    let mut hash = 0x811C_9DC5u32;
-    for &w in words {
-        hash = (hash ^ (w & 0xFFFF)).wrapping_mul(0x0100_0193);
-        hash = (hash ^ (w >> 16)).wrapping_mul(0x0100_0193);
-    }
-    hash
-}
-
 /// FNV-1a over a slice of halfwords (same mixing constants).
 fn fnv16_halfwords(hws: &[u16]) -> u32 {
     let mut hash = 0x811C_9DC5u32;
@@ -8604,7 +8599,6 @@ pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
     // override reads RAM back faithfully on silicon. Restored afterwards so
     // the boot-mode shape stays observable to the precision scan, which
     // calls spu_dma_read_shape directly.
-    const SPU_DELAY: u32 = 0x1F80_1014;
     unsafe {
         let boot = psx_io::read32(SPU_DELAY);
         psx_io::write32(SPU_DELAY, boot | 0x0200_0000);
@@ -8867,7 +8861,6 @@ fn push_precision(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize, v
 fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
 
-    const SPU_DELAY: u32 = 0x1F80_1014;
     let original_delay = unsafe { psx_io::read32(SPU_DELAY) };
     let packed_status =
         || unsafe { ((psx_io::read16(SPUCNT) as u32) << 16) | psx_io::read16(SPUSTAT) as u32 };

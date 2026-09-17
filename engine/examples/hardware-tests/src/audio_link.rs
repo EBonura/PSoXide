@@ -25,9 +25,8 @@
 //!   N  bytes payload
 //!   32 bits CRC-32            over the payload bytes only
 
+use crate::payload::crc32;
 use psx_spu as spu;
-
-use crate::photo::crc32;
 
 /// Samples in one ADPCM block, and therefore in one transmitted bit.
 const SAMPLES_PER_BLOCK: usize = 28;

@@ -20,10 +20,10 @@
 //! rather than fixed, so a capture costs as many photographs as it has data.
 
 use psx_font::FontAtlas;
-use psx_gpu as gpu;
 use psx_rt::tty;
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
+use crate::payload::{append, base64_encode, crc32, draw_qr, BinaryBuffer, QR_QUIET};
 use crate::{hex2, hex8, section_report, Mode, ScanReport, TestResult, TimingReport};
 
 /// Most pages a capture can need. Sized for the worst case a full
@@ -44,7 +44,6 @@ const QR_VERSION_MIN: Version = Version::new(10);
 const QR_SIZE: usize = 97;
 const QR_BUFFER_LEN: usize = QR_VERSION_MAX.buffer_len();
 const QR_TEXT_MAX: usize = 9 + BASE64_CHARS_PER_PAGE + 3 + 8;
-const QR_QUIET: i16 = 4;
 /// Vertical room between the two header lines and the bottom of the screen.
 const QR_AREA: i16 = 210;
 
@@ -348,11 +347,6 @@ impl PhotoCapture {
         &self.binary[..self.binary_len as usize]
     }
 
-    fn qr_module(&self, x: usize, y: usize) -> bool {
-        let bit = y * QR_SIZE + x;
-        self.qr_modules[bit / 8] & (1 << (bit & 7)) != 0
-    }
-
     fn payload(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(&self.payload[..self.payload_len as usize]) }
     }
@@ -433,121 +427,5 @@ pub(crate) fn draw_capture_page(font: &FontAtlas, capture: &PhotoCapture, page: 
     // fractional scale puts module edges between pixels, and a QR read off a
     // photograph of a CRT has little enough contrast already.
     let scale = (QR_AREA / (modules + QR_QUIET * 2)).max(1);
-    let total = (modules + QR_QUIET * 2) * scale;
-    let left = (320 - total) / 2;
-    let top = 28;
-    gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
-    let data_left = left + QR_QUIET * scale;
-    let data_top = top + QR_QUIET * scale;
-    let side = modules as usize;
-    for y in 0..side {
-        let mut x = 0usize;
-        while x < side {
-            while x < side && !capture.qr_module(x, y) {
-                x += 1;
-            }
-            let first = x;
-            while x < side && capture.qr_module(x, y) {
-                x += 1;
-            }
-            if first < x {
-                gpu::draw_rect_flat(
-                    data_left + first as i16 * scale,
-                    data_top + y as i16 * scale,
-                    ((x - first) as i16 * scale) as u16,
-                    scale as u16,
-                    0,
-                    0,
-                    0,
-                );
-            }
-        }
-    }
-}
-
-fn append(target: &mut [u8], len: &mut usize, bytes: &[u8]) {
-    let end = *len + bytes.len();
-    target[*len..end].copy_from_slice(bytes);
-    *len = end;
-}
-
-struct BinaryBuffer<'a> {
-    bytes: &'a mut [u8],
-    len: usize,
-}
-
-impl<'a> BinaryBuffer<'a> {
-    fn new(bytes: &'a mut [u8]) -> Self {
-        Self { bytes, len: 0 }
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
-
-    fn push_u8(&mut self, value: u8) {
-        assert!(self.len < self.bytes.len(), "PX7 binary overflow");
-        self.bytes[self.len] = value;
-        self.len += 1;
-    }
-
-    fn push_u16(&mut self, value: u16) {
-        self.push_bytes(&value.to_le_bytes());
-    }
-
-    fn push_u32(&mut self, value: u32) {
-        self.push_bytes(&value.to_le_bytes());
-    }
-
-    fn push_bytes(&mut self, values: &[u8]) {
-        for &value in values {
-            self.push_u8(value);
-        }
-    }
-}
-
-fn base64_encode(input: &[u8], output: &mut [u8]) -> usize {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut source = 0usize;
-    let mut target = 0usize;
-    while source < input.len() {
-        let remaining = input.len() - source;
-        let a = input[source];
-        let b = if remaining > 1 { input[source + 1] } else { 0 };
-        let c = if remaining > 2 { input[source + 2] } else { 0 };
-        assert!(target + 4 <= output.len(), "PX7 Base64 overflow");
-        output[target] = ALPHABET[(a >> 2) as usize];
-        output[target + 1] = ALPHABET[(((a & 0x03) << 4) | (b >> 4)) as usize];
-        output[target + 2] = if remaining > 1 {
-            ALPHABET[(((b & 0x0F) << 2) | (c >> 6)) as usize]
-        } else {
-            b'='
-        };
-        output[target + 3] = if remaining > 2 {
-            ALPHABET[(c & 0x3F) as usize]
-        } else {
-            b'='
-        };
-        source += remaining.min(3);
-        target += 4;
-    }
-    target
-}
-
-pub(crate) fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in bytes {
-        crc ^= byte as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-            bit += 1;
-        }
-    }
-    !crc
+    draw_qr(&capture.qr_modules, QR_SIZE, modules as usize, 28, scale);
 }

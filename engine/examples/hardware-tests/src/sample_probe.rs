@@ -32,12 +32,11 @@
 
 use psx_asset::Audio;
 use psx_font::FontAtlas;
-use psx_gpu as gpu;
 use psx_rt::tty;
 use psx_spu::{self as spu, Adsr, SpuAddr, Voice, Volume};
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
-use crate::photo::crc32;
+use crate::payload::{append, base64_encode, crc32, draw_qr};
 use crate::{hex2, hex8, spu_dma_read};
 
 /// The launcher's own cooked browse blip, byte for byte. The select
@@ -67,7 +66,6 @@ const QR_VERSION: Version = Version::new(15);
 const QR_SIZE: usize = 77;
 const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
 const QR_SCALE: i16 = 2;
-const QR_QUIET: i16 = 4;
 const BINARY_LEN: usize = 264;
 const BASE64_LEN: usize = 352;
 const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
@@ -411,40 +409,7 @@ impl SampleProbe {
             font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
             return;
         }
-        let total = (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE;
-        let left = (320 - total) / 2;
-        let top = 50;
-        gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
-        let data_left = left + QR_QUIET * QR_SCALE;
-        let data_top = top + QR_QUIET * QR_SCALE;
-        for y in 0..QR_SIZE {
-            let mut x = 0usize;
-            while x < QR_SIZE {
-                while x < QR_SIZE && !self.qr_module(x, y) {
-                    x += 1;
-                }
-                let first = x;
-                while x < QR_SIZE && self.qr_module(x, y) {
-                    x += 1;
-                }
-                if first < x {
-                    gpu::draw_rect_flat(
-                        data_left + first as i16 * QR_SCALE,
-                        data_top + y as i16 * QR_SCALE,
-                        ((x - first) as i16 * QR_SCALE) as u16,
-                        QR_SCALE as u16,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-            }
-        }
-    }
-
-    fn qr_module(&self, x: usize, y: usize) -> bool {
-        let bit = y * QR_SIZE + x;
-        self.qr_modules[bit / 8] & (1 << (bit & 7)) != 0
+        draw_qr(&self.qr_modules, QR_SIZE, QR_SIZE, 50, QR_SCALE);
     }
 }
 
@@ -470,34 +435,4 @@ fn stage_description(stage: u8) -> &'static str {
         5 => "DEFAULT TONE: FULL PLAY + FAST RELEASE?",
         _ => "?",
     }
-}
-
-fn append(target: &mut [u8], len: &mut usize, bytes: &[u8]) {
-    target[*len..*len + bytes.len()].copy_from_slice(bytes);
-    *len += bytes.len();
-}
-
-fn base64_encode(input: &[u8], output: &mut [u8]) -> usize {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = 0usize;
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let word = (b0 << 16) | (b1 << 8) | b2;
-        output[out] = TABLE[(word >> 18) as usize & 63];
-        output[out + 1] = TABLE[(word >> 12) as usize & 63];
-        output[out + 2] = if chunk.len() > 1 {
-            TABLE[(word >> 6) as usize & 63]
-        } else {
-            b'='
-        };
-        output[out + 3] = if chunk.len() > 2 {
-            TABLE[word as usize & 63]
-        } else {
-            b'='
-        };
-        out += 4;
-    }
-    out
 }

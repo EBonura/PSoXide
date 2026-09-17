@@ -45,12 +45,11 @@
 //! it does not.
 
 use psx_font::FontAtlas;
-use psx_gpu as gpu;
 use psx_rt::tty;
 use psx_spu::{self as spu, Adsr, Pitch, SpuAddr, Voice, Volume};
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
-use crate::photo::crc32;
+use crate::payload::{append, base64_encode, crc32, draw_qr, QR_QUIET};
 use crate::{hex2, hex8, spu_dma_read};
 
 // ---- Pass 1: SPU RAM integrity -----------------------------------------
@@ -64,12 +63,6 @@ const PATTERN_WORDS: usize = 1024;
 const SHORT_WORDS: usize = 4;
 const ADDR_LOW: u32 = 0x1010;
 const ADDR_HIGH: u32 = 0x3_0000;
-
-/// SPU transfer registers, for the PIO paths.
-const SPU_TRANSFER_ADDR: u32 = 0x1F80_1DA6;
-const SPU_TRANSFER_DATA: u32 = 0x1F80_1DA8;
-const SPU_CNT: u32 = 0x1F80_1DAA;
-const SPU_TRANSFER_CTRL: u32 = 0x1F80_1DAC;
 
 static mut SOURCE: [u32; PATTERN_WORDS] = [0; PATTERN_WORDS];
 static mut READBACK: [u32; PATTERN_WORDS] = [0; PATTERN_WORDS];
@@ -155,7 +148,6 @@ const QR_VERSION: Version = Version::new(QR_VERSION_NUM);
 const QR_SIZE: usize = 4 * QR_VERSION_NUM as usize + 17;
 const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
 const QR_SCALE: i16 = 2;
-const QR_QUIET: i16 = 4;
 const BINARY_LEN: usize = 20 + WORDS * 4 + 4;
 const BASE64_LEN: usize = BINARY_LEN.div_ceil(3) * 4;
 const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
@@ -571,6 +563,10 @@ impl SpuProbe {
             hex8(self.binary_crc).digits().as_bytes(),
         );
         let encoded = unsafe { core::str::from_utf8_unchecked(&text[..len]) };
+        // Mirror the symbol's text like every other probe does, so a headless
+        // run can be decoded and diffed, not only photographed.
+        tty::print("hardware-tests: sb2 ");
+        tty::println(encoded);
         let mut temp = [0u8; QR_BUFFER_LEN];
         let mut output = [0u8; QR_BUFFER_LEN];
         let Ok(qr) = QrCode::encode_text(
@@ -643,35 +639,7 @@ impl SpuProbe {
             font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
             return;
         }
-        let total = (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE;
-        let left = (320 - total) / 2;
-        let top = 44;
-        gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
-        let data_left = left + QR_QUIET * QR_SCALE;
-        let data_top = top + QR_QUIET * QR_SCALE;
-        for y in 0..QR_SIZE {
-            let mut x = 0usize;
-            while x < QR_SIZE {
-                while x < QR_SIZE && !self.qr_module(x, y) {
-                    x += 1;
-                }
-                let first = x;
-                while x < QR_SIZE && self.qr_module(x, y) {
-                    x += 1;
-                }
-                if first < x {
-                    gpu::draw_rect_flat(
-                        data_left + first as i16 * QR_SCALE,
-                        data_top + y as i16 * QR_SCALE,
-                        ((x - first) as i16 * QR_SCALE) as u16,
-                        QR_SCALE as u16,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-            }
-        }
+        draw_qr(&self.qr_modules, QR_SIZE, QR_SIZE, 44, QR_SCALE);
     }
 
     /// Bad-word counts, one stage per row: label at x=8, count at x=88.
@@ -690,11 +658,6 @@ impl SpuProbe {
             font.draw_text(8, y, ram_label(stage as u8), (200, 208, 220));
             font.draw_text(88, y, hex8(bad).digits(), colour);
         }
-    }
-
-    fn qr_module(&self, x: usize, y: usize) -> bool {
-        let bit = y * QR_SIZE + x;
-        self.qr_modules[bit / 8] & (1 << (bit & 7)) != 0
     }
 }
 
@@ -825,18 +788,18 @@ fn build_square(table: &mut [u8], half_period_blocks: usize) {
 /// block sizing, nothing but the SPU's own FIFO.
 fn pio_write(addr: u32, words: &[u32]) {
     unsafe {
-        psx_io::write16(SPU_TRANSFER_CTRL, 0x0000);
-        psx_io::write16(SPU_TRANSFER_ADDR, (addr / 8) as u16);
-        psx_io::write16(SPU_TRANSFER_CTRL, 0x0004);
-        let cnt = psx_io::read16(SPU_CNT);
-        psx_io::write16(SPU_CNT, (cnt & !0x0030) | 0x0010); // manual write
+        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0000);
+        psx_io::write16(psx_io::spu::TRANSFER_ADDR, (addr / 8) as u16);
+        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0004);
+        let cnt = psx_io::read16(psx_io::spu::SPUCNT);
+        psx_io::write16(psx_io::spu::SPUCNT, (cnt & !0x0030) | 0x0010); // manual write
         for &word in words {
-            psx_io::write16(SPU_TRANSFER_DATA, word as u16);
-            psx_io::write16(SPU_TRANSFER_DATA, (word >> 16) as u16);
+            psx_io::write16(psx_io::spu::TRANSFER_DATA, word as u16);
+            psx_io::write16(psx_io::spu::TRANSFER_DATA, (word >> 16) as u16);
         }
-        psx_io::write16(SPU_CNT, cnt & !0x0030);
+        psx_io::write16(psx_io::spu::SPUCNT, cnt & !0x0030);
         // 0x0004, never 0: see the note in pio_read.
-        psx_io::write16(SPU_TRANSFER_CTRL, 0x0004);
+        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0004);
     }
 }
 
@@ -844,18 +807,18 @@ fn pio_write(addr: u32, words: &[u32]) {
 /// that difference is the SPU's read pipeline.
 fn pio_read(addr: u32, out: &mut [u32]) {
     unsafe {
-        psx_io::write16(SPU_TRANSFER_CTRL, 0x0000);
-        psx_io::write16(SPU_TRANSFER_ADDR, (addr / 8) as u16);
-        psx_io::write16(SPU_TRANSFER_CTRL, 0x0004);
-        let cnt = psx_io::read16(SPU_CNT);
-        psx_io::write16(SPU_CNT, (cnt & !0x0030) | 0x0030); // manual read
+        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0000);
+        psx_io::write16(psx_io::spu::TRANSFER_ADDR, (addr / 8) as u16);
+        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0004);
+        let cnt = psx_io::read16(psx_io::spu::SPUCNT);
+        psx_io::write16(psx_io::spu::SPUCNT, (cnt & !0x0030) | 0x0030); // manual read
         for word in out.iter_mut() {
-            let lo = psx_io::read16(SPU_TRANSFER_DATA) as u32;
-            let hi = psx_io::read16(SPU_TRANSFER_DATA) as u32;
+            let lo = psx_io::read16(psx_io::spu::TRANSFER_DATA) as u32;
+            let hi = psx_io::read16(psx_io::spu::TRANSFER_DATA) as u32;
             *word = lo | (hi << 16);
         }
-        psx_io::write16(SPU_CNT, cnt & !0x0030);
-        psx_io::write16(SPU_TRANSFER_CTRL, 0x0000);
+        psx_io::write16(psx_io::spu::SPUCNT, cnt & !0x0030);
+        psx_io::write16(psx_io::spu::TRANSFER_CTRL, 0x0000);
     }
 }
 
@@ -950,34 +913,4 @@ fn tone_expectation(segment: u8) -> &'static str {
         14 => "1575 HZ IF SIZE NEVER MATTERED",
         _ => "?",
     }
-}
-
-fn append(target: &mut [u8], len: &mut usize, bytes: &[u8]) {
-    target[*len..*len + bytes.len()].copy_from_slice(bytes);
-    *len += bytes.len();
-}
-
-fn base64_encode(input: &[u8], output: &mut [u8]) -> usize {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = 0usize;
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let word = (b0 << 16) | (b1 << 8) | b2;
-        output[out] = TABLE[(word >> 18) as usize & 63];
-        output[out + 1] = TABLE[(word >> 12) as usize & 63];
-        output[out + 2] = if chunk.len() > 1 {
-            TABLE[(word >> 6) as usize & 63]
-        } else {
-            b'='
-        };
-        output[out + 3] = if chunk.len() > 2 {
-            TABLE[word as usize & 63]
-        } else {
-            b'='
-        };
-        out += 4;
-    }
-    out
 }

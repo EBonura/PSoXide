@@ -100,7 +100,9 @@ def renderings(gray: np.ndarray):
 
 
 PAGE_SCHEMAS = ("PX7", "PX8")
-PROBE_PREFIXES = tuple(f"PA{n}" for n in range(1, 6)) + tuple(f"SB{n}" for n in range(1, 5))
+# Every prefix a targeted probe emits. SB3 never existed; CL1 is the CD read
+# mechanism probe, which is labelled CL2 on screen but kept its wire prefix.
+PROBE_PREFIXES = ("PA1", "PA2", "PA3", "PA4", "PA5", "SB1", "SB2", "SB4", "CL1")
 
 
 def probe_payload_valid(chunk: str) -> bool:
