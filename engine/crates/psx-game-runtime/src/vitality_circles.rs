@@ -6,6 +6,7 @@
 
 use psx_level::{LevelVitalityCircleRecord, RoomIndex, MAX_VITALITY_CIRCLES};
 
+use crate::poi::xz_within_radius;
 use crate::vitality::{DualVitality, VitalityChannelId};
 
 const TICKS_PER_SECOND: u16 = 60;
@@ -52,9 +53,7 @@ impl VitalityCircleState {
                 continue;
             }
             let radius = u32::from(circle.radius).saturating_add(u32::from(reach));
-            if xz_distance_squared(player_x, player_z, circle.x, circle.z)
-                > u64::from(radius) * u64::from(radius)
-            {
+            if !xz_within_radius([player_x, player_z], [circle.x, circle.z], radius) {
                 continue;
             }
             let bit = 1u32 << index;
@@ -135,14 +134,7 @@ pub const fn circle_axis(circle: &LevelVitalityCircleRecord) -> VitalityChannelI
 }
 
 fn within_circle(x: i32, z: i32, circle: &LevelVitalityCircleRecord) -> bool {
-    let radius = u64::from(circle.radius);
-    xz_distance_squared(x, z, circle.x, circle.z) <= radius * radius
-}
-
-fn xz_distance_squared(ax: i32, az: i32, bx: i32, bz: i32) -> u64 {
-    let dx = i64::from(ax) - i64::from(bx);
-    let dz = i64::from(az) - i64::from(bz);
-    (dx * dx + dz * dz) as u64
+    xz_within_radius([x, z], [circle.x, circle.z], u32::from(circle.radius))
 }
 
 #[cfg(test)]

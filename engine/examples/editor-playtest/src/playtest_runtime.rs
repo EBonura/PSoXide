@@ -1919,7 +1919,7 @@ impl Playtest {
     pub(super) fn find_best_interactable(&mut self) -> Option<usize> {
         let player = self.motor.position();
         let mut best = None;
-        let mut best_distance = u64::MAX;
+        let mut best_distance = u32::MAX;
         for (index, interactable) in INTERACTABLES.iter().enumerate() {
             if !self.point_of_interest_available(interactable)
                 || interactable.room != self.room_index

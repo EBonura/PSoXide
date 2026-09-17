@@ -489,7 +489,7 @@ struct UiLayoutMemo {
     first: usize,
     end: usize,
     /// Bit *i* set means `resolved[i]` holds the layout for node `first + i`.
-    valid: u64,
+    valid: [u32; UI_LAYOUT_MEMO_CAP.div_ceil(32)],
     resolved: [UiResolvedNode; UI_LAYOUT_MEMO_CAP],
 }
 
@@ -498,7 +498,7 @@ static mut UI_LAYOUT_MEMO: UiLayoutMemo = UiLayoutMemo {
     len: 0,
     first: 0,
     end: 0,
-    valid: 0,
+    valid: [0; UI_LAYOUT_MEMO_CAP.div_ceil(32)],
     resolved: [UiResolvedNode::EMPTY; UI_LAYOUT_MEMO_CAP],
 };
 
@@ -522,7 +522,7 @@ fn layout_memo_begin(nodes: &[LevelUiNodeRecord], first: usize, end: usize) -> b
             (*memo).len = nodes.len();
             (*memo).first = first;
             (*memo).end = end;
-            (*memo).valid = 0;
+            (*memo).valid = [0; UI_LAYOUT_MEMO_CAP.div_ceil(32)];
         }
     }
     true
@@ -539,16 +539,16 @@ fn layout_memo_resolved(
     if slot >= UI_LAYOUT_MEMO_CAP {
         return node_resolved_memo(nodes, index, cache);
     }
-    let bit = 1u64 << slot;
+    let (word, bit) = (slot >> 5, 1u32 << (slot & 31));
     // SAFETY: as `layout_memo_begin`.
     unsafe {
         let memo = core::ptr::addr_of_mut!(UI_LAYOUT_MEMO);
-        if (*memo).valid & bit != 0 {
+        if (*memo).valid[word] & bit != 0 {
             return Some((*memo).resolved[slot]);
         }
         let resolved = node_resolved_memo(nodes, index, cache)?;
         (*memo).resolved[slot] = resolved;
-        (*memo).valid |= bit;
+        (*memo).valid[word] |= bit;
         Some(resolved)
     }
 }

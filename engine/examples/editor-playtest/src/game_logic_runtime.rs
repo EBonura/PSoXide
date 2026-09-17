@@ -1089,6 +1089,7 @@ impl Playtest {
     /// already dead, so a newly-connected entity now reading Dead is one this
     /// swing killed. Guarded by `stats.deaths > 0` at the call site, so a
     /// swing that kills nothing never walks the list.
+    // psx-numeric-allow-next-line: swing bitmask snapshot; bit ops only, two-word on R3000
     fn award_melee_arc_souls(&mut self, before: u64, now: SimTick) {
         // psx-numeric-allow-next-line: swing bitmask diff; bit ops only, two-word on R3000
         let connected = self.swing_hit_mask & !before;
@@ -1115,6 +1116,7 @@ impl Playtest {
     /// the same `damage` because the arc path applies one value.
     fn spawn_melee_arc_damage_numbers(
         &mut self,
+        // psx-numeric-allow-next-line: swing bitmask snapshot; bit ops only, two-word on R3000
         before: u64,
         damage: u16,
         channel: DamageNumberChannel,

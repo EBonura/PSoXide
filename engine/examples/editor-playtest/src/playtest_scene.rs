@@ -64,46 +64,16 @@ impl<'a> UiScratch<'a> {
     }
 
     fn push_signed_percent_q12(&mut self, value_q12: i32) {
-        let scaled = i64::from(value_q12).saturating_mul(100);
-        let rounded = if scaled < 0 {
-            (scaled - 2048) / 4096
-        } else {
-            (scaled + 2048) / 4096
-        };
-        if rounded < 0 {
-            self.push_str("-");
-        } else {
-            self.push_str("+");
-        }
-        self.push_u64(rounded.unsigned_abs());
+        let percent = psx_game_runtime::vitality::q12_to_percent(value_q12);
+        self.push_str(if percent < 0 { "-" } else { "+" });
+        self.push_u32(percent.unsigned_abs());
         self.push_str("%");
     }
 
     /// Decimal `value`, 32-bit division only. The R3000 has no 64-bit divide,
-    /// so a per-frame number must not go through `push_u64`.
+    /// so HUD numbers stay in `u32`.
     fn push_u32(&mut self, mut value: u32) {
         let mut digits = [0u8; 10];
-        let mut count = 0usize;
-        loop {
-            digits[count] = b'0' + (value % 10) as u8;
-            count += 1;
-            value /= 10;
-            if value == 0 {
-                break;
-            }
-        }
-        while count > 0 {
-            count -= 1;
-            if self.len >= self.bytes.len() {
-                return;
-            }
-            self.bytes[self.len] = digits[count];
-            self.len += 1;
-        }
-    }
-
-    fn push_u64(&mut self, mut value: u64) {
-        let mut digits = [0u8; 20];
         let mut count = 0usize;
         loop {
             digits[count] = b'0' + (value % 10) as u8;
@@ -169,7 +139,7 @@ impl Playtest {
     /// stripped, so this is a two-arm compare on the remainder.
     ///
     /// The soul total is drawn every frame while the HUD is up, so it formats
-    /// with 32-bit division only: `UiScratch::push_u64` would drag in the
+    /// with 32-bit division only; a 64-bit formatter would drag in the
     /// software `__udivdi3` this target has no business calling from a
     /// per-frame path.
     fn souls_ui_text<'a>(&self, tag: &str, scratch: &'a mut [u8]) -> Option<&'a str> {

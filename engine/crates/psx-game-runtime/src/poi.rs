@@ -144,25 +144,58 @@ impl PoiCandidate {
 /// Squared XZ distance when `target` is inside `radius` of `player`.
 ///
 /// The axis precheck both avoids unnecessary multiplies and bounds each delta
-/// to `u16::MAX`, so the exact squared sum fits in `u64` without saturation.
-/// Keeping this primitive shared prevents game integrations from accidentally
-/// reintroducing the saturated-`i32` range bug while adapting cooked records.
+/// to `u16::MAX`, so each square fits in 32 bits and only their sum can carry.
+/// A carry is already farther than any `u16` radius, so the result is exact
+/// without a 64-bit type. Keeping this primitive shared prevents game
+/// integrations from accidentally reintroducing the saturated-`i32` range bug
+/// while adapting cooked records.
 pub fn xz_distance_squared_within_radius(
     player: [i32; 2],
     target: [i32; 2],
     radius: u16,
-) -> Option<u64> {
+) -> Option<u32> {
     let radius = u32::from(radius);
     let dx = player[0].abs_diff(target[0]);
     let dz = player[1].abs_diff(target[1]);
     if dx > radius || dz > radius {
         return None;
     }
-    let dx = u64::from(dx);
-    let dz = u64::from(dz);
-    let radius_squared = u64::from(radius) * u64::from(radius);
-    let distance = dx * dx + dz * dz;
-    (distance <= radius_squared).then_some(distance)
+    let (distance, carried) = (dx * dx).overflowing_add(dz * dz);
+    (!carried && distance <= radius * radius).then_some(distance)
+}
+
+/// Whether `b` lies within `radius` of `a` on the XZ plane, exactly, for any
+/// coordinates and any radius.
+///
+/// A radius past `u16::MAX` (a circle widened by a weapon's reach) squares
+/// beyond 32 bits. The R3000 has no 64-bit arithmetic, so the squares are
+/// carried as (high, low) halves instead.
+pub fn xz_within_radius(a: [i32; 2], b: [i32; 2], radius: u32) -> bool {
+    let dx = a[0].abs_diff(b[0]);
+    let dz = a[1].abs_diff(b[1]);
+    if dx > radius || dz > radius {
+        return false;
+    }
+    let (dx_hi, dx_lo) = square_wide(dx);
+    let (dz_hi, dz_lo) = square_wide(dz);
+    let (lo, carry) = dx_lo.overflowing_add(dz_lo);
+    // Two squares of at most `radius` sum below 2^65; past 64 bits is outside.
+    let Some(hi) = dx_hi
+        .checked_add(dz_hi)
+        .and_then(|hi| hi.checked_add(u32::from(carry)))
+    else {
+        return false;
+    };
+    (hi, lo) <= square_wide(radius)
+}
+
+/// `x * x` as (high, low) 32-bit halves, from 16-bit limbs.
+const fn square_wide(x: u32) -> (u32, u32) {
+    let (h, l) = (x >> 16, x & 0xFFFF);
+    // x^2 = h^2 * 2^32 + h*l * 2^17 + l^2, and each product fits in 32 bits.
+    let cross = h * l;
+    let (lo, carry) = (l * l).overflowing_add(cross << 17);
+    (h * h + (cross >> 15) + carry as u32, lo)
 }
 
 /// Return the nearest available point of interest whose XZ radius contains
@@ -174,7 +207,7 @@ pub fn nearest_available_poi(
     save: &SaveBlock,
 ) -> Option<usize> {
     let mut best = None;
-    let mut best_distance = u64::MAX;
+    let mut best_distance = u32::MAX;
     for (index, candidate) in candidates.iter().copied().enumerate() {
         if candidate.room != room || !candidate.is_available(save) {
             continue;
@@ -539,6 +572,69 @@ mod tests {
                 [i32::from(u16::MAX), i32::from(u16::MAX)],
                 u16::MAX,
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn wide_radius_test_matches_64_bit_arithmetic() {
+        let edge = [
+            0,
+            1,
+            2,
+            0xFFFF,
+            0x1_0000,
+            0x1_0001,
+            131_070,
+            0x7FFF_FFFF,
+            u32::MAX,
+        ];
+        for x in edge {
+            let (hi, lo) = square_wide(x);
+            assert_eq!(
+                (u64::from(hi) << 32) | u64::from(lo),
+                u64::from(x) * u64::from(x)
+            );
+        }
+        let coords = [
+            i32::MIN,
+            -131_071,
+            -92_681,
+            -65_536,
+            -1,
+            0,
+            1,
+            3,
+            46_341,
+            65_535,
+            92_682,
+            131_070,
+            i32::MAX,
+        ];
+        let radii = [0, 1, 5, 65_535, 65_536, 92_682, 131_070, u32::MAX];
+        for &ax in &coords {
+            for &bx in &coords {
+                for &bz in &coords {
+                    for &radius in &radii {
+                        let dx = i128::from(ax) - i128::from(bx);
+                        let dz = i128::from(bz);
+                        let expected = dx * dx + dz * dz <= i128::from(radius) * i128::from(radius);
+                        assert_eq!(
+                            xz_within_radius([ax, 0], [bx, bz], radius),
+                            expected,
+                            "a=({ax},0) b=({bx},{bz}) radius={radius}"
+                        );
+                    }
+                }
+            }
+        }
+        // The u16 form agrees with it and still reports the exact distance.
+        assert_eq!(
+            xz_distance_squared_within_radius([0, 0], [46_340, 46_340], u16::MAX),
+            Some(46_340 * 46_340 * 2)
+        );
+        assert_eq!(
+            xz_distance_squared_within_radius([0, 0], [65_535, 1], u16::MAX),
             None
         );
     }

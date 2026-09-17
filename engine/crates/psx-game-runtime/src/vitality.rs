@@ -688,16 +688,125 @@ fn scale_u16_q12(value: u16, multiplier_q12: u16) -> u16 {
     scaled.min(u32::from(u16::MAX)) as u16
 }
 
+/// A Q12 ratio as a whole percentage, rounded half away from zero.
+///
+/// For HUD text. Split at the Q12 point like [`scale_i32_q12`], so nothing
+/// leaves 32 bits.
+pub const fn q12_to_percent(value_q12: i32) -> i32 {
+    let magnitude = value_q12.unsigned_abs();
+    let percent = (magnitude >> 12) * 100 + (((magnitude & 0xFFF) * 100 + 2048) >> 12);
+    if value_q12 < 0 {
+        -(percent as i32)
+    } else {
+        percent as i32
+    }
+}
+
+/// `value * multiplier / 4096`, rounded half away from zero and saturated.
+///
+/// Splitting the magnitude at the Q12 point keeps the product in 32 bits:
+/// `a * m = (a >> 12) * m * 4096 + (a & 4095) * m`, so the quotient is the
+/// first product plus the rounded remainder term, with no 64-bit divide.
 fn scale_i32_q12(value: i32, multiplier_q12: u16) -> i32 {
-    let scaled = i64::from(value) * i64::from(multiplier_q12);
-    let rounding = i64::from(VITALITY_Q12_ONE / 2) * i64::from(value.signum());
-    ((scaled + rounding) / i64::from(VITALITY_Q12_ONE))
-        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    let magnitude = value.unsigned_abs();
+    let multiplier = u32::from(multiplier_q12);
+    let half = u32::from(VITALITY_Q12_ONE / 2);
+    let fraction = ((magnitude & 0xFFF) * multiplier + half) >> 12;
+    let scaled = (magnitude >> 12)
+        .checked_mul(multiplier)
+        .and_then(|whole| whole.checked_add(fraction));
+    match (scaled, value < 0) {
+        (Some(scaled), false) => scaled.min(i32::MAX as u32) as i32,
+        (Some(scaled), true) if scaled <= i32::MAX as u32 => -(scaled as i32),
+        (_, false) => i32::MAX,
+        (_, true) => i32::MIN,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn q12_percent_matches_64_bit_arithmetic() {
+        for value in [
+            i32::MIN,
+            -4096,
+            -2069,
+            -21,
+            -20,
+            -1,
+            0,
+            1,
+            20,
+            21,
+            2048,
+            4096,
+            6144,
+            i32::MAX,
+        ] {
+            let scaled = i64::from(value) * 100;
+            let expected = if scaled < 0 {
+                (scaled - 2048) / 4096
+            } else {
+                (scaled + 2048) / 4096
+            };
+            assert_eq!(i64::from(q12_to_percent(value)), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn q12_scale_matches_64_bit_arithmetic() {
+        let values = [
+            i32::MIN,
+            i32::MIN + 1,
+            -2_147_000_000,
+            -1_048_577,
+            -4097,
+            -4096,
+            -2049,
+            -2048,
+            -2047,
+            -1,
+            0,
+            1,
+            2047,
+            2048,
+            2049,
+            4095,
+            4096,
+            4097,
+            123_456_789,
+            i32::MAX - 1,
+            i32::MAX,
+        ];
+        let multipliers = [
+            0u16,
+            1,
+            2047,
+            2048,
+            4095,
+            4096,
+            4097,
+            6144,
+            32_768,
+            u16::MAX,
+        ];
+        for value in values {
+            for multiplier in multipliers {
+                let scaled = i64::from(value) * i64::from(multiplier);
+                let rounding = 2048 * i64::from(value.signum());
+                let expected = ((scaled + rounding) / 4096)
+                    .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+                    as i32;
+                assert_eq!(
+                    scale_i32_q12(value, multiplier),
+                    expected,
+                    "{value} * {multiplier}"
+                );
+            }
+        }
+    }
 
     const MODULES: [psx_level::BoostModuleRecord; 3] = [
         psx_level::BoostModuleRecord {

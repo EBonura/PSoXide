@@ -726,8 +726,10 @@ impl BspRuntime {
         let mut visibility = WorldObjectVisibility::NONE;
         let mut first = 0;
         while first < count {
-            let chunk_count = (count - first).min(u64::BITS as usize);
-            let mut bounds = [BspVisibilityBounds::EMPTY; u64::BITS as usize];
+            // One `visible_bounds_mask` call answers this many bounds.
+            const MASK_BITS: usize = 64;
+            let chunk_count = (count - first).min(MASK_BITS);
+            let mut bounds = [BspVisibilityBounds::EMPTY; MASK_BITS];
             for local in 0..chunk_count {
                 let object = &WORLD_OBJECTS[first + local];
                 bounds[local] = BspVisibilityBounds::aabb(object.bounds_min, object.bounds_max);
