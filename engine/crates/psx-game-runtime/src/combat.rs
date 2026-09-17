@@ -100,9 +100,9 @@ pub fn transform_actor_combat_capsule_sweep(
                     origin,
                     [sampled_origin.x, sampled_origin.y, sampled_origin.z],
                 );
-                for axis in 0..3 {
-                    capsule.start[axis] = capsule.start[axis].saturating_add(offset[axis]);
-                    capsule.end[axis] = capsule.end[axis].saturating_add(offset[axis]);
+                for (axis, delta) in offset.into_iter().enumerate() {
+                    capsule.start[axis] = capsule.start[axis].saturating_add(delta);
+                    capsule.end[axis] = capsule.end[axis].saturating_add(delta);
                 }
             }
         }

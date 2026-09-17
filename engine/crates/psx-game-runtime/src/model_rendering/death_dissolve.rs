@@ -131,9 +131,9 @@ pub(super) fn draw<const OT_DEPTH: usize>(
                 .with_raw_texture(false)
                 .with_blend_mode(BlendMode::AddQuarter)
                 .with_tint((
-                    (i32::from(r) * strength >> 8) as u8,
-                    (i32::from(g) * strength >> 8) as u8,
-                    (i32::from(b) * strength >> 8) as u8,
+                    ((i32::from(r) * strength) >> 8) as u8,
+                    ((i32::from(g) * strength) >> 8) as u8,
+                    ((i32::from(b) * strength) >> 8) as u8,
                 ))
         } else {
             material

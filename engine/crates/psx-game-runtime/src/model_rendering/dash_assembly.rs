@@ -275,16 +275,16 @@ fn departure_vertices(vertices: [WorldVertex; 3], index: usize, age: u32) -> [Wo
     let angle = Angle::from_q12((index as u16).wrapping_mul(1567));
     let radius = age.min(DEPARTURE_TICKS) as i32;
     let drift = WorldVertex::new(
-        angle.sin_q12() * radius >> 12,
+        (angle.sin_q12() * radius) >> 12,
         (index as i32 % 5 - 1) * radius / 5,
-        angle.cos_q12() * radius >> 12,
+        (angle.cos_q12() * radius) >> 12,
     );
     let scale = 384 - age.min(DEPARTURE_TICKS) as i32 * 128 / DEPARTURE_TICKS as i32;
     vertices.map(|v| {
         WorldVertex::new(
-            center.x + drift.x + ((v.x - center.x) * scale >> 8),
-            center.y + drift.y + ((v.y - center.y) * scale >> 8),
-            center.z + drift.z + ((v.z - center.z) * scale >> 8),
+            center.x + drift.x + (((v.x - center.x) * scale) >> 8),
+            center.y + drift.y + (((v.y - center.y) * scale) >> 8),
+            center.z + drift.z + (((v.z - center.z) * scale) >> 8),
         )
     })
 }
@@ -353,15 +353,15 @@ fn scatter_triangle(triangle: &mut TriTextured, index: u32, height: i32, distanc
     ];
     let (dx, dy) = DIRECTIONS[(index.wrapping_mul(5) & 7) as usize];
     let radius = height * distance / 640;
-    let dx = dx * radius >> 8;
-    let dy = dy * radius >> 8;
+    let dx = (dx * radius) >> 8;
+    let dy = (dy * radius) >> 8;
     // Keep travelling facets legible at native resolution. Shrinking them to
     // points hid most of reconstruction even when its timer was longer.
     let scale = 256 - distance / 4;
     let moved = corners.map(|(x, y)| {
         (
-            cx + dx + ((x - cx) * scale >> 8),
-            cy + dy + ((y - cy) * scale >> 8),
+            cx + dx + (((x - cx) * scale) >> 8),
+            cy + dy + (((y - cy) * scale) >> 8),
         )
     });
     let safe = moved

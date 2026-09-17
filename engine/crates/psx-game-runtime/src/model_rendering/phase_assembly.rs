@@ -58,7 +58,7 @@ impl ModelPhaseAssembly {
         let t = i32::from(age) * 256 / i32::from(FLIGHT_TICKS);
         // Slow down as each piece finds its place, without an overshoot.
         let remaining = 256 - t;
-        (age, remaining * remaining >> 8)
+        (age, (remaining * remaining) >> 8)
     }
 
     /// Once assembled, draw the ordinary shaded model and fade its packets.
@@ -71,7 +71,7 @@ impl ModelPhaseAssembly {
             .elapsed
             .saturating_sub(self.duration.saturating_add(HOLD_TICKS));
         let t = i32::from(restore.min(RESTORE_TICKS)) * 256 / i32::from(RESTORE_TICKS);
-        256 - (((t * t) >> 8) * (768 - 2 * t) >> 8)
+        256 - ((((t * t) >> 8) * (768 - 2 * t)) >> 8)
     }
 
     fn tint(self, base: (u8, u8, u8)) -> (u8, u8, u8) {
@@ -167,14 +167,14 @@ fn burst_triangle(
     let displaced = displace(center, offset, projection)?;
     // Treat each small fragment as a rigid plane: project its centre once,
     // then scale its corners for depth and dissolution.
-    let scale = (256 - (progress * progress >> 8)) * center.sz / displaced.sz;
+    let scale = (256 - ((progress * progress) >> 8)) * center.sz / displaced.sz;
     let points = target.map(|p| {
         ProjectedVertex::new(
             clamp_i16(
-                i32::from(displaced.sx) + ((i32::from(p.sx) - i32::from(center.sx)) * scale >> 8),
+                i32::from(displaced.sx) + (((i32::from(p.sx) - i32::from(center.sx)) * scale) >> 8),
             ),
             clamp_i16(
-                i32::from(displaced.sy) + ((i32::from(p.sy) - i32::from(center.sy)) * scale >> 8),
+                i32::from(displaced.sy) + (((i32::from(p.sy) - i32::from(center.sy)) * scale) >> 8),
             ),
             p.sz + offset.z,
         )
@@ -228,9 +228,9 @@ pub(super) fn draw<const OT_DEPTH: usize>(
         i32::from(assembly.elapsed.min(BURST_TICKS)) * 256 / i32::from(BURST_TICKS);
     let burst_fade = 256 - burst_progress;
     let burst_material = material.with_raw_texture(false).with_tint((
-        (i32::from(material.tint().0) * burst_fade >> 8) as u8,
-        (i32::from(material.tint().1) * burst_fade >> 8) as u8,
-        (i32::from(material.tint().2) * burst_fade >> 8) as u8,
+        ((i32::from(material.tint().0) * burst_fade) >> 8) as u8,
+        ((i32::from(material.tint().1) * burst_fade) >> 8) as u8,
+        ((i32::from(material.tint().2) * burst_fade) >> 8) as u8,
     ));
     let attached_material = if bursting {
         burst_material
@@ -247,9 +247,9 @@ pub(super) fn draw<const OT_DEPTH: usize>(
         for (index, offset) in burst_offsets.iter_mut().enumerate() {
             let angle = Angle::from_q12(index as u16 * 512);
             let vector = camera.view_vertex(WorldVertex::new(
-                angle.sin_q12() * radius >> 12,
+                (angle.sin_q12() * radius) >> 12,
                 (index as i32 % 3 - 1) * radius / 2,
-                angle.cos_q12() * radius >> 12,
+                (angle.cos_q12() * radius) >> 12,
             ));
             *offset = ViewVertex::new(vector.x - zero.x, vector.y - zero.y, vector.z - zero.z);
         }
@@ -343,9 +343,9 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             let angle = Angle::from_q12((index as u16).wrapping_mul(1567));
             let radius = assembly.height * (65 + (index % 4) as i32 * 12) / 100;
             let offset = camera.view_vertex(WorldVertex::new(
-                (angle.sin_q12() * radius >> 12) * remaining >> 8,
-                (((index % 7) as i32 - 3) * assembly.height / 16) * remaining >> 8,
-                (angle.cos_q12() * radius >> 12) * remaining >> 8,
+                (((angle.sin_q12() * radius) >> 12) * remaining) >> 8,
+                ((((index % 7) as i32 - 3) * assembly.height / 16) * remaining) >> 8,
+                (((angle.cos_q12() * radius) >> 12) * remaining) >> 8,
             ));
             let offset = ViewVertex::new(offset.x - zero.x, offset.y - zero.y, offset.z - zero.z);
             let [Some(a), Some(b), Some(c)] =
@@ -355,16 +355,16 @@ pub(super) fn draw<const OT_DEPTH: usize>(
             };
             let strength = i32::from(age) * 256 / i32::from(FLIGHT_TICKS);
             let tint = (
-                (i32::from(tint.0) * strength >> 8) as u8,
-                (i32::from(tint.1) * strength >> 8) as u8,
-                (i32::from(tint.2) * strength >> 8) as u8,
+                ((i32::from(tint.0) * strength) >> 8) as u8,
+                ((i32::from(tint.1) * strength) >> 8) as u8,
+                ((i32::from(tint.2) * strength) >> 8) as u8,
             );
             let center_x = (i32::from(a.sx) + i32::from(b.sx) + i32::from(c.sx)) / 3;
             let center_y = (i32::from(a.sy) + i32::from(b.sy) + i32::from(c.sy)) / 3;
             let scale = 256 + remaining * 2;
             let points = [a, b, c].map(|p| ProjectedLit {
-                sx: clamp_i16(center_x + ((i32::from(p.sx) - center_x) * scale >> 8)),
-                sy: clamp_i16(center_y + ((i32::from(p.sy) - center_y) * scale >> 8)),
+                sx: clamp_i16(center_x + (((i32::from(p.sx) - center_x) * scale) >> 8)),
+                sy: clamp_i16(center_y + (((i32::from(p.sy) - center_y) * scale) >> 8)),
                 sz: p.sz.clamp(0, 65535) as u16,
                 r: tint.0,
                 g: tint.1,
