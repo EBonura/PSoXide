@@ -5,9 +5,11 @@ The R3000 has no load interlock: the instruction after a load still sees the
 register's old value. LLVM inserts the required nop after a load, but its
 MipsDelaySlotFiller can then hoist that load into a branch delay slot, and the
 first instruction of the branch target (or of the fall-through) reads the
-register one instruction too early. The guest builds pass
-`-Cllvm-args=-disable-mips-df-backward-search` to stop it; this scan proves an
-image is clean, whatever built it.
+register one instruction too early. A guest either passes
+`-Cllvm-args=-disable-mips-df-backward-search`, which stops the hoist and
+leaves a nop in most delay slots, or keeps every filler search on and runs
+`tools/hazard_patch.py` after the link (`tools/sdk-examples.mk` does the
+latter). This scan proves an image is clean, whatever built it.
 
     python3 tools/hazard_scan.py path/to/game.exe [more.exe ...]
 
