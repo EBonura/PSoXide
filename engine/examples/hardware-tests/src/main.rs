@@ -2757,6 +2757,11 @@ impl Scene for HardwareTests {
                 | Mode::TransitionProbe
                 | Mode::VoiceProbe
                 | Mode::AudioProbe
+                // These two draw their own title at the top of the screen,
+                // like the PA probes; with the harness header underneath, the
+                // two lines of text overprinted each other.
+                | Mode::SampleProbe
+                | Mode::CdChainProbe
                 | Mode::ControllerTest
                 | Mode::VideoLevels
                 | Mode::MemoryCard
