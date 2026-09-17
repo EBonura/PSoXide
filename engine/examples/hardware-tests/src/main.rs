@@ -4659,7 +4659,6 @@ fn run_timing_scan() -> TimingReport {
     let (refresh_period, refresh_stall) = sample_dram_refresh();
     push_timing_record(&mut records, &mut next, refresh_period);
     push_timing_record(&mut records, &mut next, refresh_stall);
-    debug_assert_eq!(next, TIMING_RECORD_COUNT);
 
     let mut memory_control = [0u32; MEMORY_CONTROL_REGISTER_COUNT];
     let mut register = 0usize;
@@ -4711,8 +4710,13 @@ fn push_timing_record(
     tty::print(" max=");
     tty_print_dec_u16(record.max);
     tty::println("");
-    records[*next] = record;
-    *next += 1;
+    // Saturate rather than index past the end: with panic=abort an overflow
+    // would hang the console mid-scan. tools/test_hwtest_tools.py keeps the
+    // slot count ahead of the record count.
+    if let Some(slot) = records.get_mut(*next) {
+        *slot = record;
+        *next += 1;
+    }
     draw_init_progress(*next, TIMING_RECORD_COUNT, (80, 200, 255));
     // Between records the console is briefly ours again: let START or
     // TRIANGLE skip the rest of the scan. Remaining records stay pending
@@ -4840,14 +4844,21 @@ fn scan_aborted() -> bool {
     unsafe { core::ptr::read_volatile(&raw const SCAN_ABORT) }
 }
 
-// inline(never): with every instantiation inlined, run_timing_scan grows
-// past the +-128 KiB reach of a MIPS PC16 branch and the build dies with
-// "out of range PC16 fixup".
-#[inline(never)]
+// One shared body behind a dyn call. A generic body is monomorphised once per
+// call site, which is ~150 copies of the sampling loop in an EXE that has a
+// few sectors of headroom before it reaches the CDTEST region; and inlined,
+// those copies push run_timing_scan past the +-128 KiB reach of a MIPS PC16
+// branch. The indirect call sits outside every probe's measured window.
+#[inline(always)]
 fn sample_timing<F>(id: u8, work: u16, mut probe: F) -> TimingRecord
 where
     F: FnMut() -> u16,
 {
+    sample_timing_dyn(id, work, &mut probe)
+}
+
+#[inline(never)]
+fn sample_timing_dyn(id: u8, work: u16, probe: &mut dyn FnMut() -> u16) -> TimingRecord {
     // Checked here rather than at the push, because the measurement runs
     // as the push's argument: this is the only place that can skip it.
     if scan_aborted() {
