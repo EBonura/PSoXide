@@ -42,6 +42,8 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
 - `crates/`: shared hardware, disc, trace and cooked-asset format contracts.
 - `tools/mkisopsx`: host-side BIN/CUE mastering.
 - `tools/psoxide-link`: source hydration for pinned downstream builds.
+- `tools/psoxide-pgo`: emulator PC histogram to LLVM sample profile, for
+  profile-guided guest builds with no instrumentation.
 - `tools/hazard_scan.py`, `hazard_patch.py`, `guest_symbol_gate.sh`: guest checks.
 
 The root host workspace and `sdk/` device workspace intentionally remain

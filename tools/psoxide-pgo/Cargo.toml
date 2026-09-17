@@ -1,0 +1,15 @@
+[package]
+name    = "psoxide-pgo"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Turn an emulator PC histogram into an LLVM sample profile for a PS1 guest"
+
+[dependencies]
+gimli  = { version = "0.34", default-features = false, features = ["read", "std"] }
+object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
+
+[[bin]]
+name = "psoxide-pgo"
+path = "src/main.rs"
+
