@@ -149,7 +149,7 @@ pub(crate) struct HandoffProbe {
     event_vblank_after: [u32; STAGE_COUNT],
     expected_hash: u32,
     observed_hash: u32,
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
     binary_crc: u32,
 }
@@ -171,7 +171,7 @@ impl HandoffProbe {
             event_vblank_after: [0; STAGE_COUNT],
             expected_hash: 0,
             observed_hash: 0,
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
             binary_crc: 0,
         }

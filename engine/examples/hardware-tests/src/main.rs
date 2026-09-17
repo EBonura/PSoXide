@@ -2946,8 +2946,7 @@ fn draw_rows(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
     let mut visible_index = 0usize;
     let mut row = 0usize;
 
-    for index in 0..TEST_COUNT {
-        let spec = TESTS[index];
+    for (index, spec) in TESTS.iter().copied().enumerate() {
         if !mode.includes_test(spec) {
             continue;
         }
@@ -3283,7 +3282,7 @@ fn page_count_for_mode(mode: Mode) -> usize {
     if count == 0 {
         1
     } else {
-        (count + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE
+        count.div_ceil(ROWS_PER_PAGE)
     }
 }
 
@@ -3391,14 +3390,10 @@ fn print_section_report(mode: Mode, report: SectionReport) {
 }
 
 fn clipped_text(text: &'static str, max_chars: usize) -> &'static str {
-    let mut count = 0usize;
-    for (index, _) in text.char_indices() {
-        if count == max_chars {
-            return &text[..index];
-        }
-        count += 1;
+    match text.char_indices().nth(max_chars) {
+        Some((index, _)) => &text[..index],
+        None => text,
     }
-    text
 }
 
 fn diagnostic_lines_for_case(index: usize) -> &'static [&'static str] {
@@ -5392,7 +5387,7 @@ fn timed_fill_batch(count: u16, command: u32, size: u32, kind: FillKind, dither:
                 // wide texture (cache-hostile) or resample a small one
                 // (cache-friendly) at identical pixel cost.
                 gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0((u32::from(tpage) << 16) | 0x0000);
+                gpu_io::write_gp0(u32::from(tpage) << 16);
                 gpu_io::write_gp0(((y) << 16) | (x + size));
                 gpu_io::write_gp0(u32::from(span) & 0xFF);
                 gpu_io::write_gp0(((y + size) << 16) | x);
@@ -5411,7 +5406,7 @@ fn timed_fill_batch(count: u16, command: u32, size: u32, kind: FillKind, dither:
                 // extent. Omitting it shifts the extent into the UV slot and
                 // the GPU draws something unrelated to what was asked for.
                 gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0((u32::from(clut) << 16) | 0x0000);
+                gpu_io::write_gp0(u32::from(clut) << 16);
                 gpu_io::write_gp0((size << 16) | size);
             }
         }
@@ -8215,10 +8210,10 @@ fn test_gpu_tri_coord_wrap() -> TestResult {
 // 16x16 15bpp texture into a tpage-aligned slot, then draw + read back.
 fn test_gpu_textured_gouraud_tri() -> TestResult {
     let mut tex = [0u16; 16 * 16];
-    for i in 0..tex.len() {
+    for (i, texel) in tex.iter_mut().enumerate() {
         let x = (i % 16) as u16;
         let y = (i / 16) as u16;
-        tex[i] = 0x8000 | (x << 10) | (y << 5) | ((x ^ y) & 0x1f);
+        *texel = 0x8000 | (x << 10) | (y << 5) | ((x ^ y) & 0x1f);
     }
     psx_vram::upload_16bpp(psx_vram::VramRect::new(768, 256, 16, 16), &tex);
     let tpage = Tpage::new(768, 256, TexDepth::Bit15).uv_tpage_word(0);
@@ -8596,13 +8591,13 @@ fn fnv16_halfwords(hws: &[u16]) -> u32 {
 /// SDK's DMA upload.
 pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
     let words = out.len() as u32;
-    let block_size: u32 = if words % 16 == 0 {
+    let block_size: u32 = if words.is_multiple_of(16) {
         16
-    } else if words % 8 == 0 {
+    } else if words.is_multiple_of(8) {
         8
-    } else if words % 4 == 0 {
+    } else if words.is_multiple_of(4) {
         4
-    } else if words % 2 == 0 {
+    } else if words.is_multiple_of(2) {
         2
     } else {
         1
@@ -8630,7 +8625,7 @@ pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
 fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) -> u32 {
     use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
     let words = out.len() as u32;
-    debug_assert!(block_size != 0 && words % block_size == 0);
+    debug_assert!(block_size != 0 && words.is_multiple_of(block_size));
     let block_count = words / block_size;
     unsafe {
         let spucnt = psx_io::read16(SPUCNT) & !0x0030;
@@ -8848,7 +8843,8 @@ fn raster_hashes() -> [u32; 22] {
         out[index] = gpu_draw_and_hash(&quad, QuadFlat::WORDS);
         index += 1;
     }
-    for corners in [[(8, 8), (88, 8), (8, 88), (88, 88)]] {
+    {
+        let corners = [(8, 8), (88, 8), (8, 88), (88, 88)];
         let quad = QuadGouraud::new(
             corners,
             [(0xFF, 0, 0), (0, 0xFF, 0), (0, 0, 0xFF), (0xFF, 0xFF, 0)],
@@ -9349,7 +9345,7 @@ fn test_gpu_dma_direction_after_otc() -> TestResult {
     // The helper is bounded now, so a wedged OTC channel reports instead
     // of hanging the battery; bit 2 carries whether it completed.
     // SAFETY: single-threaded test battery, no other live borrow of OT.
-    let cleared = dma::clear_ordering_table(unsafe { &mut *(&raw mut OT) });
+    let cleared = dma::clear_ordering_table(unsafe { &mut OT });
     gpu_io::write_gp1(0x0400_0000 | 2);
     let observed = ((gpu_io::gpustat().bits() >> 29) & 0b11) | ((cleared as u32) << 2);
     expect_eq(0b110, observed, "dma dir | otc done")
@@ -9516,11 +9512,7 @@ fn test_timer2_wrap_irq_latch() -> TestResult {
 fn test_timer1_hblank_clock_advances() -> TestResult {
     let delta = timer_delta(timers::Timer::Timer1, TIMER_MODE_CLOCK_SOURCE_1, 0x20000);
     timers::set_mode(timers::Timer::Timer1, 0x0103);
-    if (1..1024).contains(&delta) {
-        TestResult::info(1024, delta as u32, "hblank")
-    } else {
-        TestResult::info(1024, delta as u32, "hblank")
-    }
+    TestResult::info(1024, delta as u32, "hblank")
 }
 
 fn test_timer0_dot_clock_ratio() -> TestResult {

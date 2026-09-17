@@ -92,7 +92,7 @@ pub(crate) struct VoiceProbe {
     expected_tail_hash: u32,
     observed_tail_hash: u32,
     upload_timing: UploadTiming,
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
     binary_crc: u32,
 }
@@ -115,7 +115,7 @@ impl VoiceProbe {
                 max_mode_polls: 0,
                 max_drain_polls: 0,
             },
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
             binary_crc: 0,
         }
@@ -576,15 +576,15 @@ fn fnv32_words(words: &[u32]) -> u32 {
 /// allowing the final FIFO words to drain before returning to Stop mode.
 fn upload_adpcm_settled(dest: SpuAddr, bytes: &[u8]) -> UploadTiming {
     use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
-    assert!(bytes.as_ptr() as usize % 4 == 0 && bytes.len().is_multiple_of(4));
+    assert!((bytes.as_ptr() as usize).is_multiple_of(4) && bytes.len().is_multiple_of(4));
     let words = (bytes.len() / 4) as u32;
-    let block_size = if words % 16 == 0 {
+    let block_size = if words.is_multiple_of(16) {
         16
-    } else if words % 8 == 0 {
+    } else if words.is_multiple_of(8) {
         8
-    } else if words % 4 == 0 {
+    } else if words.is_multiple_of(4) {
         4
-    } else if words % 2 == 0 {
+    } else if words.is_multiple_of(2) {
         2
     } else {
         1
@@ -663,7 +663,7 @@ fn stage_description(stage: u8) -> &'static str {
 
 fn stage_color(stage: u8) -> (u8, u8, u8) {
     match stage {
-        1 | 2 | 3 => (255, 128, 96),
+        1..=3 => (255, 128, 96),
         4 | 5 => (96, 240, 128),
         _ => (255, 216, 96),
     }

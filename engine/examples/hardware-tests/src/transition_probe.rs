@@ -82,7 +82,7 @@ pub(crate) struct TransitionProbe {
     event_vblanks: [u16; STAGE_COUNT],
     expected_hash: u32,
     observed_hash: u32,
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
     binary_crc: u32,
 }
@@ -101,7 +101,7 @@ impl TransitionProbe {
             event_vblanks: [0; STAGE_COUNT],
             expected_hash: 0,
             observed_hash: 0,
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
             binary_crc: 0,
         }

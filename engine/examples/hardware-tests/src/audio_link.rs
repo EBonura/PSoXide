@@ -88,7 +88,7 @@ const fn tone_block(period: usize, flags: u8) -> [u8; BLOCK_BYTES] {
             LOW_NIBBLE
         };
         let byte = 2 + sample / 2;
-        if sample % 2 == 0 {
+        if sample.is_multiple_of(2) {
             block[byte] |= nibble;
         } else {
             block[byte] |= nibble << 4;
@@ -221,7 +221,7 @@ fn frame_bit(index: usize, payload: &[u8], crc: u32, total_bits: usize) -> bool 
     let index = index - CALIBRATION_BLOCKS * 2;
     if index < 64 {
         // Alternating preamble: a clean 1/0 sequence the host can lock to.
-        return index % 2 == 0;
+        return index.is_multiple_of(2);
     }
     let index = index - 64;
     if index < 16 {

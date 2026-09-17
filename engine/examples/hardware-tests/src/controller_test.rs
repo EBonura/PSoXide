@@ -293,7 +293,7 @@ fn required_buttons(mode: PadMode) -> u16 {
     } else if mode.has_sticks() {
         u16::MAX
     } else {
-        u16::MAX & !(button::L3 | button::R3)
+        !(button::L3 | button::R3)
     }
 }
 
@@ -356,11 +356,7 @@ fn draw_drift_status(font: &FontAtlas, x: i16, y: i16, drift: DriftMonitor) {
 }
 
 const fn axis_offset(value: u8) -> u8 {
-    if value >= 0x80 {
-        value - 0x80
-    } else {
-        0x80 - value
-    }
+    value.abs_diff(0x80)
 }
 
 fn stick_offset(sticks: AnalogSticks) -> u8 {

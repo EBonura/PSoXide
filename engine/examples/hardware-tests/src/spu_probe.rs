@@ -180,7 +180,7 @@ pub(crate) struct SpuProbe {
     words: [u32; WORDS],
     /// Words 0 and 4 of the uploaded table, read back from SPU RAM.
     table_back: [u32; 2],
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
     binary_crc: u32,
 }
@@ -194,7 +194,7 @@ impl SpuProbe {
             run: 0,
             words: [0; WORDS],
             table_back: [0; 2],
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
             binary_crc: 0,
         }
@@ -254,18 +254,16 @@ impl SpuProbe {
                 _ => {}
             },
             // REKEY at PICO-8's note rate.
-            9 => {
-                if self.frame < tone_frames && self.frame % 4 == 0 {
+            9
+                if self.frame < tone_frames && self.frame.is_multiple_of(4) => {
                     key_voice(VOICE, UNITY_PITCH, SPU_TABLE_ADDR);
                 }
-            }
             // ADDRSWAP: new start address, no key_on. Silicon should honour
             // it only at the loop point, and the recording times that.
-            10 => {
-                if self.frame == tone_frames / 2 {
+            10
+                if self.frame == tone_frames / 2 => {
                     Voice::new(VOICE).set_start_addr(SpuAddr::new(SPU_TABLE2_ADDR));
                 }
-            }
             // VOICES: 1, then 4, then 8 keyed together.
             11 => {
                 if self.frame == tone_frames / 3 {
@@ -281,39 +279,35 @@ impl SpuProbe {
             // PARKED: a one-shot followed by a self-looping silent block.
             // ENDX is cleared at key-on so the payload's "early" word reports
             // only what this voice did during this segment.
-            15 => {
-                if self.frame == 0 {
+            15
+                if self.frame == 0 => {
                     Voice::clear_ended(0x00FF_FFFF);
                     key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
                 }
-            }
             // UNPARKED: the same one-shot with a loud neighbour behind it and
             // nothing to park on. Audible on a capture as well as readable in
             // the payload, because a voice that runs on drops an octave.
-            16 => {
-                if self.frame == 0 {
+            16
+                if self.frame == 0 => {
                     Voice::clear_ended(0x00FF_FFFF);
                     key_voice(VOICE, UNITY_PITCH, SPU_TERM_UNPARKED_ADDR);
                 }
-            }
             // ENDXBIT: does the sticky END flag set for the right voice, and
             // only that voice? Keys voice 1 rather than 0, so a payload that
             // reports bit 0 is reporting a stale flag.
-            17 => {
-                if self.frame == 0 {
+            17
+                if self.frame == 0 => {
                     Voice::clear_ended(0x00FF_FFFF);
                     key_voice(1, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
                 }
-            }
             // ENVZERO: leave the voice alone after it ends and read the
             // envelope late. A one-shot that terminated should be at zero; one
             // still reading forward will not be.
-            18 => {
-                if self.frame == 0 {
+            18
+                if self.frame == 0 => {
                     Voice::clear_ended(0x00FF_FFFF);
                     key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
                 }
-            }
             // KEYVOL: does key_on restore a voice whose volume was written to
             // zero while it played?
             //
@@ -341,7 +335,7 @@ impl SpuProbe {
             // envelope read late says whether silicon restarts cleanly or
             // accumulates state across an interrupted sample.
             20 => {
-                if self.frame % 12 == 0 && self.frame < tone_frames {
+                if self.frame.is_multiple_of(12) && self.frame < tone_frames {
                     Voice::key_on(Voice::new(VOICE).mask());
                 }
                 if self.frame == 0 {

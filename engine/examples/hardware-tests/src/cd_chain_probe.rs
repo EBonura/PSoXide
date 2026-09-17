@@ -119,7 +119,7 @@ pub(crate) struct CdChainProbe {
     complete: bool,
     run: u8,
     records: [VariantRecord; VARIANT_COUNT],
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
     binary_crc: u32,
 }
@@ -131,7 +131,7 @@ impl CdChainProbe {
             complete: false,
             run: 0,
             records: [VariantRecord::empty(); VARIANT_COUNT],
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
             binary_crc: 0,
         }

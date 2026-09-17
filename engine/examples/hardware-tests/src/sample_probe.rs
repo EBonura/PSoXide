@@ -139,7 +139,7 @@ pub(crate) struct SampleProbe {
     beep_rate: u32,
     beep_audit: FlagAudit,
     beep_readback_fnv: u32,
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
     binary_crc: u32,
 }
@@ -162,7 +162,7 @@ impl SampleProbe {
                 loop_starts: 0,
             },
             beep_readback_fnv: 0,
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
             binary_crc: 0,
         }
@@ -200,11 +200,10 @@ impl SampleProbe {
                     Voice::key_on(Voice::new(BEEP_VOICE).mask());
                 }
             }
-            3 => {
-                if self.stage_frame == 60 {
+            3
+                if self.stage_frame == 60 => {
                     Voice::key_off(Voice::new(BEEP_VOICE).mask());
                 }
-            }
             _ => {}
         }
 
@@ -246,7 +245,7 @@ impl SampleProbe {
     fn apply_stage(&mut self) {
         match self.stage {
             0 => self.audit(),
-            1 | 2 | 3 => self.key(BEEP_VOICE, self.beep_addr, self.beep_rate, Adsr::sample()),
+            1..=3 => self.key(BEEP_VOICE, self.beep_addr, self.beep_rate, Adsr::sample()),
             4 => self.key(
                 BEEP_VOICE,
                 self.beep_addr,

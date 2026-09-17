@@ -93,7 +93,7 @@ pub(crate) mod blocks {
 // A failure record names its case by `TestSpec::id`, not by array position, so
 // a capture archived today still points at the same test after the array grows.
 const FAILURE_RECORD_LEN: usize = 2 + 4 + 4;
-const STATUS_LEN: usize = (crate::TEST_COUNT * 3 + 7) / 8;
+const STATUS_LEN: usize = (crate::TEST_COUNT * 3).div_ceil(8);
 const HEADER_LEN: usize = 72;
 /// Worst case: a full characterisation run in which every case also failed.
 const BINARY_CAP: usize = HEADER_LEN
@@ -105,9 +105,9 @@ const BINARY_CAP: usize = HEADER_LEN
     + crate::MEMORY_CONTROL_REGISTER_COUNT * 4
     + crate::PRECISION_VALUE_COUNT * 4
     + 4;
-const BASE64_CAP: usize = (BINARY_CAP + 2) / 3 * 4;
+const BASE64_CAP: usize = BINARY_CAP.div_ceil(3) * 4;
 const _: () = assert!(
-    (BASE64_CAP + BASE64_CHARS_PER_PAGE - 1) / BASE64_CHARS_PER_PAGE <= CAPTURE_PAGE_MAX,
+    BASE64_CAP.div_ceil(BASE64_CHARS_PER_PAGE) <= CAPTURE_PAGE_MAX,
     "worst-case capture needs more pages than CAPTURE_PAGE_MAX"
 );
 
@@ -122,7 +122,7 @@ pub(crate) struct PhotoCapture {
     flags: u8,
     failures: u16,
     binary_crc: u32,
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
 }
 
@@ -137,7 +137,7 @@ impl PhotoCapture {
             flags: 0,
             failures: 0,
             binary_crc: 0,
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
         }
     }
@@ -244,13 +244,12 @@ impl PhotoCapture {
         let crc = crc32(out.bytes());
         out.push_u32(crc);
         let binary_len = out.len();
-        drop(out);
 
         let encoded_len = base64_encode(&binary[..binary_len], &mut self.payload);
         self.binary_len = binary_len as u16;
         self.payload_len = encoded_len as u16;
         self.page_count =
-            ((encoded_len + BASE64_CHARS_PER_PAGE - 1) / BASE64_CHARS_PER_PAGE).max(1) as u8;
+            encoded_len.div_ceil(BASE64_CHARS_PER_PAGE).max(1) as u8;
         self.flags = flags;
         self.failures = failures;
         self.binary_crc = crc;
@@ -291,7 +290,7 @@ impl PhotoCapture {
         append(
             &mut text,
             &mut len,
-            hex2(self.page_count as u8).as_str().as_bytes(),
+            hex2(self.page_count).as_str().as_bytes(),
         );
         append(&mut text, &mut len, b"/");
         append(&mut text, &mut len, self.page_chunk(page).as_bytes());
@@ -368,7 +367,7 @@ impl PhotoCapture {
         }
         tty::print("hardware-tests: px8 PX8/");
         tty::print(hex2((page + 1) as u8).as_str());
-        tty::print(hex2(self.page_count as u8).as_str());
+        tty::print(hex2(self.page_count).as_str());
         tty::print("/");
         tty::print(self.page_chunk(page));
         tty::print("/C:");

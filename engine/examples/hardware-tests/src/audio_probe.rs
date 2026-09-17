@@ -71,7 +71,7 @@ pub(crate) struct AudioProbe {
     records: [AudioStageRecord; STAGE_COUNT],
     sector_buffer: [u32; SECTOR_WORDS],
     capture_buffer: [u32; CAPTURE_WORDS],
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
     binary_crc: u32,
 }
@@ -88,7 +88,7 @@ impl AudioProbe {
             records: [AudioStageRecord::empty(); STAGE_COUNT],
             sector_buffer: [0; SECTOR_WORDS],
             capture_buffer: [0; CAPTURE_WORDS],
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
             binary_crc: 0,
         }
@@ -280,7 +280,6 @@ impl AudioProbe {
         let crc = crc32(out.bytes());
         out.push_u32(crc);
         let len = out.len();
-        drop(out);
         assert!(len == BINARY_LEN, "PA1 binary layout drift");
         self.binary_crc = crc;
 
@@ -341,7 +340,6 @@ impl AudioProbe {
             }
         }
         out.push_u32(self.binary_crc);
-        drop(out);
         let mut payload = [0u8; BASE64_LEN];
         base64_encode(&binary, &mut payload);
         tty::print("hardware-tests: pa1 PA1/");

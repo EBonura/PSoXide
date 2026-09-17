@@ -178,7 +178,7 @@ pub(crate) struct RingProbe {
     complete: bool,
     run: u8,
     snapshots: [Snapshot; SEGMENTS],
-    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_modules: [u8; (QR_SIZE * QR_SIZE).div_ceil(8)],
     qr_size: u8,
     binary_crc: u32,
 }
@@ -191,7 +191,7 @@ impl RingProbe {
             complete: false,
             run: 0,
             snapshots: [Snapshot::empty(); SEGMENTS],
-            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_modules: [0; (QR_SIZE * QR_SIZE).div_ceil(8)],
             qr_size: 0,
             binary_crc: 0,
         }
@@ -472,7 +472,7 @@ fn run_segment(segment: usize) -> Snapshot {
     let mut index = 0usize;
     while index < HALF_SAMPLES {
         let word = words[index / 2];
-        let half_word = if index % 2 == 0 {
+        let half_word = if index.is_multiple_of(2) {
             word & 0xFFFF
         } else {
             word >> 16
