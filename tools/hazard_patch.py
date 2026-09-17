@@ -29,9 +29,10 @@ The trampolines live in a `.data` array the guest declares:
 
 Exit status is non-zero when a hazard cannot be patched, the array is missing
 or full, or the rescan after patching still finds one. Needs
-mipsel-none-elf-objdump on PATH. Self-contained on purpose: game repos vendor
+mipsel-none-elf-objdump on PATH, or another one named in OBJDUMP. Self-contained on purpose: game repos vendor
 this file next to their build tool.
 """
+import os
 import re
 import struct
 import subprocess
@@ -58,7 +59,7 @@ WRITES_ONLY = {"lui", "li", "mfhi", "mflo"}
 
 def disassemble(path):
     out = subprocess.run(
-        ["mipsel-none-elf-objdump", "-D", "-b", "binary", "-m", "mips:3000", "-EL",
+        [os.environ.get("OBJDUMP", "mipsel-none-elf-objdump"), "-D", "-b", "binary", "-m", "mips:3000", "-EL",
          f"--adjust-vma={LOAD_ADDR - HEADER:#x}", path],
         capture_output=True, text=True, check=True).stdout
     listing = {}
@@ -249,7 +250,6 @@ def main():
     patched = 0
     # Diagnostics: HAZARD_PATCH_SKIP="80012298,8008c30c" leaves those sites
     # alone, HAZARD_PATCH_ONLY="..." patches nothing else. Both hex addresses.
-    import os
     skip = {int(a, 16) for a in os.environ.get("HAZARD_PATCH_SKIP", "").split(",") if a}
     only = {int(a, 16) for a in os.environ.get("HAZARD_PATCH_ONLY", "").split(",") if a}
     # A conditional branch whose slot load is consumed on both paths is one
