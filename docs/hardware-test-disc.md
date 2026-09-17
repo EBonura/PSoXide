@@ -400,19 +400,27 @@ standing battery's full capture was already at five pages.
 | Id | Record | What it prices |
 |---|---|---|
 | `1E` | the warm nop block through KSEG1 | an instruction executed uncached, which is also what thrashing degenerates to |
-| `1F`, `37`-`39`, `C8`-`CF` | untaken branch; byte, half and uncached stores; loads with no nop between them; byte and half loads; `lwl`/`lwr` and `swl`/`swr` unaligned pairs; loads through KSEG1; sixteen sequential addresses | the data-access shapes the compiler emits. The emulator charges an unaligned word 18 cycles against 8 aligned, and LLVM emits thousands of them |
-| `27`-`2F`, `3A`, `3B` | warm latency of RTPS, RTPT, NCLIP, MVMVA, AVSZ3, SQR, OP, GPF, NCDS, AVSZ4, NCCS, issued back to back | the GTE's latency table, which until now had six cold, layout-dependent silicon points |
+| `37`, `39`, `C8`-`CA`, `CC`, `CD`, `CF` | byte and KSEG1 stores; loads with no nop between them; byte loads; `lwl`/`lwr` and `swl`/`swr` unaligned pairs; sixteen sequential addresses | the data-access shapes the compiler emits. The emulator charges an unaligned word 18 cycles against 8 aligned, and LLVM emits thousands of them |
+| `1F`, `CE` | a store then three independent instructions (against `76`); a load then four (against `74`) | the four-entry write queue and LSI's load scheduling. Sony's notes and nugget's kernels say the store becomes free and the load hides part of its wait; the emulator has neither and reads both as purely additive |
+| `27`-`2F` | warm latency of RTPS, RTPT, NCLIP, MVMVA, AVSZ3, SQR, OP, GPF, NCDS, issued back to back | the GTE's latency table, which until now had six cold, layout-dependent silicon points. Every GTE record carries 48 trailing nops (subtract them) so the timed pass starts with the GTE idle |
+| `3A` | RTPT followed by the six `mtc2` that load the next triple (against `28`) | psx-spx's GTE pipeline page says inputs are latched within about four cycles and `mtc2` never stalls, so the next vertices can be loaded behind the current command |
 | `ED`-`F2` | RTPT then 21/23/25 nops, RTPS then 13/15/17 nops, before the next command | how much CPU work fits behind a GTE command for free. Knee at the latency |
-| `F3`-`F6` | sixteen `mtc2`, `ctc2`, `mfc2`, `cfc2` | the coprocessor register moves every vertex pays for |
+| `F3`-`F5` | sixteen `mtc2`, `ctc2`, `mfc2` | the coprocessor register moves every vertex pays for |
 | `F7`, `F8` | one three-component Q12 lerp with `mult` and with GPF | the same work on each side, including the register traffic |
 | `8E`, `8F` | sixteen `multu` with no read between them, then one `mflo` | whether a multiply issued behind a running one waits for it. The emulator says it costs nothing |
-| `9F`, `FE` | signed `div`; `divu` with tiny operands | whether the divider has any early-out |
 | `F9`-`FD` | GPUSTAT read, GP0 write (a GPU nop), I_STAT read, SPU halfword read and write | what an I/O port costs in an inner loop. The emulator has an SPU read at 27 cycles |
 | `33`, `34` | the DMA controller walking 256 and 1024 empty packets | what an unused ordering-table slot costs per frame |
 | `35`, `36` | 128 nops with GPU DMA idle, and started right after kicking a 512-node list | whether the CPU runs while the list is walked. Equal means it does |
-| `BA`-`BF` (with `A0`, `A2`, `AE` retaken) | raw-texture and translucent textured triangles, Gouraud-textured triangles, triangles clipped away entirely, VRAM fill and VRAM copy | GPU cases the fill battery left out, each next to its reference |
+| `9F`, `FE` | the same pair with 64 RAM loads in place of the nops | psx-spx and Sony both say the CPU runs during DMA only until it needs the bus. The emulator lets it run freely |
+| `BA`-`BF` (with `A0`, `A2`, `AE`, `AF` retaken) | raw-texture and translucent textured triangles, Gouraud-textured triangles, triangles clipped away entirely, VRAM fill and VRAM copy | GPU cases the fill battery left out, each next to its reference |
+| `3B`, `38` | 64 two-pixel triangles, flat-textured and Gouraud-textured | per-triangle setup with nothing to fill. nocash: 100 against 250 cycles |
+| `CB` | `AF`'s 8bpp rects with a different CLUT on every other one | the CLUT cache reload. nocash: 256 cycles each |
+| `F6` | `A2` with the vertical display range collapsed to one line | whether the GPU renders faster when it is not fetching the picture. The screen blanks for the few milliseconds this takes |
 | `3C`, `3D` (A/B run) | `RAM_SIZE` bit 7 around a cold sweep of 4 KiB of code that also loads data | the realistic case for that bit: line refills and data reads contending for RAM |
 | `3E`, `3F` (A/B run) | the SPU bus read-delay nibble as found and shortened, around 64 SPU status reads | whether SPU register traffic can be made cheaper. The emulator models this one: 3489 to 2229 |
+
+Where these claims come from, and what the engine does about each today, is in
+[ps1-performance-research-2026-09-17.md](ps1-performance-research-2026-09-17.md).
 
 `make hwtest-diff-perf` gates the whole A/B capture headless against
 `px8-emulator-perf-v<version>.txt`, counting timing drift only for warm
@@ -429,8 +437,8 @@ under `emu/crates/emulator-core` is editable in this tree.
    `bus/memory_timing.rs`, which were fitted to the layout-dependent records.
 4. `8C` against `8D`: the refill cost per line in `icache_fill_stalls`.
 5. `DD` against `DC`: if the uncached pair differs and the cached pair does
-   not, `RAM_SIZE` bit 7 is real. Model it in the fetch path, and consider
-   clearing it at boot in psx-rt.
+   not, `RAM_SIZE` bit 7 is real. Model it in the fetch path. Do NOT clear it
+   at boot: psx-spx says that hangs CD loading on PU-8 boards.
 6. Any cache-control pair that differs: model the bit, then measure the games.
 7. GTE latencies and gap knees: the table in `psx-gte-core/src/state.rs`.
 8. `8E`/`8F`: `hilo_busy_until` is overwritten by a second multiply today. If
@@ -438,7 +446,13 @@ under `emu/crates/emulator-core` is editable in this tree.
 9. `36` against `35`, and `33`/`34`: linked-list DMA cost per node and whether
    it holds the CPU off the bus.
 10. `BA`-`BF` and the fill battery: the GPU draw-time model, which does not
-    exist yet.
+    exist yet. nocash's measured rendering timings are the prior.
+11. `1F` and `CE`: the write queue and load scheduling, neither of which the
+    emulator has. With a third of every Cortex vblank in RAM stalls, these
+    two move whole-frame numbers more than anything else here.
+12. `E2`-`EC`: LSI documents NOPAD, LDSCH and RDPRI, and the BIOS value has
+    all three in their fast setting, so expect each flip to slow its workload
+    rather than speed it up.
 
 ## CD-DA contention (records `0x9B`-`0x9E`)
 

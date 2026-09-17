@@ -39,8 +39,10 @@ The performance sweep: 59 more records pricing techniques rather than checking
 behaviour, listed in [hardware-test-disc.md](hardware-test-disc.md). Warm GTE
 command latencies and the GTE gap sweep, coprocessor register moves, a lerp on
 the CPU against GPF, multiply behind multiply, unaligned and narrow data
-accesses, I/O port costs, empty ordering-table slots and whether the CPU runs
-during a linked-list DMA, GPU cases the fill battery left out, and two more
+accesses, the write queue and load scheduling, loading the next RTPT's inputs
+behind the current one, I/O port costs, empty ordering-table slots and whether
+the CPU runs during a linked-list DMA (with and without RAM loads), GPU cases
+the fill battery left out, triangle setup, CLUT reload and letterboxing, and two more
 register A/B pairs (`RAM_SIZE` bit 7 on a cold sweep of code that loads data;
 a shorter SPU bus read delay).
 

@@ -5,9 +5,9 @@
 #   must never be cited as a console measurement.
 #
 # captured:  2026-09-17
-# git:       source-2026.09.05-35-ge7e06eed-dirty
-# guest exe: sha256:b9878d242bdb19fe
+# git:       source-2026.09.05-36-gda1ac12a-dirty
+# guest exe: sha256:d24646cd9a7b384f
 # emulator:  frontend launch --steps 400000000 (menu Cross pulse)
 # schema:    PX8 conformance, 1 page(s)
 #
-PX8/0101/UFg4QgQBFgMBAcgAswALAMAAAwNiBjizfI/0+tdpsmMWZAAABBwAeKGhPAAAAAABBBYAudz1QQAAAAABBKgANzSZUagAAAABSZIkCZMkYZKECZMkJEkyCcMwIUkmSRKSZJIkSZIkJJMkScIkYZIkSZIkSZIkSZKQJEmSJJUkSZIkSZIkSUImSRKSTJIkSZIkJEmSAQCLAFoWAAA6DwAAtGZJ3A==/C:B9D520C9
+PX8/0101/UFg4QgQBFgMBAcgAswALAMAAAwMQ2B67idEG4Jq2AjX2ZwAABBwAeKGhPAAAAAABBBYAudz1QQAAAAABBKgANzSZUagAAAABSZIkCZMkYZKECZMkJEkyCcMwIUkmSRKSZJIkSZIkJJMkScIkYZIkSZIkSZIkSZKQJEmSJJUkSZIkSZIkSUImSRKSTJIkSZIkJEmSAQCLAFoWAAA6DwAA0+1Qpw==/C:9C01FDD5

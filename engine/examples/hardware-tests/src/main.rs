@@ -4717,27 +4717,67 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
 /// records are taken again here, under their usual ids.
 fn push_gpu_technique_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &mut usize) {
     const TEX4: FillKind = FillKind::Textured { tpage: 0, span: 32 };
-    let cases: [(u8, u32, FillKind, bool); 9] = [
-        (0xA0, 0x2000_80FF, FillKind::Flat, false),
-        (0xA2, 0x2400_80FF, TEX4, false),
-        (0xAE, 0x6000_80FF, FillKind::Rect, false),
+    const TINY_TEX4: FillKind = FillKind::Textured { tpage: 0, span: 2 };
+    use FillSetting::{Clipped, Letterboxed, Normal};
+    // (id, primitives, command, size, kind, setting)
+    let cases: [(u8, u16, u32, u32, FillKind, FillSetting); 14] = [
+        (0xA0, 16, 0x2000_80FF, 32, FillKind::Flat, Normal),
+        (0xA2, 16, 0x2400_80FF, 32, TEX4, Normal),
+        (0xAE, 16, 0x6000_80FF, 32, FillKind::Rect, Normal),
+        (
+            0xAF,
+            16,
+            0x6400_80FF,
+            32,
+            FillKind::TexturedRect { clut: 0 },
+            Normal,
+        ),
         // Raw texture (no colour modulation) and translucent textured, both
         // against 0xA2.
-        (0xBA, 0x2500_80FF, TEX4, false),
-        (0xBB, 0x2600_80FF, TEX4, false),
+        (0xBA, 16, 0x2500_80FF, 32, TEX4, Normal),
+        (0xBB, 16, 0x2600_80FF, 32, TEX4, Normal),
         // The most expensive triangle there is, and the one a lit textured
         // model is made of.
-        (0xBC, 0x3400_80FF, FillKind::GouraudTextured, false),
+        (
+            0xBC,
+            16,
+            0x3400_80FF,
+            32,
+            FillKind::GouraudTextured { span: 32 },
+            Normal,
+        ),
         // 0xA0's triangles with the drawing area somewhere else.
-        (0xBD, 0x2000_80FF, FillKind::Flat, true),
+        (0xBD, 16, 0x2000_80FF, 32, FillKind::Flat, Clipped),
         // Two other ways to move 32x32 pixels, against 0xAE: the VRAM fill
         // command, and a VRAM-to-VRAM copy.
-        (0xBE, 0x0200_80FF, FillKind::Rect, false),
-        (0xBF, 0x8000_0000, FillKind::Copy, false),
+        (0xBE, 16, 0x0200_80FF, 32, FillKind::Rect, Normal),
+        (0xBF, 16, 0x8000_0000, 32, FillKind::Copy, Normal),
+        // 64 two-pixel triangles: nothing to fill, so what is left is setup.
+        // nocash has it at 100 cycles flat-textured, 250 Gouraud-textured.
+        (0x3B, 64, 0x2400_80FF, 2, TINY_TEX4, Normal),
+        (
+            0x38,
+            64,
+            0x3400_80FF,
+            2,
+            FillKind::GouraudTextured { span: 2 },
+            Normal,
+        ),
+        // 0xAF with a CLUT change on every rect (nocash: 256 cycles each),
+        // and 0xA2 with the display range collapsed.
+        (
+            0xCB,
+            16,
+            0x6400_80FF,
+            32,
+            FillKind::TexturedRectAlternatingClut,
+            Normal,
+        ),
+        (0xF6, 16, 0x2400_80FF, 32, TEX4, Letterboxed),
     ];
-    for (id, command, kind, clipped) in cases {
-        let record = sample_timing(id, 16, || {
-            timed_fill_batch_in(16, command, 32, kind, false, clipped)
+    for (id, count, command, size, kind, setting) in cases {
+        let record = sample_timing(id, count, || {
+            timed_fill_batch_in(count, command, size, kind, false, setting)
         });
         push_timing_record(records, next, record);
     }
@@ -5411,25 +5451,48 @@ fn fill_drain() -> bool {
 /// `command` is the GP0 opcode; `words` are the packet words after it, built by
 /// the caller so each variant's exact packet shape is explicit.
 fn timed_fill_batch(count: u16, command: u32, size: u32, kind: FillKind, dither: bool) -> u16 {
-    timed_fill_batch_in(count, command, size, kind, dither, false)
+    timed_fill_batch_in(count, command, size, kind, dither, FillSetting::Normal)
 }
 
-/// `clipped` moves the drawing area away from the primitives, so the GPU
-/// receives and rejects every one of them: the price of leaving culling to it.
+/// Where a fill batch is drawn from.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum FillSetting {
+    Normal,
+    /// The drawing area is moved away from the primitives, so the GPU
+    /// receives and rejects every one: the price of leaving culling to it.
+    Clipped,
+    /// The vertical display range is collapsed to one line for the batch.
+    /// nocash: the GPU only renders at full speed when it is not also
+    /// fetching the picture, and a short display range removes nearly all of
+    /// that. The screen blanks for the few milliseconds this takes.
+    Letterboxed,
+}
+
 fn timed_fill_batch_in(
     count: u16,
     command: u32,
     size: u32,
     kind: FillKind,
     dither: bool,
-    clipped: bool,
+    setting: FillSetting,
 ) -> u16 {
     fill_env(dither);
-    if clipped {
+    if setting == FillSetting::Clipped {
         gpu_io::write_gp0(0xE300_0000 | 960 | (FILL_Y << 10));
         gpu_io::write_gp0(0xE400_0000 | 975 | ((FILL_Y + 15) << 10));
         gpu_io::wait_cmd_ready();
     }
+    if setting == FillSetting::Letterboxed {
+        gpu_io::write_gp1(0x0700_0000 | 0x10 | (0x11 << 10));
+    }
+    let elapsed = timed_fill_batch_body(count, command, size, kind);
+    if setting == FillSetting::Letterboxed {
+        psx_gpu::set_screen_v_offset(0, VideoMode::Ntsc, Resolution::R320X240);
+    }
+    elapsed
+}
+
+fn timed_fill_batch_body(count: u16, command: u32, size: u32, kind: FillKind) -> u16 {
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
     let mut index = 0u16;
@@ -5476,17 +5539,24 @@ fn timed_fill_batch_in(
                 gpu_io::write_gp0((y << 16) | x);
                 gpu_io::write_gp0((size << 16) | size);
             }
-            FillKind::GouraudTextured => {
+            FillKind::GouraudTextured { span } => {
                 // GP0 0x34: colour, position, UV for each vertex, with the
                 // CLUT riding on the first UV word and the page on the second.
                 gpu_io::write_gp0((y << 16) | x);
                 gpu_io::write_gp0(0);
                 gpu_io::write_gp0(0x0000_FF00);
                 gpu_io::write_gp0((y << 16) | (x + size));
-                gpu_io::write_gp0(32);
+                gpu_io::write_gp0(u32::from(span));
                 gpu_io::write_gp0(0x00FF_0000);
                 gpu_io::write_gp0(((y + size) << 16) | x);
-                gpu_io::write_gp0(32 << 8);
+                gpu_io::write_gp0(u32::from(span) << 8);
+            }
+            FillKind::TexturedRectAlternatingClut => {
+                // Same 8bpp rect as TexturedRect, but every other one names a
+                // different CLUT, so each forces a 256-entry CLUT reload.
+                gpu_io::write_gp0((y << 16) | x);
+                gpu_io::write_gp0(if index & 1 == 0 { 0 } else { 0x0040 << 16 });
+                gpu_io::write_gp0((size << 16) | size);
             }
             FillKind::Copy => {
                 // GP0 0x80: source, destination, extent.
@@ -5522,7 +5592,8 @@ enum FillKind {
     Textured { tpage: u16, span: u8 },
     Rect,
     TexturedRect { clut: u16 },
-    GouraudTextured,
+    GouraudTextured { span: u8 },
+    TexturedRectAlternatingClut,
     Copy,
 }
 
