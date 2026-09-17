@@ -9,11 +9,11 @@ use psx_game_runtime::destructibles::RuntimeDestructibles;
 use psx_level::{LevelWorldObjectRecord, MAX_WORLD_OBJECTS};
 
 pub(super) const WORLD_OBJECT_VISIBILITY_WORDS: usize =
-    MAX_WORLD_OBJECTS.div_ceil(u64::BITS as usize);
+    MAX_WORLD_OBJECTS.div_ceil(u32::BITS as usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct WorldObjectVisibility {
-    words: [u64; WORLD_OBJECT_VISIBILITY_WORDS],
+    words: [u32; WORLD_OBJECT_VISIBILITY_WORDS],
 }
 
 impl WorldObjectVisibility {
@@ -22,21 +22,21 @@ impl WorldObjectVisibility {
     };
 
     pub(super) const ALL: Self = Self {
-        words: [u64::MAX; WORLD_OBJECT_VISIBILITY_WORDS],
+        words: [u32::MAX; WORLD_OBJECT_VISIBILITY_WORDS],
     };
 
     pub(super) fn set(&mut self, index: usize) {
         if index >= MAX_WORLD_OBJECTS {
             return;
         }
-        self.words[index / u64::BITS as usize] |= 1u64 << (index % u64::BITS as usize);
+        self.words[index / u32::BITS as usize] |= 1u32 << (index % u32::BITS as usize);
     }
 
     pub(super) const fn contains(self, index: usize) -> bool {
         if index >= MAX_WORLD_OBJECTS {
             return false;
         }
-        self.words[index / u64::BITS as usize] & (1u64 << (index % u64::BITS as usize)) != 0
+        self.words[index / u32::BITS as usize] & (1u32 << (index % u32::BITS as usize)) != 0
     }
 
     /// Resolve a typed payload through the shared registry. A missing record
@@ -62,7 +62,8 @@ impl WorldObjectVisibility {
     }
 }
 
-const _: () = assert!(WORLD_OBJECT_VISIBILITY_WORDS == 2);
+// The mask travels by value through the render passes; keep it at 16 bytes.
+const _: () = assert!(core::mem::size_of::<WorldObjectVisibility>() == 16);
 
 /// Whether one typed payload remains live according to the same shared state
 /// used by brush submodels. Works for BSP and legacy-grid scenes alike.
