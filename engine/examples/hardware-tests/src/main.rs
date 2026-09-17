@@ -37,6 +37,7 @@ mod cd_chain_probe;
 mod controller_test;
 mod cpu_tests;
 mod handoff_probe;
+mod perf_probes;
 mod photo;
 mod reverb_probe;
 mod ring_probe;
@@ -96,6 +97,25 @@ core::arch::global_asm!(
     "__hwtest_icache_entry_w2:",
     "jr $10",
     "nop",
+    // Exactly 4 KiB after entry_w0: same cache index, different tag, so the
+    // two evict each other on every alternating call (perf_probes.rs).
+    ".balign 4096",
+    ".globl __hwtest_icache_alias_b",
+    "__hwtest_icache_alias_b:",
+    "jr $10",
+    "nop",
+    // Workload for the register A/B probes: 64 loads from the word in $25.
+    // Position independent, so its KSEG1 alias runs the same instructions
+    // with every fetch going to RAM.
+    ".balign 16",
+    ".globl __hwtest_perf_loads",
+    "__hwtest_perf_loads:",
+    ".rept 64",
+    "lw $3, 0($25)",
+    "nop",
+    ".endr",
+    "jr $10",
+    "nop",
     ".set reorder",
 );
 
@@ -104,11 +124,13 @@ unsafe extern "C" {
     fn __hwtest_icache_entry_w0();
     fn __hwtest_icache_entry_w1();
     fn __hwtest_icache_entry_w2();
+    fn __hwtest_icache_alias_b();
+    fn __hwtest_perf_loads();
 }
 
 // Suite version, written into every payload so a capture is self-identifying.
 //
-// The transport schema (PX7) and the suite version are different things: the
+// The transport schema (PX8) and the suite version are different things: the
 // schema says how bytes are laid out, the suite version says what a record id
 // MEANS. Comparing a capture from one suite version against a baseline from
 // another is the trap this exists to prevent, because record 0xA0 can be
@@ -121,74 +143,11 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
-// v1.20: Eight RTPT hazard characterisation records. Four isolate the input
-//        commit window after the exact six-MTC2 HL/PSoXide vertex load; four
-//        isolate result availability after RTPT with a settled input load.
-//        Every sequence is one literal assembly block and compares against a
-//        64-NOP settled reference, so compiler scheduling cannot answer the
-//        question for the console.
-// v1.10: SB2, aimed at the wider SPU problem: Celeste's looped
-//       wavetables and VoXide's sample bank are both wrong on console while
-//       CD-DA -- the one path that never stores in SPU RAM -- is fine. Pass
-//       1 uploads a known pattern and reads it back over four DMA/PIO
-//       combinations, so a bad upload, a bad readback and a lying emulator
-//       are told apart; SB1's console capture already hashed SPU RAM back
-//       differently from the emulator, which is the lead. Pass 2 plays tones
-//       whose frequency is arithmetic (a synthesised square table at known
-//       pitches, 1.5s on 0.5s off) so an OBS recording measures what the
-//       speaker got while the QR carries what the registers said.
-// v1.9: SB1, the UI sample end/loop probe: the demo-disc launcher blip
-//       repeats aggressively on console, and the suspect is the blip sample's
-//       own ADPCM terminator under an ADSR that sustains forever. SB1 audits
-//       both launcher blips' block flags, replays the exact launcher voice
-//       path (plus retrigger, key_off and percussive variants), and traces
-//       envelope/ENDX into one QR. Frozen record schema unchanged.
-// v1.8: Adds a polished, interactive two-port controller test. It tracks every
-//       button independently, enables and visualises both DualShock sticks,
-//       and samples their resting offset for drift. The frozen PX7 record
-//       schema is unchanged; the minor bump identifies the newly linked binary.
-// v1.7: The CD-DA contention pair (0x9B/0x9C) normalises with PAUSE instead
-//       of STOP. The 2026-07-31 console run proved STOP+respin grinds the
-//       mech for minutes right after the contention read; with the motor
-//       kept up, 0x9C measures the read it always claimed to measure
-//       instead of a spin-up. Also: the scan draws the in-flight record id
-//       as bit-cells, and START skips mid-record.
-// v1.6: Menu-first boot and the shared memory-card hardware diagnostic. The
-//       record schema is unchanged, but linking the diagnostic moves timing
-//       code, so machine-code and emulator timing baselines are pinned to this
-//       binary rather than compared byte-for-byte with v1.5.
-// v1.5: Sweeps aimed at two findings the first full capture could not settle.
-//       Ten seek distances plus two backward seeks, because four forward
-//       distances came back non-monotonic and no fit reached the middle
-//       points. Twelve SIO setup delays, because the console answered at 0,
-//       fell silent at 128 and answered again at 384.
-// v1.4: The capture is frozen when taken. Paging previously REBUILT the whole
-//       payload, and some observations are live (the pad poll is refreshed
-//       every frame), so each page carried a different payload while only the
-//       last page's CRC described its own bytes. No multi-page console capture
-//       could ever reconstruct. This is why three captures failed.
-// v1.3: Audio readout holds its level. v1.2 keyed the voice with an all-zero
-//       ADSR, which is sustain level 0, so on hardware the envelope decayed and
-//       a console capture carried ~3 seconds of a 13.6 second payload. The
-//       emulator does not model that decay, so only silicon could show it.
-// v1.2: Audio readout on by default. Off-by-default cost a console session:
-//       the operator has no reason to know a silent disc is withholding the
-//       payload, and the QR route then lost a symbol, which costs the whole
-//       capture. Volume stays at the reduced level.
-// v1.1: Operator flow. Boot runs the battery behind a visible progress bar,
-//       then lands on the capture pages; a main menu (TRIANGLE) reruns the
-//       startup tests or opens results, scans and probes; the audio readout is
-//       silent until asked for. No record changed meaning, but the guest binary
-//       did, and timing records shift with code alignment, so the baseline was
-//       re-pinned.
-// v1.0: PX7. CD/CD-DA/GPU/MDEC/SIO batteries, interrupt-masked sampling,
-//       median column, explicit record ids, raster hashes, audio readout.
-//       Supersedes the v0.18 suite, whose records used a different sampling
-//       method and cannot be compared against these.
+// History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 20;
+const SUITE_VERSION_MINOR: u8 = 21;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.20";
+const SUITE_VERSION: &str = "HWTEST v1.21";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -662,8 +621,34 @@ struct ScanReport {
     runs: u8,
 }
 
-const TIMING_RECORD_COUNT: usize = 176;
-const MEMORY_CONTROL_REGISTER_COUNT: usize = 9;
+const TIMING_RECORD_COUNT: usize = 208;
+
+/// Which records a timing scan takes.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum TimingScope {
+    /// Everything that is safe to run unattended.
+    Standard,
+    /// Only the performance probes, including the register A/B group that
+    /// can hang a console. Skips the CD, GPU, MDEC and SIO batteries so a
+    /// power cycle after a hang costs a minute rather than the whole scan.
+    PerfAb,
+}
+const MEMORY_CONTROL_REGISTER_COUNT: usize = MEMORY_CONTROL_REGISTERS.len();
+/// Captured with the timing block, in this order (the host names them by
+/// position). The first nine are the bus configuration the BIOS left.
+const MEMORY_CONTROL_REGISTERS: [u32; 11] = [
+    0x1F80_1000,
+    0x1F80_1004,
+    0x1F80_1008,
+    0x1F80_100C,
+    0x1F80_1010,
+    0x1F80_1014,
+    0x1F80_1018,
+    0x1F80_101C,
+    0x1F80_1020,
+    perf_probes::RAM_SIZE,
+    perf_probes::CACHE_CONTROL,
+];
 const PRECISION_VALUE_COUNT: usize = 192;
 
 /// Samples per timing record. The minimum rejects interrupt interference, the
@@ -700,6 +685,8 @@ enum MenuAction {
     CycleAudio,
     /// Run the conformance battery starting at `resume_index`.
     RunFromIndex,
+    /// Timing scan in `TimingScope::PerfAb`, then a full capture.
+    RunPerfAb,
 }
 
 const ROOT_MENU: [(&str, MenuAction); 11] = [
@@ -769,7 +756,7 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
     ("BACK", MenuAction::Back),
 ];
 
-const PROBES_MENU: [(&str, MenuAction); 11] = [
+const PROBES_MENU: [(&str, MenuAction); 12] = [
     ("SPU DIAGNOSTIC (SB2)", MenuAction::Open(Mode::SpuProbe)),
     ("CAPTURE RINGS (SB4)", MenuAction::Open(Mode::RingProbe)),
     (
@@ -795,6 +782,12 @@ const PROBES_MENU: [(&str, MenuAction); 11] = [
     ),
     ("HL VOICE BANK (PA2)", MenuAction::Open(Mode::VoiceProbe)),
     ("CD/SPU AUDIO (PA1)", MenuAction::Open(Mode::AudioProbe)),
+    // Second to last on purpose: rows above it are baked into the SB4 pulse
+    // train, and the headless rig reaches this one by wrapping UP from row 0.
+    // It flips undocumented memory-controller and cache-control bits around a
+    // timed workload. A console that hangs here needs a power cycle, and the
+    // record id left on screen names the bit.
+    ("PERF A/B (MAY HANG)", MenuAction::RunPerfAb),
     ("BACK", MenuAction::Back),
 ];
 
@@ -2161,6 +2154,8 @@ struct HardwareTests {
     /// [`photo::blocks::FULL`] for one capture and the operator files the
     /// result as a reference.
     capture_flags: u8,
+    /// Which records the next timing scan (and a CROSS rerun of it) takes.
+    timing_scope: TimingScope,
     /// Latest port-1 poll for each [`PROBE_VARIANTS`] timing, refreshed every
     /// frame while in the controller probe. Used to find which setup/inter-byte
     /// timing wakes a strict original pad.
@@ -2231,6 +2226,7 @@ impl HardwareTests {
             page: 0,
             rerun_count: 0,
             capture_flags: photo::blocks::CONFORMANCE,
+            timing_scope: TimingScope::Standard,
             probe_variants: [psx_pad::RawPoll::NONE; PROBE_VARIANT_COUNT],
             audio_rate: 0,
             audio_prepared: false,
@@ -2275,7 +2271,7 @@ impl HardwareTests {
         self.spu_scan = run_spu_scan();
         print_scan_report(Mode::SpuScan, self.spu_scan);
         self.draw_running_label(TEST_COUNT, "scan", "timing map  START SKIPS");
-        self.timing_scan = run_timing_scan();
+        self.timing_scan = run_timing_scan(self.timing_scope);
         self.encode_capture(0);
         print_scan_report(Mode::TimingScan, self.timing_scan.summary);
     }
@@ -2448,7 +2444,7 @@ impl HardwareTests {
                 print_scan_report(self.mode, self.spu_scan);
             }
             Mode::TimingScan => {
-                self.timing_scan = run_timing_scan().with_run(self.timing_scan);
+                self.timing_scan = run_timing_scan(self.timing_scope).with_run(self.timing_scan);
                 self.encode_capture(self.page);
                 print_scan_report(self.mode, self.timing_scan.summary);
             }
@@ -2641,11 +2637,13 @@ impl Scene for HardwareTests {
             if ctx.just_pressed(button::CROSS) {
                 match entries[self.menu_cursor].1 {
                     MenuAction::RunFullSuite => {
+                        self.timing_scope = TimingScope::Standard;
                         self.capture_flags = photo::blocks::CONFORMANCE;
                         self.run_full_suite();
                         self.enter_mode(Mode::TimingScan);
                     }
                     MenuAction::RunFullSuiteCharacterisation => {
+                        self.timing_scope = TimingScope::Standard;
                         self.capture_flags = photo::blocks::FULL;
                         self.run_full_suite();
                         self.enter_mode(Mode::TimingScan);
@@ -2654,7 +2652,18 @@ impl Scene for HardwareTests {
                     MenuAction::Submenu(page) => self.open_menu_page(page),
                     MenuAction::Back => self.open_menu_page(MenuPage::Root),
                     MenuAction::CycleAudio => self.cycle_audio_readout(),
+                    MenuAction::RunPerfAb => {
+                        // No conformance pass: the point is a short run that
+                        // is cheap to repeat after a hang. The capture is
+                        // FULL because the timing block is the whole result.
+                        self.timing_scope = TimingScope::PerfAb;
+                        self.capture_flags = photo::blocks::FULL;
+                        self.run_startup_scans();
+                        self.prepare_audio_readout();
+                        self.enter_mode(Mode::TimingScan);
+                    }
                     MenuAction::RunFromIndex => {
+                        self.timing_scope = TimingScope::Standard;
                         self.run_all_from(self.resume_index as usize);
                         self.run_startup_scans();
                         self.prepare_audio_readout();
@@ -3821,851 +3830,17 @@ fn run_spu_scan() -> ScanReport {
     ScanReport::info(items, hash, changed, "spu voice regs")
 }
 
-fn run_timing_scan() -> TimingReport {
-    // Stay below the 16-bit root-counter wrap even when silicon RAM/MMIO is
-    // slower than the emulator. Geometric points let the host fit a slope and
-    // intercept instead of treating harness overhead as per-iteration cost.
-    const SPINS: [u32; 4] = [64, 256, 1024, 4096];
+fn run_timing_scan(scope: TimingScope) -> TimingReport {
     let mut records = [TimingRecord::pending(); TIMING_RECORD_COUNT];
     let mut next = 0usize;
-
-    push_timing_record(&mut records, &mut next, sample_timing(0x00, 0, timed_empty));
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x01, 128, timed_nops),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x02, 128, timed_dependent_alu),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x03, 64, timed_load_hazards),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x04, 64, timed_taken_branches),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x05, 16, || timed_multu_mflo(0x0000_07FF)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x06, 16, || timed_multu_mflo(0x000F_FFFF)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x07, 16, || timed_multu_mflo(0x1357_2468)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x08, 8, timed_divu_mflo),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x09, 64, || timed_load_hazards_at(0x1F80_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x0A, 64, || {
-            let cached = (&raw const TIMING_WORD) as u32;
-            timed_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x0B, 64, || {
-            timed_stores_at((&raw const TIMING_WORD) as u32)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x0C, 64, || timed_stores_at(0x1F80_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x0D, 64, || {
-            let cached = (&raw const TIMING_WORD) as u32;
-            timed_stores_at(0xA000_0000 | (cached & 0x001F_FFFF))
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x0E, 64, || timed_load_hazards_at(0x1F80_1814)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x0F, 64, || timed_load_hazards_at(irq::I_STAT)),
-    );
-
-    for (set, spin_count) in SPINS.into_iter().enumerate() {
-        let base = 0x10 + set as u8 * 3;
-        push_timing_record(
-            &mut records,
-            &mut next,
-            sample_timing(base, spin_count as u16, || {
-                timer_delta(timers::Timer::Timer2, 0, spin_count)
-            }),
-        );
-        push_timing_record(
-            &mut records,
-            &mut next,
-            sample_timing(base + 1, spin_count as u16, || {
-                timer_delta(timers::Timer::Timer2, TIMER_MODE_CLOCK_SOURCE_2, spin_count)
-            }),
-        );
-        push_timing_record(
-            &mut records,
-            &mut next,
-            sample_timing(base + 2, spin_count as u16, || {
-                timer_delta(timers::Timer::Timer0, TIMER_MODE_CLOCK_SOURCE_1, spin_count)
-            }),
-        );
+    if scope == TimingScope::Standard {
+        push_standard_records(&mut records, &mut next);
     }
-
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x1C, 1024, || call_uncached_timing(timed_icache_cold)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x1D, 1024, || call_uncached_timing(timed_icache_warm)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x20, 0xFFFF, || {
-            timer_delta(timers::Timer::Timer1, TIMER_MODE_CLOCK_SOURCE_1, 0x20000)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x21, 16, timed_gte_rtps_commands),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x22, 8, timed_gte_rtpt_commands),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x23, 16, timed_gte_nclip_commands),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x24, 16, timed_gte_mvmva_commands),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x25, 4, timed_gte_ncdt_commands),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x26, 4, timed_gte_ncct_commands),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x30, 16, || timed_otc_dma_cycles(16)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x31, 64, || timed_otc_dma_cycles(64)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x32, 256, || timed_otc_dma_cycles(256)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x40, 1, timed_cdrom_getstat),
-    );
-    // CD battery. Timed on Timer 1 HBlank ticks, not Timer 2 cycles, and each
-    // record repeats through sample_timing so a retry or a bad block shows up
-    // as a min/max spread instead of silently becoming the answer.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x90, 1, || cd_seek_distance(1)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x91, 16, || cd_seek_distance(16)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x92, 128, || cd_seek_distance(128)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x93, 512, || cd_seek_distance(512)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x94, 8, || cd_read_throughput(false, 8)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x95, 8, || cd_read_throughput(true, 8)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x96, 1, || {
-            cd_timed(|| cdrom::try_get_stat(CD_SPINS).is_some())
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x97, 1, || {
-            cd_timed(|| cdrom::try_set_mode(0, CD_SPINS).is_some())
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x98, 1, || {
-            cd_timed(|| cdrom::try_get_loc_p(CD_SPINS).is_some())
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x99, 1, || {
-            cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]))
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x9A, 1, || {
-            cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_INIT, &[]))
-        }),
-    );
-    // CD-DA contention. 0x9B against 0x9C is the whole point: identical read
-    // path, identical sector count, the only difference being live audio.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x9B, 8, || cd_read_with_audio(true, 8)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x9C, 8, || cd_read_with_audio(false, 8)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x9D, 1, cd_play_start),
-    );
-    // Seek sweep. Four distances proved too few to model: the console measured
-    // +128 slower than +512, and no monotonic fit came within 2x of the middle
-    // points. Ten distances with the same five repeats each make an outlier
-    // visible AS an outlier rather than as the shape of the curve.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xC0, 2, || cd_seek_distance(2)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xC1, 4, || cd_seek_distance(4)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xC2, 8, || cd_seek_distance(8)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xC3, 32, || cd_seek_distance(32)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xC4, 64, || cd_seek_distance(64)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xC5, 256, || cd_seek_distance(256)),
-    );
-    // Backward seeks at the same distances. A drive settles differently
-    // approaching from outside, and every existing record seeks forward only,
-    // so a direction asymmetry would currently be invisible.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xC6, 64, || cd_seek_backward(64)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xC7, 256, || cd_seek_backward(256)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        // Must establish playback itself: 0x9D pauses and mutes when it
-        // finishes, so measuring "during CD-DA" without restarting audio would
-        // silently measure the idle case instead.
-        sample_timing(0x9E, 1, cd_getlocp_during_playback),
-    );
-    // GPU fill rate. Pixel counts are held identical across shading modes so
-    // the DIFFERENCE isolates interpolation, blending and dither cost from the
-    // per-pixel floor; 0xAA/0xAB hold total pixels constant while changing
-    // primitive count, which separates setup cost from fill cost.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA0, 16, || {
-            timed_fill_batch(16, 0x2000_80FF, 32, FillKind::Flat, false)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA1, 16, || {
-            timed_fill_batch(16, 0x3000_00FF, 32, FillKind::Gouraud, false)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA2, 16, || {
-            timed_fill_batch(
-                16,
-                0x2400_80FF,
-                32,
-                FillKind::Textured { tpage: 0, span: 32 },
-                false,
-            )
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA3, 16, || {
-            timed_fill_batch(
-                16,
-                0x2400_80FF,
-                32,
-                FillKind::Textured {
-                    tpage: 0x40,
-                    span: 32,
-                },
-                false,
-            )
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA4, 16, || {
-            timed_fill_batch(
-                16,
-                0x2400_80FF,
-                32,
-                FillKind::Textured {
-                    tpage: 0x80,
-                    span: 32,
-                },
-                false,
-            )
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA5, 16, || {
-            timed_fill_batch(16, 0x2800_80FF, 32, FillKind::Flat, false)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA6, 16, || {
-            timed_fill_batch(16, 0x3800_00FF, 32, FillKind::Gouraud, false)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA7, 16, || {
-            timed_fill_batch(
-                16,
-                0x2C00_80FF,
-                32,
-                FillKind::Textured { tpage: 0, span: 32 },
-                false,
-            )
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA8, 16, || {
-            timed_fill_batch(16, 0x2A00_80FF, 32, FillKind::Translucent, false)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xA9, 16, || {
-            timed_fill_batch(16, 0x3000_00FF, 32, FillKind::Gouraud, true)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xAA, 4, || {
-            timed_fill_batch(4, 0x2800_80FF, 64, FillKind::Flat, false)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xAB, 64, || {
-            timed_fill_batch(64, 0x2800_80FF, 8, FillKind::Flat, false)
-        }),
-    );
-    // Texture cache: identical pixel count, different UV footprint. A 2 KiB
-    // cache should make the wide walk markedly slower than the tight resample.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xAC, 16, || {
-            timed_fill_batch(
-                16,
-                0x2C00_80FF,
-                32,
-                FillKind::Textured {
-                    tpage: 0,
-                    span: 255,
-                },
-                false,
-            )
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xAD, 16, || {
-            timed_fill_batch(
-                16,
-                0x2C00_80FF,
-                32,
-                FillKind::Textured { tpage: 0, span: 8 },
-                false,
-            )
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xAE, 16, || {
-            timed_fill_batch(16, 0x6000_80FF, 32, FillKind::Rect, false)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xAF, 16, || {
-            // GP0 0x64: the 8bpp-CLUT textured rect path that renders black in
-            // both backends and has never been measured on silicon.
-            timed_fill_batch(
-                16,
-                0x6400_80FF,
-                32,
-                FillKind::TexturedRect { clut: 0 },
-                false,
-            )
-        }),
-    );
-    // MDEC. No coverage at all before now. Command number lives in bits 31..29:
-    // 2 = set quant table, 3 = set scale table, 1 = decode.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        // Set quant table, luma only: 64 bytes = 16 words.
-        sample_timing(0xB0, 16, || timed_mdec(0x4000_0000, 16)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        // Set quant table, luma + chroma: 128 bytes = 32 words.
-        sample_timing(0xB1, 32, || timed_mdec(0x4000_0001, 32)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        // Set scale (IDCT) table: 64 halfwords = 32 words.
-        sample_timing(0xB2, 32, || timed_mdec(0x6000_0000, 32)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xB3, 1, timed_mdec_reset_settle),
-    );
-    // Decode-to-drained for one and four colour macroblocks. Two points, so
-    // the host can separate per-macroblock cost from command setup.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xB4, 1, || timed_mdec_decode(1)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xB5, 2, || timed_mdec_decode(2)),
-    );
-    // SIO: the same poll at four pacing configurations.
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xB6, 1, || {
-            timed_pad_poll(PROBE_VARIANTS[0].1, PROBE_VARIANTS[0].2)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xB7, 1, || {
-            timed_pad_poll(PROBE_VARIANTS[1].1, PROBE_VARIANTS[1].2)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xB8, 1, || {
-            timed_pad_poll(PROBE_VARIANTS[2].1, PROBE_VARIANTS[2].2)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0xB9, 1, || {
-            timed_pad_poll(PROBE_VARIANTS[3].1, PROBE_VARIANTS[3].2)
-        }),
-    );
-    // Setup-delay sweep. The console answered at setup 0, gave NO reply at 128,
-    // and answered again at 384: non-monotonic, so the threshold cannot be read
-    // off four points. Twelve evenly spaced delays bracket where a real pad
-    // starts replying, which is the SCPH-1200 problem stated as a measurement.
-    let mut sweep = 0usize;
-    while sweep < SIO_SETUP_SWEEP.len() {
-        let setup = SIO_SETUP_SWEEP[sweep];
-        push_timing_record(
-            &mut records,
-            &mut next,
-            sample_timing(0xD0 + sweep as u8, (setup / 8) as u16, move || {
-                timed_pad_poll(setup, 0)
-            }),
-        );
-        sweep += 1;
+    perf_probes::push_safe(&mut records, &mut next);
+    if scope == TimingScope::PerfAb {
+        perf_probes::push_risky(&mut records, &mut next);
     }
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x41, 1, timed_gpu_irq_settle),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x42, 1, || {
-            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w0)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x43, 1, || {
-            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w1)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x44, 1, || {
-            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w2)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x45, 1, || {
-            call_uncached_entry_timing(timed_icache_entry_warm, __hwtest_icache_entry_w0)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x46, 64, timed_untaken_branches),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x47, 64, || {
-            timed_byte_load_hazards_at((&raw const TIMING_WORD) as u32)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x48, 64, || {
-            timed_half_load_hazards_at((&raw const TIMING_WORD) as u32)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x49, 64, || {
-            let cached = (&raw const TIMING_WORD) as u32;
-            timed_byte_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x4A, 64, || {
-            let cached = (&raw const TIMING_WORD) as u32;
-            timed_half_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x4B, 64, || timed_load_hazards_at(0xBFC0_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x4C, 64, || timed_half_load_hazards_at(0xBFC0_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x4D, 64, || timed_byte_load_hazards_at(0xBFC0_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x4E, 64, || timed_half_load_hazards_at(0x1F80_1DAE)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x4F, 64, || timed_load_hazards_at(0x1F80_1044)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x50, 64, || {
-            timed_byte_stores_at((&raw const TIMING_WORD) as u32)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x51, 64, || {
-            timed_half_stores_at((&raw const TIMING_WORD) as u32)
-        }),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x52, 64, || timed_byte_load_hazards_at(0x1F80_1800)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x53, 64, || timed_half_load_hazards_at(0x1F80_1800)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x54, 64, || timed_load_hazards_at(0x1F80_1800)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x55, 64, || timed_byte_load_hazards_at(0x1F00_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x56, 64, || timed_half_load_hazards_at(0x1F00_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x57, 64, || timed_load_hazards_at(0x1F00_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x58, 64, || timed_byte_load_hazards_at(0x1F80_2000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x59, 64, || timed_half_load_hazards_at(0x1F80_2000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x5A, 64, || timed_load_hazards_at(0x1F80_2000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x5B, 64, || timed_byte_load_hazards_at(0x1FA0_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x5C, 64, || timed_half_load_hazards_at(0x1FA0_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x5D, 64, || timed_load_hazards_at(0x1FA0_0000)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x5E, 64, || timed_byte_load_hazards_at(0x1F80_1DAE)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x5F, 64, || timed_load_hazards_at(0x1F80_1DAC)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x60, 64, || timed_byte_load_hazards_at(0xFFFE_0130)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x61, 64, || timed_half_load_hazards_at(0xFFFE_0130)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x62, 64, || timed_load_hazards_at(0xFFFE_0130)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x63, 64, || timed_load_hazards_at(0x1F80_1010)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x64, 64, || timed_unaligned_word_loads_at(0x1F80_1DAA)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x65, 512, timed_spu_dma_write_512_halfwords),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x66, 16, || timed_gpu_dma_block(16, 1)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x67, 64, || timed_gpu_dma_block(16, 4)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x68, 256, || timed_gpu_dma_block(16, 16)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x69, 256, || timed_gpu_dma_block(64, 4)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x6A, 256, || timed_gpu_dma_block(256, 1)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x6B, 258, timed_gpu_dma_linked_2x128),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x6C, 272, || timed_gpu_line_batch(false, 16, 16)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x6D, 2056, || timed_gpu_line_batch(false, 256, 8)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x6E, 272, || timed_gpu_line_batch(true, 16, 16)),
-    );
-    push_timing_record(
-        &mut records,
-        &mut next,
-        sample_timing(0x6F, 2056, || timed_gpu_line_batch(true, 256, 8)),
-    );
-    let (refresh_period, refresh_stall) = sample_dram_refresh();
-    push_timing_record(&mut records, &mut next, refresh_period);
-    push_timing_record(&mut records, &mut next, refresh_stall);
-
-    let mut memory_control = [0u32; MEMORY_CONTROL_REGISTER_COUNT];
-    let mut register = 0usize;
-    while register < memory_control.len() {
-        memory_control[register] = unsafe { psx_io::read32(0x1F80_1000 + register as u32 * 4) };
-        register += 1;
-    }
+    let memory_control = MEMORY_CONTROL_REGISTERS.map(|address| unsafe { psx_io::read32(address) });
 
     let mut hash = 0x5449_4D33;
     let mut jitter = 0u32;
@@ -4685,6 +3860,7 @@ fn run_timing_scan() -> TimingReport {
         hash = mix32(hash, 0x5052_0000 | index as u32);
         hash = mix32(hash, value);
     }
+
     TimingReport {
         summary: ScanReport::info(
             TIMING_RECORD_COUNT as u16,
@@ -4696,6 +3872,812 @@ fn run_timing_scan() -> TimingReport {
         memory_control,
         precision,
     }
+}
+
+fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &mut usize) {
+    // Stay below the 16-bit root-counter wrap even when silicon RAM/MMIO is
+    // slower than the emulator. Geometric points let the host fit a slope and
+    // intercept instead of treating harness overhead as per-iteration cost.
+    const SPINS: [u32; 4] = [64, 256, 1024, 4096];
+
+    push_timing_record(records, next, sample_timing(0x00, 0, timed_empty));
+    push_timing_record(records, next, sample_timing(0x01, 128, timed_nops));
+    push_timing_record(records, next, sample_timing(0x02, 128, timed_dependent_alu));
+    push_timing_record(records, next, sample_timing(0x03, 64, timed_load_hazards));
+    push_timing_record(records, next, sample_timing(0x04, 64, timed_taken_branches));
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x05, 16, || timed_multu_mflo(0x0000_07FF)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x06, 16, || timed_multu_mflo(0x000F_FFFF)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x07, 16, || timed_multu_mflo(0x1357_2468)),
+    );
+    push_timing_record(records, next, sample_timing(0x08, 8, timed_divu_mflo));
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x09, 64, || timed_load_hazards_at(0x1F80_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x0A, 64, || {
+            let cached = (&raw const TIMING_WORD) as u32;
+            timed_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x0B, 64, || {
+            timed_stores_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x0C, 64, || timed_stores_at(0x1F80_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x0D, 64, || {
+            let cached = (&raw const TIMING_WORD) as u32;
+            timed_stores_at(0xA000_0000 | (cached & 0x001F_FFFF))
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x0E, 64, || timed_load_hazards_at(0x1F80_1814)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x0F, 64, || timed_load_hazards_at(irq::I_STAT)),
+    );
+
+    for (set, spin_count) in SPINS.into_iter().enumerate() {
+        let base = 0x10 + set as u8 * 3;
+        push_timing_record(
+            records,
+            next,
+            sample_timing(base, spin_count as u16, || {
+                timer_delta(timers::Timer::Timer2, 0, spin_count)
+            }),
+        );
+        push_timing_record(
+            records,
+            next,
+            sample_timing(base + 1, spin_count as u16, || {
+                timer_delta(timers::Timer::Timer2, TIMER_MODE_CLOCK_SOURCE_2, spin_count)
+            }),
+        );
+        push_timing_record(
+            records,
+            next,
+            sample_timing(base + 2, spin_count as u16, || {
+                timer_delta(timers::Timer::Timer0, TIMER_MODE_CLOCK_SOURCE_1, spin_count)
+            }),
+        );
+    }
+
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x1C, 1024, || call_uncached_timing(timed_icache_cold)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x1D, 1024, || call_uncached_timing(timed_icache_warm)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x20, 0xFFFF, || {
+            timer_delta(timers::Timer::Timer1, TIMER_MODE_CLOCK_SOURCE_1, 0x20000)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x21, 16, timed_gte_rtps_commands),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x22, 8, timed_gte_rtpt_commands),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x23, 16, timed_gte_nclip_commands),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x24, 16, timed_gte_mvmva_commands),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x25, 4, timed_gte_ncdt_commands),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x26, 4, timed_gte_ncct_commands),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x30, 16, || timed_otc_dma_cycles(16)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x31, 64, || timed_otc_dma_cycles(64)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x32, 256, || timed_otc_dma_cycles(256)),
+    );
+    push_timing_record(records, next, sample_timing(0x40, 1, timed_cdrom_getstat));
+    // CD battery. Timed on Timer 1 HBlank ticks, not Timer 2 cycles, and each
+    // record repeats through sample_timing so a retry or a bad block shows up
+    // as a min/max spread instead of silently becoming the answer.
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x90, 1, || cd_seek_distance(1)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x91, 16, || cd_seek_distance(16)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x92, 128, || cd_seek_distance(128)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x93, 512, || cd_seek_distance(512)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x94, 8, || cd_read_throughput(false, 8)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x95, 8, || cd_read_throughput(true, 8)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x96, 1, || {
+            cd_timed(|| cdrom::try_get_stat(CD_SPINS).is_some())
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x97, 1, || {
+            cd_timed(|| cdrom::try_set_mode(0, CD_SPINS).is_some())
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x98, 1, || {
+            cd_timed(|| cdrom::try_get_loc_p(CD_SPINS).is_some())
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x99, 1, || {
+            cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]))
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x9A, 1, || {
+            cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_INIT, &[]))
+        }),
+    );
+    // CD-DA contention. 0x9B against 0x9C is the whole point: identical read
+    // path, identical sector count, the only difference being live audio.
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x9B, 8, || cd_read_with_audio(true, 8)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x9C, 8, || cd_read_with_audio(false, 8)),
+    );
+    push_timing_record(records, next, sample_timing(0x9D, 1, cd_play_start));
+    // Seek sweep. Four distances proved too few to model: the console measured
+    // +128 slower than +512, and no monotonic fit came within 2x of the middle
+    // points. Ten distances with the same five repeats each make an outlier
+    // visible AS an outlier rather than as the shape of the curve.
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xC0, 2, || cd_seek_distance(2)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xC1, 4, || cd_seek_distance(4)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xC2, 8, || cd_seek_distance(8)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xC3, 32, || cd_seek_distance(32)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xC4, 64, || cd_seek_distance(64)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xC5, 256, || cd_seek_distance(256)),
+    );
+    // Backward seeks at the same distances. A drive settles differently
+    // approaching from outside, and every existing record seeks forward only,
+    // so a direction asymmetry would currently be invisible.
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xC6, 64, || cd_seek_backward(64)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xC7, 256, || cd_seek_backward(256)),
+    );
+    push_timing_record(
+        records,
+        next,
+        // Must establish playback itself: 0x9D pauses and mutes when it
+        // finishes, so measuring "during CD-DA" without restarting audio would
+        // silently measure the idle case instead.
+        sample_timing(0x9E, 1, cd_getlocp_during_playback),
+    );
+    // GPU fill rate. Pixel counts are held identical across shading modes so
+    // the DIFFERENCE isolates interpolation, blending and dither cost from the
+    // per-pixel floor; 0xAA/0xAB hold total pixels constant while changing
+    // primitive count, which separates setup cost from fill cost.
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA0, 16, || {
+            timed_fill_batch(16, 0x2000_80FF, 32, FillKind::Flat, false)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA1, 16, || {
+            timed_fill_batch(16, 0x3000_00FF, 32, FillKind::Gouraud, false)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA2, 16, || {
+            timed_fill_batch(
+                16,
+                0x2400_80FF,
+                32,
+                FillKind::Textured { tpage: 0, span: 32 },
+                false,
+            )
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA3, 16, || {
+            timed_fill_batch(
+                16,
+                0x2400_80FF,
+                32,
+                FillKind::Textured {
+                    tpage: 0x40,
+                    span: 32,
+                },
+                false,
+            )
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA4, 16, || {
+            timed_fill_batch(
+                16,
+                0x2400_80FF,
+                32,
+                FillKind::Textured {
+                    tpage: 0x80,
+                    span: 32,
+                },
+                false,
+            )
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA5, 16, || {
+            timed_fill_batch(16, 0x2800_80FF, 32, FillKind::Flat, false)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA6, 16, || {
+            timed_fill_batch(16, 0x3800_00FF, 32, FillKind::Gouraud, false)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA7, 16, || {
+            timed_fill_batch(
+                16,
+                0x2C00_80FF,
+                32,
+                FillKind::Textured { tpage: 0, span: 32 },
+                false,
+            )
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA8, 16, || {
+            timed_fill_batch(16, 0x2A00_80FF, 32, FillKind::Translucent, false)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xA9, 16, || {
+            timed_fill_batch(16, 0x3000_00FF, 32, FillKind::Gouraud, true)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xAA, 4, || {
+            timed_fill_batch(4, 0x2800_80FF, 64, FillKind::Flat, false)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xAB, 64, || {
+            timed_fill_batch(64, 0x2800_80FF, 8, FillKind::Flat, false)
+        }),
+    );
+    // Texture cache: identical pixel count, different UV footprint. A 2 KiB
+    // cache should make the wide walk markedly slower than the tight resample.
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xAC, 16, || {
+            timed_fill_batch(
+                16,
+                0x2C00_80FF,
+                32,
+                FillKind::Textured {
+                    tpage: 0,
+                    span: 255,
+                },
+                false,
+            )
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xAD, 16, || {
+            timed_fill_batch(
+                16,
+                0x2C00_80FF,
+                32,
+                FillKind::Textured { tpage: 0, span: 8 },
+                false,
+            )
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xAE, 16, || {
+            timed_fill_batch(16, 0x6000_80FF, 32, FillKind::Rect, false)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xAF, 16, || {
+            // GP0 0x64: the 8bpp-CLUT textured rect path that renders black in
+            // both backends and has never been measured on silicon.
+            timed_fill_batch(
+                16,
+                0x6400_80FF,
+                32,
+                FillKind::TexturedRect { clut: 0 },
+                false,
+            )
+        }),
+    );
+    // MDEC. No coverage at all before now. Command number lives in bits 31..29:
+    // 2 = set quant table, 3 = set scale table, 1 = decode.
+    push_timing_record(
+        records,
+        next,
+        // Set quant table, luma only: 64 bytes = 16 words.
+        sample_timing(0xB0, 16, || timed_mdec(0x4000_0000, 16)),
+    );
+    push_timing_record(
+        records,
+        next,
+        // Set quant table, luma + chroma: 128 bytes = 32 words.
+        sample_timing(0xB1, 32, || timed_mdec(0x4000_0001, 32)),
+    );
+    push_timing_record(
+        records,
+        next,
+        // Set scale (IDCT) table: 64 halfwords = 32 words.
+        sample_timing(0xB2, 32, || timed_mdec(0x6000_0000, 32)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xB3, 1, timed_mdec_reset_settle),
+    );
+    // Decode-to-drained for one and four colour macroblocks. Two points, so
+    // the host can separate per-macroblock cost from command setup.
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xB4, 1, || timed_mdec_decode(1)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xB5, 2, || timed_mdec_decode(2)),
+    );
+    // SIO: the same poll at four pacing configurations.
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xB6, 1, || {
+            timed_pad_poll(PROBE_VARIANTS[0].1, PROBE_VARIANTS[0].2)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xB7, 1, || {
+            timed_pad_poll(PROBE_VARIANTS[1].1, PROBE_VARIANTS[1].2)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xB8, 1, || {
+            timed_pad_poll(PROBE_VARIANTS[2].1, PROBE_VARIANTS[2].2)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0xB9, 1, || {
+            timed_pad_poll(PROBE_VARIANTS[3].1, PROBE_VARIANTS[3].2)
+        }),
+    );
+    // Setup-delay sweep. The console answered at setup 0, gave NO reply at 128,
+    // and answered again at 384: non-monotonic, so the threshold cannot be read
+    // off four points. Twelve evenly spaced delays bracket where a real pad
+    // starts replying, which is the SCPH-1200 problem stated as a measurement.
+    let mut sweep = 0usize;
+    while sweep < SIO_SETUP_SWEEP.len() {
+        let setup = SIO_SETUP_SWEEP[sweep];
+        push_timing_record(
+            records,
+            next,
+            sample_timing(0xD0 + sweep as u8, (setup / 8) as u16, move || {
+                timed_pad_poll(setup, 0)
+            }),
+        );
+        sweep += 1;
+    }
+    push_timing_record(records, next, sample_timing(0x41, 1, timed_gpu_irq_settle));
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x42, 1, || {
+            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w0)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x43, 1, || {
+            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w1)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x44, 1, || {
+            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w2)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x45, 1, || {
+            call_uncached_entry_timing(timed_icache_entry_warm, __hwtest_icache_entry_w0)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x46, 64, timed_untaken_branches),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x47, 64, || {
+            timed_byte_load_hazards_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x48, 64, || {
+            timed_half_load_hazards_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x49, 64, || {
+            let cached = (&raw const TIMING_WORD) as u32;
+            timed_byte_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x4A, 64, || {
+            let cached = (&raw const TIMING_WORD) as u32;
+            timed_half_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x4B, 64, || timed_load_hazards_at(0xBFC0_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x4C, 64, || timed_half_load_hazards_at(0xBFC0_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x4D, 64, || timed_byte_load_hazards_at(0xBFC0_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x4E, 64, || timed_half_load_hazards_at(0x1F80_1DAE)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x4F, 64, || timed_load_hazards_at(0x1F80_1044)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x50, 64, || {
+            timed_byte_stores_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x51, 64, || {
+            timed_half_stores_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x52, 64, || timed_byte_load_hazards_at(0x1F80_1800)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x53, 64, || timed_half_load_hazards_at(0x1F80_1800)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x54, 64, || timed_load_hazards_at(0x1F80_1800)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x55, 64, || timed_byte_load_hazards_at(0x1F00_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x56, 64, || timed_half_load_hazards_at(0x1F00_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x57, 64, || timed_load_hazards_at(0x1F00_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x58, 64, || timed_byte_load_hazards_at(0x1F80_2000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x59, 64, || timed_half_load_hazards_at(0x1F80_2000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x5A, 64, || timed_load_hazards_at(0x1F80_2000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x5B, 64, || timed_byte_load_hazards_at(0x1FA0_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x5C, 64, || timed_half_load_hazards_at(0x1FA0_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x5D, 64, || timed_load_hazards_at(0x1FA0_0000)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x5E, 64, || timed_byte_load_hazards_at(0x1F80_1DAE)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x5F, 64, || timed_load_hazards_at(0x1F80_1DAC)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x60, 64, || timed_byte_load_hazards_at(0xFFFE_0130)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x61, 64, || timed_half_load_hazards_at(0xFFFE_0130)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x62, 64, || timed_load_hazards_at(0xFFFE_0130)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x63, 64, || timed_load_hazards_at(0x1F80_1010)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x64, 64, || timed_unaligned_word_loads_at(0x1F80_1DAA)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x65, 512, timed_spu_dma_write_512_halfwords),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x66, 16, || timed_gpu_dma_block(16, 1)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x67, 64, || timed_gpu_dma_block(16, 4)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x68, 256, || timed_gpu_dma_block(16, 16)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x69, 256, || timed_gpu_dma_block(64, 4)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x6A, 256, || timed_gpu_dma_block(256, 1)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x6B, 258, timed_gpu_dma_linked_2x128),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x6C, 272, || timed_gpu_line_batch(false, 16, 16)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x6D, 2056, || timed_gpu_line_batch(false, 256, 8)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x6E, 272, || timed_gpu_line_batch(true, 16, 16)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x6F, 2056, || timed_gpu_line_batch(true, 256, 8)),
+    );
+    let (refresh_period, refresh_stall) = sample_dram_refresh();
+    push_timing_record(records, next, refresh_period);
+    push_timing_record(records, next, refresh_stall);
 }
 
 fn push_timing_record(

@@ -33,6 +33,28 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.21 (2026-09-17, schema PX8)
+
+Performance probes, all under a warm harness (`src/perf_probes.rs`, described
+in [hardware-test-disc.md](hardware-test-disc.md)). Records `0x72`-`0x8D` run
+with every timing scan: warm twins of the core CPU records, the MULT/DIV gap
+sweep, MULT operand dependence, and the I-cache 4 KiB alias pair. Records
+`0xDC`-`0xEC` flip `RAM_SIZE` bit 7 and cache-control bits 13-17 around a fixed
+workload; they can hang a console, so they run only from `TARGETED PROBES >
+PERF A/B (MAY HANG)`.
+
+Why a warm harness: the older CPU records carry a layout-dependent I-cache
+refill tax (a commit that touched no probe moved 104 of 151 emulator minima),
+so they are not comparable across builds. No existing record changed meaning,
+hence MINOR.
+
+Also in this version, none of it changing a record: probe markers became
+unique `ori`-to-zero words and the machine-code audit discovers them from the
+image (the six GTE command probes are audited for the first time; the 19
+previously pinned digests are unchanged); the timing block sends only filled
+records; the memory-control block gains `RAM_SIZE` and cache control; and the
+timing sampler is one shared body, which took the EXE from 1,003,520 bytes to 751,616 with the new probes included.
+
 ### v1.20 (2026-08-22, schema PX8)
 
 Eight INFO-only RTPT hazard probes (`0xC0`-`0xC7`) settle the remaining
@@ -329,6 +351,21 @@ bumped because adding the screen changes the linked executable against which
 machine-code and emulator timing baselines are pinned. This also corrects the
 previous payload/display mismatch: the v1.7 display string shipped while the
 two payload version bytes still encoded v1.6.
+
+### v1.7 (2026-07-31, schema PX7)
+
+The CD-DA contention pair (`0x9B`/`0x9C`) normalises with PAUSE instead of
+STOP. The 2026-07-31 console run proved STOP plus respin grinds the mechanism
+for minutes right after the contention read; with the motor kept up, `0x9C`
+measures the read it always claimed to measure instead of a spin-up. Also: the
+scan draws the in-flight record id as bit-cells, and START skips mid-record.
+
+### v1.6 (2026-07-28, schema PX7)
+
+Menu-first boot and the shared memory-card hardware diagnostic. The record
+schema is unchanged, but linking the diagnostic moves timing code, so
+machine-code and emulator timing baselines are pinned to this binary rather
+than compared byte-for-byte with v1.5.
 
 ### v1.5 (2026-07-26, schema PX7)
 

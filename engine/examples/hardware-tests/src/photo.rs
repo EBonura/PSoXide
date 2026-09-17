@@ -80,8 +80,10 @@ pub(crate) mod blocks {
 //   [STATUS]    ceil(TEST_COUNT * 3 / 8) bytes of packed 3-bit statuses
 //   [FAILURES]  u16 count, then count x (u16 id, u32 expected, u32 observed)
 //   [OBSERVED]  TEST_COUNT x u32 conformance observations
-//   [TIMING]    TIMING_RECORD_COUNT x (u8 id, u16 min, u16 median, u16 max)
-//   [MEMCTL]    9 x u32 memory-control registers
+//   [TIMING]    header count x (u8 id, u16 min, u16 median, u16 max); only
+//               filled records are sent, so the count is what ran, not the
+//               slot capacity
+//   [MEMCTL]    11 x u32: memory control 0x1F801000-20, RAM_SIZE, cache control
 //   [PRECISION] 192 x u32 raw precision values
 //   u32 CRC-32 over every preceding byte
 //
@@ -164,7 +166,12 @@ impl PhotoCapture {
         out.push_u8(conformance_run);
         out.push_u8(timing.summary.runs);
         out.push_u16(crate::TEST_COUNT as u16);
-        out.push_u16(crate::TIMING_RECORD_COUNT as u16);
+        let filled = timing
+            .records
+            .iter()
+            .filter(|record| record.id != crate::TIMING_RECORD_UNUSED)
+            .count();
+        out.push_u16(filled as u16);
         out.push_u16(crate::MEMORY_CONTROL_REGISTER_COUNT as u16);
         out.push_u16(crate::PRECISION_VALUE_COUNT as u16);
         out.push_u8(3); // status bits per conformance case
@@ -224,6 +231,9 @@ impl PhotoCapture {
         }
         if flags & blocks::TIMING != 0 {
             for record in timing.records {
+                if record.id == crate::TIMING_RECORD_UNUSED {
+                    continue;
+                }
                 out.push_u8(record.id);
                 out.push_u16(record.min);
                 out.push_u16(record.med);
@@ -248,8 +258,7 @@ impl PhotoCapture {
         let encoded_len = base64_encode(&binary[..binary_len], &mut self.payload);
         self.binary_len = binary_len as u16;
         self.payload_len = encoded_len as u16;
-        self.page_count =
-            encoded_len.div_ceil(BASE64_CHARS_PER_PAGE).max(1) as u8;
+        self.page_count = encoded_len.div_ceil(BASE64_CHARS_PER_PAGE).max(1) as u8;
         self.flags = flags;
         self.failures = failures;
         self.binary_crc = crc;

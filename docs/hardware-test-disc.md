@@ -17,7 +17,7 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.20**, schema PX8. Not comparable with v0.18 captures, whose timing
+Current: **v1.21**, schema PX8. Not comparable with v0.18 captures, whose timing
 was sampled without interrupt masking.
 
 ## Test tiers
@@ -25,9 +25,9 @@ was sampled without interrupt masking.
 Tests are split by one rule: **can this run in an arbitrary order without
 leaving hardware state behind?**
 
-**Tier 1, the standing battery.** The 173 conformance cases, the CPU/GTE/SPU
-scans, 129 timing records (CPU, GTE, DMA, CD, CD-DA contention, GPU fill rate,
-MDEC, SIO) and 192 raw precision values including console identity and 22
+**Tier 1, the standing battery.** The 200 conformance cases, the CPU/GTE/SPU
+scans, 179 timing records (CPU, GTE, DMA, CD, CD-DA contention, GPU fill rate,
+MDEC, SIO, and the warm-harness performance probes) and 192 raw precision values including console identity and 22
 bit-exact raster hashes. These run only when `RUN ALL TESTS + CAPTURE` is
 selected, need no further controller input, and mirror every PX8 page to the
 debug TTY. This is what `make hwtest-diff` gates and what a checked-in baseline
@@ -260,7 +260,7 @@ hardware state until the operator chooses an entry. Menus fit without scrolling:
    | `VIEW CAPTURE (QR PAGES)` | Back to the QR symbols the last capture produced |
    | `RESULTS BY SECTION` | All checks, then CPU/RAM/IRQ/DMA/TIMERS/GPU/GTE/SPU/CDROM/SIO |
    | `HARDWARE SCANS` | CPU sweep, GTE sweep, SPU register map |
-   | `TARGETED PROBES` | SB1/SB2/SB4 SPU probes, controller SIO timing, CD-chain and PA1-PA5 audio probes |
+   | `TARGETED PROBES` | SB1/SB2/SB4 SPU probes, controller SIO timing, CD-chain and PA1-PA5 audio probes, and `PERF A/B (MAY HANG)` |
    | `VIDEO LEVELS (TV/CAPTURE)` | Grey ramp and flat fields for display-chain checks |
    | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
    | `RESUME FROM TEST` | Restarts a long battery after a selected test index |
@@ -309,6 +309,99 @@ measurement logic changed at all.
 instructions between each probe's markers, so `drift=0` there while
 `hwtest-diff` reports drift means the measured blocks are byte-identical and only
 their addresses moved. That is a re-baseline, not a regression.
+
+The mechanism, measured on 2026-09-17: a commit of clippy fixes that touched no
+probe moved 104 of the 151 timing minima in the emulator, by up to 40 cycles
+(`multu_mflo_small` 126 -> 151, `nop_block` 211 -> 196, `divu_mflo` 317 ->
+302). Each record takes five samples, and between samples the scan heartbeat
+and a pad poll run. That code shares I-cache lines with the probe (the image is
+far larger than the 4 KiB direct-mapped cache), so every sample starts with a
+few of its own lines evicted and pays a refill for each. How many depends on
+where the linker placed both. The minimum across five samples does not escape
+it because all five are equally cold. This is also the likely reason the two
+full silicon captures disagree on `multu_mflo_small` (126 on v1.7, 140 on
+v1.17) while agreeing on the medium and large bands.
+
+Records `0x01`-`0x0F` therefore measure instruction cost plus a
+layout-dependent refill tax, and they are not comparable across suite builds.
+Their warm twins (next section) are.
+
+## Performance probes (records `0x72`-`0x8D`, and `0xDC`-`0xEC` on request)
+
+`src/perf_probes.rs`. These exist to price CPU-side optimisation techniques on
+silicon and to calibrate the emulator's cycle model against numbers that do not
+depend on link layout.
+
+**The warm harness.** Every probe here runs its timed block twice inside one
+assembly block and reports the second pass, and the block starts on a
+cache-line boundary. Every line it executes is resident by the time it is
+timed, so the result is a property of the instructions alone. In the emulator
+these records have zero jitter where their older twins show 70-90 cycles.
+`hwtest-report.py --layout-immune-timing-only` counts timing drift only for
+these ids, which is the useful gate for a refactor that moves code.
+
+| Id | Record | Question |
+|---|---|---|
+| `72`-`78` | warm twins of `01` nops, `02` ALU, `03` cached RAM load, `09` scratchpad load, `0B` RAM store, `0C` scratchpad store, `04` taken branch | what those instructions cost with no refill tax |
+| `79`-`84` | `multu; k nops; mflo` x16 at the three `rs` magnitude bands, for k = 0 and k = m-1, m, m+1 around each band's documented latency m (6, 9, 13) | how many independent instructions fit behind a multiply before the `mflo` interlock stall is gone. Flat up to a knee, then +16 per extra nop; the knee is the real latency |
+| `85`-`89` | `divu; k nops; mflo` x8 for k = 0, 34, 36, 38, 40 | the same for the divider (documented 36) |
+| `8A` | `multu` with a small `rs` against a large `rt` | whether the band is chosen by `rs` alone |
+| `8B` | signed `mult` with `rs` = -5 | whether a small negative `rs` takes the fast band |
+| `8C`, `8D` | 32 alternating calls to two one-line leaves, exactly 4 KiB apart versus on neighbouring lines | the cost of a direct-mapped I-cache conflict per call. The wrapper runs through KSEG1 so it cannot disturb the lines it measures |
+
+Emulator values at v1.21: the knees land exactly on the modelled latencies
+(`7A`/`7B` = 126, `7C` = 142; `86`/`87` = 302, `88` = 318), and the alias pair
+costs 1362 against 1036, about five cycles per conflicting call.
+
+**The register A/B group** answers whether two undocumented-in-practice
+registers buy anything:
+
+* `RAM_SIZE` (`0x1F801060`) bit 7, which psx-spx describes as "delay on
+  simultaneous CODE+DATA fetch from RAM". `DC`/`DD` run 64 RAM loads through
+  their KSEG1 alias, so every instruction fetch is a RAM access coinciding with
+  a RAM data access, with the bit as found and flipped. `DE`/`DF` are the same
+  loads from KSEG0, warm, as the control pair.
+* Cache control (`0xFFFE0130`) bits 13-17, which psx-spx labels only
+  "supposedly" (read priority, no wait state, bus grant, load scheduling, no
+  streaming). Each is flipped alone around 64 cached RAM loads and around a
+  cold sweep of all 256 cache lines. `EA` sets the refill size to two words, a
+  bit the emulator does model, as a cross-check that the flip and the restore
+  both take effect. Bit 12 (interrupt polarity) has no performance reading and
+  is left alone; bus grant runs last.
+
+Each pair goes through byte-identical code: one assembly block reads the
+register, makes an untimed call in the normal state, writes `value ^ mask`,
+times the call, and restores, all reached through KSEG1 with interrupts masked.
+Mask 0 is the control. No other code ever runs in the flipped state.
+
+A wrong guess about one of these bits can hang a console, so the group never
+runs in the standing battery or the headless conformance capture. It runs from
+`TARGETED PROBES > PERF A/B (MAY HANG)`, which takes only the performance
+probes (no CD, GPU, MDEC or SIO batteries, so a power cycle costs about a
+minute) and then shows a full capture. The record id is on screen while each
+record runs, so a hang names its bit. The emulator models none of these bits
+except the refill size: headless, every flipped record equals its control, and
+`make hwtest-capture-perf` only proves the path runs and restores. The numbers
+come from a console.
+
+The memory-control block now ends with the `RAM_SIZE` and cache-control values
+(eleven registers instead of nine), so a capture records what the BIOS left in
+both.
+
+**Folding a console capture back in.** For each finding, change the emulator in
+the PSoXide-emulator repository and bump `components.lock.json` here; nothing
+under `emu/crates/emulator-core` is editable in this tree.
+
+1. Gap sweep knees: `mult_cycles` and `DIV_CYCLES` in `cpu.rs`. A knee one nop
+   later than modelled means the latency is one cycle longer.
+2. `8A`/`8B`: the `rs`-only, sign-folded magnitude rule in `mult_cycles`.
+3. Warm twins: the RAM, scratchpad and branch costs in
+   `bus/memory_timing.rs`, which were fitted to the layout-dependent records.
+4. `8C` against `8D`: the refill cost per line in `icache_fill_stalls`.
+5. `DD` against `DC`: if the uncached pair differs and the cached pair does
+   not, `RAM_SIZE` bit 7 is real. Model it in the fetch path, and consider
+   clearing it at boot in psx-rt.
+6. Any cache-control pair that differs: model the bit, then measure the games.
 
 ## CD-DA contention (records `0x9B`-`0x9E`)
 
@@ -432,7 +525,7 @@ and as the suite grows towards covering every chip, shipping them on every
 capture is what limits how many cases can be added.
 
 So a **conformance** capture carries the status bitmap and one record per
-FAILING case -- 383 bytes and a single QR at 173 cases, and still one QR at a
+FAILING case -- 163 bytes and a single QR at 200 cases, and still one QR at a
 thousand, because a passing case costs three bits and nothing else. A
 **characterisation** capture carries the lot, in PX7's field order, so an
 archived `px7-*` reference still describes the same thing a full PX8 does.
@@ -442,7 +535,9 @@ capture archived today still points at the same test after the array grows. The
 ids are checked for uniqueness at compile time.
 
 PX7 itself superseded PX6: four pages instead of three, a median column beside
-each min/max, explicit per-record ids, and 128 record slots.
+each min/max, explicit per-record ids, and 128 record slots. Since v1.21 a PX8
+timing block carries only the records that ran, and the header count says how
+many that is; unfilled slots used to cost seven bytes each on the wire.
 
 The median is not decoration. With five samples reduced to two numbers, a
 min/max gap cannot distinguish one stray interrupt from a genuinely bimodal
@@ -673,6 +768,10 @@ make hwtest-diff      # audit the linked EXE, then diff the capture vs baseline
 make hwtest-audio     # record SPU output, decode it, parse the recovered payload
 make hwtest-audio-chain  # decode again through simulated capture-card damage
 make hwtest-baseline  # deliberately re-pin the baseline (review the diff first)
+make hwtest-capture-full  # FULL characterisation capture (timing, memctl, precision)
+make hwtest-diff-full     # ...diffed against px8-emulator-full-v<version>.txt
+make hwtest-baseline-full # ...and re-pinned
+make hwtest-capture-perf  # PERF A/B run, including the register A/B group
 make hwtest-silicon SILICON=<payload.txt>   # compare against a console capture
 ```
 
@@ -682,17 +781,21 @@ burns its full poll budget timing out, which alone exhausts the instruction cap
 before the capture encodes. Booting the CUE directly instead produces no guest
 TTY at all.
 
-`hwtest-diff` is the CI gate. It fails, and names every value that moved, if
-any of the 173 observations, 90 timing minima, or 128 precision values differ
-from the checked-in baseline. Both the guest EXE and the headless capture are
+`hwtest-diff` is the routine gate. Its baseline is a conformance capture, so it
+covers the 200 case verdicts and the expected/observed values of the failing
+ones, and nothing else: since PX8 made the other blocks optional it has not
+seen a timing minimum or a precision value. `hwtest-diff-full` covers those,
+against a FULL baseline. Both the guest EXE and the headless capture are
 byte-reproducible, so a difference is a real behaviour change rather than
-toolchain noise.
+toolchain noise; but see "Timing records move when the guest binary changes"
+before reading a timing drift as a regression.
 
 Two baselines are pinned, and they answer different questions:
 
 | File | What it pins | Fails when |
 |---|---|---|
-| `docs/hardware-refs/px6-emulator-*.txt` | every captured value | emulator behaviour moves |
+| `docs/hardware-refs/px8-emulator-v*.txt` | conformance verdicts and failing values | emulator behaviour moves |
+| `docs/hardware-refs/px8-emulator-full-v*.txt` | every captured value | emulator behaviour moves, or guest code shifts alignment |
 | `docs/hardware-refs/hwtest-machine-code-*.txt` | the instructions between each probe's markers in the linked EXE | a measured block changes shape |
 
 The second matters because a timing record only means what this document
@@ -716,9 +819,8 @@ and no such payload is currently checked in: the SCPH-9902 capture described
 below survives only as the prose in this file. Commit the raw payload text of
 the next console run.
 
-The current headless run reports `126 pass, 21 fail, 26 info` for the 173-case
-conformance section, superseding the `129 pass, 18 fail` figure this document
-carried previously. The guest's expected values were recalibrated against
+The headless run reported `126 pass, 21 fail, 26 info` when the conformance
+section had 173 cases (it is `143 pass, 1 fail, 56 info` of 200 at v1.21). The guest's expected values were recalibrated against
 SCPH-9902 across several commits (`Match SCPH-9902 hardware fidelity
 checkpoint`, `Calibrate final PAL hardware fidelity probes`, `Calibrate OTC and
 SPU behavior from SCPH-9902`) while the emulator's GTE was not changed, so

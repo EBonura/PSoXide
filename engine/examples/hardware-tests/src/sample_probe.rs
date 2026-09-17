@@ -200,10 +200,9 @@ impl SampleProbe {
                     Voice::key_on(Voice::new(BEEP_VOICE).mask());
                 }
             }
-            3
-                if self.stage_frame == 60 => {
-                    Voice::key_off(Voice::new(BEEP_VOICE).mask());
-                }
+            3 if self.stage_frame == 60 => {
+                Voice::key_off(Voice::new(BEEP_VOICE).mask());
+            }
             _ => {}
         }
 
