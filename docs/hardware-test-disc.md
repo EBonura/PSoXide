@@ -462,8 +462,7 @@ the real empty-harness record.
 
 Note that two work sizes per probe were considered and rejected: every probe
 shares the identical harness prologue and epilogue with record `0x00`, so
-`(t_probe - t_empty) / N` already cancels the harness exactly, and the marker
-scheme can only encode 16 probe pairs in any case.
+`(t_probe - t_empty) / N` already cancels the harness exactly.
 
 ## Payload schema `PX6` (superseded)
 
@@ -699,10 +698,17 @@ Two baselines are pinned, and they answer different questions:
 The second matters because a timing record only means what this document
 claims if the instructions inside its measured window are still the ones the
 source asked for. `tools/verify-hwtest-machine-code.py` extracts each span
-from the linked EXE and digests it. Marker words are not unique in the binary
-(they are legal `sll` encodings LLVM also emits), so spans are matched as
-ordered start/end pairs; a span that cannot be located uniquely is reported as
-`AMBIGUOUS` and fails rather than being resolved by guesswork.
+from the linked EXE and digests it. Markers are `ori $zero, $zero, imm` words
+(start `0x34000000 | id << 1`, end `start | 1`), which write no register and
+which no compiler emits, so the verifier discovers probes by scanning the
+image rather than the source: a macro-generated probe or one in another module
+is audited like any other. Rows are keyed by probe id and named in the
+baseline. A probe that appears, vanishes, reuses an id or loses its end marker
+fails the gate. Until v1.20 the markers were `sll`-to-zero words that LLVM
+also emits; eight were shared between probes and the six GTE command probes
+were never audited at all. The re-keyed v1.20 baseline pins the same word
+counts and digests for the original 19 probes, which is the evidence that the
+marker change left every measured window untouched.
 
 **The emulator baseline is not hardware truth.** It detects our own drift. The
 comparison that matters is `hwtest-silicon` against a real console capture,

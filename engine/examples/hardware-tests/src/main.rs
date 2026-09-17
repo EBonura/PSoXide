@@ -71,26 +71,27 @@ core::arch::global_asm!(
     "jr $10",
     "nop",
     // Three one-line return targets whose entry points occupy words 0, 1,
-    // and 2 of separate 16-byte cache lines. The non-executed SLL-to-zero
-    // markers make their final linked layouts machine-verifiable.
+    // and 2 of separate 16-byte cache lines. The non-executed layout tags
+    // (0x34008000 | n) pad those lines, and hwtest-verify-code pins each
+    // tag's word position so the final linked layout is machine-verified.
     ".section .text.hwtest_icache_entries",
     ".balign 4096",
     ".globl __hwtest_icache_entry_w0",
     "__hwtest_icache_entry_w0:",
     "jr $10",
     "nop",
-    ".word 0x00000500",
-    ".word 0x00000540",
+    ".word 0x34008001",
+    ".word 0x34008002",
     ".balign 16",
-    ".word 0x00000580",
+    ".word 0x34008003",
     ".globl __hwtest_icache_entry_w1",
     "__hwtest_icache_entry_w1:",
     "jr $10",
     "nop",
-    ".word 0x000005C0",
+    ".word 0x34008004",
     ".balign 16",
-    ".word 0x00000600",
-    ".word 0x00000640",
+    ".word 0x34008005",
+    ".word 0x34008006",
     ".globl __hwtest_icache_entry_w2",
     "__hwtest_icache_entry_w2:",
     "jr $10",
@@ -9764,23 +9765,27 @@ fn measure_dram_refresh() -> (u16, u16) {
 
 // Keep every microbenchmark in one non-inlined assembly block. Besides avoiding
 // five optimizer-dependent copies, this guarantees that register setup happens
-// before the Timer 2 counter is cleared. The harmless SLL-to-zero words bracket
-// each block so tools/verify-hwtest-machine-code.py can audit the final PS-X EXE
-// (make hwtest-verify-code; spans are pinned in docs/hardware-refs/).
+// before the Timer 2 counter is cleared. Each block is bracketed by a pair of
+// `ori $zero, $zero, imm` words: start = 0x34000000 | (id << 1), end = start | 1,
+// with `id` unique across the crate. They write no register, LLVM never emits
+// them, and tools/verify-hwtest-machine-code.py finds every pair in the linked
+// PS-X EXE to audit the words between them (make hwtest-verify-code; spans are
+// pinned by id in docs/hardware-refs/). Ids in use: 1-25 here, 32+ in
+// perf_probes.rs.
 #[inline(never)]
 fn timed_empty() -> u16 {
     let elapsed: u32;
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000040", // probe 01 start marker
+            ".word 0x34000002", // probe 01 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
             "sw $zero, 0($11)", // timing starts after this counter reset
             "lw $12, 0($11)",
             "nop", // resolve the R3000A load delay before exposing the result
-            ".word 0x00000440", // probe 01 end marker
+            ".word 0x34000003", // probe 01 end marker
             ".set reorder",
             lateout("$11") _,
             lateout("$12") elapsed,
@@ -9796,7 +9801,7 @@ fn timed_uncached_ram_read_once(address: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000640", // probe 25 start marker
+            ".word 0x34000032", // probe 25 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -9805,7 +9810,7 @@ fn timed_uncached_ram_read_once(address: u32) -> u16 {
             "nop",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000A40", // probe 25 end marker
+            ".word 0x34000033", // probe 25 end marker
             ".set reorder",
             in("$8") address,
             lateout("$9") _,
@@ -9823,7 +9828,7 @@ fn timed_nops() -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000080", // probe 02 start marker
+            ".word 0x34000004", // probe 02 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -9833,7 +9838,7 @@ fn timed_nops() -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000480", // probe 02 end marker
+            ".word 0x34000005", // probe 02 end marker
             ".set reorder",
             lateout("$11") _,
             lateout("$12") elapsed,
@@ -9849,7 +9854,7 @@ fn timed_dependent_alu() -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x000000C0", // probe 03 start marker
+            ".word 0x34000006", // probe 03 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -9859,7 +9864,7 @@ fn timed_dependent_alu() -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x000004C0", // probe 03 end marker
+            ".word 0x34000007", // probe 03 end marker
             ".set reorder",
             lateout("$8") _,
             lateout("$11") _,
@@ -9880,7 +9885,7 @@ fn timed_load_hazards_at(address: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000100", // probe 04 start marker
+            ".word 0x34000008", // probe 04 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -9891,7 +9896,7 @@ fn timed_load_hazards_at(address: u32) -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000500", // probe 04 end marker
+            ".word 0x34000009", // probe 04 end marker
             ".set reorder",
             in("$8") address,
             lateout("$9") _,
@@ -9909,7 +9914,7 @@ fn timed_byte_load_hazards_at(address: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000500", // probe 20 start marker
+            ".word 0x34000028", // probe 20 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -9920,7 +9925,7 @@ fn timed_byte_load_hazards_at(address: u32) -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000900", // probe 20 end marker
+            ".word 0x34000029", // probe 20 end marker
             ".set reorder",
             in("$8") address,
             lateout("$9") _,
@@ -9938,7 +9943,7 @@ fn timed_half_load_hazards_at(address: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000540", // probe 21 start marker
+            ".word 0x3400002A", // probe 21 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -9949,7 +9954,7 @@ fn timed_half_load_hazards_at(address: u32) -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000940", // probe 21 end marker
+            ".word 0x3400002B", // probe 21 end marker
             ".set reorder",
             in("$8") address,
             lateout("$9") _,
@@ -9967,7 +9972,7 @@ fn timed_unaligned_word_loads_at(address: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000600", // probe 24 start marker
+            ".word 0x34000030", // probe 24 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -9979,7 +9984,7 @@ fn timed_unaligned_word_loads_at(address: u32) -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000A00", // probe 24 end marker
+            ".word 0x34000031", // probe 24 end marker
             ".set reorder",
             in("$8") address,
             lateout("$9") _,
@@ -9997,7 +10002,7 @@ fn timed_stores_at(address: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000140", // probe 05 start marker
+            ".word 0x3400000A", // probe 05 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10007,7 +10012,7 @@ fn timed_stores_at(address: u32) -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000540", // probe 05 end marker
+            ".word 0x3400000B", // probe 05 end marker
             ".set reorder",
             in("$8") address,
             lateout("$11") _,
@@ -10024,7 +10029,7 @@ fn timed_byte_stores_at(address: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000580", // probe 22 start marker
+            ".word 0x3400002C", // probe 22 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10034,7 +10039,7 @@ fn timed_byte_stores_at(address: u32) -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000980", // probe 22 end marker
+            ".word 0x3400002D", // probe 22 end marker
             ".set reorder",
             in("$8") address,
             lateout("$11") _,
@@ -10051,7 +10056,7 @@ fn timed_half_stores_at(address: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x000005C0", // probe 23 start marker
+            ".word 0x3400002E", // probe 23 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10061,7 +10066,7 @@ fn timed_half_stores_at(address: u32) -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x000009C0", // probe 23 end marker
+            ".word 0x3400002F", // probe 23 end marker
             ".set reorder",
             in("$8") address,
             lateout("$11") _,
@@ -10078,7 +10083,7 @@ fn timed_taken_branches() -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000180", // probe 06 start marker
+            ".word 0x3400000C", // probe 06 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10090,7 +10095,7 @@ fn timed_taken_branches() -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000580", // probe 06 end marker
+            ".word 0x3400000D", // probe 06 end marker
             ".set reorder",
             lateout("$11") _,
             lateout("$12") elapsed,
@@ -10106,7 +10111,7 @@ fn timed_untaken_branches() -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x000004C0", // probe 19 start marker
+            ".word 0x34000026", // probe 19 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10117,7 +10122,7 @@ fn timed_untaken_branches() -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x000008C0", // probe 19 end marker
+            ".word 0x34000027", // probe 19 end marker
             ".set reorder",
             lateout("$11") _,
             lateout("$12") elapsed,
@@ -10133,7 +10138,7 @@ fn timed_multu_mflo(lhs: u32) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x000001C0", // probe 07 start marker
+            ".word 0x3400000E", // probe 07 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10144,7 +10149,7 @@ fn timed_multu_mflo(lhs: u32) -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x000005C0", // probe 07 end marker
+            ".word 0x3400000F", // probe 07 end marker
             ".set reorder",
             in("$8") lhs,
             in("$9") 0x0001_0041u32,
@@ -10163,7 +10168,7 @@ fn timed_divu_mflo() -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000200", // probe 08 start marker
+            ".word 0x34000010", // probe 08 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10174,7 +10179,7 @@ fn timed_divu_mflo() -> u16 {
             ".endr",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000600", // probe 08 end marker
+            ".word 0x34000011", // probe 08 end marker
             ".set reorder",
             in("$8") 0x7ABC_DEF1u32,
             in("$9") 0x0000_0101u32,
@@ -10221,7 +10226,7 @@ fn timed_icache_cold() -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x000003C0", // probe 15 start marker
+            ".word 0x3400001E", // probe 15 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10230,7 +10235,7 @@ fn timed_icache_cold() -> u16 {
             "nop",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x000007C0", // probe 15 end marker
+            ".word 0x3400001F", // probe 15 end marker
             ".set reorder",
             in("$8") __hwtest_icache_block as *const () as usize,
             lateout("$10") _,
@@ -10248,7 +10253,7 @@ fn timed_icache_warm() -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000400", // probe 16 start marker
+            ".word 0x34000020", // probe 16 start marker
             "jalr $10, $8", // untimed first pass fills the whole I-cache
             "nop",
             "lui $11, 0x1F80",
@@ -10259,7 +10264,7 @@ fn timed_icache_warm() -> u16 {
             "nop",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000021", // addu $zero,$zero,$zero end marker
+            ".word 0x34000021", // probe 16 end marker
             ".set reorder",
             in("$8") __hwtest_icache_block as *const () as usize,
             lateout("$10") _,
@@ -10281,7 +10286,7 @@ fn timed_icache_entry_cold(target: unsafe extern "C" fn()) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000440", // probe 17 start marker
+            ".word 0x34000022", // probe 17 start marker
             "lui $11, 0x1F80",
             "ori $11, $11, 0x1120",
             "sw $zero, 4($11)",
@@ -10290,7 +10295,7 @@ fn timed_icache_entry_cold(target: unsafe extern "C" fn()) -> u16 {
             "nop",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000840", // probe 17 end marker
+            ".word 0x34000023", // probe 17 end marker
             ".set reorder",
             in("$8") target as usize,
             lateout("$10") _,
@@ -10311,7 +10316,7 @@ fn timed_icache_entry_warm(target: unsafe extern "C" fn()) -> u16 {
     unsafe {
         core::arch::asm!(
             ".set noreorder",
-            ".word 0x00000480", // probe 18 start marker
+            ".word 0x34000024", // probe 18 start marker
             "jalr $10, $8",
             "nop",
             "lui $11, 0x1F80",
@@ -10322,7 +10327,7 @@ fn timed_icache_entry_warm(target: unsafe extern "C" fn()) -> u16 {
             "nop",
             "lw $12, 0($11)",
             "nop",
-            ".word 0x00000880", // probe 18 end marker
+            ".word 0x34000025", // probe 18 end marker
             ".set reorder",
             in("$8") target as usize,
             lateout("$10") _,
@@ -10335,7 +10340,7 @@ fn timed_icache_entry_warm(target: unsafe extern "C" fn()) -> u16 {
 }
 
 macro_rules! timed_gte_commands {
-    ($name:ident, $count:literal, $instruction:literal, $start:literal, $end:literal) => {
+    ($name:ident, $id:literal, $count:literal, $instruction:literal) => {
         #[inline(never)]
         fn $name() -> u16 {
             seed_gte_state();
@@ -10344,7 +10349,7 @@ macro_rules! timed_gte_commands {
                 core::arch::asm!(
                     concat!(
                         ".set noreorder\n",
-                        ".word ", stringify!($start), "\n",
+                        ".word 0x34000000 | (", stringify!($id), " << 1)\n",
                         "lui $11, 0x1F80\n",
                         "ori $11, $11, 0x1120\n",
                         "sw $zero, 4($11)\n",
@@ -10354,7 +10359,7 @@ macro_rules! timed_gte_commands {
                         ".endr\n",
                         "lw $12, 0($11)\n",
                         "nop\n",
-                        ".word ", stringify!($end), "\n",
+                        ".word 0x34000001 | (", stringify!($id), " << 1)\n",
                         ".set reorder"
                     ),
                     lateout("$11") _,
@@ -10367,48 +10372,12 @@ macro_rules! timed_gte_commands {
     };
 }
 
-timed_gte_commands!(
-    timed_gte_rtps_commands,
-    16,
-    0x4A080001,
-    0x00000240,
-    0x00000640
-);
-timed_gte_commands!(
-    timed_gte_rtpt_commands,
-    8,
-    0x4A080030,
-    0x00000280,
-    0x00000680
-);
-timed_gte_commands!(
-    timed_gte_nclip_commands,
-    16,
-    0x4A000006,
-    0x000002C0,
-    0x000006C0
-);
-timed_gte_commands!(
-    timed_gte_mvmva_commands,
-    16,
-    0x4A080012,
-    0x00000300,
-    0x00000700
-);
-timed_gte_commands!(
-    timed_gte_ncdt_commands,
-    4,
-    0x4A080016,
-    0x00000340,
-    0x00000740
-);
-timed_gte_commands!(
-    timed_gte_ncct_commands,
-    4,
-    0x4A08003F,
-    0x00000380,
-    0x00000780
-);
+timed_gte_commands!(timed_gte_rtps_commands, 9, 16, 0x4A080001);
+timed_gte_commands!(timed_gte_rtpt_commands, 10, 8, 0x4A080030);
+timed_gte_commands!(timed_gte_nclip_commands, 11, 16, 0x4A000006);
+timed_gte_commands!(timed_gte_mvmva_commands, 12, 16, 0x4A080012);
+timed_gte_commands!(timed_gte_ncdt_commands, 13, 4, 0x4A080016);
+timed_gte_commands!(timed_gte_ncct_commands, 14, 4, 0x4A08003F);
 
 fn timed_otc_dma_cycles(words: u16) -> u16 {
     static mut OT: [u32; 256] = [0; 256];
