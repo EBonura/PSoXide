@@ -17,7 +17,7 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.22**, schema PX8. Not comparable with v0.18 captures, whose timing
+Current: **v1.23**, schema PX8. Not comparable with v0.18 captures, whose timing
 was sampled without interrupt masking.
 
 ## Test tiers
@@ -387,6 +387,39 @@ come from a console.
 The memory-control block now ends with the `RAM_SIZE` and cache-control values
 (eleven registers instead of nine), so a capture records what the BIOS left in
 both.
+
+### v1.23: extended ids, GPU batches done properly, and the open shapes
+
+Record ids are sixteen bits in the guest. `00`-`FE` travel as before; ids of
+`100` and up go in a new PX8 block, `TIMING_EXT` (flag bit 6, last in the
+payload: a u16 count, then id/min/median/max as four u16). The in-flight id is
+drawn as sixteen cells during a scan.
+
+`100`-`114`, GPU batches (`src/gpu_probes.rs`). The v1.22 console run showed
+the fill battery's method is broken: it writes to GP0 unpaced, overflowing the
+16-word FIFO, ends on GPUSTAT bit 26, which pulses between primitives, and
+samples mostly transparent texels. These batches are a linked list of one
+packet per primitive handed to DMA, ending in a GP0(1Fh) interrupt request,
+which the GPU takes in order with the drawing; Timer 2 runs from the DMA kick
+to GPUSTAT bit 24. Textures and CLUTs have no zero entry. Flat, Gouraud,
+dithered, textured, raw, translucent and Gouraud-textured triangles; flat, 4bpp
+and 8bpp rects; an 8bpp rect with a CLUT change on each; a texture page change
+on each; a wide UV span; clipped-away triangles; a letterboxed batch; VRAM
+fill and copy; and 64 two-pixel triangles of three kinds for setup cost. The
+emulator has no draw-time model and reads about 20 for all of them. The
+standing `A0`-`AF` records are unchanged and should not be trusted; the v1.22
+sweep's `BA`-`BF`, `3B`, `38`, `CB` and `F6` are retired.
+
+`120`-`136`, the shapes v1.22 left open: the multiply interlock at k = 1 to 4
+and the divide at k = 35; a load followed by 2, 3, 6 and 8 independent
+instructions; a store followed by 1 and 2, bursts of 2, 4 and 8 stores, and a
+GP0 store followed by 3; RTPS followed at once by a read of SXY2, MAC0, MAC1
+or IR1 and then 20 nops, with a control that reads after RTPS has finished
+(22 cycles a turn if the read is free, about 36 if it waits); and the alias
+pair called from a cached wrapper that cannot share a line with either leaf.
+
+What the v1.22 captures found, and what went into the emulator, is in
+[emulator-accuracy-from-silicon.md](emulator-accuracy-from-silicon.md).
 
 ### The performance sweep (v1.22)
 

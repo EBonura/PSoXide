@@ -66,6 +66,9 @@ pub(crate) mod blocks {
     pub const MEMCTL: u8 = 1 << 4;
     /// Raw precision values.
     pub const PRECISION: u8 = 1 << 5;
+    /// Timing records whose id does not fit a byte (0x100 and up). Sent with
+    /// the TIMING block whenever there are any.
+    pub const TIMING_EXT: u8 = 1 << 6;
 
     /// What a routine run emits: verdicts, and detail only where it failed.
     pub const CONFORMANCE: u8 = STATUS | FAILURES;
@@ -84,6 +87,8 @@ pub(crate) mod blocks {
 //               slot capacity
 //   [MEMCTL]    11 x u32: memory control 0x1F801000-20, RAM_SIZE, cache control
 //   [PRECISION] 192 x u32 raw precision values
+//   [TIMING_EXT] u16 count, then count x (u16 id, u16 min, u16 median, u16 max)
+//               for ids of 0x100 and up; last, so no earlier offset moves
 //   u32 CRC-32 over every preceding byte
 //
 // The counts in the header are u16 where PX7 had u8. The suite is on its way to
@@ -102,7 +107,8 @@ const BINARY_CAP: usize = HEADER_LEN
     + 2
     + crate::TEST_COUNT * FAILURE_RECORD_LEN
     + crate::TEST_COUNT * 4
-    + crate::TIMING_RECORD_COUNT * 7
+    + crate::TIMING_RECORD_COUNT * 8
+    + 2
     + crate::MEMORY_CONTROL_REGISTER_COUNT * 4
     + crate::PRECISION_VALUE_COUNT * 4
     + 4;
@@ -154,6 +160,18 @@ impl PhotoCapture {
     ) {
         let mut binary = [0u8; BINARY_CAP];
         let mut out = BinaryBuffer::new(&mut binary);
+        let byte_id = |record: &&crate::TimingRecord| record.id < 0x100;
+        let filled = timing.records.iter().filter(byte_id).count();
+        let extended = timing
+            .records
+            .iter()
+            .filter(|record| record.id >= 0x100 && record.id != crate::TIMING_RECORD_UNUSED)
+            .count();
+        let flags = if flags & blocks::TIMING != 0 && extended != 0 {
+            flags | blocks::TIMING_EXT
+        } else {
+            flags
+        };
 
         out.push_bytes(b"PX8B");
         out.push_u8(4); // transport schema version
@@ -165,11 +183,6 @@ impl PhotoCapture {
         out.push_u8(conformance_run);
         out.push_u8(timing.summary.runs);
         out.push_u16(crate::TEST_COUNT as u16);
-        let filled = timing
-            .records
-            .iter()
-            .filter(|record| record.id != crate::TIMING_RECORD_UNUSED)
-            .count();
         out.push_u16(filled as u16);
         out.push_u16(crate::MEMORY_CONTROL_REGISTER_COUNT as u16);
         out.push_u16(crate::PRECISION_VALUE_COUNT as u16);
@@ -230,10 +243,10 @@ impl PhotoCapture {
         }
         if flags & blocks::TIMING != 0 {
             for record in timing.records {
-                if record.id == crate::TIMING_RECORD_UNUSED {
+                if record.id >= 0x100 {
                     continue;
                 }
-                out.push_u8(record.id);
+                out.push_u8(record.id as u8);
                 out.push_u16(record.min);
                 out.push_u16(record.med);
                 out.push_u16(record.max);
@@ -247,6 +260,18 @@ impl PhotoCapture {
         if flags & blocks::PRECISION != 0 {
             for value in timing.precision {
                 out.push_u32(value);
+            }
+        }
+        if flags & blocks::TIMING_EXT != 0 {
+            out.push_u16(extended as u16);
+            for record in timing.records {
+                if record.id < 0x100 || record.id == crate::TIMING_RECORD_UNUSED {
+                    continue;
+                }
+                out.push_u16(record.id);
+                out.push_u16(record.min);
+                out.push_u16(record.med);
+                out.push_u16(record.max);
             }
         }
 

@@ -33,6 +33,18 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.23 (2026-09-17, schema PX8 with the TIMING_EXT block)
+
+Follows the first v1.22 console captures. Record ids widen to sixteen bits;
+ids from `0x100` travel in a new last block, so every earlier offset and every
+archived capture is untouched. `0x100`-`0x114` are GPU batches submitted as a
+DMA list that ends in a GP0(1Fh) interrupt request, replacing the v1.22
+sweep's GPU records (`0xBA`-`0xBF`, `0x3B`, `0x38`, `0xCB`, `0xF6`), whose
+unpaced GP0 writes overflowed the FIFO on silicon. `0x120`-`0x136` fill in the
+shapes v1.22 measured one point of: the multiply interlock, the load shadow,
+the write queue, whether a GTE read waits for its command, and the I-cache
+alias pair from a cached caller. No surviving record changed meaning.
+
 ### v1.22 (2026-09-17, schema PX8)
 
 The performance sweep: 59 more records pricing techniques rather than checking

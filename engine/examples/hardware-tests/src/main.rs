@@ -36,6 +36,7 @@ mod audio_probe;
 mod cd_chain_probe;
 mod controller_test;
 mod cpu_tests;
+mod gpu_probes;
 mod handoff_probe;
 mod payload;
 mod perf_probes;
@@ -120,6 +121,34 @@ core::arch::global_asm!(
     ".endr",
     "jr $10",
     "nop",
+    // A cached caller for the alias pair, at page offset 0x100 so that its
+    // lines (16 to 51) never share a cache index with the leaves (0 to 2).
+    // Same shape as perf_probes.rs's warm harness: $a0/$a1 are the two leaves,
+    // the second pass is the one timed, the count comes back in $v0.
+    ".balign 4096",
+    ".space 0x100",
+    ".globl __hwtest_perf_cached_pairs",
+    "__hwtest_perf_cached_pairs:",
+    ".word 0x340000E4", // probe 114 start marker
+    "lui $11, 0x1F80",
+    "ori $11, $11, 0x1120",
+    "addiu $13, $zero, 2",
+    "2:",
+    "sw $zero, 4($11)",
+    "sw $zero, 0($11)",
+    ".rept 32",
+    "jalr $10, $4",
+    "nop",
+    "jalr $10, $5",
+    "nop",
+    ".endr",
+    "lw $2, 0($11)",
+    "addiu $13, $13, -1",
+    "bnez $13, 2b",
+    "nop",
+    ".word 0x340000E5", // probe 114 end marker
+    "jr $ra",
+    "nop",
     // A full I-cache footprint of code that also reads data: the realistic
     // case for a refill and a RAM data access wanting the bus together.
     ".balign 4096",
@@ -142,6 +171,7 @@ unsafe extern "C" {
     fn __hwtest_icache_alias_b();
     fn __hwtest_perf_loads();
     fn __hwtest_icache_load_block();
+    fn __hwtest_perf_cached_pairs(a: u32, b: u32) -> u32;
 }
 
 // Suite version, written into every payload so a capture is self-identifying.
@@ -161,9 +191,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 22;
+const SUITE_VERSION_MINOR: u8 = 23;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.22";
+const SUITE_VERSION: &str = "HWTEST v1.23";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -834,7 +864,10 @@ const fn menu_title(page: MenuPage) -> &'static str {
 
 #[derive(Copy, Clone)]
 struct TimingRecord {
-    id: u8,
+    /// `0x00`-`0xFE` travel in the PX8 timing block with a one-byte id, as
+    /// they always have. Ids from `0x100` up go in the extended block: the
+    /// one-byte space filled up at v1.22.
+    id: u16,
     work: u16,
     min: u16,
     med: u16,
@@ -843,7 +876,7 @@ struct TimingRecord {
 
 /// Marks a timing slot that was never filled. Must not be a real record id:
 /// `0x00` is the empty-harness measurement, so zero cannot mean "unused".
-const TIMING_RECORD_UNUSED: u8 = 0xFF;
+const TIMING_RECORD_UNUSED: u16 = 0xFFFF;
 
 impl TimingRecord {
     const fn pending() -> Self {
@@ -3867,7 +3900,7 @@ fn run_timing_scan(scope: TimingScope) -> TimingReport {
     perf_probes::push_safe(&mut records, &mut next);
     if scope != TimingScope::Standard {
         perf_probes::push_extended(&mut records, &mut next);
-        push_gpu_technique_records(&mut records, &mut next);
+        gpu_probes::push(&mut records, &mut next);
     }
     if scope == TimingScope::PerfAb {
         perf_probes::push_risky(&mut records, &mut next);
@@ -3978,7 +4011,7 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
     );
 
     for (set, spin_count) in SPINS.into_iter().enumerate() {
-        let base = 0x10 + set as u8 * 3;
+        let base = 0x10 + set as u16 * 3;
         push_timing_record(
             records,
             next,
@@ -4448,7 +4481,7 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
         push_timing_record(
             records,
             next,
-            sample_timing(0xD0 + sweep as u8, (setup / 8) as u16, move || {
+            sample_timing(0xD0 + sweep as u16, (setup / 8) as u16, move || {
                 timed_pad_poll(setup, 0)
             }),
         );
@@ -4712,84 +4745,14 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
     push_timing_record(records, next, refresh_stall);
 }
 
-/// GPU cases the fill battery leaves out, each next to the record it should
-/// be read against. Runs with the performance sweep, so the three reference
-/// records are taken again here, under their usual ids.
-fn push_gpu_technique_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &mut usize) {
-    const TEX4: FillKind = FillKind::Textured { tpage: 0, span: 32 };
-    const TINY_TEX4: FillKind = FillKind::Textured { tpage: 0, span: 2 };
-    use FillSetting::{Clipped, Letterboxed, Normal};
-    // (id, primitives, command, size, kind, setting)
-    let cases: [(u8, u16, u32, u32, FillKind, FillSetting); 14] = [
-        (0xA0, 16, 0x2000_80FF, 32, FillKind::Flat, Normal),
-        (0xA2, 16, 0x2400_80FF, 32, TEX4, Normal),
-        (0xAE, 16, 0x6000_80FF, 32, FillKind::Rect, Normal),
-        (
-            0xAF,
-            16,
-            0x6400_80FF,
-            32,
-            FillKind::TexturedRect { clut: 0 },
-            Normal,
-        ),
-        // Raw texture (no colour modulation) and translucent textured, both
-        // against 0xA2.
-        (0xBA, 16, 0x2500_80FF, 32, TEX4, Normal),
-        (0xBB, 16, 0x2600_80FF, 32, TEX4, Normal),
-        // The most expensive triangle there is, and the one a lit textured
-        // model is made of.
-        (
-            0xBC,
-            16,
-            0x3400_80FF,
-            32,
-            FillKind::GouraudTextured { span: 32 },
-            Normal,
-        ),
-        // 0xA0's triangles with the drawing area somewhere else.
-        (0xBD, 16, 0x2000_80FF, 32, FillKind::Flat, Clipped),
-        // Two other ways to move 32x32 pixels, against 0xAE: the VRAM fill
-        // command, and a VRAM-to-VRAM copy.
-        (0xBE, 16, 0x0200_80FF, 32, FillKind::Rect, Normal),
-        (0xBF, 16, 0x8000_0000, 32, FillKind::Copy, Normal),
-        // 64 two-pixel triangles: nothing to fill, so what is left is setup.
-        // nocash has it at 100 cycles flat-textured, 250 Gouraud-textured.
-        (0x3B, 64, 0x2400_80FF, 2, TINY_TEX4, Normal),
-        (
-            0x38,
-            64,
-            0x3400_80FF,
-            2,
-            FillKind::GouraudTextured { span: 2 },
-            Normal,
-        ),
-        // 0xAF with a CLUT change on every rect (nocash: 256 cycles each),
-        // and 0xA2 with the display range collapsed.
-        (
-            0xCB,
-            16,
-            0x6400_80FF,
-            32,
-            FillKind::TexturedRectAlternatingClut,
-            Normal,
-        ),
-        (0xF6, 16, 0x2400_80FF, 32, TEX4, Letterboxed),
-    ];
-    for (id, count, command, size, kind, setting) in cases {
-        let record = sample_timing(id, count, || {
-            timed_fill_batch_in(count, command, size, kind, false, setting)
-        });
-        push_timing_record(records, next, record);
-    }
-}
-
 fn push_timing_record(
     records: &mut [TimingRecord; TIMING_RECORD_COUNT],
     next: &mut usize,
     record: TimingRecord,
 ) {
     tty::print("hardware-tests: rec ");
-    tty::print(hex2(record.id).as_str());
+    tty::print(hex2((record.id >> 8) as u8).as_str());
+    tty::print(hex2(record.id as u8).as_str());
     tty::print(" min=");
     tty_print_dec_u16(record.min);
     tty::print(" max=");
@@ -4854,10 +4817,12 @@ fn scan_heartbeat() {
 /// narrows a hang down to "roughly record 18". This row names the exact
 /// record instead. Same immediate GP0 fill-rects as the bar, both buffer
 /// halves, cell width 16 because GP0(02h) snaps X and width to 16.
-fn draw_record_id(id: u8) {
+fn draw_record_id(id: u16) {
     for buffer_y in [212u32, 452] {
-        for bit in 0..8u32 {
-            let rgb = if id & (0x80 >> bit) != 0 {
+        // Sixteen cells, most significant first; the first eight stay dark
+        // for every id below 0x100.
+        for bit in 0..16u32 {
+            let rgb = if id & (0x8000 >> bit) != 0 {
                 0x0040_E0FF // (255, 224, 64) bright yellow
             } else {
                 0x0020_2020
@@ -4866,6 +4831,8 @@ fn draw_record_id(id: u8) {
             gpu_io::write_gp0(0x0200_0000 | rgb);
             gpu_io::write_gp0((buffer_y << 16) | (32 + bit * 16));
             gpu_io::write_gp0((8u32 << 16) | 16);
+            // GP0(02h) rounds x down to 16 pixels, so cells stay 16 wide and
+            // the row is 256 wide: it still fits the 320-pixel picture.
         }
     }
     gpu_io::wait_cmd_ready();
@@ -4935,7 +4902,7 @@ fn scan_aborted() -> bool {
 // those copies push run_timing_scan past the +-128 KiB reach of a MIPS PC16
 // branch. The indirect call sits outside every probe's measured window.
 #[inline(always)]
-fn sample_timing<F>(id: u8, work: u16, mut probe: F) -> TimingRecord
+fn sample_timing<F>(id: u16, work: u16, mut probe: F) -> TimingRecord
 where
     F: FnMut() -> u16,
 {
@@ -4943,7 +4910,7 @@ where
 }
 
 #[inline(never)]
-fn sample_timing_dyn(id: u8, work: u16, probe: &mut dyn FnMut() -> u16) -> TimingRecord {
+fn sample_timing_dyn(id: u16, work: u16, probe: &mut dyn FnMut() -> u16) -> TimingRecord {
     // Checked here rather than at the push, because the measurement runs
     // as the push's argument: this is the only place that can skip it.
     if scan_aborted() {
@@ -5057,7 +5024,7 @@ fn sample_dram_refresh() -> (TimingRecord, TimingRecord) {
 
 /// Min/median/max over the non-zero samples only, for probes where a zero
 /// means "this scan did not observe the event" rather than a measurement.
-fn summarize_nonzero(id: u8, work: u16, samples: [u16; TIMING_SAMPLES]) -> TimingRecord {
+fn summarize_nonzero(id: u16, work: u16, samples: [u16; TIMING_SAMPLES]) -> TimingRecord {
     let mut kept = [0u16; TIMING_SAMPLES];
     let mut count = 0usize;
     let mut i = 0;
@@ -5451,48 +5418,7 @@ fn fill_drain() -> bool {
 /// `command` is the GP0 opcode; `words` are the packet words after it, built by
 /// the caller so each variant's exact packet shape is explicit.
 fn timed_fill_batch(count: u16, command: u32, size: u32, kind: FillKind, dither: bool) -> u16 {
-    timed_fill_batch_in(count, command, size, kind, dither, FillSetting::Normal)
-}
-
-/// Where a fill batch is drawn from.
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum FillSetting {
-    Normal,
-    /// The drawing area is moved away from the primitives, so the GPU
-    /// receives and rejects every one: the price of leaving culling to it.
-    Clipped,
-    /// The vertical display range is collapsed to one line for the batch.
-    /// nocash: the GPU only renders at full speed when it is not also
-    /// fetching the picture, and a short display range removes nearly all of
-    /// that. The screen blanks for the few milliseconds this takes.
-    Letterboxed,
-}
-
-fn timed_fill_batch_in(
-    count: u16,
-    command: u32,
-    size: u32,
-    kind: FillKind,
-    dither: bool,
-    setting: FillSetting,
-) -> u16 {
     fill_env(dither);
-    if setting == FillSetting::Clipped {
-        gpu_io::write_gp0(0xE300_0000 | 960 | (FILL_Y << 10));
-        gpu_io::write_gp0(0xE400_0000 | 975 | ((FILL_Y + 15) << 10));
-        gpu_io::wait_cmd_ready();
-    }
-    if setting == FillSetting::Letterboxed {
-        gpu_io::write_gp1(0x0700_0000 | 0x10 | (0x11 << 10));
-    }
-    let elapsed = timed_fill_batch_body(count, command, size, kind);
-    if setting == FillSetting::Letterboxed {
-        psx_gpu::set_screen_v_offset(0, VideoMode::Ntsc, Resolution::R320X240);
-    }
-    elapsed
-}
-
-fn timed_fill_batch_body(count: u16, command: u32, size: u32, kind: FillKind) -> u16 {
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
     let mut index = 0u16;
@@ -5539,31 +5465,6 @@ fn timed_fill_batch_body(count: u16, command: u32, size: u32, kind: FillKind) ->
                 gpu_io::write_gp0((y << 16) | x);
                 gpu_io::write_gp0((size << 16) | size);
             }
-            FillKind::GouraudTextured { span } => {
-                // GP0 0x34: colour, position, UV for each vertex, with the
-                // CLUT riding on the first UV word and the page on the second.
-                gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0(0);
-                gpu_io::write_gp0(0x0000_FF00);
-                gpu_io::write_gp0((y << 16) | (x + size));
-                gpu_io::write_gp0(u32::from(span));
-                gpu_io::write_gp0(0x00FF_0000);
-                gpu_io::write_gp0(((y + size) << 16) | x);
-                gpu_io::write_gp0(u32::from(span) << 8);
-            }
-            FillKind::TexturedRectAlternatingClut => {
-                // Same 8bpp rect as TexturedRect, but every other one names a
-                // different CLUT, so each forces a 256-entry CLUT reload.
-                gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0(if index & 1 == 0 { 0 } else { 0x0040 << 16 });
-                gpu_io::write_gp0((size << 16) | size);
-            }
-            FillKind::Copy => {
-                // GP0 0x80: source, destination, extent.
-                gpu_io::write_gp0(((FILL_Y + 64) << 16) | x);
-                gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0((size << 16) | size);
-            }
             FillKind::TexturedRect { clut } => {
                 // GP0 0x64 takes an extra UV + CLUT word between position and
                 // extent. Omitting it shifts the extent into the UV slot and
@@ -5592,9 +5493,6 @@ enum FillKind {
     Textured { tpage: u16, span: u8 },
     Rect,
     TexturedRect { clut: u16 },
-    GouraudTextured { span: u8 },
-    TexturedRectAlternatingClut,
-    Copy,
 }
 
 // ---------------------------------------------------------------------------

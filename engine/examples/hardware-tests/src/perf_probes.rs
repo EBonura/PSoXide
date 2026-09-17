@@ -28,7 +28,7 @@
 use crate::regs::{CACHE_CONTROL, RAM_SIZE, SPU_DELAY};
 use crate::{__hwtest_icache_alias_b, __hwtest_icache_entry_w1, __hwtest_perf_loads};
 use crate::{__hwtest_icache_block, __hwtest_icache_entry_w0, TIMING_RECORD_COUNT};
-use crate::{__hwtest_icache_load_block, seed_gte_state};
+use crate::{__hwtest_icache_load_block, __hwtest_perf_cached_pairs, seed_gte_state};
 use crate::{flush_icache_without_irq, push_timing_record, sample_timing, TimingRecord};
 use psx_io::dma;
 use psx_io::gpu as gpu_io;
@@ -98,7 +98,7 @@ type WarmFn = fn(u32, u32) -> u16;
 
 #[derive(Copy, Clone)]
 struct Probe {
-    id: u8,
+    id: u16,
     work: u16,
     run: WarmFn,
     a: Arg,
@@ -110,7 +110,7 @@ struct Probe {
     seed_gte: bool,
 }
 
-const fn probe(id: u8, work: u16, run: WarmFn, a: Arg, b: Arg) -> Probe {
+const fn probe(id: u16, work: u16, run: WarmFn, a: Arg, b: Arg) -> Probe {
     Probe {
         id,
         work,
@@ -264,9 +264,51 @@ const EXTENDED: [Probe; 39] = [
     probe(0x3A, 8, rtpt_then_next_inputs, NONE, NONE).gte(),
 ];
 
+/// v1.23: the shapes the v1.22 console captures left open. Ids from `0x120`.
+const SHAPES: [Probe; 22] = [
+    // The multiply interlock between k = 0 and k = m - 1. v1.22 found the
+    // pair one clock cheaper at k = 5 than at k = 0 or k = 6 (latency 6);
+    // these say whether it is flat in between, as the emulator now assumes.
+    probe(0x120, 16, multu_gap_1, RS_SMALL, RT),
+    probe(0x121, 16, multu_gap_2, RS_SMALL, RT),
+    probe(0x122, 16, multu_gap_3, RS_SMALL, RT),
+    probe(0x123, 16, multu_gap_4, RS_SMALL, RT),
+    probe(0x124, 8, divu_gap_35, NUMERATOR, DIVISOR),
+    // The load shadow: v1.22 has a load then one instruction at 8 clocks and
+    // a load then four at 8.9, so about two clocks hide. Where, exactly?
+    probe(0x125, 64, load_then_2, Arg::RamWord, NONE),
+    probe(0x126, 64, load_then_3, Arg::RamWord, NONE),
+    probe(0x127, 64, load_then_6, Arg::RamWord, NONE),
+    probe(0x128, 64, load_then_8, Arg::RamWord, NONE),
+    // The write queue: a store then three instructions is free (v1.22), two
+    // stores back to back are two clocks each. One and two instructions, and
+    // bursts of 2, 4 and 8 stores followed by twice as many instructions.
+    probe(0x129, 64, store_then_1, Arg::RamWord, NONE),
+    probe(0x12A, 64, store_then_2, Arg::RamWord, NONE),
+    probe(0x12B, 64, store_burst_2, Arg::RamWord, NONE),
+    probe(0x12C, 64, store_burst_4, Arg::RamWord, NONE),
+    probe(0x12D, 64, store_burst_8, Arg::RamWord, NONE),
+    probe(0x12E, 64, store_then_3, Arg::Imm(GP0), NONE),
+    // Does a coprocessor read wait for the command? RTPS, the read, then 20
+    // nops so the next RTPS never stalls: 22 clocks a turn if the read is
+    // free, about 36 if it waits. The SCPH-9902 said free for MAC0 after
+    // NCLIP; the v1.22 lerp on the launch console says MAC1-3 wait for GPF.
+    probe(0x130, 16, rtps_read_sxy2, NONE, NONE).gte(),
+    probe(0x131, 16, rtps_read_mac0, NONE, NONE).gte(),
+    probe(0x132, 16, rtps_read_mac1, NONE, NONE).gte(),
+    probe(0x133, 16, rtps_read_ir1, NONE, NONE).gte(),
+    probe(0x134, 16, rtps_read_otz_after_gap, NONE, NONE).gte(),
+    // The alias pair again, from a CACHED wrapper placed so that it cannot
+    // share a line with either leaf. v1.22 measured 8 clocks a conflicting
+    // call with the jump landing in uncached code; the emulator assumes a
+    // cached landing costs the same.
+    probe(0x135, 32, cached_call_pairs, Arg::EntryW0, Arg::AliasB),
+    probe(0x136, 32, cached_call_pairs, Arg::EntryW0, Arg::EntryW1),
+];
+
 #[derive(Copy, Clone)]
 struct AbProbe {
-    id: u8,
+    id: u16,
     work: u16,
     target: Arg,
     /// Called once, untimed, in the register's normal state.
@@ -280,7 +322,7 @@ struct AbProbe {
     cold: bool,
 }
 
-const fn ab_probe(id: u8, work: u16, target: Arg, register: u32, mask: u32) -> AbProbe {
+const fn ab_probe(id: u16, work: u16, target: Arg, register: u32, mask: u32) -> AbProbe {
     AbProbe {
         id,
         work,
@@ -380,6 +422,7 @@ pub(crate) fn push_safe(records: &mut Records, next: &mut usize) {
 
 pub(crate) fn push_extended(records: &mut Records, next: &mut usize) {
     push_probes(&EXTENDED, records, next);
+    push_probes(&SHAPES, records, next);
     push_dma(records, next);
 }
 
@@ -670,6 +713,118 @@ warm_probe!(
 );
 
 // ---------------------------------------------------------------------------
+// v1.23 shape probes
+// ---------------------------------------------------------------------------
+
+muldiv_gap_probe!(multu_gap_1, 94, 16, 0x01090019, 1);
+muldiv_gap_probe!(multu_gap_2, 95, 16, 0x01090019, 2);
+muldiv_gap_probe!(multu_gap_3, 96, 16, 0x01090019, 3);
+muldiv_gap_probe!(multu_gap_4, 97, 16, 0x01090019, 4);
+muldiv_gap_probe!(divu_gap_35, 98, 8, 0x0109001B, 35);
+
+/// 64 x (`$access`, then `$count` independent instructions).
+macro_rules! access_then_probe {
+    ($name:ident, $id:literal, $access:literal, $count:literal) => {
+        warm_probe!(
+            $name,
+            $id,
+            concat!(
+                ".rept 64\n",
+                $access,
+                "\n",
+                ".rept ",
+                stringify!($count),
+                "\n",
+                "addiu $10, $10, 1\n",
+                ".endr\n",
+                ".endr\n"
+            )
+        );
+    };
+}
+
+access_then_probe!(load_then_2, 99, "lw $9, 0($8)", 2);
+access_then_probe!(load_then_3, 100, "lw $9, 0($8)", 3);
+access_then_probe!(load_then_6, 101, "lw $9, 0($8)", 6);
+access_then_probe!(load_then_8, 102, "lw $9, 0($8)", 8);
+access_then_probe!(store_then_1, 103, "sw $zero, 0($8)", 1);
+access_then_probe!(store_then_2, 104, "sw $zero, 0($8)", 2);
+access_then_probe!(store_then_3, 105, "sw $zero, 0($8)", 3);
+
+/// 64 stores in bursts of `$burst`, each burst followed by twice as many
+/// independent instructions.
+macro_rules! store_burst_probe {
+    ($name:ident, $id:literal, $bursts:literal, $burst:literal, $gap:literal) => {
+        warm_probe!(
+            $name,
+            $id,
+            concat!(
+                ".rept ",
+                stringify!($bursts),
+                "\n",
+                ".rept ",
+                stringify!($burst),
+                "\n",
+                "sw $zero, 0($8)\n",
+                ".endr\n",
+                ".rept ",
+                stringify!($gap),
+                "\n",
+                "addiu $10, $10, 1\n",
+                ".endr\n",
+                ".endr\n"
+            )
+        );
+    };
+}
+
+store_burst_probe!(store_burst_2, 106, 32, 2, 4);
+store_burst_probe!(store_burst_4, 107, 16, 4, 8);
+store_burst_probe!(store_burst_8, 108, 8, 8, 16);
+
+/// 16 x (RTPS; `$read`; 20 nops), then the usual idle tail.
+macro_rules! rtps_read_probe {
+    ($name:ident, $id:literal, $before:literal, $read:literal) => {
+        warm_probe!(
+            $name,
+            $id,
+            concat!(
+                ".rept 16\n",
+                ".word 0x4A080001\n",
+                ".rept ",
+                stringify!($before),
+                "\n",
+                "nop\n",
+                ".endr\n",
+                ".word ",
+                stringify!($read),
+                "\n",
+                ".rept 20\n",
+                "nop\n",
+                ".endr\n",
+                ".endr\n",
+                ".rept 48\nnop\n.endr\n"
+            )
+        );
+    };
+}
+
+// mfc2 $10 from SXY2 (14), MAC0 (24), MAC1 (25), IR1 (9), OTZ (7).
+rtps_read_probe!(rtps_read_sxy2, 109, 0, 0x480A7000);
+rtps_read_probe!(rtps_read_mac0, 110, 0, 0x480AC000);
+rtps_read_probe!(rtps_read_mac1, 111, 0, 0x480AC800);
+rtps_read_probe!(rtps_read_ir1, 112, 0, 0x480A4800);
+// The control: the same read once RTPS (15 clocks) has certainly finished.
+rtps_read_probe!(rtps_read_otz_after_gap, 113, 16, 0x480A3800);
+
+/// The cached twin of `warm_call_pairs`. It lives in the I-cache entry section
+/// at page offset 0x100, so its lines (16 to 51) can never share a cache index
+/// with the leaves it calls (lines 0, 1 and 2).
+fn cached_call_pairs(a: u32, b: u32) -> u16 {
+    unsafe { __hwtest_perf_cached_pairs(a, b) as u16 }
+}
+
+// ---------------------------------------------------------------------------
 // DMA: what an ordering table costs to walk, and whether the CPU runs meanwhile
 // ---------------------------------------------------------------------------
 
@@ -745,7 +900,7 @@ fn push_dma(records: &mut Records, next: &mut usize) {
     // CPU runs during DMA only until it needs the bus.
     type Overlap = fn(u32, u32, u32, u32) -> u16;
     let data = Arg::RamWord.resolve();
-    let cases: [(u8, u16, Overlap, u32); 4] = [
+    let cases: [(u16, u16, Overlap, u32); 4] = [
         (0x35, 128, timed_nops_with_dma, 0),
         (0x36, 128, timed_nops_with_dma, LIST_KICK),
         (0x9F, 64, timed_loads_with_dma, 0),
