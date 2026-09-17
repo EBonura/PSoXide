@@ -17,7 +17,7 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.21**, schema PX8. Not comparable with v0.18 captures, whose timing
+Current: **v1.22**, schema PX8. Not comparable with v0.18 captures, whose timing
 was sampled without interrupt masking.
 
 ## Test tiers
@@ -260,7 +260,7 @@ hardware state until the operator chooses an entry. Menus fit without scrolling:
    | `VIEW CAPTURE (QR PAGES)` | Back to the QR symbols the last capture produced |
    | `RESULTS BY SECTION` | All checks, then CPU/RAM/IRQ/DMA/TIMERS/GPU/GTE/SPU/CDROM/SIO |
    | `HARDWARE SCANS` | CPU sweep, GTE sweep, SPU register map |
-   | `TARGETED PROBES` | SB1/SB2/SB4 SPU probes, controller SIO timing, CD-chain and PA1-PA5 audio probes, and `PERF A/B (MAY HANG)` |
+   | `TARGETED PROBES` | SB1/SB2/SB4 SPU probes, controller SIO timing, CD-chain and PA1-PA5 audio probes, `PERF SWEEP (SAFE)` and `PERF A/B (MAY HANG)` |
    | `VIDEO LEVELS (TV/CAPTURE)` | Grey ramp and flat fields for display-chain checks |
    | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
    | `RESUME FROM TEST` | Restarts a long battery after a selected test index |
@@ -388,6 +388,36 @@ The memory-control block now ends with the `RAM_SIZE` and cache-control values
 (eleven registers instead of nine), so a capture records what the BIOS left in
 both.
 
+### The performance sweep (v1.22)
+
+`TARGETED PROBES > PERF SWEEP (SAFE)` runs the records above plus the ones
+below and nothing else, then shows a full capture (four pages). `PERF A/B (MAY
+HANG)` is the same sweep followed by the register A/B group. Neither runs the
+conformance battery, so conformance cases read as pending in these captures.
+The sweep exists because every record id from `00` to `FE` is now taken and the
+standing battery's full capture was already at five pages.
+
+| Id | Record | What it prices |
+|---|---|---|
+| `1E` | the warm nop block through KSEG1 | an instruction executed uncached, which is also what thrashing degenerates to |
+| `1F`, `37`-`39`, `C8`-`CF` | untaken branch; byte, half and uncached stores; loads with no nop between them; byte and half loads; `lwl`/`lwr` and `swl`/`swr` unaligned pairs; loads through KSEG1; sixteen sequential addresses | the data-access shapes the compiler emits. The emulator charges an unaligned word 18 cycles against 8 aligned, and LLVM emits thousands of them |
+| `27`-`2F`, `3A`, `3B` | warm latency of RTPS, RTPT, NCLIP, MVMVA, AVSZ3, SQR, OP, GPF, NCDS, AVSZ4, NCCS, issued back to back | the GTE's latency table, which until now had six cold, layout-dependent silicon points |
+| `ED`-`F2` | RTPT then 21/23/25 nops, RTPS then 13/15/17 nops, before the next command | how much CPU work fits behind a GTE command for free. Knee at the latency |
+| `F3`-`F6` | sixteen `mtc2`, `ctc2`, `mfc2`, `cfc2` | the coprocessor register moves every vertex pays for |
+| `F7`, `F8` | one three-component Q12 lerp with `mult` and with GPF | the same work on each side, including the register traffic |
+| `8E`, `8F` | sixteen `multu` with no read between them, then one `mflo` | whether a multiply issued behind a running one waits for it. The emulator says it costs nothing |
+| `9F`, `FE` | signed `div`; `divu` with tiny operands | whether the divider has any early-out |
+| `F9`-`FD` | GPUSTAT read, GP0 write (a GPU nop), I_STAT read, SPU halfword read and write | what an I/O port costs in an inner loop. The emulator has an SPU read at 27 cycles |
+| `33`, `34` | the DMA controller walking 256 and 1024 empty packets | what an unused ordering-table slot costs per frame |
+| `35`, `36` | 128 nops with GPU DMA idle, and started right after kicking a 512-node list | whether the CPU runs while the list is walked. Equal means it does |
+| `BA`-`BF` (with `A0`, `A2`, `AE` retaken) | raw-texture and translucent textured triangles, Gouraud-textured triangles, triangles clipped away entirely, VRAM fill and VRAM copy | GPU cases the fill battery left out, each next to its reference |
+| `3C`, `3D` (A/B run) | `RAM_SIZE` bit 7 around a cold sweep of 4 KiB of code that also loads data | the realistic case for that bit: line refills and data reads contending for RAM |
+| `3E`, `3F` (A/B run) | the SPU bus read-delay nibble as found and shortened, around 64 SPU status reads | whether SPU register traffic can be made cheaper. The emulator models this one: 3489 to 2229 |
+
+`make hwtest-diff-perf` gates the whole A/B capture headless against
+`px8-emulator-perf-v<version>.txt`, counting timing drift only for warm
+records, so it should survive unrelated guest edits.
+
 **Folding a console capture back in.** For each finding, change the emulator in
 the PSoXide-emulator repository and bump `components.lock.json` here; nothing
 under `emu/crates/emulator-core` is editable in this tree.
@@ -402,6 +432,13 @@ under `emu/crates/emulator-core` is editable in this tree.
    not, `RAM_SIZE` bit 7 is real. Model it in the fetch path, and consider
    clearing it at boot in psx-rt.
 6. Any cache-control pair that differs: model the bit, then measure the games.
+7. GTE latencies and gap knees: the table in `psx-gte-core/src/state.rs`.
+8. `8E`/`8F`: `hilo_busy_until` is overwritten by a second multiply today. If
+   silicon queues them, that is a stall the emulator does not charge.
+9. `36` against `35`, and `33`/`34`: linked-list DMA cost per node and whether
+   it holds the CPU off the bus.
+10. `BA`-`BF` and the fill battery: the GPU draw-time model, which does not
+    exist yet.
 
 ## CD-DA contention (records `0x9B`-`0x9E`)
 
@@ -771,7 +808,9 @@ make hwtest-baseline  # deliberately re-pin the baseline (review the diff first)
 make hwtest-capture-full  # FULL characterisation capture (timing, memctl, precision)
 make hwtest-diff-full     # ...diffed against px8-emulator-full-v<version>.txt
 make hwtest-baseline-full # ...and re-pinned
-make hwtest-capture-perf  # PERF A/B run, including the register A/B group
+make hwtest-capture-perf  # PERF A/B run: the sweep, then the register A/B group
+make hwtest-diff-perf     # ...gated on the warm records
+make hwtest-probe-capture ROW=<n>  # one TARGETED PROBES row, for before/after diffs
 make hwtest-silicon SILICON=<payload.txt>   # compare against a console capture
 ```
 

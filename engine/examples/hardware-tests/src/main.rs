@@ -120,6 +120,17 @@ core::arch::global_asm!(
     ".endr",
     "jr $10",
     "nop",
+    // A full I-cache footprint of code that also reads data: the realistic
+    // case for a refill and a RAM data access wanting the bus together.
+    ".balign 4096",
+    ".globl __hwtest_icache_load_block",
+    "__hwtest_icache_load_block:",
+    ".rept 511",
+    "lw $3, 0($25)",
+    "nop",
+    ".endr",
+    "jr $10",
+    "nop",
     ".set reorder",
 );
 
@@ -130,6 +141,7 @@ unsafe extern "C" {
     fn __hwtest_icache_entry_w2();
     fn __hwtest_icache_alias_b();
     fn __hwtest_perf_loads();
+    fn __hwtest_icache_load_block();
 }
 
 // Suite version, written into every payload so a capture is self-identifying.
@@ -149,9 +161,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 21;
+const SUITE_VERSION_MINOR: u8 = 22;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.21";
+const SUITE_VERSION: &str = "HWTEST v1.22";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -632,9 +644,11 @@ const TIMING_RECORD_COUNT: usize = 208;
 enum TimingScope {
     /// Everything that is safe to run unattended.
     Standard,
-    /// Only the performance probes, including the register A/B group that
-    /// can hang a console. Skips the CD, GPU, MDEC and SIO batteries so a
-    /// power cycle after a hang costs a minute rather than the whole scan.
+    /// The whole performance sweep and nothing else: no CD, MDEC or SIO
+    /// batteries, so it is quick to run and to repeat.
+    Perf,
+    /// `Perf` plus the register A/B group that can hang a console, last, so
+    /// a power cycle after a hang costs a minute rather than the whole scan.
     PerfAb,
 }
 const MEMORY_CONTROL_REGISTER_COUNT: usize = MEMORY_CONTROL_REGISTERS.len();
@@ -689,8 +703,8 @@ enum MenuAction {
     CycleAudio,
     /// Run the conformance battery starting at `resume_index`.
     RunFromIndex,
-    /// Timing scan in `TimingScope::PerfAb`, then a full capture.
-    RunPerfAb,
+    /// Timing scan in the given performance scope, then a full capture.
+    RunPerf(TimingScope),
 }
 
 const ROOT_MENU: [(&str, MenuAction); 11] = [
@@ -760,7 +774,7 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
     ("BACK", MenuAction::Back),
 ];
 
-const PROBES_MENU: [(&str, MenuAction); 12] = [
+const PROBES_MENU: [(&str, MenuAction); 13] = [
     ("SPU DIAGNOSTIC (SB2)", MenuAction::Open(Mode::SpuProbe)),
     ("CAPTURE RINGS (SB4)", MenuAction::Open(Mode::RingProbe)),
     (
@@ -786,12 +800,17 @@ const PROBES_MENU: [(&str, MenuAction); 12] = [
     ),
     ("HL VOICE BANK (PA2)", MenuAction::Open(Mode::VoiceProbe)),
     ("CD/SPU AUDIO (PA1)", MenuAction::Open(Mode::AudioProbe)),
-    // Second to last on purpose: rows above it are baked into the SB4 pulse
-    // train, and the headless rig reaches this one by wrapping UP from row 0.
-    // It flips undocumented memory-controller and cache-control bits around a
-    // timed workload. A console that hangs here needs a power cycle, and the
-    // record id left on screen names the bit.
-    ("PERF A/B (MAY HANG)", MenuAction::RunPerfAb),
+    // Last before BACK on purpose: rows above are baked into the SB4 pulse
+    // train, and the headless rig reaches these by wrapping UP from row 0.
+    // The sweep is every performance probe that cannot hurt anything.
+    ("PERF SWEEP (SAFE)", MenuAction::RunPerf(TimingScope::Perf)),
+    // The sweep, then undocumented memory-controller and cache-control bits
+    // flipped around a timed workload. A console that hangs here needs a
+    // power cycle, and the record id left on screen names the bit.
+    (
+        "PERF A/B (MAY HANG)",
+        MenuAction::RunPerf(TimingScope::PerfAb),
+    ),
     ("BACK", MenuAction::Back),
 ];
 
@@ -2656,11 +2675,11 @@ impl Scene for HardwareTests {
                     MenuAction::Submenu(page) => self.open_menu_page(page),
                     MenuAction::Back => self.open_menu_page(MenuPage::Root),
                     MenuAction::CycleAudio => self.cycle_audio_readout(),
-                    MenuAction::RunPerfAb => {
+                    MenuAction::RunPerf(scope) => {
                         // No conformance pass: the point is a short run that
                         // is cheap to repeat after a hang. The capture is
                         // FULL because the timing block is the whole result.
-                        self.timing_scope = TimingScope::PerfAb;
+                        self.timing_scope = scope;
                         self.capture_flags = photo::blocks::FULL;
                         self.run_startup_scans();
                         self.prepare_audio_readout();
@@ -3846,6 +3865,10 @@ fn run_timing_scan(scope: TimingScope) -> TimingReport {
         push_standard_records(&mut records, &mut next);
     }
     perf_probes::push_safe(&mut records, &mut next);
+    if scope != TimingScope::Standard {
+        perf_probes::push_extended(&mut records, &mut next);
+        push_gpu_technique_records(&mut records, &mut next);
+    }
     if scope == TimingScope::PerfAb {
         perf_probes::push_risky(&mut records, &mut next);
     }
@@ -4689,6 +4712,37 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
     push_timing_record(records, next, refresh_stall);
 }
 
+/// GPU cases the fill battery leaves out, each next to the record it should
+/// be read against. Runs with the performance sweep, so the three reference
+/// records are taken again here, under their usual ids.
+fn push_gpu_technique_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &mut usize) {
+    const TEX4: FillKind = FillKind::Textured { tpage: 0, span: 32 };
+    let cases: [(u8, u32, FillKind, bool); 9] = [
+        (0xA0, 0x2000_80FF, FillKind::Flat, false),
+        (0xA2, 0x2400_80FF, TEX4, false),
+        (0xAE, 0x6000_80FF, FillKind::Rect, false),
+        // Raw texture (no colour modulation) and translucent textured, both
+        // against 0xA2.
+        (0xBA, 0x2500_80FF, TEX4, false),
+        (0xBB, 0x2600_80FF, TEX4, false),
+        // The most expensive triangle there is, and the one a lit textured
+        // model is made of.
+        (0xBC, 0x3400_80FF, FillKind::GouraudTextured, false),
+        // 0xA0's triangles with the drawing area somewhere else.
+        (0xBD, 0x2000_80FF, FillKind::Flat, true),
+        // Two other ways to move 32x32 pixels, against 0xAE: the VRAM fill
+        // command, and a VRAM-to-VRAM copy.
+        (0xBE, 0x0200_80FF, FillKind::Rect, false),
+        (0xBF, 0x8000_0000, FillKind::Copy, false),
+    ];
+    for (id, command, kind, clipped) in cases {
+        let record = sample_timing(id, 16, || {
+            timed_fill_batch_in(16, command, 32, kind, false, clipped)
+        });
+        push_timing_record(records, next, record);
+    }
+}
+
 fn push_timing_record(
     records: &mut [TimingRecord; TIMING_RECORD_COUNT],
     next: &mut usize,
@@ -5357,7 +5411,25 @@ fn fill_drain() -> bool {
 /// `command` is the GP0 opcode; `words` are the packet words after it, built by
 /// the caller so each variant's exact packet shape is explicit.
 fn timed_fill_batch(count: u16, command: u32, size: u32, kind: FillKind, dither: bool) -> u16 {
+    timed_fill_batch_in(count, command, size, kind, dither, false)
+}
+
+/// `clipped` moves the drawing area away from the primitives, so the GPU
+/// receives and rejects every one of them: the price of leaving culling to it.
+fn timed_fill_batch_in(
+    count: u16,
+    command: u32,
+    size: u32,
+    kind: FillKind,
+    dither: bool,
+    clipped: bool,
+) -> u16 {
     fill_env(dither);
+    if clipped {
+        gpu_io::write_gp0(0xE300_0000 | 960 | (FILL_Y << 10));
+        gpu_io::write_gp0(0xE400_0000 | 975 | ((FILL_Y + 15) << 10));
+        gpu_io::wait_cmd_ready();
+    }
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
     let mut index = 0u16;
@@ -5404,6 +5476,24 @@ fn timed_fill_batch(count: u16, command: u32, size: u32, kind: FillKind, dither:
                 gpu_io::write_gp0((y << 16) | x);
                 gpu_io::write_gp0((size << 16) | size);
             }
+            FillKind::GouraudTextured => {
+                // GP0 0x34: colour, position, UV for each vertex, with the
+                // CLUT riding on the first UV word and the page on the second.
+                gpu_io::write_gp0((y << 16) | x);
+                gpu_io::write_gp0(0);
+                gpu_io::write_gp0(0x0000_FF00);
+                gpu_io::write_gp0((y << 16) | (x + size));
+                gpu_io::write_gp0(32);
+                gpu_io::write_gp0(0x00FF_0000);
+                gpu_io::write_gp0(((y + size) << 16) | x);
+                gpu_io::write_gp0(32 << 8);
+            }
+            FillKind::Copy => {
+                // GP0 0x80: source, destination, extent.
+                gpu_io::write_gp0(((FILL_Y + 64) << 16) | x);
+                gpu_io::write_gp0((y << 16) | x);
+                gpu_io::write_gp0((size << 16) | size);
+            }
             FillKind::TexturedRect { clut } => {
                 // GP0 0x64 takes an extra UV + CLUT word between position and
                 // extent. Omitting it shifts the extent into the UV slot and
@@ -5432,6 +5522,8 @@ enum FillKind {
     Textured { tpage: u16, span: u8 },
     Rect,
     TexturedRect { clut: u16 },
+    GouraudTextured,
+    Copy,
 }
 
 // ---------------------------------------------------------------------------

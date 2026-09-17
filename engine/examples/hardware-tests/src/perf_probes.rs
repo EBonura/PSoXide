@@ -25,14 +25,27 @@
 //!
 //! Marker ids 32 and up belong to this file (see the scheme in main.rs).
 
-use crate::regs::{CACHE_CONTROL, RAM_SIZE};
+use crate::regs::{CACHE_CONTROL, RAM_SIZE, SPU_DELAY};
 use crate::{__hwtest_icache_alias_b, __hwtest_icache_entry_w1, __hwtest_perf_loads};
 use crate::{__hwtest_icache_block, __hwtest_icache_entry_w0, TIMING_RECORD_COUNT};
+use crate::{__hwtest_icache_load_block, seed_gte_state};
 use crate::{flush_icache_without_irq, push_timing_record, sample_timing, TimingRecord};
+use psx_io::dma;
+use psx_io::gpu as gpu_io;
 
 const SCRATCHPAD: u32 = 0x1F80_0000;
+const GPUSTAT: u32 = 0x1F80_1814;
+const GP0: u32 = 0x1F80_1810;
+const I_STAT: u32 = 0x1F80_1070;
+/// TRANSFER_CTRL + SPUSTAT as one aligned word: two halfword bus accesses,
+/// no side effects on read.
+const SPU_STATUS_WORD: u32 = 0x1F80_1DAC;
+/// A read/write SPU register with no function (psx-spx: "unknown").
+const SPU_SPARE: u32 = 0x1F80_1DBC;
 
-static mut PERF_WORD: u32 = 0;
+/// 16 words so the sequential-address probe has somewhere to walk, plus slack
+/// for the unaligned store pair, which writes one byte past a word.
+static mut PERF_WORDS: [u32; 18] = [0; 18];
 
 /// A probe argument that is only known at run time.
 #[derive(Copy, Clone)]
@@ -40,6 +53,12 @@ enum Arg {
     Imm(u32),
     /// A word of cached main RAM.
     RamWord,
+    /// One byte into that word: the address an unaligned access uses.
+    RamUnaligned,
+    /// The same word through KSEG1.
+    RamWordKseg1,
+    /// 4 KiB of `lw; nop` pairs covering every I-cache line.
+    IcacheLoadBlock,
     /// Leaf at line 0 of a 4 KiB page.
     EntryW0,
     /// Leaf on another line of the same page: never conflicts with `EntryW0`.
@@ -59,7 +78,10 @@ impl Arg {
     fn resolve(self) -> u32 {
         match self {
             Self::Imm(value) => value,
-            Self::RamWord => (&raw const PERF_WORD) as u32,
+            Self::RamWord => (&raw const PERF_WORDS) as u32,
+            Self::RamUnaligned => (&raw const PERF_WORDS) as u32 + 1,
+            Self::RamWordKseg1 => ((&raw const PERF_WORDS) as u32 & 0x1FFF_FFFF) | 0xA000_0000,
+            Self::IcacheLoadBlock => __hwtest_icache_load_block as *const () as u32,
             Self::EntryW0 => __hwtest_icache_entry_w0 as *const () as u32,
             Self::EntryW1 => __hwtest_icache_entry_w1 as *const () as u32,
             Self::AliasB => __hwtest_icache_alias_b as *const () as u32,
@@ -83,6 +105,9 @@ struct Probe {
     b: Arg,
     /// Run the wrapper through KSEG1 so it cannot disturb the lines it measures.
     uncached: bool,
+    /// Load a defined GTE state first, so a command's inputs are not whatever
+    /// the last test left behind.
+    seed_gte: bool,
 }
 
 const fn probe(id: u8, work: u16, run: WarmFn, a: Arg, b: Arg) -> Probe {
@@ -93,12 +118,18 @@ const fn probe(id: u8, work: u16, run: WarmFn, a: Arg, b: Arg) -> Probe {
         a,
         b,
         uncached: false,
+        seed_gte: false,
     }
 }
 
 impl Probe {
     const fn uncached(mut self) -> Self {
         self.uncached = true;
+        self
+    }
+
+    const fn gte(mut self) -> Self {
+        self.seed_gte = true;
         self
     }
 }
@@ -151,6 +182,84 @@ const SAFE: [Probe; 28] = [
     probe(0x8D, 32, warm_call_pairs, Arg::EntryW0, Arg::EntryW1).uncached(),
 ];
 
+// GTE command words: 0x4A000000 | sf << 19 | command. NCLIP takes no sf.
+const T_SMALL: Arg = Arg::Imm(0x0000_0400);
+const LERP_A: Arg = Arg::Imm(0x0000_1234);
+
+/// The rest of the performance sweep. Runs from TARGETED PROBES, not with the
+/// standing battery: the full capture is already at its page budget, and this
+/// group is only interesting next to the register A/B records anyway.
+const EXTENDED: [Probe; 45] = [
+    probe(0x1E, 128, warm_nops, NONE, NONE).uncached(),
+    probe(0x1F, 64, warm_untaken_branches, NONE, NONE),
+    // Warm GTE command latency: back-to-back commands, each stalling until
+    // the one before it has finished.
+    probe(0x27, 16, gte_rtps, NONE, NONE).gte(),
+    probe(0x28, 8, gte_rtpt, NONE, NONE).gte(),
+    probe(0x29, 16, gte_nclip, NONE, NONE).gte(),
+    probe(0x2A, 16, gte_mvmva, NONE, NONE).gte(),
+    probe(0x2B, 16, gte_avsz3, NONE, NONE).gte(),
+    probe(0x2C, 16, gte_sqr, NONE, NONE).gte(),
+    probe(0x2D, 16, gte_op, NONE, NONE).gte(),
+    probe(0x2E, 16, gte_gpf, NONE, NONE).gte(),
+    probe(0x2F, 8, gte_ncds, NONE, NONE).gte(),
+    // A second multiply issued while the first is still running: does it
+    // queue behind it, replace it, or cost nothing until the read?
+    probe(0x8E, 16, multu_back_to_back, RS_SMALL, RT),
+    probe(0x8F, 16, multu_back_to_back, RS_LARGE, RT),
+    probe(0x9F, 8, div_gap_0, NUMERATOR, DIVISOR),
+    // Data access shapes the compiler emits all the time.
+    probe(0xC8, 64, warm_loads_back_to_back, Arg::RamWord, NONE),
+    probe(
+        0xC9,
+        64,
+        warm_loads_back_to_back,
+        Arg::Imm(SCRATCHPAD),
+        NONE,
+    ),
+    probe(0xCA, 64, warm_byte_loads, Arg::RamWord, NONE),
+    probe(0xCB, 64, warm_half_loads, Arg::RamWord, NONE),
+    probe(0xCC, 64, warm_unaligned_loads, Arg::RamUnaligned, NONE),
+    probe(0xCD, 64, warm_unaligned_stores, Arg::RamUnaligned, NONE),
+    probe(0xCE, 64, warm_loads, Arg::RamWordKseg1, NONE),
+    probe(0xCF, 64, warm_sequential_loads, Arg::RamWord, NONE),
+    // GTE gap sweep: independent instructions behind a command before the
+    // next command stalls. Knees expected at the command's latency.
+    probe(0xED, 8, rtpt_gap_21, NONE, NONE).gte(),
+    probe(0xEE, 8, rtpt_gap_23, NONE, NONE).gte(),
+    probe(0xEF, 8, rtpt_gap_25, NONE, NONE).gte(),
+    probe(0xF0, 16, rtps_gap_13, NONE, NONE).gte(),
+    probe(0xF1, 16, rtps_gap_15, NONE, NONE).gte(),
+    probe(0xF2, 16, rtps_gap_17, NONE, NONE).gte(),
+    // Coprocessor register moves: three or more per vertex in every loop.
+    probe(0xF3, 16, gte_mtc2, NONE, NONE).gte(),
+    probe(0xF4, 16, gte_ctc2, NONE, NONE).gte(),
+    probe(0xF5, 16, gte_mfc2, NONE, NONE).gte(),
+    probe(0xF6, 16, gte_cfc2, NONE, NONE).gte(),
+    // The same three-component Q12 lerp on the CPU and through GPF.
+    probe(0xF7, 8, lerp3_cpu, LERP_A, T_SMALL),
+    probe(0xF8, 8, lerp3_gte, LERP_A, T_SMALL).gte(),
+    // I/O ports touched from inner loops.
+    probe(0xF9, 64, warm_loads, Arg::Imm(GPUSTAT), NONE),
+    probe(0xFA, 64, warm_stores, Arg::Imm(GP0), NONE),
+    probe(0xFB, 64, warm_loads, Arg::Imm(I_STAT), NONE),
+    probe(
+        0xFC,
+        64,
+        warm_half_loads,
+        Arg::Imm(SPU_STATUS_WORD + 2),
+        NONE,
+    ),
+    probe(0xFD, 64, warm_half_stores, Arg::Imm(SPU_SPARE), NONE),
+    probe(0xFE, 8, divu_gap_0, Arg::Imm(5), Arg::Imm(3)),
+    // The other store widths, an uncached store, and two more GTE commands.
+    probe(0x37, 64, warm_byte_stores, Arg::RamWord, NONE),
+    probe(0x38, 64, warm_half_stores, Arg::RamWord, NONE),
+    probe(0x39, 64, warm_stores, Arg::RamWordKseg1, NONE),
+    probe(0x3A, 16, gte_avsz4, NONE, NONE).gte(),
+    probe(0x3B, 8, gte_nccs, NONE, NONE).gte(),
+];
+
 #[derive(Copy, Clone)]
 struct AbProbe {
     id: u8,
@@ -161,6 +270,8 @@ struct AbProbe {
     register: u32,
     /// XORed into the register for the timed call; 0 is the control.
     mask: u32,
+    /// What the workload's loads read.
+    data: Arg,
     /// Flush the I-cache first, so the timed call is a cold sweep.
     cold: bool,
 }
@@ -173,6 +284,7 @@ const fn ab_probe(id: u8, work: u16, target: Arg, register: u32, mask: u32) -> A
         warm: target,
         register,
         mask,
+        data: Arg::RamWord,
         cold: false,
     }
 }
@@ -182,6 +294,11 @@ impl AbProbe {
     const fn cold(mut self) -> Self {
         self.warm = Arg::EntryW0;
         self.cold = true;
+        self
+    }
+
+    const fn reading(mut self, data: Arg) -> Self {
+        self.data = data;
         self
     }
 }
@@ -197,7 +314,13 @@ const NOSTR: u32 = 1 << 17;
 // Each pair is control then flipped, through byte-identical code. INTP (bit
 // 12) is left alone: it has no performance reading. BGNT goes last because
 // bus grant is the bit most likely to stop the machine.
-const RISKY: [AbProbe; 17] = [
+/// SPU_DELAY's read-delay nibble (bits 4-7) is 0xE in the BIOS value
+/// 0x200931E1. XORing 0xA0 makes it 0x4 there. On a console whose value
+/// differs the result differs too; the capture's memory-control block says
+/// what the register held.
+const SPU_FASTER_READ: u32 = 0xA0;
+
+const RISKY: [AbProbe; 21] = [
     ab_probe(0xDC, 64, Arg::LoadsUncached, RAM_SIZE, 0),
     ab_probe(0xDD, 64, Arg::LoadsUncached, RAM_SIZE, CODE_DATA_DELAY),
     ab_probe(0xDE, 64, Arg::Loads, RAM_SIZE, 0),
@@ -215,14 +338,28 @@ const RISKY: [AbProbe; 17] = [
     // The emulator models this one (2-word refill on a word-0 miss), so it
     // doubles as a cross-check that the flip and the restore both happen.
     ab_probe(0xEA, 1024, Arg::IcacheBlock, CACHE_CONTROL, IBLKSZ_LOW).cold(),
+    // The realistic case for RAM_SIZE bit 7: a cold sweep of code that also
+    // loads data, so line refills and data reads contend for RAM.
+    ab_probe(0x3C, 511, Arg::IcacheLoadBlock, RAM_SIZE, 0).cold(),
+    ab_probe(0x3D, 511, Arg::IcacheLoadBlock, RAM_SIZE, CODE_DATA_DELAY).cold(),
+    // 64 word reads of SPU status (two halfword bus accesses each) with the
+    // SPU bus read delay as found and shortened. A read that is too fast
+    // returns garbage, which nothing here consumes.
+    ab_probe(0x3E, 64, Arg::Loads, SPU_DELAY, 0).reading(Arg::Imm(SPU_STATUS_WORD)),
+    ab_probe(0x3F, 64, Arg::Loads, SPU_DELAY, SPU_FASTER_READ).reading(Arg::Imm(SPU_STATUS_WORD)),
     ab_probe(0xEB, 64, Arg::Loads, CACHE_CONTROL, BGNT),
     ab_probe(0xEC, 1024, Arg::IcacheBlock, CACHE_CONTROL, BGNT).cold(),
 ];
 
-pub(crate) fn push_safe(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &mut usize) {
-    for entry in SAFE {
+type Records = [TimingRecord; TIMING_RECORD_COUNT];
+
+fn push_probes(table: &[Probe], records: &mut Records, next: &mut usize) {
+    for entry in table {
         let (a, b) = (entry.a.resolve(), entry.b.resolve());
         let record = sample_timing(entry.id, entry.work, || {
+            if entry.seed_gte {
+                seed_gte_state();
+            }
             if entry.uncached {
                 call_uncached(entry.run, a, b)
             } else {
@@ -233,10 +370,19 @@ pub(crate) fn push_safe(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next:
     }
 }
 
-pub(crate) fn push_risky(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next: &mut usize) {
-    let data = Arg::RamWord.resolve();
+pub(crate) fn push_safe(records: &mut Records, next: &mut usize) {
+    push_probes(&SAFE, records, next);
+}
+
+pub(crate) fn push_extended(records: &mut Records, next: &mut usize) {
+    push_probes(&EXTENDED, records, next);
+    push_dma(records, next);
+}
+
+pub(crate) fn push_risky(records: &mut Records, next: &mut usize) {
     for entry in RISKY {
         let (target, warm) = (entry.target.resolve(), entry.warm.resolve());
+        let data = entry.data.resolve();
         let record = sample_timing(entry.id, entry.work, || {
             if entry.cold {
                 flush_icache_without_irq();
@@ -365,6 +511,271 @@ muldiv_gap_probe!(divu_gap_34, 52, 8, 0x0109001B, 34);
 muldiv_gap_probe!(divu_gap_36, 53, 8, 0x0109001B, 36);
 muldiv_gap_probe!(divu_gap_38, 54, 8, 0x0109001B, 38);
 muldiv_gap_probe!(divu_gap_40, 55, 8, 0x0109001B, 40);
+muldiv_gap_probe!(div_gap_0, 67, 8, 0x0109001A, 0);
+
+warm_probe!(
+    warm_untaken_branches,
+    57,
+    ".rept 64\nbne $zero, $zero, 1f\nnop\n1:\n.endr\n"
+);
+warm_probe!(
+    warm_loads_back_to_back,
+    58,
+    ".rept 64\nlw $9, 0($8)\n.endr\n"
+);
+warm_probe!(warm_byte_loads, 59, ".rept 64\nlbu $9, 0($8)\nnop\n.endr\n");
+warm_probe!(warm_half_loads, 60, ".rept 64\nlhu $9, 0($8)\nnop\n.endr\n");
+// 0x89090003 = lwl $9,3($8); 0x99090000 = lwr $9,0($8): one unaligned word.
+warm_probe!(
+    warm_unaligned_loads,
+    61,
+    ".rept 64\n.word 0x89090003\n.word 0x99090000\n.endr\n"
+);
+// 0xA9090003 = swl $9,3($8); 0xB9090000 = swr $9,0($8).
+warm_probe!(
+    warm_unaligned_stores,
+    62,
+    ".rept 64\n.word 0xA9090003\n.word 0xB9090000\n.endr\n"
+);
+// Sixteen consecutive words, four times: does the memory controller reward
+// sequential addresses? (`warm_loads` reads one word 64 times.)
+warm_probe!(
+    warm_sequential_loads,
+    63,
+    concat!(".rept 4\n", "lw $9, 0($8)\nnop\nlw $9, 4($8)\nnop\nlw $9, 8($8)\nnop\nlw $9, 12($8)\nnop\nlw $9, 16($8)\nnop\nlw $9, 20($8)\nnop\nlw $9, 24($8)\nnop\nlw $9, 28($8)\nnop\nlw $9, 32($8)\nnop\nlw $9, 36($8)\nnop\nlw $9, 40($8)\nnop\nlw $9, 44($8)\nnop\nlw $9, 48($8)\nnop\nlw $9, 52($8)\nnop\nlw $9, 56($8)\nnop\nlw $9, 60($8)\nnop\n", ".endr\n")
+);
+warm_probe!(warm_byte_stores, 64, ".rept 64\nsb $zero, 0($8)\n.endr\n");
+warm_probe!(warm_half_stores, 65, ".rept 64\nsh $zero, 0($8)\n.endr\n");
+// Sixteen multiplies with no read between them, then one mflo.
+warm_probe!(
+    multu_back_to_back,
+    66,
+    ".rept 16\n.word 0x01090019\n.endr\n.word 0x00005012\n"
+);
+
+/// `$count` x (GTE command `$word`; `$gap` nops). With no gap every command
+/// stalls until the previous one finishes, so the total is the latency.
+macro_rules! gte_probe {
+    ($name:ident, $id:literal, $count:literal, $word:literal, $gap:literal) => {
+        warm_probe!(
+            $name,
+            $id,
+            concat!(
+                ".rept ",
+                stringify!($count),
+                "\n",
+                ".word ",
+                stringify!($word),
+                "\n",
+                ".rept ",
+                stringify!($gap),
+                "\n",
+                "nop\n",
+                ".endr\n",
+                ".endr\n"
+            )
+        );
+    };
+}
+
+gte_probe!(gte_rtps, 68, 16, 0x4A080001, 0);
+gte_probe!(gte_rtpt, 69, 8, 0x4A080030, 0);
+gte_probe!(gte_nclip, 70, 16, 0x4A000006, 0);
+gte_probe!(gte_mvmva, 71, 16, 0x4A080012, 0);
+gte_probe!(gte_avsz3, 72, 16, 0x4A08002D, 0);
+gte_probe!(gte_sqr, 73, 16, 0x4A080028, 0);
+gte_probe!(gte_op, 74, 16, 0x4A08000C, 0);
+gte_probe!(gte_gpf, 75, 16, 0x4A08003D, 0);
+gte_probe!(gte_ncds, 76, 8, 0x4A080013, 0);
+gte_probe!(gte_avsz4, 77, 16, 0x4A08002E, 0);
+gte_probe!(gte_nccs, 78, 8, 0x4A08001B, 0);
+gte_probe!(rtpt_gap_21, 79, 8, 0x4A080030, 21);
+gte_probe!(rtpt_gap_23, 80, 8, 0x4A080030, 23);
+gte_probe!(rtpt_gap_25, 81, 8, 0x4A080030, 25);
+gte_probe!(rtps_gap_13, 82, 16, 0x4A080001, 13);
+gte_probe!(rtps_gap_15, 83, 16, 0x4A080001, 15);
+gte_probe!(rtps_gap_17, 84, 16, 0x4A080001, 17);
+// 0x48884800 = mtc2 $8,IR1; 0x48C82800 = ctc2 $8,TRX;
+// 0x480A4800 = mfc2 $10,IR1; 0x484A2800 = cfc2 $10,TRX.
+gte_probe!(gte_mtc2, 85, 16, 0x48884800, 0);
+gte_probe!(gte_ctc2, 86, 16, 0x48C82800, 0);
+gte_probe!(gte_mfc2, 87, 16, 0x480A4800, 0);
+gte_probe!(gte_cfc2, 88, 16, 0x484A2800, 0);
+
+// r = a + ((a * t) >> 12) for three components, `$8` = a, `$9` = t with t in
+// `rs` so the multiply takes its fast band. 0x01280018 = mult $9,$8.
+warm_probe!(
+    lerp3_cpu,
+    89,
+    concat!(
+        ".rept 8\n",
+        ".rept 3\n",
+        ".word 0x01280018\n",
+        ".word 0x00005012\n",
+        "sra $10, $10, 12\n",
+        "addu $10, $10, $8\n",
+        ".endr\n",
+        ".endr\n"
+    )
+);
+// The same through GPF: IR0 = t, IR1-3 = a, command, read MAC1-3.
+// 0x48894000 = mtc2 $9,IR0; 0x48884800/5000/5800 = mtc2 $8,IR1/2/3;
+// 0x4A08003D = GPF; 0x480AC800/D000/D800 = mfc2 $10,MAC1/2/3.
+warm_probe!(
+    lerp3_gte,
+    90,
+    concat!(
+        ".rept 8\n",
+        ".word 0x48894000\n",
+        ".word 0x48884800\n",
+        ".word 0x48885000\n",
+        ".word 0x48885800\n",
+        ".word 0x4A08003D\n",
+        ".word 0x480AC800\n",
+        ".word 0x480AD000\n",
+        ".word 0x480AD800\n",
+        ".endr\n"
+    )
+);
+
+// ---------------------------------------------------------------------------
+// DMA: what an ordering table costs to walk, and whether the CPU runs meanwhile
+// ---------------------------------------------------------------------------
+
+const EMPTY_LIST_NODES: usize = 1024;
+static mut EMPTY_LIST: [u32; EMPTY_LIST_NODES] = [0; EMPTY_LIST_NODES];
+
+/// Link the first `nodes` entries into a list of empty packets and return its
+/// head. An empty packet is what every unused ordering-table slot is.
+fn build_empty_list(nodes: usize) -> u32 {
+    let list = (&raw mut EMPTY_LIST) as *mut u32;
+    for index in 0..nodes {
+        let next = if index + 1 == nodes {
+            0x00FF_FFFF
+        } else {
+            unsafe { list.add(index + 1) as u32 & 0x00FF_FFFF }
+        };
+        unsafe { core::ptr::write_volatile(list.add(index), next) };
+    }
+    list as u32
+}
+
+/// Run `body` with the GPU DMA channel set up for a linked list, then put the
+/// GPU's DMA direction back.
+fn with_gpu_list_dma(body: impl FnOnce() -> u16) -> u16 {
+    let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
+    gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
+    dma::enable_channel(dma::Channel::Gpu);
+    dma::set_bcr_manual(dma::Channel::Gpu, 0);
+    let elapsed = body();
+    gpu_io::write_gp1(0x0400_0000 | old_direction);
+    elapsed
+}
+
+const LIST_KICK: u32 = dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START;
+
+/// Cycles for the DMA controller to walk `nodes` empty packets.
+fn timed_empty_list(nodes: usize) -> u16 {
+    let head = build_empty_list(nodes);
+    with_gpu_list_dma(|| {
+        dma::set_madr(dma::Channel::Gpu, head);
+        psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0);
+        psx_io::timers::set_counter(psx_io::timers::Timer::Timer2, 0);
+        dma::set_chcr(dma::Channel::Gpu, LIST_KICK);
+        let mut polls = 0u32;
+        while dma::is_busy(dma::Channel::Gpu) && polls < 1_000_000 {
+            polls += 1;
+        }
+        let elapsed = psx_io::timers::counter(psx_io::timers::Timer::Timer2);
+        if polls == 1_000_000 {
+            0xFFFF
+        } else {
+            elapsed
+        }
+    })
+}
+
+fn push_dma(records: &mut Records, next: &mut usize) {
+    let base = dma::Channel::Gpu.base();
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x33, 256, || timed_empty_list(256)),
+    );
+    push_timing_record(
+        records,
+        next,
+        sample_timing(0x34, 1024, || timed_empty_list(1024)),
+    );
+    // 128 nops with the channel idle, then the same 128 nops started right
+    // after kicking a 512-node list. Equal means the CPU runs alongside the
+    // list walk; the difference is the time the walk took the bus away.
+    for (id, chcr) in [(0x35u8, 0u32), (0x36, LIST_KICK)] {
+        // 512 rather than 1024: if the CPU does wait for the walk, the whole
+        // walk lands in a 16-bit counter.
+        let head = build_empty_list(512);
+        let record = sample_timing(id, 128, || {
+            with_gpu_list_dma(|| timed_nops_with_dma(base, head, chcr))
+        });
+        push_timing_record(records, next, record);
+    }
+}
+
+/// 128 nops, timed on the second pass, each pass starting by writing `chcr`
+/// to the DMA channel at `base` with MADR = `head`. Each pass first waits for
+/// the channel to go idle, and the block ends the same way, so the caller can
+/// restore the GPU's DMA direction.
+#[inline(never)]
+fn timed_nops_with_dma(base: u32, head: u32, chcr: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".balign 16",
+            ".word 0x340000B6", // probe 91 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "addiu $13, $zero, 2",
+            "2:",
+            "3:",
+            "lw $10, 8($8)",
+            "nop",
+            "srl $10, $10, 24",
+            "andi $10, $10, 1",
+            "bnez $10, 3b",
+            "nop",
+            "sw $9, 0($8)",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            "sw $14, 8($8)",
+            ".rept 128",
+            "nop",
+            ".endr",
+            "lw $12, 0($11)",
+            "addiu $13, $13, -1",
+            "bnez $13, 2b",
+            "nop",
+            "4:",
+            "lw $10, 8($8)",
+            "nop",
+            "srl $10, $10, 24",
+            "andi $10, $10, 1",
+            "bnez $10, 4b",
+            "nop",
+            ".word 0x340000B7", // probe 91 end marker
+            ".set reorder",
+            in("$8") base,
+            in("$9") head,
+            in("$14") chcr,
+            lateout("$10") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            lateout("$13") _,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
 
 /// Time one call to `target` with `mask` XORed into `register`, then put the
 /// register back. The flip, the workload and the restore are one assembly

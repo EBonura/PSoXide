@@ -33,6 +33,25 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.22 (2026-09-17, schema PX8)
+
+The performance sweep: 59 more records pricing techniques rather than checking
+behaviour, listed in [hardware-test-disc.md](hardware-test-disc.md). Warm GTE
+command latencies and the GTE gap sweep, coprocessor register moves, a lerp on
+the CPU against GPF, multiply behind multiply, unaligned and narrow data
+accesses, I/O port costs, empty ordering-table slots and whether the CPU runs
+during a linked-list DMA, GPU cases the fill battery left out, and two more
+register A/B pairs (`RAM_SIZE` bit 7 on a cold sweep of code that loads data;
+a shorter SPU bus read delay).
+
+They run from two TARGETED PROBES rows, `PERF SWEEP (SAFE)` and `PERF A/B (MAY
+HANG)`, not with the standing battery, whose records are unchanged. Every
+record id from `00` to `FE` is now allocated; the next probe needs a second id
+byte or a retired id, which is a schema question.
+
+Also: SB2 mirrors its payload to the TTY, SB1 and CL2 no longer overprint the
+harness header, and the probes share one copy of their payload plumbing.
+
 ### v1.21 (2026-09-17, schema PX8)
 
 Performance probes, all under a warm harness (`src/perf_probes.rs`, described
