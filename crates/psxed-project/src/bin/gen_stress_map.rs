@@ -230,7 +230,7 @@ fn run(args: &Args) -> Result<(), String> {
     let out_root = std::path::Path::new(&args.out);
     std::fs::create_dir_all(out_root).map_err(|e| e.to_string())?;
     copy_assets(
-        std::path::Path::new("projects/cortex-ignition-tech-demo-0.4b/assets"),
+        std::path::Path::new("projects/default/assets"),
         &out_root.join("assets"),
     )?;
     project

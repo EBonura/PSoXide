@@ -7,7 +7,7 @@
 //! sequence of import dialogs.
 //!
 //! ```text
-//! import-locomotion editor/projects/cortex-ignition-tech-demo-0.4b/project.ron "/path/to/animation/library"
+//! import-locomotion editor/projects/default/project.ron "/path/to/animation/library"
 //! ```
 //!
 //! The pack is a fixed filename convention, matching the eight locomotion

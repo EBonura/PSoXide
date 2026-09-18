@@ -84,7 +84,7 @@ fn main() {
     let project_dir = std::env::args()
         .skip_while(|a| a != "--project")
         .nth(1)
-        .unwrap_or_else(|| "projects/cortex-ignition-tech-demo-0.4b".to_string());
+        .unwrap_or_else(|| "projects/default".to_string());
     let mut project =
         ProjectDocument::load_from_path(std::path::Path::new(&project_dir).join("project.ron"))
             .expect("load project");

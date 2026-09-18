@@ -39,7 +39,7 @@ fn main() {
         "Usage: gen-quake-e1m1-project MAP_PATH [OUTPUT_DIR]"
     );
 
-    let donor_dir = manifest_dir.join("../../projects/cortex-ignition-tech-demo-0.4b");
+    let donor_dir = manifest_dir.join("../../projects/default");
     let donor_source =
         std::fs::read_to_string(donor_dir.join("project.ron")).expect("read default project donor");
     let mut project = ProjectDocument::from_ron_str(&donor_source).expect("parse default donor");

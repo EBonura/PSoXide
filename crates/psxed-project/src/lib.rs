@@ -62,10 +62,10 @@ pub use document_types::*;
 
 /// Embedded copy of the default project's RON, baked at compile
 /// time so the editor binary always carries a working starter even
-/// if `editor/projects/cortex-ignition-tech-demo-0.4b/` is absent at runtime. Single source
+/// if `editor/projects/default/` is absent at runtime. Single source
 /// of truth -- edits to the on-disk file propagate to `starter()` on
 /// the next build.
-const DEFAULT_PROJECT_RON: &str = include_str!("../../../projects/cortex-ignition-tech-demo-0.4b/project.ron");
+const DEFAULT_PROJECT_RON: &str = include_str!("../../../projects/default/project.ron");
 /// Tracked reference projects that are not user projects: test fixtures,
 /// gate slices and the New Project template. They live outside
 /// [`projects_dir`] so the editor's project browser only lists real
@@ -418,9 +418,9 @@ pub fn project_file_stem(name: &str) -> String {
     }
 }
 
-/// Bundled starter project directory (`editor/projects/cortex-ignition-tech-demo-0.4b/`).
+/// Bundled starter project directory (`editor/projects/default/`).
 pub fn default_project_dir() -> PathBuf {
-    projects_dir().join("cortex-ignition-tech-demo-0.4b")
+    projects_dir().join("default")
 }
 
 /// Exact usable width and depth of the New Project courtyard.

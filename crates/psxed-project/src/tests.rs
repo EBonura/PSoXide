@@ -1852,7 +1852,7 @@ fn light_enemy_look_idle_is_installed_in_every_enemy_project() {
     )
     .expect("read selected Light Enemy idle");
 
-    for project_name in ["default", "quake-e1m1-geometry", "cortex-ignition-tech-demo-0.4b"] {
+    for project_name in ["default", "quake-e1m1-geometry"] {
         let root = projects_dir().join(project_name);
         let idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
         assert_eq!(
@@ -1910,7 +1910,7 @@ fn light_enemy_turn_and_alert_are_installed_in_every_enemy_project() {
         (22, 9, 12)
     );
 
-    for project_name in ["default", "quake-e1m1-geometry", "cortex-ignition-tech-demo-0.4b"] {
+    for project_name in ["default", "quake-e1m1-geometry"] {
         let root = projects_dir().join(project_name);
         assert_eq!(
             std::fs::read(root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
@@ -1950,7 +1950,7 @@ fn light_enemy_turn_and_alert_are_installed_in_every_enemy_project() {
 
 #[test]
 fn cortex_v04b_light_enemy_attack_ladder_uses_named_attack_clips() {
-    let root = projects_dir().join("cortex-ignition-tech-demo-0.4b");
+    let root = projects_dir().join("default");
     let project = ProjectDocument::load_from_path(root.join("project.ron"))
         .expect("load Cortex Ignition tech demo 0.4b");
     let set = project
@@ -2534,7 +2534,7 @@ fn deleting_a_sprite_bar_material_clears_the_ui_reference() {
 #[test]
 fn default_project_ui_controls_ship_with_cortex_sound_palette() {
     let project_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/cortex-ignition-tech-demo-0.4b/project.ron");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
     let project = ProjectDocument::load_from_path(&project_path)
         .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
     let project_root = project_path.parent().expect("default project root");
@@ -2596,7 +2596,7 @@ fn default_project_ui_controls_ship_with_cortex_sound_palette() {
 #[test]
 fn default_project_system_overlay_matches_inventory_language_and_exposes_options() {
     let project_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/cortex-ignition-tech-demo-0.4b/project.ron");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
     let project = ProjectDocument::load_from_path(&project_path)
         .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
     let system_scene = project
@@ -4627,3 +4627,4 @@ fn a_weapon_reachable_only_through_a_loadout_is_still_a_reference() {
 // by the runtime in editor-playtest's overlay::draw_player_vitality_hud, which
 // owns the Triangle stance swap and is covered by that module's own tests. Only
 // the enemy/target bars stay authored as UI scene Bars.
+
