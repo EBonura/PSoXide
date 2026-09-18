@@ -57,13 +57,31 @@ const MARKER: &str = ".psoxide-source";
 /// `editor` is deliberately NOT skipped, tempting as its 26 MB is: the emulator
 /// frontend's default features pull psxed-ui and psxed-project in by path, so
 /// dropping it breaks `make run` in every game that has one.
+///
+/// `editor/projects/default` is the other one worth naming. psxed-project
+/// embeds `default/project.ron` with `include_str!`, so that one file has to
+/// survive or nothing downstream compiles, but only that file: the rest of the
+/// project is authored art and review material that no game builds against.
+/// Copying the whole directory cost 18 MB when `default` was a small starter
+/// and 195 MB once the shipped build was renamed into its place, per game, on
+/// every disc build.
 fn skip(relative: &Path) -> bool {
-    // Game dependencies need the engine and cookers, but not authored Cortex
-    // projects. The default project is embedded by psxed-project, so retain it.
+    // Game dependencies need the engine and cookers, but not authored content.
     if let Ok(project) = relative.strip_prefix("editor/projects") {
-        if let Some(name) = project.components().next() {
+        let mut parts = project.components();
+        if let Some(name) = parts.next() {
             if name.as_os_str() != "default" && name.as_os_str() != ".gitignore" {
                 return true;
+            }
+            if name.as_os_str() == "default" {
+                // Keep the directory itself so the walk descends into it, and
+                // the embedded project.ron inside it. Nothing else.
+                return match parts.next() {
+                    None => false,
+                    Some(entry) => {
+                        entry.as_os_str() != "project.ron" || parts.next().is_some()
+                    }
+                };
             }
         }
     }
@@ -244,7 +262,24 @@ mod tests {
         assert!(skip(Path::new(
             "editor/projects/cortex-ignition-tech-demo-0.4b"
         )));
+        // The embedded starter RON survives, and the walk has to descend into
+        // its directory to reach it.
+        assert!(!skip(Path::new("editor/projects")));
+        assert!(!skip(Path::new("editor/projects/default")));
         assert!(!skip(Path::new("editor/projects/default/project.ron")));
+        // Nothing else in it does. `default` is the shipped Cortex build now,
+        // and its art would be copied into every game that hydrates the SDK.
+        assert!(skip(Path::new("editor/projects/default/assets")));
+        assert!(skip(Path::new("editor/projects/default/source_assets")));
+        assert!(skip(Path::new("editor/projects/default/review")));
+        assert!(skip(Path::new("editor/projects/default/concept")));
+        assert!(skip(Path::new(
+            "editor/projects/default/assets/textures/brick_1a_v2.psxt"
+        )));
+        // A nested file that merely shares the name is not the embedded one.
+        assert!(skip(Path::new(
+            "editor/projects/default/tools/project.ron"
+        )));
     }
 
     #[test]
