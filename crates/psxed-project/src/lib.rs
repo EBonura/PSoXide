@@ -19,6 +19,7 @@ pub mod brush_compile;
 pub mod brush_light;
 pub mod brush_overlap;
 pub mod brush_pack;
+pub mod brush_primitives;
 pub mod brush_playtest;
 pub mod brush_portal;
 pub mod brush_pxbsp;
