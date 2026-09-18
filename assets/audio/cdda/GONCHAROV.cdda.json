@@ -7,14 +7,6 @@
     "channels": 2
   },
   "outputs": {
-    "preview_wav": {
-      "path": "GONCHAROV.wav",
-      "codec": "pcm_s16le",
-      "sample_rate_hz": 44100,
-      "channels": 2,
-      "bits_per_sample": 16,
-      "sha256": "5b3ef4ed9b8ce2fd5feb26708692c1cdea54f52edb0f9b54359d2aad520df1da"
-    },
     "cdda_track": {
       "path": "GONCHAROV.track02.cdda",
       "format": "raw_pcm_s16le_stereo",
@@ -26,6 +18,17 @@
       "pad_bytes": 384,
       "duration_seconds": 233.92,
       "sha256": "83f9adb13e9095cc38e0f863406fa5f12e3dc99918b0f407f2b4283015cbb4d9"
+    },
+    "preview_wav": {
+      "path": "GONCHAROV.wav",
+      "codec": "pcm_s16le",
+      "sample_rate_hz": 44100,
+      "channels": 2,
+      "bits_per_sample": 16,
+      "sha256": "5b3ef4ed9b8ce2fd5feb26708692c1cdea54f52edb0f9b54359d2aad520df1da",
+      "tracked": false,
+      "reconstruct": "python3 tools/wav_from_cdda.py assets/audio/cdda/GONCHAROV.track02.cdda -o build/audio/GONCHAROV.wav",
+      "note": "Not committed: the cdda_track above holds the identical PCM, so both cost 39 MB for one song. Reconstruction drops pad_bytes and rewraps a canonical 44-byte RIFF header, recovering the data chunk byte-for-byte; only the original LIST metadata chunk is lost. The sha256 here is the old tracked file."
     }
   }
 }
