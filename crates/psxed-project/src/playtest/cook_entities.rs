@@ -3925,7 +3925,7 @@ mod socket_anchor_tests {
     fn hand_sockets_anchor_on_the_hand_mesh() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../projects/default/assets/models/aletha_delivered/aletha_delivered.psxmdl"
+            "/../../projects/cortex-ignition-tech-demo-0.4b/assets/models/aletha_delivered/aletha_delivered.psxmdl"
         );
         let bytes = std::fs::read(path).expect("aletha mesh");
         let model = psx_asset::Model::from_bytes(&bytes).expect("model");

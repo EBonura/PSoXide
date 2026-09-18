@@ -1337,7 +1337,7 @@ mod tests {
     fn socket_translation_space_resolves_once_for_studio_and_runtime() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../projects/default/assets/models/aletha_delivered/aletha_delivered.psxmdl"
+            "/../../projects/cortex-ignition-tech-demo-0.4b/assets/models/aletha_delivered/aletha_delivered.psxmdl"
         );
         let bytes = std::fs::read(path).expect("aletha mesh");
         let model = psx_asset::Model::from_bytes(&bytes).expect("model");

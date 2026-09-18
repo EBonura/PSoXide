@@ -502,7 +502,7 @@ impl ProjectDocument {
     }
 
     /// Deserialize the default project shipped at
-    /// `editor/projects/default/project.ron`. The on-disk RON file
+    /// `editor/projects/cortex-ignition-tech-demo-0.4b/project.ron`. The on-disk RON file
     /// is the single source of truth -- the editor reads the exact
     /// same bytes a `cargo run` would, so changes to the default
     /// project are git-trackable and don't require a rebuild.
@@ -512,7 +512,7 @@ impl ProjectDocument {
     /// test guards the build-time invariant.
     pub fn starter() -> Self {
         Self::from_ron_str(DEFAULT_PROJECT_RON)
-            .expect("editor/projects/default/project.ron is malformed")
+            .expect("editor/projects/cortex-ignition-tech-demo-0.4b/project.ron is malformed")
     }
 
     /// Active scene.

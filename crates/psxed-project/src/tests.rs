@@ -1334,14 +1334,17 @@ fn embedded_default_project_ron_deserializes() {
         ResourceData::Material(material) => material.psxt_path.clone(),
         _ => None,
     };
+    // The v0.4b starter's own kit. The courtyard and sanctum materials are
+    // authored by their respective New Project / slice commands rather than
+    // carried in the embedded starter.
     assert!(project
         .resources
         .iter()
-        .any(|r| material_path(r).is_some_and(|p| p.ends_with("courtyard_cobbles.psxt"))));
+        .any(|r| material_path(r).is_some_and(|p| p.ends_with("dp_city_deck_plate.psxt"))));
     assert!(project
         .resources
         .iter()
-        .any(|r| material_path(r).is_some_and(|p| p.ends_with("sanctum_masonry.psxt"))));
+        .any(|r| material_path(r).is_some_and(|p| p.ends_with("dp_city_wall_megastructure.psxt"))));
     assert!(!project.resources.iter().any(|r| material_path(r)
         .is_some_and(|p| p.ends_with("floor.psxt") || p.ends_with("brick-wall.psxt"))));
     // The legacy Texture resource kind is fully folded at load.
@@ -1349,17 +1352,26 @@ fn embedded_default_project_ron_deserializes() {
         .resources
         .iter()
         .any(|r| matches!(&r.data, ResourceData::Texture { .. })));
-    let starter_materials: Vec<&MaterialResource> = project
+    let starter_materials: Vec<(&str, &MaterialResource)> = project
         .resources
         .iter()
         .filter_map(|resource| match &resource.data {
-            ResourceData::Material(material) => Some(material),
+            ResourceData::Material(material) => Some((resource.name.as_str(), material)),
             _ => None,
         })
         .collect();
     assert!(!starter_materials.is_empty());
-    assert!(starter_materials.iter().all(|material| {
-        material.face_sidedness == MaterialFaceSidedness::Front && !material.double_sided
+    // v0.4b's three transparent DP City overlays are deliberately two-sided;
+    // everything else must stay front-only so backface culling keeps working.
+    const TWO_SIDED_STARTER_OVERLAYS: &[&str] = &[
+        "DP City / Cable Run (Average)",
+        "DP City / Hanging Lattice (Average)",
+        "DP City / Guardrail (Cutout)",
+    ];
+    assert!(starter_materials.iter().all(|(name, material)| {
+        TWO_SIDED_STARTER_OVERLAYS.contains(name)
+            || (material.face_sidedness == MaterialFaceSidedness::Front
+                && !material.double_sided)
     }));
     // Starter seeds the active player with the VERIFIED cortex_v1 combat
     // loadout: the ci_player model, the Aletha Complete Animation Set (the
@@ -1422,8 +1434,8 @@ fn embedded_default_project_ron_deserializes() {
     );
     assert_eq!(
         character.combat_capsules.len(),
-        4,
-        "starter Aletha carries the verified hurtbox plus three attack capsules"
+        7,
+        "starter Aletha carries two hurtboxes plus five swing capsules"
     );
 
     let animation_set_id = character
@@ -1471,7 +1483,6 @@ fn embedded_default_project_ron_deserializes() {
         // vertical axis's first level, and the hit reaction.
         (CharacterAnimationAction::LightAttack, "light_attack"),
         (CharacterAnimationAction::HeavyAttack, "heavy_attack"),
-        (CharacterAnimationAction::ComboAttack, "combo_attack"),
         (
             CharacterAnimationAction::VertLightAttack,
             "vert_light_attack",
@@ -1479,10 +1490,6 @@ fn embedded_default_project_ron_deserializes() {
         (
             CharacterAnimationAction::VertHeavyAttack,
             "vert_heavy_attack",
-        ),
-        (
-            CharacterAnimationAction::VertComboAttack,
-            "vert_combo_attack",
         ),
         (CharacterAnimationAction::HitReact, "hit_react"),
     ] {
@@ -1499,20 +1506,12 @@ fn embedded_default_project_ron_deserializes() {
             format!("assets/animations/gen/{stem}.psxanim")
         );
     }
+    // v0.4b's moveset drops the combo and alternate-weapon slots: the ladder
+    // is light/heavy on each of the two axes.
     for (action, stem) in [
         (CharacterAnimationAction::Idle, "aletha_idle"),
         (CharacterAnimationAction::Roll, "aletha_dash_fwd"),
         (CharacterAnimationAction::Death, "aletha_death"),
-        // The delivered heavy-weapon set keeps the alternate slots; the
-        // vertical axis has its own actions and does not touch them.
-        (
-            CharacterAnimationAction::AltLightAttack,
-            "aletha_heavy_wpn_light_atk_a",
-        ),
-        (
-            CharacterAnimationAction::AltHeavyAttack,
-            "aletha_heavy_wpn_heavy_atk",
-        ),
     ] {
         let clip_id = animation_set
             .action_clip(action)
@@ -1577,7 +1576,7 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
     };
     assert_eq!(
         animation_set.clips.len(),
-        11,
+        13,
         "idle, four-direction locomotion, light/heavy/ranged attacks, hit, stun and death ship"
     );
     for action in [
@@ -1654,8 +1653,8 @@ fn default_project_instantiates_the_single_animated_heavy_enemy() {
     );
     let package = package.expect("default project produces a playtest package");
     assert!(
-        package.models.iter().any(|cooked| cooked.clip_count == 11),
-        "the cooked Heavy Enemy model carries all eleven selected clips"
+        package.models.iter().any(|cooked| cooked.clip_count == 13),
+        "the cooked Heavy Enemy model carries all thirteen selected clips"
     );
     assert!(
         package.game_entities.iter().any(|entity| {
@@ -2176,11 +2175,12 @@ fn starter_project_has_scene_tree_and_resources() {
         })
         .expect("starter includes Aletha");
     assert_eq!(aletha.spawn_role, CharacterSpawnRole::Player);
+    // v0.4b's tuned movement: slower walk, tighter sprint.
     assert_eq!(
         (aletha.radius, aletha.walk_speed, aletha.run_speed),
-        (188, 10, 75)
+        (188, 13, 64)
     );
-    assert_eq!(aletha.roll_speed, 165);
+    assert_eq!(aletha.roll_speed, 112);
     let aletha_material = aletha
         .material
         .expect("Aletha carries her crystal material");
@@ -2209,7 +2209,7 @@ fn starter_project_has_scene_tree_and_resources() {
     assert_eq!(mantis.spawn_role, CharacterSpawnRole::Enemy);
     assert_eq!(mantis.walk_speed, 28);
     let enemy = mantis.enemy_behavior.expect("Mantis enemy behavior preset");
-    assert_eq!(enemy.aggro_radius, 2335);
+    assert_eq!(enemy.aggro_radius, 5632);
     assert_eq!(enemy.patrol_offset, [0, 0, -6000]);
     assert_eq!(enemy.reaction_ticks, 42);
 
@@ -2532,522 +2532,9 @@ fn deleting_a_sprite_bar_material_clears_the_ui_reference() {
 }
 
 #[test]
-fn default_project_uses_the_texture_free_twin_ladder_hud() {
-    let project_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
-    let project = ProjectDocument::load_from_path(&project_path)
-        .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
-    let hud = project
-        .ui_scenes
-        .iter()
-        .find(|scene| scene.name == "HUD")
-        .expect("default HUD scene");
-
-    let bar = |name: &str| {
-        hud.nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match node.kind {
-                UiNodeKind::Bar {
-                    rect,
-                    value,
-                    max,
-                    texture,
-                    frame_count,
-                    ..
-                } => Some((rect, value, max, texture, frame_count)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing geometric {name}"))
-    };
-    let horizon = bar("Horizon Fill");
-    assert_eq!((horizon.0.width, horizon.0.height), (82, 2));
-    assert_eq!(horizon.1, UiValueBinding::PlayerHealth);
-    assert_eq!(horizon.2, UiValueBinding::PlayerHealthMax);
-    assert_eq!((horizon.3, horizon.4), (None, 0));
-    let zenith = bar("Zenith Fill");
-    assert_eq!((zenith.0.width, zenith.0.height), (82, 2));
-    assert_eq!(zenith.1, UiValueBinding::PlayerHealthSecondary);
-    assert_eq!(zenith.2, UiValueBinding::PlayerHealthSecondaryMax);
-    assert_eq!((zenith.3, zenith.4), (None, 0));
-
-    for (name, text) in [("Horizon Name", "HRZ"), ("Zenith Name", "ZTH")] {
-        let authored = hud
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Label { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(authored, text);
-    }
-
-    for (name, y) in [("Horizon Shell", 12), ("Zenith Shell", 21)] {
-        let (rect, shape) = hud
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match node.kind {
-                UiNodeKind::Rect {
-                    rect,
-                    shape: Some(shape),
-                    ..
-                } => Some((rect, shape)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!((rect.x, rect.y, rect.width, rect.height), (52, y, 88, 8));
-        assert_eq!(shape.corner_cut, 2);
-        assert!(shape.cut_top_left && shape.cut_bottom_right);
-    }
-    assert_eq!(
-        hud.nodes()
-            .iter()
-            .filter(|node| node.name.contains(" Divider "))
-            .count(),
-        14
-    );
-    assert!(!project.resources.iter().any(|resource| {
-        matches!(
-            &resource.data,
-            ResourceData::Material(material)
-                if material
-                    .psxt_path
-                    .as_deref()
-                    .is_some_and(|path| path.ends_with("health_bar_clean_slim.psxt"))
-        )
-    }));
-}
-
-#[test]
-fn default_project_inventory_routes_four_continuous_vitality_poles() {
-    let project_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
-    let project = ProjectDocument::load_from_path(&project_path)
-        .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
-    let inventory = project
-        .ui_scenes
-        .iter()
-        .find(|scene| scene.name == "Dual Vitality Inventory")
-        .expect("Dual Vitality Inventory UI scene");
-
-    for (name, action, tag) in [
-        ("Horizon Empty Boost", 200, "boost.horizon.empty"),
-        ("Horizon Full Boost", 201, "boost.horizon.full"),
-        ("Zenith Empty Boost", 202, "boost.zenith.empty"),
-        ("Zenith Full Boost", 203, "boost.zenith.full"),
-        ("Inventory Item Slot 1", 210, "inventory.item.0"),
-        ("Inventory Item Slot 2", 211, "inventory.item.1"),
-        ("Inventory Item Slot 3", 212, "inventory.item.2"),
-        ("Remove Socketed Module", 220, "boost.remove"),
-    ] {
-        let (authored_action, authored_tag) = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Button { action, tag, .. } => Some((action, tag.as_str())),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(authored_action, &UiAction::Game(action));
-        assert_eq!(authored_tag, tag);
-    }
-
-    for (name, expected_label) in [
-        ("Horizon Empty Boost", "E // NONE"),
-        ("Horizon Full Boost", "F // NONE"),
-        ("Zenith Empty Boost", "E // NONE"),
-        ("Zenith Full Boost", "F // NONE"),
-        ("Inventory Item Slot 1", "MODULE 01"),
-        ("Inventory Item Slot 2", "MODULE 02"),
-        ("Inventory Item Slot 3", "MODULE 03"),
-        ("Remove Socketed Module", "REMOVE"),
-    ] {
-        let label = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Button { label, .. } => Some(label.as_str()),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(label, expected_label, "{name} must match starter state");
-    }
-
-    for (name, value, flip_x) in [
-        ("Horizon Health", UiValueBinding::PlayerHealth, true),
-        (
-            "Zenith Health",
-            UiValueBinding::PlayerHealthSecondary,
-            false,
-        ),
-    ] {
-        let (rect, authored_value) = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match node.kind {
-                UiNodeKind::Bar { rect, value, .. } => Some((rect, value)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(authored_value, value);
-        assert_eq!(rect.flip_x, flip_x);
-        assert_eq!((rect.width, rect.height), (133, 4));
-    }
-
-    for (name, value) in [
-        (
-            "Horizon Empty Influence",
-            UiValueBinding::PlayerHealthEmptyInfluence,
-        ),
-        (
-            "Horizon Full Influence",
-            UiValueBinding::PlayerHealthFullInfluence,
-        ),
-        (
-            "Zenith Empty Influence",
-            UiValueBinding::PlayerHealthSecondaryEmptyInfluence,
-        ),
-        (
-            "Zenith Full Influence",
-            UiValueBinding::PlayerHealthSecondaryFullInfluence,
-        ),
-    ] {
-        let (authored_value, max) = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match node.kind {
-                UiNodeKind::Bar { value, max, .. } => Some((value, max)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(authored_value, value);
-        assert_eq!(max, UiValueBinding::ConstantQ12(4096));
-    }
-
-    let (assignment_text, assignment_tag) = inventory
-        .nodes()
-        .iter()
-        .find(|node| node.name == "Assignment Prompt")
-        .and_then(|node| match &node.kind {
-            UiNodeKind::Label { text, tag, .. } => Some((text.as_str(), tag.as_str())),
-            _ => None,
-        })
-        .expect("Assignment Prompt");
-    assert_eq!(assignment_text, "ASSIGN MODULE: CHOOSE SLOT");
-    assert_eq!(assignment_tag, "boost.assignment.prompt");
-    for (name, tag) in [
-        ("Selected Module Base Effect", "boost.selected.base"),
-        ("Horizon Attack Stat", "boost.stat.horizon"),
-        ("Zenith Attack Stat", "boost.stat.zenith"),
-        ("Defence Stat", "boost.stat.defence"),
-        ("Movement Speed Stat", "boost.stat.movement"),
-        ("Attack Speed Stat", "boost.stat.attack_speed"),
-    ] {
-        let authored_tag = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Label { tag, .. } => Some(tag.as_str()),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(authored_tag, tag);
-    }
-    let zenith_caption = inventory
-        .nodes()
-        .iter()
-        .find(|node| node.name == "Zenith Pole Caption")
-        .and_then(|node| match &node.kind {
-            UiNodeKind::Label { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .expect("Zenith Pole Caption");
-    assert!(zenith_caption.is_empty());
-
-    for (name, endpoint_x) in [
-        ("Horizon Full Trace", 19),
-        ("Horizon Empty Trace", 151),
-        ("Zenith Empty Trace", 168),
-        ("Zenith Full Trace", 300),
-    ] {
-        let rect = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match node.kind {
-                UiNodeKind::Rect { rect, .. } => Some(rect),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(rect.x, endpoint_x, "{name} must meet its health endpoint");
-        assert_eq!((rect.y, rect.width, rect.height), (76, 2, 16));
-    }
-
-    assert!(inventory.nodes().iter().all(|node| !matches!(
-        node.name.as_str(),
-        "Inventory Title" | "Inventory Rule" | "Footer Line" | "Footer"
-    )));
-    for (name, tag) in [
-        ("Inventory Player Tab", "tab.player.selected"),
-        ("Inventory System Tab", "tab.system"),
-    ] {
-        let authored_tag = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Button { tag, .. } => Some(tag.as_str()),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(authored_tag, tag);
-    }
-    assert_eq!(
-        inventory
-            .nodes()
-            .iter()
-            .filter(|node| matches!(&node.kind, UiNodeKind::Button { tag, .. } if tag.starts_with("tab.")))
-            .count(),
-        2,
-        "Player and System are the only real pause categories"
-    );
-    assert!(inventory.nodes().iter().all(|node| {
-        !node.name.contains("Armament")
-            && !matches!(&node.kind, UiNodeKind::Button { tag, action: UiAction::Game(301), .. } if tag == "tab.armament")
-    }));
-    for name in [
-        "Inventory L1 Glyph Housing",
-        "Inventory L1 Glyph Text",
-        "Inventory R1 Glyph Housing",
-        "Inventory R1 Glyph Text",
-    ] {
-        assert!(
-            inventory.nodes().iter().any(|node| node.name == name),
-            "missing {name}"
-        );
-    }
-    let inventory_rail = inventory
-        .nodes()
-        .iter()
-        .find(|node| node.name == "Inventory Tab Rail")
-        .and_then(|node| match node.kind {
-            UiNodeKind::Rect { rect, .. } => Some(rect),
-            _ => None,
-        })
-        .expect("Inventory Tab Rail");
-    assert_eq!(
-        (
-            inventory_rail.x,
-            inventory_rail.y,
-            inventory_rail.width,
-            inventory_rail.height,
-        ),
-        (184, 8, 127, 29)
-    );
-    assert!(inventory
-        .nodes()
-        .iter()
-        .all(|node| node.name != "Player Tab Glow"));
-
-    for (name, expected_rect, expected_color) in [
-        (
-            "Collected Module Inset Rail",
-            (15, 115, 112, 22),
-            [126, 34, 26],
-        ),
-        (
-            "Module Analysis Inset Rail",
-            (133, 115, 172, 22),
-            [118, 30, 25],
-        ),
-    ] {
-        let (rect, color, shape) = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Rect {
-                    rect,
-                    color,
-                    shape: Some(shape),
-                    ..
-                } => Some((rect, color, shape)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(
-            (rect.x, rect.y, rect.width, rect.height),
-            expected_rect,
-            "{name} must share its panel perimeter"
-        );
-        assert_eq!(*color, expected_color);
-        assert_eq!(shape.corner_cut, 5);
-        assert!(shape.cut_top_left);
-        assert!(!shape.cut_top_right && !shape.cut_bottom_right && !shape.cut_bottom_left);
-        assert_eq!(shape.border_width, 1);
-        assert!(!shape.semi_transparent_fill);
-    }
-
-    for (name, expected_rect) in [
-        ("Collected Module Inset Rail Rule", (15, 136, 112, 1)),
-        ("Module Analysis Inset Rail Rule", (133, 136, 172, 1)),
-    ] {
-        let rect = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match node.kind {
-                UiNodeKind::Rect { rect, .. } => Some(rect),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!((rect.x, rect.y, rect.width, rect.height), expected_rect);
-    }
-
-    for name in ["Live World Dimmer", "Live World Quarter Scrim"] {
-        let (rect, color, shape) = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Rect {
-                    rect,
-                    color,
-                    shape: Some(shape),
-                    ..
-                } => Some((rect, color, shape)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!((rect.x, rect.y, rect.width, rect.height), (0, 0, 320, 240));
-        assert_eq!(*color, [0, 0, 0]);
-        assert!(shape.semi_transparent_fill);
-        assert_eq!((shape.corner_cut, shape.border_width), (0, 0));
-    }
-
-    for name in [
-        "Inventory Tab Rail",
-        "Horizon Ladder Shell",
-        "Zenith Ladder Shell",
-        "Collected Module Panel",
-        "Module Analysis Panel",
-    ] {
-        let shape = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Rect {
-                    shape: Some(shape), ..
-                } => Some(shape),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert!(
-            !shape.semi_transparent_fill,
-            "{name} must mask the world like the approved mockup"
-        );
-    }
-
-    for name in [
-        "Horizon Empty Boost",
-        "Horizon Full Boost",
-        "Zenith Empty Boost",
-        "Zenith Full Boost",
-    ] {
-        let (focus_chrome, shape) = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match &node.kind {
-                UiNodeKind::Button {
-                    focus_chrome,
-                    shape: Some(shape),
-                    ..
-                } => Some((focus_chrome, shape)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert!(!focus_chrome, "{name} must remain visible when unfocused");
-        assert!(
-            !shape.semi_transparent_fill,
-            "{name} must use the mockup's solid socket treatment"
-        );
-    }
-
-    for (name, expected_y) in [
-        ("Inventory Item Slot 1", 143),
-        ("Inventory Item Slot 2", 166),
-        ("Inventory Item Slot 3", 189),
-    ] {
-        let (rect, focus_chrome, font, font_scale) = inventory
-            .nodes()
-            .iter()
-            .find(|node| node.name == name)
-            .and_then(|node| match node.kind {
-                UiNodeKind::Button {
-                    rect,
-                    focus_chrome,
-                    font,
-                    font_scale,
-                    ..
-                } => Some((rect, focus_chrome, font, font_scale)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert_eq!(
-            (rect.x, rect.y, rect.width, rect.height),
-            (23, expected_y, 96, 17)
-        );
-        assert!(
-            focus_chrome,
-            "{name} must only draw selection chrome while focused"
-        );
-        assert_eq!(font, UiFontChoice::Spleen5x8);
-        assert_eq!(font_scale, 256, "{name} must use native-size 5x8 copy");
-    }
-
-    let empty_state = inventory
-        .nodes()
-        .iter()
-        .find(|node| node.name == "Empty Inventory Message")
-        .and_then(|node| match &node.kind {
-            UiNodeKind::Label {
-                text,
-                tag,
-                font,
-                font_scale,
-                ..
-            } => Some((text.as_str(), tag.as_str(), *font, *font_scale)),
-            _ => None,
-        })
-        .expect("Empty Inventory Message");
-    assert_eq!(empty_state.0, "NO MODULES");
-    assert_eq!(empty_state.1, "inventory.empty");
-    assert_eq!(empty_state.2, UiFontChoice::Spleen5x8Italic);
-    assert_eq!(empty_state.3, 256);
-
-    assert!(
-        inventory
-            .nodes()
-            .iter()
-            .all(|node| node.name != "Assign Hint"),
-        "the redundant X PICK // X SOCKET prompt must stay removed"
-    );
-}
-
-#[test]
 fn default_project_ui_controls_ship_with_cortex_sound_palette() {
     let project_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/cortex-ignition-tech-demo-0.4b/project.ron");
     let project = ProjectDocument::load_from_path(&project_path)
         .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
     let project_root = project_path.parent().expect("default project root");
@@ -3060,7 +2547,13 @@ fn default_project_ui_controls_ship_with_cortex_sound_palette() {
                 UiNodeKind::Button { sfx, .. } => {
                     buttons += 1;
                     assert!(!sfx.focus.is_empty(), "{} needs focus SFX", node.name);
-                    assert!(!sfx.activate.is_empty(), "{} needs press SFX", node.name);
+                    // v0.4b's tab buttons switch on focus rather than on press,
+                    // so they carry no activate cue. Every other button must.
+                    assert!(
+                        !sfx.activate.is_empty() || node.name.ends_with("Tab"),
+                        "{} needs press SFX",
+                        node.name
+                    );
                     [sfx.focus.as_slice(), sfx.activate.as_slice(), &[], &[]]
                 }
                 UiNodeKind::Slider { sfx, .. } => {
@@ -3094,14 +2587,16 @@ fn default_project_ui_controls_ship_with_cortex_sound_palette() {
         }
     }
 
-    assert_eq!(buttons, 16);
+    // v0.4b's UI: 19 buttons (the extra three are its tab controls) and the
+    // same twelve sliders.
+    assert_eq!(buttons, 19);
     assert_eq!(sliders, 12);
 }
 
 #[test]
 fn default_project_system_overlay_matches_inventory_language_and_exposes_options() {
     let project_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/cortex-ignition-tech-demo-0.4b/project.ron");
     let project = ProjectDocument::load_from_path(&project_path)
         .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
     let system_scene = project
@@ -3198,14 +2693,21 @@ fn default_project_system_overlay_matches_inventory_language_and_exposes_options
             })
             .unwrap_or_else(|| panic!("missing geometric {name}"))
     };
-    let left = housing("System L1 Glyph Housing");
-    assert_eq!(left.corner_cut, 2);
-    assert!(left.cut_top_left && left.cut_bottom_right);
-    assert!(!left.cut_top_right && !left.cut_bottom_left);
-    let right = housing("System R1 Glyph Housing");
-    assert_eq!(right.corner_cut, 2);
-    assert!(right.cut_top_right && right.cut_bottom_left);
-    assert!(!right.cut_top_left && !right.cut_bottom_right);
+    // v0.4b replaced the drawn L1/R1 glyph housings with real cooked
+    // button-prompt images, so the shoulder affordances are Image nodes now.
+    for name in ["System L1 Prompt", "System R1 Prompt"] {
+        let (rect, texture) = system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Image { rect, texture, .. } => Some((rect, texture)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing prompt image {name}"));
+        assert_eq!((rect.width, rect.height), (16, 16));
+        assert!(texture.is_some(), "{name} must carry a prompt texture");
+    }
 
     for name in ["System World Dimmer", "System World Quarter Scrim"] {
         let (rect, color, shape) = system_scene
@@ -5119,3 +4621,9 @@ fn a_weapon_reachable_only_through_a_loadout_is_still_a_reference() {
         .expect("character survives");
     assert_eq!(remaining.loadouts[0].equipment[0].weapon, None);
 }
+
+// NOTE: the authored twin-ladder player HUD and the inventory's four vitality
+// poles were removed with v0.4b. The player's two swappable bars are now drawn
+// by the runtime in editor-playtest's overlay::draw_player_vitality_hud, which
+// owns the Triangle stance swap and is covered by that module's own tests. Only
+// the enemy/target bars stay authored as UI scene Bars.

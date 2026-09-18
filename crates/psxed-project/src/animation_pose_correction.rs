@@ -324,7 +324,7 @@ mod tests {
         use crate::{model_import::resolve_path, ProjectDocument, ResourceData};
 
         let project_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../projects/default/project.ron");
+            .join("../../projects/cortex-ignition-tech-demo-0.4b/project.ron");
         let project =
             ProjectDocument::load_from_path(&project_path).expect("default project parses");
         let project_root = project_path.parent().expect("project directory");
