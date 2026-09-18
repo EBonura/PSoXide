@@ -1853,7 +1853,7 @@ fn light_enemy_look_idle_is_installed_in_every_enemy_project() {
     )
     .expect("read selected Light Enemy idle");
 
-    for project_name in ["default", "mantis", "quake-e1m1-geometry", "tech-demo"] {
+    for project_name in ["default", "quake-e1m1-geometry", "cortex-ignition-tech-demo-0.4b"] {
         let root = projects_dir().join(project_name);
         let idle_path = root.join("assets/animations/rust_mantis_starter/idle.psxanim");
         assert_eq!(
@@ -1911,7 +1911,7 @@ fn light_enemy_turn_and_alert_are_installed_in_every_enemy_project() {
         (22, 9, 12)
     );
 
-    for project_name in ["default", "mantis", "quake-e1m1-geometry", "tech-demo"] {
+    for project_name in ["default", "quake-e1m1-geometry", "cortex-ignition-tech-demo-0.4b"] {
         let root = projects_dir().join(project_name);
         assert_eq!(
             std::fs::read(root.join("assets/animations/rust_mantis_starter/turn.psxanim"))
@@ -1950,10 +1950,10 @@ fn light_enemy_turn_and_alert_are_installed_in_every_enemy_project() {
 }
 
 #[test]
-fn cortex_v03_light_enemy_attack_ladder_uses_named_horizon_and_zenith_clips() {
-    let root = projects_dir().join("cortex-ignition-tech-demo-0.3");
+fn cortex_v04b_light_enemy_attack_ladder_uses_named_attack_clips() {
+    let root = projects_dir().join("cortex-ignition-tech-demo-0.4b");
     let project = ProjectDocument::load_from_path(root.join("project.ron"))
-        .expect("load Cortex Ignition tech demo 0.3");
+        .expect("load Cortex Ignition tech demo 0.4b");
     let set = project
         .resources
         .iter()
@@ -1974,15 +1974,15 @@ fn cortex_v03_light_enemy_attack_ladder_uses_named_horizon_and_zenith_clips() {
     };
     assert_eq!(
         bound_name(CharacterAnimationAction::LightAttack),
-        "Light Enemy / Horizon Light"
+        "Light Enemy / Horizon Light (Single Strike)"
     );
     assert_eq!(
         bound_name(CharacterAnimationAction::HeavyAttack),
-        "Light Enemy / Horizon Heavy"
+        "Light Enemy / Horizon Heavy (Three Swings)"
     );
     assert_eq!(
         bound_name(CharacterAnimationAction::VertLightAttack),
-        "Light Enemy / Zenith Light"
+        "Light Enemy / Charged Shot"
     );
 
     for (path, expected_frames) in [
@@ -2091,23 +2091,26 @@ fn cortex_v03_light_enemy_attack_ladder_uses_named_horizon_and_zenith_clips() {
     assert_ne!(light.attack_clip, light.ranged_attack_clip);
     assert_ne!(light.heavy_attack_clip, light.ranged_attack_clip);
     assert_eq!(light.attack_speed_q8, 384);
-    // Authored 2..53. The cook drops the frames nothing references and rebases
-    // what it emits, so the runtime sees the same window against a clip that is
-    // two frames shorter at the front. The played span is unchanged: 52 frames
-    // either way.
+    // v0.4b rebuilt the ladder: the single-strike light attack now plays the
+    // late window of the clip, and the three-swing heavy plays the early one.
+    // These two ranges are exactly the v0.3 pair with their actions swapped.
     assert_eq!(
         light.attack_frame_range,
-        psx_level::CharacterActionFrameRange { start: 0, end: 51 }
-    );
-    assert_eq!(light.heavy_attack_speed_q8, 384);
-    assert_eq!(
-        light.heavy_attack_frame_range,
         psx_level::CharacterActionFrameRange {
             start: 81,
             end: 118,
         }
     );
-    assert_eq!(light.ranged_attack_speed_q8, 640);
+    assert_eq!(light.heavy_attack_speed_q8, 384);
+    // Authored 2..53. The cook drops the frames nothing references and rebases
+    // what it emits, so the runtime sees the same window against a clip that is
+    // two frames shorter at the front. The played span is unchanged: 52 frames
+    // either way.
+    assert_eq!(
+        light.heavy_attack_frame_range,
+        psx_level::CharacterActionFrameRange { start: 0, end: 51 }
+    );
+    assert_eq!(light.ranged_attack_speed_q8, 256);
     assert_eq!(
         light.ranged_attack_frame_range,
         psx_level::CharacterActionFrameRange::FULL
@@ -2118,7 +2121,7 @@ fn cortex_v03_light_enemy_attack_ladder_uses_named_horizon_and_zenith_clips() {
             light.heavy_attack_active_ticks,
             light.ranged_attack_active_ticks,
         ),
-        (92, 55, 65),
+        (59, 96, 148),
         "state timing must use the same trim/speed contract as presentation"
     );
     assert!(light.flags & psx_level::game_entity_flags::RANGED_ATTACK != 0);
