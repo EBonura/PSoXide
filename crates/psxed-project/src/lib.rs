@@ -24,6 +24,7 @@ pub mod brush_playtest;
 pub mod brush_portal;
 pub mod brush_pxbsp;
 mod brush_vis;
+pub mod brush_walk;
 pub mod brush_world;
 pub mod clip_window;
 pub mod floor_view;
