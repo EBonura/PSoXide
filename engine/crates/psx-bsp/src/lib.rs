@@ -19,6 +19,7 @@ pub mod collision_provider;
 pub mod destructible;
 pub mod mover;
 pub mod pxbsp;
+pub mod visibility;
 pub mod pxbsp_resident;
 pub mod render;
 pub mod resident;

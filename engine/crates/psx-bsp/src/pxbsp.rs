@@ -78,31 +78,7 @@ pub(crate) fn decompress_leaf_row(
     decompress_visibility(visibility, offset, &mut output[..row_bytes]).then_some(visible_leaves)
 }
 
-pub(crate) fn decompress_visibility(input: &[u8], offset: usize, output: &mut [u8]) -> bool {
-    let mut source = offset;
-    let mut destination = 0usize;
-    while destination < output.len() {
-        let Some(&value) = input.get(source) else {
-            return false;
-        };
-        source += 1;
-        if value != 0 {
-            output[destination] = value;
-            destination += 1;
-            continue;
-        }
-        let Some(&run) = input.get(source) else {
-            return false;
-        };
-        source += 1;
-        if run == 0 || destination + run as usize > output.len() {
-            return false;
-        }
-        output[destination..destination + run as usize].fill(0);
-        destination += run as usize;
-    }
-    true
-}
+pub(crate) use crate::visibility::decode_strict as decompress_visibility;
 
 /// One required PXBSP payload kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
