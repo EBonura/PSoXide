@@ -77,6 +77,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-carousel"
+version = "0.1.0"
+dependencies = [
+ "psx-math",
+]
+
+[[package]]
+name = "psx-disc-toc"
+version = "0.1.0"
+
+[[package]]
 name = "psx-engine"
 version = "0.1.0"
 dependencies = [
