@@ -1,3 +1,4 @@
+//! Behavioral ordered-stream tests with delayed fake DMA consumption.
 use psx_gpu::ordered::{CommandStreamDma, OrderedCommandStream};
 use std::{cell::RefCell, rc::Rc};
 #[derive(Default)]
@@ -141,7 +142,7 @@ fn rejects_mismatched_upload_rectangle() {
 }
 
 mod fixture {
-    include!("ordered_frame.rs");
+    include!("fixtures/ordered_frame.rs");
     pub fn packets() -> &'static [&'static [u32]] {
         FRAME
     }
