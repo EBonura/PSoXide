@@ -1235,10 +1235,10 @@ mod tests {
     use alloc::vec;
 
     use super::{
-        CUBE_SKY_ATLAS_SIZE, CubeFace, VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS,
         cube_atlas_uv, cube_face, cube_face_clut, cube_face_uv_q12, directional_texel,
         directional_uv, packet_quad_uv, quake_direction_from_y_up, screen_view_ray,
         submit_view_ray_cube_sky, submit_view_ray_cube_sky_to_slot, submit_view_ray_layered_sky,
+        CubeFace, CUBE_SKY_ATLAS_SIZE, VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS,
     };
     use psx_gte::math::Mat3I16;
 
@@ -1249,8 +1249,9 @@ mod tests {
         // the six-face clipper produces for that face, and no third face
         // may receive a polygon from the clipper.
         use super::{
-            CUBE_SKY_COLUMNS, CUBE_SKY_ROWS, CubeSkyGridVertex, CubeSkyVertex, clip_cube_sky_cell,
-            cube_face_page_local_uv, cube_sky_packet_vertex, split_cube_sky_cell_on_edge,
+            clip_cube_sky_cell, cube_face_page_local_uv, cube_sky_packet_vertex,
+            split_cube_sky_cell_on_edge, CubeSkyGridVertex, CubeSkyVertex, CUBE_SKY_COLUMNS,
+            CUBE_SKY_ROWS,
         };
         use alloc::vec::Vec;
         let (width, height, cx, cy, projection) = (320i16, 240i16, 160i16, 120i16, 320i16);
