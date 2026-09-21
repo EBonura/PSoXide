@@ -968,6 +968,50 @@ impl FontAtlas {
         self.draw_text_with_spacing(x, y, text, 0, tint);
     }
 
+    /// Emit ordered GP0 packets for deferred, axis-aligned text drawing.
+    ///
+    /// The sink receives one two-word draw-mode/texture-window packet followed
+    /// by one four-word textured rectangle per supported glyph. Atlas padding,
+    /// packed-page origin, CLUT and character advances are owned by this atlas,
+    /// just as they are for immediate drawing. No GPU access occurs here.
+    ///
+    /// The sink must copy each borrowed packet before returning. Returning
+    /// `false` stops emission immediately, allowing a fixed packet arena to
+    /// reject a full run without writing beyond its capacity. Earlier packets
+    /// remain accepted; the return value says whether the entire run fit.
+    pub fn emit_text_packets(
+        &self,
+        x: i16,
+        y: i16,
+        text: &str,
+        tint: (u8, u8, u8),
+        mut emit: impl FnMut(&[u32]) -> bool,
+    ) -> bool {
+        let material = psx_gpu::material::TextureMaterial::opaque(
+            self.clut_word,
+            self.tpage.uv_tpage_word(0),
+            tint,
+        );
+        if !emit(&[material.draw_mode_word(), material.texture_window_word()]) {
+            return false;
+        }
+        let mut cursor_x = x;
+        for ch in text.chars() {
+            if let Some((u, v)) = self.glyph_uv(ch) {
+                if !emit(&[
+                    material.textured_rect_header(),
+                    pack_vertex(cursor_x, y),
+                    pack_texcoord(u, v, self.clut_word),
+                    pack_xy(self.font.glyph_w as u16, self.font.glyph_h as u16),
+                ]) {
+                    return false;
+                }
+            }
+            cursor_x = cursor_x.wrapping_add(self.font.glyph_advance(ch) as i16);
+        }
+        true
+    }
+
     /// Draw `text` with signed spacing inserted between adjacent characters.
     /// `letter_spacing` is measured in final screen pixels and is not applied
     /// after the last character.
@@ -2110,5 +2154,88 @@ mod tests {
         out.fill(Some(stale));
         assert!(upload_fonts(&[&TEST_FONT], &mut alloc, &mut [], &mut out).is_none());
         assert!(out.iter().all(Option::is_none));
+    }
+}
+
+#[cfg(test)]
+mod deferred_packet_tests {
+    extern crate std;
+    use super::*;
+    use std::vec::Vec;
+
+    fn atlas() -> FontAtlas {
+        FontAtlas {
+            font: &fonts::SPLEEN_5X8,
+            tpage: Tpage::new(640, 0, TexDepth::Bit4),
+            clut_word: Clut::new(960, 500).uv_clut_word(),
+            glyphs_per_row: 32,
+            uv_origin: (0, 16),
+        }
+    }
+
+    #[test]
+    fn deferred_text_uses_padded_cells_and_packed_origin() {
+        let atlas = atlas();
+        let mut packets = Vec::new();
+        assert!(atlas.emit_text_packets(-4, 9, "fg", (128, 90, 20), |p| {
+            packets.push(p.to_vec());
+            true
+        }));
+        assert_eq!(packets.len(), 3);
+        assert_eq!(packets[0].len(), 2);
+        assert_eq!(packets[0][0] >> 24, 0xe1);
+        assert_eq!(packets[0][1], 0xe2000000);
+        for (i, ch) in ['f', 'g'].into_iter().enumerate() {
+            let index = ch as u16 - atlas.font.first_char;
+            let u = (index % 32) * 8; // five texels padded to eight
+            let v = 16 + (index / 32) * 8;
+            assert_eq!(
+                packets[i + 1],
+                [
+                    0x64000000 | pack_color(128, 90, 20),
+                    pack_vertex(-4 + i as i16 * 5, 9),
+                    pack_texcoord(u as u8, v as u8, atlas.clut_word),
+                    pack_xy(5, 8),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_sink_failure_stops_without_emitting_more_packets() {
+        for capacity in 0..3 {
+            let mut calls = 0;
+            assert!(
+                !atlas().emit_text_packets(0, 0, "abcdef", (128, 128, 128), |_| {
+                    calls += 1;
+                    calls <= capacity
+                })
+            );
+            assert_eq!(calls, capacity + 1);
+        }
+    }
+
+    #[test]
+    fn missing_glyph_keeps_advance_and_empty_run_only_sets_material() {
+        let atlas = atlas();
+        let mut packets = Vec::new();
+        assert!(
+            atlas.emit_text_packets(10, 20, "\u{10ffff}f", (128, 128, 128), |p| {
+                packets.push(p.to_vec());
+                true
+            })
+        );
+        assert_eq!(packets.len(), 2);
+        assert_eq!(
+            packets[1][1],
+            pack_vertex(10 + atlas.glyph_advance('\u{10ffff}') as i16, 20)
+        );
+        let mut calls = 0;
+        assert!(atlas.emit_text_packets(0, 0, "", (0, 0, 0), |p| {
+            calls += 1;
+            assert_eq!(p.len(), 2);
+            true
+        }));
+        assert_eq!(calls, 1);
     }
 }
