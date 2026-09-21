@@ -4296,28 +4296,7 @@ fn clamp_u16_i32(value: i32) -> u16 {
     }
 }
 
-fn isqrt_i32(value: i32) -> i32 {
-    if value <= 0 {
-        return 0;
-    }
-
-    let mut bit = 1 << 30;
-    let mut n = value;
-    let mut root = 0;
-    while bit > n {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if n >= root + bit {
-            n -= root + bit;
-            root = (root >> 1) + bit;
-        } else {
-            root >>= 1;
-        }
-        bit >>= 2;
-    }
-    root
-}
+use psx_math::int32::isqrt_i32;
 
 #[cfg(test)]
 fn sort_for_ot_insert(commands: &mut [GouraudTriCommand]) {

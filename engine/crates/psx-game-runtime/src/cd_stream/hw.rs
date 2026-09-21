@@ -458,23 +458,11 @@ pub(super) fn cd_ack_all() {
 
 /// Ack one controller IRQ flag (and the CPU-level CDROM IRQ).
 #[cfg(target_arch = "mips")]
-pub(super) fn cd_ack(irq: u8) {
-    cd_write_index(1);
-    // SAFETY: CD_IRQ at index 1 is the interrupt-flag register.
-    unsafe { psx_io::write8(CD_IRQ, irq & 0x1F) };
-    psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
-    cd_write_index(0);
-}
+pub(super) use psx_io::cdrom::acknowledge_irq as cd_ack;
 
 /// Read the latched controller IRQ flag (index-1 flag register).
 #[cfg(target_arch = "mips")]
-pub(super) fn cd_irq_flag() -> u8 {
-    cd_write_index(1);
-    // SAFETY: CD_IRQ is a valid CD controller register for reads.
-    let flag = unsafe { psx_io::read8(CD_IRQ) } & 0x1F;
-    cd_write_index(0);
-    flag
-}
+pub(super) use psx_io::cdrom::irq_flag_value as cd_irq_flag;
 
 /// Drain the response FIFO until the status register reports it empty.
 #[cfg(target_arch = "mips")]

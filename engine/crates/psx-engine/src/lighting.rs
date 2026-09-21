@@ -358,24 +358,7 @@ fn abs_diff_u32(a: i32, b: i32) -> u32 {
     }
 }
 
-fn isqrt_u32(value: u32) -> u32 {
-    let mut x = value;
-    let mut r = 0u32;
-    let mut bit = 1u32 << 30;
-    while bit > x {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if x >= r + bit {
-            x -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    r
-}
+use psx_math::int32::isqrt_u32;
 
 #[cfg(test)]
 mod tests {
