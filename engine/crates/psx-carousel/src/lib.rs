@@ -72,14 +72,19 @@ const SPHERE_R: i32 = 68;
 /// cluster reading as scattered confetti.
 const SPHERE_LAT: usize = 4;
 const SPHERE_LON: usize = 6;
+/// Number of beads in the sphere, including the two poles.
 pub const SPHERE_POINTS: usize = SPHERE_LAT * SPHERE_LON + 2;
 
 /// Where one carousel item landed after projection.
 #[derive(Copy, Clone)]
 pub struct Placed {
+    /// Horizontal screen coordinate in pixels.
     pub x: i16,
+    /// Vertical screen coordinate in pixels.
     pub y: i16,
+    /// Horizontal projected radius in pixels.
     pub rx: i16,
+    /// Vertical projected radius in pixels.
     pub ry: i16,
     /// Depth, larger is further away. Used to sort and to dim.
     pub z: i32,
@@ -119,10 +124,15 @@ pub fn place(angle: i32) -> Placed {
 /// A projected sphere bead, before sorting.
 #[derive(Copy, Clone, Default)]
 pub struct Bead {
+    /// Horizontal screen coordinate in pixels.
     pub x: i16,
+    /// Vertical screen coordinate in pixels.
     pub y: i16,
+    /// Projected radius in pixels.
     pub r: i16,
+    /// Depth used for back-to-front sorting; larger is farther away.
     pub z: i32,
+    /// Lighting intensity from 24 through 255.
     pub lit: u8,
 }
 
@@ -237,10 +247,13 @@ const STAR_SPREAD: i32 = 320;
 /// One star, already projected.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Star {
+    /// Horizontal screen coordinate in pixels.
     pub x: i16,
+    /// Vertical screen coordinate in pixels.
     pub y: i16,
     /// Side of the square drawn for it: distant stars are a single pixel.
     pub size: u16,
+    /// Brightness from 100 through 255 for visible stars.
     pub bright: u8,
     /// False when it projected off the screen and should be skipped.
     pub visible: bool,
@@ -321,7 +334,7 @@ pub struct Beat {
 impl Beat {
     /// Whether this is the first beat of a bar.
     pub fn is_downbeat(&self) -> bool {
-        self.index % BEATS_PER_BAR == 0
+        self.index.is_multiple_of(BEATS_PER_BAR)
     }
 }
 

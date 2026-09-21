@@ -99,15 +99,18 @@ pub const MENU_TITLE_BYTES: usize = 24;
 /// Bands in one spectrum frame, and frames a second. Must match
 /// `mkdisc`'s analyser.
 pub const SPECTRUM_BANDS: usize = 16;
+/// Spectrum frames per second; must match the host analyser.
 pub const SPECTRUM_FRAME_RATE: u32 = 30;
 
 /// A screenshot as pressed: 8bpp indexed, its 256-colour RGB555 palette in
 /// front of the pixels. 120x90 keeps the game's 4:3 exactly and fills its
 /// menu box edge to edge inside the one-pixel border.
 pub const SHOT_W: usize = 120;
+/// Screenshot height in pixels.
 pub const SHOT_H: usize = 90;
 /// 256 CLUT entries of 2 bytes, then one byte per pixel.
 pub const SHOT_CLUT_BYTES: usize = 512;
+/// Total bytes of the palette and indexed screenshot pixels.
 pub const SHOT_BYTES: usize = SHOT_CLUT_BYTES + SHOT_W * SHOT_H;
 /// Sectors one screenshot occupies in the region: shots sit on sector
 /// boundaries so the launcher can address them by index alone.
@@ -161,6 +164,7 @@ pub struct Entry {
     /// how many consecutive shots are its. Zero count means the menu shows
     /// no backdrop for it.
     pub shot_first: u8,
+    /// Consecutive screenshot count; zero means no menu backdrop.
     pub shot_count: u8,
 }
 
