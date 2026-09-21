@@ -37,6 +37,8 @@
 #![warn(missing_docs)]
 
 pub mod cd;
+/// Allocation-free Quake and GoldSrc visibility row codecs.
+pub mod visibility;
 
 /// Pack magic, first 8 header bytes.
 pub const MAGIC: [u8; 8] = *b"PSOXWPAK";
