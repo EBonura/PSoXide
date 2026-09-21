@@ -68,6 +68,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod attributed_clip;
+pub mod color;
 pub mod fmt;
 pub mod int32;
 pub mod sincos;

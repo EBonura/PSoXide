@@ -77,3 +77,52 @@ fn wait_ready(flag: GpuStat) {
 pub fn wait_dma_ready() {
     wait_ready(GpuStat::READY_DMA_RECV);
 }
+
+/// Poll command readiness without resetting the GPU on timeout.
+/// Reads once, then retries at most `spin_limit` times.
+#[inline]
+pub fn try_wait_cmd_ready(spin_limit: u32) -> bool {
+    try_wait_ready(GpuStat::READY_CMD, spin_limit)
+}
+/// Poll DMA receive readiness without resetting the GPU on timeout.
+#[inline]
+pub fn try_wait_dma_ready(spin_limit: u32) -> bool {
+    try_wait_ready(GpuStat::READY_DMA_RECV, spin_limit)
+}
+fn try_wait_ready(flag: GpuStat, spin_limit: u32) -> bool {
+    poll_ready(spin_limit, || gpustat().contains(flag))
+}
+
+fn poll_ready(spin_limit: u32, mut ready: impl FnMut() -> bool) -> bool {
+    let mut remaining = spin_limit;
+    loop {
+        if ready() {
+            return true;
+        }
+        if remaining == 0 {
+            return false;
+        }
+        remaining -= 1;
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn readiness_budget_includes_initial_probe() {
+        for limit in 0..5 {
+            let mut reads = 0;
+            assert!(!poll_ready(limit, || {
+                reads += 1;
+                false
+            }));
+            assert_eq!(reads, limit + 1);
+        }
+        let mut reads = 0;
+        assert!(poll_ready(2, || {
+            reads += 1;
+            reads == 3
+        }));
+        assert_eq!(reads, 3);
+    }
+}

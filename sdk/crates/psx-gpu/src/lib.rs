@@ -40,6 +40,7 @@
 
 pub mod framebuf;
 pub mod material;
+pub mod ordered;
 pub mod ot;
 pub mod prim;
 
@@ -642,6 +643,9 @@ pub fn submit_linked_list_async(head: *const u32) {
     // BCR is ignored in linked-list mode but must be written to
     // some value on real hardware; zero is conventional.
     dma::set_bcr_manual(Channel::Gpu, 0);
+    // Publish ordinary RAM payload/tag stores before the volatile DMA start.
+    // Volatile MMIO alone is not a compiler barrier for unrelated memory.
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
     dma::set_chcr(
         Channel::Gpu,
         dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
