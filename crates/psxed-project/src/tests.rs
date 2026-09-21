@@ -1370,8 +1370,7 @@ fn embedded_default_project_ron_deserializes() {
     ];
     assert!(starter_materials.iter().all(|(name, material)| {
         TWO_SIDED_STARTER_OVERLAYS.contains(name)
-            || (material.face_sidedness == MaterialFaceSidedness::Front
-                && !material.double_sided)
+            || (material.face_sidedness == MaterialFaceSidedness::Front && !material.double_sided)
     }));
     // Starter seeds the active player with the VERIFIED cortex_v1 combat
     // loadout: the ci_player model, the Aletha Complete Animation Set (the
@@ -4627,4 +4626,3 @@ fn a_weapon_reachable_only_through_a_loadout_is_still_a_reference() {
 // by the runtime in editor-playtest's overlay::draw_player_vitality_hud, which
 // owns the Triangle stance swap and is covered by that module's own tests. Only
 // the enemy/target bars stay authored as UI scene Bars.
-
