@@ -21,6 +21,9 @@ const SKY_FOREGROUND_CYCLE_SECONDS: u32 = 8;
 const SKY_COLUMNS: usize = 10;
 const SKY_ROWS: usize = 12;
 const SKY_CELLS: usize = SKY_COLUMNS * SKY_ROWS;
+
+/// Caller-owned texel lattice for the fixed 10 by 12 layered sky mesh.
+pub type LayeredSkySamples = [[[i32; 2]; SKY_COLUMNS + 1]; SKY_ROWS + 1];
 const SKY_OT_SLOT: u32 = 2047;
 const SKY_QUAD_WORDS: usize = 10;
 const SKY_TRI_WORDS: usize = 8;
@@ -766,11 +769,6 @@ pub unsafe fn submit_view_ray_layered_sky_to_slot(
     debug_assert!(atlas_origin[1].is_multiple_of(height));
     debug_assert!(u16::from(atlas_origin[0]) + u16::from(width) * 2 <= 256);
     debug_assert!(u16::from(atlas_origin[1]) + u16::from(height) <= 256);
-    let foreground_window =
-        TextureWindow::power_of_two_tile(atlas_origin[0], atlas_origin[1], width, height);
-    let background_origin = [atlas_origin[0].wrapping_add(width), atlas_origin[1]];
-    let background_window =
-        TextureWindow::power_of_two_tile(background_origin[0], background_origin[1], width, height);
     // `tick * width / period` modulo 256, without the 64-bit product: split
     // the tick into whole periods and a remainder; only the low byte of the
     // quotient is kept, so the whole-period term may wrap freely.
@@ -821,6 +819,62 @@ pub unsafe fn submit_view_ray_layered_sky_to_slot(
     }
     let samples = &cache.samples;
 
+    unsafe {
+        submit_layered_sky_samples_to_slot(
+            texture_page,
+            clut,
+            atlas_origin,
+            [width, height],
+            [screen_width, screen_height],
+            samples,
+            foreground_scroll,
+            background_scroll,
+            ot_slot,
+            output,
+        )
+    }
+}
+
+/// Emit the common two-layer sky packet stream from caller-owned texel samples.
+///
+/// Callers retain their coordinate system, lattice cache and animation clock.
+/// The fixed 10 by 12 mesh, texture-window commands and prepend-only ordering
+/// are shared with [`submit_view_ray_layered_sky_to_slot`]. Scroll is already
+/// expressed in texels, so this function does not impose a simulation tick rate.
+///
+/// # Safety
+///
+/// `output` must be packet-aligned and have space for
+/// [`VIEW_RAY_SKY_PACKET_WORDS`] writable words. Access to the output must be
+/// exclusive until submission, as for the view-ray wrapper.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn submit_layered_sky_samples_to_slot(
+    texture_page: u16,
+    clut: u16,
+    atlas_origin: [u8; 2],
+    layer_size: [u8; 2],
+    screen_size: [i16; 2],
+    samples: &LayeredSkySamples,
+    foreground_scroll: [u8; 2],
+    background_scroll: [u8; 2],
+    ot_slot: u16,
+    output: *mut u32,
+) -> ClassicAffineSubmit {
+    let width = layer_size[0].clamp(8, 128);
+    let height = layer_size[1].clamp(8, 128);
+    let screen_width = screen_size[0].max(1);
+    let screen_height = screen_size[1].max(1);
+    debug_assert!(width.is_power_of_two());
+    debug_assert!(height.is_power_of_two());
+    debug_assert!(atlas_origin[0].is_multiple_of(width));
+    debug_assert!(atlas_origin[1].is_multiple_of(height));
+    debug_assert!(u16::from(atlas_origin[0]) + u16::from(width) * 2 <= 256);
+    debug_assert!(u16::from(atlas_origin[1]) + u16::from(height) <= 256);
+    let foreground_window =
+        TextureWindow::power_of_two_tile(atlas_origin[0], atlas_origin[1], width, height);
+    let background_origin = [atlas_origin[0].wrapping_add(width), atlas_origin[1]];
+    let background_window =
+        TextureWindow::power_of_two_tile(background_origin[0], background_origin[1], width, height);
     let mut next = output;
     // The tagged stream is linked by prepending packets. Stage the reset first
     // so it executes after both sky layers and before ordinary world geometry.
@@ -1181,10 +1235,10 @@ mod tests {
     use alloc::vec;
 
     use super::{
+        CUBE_SKY_ATLAS_SIZE, CubeFace, VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS,
         cube_atlas_uv, cube_face, cube_face_clut, cube_face_uv_q12, directional_texel,
         directional_uv, packet_quad_uv, quake_direction_from_y_up, screen_view_ray,
         submit_view_ray_cube_sky, submit_view_ray_cube_sky_to_slot, submit_view_ray_layered_sky,
-        CubeFace, CUBE_SKY_ATLAS_SIZE, VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS,
     };
     use psx_gte::math::Mat3I16;
 
@@ -1195,9 +1249,8 @@ mod tests {
         // the six-face clipper produces for that face, and no third face
         // may receive a polygon from the clipper.
         use super::{
-            clip_cube_sky_cell, cube_face_page_local_uv, cube_sky_packet_vertex,
-            split_cube_sky_cell_on_edge, CubeSkyGridVertex, CubeSkyVertex, CUBE_SKY_COLUMNS,
-            CUBE_SKY_ROWS,
+            CUBE_SKY_COLUMNS, CUBE_SKY_ROWS, CubeSkyGridVertex, CubeSkyVertex, clip_cube_sky_cell,
+            cube_face_page_local_uv, cube_sky_packet_vertex, split_cube_sky_cell_on_edge,
         };
         use alloc::vec::Vec;
         let (width, height, cx, cy, projection) = (320i16, 240i16, 160i16, 120i16, 320i16);
@@ -1810,5 +1863,76 @@ mod tests {
             }
         }
         assert!(maximum_used < super::CUBE_SKY_PACKET_BUDGET_WORDS);
+    }
+}
+
+#[cfg(test)]
+mod sample_emission_tests {
+    use super::*;
+
+    #[test]
+    fn caller_samples_preserve_quake_packet_words_and_bounds() {
+        // Captured from Quake-PSX a2916a3's independent emitter, including
+        // every tag, window, vertex, UV, CLUT and texture-page word.
+        let fixtures: [(u8, u8, u64); 20] = [
+            (8, 0, 0x86706102dcd68632),
+            (8, 1, 0xecfbe1c2b1c9abf2),
+            (8, 127, 0x3479623e22dd05d2),
+            (8, 255, 0xbeb2a90e10235af2),
+            (16, 0, 0xd3bf6fb07aa001fe),
+            (16, 1, 0xcfcb47f15c099c6e),
+            (16, 127, 0x2c6b0335dbc69e1e),
+            (16, 255, 0xb0034369ed513d3e),
+            (32, 0, 0x40228cf40ee2d636),
+            (32, 1, 0x71f347887ad999a6),
+            (32, 127, 0xe12b5ddbab2f4f96),
+            (32, 255, 0x60331dd06e549956),
+            (64, 0, 0xf6f551a7b3bea5aa),
+            (64, 1, 0xe87f832ae3141fea),
+            (64, 127, 0x4ac06f483573580a),
+            (64, 255, 0xc101266f6fcf868a),
+            (128, 0, 0x594c07bc853f4c22),
+            (128, 1, 0x6f9bc4b2273f5612),
+            (128, 127, 0xa7b4fc1b6cc66522),
+            (128, 255, 0x6e5c9970a4b56ea2),
+        ];
+        for (width, scroll, expected_hash) in fixtures {
+            let atlas = if width < 128 { [width, width] } else { [0, 0] };
+            let mut samples = [[[0; 2]; SKY_COLUMNS + 1]; SKY_ROWS + 1];
+            for (y, row) in samples.iter_mut().enumerate() {
+                for (x, sample) in row.iter_mut().enumerate() {
+                    *sample = [x as i32 * 3 - 19, y as i32 * 2 - 17];
+                }
+            }
+            let mut words = [0xdeadbeefu32; VIEW_RAY_SKY_PACKET_WORDS + 4];
+            let result = unsafe {
+                submit_layered_sky_samples_to_slot(
+                    0x56,
+                    0x1234,
+                    atlas,
+                    [width, width],
+                    [320, 240],
+                    &samples,
+                    [scroll, scroll.wrapping_add(31)],
+                    [scroll.wrapping_mul(3), scroll / 2],
+                    2047,
+                    words.as_mut_ptr(),
+                )
+            };
+            assert_eq!(result.packets, 243);
+            assert_eq!(result.hardware_triangles, 480);
+            assert_eq!(
+                unsafe { result.next_packet.offset_from(words.as_ptr()) },
+                VIEW_RAY_SKY_PACKET_WORDS as isize
+            );
+            assert_eq!(&words[VIEW_RAY_SKY_PACKET_WORDS..], &[0xdeadbeef; 4]);
+            let hash = words[..VIEW_RAY_SKY_PACKET_WORDS]
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .fold(0xcbf29ce484222325u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+                });
+            assert_eq!(hash, expected_hash, "width {width}, scroll {scroll}");
+        }
     }
 }
