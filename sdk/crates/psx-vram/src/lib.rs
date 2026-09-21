@@ -1152,6 +1152,23 @@ fn packed_upload_word(bytes: &[u8], offset: usize) -> u32 {
     ])
 }
 
+/// Upload bytes using aligned word loads when possible. Unaligned and odd
+/// halfword counts retain [`upload_bytes`]'s zero-padded final-word behavior.
+pub fn upload_bytes_aligned(rect: VramRect, bytes: &[u8]) {
+    if cfg!(target_endian = "little")
+        && bytes.as_ptr().align_offset(4) == 0
+        && bytes.len().is_multiple_of(4)
+    {
+        // Every u32 bit pattern is valid; alignment, extent and lifetime are
+        // checked above and the input remains immutably borrowed.
+        let words =
+            unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), bytes.len() / 4) };
+        upload_words(rect, words);
+    } else {
+        upload_bytes(rect, bytes);
+    }
+}
+
 /// Upload an already packed little-endian stream of two 16-bit VRAM pixels
 /// per word.
 ///

@@ -55,6 +55,7 @@ pub struct CddaStarter {
     step: StartStep,
     next_try_tick: u32,
     spins: u32,
+    retry_ticks: u32,
 }
 
 impl CddaStarter {
@@ -64,6 +65,7 @@ impl CddaStarter {
             step: StartStep::Done,
             next_try_tick: 0,
             spins: DEFAULT_COMMAND_SPINS,
+            retry_ticks: RETRY_AFTER_NAK_TICKS,
         }
     }
 
@@ -74,11 +76,23 @@ impl CddaStarter {
         self
     }
 
+    /// Override the delay after a rejected command. Successful steps retain
+    /// their two-tick controller settling gap.
+    pub const fn with_retry_ticks(mut self, ticks: u32) -> Self {
+        self.retry_ticks = ticks;
+        self
+    }
+
+    /// Arm with an explicit initial delay (zero for an already warm drive).
+    pub fn begin_after(&mut self, now_tick: u32, delay: u32) {
+        self.step = StartStep::SetMode;
+        self.next_try_tick = now_tick.wrapping_add(delay);
+    }
+
     /// Arm the handshake: first command fires [`COLD_DRIVE_DELAY_TICKS`]
     /// after `now_tick`.
     pub fn begin(&mut self, now_tick: u32) {
-        self.step = StartStep::SetMode;
-        self.next_try_tick = now_tick.wrapping_add(COLD_DRIVE_DELAY_TICKS);
+        self.begin_after(now_tick, COLD_DRIVE_DELAY_TICKS);
     }
 
     /// Whether Play has been accepted (the handshake is finished).
@@ -106,17 +120,33 @@ impl CddaStarter {
         {
             return false;
         }
-        let ok = match self.step {
-            StartStep::SetMode => cdrom::try_set_mode(cdrom::MODE_CDDA, self.spins).is_some(),
-            StartStep::Demute => cdrom::try_demute(self.spins).is_some(),
-            StartStep::Play => cdrom::try_play_track(track, self.spins).is_some(),
-            StartStep::Done => unreachable!(),
-        };
+        self.tick_with(now_tick, track, |step, track, spins| {
+            let ok = match step {
+                StartStep::SetMode => cdrom::try_set_mode(cdrom::MODE_CDDA, spins).is_some(),
+                StartStep::Demute => cdrom::try_demute(spins).is_some(),
+                StartStep::Play => cdrom::try_play_track(track, spins).is_some(),
+                StartStep::Done => unreachable!(),
+            };
+            let _ = cdrom::try_get_stat(spins);
+            ok
+        })
+    }
+
+    fn tick_with(
+        &mut self,
+        now_tick: u32,
+        track: u8,
+        mut command: impl FnMut(StartStep, u8, u32) -> bool,
+    ) -> bool {
+        if self.step == StartStep::Done || now_tick.wrapping_sub(self.next_try_tick) > u32::MAX / 2
+        {
+            return false;
+        }
+        let ok = command(self.step, track, self.spins);
         // Settle the controller AFTER each command. The no-BIOS fast boot
         // leaves the drive touchy: without this drain between steps the next
         // command silently NAKs. (Issued *before* a command it wedges instead,
         // so it lives here.)
-        let _ = cdrom::try_get_stat(self.spins);
         if ok {
             self.step = match self.step {
                 StartStep::SetMode => StartStep::Demute,
@@ -126,7 +156,7 @@ impl CddaStarter {
             self.next_try_tick = now_tick.wrapping_add(RETRY_AFTER_OK_TICKS);
             self.step == StartStep::Done
         } else {
-            self.next_try_tick = now_tick.wrapping_add(RETRY_AFTER_NAK_TICKS);
+            self.next_try_tick = now_tick.wrapping_add(self.retry_ticks);
             false
         }
     }
@@ -343,6 +373,40 @@ fn poll_drive_ms() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configurable_start_and_retry_keep_success_gap_and_wrap() {
+        let mut starter = CddaStarter::new().with_spins(16384).with_retry_ticks(60);
+        let start = u32::MAX - 10;
+        starter.begin_after(start, 30);
+        let due = start.wrapping_add(30);
+        assert!(!starter.tick_with(due - 1, 2, |_, _, _| panic!("early command")));
+        assert!(!starter.tick_with(due, 2, |step, track, spins| {
+            assert_eq!(step, StartStep::SetMode);
+            assert_eq!((track, spins), (2, 16384));
+            false
+        }));
+        assert!(!starter.tick_with(due + 59, 2, |_, _, _| panic!("early retry")));
+        for (t, step, result) in [
+            (due + 60, StartStep::SetMode, false),
+            (due + 62, StartStep::Demute, false),
+            (due + 64, StartStep::Play, true),
+        ] {
+            assert_eq!(
+                starter.tick_with(t, 2, |s, _, _| {
+                    assert_eq!(s, step);
+                    true
+                }),
+                result
+            );
+        }
+        assert!(!starter.tick_with(due + 66, 2, |_, _, _| panic!("repeated Play")));
+        starter.begin_after(100, 0);
+        assert!(!starter.tick_with(100, 2, |s, _, _| {
+            assert_eq!(s, StartStep::SetMode);
+            true
+        }));
+    }
 
     fn started() -> CddaClock {
         let mut c = CddaClock::new(60);

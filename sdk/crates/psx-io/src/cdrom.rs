@@ -169,6 +169,70 @@ pub fn restore_irq_output(saved: u8) {
     select_index(0);
 }
 
+/// Nonblocking readiness probe for a sector reader that owns the INT1 ACK.
+/// Data-ready is never acknowledged here. Other completion responses are
+/// drained (at most 256 bytes) and acknowledged; drive errors also reset the
+/// parameter FIFO. A ready data FIFO is accepted if no classified IRQ remains.
+pub fn poll_data_sector() -> Result<bool, ()> {
+    poll_sector(&mut SectorPollMmio)
+}
+
+trait SectorPollIo {
+    fn flag(&mut self) -> u8;
+    fn drain(&mut self);
+    fn acknowledge(&mut self, flag: u8, reset: bool);
+    fn data_ready(&mut self) -> bool;
+}
+struct SectorPollMmio;
+impl SectorPollIo for SectorPollMmio {
+    #[inline]
+    fn flag(&mut self) -> u8 {
+        irq_flag()
+    }
+    #[inline]
+    fn drain(&mut self) {
+        select_index(0);
+        let mut drained = 0;
+        while read_status() & STATUS_RESPONSE_NOT_EMPTY != 0 && drained < 256 {
+            let _ = read_byte(REG_COMMAND_RESPONSE);
+            drained += 1;
+        }
+    }
+    #[inline]
+    fn acknowledge(&mut self, flag: u8, reset: bool) {
+        if reset {
+            select_index(1);
+            write_byte(REG_REQUEST_IRQ, IRQ_ACK_ALL | IRQ_PARAM_FIFO_RESET);
+            irq::ack(1 << irq::source::CDROM);
+            select_index(0);
+        } else {
+            ack_irq(flag);
+        }
+    }
+    #[inline]
+    fn data_ready(&mut self) -> bool {
+        select_index(0);
+        read_status() & (1 << 6) != 0
+    }
+}
+#[inline]
+fn poll_sector(io: &mut impl SectorPollIo) -> Result<bool, ()> {
+    match io.flag() {
+        IRQ_DATA_READY => Ok(true),
+        IRQ_ERROR => {
+            io.drain();
+            io.acknowledge(IRQ_ACK_ALL, true);
+            Err(())
+        }
+        flag @ (IRQ_COMPLETE | IRQ_ACK | 4) => {
+            io.drain();
+            io.acknowledge(flag, false);
+            Ok(false)
+        }
+        _ => Ok(io.data_ready()),
+    }
+}
+
 /// Wait for the next streamed data sector (INT1) and acknowledge it.
 ///
 /// Use between [`try_read_n`] and [`try_pause_until_complete`] to step through
@@ -653,6 +717,64 @@ fn write_byte(addr: u32, value: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sector_probe_leaves_int1_and_orders_other_acknowledgements() {
+        struct Fake {
+            flag: u8,
+            ready: bool,
+            events: [u8; 4],
+            len: usize,
+        }
+        impl Fake {
+            fn event(&mut self, e: u8) {
+                self.events[self.len] = e;
+                self.len += 1;
+            }
+        }
+        impl SectorPollIo for Fake {
+            fn flag(&mut self) -> u8 {
+                self.event(1);
+                self.flag
+            }
+            fn drain(&mut self) {
+                self.event(2);
+            }
+            fn acknowledge(&mut self, flag: u8, reset: bool) {
+                assert_eq!(flag, if reset { 31 } else { self.flag });
+                self.event(if reset { 4 } else { 3 });
+            }
+            fn data_ready(&mut self) -> bool {
+                self.event(5);
+                self.ready
+            }
+        }
+        for flag in 0..=5 {
+            for ready in [false, true] {
+                let mut io = Fake {
+                    flag,
+                    ready,
+                    events: [0; 4],
+                    len: 0,
+                };
+                let result = poll_sector(&mut io);
+                let expected = match flag {
+                    1 => Ok(true),
+                    5 => Err(()),
+                    2..=4 => Ok(false),
+                    _ => Ok(ready),
+                };
+                assert_eq!(result, expected);
+                let events: &[u8] = match flag {
+                    1 => &[1],
+                    5 => &[1, 2, 4],
+                    2..=4 => &[1, 2, 3],
+                    _ => &[1, 5],
+                };
+                assert_eq!(&io.events[..io.len], events);
+            }
+        }
+    }
 
     #[test]
     fn bcd_clamps_to_two_digits() {
