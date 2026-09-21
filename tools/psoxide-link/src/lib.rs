@@ -78,9 +78,7 @@ fn skip(relative: &Path) -> bool {
                 // the embedded project.ron inside it. Nothing else.
                 return match parts.next() {
                     None => false,
-                    Some(entry) => {
-                        entry.as_os_str() != "project.ron" || parts.next().is_some()
-                    }
+                    Some(entry) => entry.as_os_str() != "project.ron" || parts.next().is_some(),
                 };
             }
         }
@@ -277,9 +275,7 @@ mod tests {
             "editor/projects/default/assets/textures/brick_1a_v2.psxt"
         )));
         // A nested file that merely shares the name is not the embedded one.
-        assert!(skip(Path::new(
-            "editor/projects/default/tools/project.ron"
-        )));
+        assert!(skip(Path::new("editor/projects/default/tools/project.ron")));
     }
 
     #[test]
