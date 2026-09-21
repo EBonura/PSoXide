@@ -645,6 +645,14 @@ pub fn submit_linked_list_async(head: *const u32) {
     dma::set_bcr_manual(Channel::Gpu, 0);
     // Publish ordinary RAM payload/tag stores before the volatile DMA start.
     // Volatile MMIO alone is not a compiler barrier for unrelated memory.
+    // The pinned MIPS-I backend incorrectly lowers even a single-thread
+    // compiler fence to SYNC, which R3000 lacks. Empty asm with its default
+    // memory clobber is a compiler-only barrier and emits no instruction.
+    #[cfg(target_arch = "mips")]
+    unsafe {
+        core::arch::asm!("", options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "mips"))]
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
     dma::set_chcr(
         Channel::Gpu,

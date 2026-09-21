@@ -94,7 +94,7 @@ pub fn isqrt_u32(mut value: u32) -> u32 {
 /// Exact floor square root across the complete unsigned 64-bit domain.
 /// Uses restoring shifts and subtraction, without floating point or division.
 #[inline]
-pub fn isqrt_u64(mut value: u64) -> u32 {
+pub const fn isqrt_u64(mut value: u64) -> u32 {
     let mut root = 0u64;
     let mut bit = 1u64 << 62;
     while bit > value {
