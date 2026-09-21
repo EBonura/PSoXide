@@ -114,6 +114,37 @@ impl Mat3I16 {
         out
     }
 
+    /// Matrix times a wide vector, using wrapping i32 dot products followed
+    /// by an arithmetic Q12 shift. Inputs should keep each dot product in i32
+    /// when a non-wrapping result is required.
+    pub fn transform_i32(&self, v: [i32; 3]) -> [i32; 3] {
+        self.m.map(|r| {
+            i32::from(r[0])
+                .wrapping_mul(v[0])
+                .wrapping_add(i32::from(r[1]).wrapping_mul(v[1]))
+                .wrapping_add(i32::from(r[2]).wrapping_mul(v[2]))
+                >> 12
+        })
+    }
+
+    /// X rotation in 4096-per-turn units, with interpolated Q12 trig.
+    pub fn rotate_x_q12(angle: u16) -> Self {
+        let c = psx_math::cos_q12(angle) as i16;
+        let s = psx_math::sin_q12(angle) as i16;
+        Self {
+            m: [[4096, 0, 0], [0, c, -s], [0, s, c]],
+        }
+    }
+
+    /// Y rotation in 4096-per-turn units, with interpolated Q12 trig.
+    pub fn rotate_y_q12(angle: u16) -> Self {
+        let c = psx_math::cos_q12(angle) as i16;
+        let s = psx_math::sin_q12(angle) as i16;
+        Self {
+            m: [[c, 0, s], [0, 4096, 0], [-s, 0, c]],
+        }
+    }
+
     /// Rotation around the X axis by `angle` (256-per-revolution units).
     ///
     /// ```text
@@ -179,6 +210,28 @@ fn clamp_i32_to_i16(value: i32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interpolated_rotations_preserve_full_angle_resolution() {
+        for a in 0..4096 {
+            let c = psx_math::cos_q12(a) as i16;
+            let sn = psx_math::sin_q12(a) as i16;
+            assert_eq!(
+                Mat3I16::rotate_x_q12(a).m,
+                [[4096, 0, 0], [0, c, -sn], [0, sn, c]]
+            );
+            assert_eq!(
+                Mat3I16::rotate_y_q12(a).m,
+                [[c, 0, sn], [0, 4096, 0], [-sn, 0, c]]
+            );
+            let m = Mat3I16::rotate_y_q12(a);
+            let v = [12345, -34567, 8901];
+            let expected = m.m.map(|r| {
+                (i32::from(r[0]) * v[0] + i32::from(r[1]) * v[1] + i32::from(r[2]) * v[2]) >> 12
+            });
+            assert_eq!(m.transform_i32(v), expected);
+        }
+    }
 
     #[test]
     fn sin_cos_identity_at_cardinal_angles() {

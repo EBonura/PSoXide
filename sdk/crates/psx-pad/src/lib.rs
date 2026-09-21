@@ -105,6 +105,13 @@ impl ButtonState {
         self.0
     }
 
+    /// True when any masked button is down now and none was down previously.
+    /// For multi-button masks this is a group edge, not a per-button edge.
+    #[inline]
+    pub const fn pressed_since(self, previous: Self, mask: u16) -> bool {
+        self.is_held(mask) && !previous.is_held(mask)
+    }
+
     /// `true` when `mask` (any single-bit [`button`] constant or an
     /// OR of several) is currently pressed.
     #[inline]
@@ -230,6 +237,20 @@ pub const fn aim_curve(value: i16) -> i16 {
         -128
     } else if value > 127 {
         127
+    } else {
+        value
+    };
+    aim_curve_symmetric(value)
+}
+
+/// Fine-aim curve accepting both -128 and +128, for axes inverted after
+/// centering. Uses the same sequential integer rounding as [`aim_curve`].
+#[inline]
+pub const fn aim_curve_symmetric(value: i16) -> i16 {
+    let value = if value < -128 {
+        -128
+    } else if value > 128 {
+        128
     } else {
         value
     };
@@ -1104,6 +1125,20 @@ unsafe fn wait_stat_low(mask: u32, spins: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn symmetric_aim_and_group_edges_preserve_axis_policy() {
+        for v in -128..=128 {
+            assert_eq!(aim_curve_symmetric(v), -aim_curve_symmetric(-v));
+        }
+        assert_eq!(aim_curve_symmetric(128), 128);
+        assert_eq!(aim_curve(128), 125);
+        let a = ButtonState::from_bits(1);
+        let b = ButtonState::from_bits(2);
+        assert!(a.pressed_since(ButtonState::NONE, 3));
+        assert!(!a.pressed_since(b, 3));
+        assert!(a.pressed_since(b, 1));
+    }
 
     #[test]
     fn a_radial_deadzone_is_a_circle_not_a_square() {

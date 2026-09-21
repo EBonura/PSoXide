@@ -29,6 +29,20 @@ const VALUE_ADDR: *mut u32 = 0xBF80_2F04 as *mut u32;
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 const LOG_ADDR: *mut u32 = 0xBF80_2F0C as *mut u32;
 
+/// Emulator cycle counter, wrapping at 32 bits. Returns zero on host builds
+/// and when the `emit` feature is disabled, without touching telemetry MMIO.
+#[inline(always)]
+pub fn cycles() -> u32 {
+    #[cfg(all(target_arch = "mips", feature = "emit"))]
+    {
+        unsafe { core::ptr::read_volatile(0xBF80_2F08 as *const u32) }
+    }
+    #[cfg(not(all(target_arch = "mips", feature = "emit")))]
+    {
+        0
+    }
+}
+
 /// Mark the start of guest frame `frame` (drives `--guest-frames` stops).
 #[inline(always)]
 pub fn frame_begin(frame: u32) {

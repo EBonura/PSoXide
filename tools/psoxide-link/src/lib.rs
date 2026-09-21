@@ -87,7 +87,17 @@ fn skip(relative: &Path) -> bool {
     let top = components.next().and_then(|c| c.as_os_str().to_str());
     matches!(
         top,
-        Some(".git" | "target" | "build" | "captures" | "dist" | "data" | "graphify-out")
+        Some(
+            ".git"
+                | "target"
+                | "build"
+                | "captures"
+                | "dist"
+                | "data"
+                | "graphify-out"
+                | ".local-recovery"
+                | "local"
+        )
     ) || components.any(|c| matches!(c.as_os_str().to_str(), Some(".git" | "target")))
 }
 
@@ -248,6 +258,15 @@ pub fn hydrate_pinned(destination: &Path, rev: &str, quiet: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_archives_are_not_build_inputs() {
+        assert!(skip(Path::new(".local-recovery")));
+        assert!(skip(Path::new(
+            "local/cleanup-preserved/old-readonly-source"
+        )));
+        assert!(!skip(Path::new("sdk/crates/example/local/source.rs")));
+    }
 
     #[test]
     fn build_output_and_version_control_are_not_copied() {

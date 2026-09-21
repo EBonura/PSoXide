@@ -68,22 +68,48 @@ pub fn isqrt_i32(value: i32) -> i32 {
     if value <= 0 {
         return 0;
     }
-    let mut x = value as u32;
-    let mut r = 0u32;
+    isqrt_u32(value as u32) as i32
+}
+
+/// Exact floor square root across the complete unsigned 32-bit domain.
+#[inline]
+pub fn isqrt_u32(mut value: u32) -> u32 {
+    let mut root = 0u32;
     let mut bit = 1u32 << 30;
-    while bit > x {
+    while bit > value {
         bit >>= 2;
     }
     while bit != 0 {
-        if x >= r + bit {
-            x -= r + bit;
-            r = (r >> 1) + bit;
+        if value >= root + bit {
+            value -= root + bit;
+            root = (root >> 1) + bit;
         } else {
-            r >>= 1;
+            root >>= 1;
         }
         bit >>= 2;
     }
-    r as i32
+    root
+}
+
+/// Exact floor square root across the complete unsigned 64-bit domain.
+/// Uses restoring shifts and subtraction, without floating point or division.
+#[inline]
+pub fn isqrt_u64(mut value: u64) -> u32 {
+    let mut root = 0u64;
+    let mut bit = 1u64 << 62;
+    while bit > value {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if value >= root + bit {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    root as u32
 }
 
 /// Multiply an `i32` by a Q1.12 factor (`4096` = 1.0) without a
@@ -255,6 +281,29 @@ impl InvariantDivisor31 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsigned_square_root_full_domain_boundaries() {
+        let check = |n: u64| {
+            let r = u64::from(isqrt_u64(n));
+            assert!(r * r <= n);
+            assert!(r == u64::from(u32::MAX) || (r + 1) * (r + 1) > n);
+        };
+        for root in [0u64, 1, 2, 255, 65535, 65536, 1 << 31, u64::from(u32::MAX)] {
+            let square = root * root;
+            for n in [
+                square.saturating_sub(1),
+                square,
+                square.saturating_add(1),
+                u64::MAX,
+            ] {
+                check(n);
+            }
+        }
+        for n in 0..100_000 {
+            check(n);
+        }
+    }
 
     #[test]
     fn mul_div_u32_preserves_full_width_animation_phases() {
