@@ -622,14 +622,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tracked_tech_demo_has_materials_cube_sky_player_and_two_enemies() {
-        let project_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    fn generated_tech_demo_has_materials_cube_sky_player_and_two_enemies() {
+        let tracked = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("projects")
-            .join(DESTINATION_PROJECT);
+            .join("default");
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "psxed-cortex-generator-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        )));
+        let material_source = fixture.0.join("materials");
+        for (_, stem, _) in MATERIALS {
+            let relative = format!("source_assets/textures/{stem}.png");
+            copy(&tracked.join(&relative), &material_source.join(&relative));
+        }
+        // The old authored 0.2 output and source projects were retired. Exercise
+        // generation with the current tracked art and character dependencies.
+        copy(
+            &tracked.join("source_assets/sky/dp_fog_city_equirect_v1.png"),
+            &material_source.join(SKY_SOURCE_RELATIVE),
+        );
+        copy(
+            &tracked.join("TEXTURE_SET_V3.md"),
+            &material_source.join("TEXTURE_SET_V3.md"),
+        );
+        let project_dir = fixture.0.join("generated");
+        generate(&material_source, &tracked, &project_dir);
         let project = ProjectDocument::load_from_path(project_dir.join("project.ron"))
-            .expect("load tracked Cortex Ignition Tech Demo 0.2");
+            .expect("load generated Cortex Ignition Tech Demo 0.2");
 
         assert_eq!(project.name, PROJECT_NAME);
         assert!(project.resources.len() >= 65);
