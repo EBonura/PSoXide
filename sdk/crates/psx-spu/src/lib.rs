@@ -729,6 +729,34 @@ impl Voice {
 // Global controls
 // ======================================================================
 
+/// Set the sound RAM address that raises the SPU IRQ when accessed.
+/// Address units are encoded by [`SpuAddr`]; this does not enable the IRQ.
+pub fn set_irq_address(address: SpuAddr) {
+    write_reg16(0x1F80_1DA4, address.reg_field());
+}
+
+/// Enable or disable the SPU's address IRQ without changing other controls.
+/// Disabling clears the SPU latch. Acknowledging the CPU interrupt controller
+/// remains the caller's responsibility, so ISR and polled users can differ.
+pub fn enable_irq(enabled: bool) {
+    let control = read_reg16(SPUCNT);
+    write_reg16(
+        SPUCNT,
+        if enabled {
+            control | (1 << 6)
+        } else {
+            control & !(1 << 6)
+        },
+    );
+}
+
+/// Whether the SPU's address IRQ latch is set.
+pub fn irq_pending() -> bool {
+    read_reg16(SPUSTAT) & (1 << 6) != 0
+}
+
+// ======================================================================
+
 /// Set the main L/R output volume that every voice mixes through.
 pub fn set_main_volume(left: Volume, right: Volume) {
     write_reg16(MAIN_VOL_LEFT, left.0 as u16);
