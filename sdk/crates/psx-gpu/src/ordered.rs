@@ -154,7 +154,12 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         self.reserve(N);
         let mut len = self.len;
         for word in words {
-            self.words[len] = word;
+            // reserve(N) checked the whole packet plus a spare tag, including
+            // any capacity-driven reset. This index is therefore in bounds;
+            // repeating a slice check per GP0 word bloats hot draw loops.
+            unsafe {
+                *self.words.get_unchecked_mut(len) = word;
+            }
             len += 1;
         }
         self.len = len;
