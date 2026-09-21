@@ -169,11 +169,15 @@ pub fn restore_irq_output(saved: u8) {
     select_index(0);
 }
 
+/// A drive error reported while polling for the next streamed sector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SectorPollError;
+
 /// Nonblocking readiness probe for a sector reader that owns the INT1 ACK.
 /// Data-ready is never acknowledged here. Other completion responses are
 /// drained (at most 256 bytes) and acknowledged; drive errors also reset the
 /// parameter FIFO. A ready data FIFO is accepted if no classified IRQ remains.
-pub fn poll_data_sector() -> Result<bool, ()> {
+pub fn poll_data_sector() -> Result<bool, SectorPollError> {
     poll_sector(&mut SectorPollMmio)
 }
 
@@ -216,13 +220,13 @@ impl SectorPollIo for SectorPollMmio {
     }
 }
 #[inline]
-fn poll_sector(io: &mut impl SectorPollIo) -> Result<bool, ()> {
+fn poll_sector(io: &mut impl SectorPollIo) -> Result<bool, SectorPollError> {
     match io.flag() {
         IRQ_DATA_READY => Ok(true),
         IRQ_ERROR => {
             io.drain();
             io.acknowledge(IRQ_ACK_ALL, true);
-            Err(())
+            Err(SectorPollError)
         }
         flag @ (IRQ_COMPLETE | IRQ_ACK | 4) => {
             io.drain();
@@ -760,7 +764,7 @@ mod tests {
                 let result = poll_sector(&mut io);
                 let expected = match flag {
                     1 => Ok(true),
-                    5 => Err(()),
+                    5 => Err(SectorPollError),
                     2..=4 => Ok(false),
                     _ => Ok(ready),
                 };
