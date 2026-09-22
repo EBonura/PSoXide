@@ -55,7 +55,7 @@ pub const USAGE: &str = "\
                            [--launch-arg ARG]... [--name NAME]
   GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH]
   CARGO-ARGS: what follows `cargo` in the guest's own build, starting with `build`
-  V: off | default | accurate | noreplay | nopgso | hot=N | llvm=-FLAG, joined with +
+  V: off | default | accurate | noreplay | nopgso | profi | hot=N | llvm=-FLAG, joined with +
   A..B: the gameplay window in port-1 polls, loads excluded";
 
 /// How to build one guest, shared by every mode.
@@ -224,6 +224,9 @@ fn variant_flags(variant: &str) -> Result<Option<Vec<String>>> {
             // Do not optimise profile-cold code for size (which turns
             // struct copies into memcpy calls, among other things).
             "nopgso" => flags.push(llvm("-pgso=false")),
+            // Infer block counts by min-cost flow where samples are missing
+            // (line-0 code), instead of trusting sparse samples as they are.
+            "profi" => flags.push(llvm("-sample-profile-use-profi")),
             _ => {
                 if let Some(threshold) = part.strip_prefix("hot=") {
                     let threshold: u32 = threshold
@@ -884,7 +887,9 @@ fn format_table(rows: &[GateRow]) -> String {
 fn choose(guest: &Guest, options: &Options) -> Result<()> {
     let gate = options.gate.as_ref().ok_or("choose needs --gate CMD")?;
     let variants: Vec<String> = if options.variants.is_empty() {
-        ["off", "default", "accurate"].map(String::from).to_vec()
+        ["off", "default", "hot=500", "hot=500+profi"]
+            .map(String::from)
+            .to_vec()
     } else {
         options.variants.clone()
     };

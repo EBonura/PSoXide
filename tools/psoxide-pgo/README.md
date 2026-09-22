@@ -163,6 +163,7 @@ Variants, joined with `+` to combine (`accurate+hot=1000`):
 | `hot=N`    | `-Cllvm-args=-hot-callsite-threshold=N`: the inline budget of a call the profile calls hot (LLVM's default is 3000) |
 | `noreplay` | `-Cllvm-args=-disable-sample-loader-inlining`: do not replay the profiled build's inlining; inlinee samples merge into their own functions |
 | `nopgso`   | `-Cllvm-args=-pgso=false`: do not optimise profile-cold code for size |
+| `profi`    | `-Cllvm-args=-sample-profile-use-profi`: infer block counts where samples are missing |
 | `llvm=-F`  | `-Cllvm-args=-F`, any other LLVM option (`llvm=-sample-profile-inline-size`) |
 
 A variant that fails to build shows as a failed row in `choose` instead of
@@ -170,7 +171,8 @@ stopping it.
 
 ### choose
 
-Builds each `--variant` in turn (default: `off`, `default`, `accurate`), packs
+Builds each `--variant` in turn (default: `off`, `default`, `hot=500`,
+`hot=500+profi`; see "What the knobs did on VoXide" for why), packs
 it if `--pack` is given, and runs `--gate` with `PSOXIDE_PGO_VARIANT`,
 `PSOXIDE_PGO_EXE`, `PSOXIDE_PGO_IMAGE` (the disc when packed, else the exe) and
 `PSOXIDE_PGO` (this tool, for `measure`). The gate's exit status is pass or
@@ -205,6 +207,36 @@ inside the `--polls` window, as `NAME.key=value` lines for a gate:
 
 The resolution is one route tick at each end of the window. The frontend's
 own output goes to stderr so it cannot land in the table.
+
+### What the knobs did on VoXide
+
+VoXide at 29117ac (delay-slot flags on) with its `lockstep` feature, so every
+build reaches the same state at every poll (display hashes matched in every
+row). Profile from the recorded tape's gameplay polls 252..1200; work
+instructions are everything executed after route tick 600 except
+`frame_present`'s vblank wait, counted exactly (`--pc-sample-instructions 1`).
+The unseen tape is a different walk the profile never saw.
+
+| variant         | work instr, train | work instr, unseen | I-cache stalls, train | exe bytes |
+|-----------------|------------------:|-------------------:|----------------------:|----------:|
+| off             | 489,506,085       | 484,544,541        | 84,176,815            | 483,328   |
+| default         | 504,901,379       | 499,651,874        | 79,727,602            | 516,096   |
+| hot=225         | 502,387,481       | 496,702,726        | 76,157,506            | 471,040   |
+| hot=500         | 501,930,820       | 496,213,814        | 76,905,048            | 479,232   |
+| hot=1000        | 506,490,617       | 501,107,607        | 77,352,944            | 485,376   |
+| nopgso+hot=225  | 501,775,828       | 496,093,825        | 80,650,454            | 473,088   |
+| hot=500+profi   | 498,891,678       | 493,996,539        | (not recorded)        | 491,520   |
+
+LLVM's hot-callsite budget of 3000 is what grows the image (+32 KB here; on
+Cortex it overflowed RAM), and 225-500 takes all of that back and cuts
+I-cache stalls below the plain build's. It does not take back the extra
+executed instructions: every profiled variant still ran 1.9-3.1% more. In
+the face loop (a third of the frame) the profiled build executed the same
+ALU work plus 6.7M more nops, 6.0M more stack loads and stores and 1.6M more
+jumps: layout and register allocation spending the profile's block counts
+badly. `profi` recovers about a third of it. memcpy calls rose from 3,822 to
+5,642 in the window, about two per frame, and are not the cost. On VoXide
+`off` still wins, and `choose` exists to say so per game.
 
 ## Why the committed profile is portable
 
