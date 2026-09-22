@@ -696,10 +696,7 @@ fn poll_state(port2: bool) -> PadState {
     let mut last = PadState::NONE;
     let mut tries = 0;
     while tries < 4 {
-        // The default poll uses a setup delay after select: the original
-        // SCPH-1200 will not answer without it (silicon-confirmed), clones are
-        // fine with it. No inter-byte delay is needed.
-        let s = unsafe { poll_once_diag(port2, DEFAULT_SETUP_SPINS, 0) }.to_state();
+        let s = unsafe { poll_once(port2) }.to_state();
         if !s.is_connected() {
             return s; // nothing attached -- not a glitch, don't retry
         }
@@ -823,9 +820,33 @@ unsafe fn ex(
     }
 }
 
-/// Diagnostic poll with fixed setup and inter-byte delays (no `/ACK` wait).
-/// Mirrors [`poll_once_raw`]'s byte sequence but paces purely with time.
+/// The production poll every game reaches through [`poll_port1`] and
+/// [`poll_port2`]: [`DEFAULT_SETUP_SPINS`] of setup delay after select (the
+/// original SCPH-1200 will not answer without it, silicon-confirmed; clones are
+/// fine with it) and no inter-byte delay.
+///
+/// Its own function so the fixed timing is a compile-time fact rather than
+/// something constant propagation happens to recover: a build that also calls
+/// [`poll_port1_diag`] (the hardware-test suite) still gets this specialised
+/// copy for its normal polling, and profiles stop charging every game's pad
+/// cost to a function named `diag`. Nearly all of that cost is the setup loop
+/// itself (1024 STAT reads, four instructions each); its machine code is what
+/// the silicon sweep measured, so keep its shape.
+unsafe fn poll_once(port2: bool) -> RawPoll {
+    unsafe { poll_once_timed(port2, DEFAULT_SETUP_SPINS, 0) }
+}
+
+/// Diagnostic poll with caller-chosen setup and inter-byte delays, reached only
+/// through [`poll_port1_diag`].
 unsafe fn poll_once_diag(port2: bool, setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+    unsafe { poll_once_timed(port2, setup_spins, interbyte_spins) }
+}
+
+/// Poll with fixed setup and inter-byte delays (no `/ACK` wait). Mirrors
+/// [`poll_once_raw`]'s byte sequence but paces purely with time. Always inlined
+/// so each caller above is specialised on its own timing.
+#[inline(always)]
+unsafe fn poll_once_timed(port2: bool, setup_spins: u32, interbyte_spins: u32) -> RawPoll {
     unsafe {
         select(port2, false);
         // Setup time after asserting /CS, before the first clock -- the strict
