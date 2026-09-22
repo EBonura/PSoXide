@@ -16,7 +16,9 @@
 //!   octant-linear `atan2_q12`.
 //! - [`int32`] -- saturating 32-bit scalar helpers: `abs_i32` /
 //!   `abs_i16`, `clamp_i16`, `square_i32_saturating`, `isqrt_i32`,
-//!   `mul_q12_i32`.
+//!   `mul_q12_i32`, plus the 64-bit-free wide forms `mul_div_i32`,
+//!   `mul_shr_i32`, `mul_shr_trunc_i32`, `mul_div_u32`, `isqrt_u64` and
+//!   `div_u64_by_u32`.
 //! - [`fmt`] -- integer-to-decimal ASCII without `core::fmt`, for
 //!   HUD/score text drawn with `psx-font`.
 //!
