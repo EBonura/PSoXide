@@ -19,6 +19,21 @@ conditional form re-evaluates the branch inside the trampoline, which is
 sound because the slot instruction writes only its own destination and the
 tool refuses any site where that destination is a branch source.
 
+A register jump's consumer is not in the image: `jr ra` returns into every
+caller, `jalr` calls an unknown function, and a `jr` whose jump table cannot
+be resolved goes somewhere unknown. Those move the load out of the slot
+instead, so it runs two instructions before the jump lands:
+
+    jr   rs ; LOAD    ->  j TRAMP ; nop    TRAMP: LOAD ; jr rs ; nop
+    jalr rs ; LOAD    ->  j TRAMP ; nop    TRAMP: LOAD ; jalr rs ; nop
+                                                  j NEXT ; nop
+
+`j` touches no register and nothing runs between the original address setup
+and the load, so the load reads the same operands. The callee of the `jalr`
+returns into the trampoline, which jumps back to the original return address.
+A load that writes the jump register itself is refused, and `jr ra` loading
+ra is left alone (the caller never reads ra before restoring it).
+
 The trampolines live in a `.data` array the guest declares:
 
     #[no_mangle] #[used]
@@ -57,10 +72,17 @@ READS_ALL = STORES | {"mtc0", "mtc2", "ctc2", "jr", "jalr", "mult", "multu", "di
 WRITES_ONLY = {"lui", "li", "mfhi", "mflo"}
 
 
-def disassemble(path):
+def load_address(data):
+    """The header's t_addr; images without a PS-EXE header load at LOAD_ADDR."""
+    if data[:8] == b"PS-X EXE":
+        return struct.unpack_from("<I", data, 0x18)[0]
+    return LOAD_ADDR
+
+
+def disassemble(path, base=LOAD_ADDR):
     out = subprocess.run(
         [os.environ.get("OBJDUMP", "mipsel-none-elf-objdump"), "-D", "-b", "binary", "-m", "mips:3000", "-EL",
-         f"--adjust-vma={LOAD_ADDR - HEADER:#x}", path],
+         f"--adjust-vma={base - HEADER:#x}", path],
         capture_output=True, text=True, check=True).stdout
     listing = {}
     for line in out.splitlines():
@@ -104,10 +126,10 @@ def reads(op, args, reg):
     return False
 
 
-def jump_table(listing, jr_addr, word_at, image_end):
+def jump_table(listing, jr_addr, word_at, image_end, base=LOAD_ADDR):
     """Resolve the table a `jr rs` dispatches through: (entry address, target)
     pairs. LLVM lowers a switch as `sll idx,idx,2 ; lui t,%hi(T) ; addu ;
-    lw rs,%lo(T)(...) ; jr rs`; the base is the last `lui` before that load
+    lw rs,%lo(T)(...) ; jr rs`; the table is at the last `lui` before that load
     plus the load's offset. Entries run until a word stops being a code
     address (the next table's entries are code addresses too, so a few extra
     targets may be examined; a spurious match only costs one detour)."""
@@ -134,43 +156,55 @@ def jump_table(listing, jr_addr, word_at, image_end):
             break
     if hi is None:
         return None
-    base = ((hi << 16) + load[1]) & 0xFFFFFFFF
+    table = ((hi << 16) + load[1]) & 0xFFFFFFFF
     entries = []
     for k in range(64):
-        addr = base + k * 4
-        if not LOAD_ADDR <= addr < image_end:
+        addr = table + k * 4
+        if not base <= addr < image_end:
             break
         target = word_at(addr)
-        if target & 3 or not LOAD_ADDR <= target < image_end or target not in listing:
+        if target & 3 or not base <= target < image_end or target not in listing:
             break
         entries.append((addr, target))
     return entries or None
 
 
-def find_hazards(listing, word_at=None, image_end=0):
+def find_hazards(listing, word_at=None, image_end=0, base=LOAD_ADDR):
     """Every (branch address, op, args, slot op, slot args, consumer address,
     table entry address). The entry address is the jump-table word that
-    names the consumer for a `jr` switch dispatch and None otherwise."""
+    names the consumer for a `jr` switch dispatch and None otherwise. The
+    consumer is None for a register jump whose destination is not in the
+    image: `jr ra`, `jalr`, and a `jr` whose table cannot be resolved."""
     found = []
     for addr in sorted(listing):
         op, args = listing[addr]
         if addr + 4 not in listing:
             continue
-        register_jump = op == "jr" and args.strip() != "ra"
-        if op not in COND | JUMPS | LINKING and not register_jump:
-            # jalr has no static callee and jr ra returns into the caller,
-            # so nothing about their slot loads can be checked here.
+        if op not in COND | JUMPS | LINKING and op != "jr":
             continue
         slot_op, slot_args = listing[addr + 4]
         rd = load_destination(slot_op, slot_args)
         if rd is None or not looks_like_code(listing, addr):
             continue
-        if register_jump:
+        if op == "jr" and args.strip() == "ra":
+            # A function returning a value loaded in its own delay slot: the
+            # caller's first instruction reads it one instruction early, and
+            # through a function pointer there is no call site to check, so
+            # every one counts (cs-psx 31517d4, hl-psx settings::value).
+            if rd != "ra":
+                found.append((addr, op, args, slot_op, slot_args, None, None))
+            continue
+        if op == "jalr":
+            # The callee, and so its first instruction, is unknown.
+            found.append((addr, op, args, slot_op, slot_args, None, None))
+            continue
+        if op == "jr":
             # A switch dispatch: the table words are data, so an entry whose
             # target consumes the slot load can be pointed at a trampoline.
-            entries = jump_table(listing, addr, word_at, image_end) if word_at else None
+            # An unresolved table leaves the target unknown, like a return.
+            entries = jump_table(listing, addr, word_at, image_end, base) if word_at else None
             if entries is None:
-                print("warning %08x: jr %s | slot %s %s | table not resolved" % (addr, args, slot_op, slot_args))
+                found.append((addr, op, args, slot_op, slot_args, None, None))
                 continue
             for entry, target in entries:
                 if reads(*listing[target], rd):
@@ -207,17 +241,26 @@ def main():
         return 2
     path = argv[0]
     data = bytearray(open(path, "rb").read())
-    listing = disassemble(path)
-    image_end = LOAD_ADDR + len(data) - HEADER
+    base = load_address(data)
+    listing = disassemble(path, base)
+    image_end = base + len(data) - HEADER
 
     def word_at(addr):
-        off = addr - LOAD_ADDR + HEADER
+        off = addr - base + HEADER
         return struct.unpack_from("<I", data, off)[0]
 
-    hazards = find_hazards(listing, word_at, image_end)
+    hazards = find_hazards(listing, word_at, image_end, base)
     for h in hazards:
         via = " via table entry %08x" % h[6] if h[6] is not None else ""
-        print("hazard %08x: %s %s | slot %s %s | consumer %08x%s" % (h[0], h[1], h[2], h[3], h[4], h[5], via))
+        if h[5] is not None:
+            where = "%08x" % h[5]
+        elif h[1] == "jalr":
+            where = "the callee"
+        elif h[2].strip() == "ra":
+            where = "the caller"
+        else:
+            where = "the jump target (table not resolved)"
+        print("hazard %08x: %s %s | slot %s %s | consumer %s%s" % (h[0], h[1], h[2], h[3], h[4], where, via))
     if not hazards:
         print("0 hazards in %s" % path)
         return 0
@@ -226,7 +269,7 @@ def main():
         return 1
 
     def put_word(addr, value):
-        off = addr - LOAD_ADDR + HEADER
+        off = addr - base + HEADER
         struct.pack_into("<I", data, off, value)
 
     # The trampoline array: magic, capacity, then free words.
@@ -235,16 +278,18 @@ def main():
         if struct.unpack_from("<I", data, off)[0] == MAGIC:
             capacity = struct.unpack_from("<I", data, off + 4)[0]
             if 0 < capacity <= 4096:
-                area = (LOAD_ADDR + off - HEADER + 8, capacity)
+                area = (base + off - HEADER + 8, capacity)
                 break
     if area is None:
         print("no HAZARD_TRAMPOLINES array (magic %#x) in %s" % (MAGIC, path))
         return 1
-    base, capacity = area
-    cursor = 0
-    # Any non-zero word means an earlier patch pass already used the area.
-    while cursor < capacity and word_at(base + cursor * 4) != 0:
-        cursor += 1
+    area_start, capacity = area
+    # An earlier pass may have used the area. Its trampolines contain nops,
+    # so the first zero word is not free space: resume after the last
+    # non-zero word plus the nop in its delay slot (every trampoline ends
+    # with a jump and one nop).
+    used = [i for i in range(capacity) if word_at(area_start + i * 4) != 0]
+    cursor = used[-1] + 2 if used else 0
 
     nop = 0
     patched = 0
@@ -265,7 +310,7 @@ def main():
                 continue
             tramp = table_trampolines.get(consumer)
             if tramp is None:
-                tramp = base + cursor * 4
+                tramp = area_start + cursor * 4
                 words = [nop, encode_j(consumer), nop]
                 if cursor + len(words) > capacity:
                     print("trampoline array full at %08x (%d words)" % (addr, capacity))
@@ -285,15 +330,41 @@ def main():
             print("left alone %08x (diagnostic request)" % addr)
             continue
         rd = load_destination(slot_op, slot_args)
-        if op in ("jr", "jalr", "bltzal", "bgezal", "bal"):
-            print("cannot patch %08x: %s branches on a register or links inside the trampoline" % (addr, op))
+        if op in ("jr", "jalr"):
+            # Move the load out of the slot: the trampoline runs it, then
+            # makes the original jump with a nop in its slot.
+            parts = [p.strip() for p in args.split(",")]
+            jump_reg = parts[-1]
+            link_reg = parts[0] if op == "jalr" and len(parts) == 2 else "ra"
+            if rd == jump_reg or (op == "jalr" and rd == link_reg):
+                print("cannot patch %08x: the slot load writes the jump or link register (%s)" % (addr, rd))
+                return 1
+            words = [word_at(addr + 4), word_at(addr), nop]
+            if op == "jalr":
+                # The callee returns into the trampoline, which goes back
+                # to the original return address.
+                words += [encode_j(addr + 8), nop]
+            tramp = area_start + cursor * 4
+            if cursor + len(words) > capacity:
+                print("trampoline array full at %08x (%d words)" % (addr, capacity))
+                return 1
+            for i, w in enumerate(words):
+                put_word(tramp + i * 4, w)
+            cursor += len(words)
+            put_word(addr, encode_j(tramp))
+            put_word(addr + 4, nop)
+            patched += 1
+            print("patched %s %s at %08x -> trampoline %08x (load %s %s)" % (op, args, addr, tramp, slot_op, slot_args))
+            continue
+        if op in ("bltzal", "bgezal", "bal"):
+            print("cannot patch %08x: %s links inside the trampoline" % (addr, op))
             return 1
         if op in COND and rd in branch_sources(op, args):
             print("cannot patch %08x: the slot load writes a branch source (%s)" % (addr, rd))
             return 1
         target = int(re.search(r"0x([0-9a-f]+)$", args).group(1), 16)
         original = word_at(addr)
-        tramp = base + cursor * 4
+        tramp = area_start + cursor * 4
         if op in JUMPS:
             words = [nop, encode_j(target), nop]
             put_word(addr, encode_j(tramp, link=(op == "jal")))
@@ -312,7 +383,7 @@ def main():
         print("patched %08x -> trampoline %08x (%d words)" % (addr, tramp, len(words)))
 
     open(path, "wb").write(data)
-    remaining = find_hazards(disassemble(path), word_at, image_end)
+    remaining = find_hazards(disassemble(path, base), word_at, image_end, base)
     for h in remaining:
         print("still hazardous %08x: %s %s" % (h[0], h[1], h[2]))
     print("%d patched, %d remaining, %d/%d trampoline words used in %s" % (patched, len(remaining), cursor, capacity, path))

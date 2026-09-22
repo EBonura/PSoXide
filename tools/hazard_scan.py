@@ -14,13 +14,27 @@ latter). This scan proves an image is clean, whatever built it.
     python3 tools/hazard_scan.py path/to/game.exe [more.exe ...]
 
 Prints every hazard as `branch | delay-slot load | consumer` and exits 1 if
-any image has one. Needs mipsel-none-elf-objdump on PATH. Loads into $zero
-(cache probes) are ignored, and so is anything within 16 words of a byte
-pattern that does not decode as an instruction: a PS-EXE carries its tables
-and assets in the same load, and those decode as random branches.
+any image has one. Needs mipsel-none-elf-objdump on PATH, or another one named
+in OBJDUMP. Loads into $zero (cache probes) are ignored, and so is anything
+within 16 words of a byte pattern that does not decode as an instruction: a
+PS-EXE carries its tables and assets in the same load, and those decode as
+random branches. Addresses come from the header's load address, so a raw blob
+linked elsewhere (the demo disc's chain loader at 0x801F0000) can be scanned
+once a PS-EXE header naming that address is put in front of it.
+
+A slot load whose consumer cannot be seen from the image counts as a hazard,
+because nothing here can prove it safe:
+
+    jr ra        the value lands on the caller's first instruction, and a
+                 function reached through a pointer has no call site to check
+                 (cs-psx's settings getters drew stale values through this
+                 shape, 2026-09-15; hl-psx's `settings::value` has it too)
+    jalr rs      the callee is unknown, so is its first instruction
+    jr rs        a register jump whose jump table cannot be resolved
 """
 import re
 import os
+import struct
 import subprocess
 import sys
 
@@ -41,10 +55,17 @@ READS_ALL = STORES | {"mtc0", "mtc2", "ctc2", "jr", "jalr", "mult", "multu", "di
 WRITES_ONLY = {"lui", "li", "mfhi", "mflo"}
 
 
-def disassemble(path):
+def load_address(data):
+    """The header's t_addr; images without a PS-EXE header load at LOAD_ADDR."""
+    if data[:8] == b"PS-X EXE":
+        return struct.unpack_from("<I", data, 0x18)[0]
+    return LOAD_ADDR
+
+
+def disassemble(path, base=LOAD_ADDR):
     out = subprocess.run(
         [os.environ.get("OBJDUMP", "mipsel-none-elf-objdump"), "-D", "-b", "binary", "-m", "mips:3000", "-EL",
-         f"--adjust-vma={LOAD_ADDR - HEADER:#x}", path],
+         f"--adjust-vma={base - HEADER:#x}", path],
         capture_output=True, text=True, check=True).stdout
     listing = {}
     for line in out.splitlines():
@@ -89,10 +110,10 @@ def reads(op, args, reg):
     return False
 
 
-def jump_table(listing, jr_addr, word_at, image_end):
+def jump_table(listing, jr_addr, word_at, image_end, base=LOAD_ADDR):
     """Resolve the table a `jr rs` dispatches through: (entry address, target)
     pairs. LLVM lowers a switch as `sll idx,idx,2 ; lui t,%hi(T) ; addu ;
-    lw rs,%lo(T)(...) ; jr rs`; the base is the last `lui` before that load
+    lw rs,%lo(T)(...) ; jr rs`; the table is at the last `lui` before that load
     plus the load's offset. Entries run until a word stops being a code
     address (the next table's entries are code addresses too, so a few extra
     targets may be examined; a spurious match only costs one detour)."""
@@ -119,26 +140,28 @@ def jump_table(listing, jr_addr, word_at, image_end):
             break
     if hi is None:
         return None
-    base = ((hi << 16) + load[1]) & 0xFFFFFFFF
+    table = ((hi << 16) + load[1]) & 0xFFFFFFFF
     entries = []
     for k in range(64):
-        addr = base + k * 4
-        if not LOAD_ADDR <= addr < image_end:
+        addr = table + k * 4
+        if not base <= addr < image_end:
             break
         target = word_at(addr)
-        if target & 3 or not LOAD_ADDR <= target < image_end or target not in listing:
+        if target & 3 or not base <= target < image_end or target not in listing:
             break
         entries.append((addr, target))
     return entries or None
 
 
 def scan(path):
-    listing = disassemble(path)
-    data = open(path, "rb").read()
-    image_end = LOAD_ADDR + len(data) - HEADER
+    with open(path, "rb") as f:
+        data = f.read()
+    base = load_address(data)
+    listing = disassemble(path, base)
+    image_end = base + len(data) - HEADER
 
     def word_at(addr):
-        return int.from_bytes(data[addr - LOAD_ADDR + HEADER:][:4], "little")
+        return int.from_bytes(data[addr - base + HEADER:][:4], "little")
 
     hazards = []
     # Straight-line load-use pairs: a load whose destination the very next
@@ -164,22 +187,29 @@ def scan(path):
         rd = load_destination(slot_op, slot_args)
         if rd is None or not looks_like_code(listing, addr):
             continue
+        site = f"{addr:08x}: {op} {args} | slot {slot_op} {slot_args}"
         targets = []
-        if op == "jr" and args.strip() != "ra":
+        if op == "jr" and args.strip() == "ra":
+            # A function returning through its own delay-slot load: the
+            # caller's first instruction is the consumer. A slot load into
+            # ra itself only changes a register the caller never reads
+            # before restoring it, so it is left alone.
+            if rd != "ra":
+                hazards.append(f"{site} | the caller's first instruction")
+            continue
+        if op == "jr":
             # A switch dispatch: every table target is a possible consumer.
-            entries = jump_table(listing, addr, word_at, image_end)
+            entries = jump_table(listing, addr, word_at, image_end, base)
             if entries is None:
-                print(f"warning {addr:08x}: jr {args} | slot {slot_op} {slot_args}"
-                      " | table not resolved, targets unverified")
-            else:
-                targets.extend(target for _, target in entries)
+                hazards.append(f"{site} | jump table not resolved, target unknown")
+                continue
+            targets.extend(target for _, target in entries)
         elif op == "jalr":
-            # A register call: the callee is unknown, so an argument loaded
-            # in the slot cannot be proven safe here.
-            if rd in ("a0", "a1", "a2", "a3"):
-                print(f"warning {addr:08x}: jalr {args} | slot {slot_op} {slot_args}"
-                      " | callee unknown, argument unverified")
-        elif op != "jr":
+            # A register call: the callee, and so its first instruction, is
+            # unknown.
+            hazards.append(f"{site} | callee unknown")
+            continue
+        else:
             m = re.search(r"0x([0-9a-f]+)$", args)
             if m:
                 targets.append(int(m.group(1), 16))
@@ -190,8 +220,7 @@ def scan(path):
         for target in targets:
             if target in listing and reads(*listing[target], rd):
                 top, targs = listing[target]
-                hazards.append(f"{addr:08x}: {op} {args} | slot {slot_op} {slot_args}"
-                               f" | {target:08x}: {top} {targs}")
+                hazards.append(f"{site} | {target:08x}: {top} {targs}")
     return hazards
 
 
