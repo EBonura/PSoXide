@@ -21,6 +21,11 @@ boot-trace = []
 # instead of 96 (+640 bytes of `.data`). Opt in only when a guest's linked
 # exe reports "trampoline array full".
 hazard-trampolines-256 = []
+# Guard every `scratchpad::ScratchpadStack::run`: a canary word at the bottom
+# of the region, checked after the call, and a trap when interrupts are on
+# with an exception handler other than psx-rt's. A few instructions and one
+# RAM load per call; the build-time proof is tools/stack_guard.py.
+scratchpad-stack-check = []
 
 [lints.rust]
 missing_docs = "warn"

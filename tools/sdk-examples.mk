@@ -30,12 +30,18 @@ GATE ?=
 
 .PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose
 examples:
-	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
+	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
+# After the patched link, tools/stack_guard.py proves every scratchpad stack
+# call tree fits its region. It needs the link map, which an example that uses
+# psx_rt::scratchpad::ScratchpadStack writes next to its exe from build.rs
+# (hello-spstack); without one it only checks the image never switches stacks.
 example:
 	@test -f "sdk/examples/$(EXAMPLE)/Cargo.toml"
 	$(PGO) apply --crate "sdk/examples/$(EXAMPLE)" --profile "$(PGO_PROFILE)" \
 		--variant "$$(test -f "$(PGO_PROFILE)" && echo "$(PGO_VARIANT)" || echo off)" -- $(EXAMPLE_CARGO)
+	@exe="$(BUILD)/$(TARGET)/release/$(EXAMPLE).exe"; map="$(BUILD)/$(TARGET)/release/$(EXAMPLE).map"; \
+		if [ -f "$$map" ]; then python3 tools/stack_guard.py "$$exe" "$$map"; else python3 tools/stack_guard.py "$$exe"; fi
 disc: example
 	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/$(EXAMPLE).exe" --out "$(BUILD)/$(TARGET)/release/$(EXAMPLE).bin" --volume PSOXIDESDK
 # make pgo-collect EXAMPLE=x TAPE=route.pxtape FRONTEND=frontend [PGO_ARGS="--polls 100..1400"]

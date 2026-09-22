@@ -312,6 +312,27 @@ pub fn wait_vblank() {
 #[cfg(not(target_arch = "mips"))]
 pub fn wait_vblank() {}
 
+/// True when the general exception vector jumps to psx-rt's handler, the
+/// one that never touches `$sp` (so interrupts are safe on any stack).
+#[cfg(target_arch = "mips")]
+pub fn handler_installed() -> bool {
+    const EXCEPTION_VECTOR: *const u32 = 0x8000_0080 as *const u32;
+    let handler = __psx_rt_exception_handler as *const () as usize as u32;
+    // SAFETY: a read of the kernel's vector word.
+    unsafe {
+        core::ptr::read_volatile(EXCEPTION_VECTOR) == 0x0800_0000 | ((handler >> 2) & 0x03ff_ffff)
+    }
+}
+
+/// True when COP0 SR has interrupts enabled (IEc).
+#[cfg(target_arch = "mips")]
+pub fn cpu_interrupts_enabled() -> bool {
+    let sr: u32;
+    // The nop covers MFC0's load delay.
+    unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr, options(nomem, nostack)) };
+    sr & 1 != 0
+}
+
 #[cfg(target_arch = "mips")]
 unsafe fn enable_cpu_interrupts() {
     const STATUS_IE: u32 = 1 << 0;
