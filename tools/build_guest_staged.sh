@@ -36,27 +36,25 @@ GUEST_DIR="engine/examples/editor-playtest"
 EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 # The linker script is reached relative to the guest crate directory, so the
 # stage has to mirror the repository layout rather than flatten it.
-# -disable-mips-df-backward-search is a CORRECTNESS flag, not a tuning knob.
-# LLVM's MipsDelaySlotFiller searches backwards for an instruction to fill a
-# branch delay slot and will hoist a load into it whose destination the very
-# next instruction reads. On MIPS-I that reads the register one cycle before
-# the load lands:
-#
-#   bne   $3, $1, ...      ; branch
-#   lwr   $2, 0x4($6)      ; delay slot: loads into $2
-#   addiu $8, $2, -0x1     ; load delay slot: reads the STALE $2
-#
-# The R3000A has no load interlock, so this is silently wrong on hardware and
-# in any faithful emulator. Measured by hashing 900 CollisionHull::trace_into
-# calls and 300 point_leaf_index queries over the real cooked brush_world.pxbsp
-# against a native oracle: opt-z, lto=thin and lto=off all diverge, and this
-# flag makes every one of them bit-exact. A scan of the shipping guest found
-# eight violating load sites at opt-level 2 and three at opt-level "s"; with
-# this flag, zero at both.
-#
-# This also retires the standing "guest opt-level s miscompiles" rule, which
-# was mis-attributed: opt-s is correct, the delay-slot filler was not.
-RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
+# Delay-slot filling. LLVM's MipsDelaySlotFiller can move a load into a
+# branch delay slot whose consumer is the first instruction at the branch
+# target or fall-through. The R3000A has no load interlock, so that consumer
+# reads the stale register, silently, on hardware and in any faithful
+# emulator (it once broke CollisionHull::trace_into and point_leaf_index).
+# The old cure was -disable-mips-df-backward-search, which fills those slots
+# with nops instead. The guest no longer passes it: every filler search stays
+# ON and tools/hazard_patch.py reroutes each hazardous branch through psx-rt's
+# HAZARD_TRAMPOLINES after the link, then rescans (below). The SDK owns the
+# flag set (tools/sdk-examples.mk PSX_DELAY_SLOT_FLAGS, hydrated from the
+# locked SDK), so it is read from there rather than copied. The SDK writes it
+# as TOML list items for cargo --config ("-Ca","-Cb"); RUSTFLAGS wants the
+# same flags space-separated, so the quotes and commas are dropped.
+DELAY_SLOT_FLAGS="$(sed -n 's/^PSX_DELAY_SLOT_FLAGS := //p' "$ROOT/tools/sdk-examples.mk" | sed -e 's/","/ /g' -e 's/"//g')"
+[ -n "$DELAY_SLOT_FLAGS" ] || {
+    echo "[guest-build] PSX_DELAY_SLOT_FLAGS not found in tools/sdk-examples.mk; run tools/bootstrap-components.py" >&2
+    exit 1
+}
+RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort $DELAY_SLOT_FLAGS -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 # Raw PS-X EXE builds have no symbol table. Ask lld for an optional side map
 # without changing the output image, so an exact profiled binary can be
 # attributed instead of rebuilt through a layout-changing diagnostic path.
