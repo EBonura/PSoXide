@@ -21,7 +21,7 @@ PS-EXE carries its tables and assets in the same load, and those decode as
 random branches. Addresses come from the header's load address, so a raw blob
 linked elsewhere (the demo disc's chain loader at 0x801F0000) can be scanned
 once a PS-EXE header naming that address is put in front of it. Detection is
-tools/hazard_detect.py, the same code hazard_patch.py patches from.
+imported from hazard_patch.py, the same code the patcher patches from.
 
 A slot load whose consumer cannot be seen from the image counts as a hazard,
 because nothing here can prove it safe:
@@ -37,9 +37,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-# disassemble and looks_like_code are looked up here, not in hazard_detect,
-# so a caller that loads this file as a module can still replace them.
-from hazard_detect import (HEADER, disassemble, find_hazards, load_address,  # noqa: E402
+# The detector lives in hazard_patch.py. disassemble and looks_like_code are
+# looked up here, not there, so a caller that loads this file as a module can
+# still replace them.
+from hazard_patch import (HEADER, disassemble, find_hazards, load_address,  # noqa: E402
                            looks_like_code, straight_line_pairs)
 
 
