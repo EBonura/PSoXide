@@ -17,6 +17,13 @@ The oracle compiles frozen HL70072 and CS988f implementations and the actual sha
 PVS-local change generations used by HL and CS. It borrows the ports' existing
 state; display-row writes stay with their map decoders. The simulation driver is
 outlined once per caller type, with no heap, vtable or additional resident array.
+`PacketRetarget` lets a port keep a stationary view's built world packets across
+a chain step: `packets_retargetable` checks once per map that a packet's window,
+CLUT and page name exactly one texture and that chain frames differ in nothing
+else the packet builders read, then each step stages the changed frames and the
+port rewrites those three words in every packet it replays, after its DMA fence.
+The unit tests compare every retargeted packet with a fresh build for every
+clock pair, row and blend mode.
 `model_variant::lookup` decodes their generated sorted three-byte variant rows;
 map IDs, model IDs and generated tables stay in each game.
 
