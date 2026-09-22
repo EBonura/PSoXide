@@ -37,6 +37,7 @@ pub mod bios;
 pub mod cache;
 #[cfg(target_arch = "mips")]
 pub mod interrupts;
+pub mod scratchpad;
 #[cfg(target_arch = "mips")]
 pub mod tty;
 
@@ -146,7 +147,8 @@ fn stack_pointer() -> usize {
     let sp: usize;
     // SAFETY: a single register move out of `$sp`.
     unsafe {
-        core::arch::asm!("move {}, $sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+        // The allocator may pick $at; `.set noat` keeps the assembler quiet.
+        core::arch::asm!(".set noat", "move {}, $sp", ".set at", out(reg) sp, options(nomem, nostack, preserves_flags));
     }
     sp
 }
@@ -196,6 +198,11 @@ pub fn halt() -> ! {
 /// Panic handler. Tries to write the message to TTY so PCSX-Redux
 /// (and our emulator's future console hook) shows it, then halts.
 ///
+/// A panic raised on a [`scratchpad::ScratchpadStack`] first moves back to
+/// the RAM stack, so reporting (BIOS `putchar` included) never runs on the
+/// scratchpad. `tools/stack_guard.py` counts this function's own frame and
+/// nothing below it, which is only sound while the report stays out of line.
+///
 /// Only registered when targeting PS1 hardware. Host builds of the
 /// SDK use `std`'s panic handler -- this avoids the lang-item conflict
 /// that would otherwise fire when something on host transitively
@@ -203,6 +210,16 @@ pub fn halt() -> ! {
 #[cfg(target_arch = "mips")]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    let info = (info as *const core::panic::PanicInfo<'_>).cast::<u8>();
+    scratchpad::leave_for_panic(info, report_panic);
+    report_panic(info)
+}
+
+#[cfg(target_arch = "mips")]
+#[inline(never)]
+extern "C" fn report_panic(info: *const u8) -> ! {
+    // SAFETY: `panic` passes its `&PanicInfo`, alive for the whole panic.
+    let info = unsafe { &*info.cast::<core::panic::PanicInfo<'_>>() };
     tty::print("PANIC: ");
     if let Some(msg) = info.message().as_str() {
         tty::print(msg);
