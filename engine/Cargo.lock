@@ -84,6 +84,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-chainloader"
+version = "0.1.0"
+dependencies = [
+ "psx-font",
+ "psx-io",
+ "psx-pack",
+]
+
+[[package]]
 name = "psx-disc-toc"
 version = "0.1.0"
 

@@ -1,0 +1,15 @@
+[package]
+name = "psx-chainloader"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared PSX collection executable transport, diagnostics and hardware handoff"
+
+[lints]
+workspace = true
+
+[dependencies]
+psx-pack = { path = "../../../sdk/crates/psx-pack" }
+psx-io = { path = "../../../sdk/crates/psx-io" }
+psx-font = { path = "../../../sdk/crates/psx-font" }

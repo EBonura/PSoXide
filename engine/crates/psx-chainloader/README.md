@@ -1,0 +1,11 @@
+# Shared collection chainloader
+
+The demo disc and Arcade use this owner for the executable transport, RAM FNV-1a checksum gate, three-attempt diagnostic checklist, SPU/IRQ/DMA/GPU teardown, cache flush and register handoff. It supplies no `_start` or panic handler and does not depend on `psx-rt`.
+
+The collection retains only its loading visuals. The demo keeps its double-buffered procedural globe, while Arcade keeps its centered progress bar. `Presentation` also preserves their distinct drawing bounds, diagnostic-buffer selection and clean-screen NOSPAD position. Callbacks run with the CD reader owned by the loader; they must not issue CD commands or modify the payload.
+
+`try_load` is deliberately unsafe. It preserves the existing packer-validated contract, including the logical `t_addr + t_size` bounds check. That check does not validate arbitrary headers: the producer must separately ensure destination alignment, the complete rounded sector-write extent, valid entry/GP/SP values and separation from the live stack/blob. A corrupt header can violate these preconditions. This extraction does not silently add a new media-validation policy.
+
+`cargo test --manifest-path engine/Cargo.toml -p psx-chainloader` compares the production algorithm with a frozen legacy transport oracle and checks explicit read/stop/event traces at byte and 64-sector boundaries. It exercises failed prepare/seek/header/payload operations, stale-header scrubbing, magic/bounds rejection, checksum failure, wrapping stack arithmetic and the legacy validation limitation. `tests/oracle/legacy.rs` is test-only; it is not a second runtime implementation.
+
+The legacy oracle came from demo source `23c0dfb735d149ff6c3ecf6992527d26de18b0b1`, `loader/src/main.rs`. Its adaptation replaces only the device type, target address translation, stage/progress callbacks and loader-base lookup. Arithmetic, decisions, stop ordering and the checksum loop are retained. Separate compiled MIPS fixtures compare both original collection blobs against both adopters, including three failed-attempt rows and HALTED, 130-sector payload bytes, entry registers, scratchpad and cache-control state. These fixtures are diagnostic artifacts, never disc payloads.

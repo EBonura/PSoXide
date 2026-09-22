@@ -4,6 +4,7 @@ members = [
     "crates/psx-bsp",
     "crates/psx-carousel",
     "crates/psx-disc-toc",
+    "crates/psx-chainloader",
     "crates/psx-engine",
     "crates/psx-game-runtime",
     "crates/psx-goldsrc",
