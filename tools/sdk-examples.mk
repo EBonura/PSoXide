@@ -25,7 +25,7 @@ PGO_VARIANT ?= default
 # Extra collect arguments, placed after the tape: `--polls FROM..TO` keeps only
 # gameplay samples from it, `--launch-arg ARG` passes ARG to the frontend.
 PGO_ARGS ?=
-PGO_VARIANTS ?= --variant off --variant default --variant accurate
+PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
 .PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose
