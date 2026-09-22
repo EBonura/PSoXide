@@ -355,6 +355,73 @@ fn row_at(rows: &[(u64, u64, u32, bool)], pc: u64) -> Option<(u64, u64, u32, boo
     Some(rows[index]).filter(|row| !row.3)
 }
 
+/// Samples the profile cannot carry, by why. None of them can reach LLVM:
+///
+/// - Line 0 marks code the compiler made up (a merged tail, a loop counter)
+///   inside a function that does have DWARF. LLVM weighs a block by its
+///   hottest located instruction, so the block still gets its count from its
+///   neighbours; emitting line-0 records gave a byte-identical build.
+/// - Code with no DWARF, named by its ELF symbol, is hand-written assembly
+///   (psx-rt's memcpy and memset) and the hazard patcher's trampolines in
+///   `HAZARD_TRAMPOLINES`. LLVM only annotates functions it compiles from
+///   IR, so records named after the assembly gave a byte-identical build,
+///   and a trampoline stands in for a branch whose block is already counted
+///   at its other instructions.
+/// - Code outside every symbol is the BIOS.
+#[derive(Default)]
+struct Unmapped {
+    line_zero: u64,
+    no_dwarf: HashMap<String, u64>,
+    no_symbol: u64,
+}
+
+impl Unmapped {
+    fn add(&mut self, in_dwarf: bool, symbols: &[(u64, u64, &str)], pc: u64, count: u64) {
+        if in_dwarf {
+            self.line_zero += count;
+            return;
+        }
+        match symbols
+            .partition_point(|symbol| symbol.0 <= pc)
+            .checked_sub(1)
+        {
+            Some(index) if pc < symbols[index].0 + symbols[index].1 => {
+                *self
+                    .no_dwarf
+                    .entry(symbols[index].2.to_string())
+                    .or_default() += count;
+            }
+            _ => self.no_symbol += count,
+        }
+    }
+
+    fn total(&self) -> u64 {
+        self.line_zero + self.no_dwarf.values().sum::<u64>() + self.no_symbol
+    }
+}
+
+impl std::fmt::Display for Unmapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut symbols: Vec<(&u64, &String)> = self
+            .no_dwarf
+            .iter()
+            .map(|(name, count)| (count, name))
+            .collect();
+        symbols.sort_unstable_by(|a, b| b.cmp(a));
+        let no_dwarf: u64 = self.no_dwarf.values().sum();
+        write!(f, "line 0 {}  no DWARF {no_dwarf}", self.line_zero)?;
+        if !symbols.is_empty() {
+            let named: Vec<String> = symbols
+                .iter()
+                .take(6)
+                .map(|(count, name)| format!("{name} {count}"))
+                .collect();
+            write!(f, " ({})", named.join(", "))?;
+        }
+        write!(f, "  outside any symbol {}", self.no_symbol)
+    }
+}
+
 fn contains(ranges: &[(u64, u64)], pc: u64) -> bool {
     ranges.iter().any(|&(lo, hi)| lo <= pc && pc < hi)
 }
@@ -414,7 +481,14 @@ fn run(elf_path: &str, pc_path: &str, out_path: &str) -> Result<()> {
     // Functions in first-seen order, so equal totals print in a stable order.
     let mut order: Vec<String> = Vec::new();
     let mut profile: HashMap<String, Node> = HashMap::new();
-    let (mut mapped, mut unmapped) = (0u64, 0u64);
+    let mut mapped = 0u64;
+    let mut unmapped = Unmapped::default();
+    let mut elf_symbols: Vec<(u64, u64, &str)> = object
+        .symbols()
+        .filter(|symbol| symbol.size() > 0)
+        .filter_map(|symbol| Some((symbol.address(), symbol.size(), symbol.name().ok()?)))
+        .collect();
+    elf_symbols.sort_unstable();
     for record in fs::read_to_string(pc_path)?.lines().skip(1) {
         let mut fields = record.split(',');
         let (Some(pc), Some(count)) = (fields.next(), fields.next()) else {
@@ -432,12 +506,13 @@ fn run(elf_path: &str, pc_path: &str, out_path: &str) -> Result<()> {
             _ => None,
         };
         let row = row_at(&rows, pc);
-        let (Some(top), Some((_, line, discriminator, _))) = (top, row) else {
-            unmapped += count;
+        let (Some(top), Some((_, line, discriminator, _))) = (top.filter(|_| row.is_some()), row)
+        else {
+            unmapped.add(top.is_some(), &elf_symbols, pc, count);
             continue;
         };
         let Some(name) = top.func.name.as_ref().filter(|_| line != 0) else {
-            unmapped += count;
+            unmapped.add(true, &elf_symbols, pc, count);
             continue;
         };
         mapped += count;
@@ -476,9 +551,13 @@ fn run(elf_path: &str, pc_path: &str, out_path: &str) -> Result<()> {
     }
     fs::write(out_path, out)?;
     println!(
-        "functions {}  mapped samples {mapped}  unmapped {unmapped}",
-        order.len()
+        "functions {}  mapped samples {mapped}  unmapped {}",
+        order.len(),
+        unmapped.total()
     );
+    if unmapped.total() > 0 {
+        println!("unmapped: {unmapped}");
+    }
     Ok(())
 }
 
@@ -817,6 +896,22 @@ mod tests {
         assert_eq!(row_at(&rows, 0x11c).map(|row| row.1), Some(7));
         assert_eq!(row_at(&rows, 0x120), None);
         assert_eq!(row_at(&rows, 0xfc), None);
+    }
+
+    #[test]
+    fn unmapped_samples_are_split_by_cause() {
+        let symbols = [(0x100, 0x20, "memcpy"), (0x200, 0x40, "HAZARD_TRAMPOLINES")];
+        let mut unmapped = Unmapped::default();
+        unmapped.add(true, &symbols, 0x104, 5);
+        unmapped.add(false, &symbols, 0x104, 7);
+        unmapped.add(false, &symbols, 0x11c, 1);
+        unmapped.add(false, &symbols, 0x120, 2);
+        unmapped.add(false, &symbols, 0x230, 3);
+        assert_eq!(unmapped.total(), 18);
+        assert_eq!(
+            unmapped.to_string(),
+            "line 0 5  no DWARF 11 (memcpy 8, HAZARD_TRAMPOLINES 3)  outside any symbol 2"
+        );
     }
 
     #[test]
