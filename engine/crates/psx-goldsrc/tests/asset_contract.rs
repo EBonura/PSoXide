@@ -182,3 +182,24 @@ fn sparse_decoder_preserves_empty_truncated_and_sorted_row_behavior() {
         Some(0xabff)
     );
 }
+
+#[test]
+fn parameterized_lookup_oracle_is_only_a_table_access_adapter() {
+    let frozen = include_str!("oracles/legacy-model-variant.rs");
+    let expected = frozen
+        .replace("fn map_model_variant_chunk(map_index: usize, ty: usize)",
+                 "fn old_lookup(offsets: &[u16], bytes: &[u8], type_count: usize, map_index: usize, ty: usize)")
+        .replace("    let offsets = &room_budget::MODEL_VARIANT_OFFSETS;\n", "")
+        .replace("        let bytes = &room_budget::MODEL_VARIANT_BYTES;\n", "")
+        .replace("N_MODEL_TYPES", "type_count");
+    let tests = include_str!("asset_contract.rs");
+    let start = tests.find("fn old_lookup(").unwrap();
+    let end = start + tests[start..].find("\n}").unwrap() + 2;
+    let normalize = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .replace(",)", ")")
+    };
+    assert_eq!(normalize(&expected), normalize(&tests[start..end]));
+}
