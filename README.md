@@ -46,7 +46,7 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   profile-guided guest builds with no instrumentation. `portable` writes a
   profile that can be committed, and `rebind` applies it to a build made in
   any other checkout.
-- `tools/hazard_scan.py`, `hazard_patch.py`, `guest_symbol_gate.sh`: guest checks.
+- `tools/hazard_scan.py`, `hazard_patch.py` (one detector, `hazard_detect.py`), `guest_symbol_gate.sh`: guest checks.
 
 The root host workspace and `sdk/` device workspace intentionally remain
 separate. Existing `sdk/crates/*` and `sdk/psoxide.ld` paths are retained.
