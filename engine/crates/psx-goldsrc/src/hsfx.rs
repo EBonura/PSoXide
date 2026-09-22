@@ -34,6 +34,7 @@ pub struct Hsfx<const N: usize, const HEALTH: u8, const SUIT: u8> {
     ear: [i32; 3],
 }
 
+#[inline(never)]
 fn rd_u32(d: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
 }
@@ -179,6 +180,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     ///
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn init_from_pack(&mut self, pack: &[u8]) -> usize {
         spu::init();
         if pack.len() < 8 || &pack[0..4] != b"HSFX" {
@@ -224,6 +226,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// 0..count-1 index this map's lines. Returns the number of lines ready.
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn load_dialogue_pack(&mut self, pack: &[u8]) -> usize {
         // The previous map may changelevel in the middle of a sentence. Silence
         // and stop voice 15 before DMA writes replace the region it is decoding.
@@ -316,6 +319,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// Play dialogue using the source entity's authored volume and attenuation.
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn play_voice_authored(
         &mut self,
         local_id: u8,
@@ -394,6 +398,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
 
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn play_map_authored(
         &mut self,
         local_id: u8,
@@ -422,6 +427,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
 
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn play_map_world(&mut self, local_id: u8, pos: [i32; 3]) {
         let distance = integer_distance(pos, self.ear);
         if distance < 1600 {
@@ -446,6 +452,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
 
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn play_map_loop_authored(
         &mut self,
         local_id: u8,
@@ -457,6 +464,8 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         let gain = self.authored_volume(volume_percent, packed_attenuation, pos);
         self.play_map_loop_with_volume(local_id, owner, gain);
     }
+
+    #[inline(never)]
 
     unsafe fn play_map_loop_with_volume(&mut self, local_id: u8, owner: u16, gain: Volume) {
         let Some((addr, rate)) = self.map_sample(local_id) else {
@@ -487,6 +496,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
 
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn stop_map_loop(&mut self, owner: u16) {
         let mut index = 0usize;
         while index < MAP_LOOP_VOICE_COUNT {
@@ -504,6 +514,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// quieter); ids come from the consts above.
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn play_vol(&mut self, id: u8, den: u16) {
         let i = id as usize;
         if i >= self.count {
@@ -535,6 +546,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// Full-volume one-shot (player-local sounds: own weapon, pain, pickups).
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn play(&mut self, id: u8) {
         self.play_vol(id, 1);
     }
@@ -560,6 +572,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// World-positioned one-shot, attenuated by distance to the last `set_ear`.
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
     pub unsafe fn play_world(&mut self, id: u8, pos: [i32; 3]) {
         self.play_at_distance(id, integer_distance(pos, self.ear));
     }
