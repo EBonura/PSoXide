@@ -65,9 +65,15 @@ if [ -n "${PSOXIDE_GUEST_LINK_MAP:-}" ]; then
     RUSTFLAGS_VALUE="$RUSTFLAGS_VALUE -Clink-arg=-Map=$PSOXIDE_GUEST_LINK_MAP"
 fi
 # Extra rustc flags for layout experiments (symbol ordering files, linker
-# diagnostics). Empty in every shipping build.
+# diagnostics, profile-guided builds). Empty in every default build.
 if [ -n "${PSOXIDE_GUEST_EXTRA_RUSTFLAGS:-}" ]; then
     RUSTFLAGS_VALUE="$RUSTFLAGS_VALUE $PSOXIDE_GUEST_EXTRA_RUSTFLAGS"
+fi
+# PSOXIDE_GUEST_LINK_ELF=<path>: link the same code as an ELF that keeps its
+# DWARF and copy it to <path>, for psoxide-pgo to symbolize a PC histogram
+# (tools/cortex_pgo.sh). The shipping executable is left untouched.
+if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
+    RUSTFLAGS_VALUE="$(printf '%s' "$RUSTFLAGS_VALUE" | sed 's/ -Clink-arg=--oformat=binary//')"
 fi
 
 # Everything the guest link closure reads. Directories are mirrored with
@@ -163,6 +169,13 @@ RUSTFLAGS="$RUSTFLAGS_VALUE" \
 
 staged_exe="$STAGE/$EXE_RELATIVE"
 [ -f "$staged_exe" ] || { echo "[guest-build] staged build produced no $EXE_RELATIVE" >&2; exit 1; }
+if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
+    # An ELF for the symbolizer, not an executable: nothing to patch or stage.
+    mkdir -p "$(dirname "$PSOXIDE_GUEST_LINK_ELF")"
+    cp "$staged_exe" "$PSOXIDE_GUEST_LINK_ELF"
+    echo "[guest-build] DWARF ELF -> $PSOXIDE_GUEST_LINK_ELF"
+    exit 0
+fi
 # LLVM's delay-slot filler leaves loads in branch delay slots whose consumer
 # runs inside the R3000 load delay. Rather than disabling the filler (tens of
 # kilobytes of nops), reroute those branches through the guest's
