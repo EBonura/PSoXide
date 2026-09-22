@@ -160,7 +160,13 @@ Variants, joined with `+` to combine (`accurate+hot=1000`):
 | `off`      | none, and no profile: the plain build         |
 | `default`  | the profile alone                             |
 | `accurate` | `-Cllvm-args=-profile-sample-accurate`: code the profile never saw is treated as cold |
-| `hot=N`    | `-Cllvm-args=-hot-callsite-threshold=N` (LLVM's default is 3000) |
+| `hot=N`    | `-Cllvm-args=-hot-callsite-threshold=N`: the inline budget of a call the profile calls hot (LLVM's default is 3000) |
+| `noreplay` | `-Cllvm-args=-disable-sample-loader-inlining`: do not replay the profiled build's inlining; inlinee samples merge into their own functions |
+| `nopgso`   | `-Cllvm-args=-pgso=false`: do not optimise profile-cold code for size |
+| `llvm=-F`  | `-Cllvm-args=-F`, any other LLVM option (`llvm=-sample-profile-inline-size`) |
+
+A variant that fails to build shows as a failed row in `choose` instead of
+stopping it.
 
 ### choose
 
@@ -195,6 +201,7 @@ inside the `--polls` window, as `NAME.key=value` lines for a gate:
 | `flips`  | ticks in which the display start changed: rendered frames, for a guest that renders at most once per tick |
 | `cycles` | bus cycles in those ticks |
 | `icache` | I-cache refill stall cycles in those ticks |
+| `vram`, `display` | the frontend's `--dump-hash` at the stop: equal across builds only when the guest's simulation does not depend on its own speed (VoXide's `lockstep` feature, for example) |
 
 The resolution is one route tick at each end of the window. The frontend's
 own output goes to stderr so it cannot land in the table.
@@ -210,6 +217,14 @@ without disambiguators (`hello_gte::step_entity`, with ` @crate` appended for a
 generic instance), and `apply` maps them back onto the local build. That is
 what lets CI, itch and the demo disc (which rebuilds every game against one
 SDK with `psoxide-link --from`) apply the profile a developer committed.
+
+Cargo features change the disambiguators too (they feed the same hash), and
+portable names drop them the same way: a profile collected without a feature
+binds every name in a build with it. The code behind those names can differ,
+though, so `collect` writes the features it trained with as the profile's
+first line (`# psoxide-pgo features: ...`, a comment to LLVM), and `apply`
+warns when the build's features differ. Keep one committed profile per
+shipped feature set (`pgo/mygame.prof`, `pgo/mygame-monsters.prof`).
 
 A profile goes stale as code changes: renamed or removed functions show up as
 `missing` in `rebind`'s count, and LLVM ignores lines that moved. Regenerate
