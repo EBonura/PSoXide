@@ -810,13 +810,17 @@ const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
        psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>";
 
-const MODES: [&str; 5] = ["portable", "rebind", "collect", "apply", "choose"];
+const MODES: [&str; 6] = [
+    "portable", "rebind", "collect", "apply", "choose", "measure",
+];
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {
-        [mode @ ("collect" | "apply" | "choose"), ..] => pipeline::main(mode, &args[1..]),
+        [mode @ ("collect" | "apply" | "choose" | "measure"), ..] => {
+            pipeline::main(mode, &args[1..])
+        }
         ["portable", input, output] => portable(Path::new(input), Path::new(output)),
         ["rebind", input, elf, output] => {
             rebind(Path::new(input), Path::new(elf), Path::new(output))

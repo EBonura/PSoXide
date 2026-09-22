@@ -22,7 +22,9 @@ EXAMPLE_CARGO = build --release --target $(TARGET) -Zbuild-std=core -Zbuild-std-
 PGO = cargo run -q --release --locked -p psoxide-pgo --
 PGO_PROFILE ?= sdk/examples/$(EXAMPLE)/pgo.prof
 PGO_VARIANT ?= default
-PGO_LAUNCH ?=
+# Extra collect arguments, placed after the tape: `--polls FROM..TO` keeps only
+# gameplay samples from it, `--launch-arg ARG` passes ARG to the frontend.
+PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant accurate
 GATE ?=
 
@@ -36,12 +38,13 @@ example:
 		--variant "$$(test -f "$(PGO_PROFILE)" && echo "$(PGO_VARIANT)" || echo off)" -- $(EXAMPLE_CARGO)
 disc: example
 	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/$(EXAMPLE).exe" --out "$(BUILD)/$(TARGET)/release/$(EXAMPLE).bin" --volume PSOXIDESDK
-# make pgo-collect EXAMPLE=x TAPE=route.pxtape FRONTEND=frontend [PGO_LAUNCH="--launch-arg --stop-at-poll --launch-arg 1400"]
+# make pgo-collect EXAMPLE=x TAPE=route.pxtape FRONTEND=frontend [PGO_ARGS="--polls 100..1400"]
 pgo-collect:
 	@test -n "$(FRONTEND)" -a -n "$(TAPE)" || (echo "Set FRONTEND and TAPE"; exit 1)
-	$(PGO) collect --crate "sdk/examples/$(EXAMPLE)" --frontend "$(FRONTEND)" --tape "$(TAPE)" $(PGO_LAUNCH) \
+	$(PGO) collect --crate "sdk/examples/$(EXAMPLE)" --frontend "$(FRONTEND)" --tape "$(TAPE)" $(PGO_ARGS) \
 		--out "$(PGO_PROFILE)" -- $(EXAMPLE_CARGO)
-# make pgo-choose EXAMPLE=x GATE='script that prints key=value lines for $$PSOXIDE_PGO_EXE'
+# make pgo-choose EXAMPLE=x GATE='script printing key=value lines for $$PSOXIDE_PGO_IMAGE'
+# (`$$PSOXIDE_PGO measure` prints gameplay-window totals for one tape)
 pgo-choose:
 	@test -n '$(GATE)' || (echo "Set GATE"; exit 1)
 	$(PGO) choose --crate "sdk/examples/$(EXAMPLE)" --profile "$(PGO_PROFILE)" --gate '$(GATE)' $(PGO_VARIANTS) \

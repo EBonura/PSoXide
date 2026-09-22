@@ -25,6 +25,10 @@ PGO         = cargo run -q --release --locked --manifest-path "$(PSOXIDE)/Cargo.
 PGO_PROFILE = pgo/mygame.prof
 # The winner from `make pgo-choose`, or off.
 PGO_VARIANT = default
+# Gameplay windows in port-1 polls, read once from a --route-log of each replay.
+TRAIN_POLLS  = <from>..<to>
+SECOND_POLLS = <from>..<to>
+UNSEEN_POLLS = <from>..<to>
 
 # Every build: CI, itch, demo disc.
 compile:
@@ -33,7 +37,8 @@ compile:
 # Regenerate the committed profile.
 pgo-collect:
 	$(PGO) collect --crate game --frontend "$(FRONTEND)" \
-		--tape tapes/route-a.pxtape --tape tapes/route-b.pxtape \
+		--tape tapes/route-a.pxtape --polls $(TRAIN_POLLS) \
+		--tape tapes/route-b.pxtape --polls $(SECOND_POLLS) \
 		--pack 'make pack EXE="$$PSOXIDE_PGO_EXE" OUT="$$PSOXIDE_PGO_DISC"' \
 		--launch-arg --embedded-playtest \
 		--out "$(PGO_PROFILE)" -- $(GAME_CARGO)
@@ -43,8 +48,20 @@ pgo-choose:
 	$(PGO) choose --crate game --profile "$(PGO_PROFILE)" \
 		--variant off --variant default --variant accurate --variant hot=1000 \
 		--pack 'make pack EXE="$$PSOXIDE_PGO_EXE" OUT="$$PSOXIDE_PGO_DISC"' \
-		--gate 'tools/bench.sh "$$PSOXIDE_PGO_IMAGE"' -- $(GAME_CARGO)
+		--gate '"$$PSOXIDE_PGO" measure --frontend "$(FRONTEND)" --image "$$PSOXIDE_PGO_IMAGE" \
+			--launch-arg --embedded-playtest --tape tapes/route-a.pxtape --polls $(TRAIN_POLLS) --name train \
+		&& "$$PSOXIDE_PGO" measure --frontend "$(FRONTEND)" --image "$$PSOXIDE_PGO_IMAGE" \
+			--launch-arg --embedded-playtest --tape tapes/unseen.pxtape --polls $(UNSEEN_POLLS) --name unseen' \
+		-- $(GAME_CARGO)
 ```
+
+**Judge gameplay, not loading.** Every tape above carries a `--polls FROM..TO`
+window: the port-1 polls between the end of the loads and the end of the
+route, found once from a `--route-log` of the replay (its `port1_polls`
+column against the CD activity or the screen). A poll is one simulation tick,
+so the same window covers the same gameplay in builds of any speed, which a
+route-tick window would not. Training on it keeps CD polling loops and menus
+out of the profile; gating on it keeps load times out of the verdict.
 
 `apply` leaves the patched executable where cargo always puts it, so the
 game's pack step does not change. With `--variant off` it is the plain build
@@ -81,11 +98,13 @@ Nothing needs ignoring in git: the work directory is
 ## Modes
 
 ```text
-psoxide-pgo collect [GUEST] --frontend PATH [--tape PATH]... [--launch-arg ARG]...
-                    [--pack CMD] --out PROFILE -- CARGO-ARGS...
+psoxide-pgo collect [GUEST] --frontend PATH [--tape PATH [--polls A..B]]...
+                    [--launch-arg ARG]... [--pack CMD] --out PROFILE -- CARGO-ARGS...
 psoxide-pgo apply   [GUEST] [--profile PROFILE] [--variant V] -- CARGO-ARGS...
 psoxide-pgo choose  [GUEST] --profile PROFILE --gate CMD [--variant V]... [--pack CMD]
                     -- CARGO-ARGS...
+psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
+                    [--launch-arg ARG]... [--name NAME]
 GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH]
 ```
 
@@ -111,9 +130,16 @@ contain spaces; `--pack` and `--gate` are shell commands, quoted by the caller.
    into step with a loop) plus every `--launch-arg`. A tape replay stops when
    the tape runs out; the driver adds `--steps 40000000000` as a cap unless a
    launch argument sets `--steps`. With no tape, one run uses the launch
-   arguments alone (for example `--stop-at-poll`).
+   arguments alone.
+
+   A `--polls FROM..TO` after a tape (or on its own, for the tapeless run)
+   keeps only gameplay samples. The frontend cannot start `--pc-sample-log`
+   late, so the driver samples in 30-route-tick windows
+   (`--pc-sample-window-log`), maps ticks to polls through a `--route-log` of
+   the same replay, keeps the windows wholly inside the poll range, and stops
+   the replay at `TO`. Up to one window at each end is lost to the rounding.
 4. Sums the histograms, converts them, writes the portable profile to `--out`,
-   and deletes the PC logs, the collect image and the disc.
+   and deletes the PC and route logs, the collect image and the disc.
 
 After `collect` the exe at cargo's path is the ELF twin, which does not boot;
 run `apply` (or the game's normal build) next.
@@ -140,9 +166,10 @@ Variants, joined with `+` to combine (`accurate+hot=1000`):
 
 Builds each `--variant` in turn (default: `off`, `default`, `accurate`), packs
 it if `--pack` is given, and runs `--gate` with `PSOXIDE_PGO_VARIANT`,
-`PSOXIDE_PGO_EXE` and, when packed, `PSOXIDE_PGO_IMAGE`. The gate's exit status
-is pass or fail; every `key=value` line it prints becomes a column. On a
-CPU-bound SDK guest (bus cycles to reach poll 1,400 of each tape):
+`PSOXIDE_PGO_EXE`, `PSOXIDE_PGO_IMAGE` (the disc when packed, else the exe) and
+`PSOXIDE_PGO` (this tool, for `measure`). The gate's exit status is pass or
+fail; every `key=value` line it prints (no spaces in the value) becomes a
+column. On a CPU-bound SDK guest (bus cycles to reach poll 1,400 of each tape):
 
 ```text
 variant   gate  train.cycles  unseen.cycles
@@ -156,6 +183,21 @@ state) as well as speed. PSoXide-editor's
 `docs/measuring-guest-performance-2026-09-17.md` explains why final-frame
 hashes alone mislead. Commit the
 winner as the game's `PGO_VARIANT`, `off` included.
+
+### measure
+
+One replay of `--image`, printing totals over the ticks that ran wholly
+inside the `--polls` window, as `NAME.key=value` lines for a gate:
+
+| key      | meaning |
+|----------|---------|
+| `ticks`  | route ticks (vblanks) the window took: lower is faster for a guest that never waits on vblank |
+| `flips`  | ticks in which the display start changed: rendered frames, for a guest that renders at most once per tick |
+| `cycles` | bus cycles in those ticks |
+| `icache` | I-cache refill stall cycles in those ticks |
+
+The resolution is one route tick at each end of the window. The frontend's
+own output goes to stderr so it cannot land in the table.
 
 ## Why the committed profile is portable
 

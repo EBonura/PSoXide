@@ -40,15 +40,23 @@ const SAMPLE_INTERVAL: &str = "61";
 /// Cap for tape replays, which stop on their own when the tape runs out.
 const REPLAY_STEPS: &str = "40000000000";
 
+/// Route ticks per PC-sample window when training on a poll window. The
+/// frontend cannot start sampling late, so it samples in windows and only
+/// the ones wholly inside the gameplay polls are kept.
+const SAMPLE_WINDOW_TICKS: usize = 30;
+
 pub const USAGE: &str = "\
-       psoxide-pgo collect [GUEST] --frontend PATH [--tape PATH]... [--launch-arg ARG]...
-                           [--pack CMD] --out PROFILE -- CARGO-ARGS...
+       psoxide-pgo collect [GUEST] --frontend PATH [--tape PATH [--polls A..B]]...
+                           [--launch-arg ARG]... [--pack CMD] --out PROFILE -- CARGO-ARGS...
        psoxide-pgo apply   [GUEST] [--profile PROFILE] [--variant V] -- CARGO-ARGS...
        psoxide-pgo choose  [GUEST] --profile PROFILE --gate CMD [--variant V]... [--pack CMD]
                            -- CARGO-ARGS...
+       psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
+                           [--launch-arg ARG]... [--name NAME]
   GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH]
   CARGO-ARGS: what follows `cargo` in the guest's own build, starting with `build`
-  V: off | default | accurate | hot=N, joined with + (accurate+hot=1000)";
+  V: off | default | accurate | hot=N, joined with + (accurate+hot=1000)
+  A..B: the gameplay window in port-1 polls, loads excluded";
 
 /// How to build one guest, shared by every mode.
 struct Guest {
@@ -59,6 +67,13 @@ struct Guest {
     scanner: PathBuf,
 }
 
+/// One emulator run: a tape (or none) and the gameplay polls to keep.
+#[derive(Default)]
+struct Run {
+    tape: Option<PathBuf>,
+    polls: Option<(u64, u64)>,
+}
+
 #[derive(Default)]
 struct Options {
     crate_dir: Option<PathBuf>,
@@ -66,17 +81,30 @@ struct Options {
     patcher: Option<PathBuf>,
     scanner: Option<PathBuf>,
     frontend: Option<PathBuf>,
-    tapes: Vec<PathBuf>,
+    runs: Vec<Run>,
     launch_args: Vec<String>,
     pack: Option<String>,
     out: Option<PathBuf>,
     profile: Option<PathBuf>,
     variants: Vec<String>,
     gate: Option<String>,
+    image: Option<PathBuf>,
+    name: Option<String>,
     cargo: Vec<String>,
 }
 
-fn parse(args: &[String]) -> Result<Options> {
+/// `A..B` as a half-open poll range.
+fn parse_polls(text: &str) -> Result<(u64, u64)> {
+    let parsed = text
+        .split_once("..")
+        .and_then(|(from, to)| Some((from.parse().ok()?, to.parse().ok()?)));
+    match parsed {
+        Some((from, to)) if from < to => Ok((from, to)),
+        _ => Err(format!("--polls wants FROM..TO with FROM < TO, not {text:?}").into()),
+    }
+}
+
+fn parse(mode: &str, args: &[String]) -> Result<Options> {
     let mut options = Options::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -96,7 +124,24 @@ fn parse(args: &[String]) -> Result<Options> {
             "--patcher" => options.patcher = Some(path(value()?)?),
             "--scanner" => options.scanner = Some(path(value()?)?),
             "--frontend" => options.frontend = Some(path(value()?)?),
-            "--tape" => options.tapes.push(path(value()?)?),
+            "--tape" => options.runs.push(Run {
+                tape: Some(path(value()?)?),
+                polls: None,
+            }),
+            // Belongs to the --tape before it, or to the one tapeless run.
+            "--polls" => {
+                let polls = parse_polls(&value()?)?;
+                match options.runs.last_mut() {
+                    Some(run) if run.polls.is_none() => run.polls = Some(polls),
+                    Some(_) => return Err("one --polls per --tape".into()),
+                    None => options.runs.push(Run {
+                        tape: None,
+                        polls: Some(polls),
+                    }),
+                }
+            }
+            "--image" => options.image = Some(path(value()?)?),
+            "--name" => options.name = Some(value()?),
             "--launch-arg" => options.launch_args.push(value()?),
             "--pack" => options.pack = Some(value()?),
             "--out" => options.out = Some(path(value()?)?),
@@ -106,15 +151,18 @@ fn parse(args: &[String]) -> Result<Options> {
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
-    if options.cargo.first().map(String::as_str) != Some("build") {
+    if mode != "measure" && options.cargo.first().map(String::as_str) != Some("build") {
         return Err("give the guest's cargo arguments after --, starting with `build`".into());
     }
     Ok(options)
 }
 
-/// Run `collect`, `apply` or `choose`.
+/// Run `collect`, `apply`, `choose` or `measure`.
 pub fn main(mode: &str, args: &[String]) -> Result<()> {
-    let mut options = parse(args)?;
+    let mut options = parse(mode, args)?;
+    if mode == "measure" {
+        return measure(&options);
+    }
     let tools = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let guest = Guest {
         crate_dir: match options.crate_dir.take() {
@@ -398,13 +446,176 @@ fn remove_disc(disc: &Path) {
     let _ = fs::remove_file(disc.with_extension("cue"));
 }
 
+/// `frontend launch` on `image` for one run: its tape, a stop at the end of
+/// its poll window, then the caller's arguments.
+fn launch(frontend: &Path, image: &Path, run: &Run, launch_args: &[String]) -> Command {
+    let given = |flag: &str| launch_args.iter().any(|arg| arg == flag);
+    let mut command = Command::new(frontend);
+    command.arg("launch").arg("--path").arg(image);
+    if let Some(tape) = &run.tape {
+        command.arg("--input-tape").arg(tape);
+    }
+    if let Some((_, to)) = run.polls {
+        if !given("--stop-at-poll") {
+            command.arg("--stop-at-poll").arg(to.to_string());
+        }
+    }
+    if (run.tape.is_some() || run.polls.is_some()) && !given("--steps") {
+        command.args(["--steps", REPLAY_STEPS]);
+    }
+    command.args(launch_args);
+    command
+}
+
+/// One `--route-log` row: the state at the end of a route tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Tick {
+    polls: u64,
+    cycles: u64,
+    flipped: bool,
+    icache: u64,
+}
+
+/// A route log, indexed by route tick.
+fn read_route_log(path: &Path) -> Result<Vec<Tick>> {
+    let text = fs::read_to_string(path)?;
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+    let column = |name: &str| {
+        header
+            .iter()
+            .position(|field| *field == name)
+            .ok_or_else(|| format!("route log has no {name} column"))
+    };
+    let (polls, cycles) = (column("port1_polls")?, column("bus_cycle_delta")?);
+    let (flipped, icache) = (
+        column("display_start_changed")?,
+        column("icache_refill_stall_cycles_delta")?,
+    );
+    let mut ticks = Vec::new();
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').collect();
+        let number = |index: usize| -> Result<u64> {
+            Ok(fields.get(index).ok_or("short route log row")?.parse()?)
+        };
+        ticks.push(Tick {
+            polls: number(polls)?,
+            cycles: number(cycles)?,
+            flipped: number(flipped)? != 0,
+            icache: number(icache)?,
+        });
+    }
+    Ok(ticks)
+}
+
+/// Whether ticks `first..=last` all ran inside the poll window: none
+/// started before poll `from`, and none ran past poll `to`.
+fn inside(ticks: &[Tick], first: usize, last: usize, (from, to): (u64, u64)) -> bool {
+    let before = first.checked_sub(1).map_or(0, |index| ticks[index].polls);
+    last < ticks.len() && before >= from && ticks[last].polls <= to
+}
+
+/// Sum a `--pc-sample-window-log` over the windows wholly inside `polls`
+/// into a plain `pc,samples` histogram, and say how much was kept.
+fn window_histogram(
+    windows: &Path,
+    ticks: &[Tick],
+    polls: (u64, u64),
+    out: &Path,
+) -> Result<(usize, usize)> {
+    let last_tick = ticks.len().saturating_sub(1);
+    let mut kept: HashMap<u64, bool> = HashMap::new();
+    let mut samples: Vec<(String, u64)> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for line in fs::read_to_string(windows)?.lines().skip(1) {
+        let mut fields = line.split(',');
+        let (Some(start), Some(pc), Some(count)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (Ok(start), Ok(count)) = (start.parse::<u64>(), count.parse::<u64>()) else {
+            continue;
+        };
+        // Samples taken while `start` ticks had completed land in route-log
+        // rows start+1 ..= start+SAMPLE_WINDOW_TICKS.
+        let keep = *kept.entry(start).or_insert_with(|| {
+            let first = start as usize + 1;
+            let last = (first + SAMPLE_WINDOW_TICKS - 1).min(last_tick);
+            first <= last && inside(ticks, first, last, polls)
+        });
+        if keep {
+            let slot = *index.entry(pc.to_string()).or_insert_with(|| {
+                samples.push((pc.to_string(), 0));
+                samples.len() - 1
+            });
+            samples[slot].1 += count;
+        }
+    }
+    let mut text = String::from("pc,samples\n");
+    for (pc, count) in &samples {
+        let _ = writeln!(text, "{pc},{count}");
+    }
+    fs::write(out, text)?;
+    Ok((kept.values().filter(|keep| **keep).count(), kept.len()))
+}
+
+/// Run one replay and print its gameplay-window totals as `key=value` lines
+/// for a `choose` gate.
+fn measure(options: &Options) -> Result<()> {
+    let frontend = options
+        .frontend
+        .as_ref()
+        .ok_or("measure needs --frontend")?;
+    let image = options.image.as_ref().ok_or("measure needs --image")?;
+    let spec = match options.runs.as_slice() {
+        [spec] if spec.polls.is_some() => spec,
+        _ => {
+            return Err("measure needs one --polls FROM..TO window (and at most one --tape)".into())
+        }
+    };
+    let polls = spec.polls.expect("checked above");
+    let log = env::temp_dir().join(format!("psoxide-pgo-route-{}.csv", std::process::id()));
+    let mut command = launch(frontend, image, spec, &options.launch_args);
+    // Keep the frontend's own `key=value` chatter out of the gate's output.
+    command
+        .arg("--route-log")
+        .arg(&log)
+        .stdout(std::io::stderr());
+    let replayed = run(&mut command, "measuring replay");
+    let ticks = replayed.and_then(|()| read_route_log(&log));
+    let _ = fs::remove_file(&log);
+    let ticks = ticks?;
+    let window: Vec<&Tick> = (1..ticks.len())
+        .filter(|&tick| inside(&ticks, tick, tick, polls))
+        .map(|tick| &ticks[tick])
+        .collect();
+    if window.is_empty() {
+        return Err(format!("the run never reached polls {}..{}", polls.0, polls.1).into());
+    }
+    let name = options.name.as_deref().unwrap_or("run");
+    println!("{name}.ticks={}", window.len());
+    println!(
+        "{name}.flips={}",
+        window.iter().filter(|tick| tick.flipped).count()
+    );
+    println!(
+        "{name}.cycles={}",
+        window.iter().map(|tick| tick.cycles).sum::<u64>()
+    );
+    println!(
+        "{name}.icache={}",
+        window.iter().map(|tick| tick.icache).sum::<u64>()
+    );
+    Ok(())
+}
+
 fn collect(guest: &Guest, options: &Options) -> Result<()> {
     let frontend = options
         .frontend
         .as_ref()
         .ok_or("collect needs --frontend")?;
     let out = options.out.as_ref().ok_or("collect needs --out PROFILE")?;
-    if options.tapes.is_empty() && options.launch_args.is_empty() {
+    if options.runs.is_empty() && options.launch_args.is_empty() {
         return Err("collect needs a --tape, or --launch-arg for a run without one".into());
     }
 
@@ -421,33 +632,51 @@ fn collect(guest: &Guest, options: &Options) -> Result<()> {
         None => exe.clone(),
     };
 
-    let runs: Vec<Option<&PathBuf>> = if options.tapes.is_empty() {
-        vec![None]
+    let tapeless = [Run::default()];
+    let runs = if options.runs.is_empty() {
+        &tapeless[..]
     } else {
-        options.tapes.iter().map(Some).collect()
+        &options.runs[..]
     };
     let mut logs = Vec::new();
+    let mut scratch = Vec::new();
     let replayed = (|| -> Result<()> {
-        for (index, tape) in runs.iter().enumerate() {
+        for (index, run_spec) in runs.iter().enumerate() {
             let log = work.join(format!("pc-{index}.csv"));
-            let mut command = Command::new(frontend);
-            command.arg("launch").arg("--path").arg(&image);
-            if let Some(tape) = tape {
-                command.arg("--input-tape").arg(tape);
-                if !options.launch_args.iter().any(|arg| arg == "--steps") {
-                    command.args(["--steps", REPLAY_STEPS]);
-                }
-            }
+            logs.push(log.clone());
+            let mut command = launch(frontend, &image, run_spec, &options.launch_args);
+            command.args(["--pc-sample-instructions", SAMPLE_INTERVAL]);
+            let Some(polls) = run_spec.polls else {
+                command.arg("--pc-sample-log").arg(&log);
+                run(&mut command, "profiling replay")?;
+                continue;
+            };
+            // Loading and menus would skew the profile towards CD polling,
+            // so only samples from the gameplay polls are kept.
+            let windows = work.join(format!("pc-windows-{index}.csv"));
+            let route = work.join(format!("route-{index}.csv"));
+            scratch.extend([windows.clone(), route.clone()]);
             command
-                .arg("--pc-sample-log")
-                .arg(&log)
-                .args(["--pc-sample-instructions", SAMPLE_INTERVAL])
-                .args(&options.launch_args);
-            logs.push(log);
+                .arg("--pc-sample-window-log")
+                .arg(&windows)
+                .args(["--pc-sample-window-ticks", &SAMPLE_WINDOW_TICKS.to_string()])
+                .arg("--route-log")
+                .arg(&route);
             run(&mut command, "profiling replay")?;
+            let (kept, total) = window_histogram(&windows, &read_route_log(&route)?, polls, &log)?;
+            println!(
+                "psoxide-pgo: polls {}..{} kept {kept} of {total} sample windows",
+                polls.0, polls.1
+            );
+            if kept == 0 {
+                return Err("no sample window fell inside the gameplay polls".into());
+            }
         }
         Ok(())
     })();
+    for file in &scratch {
+        let _ = fs::remove_file(file);
+    }
     remove_disc(&disc);
     let _ = fs::remove_file(&exe);
     let converted = replayed.and_then(|()| {
@@ -492,12 +721,13 @@ fn gate_values(output: &str) -> Vec<(String, String)> {
         .lines()
         .filter_map(|line| {
             let (key, value) = line.split_once('=')?;
-            let key = key.trim();
+            let (key, value) = (key.trim(), value.trim());
             let valid = !key.is_empty()
+                && !value.contains(char::is_whitespace)
                 && key
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
-            valid.then(|| (key.to_string(), value.trim().to_string()))
+            valid.then(|| (key.to_string(), value.to_string()))
         })
         .collect()
 }
@@ -579,12 +809,11 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
         command
             .arg("-c")
             .arg(gate)
+            .env("PSOXIDE_PGO", env::current_exe()?)
             .env("PSOXIDE_PGO_VARIANT", variant)
             .env("PSOXIDE_PGO_EXE", &exe)
+            .env("PSOXIDE_PGO_IMAGE", image.as_ref().unwrap_or(&exe))
             .stdout(Stdio::piped());
-        if let Some(image) = &image {
-            command.env("PSOXIDE_PGO_IMAGE", image);
-        }
         let mut child = command.spawn()?;
         let mut output = String::new();
         for line in BufReader::new(child.stdout.take().expect("stdout is piped")).lines() {
@@ -638,7 +867,10 @@ mod tests {
 
     #[test]
     fn gates_report_key_value_lines() {
-        let values = gate_values("replaying\ncycles=123\n unseen.cycles = 456 \nnot a pair\n=x\n");
+        let values = gate_values(
+            "replaying\ncycles=123\n unseen.cycles = 456 \nnot a pair\n=x\n\
+             tick=1  cycles=2  pc=0x80010ca8\n",
+        );
         assert_eq!(
             values,
             vec![
@@ -646,6 +878,63 @@ mod tests {
                 ("unseen.cycles".to_string(), "456".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn poll_windows_parse_as_half_open_ranges() {
+        assert_eq!(parse_polls("300..1400").unwrap(), (300, 1400));
+        assert!(parse_polls("1400..300").is_err());
+        assert!(parse_polls("300").is_err());
+    }
+
+    fn ticks(polls: &[u64]) -> Vec<Tick> {
+        polls
+            .iter()
+            .map(|&polls| Tick {
+                polls,
+                cycles: 10,
+                ..Tick::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tick_is_inside_only_when_it_starts_and_ends_in_the_window() {
+        // Row 0 is the start of the run; poll 2 lands during tick 2.
+        let route = ticks(&[0, 1, 2, 3, 4, 5]);
+        let window = (2, 4);
+        let inside_ticks: Vec<usize> = (1..route.len())
+            .filter(|&tick| inside(&route, tick, tick, window))
+            .collect();
+        assert_eq!(inside_ticks, vec![3, 4]);
+        assert!(!inside(&route, 3, 9, window));
+    }
+
+    #[test]
+    fn sample_windows_outside_the_gameplay_polls_are_dropped() {
+        let dir = env::temp_dir().join(format!("psoxide-pgo-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (windows, out) = (dir.join("windows.csv"), dir.join("pc.csv"));
+        // One poll per tick; windows of SAMPLE_WINDOW_TICKS ticks.
+        let route = ticks(&(0..=3 * SAMPLE_WINDOW_TICKS as u64).collect::<Vec<_>>());
+        let w = SAMPLE_WINDOW_TICKS;
+        fs::write(
+            &windows,
+            format!(
+                "window_start_tick,pc,samples,percent_window\n\
+                 0,0x80010000,5,1\n{w},0x80010004,7,1\n{w},0x80010000,1,1\n{},0x80010004,9,1\n",
+                2 * w
+            ),
+        )
+        .unwrap();
+        // Polls w..2w cover exactly the middle window.
+        let kept = window_histogram(&windows, &route, (w as u64, 2 * w as u64), &out).unwrap();
+        assert_eq!(kept, (1, 3));
+        assert_eq!(
+            fs::read_to_string(&out).unwrap(),
+            "pc,samples\n0x80010004,7\n0x80010000,1\n"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
