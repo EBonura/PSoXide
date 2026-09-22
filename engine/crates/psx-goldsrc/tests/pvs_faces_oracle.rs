@@ -257,6 +257,7 @@ fn last_representable_links_and_record_layout_match_the_old_declaration() {
     assert_eq!(sum.triangle_references, 16383);
     assert_eq!(out.indices[0], 65534);
     assert_eq!(out.active_groups[0], 65534);
+    assert_eq!(out.group_face[65534], 65534 & 0x7fff);
     assert_eq!(out.records[0].first, 65535);
     assert_eq!(out.records[0].count(), 16383);
     struct OldLayout {

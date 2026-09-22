@@ -169,7 +169,10 @@ pub struct FaceBuffers<'a> {
     pub marks: &'a mut [u32],
     /// Group list heads; length defines group capacity.
     pub group_first: &'a mut [u16],
-    /// Group representative face and liquid flag; same capacity as group heads.
+    /// Group representative face in the low 15 bits plus the liquid flag.
+    /// Existing encoding masks higher face-index bits; u16 link capacity does
+    /// not make all u16 representative faces losslessly representable. Cooked
+    /// producers must respect that format. Same capacity as group heads.
     pub group_face: &'a mut [u16],
     /// First-seen active group order; at least group capacity.
     pub active_groups: &'a mut [u16],
@@ -270,9 +273,9 @@ pub fn compile_faces<M: FaceSource>(
     }
     let mut summary = FaceSummary::default();
     out.animated_textures.fill(0);
-    // A 1-bit duplicate marker recovers 7.4 KiB over the old byte-per-face
-    // token array. PVS rebuilds already walk the visible marks; clearing 272
-    // words here is cold compared with retaining that RAM every frame.
+    // Historical storage policy: the 1-bit marker replaced the byte-per-face
+    // token array before this extraction. PVS rebuilds walk visible marks; clearing
+    // these words is cold; this extraction adds no resident marker storage.
     out.marks.fill(0);
 
     for i in 0..m.visible_leaf_count().min(max_leaves) {
