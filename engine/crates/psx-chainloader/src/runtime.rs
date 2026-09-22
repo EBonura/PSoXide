@@ -471,9 +471,9 @@ fn halt() -> ! {
 }
 
 /// Paint a panic panel using the collection's existing setup policy, then halt.
-pub fn panic<P: Presentation>(loading: &mut P) -> ! {
+pub fn panic(setup: impl FnOnce()) -> ! {
     paint::show_checklist();
-    loading.setup();
+    setup();
     paint::rect(0, 0, 320, 240, paint::RED_BASE);
     paint::text(8, 8, 2, "LOADER PANIC", paint::YELLOW);
     paint::show();
