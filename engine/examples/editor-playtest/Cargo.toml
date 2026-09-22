@@ -154,7 +154,10 @@ psx-io     = { path = "../../../sdk/crates/psx-io", optional = true }
 psx-level  = { path = "../../crates/psx-level" }
 psx-math   = { path = "../../../sdk/crates/psx-math" }
 psx-mc     = { path = "../../../sdk/crates/psx-mc" }
-psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["alloc"] }
+# hazard-trampolines-256: with every delay-slot filler search on, PGO builds
+# can need more than the default 96 trampoline words (a profile-driven layout
+# filled the array with one jump table's entries).
+psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["alloc", "hazard-trampolines-256"] }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
 psxed-format = { path = "../../../crates/psxed-format" }
