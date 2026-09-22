@@ -42,6 +42,7 @@ use std::process::ExitCode;
 use std::{env, fs};
 
 mod pipeline;
+mod work;
 
 use gimli::{AttributeValue, DebuggingInformationEntry, EndianSlice, RunTimeEndian, UnitOffset};
 use object::{Object, ObjectSection, ObjectSymbol};
