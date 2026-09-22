@@ -100,7 +100,7 @@ pub(super) fn player_phase_assembly(
 /// sole state authority.
 fn enemy_stance_tint_sweep(
     entities: &RuntimeGameEntities,
-    pose: InstanceActorPoseSnapshot,
+    pose: &InstanceActorPoseSnapshot,
     camera: &WorldCamera,
 ) -> Option<ModelTintSweep> {
     let instance = u16::try_from(pose.instance_index()).ok()?;
@@ -752,7 +752,10 @@ pub(super) fn draw_instance_equipment(
     let mut out = EquipmentDrawStats::default();
     let mut remaining = max_draws.min(MODEL_DRAW_KNOBS.max_equipment_draws);
     let instance_equipment_skin = horizon_skin();
-    for pose in instance_poses.iter().copied().flatten() {
+    // By reference: `.copied().flatten()` moved every slot's whole
+    // `Option<InstanceActorPoseSnapshot>` (and, once PGO stopped inlining the
+    // iterator, through compiler-builtins' memmove) just to read it.
+    for pose in instance_poses.iter().flatten() {
         if remaining == 0 {
             break;
         }
@@ -920,7 +923,6 @@ pub(super) fn draw_model_instances(
     for pose in instance_poses
         .iter()
         .take(MODEL_DRAW_KNOBS.max_model_instances)
-        .copied()
         .flatten()
     {
         let first_slot = triangles.used_slots();

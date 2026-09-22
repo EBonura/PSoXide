@@ -1619,7 +1619,11 @@ impl Scene for Playtest {
 
             // Player draws through the same compact model path as
             // placed model instances.
-            if let (Some(character), Some(player_pose)) = (self.character, self.player_actor_pose) {
+            // `character` by reference: copying the whole RuntimeCharacter
+            // (688 B) into the tuple cost a memcpy per frame.
+            if let (Some(character), Some(player_pose)) =
+                (self.character.as_ref(), self.player_actor_pose)
+            {
                 {
                     // Diagnostic: the model's rendered forward (local +Z through the
                     // rotation the draw uses), to compare with the motor's facing.
@@ -1673,11 +1677,11 @@ impl Scene for Playtest {
                             self.player_stance,
                             &self.player_stance_config,
                             player,
-                            player_phase_height(&character),
+                            player_phase_height(character),
                         );
                         draw_player(
                             self.room_index,
-                            &character,
+                            character,
                             player_pose,
                             &self.model_faces[..self.model_face_count],
                             &self.model_parts[..self.model_part_count],

@@ -1951,7 +1951,7 @@ pub fn draw_instance_equipment_from_pose<
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     current_room: RoomIndex,
-    instance_pose: InstanceActorPoseSnapshot,
+    instance_pose: &InstanceActorPoseSnapshot,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,

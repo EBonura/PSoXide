@@ -156,10 +156,27 @@ impl BspDestructibleFragmentEvent {
 /// Dynamic world bounds used to link actors/instances to every BSP leaf they
 /// touch. Coordinates use the playtest's integer engine-unit convention; the
 /// BSP runtime converts them to Q20.12 only at the tree boundary.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq)]
 pub(super) struct BspVisibilityBounds {
     min: [i32; 3],
     max: [i32; 3],
+}
+
+// Word by word: the derived `[i32; 3] == [i32; 3]` lowers to a call to
+// memcmp on MIPS, and the visibility cache compares bounds for every
+// linked actor and instance each frame (about 2.3M instructions over the
+// Cortex whole-level route, all inside memcmp).
+impl PartialEq for BspVisibilityBounds {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        (self.min[0] ^ other.min[0])
+            | (self.min[1] ^ other.min[1])
+            | (self.min[2] ^ other.min[2])
+            | (self.max[0] ^ other.max[0])
+            | (self.max[1] ^ other.max[1])
+            | (self.max[2] ^ other.max[2])
+            == 0
+    }
 }
 
 impl BspVisibilityBounds {

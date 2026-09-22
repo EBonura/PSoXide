@@ -755,7 +755,7 @@ pub(super) fn draw_instance_equipment_from_pose<
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     current_room: RoomIndex,
-    instance_pose: super::instances::InstanceActorPoseSnapshot,
+    instance_pose: &super::instances::InstanceActorPoseSnapshot,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -884,7 +884,7 @@ pub(super) fn draw_instance_equipment<
         >(
             tables,
             equipment,
-            context,
+            &context,
             knobs,
             scratch,
             models,
@@ -924,7 +924,7 @@ fn submit_instance_equipment_record_from_pose<
 >(
     tables: ModelTables,
     equipment: &psx_level::EquipmentRecord,
-    instance_pose: super::instances::InstanceActorPoseSnapshot,
+    instance_pose: &super::instances::InstanceActorPoseSnapshot,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
