@@ -26,8 +26,8 @@ only its frozen viewport delta and verifies both original hashes. There is
 one frozen legacy body, not two maintained implementations.
 
 `render_oracle.py` compiles the current shared owner with both thin view
-adapters and compares 30,000 full-screen and 120,000 split/windowed polygons
-across six focal lengths. It compares every output coordinate, RGB/UV/depth,
+adapters and compares 30,000 full-screen and 210,000 split/windowed polygons
+across six focal lengths, including both split orientations and return to full screen. It compares every output coordinate, RGB/UV/depth,
 clip count and order, guard/extent/refinement decision directly. It also runs
 the 17 original unit tests against both old and shared implementations for
 each game. Private helper tests live inside the temporary shared module so

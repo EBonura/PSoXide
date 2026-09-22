@@ -417,7 +417,7 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
 
     /// Open an incremental stream for `chunk_id`: resolve its pack entry (the
     /// persistent mini-cache first, so no header re-scan), seek, start the READN
-    /// session, and leave it open for [`stream_pump`] to drain across ticks. Any
+    /// session, and leave it open for [`Self::stream_pump`] to drain across ticks. Any
     /// stream already in flight is superseded (aborted) -- never queued.
     ///
     /// # Safety
@@ -462,7 +462,7 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     /// chunk passes through untouched). Never blocks longer than the poll budget.
     ///
     /// # Safety
-    /// Same contract as [`stream_begin`] (whose `dst` this writes through).
+    /// Same contract as [`Self::stream_begin`] (whose `dst` this writes through).
     pub unsafe fn stream_pump(&mut self) -> StreamPump {
         let st = &mut *core::ptr::addr_of_mut!(self.stream);
         if !st.active {

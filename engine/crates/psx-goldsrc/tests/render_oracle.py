@@ -22,7 +22,7 @@ def main():
     fn view_plane_distance(v:&SVert,p:ViewPlane)->i32 {super::view_plane_distance(&FullView::new(),v,p)}
 ''')
    (p/'src/new.rs').write_text(adapter);(p/'src/shared.rs').write_text((HERE.parent/'src/render.rs').read_text()+'\n#[cfg(test)]'+unit_tests)
-   main=(HERE/'support/render_harness.rs').read_text().replace('SELECT_VIEW',('old::set_view_rect(x,y,w,h);new::set_view_rect(x,y,w,h);'if game=='cs'else'assert_eq!((x,y,w,h),(0,0,320,240));')).replace('VIEW_RECTS',('[(0,0,320,240),(0,0,320,120),(0,120,320,120),(32,24,256,192)]'if game=='cs'else'[(0,0,320,240)]'))
+   main=(HERE/'support/render_harness.rs').read_text().replace('SELECT_VIEW',('old::set_view_rect(x,y,w,h);new::set_view_rect(x,y,w,h);'if game=='cs'else'assert_eq!((x,y,w,h),(0,0,320,240));')).replace('VIEW_RECTS',('[(0,0,320,240),(0,0,320,120),(0,120,320,120),(0,0,160,240),(160,0,160,240),(32,24,256,192),(0,0,320,240)]'if game=='cs'else'[(0,0,320,240)]'))
    (p/'src/main.rs').write_text(main);(p/'Cargo.toml').write_text('[package]\nname="render-oracle"\nversion="0.0.0"\nedition="2021"\n[workspace]\n[dependencies]\npsx-engine={path="'+str(ROOT/'engine/crates/psx-engine')+'"}\n')
    for lane in [['cargo','run','--release','--quiet'],['cargo','test','--release','--quiet','--','--test-threads=1']]:
     run=subprocess.run(lane,cwd=p,capture_output=True,text=True)

@@ -112,7 +112,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// can keep fetching ADPCM blocks while a map load overwrites them, which on
     /// real hardware turns a crossing sentence into a persistent buzz. Zeroing
     /// the live voice volume first makes the handoff immediate; the next
-    /// [`play_voice`] call restores its authored volume and restarts the decoder.
+    /// [`Self::play_voice`] call restores its authored volume and restarts the decoder.
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
     pub unsafe fn stop_dialogue(&mut self) {

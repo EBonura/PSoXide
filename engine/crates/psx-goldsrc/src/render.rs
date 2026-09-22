@@ -537,9 +537,8 @@ impl AttributedClipPlane<SVert> for ScreenPlane {
     }
 }
 
-/// Clip a convex screen polygon to the guard band. Returns vertices in `out`.
-// Ping-pong scratch for guard_clip. Statics, not locals: the stack arrays
-// memset 512 B per call. Single-threaded render loop, never live across calls.
+// Both clipping paths borrow the same caller-owned ClipScratch. The ports keep
+// it in static RAM, avoiding a 512-byte stack clear on every clipping call.
 
 #[derive(Clone, Copy)]
 enum ViewPlane {
