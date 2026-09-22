@@ -66,6 +66,18 @@ fn base_discriminator(raw: u64) -> u32 {
     }
 }
 
+/// `DILocation::getDuplicationFactorFromDiscriminator`: how many copies of
+/// this code the loop unroller or vectoriser made. Each copy runs that many
+/// times less often than the source line it came from.
+fn duplication_factor(raw: u64) -> u64 {
+    let next = if raw & 1 == 0 {
+        raw >> if raw & 0x40 != 0 { 14 } else { 7 }
+    } else {
+        raw >> 1
+    };
+    u64::from(base_discriminator(next)).max(1)
+}
+
 /// Linkage name and declaration line of one function.
 #[derive(Clone)]
 struct Func {
@@ -318,7 +330,7 @@ impl<'a> Symbols<'a> {
     }
 }
 
-/// Line-table rows as (address, line, base discriminator, end of sequence),
+/// Line-table rows as (address, line, raw discriminator, end of sequence),
 /// sorted so the last row at or below a PC is the one that covers it.
 fn line_rows(units: &[Unit<'_>]) -> Result<Vec<(u64, u64, u32, bool)>> {
     let mut rows = Vec::new();
@@ -337,7 +349,7 @@ fn line_rows(units: &[Unit<'_>]) -> Result<Vec<(u64, u64, u32, bool)>> {
             rows.push((
                 row.address(),
                 line,
-                base_discriminator(row.discriminator()),
+                u32::try_from(row.discriminator()).unwrap_or(0),
                 end,
             ));
         }
@@ -376,53 +388,60 @@ fn row_at(rows: &[(u64, u64, u32, bool)], pc: u64) -> Option<(u64, u64, u32, boo
 /// - Code outside every symbol is the BIOS.
 #[derive(Default)]
 struct Unmapped {
-    line_zero: u64,
+    line_zero: HashMap<String, u64>,
     no_dwarf: HashMap<String, u64>,
     no_symbol: u64,
 }
 
+/// The largest few entries of a per-symbol count, as `name count, ...`.
+fn top_symbols(counts: &HashMap<String, u64>, limit: usize) -> String {
+    let mut symbols: Vec<(&u64, &String)> =
+        counts.iter().map(|(name, count)| (count, name)).collect();
+    symbols.sort_unstable_by(|a, b| b.cmp(a));
+    let named: Vec<String> = symbols
+        .iter()
+        .take(limit)
+        .map(|(count, name)| format!("{} {count}", portable_name(name)))
+        .collect();
+    named.join(", ")
+}
+
 impl Unmapped {
     fn add(&mut self, in_dwarf: bool, symbols: &[(u64, u64, &str)], pc: u64, count: u64) {
-        if in_dwarf {
-            self.line_zero += count;
-            return;
-        }
-        match symbols
+        let symbol = match symbols
             .partition_point(|symbol| symbol.0 <= pc)
             .checked_sub(1)
         {
-            Some(index) if pc < symbols[index].0 + symbols[index].1 => {
-                *self
-                    .no_dwarf
-                    .entry(symbols[index].2.to_string())
-                    .or_default() += count;
+            Some(index) if pc < symbols[index].0 + symbols[index].1 => symbols[index].2,
+            _ if in_dwarf => "?",
+            _ => {
+                self.no_symbol += count;
+                return;
             }
-            _ => self.no_symbol += count,
-        }
+        };
+        let bucket = if in_dwarf {
+            &mut self.line_zero
+        } else {
+            &mut self.no_dwarf
+        };
+        *bucket.entry(symbol.to_string()).or_default() += count;
     }
 
     fn total(&self) -> u64 {
-        self.line_zero + self.no_dwarf.values().sum::<u64>() + self.no_symbol
+        self.line_zero.values().sum::<u64>() + self.no_dwarf.values().sum::<u64>() + self.no_symbol
     }
 }
 
 impl std::fmt::Display for Unmapped {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut symbols: Vec<(&u64, &String)> = self
-            .no_dwarf
-            .iter()
-            .map(|(name, count)| (count, name))
-            .collect();
-        symbols.sort_unstable_by(|a, b| b.cmp(a));
-        let no_dwarf: u64 = self.no_dwarf.values().sum();
-        write!(f, "line 0 {}  no DWARF {no_dwarf}", self.line_zero)?;
-        if !symbols.is_empty() {
-            let named: Vec<String> = symbols
-                .iter()
-                .take(6)
-                .map(|(count, name)| format!("{name} {count}"))
-                .collect();
-            write!(f, " ({})", named.join(", "))?;
+        for (label, counts, limit) in [
+            ("line 0", &self.line_zero, 3),
+            ("  no DWARF", &self.no_dwarf, 6),
+        ] {
+            write!(f, "{label} {}", counts.values().sum::<u64>())?;
+            if !counts.is_empty() {
+                write!(f, " ({})", top_symbols(counts, limit))?;
+            }
         }
         write!(f, "  outside any symbol {}", self.no_symbol)
     }
@@ -515,7 +534,7 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
     // Functions in first-seen order, so equal totals print in a stable order.
     let mut order: Vec<String> = Vec::new();
     let mut profile: HashMap<String, Node> = HashMap::new();
-    let mut mapped = 0u64;
+    let (mut mapped, mut duplicated) = (0u64, 0u64);
     let mut unmapped = Unmapped::default();
     let mut elf_symbols: Vec<(u64, u64, &str)> = object
         .symbols()
@@ -533,7 +552,8 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
             _ => None,
         };
         let row = row_at(&rows, pc);
-        let (Some(top), Some((_, line, discriminator, _))) = (top.filter(|_| row.is_some()), row)
+        let (Some(top), Some((_, line, raw_discriminator, _))) =
+            (top.filter(|_| row.is_some()), row)
         else {
             unmapped.add(top.is_some(), &elf_symbols, pc, count);
             continue;
@@ -565,8 +585,17 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
             children = &hit.children;
         }
         let offset = (line.wrapping_sub(current.line) & 0xFFFF) as u32;
-        let slot = node.body.entry((offset, discriminator)).or_default();
-        *slot = (*slot).max(count);
+        // An unrolled copy runs once per `duplication` iterations of the
+        // source loop, so its count stands for that many (AutoFDO scales the
+        // same way). Unscaled, every unrolled hot loop reads as colder than
+        // the straight-line code around it.
+        let duplication = duplication_factor(u64::from(raw_discriminator));
+        if duplication > 1 {
+            duplicated += count;
+        }
+        let key = (offset, base_discriminator(u64::from(raw_discriminator)));
+        let slot = node.body.entry(key).or_default();
+        *slot = (*slot).max(count * duplication);
     }
 
     order.sort_by_key(|name| std::cmp::Reverse(profile[name].total()));
@@ -578,7 +607,7 @@ fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()>
     }
     fs::write(out_path, out)?;
     println!(
-        "functions {}  mapped samples {mapped}  unmapped {}",
+        "functions {}  mapped samples {mapped}  unmapped {}  in unrolled copies {duplicated}",
         order.len(),
         unmapped.total()
     );
@@ -854,6 +883,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn duplication_factor_decodes_the_second_component() {
+        // No duplication component: factor 1.
+        assert_eq!(duplication_factor(0), 1);
+        assert_eq!(duplication_factor(3 << 1), 1);
+        // Base 3 (seven bits, low bit 0), then duplication factor 4.
+        assert_eq!(duplication_factor((4 << 1 << 7) | (3 << 1)), 4);
+        // No base (low bit 1), then duplication factor 2.
+        assert_eq!(duplication_factor((2 << 1 << 1) | 1), 2);
+        assert_eq!(base_discriminator((4 << 1 << 7) | (3 << 1)), 3);
+    }
+
+    #[test]
     fn base_discriminator_decodes_the_prefix_encoding() {
         assert_eq!(base_discriminator(0), 0);
         assert_eq!(base_discriminator(1), 0); // odd: no base component
@@ -970,7 +1011,7 @@ mod tests {
         assert_eq!(unmapped.total(), 18);
         assert_eq!(
             unmapped.to_string(),
-            "line 0 5  no DWARF 11 (memcpy 8, HAZARD_TRAMPOLINES 3)  outside any symbol 2"
+            "line 0 5 (memcpy 5)  no DWARF 11 (memcpy 8, HAZARD_TRAMPOLINES 3)  outside any symbol 2"
         );
     }
 

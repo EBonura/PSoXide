@@ -235,15 +235,23 @@ after large changes, and whenever the game repins onto a different SDK.
 - **Head samples** (a function's entry count) come from the samples at its
   first instruction. Until 2026-09-22 the line-table lookup gave that address
   to the end of the previous function's sequence, so every head was 0.
-- **Unmapped samples** are reported by cause, and none of them can reach
-  LLVM. On a CPU-bound SDK guest 7.5% of samples were unmapped: 4.8% on line
-  0 (compiler-made code such as loop counters, whose block LLVM weighs by its
-  hottest located instruction anyway) and 2.8% in psx-rt's assembly
-  `memcpy`/`memset`, which have no IR for the sample loader to annotate.
-  Adding records for the assembly routines, or keeping the line-0 samples,
-  both built byte-identical executables. Hazard trampolines show up by name
-  (`HAZARD_TRAMPOLINES`) and stand in for one branch of an already counted
-  block.
+- **Unrolled copies.** A loop body the unroller copied N times carries
+  duplication factor N in its discriminator, and each copy runs N times less
+  often than its source line. Counts are scaled by it, as AutoFDO does; the
+  summary line reports how many samples that touched (none on VoXide or the
+  SDK bench, whose builds unroll nothing hot).
+- **Unmapped samples** are reported by cause, with the functions they sit in,
+  and none of them can reach LLVM usefully:
+  - *Line 0* is code the compiler made up or merged (loop counters, hoisted
+    common code). On a CPU-bound SDK guest it was 4.8% of samples, on VoXide
+    15.5%, mostly inside its face loop. Emitting it under its own key built a
+    byte-identical bench exe; carrying each line-0 sample forward to the
+    previous line made VoXide execute 1.7% *more* instructions than dropping
+    them, so they stay dropped.
+  - *No DWARF* is psx-rt's assembly `memcpy`/`memset` and the hazard
+    trampolines (2.8% on the bench, 0.2% on VoXide). The sample loader only
+    annotates functions it compiles from IR; adding records for the assembly
+    built a byte-identical exe.
 
 ## Lower-level commands
 
