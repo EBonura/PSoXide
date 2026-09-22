@@ -171,31 +171,36 @@ stopping it.
 
 ### choose
 
-Builds each `--variant` in turn (default: `off`, `default`, `hot=500`,
-`hot=500+profi`; see "What the knobs did on VoXide" for why), packs
-it if `--pack` is given, and runs `--gate` with `PSOXIDE_PGO_VARIANT`,
-`PSOXIDE_PGO_EXE`, `PSOXIDE_PGO_IMAGE` (the disc when packed, else the exe) and
-`PSOXIDE_PGO` (this tool, for `measure`). The gate's exit status is pass or
-fail; every `key=value` line it prints (no spaces in the value) becomes a
-column. On a CPU-bound SDK guest (bus cycles to reach poll 1,400 of each tape):
+Builds each `--variant` in turn, packs it if `--pack` is given, and runs
+`--gate` with `PSOXIDE_PGO_VARIANT`, `PSOXIDE_PGO_EXE`, `PSOXIDE_PGO_IMAGE`
+(the disc when packed, else the exe) and `PSOXIDE_PGO` (this tool, for
+`measure`). The gate's exit status is pass or fail; every `key=value` line it
+prints (no spaces in the value) becomes a column.
 
-```text
-variant   gate  train.cycles  unseen.cycles
-off       pass  514724511     533018552
-default   pass  509023853     527305124
-```
+With no `--variant`, the candidates are `off`, `default`, `hot=500`,
+`hot=500+profi`, `accurate+nopgso+hot=1000` and `accurate+nopgso+hot=1500`:
+the winners so far were `hot=500+profi` on VoXide 895cb60 (see the table
+under `measure`), `hot=1000` on hl-psx and cs-psx, and `accurate` with
+`-pgso=false` and `hot=1500` on Cortex (see "Troubleshooting").
+
+When the gate prints `work_cycles` (as `measure` does), `choose` ranks the
+passing rows by them, fastest first, and adds a `work` column: each row's
+work cycles against the `off` row, averaged over the gate's replays so every
+tape counts the same. Failed rows go last, unranked. Without `work_cycles` the
+rows stay in build order.
 
 The gate is the game's own judgement, so it should replay a training tape
 *and* one the profile never saw, and check correctness (hashes, poll-bound
 state) as well as speed. PSoXide-editor's
 `docs/measuring-guest-performance-2026-09-17.md` explains why final-frame
-hashes alone mislead. Commit the
-winner as the game's `PGO_VARIANT`, `off` included.
+hashes alone mislead. Commit the winner as the game's `PGO_VARIANT`, `off`
+included.
 
 ### measure
 
-One replay of `--image`, printing totals over the ticks that ran wholly
-inside the `--polls` window, as `NAME.key=value` lines for a gate:
+Replays `--image` and prints `NAME.key=value` lines for a gate. The first
+group covers the route ticks that ran wholly inside the `--polls` window
+(one route tick of resolution at each end):
 
 | key      | meaning |
 |----------|---------|
@@ -203,10 +208,68 @@ inside the `--polls` window, as `NAME.key=value` lines for a gate:
 | `flips`  | ticks in which the display start changed: rendered frames, for a guest that renders at most once per tick |
 | `cycles` | bus cycles in those ticks |
 | `icache` | I-cache refill stall cycles in those ticks |
+| `frame_p50`, `frame_p95` | bus cycles from one flip to the next (the median and 95th percentile): how long each frame stayed on screen, which is what a player sees |
+| `vblanks` | how many route ticks each frame stayed on screen, as `vblanks:frames` pairs (`2:937,3:6` is 937 frames at 30 fps and 6 at 20) |
 | `vram`, `display` | the frontend's `--dump-hash` at the stop: equal across builds only when the guest's simulation does not depend on its own speed (VoXide's `lockstep` feature, for example) |
 
-The resolution is one route tick at each end of the window. The frontend's
-own output goes to stderr so it cannot land in the table.
+A game locked to the display (every frame two vblanks, like VoXide or
+NitroXide) spends its slack spinning in `wait_vblank`, `draw_sync` or a DMA
+poll, so `ticks` and `cycles` come out the same for a faster and a slower
+build. The second group subtracts the waiting. It covers everything from the
+start of the window's first tick to the stop (the first flip after poll `TO`):
+
+| key      | meaning |
+|----------|---------|
+| `work_cycles` | bus cycles spent outside wait loops: the number `choose` ranks by |
+| `work_instr` | instructions retired outside wait loops |
+| `wait_cycles` | cycles inside wait loops: their instructions plus the MMIO and RAM-load stalls charged to them |
+| `wait_share` | `wait_cycles` as a share of all cycles in that span |
+| `work_per_frame` | `work_cycles` over the frames presented in that span |
+
+Wait loops are found in the code itself, not by name, so psx-rt's waits, a
+game's own (Quake's `gpu_end_frame`, VoXide's `frame_present`, HL's `play`)
+and every PGO layout of either are covered by one rule: a small loop, closed
+by a backward branch or a `j`, with no store, call or GTE work in it, whose
+loads all read an address the loop never changes (LLVM would have hoisted a
+plain load, so these are volatile: a hardware register or a counter an
+interrupt writes), and whose branches depend only on those loads, on values
+fixed for the loop or on a spin counter. A loop that is a piece of a larger
+one, holds an inner loop, or branches on a register it carries round in any
+other way is work. The rule and its tests are in `src/work.rs`. Everything
+else is work, interrupt handlers included. Each wait loop above 0.1% of the
+span's instructions is listed on stderr, so a new game's first run can be
+checked against its source.
+
+This costs a second replay: the per-line logs can only start at a route tick,
+so a short first replay (to 30 polls past `FROM`) finds the tick in which
+poll `FROM` lands, and the full one logs every retired instruction per
+16-byte I-cache line (`--pc-line-log`) with the MMIO and RAM-load stalls per
+line, then dumps RAM for the code. `measure` stops if the two replays
+disagree at that tick. The frontend's own output goes to stderr so it cannot
+land in the table.
+
+Two approximations, both small next to the differences a variant makes:
+a line the loop touches counts as wait in full (the instructions sharing it
+run once per call, not once per iteration), and a wait loop's I-cache and
+other stalls stay in `work_cycles` (a spin loop stays cached). A guest that
+renders a different number of frames per build (NitroXide without a
+lockstep build drew 394 to 396 in the same polls) does more work for the
+extra frames; compare `work_per_frame` there too.
+
+On VoXide 895cb60 (lockstep, polls 252..1200 of both tapes), `measure` ranked
+the five variants of the hand-built loop-body harness (telemetry builds,
+`frame_present`'s waits excluded) in the same order on both tapes:
+
+| variant           | work cycles, train | loop body, train | work cycles, unseen | loop body, unseen |
+|-------------------|-------------------:|-----------------:|--------------------:|------------------:|
+| off               | 918,203,048        | 974,573          | 729,358,977         | 778,546           |
+| default           | +0.60%             | +0.65%           | +1.68%              | +1.87%            |
+| hot=500           | -0.28%             | -0.33%           | +0.33%              | +0.35%            |
+| hot=500+profi     | -2.35%             | -2.59%           | -2.50%              | -2.69%            |
+| accurate+hot=500  | -0.82%             | -0.86%           | -0.44%              | -0.42%            |
+
+`ticks` and `cycles` could not tell them apart on the training tape (1,913
+or 1,914 ticks each).
 
 ### What the knobs did on VoXide
 
@@ -284,6 +347,27 @@ after large changes, and whenever the game repins onto a different SDK.
     trampolines (2.8% on the bench, 0.2% on VoXide). The sample loader only
     annotates functions it compiles from IR; adding records for the assembly
     built a byte-identical exe.
+
+## Troubleshooting
+
+- **A profiled build loses, and it calls memcpy more.** With a profile, LLVM
+  optimises the code the profile calls cold for size (profile-guided size
+  optimisation, PGSO), and one thing it does there is turn fixed-size struct
+  copies into `memcpy` calls. On Cortex, under `accurate` (which calls
+  everything the profile never saw cold), that made 346 memcpy call sites
+  against 115 with no profile, for copies of 20 to 96 bytes. Only `nopgso`
+  (`-pgso=false`) took them back out; `-pgso-cold-code-only` and the PGSO
+  cutoff options changed nothing. Cortex's winner was
+  `accurate+nopgso+hot=1500` trained on gameplay polls: +1.9% fps, 1.2% fewer
+  work instructions and 15% fewer I-cache stalls. Count `jal` to memcpy in the
+  disassembly of the two builds before blaming the profile.
+- **`ticks` and `cycles` are the same for every variant.** The game is locked
+  to the display; rank by `work_cycles` (which `choose` does when the gate
+  prints it) and check `vblanks` for frames that got slower.
+- **`measure` reports a wait loop that is not one, or misses one.** Its
+  addresses are on stderr; look them up in the link map. The rule is in
+  `src/work.rs` with a test per pattern it accepts or rejects; add the new
+  shape there.
 
 ## Lower-level commands
 
