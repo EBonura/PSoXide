@@ -487,6 +487,104 @@ under `emu/crates/emulator-core` is editable in this tree.
     all three in their fast setting, so expect each flip to slow its workload
     rather than speed it up.
 
+## Performance-lever gates (cases `0xC8`-`0xD2`, records `137`-`13A`, v1.24)
+
+Three levers measured well headless and each rests on something only silicon
+can answer. The cases sit at the end of the conformance battery (indices
+200-210), so RUN ALL TESTS and FULL CHARACTERISATION both run them, and RESUME
+FROM TEST at 200 runs just these plus the timing scan. Code in
+`src/lever_probes.rs`. INFO values and passing observations travel only in the
+FULL CHARACTERISATION capture; a conformance capture carries a case's numbers
+only when it fails.
+
+**GTE vs IRQ** (gates psx-rt's handler under any IRQ-heavy present path).
+psx-rt's exception handler returns to EPC. psx-spx documents that an interrupt
+taken on a GTE command lets the command run and leaves EPC pointing at it, so
+returning to EPC runs it twice; its fix is to step EPC over a GTE command. The
+emulator never takes an interrupt in front of a GTE command
+(`should_take_interrupt`), so headless both variants are clean by construction.
+The probe loops `mtc2` x3 to SXY0-2 (sentinels outside RTPS's output range),
+RTPS, 20 nops, and reads SXY0: one RTPS leaves the old SXY1, two leave the old
+SXY2, none leaves SXY0. Timer 2 interrupts at 331, 457, 613 and 797 clocks
+(8192 iterations each) on top of VBlank, under a probe-owned handler that
+acknowledges, counts the interrupts whose EPC held a GTE command, and returns
+to EPC or EPC + 4.
+
+| Case | Status | Expected | Observed |
+|---|---|---|---|
+| `0xC8` return to EPC: exposure | INFO | interrupts taken | interrupts whose EPC held a GTE command |
+| `0xC9` return to EPC: RTPS intact | PASS if none corrupted | interrupts on a GTE command | doubled (bits 0-15), lost or unrecognised (16-31) |
+| `0xCA` skip GTE at EPC: exposure | INFO | interrupts taken | commands stepped over |
+| `0xCB` skip GTE at EPC: RTPS intact | PASS if none corrupted | commands stepped over | as `0xC9` |
+
+On silicon, `0xC9` failing with doubled close to its expected value says the
+hazard is real at that rate; `0xCB` passing with a non-zero expected says the
+fix works. `0xCB` failing with a non-zero high half says the command had not
+run when the handler skipped it, i.e. the fix loses commands.
+
+**Present queue** (gates quake-psx a29ca4d's `present-queue`). The prototype's
+VBlank handler, copied instruction for instruction and chained to psx-rt's the
+same way, runs 120 frames. Each frame's DMA chain sets its draw environment,
+clears its buffer, draws 0 to 19 screen-sized Gouraud triangles (so some frames
+outlast a VBlank and some edges find the GPU busy), a white bar that moves 16
+pixels a frame, a marker, and ends in GP0(1Fh). Three instrumentation steps are
+added to the handler: it counts edges, records GPUSTAT and Timer 1 when it
+decides to flip, and acknowledges the GPU interrupt before the kick so each
+chain's GP0(1Fh) raises GPUSTAT bit 24 afresh. A flip made while bit 24 is
+clear exposes a frame the GPU has not finished: the tear this lever must not
+cause.
+
+| Case | Status | Expected | Observed |
+|---|---|---|---|
+| `0xCC` frames kicked and drawn | PASS if all 120 kicked, no timeout, both markers read back | 120 | kicks (bits 0-15), timeouts (16-23), bad markers (24-31) |
+| `0xCD` bit 28 idle means drawn | PASS if no early flip | flips checked (119) | flips made before the previous chain's GP0(1Fh) |
+| `0xCE` flip lines after VBlank | INFO | largest Timer 1 value seen (lines a frame) | latest flip line (bits 0-15), earliest (16-31) |
+| `0xCF` busy edges skipped | INFO | VBlank edges seen | edges that found the GPU or channel 2 busy |
+
+Timer 1 runs from HBlank with sync mode 1 (reset at VBlank). `0xCE` is a
+measurement: where that reset sits relative to the VBlank IRQ differs between
+console models, and the emulator reads timers without catching them up (see
+"Timers" in [emulator-accuracy-from-silicon.md](emulator-accuracy-from-silicon.md)),
+so its value there is not a beam position. On silicon a spread of a few lines
+between earliest and latest says every flip landed at the same beam position.
+The moving bar is for the camera: a torn flip breaks it horizontally.
+
+**Scratchpad stack** (gates the SDK's `ScratchpadStack`, PSoXide 3e939cd54).
+The editor pins an SDK from before it, so psx-rt's trampoline is vendored
+(`__hwtest_call_on_stack`, without the panic bookkeeping). hello-spstack's
+workload (three call levels, each with an array in its frame, reading a
+256-byte table in the scratchpad) runs 32 rounds on the RAM stack, then 32 on
+a stack in scratchpad bytes 256-1024, each round after a different spin so the
+interrupts land at different points. Throughout both runs: Timer 2 interrupts
+every 1531 clocks plus VBlank (the GTE probe's handler, in skip mode; it uses
+only `$k0`/`$k1`), and between rounds a 2048-node linked list re-kicked on
+channel 2, a 4 KiB SPU upload re-kicked on channel 4 (sound RAM 0x60000), the
+SDK's SectorReader streaming the CDTEST region, and a pad poll. CD data moves
+by PIO, as SectorReader does since a1e95d30: chopping CD DMA on channel 3 can
+latch busy for good on the project console, which would take the timing scan's
+CD records with it, and no DMA channel can reach the scratchpad anyway.
+
+| Case | Status | Expected | Observed |
+|---|---|---|---|
+| `0xD0` checksum vs RAM stack | PASS if equal (and every round equal) | RAM-stack checksum | scratchpad-stack checksum |
+| `0xD1` IRQs taken, all intact | PASS if no flag and at least 64 interrupts on the stack | 64 | interrupts taken with `$sp` in the scratchpad (bits 0-14), deepest stack use in bytes (15-26), flags (27-31: table changed, region bottom word changed, `$sp` not restored, caller's RAM frame changed, an interrupt saw the scratchpad during the RAM run) |
+| `0xD2` background activity | INFO | 64 (rounds) | channel 2 kicks (bits 0-7), channel 4 kicks (8-15), CD sectors (16-23), pad polls (24-31), each saturating |
+
+Records `137`-`13A` time one `level2` call (16 `level3` calls) with Timer 2,
+inside the called function so both stacks run identical timed code: RAM stack,
+scratchpad stack, then both again while channel 2 walks the 2048-node empty
+list. Warm records `74`/`75` already price a bare RAM load against a
+scratchpad one (514 against 126 for 64 on the v1.23 console sweep, about six
+clocks a load). In the v1.24 build the timed call makes 515 stack loads and 899
+stack stores (31 loads and 55 stores per `level3`, counted from the
+disassembly, plus 19 of each in `level2`), so six clocks a load predicts about
+3,100 clocks between `137` and `138`.
+
+Emulator (frozen frontend, PSoXide-editor a03b8fa9): `137` 16,064, `138`
+12,556, `139` 16,065, `13A` 12,517. The emulator does not model RAM loads
+slowing during a linked-list DMA (record `FE`), so `139` equals `137` there;
+silicon is expected to differ.
+
 ## CD-DA contention (records `0x9B`-`0x9E`)
 
 The disc carries a synthetic CD-DA track (track 2, generated by

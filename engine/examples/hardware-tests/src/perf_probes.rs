@@ -306,6 +306,37 @@ const SHAPES: [Probe; 22] = [
     probe(0x136, 32, cached_call_pairs, Arg::EntryW0, Arg::EntryW1),
 ];
 
+/// v1.24: the scratchpad-stack lever (lever_probes.rs). One call of
+/// hello-spstack's `level2` (16 `level3` calls) on the RAM stack and on a
+/// scratchpad stack, idle and while channel 2 walks a 2048-node empty list.
+/// Warm records 0x74/0x75 already price a bare RAM load against a scratchpad
+/// one; these ask what that is worth to compiled code with spills and frame
+/// arrays.
+const LEVERS: [Probe; 4] = [
+    probe(0x137, 16, crate::lever_probes::level2_ram_stack, NONE, NONE),
+    probe(
+        0x138,
+        16,
+        crate::lever_probes::level2_scratchpad_stack,
+        NONE,
+        NONE,
+    ),
+    probe(
+        0x139,
+        16,
+        crate::lever_probes::level2_ram_stack_during_dma,
+        NONE,
+        NONE,
+    ),
+    probe(
+        0x13A,
+        16,
+        crate::lever_probes::level2_scratchpad_stack_during_dma,
+        NONE,
+        NONE,
+    ),
+];
+
 #[derive(Copy, Clone)]
 struct AbProbe {
     id: u16,
@@ -418,6 +449,7 @@ fn push_probes(table: &[Probe], records: &mut Records, next: &mut usize) {
 
 pub(crate) fn push_safe(records: &mut Records, next: &mut usize) {
     push_probes(&SAFE, records, next);
+    push_probes(&LEVERS, records, next);
 }
 
 pub(crate) fn push_extended(records: &mut Records, next: &mut usize) {
