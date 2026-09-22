@@ -466,7 +466,6 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     }
 
     #[inline(never)]
-
     unsafe fn play_map_loop_with_volume(&mut self, local_id: u8, owner: u16, gain: Volume) {
         let Some((addr, rate)) = self.map_sample(local_id) else {
             return;
