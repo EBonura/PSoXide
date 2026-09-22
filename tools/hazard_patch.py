@@ -32,7 +32,12 @@ instead, so it runs two instructions before the jump lands:
 and the load, so the load reads the same operands. The callee of the `jalr`
 returns into the trampoline, which jumps back to the original return address.
 A load that writes the jump register itself is refused, and `jr ra` loading
-ra is left alone (the caller never reads ra before restoring it).
+ra is left alone (the caller never reads ra before restoring it). So is a
+`jalr` slot load that reads the link register: the jalr writes it before its
+slot runs, so the load reads the new return address, and hoisted ahead of the
+jalr it would read the old one. A load reading the jump register is fine for
+both shapes, since neither jump writes it. The other shapes keep the load in
+its slot after the same (or, for `jal`, an identically linking) instruction.
 
 The trampolines live in a `.data` array the guest declares:
 
@@ -377,6 +382,11 @@ def main():
             link_reg = parts[0] if op == "jalr" and len(parts) == 2 else "ra"
             if rd == jump_reg or (op == "jalr" and rd == link_reg):
                 print("cannot patch %08x: the slot load writes the jump or link register (%s)" % (addr, rd))
+                return 1
+            if op == "jalr" and reads(slot_op, slot_args, link_reg):
+                print("cannot patch %08x: the slot load reads the link register (%s), which jalr "
+                      "writes before its slot runs; hoisted ahead of the jalr it would read the old value"
+                      % (addr, link_reg))
                 return 1
             words = [word_at(addr + 4), word_at(addr), nop]
             if op == "jalr":
