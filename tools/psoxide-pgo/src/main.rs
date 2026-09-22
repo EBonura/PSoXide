@@ -29,13 +29,19 @@
 //!   with the same features and profile settings. Adding
 //!   `-Zprofile-sample-use` does not change the disambiguators, so the ELF
 //!   from step 1 in that checkout serves.
+//!
+//! Games do not run these steps by hand: `collect`, `apply` and `choose`
+//! (pipeline.rs) drive the whole build. See README.md.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fs};
+
+mod pipeline;
 
 use gimli::{AttributeValue, DebuggingInformationEntry, EndianSlice, RunTimeEndian, UnitOffset};
 use object::{Object, ObjectSection, ObjectSymbol};
@@ -453,7 +459,35 @@ fn dwarf_units<'a>(dwarf: &Dwarf<'a>) -> Result<Vec<Unit<'a>>> {
     Ok(units)
 }
 
-fn run(elf_path: &str, pc_path: &str, out_path: &str) -> Result<()> {
+/// Sum PC histograms from several replays, keeping first-seen order.
+fn read_histograms(paths: &[PathBuf]) -> Result<Vec<(u64, u64)>> {
+    let mut samples: Vec<(u64, u64)> = Vec::new();
+    let mut index: HashMap<u64, usize> = HashMap::new();
+    for path in paths {
+        let text =
+            fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        for record in text.lines().skip(1) {
+            let mut fields = record.split(',');
+            let (Some(pc), Some(count)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let Ok(pc) = u64::from_str_radix(pc.trim().trim_start_matches("0x"), 16) else {
+                continue;
+            };
+            let Ok(count) = count.trim().parse::<u64>() else {
+                continue;
+            };
+            let slot = *index.entry(pc).or_insert_with(|| {
+                samples.push((pc, 0));
+                samples.len() - 1
+            });
+            samples[slot].1 += count;
+        }
+    }
+    Ok(samples)
+}
+
+fn convert(elf_path: &Path, pc_paths: &[PathBuf], out_path: &Path) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
     let (sections, endian) = dwarf_sections(&object)?;
@@ -489,18 +523,11 @@ fn run(elf_path: &str, pc_path: &str, out_path: &str) -> Result<()> {
         .filter_map(|symbol| Some((symbol.address(), symbol.size(), symbol.name().ok()?)))
         .collect();
     elf_symbols.sort_unstable();
-    for record in fs::read_to_string(pc_path)?.lines().skip(1) {
-        let mut fields = record.split(',');
-        let (Some(pc), Some(count)) = (fields.next(), fields.next()) else {
-            continue;
-        };
-        let Ok(pc) = u64::from_str_radix(pc.trim().trim_start_matches("0x"), 16) else {
-            continue;
-        };
-        let Ok(count) = count.trim().parse::<u64>() else {
-            continue;
-        };
-
+    let histogram = read_histograms(pc_paths)?;
+    if histogram.is_empty() {
+        return Err("the PC sample logs hold no samples".into());
+    }
+    for (pc, count) in histogram {
         let top = match flat_lo.partition_point(|&lo| lo <= pc).checked_sub(1) {
             Some(index) if pc < flat[index].1 => Some(&tops[flat[index].2]),
             _ => None,
@@ -684,7 +711,7 @@ fn rename_profile(text: &str, mut rename: impl FnMut(&str) -> Result<String>) ->
     Ok(out)
 }
 
-fn portable(in_path: &str, out_path: &str) -> Result<()> {
+fn portable(in_path: &Path, out_path: &Path) -> Result<()> {
     let text = fs::read_to_string(in_path)?;
     fs::write(
         out_path,
@@ -695,14 +722,18 @@ fn portable(in_path: &str, out_path: &str) -> Result<()> {
 
 /// Map a profile's names, portable or from another checkout, onto the
 /// symbols of `elf_path`, which must carry DWARF for its inlined functions.
-fn rebind(in_path: &str, elf_path: &str, out_path: &str) -> Result<()> {
+fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
     let data = fs::read(elf_path)?;
     let object = object::File::parse(&*data)?;
     let (sections, endian) = dwarf_sections(&object)?;
     let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
     let units = dwarf_units(&dwarf)?;
     if units.is_empty() {
-        return Err(format!("{elf_path} has no DWARF; build it with -Cdebuginfo=1").into());
+        return Err(format!(
+            "{} has no DWARF; build it with -Cdebuginfo=1",
+            elf_path.display()
+        )
+        .into());
     }
 
     // Portable name -> this build's symbol, or None when two symbols share
@@ -769,25 +800,33 @@ fn rebind(in_path: &str, elf_path: &str, out_path: &str) -> Result<()> {
     })?;
     println!("rebound {bound}  missing {missing}  ambiguous {ambiguous}  non-Rust kept {kept}");
     if bound == 0 && missing + ambiguous > 0 {
-        return Err(format!("no profile name matched a symbol in {elf_path}").into());
+        return Err(format!("no profile name matched a symbol in {}", elf_path.display()).into());
     }
     fs::write(out_path, rebound)?;
     Ok(())
 }
 
-const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv> <out.prof>
+const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
        psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>";
 
+const MODES: [&str; 5] = ["portable", "rebind", "collect", "apply", "choose"];
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let result = match args.as_slice() {
-        ["portable", input, output] => portable(input, output),
-        ["rebind", input, elf, output] => rebind(input, elf, output),
-        [elf, pc, output] if !["portable", "rebind"].contains(elf) => run(elf, pc, output),
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = match words.as_slice() {
+        [mode @ ("collect" | "apply" | "choose"), ..] => pipeline::main(mode, &args[1..]),
+        ["portable", input, output] => portable(Path::new(input), Path::new(output)),
+        ["rebind", input, elf, output] => {
+            rebind(Path::new(input), Path::new(elf), Path::new(output))
+        }
+        [elf, pcs @ .., output] if !pcs.is_empty() && !MODES.contains(elf) => {
+            let pcs: Vec<PathBuf> = pcs.iter().map(PathBuf::from).collect();
+            convert(Path::new(elf), &pcs, Path::new(output))
+        }
         _ => {
-            eprintln!("{USAGE}");
+            eprintln!("{USAGE}\n{}", pipeline::USAGE);
             return ExitCode::from(2);
         }
     };
