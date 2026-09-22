@@ -66,7 +66,7 @@ pub fn touches_mount_assist(
 /// made an intentional mount, so an upper-half tolerance cannot accidentally
 /// grab somebody walking across the landing. The thin/normal axis is never
 /// widened, and the strict vertical exit plane still releases a normal topout.
-#[inline]
+#[inline(always)] // a plain hint let LTO outline it from HL's player tick
 pub fn touches_attached(pos: [i32; 3], center: [i32; 3], half: [i32; 3]) -> bool {
     let dx = (pos[0] - center[0]).abs();
     let dz = (pos[2] - center[2]).abs();
