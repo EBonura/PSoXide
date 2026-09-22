@@ -294,6 +294,48 @@ class HazardToolTests(unittest.TestCase):
         self.assert_fixed(image, "s0")
         self.assertEqual(run(self.path)[REG["s1"]], 7)
 
+    def test_register_call_slot_load_reading_the_jump_register(self):
+        # jalr reads t9 and writes only ra, so a slot load based on t9 reads
+        # the same address whether it runs in the slot or ahead of the jalr.
+        image = Image()
+        callee = image.addr(0x100)
+        image.put(0, lui("t9", callee >> 16), ori("t9", "t9", callee & 0xFFFF),
+                  jalr("t9"), lw("a0", Image.DATA - 0x100, "t9"), addiu("s1", "zero", 7), BREAK)
+        image.put(0x100, addu("s0", "a0", "zero"), jr("ra"), NOP)
+        self.assert_fixed(image, "s0")
+        self.assertEqual(run(self.path)[REG["s1"]], 7)
+
+    def test_register_call_slot_load_reading_the_link_register_is_refused(self):
+        # jalr writes ra before its delay slot runs, so `lw a0, X(ra)` there
+        # reads through the NEW return address. Hoisted into a trampoline
+        # ahead of the jalr it would read through the old ra instead.
+        image = Image()
+        callee, old_ra = image.addr(0x100), image.addr(0x40)
+        offset = Image.DATA - 0x18  # the jalr is at 0x10, so the new ra is +0x18
+        image.put(0, lui("t9", callee >> 16), ori("t9", "t9", callee & 0xFFFF),
+                  lui("ra", old_ra >> 16), ori("ra", "ra", old_ra & 0xFFFF),
+                  jalr("t9"), lw("a0", offset, "ra"), addu("s1", "a0", "zero"), BREAK)
+        image.put(0x100, addu("s0", "a0", "zero"), jr("ra"), NOP)
+        image.put(0x40 + offset, 0x0BAD)  # what the old ra would lead to
+        image.write(self.path)
+        self.assertEqual(len(self.scan()), 1)
+        regs = run(self.path)
+        self.assertNotEqual(regs[REG["s0"]], VALUE, "fixture does not expose the hazard")
+        self.assertEqual(regs[REG["s1"]], VALUE)
+        before = Path(self.path).read_bytes()
+        result = self.patch()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("reads the link register (ra)", result.stdout)
+        self.assertEqual(Path(self.path).read_bytes(), before)
+        # Why: the trampoline the patcher would otherwise build fetches the
+        # other word, because the load now runs before the jalr links.
+        tramp = image.addr(Image.TRAMPOLINES + 8)
+        image.put(0x10, j(tramp), NOP)
+        image.put(Image.TRAMPOLINES + 8, lw("a0", offset, "ra"), jalr("t9"), NOP,
+                  j(image.addr(0x18)), NOP)
+        image.write(self.path)
+        self.assertEqual(run(self.path)[REG["s1"]], 0x0BAD)
+
     def test_clean_shapes_are_not_reported(self):
         image = Image()
         data = image.addr(Image.DATA)
