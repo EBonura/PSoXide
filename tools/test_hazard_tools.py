@@ -6,7 +6,7 @@ small R3000 interpreter that delivers a load one instruction late, and checks
 three things: the scanner and `hazard_patch.py --check` both report it, the
 unpatched program reads the stale register, and after patching the rescan is
 clean and the program reads the loaded value. The last check matters most:
-the scanner and patcher share one detector (hazard_detect.py) and so its
+the scanner and patcher share one detector (in hazard_patch.py) and so its
 blind spots, and "0 hazards" alone would not have caught either past gap
 (branch operands, 2026-09-04; `jr ra` returns, 2026-09-22). Every scan also
 checks that the scanner and `hazard_patch.py --check` name the same sites, so
