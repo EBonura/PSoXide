@@ -45,6 +45,7 @@ dependencies = [
  "psx-gpu",
  "psx-gte",
  "psx-math",
+ "psx-pack",
 ]
 
 [[package]]
@@ -146,6 +147,13 @@ name = "psx-mc"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
+ "psx-io",
+]
+
+[[package]]
+name = "psx-pack"
+version = "0.1.0"
+dependencies = [
  "psx-io",
 ]
 
