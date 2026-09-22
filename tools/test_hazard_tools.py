@@ -6,9 +6,11 @@ small R3000 interpreter that delivers a load one instruction late, and checks
 three things: the scanner and `hazard_patch.py --check` both report it, the
 unpatched program reads the stale register, and after patching the rescan is
 clean and the program reads the loaded value. The last check matters most:
-the scanner and patcher share their blind spots, so "0 hazards" alone would
-not have caught either past gap (branch operands, 2026-09-04; `jr ra`
-returns, 2026-09-22).
+the scanner and patcher share one detector (hazard_detect.py) and so its
+blind spots, and "0 hazards" alone would not have caught either past gap
+(branch operands, 2026-09-04; `jr ra` returns, 2026-09-22). Every scan also
+checks that the scanner and `hazard_patch.py --check` name the same sites, so
+a filter added to one CLI cannot make them drift apart again.
 
 Needs a MIPS objdump: OBJDUMP, mipsel-none-elf-objdump or
 mipsel-linux-gnu-objdump.
@@ -16,6 +18,7 @@ mipsel-linux-gnu-objdump.
 import importlib.util
 import io
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -160,6 +163,20 @@ def run(path, limit=500):
     raise AssertionError("fixture program did not reach break")
 
 
+def scanner_site(line):
+    """(branch, consumer) from `hazard_scan.py`: `B: op | slot .. | C: op`,
+    with no consumer address for a register jump that leaves the image."""
+    m = re.match(r"([0-9a-f]{8}): .* \| slot .* \| (?:([0-9a-f]{8}): )?", line)
+    return m.group(1), m.group(2)
+
+
+def patcher_site(line):
+    """(branch, consumer) from `hazard_patch.py --check`: `hazard B: op |
+    slot .. | consumer C`."""
+    m = re.match(r"hazard ([0-9a-f]{8}): .* \| slot .* \| consumer (?:([0-9a-f]{8})\b)?", line)
+    return m.group(1), m.group(2)
+
+
 @unittest.skipUnless(os.environ.get("OBJDUMP") and shutil.which(os.environ["OBJDUMP"]),
                      "no MIPS objdump")
 class HazardToolTests(unittest.TestCase):
@@ -171,8 +188,17 @@ class HazardToolTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def scan(self):
+        """The scanner's report, after checking that `hazard_patch.py
+        --check` names the same (branch, consumer) sites on this image."""
         with redirect_stdout(io.StringIO()):
-            return scanner.scan(self.path)
+            hazards = scanner.scan(self.path)
+        scanned = sorted(scanner_site(line) for line in hazards)
+        check = self.patch("--check")
+        self.assertEqual(check.returncode, 1 if hazards else 0, check.stdout)
+        checked = sorted(patcher_site(line) for line in check.stdout.splitlines()
+                         if line.startswith("hazard "))
+        self.assertEqual(scanned, checked, check.stdout)
+        return hazards
 
     def patch(self, *args):
         return subprocess.run([sys.executable, str(TOOLS / "hazard_patch.py"), self.path, *args],
@@ -280,6 +306,44 @@ class HazardToolTests(unittest.TestCase):
         image.write(self.path)
         self.assertEqual(self.scan(), [])
         self.assertEqual(self.patch("--check").returncode, 0)
+
+    def test_scanner_and_patcher_name_the_same_sites(self):
+        # Several shapes in one image, including a conditional whose load is
+        # read on both paths (two sites at one branch). scan() fails if the
+        # two CLIs disagree on any of them.
+        image = Image()
+        data = image.addr(Image.DATA)
+        image.put(0x100, lui("at", hi(data)), jr("ra"), lbu("v0", lo(data), "at"))
+        image.put(0x200, lui("t0", hi(data)), beq("zero", "zero", 2), lw("a1", lo(data), "t0"),
+                  addu("s0", "a1", "zero"), addu("s1", "a1", "zero"), jr("ra"), NOP)
+        image.put(0x300, lui("t0", hi(data)), jalr("t9"), lw("a0", lo(data), "t0"), jr("ra"), NOP)
+        image.write(self.path)
+        sites = sorted(scanner_site(line) for line in self.scan())
+        self.assertEqual(sites, sorted([
+            ("%08x" % image.addr(0x104), None),
+            ("%08x" % image.addr(0x204), "%08x" % image.addr(0x20C)),
+            ("%08x" % image.addr(0x204), "%08x" % image.addr(0x210)),
+            ("%08x" % image.addr(0x304), None),
+        ]))
+
+    def test_module_callers_can_replace_the_data_guard(self):
+        # Games load hazard_scan.py as a module and replace looks_like_code
+        # so proven .text is never skipped as data (alttp-psx, hk-psx). The
+        # replacement has to reach the shared detector.
+        image = Image()
+        data = image.addr(Image.DATA)
+        self.caller(image, 0x100)
+        image.put(0x100, lui("at", hi(data)), jr("ra"), lbu("v0", lo(data), "at"))
+        image.put(0x120, 0xFFFFFFFF)  # decodes as `.word`, inside the 16-word guard
+        image.write(self.path)
+        guard = scanner.looks_like_code
+        try:
+            self.assertEqual(self.scan(), [])
+            scanner.looks_like_code = lambda *args, **kwargs: True
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(len(scanner.scan(self.path)), 1)
+        finally:
+            scanner.looks_like_code = guard
 
     def test_second_pass_keeps_earlier_trampolines(self):
         # Every trampoline contains nops, so a second pass must not take the
