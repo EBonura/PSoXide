@@ -55,7 +55,7 @@ pub const USAGE: &str = "\
                            [--launch-arg ARG]... [--name NAME]
   GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH]
   CARGO-ARGS: what follows `cargo` in the guest's own build, starting with `build`
-  V: off | default | accurate | hot=N, joined with + (accurate+hot=1000)
+  V: off | default | accurate | noreplay | nopgso | hot=N | llvm=-FLAG, joined with +
   A..B: the gameplay window in port-1 polls, loads excluded";
 
 /// How to build one guest, shared by every mode.
@@ -214,18 +214,66 @@ fn variant_flags(variant: &str) -> Result<Option<Vec<String>>> {
     }
     let mut flags = Vec::new();
     for part in variant.split('+') {
+        let llvm = |flag: &str| format!("-Cllvm-args={flag}");
         match part {
             "default" => {}
-            "accurate" => flags.push("-Cllvm-args=-profile-sample-accurate".to_string()),
-            _ => match part.strip_prefix("hot=").map(str::parse::<u32>) {
-                Some(Ok(threshold)) => {
-                    flags.push(format!("-Cllvm-args=-hot-callsite-threshold={threshold}"))
+            "accurate" => flags.push(llvm("-profile-sample-accurate")),
+            // Do not replay the profiled build's inlining; the inlinees'
+            // samples merge into their own functions instead.
+            "noreplay" => flags.push(llvm("-disable-sample-loader-inlining")),
+            // Do not optimise profile-cold code for size (which turns
+            // struct copies into memcpy calls, among other things).
+            "nopgso" => flags.push(llvm("-pgso=false")),
+            _ => {
+                if let Some(threshold) = part.strip_prefix("hot=") {
+                    let threshold: u32 = threshold
+                        .parse()
+                        .map_err(|_| format!("hot= wants a number, not {threshold:?}"))?;
+                    flags.push(llvm(&format!("-hot-callsite-threshold={threshold}")));
+                } else if let Some(flag) = part.strip_prefix("llvm=").filter(|f| f.starts_with('-'))
+                {
+                    flags.push(llvm(flag));
+                } else {
+                    return Err(format!("unknown variant part {part:?}").into());
                 }
-                _ => return Err(format!("unknown variant part {part:?}").into()),
-            },
+            }
         }
     }
     Ok(Some(flags))
+}
+
+/// First line of a profile written by `collect`: the cargo features it was
+/// trained with. LLVM skips `#` lines.
+const FEATURES_TAG: &str = "# psoxide-pgo features: ";
+
+/// The cargo features `args` select, normalised so equal sets compare equal.
+fn features_of(args: &[String]) -> String {
+    let mut features = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let list = match arg.as_str() {
+            "--features" | "-F" => iter.next().map(String::as_str),
+            "--all-features" | "--no-default-features" => {
+                features.push(arg.trim_start_matches('-').to_string());
+                None
+            }
+            _ => arg.strip_prefix("--features="),
+        };
+        if let Some(list) = list {
+            features.extend(
+                list.split([',', ' '])
+                    .filter(|f| !f.is_empty())
+                    .map(String::from),
+            );
+        }
+    }
+    features.sort();
+    features.dedup();
+    if features.is_empty() {
+        "(default)".to_string()
+    } else {
+        features.join(",")
+    }
 }
 
 /// A TOML basic string.
@@ -576,12 +624,32 @@ fn measure(options: &Options) -> Result<()> {
     let polls = spec.polls.expect("checked above");
     let log = env::temp_dir().join(format!("psoxide-pgo-route-{}.csv", std::process::id()));
     let mut command = launch(frontend, image, spec, &options.launch_args);
-    // Keep the frontend's own `key=value` chatter out of the gate's output.
-    command
-        .arg("--route-log")
-        .arg(&log)
-        .stdout(std::io::stderr());
-    let replayed = run(&mut command, "measuring replay");
+    if !options.launch_args.iter().any(|arg| arg == "--dump-hash") {
+        command.arg("--dump-hash");
+    }
+    command.arg("--route-log").arg(&log).stdout(Stdio::piped());
+    // The frontend's own `key=value` chatter goes to stderr, out of the
+    // gate's table; only the final hashes are kept from it.
+    let mut hashes = Vec::new();
+    let replayed = (|| -> Result<()> {
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().expect("stdout is piped");
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            eprintln!("{line}");
+            for (tag, key) in [("vram_fnv1a_64=", "vram"), ("display_fnv1a_64=", "display")] {
+                if let Some(value) = line.strip_prefix(tag) {
+                    let value = value.split_whitespace().next().unwrap_or_default();
+                    hashes.push((key, value.to_string()));
+                }
+            }
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            return Err(format!("measuring replay failed ({status})").into());
+        }
+        Ok(())
+    })();
     let ticks = replayed.and_then(|()| read_route_log(&log));
     let _ = fs::remove_file(&log);
     let ticks = ticks?;
@@ -606,6 +674,11 @@ fn measure(options: &Options) -> Result<()> {
         "{name}.icache={}",
         window.iter().map(|tick| tick.icache).sum::<u64>()
     );
+    // Final-state hashes at the stop poll: equal across builds only for a
+    // guest whose simulation does not depend on its own speed.
+    for (key, value) in hashes {
+        println!("{name}.{key}={value}");
+    }
     Ok(())
 }
 
@@ -682,7 +755,15 @@ fn collect(guest: &Guest, options: &Options) -> Result<()> {
     let converted = replayed.and_then(|()| {
         let raw = work.join("raw.prof");
         crate::convert(&elf, &logs, &raw)?;
-        crate::portable(&raw, out)
+        crate::portable(&raw, out)?;
+        // Symbol names hold no features once portable, but the code they
+        // describe does: record them so `apply` can warn on a mismatch.
+        let profile = fs::read_to_string(out)?;
+        fs::write(
+            out,
+            format!("{FEATURES_TAG}{}\n{profile}", features_of(&guest.cargo)),
+        )?;
+        Ok(())
     });
     // The logs are only an intermediate; the profile carries what matters.
     for log in &logs {
@@ -703,6 +784,20 @@ fn apply(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result<PathBuf
     let profile = profile.ok_or("a profiled variant needs --profile")?;
     if !profile.is_file() {
         return Err(format!("no profile at {}", profile.display()).into());
+    }
+    let trained = fs::read_to_string(profile)?
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix(FEATURES_TAG))
+        .map(str::to_string);
+    let building = features_of(&guest.cargo);
+    if let Some(trained) = trained.filter(|trained| *trained != building) {
+        eprintln!(
+            "psoxide-pgo: warning: {} was trained with features {trained} and this build \
+             uses {building}. Names still bind, but code that differs between the two gets \
+             the other build's counts or none; keep one profile per shipped feature set.",
+            profile.display()
+        );
     }
     let elf = guest.build_twin()?;
     let rebound = elf.with_extension("rebound.prof");
@@ -799,7 +894,18 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
     let mut rows = Vec::new();
     for variant in &variants {
         println!("psoxide-pgo: building variant {variant}");
-        let exe = apply(guest, options.profile.as_deref(), variant)?;
+        let exe = match apply(guest, options.profile.as_deref(), variant) {
+            Ok(exe) => exe,
+            Err(error) => {
+                eprintln!("psoxide-pgo: variant {variant} did not build: {error}");
+                rows.push(GateRow {
+                    variant: variant.clone(),
+                    passed: false,
+                    values: vec![("build".to_string(), "failed".to_string())],
+                });
+                continue;
+            }
+        };
         let disc = guest.work_dir(&exe)?.join("choose.bin");
         let image = match &options.pack {
             Some(command) => Some(pack(command, &exe, &disc)?),
@@ -853,8 +959,43 @@ mod tests {
                 "-Cllvm-args=-hot-callsite-threshold=1000".to_string(),
             ])
         );
+        assert_eq!(
+            variant_flags("noreplay+nopgso+llvm=-sample-profile-inline-size").unwrap(),
+            Some(vec![
+                "-Cllvm-args=-disable-sample-loader-inlining".to_string(),
+                "-Cllvm-args=-pgso=false".to_string(),
+                "-Cllvm-args=-sample-profile-inline-size".to_string(),
+            ])
+        );
         assert!(variant_flags("hot=lots").is_err());
+        assert!(variant_flags("llvm=pgso").is_err());
         assert!(variant_flags("fast").is_err());
+    }
+
+    #[test]
+    fn features_normalise_across_spellings() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(features_of(&args(&["build", "--release"])), "(default)");
+        assert_eq!(
+            features_of(&args(&[
+                "build",
+                "--features",
+                "b a",
+                "-F",
+                "c",
+                "--features=a"
+            ])),
+            "a,b,c"
+        );
+        assert_eq!(
+            features_of(&args(&[
+                "build",
+                "--no-default-features",
+                "--features",
+                "x,y"
+            ])),
+            "no-default-features,x,y"
+        );
     }
 
     #[test]
