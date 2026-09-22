@@ -74,6 +74,7 @@ version = "0.1.0"
 dependencies = [
  "gimli",
  "object",
+ "rustc-demangle",
 ]
 
 [[package]]
@@ -107,6 +108,12 @@ checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "rustc-demangle"
+version = "0.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "serde"
