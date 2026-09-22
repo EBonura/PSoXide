@@ -336,8 +336,23 @@ fn line_rows(units: &[Unit<'_>]) -> Result<Vec<(u64, u64, u32, bool)>> {
             ));
         }
     }
-    rows.sort_by_key(|row| (row.0, row.3));
+    sort_rows(&mut rows);
     Ok(rows)
+}
+
+/// Order rows by address, and at one address put end-of-sequence rows
+/// first. A function whose code directly follows another's starts at the
+/// address where the previous sequence ends; with the end row last, every
+/// sample at a function's first instruction (its head) read as unmapped.
+fn sort_rows(rows: &mut [(u64, u64, u32, bool)]) {
+    rows.sort_by_key(|row| (row.0, !row.3));
+}
+
+/// The row covering `pc`: the last one at or below it, unless that one
+/// ends a sequence.
+fn row_at(rows: &[(u64, u64, u32, bool)], pc: u64) -> Option<(u64, u64, u32, bool)> {
+    let index = rows.partition_point(|row| row.0 <= pc).checked_sub(1)?;
+    Some(rows[index]).filter(|row| !row.3)
 }
 
 fn contains(ranges: &[(u64, u64)], pc: u64) -> bool {
@@ -378,7 +393,6 @@ fn run(elf_path: &str, pc_path: &str, out_path: &str) -> Result<()> {
     let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
     let units = dwarf_units(&dwarf)?;
     let rows = line_rows(&units)?;
-    let row_addresses: Vec<u64> = rows.iter().map(|row| row.0).collect();
 
     let mut symbols = Symbols {
         dwarf: &dwarf,
@@ -417,13 +431,7 @@ fn run(elf_path: &str, pc_path: &str, out_path: &str) -> Result<()> {
             Some(index) if pc < flat[index].1 => Some(&tops[flat[index].2]),
             _ => None,
         };
-        let row = match row_addresses
-            .partition_point(|&address| address <= pc)
-            .checked_sub(1)
-        {
-            Some(index) if !rows[index].3 => Some(rows[index]),
-            _ => None,
-        };
+        let row = row_at(&rows, pc);
         let (Some(top), Some((_, line, discriminator, _))) = (top, row) else {
             unmapped += count;
             continue;
@@ -791,6 +799,24 @@ mod tests {
     fn two_records_with_one_portable_name_are_refused() {
         let profile = format!("{STEP_A}:1:0\n 1: 1\n{STEP_B}:1:0\n 1: 1\n");
         assert!(rename_profile(&profile, |name| Ok(portable_name(name).into_owned())).is_err());
+    }
+
+    #[test]
+    fn a_function_head_is_covered_by_its_own_sequence() {
+        // Sequence one covers 0x100..0x110 and ends where sequence two,
+        // the next function, begins; both rows sit at 0x110.
+        let mut rows = vec![
+            (0x110, 7, 0, false),
+            (0x120, 0, 0, true),
+            (0x100, 3, 0, false),
+            (0x110, 0, 0, true),
+        ];
+        sort_rows(&mut rows);
+        assert_eq!(row_at(&rows, 0x10c).map(|row| row.1), Some(3));
+        assert_eq!(row_at(&rows, 0x110).map(|row| row.1), Some(7));
+        assert_eq!(row_at(&rows, 0x11c).map(|row| row.1), Some(7));
+        assert_eq!(row_at(&rows, 0x120), None);
+        assert_eq!(row_at(&rows, 0xfc), None);
     }
 
     #[test]
