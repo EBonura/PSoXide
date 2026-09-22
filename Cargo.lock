@@ -75,6 +75,7 @@ dependencies = [
  "gimli",
  "object",
  "rustc-demangle",
+ "serde_json",
 ]
 
 [[package]]

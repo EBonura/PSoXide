@@ -9,6 +9,7 @@ description = "Turn an emulator PC histogram into an LLVM sample profile for a P
 gimli  = { version = "0.34", default-features = false, features = ["read", "std"] }
 object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
 rustc-demangle = "0.1"
+serde_json = { workspace = true }
 
 [[bin]]
 name = "psoxide-pgo"
