@@ -10,4 +10,13 @@ psx-sfx = { path = "../../../sdk/crates/psx-sfx" }
 psx-spu = { path = "../../../sdk/crates/psx-spu" }
 psx-pack = { path = "../../../sdk/crates/psx-pack" }
 psx-io = { path = "../../../sdk/crates/psx-io" }
+psx-math = { path = "../../../sdk/crates/psx-math" }
+psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
 psx-engine = { path = "../psx-engine" }
+
+[features]
+# `telemetry` writes PSoXide's guest event ports only when a port enables one of
+# these through its own feature of the same name; otherwise every hook compiles
+# to nothing.
+emulator-telemetry = []
+performance-telemetry = []

@@ -151,9 +151,11 @@ dependencies = [
  "psx-asset",
  "psx-engine",
  "psx-io",
+ "psx-math",
  "psx-pack",
  "psx-sfx",
  "psx-spu",
+ "psx-telemetry",
 ]
 
 [[package]]
