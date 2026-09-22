@@ -1953,12 +1953,16 @@ pub struct LevelModelClipBoundsRecord {
 /// before instance yaw and world translation. `radius` is in engine
 /// world units and intentionally conservative so culling never clips
 /// a visible animated limb.
+///
+/// Stored as `i16` because the table has one record per cooked frame
+/// (1,914 in Cortex Tech Demo 0.4b, 30.6 KB as `i32`) and every value is a
+/// model-sized distance; the cooker rejects anything outside `i16`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelModelFrameBoundsRecord {
     /// Model-local center in engine world units.
-    pub center: [i32; 3],
+    pub center: [i16; 3],
     /// Conservative sphere radius in engine world units.
-    pub radius: i32,
+    pub radius: i16,
 }
 
 /// One cooked PSX model: `.psxmdl` mesh, optional `.psxt`

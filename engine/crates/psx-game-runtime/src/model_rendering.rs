@@ -2588,9 +2588,9 @@ fn model_world_bounds(
 ) -> (WorldVertex, i32) {
     let center = rotate_bounds_center(
         rotation,
-        scaled_bounds_center(bounds.center, visual_scale_q8),
+        scaled_bounds_center(bounds.center.map(i32::from), visual_scale_q8),
     );
-    let radius = scale_model_bounds_radius(bounds.radius, visual_scale_q8);
+    let radius = scale_model_bounds_radius(i32::from(bounds.radius), visual_scale_q8);
     (
         WorldVertex::new(
             origin.x.saturating_add(center[0]),
