@@ -14,7 +14,7 @@ enum Event {
     Invalidate,
     Hook(usize, usize),
     Value(String),
-    Output(u32),
+    Output(Vec<u8>),
 }
 #[derive(Clone, Default)]
 struct Fault {
@@ -37,7 +37,7 @@ fn event(e: Event) {
 }
 fn output(d: &[u32]) {
     let bytes = unsafe { std::slice::from_raw_parts(d.as_ptr().cast::<u8>(), d.len() * 4) };
-    event(Event::Output(psx_pack::fnv1a32(bytes)));
+    event(Event::Output(bytes.to_vec()));
 }
 fn value<T: std::fmt::Debug>(x: T) {
     event(Event::Value(format!("{x:?}")));
@@ -146,22 +146,27 @@ pub mod fake {
     }
 }
 impl shared::ChunkReader for fake::Reader {
-    fn prepare(&mut self) -> bool {
+    unsafe fn prepare(&mut self) -> bool {
         self.prepare()
     }
-    fn start_read(&mut self, lba: u32) -> bool {
+    unsafe fn start_read(&mut self, lba: u32) -> bool {
         self.start_read(lba)
     }
-    fn read_sector(&mut self, dst: &mut [u32; 512]) -> bool {
+    unsafe fn read_sector(&mut self, dst: &mut [u32; 512]) -> bool {
         self.read_sector(dst)
     }
-    fn stop(&mut self) {
+    unsafe fn stop(&mut self) {
         self.stop()
     }
-    fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError> {
+    unsafe fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError> {
         fake::ready()
     }
-    fn find_entry(&mut self, l: u32, id: u32, s: &mut [u32; 512]) -> Option<psx_pack::PackEntry> {
+    unsafe fn find_entry(
+        &mut self,
+        l: u32,
+        id: u32,
+        s: &mut [u32; 512],
+    ) -> Option<psx_pack::PackEntry> {
         fake::find_entry(self, l, id, s)
     }
 }

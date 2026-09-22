@@ -31,12 +31,25 @@ pub unsafe trait PacketArena {
 /// Statically dispatched sector transport. Implementations preserve command and
 /// acknowledgement ordering; readiness must leave a ready sector pending.
 pub trait ChunkReader {
-    fn prepare(&mut self) -> bool;
-    fn start_read(&mut self, lba: u32) -> bool;
-    fn read_sector(&mut self, dst: &mut [u32; SECTOR_WORDS]) -> bool;
-    fn stop(&mut self);
-    fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError>;
-    fn find_entry(
+    // Each operation requires exclusive, serialized transport ownership.
+    /// # Safety
+    /// Caller exclusively owns the transport and serializes all CD operations.
+    unsafe fn prepare(&mut self) -> bool;
+    /// # Safety
+    /// Caller exclusively owns the transport and serializes all CD operations.
+    unsafe fn start_read(&mut self, lba: u32) -> bool;
+    /// # Safety
+    /// Caller exclusively owns the transport and serializes all CD operations.
+    unsafe fn read_sector(&mut self, dst: &mut [u32; SECTOR_WORDS]) -> bool;
+    /// # Safety
+    /// Caller exclusively owns the transport and serializes all CD operations.
+    unsafe fn stop(&mut self);
+    /// # Safety
+    /// Caller exclusively owns the transport and serializes all CD operations.
+    unsafe fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError>;
+    /// # Safety
+    /// Caller exclusively owns the transport and serializes all CD operations.
+    unsafe fn find_entry(
         &mut self,
         pack_lba: u32,
         id: u32,
@@ -46,27 +59,27 @@ pub trait ChunkReader {
 #[cfg(target_arch = "mips")]
 impl ChunkReader for psx_pack::cd::SectorReader {
     #[inline]
-    fn prepare(&mut self) -> bool {
-        Self::prepare(self)
+    unsafe fn prepare(&mut self) -> bool {
+        unsafe { Self::prepare(self) }
     }
     #[inline]
-    fn start_read(&mut self, lba: u32) -> bool {
-        Self::start_read(self, lba)
+    unsafe fn start_read(&mut self, lba: u32) -> bool {
+        unsafe { Self::start_read(self, lba) }
     }
     #[inline]
-    fn read_sector(&mut self, dst: &mut [u32; SECTOR_WORDS]) -> bool {
-        Self::read_sector(self, dst)
+    unsafe fn read_sector(&mut self, dst: &mut [u32; SECTOR_WORDS]) -> bool {
+        unsafe { Self::read_sector(self, dst) }
     }
     #[inline]
-    fn stop(&mut self) {
-        Self::stop(self)
+    unsafe fn stop(&mut self) {
+        unsafe { Self::stop(self) }
     }
     #[inline]
-    fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError> {
+    unsafe fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError> {
         psx_io::cdrom::poll_data_sector()
     }
     #[inline]
-    fn find_entry(
+    unsafe fn find_entry(
         &mut self,
         pack_lba: u32,
         id: u32,
@@ -267,6 +280,8 @@ const PUMP_STALL_TICKS: u32 = 64;
 
 /// One exclusive reader/cache/pump owner. The caller supplies its existing
 /// sector reader; the arena is borrowed through `A`, never allocated here.
+/// There is no automatic `Drop` abort: the owner must call `stream_abort`
+/// before relinquishing the transport or an active destination buffer.
 pub struct CachedStreamer<R: ChunkReader, A: PacketArena, const P: usize> {
     reader: R,
     scratch: [u32; SECTOR_WORDS],
@@ -312,6 +327,8 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     /// persistent mini-cache. Call while the arena-overlay table is resident
     /// (mid map load) so the fill is pure RAM scans; entries the table cannot
     /// resolve are skipped and fall back to a lazy per-switch lookup.
+    /// Call only during map loading with no incremental session active; a cache
+    /// miss may issue header reads and would interrupt that session.
     pub fn prime_persistent_entries(&mut self, first_id: u32, count: usize) {
         unsafe {
             let rd = &mut *core::ptr::addr_of_mut!(self.reader);
@@ -404,9 +421,11 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
     /// stream already in flight is superseded (aborted) -- never queued.
     ///
     /// # Safety
-    /// `dst` must stay valid for `dst_words` words until the stream reports
-    /// `Done`/`Failed` or [`stream_abort`] runs; single-threaded polled MMIO
-    /// (same contract as `load_chunk`).
+    /// `dst` must be four-byte aligned, writable and exclusively available for
+    /// `dst_words` words until `Done`/`Failed` or [`Self::stream_abort`]. It must
+    /// not overlap this owner's sector scratch or the caller's cache arena.
+    /// Only the owner may access the destination while the stream is active.
+    /// Calls are serialized with all other CD MMIO and may not reenter.
     pub unsafe fn stream_begin(&mut self, chunk_id: u32, dst: *mut u32, dst_words: usize) -> bool {
         self.stream_abort();
         let rd = &mut *core::ptr::addr_of_mut!(self.reader);
