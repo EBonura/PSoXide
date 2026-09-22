@@ -1,0 +1,10 @@
+{
+  "runtime_sha256": "252fa652285a319d220d64833938cbd16a2d1f9d550e54c5abbacf8a1293e1fa",
+  "hl_source_sha256": "e3f46aaaae103e76f4215c43fffecbab6c8de0fedd0eae9f66e82ffea6a8c757",
+  "cs_source_sha256": "44e600d3c0dab248898c52de41517cc96969dd8904035b3165336bd82239ffc5",
+  "reconstruction": "Exact original file = game ids preamble + one identical frozen runtime; byte-for-byte equality checked before replacing fixtures.",
+  "commits": {
+    "hl": "70072ce98efe11ec1ba493ea2e52624864ba4e5a",
+    "cs": "988f308f2be2e12c18cca199d5b10a2ff02aa010"
+  }
+}

@@ -56,7 +56,7 @@ impl<const N:usize,const H:u8,const S:u8> Hsfx<N,H,S> {
 '''
         (p/'src/shared.rs').write_text(shared)
         for short, game in [('hl','hl-psx'),('cs','cs-psx')]:
-            old = hardware_imports((HERE/'oracles'/(game+'-hsfx.rs')).read_text())
+            old = hardware_imports(((HERE/'oracles'/(game+'-ids.rs')).read_text() + (HERE/'oracles/legacy-hsfx-runtime.rs').read_text()))
             old += '''
 pub unsafe fn reset() { ADDRS=[0;MAX_SFX]; RATES=[0;MAX_SFX]; COUNT=0; NEXT_VOICE=0; DIALOGUE_BASE=0; VOICE_ADDRS=[0;MAX_VOICES];VOICE_RATES=[0;MAX_VOICES];VOICE_COUNT=0;MAP_LOOP_OWNER=[MAP_LOOP_OWNER_NONE;MAP_LOOP_VOICE_COUNT];NEXT_MAP_LOOP=0;EAR=[0;3]; }
 pub unsafe fn snapshot()->Vec<u64>{let mut v=Vec::new();for n in ADDRS {v.push(n as u64)}for n in RATES{v.push(n as u64)}v.extend([COUNT as u64,NEXT_VOICE as u64,DIALOGUE_BASE as u64]);for n in VOICE_ADDRS{v.push(n as u64)}for n in VOICE_RATES{v.push(n as u64)}v.push(VOICE_COUNT as u64);for n in MAP_LOOP_OWNER{v.push(n as u64)}v.push(NEXT_MAP_LOOP as u64);for n in EAR{v.push(n as u64)}v}
