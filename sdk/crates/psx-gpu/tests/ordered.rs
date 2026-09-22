@@ -112,6 +112,42 @@ fn exactly_full_packet_retains_spare_tag_and_drop_waits_after_move() {
     assert_eq!(s.borrow().output, [7; 15]);
     assert!(s.borrow().waits > 0);
 }
+
+#[test]
+fn exact_capacity_boundaries_preserve_dma_nodes_and_fences() {
+    for capacity in [17, 18, 31, 32, 33, 34] {
+        for complete in [false, true] {
+            let (mut list, state) = stream(capacity, complete);
+            list.push_packet([1; 15]);
+            list.push_packet([2; 1]);
+            list.push_packet([3; 14]);
+            list.push_packet([4; 2]);
+            list.push_packet([5; 13]);
+            list.submit();
+            list.push_packet([6; 15]);
+            list.draw_sync();
+            let s = state.borrow();
+            // Recorded from the original inlined reserve implementation. The
+            // 31/32-word cases also exercise rollover's second spare-tag check.
+            let (nodes, waits, syncs) = match capacity {
+                17 | 18 => (vec![15, 15, 15, 15], 4, 4),
+                31 => (vec![15, 1, 14, 2, 13, 15], if complete { 3 } else { 6 }, 3),
+                32 => (vec![15, 1, 14, 15, 15], if complete { 3 } else { 5 }, 3),
+                33 | 34 => (vec![15, 15, 15, 15], if complete { 2 } else { 4 }, 2),
+                _ => unreachable!(),
+            };
+            assert_eq!(s.nodes, nodes);
+            assert_eq!(s.polls, nodes.len());
+            assert_eq!(s.waits, waits);
+            assert_eq!(s.syncs, syncs);
+            let expected: Vec<u32> = [(1, 15), (2, 1), (3, 14), (4, 2), (5, 13), (6, 15)]
+                .into_iter()
+                .flat_map(|(v, n)| std::iter::repeat_n(v, n))
+                .collect();
+            assert_eq!(s.output, expected);
+        }
+    }
+}
 #[test]
 fn mixed_uploads_and_immediate_fences_preserve_payload() {
     let (mut list, s) = stream(64, false);

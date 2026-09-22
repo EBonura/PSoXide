@@ -134,16 +134,25 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         // Reserve the next tag too, even if this packet fits the current node.
         // Otherwise an exactly full arena makes submit's open_node overflow.
         if self.len + count + 1 > self.words.len() {
-            self.draw_sync();
+            self.reuse_full_buffer();
         }
         if self.len - self.head - 1 + count > NODE_PAYLOAD_WORDS {
             if self.len + count + 2 > self.words.len() {
-                self.draw_sync();
+                self.reuse_full_buffer();
             } else {
                 self.close_node(Some(self.len));
                 self.open_node();
             }
         }
+    }
+
+    // Capacity exhaustion is rare for normal frame-sized storage. Keep its
+    // complete DMA/GPU drain out of every inlined packet emitter, where it
+    // otherwise increases live values and stack spills on the R3000.
+    #[cold]
+    #[inline(never)]
+    fn reuse_full_buffer(&mut self) {
+        self.draw_sync();
     }
 
     /// Append one complete GP0 packet in painter order.
