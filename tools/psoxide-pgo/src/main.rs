@@ -679,6 +679,12 @@ fn rename_profile(text: &str, mut rename: impl FnMut(&str) -> Result<String>) ->
     let mut out = String::with_capacity(text.len());
     let mut headers = HashMap::new();
     for line in text.lines() {
+        if line.starts_with('#') {
+            // A comment, which LLVM skips too.
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
         let indent = line.len() - line.trim_start_matches(' ').len();
         if indent == 0 {
             let mut fields = line.rsplitn(3, ':');
@@ -914,6 +920,17 @@ mod tests {
         assert_eq!(
             rebound,
             profile.replace(STEP_A, STEP_B).replace(NEXT_A, NEXT_B)
+        );
+    }
+
+    #[test]
+    fn comment_lines_survive_renaming() {
+        let profile = format!("# psoxide-pgo features: a,b\n{STEP_A}:1:0\n 1: 1\n");
+        let portable = rename_profile(&profile, |name| Ok(portable_name(name).into_owned()))
+            .expect("portable");
+        assert_eq!(
+            portable,
+            "# psoxide-pgo features: a,b\nhello_gte::step_entity:1:0\n 1: 1\n"
         );
     }
 
