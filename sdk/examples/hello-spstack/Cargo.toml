@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-spstack"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-spstack"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[features]
+default = []
+# Panic on purpose from inside the scratchpad stack, to check that the panic
+# report moves back to the RAM stack and prints.
+panic-on-stack = []
+
+[dependencies]
+psx-gpu  = { path = "../../crates/psx-gpu" }
+psx-rt   = { path = "../../crates/psx-rt", features = ["scratchpad-stack-check"] }
+psx-font = { path = "../../crates/psx-font" }
+psx-vram = { path = "../../crates/psx-vram" }
