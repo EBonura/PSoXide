@@ -1,0 +1,10 @@
+[package]
+name = "psx-goldsrc"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+psx-asset = { path = "../../../sdk/crates/psx-asset" }
+psx-sfx = { path = "../../../sdk/crates/psx-sfx" }
+psx-spu = { path = "../../../sdk/crates/psx-spu" }

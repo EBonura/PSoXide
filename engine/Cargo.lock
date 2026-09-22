@@ -136,6 +136,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-goldsrc"
+version = "0.1.0"
+dependencies = [
+ "psx-asset",
+ "psx-sfx",
+ "psx-spu",
+]
+
+[[package]]
 name = "psx-gpu"
 version = "0.1.0"
 dependencies = [

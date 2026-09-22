@@ -1,0 +1,1 @@
+Frozen test-only HSFX implementations: HL70072ce and CS988f308, before extraction. They have no production callers. The oracle rewires hardware access for recording; all parser, ownership, gain, upload ordering and sample configuration bodies are retained. Directory truncation is a known legacy panic, tested separately from tolerant invalid payloads.

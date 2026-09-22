@@ -6,6 +6,7 @@ members = [
     "crates/psx-disc-toc",
     "crates/psx-engine",
     "crates/psx-game-runtime",
+    "crates/psx-goldsrc",
     "crates/psx-level",
     "crates/psx-render-contract",
 ]
