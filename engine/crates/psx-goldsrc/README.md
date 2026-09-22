@@ -12,3 +12,16 @@ python3 engine/crates/psx-goldsrc/tests/hsfx_oracle.py
 ```
 
 The oracle compiles frozen HL70072 and CS988f implementations and the actual shared source, using the actual pinned SDK Voice/OneShot register-lowering code. Only MMIO/transfer endpoints are replaced with recorders. Synthetic banks exercise both resident capacities, truncation, invalid payloads, SPU bounds, voice rotation, dialogue duration, map-loop ownership and stop-before-replacement. Frozen code is test-only and has no production callers.
+
+`texture_animation` owns the 20 Hz-to-texture-chain clock, chain membership and
+PVS-local change generations used by HL and CS. It borrows the ports' existing
+state; display-row writes stay with their map decoders. The simulation driver is
+outlined once per caller type, with no heap, vtable or additional resident array.
+`model_variant::lookup` decodes their generated sorted three-byte variant rows;
+map IDs, model IDs and generated tables stay in each game.
+
+`tests/asset_contract.rs` compares the included frozen pre-extraction texture
+driver across every u16 simulation tick, primary/alternate/empty/overlapping
+chains and clock wrap. Its lookup oracle preserves the old function with only
+generated table references changed to parameters. Original source and line/hash
+provenance are retained under `tests/oracles/ASSET-PROVENANCE.json`.
