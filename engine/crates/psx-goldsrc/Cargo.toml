@@ -8,3 +8,5 @@ license = "GPL-2.0-or-later"
 psx-asset = { path = "../../../sdk/crates/psx-asset" }
 psx-sfx = { path = "../../../sdk/crates/psx-sfx" }
 psx-spu = { path = "../../../sdk/crates/psx-spu" }
+psx-pack = { path = "../../../sdk/crates/psx-pack" }
+psx-io = { path = "../../../sdk/crates/psx-io" }

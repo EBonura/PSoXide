@@ -149,6 +149,8 @@ name = "psx-goldsrc"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
+ "psx-io",
+ "psx-pack",
  "psx-sfx",
  "psx-spu",
 ]

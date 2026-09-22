@@ -1,0 +1,12 @@
+{
+  "hl": {
+    "commit": "70072ce98efe11ec1ba493ea2e52624864ba4e5a",
+    "sha256": "6822f212406a558a730180eef1224342eed154bd756ab3559641986633ebe100"
+  },
+  "cs": {
+    "commit": "988f308f2be2e12c18cca199d5b10a2ff02aa010",
+    "sha256": "0523a6252bccd58da7c2de44841ad4eca7a269c4ed076477ce213ab17dad5ae6"
+  },
+  "shared_frozen_source": "legacy-cdstream.rs",
+  "cs_delta": "PERSIST_ENTRIES16\u219232; one comment removes \"sixteen\". No other source differences. Oracle compiles each capacity from this frozen source."
+}
