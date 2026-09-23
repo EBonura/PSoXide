@@ -681,6 +681,21 @@ pub enum TextureDepth {
     Bit15 = 2,
 }
 
+/// Most payload words one linked-list DMA node may carry (the words after
+/// its tag), the depth of the GPU's command FIFO.
+///
+/// Silicon very likely loses words from longer nodes while it draws.
+/// Hardware-tests v1.24 drew the same 16 half-screen Gouraud triangles as
+/// 16 nodes and as 4 nodes of 24 words: the packed list's closing GP0(1Fh)
+/// arrived at 314,075 clocks against 625,348, about 8 triangles' worth at
+/// the 39,084 clocks each costs, and its last-node drain matched the
+/// unpacked list's one-triangle gap, so roughly half its drawing never
+/// happened. Every SDK node builder stays at or under this limit:
+/// [`ordered::OrderedCommandStream`] caps nodes at
+/// [`ordered::NODE_PAYLOAD_WORDS`], [`ot::OrderingTable::insert`] refuses
+/// longer packets, and every [`prim`] packet is shorter.
+pub const MAX_NODE_WORDS: usize = 16;
+
 /// Kick a linked-list chain to GPU GP0 via DMA channel 2 in
 /// linked-list mode **without** waiting for the walk to finish.
 ///
@@ -692,7 +707,8 @@ pub enum TextureDepth {
 ///
 /// `head` must point at a 4-byte-aligned RAM address; the DMA
 /// controller clocks bits 23..=0 of the 32-bit tag as the next-
-/// node address and bits 31..=24 as that packet's data-word count.
+/// node address and bits 31..=24 as that packet's data-word count,
+/// which must not exceed [`MAX_NODE_WORDS`].
 pub fn submit_linked_list_async(head: *const u32) {
     // A completed DMA walk does not imply that the GPU has finished
     // rasterising the commands it consumed. Do not call `draw_sync()` here:
