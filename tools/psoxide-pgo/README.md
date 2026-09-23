@@ -118,14 +118,16 @@ psoxide-pgo choose  [GUEST] --profile PROFILE --gate CMD [--variant V]... [--pac
                     -- CARGO-ARGS...
 psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                     [--launch-arg ARG]... [--name NAME]
-GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH]
+GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
 ```
 
 `CARGO-ARGS` is what follows `cargo` in the guest's own build, starting with
 `build`. `--crate` is where cargo runs (default: the current directory).
-`--patcher` and `--scanner` default to this SDK's `tools/hazard_patch.py` and
-`tools/hazard_scan.py`; a game with its own patcher passes it here. Paths may
-contain spaces; `--pack` and `--gate` are shell commands, quoted by the caller.
+`--patcher`, `--scanner` and `--stack-guard` default to this SDK's
+`tools/hazard_patch.py`, `tools/hazard_scan.py` and `tools/stack_guard.py`; a
+game with its own copy, or a wrapper that hands the tool the map its own
+`build.rs` asks the link for, passes it here. Every tool refuses a map that
+does not match the image. Paths may contain spaces; `--pack` and `--gate` are shell commands, quoted by the caller.
 
 ### collect
 

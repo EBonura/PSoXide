@@ -91,13 +91,14 @@ class Fixture:
         self.functions.append((self.addr(index), len(words) * 4, name))
         return self.addr(index)
 
-    def data(self, offset, *words, section=".rodata"):
+    def data(self, offset, *words, section=".rodata", owner=None):
         """Words at `offset` past .text (0x800..0xC00), such as a jump table,
         as one input section of the map: `.rodata`, where LLVM puts switch
-        tables, unless `section` says otherwise."""
+        tables, unless `section` says otherwise. With `owner`, a function's
+        address, the section is that function's own `.rodata.<function>`."""
         assert 0x800 < offset and offset + 4 * len(words) <= fx.Image.TRAMPOLINES
         self.image.put(offset, *words)
-        self.sections.append((BASE + offset, 4 * len(words), f"{section}.d{len(self.sections)}"))
+        self.sections.append((BASE + offset, 4 * len(words), owner or f"{section}.d{len(self.sections)}"))
         return BASE + offset
 
     def trampoline(self, *words):
@@ -106,7 +107,10 @@ class Fixture:
         self.trampoline_words += len(words)
         return BASE + offset
 
-    def write(self, directory, text_end_index=0x20, payload_skew=0):
+    def write(self, directory, text_end_index=0x20, payload_skew=0, layout_skew=0):
+        """`payload_skew` misstates the map's payload size; `layout_skew`
+        moves every function and the trampoline array in the map but keeps
+        the payload, like a stale map of a relink."""
         exe = os.path.join(directory, "fixture.exe")
         self.image.write(exe)
         payload = len(self.image.words) * 4
@@ -117,13 +121,16 @@ class Fixture:
             lines.append(f"{address:8x} {address:8x} {size:8x} {align:5d} " + " " * depth + name)
 
         row(BASE, 0, 8, "__text_start = .")
+        keys = {}
         for i, (address, size, name) in enumerate(sorted(self.functions)):
-            row(address, size, 8, f"/fixture.o:(.text.f{i})", 4)
-            row(address, size, 16, name)
+            keys[address] = f"f{i}"
+            row(address + layout_skew, size, 8, f"/fixture.o:(.text.f{i})", 4)
+            row(address + layout_skew, size, 16, name)
         row(text_end, 0, 8, "__text_end = .")
-        for address, size, section in sorted(self.sections):
+        for address, size, section in sorted(self.sections, key=lambda s: s[0]):
+            section = f".rodata.{keys[section]}" if isinstance(section, int) else section
             row(address, size, 8, f"/fixture.o:({section})", 4)
-        tramp = BASE + fx.Image.TRAMPOLINES
+        tramp = BASE + fx.Image.TRAMPOLINES + layout_skew
         row(tramp, 8 + 64 * 4, 8, "/fixture.o:(.data.HAZARD_TRAMPOLINES)", 4)
         row(tramp, 8 + 64 * 4, 16, "HAZARD_TRAMPOLINES")
         row(BASE + payload + payload_skew, 0, 8, "__bss_start = .")
@@ -245,7 +252,47 @@ class StackGuardTests(unittest.TestCase):
         self.caller(1, entry(0, 1024), 8)
         failures, out = self.run_guard(payload_skew=0x800)
         self.assertEqual(failures, 1, out)
-        self.assertIn("does not describe", out)
+        self.assertIn("map does not match this image", out)
+
+    def test_a_stale_map_with_the_same_payload_is_refused(self):
+        # A relink moved every function and the trampoline array by 0x20
+        # bytes but kept the 2 KiB aligned payload, so the old size check
+        # passed; a stale Quake map cut 11 jump tables short this way.
+        self.fixture.function(0, "_start", [fx.jal(self.fixture.addr(1)), NOP, fx.j(BASE), NOP])
+        self.caller(1, entry(0, 1024), 8, self.leaf(2, "t::leaf", 8))
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 0, out)
+        failures, out = self.run_guard(layout_skew=0x20)
+        self.assertEqual(failures, 1, out)
+        self.assertIn("map does not match this image", out)
+        self.assertIn(f"entry point {BASE:08x}, map's _start {BASE + 0x20:08x}", out)
+        self.assertIn(f"no HAZARD_TRAMPOLINES magic at the map's {BASE + fx.Image.TRAMPOLINES + 0x20:08x}", out)
+        self.assertIn(f"2 calls to no function the map names, first jal {BASE + 0x40:08x} at {BASE:08x}", out)
+        exe, map_path = self.fixture.write(self.tmp.name, layout_skew=0x20)
+        for tool, args in (("hazard_patch.py", ["--check"]), ("hazard_patch.py", []), ("hazard_scan.py", [])):
+            run = subprocess.run([sys.executable, str(TOOLS / tool), exe, *args, "--map", map_path],
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 1, run.stdout)
+            self.assertIn("map does not match this image", run.stdout)
+
+    def test_a_functions_own_rodata_must_hold_its_jump_table(self):
+        # LLVM writes a function's jump tables to `.rodata.<its section>`,
+        # so every word there lands in that function, or in a trampoline
+        # once patched. A map that puts the section over other words (here
+        # one naming another function) is from another link.
+        a, cases = self.switch(2, "t::a", 16, BASE + 0x900)
+        other = self.leaf(4, "t::other", 8)
+        self.caller(1, entry(0, 1024), 8, a, other)
+        tramp = self.fixture.trampoline(NOP, fx.j(cases[1]), NOP)
+        self.fixture.data(0x900, cases[0], tramp, owner=a)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 0, out)
+        self.fixture.sections.clear()
+        self.fixture.data(0x900, cases[0], other, owner=a)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 1, out)
+        self.assertIn(f"1 jump table words outside their function, first {BASE + 0x904:08x} holds {other:08x}, "
+                      f"not in the function at {a:08x}", out)
 
     def test_custom_roots_take_a_budget(self):
         b = self.leaf(3, "t::b", 100)
