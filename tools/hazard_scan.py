@@ -27,6 +27,14 @@ imported from hazard_patch.py, the same code the patcher patches from, and
 Without it, an image with register jumps gets a one-line warning: its tables
 are then read from each dispatch's own block and none is proven.
 
+It also warns, without failing, about a GTE command (COP2 `cofun`) in a
+branch delay slot. An interrupt taken on a GTE command lets it run and leaves
+EPC on it; psx-rt's handler steps over it (hardware-tests v1.24, cases
+0xC9/0xCB), but in a delay slot EPC names the branch, so the branch and the
+command both run again. psx-spx's answer is to keep GTE commands out of
+delay slots; LLVM never puts inline asm there, so a hit is hand-written asm
+or data that decodes as code.
+
 A slot load whose consumer cannot be seen from the image counts as a hazard,
 because nothing here can prove it safe:
 
@@ -44,8 +52,21 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 # The detector lives in hazard_patch.py. disassemble and looks_like_code are
 # looked up here, not there, so a caller that loads this file as a module can
 # still replace them.
-from hazard_patch import (HEADER, cli_args, disassemble, find_hazards, load_address,  # noqa: E402
-                           looks_like_code, open_map, straight_line_pairs, unmapped_warning)
+from hazard_patch import (BRANCHES, HEADER, cli_args, disassemble, find_hazards,  # noqa: E402
+                           load_address, looks_like_code, open_map, straight_line_pairs,
+                           unmapped_warning)
+
+
+def is_gte_command(word):
+    """psx-spx's test: opcode 0x12 (COP2) with bit 25 set."""
+    return word & 0xFE000000 == 0x4A000000
+
+
+def gte_in_delay_slots(listing, word_at, is_code=looks_like_code):
+    """Addresses of branches whose delay slot holds a GTE command."""
+    return sorted(addr for addr, (op, _) in listing.items()
+                  if op in BRANCHES and addr + 4 in listing
+                  and is_gte_command(word_at(addr + 4)) and is_code(listing, addr))
 
 
 def scan(path, map_path=None):
@@ -64,6 +85,10 @@ def scan(path, map_path=None):
         note = unmapped_warning(listing, word_at, image_end, base, looks_like_code)
         if note:
             print(note)
+    gte_slots = gte_in_delay_slots(listing, word_at, looks_like_code)
+    if gte_slots:
+        print(f"warning: {len(gte_slots)} GTE commands in branch delay slots, run twice by an interrupt "
+              f"taken on them: " + " ".join(f"{addr:08x}" for addr in gte_slots))
     straight = len(straight_line_pairs(listing, looks_like_code))
     if straight:
         print(f"warning: {straight} straight-line load-use pairs (next instruction reads the loaded register)")
