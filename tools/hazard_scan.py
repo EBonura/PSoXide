@@ -24,6 +24,8 @@ linked elsewhere (the demo disc's chain loader at 0x801F0000) can be scanned
 once a PS-EXE header naming that address is put in front of it. Detection is
 imported from hazard_patch.py, the same code the patcher patches from, and
 `--map` (one image only) resolves jump tables as `hazard_patch.py --map` does.
+Without it, an image with register jumps gets a one-line warning: its tables
+are then read from each dispatch's own block and none is proven.
 
 A slot load whose consumer cannot be seen from the image counts as a hazard,
 because nothing here can prove it safe:
@@ -43,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 # looked up here, not there, so a caller that loads this file as a module can
 # still replace them.
 from hazard_patch import (HEADER, cli_args, disassemble, find_hazards, load_address,  # noqa: E402
-                           looks_like_code, open_map, straight_line_pairs)
+                           looks_like_code, open_map, straight_line_pairs, unmapped_warning)
 
 
 def scan(path, map_path=None):
@@ -55,8 +57,13 @@ def scan(path, map_path=None):
     image_end = base + len(data) - HEADER
 
     def word_at(addr):
-        return int.from_bytes(data[addr - base + HEADER:][:4], "little")
+        offset = addr - base + HEADER
+        return int.from_bytes(data[offset:offset + 4], "little")
 
+    if link_map is None:
+        note = unmapped_warning(listing, word_at, image_end, base, looks_like_code)
+        if note:
+            print(note)
     straight = len(straight_line_pairs(listing, looks_like_code))
     if straight:
         print(f"warning: {straight} straight-line load-use pairs (next instruction reads the loaded register)")
