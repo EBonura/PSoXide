@@ -7,6 +7,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use psx_engine::scratchpad::{assert_disjoint, Region, ScratchpadStack};
 use psx_engine::{
     attributed_clip::{
         clip_convex_plane, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
@@ -185,19 +186,31 @@ const AFFINE_BATCH_WORKSPACE_BYTES: usize =
 #[cfg(target_arch = "mips")]
 const _: () = assert!(AFFINE_BATCH_WORKSPACE_BYTES <= psx_engine::scratchpad::SIZE);
 
-/// PXBSP scratchpad layout: the five clip-plane records, then the batch
-/// vertex workspace.
+/// PXBSP scratchpad layout: the five clip-plane records, the batch vertex
+/// workspace, then the mixed-batch writer's stack.
 ///
 /// The clip planes are the most re-read bytes in the face loop. Each live
 /// plane costs five loads per face, and with the hierarchical clipflags
 /// leaving under two planes live per face that is about two thousand loads a
 /// frame from main RAM at six stall cycles each. In the scratchpad they are
 /// one-cycle reads at an absolute address, so the base-pointer reload goes
-/// too. The batch gives up six vertex slots to pay for it; this project's
-/// cook has no face wider than six vertices, so the batch still groups eight
-/// faces per flush instead of nine.
+/// too. The batch gives up six vertex slots to pay for it.
+///
+/// The writer's frame (spilled loop state it reloads per packet) is the next
+/// most re-read, so `flush_pxbsp_batch` runs it on the bytes above the batch.
+/// The batch gives up fourteen more slots for that: nineteen is the most that
+/// leaves the writer's linked call tree room (296 bytes, which
+/// `tools/stack_guard.py` proves). A face wider than the batch cannot be
+/// drawn, so the cooker splits every face down to [`PXBSP_MAX_FACE_VERTICES`]
+/// and the face pass skips (never breaks on) anything wider. Cortex's cook is
+/// all quads (measured 2026-09-23), so a flush still groups four of them.
 const PXBSP_CLIP_PLANE_BYTES: usize = core::mem::size_of::<[([i32; 3], i32); 5]>();
-const PXBSP_BATCH_MAX_VERTICES: usize = 33;
+const PXBSP_BATCH_MAX_VERTICES: usize = 19;
+/// The widest PXBSP face the renderer draws exactly: the near-plane clip can
+/// add one vertex, and the clipped polygon must still fit the batch. The
+/// cooker imports this as its face limit, so it never emits a face the
+/// runtime would drop.
+pub const PXBSP_MAX_FACE_VERTICES: usize = PXBSP_BATCH_MAX_VERTICES - 1;
 const PXBSP_BATCH_MAX_SURFACES: usize = 13;
 const PXBSP_AFFINE_BATCH_VERTEX_CAPACITY: usize =
     PXBSP_BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES;
@@ -210,6 +223,25 @@ const _: () = assert!(
 // A `ClassicAffineVertex` is four-aligned and the plane block is a multiple
 // of both its own eight-byte alignment and four.
 const _: () = assert!(PXBSP_CLIP_PLANE_BYTES.is_multiple_of(8));
+/// The PXBSP face pass's scratchpad bytes, live only inside
+/// `draw_pxbsp_faces`.
+const PXBSP_CLIP_PLANES: Region = Region::new(0, PXBSP_CLIP_PLANE_BYTES);
+const PXBSP_BATCH: Region = Region::new(
+    PXBSP_CLIP_PLANE_BYTES,
+    PXBSP_CLIP_PLANE_BYTES
+        + PXBSP_AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>(),
+);
+/// The mixed-batch writer's stack: every scratchpad byte above the batch.
+/// The clip planes and the batch are live across each flush.
+type PxbspWriterStack = ScratchpadStack<{ PXBSP_BATCH.end() }, { psx_engine::scratchpad::SIZE }>;
+const _: () = assert_disjoint(&[PXBSP_CLIP_PLANES, PXBSP_BATCH, PxbspWriterStack::REGION]);
+/// Face selection runs with its stack in the scratchpad (its spills and the
+/// node walk's frame are its hottest loads). It returns before the face pass
+/// claims `PXBSP_CLIP_PLANES` and `PXBSP_BATCH`, and nothing else holds
+/// scratchpad bytes across it, so it may use all of them.
+type PxbspSelectionStack = ScratchpadStack<0, { psx_engine::scratchpad::SIZE }>;
+// Regions live around the selection call: none but its own stack.
+const _: () = assert_disjoint(&[PxbspSelectionStack::REGION]);
 const MAX_ALIAS_VERTICES: usize = 512;
 const MAX_RENDER_ENTITIES: usize = 512;
 const CLUT_DEFAULT: u16 = 240 << 6;
@@ -1789,8 +1821,15 @@ impl Renderer {
             }
             true
         } else {
+            // SAFETY: no scratchpad bytes are live here (see
+            // PxbspSelectionStack), selection installs no exception handler,
+            // and tools/stack_guard.py proves its call tree fits.
             let ok = self.mark_visible_pxbsp_faces(map, visibility_origin)
-                && self.select_frame_pxbsp_faces(map, camera.origin, &frustum);
+                && unsafe {
+                    PxbspSelectionStack::run(|| {
+                        self.select_frame_pxbsp_faces(map, camera.origin, &frustum)
+                    })
+                };
             if self.selection_reuse {
                 self.reuse_pxbsp_faces.clear();
                 if ok {
@@ -2027,8 +2066,12 @@ impl Renderer {
 
             let source_count = face.vertex_count();
             if source_count > PXBSP_BATCH_MAX_VERTICES {
-                stats.packet_overflow_avoided = true;
-                break;
+                // The cooker never emits one (see PXBSP_MAX_FACE_VERTICES).
+                // Skip only this face; the rest of the frame still draws.
+                // No `packet_overflow_avoided` here: setting it made the flag
+                // live across the loop, which re-allocated the face pass's
+                // registers and measured +0.24% cycles on the Cortex tape.
+                continue;
             }
             // Classify all five planes in one vertex pass. The historical
             // path rescanned the polygon once per plane and then a sixth time
@@ -3684,15 +3727,20 @@ unsafe fn flush_pxbsp_batch(
             hardware_triangles: 0,
         };
     }
+    // SAFETY: the planes and the batch are the only scratchpad bytes live
+    // around the flush (see PxbspWriterStack), the writer installs no
+    // exception handler, and tools/stack_guard.py proves its call tree fits.
     unsafe {
-        submit_classic_affine_mixed_batch(
-            vertices.as_mut_ptr(),
-            vertex_count,
-            surfaces.as_ptr(),
-            surface_count,
-            output,
-            PXBSP_RENDER_PROFILE,
-        )
+        PxbspWriterStack::run(|| {
+            submit_classic_affine_mixed_batch(
+                vertices.as_mut_ptr(),
+                vertex_count,
+                surfaces.as_ptr(),
+                surface_count,
+                output,
+                PXBSP_RENDER_PROFILE,
+            )
+        })
     }
 }
 
@@ -4790,6 +4838,88 @@ mod tests {
                 &mut packets,
             )
             .is_none());
+    }
+
+    #[test]
+    fn face_wider_than_the_batch_skips_only_itself() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        let mut push = |position: [i16; 3]| {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
+        };
+        for position in [[64i16, -16, -16], [64, 16, -16], [64, 0, 16]] {
+            push(position);
+        }
+        // A 20-vertex square (five collinear steps per edge) on the same
+        // plane: one vertex wider than the batch.
+        let wide = PXBSP_BATCH_MAX_VERTICES + 1;
+        for step in 0..wide as i16 {
+            let (edge, along) = (step / 5, (step % 5) * 8 - 20);
+            push(match edge {
+                0 => [64, along, -20],
+                1 => [64, 20, along],
+                2 => [64, -along, 20],
+                _ => [64, -20, -along],
+            });
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        // The wide face first, then the triangle every fixture draws.
+        let triangle = lumps[PxbspLumpKind::Faces as usize].clone();
+        let mut faces = triangle.clone();
+        faces[2..4].copy_from_slice(&3u16.to_le_bytes());
+        faces[7] = wide as u8;
+        faces.extend_from_slice(&triangle);
+        lumps[PxbspLumpKind::Faces as usize] = faces;
+        let mut model = lumps[PxbspLumpKind::Models as usize].clone();
+        let count = model.len() - 2;
+        model[count..].copy_from_slice(&2u16.to_le_bytes());
+        lumps[PxbspLumpKind::Models as usize].extend_from_slice(&model);
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(8, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        assert_eq!(map.faces().get(0).expect("wide face").vertex_count, 20);
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
+            texture_size: [64; 2],
+        };
+        let mut packets = [0u32; 512];
+        let mut renderer = Renderer::new();
+        let frame = renderer
+            .draw_pxbsp_model(
+                &map,
+                1,
+                BrushTransform::translated(Vec3I32 { x: 0, y: 0, z: 0 }),
+                camera,
+                load_pxbsp_view(camera),
+                &[Some(binding)],
+                0,
+                &mut packets,
+            )
+            .expect("brush model");
+
+        assert_eq!(
+            frame.stats.visible_faces, 1,
+            "the face after the wide one must still draw"
+        );
+        assert!(frame.stats.packets > 0);
     }
 }
 

@@ -100,6 +100,13 @@ GUEST_CARGO_HOME="${PSOXIDE_GUEST_CARGO_HOME:-$STAGE_ROOT/cargo-home}"
 
 mkdir -p "$STAGE_ROOT"
 
+# tools/stack_guard.py (below) needs the link map to prove the guest's
+# scratchpad stacks, so a build that did not ask for one still writes one.
+GUEST_MAP="${PSOXIDE_GUEST_LINK_MAP:-$STAGE_ROOT/editor-playtest.map}"
+if [ -z "${PSOXIDE_GUEST_LINK_MAP:-}" ]; then
+    RUSTFLAGS_VALUE="$RUSTFLAGS_VALUE -Clink-arg=-Map=$GUEST_MAP"
+fi
+
 # mkdir is the portable atomic lock: macOS has no flock(1). A concurrent
 # build from another checkout waits rather than corrupting the shared stage.
 waited=0
@@ -186,6 +193,14 @@ command -v mipsel-none-elf-objdump >/dev/null 2>&1 || {
 python3 "$ROOT/tools/hazard_patch.py" "$staged_exe" >"$STAGE/hazard-patch.txt" 2>&1 || {
     cat "$STAGE/hazard-patch.txt" >&2
     echo "[guest-build] load-delay hazards remain in $EXE_RELATIVE; refusing to stage it" >&2
+    exit 1
+}
+# Every psx_rt::scratchpad::ScratchpadStack call tree must fit its region.
+# An inlining change can deepen one with no source change, so this is proved
+# on the patched image after every link, never assumed.
+python3 "$ROOT/tools/stack_guard.py" "$staged_exe" "$GUEST_MAP" >"$STAGE/stack-guard.txt" 2>&1 || {
+    cat "$STAGE/stack-guard.txt" >&2
+    echo "[guest-build] a scratchpad stack call tree is unproven in $EXE_RELATIVE; refusing to stage it" >&2
     exit 1
 }
 mkdir -p "$ROOT/$(dirname "$EXE_RELATIVE")"

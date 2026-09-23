@@ -23,8 +23,9 @@ psx-spu   = { path = "../../../sdk/crates/psx-spu" }
 psx-sfx   = { path = "../../../sdk/crates/psx-sfx" }
 psx-settings = { path = "../../../sdk/crates/psx-settings", default-features = false }
 psx-vram  = { path = "../../../sdk/crates/psx-vram" }
-
-[target.'cfg(target_arch = "mips")'.dependencies]
+# Also on the host: `scratchpad` re-exports its Region/ScratchpadStack, whose
+# layout checks are consts every build evaluates (on the host `run` is a plain
+# call).
 psx-rt = { path = "../../../sdk/crates/psx-rt" }
 
 [dev-dependencies]
