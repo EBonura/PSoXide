@@ -56,6 +56,11 @@ impl CommandStreamDma for GpuDma {
 /// immediate GP0 drawing, VRAM uploads, or framebuffer presentation. Capacity
 /// exhaustion performs that same synchronization before reusing storage.
 /// Dropping the stream waits for in-flight DMA and discards unsent commands.
+///
+/// To present through psx-rt's queued flip, call [`crate::arm_draw_done`]
+/// before the frame's first packet (nodes can start walking as soon as they
+/// close) and end the frame with `push_packet([gp0::REQUEST_IRQ])` and
+/// [`Self::submit`]; see [`crate::draw_done`].
 pub struct OrderedCommandStream<D: CommandStreamDma = GpuDma> {
     words: &'static mut [u32],
     len: usize,
