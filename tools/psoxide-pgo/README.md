@@ -256,6 +256,16 @@ else is work, interrupt handlers included. Each wait loop above 0.1% of the
 span's instructions is listed on stderr, so a new game's first run can be
 checked against its source.
 
+The rule reads a site the hazard patcher rerouted as the instruction it
+replaced: `j TRAMP` into `bXX +3 ; nop ; j NEXT ; nop ; j T ; nop` is the
+branch `bXX T`, and `j`/`jal` into `nop ; j T ; nop` is `j`/`jal T`. The
+trampoline's words run once per iteration and count as wait with the loop.
+Read as written, a loop whose exit branch had its slot load rerouted leaves
+its span and never comes back: NitroXide's flip wait in its PGO build at
+SDK 8adf4b14f went unseen, and `measure` put `hot=500+profi` at +36.6% work
+against `off` on the training polls. Seen through, the same builds measure
+-4.9% (315,733,754 against 332,039,002 work cycles, display hashes equal).
+
 Some waits are beyond the rule. HK's present loop (the `loop` after
 `presentation::begin` in its `main.rs`) spins until the next vblank calling
 `input::checkpoint` twice and `presentation::service`, keeps its clock in a

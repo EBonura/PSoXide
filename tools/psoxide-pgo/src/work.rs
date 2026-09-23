@@ -189,15 +189,75 @@ impl<'a> Code<'a> {
     fn op(&self, pc: u32) -> Op {
         self.word(pc).map_or(Op::Effect, |word| decode(word, pc))
     }
+
+    /// When `pc` is a site `hazard_patch.py` rerouted, the instruction it
+    /// replaced and the trampoline (its first word and length in words):
+    ///
+    /// - `j`/`jal TRAMP`, `TRAMP: nop ; j T ; nop` stands for `j`/`jal T`;
+    /// - `j TRAMP`, `TRAMP: bXX +3 ; nop ; j pc+8 ; nop ; j T ; nop` stands
+    ///   for `bXX T` (the slot load cannot write the branch's sources).
+    ///
+    /// A wait loop whose slot load raced its consumer gets the second shape,
+    /// and read as written it leaves the loop's span and never comes back.
+    fn trampoline(&self, pc: u32) -> Option<(Op, u32, u32)> {
+        let Op::Jump {
+            target: tramp,
+            link,
+        } = self.op(pc)
+        else {
+            return None;
+        };
+        let word = |index: u32| self.word(tramp + 4 * index);
+        let jump = |index: u32| match self.op(tramp + 4 * index) {
+            Op::Jump {
+                target,
+                link: false,
+            } => Some(target),
+            _ => None,
+        };
+        if word(0)? == 0 && word(2)? == 0 {
+            if let Some(target) = jump(1) {
+                return Some((Op::Jump { target, link }, tramp, 3));
+            }
+        }
+        let branch = word(0)?;
+        let Op::Branch { srcs, link, .. } = decode(branch, tramp) else {
+            return None;
+        };
+        let shape = !link
+            && branch & 0xffff == 3
+            && word(1)? == 0
+            && jump(2)? == pc + 8
+            && word(3)? == 0
+            && word(5)? == 0;
+        let target = jump(4).filter(|_| shape)?;
+        Some((
+            Op::Branch {
+                srcs,
+                target,
+                link: false,
+            },
+            tramp,
+            6,
+        ))
+    }
+
+    /// The instruction at `pc` as the compiler emitted it: [`Self::op`], or
+    /// what a hazard trampoline stands in for.
+    fn unpatched(&self, pc: u32) -> Op {
+        self.trampoline(pc)
+            .map_or_else(|| self.op(pc), |(op, _, _)| op)
+    }
 }
 
 /// One loop found to be waiting: `start` (the backward branch's target)
-/// through `end` (the closing branch's delay slot).
+/// through `end` (the closing branch's delay slot), and the words of any
+/// hazard trampoline it runs through.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WaitLoop {
     pub start: u32,
     pub end: u32,
-    /// Every instruction on the loop's cycle.
+    /// Every instruction on the loop's cycle, its trampolines' included.
     pub body: Vec<u32>,
 }
 
@@ -214,7 +274,7 @@ fn cycle(code: &Code<'_>, start: u32, closer: u32) -> Vec<u32> {
     let mut successors: HashMap<u32, Vec<u32>> = HashMap::new();
     for pc in (start..=end).step_by(4) {
         // A branch's delay slot leaves for wherever the branch goes.
-        let after = match (pc > start).then(|| code.op(pc - 4)) {
+        let after = match (pc > start).then(|| code.unpatched(pc - 4)) {
             Some(Op::Branch { target, link, .. }) if !link => vec![target, pc + 4],
             Some(Op::Jump {
                 target,
@@ -268,7 +328,7 @@ enum Value {
 
 /// Whether the cycle `body` is a wait loop (see the module comment).
 fn waits(code: &Code<'_>, body: &[u32]) -> bool {
-    let ops: Vec<(u32, Op)> = body.iter().map(|&pc| (pc, code.op(pc))).collect();
+    let ops: Vec<(u32, Op)> = body.iter().map(|&pc| (pc, code.unpatched(pc))).collect();
     if ops.iter().any(|(_, op)| {
         matches!(
             op,
@@ -340,11 +400,21 @@ pub fn executed(counted: impl IntoIterator<Item = u32>, unit: u32) -> BTreeSet<u
         .collect()
 }
 
-/// Where each executed direct branch, jump and call can go.
+/// Where each executed direct branch, jump and call can go, as the
+/// compiler emitted it: a hazard trampoline's own jumps back into the code
+/// are part of the site that jumps to it.
 fn sources(code: &Code<'_>, executed: &BTreeSet<u32>) -> HashMap<u32, Vec<u32>> {
+    let trampolines: HashSet<u32> = executed
+        .iter()
+        .filter_map(|&pc| code.trampoline(pc))
+        .flat_map(|(_, tramp, words)| (0..words).map(move |index| tramp + 4 * index))
+        .collect();
     let mut sources: HashMap<u32, Vec<u32>> = HashMap::new();
     for &pc in executed {
-        if let Some(target) = code.op(pc).target() {
+        if trampolines.contains(&pc) {
+            continue;
+        }
+        if let Some(target) = code.unpatched(pc).target() {
             sources.entry(target).or_default().push(pc);
         }
     }
@@ -358,7 +428,7 @@ pub fn wait_loops(ram: &[u8], executed: &BTreeSet<u32>) -> Vec<WaitLoop> {
     let sources = sources(&code, executed);
     let mut found = Vec::new();
     for &closer in executed {
-        let op = code.op(closer);
+        let op = code.unpatched(closer);
         let (Op::Branch { target, .. } | Op::Jump { target, .. }) = op else {
             continue;
         };
@@ -374,7 +444,7 @@ pub fn wait_loops(ram: &[u8], executed: &BTreeSet<u32>) -> Vec<WaitLoop> {
         let nested = body.iter().any(|&pc| {
             pc != closer
                 && code
-                    .op(pc)
+                    .unpatched(pc)
                     .target()
                     .is_some_and(|to| to <= pc && members.contains(&to))
         });
@@ -387,6 +457,15 @@ pub fn wait_loops(ram: &[u8], executed: &BTreeSet<u32>) -> Vec<WaitLoop> {
                 .any(|from| *from >= target && !members.contains(from))
         });
         if !nested && !open && waits(&code, &body) {
+            let mut body = body;
+            let detours: Vec<u32> = body
+                .iter()
+                .filter_map(|&pc| code.trampoline(pc))
+                .flat_map(|(_, tramp, words)| (0..words).map(move |index| tramp + 4 * index))
+                .collect();
+            body.extend(detours);
+            body.sort_unstable();
+            body.dedup();
             found.push(WaitLoop {
                 start: target,
                 end: closer + 4,
@@ -913,6 +992,40 @@ mod tests {
             NOP, // 6: exit
         ];
         assert_eq!(found(&code), vec![(0, 20)]);
+    }
+
+    #[test]
+    fn a_loop_through_a_hazard_trampoline_still_waits() {
+        // NitroXide's flip wait after hazard_patch.py: the slot load of the
+        // exit branch raced `subu`, so the branch became `j TRAMP`, and the
+        // trampoline re-evaluates it and jumps back to the fall-through.
+        let v1_minus_a2 = r(V1, 6, AT, 0x23); // subu at, v1, a2
+        let mut code = vec![
+            lw(AT, A0, 0), // 0: loop
+            NOP,
+            j(16), // was beq at, zero, 8
+            lw(V1, A1, 0),
+            v1_minus_a2,       // 4
+            i(0xb, AT, AT, 9), // sltiu at, at, 9
+            bne(AT, 0, to(6, 0)),
+            NOP,
+            NOP, // 8: exit
+        ];
+        code.resize(16, NOP);
+        // 16: TRAMP
+        code.extend([beq(AT, 0, 3), NOP, j(4), NOP, j(8), NOP]);
+        let ram = ram(&code);
+        let loops = wait_loops(&ram, &executed(lines(code.len().div_ceil(4)), 16));
+        assert_eq!(loops.len(), 1);
+        assert_eq!((loops[0].start - BASE, loops[0].end - BASE), (0, 28));
+        // The trampoline's words run once per iteration: they wait too.
+        let tramp: Vec<u32> = (16..22).map(|word| BASE + 4 * word).collect();
+        assert!(tramp.iter().all(|pc| loops[0].body.contains(pc)));
+        // A stub of any other shape is followed as written, and the loop
+        // never gets back from it.
+        let mut other = code.clone();
+        other[18] = j(5);
+        assert!(found(&other).is_empty());
     }
 
     #[test]
