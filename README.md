@@ -45,7 +45,8 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
 - `tools/psoxide-pgo`: emulator PC histogram to LLVM sample profile, for
   profile-guided guest builds with no instrumentation. `portable` writes a
   profile that can be committed, and `rebind` applies it to a build made in
-  any other checkout.
+  any other checkout. `order` and the `+order` variants link functions in an
+  I-cache-aware order from exact per-word counts, gated per game by `choose`.
 - `tools/hazard_scan.py`, `hazard_patch.py` (the scanner imports the patcher's detector), `guest_symbol_gate.sh`: guest checks.
   Given the link's `-Map` (`--map`), both bound each switch's jump table to its own function.
 - `tools/stack_guard.py`: proves every `psx_rt::scratchpad::ScratchpadStack` call tree in a

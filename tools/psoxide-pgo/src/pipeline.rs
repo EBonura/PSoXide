@@ -1,4 +1,4 @@
-//! The shared PGO build: `collect`, `apply` and `choose`.
+//! The shared PGO build: `collect`, `order`, `apply` and `choose`.
 //!
 //! Every game used to carry its own copy of these steps (hl-psx's
 //! `hl-build pgo`, VoXide's `make pgo`). They differ only in how the guest
@@ -15,7 +15,7 @@ use std::{env, fs};
 use object::read::elf::{ElfFile32, FileHeader, ProgramHeader};
 use object::{Object, ObjectSection};
 
-use crate::Result;
+use crate::{layout, Result};
 
 /// The only guest target.
 const TARGET: &str = "mipsel-sony-psx";
@@ -27,6 +27,12 @@ const COLLECT_FLAGS: [&str; 3] = [
     "-Zdebug-info-for-profiling",
     "-Cstrip=none",
 ];
+
+/// Set to an ordering file while relinking an `+order` variant. The guest's
+/// build.rs passes it to the link as `--symbol-ordering-file` (in place of
+/// any ordering of its own), and prints `cargo:rerun-if-env-changed` for it,
+/// so only the final crate relinks. Its path names its contents.
+const LINK_ORDER_ENV: &str = "PSOXIDE_LINK_ORDER";
 
 /// Set while linking the ELF twin. A guest whose build.rs adds
 /// `--oformat=binary` must leave it out when this is set; flags given
@@ -48,14 +54,18 @@ const SAMPLE_WINDOW_TICKS: usize = 30;
 pub const USAGE: &str = "\
        psoxide-pgo collect [GUEST] --frontend PATH [--tape PATH [--polls A..B]]...
                            [--launch-arg ARG]... [--pack CMD] --out PROFILE -- CARGO-ARGS...
-       psoxide-pgo apply   [GUEST] [--profile PROFILE] [--variant V] -- CARGO-ARGS...
-       psoxide-pgo choose  [GUEST] --profile PROFILE --gate CMD [--variant V]... [--pack CMD]
-                           -- CARGO-ARGS...
+       psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--launch-arg ARG]...
+                           [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
+       psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V] -- CARGO-ARGS...
+       psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
+                           [--pack CMD] -- CARGO-ARGS...
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                            [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
   GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
+         [--linker-script PATH]
   CARGO-ARGS: what follows `cargo` in the guest's own build, starting with `build`
-  V: off | default | accurate | noreplay | nopgso | profi | hot=N | llvm=-FLAG, joined with +
+  V: off | default | accurate | noreplay | nopgso | profi | hot=N | llvm=-FLAG, joined with +;
+     add +order to link in the order the layout profile gives (off+order, hot=500+order)
   A..B: the gameplay window in port-1 polls, loads excluded
   START..END: guest addresses in hex (one build's layout) of a loop to count as waiting";
 
@@ -67,6 +77,9 @@ struct Guest {
     patcher: PathBuf,
     scanner: PathBuf,
     stack_guard: PathBuf,
+    /// The guest's linker script, for the sections it places ahead of the
+    /// catch-all `*(.text .text.*)`, which no ordering file can move.
+    linker_script: PathBuf,
 }
 
 /// One link: the executable cargo reports and the link map the driver asked
@@ -90,12 +103,14 @@ struct Options {
     patcher: Option<PathBuf>,
     scanner: Option<PathBuf>,
     stack_guard: Option<PathBuf>,
+    linker_script: Option<PathBuf>,
     frontend: Option<PathBuf>,
     runs: Vec<Run>,
     launch_args: Vec<String>,
     pack: Option<String>,
     out: Option<PathBuf>,
     profile: Option<PathBuf>,
+    layout: Option<PathBuf>,
     variants: Vec<String>,
     gate: Option<String>,
     image: Option<PathBuf>,
@@ -150,6 +165,8 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
             "--patcher" => options.patcher = Some(path(value()?)?),
             "--scanner" => options.scanner = Some(path(value()?)?),
             "--stack-guard" => options.stack_guard = Some(path(value()?)?),
+            "--linker-script" => options.linker_script = Some(path(value()?)?),
+            "--layout" => options.layout = Some(path(value()?)?),
             "--frontend" => options.frontend = Some(path(value()?)?),
             "--tape" => options.runs.push(Run {
                 tape: Some(path(value()?)?),
@@ -185,7 +202,7 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
     Ok(options)
 }
 
-/// Run `collect`, `apply`, `choose` or `measure`.
+/// Run `collect`, `order`, `apply`, `choose` or `measure`.
 pub fn main(mode: &str, args: &[String]) -> Result<()> {
     let mut options = parse(mode, args)?;
     if mode == "measure" {
@@ -211,6 +228,10 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
             .stack_guard
             .take()
             .unwrap_or_else(|| tools.join("stack_guard.py")),
+        linker_script: options
+            .linker_script
+            .take()
+            .unwrap_or_else(|| tools.join("../sdk/psoxide.ld")),
     };
     for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
         if env::var_os(name).is_some_and(|value| !value.is_empty()) {
@@ -224,19 +245,47 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
     }
     match mode {
         "collect" => collect(&guest, &options),
+        "order" => order(&guest, &options),
         "apply" => {
-            let variant = match options.variants.as_slice() {
-                [] => "default",
-                [one] => one.as_str(),
-                _ => return Err("apply takes one --variant".into()),
-            };
-            let exe = apply(&guest, options.profile.as_deref(), variant)?;
-            println!("psoxide-pgo: {variant} -> {}", exe.display());
+            let variant = one_variant(&options, "apply")?;
+            let linked = apply(
+                &guest,
+                options.profile.as_deref(),
+                options.layout.as_deref(),
+                variant,
+            )?;
+            println!("psoxide-pgo: {variant} -> {}", linked.exe.display());
             Ok(())
         }
         "choose" => choose(&guest, &options),
         _ => unreachable!("main only dispatches pipeline modes"),
     }
+}
+
+/// The one `--variant` of `apply` or `order`, `default` if none.
+fn one_variant<'a>(options: &'a Options, mode: &str) -> Result<&'a str> {
+    match options.variants.as_slice() {
+        [] => Ok("default"),
+        [one] => Ok(one),
+        _ => Err(format!("{mode} takes one --variant").into()),
+    }
+}
+
+/// A variant's compile part, and whether it adds `+order` (the layout
+/// profile's function order, which is a link and not a compile).
+fn split_order(variant: &str) -> Result<(String, bool)> {
+    let parts: Vec<&str> = variant.split('+').collect();
+    let compile: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|&part| part != "order")
+        .collect();
+    if compile.is_empty() {
+        return Err(
+            "order joins a compile variant: off+order, default+order, hot=500+profi+order".into(),
+        );
+    }
+    Ok((compile.join("+"), compile.len() < parts.len()))
 }
 
 /// Extra rustflags for one variant, or `None` for `off`.
@@ -331,7 +380,7 @@ fn toml_string(text: &str) -> String {
 
 /// 64-bit FNV-1a: a name for a set of build inputs that stays the same from
 /// one driver build to the next (std's hasher promises no such thing).
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     })
@@ -348,11 +397,16 @@ fn run(command: &mut Command, what: &str) -> Result<()> {
 impl Guest {
     /// Build with `flags` appended to the guest's own rustflags and return
     /// the executable cargo reports, with the link map when the link wrote
-    /// one.
-    fn build(&self, flags: &[String], elf: bool) -> Result<Linked> {
+    /// one. `order` goes to the guest's build.rs in [`LINK_ORDER_ENV`]; it
+    /// changes no rustflags, so only the final crate relinks.
+    fn build(&self, flags: &[String], elf: bool, order: Option<&Path>) -> Result<Linked> {
         let mut flags = flags.to_vec();
         let mut command = Command::new("cargo");
         command.current_dir(&self.crate_dir).args(&self.cargo);
+        match order {
+            Some(order) => command.env(LINK_ORDER_ENV, order),
+            None => command.env_remove(LINK_ORDER_ENV),
+        };
         if elf {
             flags.push("-Clink-arg=--oformat=elf".to_string());
             command.env(LINK_ELF_ENV, "1");
@@ -362,7 +416,9 @@ impl Guest {
         // Link-only: the emitted bytes do not change. The path names every
         // input that selects the link, so a build cargo finds fresh (and so
         // does not relink) still has the map of the link that made it, and
-        // stays fresh itself: a new path would be new rustflags.
+        // stays fresh itself: a new path would be new rustflags. An ordered
+        // relink shares its variant's path: a change of order reruns the
+        // build script, so that link always writes the map.
         let map = self.map_path(&flags)?;
         flags.push(format!("-Clink-arg=-Map={}", map.display()));
         // `--config` appends to the rustflags in the guest's
@@ -475,7 +531,7 @@ impl Guest {
     /// in the work directory.
     fn build_twin(&self) -> Result<Linked> {
         let flags: Vec<String> = COLLECT_FLAGS.iter().map(ToString::to_string).collect();
-        let Linked { exe: built, map } = self.build(&flags, true)?;
+        let Linked { exe: built, map } = self.build(&flags, true, None)?;
         let data = fs::read(&built)?;
         let object = object::File::parse(&*data)?;
         if object.section_by_name(".debug_line").is_none() {
@@ -739,7 +795,7 @@ const LOCATE_LEAD_POLLS: u64 = 30;
 
 /// A `line_pc,value,percent` log from `--pc-line-log` or one of the stall
 /// attributions, as line address to value.
-fn read_line_log(path: &Path) -> Result<HashMap<u32, u64>> {
+pub(crate) fn read_line_log(path: &Path) -> Result<HashMap<u32, u64>> {
     let mut lines = HashMap::new();
     for row in fs::read_to_string(path)?.lines().skip(1) {
         let mut fields = row.split(',');
@@ -986,6 +1042,55 @@ impl MeasureLogs {
     }
 }
 
+/// The per-line logs can only start at a route tick, so a short replay
+/// finds the tick in which poll FROM of `spec`'s window lands: the last
+/// tick before the window, whose route-log row is the first to reach it.
+/// Returns it and its row, which the full replay must match (the emulator
+/// is deterministic, so it reaches the tick in the same state).
+fn locate(
+    frontend: &Path,
+    image: &Path,
+    spec: &Run,
+    launch_args: &[String],
+    log: &Path,
+) -> Result<(usize, Tick)> {
+    let polls = spec.polls.ok_or("a replay window needs --polls FROM..TO")?;
+    let locate = Run {
+        tape: spec.tape.clone(),
+        polls: Some((0, (polls.0 + LOCATE_LEAD_POLLS).min(polls.1))),
+    };
+    let mut command = launch(frontend, image, &locate, launch_args);
+    command.arg("--route-log").arg(log);
+    replay(command, "locating replay")?;
+    let located = read_route_log(log)?;
+    let start = located
+        .iter()
+        .position(|tick| tick.polls >= polls.0)
+        .ok_or_else(|| format!("the run never reached poll {}", polls.0))?;
+    Ok((start, located[start]))
+}
+
+/// Refuse a full replay that does not match its locating replay at `start`.
+fn same_at(ticks: &[Tick], start: usize, located: Tick) -> Result<()> {
+    if ticks.get(start) != Some(&located) {
+        return Err(format!(
+            "the two replays differ at route tick {start}; this needs a deterministic run"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Whether the frontend can count every word (`--pc-log-words`) instead
+/// of every 16-byte line.
+fn counts_words(frontend: &Path) -> Result<bool> {
+    let help = Command::new(frontend)
+        .args(["launch", "--help"])
+        .stderr(Stdio::null())
+        .output()?;
+    Ok(String::from_utf8_lossy(&help.stdout).contains("--pc-log-words"))
+}
+
 /// Run one replay and print its gameplay-window totals as `key=value` lines
 /// for a `choose` gate.
 fn measure(options: &Options) -> Result<()> {
@@ -1008,33 +1113,12 @@ fn measure_with(options: &Options, logs: &MeasureLogs) -> Result<()> {
         }
     };
     let polls = spec.polls.expect("checked above");
-
-    // The per-line logs can only start at a route tick, so a short first
-    // replay finds the tick in which poll FROM lands. The emulator is
-    // deterministic, so the second replay reaches it in the same state.
-    let locate = Run {
-        tape: spec.tape.clone(),
-        polls: Some((0, (polls.0 + LOCATE_LEAD_POLLS).min(polls.1))),
-    };
-    let mut command = launch(frontend, image, &locate, &options.launch_args);
-    command.arg("--route-log").arg(&logs.locate);
-    replay(command, "locating replay")?;
-    let located = read_route_log(&logs.locate)?;
-    // `start` is the last tick before the window: its row is the first to
-    // reach poll FROM.
-    let start = located
-        .iter()
-        .position(|tick| tick.polls >= polls.0)
-        .ok_or_else(|| format!("the run never reached poll {}", polls.0))?;
+    let (start, located) = locate(frontend, image, spec, &options.launch_args, &logs.locate)?;
     let start_tick = start.to_string();
 
     // Per-word counts, where the frontend has them, make the split exact
     // and let a wait loop's calls count (see work::attribute).
-    let help = Command::new(frontend)
-        .args(["launch", "--help"])
-        .stderr(Stdio::null())
-        .output()?;
-    let words = String::from_utf8_lossy(&help.stdout).contains("--pc-log-words");
+    let words = counts_words(frontend)?;
     let mut command = launch(frontend, image, spec, &options.launch_args);
     if !options.launch_args.iter().any(|arg| arg == "--dump-hash") {
         command.arg("--dump-hash");
@@ -1058,12 +1142,7 @@ fn measure_with(options: &Options, logs: &MeasureLogs) -> Result<()> {
         .arg(&logs.ram);
     let report = replay(command, "measuring replay")?;
     let ticks = read_route_log(&logs.route)?;
-    if ticks.get(start) != located.get(start) {
-        return Err(format!(
-            "the two replays differ at route tick {start}; measure needs a deterministic run"
-        )
-        .into());
-    }
+    same_at(&ticks, start, located)?;
     let window: Vec<usize> = (1..ticks.len())
         .filter(|&tick| inside(&ticks, tick, tick, polls))
         .collect();
@@ -1202,12 +1281,11 @@ fn collect(guest: &Guest, options: &Options) -> Result<()> {
     Ok(())
 }
 
-/// Build one variant and return the patched executable.
-fn apply(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result<PathBuf> {
+/// The rustflags of a variant's compile part, none for `off`. A profiled
+/// variant builds the ELF twin here to rebind the profile.
+fn compile_flags(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result<Vec<String>> {
     let Some(extra) = variant_flags(variant)? else {
-        let Linked { exe, map } = guest.build(&[], false)?;
-        guest.patch(&exe, map.as_deref())?;
-        return Ok(exe);
+        return Ok(Vec::new());
     };
     let profile = profile.ok_or("a profiled variant needs --profile")?;
     if !profile.is_file() {
@@ -1233,9 +1311,180 @@ fn apply(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result<PathBuf
     let mut flags: Vec<String> = COLLECT_FLAGS.iter().map(ToString::to_string).collect();
     flags.push(format!("-Zprofile-sample-use={}", rebound.display()));
     flags.extend(extra);
-    let Linked { exe, map } = guest.build(&flags, false)?;
-    guest.patch(&exe, map.as_deref())?;
-    Ok(exe)
+    Ok(flags)
+}
+
+/// Build one variant and return the patched executable and its map.
+fn apply(
+    guest: &Guest,
+    profile: Option<&Path>,
+    layout: Option<&Path>,
+    variant: &str,
+) -> Result<Linked> {
+    let (compile, ordered) = split_order(variant)?;
+    let flags = compile_flags(guest, profile, &compile)?;
+    let linked = guest.build(&flags, false, None)?;
+    guest.patch(&linked.exe, linked.map.as_deref())?;
+    if !ordered {
+        return Ok(linked);
+    }
+    let layout = layout.ok_or("an +order variant needs --layout")?;
+    let order = place(guest, &linked, layout, &compile)?;
+    let relinked = guest.build(&flags, false, Some(&order.path))?;
+    let map = relinked
+        .map
+        .as_deref()
+        .ok_or("the ordered relink wrote no map to check its order against")?;
+    let followed = layout::check_order(
+        &order.text,
+        &order.placed,
+        &layout::read_map(&fs::read_to_string(map)?),
+    )?;
+    println!(
+        "psoxide-pgo: the relink put all {} ordered functions in order; {} of the {} placed \
+         ones start where the model put them",
+        followed.listed,
+        order.placed.len() - followed.drifted,
+        order.placed.len()
+    );
+    guest.patch(&relinked.exe, relinked.map.as_deref())?;
+    Ok(relinked)
+}
+
+/// An ordering file written for one link.
+struct Order {
+    path: PathBuf,
+    text: String,
+    /// The placed functions' symbols and modelled addresses.
+    placed: Vec<(String, u32)>,
+}
+
+/// Bind the layout profile onto `linked` (patched, as `order` replayed it),
+/// refuse it below [`layout::MIN_BOUND`], and write the ordering file the
+/// placement gives, named by its contents.
+fn place(guest: &Guest, linked: &Linked, layout: &Path, compile: &str) -> Result<Order> {
+    let map = linked
+        .map
+        .as_deref()
+        .ok_or("an +order variant needs the link map, and the link wrote none")?;
+    let sections = layout::read_map(&fs::read_to_string(map)?);
+    let image = layout::Image::parse(&fs::read(&linked.exe)?)?;
+    let profile = layout::Layout::parse(&fs::read_to_string(layout)?)
+        .map_err(|error| format!("{}: {error}", layout.display()))?;
+    let building = features_of(&guest.cargo);
+    if profile.features != building || profile.variant != compile {
+        eprintln!(
+            "psoxide-pgo: warning: {} was collected on features {} and variant {}, and this \
+             build is {building} and {compile}. Only functions whose code is the same bind.",
+            layout.display(),
+            profile.features,
+            profile.variant
+        );
+    }
+    let bound = layout::bind(&profile, &sections, &image);
+    println!(
+        "psoxide-pgo: layout {}: {}",
+        layout.display(),
+        bound.coverage
+    );
+    bound.coverage.check(layout::MIN_BOUND)?;
+    let fixed = layout::fixed_patterns(
+        &fs::read_to_string(&guest.linker_script)
+            .map_err(|error| format!("{}: {error}", guest.linker_script.display()))?,
+    );
+    let placement = layout::place(&sections, &image, &bound, &fixed);
+    println!(
+        "psoxide-pgo: placed {} functions ({} cold bytes moved into gaps); predicted \
+         I-cache conflict refills {:.0} -> {:.0}",
+        placement.placed.len(),
+        placement.gap,
+        placement.before,
+        placement.after
+    );
+    let text = layout::order_file(&sections, &placement);
+    let path = guest
+        .work_dir(&linked.exe)?
+        .join(format!("order-{:016x}.txt", fnv1a(text.as_bytes())));
+    fs::write(&path, &text)?;
+    let placed = placement
+        .placed
+        .iter()
+        .filter_map(|&(k, at)| Some((sections[k].symbol.clone()?, at)))
+        .collect();
+    Ok(Order { path, text, placed })
+}
+
+/// Build a variant, replay it with a count for every word over each run's
+/// gameplay polls, and write the layout profile `apply ...+order` places
+/// from.
+fn order(guest: &Guest, options: &Options) -> Result<()> {
+    let frontend = options.frontend.as_ref().ok_or("order needs --frontend")?;
+    let out = options.out.as_ref().ok_or("order needs --out LAYOUT")?;
+    // Collected on the compile part, which is what `+order` relinks.
+    let (compile, _) = split_order(one_variant(options, "order")?)?;
+    if options.runs.is_empty() || options.runs.iter().any(|run| run.polls.is_none()) {
+        return Err("order needs --polls FROM..TO for every --tape (or one without a tape)".into());
+    }
+    if !counts_words(frontend)? {
+        return Err(format!("{} has no --pc-log-words", frontend.display()).into());
+    }
+    let linked = apply(guest, options.profile.as_deref(), None, &compile)?;
+    let map = linked
+        .map
+        .as_deref()
+        .ok_or("order needs the link map, and the link wrote none")?;
+    let sections = layout::read_map(&fs::read_to_string(map)?);
+    let image_bytes = fs::read(&linked.exe)?;
+    let work = guest.work_dir(&linked.exe)?;
+    let disc = work.join("order.bin");
+    let image = match &options.pack {
+        Some(command) => pack(command, &linked.exe, &disc)?,
+        None => linked.exe.clone(),
+    };
+    let mut counts: HashMap<u32, u64> = HashMap::new();
+    let mut scratch = Vec::new();
+    let replayed = (|| -> Result<()> {
+        for (index, spec) in options.runs.iter().enumerate() {
+            let [locate_log, route, words] = ["locate", "route", "words"]
+                .map(|name| work.join(format!("order-{name}-{index}.csv")));
+            scratch.extend([locate_log.clone(), route.clone(), words.clone()]);
+            let (start, located) =
+                locate(frontend, &image, spec, &options.launch_args, &locate_log)?;
+            let mut command = launch(frontend, &image, spec, &options.launch_args);
+            command
+                .arg("--pc-log-words")
+                .arg("--route-log")
+                .arg(&route)
+                .arg("--pc-line-log")
+                .arg(&words)
+                .args(["--pc-line-start-route-tick", &start.to_string()]);
+            replay(command, "layout replay")?;
+            same_at(&read_route_log(&route)?, start, located)?;
+            for (pc, count) in read_line_log(&words)? {
+                *counts.entry(pc).or_default() += count;
+            }
+        }
+        Ok(())
+    })();
+    for file in &scratch {
+        let _ = fs::remove_file(file);
+    }
+    remove_disc(&disc);
+    replayed?;
+    let mut collected = layout::collect(&sections, &layout::Image::parse(&image_bytes)?, &counts);
+    collected.layout.features = features_of(&guest.cargo);
+    collected.layout.variant = compile;
+    fs::write(out, collected.layout.to_text())?;
+    let share = |part: u64| 100.0 * part as f64 / collected.instructions.max(1) as f64;
+    println!(
+        "psoxide-pgo: layout profile -> {}: {} functions ran; {:.2}% of instructions outside \
+         them (BIOS, trampolines), {} indirect calls (jalr) not in the call graph",
+        out.display(),
+        collected.layout.functions.len(),
+        share(collected.outside),
+        collected.indirect
+    );
+    Ok(())
 }
 
 /// Parse `key=value` lines from a gate's output.
@@ -1378,7 +1627,7 @@ fn rank_by_work(rows: &mut Vec<GateRow>) -> Option<String> {
 fn choose(guest: &Guest, options: &Options) -> Result<()> {
     let gate = options.gate.as_ref().ok_or("choose needs --gate CMD")?;
     let variants: Vec<String> = if options.variants.is_empty() {
-        [
+        let mut variants = [
             "off",
             "default",
             "hot=500",
@@ -1387,18 +1636,36 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
             "accurate+nopgso+hot=1500",
         ]
         .map(String::from)
-        .to_vec()
+        .to_vec();
+        // A layout profile binds onto the variant it was collected on, so
+        // that one is the candidate for its order.
+        if let Some(layout) = &options.layout {
+            let collected_on = layout::Layout::parse(&fs::read_to_string(layout)?)
+                .map_err(|error| format!("{}: {error}", layout.display()))?
+                .variant;
+            if !variants.contains(&collected_on) {
+                variants.push(collected_on.clone());
+            }
+            variants.push(format!("{collected_on}+order"));
+        }
+        variants
     } else {
         options.variants.clone()
     };
     for variant in &variants {
-        variant_flags(variant)?;
+        variant_flags(&split_order(variant)?.0)?;
     }
     let mut rows = Vec::new();
     for variant in &variants {
         println!("psoxide-pgo: building variant {variant}");
-        let exe = match apply(guest, options.profile.as_deref(), variant) {
-            Ok(exe) => exe,
+        let built = apply(
+            guest,
+            options.profile.as_deref(),
+            options.layout.as_deref(),
+            variant,
+        );
+        let exe = match built {
+            Ok(linked) => linked.exe,
             Err(error) => {
                 eprintln!("psoxide-pgo: variant {variant} did not build: {error}");
                 rows.push(GateRow {
@@ -1468,6 +1735,7 @@ mod tests {
             patcher: PathBuf::new(),
             scanner: PathBuf::new(),
             stack_guard: PathBuf::new(),
+            linker_script: PathBuf::new(),
         };
         let spaced = guest(&["build", "--target-dir", target.to_str().unwrap()]);
         let joined = guest(&["build", &format!("--target-dir={}", target.display())]);
@@ -1510,6 +1778,20 @@ mod tests {
         assert!(variant_flags("hot=lots").is_err());
         assert!(variant_flags("llvm=pgso").is_err());
         assert!(variant_flags("fast").is_err());
+    }
+
+    #[test]
+    fn order_is_a_link_part_of_any_variant() {
+        assert_eq!(
+            split_order("hot=500+profi").unwrap(),
+            ("hot=500+profi".into(), false)
+        );
+        assert_eq!(
+            split_order("hot=500+order+profi").unwrap(),
+            ("hot=500+profi".into(), true)
+        );
+        assert_eq!(split_order("off+order").unwrap(), ("off".into(), true));
+        assert!(split_order("order").is_err());
     }
 
     #[test]
@@ -1712,6 +1994,37 @@ mod tests {
         let mut plain = vec![row("off", true, &[("cycles", "1")])];
         assert_eq!(rank_by_work(&mut plain), None);
         assert_eq!(plain[0].values.len(), 1);
+    }
+
+    #[test]
+    fn choose_ranks_a_losing_order_below_its_variant() {
+        // Quake's I-cache study: an order trained on E1M1 alone, gated on
+        // E1M1 and E1M2 (prototype builds, 2026-09-22 frontend).
+        let mut rows = vec![
+            row(
+                "base",
+                true,
+                &[
+                    ("e1m1.work_cycles", "1581957371"),
+                    ("e1m2.work_cycles", "2130733102"),
+                ],
+            ),
+            row(
+                "base+order",
+                true,
+                &[
+                    ("e1m1.work_cycles", "1585393788"),
+                    ("e1m2.work_cycles", "2147913376"),
+                ],
+            ),
+        ];
+        assert_eq!(rank_by_work(&mut rows).as_deref(), Some("base"));
+        let order: Vec<&str> = rows.iter().map(|row| row.variant.as_str()).collect();
+        assert_eq!(order, vec!["base", "base+order"]);
+        assert_eq!(
+            rows[1].values[0],
+            ("work".to_string(), "+0.51%".to_string())
+        );
     }
 
     #[test]
