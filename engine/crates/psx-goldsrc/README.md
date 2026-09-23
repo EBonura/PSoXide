@@ -46,3 +46,17 @@ const parameter (320 for HL, 512 for CS), and `ground_logic` leaves
 `emulator-telemetry` or `performance-telemetry` feature to this crate.
 Small functions that were previously intra-crate carry `#[inline]` so the
 games' LTO builds keep their previous inlining.
+
+## Viewmodel
+
+`viewmodel` draws the held weapon for both ports. `build_static` decodes the
+pose-invariant half of every triangle (vertex indices, texture, shade, cull
+exemption) once per weapon and brightness level; each pose change only
+rejects and bucket-sorts (`sort`). `write_chain` writes the sorted triangles,
+wrapped in the port's two draw-offset words, as one DMA linked list whose last
+node links wherever the port says, so the weapon can sit inside a longer
+overlay list; `emit_immediate` writes the same GP0 words directly when the
+port's packet storage is short. Storage, shade, cull and depth rules stay with
+each port. The unit tests compare the chain with the per-sort decoder both
+ports carried before, word for word. `build_static` and `emit_immediate` run
+once per weapon and on the storage fallback, so they are optimized for size.

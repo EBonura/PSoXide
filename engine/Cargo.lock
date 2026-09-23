@@ -150,6 +150,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-engine",
+ "psx-gpu",
  "psx-io",
  "psx-math",
  "psx-pack",
