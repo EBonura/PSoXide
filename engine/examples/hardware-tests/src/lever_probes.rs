@@ -2,9 +2,10 @@
 //! Console gates for three performance levers the emulator cannot vouch for.
 //!
 //! Each lever measured well headless and each rests on something only silicon
-//! can answer. All three run at the end of the conformance battery (cases
+//! can answer. All three run near the end of the conformance battery (cases
 //! `0xC8`-`0xD2`), so both RUN ALL TESTS and FULL CHARACTERISATION carry them,
-//! and RESUME FROM TEST at index 200 runs just these plus the timing scan.
+//! and RESUME FROM TEST at index 200 runs these, the list-busy cases after them
+//! (`list_busy_probes.rs`) and the timing scan.
 //!
 //! * **GTE vs IRQ** (`0xC8`-`0xCB`). psx-rt's exception handler returns to
 //!   EPC. psx-spx documents that an interrupt taken on a GTE command lets the

@@ -39,6 +39,7 @@ mod cpu_tests;
 mod gpu_probes;
 mod handoff_probe;
 mod lever_probes;
+mod list_busy_probes;
 mod payload;
 mod perf_probes;
 mod photo;
@@ -201,7 +202,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 211;
+const TEST_COUNT: usize = 234;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the controller probe sweeps.
@@ -2175,7 +2176,7 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         run: test_rtpt_read_gap24,
     },
     // v1.24: console gates for the pending performance levers
-    // (lever_probes.rs). Last in the battery: RESUME FROM TEST 200 runs them.
+    // (lever_probes.rs). RESUME FROM TEST 200 runs them and everything after.
     TestSpec {
         id: 0x00c8,
         group: "IRQ",
@@ -2241,6 +2242,146 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "RAM",
         name: "scratchpad stack: background activity",
         run: lever_probes::test_spstack_activity,
+    },
+    // v1.24: how long channel 2 stays busy on a list whose nodes draw, and
+    // what the CPU gets done meanwhile (list_busy_probes.rs). Indices 211-233.
+    TestSpec {
+        id: 0x00d3,
+        group: "DMA",
+        name: "empty list: CHCR clear",
+        run: list_busy_probes::test_empty_chcr,
+    },
+    TestSpec {
+        id: 0x00d4,
+        group: "DMA",
+        name: "empty list: GP0(1Fh) IRQ",
+        run: list_busy_probes::test_empty_irq,
+    },
+    TestSpec {
+        id: 0x00d5,
+        group: "DMA",
+        name: "empty list: GPUSTAT.28 settled",
+        run: list_busy_probes::test_empty_bit28,
+    },
+    TestSpec {
+        id: 0x00d6,
+        group: "DMA",
+        name: "empty list: GPUSTAT.26 settled",
+        run: list_busy_probes::test_empty_bit26,
+    },
+    TestSpec {
+        id: 0x00d7,
+        group: "DMA",
+        name: "cheap list: CHCR clear",
+        run: list_busy_probes::test_cheap_chcr,
+    },
+    TestSpec {
+        id: 0x00d8,
+        group: "DMA",
+        name: "cheap list: GP0(1Fh) IRQ",
+        run: list_busy_probes::test_cheap_irq,
+    },
+    TestSpec {
+        id: 0x00d9,
+        group: "DMA",
+        name: "cheap list: GPUSTAT.28 settled",
+        run: list_busy_probes::test_cheap_bit28,
+    },
+    TestSpec {
+        id: 0x00da,
+        group: "DMA",
+        name: "cheap list: GPUSTAT.26 settled",
+        run: list_busy_probes::test_cheap_bit26,
+    },
+    TestSpec {
+        id: 0x00db,
+        group: "DMA",
+        name: "expensive list: CHCR clear",
+        run: list_busy_probes::test_expensive_chcr,
+    },
+    TestSpec {
+        id: 0x00dc,
+        group: "DMA",
+        name: "expensive list: GP0(1Fh) IRQ",
+        run: list_busy_probes::test_expensive_irq,
+    },
+    TestSpec {
+        id: 0x00dd,
+        group: "DMA",
+        name: "expensive list: GPUSTAT.28 settled",
+        run: list_busy_probes::test_expensive_bit28,
+    },
+    TestSpec {
+        id: 0x00de,
+        group: "DMA",
+        name: "expensive list: GPUSTAT.26 settled",
+        run: list_busy_probes::test_expensive_bit26,
+    },
+    TestSpec {
+        id: 0x00df,
+        group: "DMA",
+        name: "packed list: CHCR clear",
+        run: list_busy_probes::test_packed_chcr,
+    },
+    TestSpec {
+        id: 0x00e0,
+        group: "DMA",
+        name: "packed list: GP0(1Fh) IRQ",
+        run: list_busy_probes::test_packed_irq,
+    },
+    TestSpec {
+        id: 0x00e1,
+        group: "DMA",
+        name: "packed list: GPUSTAT.28 settled",
+        run: list_busy_probes::test_packed_bit28,
+    },
+    TestSpec {
+        id: 0x00e2,
+        group: "DMA",
+        name: "packed list: GPUSTAT.26 settled",
+        run: list_busy_probes::test_packed_bit26,
+    },
+    TestSpec {
+        id: 0x00e3,
+        group: "DMA",
+        name: "packed list draws the same pixels",
+        run: list_busy_probes::test_packed_pixels,
+    },
+    TestSpec {
+        id: 0x00e4,
+        group: "DMA",
+        name: "CPU during walk: ALU iterations",
+        run: list_busy_probes::test_alu_counts,
+    },
+    TestSpec {
+        id: 0x00e5,
+        group: "DMA",
+        name: "CPU during walk: ALU walk clocks",
+        run: list_busy_probes::test_alu_cycles,
+    },
+    TestSpec {
+        id: 0x00e6,
+        group: "DMA",
+        name: "CPU during walk: RAM load iterations",
+        run: list_busy_probes::test_ram_counts,
+    },
+    TestSpec {
+        id: 0x00e7,
+        group: "DMA",
+        name: "CPU during walk: RAM load walk clocks",
+        run: list_busy_probes::test_ram_cycles,
+    },
+    TestSpec {
+        id: 0x00e8,
+        group: "DMA",
+        name: "CPU during walk: scratchpad iterations",
+        run: list_busy_probes::test_spad_counts,
+    },
+    TestSpec {
+        id: 0x00e9,
+        group: "DMA",
+        name: "CPU during walk: scratchpad walk clocks",
+        run: list_busy_probes::test_spad_cycles,
     },
 ];
 

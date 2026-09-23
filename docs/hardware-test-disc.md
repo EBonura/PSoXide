@@ -490,10 +490,10 @@ under `emu/crates/emulator-core` is editable in this tree.
 ## Performance-lever gates (cases `0xC8`-`0xD2`, records `137`-`13A`, v1.24)
 
 Three levers measured well headless and each rests on something only silicon
-can answer. The cases sit at the end of the conformance battery (indices
+can answer. The cases sit near the end of the conformance battery (indices
 200-210), so RUN ALL TESTS and FULL CHARACTERISATION both run them, and RESUME
-FROM TEST at 200 runs just these plus the timing scan. Code in
-`src/lever_probes.rs`. INFO values and passing observations travel only in the
+FROM TEST at 200 runs these, the list-busy cases after them and the timing
+scan. Code in `src/lever_probes.rs`. INFO values and passing observations travel only in the
 FULL CHARACTERISATION capture; a conformance capture carries a case's numbers
 only when it fails.
 
@@ -584,6 +584,89 @@ Emulator (frozen frontend, PSoXide-editor a03b8fa9): `137` 16,064, `138`
 12,556, `139` 16,065, `13A` 12,517. The emulator does not model RAM loads
 slowing during a linked-list DMA (record `FE`), so `139` equals `137` there;
 silicon is expected to differ.
+
+## Linked-list busy time (cases `0xD3`-`0xE9`, v1.24)
+
+How long GPU DMA channel 2 stays busy (CHCR bit 24) on a linked list whose
+nodes draw. The emulator's default model clears CHCR after a word-count
+formula (`gpu_command_linked_cycles` in bus.rs: words + words/16 + 9 a node +
+nodes/5 + 5) that ignores draw cost; the experimental FIFO model
+(`PSOXIDE_EXPERIMENTAL_DMA_FIFO=1`) keeps it busy until the drawing nearly
+drains. An hl-psx optimisation measures +21% on the default model and nothing
+on the FIFO one, so which is true decides it. Code in `src/list_busy_probes.rs`;
+indices 211-233, so RESUME FROM TEST at 211 runs only these and the timing
+scan. The values are INFO and travel only in the FULL CHARACTERISATION capture;
+`hwtest-report.py` prints them as a labelled `list_busy` table.
+
+Four lists, each ending in GP0(1Fh), all drawing into the 320x240 area at
+(0, 0) after a black fill that is fenced with its own GP0(1Fh):
+
+| List | Nodes | Words (with headers) | Default-model CHCR formula |
+|---|---|---|---|
+| empty: 16 empty nodes | 17 | 18 | 181 |
+| cheap: 16 two-pixel Gouraud triangles, one a node | 17 | 114 | 283 |
+| expensive: the same packets, each triangle half the area | 17 | 114 | 283 |
+| packed: the expensive triangles four to a node, 24 words each | 5 | 102 | 160 |
+
+Cheap and expensive differ only in vertex coordinates, so the default model
+gives them the same busy time. Every packet word's top byte is 0x00 or 0x30,
+so if the GPU loses words from a packed node it can only misread them as NOPs,
+cache clears or triangles, all clipped to the draw area.
+
+Each list runs twice and the second run counts. From the kick, one poll loop
+reads Timer 2 at the system clock, widened to 32 bits in software on every poll
+so no list can overflow it, and stamps the first poll that sees each event; a
+stamp is late by up to one poll turn, and 0xFFFFFFFF means never seen (after
+16M clocks the loop gives up, the channel is aborted and GP1(01h) resets the
+GPU). Bits 28 and 26 are stamped where their final high run begins, since both
+pulse while the GPU works. Interrupts are masked for each walk.
+
+| Case (index) | Status | Expected | Observed |
+|---|---|---|---|
+| `0xD3`/`0xD7`/`0xDB`/`0xDF` (211/215/219/223) CHCR clear, empty/cheap/expensive/packed | INFO | words (bits 16-31), nodes (0-15) | clocks from the kick to CHCR bit 24 clear |
+| `0xD4`/`0xD8`/`0xDC`/`0xE0` (212/216/220/224) GP0(1Fh) IRQ | INFO | as above | clocks to GPUSTAT bit 24 |
+| `0xD5`/`0xD9`/`0xDD`/`0xE1` (213/217/221/225) GPUSTAT.28 settled | INFO | as above | clocks to the start of bit 28's final high run |
+| `0xD6`/`0xDA`/`0xDE`/`0xE2` (214/218/222/226) GPUSTAT.26 settled | INFO | as above | the same for bit 26 |
+| `0xE3` (227) packed list draws the same pixels | PASS if the packed list's GP0(1Fh) arrived and twelve sampled pixel pairs hash the same as after the expensive list | hash after expensive | hash after packed |
+| `0xE4`/`0xE6`/`0xE8` (228/230/232) CPU during walk: ALU / RAM load / scratchpad iterations | INFO | 256 | iterations while the expensive list walked (bits 0-15), clocks for 256 iterations idle (16-31), each saturating |
+| `0xE5`/`0xE7`/`0xE9` (229/231/233) the same loops' walk clocks | INFO | iterations | clocks from just after the kick to CHCR clear |
+
+The throughput loop is one assembly block: eight `addiu`, eight RAM `lw` or
+eight scratchpad `lw`, then a read of channel 2's CHCR and one of Timer 2,
+until CHCR bit 24 clears. Run idle, CHCR is XORed with bit 24 so the exit test
+never passes and the same instructions run 256 times. Slowdown during the walk
+is (walk clocks / walk iterations) / (idle clocks / 256).
+
+Emulator, frozen frontend `baseline-2026-09-22`, full characterisation capture
+(clocks):
+
+| | default model | FIFO model |
+|---|---|---|
+| empty: CHCR / 1Fh / bit 28 / bit 26 | 225 / 6 / 6 / 6 | 226 / 226 / 6 / 6 |
+| cheap | 283 / 6 / 4,906 / 4,906 | 4,648 / 4,937 / 4,937 / 4,937 |
+| expensive | 283 / 6 / 314,366 / 314,366 | 293,588 / 313,187 / 313,187 / 313,187 |
+| packed | 159 / 19 / 314,331 / 314,331 | 234,905 / never / 234,905 / 234,905 |
+| `0xE3` packed pixels | PASS | FAIL (the GP0(1Fh) was lost) |
+| ALU loop: walk iterations / walk clocks / idle per 256 | 9 / 217 / 6,392 | 10,719 / 267,967 / 6,392 |
+| RAM loads | 4 / 292 / 18,941 | 3,987 / 294,917 / 18,932 |
+| scratchpad loads | 9 / 217 / 6,392 | 10,719 / 267,967 / 6,392 |
+
+The two models answer differently exactly where the lever cares: default
+gives cheap and expensive the same CHCR time and raises the 1Fh interrupt a
+few clocks after the kick, long before the drawing it follows (bits 28 and 26
+do track the drawing there); FIFO keeps CHCR busy for most of the drawing, and
+drops words from a 24-word node while the GPU draws. Neither slows the CPU
+during the walk (FIFO: 25.0 clocks an ALU iteration against 25.0 idle, 74.0 a
+RAM iteration against 73.9), where the v1.22 console read RAM loads half again
+as slow during an empty-list walk (`FE`).
+
+Reading a console capture: `219` near `215` means the default model is right
+about CHCR; `219` near `220` and far above `215` means the FIFO model is, and
+the +21% does not exist on silicon. `220` is the console's time to draw the
+expensive list. `221` against `220` says whether GPUSTAT bit 28 going idle
+means the drawing has finished, which the present-queue gate (`0xCD`) relies
+on. `227` failing, or `224` reading never, says silicon loses words from a node
+larger than its FIFO while it draws, and `223` then times some other workload.
 
 ## CD-DA contention (records `0x9B`-`0x9E`)
 
