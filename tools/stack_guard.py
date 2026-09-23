@@ -16,8 +16,17 @@ only overestimates) down the deepest path, and fails
 when the total exceeds the region minus psx-rt's 20-byte overhead (16 bytes
 of o32 argument home area, one canary word). It also fails on what it cannot
 bound: recursion, calls through a register (`jalr`, dyn and fn pointers),
-register jumps it cannot resolve as a jump table (BIOS calls go through
-`jr` to 0xA0/0xB0/0xC0), and $sp adjusted any other way.
+register jumps it cannot prove are a switch (BIOS calls go through `jr` to
+0xA0/0xB0/0xC0), and $sp adjusted any other way.
+
+A switch's `jr` is proven from the map by hazard_patch.py's `jump_table`
+(see its `Flow`): the table's address is followed back through the
+function however far away it was loaded, and the table ends at its first
+entry that leaves the function. A proven switch calls nothing, since every
+entry lands inside its own function. Before, a table read on into the next
+function's table, whose cases then counted as calls (hk-psx's input polling
+pulled in the menu and memory card code), and a base loaded more than a few
+instructions before the dispatch could not be resolved at all.
 
     python3 tools/stack_guard.py game.exe game.map
     python3 tools/stack_guard.py game.exe game.map --root REGEX --budget BYTES
@@ -39,7 +48,6 @@ stack before it reports. Each still counts its own frame.
 
 Needs mipsel-none-elf-objdump on PATH, or another one named in OBJDUMP.
 """
-import bisect
 import os
 import re
 import struct
@@ -47,49 +55,18 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 # One disassembler and one jump-table resolver for every post-link tool.
-from hazard_patch import HEADER, READS_ALL, disassemble, jump_table, load_address  # noqa: E402
+from hazard_patch import (HEADER, READS_ALL, LinkMap, MapError, disassemble, jump_table,  # noqa: E402
+                          load_address)
 
 ENTRY = re.compile(r"^<psx_rt::scratchpad::ScratchpadStack<(\d+)(?:usize)?, (\d+)(?:usize)?>>::stack_entry::<")
 STACK_OVERHEAD = 20
 SWITCH = "__psx_rt_call_on_stack"
 LEAVES = (SWITCH, "rust_begin_unwind", "__rustc::rust_begin_unwind")
 COND = {"beq", "bne", "beqz", "bnez", "blez", "bgtz", "bltz", "bgez", "b", "bltzal", "bgezal", "bal"}
-LINE = re.compile(r"^([0-9a-f]+) +([0-9a-f]+) +([0-9a-f]+) +(\d+) (.*)$")
 
 
 class GuardError(Exception):
     pass
-
-
-def parse_map(path):
-    """Symbols (address, size, name) in .text, input-section starts, and the
-    trampoline array, from an ld.lld map. Symbols sit 16 columns in, input
-    sections 8."""
-    symbols, sections, text, trampolines = [], [], {}, None
-    with open(path, errors="replace") as lines:
-        text_lines = lines.read().splitlines()
-    for line in text_lines:
-        m = LINE.match(line)
-        if not m:
-            continue
-        address, size = int(m.group(1), 16), int(m.group(3), 16)
-        rest = m.group(5)
-        depth = len(rest) - len(rest.lstrip(" "))
-        name = rest.strip()
-        if name in ("__text_start = .", "__text_end = .", "__bss_start = ."):
-            text[name.split()[0]] = address
-        elif depth == 16 and name == "HAZARD_TRAMPOLINES":
-            trampolines = (address, address + size)
-        elif depth == 8 and name.endswith(")") and ":(.text" in name:
-            sections.append((address, size))
-        elif depth == 16 and not name.startswith(".L") and " = " not in name:
-            symbols.append((address, size, name))
-    if "__text_start" not in text or "__text_end" not in text:
-        raise GuardError(f"{path}: no __text_start/__text_end, not an ld.lld map of psoxide.ld")
-    lo, hi = text["__text_start"], text["__text_end"]
-    symbols = [s for s in symbols if lo <= s[0] < hi]
-    sections = [s for s in sections if lo <= s[0] < hi]
-    return symbols, sections, (lo, hi, text.get("__bss_start")), trampolines
 
 
 class Image:
@@ -100,21 +77,14 @@ class Image:
         self.data = data
         self.image_end = self.base + len(data) - HEADER
         self.listing = disassemble(exe, self.base)
-        symbols, sections, (lo, hi, bss), self.trampolines = parse_map(map_path)
-        # The header's payload size is __bss_start - __text_start: a map from
-        # another link (a stale one, or another example's) fails here.
-        if data[:8] == b"PS-X EXE" and bss is not None:
-            payload = struct.unpack_from("<I", data, 0x1C)[0]
-            if payload != bss - lo or self.base != lo:
-                raise GuardError(f"{map_path} does not describe {exe} (payload {payload:#x}, "
-                                 f"map says {bss - lo:#x} at {lo:#x}); relink so both come from one link")
-        self.names = {}
-        for address, size, name in symbols:
-            self.names.setdefault(address, []).append((size, name))
-        # Every symbol or section start ends the function before it.
-        self.bounds = sorted({a for a in self.names} | {a for a, _ in sections} | {s + n for s, n in sections} | {hi})
-        self.text = (lo, hi)
-        self.starts = sorted(self.names)
+        try:
+            self.map = LinkMap(map_path)
+            self.map.check(data)
+        except MapError as error:
+            raise GuardError(str(error)) from None
+        self.names = self.map.names
+        self.text = self.map.text
+        self.trampolines = self.map.trampolines
 
     def word_at(self, addr):
         return struct.unpack_from("<I", self.data, addr - self.base + HEADER)[0]
@@ -122,18 +92,7 @@ class Image:
     def function(self, addr):
         """(start, end, name) of the function containing `addr`. A function
         is a named symbol, or runs from a call target to the next boundary."""
-        starts = self.starts
-        i = bisect.bisect_right(starts, addr) - 1
-        if i >= 0:
-            start = starts[i]
-            size, name = max(self.names[start])
-            end = start + size if size else self.bounds[bisect.bisect_right(self.bounds, start)]
-            if addr < end:
-                return start, end, name
-        if self.text[0] <= addr < self.text[1]:
-            end = self.bounds[bisect.bisect_right(self.bounds, addr)]
-            return addr, end, f"<unnamed {addr:08x}>"
-        return None
+        return self.map.function(addr)
 
     def in_trampolines(self, addr):
         return self.trampolines is not None and self.trampolines[0] <= addr < self.trampolines[1]
@@ -167,17 +126,15 @@ class Walker:
         if op == "jalr":
             raise GuardError(f"{name} calls through a register at {addr:08x}; the callee cannot be bounded")
         if op == "jr" and args.strip() != "ra":
-            entries = jump_table(self.image.listing, addr, self.image.word_at, self.image.image_end, self.image.base)
+            entries = jump_table(self.image.listing, addr, self.image.word_at, self.image.image_end,
+                                 self.image.base, self.image.map)
             if entries is None:
                 raise GuardError(f"{name} jumps through a register at {addr:08x} ({op} {args}) and it is not "
-                                 f"a jump table; a BIOS call or a tail call through a pointer cannot be bounded")
-            found = []
-            for _, dest in entries:
-                if self.image.in_trampolines(dest):
-                    found += self.trampoline(start, end, dest, name)
-                elif not start <= dest < end:
-                    found.append(dest)
-            return found
+                                 f"a jump table it can prove; a BIOS call or a tail call through a pointer "
+                                 f"cannot be bounded")
+            # A proven table ends at its first entry that leaves the function
+            # (a switch never does), so a dispatch calls nothing.
+            return []
         return []
 
     def trampoline(self, start, end, tramp, name):

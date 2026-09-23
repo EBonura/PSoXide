@@ -47,6 +47,7 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   profile that can be committed, and `rebind` applies it to a build made in
   any other checkout.
 - `tools/hazard_scan.py`, `hazard_patch.py` (the scanner imports the patcher's detector), `guest_symbol_gate.sh`: guest checks.
+  Given the link's `-Map` (`--map`), both bound each switch's jump table to its own function.
 - `tools/stack_guard.py`: proves every `psx_rt::scratchpad::ScratchpadStack` call tree in a
   linked exe fits its scratchpad region, from the exe and its ld.lld `-Map`.
 

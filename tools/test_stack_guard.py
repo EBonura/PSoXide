@@ -12,7 +12,10 @@ mipsel-linux-gnu-objdump.
 import importlib.util
 import io
 import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +53,24 @@ def or_(rd, rs, rt):
     return fx.r_type(0x25, rs, rt, rd)
 
 
+def sll(rd, rt, sa):
+    return fx.REG[rt] << 16 | fx.REG[rd] << 11 | sa << 6
+
+
+def sw(rt, off, rs):
+    return fx.i_type(0x2B, rs, rt, off)
+
+
+def b(offset):
+    return fx.beq("zero", "zero", offset)
+
+
+def dispatch(index, base, table, rd="at"):
+    """`sll ; addu ; lw ; nop ; jr ; nop`: a switch on `index` through the
+    table at `table`, whose %hi is already in `base`."""
+    return [sll(rd, index, 2), fx.addu(rd, rd, base), fx.lw(rd, fx.lo(table), rd), NOP, fx.jr(rd), NOP]
+
+
 class Fixture:
     """Functions laid out every 0x40 bytes from BASE, then a HAZARD_TRAMPOLINES
     array at +0xC00; writes the exe and a matching map."""
@@ -63,11 +84,17 @@ class Fixture:
     def addr(self, index):
         return BASE + index * self.SLOT
 
-    def function(self, index, name, words):
-        assert len(words) * 4 <= self.SLOT, name
+    def function(self, index, name, words, slots=1):
+        assert len(words) * 4 <= self.SLOT * slots, name
         self.image.put(index * self.SLOT, *words)
         self.functions.append((self.addr(index), len(words) * 4, name))
         return self.addr(index)
+
+    def data(self, offset, *words):
+        """Words at `offset` past .text (0x800..0xC00), such as a jump table."""
+        assert 0x800 < offset and offset + 4 * len(words) <= fx.Image.TRAMPOLINES
+        self.image.put(offset, *words)
+        return BASE + offset
 
     def trampoline(self, *words):
         offset = fx.Image.TRAMPOLINES + 8 + self.trampoline_words * 4
@@ -220,6 +247,180 @@ class StackGuardTests(unittest.TestCase):
         failures, out = self.run_guard(r"^game::projection_entry$", 100)
         self.assertEqual(failures, 1, out)
         self.assertIn("116 of 100 bytes", out)
+
+    def switch(self, index, name, frame, table, cases=2):
+        """A leaf that switches through `table` and returns from every case.
+        Returns (address, case addresses)."""
+        addr = self.fixture.addr(index)
+        body = prologue(frame) + [fx.lui("t0", fx.hi(table))] + dispatch("a0", "t0", table)
+        cases_at = []
+        for _ in range(cases):
+            cases_at.append(addr + 4 * len(body))
+            body += epilogue(frame)
+        self.fixture.function(index, name, body)
+        return addr, cases_at
+
+    def test_a_table_stops_at_the_next_functions_table(self):
+        # The tables sit back to back, as in .rodata. Read on, t::a's table
+        # names t::b's cases, and t::b's 600-byte frame lands in t::a's tree
+        # (hk-psx: presentation::service's table ran into menu::run's). The
+        # second word of t::b's table is a trampoline into t::b, as an
+        # earlier patch leaves it: still not t::a's.
+        table_a, table_b = BASE + 0x900, BASE + 0x908
+        a, cases_a = self.switch(2, "t::a", 16, table_a)
+        b_addr, cases_b = self.switch(4, "t::b", 600, table_b)
+        tramp = self.fixture.trampoline(NOP, fx.j(cases_b[1]), NOP)
+        self.fixture.data(0x900, *cases_a, tramp, cases_b[1])
+        self.caller(1, entry(0, 1024), 8, a)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 0, out)
+        self.assertIn("24 of 1004 bytes", out)
+        self.assertNotIn("t::b", out)
+        image = guard.Image(*self.fixture.write(self.tmp.name))
+        entries = guard.jump_table(image.listing, a + 24, image.word_at, image.image_end, image.base, image.map)
+        self.assertEqual(entries, [(table_a, cases_a[0]), (table_a + 4, cases_a[1])])
+
+    def far_base(self, base_reg, call=True, filler=12):
+        """t::far loads its table's %hi at the top, calls a leaf, branches,
+        and dispatches more than the old 11-instruction window later."""
+        leaf = self.leaf(6, "t::leaf", 40)
+        far = self.fixture.addr(2)
+        table = BASE + 0x900
+        body = prologue(24) + [fx.lui(base_reg, fx.hi(table)), sw("ra", 20, "sp")]
+        body += [fx.jal(leaf), NOP] if call else [NOP, NOP]
+        body += [fx.beq("a1", "zero", filler + 1), NOP] + [fx.addiu("v0", "v0", 1)] * filler
+        body += dispatch("a0", base_reg, table)
+        cases = []
+        for _ in range(2):
+            cases.append(far + 4 * len(body))
+            body += [fx.lw("ra", 20, "sp"), fx.jr("ra"), fx.addiu("sp", "sp", 24)]
+        self.fixture.function(2, "t::far", body, slots=3)
+        self.fixture.data(0x900, *cases)
+        self.caller(1, entry(0, 1024), 8, far)
+        return self.run_guard()
+
+    def test_a_table_base_loaded_far_away_is_followed_back(self):
+        # State::apply keeps its table's %hi in s8 for the whole loop.
+        failures, out = self.far_base("s0")
+        self.assertEqual(failures, 0, out)
+        self.assertIn("72 of 1004 bytes", out)
+        self.assertIn("t::far(24) > t::leaf(40)", out)
+
+    def test_a_caller_saved_base_across_a_call_stays_unresolved(self):
+        # t0 does not survive the call, so no write of it reaches the use.
+        failures, out = self.far_base("t0")
+        self.assertEqual(failures, 1, out)
+        self.assertIn("not a jump table it can prove", out)
+
+    def test_a_base_from_the_caller_stays_unresolved(self):
+        table = BASE + 0x900
+        addr = self.fixture.addr(2)
+        body = dispatch("a0", "a1", table)
+        self.fixture.function(2, "t::from_arg", body + epilogue(0) + epilogue(0))
+        self.fixture.data(0x900, addr + 24, addr + 32)
+        self.caller(1, entry(0, 1024), 8, addr)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 1, out)
+        self.assertIn("not a jump table it can prove", out)
+
+    def test_a_table_of_function_pointers_is_not_a_switch(self):
+        # A tail call through a constant table of functions leaves t::tail.
+        other = self.leaf(4, "t::other", 200)
+        table = BASE + 0x900
+        tail = self.fixture.function(2, "t::tail", [fx.lui("t0", fx.hi(table))] + dispatch("a0", "t0", table))
+        self.fixture.data(0x900, other, other)
+        self.caller(1, entry(0, 1024), 8, tail)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 1, out)
+        self.assertIn("not a jump table it can prove", out)
+
+    def test_a_switch_inside_another_switchs_case(self):
+        # The second dispatch's block is only entered through the first
+        # table, so it resolves once that table is proven (apply_arena).
+        nested = self.fixture.addr(2)
+        table_1, table_2 = BASE + 0x900, BASE + 0x908
+        body = prologue(16) + [fx.lui("t2", fx.hi(table_1))] + [fx.addiu("v0", "v0", 1)] * 12
+        body += dispatch("a0", "t2", table_1)
+        inner = nested + 4 * len(body)
+        body += dispatch("a1", "t2", table_2)
+        done = nested + 4 * len(body)
+        body += epilogue(16)
+        self.fixture.function(2, "t::nested", body, slots=2)
+        self.fixture.data(0x900, inner, done, done, done)
+        self.caller(1, entry(0, 1024), 8, nested)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 0, out)
+        self.assertIn("24 of 1004 bytes", out)
+
+    def after_noreturn(self, base):
+        """t::after_panic sets `base` to its table's %hi, but on one path
+        moves an argument into it and calls t::panic, which never returns;
+        the word after that call is a case block that loops back to the
+        dispatch. That fall-through is not an edge: following it would find
+        `move base, a0` and refuse the switch."""
+        panic = self.fixture.function(6, "t::panic", prologue(8) + [b(-1), NOP])
+        fn = self.fixture.addr(2)
+        table = BASE + 0x900
+        body = prologue(24) + [sw("ra", 20, "sp"), fx.lui(base, fx.hi(table))]
+        branch = len(body)
+        body += [fx.beq("a1", "zero", 0), NOP, or_(base, "a0", "zero"), fx.jal(panic), NOP]
+        case_loop = fn + 4 * len(body)
+        body += [fx.addiu("a1", "a1", -1), b(0), NOP]
+        back = len(body) - 2
+        case_exit = fn + 4 * len(body)
+        body += [fx.lw("ra", 20, "sp"), fx.jr("ra"), fx.addiu("sp", "sp", 24)]
+        top = len(body)
+        body += dispatch("a1", base, table)
+        body[branch] = fx.beq("a1", "zero", top - branch - 1)
+        body[back] = b(top - back - 1)
+        self.fixture.function(2, "t::after_panic", body, slots=2)
+        self.fixture.data(0x900, case_loop, case_exit)
+        self.caller(1, entry(0, 1024), 8, fn)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 0, out)
+        self.assertIn("40 of 1004 bytes", out)
+
+    def test_the_word_after_a_noreturn_call_is_not_its_return(self):
+        # A callee-saved base survives calls that return, so only knowing
+        # t::panic does not return drops the path.
+        self.after_noreturn("s0")
+
+    def test_no_path_carries_a_caller_saved_base_across_a_call(self):
+        # The callee may change t3, so no value of it reaches back past the
+        # call, returning or not (hk-psx State::apply keeps a base in ra).
+        self.after_noreturn("t3")
+
+    def test_the_patcher_bounds_tables_with_a_map(self):
+        # t::a's switch loads v0 in its delay slot. t::b's first case reads
+        # v0 at once, so a table that reads on names that case as a consumer
+        # of t::a's load: a harmless extra trampoline without a map, none
+        # with one. The scanner agrees with the patcher either way.
+        table_a, table_b = BASE + 0x900, BASE + 0x908
+        a = self.fixture.addr(2)
+        body = [fx.lui("t0", fx.hi(table_a))] + dispatch("a0", "t0", table_a)
+        body[-1] = fx.lw("v0", 0, "a1")
+        cases_a = [a + 4 * len(body), a + 4 * len(body) + 8]
+        self.fixture.function(2, "t::a", body + epilogue(0) + epilogue(0))
+        b_addr = self.fixture.addr(4)
+        body = [fx.lui("t0", fx.hi(table_b))] + dispatch("a0", "t0", table_b)
+        case_b = b_addr + 4 * len(body)
+        self.fixture.function(4, "t::b", body + [fx.addu("v1", "v0", "zero")] + epilogue(0))
+        self.fixture.data(0x900, *cases_a, case_b, case_b)
+        exe, map_path = self.fixture.write(self.tmp.name)
+        runs = {}
+        for tool in ("hazard_patch.py", "hazard_scan.py"):
+            for extra in ([], ["--map", map_path]):
+                args = [exe, "--check"] if tool == "hazard_patch.py" else [exe]
+                runs[tool, bool(extra)] = subprocess.run([sys.executable, str(TOOLS / tool), *args, *extra],
+                                                          capture_output=True, text=True).stdout
+        spurious = f"via table entry {table_b:08x}"
+        self.assertIn(spurious, runs["hazard_patch.py", False])
+        self.assertNotIn(spurious, runs["hazard_patch.py", True])
+        self.assertIn("0 hazards", runs["hazard_patch.py", True])
+        for with_map in (False, True):
+            count = lambda out: re.search(r"(\d+) hazards in", out).group(1)
+            self.assertEqual(count(runs["hazard_patch.py", with_map]), count(runs["hazard_scan.py", with_map]),
+                             runs)
 
     def test_without_a_map_only_the_switch_is_looked_for(self):
         self.caller(1, "t::main", 8)

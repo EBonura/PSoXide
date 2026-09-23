@@ -21,6 +21,9 @@ default = []
 # Panic on purpose from inside the scratchpad stack, to check that the panic
 # report moves back to the RAM stack and prints.
 panic-on-stack = []
+# Put a handler of the example's own in the exception vector, chaining to
+# psx-rt's, and declare it stack-safe.
+chained-vector = []
 
 [dependencies]
 psx-gpu  = { path = "../../crates/psx-gpu" }

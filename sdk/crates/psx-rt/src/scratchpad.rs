@@ -46,8 +46,12 @@
 //!   never touches `$sp`, so an IRQ taken on a scratchpad stack writes
 //!   nothing there and returns to the same `$sp`. A game that runs with a
 //!   different handler installed must check that it does not push onto the
-//!   interrupted stack. The `scratchpad-stack-check` feature traps a call
-//!   made with interrupts enabled and another handler in the vector.
+//!   interrupted stack, and then says so with
+//!   [`declare_stack_safe_handler`](crate::interrupts::declare_stack_safe_handler)
+//!   (hk-psx's CD wrapper saves to its own context, runs on its own stack
+//!   and chains to psx-rt's handler). The `scratchpad-stack-check` feature
+//!   traps a call made with interrupts enabled and any other handler in
+//!   the vector.
 //! * Stack depth. The whole call tree of `f` must fit in the region minus
 //!   [`STACK_OVERHEAD`] ([`ScratchpadStack::BUDGET`]). `tools/stack_guard.py`
 //!   proves it from the linked image after every build: it finds each
@@ -211,7 +215,9 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
     /// * The linked call tree of `f` must fit in [`Self::BUDGET`]. Run
     ///   `tools/stack_guard.py` on every linked image that calls this.
     /// * Any exception handler installed while interrupts are enabled must
-    ///   leave `$sp` and the memory below it alone (psx-rt's does).
+    ///   leave `$sp` and the memory below it alone (psx-rt's does; declare
+    ///   another with
+    ///   [`declare_stack_safe_handler`](crate::interrupts::declare_stack_safe_handler)).
     #[inline(always)]
     pub unsafe fn run<R, F: FnOnce() -> R>(f: F) -> R {
         // Force the layout checks for every instantiation.
@@ -376,8 +382,13 @@ mod check {
 
     #[cfg(target_arch = "mips")]
     pub(super) fn before(region: Region) {
-        if crate::interrupts::cpu_interrupts_enabled() && !crate::interrupts::handler_installed() {
-            panic!("scratchpad stack: interrupts are on and psx-rt's exception handler is not installed");
+        if crate::interrupts::cpu_interrupts_enabled()
+            && !crate::interrupts::stack_safe_handler_installed()
+        {
+            panic!(
+                "scratchpad stack: interrupts are on and the exception vector is neither psx-rt's \
+                 handler nor one declared with interrupts::declare_stack_safe_handler"
+            );
         }
         // SAFETY: the word is inside the scratchpad and owned by the call.
         unsafe { canary(region).write_volatile(super::CANARY) }
