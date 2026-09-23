@@ -49,11 +49,12 @@ The trampolines live in a `.data` array the guest declares:
     python3 hazard_patch.py game.exe --map game.map
 
 With `--map` (ld.lld's `-Map` output for the same link) a switch's jump
-table is proven and bounded to its own function, as the stack guard does
-(see `jump_table`). Without it a table is found only from the dispatch's own
-straight-line block (see `Block`), a dispatch whose table base comes from
-farther away is unresolved (its slot load moves out of the slot), and a
-table may read into a neighbouring one, which only adds harmless detours.
+table is proven, required to lie in `.rodata`, and bounded to its own
+function, as the stack guard does (see `jump_table`). Without it a table
+is found only from the dispatch's own straight-line block (see `Block`), a
+dispatch whose table base comes from farther away is unresolved (its slot
+load moves out of the slot), and a table may read into a neighbouring one,
+which only adds harmless detours.
 Scan an image patched with `--map` with `hazard_scan.py --map` too: without
 the map the scanner may read into the next tables again and report the
 detours it skipped.
@@ -162,9 +163,10 @@ def jump_table(listing, jr_addr, word_at, image_end, base=LOAD_ADDR, link_map=No
     pairs, or None. LLVM lowers a switch as `sll idx,idx,2 ; lui t,%hi(T) ;
     addu ; lw rs,%lo(T)(...) ; jr rs`.
 
-    With the image's `link_map` (a LinkMap) the answer is proven; see
-    `Flow`. Without one, `Block` follows the jump register back to that
-    load and its base back to the constant, inside the dispatch's own
+    With the image's `link_map` (a LinkMap) the answer is proven, and only
+    a table in `.rodata` counts; see `Flow`. Without one, `Block` follows
+    the jump register back to that load and its base back to the constant,
+    inside the dispatch's own
     straight-line block, and gives up (None, so the site stays unresolved)
     when the chain leaves the block. Entries then run until the next table
     another dispatch resolves to, or a word that is not a code address.
@@ -435,14 +437,23 @@ class Flow:
     proof needs every real path to dead-end and the lent ones to agree on
     another constant whose table also jumps only into the function.
 
-    Nothing bounds a table in the image: an index that is an enum tag has
-    no range check (hk-psx frame::simulate). A proven table runs to the
-    next proven table's start or its first word that does not jump into the
-    function past its first instruction (a switch never jumps to its
-    function's entry, and a function pointer names nothing else); tables
-    sit back to back in the function's `.rodata`, and reading on would take
-    the next function's table for this one's (hk-psx, 2026-09-23:
-    presentation::service's table ran into menu::run's). An entry may be a
+    A table must start inside a `.rodata*` input section of the map. LLVM
+    emits every switch table there, and psoxide.ld links `.rodata.*` into
+    the same `.data` output section as mutable `.data.*`: a `static mut`
+    array of code pointers indexed by `lw` reads like a table, but what the
+    image holds is only its initial value, so proving jump targets from it,
+    or patching an entry, would be wrong. Unresolved, its dispatch gets the
+    safe trampoline that moves the slot load out.
+
+    Nothing else bounds a table in the image: an index that is an enum tag
+    has no range check (hk-psx frame::simulate). A proven table runs to the
+    next proven table's start, the end of its `.rodata` section, or its
+    first word that does not jump into the function past its first
+    instruction (a switch never jumps to its function's entry, and a
+    function pointer names nothing else); tables sit back to back in the
+    function's `.rodata`, and reading on would take the next function's
+    table for this one's (hk-psx, 2026-09-23: presentation::service's table
+    ran into menu::run's). An entry may be a
     `nop ; j T ; nop` trampoline into the function: an earlier patch
     pointed it there. Every switch of a function is proven together, round
     by round (one that sits in another's case is only reached through that
@@ -638,10 +649,14 @@ class Flow:
 
     def extent(self, table, starts, fn):
         """(entries, targets) of the table at `table`, up to the next of
-        `starts` or its first word that does not jump into the function past
-        its first instruction."""
+        `starts`, the end of its `.rodata` input section, or its first word
+        that does not jump into the function past its first instruction. A
+        table outside `.rodata` has no entries."""
         start, end = fn
-        stop = min(next((s for s in starts if s > table), self.image_end), self.image_end)
+        section = self.map.rodata_section(table)
+        if section is None:
+            return [], set()
+        stop = min(next((s for s in starts if s > table), self.image_end), section[1], self.image_end)
         entries = []
         addr = table
         while self.base <= addr < stop:
@@ -681,7 +696,7 @@ class LinkMap:
     columns in, input sections 8."""
 
     def __init__(self, path):
-        symbols, sections, text, trampolines = [], [], {}, None
+        symbols, sections, rodata, text, trampolines = [], [], [], {}, None
         with open(path, errors="replace") as lines:
             text_lines = lines.read().splitlines()
         for line in text_lines:
@@ -698,6 +713,8 @@ class LinkMap:
                 trampolines = (address, address + size)
             elif depth == 8 and name.endswith(")") and ":(.text" in name:
                 sections.append((address, size))
+            elif depth == 8 and name.endswith(")") and ":(.rodata" in name and size:
+                rodata.append((address, address + size))
             elif depth == 16 and not name.startswith(".L") and " = " not in name:
                 symbols.append((address, size, name))
         if "__text_start" not in text or "__text_end" not in text:
@@ -715,6 +732,7 @@ class LinkMap:
         # Every symbol or section start ends the function before it.
         self.bounds = sorted(set(self.names) | {a for a, _ in sections} | {s + n for s, n in sections} | {hi})
         self.starts = sorted(self.names)
+        self.rodata = sorted(rodata)
 
     def check(self, data):
         """Refuse a map from another link (a stale one, or another example's):
@@ -726,6 +744,16 @@ class LinkMap:
             if payload != self.bss - lo or base != lo:
                 raise MapError(f"{self.path} does not describe this image (payload {payload:#x}, map says "
                                f"{self.bss - lo:#x} at {lo:#x}); relink so both come from one link")
+
+    def rodata_section(self, addr):
+        """(start, end) of the `.rodata*` input section holding `addr`, or
+        None. psoxide.ld links `.rodata.*` into its `.data` output section,
+        next to mutable `.data.*`; only the input section name tells them
+        apart."""
+        i = bisect.bisect_right(self.rodata, (addr, 0xFFFFFFFF)) - 1
+        if i >= 0 and self.rodata[i][0] <= addr < self.rodata[i][1]:
+            return self.rodata[i]
+        return None
 
     def function(self, addr):
         """(start, end, name) of the function containing `addr`. A function

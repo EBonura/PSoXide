@@ -14,8 +14,9 @@ and `off` is always one of the candidates.
 ## What a game adds
 
 One profile file in the repository and three Makefile targets. Everything else
-(build flags, the ELF twin, replays, conversion, renaming, the hazard patcher
-and scanner) lives here, so a fix reaches every game with its next SDK pin.
+(build flags, the ELF twin, replays, conversion, renaming, the link map, the
+hazard patcher and scanner, the stack guard) lives here, so a fix reaches
+every game with its next SDK pin.
 
 ```make
 # The guest's cargo arguments, exactly as its normal build passes them.
@@ -65,8 +66,20 @@ out of the profile; gating on it keeps load times out of the verdict.
 
 `apply` leaves the patched executable where cargo always puts it, so the
 game's pack step does not change. With `--variant off` it is the plain build
-plus the hazard patcher and scanner, so a game can route its build through
-`apply` before it has a profile.
+plus the post-link tools, so a game can route its build through `apply`
+before it has a profile.
+
+Every link the driver makes writes its ld.lld map (`-Clink-arg=-Map`, which
+does not change the emitted bytes) to
+`<target>/mipsel-sony-psx/psoxide-pgo-maps/<hash>.map`, the hash naming the
+crate, the cargo arguments and the rustflags, so a build cargo finds fresh
+still has the map of its own link. The patcher and scanner get it as
+`--map`, which proves every jump table instead of guessing from the
+dispatch's block, and `tools/stack_guard.py` gets it to prove every
+scratchpad stack call tree fits its region. A `-Map` the guest's own
+`build.rs` adds comes later on the link line and wins; the driver then warns
+and runs the tools without a map (and the stack guard refuses an image that
+switches to a scratchpad stack).
 
 Two conventions the guest must follow:
 
@@ -122,7 +135,8 @@ contain spaces; `--pack` and `--gate` are shell commands, quoted by the caller.
    sampled PC is an address in the ELF by construction). The profiling flags
    do not change the code; the flat image runs and measures like a plain
    build.
-2. Hazard-patches and scans the image, and runs `--pack` if given, with
+2. Hazard-patches and scans the image and runs the stack guard, all with the
+   twin's link map, and runs `--pack` if given, with
    `PSOXIDE_PGO_EXE` (the image) and `PSOXIDE_PGO_DISC` (a `.bin` path to
    write; the driver launches its `.cue` sibling when there is one).
 3. Replays each `--tape` with `frontend launch --pc-sample-log
@@ -149,9 +163,9 @@ run `apply` (or the game's normal build) next.
 Builds the ELF twin in *this* checkout, rebinds the portable profile onto its
 symbols (`rebind` prints how many names bound and how many are missing), then
 builds with the collect flags, `-Zprofile-sample-use=<rebound>` and the
-variant's flags, and runs the hazard patcher and scanner. Their output is
-never piped, and a non-zero exit stops the build: a swallowed failure once
-shipped an unpatched hl-psx exe.
+variant's flags, and runs the hazard patcher, scanner and stack guard with
+the link map. Their output is never piped, and a non-zero exit stops the
+build: a swallowed failure once shipped an unpatched hl-psx exe.
 
 Variants, joined with `+` to combine (`accurate+hot=1000`):
 

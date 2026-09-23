@@ -65,6 +65,14 @@ struct Guest {
     work: Option<PathBuf>,
     patcher: PathBuf,
     scanner: PathBuf,
+    stack_guard: PathBuf,
+}
+
+/// One link: the executable cargo reports and the link map the driver asked
+/// the link for, when it was written.
+struct Linked {
+    exe: PathBuf,
+    map: Option<PathBuf>,
 }
 
 /// One emulator run: a tape (or none) and the gameplay polls to keep.
@@ -179,6 +187,7 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
             .scanner
             .take()
             .unwrap_or_else(|| tools.join("hazard_scan.py")),
+        stack_guard: tools.join("stack_guard.py"),
     };
     for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
         if env::var_os(name).is_some_and(|value| !value.is_empty()) {
@@ -297,6 +306,14 @@ fn toml_string(text: &str) -> String {
     out
 }
 
+/// 64-bit FNV-1a: a name for a set of build inputs that stays the same from
+/// one driver build to the next (std's hasher promises no such thing).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 fn run(command: &mut Command, what: &str) -> Result<()> {
     let status = command.status()?;
     if !status.success() {
@@ -307,8 +324,9 @@ fn run(command: &mut Command, what: &str) -> Result<()> {
 
 impl Guest {
     /// Build with `flags` appended to the guest's own rustflags and return
-    /// the executable cargo reports.
-    fn build(&self, flags: &[String], elf: bool) -> Result<PathBuf> {
+    /// the executable cargo reports, with the link map when the link wrote
+    /// one.
+    fn build(&self, flags: &[String], elf: bool) -> Result<Linked> {
         let mut flags = flags.to_vec();
         let mut command = Command::new("cargo");
         command.current_dir(&self.crate_dir).args(&self.cargo);
@@ -318,14 +336,18 @@ impl Guest {
         } else {
             command.env_remove(LINK_ELF_ENV);
         }
-        if !flags.is_empty() {
-            // `--config` appends to the rustflags in the guest's
-            // .cargo/config.toml, where RUSTFLAGS would replace them.
-            let list: Vec<String> = flags.iter().map(|flag| toml_string(flag)).collect();
-            command
-                .arg("--config")
-                .arg(format!("target.{TARGET}.rustflags=[{}]", list.join(",")));
-        }
+        // Link-only: the emitted bytes do not change. The path names every
+        // input that selects the link, so a build cargo finds fresh (and so
+        // does not relink) still has the map of the link that made it, and
+        // stays fresh itself: a new path would be new rustflags.
+        let map = self.map_path(&flags)?;
+        flags.push(format!("-Clink-arg=-Map={}", map.display()));
+        // `--config` appends to the rustflags in the guest's
+        // .cargo/config.toml, where RUSTFLAGS would replace them.
+        let list: Vec<String> = flags.iter().map(|flag| toml_string(flag)).collect();
+        command
+            .arg("--config")
+            .arg(format!("target.{TARGET}.rustflags=[{}]", list.join(",")));
         command
             .arg("--message-format=json-render-diagnostics")
             .stdout(Stdio::piped());
@@ -360,14 +382,77 @@ impl Guest {
         if !elf && is_elf {
             return Err(format!("{} is an ELF, not a flat PSX-EXE", exe.display()).into());
         }
-        Ok(exe)
+        let map = if map.is_file() {
+            Some(map)
+        } else {
+            // A `-Map` the guest's build.rs adds comes later on the link
+            // line and wins.
+            eprintln!(
+                "psoxide-pgo: warning: the link wrote no map to {}, so the hazard tools and \
+                 the stack guard run without one",
+                map.display()
+            );
+            None
+        };
+        Ok(Linked { exe, map })
+    }
+
+    /// Where the link for these rustflags writes its map:
+    /// `<target>/mipsel-sony-psx/psoxide-pgo-maps/<hash>.map`, the hash of
+    /// the crate, the guest's cargo arguments and `flags`.
+    fn map_path(&self, flags: &[String]) -> Result<PathBuf> {
+        let mut key = self.crate_dir.display().to_string();
+        for part in self.cargo.iter().chain(flags) {
+            key.push('\0');
+            key.push_str(part);
+        }
+        let dir = self.target_dir()?.join(TARGET).join("psoxide-pgo-maps");
+        fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!("{:016x}.map", fnv1a(key.as_bytes()))))
+    }
+
+    /// The guest's cargo target directory: its own `--target-dir`, or what
+    /// `cargo metadata` resolves (CARGO_TARGET_DIR, config files, the
+    /// guest's `--config`).
+    fn target_dir(&self) -> Result<PathBuf> {
+        let mut pass = Vec::new();
+        let mut args = self.cargo.iter();
+        while let Some(arg) = args.next() {
+            if arg == "--target-dir" {
+                let dir = args.next().ok_or("--target-dir needs a value")?;
+                return Ok(self.crate_dir.join(dir));
+            }
+            if let Some(dir) = arg.strip_prefix("--target-dir=") {
+                return Ok(self.crate_dir.join(dir));
+            }
+            if arg == "--config" || arg == "--manifest-path" {
+                pass.push(arg.clone());
+                pass.extend(args.next().cloned());
+            } else if arg.starts_with("--config=") || arg.starts_with("--manifest-path=") {
+                pass.push(arg.clone());
+            }
+        }
+        let output = Command::new("cargo")
+            .current_dir(&self.crate_dir)
+            .args(["metadata", "--format-version", "1", "--no-deps"])
+            .args(&pass)
+            .stderr(Stdio::inherit())
+            .output()?;
+        if !output.status.success() {
+            return Err(format!("cargo metadata failed ({})", output.status).into());
+        }
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let dir = metadata["target_directory"]
+            .as_str()
+            .ok_or("cargo metadata names no target directory")?;
+        Ok(PathBuf::from(dir))
     }
 
     /// Build the ELF twin with profiling line tables and keep a copy of it
     /// in the work directory.
-    fn build_twin(&self) -> Result<PathBuf> {
+    fn build_twin(&self) -> Result<Linked> {
         let flags: Vec<String> = COLLECT_FLAGS.iter().map(ToString::to_string).collect();
-        let built = self.build(&flags, true)?;
+        let Linked { exe: built, map } = self.build(&flags, true)?;
         let data = fs::read(&built)?;
         let object = object::File::parse(&*data)?;
         if object.section_by_name(".debug_line").is_none() {
@@ -383,7 +468,7 @@ impl Guest {
         let stem = built.file_stem().ok_or("executable has no name")?;
         let elf = work.join(Path::new(stem).with_extension("elf"));
         fs::copy(&built, &elf)?;
-        Ok(elf)
+        Ok(Linked { exe: elf, map })
     }
 
     fn work_dir(&self, exe: &Path) -> Result<PathBuf> {
@@ -398,18 +483,26 @@ impl Guest {
         Ok(work)
     }
 
-    /// Reroute the load-delay hazards the delay-slot filler leaves, then
-    /// prove the image clean. Never piped: a swallowed failure ships an
-    /// unpatched exe.
-    fn patch(&self, exe: &Path) -> Result<()> {
-        run(
-            Command::new("python3").arg(&self.patcher).arg(exe),
-            "hazard patch",
-        )?;
-        run(
-            Command::new("python3").arg(&self.scanner).arg(exe),
-            "hazard scan",
-        )
+    /// Reroute the load-delay hazards the delay-slot filler leaves, prove
+    /// the image clean, and prove every scratchpad stack call tree fits its
+    /// region. With the link's map every jump table is proven from it (and
+    /// the stack guard needs it for an image that switches stacks). Never
+    /// piped: a swallowed failure ships an unpatched exe.
+    fn patch(&self, exe: &Path, map: Option<&Path>) -> Result<()> {
+        let tool = |script: &Path, map_flag: bool| {
+            let mut command = Command::new("python3");
+            command.arg(script).arg(exe);
+            if let Some(map) = map {
+                if map_flag {
+                    command.arg("--map");
+                }
+                command.arg(map);
+            }
+            command
+        };
+        run(&mut tool(&self.patcher, true), "hazard patch")?;
+        run(&mut tool(&self.scanner, true), "hazard scan")?;
+        run(&mut tool(&self.stack_guard, false), "stack guard")
     }
 }
 
@@ -965,13 +1058,14 @@ fn collect(guest: &Guest, options: &Options) -> Result<()> {
         return Err("collect needs a --tape, or --launch-arg for a run without one".into());
     }
 
-    let elf = guest.build_twin()?;
+    let Linked { exe: elf, map } = guest.build_twin()?;
     let work = elf.parent().expect("the twin lives in the work directory");
     // The replayed image is cut from the twin itself, so every sampled PC
-    // is an address in the ELF by construction.
+    // is an address in the ELF by construction, and the twin's map
+    // describes it.
     let exe = work.join("collect.exe");
     fs::write(&exe, flat_image(&fs::read(&elf)?)?)?;
-    guest.patch(&exe)?;
+    guest.patch(&exe, map.as_deref())?;
     let disc = work.join("collect.bin");
     let image = match &options.pack {
         Some(command) => pack(command, &exe, &disc)?,
@@ -1050,8 +1144,8 @@ fn collect(guest: &Guest, options: &Options) -> Result<()> {
 /// Build one variant and return the patched executable.
 fn apply(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result<PathBuf> {
     let Some(extra) = variant_flags(variant)? else {
-        let exe = guest.build(&[], false)?;
-        guest.patch(&exe)?;
+        let Linked { exe, map } = guest.build(&[], false)?;
+        guest.patch(&exe, map.as_deref())?;
         return Ok(exe);
     };
     let profile = profile.ok_or("a profiled variant needs --profile")?;
@@ -1072,14 +1166,14 @@ fn apply(guest: &Guest, profile: Option<&Path>, variant: &str) -> Result<PathBuf
             profile.display()
         );
     }
-    let elf = guest.build_twin()?;
+    let elf = guest.build_twin()?.exe;
     let rebound = elf.with_extension("rebound.prof");
     crate::rebind(profile, &elf, &rebound)?;
     let mut flags: Vec<String> = COLLECT_FLAGS.iter().map(ToString::to_string).collect();
     flags.push(format!("-Zprofile-sample-use={}", rebound.display()));
     flags.extend(extra);
-    let exe = guest.build(&flags, false)?;
-    guest.patch(&exe)?;
+    let Linked { exe, map } = guest.build(&flags, false)?;
+    guest.patch(&exe, map.as_deref())?;
     Ok(exe)
 }
 
@@ -1302,6 +1396,36 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_maps_are_named_by_what_selects_the_link() {
+        let target = env::temp_dir().join(format!("psoxide-pgo-maps-{}", std::process::id()));
+        let guest = |cargo: &[&str]| Guest {
+            crate_dir: PathBuf::from("/game"),
+            cargo: cargo.iter().map(|arg| arg.to_string()).collect(),
+            work: None,
+            patcher: PathBuf::new(),
+            scanner: PathBuf::new(),
+            stack_guard: PathBuf::new(),
+        };
+        let spaced = guest(&["build", "--target-dir", target.to_str().unwrap()]);
+        let joined = guest(&["build", &format!("--target-dir={}", target.display())]);
+        let flags = |list: &[&str]| list.iter().map(|flag| flag.to_string()).collect::<Vec<_>>();
+        let plain = spaced.map_path(&[]).unwrap();
+        assert_eq!(
+            plain.parent().unwrap(),
+            target.join(TARGET).join("psoxide-pgo-maps")
+        );
+        assert_eq!(spaced.map_path(&[]).unwrap(), plain);
+        assert_ne!(spaced.map_path(&flags(&["-Cdebuginfo=1"])).unwrap(), plain);
+        assert_ne!(joined.map_path(&[]).unwrap(), plain);
+        assert_eq!(
+            joined.map_path(&[]).unwrap().parent(),
+            plain.parent(),
+            "both spellings of --target-dir name the same directory"
+        );
+        fs::remove_dir_all(&target).unwrap();
+    }
 
     #[test]
     fn variants_map_to_llvm_flags() {

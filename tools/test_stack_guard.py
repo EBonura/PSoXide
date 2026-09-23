@@ -79,6 +79,7 @@ class Fixture:
     def __init__(self):
         self.image = fx.Image(BASE)
         self.functions = []  # (address, size, name)
+        self.sections = []  # (address, size, input section) past .text
         self.trampoline_words = 0
 
     def addr(self, index):
@@ -90,10 +91,13 @@ class Fixture:
         self.functions.append((self.addr(index), len(words) * 4, name))
         return self.addr(index)
 
-    def data(self, offset, *words):
-        """Words at `offset` past .text (0x800..0xC00), such as a jump table."""
+    def data(self, offset, *words, section=".rodata"):
+        """Words at `offset` past .text (0x800..0xC00), such as a jump table,
+        as one input section of the map: `.rodata`, where LLVM puts switch
+        tables, unless `section` says otherwise."""
         assert 0x800 < offset and offset + 4 * len(words) <= fx.Image.TRAMPOLINES
         self.image.put(offset, *words)
+        self.sections.append((BASE + offset, 4 * len(words), f"{section}.d{len(self.sections)}"))
         return BASE + offset
 
     def trampoline(self, *words):
@@ -117,6 +121,8 @@ class Fixture:
             row(address, size, 8, f"/fixture.o:(.text.f{i})", 4)
             row(address, size, 16, name)
         row(text_end, 0, 8, "__text_end = .")
+        for address, size, section in sorted(self.sections):
+            row(address, size, 8, f"/fixture.o:({section})", 4)
         tramp = BASE + fx.Image.TRAMPOLINES
         row(tramp, 8 + 64 * 4, 8, "/fixture.o:(.data.HAZARD_TRAMPOLINES)", 4)
         row(tramp, 8 + 64 * 4, 16, "HAZARD_TRAMPOLINES")
@@ -333,6 +339,67 @@ class StackGuardTests(unittest.TestCase):
         failures, out = self.run_guard()
         self.assertEqual(failures, 1, out)
         self.assertIn("not a jump table it can prove", out)
+
+    def code_pointer_dispatch(self, *sections):
+        """t::a dispatches through `lw` from BASE + 0x900 with `lw v0` in the
+        jr's slot; its second case reads v0 at once. `sections` lays the
+        words from 0x900 out as (section, case indexes), and the result is
+        (exe, map, jr address, cases)."""
+        self.fixture = Fixture()
+        a = self.fixture.addr(2)
+        table = BASE + 0x900
+        body = [fx.lui("t0", fx.hi(table))] + dispatch("a0", "t0", table)
+        body[-1] = fx.lw("v0", 0, "a1")
+        cases = [a + 4 * len(body), a + 4 * len(body) + 8]
+        self.fixture.function(2, "t::a", body + epilogue(0) + [fx.addu("v1", "v0", "zero")] + epilogue(0))
+        self.caller(1, entry(0, 1024), 8, a)
+        offset = 0x900
+        for section, indexes in sections:
+            self.fixture.data(offset, *(cases[i] for i in indexes), section=section)
+            offset += 4 * len(indexes)
+        exe, map_path = self.fixture.write(self.tmp.name)
+        return exe, map_path, a + 4 * (len(body) - 2), cases
+
+    def patch_with_map(self, exe, map_path, *args):
+        return subprocess.run([sys.executable, str(TOOLS / "hazard_patch.py"), exe, "--map", map_path, *args],
+                              capture_output=True, text=True).stdout
+
+    def test_a_mutable_array_of_code_pointers_is_not_a_switch(self):
+        # A `static mut` array in .data indexed by `lw` reads like a switch
+        # table whose entries land inside t::a, but the image only holds its
+        # initial words. In .rodata the second entry is proven and patched to
+        # a trampoline; in .data the dispatch stays unresolved, so the slot
+        # load moves out of the slot and the array is left as it was.
+        exe, map_path, jr_at, cases = self.code_pointer_dispatch((".rodata", (0, 1)))
+        self.assertIn(f"via table entry {BASE + 0x904:08x}", self.patch_with_map(exe, map_path, "--check"))
+        exe, map_path, jr_at, cases = self.code_pointer_dispatch((".data", (0, 1)))
+        image = guard.Image(exe, map_path)
+        self.assertIsNone(guard.jump_table(image.listing, jr_at, image.word_at, image.image_end, image.base,
+                                           image.map))
+        out = self.patch_with_map(exe, map_path, "--check")
+        self.assertIn(f"hazard {jr_at:08x}: jr at | slot lw v0,0(a1) | consumer the jump target (table not "
+                      f"resolved)", out)
+        self.assertNotIn("via table entry", out)
+        out = self.patch_with_map(exe, map_path)
+        self.assertIn(f"patched jr at at {jr_at:08x}", out)
+        self.assertIn("0 remaining", out)
+        self.assertEqual([guard.Image(exe, map_path).word_at(BASE + 0x900 + 4 * i) for i in range(2)], cases)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 1, out)
+        self.assertIn("not a jump table it can prove", out)
+
+    def test_a_table_ends_with_its_rodata_section(self):
+        # The words right after the table name t::a's case too, but they are
+        # a .data array: the table stops at its section's end and the array
+        # word is neither an entry nor patched.
+        exe, map_path, jr_at, cases = self.code_pointer_dispatch((".rodata", (0, 0)), (".data", (1,)))
+        image = guard.Image(exe, map_path)
+        entries = guard.jump_table(image.listing, jr_at, image.word_at, image.image_end, image.base, image.map)
+        self.assertEqual(entries, [(BASE + 0x900, cases[0]), (BASE + 0x904, cases[0])])
+        out = self.patch_with_map(exe, map_path, "--check")
+        self.assertIn("0 hazards", out)
+        failures, out = self.run_guard()
+        self.assertEqual(failures, 0, out)
 
     def test_a_switch_inside_another_switchs_case(self):
         # The second dispatch's block is only entered through the first
