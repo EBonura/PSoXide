@@ -32,6 +32,9 @@
 //!
 //! Games do not run these steps by hand: `collect`, `apply` and `choose`
 //! (pipeline.rs) drive the whole build. See README.md.
+//!
+//! `order` and the `+order` variants lay functions out for the I-cache from
+//! exact per-word counts instead (layout.rs).
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -41,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fs};
 
+mod layout;
 mod pipeline;
 mod work;
 
@@ -844,23 +848,85 @@ fn rebind(in_path: &Path, elf_path: &Path, out_path: &Path) -> Result<()> {
 
 const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
-       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>";
+       psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
+       psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>
+       psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>";
 
-const MODES: [&str; 6] = [
-    "portable", "rebind", "collect", "apply", "choose", "measure",
+const MODES: [&str; 9] = [
+    "portable", "rebind", "layout", "place", "collect", "order", "apply", "choose", "measure",
 ];
+
+/// A layout profile from one link and per-word logs (`--pc-log-words
+/// --pc-line-log`) of replays of its image.
+fn layout_profile(map: &Path, exe: &Path, logs: &[&str], out: &Path) -> Result<()> {
+    let sections = layout::read_map(&fs::read_to_string(map)?);
+    let image = layout::Image::parse(&fs::read(exe)?)?;
+    let mut counts: HashMap<u32, u64> = HashMap::new();
+    for log in logs {
+        for (pc, count) in pipeline::read_line_log(Path::new(log))? {
+            *counts.entry(pc).or_default() += count;
+        }
+    }
+    let collected = layout::collect(&sections, &image, &counts);
+    fs::write(out, collected.layout.to_text())?;
+    println!(
+        "functions {}  instructions {}  outside them {}  indirect calls {}",
+        collected.layout.functions.len(),
+        collected.instructions,
+        collected.outside,
+        collected.indirect
+    );
+    Ok(())
+}
+
+/// The ordering file a layout profile gives one link.
+fn place_order(
+    layout_path: &Path,
+    map: &Path,
+    exe: &Path,
+    script: &Path,
+    out: &Path,
+) -> Result<()> {
+    let profile = layout::Layout::parse(&fs::read_to_string(layout_path)?)?;
+    let sections = layout::read_map(&fs::read_to_string(map)?);
+    let image = layout::Image::parse(&fs::read(exe)?)?;
+    let bound = layout::bind(&profile, &sections, &image);
+    println!("{}", bound.coverage);
+    bound.coverage.check(layout::MIN_BOUND)?;
+    let fixed = layout::fixed_patterns(&fs::read_to_string(script)?);
+    let placement = layout::place(&sections, &image, &bound, &fixed);
+    println!(
+        "placed {}  gap {} B  predicted refills {:.0} -> {:.0}",
+        placement.placed.len(),
+        placement.gap,
+        placement.before,
+        placement.after
+    );
+    fs::write(out, layout::order_file(&sections, &placement))?;
+    Ok(())
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {
-        [mode @ ("collect" | "apply" | "choose" | "measure"), ..] => {
+        [mode @ ("collect" | "order" | "apply" | "choose" | "measure"), ..] => {
             pipeline::main(mode, &args[1..])
         }
         ["portable", input, output] => portable(Path::new(input), Path::new(output)),
         ["rebind", input, elf, output] => {
             rebind(Path::new(input), Path::new(elf), Path::new(output))
         }
+        ["layout", map, exe, logs @ .., output] if !logs.is_empty() => {
+            layout_profile(Path::new(map), Path::new(exe), logs, Path::new(output))
+        }
+        ["place", input, map, exe, script, output] => place_order(
+            Path::new(input),
+            Path::new(map),
+            Path::new(exe),
+            Path::new(script),
+            Path::new(output),
+        ),
         [elf, pcs @ .., output] if !pcs.is_empty() && !MODES.contains(elf) => {
             let pcs: Vec<PathBuf> = pcs.iter().map(PathBuf::from).collect();
             convert(Path::new(elf), &pcs, Path::new(output))
