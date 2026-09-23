@@ -144,6 +144,8 @@ pub struct Model {
     has_body_masks: bool,
     has_mouth: bool,
     has_frame_times: bool,
+    hma_off: usize,
+    hma_len: usize,
     #[allow(dead_code)] // read only by the MIPS vertex fast path
     aligned_vertices: bool,
     vertex_soa: bool,
@@ -233,6 +235,14 @@ const HMD_FLAG_HITBOXES: u16 = 1 << 4;
 const HMD_FLAG_FRAME_TIMES: u16 = 1 << 5;
 const HMD_FLAG_ALIGNED_MODEL_DATA: u16 = 1 << 6;
 const HMD_FLAG_VERTEX_SOA: u16 = 1 << 7;
+/// Local-space HMA1 tracks follow the hitboxes: `u32 len`, then `u16 n_used`,
+/// `u8 jaw_bone` (HMA1 bone of the mouth controller, 0xff none), `u8
+/// jaw_flags` (bit 0: post-multiply), `i16 jaw_open[4]` (Q12 quaternion of the
+/// fully open controller), `u8 hma_bone[n_used]` (HMD8 range bone -> HMA1
+/// bone), pad to 2 (absolute), the HMA1 blob, 4 zero bytes, pad to 4. The pose
+/// palette then holds a single bind pose for readers that ignore the tracks.
+const HMD_FLAG_HMA1: u16 = 1 << 8;
+const HMA1_SECTION_HEADER: usize = 4 + 2 + 2 + 8;
 const HMD7_RANGE_MOUTH: u8 = 1 << 0;
 const NORMAL_NONE: u8 = 0;
 const NORMAL_I8X3: u8 = 1;
@@ -330,6 +340,8 @@ impl Model {
         has_body_masks: false,
         has_mouth: false,
         has_frame_times: false,
+        hma_off: 0,
+        hma_len: 0,
         aligned_vertices: false,
         vertex_soa: false,
     };
@@ -401,6 +413,12 @@ impl Model {
         };
         let hitboxes_off = mouth_xforms_off.saturating_add(mouth_xforms_len);
         let hitboxes_len = n_hitboxes.saturating_mul(HMD7_HITBOX_BYTES);
+        let hma_off = hitboxes_off.saturating_add(hitboxes_len);
+        let hma_len = if hmd_flags & HMD_FLAG_HMA1 != 0 && hma_off.saturating_add(4) <= data.len() {
+            4usize.saturating_add(rd_u32(data, hma_off) as usize)
+        } else {
+            0
+        };
         let tri_off = ranges_off.saturating_add(model_data_len);
         let full_normals = hmd_flags & HMD_FLAG_I8_NORMALS != 0;
         let tri_sz = if full_normals {
@@ -411,7 +429,7 @@ impl Model {
         let requested_body_masks = hmd_flags & HMD_FLAG_BODY_MASKS != 0;
         let requested_packed_normals = hmd_flags & HMD_FLAG_PACKED_NORMALS != 0;
         let metadata_ok = (!requested_packed_normals || (!requested_body_masks && !full_normals))
-            && hitboxes_off.saturating_add(hitboxes_len) == tri_off;
+            && hma_off.saturating_add(hma_len) == tri_off;
 
         // Validate the parsed header against the actual buffer before trusting
         // any of it. The per-field reads below are unchecked (no D-cache on the
@@ -442,6 +460,9 @@ impl Model {
             valid = (rd_u16(data, o) as usize) < n_bones;
             hitbox += 1;
         }
+        if valid && hma_len != 0 {
+            valid = hma1_section_valid(data, hma_off, hma_len, n_bones, n_clips);
+        }
         if !valid {
             // ponytail: null model = draws nothing. If a legit model trips this,
             // fix the cook / raise the cap rather than removing the guard.
@@ -469,6 +490,8 @@ impl Model {
                 has_body_masks: false,
                 has_mouth: false,
                 has_frame_times: false,
+                hma_off: 0,
+                hma_len: 0,
                 aligned_vertices: false,
                 vertex_soa: false,
             };
@@ -504,9 +527,92 @@ impl Model {
             has_body_masks: requested_body_masks,
             has_mouth: requested_mouth,
             has_frame_times: requested_frame_times,
+            hma_off,
+            hma_len,
             aligned_vertices: (data.as_ptr() as usize + vertices_off) & 1 == 0,
             vertex_soa: requested_vertex_soa,
         }
+    }
+
+    /// HMA1 local-space tracks, when the cook emitted them (validated at
+    /// load). Most callers want [`Model::pose`], which picks the right path.
+    #[inline]
+    pub fn hma1(&self) -> Option<Tracks> {
+        if self.hma_len == 0 {
+            return None;
+        }
+        let (map_off, blob_off, end) = hma1_section_layout(self.data, self.hma_off, self.hma_len);
+        let data: &'static [u8] = self.data;
+        let jaw_bone = data[self.hma_off + 6];
+        Some(Tracks {
+            model: crate::hma1::Model::new(&data[blob_off..end]),
+            map: &data[map_off..map_off + self.n_bones],
+            jaw: if jaw_bone == 0xff {
+                None
+            } else {
+                Some(Jaw {
+                    bone: jaw_bone as usize,
+                    post: data[self.hma_off + 7] & 1 != 0,
+                    open: [
+                        rd_i16(data, self.hma_off + 8),
+                        rd_i16(data, self.hma_off + 10),
+                        rd_i16(data, self.hma_off + 12),
+                        rd_i16(data, self.hma_off + 14),
+                    ],
+                })
+            },
+        })
+    }
+
+    /// True when the model animates from HMA1 tracks. Its phase functions
+    /// then return `(clip, clip, pos_q8)`: `pos_q8` is the source position in
+    /// frames * 256, and [`Model::pose`] reads the triple the same way.
+    #[inline]
+    pub fn has_tracks(&self) -> bool {
+        self.hma_len != 0
+    }
+
+    /// The bone transforms for one animation sample, whichever animation the
+    /// model carries: a `(frame, frame2, frac16)` palette pair, or for HMA1
+    /// models `(clip, _, pos_q8)` decoded into `scratch` with the mouth
+    /// controller opened `mouth`/64 on the jaw. A model with more HMA1 bones
+    /// than `scratch` holds draws its bind pose.
+    #[inline]
+    pub fn pose<'a>(
+        &'a self,
+        frame: usize,
+        frame2: usize,
+        frac16: u32,
+        mouth: u8,
+        scratch: &'a mut [crate::hma1::Aff],
+    ) -> Pose<'a> {
+        let Some(tracks) = self.hma1() else {
+            return Pose::Palette(self.frame(frame).interpolate(self.frame(frame2), frac16));
+        };
+        if tracks.model.n_bones > scratch.len() {
+            return Pose::Palette(self.frame(0).interpolate(self.frame(0), 0));
+        }
+        let jaw = match tracks.jaw {
+            Some(j) => crate::hma1::Jaw::open(j.bone, j.post, j.open, mouth),
+            None => crate::hma1::Jaw::NONE,
+        };
+        let clip = frame.min(self.n_clips.saturating_sub(1));
+        tracks.model.decode_with(clip, frac16, &jaw, scratch);
+        Pose::Tracks {
+            map: tracks.map,
+            bones: scratch,
+        }
+    }
+
+    /// The sample holding `clip`'s final pose.
+    #[inline]
+    pub fn clip_end_pose(&self, clip: usize) -> (usize, usize, u32) {
+        let clip = clip.min(self.n_clips.saturating_sub(1));
+        if let Some(tracks) = self.hma1() {
+            return (clip, clip, tracks.model.clip_intervals(clip) * 256);
+        }
+        let frame = self.clip_frame(clip, self.clip_len(clip) - 1);
+        (frame, frame, 0)
     }
 
     #[inline]
@@ -574,6 +680,19 @@ impl Model {
         looping: bool,
     ) -> (usize, usize, u32) {
         let clip = clip.min(self.n_clips.saturating_sub(1));
+        if let Some(tracks) = self.hma1() {
+            // GoldSrc spreads a cycle over numframes - 1 intervals, looping
+            // or not; HMA1 positions are source frames * 256.
+            let span = tracks.model.clip_intervals(clip) as usize * 256;
+            let duration = duration.max(1);
+            let elapsed = if looping {
+                elapsed % duration
+            } else {
+                elapsed.min(duration)
+            };
+            let pos = elapsed.saturating_mul(span) / duration;
+            return (clip, clip, pos as u32);
+        }
         let len = self.clip_len(clip);
         if len <= 1 {
             let frame = self.clip_frame(clip, 0);
@@ -920,6 +1039,16 @@ impl Model {
                 ptr::copy(data.add(self.hitboxes_off), data.add(dst), hitbox_len);
                 dst += hitbox_len;
             }
+            if self.hma_len != 0 {
+                // HMA1 tracks are per bone, not per vertex: move them intact.
+                if self.hma_off.checked_add(self.hma_len)? > self.tri_off
+                    || dst.checked_add(self.hma_len)? > data_len
+                {
+                    return None;
+                }
+                ptr::copy(data.add(self.hma_off), data.add(dst), self.hma_len);
+                dst += self.hma_len;
+            }
             let model_data_len = dst.checked_sub(self.ranges_off)?;
             if model_data_len > u32::MAX as usize || new_n > u32::MAX as usize {
                 return None;
@@ -1115,6 +1244,95 @@ impl Model {
             (out_t, run_count)
         }
     }
+}
+
+/// A model's HMA1 section (see [`Model::hma1`]).
+#[derive(Clone, Copy)]
+pub struct Tracks {
+    pub model: crate::hma1::Model,
+    /// HMD8 range/hitbox bone -> HMA1 bone.
+    pub map: &'static [u8],
+    pub jaw: Option<Jaw>,
+}
+
+/// The cooked mouth controller: one bone's local rotation, fully open.
+#[derive(Clone, Copy)]
+pub struct Jaw {
+    pub bone: usize,
+    pub post: bool,
+    pub open: [i16; 4],
+}
+
+/// One animation sample's bone transforms (see [`Model::pose`]).
+#[derive(Clone, Copy)]
+pub enum Pose<'a> {
+    Palette(InterpolatedModelFrame<'a>),
+    Tracks {
+        map: &'a [u8],
+        bones: &'a [crate::hma1::Aff],
+    },
+}
+
+impl Pose<'_> {
+    /// Model-space transform of HMD8 bone `bone`. Palette poses open the
+    /// mouth ranges by `mouth` here; track poses already folded the mouth
+    /// into the jaw bone when they were decoded.
+    #[inline]
+    pub fn bone(&self, bone: usize, mouth_range: bool, mouth: u8) -> BoneTransform {
+        match self {
+            Pose::Palette(frame) => frame.bone(bone, mouth_range, mouth),
+            Pose::Tracks { map, bones } => {
+                let a = &bones[map[bone] as usize];
+                // Tracks keep a quarter unit of translation; the bone
+                // transform carries whole cooked units, like the palettes.
+                let t = |v: i32| ((v + 2) >> 2).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                BoneTransform {
+                    rotation: Mat3I16 { m: a.r },
+                    translation: Vec3I16::new(t(a.t[0]), t(a.t[1]), t(a.t[2])),
+                }
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn hma1_section_layout(data: &[u8], off: usize, len: usize) -> (usize, usize, usize) {
+    let n_used = rd_u16(data, off + 4) as usize;
+    let map_off = off + HMA1_SECTION_HEADER;
+    ((map_off), (map_off + n_used + 1) & !1, off + len)
+}
+
+/// Structural check of an HMA1 section, run once at load: every range bone
+/// maps to a track bone, the jaw exists, and every clip the HMD8 table names
+/// has tracks. Key data itself is trusted like the palettes are.
+fn hma1_section_valid(
+    data: &'static [u8],
+    off: usize,
+    len: usize,
+    n_bones: usize,
+    n_clips: usize,
+) -> bool {
+    if len < HMA1_SECTION_HEADER + 4 || rd_u16(data, off + 4) as usize != n_bones {
+        return false;
+    }
+    let (map_off, blob_off, end) = hma1_section_layout(data, off, len);
+    if blob_off.saturating_add(8) > end {
+        return false;
+    }
+    let hma_bones = rd_u16(data, blob_off) as usize;
+    let hma_clips = rd_u16(data, blob_off + 2) as usize;
+    if hma_bones == 0 || hma_clips < n_clips.max(1) {
+        return false;
+    }
+    let mut b = 0usize;
+    while b < n_bones {
+        if data[map_off + b] as usize >= hma_bones {
+            return false;
+        }
+        b += 1;
+    }
+    let jaw = data[off + 6];
+    jaw == 0xff || (jaw as usize) < hma_bones
 }
 
 impl<'a> ModelFrame<'a> {

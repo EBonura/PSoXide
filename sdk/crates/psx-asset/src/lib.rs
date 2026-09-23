@@ -41,6 +41,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod hma1;
 pub mod hmd8;
 
 use psx_gte::math::{Vec3I16, Vec3I32};
