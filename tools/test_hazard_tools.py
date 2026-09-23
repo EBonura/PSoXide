@@ -439,6 +439,26 @@ class HazardToolTests(unittest.TestCase):
         self.assertEqual(self.scan(), [])
         self.assertEqual(self.patch("--check").returncode, 0)
 
+    def test_gte_command_in_a_delay_slot_is_a_warning(self):
+        # psx-rt's handler cannot step over a GTE command in a delay slot
+        # (EPC names the branch), so the scanner points at it, without
+        # failing the image, and ignores GTE commands outside delay slots.
+        rtps = 0x4A180001
+        image = Image()
+        image.put(0, beq("zero", "zero", 2), rtps, NOP, rtps, NOP, BREAK)
+        image.write(self.path)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(scanner.scan(self.path), [])
+        self.assertIn("warning: 1 GTE commands in branch delay slots", out.getvalue())
+        self.assertIn("%08x" % image.addr(0), out.getvalue())
+        image.put(4, NOP)
+        image.write(self.path)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            scanner.scan(self.path)
+        self.assertNotIn("GTE", out.getvalue())
+
     def test_scanner_and_patcher_name_the_same_sites(self):
         # Several shapes in one image, including a conditional whose load is
         # read on both paths (two sites at one branch). scan() fails if the

@@ -55,6 +55,7 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-audio` | SPU voice playback. |
 | `hello-cdda` | CD-DA audio tracks. |
 | `hello-spstack` | A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `tools/stack_guard.py` proves it fits. |
+| `hello-gteirq` | RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice (a console run is the real test: the emulator never interrupts one). |
 
 ## See also
 
