@@ -117,7 +117,7 @@ psoxide-pgo apply   [GUEST] [--profile PROFILE] [--variant V] -- CARGO-ARGS...
 psoxide-pgo choose  [GUEST] --profile PROFILE --gate CMD [--variant V]... [--pack CMD]
                     -- CARGO-ARGS...
 psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
-                    [--launch-arg ARG]... [--name NAME]
+                    [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
 GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
 ```
 
@@ -256,18 +256,61 @@ else is work, interrupt handlers included. Each wait loop above 0.1% of the
 span's instructions is listed on stderr, so a new game's first run can be
 checked against its source.
 
+Some waits are beyond the rule. HK's present loop (the `loop` after
+`presentation::begin` in its `main.rs`) spins until the next vblank calling
+`input::checkpoint` twice and `presentation::service`, keeps its clock in a
+stack slot and branches on a flag it clears, so it counts as work. Name such
+a loop with `--wait-range START..END` (hex, end exclusive, repeatable: a PGO
+layout can move a loop's pieces apart, so pass each). The addresses belong to
+one build, so read them from that build's disassembly; a range that ran
+nothing is refused. A range counts what it ran itself as waiting, except a
+word (or line) holding a store outside the stack, a coprocessor write or a
+GTE command, and stderr lists each range's share.
+
+A range's calls count only with per-word counts, which `measure` asks for
+(`--pc-log-words`) whenever `frontend launch --help` lists it. A callee is
+usually shared (`checkpoint` also runs from inside rendering), and the counts
+cannot say whose call ran an instruction, so `measure` counts a lower bound.
+If a callee was entered `N` times, `n` of them from the range, an instruction
+on a quiet path that ran `c` times ran at least `c - (N - n)` times for the
+range, because one call runs it at most once. A quiet path goes from the
+entry to `jr ra` with no store outside the stack, no coprocessor or GTE work,
+no loop, and only calls with quiet paths of their own, which get the same
+bound in turn; code that any other executed branch or call also jumps into
+is left out. Whatever only some calls do stays work: on HK that is the pad
+poll `checkpoint` makes once a vblank, a DMA kick, an audio refill. Stalls
+on a partly waiting word are split in proportion to its count. Without
+per-word counts the calls stay work and stderr says so. The rule and its
+tests are in `src/work.rs` (`split`, `attribute`).
+
+On HK's kings climb (polls 100..4790, a frontend with `--pc-log-words`),
+naming the present loop's pieces moved it out of work:
+
+| build                | spins a frame | wait share, rule only | named  | work per frame, rule only | named     |
+|----------------------|--------------:|----------------------:|-------:|--------------------------:|----------:|
+| plain                | 403           | 1.37%                 | 10.80% | 1,584,777                 | 1,433,206 |
+| PGO (a later commit) | 503           | 1.37%                 | 19.08% | 1,359,079                 | 1,114,999 |
+
+The loop itself was 22,344 and 34,903 cycles a frame; its calls added
+129,318 and 209,303, against at most 133,909 and 214,150 had every
+instruction those calls could have run in `checkpoint` and `service` been
+waiting. The pad poll (22,480 and 19,303 cycles a frame) stays work. Without
+per-word counts only the loop's own instructions move (wait share 2.77%
+and 3.90%).
+
 This costs a second replay: the per-line logs can only start at a route tick,
 so a short first replay (to 30 polls past `FROM`) finds the tick in which
 poll `FROM` lands, and the full one logs every retired instruction per
-16-byte I-cache line (`--pc-line-log`) with the MMIO and RAM-load stalls per
-line, then dumps RAM for the code. `measure` stops if the two replays
-disagree at that tick. The frontend's own output goes to stderr so it cannot
-land in the table.
+16-byte I-cache line (`--pc-line-log`), or per word, with the MMIO and
+RAM-load stalls on the same key, then dumps RAM for the code. `measure`
+stops if the two replays disagree at that tick. The frontend's own output
+goes to stderr so it cannot land in the table.
 
 Two approximations, both small next to the differences a variant makes:
-a line the loop touches counts as wait in full (the instructions sharing it
-run once per call, not once per iteration), and a wait loop's I-cache and
-other stalls stay in `work_cycles` (a spin loop stays cached). A guest that
+per line, a line the loop touches counts as wait in full (the instructions
+sharing it run once per call, not once per iteration; per word this one is
+gone), and a wait loop's I-cache and other stalls stay in `work_cycles` (a
+spin loop stays cached). A guest that
 renders a different number of frames per build (NitroXide without a
 lockstep build drew 394 to 396 in the same polls) does more work for the
 extra frames; compare `work_per_frame` there too.
@@ -383,7 +426,8 @@ after large changes, and whenever the game repins onto a different SDK.
 - **`measure` reports a wait loop that is not one, or misses one.** Its
   addresses are on stderr; look them up in the link map. The rule is in
   `src/work.rs` with a test per pattern it accepts or rejects; add the new
-  shape there.
+  shape there. A loop that calls out, stores or carries state (HK's present
+  loop) can be named with `--wait-range` instead.
 
 ## Lower-level commands
 
