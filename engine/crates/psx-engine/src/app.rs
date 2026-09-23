@@ -612,13 +612,7 @@ impl App {
                         if !traced_present {
                             boot_trace("psx-engine: present begin");
                         }
-                        Self::present_pending(
-                            scene,
-                            &mut clock,
-                            &mut ctx,
-                            &mut pending_present,
-                            true,
-                        );
+                        Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present);
                         if !traced_present {
                             boot_visual_checkpoint_hold(
                                 &mut ctx.fb,
@@ -718,14 +712,10 @@ impl App {
                         })
                     } else {
                         // Immediate scenes retain the original overload path:
-                        // present before clearing/reusing the back buffer.
-                        Self::present_pending(
-                            scene,
-                            &mut clock,
-                            &mut ctx,
-                            &mut pending_present,
-                            false,
-                        );
+                        // present before clearing/reusing the back buffer. A
+                        // late frame still flips on a blank edge: it stays on
+                        // screen one VBlank longer instead of tearing.
+                        Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present);
                         None
                     };
                     if !traced_render {
@@ -852,18 +842,19 @@ impl App {
     /// Drain the in-flight ordering-table DMA, draw the scene's 2D
     /// overlay layer over the finished frame, and flip the display.
     ///
-    /// `wait_edge` selects tear-free presentation: the swap is held to
-    /// the next VBlank IRQ edge so GP1 display-start changes land in
-    /// the blanking interval. The overload path passes `false` and
-    /// flips immediately -- the slot is already blown and holding the
-    /// swap would only fall further behind. No-op when no built frame
-    /// is awaiting its flip.
+    /// The flip always goes through psx-rt's VBlank handler, which applies
+    /// it at a blank edge once the frame's closing GP0(1Fh) has run, and
+    /// this blocks until it has landed: the next frame clears the buffer
+    /// that was on screen. That holds on the overload path too. A late
+    /// frame used to flip immediately, mid-scanout, which tears for a field
+    /// on a console (NitroXide at 60 fps: 6 double flips in 805 gameplay
+    /// VBlanks); it now shows one VBlank later instead. No-op when no built
+    /// frame is awaiting its flip.
     fn present_pending<S: Scene>(
         scene: &mut S,
         clock: &mut EngineClock,
         ctx: &mut Ctx,
         pending: &mut Option<u16>,
-        wait_edge: bool,
     ) {
         let Some(missed_visual_intervals) = pending.take() else {
             return;
@@ -883,11 +874,13 @@ impl App {
         telemetry::stage_end(telemetry::stage::RENDER);
 
         telemetry::stage_begin(telemetry::stage::PRESENT);
-        if wait_edge {
-            clock.wait_vblank_edge();
-        }
-        ctx.fb.swap();
+        clock.queue_display_flip(ctx.fb.begin_deferred_swap());
+        let landed = clock.wait_display_flip();
+        ctx.fb.apply_draw_target();
         telemetry::stage_end(telemetry::stage::PRESENT);
+        if !landed {
+            telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
+        }
 
         emit_visual_frame_counters(missed_visual_intervals);
         ctx.visual_frame = ctx.visual_frame.advance();

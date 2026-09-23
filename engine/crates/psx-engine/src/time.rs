@@ -37,20 +37,6 @@ impl EngineClock {
         self.last_present_vblank = platform::wait_present_vblank(self.last_present_vblank);
     }
 
-    /// Wait for a fresh VBlank IRQ edge, regardless of how many vblanks
-    /// have already passed since the last present.
-    ///
-    /// [`wait_next_vblank`](Self::wait_next_vblank) returns immediately
-    /// when any vblank elapsed since the previous present, which is right
-    /// for pacing but wrong for the display flip: a flip issued mid-frame
-    /// shears the picture on real hardware (GP1 display-start applies to
-    /// the next scanline). This waits for the next actual edge so the
-    /// swap always lands inside the vertical blanking interval.
-    pub(crate) fn wait_vblank_edge(&mut self) {
-        let entry = platform::vblank_count();
-        self.last_present_vblank = platform::wait_present_vblank(entry);
-    }
-
     /// Close the frame drawn so far with GP0(1Fh), hand one GP1
     /// display-start word to the VBlank handler and return immediately.
     ///
@@ -64,10 +50,10 @@ impl EngineClock {
     /// only queue once the previous flip has landed, or that acknowledge
     /// would hide the previous frame's completion from the handler.
     ///
-    /// The flip still lands inside the vertical blanking interval exactly as
-    /// [`wait_vblank_edge`](Self::wait_vblank_edge) plus a direct write
-    /// would -- but the CPU is free to do the next frame's work in the
-    /// meantime instead of spinning out the remainder of the display period.
+    /// The flip lands inside the vertical blanking interval: a flip written
+    /// mid-frame shears the picture on real hardware, since GP1 display
+    /// start applies from the next scanline. The CPU is free to do other
+    /// work until [`wait_display_flip`](Self::wait_display_flip).
     pub(crate) fn queue_display_flip(&mut self, display_start: u32) {
         platform::queue_display_flip(display_start);
     }
@@ -89,8 +75,9 @@ impl EngineClock {
     /// would hang the game, and a wedged GPU is a state the console has been
     /// observed to reach.
     ///
-    /// On the giving-up path the word is applied here rather than left in the
-    /// handler's slot. Abandoning it is not one bad frame, it is permanent:
+    /// On the giving-up path the word is applied here, at the next blank
+    /// edge so it still does not tear, rather than left in the handler's
+    /// slot. Abandoning it is not one bad frame, it is permanent:
     /// the next frame's [`Self::queue_display_flip`] overwrites the slot, so
     /// that display start never reaches the GPU while `FrameBuffer` has
     /// already moved its draw side on. From then on the runner clears and
@@ -104,6 +91,7 @@ impl EngineClock {
         let entry = platform::vblank_count();
         while platform::display_flip_pending() {
             if platform::vblank_count().wrapping_sub(entry) > FLIP_WAIT_VBLANKS {
+                platform::wait_present_vblank(platform::vblank_count());
                 platform::apply_pending_display_flip();
                 self.last_present_vblank = platform::vblank_count();
                 return false;
@@ -146,9 +134,10 @@ mod platform {
         psx_rt::interrupts::gp1_queue_pending()
     }
 
-    /// Write a still-queued display start straight to GP1, outside the blank
-    /// edge. Tears the frame it lands in; keeping the display side in step
-    /// with the draw side is worth one torn frame.
+    /// Write a still-queued display start straight to GP1. Called just after
+    /// a blank edge, so it lands in the blanking interval; keeping the
+    /// display side in step with the draw side is worth showing a frame whose
+    /// GP0(1Fh) never arrived.
     pub(super) fn apply_pending_display_flip() {
         let word = psx_rt::interrupts::take_pending_gp1();
         if word != 0 {
