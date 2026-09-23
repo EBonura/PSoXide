@@ -50,10 +50,13 @@ The trampolines live in a `.data` array the guest declares:
 
 With `--map` (ld.lld's `-Map` output for the same link) a switch's jump
 table is proven and bounded to its own function, as the stack guard does
-(see `jump_table`); without it tables are found as before and may read into
-the next function's table, which only adds harmless detours. Scan an image
-patched with `--map` with `hazard_scan.py --map` too: without the map the
-scanner reads into the next tables again and reports the detours it skipped.
+(see `jump_table`). Without it a table is found only from the dispatch's own
+straight-line block (see `Block`), a dispatch whose table base comes from
+farther away is unresolved (its slot load moves out of the slot), and a
+table may read into a neighbouring one, which only adds harmless detours.
+Scan an image patched with `--map` with `hazard_scan.py --map` too: without
+the map the scanner may read into the next tables again and report the
+detours it skipped.
 
 Exit status is non-zero when a hazard cannot be patched, the array is missing
 or full, or the rescan after patching still finds one. Needs
@@ -160,50 +163,216 @@ def jump_table(listing, jr_addr, word_at, image_end, base=LOAD_ADDR, link_map=No
     addu ; lw rs,%lo(T)(...) ; jr rs`.
 
     With the image's `link_map` (a LinkMap) the answer is proven; see
-    `Flow`. Without one the table is at the last `lui` before that load plus
-    the load's offset, and entries run until a word stops being a code
-    address, at most 64. That reads on into the next table, whose entries
-    are code addresses too; nothing without function bounds can tell whose
-    table a word is, so it never stops early and never drops a real entry.
-    For the patcher an extra entry costs one detour when its target happens
-    to read the slot load; the stack guard always has a map."""
+    `Flow`. Without one, `Block` follows the jump register back to that
+    load and its base back to the constant, inside the dispatch's own
+    straight-line block, and gives up (None, so the site stays unresolved)
+    when the chain leaves the block. Entries then run until the next table
+    another dispatch resolves to, or a word that is not a code address.
+    A neighbouring table no dispatch resolves still reads as part of this
+    one; nothing without function bounds can tell whose table its words
+    are, so it reads on rather than drop a real entry. For the
+    patcher an extra entry costs one detour when its target happens to read
+    the slot load; the stack guard always has a map."""
     if link_map is not None:
         fn = link_map.function(jr_addr)
         return flow_of(listing, word_at, base, image_end, link_map).jump_table(jr_addr, fn[:2]) if fn else None
-    op, args = listing[jr_addr]
-    rs = args.strip()
-    load = None
-    for back in range(1, 12):
-        entry = listing.get(jr_addr - back * 4)
-        if entry is None:
-            break
-        m = re.match(r"(-?\d+)\(([a-z0-9]+)\)", entry[1].split(",")[-1].strip()) if entry[0] == "lw" else None
-        if m and entry[1].split(",")[0].strip() == rs:
-            load = (jr_addr - back * 4, int(m.group(1)))
-            break
-    if load is None:
+    return block_of(listing, word_at, base, image_end).jump_table(jr_addr)
+
+
+# The most entries `Block` reads from one table. A Rust match on a byte can
+# have 256 cases; Quake's TargetGraph::apply_command has 74 (the old cap of
+# 64 would have cut it). Reaching this means the words after the table
+# are code addresses too, so it says so.
+TABLE_CEILING = 4096
+
+
+class Block:
+    """Resolves a `jr` switch dispatch without a link map, from the
+    dispatch's straight-line block alone. The old resolver took the nearest
+    `lui` of any register and crossed labels, so it could name another
+    table; a wrong table hides a hazard from the patcher and the scanner.
+
+    The jump register must come from `lw rs, off(b)` and `b` from
+    `addu b, x, y` with exactly one of x, y a constant (lui/li/addiu/ori/move
+    chains, as `Flow` accepts), each found by walking back from its reader.
+    The walk stops, and the site stays unresolved, where the block may be
+    entered some other way: a branch target, an address a data word names
+    (a case label, a function pointer), a function prologue
+    (`addiu sp,sp,-N`), a word that does not decode, the fall-through of an
+    unconditional jump or a return. It crosses a call only for a
+    callee-saved register. Unresolved costs the patcher one trampoline that
+    moves the load out of the slot, which is always safe; a guess costs a
+    missed hazard when it is wrong. `hazard_patch.py --map` proves bases
+    loaded farther away (hoisted out of a loop, kept across a branch).
+
+    Tables sit back to back in `.rodata`, so a table runs until the next
+    table any dispatch in the image resolves to, or its first word that is
+    not a code address, at most TABLE_CEILING entries. On the eleven images
+    with maps it was checked against (2026-09-23), every table it resolved
+    that `Flow` also proved had the same address and at least `Flow`'s
+    entries; the old fixed cap of 64 cut Quake's 74-entry table."""
+
+    def __init__(self, listing, word_at, base, image_end):
+        self.listing, self.word_at, self.base, self.image_end = listing, word_at, base, image_end
+        self.labels = set()
+        for op, args in listing.values():
+            target = branch_target(op, args)
+            if target is not None:
+                self.labels.add(target)
+        for addr in range(base, image_end - 3, 4):
+            word = word_at(addr)
+            if base <= word < image_end and not word & 3:
+                self.labels.add(word)
+        self.warned = set()
+        self.starts = None
+
+    def instruction(self, addr):
+        """As Flow.instruction: objdump prints a run of zero words as `...`."""
+        entry = self.listing.get(addr)
+        if entry is None and self.base <= addr < self.image_end and self.word_at(addr) == 0:
+            return ("nop", "")
+        return entry
+
+    def entered_here(self, addr):
+        """True when control may reach `addr` other than from `addr - 4`."""
+        return addr in self.labels or is_prologue(*(self.instruction(addr) or ("", "")))
+
+    def writer(self, reg, at, limit=256):
+        """The instruction whose write of `reg` reaches `at` inside its
+        straight-line block, or None."""
+        x = at
+        for _ in range(limit):
+            if self.entered_here(x):
+                return None
+            y = x - 4
+            entry = self.instruction(y)
+            if entry is None or entry[0] == ".word":
+                return None
+            before = (self.instruction(y - 4) or ("",))[0]
+            if before in ("j", "b", "jr"):
+                return None  # x follows an unconditional jump: only a label reaches it
+            if before in LINKING and reg not in CALLEE_SAVED:
+                return None  # x is a call's return point and the callee may change reg
+            if writes(entry[0], entry[1], reg):
+                return y
+            x = y
         return None
-    hi = None
-    for back in range(1, 12):
-        entry = listing.get(load[0] - back * 4)
-        if entry is None:
-            break
-        if entry[0] == "lui":
-            hi = int(entry[1].split(",")[1].strip(), 16)
-            break
-    if hi is None:
+
+    def value(self, reg, at, depth=0):
+        if reg == "zero":
+            return 0
+        d = self.writer(reg, at) if depth < 8 else None
+        if d is None:
+            return None
+        return constant(*self.instruction(d), lambda source: self.value(source, d, depth + 1))
+
+    def table_address(self, jr_addr):
+        rs = self.listing[jr_addr][1].strip()
+        load = self.writer(rs, jr_addr)
+        if load is None:
+            return None
+        op, args = self.instruction(load)
+        m = re.fullmatch(r"[a-z0-9]+,(-?\d+)\(([a-z0-9]+)\)", args.replace(" ", ""))
+        if op != "lw" or m is None:
+            return None
+        offset, pointer = int(m.group(1)), m.group(2)
+        total = self.writer(pointer, load)
+        if total is None:
+            return None
+        op, args = self.instruction(total)
+        parts = [p.strip() for p in args.split(",")]
+        if op != "addu" or len(parts) != 3:
+            return None
+        known = [v for v in (self.value(parts[1], total), self.value(parts[2], total)) if v is not None]
+        if len(known) != 1:
+            return None
+        return (known[0] + offset) & 0xFFFFFFFF
+
+    def table_starts(self):
+        """Every table address a dispatch in code resolves to, sorted."""
+        if self.starts is None:
+            self.starts = sorted({t for t in (self.table_address(a) for a, (op, args) in self.listing.items()
+                                              if op == "jr" and args.strip() != "ra"
+                                              and looks_like_code(self.listing, a)) if t is not None})
+        return self.starts
+
+    def jump_table(self, jr_addr):
+        table = self.table_address(jr_addr)
+        if table is None:
+            return None
+        starts = self.table_starts()
+        stop = min(next((s for s in starts if s > table), self.image_end), self.image_end)
+        entries = []
+        addr = table
+        while self.target(addr, stop) is not None and len(entries) < TABLE_CEILING:
+            entries.append((addr, self.target(addr, stop)))
+            addr += 4
+        if self.target(addr, stop) is not None and jr_addr not in self.warned:
+            self.warned.add(jr_addr)
+            print("warning: the jump table of the jr at %08x (%08x) still names code after %d entries; "
+                  "read no further. Pass --map to bound it to its function" % (jr_addr, table, TABLE_CEILING))
+        return entries or None
+
+    def target(self, addr, stop):
+        """The code address the table word at `addr` names, or None."""
+        if not self.base <= addr < stop:
+            return None
+        target = self.word_at(addr)
+        entry = self.listing.get(target)
+        if target & 3 or not self.base <= target < self.image_end or entry is None or entry[0] == ".word":
+            return None
+        return target
+
+
+def unmapped_warning(listing, word_at, image_end, base, is_code=looks_like_code):
+    """One line for a scan without a link map of an image that has register
+    jumps, or None: without the map no table is proven."""
+    sites = [a for a, (op, args) in listing.items() if op == "jr" and args.strip() != "ra" and is_code(listing, a)]
+    if not sites:
         return None
-    table = ((hi << 16) + load[1]) & 0xFFFFFFFF
-    entries = []
-    for k in range(64):
-        addr = table + k * 4
-        if not base <= addr < image_end:
-            break
-        target = word_at(addr)
-        if target & 3 or not base <= target < image_end or target not in listing:
-            break
-        entries.append((addr, target))
-    return entries or None
+    block = block_of(listing, word_at, base, image_end)
+    resolved = sum(1 for a in sites if block.table_address(a) is not None)
+    return (f"warning: no --map: {resolved} of {len(sites)} register jumps resolve to a jump table from their own "
+            f"block and none is proven; pass the link map (--map game.map)")
+
+
+def is_prologue(op, args):
+    """`addiu sp,sp,-N`: a function's first instruction, as far as an image
+    without a map can tell."""
+    return op == "addiu" and re.fullmatch(r"sp,sp,-\d+", args.replace(" ", "")) is not None
+
+
+_BLOCK = [None, None]
+
+
+def block_of(listing, word_at, base, image_end):
+    """The Block of the last listing asked about (built once per image)."""
+    if _BLOCK[0] is not listing:
+        _BLOCK[:] = [listing, Block(listing, word_at, base, image_end)]
+    return _BLOCK[1]
+
+
+def constant(op, args, operand):
+    """The value lui, li, addiu, ori or move computes, with `operand(reg)`
+    giving its source register's value; None for anything else or unknown."""
+    parts = [p.strip() for p in args.split(",")]
+    try:
+        if op == "lui":
+            return (int(parts[1], 0) << 16) & 0xFFFFFFFF
+        if op == "li":
+            return int(parts[1], 0) & 0xFFFFFFFF
+        if op not in ("addiu", "ori", "move"):
+            return None
+        v = operand(parts[1])
+        if v is None:
+            return None
+        if op == "addiu":
+            v += int(parts[2], 0)
+        elif op == "ori":
+            v |= int(parts[2], 0)
+        return v & 0xFFFFFFFF
+    except (IndexError, ValueError):
+        return None
 
 
 # Registers a callee preserves (o32): their value survives a call.
@@ -396,26 +565,10 @@ class Flow:
             return None
         values = set()
         for d in defs:
-            op, args = self.instruction(d)
-            parts = [p.strip() for p in args.split(",")]
-            try:
-                if op == "lui":
-                    v = int(parts[1], 0) << 16
-                elif op == "li":
-                    v = int(parts[1], 0)
-                elif op in ("addiu", "ori", "move"):
-                    v = self.value(parts[1], d, fn, depth + 1)
-                    if v is not None and op == "addiu":
-                        v += int(parts[2], 0)
-                    elif v is not None and op == "ori":
-                        v |= int(parts[2], 0)
-                else:
-                    return None
-            except (IndexError, ValueError):
-                return None
+            v = constant(*self.instruction(d), lambda source: self.value(source, d, fn, depth + 1))
             if v is None:
                 return None
-            values.add(v & 0xFFFFFFFF)
+            values.add(v)
         return values.pop() if len(values) == 1 else None
 
     def table_address(self, jr_addr, fn):
