@@ -607,6 +607,10 @@ pub trait PrimitiveSink<T> {
 /// Only the written prefix is consumed, including on an early return.
 pub struct PrimitivePacketBatch<'a, T> {
     next: *mut PrimitivePacketSlot,
+    /// +1 slot per packet, or -1 in a descending paired frame, so a batch
+    /// lands on exactly the slots the same pushes one by one would.
+    step: isize,
+    cursor: &'a mut *mut PrimitivePacketSlot,
     used_slots: &'a mut usize,
     packet_count: &'a mut usize,
     written: usize,
@@ -639,7 +643,7 @@ impl<T> PrimitiveSink<T> for PrimitivePacketBatch<'_, T> {
     unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
         debug_assert!(self.written < self.capacity);
         let packet = self.next.cast::<T>();
-        self.next = unsafe { self.next.add(1) };
+        self.next = self.next.wrapping_offset(self.step);
         self.written += 1;
         unsafe {
             packet.write(prim);
@@ -651,6 +655,7 @@ impl<T> PrimitiveSink<T> for PrimitivePacketBatch<'_, T> {
 impl<T> Drop for PrimitivePacketBatch<'_, T> {
     #[inline(always)]
     fn drop(&mut self) {
+        *self.cursor = self.next;
         *self.used_slots += self.written;
         *self.packet_count += self.written;
     }
@@ -900,22 +905,87 @@ impl PrimitivePacketWordReservation<'_, '_> {
             return None;
         }
         let next_packet_count = self.arena.packet_count.checked_add(packet_count)?;
-        let first = unsafe {
-            self.arena
-                .storage
-                .as_mut_ptr()
-                .add(self.first_slot)
-                .cast::<u32>()
+        let target_slot = if self.arena.descending {
+            self.arena.storage.len() - next_used_slots
+        } else {
+            self.first_slot
         };
+        let base = self.arena.storage.as_mut_ptr();
+        let first = unsafe { base.add(target_slot).cast::<u32>() };
+        if target_slot != self.first_slot {
+            // A descending frame reserves below its packets and the producer
+            // writes from the reservation's low end; slide the prefix up
+            // against the frame's packets so the frame stays one block at its
+            // end of the scratch. The stream is not linked yet (tagged packets
+            // carry slots, not addresses), so it moves freely.
+            unsafe {
+                move_words_up(base.add(self.first_slot).cast::<u32>(), first, used_words);
+            }
+        }
         let end = unsafe { first.add(used_words) };
         self.arena.used_slots = next_used_slots;
         self.arena.packet_count = next_packet_count;
+        self.arena.cursor =
+            packet_cursor(self.arena.storage, self.arena.descending, next_used_slots);
         Some(PrimitivePacketStream {
             first,
             end,
             words: used_words,
             packets: packet_count,
         })
+    }
+}
+
+/// The frame a shared [`PrimitivePacketScratch`] last held, so the next
+/// frame can be built while the GPU still reads that one.
+///
+/// A queued renderer kicks frame N's ordering table and builds frame N+1
+/// while the DMA walks N. With one arena the builder used to wait for the
+/// whole walk first. Paired arenas ([`PrimitivePacketArena::new_paired`])
+/// alternate ends of one scratch instead: ascending frames fill from slot 0
+/// up, descending frames from the last slot down. A frame takes the slots
+/// the in-flight frame does not without waiting; the first packet that would
+/// reach the in-flight frame's slots runs the fence (the wait for that walk)
+/// once, after which the whole scratch is the new frame's. Two consecutive
+/// frames rarely need more than the scratch together, so the wait is
+/// usually skipped entirely and no second arena is needed.
+///
+/// Keep it outside any borrow held across a frame's render (a `static`
+/// beside the scratch). A frame whose arena never reaches
+/// [`PrimitivePacketArena::finish_paired_frame`] is recorded as filling the
+/// whole scratch, so the next frame fences before its first packet: slower,
+/// never unsafe.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PacketFramePair {
+    built_slots: usize,
+    built_descending: bool,
+    built: bool,
+}
+
+impl PacketFramePair {
+    /// No frame built yet: the first paired arena ascends without a fence.
+    pub const fn new() -> Self {
+        Self {
+            built_slots: 0,
+            built_descending: false,
+            built: false,
+        }
+    }
+
+    /// 0 when the most recently built frame ascended, 1 when it descended.
+    /// Submission uses it to pick that frame's ordering table.
+    pub const fn built_frame(&self) -> usize {
+        self.built_descending as usize
+    }
+
+    /// The index [`built_frame`](Self::built_frame) will report once the
+    /// next paired arena starts: the ordering table to build into.
+    pub const fn next_frame(&self) -> usize {
+        self.next_descending() as usize
+    }
+
+    const fn next_descending(&self) -> bool {
+        self.built && !self.built_descending
     }
 }
 
@@ -926,19 +996,140 @@ impl PrimitivePacketWordReservation<'_, '_> {
 /// valid until the arena is reset/reused, so callers can insert their
 /// packet pointers into an ordering table exactly like with
 /// [`PrimitiveArena`].
+///
+/// Slot numbers the arena reports ([`used_slots`](Self::used_slots) and
+/// the ranges [`mutate_typed_slots`](Self::mutate_typed_slots) takes) count
+/// this frame's allocations in order, whichever end of the scratch a
+/// paired frame fills.
 pub struct PrimitivePacketArena<'a> {
     storage: &'a mut [PrimitivePacketSlot],
     used_slots: usize,
     packet_count: usize,
+    /// The slot the next typed packet takes, and the step to the one after
+    /// (-1 in a descending frame). Never dereferenced once the arena is full.
+    cursor: *mut PrimitivePacketSlot,
+    step: isize,
+    /// A paired frame filling the scratch from the last slot down.
+    descending: bool,
+    /// Slots usable before `fence` must run.
+    fence_at: usize,
+    /// The in-flight frame has not been waited for yet (paired arenas).
+    fence_pending: bool,
+    /// Where a paired arena records its frame.
+    pair: Option<&'a mut PacketFramePair>,
 }
 
 impl<'a> PrimitivePacketArena<'a> {
     /// Wrap slot-backed primitive scratch.
     pub fn new<const SLOTS: usize>(scratch: &'a mut PrimitivePacketScratch<SLOTS>) -> Self {
+        let cursor = scratch.slots.as_mut_ptr();
         Self {
             storage: &mut scratch.slots,
             used_slots: 0,
             packet_count: 0,
+            cursor,
+            step: 1,
+            descending: false,
+            fence_at: SLOTS,
+            fence_pending: false,
+            pair: None,
+        }
+    }
+
+    /// Wrap scratch shared with the frame `pair` last recorded, which the
+    /// GPU may still be reading (see [`PacketFramePair`]). The fence, a
+    /// wait for the channel-2 linked-list walk, runs at most once, and only
+    /// if this frame needs the in-flight frame's slots.
+    ///
+    /// Frames alternate ends by construction, so exactly one frame may be
+    /// in flight: the caller must have finished the frame before the
+    /// recorded one (its walk drained) before starting this one.
+    pub fn new_paired<const SLOTS: usize>(
+        scratch: &'a mut PrimitivePacketScratch<SLOTS>,
+        pair: &'a mut PacketFramePair,
+    ) -> Self {
+        let in_flight = if pair.built {
+            pair.built_slots.min(SLOTS)
+        } else {
+            0
+        };
+        let descending = pair.next_descending();
+        let cursor = packet_cursor(&mut scratch.slots, descending, 0);
+        // Until finish_paired_frame records the real extent, this frame
+        // claims the whole scratch.
+        *pair = PacketFramePair {
+            built_slots: SLOTS,
+            built_descending: descending,
+            built: true,
+        };
+        Self {
+            storage: &mut scratch.slots,
+            used_slots: 0,
+            packet_count: 0,
+            cursor,
+            step: if descending { -1 } else { 1 },
+            descending,
+            fence_at: SLOTS - in_flight,
+            fence_pending: in_flight != 0,
+            pair: Some(pair),
+        }
+    }
+
+    /// Record how much of the scratch this paired frame used, so the next
+    /// frame can build beside it without waiting. Call it once the frame's
+    /// last packet is written (before its ordering table is submitted). A
+    /// no-op for arenas built with [`new`](Self::new).
+    pub fn finish_paired_frame(&mut self) {
+        if let Some(pair) = self.pair.as_deref_mut() {
+            pair.built_slots = self.used_slots;
+        }
+    }
+
+    /// Wait for the in-flight frame of a paired arena, after which every
+    /// slot is this frame's. Call it before relinking retained packets the
+    /// previous frame's list also linked. No-op once run, and for arenas
+    /// built with [`new`](Self::new).
+    #[cold]
+    #[inline(never)]
+    pub fn fence(&mut self) {
+        if self.fence_pending {
+            self.fence_pending = false;
+            wait_for_in_flight_list();
+        }
+        self.fence_at = self.storage.len();
+    }
+
+    /// True while a paired arena has not yet waited for the in-flight frame.
+    pub const fn fence_pending(&self) -> bool {
+        self.fence_pending
+    }
+
+    /// Slots available before the fence would have to run.
+    pub fn remaining_before_fence(&self) -> usize {
+        self.fence_at.saturating_sub(self.used_slots)
+    }
+
+    /// [`remaining_before_fence`](Self::remaining_before_fence) as a
+    /// contiguous word capacity.
+    pub fn remaining_words_before_fence(&self) -> usize {
+        self.remaining_before_fence()
+            .saturating_mul(PRIMITIVE_PACKET_SLOT_WORDS)
+    }
+
+    #[inline(always)]
+    fn claim(&mut self, slots: usize) {
+        if self.used_slots + slots > self.fence_at {
+            self.fence();
+        }
+    }
+
+    /// Storage index of this frame's `logical`-th slot.
+    #[inline(always)]
+    fn slot_index(&self, logical: usize) -> usize {
+        if self.descending {
+            self.storage.len() - 1 - logical
+        } else {
+            logical
         }
     }
 
@@ -996,7 +1187,8 @@ impl<'a> PrimitivePacketArena<'a> {
         }
         let mut index = start_slot;
         while index < end_slot {
-            let packet = self.storage[index].words.as_mut_ptr().cast::<T>();
+            let slot = self.slot_index(index);
+            let packet = self.storage[slot].words.as_mut_ptr().cast::<T>();
             // SAFETY: guaranteed by this method's caller contract and the
             // range/size/alignment validation above.
             mutate(unsafe { &mut *packet });
@@ -1025,7 +1217,12 @@ impl<'a> PrimitivePacketArena<'a> {
         if reserved_slots > self.remaining() {
             return None;
         }
-        let first_slot = self.used_slots;
+        self.claim(reserved_slots);
+        let first_slot = if self.descending {
+            self.storage.len() - self.used_slots - reserved_slots
+        } else {
+            self.used_slots
+        };
         Some(PrimitivePacketWordReservation {
             arena: self,
             first_slot,
@@ -1044,7 +1241,9 @@ impl<'a> PrimitivePacketArena<'a> {
         if self.used_slots >= self.storage.len() {
             return None;
         }
-        let ptr = self.storage[self.used_slots].words.as_mut_ptr().cast::<T>();
+        self.claim(1);
+        let ptr = self.cursor.cast::<T>();
+        self.cursor = self.cursor.wrapping_offset(self.step);
         unsafe {
             ptr.write(prim);
             self.used_slots += 1;
@@ -1055,6 +1254,9 @@ impl<'a> PrimitivePacketArena<'a> {
 
     /// Advance over a packet that is already initialized in the next fixed
     /// slot and borrow it again without changing its payload or type.
+    ///
+    /// Paired arenas alternate ends of their scratch, so there the slot holds
+    /// the packet of two frames ago, not the last one.
     ///
     /// # Safety
     /// The next slot must contain a valid `T` written by an earlier arena use,
@@ -1071,7 +1273,9 @@ impl<'a> PrimitivePacketArena<'a> {
         if self.used_slots >= self.storage.len() {
             return None;
         }
-        let ptr = self.storage[self.used_slots].words.as_mut_ptr().cast::<T>();
+        self.claim(1);
+        let ptr = self.cursor.cast::<T>();
+        self.cursor = self.cursor.wrapping_offset(self.step);
         self.used_slots += 1;
         self.packet_count += 1;
         Some(unsafe { &mut *ptr })
@@ -1100,11 +1304,14 @@ impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
         {
             return None;
         }
-        // SAFETY: remaining() bounds the entire reservation. The mutable
-        // counter borrows keep this arena exclusively borrowed until drop.
-        let next = unsafe { self.storage.as_mut_ptr().add(self.used_slots) };
+        self.claim(capacity);
+        // remaining() bounds the entire reservation, so every slot the batch
+        // can write is in storage. The mutable borrows keep this arena
+        // exclusively borrowed until drop.
         Some(PrimitivePacketBatch {
-            next,
+            next: self.cursor,
+            step: self.step,
+            cursor: &mut self.cursor,
             used_slots: &mut self.used_slots,
             packet_count: &mut self.packet_count,
             written: 0,
@@ -1117,20 +1324,78 @@ impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
         debug_assert!(core::mem::size_of::<T>() > 0);
         debug_assert!(core::mem::size_of::<T>() <= core::mem::size_of::<PrimitivePacketSlot>());
         debug_assert!(core::mem::align_of::<T>() <= core::mem::align_of::<PrimitivePacketSlot>());
-        let index = self.used_slots;
+        if self.used_slots >= self.fence_at {
+            self.fence();
+        }
+        // SAFETY: the trait contract proves the cursor slot is in range; the
+        // slot alignment/size assertions are compile-time properties of `T`.
+        let ptr = self.cursor.cast::<T>();
+        self.cursor = self.cursor.wrapping_offset(self.step);
         self.used_slots += 1;
         self.packet_count += 1;
-        // SAFETY: the trait contract proves `index` is in range; the slot
-        // alignment/size assertions are compile-time properties of `T`.
-        let ptr = unsafe { self.storage.get_unchecked_mut(index) }
-            .words
-            .as_mut_ptr()
-            .cast::<T>();
         unsafe {
             ptr.write(prim);
             &mut *ptr
         }
     }
+}
+
+/// Copy `words` words from `src` up to `dst` (`dst > src`, ranges may
+/// overlap) as whole non-overlapping chunks, highest first. Each chunk goes
+/// through `memcpy`, which psx-rt hand-schedules, instead of the generic
+/// word-at-a-time `memmove` loop.
+///
+/// # Safety
+/// Both ranges must be valid for `words` words and `dst` must not be below
+/// `src`.
+unsafe fn move_words_up(src: *mut u32, dst: *mut u32, words: usize) {
+    let distance = unsafe { dst.offset_from(src) } as usize;
+    let mut remaining = words;
+    while remaining != 0 {
+        let chunk = if remaining < distance {
+            remaining
+        } else {
+            distance
+        };
+        remaining -= chunk;
+        unsafe { core::ptr::copy_nonoverlapping(src.add(remaining), dst.add(remaining), chunk) };
+    }
+}
+
+/// Address of a frame's `used`-th slot, counted from its end of `storage`.
+/// Wrapping, because a full descending frame's next slot is one before the
+/// scratch; it is never dereferenced then.
+#[inline(always)]
+fn packet_cursor(
+    storage: &mut [PrimitivePacketSlot],
+    descending: bool,
+    used: usize,
+) -> *mut PrimitivePacketSlot {
+    let base = storage.as_mut_ptr();
+    if descending {
+        base.wrapping_add(storage.len()).wrapping_sub(used + 1)
+    } else {
+        base.wrapping_add(used)
+    }
+}
+
+/// The paired-arena fence: block until the channel-2 linked-list walk (the
+/// in-flight frame's ordering table) has consumed its packets. A direct call,
+/// not a function pointer, so `tools/stack_guard.py` can bound the
+/// scratchpad-stack model paths that reach it through a packet push.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn wait_for_in_flight_list() {
+    psx_gpu::submit_linked_list_wait();
+}
+
+/// Host builds have no DMA; the tests count fences instead.
+#[cfg(not(target_arch = "mips"))]
+static HOST_FENCES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(target_arch = "mips"))]
+fn wait_for_in_flight_list() {
+    HOST_FENCES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -1169,6 +1434,167 @@ mod tests {
         }
         assert_eq!(arena.len(), 4);
         assert_eq!(arena.remaining(), 0);
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(C)]
+    struct TestPacket {
+        tag: u32,
+        value: u32,
+    }
+
+    fn slot_ptr<const N: usize>(scratch: &mut PrimitivePacketScratch<N>, slot: usize) -> *mut u32 {
+        scratch.slots[slot].words.as_mut_ptr()
+    }
+
+    #[test]
+    fn paired_frames_alternate_ends_and_fence_only_on_overlap() {
+        // Only this test runs a fence, so the global count is its own.
+        let fences = || HOST_FENCES.load(core::sync::atomic::Ordering::Relaxed);
+        let before = fences();
+        let mut scratch = PrimitivePacketScratch::<8>::ZERO;
+        let mut pair = PacketFramePair::new();
+        assert_eq!(pair.next_frame(), 0);
+
+        // First frame: nothing in flight, ascending from slot 0.
+        {
+            let mut arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+            assert!(!arena.fence_pending());
+            for value in 0..3 {
+                arena.push(TestPacket { tag: 0, value }).unwrap();
+            }
+            arena.finish_paired_frame();
+        }
+        assert_eq!(pair.built_frame(), 0);
+        assert_eq!(pair.next_frame(), 1);
+        assert_eq!(unsafe { *slot_ptr(&mut scratch, 2).add(1) }, 2);
+
+        // Second frame descends and owns the 5 slots frame one left free.
+        {
+            let mut arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+            assert!(arena.fence_pending());
+            assert_eq!(arena.remaining_before_fence(), 5);
+            for value in 10..15 {
+                let packet = arena.push(TestPacket { tag: 0, value }).unwrap() as *mut TestPacket;
+                assert_eq!(unsafe { (*packet).value }, value);
+            }
+            assert_eq!(fences() - before, 0);
+            assert_eq!(arena.used_slots(), 5);
+            // The sixth packet reaches frame one's slots: fence once.
+            arena.push(TestPacket { tag: 0, value: 15 }).unwrap();
+            assert_eq!(fences() - before, 1);
+            assert!(!arena.fence_pending());
+            arena.push(TestPacket { tag: 0, value: 16 }).unwrap();
+            assert_eq!(fences() - before, 1);
+            arena.finish_paired_frame();
+        }
+        assert_eq!(pair.built_frame(), 1);
+        // Descending frames fill from the last slot down, in push order.
+        for (slot, value) in [(7, 10), (3, 14), (2, 15), (1, 16)] {
+            assert_eq!(unsafe { *slot_ptr(&mut scratch, slot).add(1) }, value);
+        }
+
+        // Third frame ascends below the 7-slot descending frame, and is
+        // never finished...
+        {
+            let arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+            assert_eq!(arena.remaining_before_fence(), 1);
+            assert_eq!(arena.remaining(), 8);
+        }
+        // ...so the fourth frame must assume it filled the scratch.
+        let arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+        assert!(arena.fence_pending());
+        assert_eq!(arena.remaining_before_fence(), 0);
+    }
+
+    #[test]
+    fn descending_reservation_commits_against_the_frame_block() {
+        const W: usize = PRIMITIVE_PACKET_SLOT_WORDS;
+        let mut scratch = PrimitivePacketScratch::<64>::ZERO;
+        let mut pair = PacketFramePair::new();
+        {
+            let mut arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+            arena.push(TestPacket { tag: 0, value: 1 }).unwrap();
+            arena.finish_paired_frame();
+        }
+        let base = scratch.slots.as_mut_ptr().cast::<u32>();
+        let mut arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+        arena.push(TestPacket { tag: 0, value: 2 }).unwrap();
+        // Reserve every slot the in-flight frame leaves, write 20 words and
+        // commit them: the words end up in the two slots directly below the
+        // typed packet, not at the bottom of the reservation.
+        let capacity = arena.remaining_words_before_fence();
+        assert_eq!(capacity, 62 * W);
+        let mut reservation = arena.reserve_packet_words(capacity).unwrap();
+        for (i, word) in reservation.words_mut()[..20].iter_mut().enumerate() {
+            *word = 100 + i as u32;
+        }
+        let stream = reservation.commit(20, 2).unwrap();
+        let expected_first = unsafe { base.add(61 * W) };
+        assert_eq!(stream.first_ptr(), expected_first);
+        assert_eq!(stream.end_ptr(), unsafe { expected_first.add(20) });
+        let moved = unsafe { core::slice::from_raw_parts(stream.first_ptr(), 20) };
+        assert!(moved.iter().enumerate().all(|(i, &w)| w == 100 + i as u32));
+        assert_eq!(arena.used_slots(), 3);
+        // The next typed packet continues the block downward.
+        let next = arena.push(TestPacket { tag: 0, value: 3 }).unwrap() as *mut TestPacket;
+        assert_eq!(next.cast::<u32>(), unsafe { base.add(60 * W) });
+        // An exactly filled reservation (5 slots at 55..60) needs no move.
+        let mut reservation = arena.reserve_packet_words(5 * W).unwrap();
+        reservation.words_mut()[0] = 7;
+        let stream = reservation.commit(5 * W, 1).unwrap();
+        assert_eq!(stream.first_ptr(), unsafe { base.add(55 * W) });
+        assert_eq!(unsafe { *stream.first_ptr() }, 7);
+        assert_eq!(arena.used_slots(), 9);
+        let next = arena.push(TestPacket { tag: 0, value: 4 }).unwrap() as *mut TestPacket;
+        assert_eq!(next.cast::<u32>(), unsafe { base.add(54 * W) });
+    }
+
+    #[test]
+    fn overlapping_word_move_matches_memmove() {
+        for (words, distance) in [(40usize, 14usize), (14, 14), (5, 1), (30, 29), (7, 50)] {
+            let mut expected: [u32; 128] = core::array::from_fn(|i| i as u32);
+            let mut actual = expected;
+            expected.copy_within(3..3 + words, 3 + distance);
+            unsafe {
+                let base = actual.as_mut_ptr();
+                move_words_up(base.add(3), base.add(3 + distance), words);
+            }
+            assert_eq!(actual, expected, "words={words} distance={distance}");
+        }
+    }
+
+    #[test]
+    fn descending_batches_and_slot_mutation_follow_push_order() {
+        let mut scratch = PrimitivePacketScratch::<6>::ZERO;
+        let mut pair = PacketFramePair::new();
+        PrimitivePacketArena::new_paired(&mut scratch, &mut pair).finish_paired_frame();
+        let base = scratch.slots.as_mut_ptr();
+        let mut arena = PrimitivePacketArena::new_paired(&mut scratch, &mut pair);
+        let first = arena.used_slots();
+        {
+            let mut batch = <PrimitivePacketArena<'_> as PrimitiveSink<TestPacket>>::reserve_batch(
+                &mut arena, 3,
+            )
+            .unwrap();
+            let a = batch.push(TestPacket { tag: 0, value: 1 }).unwrap() as *mut TestPacket;
+            let b = batch.push(TestPacket { tag: 0, value: 2 }).unwrap() as *mut TestPacket;
+            assert_eq!(a.cast(), unsafe { base.add(5) });
+            assert_eq!(b.cast(), unsafe { base.add(4) });
+        }
+        let one = arena.push(TestPacket { tag: 0, value: 3 }).unwrap() as *mut TestPacket;
+        assert_eq!(one.cast(), unsafe { base.add(3) });
+        let end = arena.used_slots();
+        assert_eq!((first, end), (0, 3));
+        assert!(unsafe {
+            arena.mutate_typed_slots::<TestPacket>(first, end, |packet| packet.value += 10)
+        });
+        for (slot, value) in [(5, 11), (4, 12), (3, 13)] {
+            assert_eq!(
+                unsafe { (*base.add(slot).cast::<TestPacket>()).value },
+                value
+            );
+        }
     }
 
     #[test]

@@ -3290,6 +3290,21 @@ impl Renderer {
         self.reuse_pxbsp_valid = false;
     }
 
+    /// The draw counter that decides, among other things, which frames reuse
+    /// the previous selection. A caller that abandons a draw (its packet
+    /// storage ran out) and repeats it with more storage restores the value
+    /// read before the first attempt with
+    /// [`set_frame_counter`](Self::set_frame_counter), so the repeat selects
+    /// and draws exactly what the first attempt would have.
+    pub fn frame_counter(&self) -> u32 {
+        self.frame
+    }
+
+    /// Restore a counter read with [`frame_counter`](Self::frame_counter).
+    pub fn set_frame_counter(&mut self, frame: u32) {
+        self.frame = frame;
+    }
+
     fn retire_frame_pxbsp_selection(&mut self) {
         // Clearing the chain's entries one read-modify-write at a time costs
         // about ten instructions per face; a whole-table clear is a word

@@ -700,9 +700,12 @@ impl App {
                 } => {
                     let submission = scene.render_submission();
                     // A queued scene keeps one completed visual in flight.
-                    // Drain only the linked-list DMA before reusing its packet
-                    // RAM; the GPU may continue rasterising while the CPU
-                    // prepares the next list. The final draw_sync is delayed
+                    // A single-buffered one drains only the linked-list DMA
+                    // before reusing its packet RAM; the GPU may continue
+                    // rasterising while the CPU prepares the next list. A
+                    // double-buffered one builds into memory the walk does
+                    // not read, so it skips even that and its render runs
+                    // alongside the walk. The final draw_sync is delayed
                     // until after that CPU work, which hides the raster tail.
                     let queued_previous = if submission == RenderSubmission::Queued {
                         pending_present.take().inspect(|_| {
@@ -710,6 +713,8 @@ impl App {
                             gpu::submit_linked_list_wait();
                             telemetry::stage_end(telemetry::stage::OT_WAIT);
                         })
+                    } else if submission == RenderSubmission::QueuedDoubleBuffered {
+                        pending_present.take()
                     } else {
                         // Immediate scenes retain the original overload path:
                         // present before clearing/reusing the back buffer. A
@@ -758,7 +763,7 @@ impl App {
                     }
                     telemetry::stage_end(telemetry::stage::RENDER);
 
-                    if submission == RenderSubmission::Queued {
+                    if submission.is_queued() {
                         if let Some(previous_misses) = queued_previous {
                             telemetry::stage_begin(telemetry::stage::OT_WAIT);
                             gpu::draw_sync();

@@ -28,8 +28,28 @@ pub enum RenderSubmission {
     /// [`Scene::render`] only builds CPU-side packets; the runner calls
     /// [`Scene::submit_render`] after the previous frame is presented.
     /// This overlaps frame N GPU rasterisation with frame N+1 CPU work
-    /// without requiring a second packet arena.
+    /// without requiring a second packet arena. The runner drains frame N's
+    /// linked-list walk before `render` starts, because `render` rewrites
+    /// the packets and ordering table N's DMA is still reading.
     Queued,
+    /// [`Queued`](Self::Queued), except that `render` never writes memory
+    /// the previous frame's list still reads: it alternates two ordering
+    /// tables and shares its packet scratch through
+    /// [`PacketFramePair`](crate::PacketFramePair), whose fence waits for
+    /// the walk only if this frame needs the in-flight frame's slots (and
+    /// before relinking retained packets). The runner therefore starts
+    /// `render` while the walk is still running, so the CPU builds frame
+    /// N+1 during frame N's DMA instead of waiting it out. `render` must
+    /// not touch the GPU or channel 2 except through calls that drain the
+    /// channel first (VRAM uploads do).
+    QueuedDoubleBuffered,
+}
+
+impl RenderSubmission {
+    /// True for both queued contracts: `render` builds, `submit_render` kicks.
+    pub const fn is_queued(self) -> bool {
+        matches!(self, Self::Queued | Self::QueuedDoubleBuffered)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
