@@ -56,6 +56,7 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-cdda` | CD-DA audio tracks. |
 | `hello-spstack` | A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `tools/stack_guard.py` proves it fits. |
 | `hello-gteirq` | RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice (a console run is the real test: the emulator never interrupts one). |
+| `hello-faultbd` | Faults in branch delay slots, checking that psx-rt's handler resumes where each branch sends control (a console run is the real test: the emulator does not set Cause.BD for data-side faults). |
 | `hello-present` | psx-rt's queued display flip, held until the frame's closing GP0(1Fh) sets GPUSTAT bit 24 (`arm_draw_done`, `end_with_draw_done`, `signal_draw_done`). |
 
 ## See also
