@@ -184,6 +184,39 @@ pub fn subdivide_surfaces_to_budget(
     }
 }
 
+/// Fan-split every surface wider than `max_vertices` into pieces that share
+/// its first vertex. The pieces tile the polygon exactly, keep every other
+/// field, and draw the same triangles: the runtime fans each face from its
+/// first vertex, so piece `{0, a..=b}` is triangles `(0, i, i + 1)` for
+/// `a <= i < b`.
+pub fn split_wide_surfaces(
+    surfaces: Vec<CompiledSurface>,
+    max_vertices: usize,
+) -> Vec<CompiledSurface> {
+    assert!(max_vertices >= 3, "a fan piece needs three vertices");
+    let mut result = Vec::with_capacity(surfaces.len());
+    for surface in surfaces {
+        let count = surface.vertices.len();
+        if count <= max_vertices {
+            result.push(surface);
+            continue;
+        }
+        let mut first = 1;
+        while first + 1 < count {
+            let end = (first + max_vertices - 1).min(count);
+            let mut piece = surface.clone();
+            piece.vertices.clear();
+            piece.vertices.push(surface.vertices[0]);
+            piece
+                .vertices
+                .extend_from_slice(&surface.vertices[first..end]);
+            result.push(piece);
+            first = end - 1;
+        }
+    }
+    result
+}
+
 /// Replace partition fragments with the final authored render surfaces.
 ///
 /// The BSP builder may split one polygon many times to derive exact convex
@@ -990,6 +1023,36 @@ pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn wide_surfaces_split_into_fans_that_draw_the_same_triangles() {
+        use crate::brush::Brush;
+        let square = Brush::cuboid([0, 0, 0], [64, 64, 64]);
+        let mut surface = compile_csg_surfaces(&[square]).remove(0);
+        // A convex 40-gon (a parabola arc); its plane is irrelevant here.
+        surface.vertices = (0..40).map(|i| [i as f64, (i * i) as f64, 0.0]).collect();
+        let fan = |vertices: &[[f64; 3]]| {
+            (1..vertices.len() - 1)
+                .map(|i| [vertices[0], vertices[i], vertices[i + 1]])
+                .collect::<Vec<_>>()
+        };
+        let whole = fan(&surface.vertices);
+        for max in [3, 4, 18, 39] {
+            let pieces = split_wide_surfaces(vec![surface.clone()], max);
+            assert!(pieces
+                .iter()
+                .all(|piece| (3..=max).contains(&piece.vertices.len())));
+            assert!(pieces.iter().all(|piece| piece.plane == surface.plane));
+            let drawn: Vec<_> = pieces
+                .iter()
+                .flat_map(|piece| fan(&piece.vertices))
+                .collect();
+            assert_eq!(drawn, whole, "max {max}");
+        }
+        let narrow = split_wide_surfaces(vec![surface.clone()], 40);
+        assert_eq!(narrow.len(), 1);
+        assert_eq!(narrow[0].vertices, surface.vertices);
+    }
 
     #[test]
     fn lighting_subdivision_bounds_patches_and_preserves_area() {

@@ -9,8 +9,8 @@ use crate::brush_collision_hulls::{
 };
 use crate::brush_compile::{
     build_surface_bsp, compile_authored_surfaces, compile_csg_surfaces, pack_normalized_plane,
-    replace_bsp_render_surfaces, subdivide_polygon_for_lighting, subdivide_surfaces_to_budget,
-    CompiledSurface, CompiledSurfaceBsp,
+    replace_bsp_render_surfaces, split_wide_surfaces, subdivide_polygon_for_lighting,
+    subdivide_surfaces_to_budget, CompiledSurface, CompiledSurfaceBsp,
 };
 use crate::brush_light::{
     bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
@@ -1302,6 +1302,10 @@ fn compile_model(
             split_surfaces: uv_window.split_surfaces,
         });
     }
+    // The runtime draws a face only up to its batch bound; split wider ones
+    // into same-triangle fans rather than let the packer refuse the level.
+    let render_surfaces =
+        split_wide_surfaces(render_surfaces, psx_bsp::render::PXBSP_MAX_FACE_VERTICES);
     replace_bsp_render_surfaces(&mut bsp, render_surfaces);
     // Small editor BSPs can afford the same separator-flow VIS used by a
     // release cook. Larger interactive cooks retain Quake's conservative

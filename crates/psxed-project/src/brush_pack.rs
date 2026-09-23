@@ -17,7 +17,10 @@ use psx_render_contract::CookedDrawSurface;
 const CONTENTS_SOLID: i16 = psx_bsp::collision::CONTENTS_SOLID;
 const FULLBRIGHT_RGB: u32 = 0x00ff_ffff;
 const MAX_RENDER_FACES: usize = 32_767;
-const MAX_FACE_VERTICES: usize = 39;
+/// The runtime's face-pass batch bound (near-clip vertex included). A wider
+/// face would be skipped at draw time, so the packer refuses it and
+/// `compile_model` fan-splits every surface down to it first.
+const MAX_FACE_VERTICES: usize = psx_bsp::render::PXBSP_MAX_FACE_VERTICES;
 const MAX_VISIBLE_LEAVES: usize = 8 * 1024;
 
 /// Per-surface vertex colors used by the release light bake.
@@ -738,6 +741,47 @@ mod tests {
     use crate::brush_compile::{build_surface_bsp, compile_csg_surfaces};
     use crate::brush_portal::{classify_bsp_leaves, point_leaf_index, portalize_surface_bsp};
     use psx_bsp::{Face, Leaf, Node, Plane, RecordSlice, Vertex};
+
+    #[test]
+    fn packer_refuses_a_face_wider_than_the_runtime_draws() {
+        let brushes = [Brush::cuboid([0, 0, 0], [128, 64, 256])];
+        let surfaces = compile_csg_surfaces(&brushes);
+        let mut bsp = build_surface_bsp(&surfaces);
+        let portals = portalize_surface_bsp(&bsp);
+        classify_bsp_leaves(&mut bsp, &portals, &brushes);
+        // Pad one quad with collinear points along its first edge.
+        let widen = |bsp: &mut CompiledSurfaceBsp, count: usize| {
+            let vertices = &mut bsp.surfaces[0].vertices;
+            let (a, b) = (vertices[0], vertices[1]);
+            let extra = count - 4;
+            let edge = (1..=extra).map(|step| {
+                let t = step as f64 / (extra + 1) as f64;
+                [0, 1, 2].map(|axis| a[axis] + (b[axis] - a[axis]) * t)
+            });
+            let mut widened = vec![a];
+            widened.extend(edge);
+            widened.extend_from_slice(&vertices[1..4]);
+            *vertices = widened;
+        };
+        let mut fits = bsp.clone();
+        widen(&mut fits, MAX_FACE_VERTICES);
+        pack_bsp_geometry(
+            &fits,
+            &portals,
+            BspLighting::Fullbright,
+            &Default::default(),
+        )
+        .expect("a face at the runtime limit packs");
+        widen(&mut bsp, MAX_FACE_VERTICES + 1);
+        assert_eq!(
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &Default::default()),
+            Err(BrushPackError::LimitExceeded {
+                kind: "face vertices",
+                count: MAX_FACE_VERTICES + 1,
+                max: MAX_FACE_VERTICES,
+            })
+        );
+    }
 
     fn packed(brushes: &[Brush]) -> (CompiledSurfaceBsp, PackedBspGeometry) {
         let surfaces = compile_csg_surfaces(brushes);
