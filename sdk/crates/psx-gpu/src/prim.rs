@@ -1352,6 +1352,33 @@ impl Sprite {
     }
 }
 
+// Every packet here fits one linked-list node (see `crate::MAX_NODE_WORDS`).
+const _: () = {
+    let words = [
+        TriFlat::WORDS,
+        TriGouraud::WORDS,
+        QuadFlat::WORDS,
+        RectFlat::WORDS,
+        QuadGouraud::WORDS,
+        QuadGouraudBlended::WORDS,
+        LineMono::WORDS,
+        TriTextured::WORDS,
+        ClassicTriTextured::WORDS,
+        TriTexturedGouraud::WORDS,
+        ClassicTriTexturedGouraud::WORDS,
+        ClassicQuadTexturedGouraud::WORDS,
+        QuadTexturedGouraud::WORDS,
+        QuadTextured::WORDS,
+        QuadTexturedMaterial::WORDS,
+        Sprite::WORDS,
+    ];
+    let mut i = 0;
+    while i < words.len() {
+        assert!(words[i] as usize <= crate::MAX_NODE_WORDS);
+        i += 1;
+    }
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

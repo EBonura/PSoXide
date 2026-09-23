@@ -7,6 +7,7 @@
 
 /// Conservative merged primitive payload limit, excluding the DMA tag.
 pub const NODE_PAYLOAD_WORDS: usize = 15;
+const _: () = assert!(NODE_PAYLOAD_WORDS <= crate::MAX_NODE_WORDS);
 const END: u32 = 0x00ff_ffff;
 
 /// DMA operations required by an ordered stream.

@@ -15,7 +15,8 @@
 //!
 //! ```text
 //!   bits 0..=23: address of next packet (24-bit, masked into RAM)
-//!   bits 24..=31: word count (0..=15) of this packet's data
+//!   bits 24..=31: word count of this packet's data, at most
+//!                 `crate::MAX_NODE_WORDS` (16) on silicon
 //! ```
 //!
 //! An "empty OT" has every entry pointing at its predecessor,
@@ -252,14 +253,23 @@ impl<const N: usize> OrderingTable<N> {
 
     /// Prepend a primitive packet into the depth-`z` slot. `packet_ptr`
     /// must point at the packet's tag word (first `u32`); `words` is
-    /// the count of data words that follow the tag (≤ 15).
+    /// the count of data words that follow the tag, at most
+    /// [`crate::MAX_NODE_WORDS`].
     ///
     /// # Safety
     /// Caller guarantees that `[packet_ptr .. packet_ptr + 1 + words]`
     /// is live, writable, 4-byte-aligned RAM for the duration of the
     /// OT submission. Primitives returned by the builders in
     /// [`crate::prim`] satisfy this.
+    ///
+    /// # Panics
+    /// If `words` exceeds [`crate::MAX_NODE_WORDS`]: silicon loses words
+    /// from a longer node.
     pub unsafe fn insert(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
+        assert!(
+            words as usize <= crate::MAX_NODE_WORDS,
+            "GPU DMA node longer than MAX_NODE_WORDS"
+        );
         let z = z.min(N - 1);
         unsafe { self.insert_unchecked(z, packet_ptr, words) };
     }
@@ -272,6 +282,7 @@ impl<const N: usize> OrderingTable<N> {
     #[inline(always)]
     pub unsafe fn insert_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
         debug_assert!(z < N);
+        debug_assert!(words as usize <= crate::MAX_NODE_WORDS);
         let old_head = self.entries[z] & OT_ADDR_MASK;
         let tag = ((words as u32) << 24) | old_head;
         unsafe { ptr::write_volatile(packet_ptr, tag) };
@@ -294,6 +305,7 @@ impl<const N: usize> OrderingTable<N> {
     ) {
         debug_assert!(z < N);
         debug_assert_eq!(tag_high & OT_ADDR_MASK, 0);
+        debug_assert!((tag_high >> 24) as usize <= crate::MAX_NODE_WORDS);
         let old_head = self.entries[z] & OT_ADDR_MASK;
         unsafe { ptr::write_volatile(packet_ptr, tag_high | old_head) };
         let pkt_addr = packet_ptr as u32 & OT_ADDR_MASK;
@@ -315,7 +327,8 @@ impl<const N: usize> OrderingTable<N> {
     /// `commands` must point to `command_count * 2` readable machine words in
     /// the documented layout. Every packet pointer must meet the lifetime,
     /// alignment, and writability requirements of [`Self::insert_unchecked`],
-    /// and every encoded slot must be less than `N`.
+    /// every encoded slot must be less than `N`, and every word count at most
+    /// [`crate::MAX_NODE_WORDS`].
     #[inline]
     pub unsafe fn insert_packed_commands_unchecked(
         &mut self,
@@ -402,7 +415,8 @@ impl<const N: usize> OrderingTable<N> {
     /// `commands` must point to `command_count * 2` readable machine words in the
     /// documented layout. Every encoded packet pointer must meet the lifetime,
     /// alignment, and writability requirements of [`Self::insert_unchecked`],
-    /// and every encoded slot must be less than `N`.
+    /// every encoded slot must be less than `N`, and every word count at most
+    /// [`crate::MAX_NODE_WORDS`].
     #[inline]
     pub unsafe fn insert_packed_commands_reverse_unchecked(
         &mut self,
@@ -493,7 +507,8 @@ impl<const N: usize> OrderingTable<N> {
     /// # Safety
     /// `first..end` must be a writable, contiguous sequence of complete GPU
     /// packets. Every packet's word count must describe the next packet
-    /// exactly, and every non-sentinel slot must be less than `N`.
+    /// exactly and be at most [`crate::MAX_NODE_WORDS`], and every
+    /// non-sentinel slot must be less than `N`.
     #[inline]
     pub unsafe fn insert_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
         if first >= end {
@@ -828,7 +843,21 @@ impl<const N: usize> OrderingTable<N> {
     /// Insert a primitive struct. The struct must be `#[repr(C)]`
     /// with its first field being the tag `u32`. `words` is the
     /// number of data words that follow the tag.
+    ///
+    /// A struct larger than one DMA node does not build:
+    ///
+    /// ```compile_fail
+    /// let mut ot: psx_gpu::ot::OrderingTable<4> = psx_gpu::ot::OrderingTable::new();
+    /// let mut packet = [0u32; 2 + psx_gpu::MAX_NODE_WORDS];
+    /// ot.add(0, &mut packet, 17);
+    /// ```
     pub fn add<T>(&mut self, z: usize, prim: &mut T, words: u8) {
+        const {
+            assert!(
+                core::mem::size_of::<T>() <= 4 * (crate::MAX_NODE_WORDS + 1),
+                "primitive larger than one GPU DMA node"
+            )
+        };
         unsafe { self.insert(z, prim as *mut T as *mut u32, words) };
     }
 
@@ -1278,6 +1307,24 @@ mod tests {
         assert!(iter.next().is_none());
         assert_eq!(first, b.as_ptr() as usize);
         assert_eq!(second, a.as_ptr() as usize);
+    }
+
+    #[test]
+    fn insert_takes_a_full_fifo_of_words() {
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        ot.clear();
+        let mut packet = [0u32; 1 + crate::MAX_NODE_WORDS];
+        unsafe { ot.insert(1, packet.as_mut_ptr(), crate::MAX_NODE_WORDS as u8) };
+        assert_eq!(packet[0] >> 24, crate::MAX_NODE_WORDS as u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "longer than MAX_NODE_WORDS")]
+    fn insert_refuses_a_node_longer_than_the_fifo() {
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        ot.clear();
+        let mut packet = [0u32; 2 + crate::MAX_NODE_WORDS];
+        unsafe { ot.insert(1, packet.as_mut_ptr(), crate::MAX_NODE_WORDS as u8 + 1) };
     }
 
     /// The draw-done node is the last thing walked, after every slot and
