@@ -393,8 +393,26 @@ class StackGuardTests(unittest.TestCase):
     def test_the_patcher_bounds_tables_with_a_map(self):
         # t::a's switch loads v0 in its delay slot. t::b's first case reads
         # v0 at once, so a table that reads on names that case as a consumer
-        # of t::a's load: a harmless extra trampoline without a map, none
-        # with one. The scanner agrees with the patcher either way.
+        # of t::a's load: a harmless extra trampoline. Without a map a table
+        # stops where another dispatch's table starts, which bounds t::a's
+        # while t::b's dispatch shows its own base; once t::b keeps that base
+        # across a branch, only the map proves t::b and so bounds t::a. The
+        # scanner agrees with the patcher every time.
+        spurious = f"via table entry {BASE + 0x908:08x}"
+        count = lambda out: re.search(r"(\d+) hazards in", out).group(1)
+        for across_branch in (False, True):
+            runs = self.two_switches(across_branch)
+            self.assertEqual(spurious in runs["hazard_patch.py", False], across_branch, runs)
+            self.assertNotIn(spurious, runs["hazard_patch.py", True])
+            self.assertIn("0 hazards", runs["hazard_patch.py", True])
+            for with_map in (False, True):
+                self.assertEqual(count(runs["hazard_patch.py", with_map]), count(runs["hazard_scan.py", with_map]),
+                                 runs)
+
+    def two_switches(self, across_branch):
+        """The patcher's --check and the scanner's output for t::a and t::b,
+        with and without the map."""
+        self.fixture = Fixture()
         table_a, table_b = BASE + 0x900, BASE + 0x908
         a = self.fixture.addr(2)
         body = [fx.lui("t0", fx.hi(table_a))] + dispatch("a0", "t0", table_a)
@@ -402,7 +420,10 @@ class StackGuardTests(unittest.TestCase):
         cases_a = [a + 4 * len(body), a + 4 * len(body) + 8]
         self.fixture.function(2, "t::a", body + epilogue(0) + epilogue(0))
         b_addr = self.fixture.addr(4)
-        body = [fx.lui("t0", fx.hi(table_b))] + dispatch("a0", "t0", table_b)
+        body = [fx.lui("t0", fx.hi(table_b))]
+        if across_branch:
+            body += [fx.beq("a1", "zero", 1), NOP]  # to the dispatch, which is then a label
+        body += dispatch("a0", "t0", table_b)
         case_b = b_addr + 4 * len(body)
         self.fixture.function(4, "t::b", body + [fx.addu("v1", "v0", "zero")] + epilogue(0))
         self.fixture.data(0x900, *cases_a, case_b, case_b)
@@ -413,14 +434,7 @@ class StackGuardTests(unittest.TestCase):
                 args = [exe, "--check"] if tool == "hazard_patch.py" else [exe]
                 runs[tool, bool(extra)] = subprocess.run([sys.executable, str(TOOLS / tool), *args, *extra],
                                                           capture_output=True, text=True).stdout
-        spurious = f"via table entry {table_b:08x}"
-        self.assertIn(spurious, runs["hazard_patch.py", False])
-        self.assertNotIn(spurious, runs["hazard_patch.py", True])
-        self.assertIn("0 hazards", runs["hazard_patch.py", True])
-        for with_map in (False, True):
-            count = lambda out: re.search(r"(\d+) hazards in", out).group(1)
-            self.assertEqual(count(runs["hazard_patch.py", with_map]), count(runs["hazard_scan.py", with_map]),
-                             runs)
+        return runs
 
     def test_without_a_map_only_the_switch_is_looked_for(self):
         self.caller(1, "t::main", 8)

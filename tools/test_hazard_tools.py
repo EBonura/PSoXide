@@ -262,16 +262,106 @@ class HazardToolTests(unittest.TestCase):
                   addu("s0", "a1", "zero"), BREAK)
         self.assert_fixed(image, "s0")
 
+    def switch(self, image, index, *words):
+        """main: a0 = index ; jal f (at 0x100) with f's body `words`. The
+        index arrives in a0, which f's own block cannot see."""
+        image.put(0, addiu("a0", "zero", index), jal(image.addr(0x100)), NOP, BREAK)
+        image.put(0x100, *words)
+
+    def scan_output(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            scanner.scan(self.path)
+        return out.getvalue()
+
     def test_jump_table_target_consumer(self):
-        # A switch: `lw at, %lo(T)(v1) ; jr at ; lw a1, X` with the table
-        # entry's target reading a1 first.
+        # A switch: `lui v1,%hi(T) ; addu v1,v1,a0 ; lw at,%lo(T)(v1) ;
+        # jr at ; lw a1, X` with the table entry's target reading a1 first.
+        # The patcher points that entry at a trampoline.
         image = Image()
         data, table = image.addr(Image.DATA), image.addr(Image.DATA + 0x40)
-        image.put(Image.DATA + 0x40, image.addr(0x100))
-        image.put(0, lui("v1", hi(table)), lw("at", lo(table), "v1"), lui("t0", hi(data)),
-                  jr("at"), lw("a1", lo(data), "t0"))
-        image.put(0x100, addu("s0", "a1", "zero"), BREAK)
+        image.put(Image.DATA + 0x40, image.addr(0x180))
+        self.switch(image, 0, lui("v1", hi(table)), addu("v1", "v1", "a0"), lw("at", lo(table), "v1"),
+                    lui("t0", hi(data)), jr("at"), lw("a1", lo(data), "t0"))
+        image.put(0x180, addu("s0", "a1", "zero"), BREAK)
         self.assert_fixed(image, "s0")
+        image.write(self.path)
+        self.assertIn("patched table entry %08x" % table, self.patch().stdout)
+        self.assertIn("warning: no --map: 1 of 1 register jumps resolve", self.scan_output())
+
+    def test_the_table_base_is_the_jump_registers_own(self):
+        # The old resolver took the nearest `lui` of ANY register before the
+        # table load: here `lui t1` for the real `lui t0`. Its page holds
+        # another table at the same offset whose case does not read a1, so
+        # it reported nothing while the real case read a stale a1.
+        image = Image()
+        image.words += [NOP] * (0x10000 // 4)  # a second 64 KiB page
+        data, table = image.addr(Image.DATA), image.addr(0x10000 + 0x840)
+        decoy = table - 0x10000
+        self.assertEqual(hi(decoy), hi(table) - 1)
+        image.put(0x10840, image.addr(0x180))
+        image.put(0x840, image.addr(0x200))
+        self.switch(image, 0, lui("t0", hi(table)), lui("t1", hi(decoy)), addu("t0", "t0", "a0"),
+                    lw("at", lo(table), "t0"), lui("t2", hi(data)), jr("at"), lw("a1", lo(data), "t2"))
+        image.put(0x180, addu("s0", "a1", "zero"), BREAK)
+        image.put(0x200, addiu("s1", "zero", 1), BREAK)
+        image.write(self.path)
+        self.assertEqual([scanner_site(line) for line in self.scan()],
+                         [("%08x" % image.addr(0x114), "%08x" % image.addr(0x180))])
+        self.assert_fixed(image, "s0")
+
+    def test_a_table_longer_than_64_entries(self):
+        # Quake's TargetGraph::apply_command has 74 entries; the old
+        # resolver stopped reading at 64 and never saw case 70.
+        image = Image()
+        data, table = image.addr(Image.DATA), image.addr(Image.DATA + 0x100)
+        entries = [image.addr(0x200)] * 74
+        entries[70] = image.addr(0x180)
+        image.put(Image.DATA + 0x100, *entries)
+        self.switch(image, 70 * 4, lui("v1", hi(table)), addu("v1", "v1", "a0"), lw("at", lo(table), "v1"),
+                    lui("t0", hi(data)), jr("at"), lw("a1", lo(data), "t0"))
+        image.put(0x180, addu("s0", "a1", "zero"), BREAK)
+        image.put(0x200, addiu("s1", "zero", 1), BREAK)
+        image.write(self.path)
+        self.assertIn("via table entry %08x" % (table + 70 * 4), self.patch("--check").stdout)
+        self.assert_fixed(image, "s0")
+        # A table that reaches the ceiling stops there and says so.
+        patcher = sys.modules["hazard_patch"]
+        ceiling = patcher.TABLE_CEILING
+        try:
+            patcher.TABLE_CEILING = 4
+            self.assertIn("still names code after 4 entries", self.scan_output())
+        finally:
+            patcher.TABLE_CEILING = ceiling
+
+    def test_a_base_from_outside_the_block_is_reported(self):
+        # The table base s1 is set before the label L that a branch
+        # elsewhere reaches, so the dispatch's block cannot show it. The old
+        # resolver took `lui t0` (the slot load's page) instead, found a
+        # "table" at its page plus the load offset, and reported nothing.
+        # Now the site is unresolved: reported, and patched by moving the
+        # load out of the slot.
+        image = Image()
+        data, table = image.addr(Image.DATA), image.addr(Image.DATA + 0x40)
+        image.put(Image.DATA + 0x40, image.addr(0x180))
+        image.put(0x40, image.addr(0x200))  # what `lui t0` + 0x40 names
+        self.assertEqual(hi(data) << 16 | 0x40, image.addr(0x40))
+        body = [lui("s1", hi(table - 0x40)), addiu("s1", "s1", lo(table - 0x40)),
+                lui("t0", hi(data)), addu("t1", "s1", "a0"), lw("at", 0x40, "t1"), NOP,  # L at 0x108
+                jr("at"), lw("a1", lo(data), "t0")]
+        self.switch(image, 0, *body)
+        image.put(0x180, addu("s0", "a1", "zero"), BREAK)
+        image.put(0x200, addiu("s1", "zero", 1), BREAK)
+        image.put(0x300, beq("zero", "zero", (0x108 - 0x304) // 4), NOP)
+        image.write(self.path)
+        self.assertEqual([line.split(" | ")[-1] for line in self.scan()], ["jump table not resolved, target unknown"])
+        self.assertIn("warning: no --map: 0 of 1 register jumps resolve", self.scan_output())
+        self.assert_fixed(image, "s0")
+        # Without the branch to L the block reaches s1's lui and proves it.
+        image.put(0x300, NOP)
+        image.write(self.path)
+        self.assertEqual([scanner_site(line) for line in self.scan()],
+                         [("%08x" % image.addr(0x118), "%08x" % image.addr(0x180))])
 
     def test_register_jump_with_unresolved_target(self):
         # `jr t9` built from lui/ori, no table load to resolve: the target is
