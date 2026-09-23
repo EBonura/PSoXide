@@ -18,4 +18,5 @@ pub mod route_follow;
 pub mod semantic_input;
 pub mod telemetry;
 pub mod texture_animation;
+pub mod viewmodel;
 pub mod visibility_logic;
