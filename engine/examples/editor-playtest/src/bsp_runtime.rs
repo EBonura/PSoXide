@@ -1539,86 +1539,108 @@ impl BspRuntime {
         let view_rotation = pxbsp_view_rotation(camera);
         let camera = pxbsp_camera(camera);
         let view = load_pxbsp_view_rotation(camera.origin, view_rotation);
-        let capacity = primitive_packets.remaining_words();
-        let Some(mut reservation) = primitive_packets.reserve_packet_words(capacity) else {
-            return false;
-        };
-        let (used_words, packet_count, visible_sky_apertures) = {
-            let packets = reservation.words_mut();
-            let world = self.renderer.draw_pxbsp_world_from_visibility_origin(
-                &self.map,
-                camera,
-                visibility_origin.map_or(camera.origin, |point| Vec3I32 {
-                    x: point.x.saturating_mul(4096),
-                    y: point.y.saturating_mul(4096),
-                    z: point.z.saturating_mul(4096),
-                }),
-                view,
-                &self.materials,
-                material_tick,
-                packets,
-            );
-            let mut used_words = world.packet_words;
-            let mut packet_count = world.stats.packets as usize;
-            let mut visible_sky_apertures = world.stats.visible_sky_apertures;
+        let visibility_origin = visibility_origin.map_or(camera.origin, |point| Vec3I32 {
+            x: point.x.saturating_mul(4096),
+            y: point.y.saturating_mul(4096),
+            z: point.z.saturating_mul(4096),
+        });
+        // The arena may share its scratch with the frame the GPU is still
+        // reading. Draw into the slots that frame leaves free; only when the
+        // world does not fit there, wait for the walk and draw again into the
+        // whole arena. Restoring the frame counter makes the repeat select
+        // exactly what the abandoned attempt did.
+        let first_attempt_frame = self.renderer.frame_counter();
+        loop {
+            if primitive_packets.remaining_before_fence() == 0 {
+                primitive_packets.fence();
+            }
+            let capacity = primitive_packets.remaining_words_before_fence();
+            let can_grow = primitive_packets.fence_pending();
+            let Some(mut reservation) = primitive_packets.reserve_packet_words(capacity) else {
+                return false;
+            };
+            let (used_words, packet_count, visible_sky_apertures, overflowed) = {
+                let packets = reservation.words_mut();
+                let world = self.renderer.draw_pxbsp_world_from_visibility_origin(
+                    &self.map,
+                    camera,
+                    visibility_origin,
+                    view,
+                    &self.materials,
+                    material_tick,
+                    packets,
+                );
+                let mut used_words = world.packet_words;
+                let mut packet_count = world.stats.packets as usize;
+                let mut visible_sky_apertures = world.stats.visible_sky_apertures;
+                let mut overflowed = world.stats.packet_overflow_avoided;
 
-            for door in self.doors.iter() {
-                let Some(frame) = self.renderer.draw_pxbsp_model(
-                    &self.map,
-                    door.model_index(),
-                    door.transform(),
-                    camera,
-                    view,
-                    &self.materials,
-                    material_tick,
-                    &mut packets[used_words..],
-                ) else {
-                    panic!("validated PXBSP mover model disappeared");
-                };
-                used_words = used_words
-                    .checked_add(frame.packet_words)
-                    .expect("PXBSP packet word count overflow");
-                packet_count = packet_count
-                    .checked_add(frame.stats.packets as usize)
-                    .expect("PXBSP packet count overflow");
-                visible_sky_apertures =
-                    visible_sky_apertures.saturating_add(frame.stats.visible_sky_apertures);
+                for door in self.doors.iter() {
+                    let Some(frame) = self.renderer.draw_pxbsp_model(
+                        &self.map,
+                        door.model_index(),
+                        door.transform(),
+                        camera,
+                        view,
+                        &self.materials,
+                        material_tick,
+                        &mut packets[used_words..],
+                    ) else {
+                        panic!("validated PXBSP mover model disappeared");
+                    };
+                    used_words = used_words
+                        .checked_add(frame.packet_words)
+                        .expect("PXBSP packet word count overflow");
+                    packet_count = packet_count
+                        .checked_add(frame.stats.packets as usize)
+                        .expect("PXBSP packet count overflow");
+                    visible_sky_apertures =
+                        visible_sky_apertures.saturating_add(frame.stats.visible_sky_apertures);
+                    overflowed |= frame.stats.packet_overflow_avoided;
+                }
+                for destructible in self
+                    .destructible_targets
+                    .iter()
+                    .filter(|target| destructibles.alive(target.destructible_index()))
+                {
+                    let Some(frame) = self.renderer.draw_pxbsp_model(
+                        &self.map,
+                        destructible.model_index(),
+                        destructible.transform(),
+                        camera,
+                        view,
+                        &self.materials,
+                        material_tick,
+                        &mut packets[used_words..],
+                    ) else {
+                        panic!("validated PXBSP destructible model disappeared");
+                    };
+                    used_words = used_words
+                        .checked_add(frame.packet_words)
+                        .expect("PXBSP packet word count overflow");
+                    packet_count = packet_count
+                        .checked_add(frame.stats.packets as usize)
+                        .expect("PXBSP packet count overflow");
+                    visible_sky_apertures =
+                        visible_sky_apertures.saturating_add(frame.stats.visible_sky_apertures);
+                    overflowed |= frame.stats.packet_overflow_avoided;
+                }
+                (used_words, packet_count, visible_sky_apertures, overflowed)
+            };
+            if overflowed && can_grow {
+                // The uncommitted reservation is abandoned, not linked.
+                primitive_packets.fence();
+                self.renderer.set_frame_counter(first_attempt_frame);
+                continue;
             }
-            for destructible in self
-                .destructible_targets
-                .iter()
-                .filter(|target| destructibles.alive(target.destructible_index()))
-            {
-                let Some(frame) = self.renderer.draw_pxbsp_model(
-                    &self.map,
-                    destructible.model_index(),
-                    destructible.transform(),
-                    camera,
-                    view,
-                    &self.materials,
-                    material_tick,
-                    &mut packets[used_words..],
-                ) else {
-                    panic!("validated PXBSP destructible model disappeared");
-                };
-                used_words = used_words
-                    .checked_add(frame.packet_words)
-                    .expect("PXBSP packet word count overflow");
-                packet_count = packet_count
-                    .checked_add(frame.stats.packets as usize)
-                    .expect("PXBSP packet count overflow");
-                visible_sky_apertures =
-                    visible_sky_apertures.saturating_add(frame.stats.visible_sky_apertures);
+            let stream = reservation
+                .commit(used_words, packet_count)
+                .expect("PXBSP renderer reported an invalid shared-arena stream");
+            unsafe {
+                ot.add_committed_tagged_packet_stream_unchecked(stream);
             }
-            (used_words, packet_count, visible_sky_apertures)
-        };
-        let stream = reservation
-            .commit(used_words, packet_count)
-            .expect("PXBSP renderer reported an invalid shared-arena stream");
-        unsafe {
-            ot.add_committed_tagged_packet_stream_unchecked(stream);
+            return visible_sky_apertures != 0;
         }
-        visible_sky_apertures != 0
     }
 
     fn collision_models(

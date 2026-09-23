@@ -270,7 +270,7 @@ mod target_ui_tests {
 
 impl Scene for Playtest {
     fn render_submission(&self) -> RenderSubmission {
-        RenderSubmission::Queued
+        RenderSubmission::QueuedDoubleBuffered
     }
 
     fn take_gameplay_sfx_events(&mut self) -> u32 {
@@ -1006,10 +1006,17 @@ impl Scene for Playtest {
             );
         }
 
-        let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let render_scratch = frame_render_scratch();
-        let mut primitive_packets =
-            PrimitivePacketArena::new(&mut render_scratch.primitive_packets);
+        // This frame's table and packets never overlap the previous frame's,
+        // which the GPU may still be walking: see PACKET_FRAMES.
+        let (mut ot, mut primitive_packets) = unsafe {
+            let frames = &mut *core::ptr::addr_of_mut!(PACKET_FRAMES);
+            let ot = &mut *core::ptr::addr_of_mut!(OT[frames.next_frame()]);
+            (
+                OtFrame::begin(ot),
+                PrimitivePacketArena::new_paired(&mut render_scratch.primitive_packets, frames),
+            )
+        };
 
         let room_record = ROOMS.get(self.room_index.to_usize());
         // The cooked BSP replaces only static grid surfaces. It writes its
@@ -1275,7 +1282,10 @@ impl Scene for Playtest {
                                             ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                             active.sector_size,
                                             active.index == self.visibility.root,
-                                            Some(prebuilt_room_quads_for(active.index)),
+                                            Some(prebuilt_room_quads_for_frame(
+                                                active.index,
+                                                &mut primitive_packets
+                                            )),
                                             &mut primitive_packets,
                                             &mut world,
                                         ]
@@ -1420,7 +1430,10 @@ impl Scene for Playtest {
                                                 cells,
                                                 ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                                 portal_cell_window,
-                                                Some(prebuilt_room_quads_for(active.index)),
+                                                Some(prebuilt_room_quads_for_frame(
+                                                    active.index,
+                                                    &mut primitive_packets
+                                                )),
                                                 &mut primitive_packets,
                                                 &mut world,
                                             ]
@@ -1529,7 +1542,10 @@ impl Scene for Playtest {
                                                 // projection + surface walk for them is
                                                 // skipped.
                                                 true,
-                                                Some(prebuilt_room_quads_for(active.index)),
+                                                Some(prebuilt_room_quads_for_frame(
+                                                    active.index,
+                                                    &mut primitive_packets
+                                                )),
                                                 &mut primitive_packets,
                                                 &mut world,
                                             ]
@@ -2110,6 +2126,8 @@ impl Scene for Playtest {
             primitive_packets.remaining() as u32,
         );
         telemetry::counter(telemetry::counter::WORLD_COMMANDS, world_command_len as u32);
+        // The next frame builds beside this one while its list is walked.
+        primitive_packets.finish_paired_frame();
         // Submission is deliberately split from packet preparation. The app
         // runner first presents the previous queued frame and clears the new
         // back buffer, then calls submit_render below.
@@ -2122,7 +2140,11 @@ impl Scene for Playtest {
         self.overlay_poi_panel_frame = self.prepared_poi_panel_frame;
         self.overlay_poi_page_type_frame = self.prepared_poi_page_type_frame;
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
-        let ot_in_flight = unsafe { OtFrame::resume(&mut OT) }.submit_async();
+        let ot_in_flight = unsafe {
+            let built = (*core::ptr::addr_of!(PACKET_FRAMES)).built_frame();
+            OtFrame::resume(&mut *core::ptr::addr_of_mut!(OT[built]))
+        }
+        .submit_async();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
         ot_in_flight.detach();
     }

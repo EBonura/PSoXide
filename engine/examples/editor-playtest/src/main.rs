@@ -74,12 +74,13 @@ use psx_engine::{
     AdaptiveSubdivisionKindMask, Angle, App, CachedRoomCell, CachedRoomSurface, CharacterCollision,
     CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAnim,
     CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand,
-    DepthRange, LoadedWorldCameraGte, OtFrame, PrimitivePacketArena, PrimitivePacketScratch,
-    PrimitiveSink, ProjectedVertex, RenderSubmission, Rgb8, RoomPoint, RuntimeCollisionRoom,
-    RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick, TexturedModelRenderFace,
-    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
-    WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex, Q12,
+    DepthRange, LoadedWorldCameraGte, OtFrame, PacketFramePair, PrimitivePacketArena,
+    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, RenderSubmission, Rgb8, RoomPoint,
+    RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
+    TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
+    ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
+    WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
+    WorldVertex, Q12,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -231,7 +232,13 @@ use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 ))]
 use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 
-static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
+/// Two ordering tables, alternated with the packet scratch's frame pair: the
+/// runner starts building a frame while the GPU still walks the previous
+/// one's table (`RenderSubmission::QueuedDoubleBuffered`).
+static mut OT: [OrderingTable<OT_DEPTH>; 2] = [OrderingTable::new(), OrderingTable::new()];
+/// Which end of the shared packet scratch the last built frame used; see
+/// `PacketFramePair`. Indexes `OT` too.
+static mut PACKET_FRAMES: PacketFramePair = PacketFramePair::new();
 fn world_camera_from_position_focus(
     projection: WorldProjection,
     position: RoomPoint,

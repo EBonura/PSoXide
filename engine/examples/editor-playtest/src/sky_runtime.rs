@@ -81,6 +81,9 @@ pub(super) fn draw_scene_sky(
 
     let projection = sky.flags & psx_level::sky_flags::PROJECTION_MASK;
     if projection == 0 || projection == psx_level::sky_flags::PANORAMA {
+        // The panorama relinks packets it keeps across frames, which the
+        // previous frame's list may still be reading.
+        primitive_packets.fence();
         draw_sky_panorama(sky, camera, ot);
         return;
     }

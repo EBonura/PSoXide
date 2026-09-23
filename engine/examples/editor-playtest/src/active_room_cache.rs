@@ -304,6 +304,18 @@ pub(super) fn prebuilt_room_quads_for(
     prebuilt_quads_arena().claim(room)
 }
 
+/// [`prebuilt_room_quads_for`] while building a frame. The pool's packets are
+/// relinked every frame, and the previous frame's list, which the GPU may
+/// still be walking, links the same packets: wait for it first.
+#[cfg_attr(playtest_pxbsp, allow(dead_code))]
+pub(super) fn prebuilt_room_quads_for_frame(
+    room: RoomIndex,
+    frame_packets: &mut PrimitivePacketArena<'_>,
+) -> (&'static mut [QuadTexturedGouraud], &'static mut [u8]) {
+    frame_packets.fence();
+    prebuilt_room_quads_for(room)
+}
+
 pub(super) fn room_surface_cache_slices(
     index: RoomIndex,
     cache: ActiveRoomSurfaceCache,
