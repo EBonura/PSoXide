@@ -186,19 +186,25 @@ const AFFINE_BATCH_WORKSPACE_BYTES: usize =
 #[cfg(target_arch = "mips")]
 const _: () = assert!(AFFINE_BATCH_WORKSPACE_BYTES <= psx_engine::scratchpad::SIZE);
 
-/// PXBSP scratchpad layout: the five clip-plane records, then the batch
-/// vertex workspace.
+/// PXBSP scratchpad layout: the five clip-plane records, the batch vertex
+/// workspace, then the mixed-batch writer's stack.
 ///
 /// The clip planes are the most re-read bytes in the face loop. Each live
 /// plane costs five loads per face, and with the hierarchical clipflags
 /// leaving under two planes live per face that is about two thousand loads a
 /// frame from main RAM at six stall cycles each. In the scratchpad they are
 /// one-cycle reads at an absolute address, so the base-pointer reload goes
-/// too. The batch gives up six vertex slots to pay for it; this project's
-/// cook has no face wider than six vertices, so the batch still groups eight
-/// faces per flush instead of nine.
+/// too. The batch gives up six vertex slots to pay for it.
+///
+/// The writer's frame (spilled loop state it reloads per packet) is the next
+/// most re-read, so `flush_pxbsp_batch` runs it on the bytes above the batch.
+/// The batch gives up fourteen more slots for that: nineteen is the most that
+/// leaves the writer's linked call tree room (296 bytes, which
+/// `tools/stack_guard.py` proves). A face wider than the batch is not drawn;
+/// Cortex's cook has none wider than six vertices, so a flush still groups
+/// four quads.
 const PXBSP_CLIP_PLANE_BYTES: usize = core::mem::size_of::<[([i32; 3], i32); 5]>();
-const PXBSP_BATCH_MAX_VERTICES: usize = 33;
+const PXBSP_BATCH_MAX_VERTICES: usize = 19;
 const PXBSP_BATCH_MAX_SURFACES: usize = 13;
 const PXBSP_AFFINE_BATCH_VERTEX_CAPACITY: usize =
     PXBSP_BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES;
@@ -219,7 +225,10 @@ const PXBSP_BATCH: Region = Region::new(
     PXBSP_CLIP_PLANE_BYTES
         + PXBSP_AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>(),
 );
-const _: () = assert_disjoint(&[PXBSP_CLIP_PLANES, PXBSP_BATCH]);
+/// The mixed-batch writer's stack: every scratchpad byte above the batch.
+/// The clip planes and the batch are live across each flush.
+type PxbspWriterStack = ScratchpadStack<{ PXBSP_BATCH.end() }, { psx_engine::scratchpad::SIZE }>;
+const _: () = assert_disjoint(&[PXBSP_CLIP_PLANES, PXBSP_BATCH, PxbspWriterStack::REGION]);
 /// Face selection runs with its stack in the scratchpad (its spills and the
 /// node walk's frame are its hottest loads). It returns before the face pass
 /// claims `PXBSP_CLIP_PLANES` and `PXBSP_BATCH`, and nothing else holds
@@ -3708,15 +3717,20 @@ unsafe fn flush_pxbsp_batch(
             hardware_triangles: 0,
         };
     }
+    // SAFETY: the planes and the batch are the only scratchpad bytes live
+    // around the flush (see PxbspWriterStack), the writer installs no
+    // exception handler, and tools/stack_guard.py proves its call tree fits.
     unsafe {
-        submit_classic_affine_mixed_batch(
-            vertices.as_mut_ptr(),
-            vertex_count,
-            surfaces.as_ptr(),
-            surface_count,
-            output,
-            PXBSP_RENDER_PROFILE,
-        )
+        PxbspWriterStack::run(|| {
+            submit_classic_affine_mixed_batch(
+                vertices.as_mut_ptr(),
+                vertex_count,
+                surfaces.as_ptr(),
+                surface_count,
+                output,
+                PXBSP_RENDER_PROFILE,
+            )
+        })
     }
 }
 
