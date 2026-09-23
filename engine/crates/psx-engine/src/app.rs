@@ -788,6 +788,13 @@ impl App {
                             // about to run and does them inside the wait. The
                             // clear and the ordering-table kick come after the
                             // edge, in `finish_deferred_flip`.
+                            //
+                            // The queue closes the frame with GP0(1Fh) and
+                            // the handler flips only once the GPU reaches it,
+                            // so the overlay above must be the frame's last
+                            // drawing. The previous flip has landed (it is
+                            // resolved before any visual frame runs), which
+                            // the acknowledge inside the queue requires.
                             telemetry::stage_begin(telemetry::stage::PRESENT);
                             clock.queue_display_flip(ctx.fb.begin_deferred_swap());
                             telemetry::stage_end(telemetry::stage::PRESENT);

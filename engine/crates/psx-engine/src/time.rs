@@ -51,15 +51,23 @@ impl EngineClock {
         self.last_present_vblank = platform::wait_present_vblank(entry);
     }
 
-    /// Hand one GP1 display-start word to the VBlank handler and return
-    /// immediately.
+    /// Close the frame drawn so far with GP0(1Fh), hand one GP1
+    /// display-start word to the VBlank handler and return immediately.
     ///
-    /// The handler applies it at the next blank edge on which the GPU
-    /// reports idle, so the flip still lands inside the vertical blanking
-    /// interval exactly as [`wait_vblank_edge`](Self::wait_vblank_edge)
-    /// plus a direct write would -- but the CPU is free to do the next
-    /// frame's work in the meantime instead of spinning out the remainder
-    /// of the display period.
+    /// psx-rt's handler applies the word at the first blank edge on which
+    /// GPUSTAT bit 24 is set. GP0(1Fh) sets that bit when the GPU reaches it
+    /// in its command stream, after everything sent before it is drawn, so
+    /// every GP0 command issued before this call is on screen when the flip
+    /// lands. GPUSTAT bit 28, the old gate, is not a drawing-complete test on
+    /// silicon: it rises about one large primitive early (hardware-tests
+    /// v1.24). The flag is acknowledged with GP1(02h) first; the caller must
+    /// only queue once the previous flip has landed, or that acknowledge
+    /// would hide the previous frame's completion from the handler.
+    ///
+    /// The flip still lands inside the vertical blanking interval exactly as
+    /// [`wait_vblank_edge`](Self::wait_vblank_edge) plus a direct write
+    /// would -- but the CPU is free to do the next frame's work in the
+    /// meantime instead of spinning out the remainder of the display period.
     pub(crate) fn queue_display_flip(&mut self, display_start: u32) {
         platform::queue_display_flip(display_start);
     }
@@ -76,8 +84,8 @@ impl EngineClock {
     /// Block until a queued flip has been applied.
     ///
     /// Returns `false` if it did not land within [`FLIP_WAIT_VBLANKS`]
-    /// display periods, which can only happen if the GPU never reports idle
-    /// at a blank edge. The caller carries on either way: not continuing
+    /// display periods, which can only happen if the GPU never reaches the
+    /// frame's closing GP0(1Fh). The caller carries on either way: not continuing
     /// would hang the game, and a wedged GPU is a state the console has been
     /// observed to reach.
     ///
@@ -129,6 +137,8 @@ mod platform {
     }
 
     pub(super) fn queue_display_flip(display_start: u32) {
+        psx_gpu::arm_draw_done();
+        psx_gpu::signal_draw_done();
         psx_rt::interrupts::queue_gp1_at_vblank(display_start);
     }
 

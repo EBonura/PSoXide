@@ -106,10 +106,13 @@ pub fn ack_vblank() {
 }
 
 /// Wait until every submitted primitive has drained before presenting its
-/// buffer. GPUSTAT bit 28 is the same idle gate used by the SDK's deferred
-/// framebuffer flip.
+/// buffer: GPUSTAT bit 28, then bit 26, as `psx_gpu::draw_sync` does. Bit 28
+/// alone is not a drawing-complete test on silicon (hardware-tests v1.24): it
+/// rises about one large primitive before the drawing ends, and bit 26 only
+/// once the GPU can take the next command.
 pub fn draw_sync() {
     let _ = psx_io::gpu::try_wait_dma_ready(1_000_000);
+    let _ = psx_io::gpu::try_wait_cmd_ready(1_000_000);
 }
 
 /// Whether the diagnostic checklist has been revealed.
