@@ -79,6 +79,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-anim-cook"
+version = "0.1.0"
+dependencies = [
+ "psx-asset",
+]
+
+[[package]]
+name = "psx-asset"
+version = "0.1.0"
+dependencies = [
+ "psx-gte",
+ "psxed-format",
+]
+
+[[package]]
+name = "psx-gte"
+version = "0.1.0"
+dependencies = [
+ "psx-gte-core",
+]
+
+[[package]]
+name = "psx-gte-core"
+version = "0.1.0"
+dependencies = [
+ "psx-math",
+]
+
+[[package]]
 name = "psx-hw"
 version = "0.1.0"
 dependencies = [
@@ -87,6 +116,10 @@ dependencies = [
 
 [[package]]
 name = "psx-iso"
+version = "0.1.0"
+
+[[package]]
+name = "psx-math"
 version = "0.1.0"
 
 [[package]]

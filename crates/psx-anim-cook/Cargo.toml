@@ -1,0 +1,10 @@
+[package]
+name = "psx-anim-cook"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-side HMA1 animation encoder: local-space quaternion tracks with per-bone key rates, chosen against a vertex-space error bound. Decoded on the PS1 by psx_asset::hma1."
+
+[dev-dependencies]
+psx-asset = { path = "../../sdk/crates/psx-asset" }
