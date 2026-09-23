@@ -112,8 +112,17 @@ __psx_rt_exception_handler:
     beq   $26, $27, 3f
     nop
 
+    # Step over the faulting instruction. With Cause.BD clear it is at EPC,
+    # so resume at EPC + 4. With BD set it sat in the delay slot of the
+    # branch at EPC, which has already run: resume where that branch sends
+    # control (6: below). EPC + 4 would re-run the faulting instruction as
+    # if the branch had fallen through. `fault_resume_pc` below is the same
+    # decision in Rust, unit-tested on host.
 4:
+    mfc0  $27, $13
     mfc0  $26, $14
+    nop
+    bltz  $27, 6f
     nop
     addiu $26, $26, 4
     jr    $26
@@ -153,6 +162,154 @@ __psx_rt_exception_handler:
 3:
     b     3b
     nop
+
+    # Fault in a delay slot: evaluate the branch at EPC. $26 = EPC. Save the
+    # GPRs to __psx_rt_fault_regs (slot n = $n) so the branch's registers can
+    # be read by index, use $8-$15 as scratch, restore those eight. $k0/$k1
+    # slots are not written: this handler owns both, so no branch can test
+    # them. A branch this cannot evaluate (a coprocessor BCzF/BCzT) halts.
+6:
+    .set  noat
+    lui   $27, %hi(__psx_rt_fault_regs)
+    addiu $27, $27, %lo(__psx_rt_fault_regs)
+    sw    $0, 0($27)
+    sw    $1, 4($27)
+    sw    $2, 8($27)
+    sw    $3, 12($27)
+    sw    $4, 16($27)
+    sw    $5, 20($27)
+    sw    $6, 24($27)
+    sw    $7, 28($27)
+    sw    $8, 32($27)
+    sw    $9, 36($27)
+    sw    $10, 40($27)
+    sw    $11, 44($27)
+    sw    $12, 48($27)
+    sw    $13, 52($27)
+    sw    $14, 56($27)
+    sw    $15, 60($27)
+    sw    $16, 64($27)
+    sw    $17, 68($27)
+    sw    $18, 72($27)
+    sw    $19, 76($27)
+    sw    $20, 80($27)
+    sw    $21, 84($27)
+    sw    $22, 88($27)
+    sw    $23, 92($27)
+    sw    $24, 96($27)
+    sw    $25, 100($27)
+    sw    $28, 112($27)
+    sw    $29, 116($27)
+    sw    $30, 120($27)
+    sw    $31, 124($27)
+    .set  at
+
+    # $8 = branch word, $11 = value of rs, $12 = value of rt,
+    # $13 = EPC + 8 (not taken), $9 = EPC + 4 + (simm16 << 2) (taken),
+    # $10 = major opcode.
+    lw    $8, 0($26)
+    nop
+    srl   $11, $8, 19
+    andi  $11, $11, 0x7c
+    addu  $11, $11, $27
+    lw    $11, 0($11)
+    srl   $12, $8, 14
+    andi  $12, $12, 0x7c
+    addu  $12, $12, $27
+    lw    $12, 0($12)
+    addiu $13, $26, 8
+    srl   $10, $8, 26
+    sll   $9, $8, 16
+    sra   $9, $9, 14
+    addu  $9, $9, $26
+    addiu $9, $9, 4
+
+    beqz  $10, 10f
+    addiu $14, $zero, 1
+    beq   $10, $14, 11f
+    addiu $14, $zero, 2
+    beq   $10, $14, 12f
+    addiu $14, $zero, 3
+    beq   $10, $14, 12f
+    addiu $14, $zero, 4
+    beq   $10, $14, 14f
+    addiu $14, $zero, 5
+    beq   $10, $14, 15f
+    addiu $14, $zero, 6
+    beq   $10, $14, 16f
+    addiu $14, $zero, 7
+    beq   $10, $14, 17f
+    nop
+    b     3b
+    nop
+
+    # SPECIAL: jr (funct 8) and jalr (funct 9) go to rs.
+10:
+    andi  $14, $8, 0x3e
+    xori  $14, $14, 0x08
+    bnez  $14, 3b
+    nop
+    b     20f
+    move  $13, $11
+
+    # REGIMM: bltz/bltzal (rt bit 0 clear) are taken when rs < 0,
+    # bgez/bgezal (set) when rs >= 0: taken when the sign bit differs from
+    # rt bit 0.
+11:
+    srl   $14, $11, 31
+    srl   $15, $8, 16
+    andi  $15, $15, 1
+    bne   $14, $15, 18f
+    nop
+    b     20f
+    nop
+
+    # j / jal: the 256 MB region of the delay slot, index << 2.
+12:
+    addiu $14, $26, 4
+    lui   $15, 0xf000
+    and   $14, $14, $15
+    sll   $15, $8, 6
+    srl   $15, $15, 4
+    b     20f
+    or    $13, $14, $15
+
+14:
+    beq   $11, $12, 18f
+    nop
+    b     20f
+    nop
+15:
+    bne   $11, $12, 18f
+    nop
+    b     20f
+    nop
+16:
+    blez  $11, 18f
+    nop
+    b     20f
+    nop
+17:
+    bgtz  $11, 18f
+    nop
+    b     20f
+    nop
+
+18:
+    move  $13, $9
+20:
+    move  $26, $13
+    lw    $8, 32($27)
+    lw    $9, 36($27)
+    lw    $10, 40($27)
+    lw    $11, 44($27)
+    lw    $12, 48($27)
+    lw    $13, 52($27)
+    lw    $14, 56($27)
+    lw    $15, 60($27)
+    nop
+    jr    $26
+    .word 0x42000010
     .set reorder
     "#
 );
@@ -167,8 +324,9 @@ pub static mut __psx_rt_vblank_count: u32 = 0;
 /// The handler used to return straight to EPC for these, which
 /// re-executes the faulting instruction and loops forever: a silent
 /// freeze with no diagnostic, indistinguishable from a hung spin. It now
-/// steps over the faulting instruction and counts it here, so a bad
-/// access costs one wrong value instead of the whole program, and the
+/// steps over the faulting instruction (in a delay slot, to wherever its
+/// branch sends control: see [`fault_resume_pc`]) and counts it here, so a
+/// bad access costs one wrong value instead of the whole program, and the
 /// count says it happened. Fatal instruction-side faults are deliberately
 /// different: BREAK is the shipping representation of
 /// `panic=immediate-abort`, while IBE and instruction-side AdEL cannot be
@@ -189,6 +347,12 @@ pub static mut __psx_rt_fault_cause: u32 = 0;
 /// COP0 EPC captured for the latest unexpected exception.
 #[no_mangle]
 pub static mut __psx_rt_fault_epc: u32 = 0;
+
+/// GPRs at the latest fault taken in a branch delay slot (slot n holds `$n`;
+/// the `$k0`/`$k1` slots are never written). The handler saves them here to
+/// evaluate the branch at EPC, see [`fault_resume_pc`].
+#[no_mangle]
+pub static mut __psx_rt_fault_regs: [u32; 32] = [0; 32];
 
 /// One queued GP1 word the VBlank handler writes to the GPU at the first
 /// blank edge on which GPUSTAT bit 24 is set, then clears. Zero = empty.
@@ -282,6 +446,86 @@ pub const fn interrupt_resume_pc(epc: u32, word_at_epc: u32) -> u32 {
         epc.wrapping_add(4)
     } else {
         epc
+    }
+}
+
+/// COP0 Cause.BD: the exception was taken in the delay slot of the branch
+/// at EPC.
+pub const CAUSE_BD: u32 = 1 << 31;
+
+/// Where the branch or jump `word` at `pc` sends control once its delay
+/// slot has run: its target when taken, `pc + 8` when not. `None` when
+/// `word` is not a branch this can evaluate (a coprocessor `BCzF`/`BCzT`,
+/// or not a branch at all).
+///
+/// `regs[n]` is `$n` at the exception; `$zero` reads as zero whatever
+/// `regs[0]` holds. The registers are read after the branch has run, which
+/// gives the value it tested except in two cases the R3000 leaves
+/// unpredictable or compilers never emit: a `bltzal`/`bgezal`/`jalr` whose
+/// link register is also a source, and a branch that sits in the load delay
+/// of a load into one of its sources (`tools/hazard_scan.py` flags those).
+/// The REGIMM decode is the R3000's: `rt` bit 0 picks `bgez` over `bltz`,
+/// every other `rt` bit only chooses whether to link.
+pub const fn branch_resume_pc(pc: u32, word: u32, regs: &[u32; 32]) -> Option<u32> {
+    let rs_index = ((word >> 21) & 31) as usize;
+    let rt_index = ((word >> 16) & 31) as usize;
+    let rs = if rs_index == 0 { 0 } else { regs[rs_index] };
+    let rt = if rt_index == 0 { 0 } else { regs[rt_index] };
+    let not_taken = pc.wrapping_add(8);
+    let taken = pc
+        .wrapping_add(4)
+        .wrapping_add(((word as i16 as i32) << 2) as u32);
+    let cond = match word >> 26 {
+        // jr / jalr
+        0x00 => {
+            return if word & 0x3E == 0x08 { Some(rs) } else { None };
+        }
+        // bltz / bgez / bltzal / bgezal
+        0x01 => ((rs as i32) < 0) != (rt_index & 1 != 0),
+        // j / jal
+        0x02 | 0x03 => {
+            return Some((pc.wrapping_add(4) & 0xF000_0000) | ((word & 0x03FF_FFFF) << 2));
+        }
+        0x04 => rs == rt,
+        0x05 => rs != rt,
+        0x06 => (rs as i32) <= 0,
+        0x07 => (rs as i32) > 0,
+        _ => return None,
+    };
+    Some(if cond { taken } else { not_taken })
+}
+
+/// Where psx-rt's exception handler resumes after a fault (any exception
+/// but an interrupt), or `None` where it halts. `badvaddr` is COP0
+/// BadVAddr; `word_at_epc` and `regs` are only read with [`CAUSE_BD`] set.
+///
+/// BREAK (the shipping form of `panic=immediate-abort`), an instruction bus
+/// error and a misaligned instruction fetch (AdEL with BadVAddr == EPC)
+/// halt. Every other fault is stepped over and counted: the faulting
+/// instruction is at EPC, so resume at `epc + 4`, unless Cause.BD says it
+/// sat in the delay slot of the branch at EPC. That branch has already run,
+/// so resume where it sends control ([`branch_resume_pc`]); `epc + 4` would
+/// run the faulting instruction again as if the branch had fallen through.
+/// A delay-slot fault behind a branch that cannot be evaluated halts. The
+/// handler's assembly makes exactly this decision.
+pub const fn fault_resume_pc(
+    cause: u32,
+    epc: u32,
+    badvaddr: u32,
+    word_at_epc: u32,
+    regs: &[u32; 32],
+) -> Option<u32> {
+    match (cause >> 2) & 0x1F {
+        // Break, IBE
+        9 | 6 => return None,
+        // AdEL on the fetch itself
+        4 if badvaddr == epc => return None,
+        _ => {}
+    }
+    if cause & CAUSE_BD == 0 {
+        Some(epc.wrapping_add(4))
+    } else {
+        branch_resume_pc(epc, word_at_epc, regs)
     }
 }
 
@@ -602,5 +846,162 @@ mod tests {
     #[test]
     fn the_resume_address_wraps_like_the_hardware_add() {
         assert_eq!(interrupt_resume_pc(0xFFFF_FFFC, RTPS), 0);
+    }
+
+    // Fault path. Cause values are ExcCode << 2, plus CAUSE_BD.
+    const ADEL: u32 = 4 << 2;
+    const ADES: u32 = 5 << 2;
+    const IBE: u32 = 6 << 2;
+    const DBE: u32 = 7 << 2;
+    const BREAK: u32 = 9 << 2;
+    const RI: u32 = 10 << 2;
+    const CPU: u32 = 11 << 2;
+    const OV: u32 = 12 << 2;
+
+    /// A misaligned data address: never equal to an (aligned) EPC.
+    const BAD_DATA: u32 = 0x8001_0001;
+    const NOT_TAKEN: u32 = EPC + 8;
+
+    /// `$8 = a`, `$9 = b`, `$31` = the link a jal at EPC wrote.
+    fn regs(a: u32, b: u32) -> [u32; 32] {
+        let mut regs = [0u32; 32];
+        regs[8] = a;
+        regs[9] = b;
+        regs[31] = EPC + 8;
+        regs
+    }
+
+    fn in_slot(cause: u32, branch: u32, regs: &[u32; 32]) -> Option<u32> {
+        fault_resume_pc(cause | CAUSE_BD, EPC, BAD_DATA, branch, regs)
+    }
+
+    #[test]
+    fn a_fault_outside_a_delay_slot_resumes_after_it() {
+        // Word and registers are ignored with BD clear: even a branch word
+        // at EPC (the faulting instruction can be a branch's target) steps
+        // to EPC + 4.
+        for cause in [ADEL, ADES, DBE, RI, CPU, OV] {
+            for word in [0x8C82_0000, 0x1109_0004, RTPS] {
+                assert_eq!(
+                    fault_resume_pc(cause, EPC, BAD_DATA, word, &regs(1, 1)),
+                    Some(EPC + 4),
+                    "{cause:#x} {word:#010x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fatal_faults_halt_in_or_out_of_a_delay_slot() {
+        for bd in [0, CAUSE_BD] {
+            let r = regs(1, 1);
+            assert_eq!(fault_resume_pc(BREAK | bd, EPC, 0, 0x1109_0004, &r), None);
+            assert_eq!(fault_resume_pc(IBE | bd, EPC, 0, 0x1109_0004, &r), None);
+            assert_eq!(fault_resume_pc(ADEL | bd, EPC, EPC, 0x1109_0004, &r), None);
+        }
+    }
+
+    #[test]
+    fn a_delay_slot_fault_behind_a_taken_branch_resumes_at_its_target() {
+        // (branch word, $8, $9, target)
+        let cases = [
+            (0x1109_0004, 7, 7, EPC + 4 + 16),          // beq $8, $9, +4
+            (0x1509_FFFC, 7, 8, EPC + 4 - 16),          // bne $8, $9, -4
+            (0x1000_0004, 0, 0, EPC + 4 + 16),          // b +4 (beq $0, $0)
+            (0x0501_0008, 0, 0, EPC + 4 + 32),          // bgez $8, +8 ($8 = 0)
+            (0x0501_0008, 5, 0, EPC + 4 + 32),          // bgez $8, +8 ($8 > 0)
+            (0x0500_0008, -1i32 as u32, 0, EPC + 36),   // bltz $8, +8
+            (0x0511_0008, 5, 0, EPC + 36),              // bgezal $8, +8
+            (0x0510_0008, 0x8000_0000, 0, EPC + 36),    // bltzal $8, +8
+            (0x1900_0008, 0, 0, EPC + 36),              // blez $8, +8 ($8 = 0)
+            (0x1900_0008, -3i32 as u32, 0, EPC + 36),   // blez $8, +8 ($8 < 0)
+            (0x1D00_0008, 1, 0, EPC + 36),              // bgtz $8, +8
+            (0x0800_5000, 0, 0, 0x8001_4000),           // j 0x80014000
+            (0x0C00_5000, 0, 0, 0x8001_4000),           // jal 0x80014000
+            (0x0100_F809, 0x8002_0000, 0, 0x8002_0000), // jalr $8
+        ];
+        for (branch, a, b, target) in cases {
+            for cause in [ADEL, ADES, DBE, RI, CPU, OV] {
+                assert_eq!(
+                    in_slot(cause, branch, &regs(a, b)),
+                    Some(target),
+                    "{cause:#x} {branch:#010x} $8={a:#x} $9={b:#x}"
+                );
+            }
+        }
+        // jr $ra: $31 as saved.
+        let mut r = regs(0, 0);
+        r[31] = 0x8003_0010;
+        assert_eq!(in_slot(DBE, 0x03E0_0008, &r), Some(0x8003_0010));
+    }
+
+    #[test]
+    fn a_delay_slot_fault_behind_a_branch_not_taken_resumes_after_the_slot() {
+        let cases = [
+            (0x1109_0004, 7, 8),            // beq $8, $9 with $8 != $9
+            (0x1509_FFFC, 7, 7),            // bne $8, $9 with $8 == $9
+            (0x0501_0008, -1i32 as u32, 0), // bgez $8 with $8 < 0
+            (0x0500_0008, 0, 0),            // bltz $8 with $8 = 0
+            (0x0511_0008, 0x8000_0000, 0),  // bgezal $8 with $8 < 0
+            (0x0510_0008, 1, 0),            // bltzal $8 with $8 > 0
+            (0x1900_0008, 1, 0),            // blez $8 with $8 > 0
+            (0x1D00_0008, 0, 0),            // bgtz $8 with $8 = 0
+            (0x1D00_0008, 0x8000_0000, 0),  // bgtz $8 with $8 < 0
+        ];
+        for (branch, a, b) in cases {
+            assert_eq!(
+                in_slot(DBE, branch, &regs(a, b)),
+                Some(NOT_TAKEN),
+                "{branch:#010x} $8={a:#x} $9={b:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_reads_as_zero_whatever_its_slot_holds() {
+        let mut r = regs(0, 0);
+        r[0] = 0xDEAD_BEEF;
+        assert_eq!(in_slot(DBE, 0x1000_0004, &r), Some(EPC + 20)); // beq $0, $0
+    }
+
+    #[test]
+    fn j_keeps_the_delay_slots_256mb_region() {
+        // The region is that of EPC + 4, not EPC.
+        assert_eq!(
+            branch_resume_pc(0x8FFF_FFFC, 0x0800_0010, &[0; 32]),
+            Some(0x9000_0040)
+        );
+        assert_eq!(
+            branch_resume_pc(0x8001_0000, 0x0BFF_FFFF, &[0; 32]),
+            Some(0x8FFF_FFFC)
+        );
+    }
+
+    #[test]
+    fn a_delay_slot_fault_behind_an_unevaluable_word_halts() {
+        let words = [
+            0x4900_0003, // bc2f
+            0x4901_0003, // bc2t
+            0x4100_0003, // bc0f
+            0x0000_0000, // nop: BD with no branch at EPC
+            0x8C82_0000, // lw
+            0x0000_000C, // syscall
+            RTPS,
+        ];
+        for word in words {
+            assert_eq!(in_slot(DBE, word, &regs(0, 0)), None, "{word:#010x}");
+        }
+    }
+
+    #[test]
+    fn a_gte_command_in_a_delay_slot_interrupt_versus_fault() {
+        // bne $8, $9, -4 taken, RTPS in its slot. An interrupt there
+        // resumes at the branch (both run again, as documented above); only
+        // a fault (Coprocessor Unusable with SR.CU2 clear, say) steps past
+        // the RTPS, to where the branch goes.
+        let bne = 0x1509_FFFC;
+        assert_eq!(interrupt_resume_pc(EPC, bne), EPC);
+        assert_eq!(in_slot(CPU, bne, &regs(1, 2)), Some(EPC + 4 - 16));
+        assert_eq!(in_slot(CPU, bne, &regs(2, 2)), Some(NOT_TAKEN));
     }
 }
