@@ -53,7 +53,7 @@ pub const USAGE: &str = "\
                            -- CARGO-ARGS...
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                            [--launch-arg ARG]... [--name NAME]
-  GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH]
+  GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
   CARGO-ARGS: what follows `cargo` in the guest's own build, starting with `build`
   V: off | default | accurate | noreplay | nopgso | profi | hot=N | llvm=-FLAG, joined with +
   A..B: the gameplay window in port-1 polls, loads excluded";
@@ -88,6 +88,7 @@ struct Options {
     work: Option<PathBuf>,
     patcher: Option<PathBuf>,
     scanner: Option<PathBuf>,
+    stack_guard: Option<PathBuf>,
     frontend: Option<PathBuf>,
     runs: Vec<Run>,
     launch_args: Vec<String>,
@@ -131,6 +132,7 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
             "--work" => options.work = Some(path(value()?)?),
             "--patcher" => options.patcher = Some(path(value()?)?),
             "--scanner" => options.scanner = Some(path(value()?)?),
+            "--stack-guard" => options.stack_guard = Some(path(value()?)?),
             "--frontend" => options.frontend = Some(path(value()?)?),
             "--tape" => options.runs.push(Run {
                 tape: Some(path(value()?)?),
@@ -187,7 +189,10 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
             .scanner
             .take()
             .unwrap_or_else(|| tools.join("hazard_scan.py")),
-        stack_guard: tools.join("stack_guard.py"),
+        stack_guard: options
+            .stack_guard
+            .take()
+            .unwrap_or_else(|| tools.join("stack_guard.py")),
     };
     for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
         if env::var_os(name).is_some_and(|value| !value.is_empty()) {

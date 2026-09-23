@@ -55,6 +55,7 @@ is found only from the dispatch's own straight-line block (see `Block`), a
 dispatch whose table base comes from farther away is unresolved (its slot
 load moves out of the slot), and a table may read into a neighbouring one,
 which only adds harmless detours.
+A map from another link is refused (see `LinkMap.check`).
 Scan an image patched with `--map` with `hazard_scan.py --map` too: without
 the map the scanner may read into the next tables again and report the
 detours it skipped.
@@ -697,6 +698,7 @@ class LinkMap:
 
     def __init__(self, path):
         symbols, sections, rodata, text, trampolines = [], [], [], {}, None
+        functions, tables = {}, []  # `.text.KEY` bounds; `.rodata.KEY` sections
         with open(path, errors="replace") as lines:
             text_lines = lines.read().splitlines()
         for line in text_lines:
@@ -713,8 +715,12 @@ class LinkMap:
                 trampolines = (address, address + size)
             elif depth == 8 and name.endswith(")") and ":(.text" in name:
                 sections.append((address, size))
+                if ":(.text." in name:
+                    functions[name[name.index(":(.text.") + 8:-1]] = (address, address + size)
             elif depth == 8 and name.endswith(")") and ":(.rodata" in name and size:
                 rodata.append((address, address + size))
+                if ":(.rodata." in name:
+                    tables.append((address, size, name[name.index(":(.rodata.") + 10:-1]))
             elif depth == 16 and not name.startswith(".L") and " = " not in name:
                 symbols.append((address, size, name))
         if "__text_start" not in text or "__text_end" not in text:
@@ -733,17 +739,66 @@ class LinkMap:
         self.bounds = sorted(set(self.names) | {a for a, _ in sections} | {s + n for s, n in sections} | {hi})
         self.starts = sorted(self.names)
         self.rodata = sorted(rodata)
+        self.entry = next((a for a, named in self.names.items() if any(n == "_start" for _, n in named)), None)
+        # LLVM writes a function's jump tables to `.rodata.<its section>`.
+        self.tables = [(a, size, functions[key]) for a, size, key in tables if key in functions]
 
     def check(self, data):
-        """Refuse a map from another link (a stale one, or another example's):
-        the header's payload size is __bss_start - __text_start."""
+        """Refuse a map from another link (a stale one, or another example's).
+        The header's payload size (__bss_start - __text_start) is 2 KiB
+        aligned, so a stale map of a relinked game can agree with it: one
+        that put HAZARD_TRAMPOLINES 0x78 bytes early passed and cut 11 of
+        Quake's jump tables short (2026-09-23). So also probe words every
+        psoxide.ld guest has at an address only the right map knows: the
+        entry point, psx-rt's trampoline magic and capacity, every `jal`
+        into .text landing on a function the map names, and every word of a
+        function's own `.rodata.<function>` section (its jump tables)
+        pointing into that function, or into the trampoline array once
+        patched. Each probe is exact and held on every game's own map it
+        was tried on."""
         base = load_address(data)
-        lo = self.text[0]
-        if data[:8] == b"PS-X EXE" and self.bss is not None:
-            payload = struct.unpack_from("<I", data, 0x1C)[0]
-            if payload != self.bss - lo or base != lo:
-                raise MapError(f"{self.path} does not describe this image (payload {payload:#x}, map says "
-                               f"{self.bss - lo:#x} at {lo:#x}); relink so both come from one link")
+        lo, hi = self.text
+        problems = []
+
+        def word(addr):
+            off = addr - base + HEADER
+            return struct.unpack_from("<I", data, off)[0] if HEADER <= off <= len(data) - 4 else None
+
+        if data[:8] == b"PS-X EXE":
+            pc, _, _, payload = struct.unpack_from("<4I", data, 0x10)
+            if self.bss is not None and (payload != self.bss - lo or base != lo):
+                problems.append(f"payload {payload:#x} at {base:#x}, map says {self.bss - lo:#x} at {lo:#x}")
+            if self.entry is not None and pc != self.entry:
+                problems.append(f"entry point {pc:08x}, map's _start {self.entry:08x}")
+        if self.trampolines is not None:
+            t0, t1 = self.trampolines
+            if word(t0) != MAGIC or word(t0 + 4) != (t1 - t0) // 4 - 2:
+                problems.append(f"no HAZARD_TRAMPOLINES magic at the map's {t0:08x}")
+        known = set(self.bounds)
+        calls = []
+        for addr in range(lo, hi, 4):
+            w = word(addr)
+            if w is not None and w >> 26 == 3:
+                target = addr & 0xF0000000 | (w & 0x03FFFFFF) << 2
+                if lo <= target < hi and target not in known:
+                    calls.append((addr, target))
+        if calls:
+            problems.append(f"{len(calls)} calls to no function the map names, first jal {calls[0][1]:08x} at "
+                            f"{calls[0][0]:08x}")
+        tramp = self.trampolines or (0, 0)
+
+        def lands(w, start, end):
+            return start <= w < end or tramp[0] <= w < tramp[1]
+
+        strays = [(addr, start) for table, size, (start, end) in self.tables
+                  for addr in range(table, table + size - 3, 4) if not lands(word(addr) or 0, start, end)]
+        if strays:
+            addr, start = strays[0]
+            problems.append(f"{len(strays)} jump table words outside their function, first {addr:08x} holds "
+                            f"{word(addr) or 0:08x}, not in the function at {start:08x}")
+        if problems:
+            raise MapError(f"{self.path}: map does not match this image ({'; '.join(problems)}); "
+                           f"relink so both come from one link")
 
     def rodata_section(self, addr):
         """(start, end) of the `.rodata*` input section holding `addr`, or
