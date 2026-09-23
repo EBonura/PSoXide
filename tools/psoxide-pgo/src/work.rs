@@ -26,9 +26,17 @@
 //!   bounded wait's limit). A register the loop carries in any other way is
 //!   state, and a loop that branches on it is doing work.
 //!
-//! The emulator counts instructions per 16-byte I-cache line, so a line the
-//! loop touches counts as wait in full. The instructions sharing such a line
-//! with the loop run once per call, not once per iteration.
+//! The emulator counts instructions per 16-byte I-cache line, or per word
+//! when it has `--pc-log-words`. Per line, a line the loop touches counts as
+//! wait in full (the instructions sharing it run once per call, not once
+//! per iteration); per word the split is exact.
+//!
+//! Some waits are beyond this rule. HK's present loop calls
+//! `input::checkpoint` (which polls the pad or refills audio when either is
+//! due), keeps its clock in a stack slot and branches on a flag it clears.
+//! A caller names such a loop by address (`measure --wait-range`, see
+//! [`split`]); with per-word counts, its calls count as waiting as far as
+//! [`attribute`] can prove, and no further.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -57,10 +65,12 @@ enum Op {
     },
     /// J or JAL.
     Jump { target: u32, link: bool },
-    /// JR or JALR.
-    JumpRegister,
-    /// Anything that is work by definition: a store, a call's side, a
-    /// coprocessor write, a GTE command, an unknown opcode.
+    /// JR or JALR through `rs`.
+    JumpRegister { rs: u8, link: bool },
+    /// A store through `base`.
+    Store { base: u8 },
+    /// Anything that is work by definition: a coprocessor write, a GTE
+    /// command, a syscall, an unknown opcode.
     Effect,
 }
 
@@ -80,8 +90,8 @@ fn decode(word: u32, pc: u32) -> Op {
         0 => match word & 63 {
             0x00 | 0x02 | 0x03 => alu(&[rd], &[rt]),
             0x04 | 0x06 | 0x07 => alu(&[rd], &[rt, rs]),
-            0x08 => Op::JumpRegister,
-            0x09 => Op::JumpRegister,
+            0x08 => Op::JumpRegister { rs, link: false },
+            0x09 => Op::JumpRegister { rs, link: true },
             0x10 => alu(&[rd], &[HI]),
             0x11 => alu(&[HI], &[rs]),
             0x12 => alu(&[rd], &[LO]),
@@ -121,7 +131,8 @@ fn decode(word: u32, pc: u32) -> Op {
             dst: (rt != 0).then_some(rt),
             base: Some(rs),
         },
-        _ => Op::Effect, // stores, COP0 writes, RFE, every GTE op, LWC2, SWC2
+        0x28..=0x2b | 0x2e => Op::Store { base: rs },
+        _ => Op::Effect, // COP0 writes, RFE, every GTE op, LWC2, SWC2
     }
 }
 
@@ -209,7 +220,7 @@ fn cycle(code: &Code<'_>, start: u32, closer: u32) -> Vec<u32> {
                 target,
                 link: false,
             }) => vec![target],
-            Some(Op::JumpRegister) => vec![],
+            Some(Op::JumpRegister { .. }) => vec![],
             _ => vec![pc + 4],
         };
         let after = if pc == end {
@@ -262,7 +273,8 @@ fn waits(code: &Code<'_>, body: &[u32]) -> bool {
         matches!(
             op,
             Op::Effect
-                | Op::JumpRegister
+                | Op::Store { .. }
+                | Op::JumpRegister { .. }
                 | Op::Branch { link: true, .. }
                 | Op::Jump { link: true, .. }
         )
@@ -318,26 +330,34 @@ fn waits(code: &Code<'_>, body: &[u32]) -> bool {
     polls > 0
 }
 
-/// Every wait loop among the instructions in `lines` (the 16-byte I-cache
-/// lines the replay executed), read from `ram`.
-pub fn wait_loops(ram: &[u8], lines: &BTreeSet<u32>) -> Vec<WaitLoop> {
-    let code = Code::new(ram);
-    let executed = || {
-        lines
-            .iter()
-            .filter(|&&line| in_ram(line))
-            .flat_map(|&line| (line..line + 16).step_by(4))
-    };
-    // Where each executed branch and jump can go, to spot a loop that code
-    // after it jumps back into.
+/// Every instruction word the replay ran, from the addresses its logs count
+/// (`unit`: 4 for words, 16 for I-cache lines).
+pub fn executed(counted: impl IntoIterator<Item = u32>, unit: u32) -> BTreeSet<u32> {
+    counted
+        .into_iter()
+        .filter(|&at| in_ram(at))
+        .flat_map(|at| (at..at + unit).step_by(4))
+        .collect()
+}
+
+/// Where each executed direct branch, jump and call can go.
+fn sources(code: &Code<'_>, executed: &BTreeSet<u32>) -> HashMap<u32, Vec<u32>> {
     let mut sources: HashMap<u32, Vec<u32>> = HashMap::new();
-    for pc in executed() {
+    for &pc in executed {
         if let Some(target) = code.op(pc).target() {
             sources.entry(target).or_default().push(pc);
         }
     }
+    sources
+}
+
+/// Every wait loop among the `executed` instruction words, read from `ram`.
+pub fn wait_loops(ram: &[u8], executed: &BTreeSet<u32>) -> Vec<WaitLoop> {
+    let code = Code::new(ram);
+    // To spot a loop that code after it jumps back into.
+    let sources = sources(&code, executed);
     let mut found = Vec::new();
-    for closer in executed() {
+    for &closer in executed {
         let op = code.op(closer);
         let (Op::Branch { target, .. } | Op::Jump { target, .. }) = op else {
             continue;
@@ -377,6 +397,403 @@ pub fn wait_loops(ram: &[u8], lines: &BTreeSet<u32>) -> Vec<WaitLoop> {
     found
 }
 
+const RA: u8 = 31;
+
+/// The successor of a function's return, as a node (no word is odd).
+const EXIT: u32 = 1;
+
+/// Most instructions a callee may reach, calls stepped over, before it is
+/// left as work.
+const MAX_CALLEE: usize = 1024;
+
+/// Most callees `attribute` looks at below one span's wait loops.
+const MAX_CALLEES: usize = 256;
+
+/// Whether `op` leaves everything but its own stack frame alone. A call is
+/// judged by its callee, apart.
+fn quiet(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Alu { .. }
+            | Op::Load { .. }
+            | Op::Branch { link: false, .. }
+            | Op::Jump { .. }
+            | Op::JumpRegister {
+                rs: RA,
+                link: false
+            }
+            | Op::Store { base: SP }
+    )
+}
+
+/// A call instruction's target.
+fn call_target(op: &Op) -> Option<u32> {
+    match op {
+        Op::Jump { target, link: true } => Some(*target),
+        _ => None,
+    }
+}
+
+/// Where control goes after `pc` inside one call of a function, calls
+/// stepped over: a delay slot leaves for wherever its branch goes, the
+/// delay slot of `jr ra` for [`EXIT`], and a register jump anywhere else
+/// nowhere this analysis follows. A function's first instruction is never
+/// a delay slot.
+fn step(code: &Code<'_>, pc: u32, entry: bool) -> Vec<u32> {
+    let before = if entry {
+        Op::Alu {
+            dst: vec![],
+            srcs: vec![],
+        }
+    } else {
+        code.op(pc.wrapping_sub(4))
+    };
+    match before {
+        Op::Branch {
+            target,
+            link: false,
+            ..
+        } => vec![target, pc + 4],
+        Op::Jump {
+            target,
+            link: false,
+        } => vec![target],
+        Op::JumpRegister {
+            rs: RA,
+            link: false,
+        } => vec![EXIT],
+        Op::JumpRegister { link: false, .. } | Op::Branch { link: true, .. } => vec![],
+        // A call returns to the instruction after its delay slot.
+        _ => vec![pc + 4],
+    }
+}
+
+/// A callee as far as [`attribute`] needs it.
+struct Callee {
+    /// Whether it has a quiet path: one from its entry to its return that
+    /// changes nothing outside its own stack frame, runs no instruction
+    /// twice, and calls only callees that have such a path themselves.
+    quiet: bool,
+    /// The instructions on quiet paths that run only from the entry.
+    counted: BTreeSet<u32>,
+    /// `(site, target)` for the calls among them.
+    calls: Vec<(u32, u32)>,
+}
+
+/// Callees analysed so far, by entry: `None` for one left as work.
+struct Callees<'a> {
+    code: Code<'a>,
+    sources: HashMap<u32, Vec<u32>>,
+    known: HashMap<u32, Option<Callee>>,
+    open: HashSet<u32>,
+}
+
+impl Callees<'_> {
+    /// Analyse the function at `entry`, unless it is already known.
+    fn analyse(&mut self, entry: u32) {
+        if self.known.contains_key(&entry) || self.open.contains(&entry) {
+            return;
+        }
+        if self.known.len() >= MAX_CALLEES {
+            self.known.insert(entry, None);
+            return;
+        }
+        self.open.insert(entry);
+        let callee = self.callee(entry);
+        self.open.remove(&entry);
+        self.known.insert(entry, callee);
+    }
+
+    /// Whether the function at `entry` has a quiet path (a recursive call
+    /// has none).
+    fn has_quiet_path(&mut self, entry: u32) -> bool {
+        self.analyse(entry);
+        self.known
+            .get(&entry)
+            .is_some_and(|callee| callee.as_ref().is_some_and(|callee| callee.quiet))
+    }
+
+    fn callee(&mut self, entry: u32) -> Option<Callee> {
+        // Everything one call can run, calls stepped over.
+        let mut successors: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut stack = vec![entry];
+        while let Some(pc) = stack.pop() {
+            if pc == EXIT || successors.contains_key(&pc) {
+                continue;
+            }
+            if !in_ram(pc) || successors.len() >= MAX_CALLEE {
+                return None;
+            }
+            let after = step(&self.code, pc, pc == entry);
+            stack.extend(&after);
+            successors.insert(pc, after);
+        }
+        let reach = |from: u32, edges: &HashMap<u32, Vec<u32>>, allowed: &dyn Fn(u32) -> bool| {
+            let mut seen = HashSet::new();
+            let mut stack = vec![from];
+            while let Some(pc) = stack.pop() {
+                if allowed(pc) && seen.insert(pc) {
+                    stack.extend(edges.get(&pc).into_iter().flatten().copied());
+                }
+            }
+            seen
+        };
+        // An instruction on a cycle can run more than once per call.
+        let looping: HashSet<u32> = successors
+            .iter()
+            .filter(|(pc, after)| {
+                after
+                    .iter()
+                    .any(|&next| reach(next, &successors, &|_| true).contains(pc))
+            })
+            .map(|(pc, _)| *pc)
+            .collect();
+        let mut allowed: HashSet<u32> = successors
+            .keys()
+            .copied()
+            .filter(|pc| quiet(&self.code.op(*pc)) && !looping.contains(pc))
+            .chain([EXIT])
+            .collect();
+        let mut predecessors: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (&pc, after) in &successors {
+            for &next in after {
+                predecessors.entry(next).or_default().push(pc);
+            }
+        }
+        // Judge only the calls on an otherwise quiet path, so a callee
+        // reached only through real work is never looked at.
+        let quiet = loop {
+            let forward = reach(entry, &successors, &|pc| allowed.contains(&pc));
+            let backward = reach(EXIT, &predecessors, &|pc| forward.contains(&pc));
+            // In address order, so the callee budget runs out the same way
+            // on every run.
+            let mut path: Vec<u32> = backward.iter().copied().collect();
+            path.sort_unstable();
+            let loud: Vec<u32> = path
+                .into_iter()
+                .filter(|&pc| {
+                    call_target(&self.code.op(pc))
+                        .is_some_and(|target| !self.has_quiet_path(target))
+                })
+                .collect();
+            if loud.is_empty() {
+                break backward;
+            }
+            for pc in loud {
+                allowed.remove(&pc);
+            }
+        };
+        // An executed branch, jump or call from anywhere else into this
+        // code (a switch's cases rejoining a shared return, say) may run
+        // what follows it outside a call, or twice in one, so none of that
+        // is counted. The rest runs only from the entry, once per call.
+        let entered: Vec<u32> = successors
+            .keys()
+            .copied()
+            .filter(|&pc| {
+                pc != entry
+                    && self.sources.get(&pc).into_iter().flatten().any(|from| {
+                        !successors.contains_key(from)
+                            || call_target(&self.code.op(*from)).is_some()
+                    })
+            })
+            .collect();
+        let mut shared = HashSet::new();
+        for pc in entered {
+            shared.extend(reach(pc, &successors, &|_| true));
+        }
+        let counted: BTreeSet<u32> = quiet
+            .iter()
+            .copied()
+            .filter(|pc| *pc != EXIT && !shared.contains(pc))
+            .collect();
+        let calls = counted
+            .iter()
+            .filter_map(|&pc| Some((pc, call_target(&self.code.op(pc))?)))
+            .collect();
+        Some(Callee {
+            quiet: !quiet.is_empty(),
+            counted,
+            calls,
+        })
+    }
+}
+
+/// What the calls a wait loop makes spend waiting, per instruction word:
+/// `sites` are those calls, `counts` the replay's exact per-word counts.
+///
+/// A callee is shared (HK's `input::checkpoint` runs from its present loop
+/// and from inside real work), and the counts cannot tell whose call ran
+/// an instruction, so this counts a lower bound. For a callee called `n`
+/// times from waiting and `other` times in all else, an instruction on a
+/// quiet path (see [`Callee`]) that ran `c` times ran at least
+/// `c - other` times for the waiting calls, because each call runs it at
+/// most once. Its own calls pass that bound down the same way. Anything
+/// with a side effect, and anything a call does only now and then (a pad
+/// poll due once a vblank), stays work.
+pub fn attribute(
+    ram: &[u8],
+    counts: &HashMap<u32, u64>,
+    sites: &[(u32, u32)],
+) -> HashMap<u32, u64> {
+    let code = Code::new(ram);
+    let executed = executed(counts.keys().copied(), 4);
+    let mut callees = Callees {
+        sources: sources(&code, &executed),
+        code: Code::new(ram),
+        known: HashMap::new(),
+        open: HashSet::new(),
+    };
+    let count = |pc: u32| counts.get(&pc).copied().unwrap_or(0);
+    let mut waiting: HashMap<u32, u64> = HashMap::new();
+    let mut stack = Vec::new();
+    for &(site, target) in sites {
+        *waiting.entry(target).or_default() += count(site);
+        stack.push(target);
+    }
+    // Every callee reachable through quiet calls, and how many callers
+    // each has among them.
+    let mut callers: HashMap<u32, usize> = HashMap::new();
+    let mut seen = HashSet::new();
+    while let Some(entry) = stack.pop() {
+        if !seen.insert(entry) {
+            continue;
+        }
+        callees.analyse(entry);
+        if let Some(Some(callee)) = callees.known.get(&entry) {
+            for &(_, target) in &callee.calls {
+                *callers.entry(target).or_default() += 1;
+                stack.push(target);
+            }
+        }
+    }
+    // Callers before callees, so every bound a callee gets is in first.
+    // Quiet calls never form a cycle: a call back into a callee still being
+    // analysed counts as work.
+    let mut ready: Vec<u32> = seen
+        .iter()
+        .copied()
+        .filter(|entry| !callers.contains_key(entry))
+        .collect();
+    let mut wait = HashMap::new();
+    while let Some(entry) = ready.pop() {
+        let Some(Some(callee)) = callees.known.get(&entry) else {
+            continue;
+        };
+        let calls = waiting.get(&entry).copied().unwrap_or(0);
+        let other = count(entry).saturating_sub(calls);
+        for &pc in &callee.counted {
+            let bound = count(pc).saturating_sub(other).min(calls);
+            if bound > 0 {
+                wait.insert(pc, bound);
+            }
+        }
+        for &(site, target) in &callee.calls {
+            let bound = count(site).saturating_sub(other).min(calls);
+            *waiting.entry(target).or_default() += bound;
+            let left = callers.get_mut(&target).expect("counted above");
+            *left -= 1;
+            if *left == 0 {
+                ready.push(target);
+            }
+        }
+    }
+    wait
+}
+
+/// A caller-named wait loop (`measure --wait-range`) and what it added.
+pub struct Named {
+    pub start: u32,
+    pub end: u32,
+    /// Instructions it ran itself.
+    pub own: u64,
+    /// Calls it makes.
+    pub calls: usize,
+    /// What those calls spent waiting, when the counts are per word.
+    pub called: Option<u64>,
+}
+
+/// A replay's instructions split into work and waiting.
+pub struct Split {
+    /// Instructions spent waiting, per counted address; never more than
+    /// its count.
+    pub wait: HashMap<u32, u64>,
+    /// The wait loops found, with the instructions each ran.
+    pub loops: Vec<(WaitLoop, u64)>,
+    pub named: Vec<Named>,
+}
+
+/// Split the instructions `counts` holds (per 4-byte word or 16-byte line,
+/// `unit`) into work and waiting: the wait loops found in `ram`, and the
+/// caller's `ranges` (START..END), each a wait loop the rule above cannot
+/// see, like HK's present loop, which calls out to poll. A range counts
+/// what it ran itself as waiting, bar any unit holding a store outside the
+/// stack, a coprocessor write or a GTE command; with per-word counts, its
+/// calls count what [`attribute`] can prove they spent waiting.
+pub fn split(
+    ram: &[u8],
+    counts: &HashMap<u32, u64>,
+    unit: u32,
+    ranges: &[(u32, u32)],
+) -> Result<Split, String> {
+    let code = Code::new(ram);
+    let on = |at: u32| counts.get(&at).copied().unwrap_or(0);
+    let units = |words: &mut dyn Iterator<Item = u32>| {
+        let mut units: Vec<u32> = words.map(|pc| pc & !(unit - 1)).collect();
+        units.sort_unstable();
+        units.dedup();
+        units
+    };
+    let executed = executed(counts.keys().copied(), unit);
+    let mut wait = HashMap::new();
+    let mut loops = Vec::new();
+    for found in wait_loops(ram, &executed) {
+        let body = units(&mut found.body.iter().copied());
+        let count = body.iter().map(|&at| on(at)).sum();
+        for at in body {
+            wait.insert(at, on(at));
+        }
+        loops.push((found, count));
+    }
+    let mut named = Vec::new();
+    for &(start, end) in ranges {
+        let inside: Vec<u32> = executed.range(start..end).copied().collect();
+        if inside.is_empty() {
+            return Err(format!(
+                "--wait-range {start:#010x}..{end:#010x} ran no instructions; its addresses \
+                 belong to one build's layout"
+            ));
+        }
+        let loud = units(&mut inside.iter().copied().filter(|&pc| !quiet(&code.op(pc))));
+        let quiet = units(&mut inside.iter().copied());
+        let quiet: Vec<u32> = quiet.into_iter().filter(|at| !loud.contains(at)).collect();
+        for &at in &quiet {
+            wait.insert(at, on(at));
+        }
+        let sites: Vec<(u32, u32)> = inside
+            .iter()
+            .filter_map(|&pc| Some((pc, call_target(&code.op(pc))?)))
+            .collect();
+        let called = (unit == 4).then(|| {
+            let called = attribute(ram, counts, &sites);
+            let total = called.values().sum();
+            for (at, count) in called {
+                let entry = wait.entry(at).or_default();
+                *entry = (*entry).max(count);
+            }
+            total
+        });
+        named.push(Named {
+            start,
+            end,
+            own: quiet.iter().map(|&at| on(at)).sum(),
+            calls: sites.len(),
+            called,
+        });
+    }
+    Ok(Split { wait, loops, named })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,7 +815,7 @@ mod tests {
     }
 
     fn found(words: &[u32]) -> Vec<(u32, u32)> {
-        wait_loops(&ram(words), &lines(words.len().div_ceil(4)))
+        wait_loops(&ram(words), &executed(lines(words.len().div_ceil(4)), 16))
             .into_iter()
             .map(|found| (found.start - BASE, found.end - BASE))
             .collect()
@@ -591,5 +1008,286 @@ mod tests {
             NOP,
         ];
         assert!(found(&code).is_empty());
+    }
+
+    // --- Calls from a wait loop -------------------------------------------
+
+    fn jal(to_word: u32) -> u32 {
+        (3 << 26) | (((BASE + 4 * to_word) >> 2) & 0x03ff_ffff)
+    }
+    const JR_RA: u32 = (31 << 21) | 8;
+    const SP_: u32 = SP as u32;
+    const S0: u32 = 16;
+
+    /// `(word index, instruction, count)` rows as a RAM image and exact
+    /// per-word counts.
+    fn program(rows: &[(u32, u32, u64)]) -> (Vec<u8>, HashMap<u32, u64>) {
+        let size = rows.iter().map(|row| row.0 + 1).max().unwrap_or(0) as usize;
+        let mut words = vec![NOP; size];
+        let mut counts = HashMap::new();
+        for &(index, word, count) in rows {
+            words[index as usize] = word;
+            if count > 0 {
+                counts.insert(BASE + 4 * index, count);
+            }
+        }
+        (ram(&words), counts)
+    }
+
+    /// `attribute` for calls from the given sites (word indices), as word
+    /// index to wait count, sorted.
+    fn attributed(rows: &[(u32, u32, u64)], sites: &[u32]) -> Vec<(u32, u64)> {
+        let (ram, counts) = program(rows);
+        let code = Code::new(&ram);
+        let sites: Vec<(u32, u32)> = sites
+            .iter()
+            .map(|&site| {
+                let pc = BASE + 4 * site;
+                (pc, call_target(&code.op(pc)).expect("a call"))
+            })
+            .collect();
+        let mut found: Vec<(u32, u64)> = attribute(&ram, &counts, &sites)
+            .into_iter()
+            .map(|(pc, count)| ((pc - BASE) / 4, count))
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    /// A poll at word 32: read a status register, return a bit of it.
+    fn poll(calls: u64) -> Vec<(u32, u32, u64)> {
+        vec![
+            (32, lui(V0, 0x1f80), calls),
+            (33, lw(V0, V0, 0x10a8), calls),
+            (34, NOP, calls),
+            (35, JR_RA, calls),
+            (36, and(V0, V0, A0), calls),
+        ]
+    }
+
+    #[test]
+    fn a_polled_callee_waits_for_the_calls_a_wait_loop_makes() {
+        // The loop at 0 makes 100 calls; code at 20 makes 10 more.
+        let mut rows = vec![
+            (0, jal(32), 100),
+            (1, NOP, 100),
+            (20, jal(32), 10),
+            (21, NOP, 10),
+        ];
+        rows.extend(poll(110));
+        let waited: Vec<(u32, u64)> = (32..37).map(|word| (word, 100)).collect();
+        assert_eq!(attributed(&rows, &[0]), waited);
+    }
+
+    #[test]
+    fn a_callee_mostly_called_from_work_waits_only_for_what_is_proven() {
+        // 100 waiting calls, 1000 from work. A branch skips word 35 on some
+        // calls: it ran 50 times, which the work calls alone could explain.
+        let rows = vec![
+            (0, jal(32), 100),
+            (1, NOP, 100),
+            (20, jal(32), 1000),
+            (21, NOP, 1000),
+            (32, lw(V0, A0, 0), 1100),
+            (33, NOP, 1100),
+            (34, beq(V0, 0, to(34, 36)), 1100),
+            (35, NOP, 1100),
+            (36, addiu(V0, V0, 1), 50),
+            (37, JR_RA, 1100),
+            (38, NOP, 1100),
+        ];
+        let waited: Vec<(u32, u64)> = [32, 33, 34, 35, 37, 38]
+            .into_iter()
+            .map(|word| (word, 100))
+            .collect();
+        assert_eq!(attributed(&rows, &[0]), waited);
+    }
+
+    #[test]
+    fn a_callee_side_effect_stays_work() {
+        // A callee that saves to its stack frame is quiet; its store to a
+        // global, on the path it takes when something is due, is work, as
+        // is everything only that path runs.
+        let rows = vec![
+            (0, jal(32), 100),
+            (1, NOP, 100),
+            (32, addiu(SP_, SP_, -8), 100),
+            (33, sw(S0, SP_, 0), 100),
+            (34, lw(V0, A0, 0), 100),
+            (35, NOP, 100),
+            (36, beq(V0, 0, to(36, 40)), 100),
+            (37, NOP, 100),
+            (38, addiu(V1, V1, 1), 100),
+            (39, sw(V1, A1, 0), 100),
+            (40, lw(S0, SP_, 0), 100),
+            (41, JR_RA, 100),
+            (42, addiu(SP_, SP_, 8), 100),
+        ];
+        let waited: Vec<(u32, u64)> = [32, 33, 34, 35, 36, 37, 40, 41, 42]
+            .into_iter()
+            .map(|word| (word, 100))
+            .collect();
+        assert_eq!(attributed(&rows, &[0]), waited);
+    }
+
+    #[test]
+    fn a_nested_poll_waits_for_the_calls_proven_to_reach_it() {
+        // The loop calls A (word 32) 100 times; work calls A 5 more times
+        // and calls B (word 48) directly 7 times. A calls B on every call.
+        let mut rows = vec![
+            (0, jal(32), 100),
+            (1, NOP, 100),
+            (20, jal(32), 5),
+            (21, NOP, 5),
+            (24, jal(48), 7),
+            (25, NOP, 7),
+            (32, addiu(SP_, SP_, -8), 105),
+            (33, sw(31, SP_, 4), 105),
+            (34, jal(48), 105),
+            (35, NOP, 105),
+            (36, lw(31, SP_, 4), 105),
+            (37, JR_RA, 105),
+            (38, addiu(SP_, SP_, 8), 105),
+        ];
+        rows.extend(
+            poll(112)
+                .into_iter()
+                .map(|(word, op, count)| (word + 16, op, count)),
+        );
+        let mut waited: Vec<(u32, u64)> = (32..39).map(|word| (word, 100)).collect();
+        // B: 112 calls, at least 100 of them from A's waiting calls.
+        waited.extend((48..53).map(|word| (word, 100)));
+        assert_eq!(attributed(&rows, &[0]), waited);
+    }
+
+    #[test]
+    fn a_callee_loop_or_a_shared_tail_stays_work() {
+        // A delay loop in the callee can run many times per call: no quiet
+        // path, so nothing waits.
+        let delay = vec![
+            (0, jal(32), 100),
+            (1, NOP, 100),
+            (32, addiu(V1, V1, -1), 5000),
+            (33, bne(V1, 0, to(33, 32)), 5000),
+            (34, NOP, 5000),
+            (35, JR_RA, 100),
+            (36, NOP, 100),
+        ];
+        assert!(attributed(&delay, &[0]).is_empty());
+        // Code elsewhere (word 20) jumps into the callee's return: that tail
+        // may run outside any call, so only the words before it wait.
+        let mut shared = vec![
+            (0, jal(32), 100),
+            (1, NOP, 100),
+            (20, j(35), 30),
+            (21, NOP, 30),
+        ];
+        shared.extend(poll(100));
+        shared.retain(|row| row.0 < 35);
+        shared.extend([(35, JR_RA, 130), (36, and(V0, V0, A0), 130)]);
+        let waited: Vec<(u32, u64)> = (32..35).map(|word| (word, 100)).collect();
+        assert_eq!(attributed(&shared, &[0]), waited);
+    }
+
+    #[test]
+    fn a_recursive_call_stays_work() {
+        // Every entry runs the callee's words at most once, so the 50
+        // recursive entries count against the 100 waiting calls like any
+        // other caller's; the recursive call itself is left as work.
+        let rows = vec![
+            (0, jal(32), 100),
+            (1, NOP, 100),
+            (32, lw(V0, A0, 0), 150),
+            (33, NOP, 150),
+            (34, beq(V0, 0, to(34, 38)), 150),
+            (35, NOP, 150),
+            (36, jal(32), 50),
+            (37, NOP, 50),
+            (38, JR_RA, 150),
+            (39, NOP, 150),
+        ];
+        let waited: Vec<(u32, u64)> = [32, 33, 34, 35, 38, 39]
+            .into_iter()
+            .map(|word| (word, 100))
+            .collect();
+        assert_eq!(attributed(&rows, &[0]), waited);
+    }
+
+    // --- Named wait loops -------------------------------------------------
+
+    /// HK's present loop in miniature: poll a phase byte, call a poll, spill
+    /// the clock to the stack, and loop until the phase is 3.
+    fn present_loop(iterations: u64) -> Vec<(u32, u32, u64)> {
+        let mut rows = vec![
+            (0, lbu(V0, S0, 0), iterations),
+            (1, jal(32), iterations),
+            (2, NOP, iterations),
+            (3, sw(V0, SP_, 16), iterations),
+            (4, addiu(AT, V0, -3), iterations),
+            (5, bne(AT, 0, to(5, 0)), iterations),
+            (6, NOP, iterations),
+        ];
+        rows.extend(poll(iterations));
+        rows
+    }
+
+    fn split_at(rows: &[(u32, u32, u64)], unit: u32, ranges: &[(u32, u32)]) -> Split {
+        let (ram, counts) = program(rows);
+        let counts = if unit == 4 {
+            counts
+        } else {
+            let mut lines = HashMap::new();
+            for (pc, count) in counts {
+                *lines.entry(pc & !15).or_default() += count;
+            }
+            lines
+        };
+        let ranges: Vec<(u32, u32)> = ranges
+            .iter()
+            .map(|&(start, end)| (BASE + 4 * start, BASE + 4 * end))
+            .collect();
+        split(&ram, &counts, unit, &ranges).expect("the ranges ran")
+    }
+
+    #[test]
+    fn a_named_loop_waits_with_its_calls() {
+        let rows = present_loop(50);
+        // The rule alone sees a store and a call: work.
+        assert!(split_at(&rows, 4, &[]).wait.is_empty());
+        let split = split_at(&rows, 4, &[(0, 7)]);
+        let named = &split.named[0];
+        assert_eq!(
+            (named.own, named.calls, named.called),
+            (7 * 50, 1, Some(5 * 50))
+        );
+        assert_eq!(split.wait.values().sum::<u64>(), 12 * 50);
+    }
+
+    #[test]
+    fn a_named_loop_keeps_a_global_store_as_work() {
+        // Word 3 stores to a global instead of the stack.
+        let mut rows = present_loop(50);
+        rows[3].1 = sw(V0, S0, 16);
+        let split = split_at(&rows, 4, &[(0, 7)]);
+        assert_eq!(split.named[0].own, 6 * 50);
+        assert!(!split.wait.contains_key(&(BASE + 12)));
+        // Per I-cache line, the line holding it stays work in full.
+        let split = split_at(&rows, 16, &[(0, 7)]);
+        assert_eq!(split.named[0].own, 3 * 50);
+    }
+
+    #[test]
+    fn a_named_loop_leaves_its_calls_as_work_without_word_counts() {
+        let split = split_at(&present_loop(50), 16, &[(0, 7)]);
+        let named = &split.named[0];
+        assert_eq!((named.own, named.calls, named.called), (7 * 50, 1, None));
+        // The poll's lines are not waiting.
+        assert!(!split.wait.contains_key(&(BASE + 128)));
+    }
+
+    #[test]
+    fn a_named_range_that_ran_nothing_is_refused() {
+        let (ram, counts) = program(&present_loop(50));
+        assert!(split(&ram, &counts, 4, &[(BASE + 400, BASE + 420)]).is_err());
     }
 }

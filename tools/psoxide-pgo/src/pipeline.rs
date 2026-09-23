@@ -52,11 +52,12 @@ pub const USAGE: &str = "\
        psoxide-pgo choose  [GUEST] --profile PROFILE --gate CMD [--variant V]... [--pack CMD]
                            -- CARGO-ARGS...
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
-                           [--launch-arg ARG]... [--name NAME]
+                           [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
   GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
   CARGO-ARGS: what follows `cargo` in the guest's own build, starting with `build`
   V: off | default | accurate | noreplay | nopgso | profi | hot=N | llvm=-FLAG, joined with +
-  A..B: the gameplay window in port-1 polls, loads excluded";
+  A..B: the gameplay window in port-1 polls, loads excluded
+  START..END: guest addresses in hex (one build's layout) of a loop to count as waiting";
 
 /// How to build one guest, shared by every mode.
 struct Guest {
@@ -99,7 +100,23 @@ struct Options {
     gate: Option<String>,
     image: Option<PathBuf>,
     name: Option<String>,
+    wait_ranges: Vec<(u32, u32)>,
     cargo: Vec<String>,
+}
+
+/// `START..END` as a half-open range of guest addresses, in hex.
+fn parse_range(text: &str) -> Result<(u32, u32)> {
+    let hex = |text: &str| u32::from_str_radix(text.trim_start_matches("0x"), 16).ok();
+    let parsed = text
+        .split_once("..")
+        .and_then(|(start, end)| Some((hex(start)?, hex(end)?)));
+    match parsed {
+        Some((start, end)) if start < end && start % 4 == 0 && end % 4 == 0 => Ok((start, end)),
+        _ => Err(format!(
+            "--wait-range wants START..END in hex, word-aligned, START < END, not {text:?}"
+        )
+        .into()),
+    }
 }
 
 /// `A..B` as a half-open poll range.
@@ -152,6 +169,7 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
             }
             "--image" => options.image = Some(path(value()?)?),
             "--name" => options.name = Some(value()?),
+            "--wait-range" => options.wait_ranges.push(parse_range(&value()?)?),
             "--launch-arg" => options.launch_args.push(value()?),
             "--pack" => options.pack = Some(value()?),
             "--out" => options.out = Some(path(value()?)?),
@@ -838,15 +856,18 @@ struct Work {
 }
 
 /// Split the replay's span into work and wait (see work.rs), and list the
-/// wait loops on stderr so a reader can check them.
+/// wait loops on stderr so a reader can check them. `unit` is how finely
+/// the logs count: 4 bytes (one word) or 16 (one I-cache line).
 fn split_work(
     logs: &MeasureLogs,
     ticks: &[Tick],
     start: usize,
     report: &Report,
     to: u64,
+    unit: u32,
+    ranges: &[(u32, u32)],
 ) -> Result<Work> {
-    let lines = read_line_log(&logs.lines)?;
+    let counts = read_line_log(&logs.lines)?;
     let mmio = read_line_log(&logs.mmio)?;
     let ram_load = read_line_log(&logs.ram_load)?;
     let ram = fs::read(&logs.ram)?;
@@ -854,7 +875,7 @@ fn split_work(
         return Err("the frontend printed no final tick= and cycles=".into());
     };
     let span_instructions = end_instructions - ticks[start].instructions_total;
-    let counted: u64 = lines.values().sum();
+    let counted: u64 = counts.values().sum();
     if counted != span_instructions {
         return Err(format!(
             "the PC-line log holds {counted} instructions but the route log says \
@@ -862,38 +883,54 @@ fn split_work(
         )
         .into());
     }
-    let executed = lines.keys().copied().collect();
-    let loops = crate::work::wait_loops(&ram, &executed);
-    let mut wait_lines: Vec<u32> = loops
-        .iter()
-        .flat_map(|found| found.body.iter().map(|pc| pc & !15))
-        .collect();
-    wait_lines.sort_unstable();
-    wait_lines.dedup();
-    let on = |log: &HashMap<u32, u64>, line: &u32| log.get(line).copied().unwrap_or(0);
-    let wait_instructions: u64 = wait_lines.iter().map(|line| on(&lines, line)).sum();
-    // Issue plus the stalls charged to the loop's own loads. A spin loop
-    // stays in the I-cache and does no GTE or multiply work, so the other
-    // stall kinds are negligible there.
-    let wait_cycles = wait_instructions
-        + wait_lines
-            .iter()
-            .map(|line| on(&mmio, line) + on(&ram_load, line))
-            .sum::<u64>();
-    let span_cycles = end_cycles - ticks[start].cycles_total;
-    for found in &loops {
-        let mut body_lines: Vec<u32> = found.body.iter().map(|pc| pc & !15).collect();
-        body_lines.dedup();
-        let count: u64 = body_lines.iter().map(|line| on(&lines, line)).sum();
+    let on = |log: &HashMap<u32, u64>, at: u32| log.get(&at).copied().unwrap_or(0);
+    let percent = |count: u64| 100.0 * count as f64 / span_instructions as f64;
+    let split = crate::work::split(&ram, &counts, unit, ranges)?;
+    for (found, count) in &split.loops {
         if count * 1000 >= span_instructions {
             eprintln!(
                 "psoxide-pgo: wait loop {:#010x}..{:#010x}: {:.2}% of instructions",
                 found.start,
                 found.end,
-                100.0 * count as f64 / span_instructions as f64
+                percent(*count)
             );
         }
     }
+    for named in &split.named {
+        let calls = match named.called {
+            _ if named.calls == 0 => String::new(),
+            Some(called) => format!(
+                ", and its {} calls {:.2}% more",
+                named.calls,
+                percent(called)
+            ),
+            None => format!(
+                ", and its {} calls count as work: the frontend has no --pc-log-words",
+                named.calls
+            ),
+        };
+        eprintln!(
+            "psoxide-pgo: wait range {:#010x}..{:#010x}: {:.2}% of instructions{calls}",
+            named.start,
+            named.end,
+            percent(named.own)
+        );
+    }
+    let wait = split.wait;
+    let wait_instructions: u64 = wait.values().sum();
+    // Issue plus the stalls charged to the waiting instructions, in
+    // proportion where only part of a word's count waited. A spin loop
+    // stays in the I-cache and does no GTE or multiply work, so the other
+    // stall kinds are negligible there.
+    let wait_cycles = wait_instructions
+        + wait
+            .iter()
+            .map(|(&at, &count)| {
+                let stalls = u128::from(on(&mmio, at) + on(&ram_load, at));
+                (stalls * u128::from(count) / u128::from(on(&counts, at).max(1))) as u64
+            })
+            .sum::<u64>();
+    let span_cycles = end_cycles - ticks[start].cycles_total;
     // Frames presented in the span: the flips in its whole ticks, and the
     // one the replay stops on once it has passed poll `to`.
     let tail = &ticks[start + 1..];
@@ -991,9 +1028,19 @@ fn measure_with(options: &Options, logs: &MeasureLogs) -> Result<()> {
         .ok_or_else(|| format!("the run never reached poll {}", polls.0))?;
     let start_tick = start.to_string();
 
+    // Per-word counts, where the frontend has them, make the split exact
+    // and let a wait loop's calls count (see work::attribute).
+    let help = Command::new(frontend)
+        .args(["launch", "--help"])
+        .stderr(Stdio::null())
+        .output()?;
+    let words = String::from_utf8_lossy(&help.stdout).contains("--pc-log-words");
     let mut command = launch(frontend, image, spec, &options.launch_args);
     if !options.launch_args.iter().any(|arg| arg == "--dump-hash") {
         command.arg("--dump-hash");
+    }
+    if words {
+        command.arg("--pc-log-words");
     }
     command
         .arg("--route-log")
@@ -1034,7 +1081,16 @@ fn measure_with(options: &Options, logs: &MeasureLogs) -> Result<()> {
         println!("{name}.frame_p95={p95}");
         println!("{name}.vblanks={vblanks}");
     }
-    let work = split_work(logs, &ticks, start, &report, polls.1)?;
+    let unit = if words { 4 } else { 16 };
+    let work = split_work(
+        logs,
+        &ticks,
+        start,
+        &report,
+        polls.1,
+        unit,
+        &options.wait_ranges,
+    )?;
     println!("{name}.work_instr={}", work.instructions);
     println!("{name}.work_cycles={}", work.cycles);
     println!("{name}.wait_cycles={}", work.wait_cycles);
@@ -1510,6 +1566,21 @@ mod tests {
         assert_eq!(parse_polls("300..1400").unwrap(), (300, 1400));
         assert!(parse_polls("1400..300").is_err());
         assert!(parse_polls("300").is_err());
+    }
+
+    #[test]
+    fn wait_ranges_parse_as_word_aligned_hex() {
+        assert_eq!(
+            parse_range("0x80090d88..0x80090e2c").unwrap(),
+            (0x8009_0d88, 0x8009_0e2c)
+        );
+        assert_eq!(
+            parse_range("800b1c90..800b1ca8").unwrap(),
+            (0x800b_1c90, 0x800b_1ca8)
+        );
+        assert!(parse_range("0x80090e2c..0x80090d88").is_err());
+        assert!(parse_range("0x80090d89..0x80090e2c").is_err());
+        assert!(parse_range("0x80090d88").is_err());
     }
 
     fn ticks(polls: &[u64]) -> Vec<Tick> {
