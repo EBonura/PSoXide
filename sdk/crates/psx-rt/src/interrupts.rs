@@ -33,10 +33,15 @@ __psx_rt_exception_handler:
 
     # Apply one queued GP1 word exactly at the blank edge (deferred display
     # flip). Zero means no request; a display-start word is never zero.
-    # Only apply while GPUSTAT bit 28 (READY_DMA_RECV, the draw_sync bit)
-    # reports the GPU idle -- a raster/fill still draining keeps the word
-    # queued for the next edge, so a flip never exposes a partial buffer
-    # and the CPU never blocks on GPU completion.
+    # Only apply once GPUSTAT bit 24 is set: the frame's work ends with
+    # GP0(1Fh), which sets it when the GPU reaches it, i.e. when everything
+    # before it has been drawn, and the game acknowledged the flag with
+    # GP1(02h) when it kicked that work. Until then the word stays queued for
+    # a later edge, so a flip never exposes a partial buffer and the CPU never
+    # blocks on the GPU. Bit 28 is not a drawing-complete test: on silicon it
+    # rises when the DMA has pushed the last packet, about one large
+    # primitive before the drawing ends (hardware-tests v1.24 cases 219-226);
+    # the v1.24 present probe flipped on bit 24 with 120 of 120 frames right.
     lui   $26, %hi(__psx_rt_pending_gp1)
     lw    $27, %lo(__psx_rt_pending_gp1)($26)
     nop
@@ -45,7 +50,7 @@ __psx_rt_exception_handler:
     lui   $26, 0x1f80
     lw    $26, 0x1814($26)
     nop
-    srl   $26, $26, 28
+    srl   $26, $26, 24
     andi  $26, $26, 1
     beqz  $26, 2f
     nop
@@ -185,8 +190,9 @@ pub static mut __psx_rt_fault_cause: u32 = 0;
 #[no_mangle]
 pub static mut __psx_rt_fault_epc: u32 = 0;
 
-/// One queued GP1 word the VBlank handler writes to the GPU at the next
-/// blank edge, then clears. Zero = empty. Written by [`queue_gp1_at_vblank`].
+/// One queued GP1 word the VBlank handler writes to the GPU at the first
+/// blank edge on which GPUSTAT bit 24 is set, then clears. Zero = empty.
+/// Written by [`queue_gp1_at_vblank`].
 #[no_mangle]
 pub static mut __psx_rt_pending_gp1: u32 = 0;
 
@@ -297,8 +303,29 @@ pub fn vblank_count() -> u32 {
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_vblank_count) }
 }
 
-/// Queue one GP1 word for the VBlank handler to apply at the next blank
-/// edge (deferred tear-free display flip). Overwrites any unapplied word.
+/// Queue one GP1 word for the VBlank handler to apply at a blank edge
+/// (deferred tear-free display flip). Overwrites any unapplied word.
+///
+/// The handler applies the word at the first VBlank edge on which GPUSTAT
+/// bit 24 (the GPU's IRQ1 flag) is set, so the frame must signal its own
+/// end:
+///
+/// 1. acknowledge the flag with GP1(02h) before kicking the frame's work
+///    (`psx_gpu::arm_draw_done`), after the previous flip has landed;
+/// 2. end that work with GP0(1Fh): as the last node of the DMA chain
+///    (`psx_gpu::OrderingTable::end_with_draw_done`, or a one-word packet
+///    in an ordered stream) or, after drawing through the ports,
+///    `psx_gpu::signal_draw_done`;
+/// 3. queue the display-start word here.
+///
+/// The flag stays set until the next acknowledge, so a word queued while
+/// the GPU is idle after such a frame (a display enable, say) applies at
+/// the next edge. A game that never sends GP0(1Fh) never flips: before this
+/// handler tested bit 24 it tested GPUSTAT bit 28, which on silicon rises
+/// about one large primitive before the drawing ends (hardware-tests v1.24
+/// cases 219-226), so a flip could expose a frame one primitive short.
+/// Keep interrupt source 1 (GPU) masked in `I_MASK`: this handler does not
+/// acknowledge it.
 #[cfg(target_arch = "mips")]
 #[inline]
 pub fn queue_gp1_at_vblank(word: u32) {
@@ -321,9 +348,9 @@ pub fn gp1_queue_pending() -> bool {
 /// Empty the queue and hand back the word the handler has not applied, so
 /// the caller can write it to GP1 itself. Returns 0 when nothing was queued.
 ///
-/// The handler only applies its word at a blank edge on which the GPU
-/// reports idle, so a long enough run of busy edges leaves it queued
-/// indefinitely. A caller that has given up waiting must take the word
+/// The handler only applies its word at a blank edge on which GPUSTAT
+/// bit 24 is set (see [`queue_gp1_at_vblank`]), so a long enough frame, or
+/// one that never sends GP0(1Fh), leaves it queued indefinitely. A caller that has given up waiting must take the word
 /// rather than leave it: the next [`queue_gp1_at_vblank`] overwrites the
 /// slot, and a display start that never reaches the GPU desynchronises the
 /// display side from the draw side for the rest of the session.

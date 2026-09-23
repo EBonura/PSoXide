@@ -80,8 +80,9 @@ impl FrameBuffer {
     /// Deferred-present half of [`FrameBuffer::swap`]: switch the DRAW side
     /// now and return the GP1 display-start word for the finished buffer,
     /// for the caller to apply exactly at a blank edge (e.g. via psx-rt's
-    /// queued-GP1 VBlank hook). The GPU must be idle (`draw_sync`) before
-    /// this call, because it rewrites the draw area/offset directly.
+    /// queued-GP1 VBlank hook). Drawing must be finished
+    /// ([`crate::draw_sync`]) before this call, because it rewrites the draw
+    /// area/offset directly.
     pub fn begin_swap(&mut self) -> u32 {
         let display_start = self.begin_deferred_swap();
         self.apply_draw_target();
@@ -92,7 +93,9 @@ impl FrameBuffer {
     ///
     /// This is the non-blocking first half of a pipelined swap. Queue the
     /// returned GP1 word for a VBlank edge whose handler applies it only once
-    /// the GPU is idle, wait until that queue entry is consumed, then call
+    /// the frame's closing GP0(1Fh) has run (psx-rt's
+    /// `interrupts::queue_gp1_at_vblank`; see [`crate::draw_done`]), wait
+    /// until that queue entry is consumed, then call
     /// [`FrameBuffer::apply_draw_target`] before clearing or drawing into the
     /// newly selected buffer.
     ///
@@ -108,8 +111,8 @@ impl FrameBuffer {
     /// Program GP0 draw area and offset for the currently selected draw side.
     ///
     /// Call this after a display-start queued by
-    /// [`FrameBuffer::begin_deferred_swap`] has been applied at a GPU-idle
-    /// VBlank edge. It deliberately remains separate from buffer selection so
+    /// [`FrameBuffer::begin_deferred_swap`] has been applied at a VBlank edge
+    /// that found the frame drawn. It deliberately remains separate from buffer selection so
     /// a busy raster never turns these three state writes into a synchronous
     /// CPU wait at the start of the next frame.
     pub fn apply_draw_target(&self) {

@@ -832,6 +832,41 @@ impl<const N: usize> OrderingTable<N> {
         unsafe { self.insert(z, prim as *mut T as *mut u32, words) };
     }
 
+    /// End this table's DMA walk with GP0(1Fh), so the GPU raises
+    /// [`crate::draw_done`] once everything in the table is drawn.
+    ///
+    /// Links slot 0, the last one walked, to [`crate::DRAW_DONE_NODE`];
+    /// packets inserted at slot 0 afterwards still draw before it. Call it
+    /// after every [`clear`](Self::clear) and before anything is inserted at
+    /// slot 0. Pair the submission with [`crate::arm_draw_done`].
+    ///
+    /// Host builds leave the table as it is: the shared node lives outside
+    /// the table's address window, which [`iter_packets`](Self::iter_packets)
+    /// relies on.
+    ///
+    /// # Panics
+    /// If slot 0 is not empty.
+    pub fn end_with_draw_done(&mut self) {
+        #[cfg(target_arch = "mips")]
+        // SAFETY: the shared node is immutable static RAM for the whole run.
+        unsafe {
+            self.end_with_node(crate::DRAW_DONE_NODE.as_ptr())
+        };
+    }
+
+    /// Link slot 0 to `node`, a node whose own link ends the list.
+    ///
+    /// # Safety
+    /// `node` must stay live and unmodified while the table is submitted.
+    #[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
+    unsafe fn end_with_node(&mut self, node: *const u32) {
+        assert!(
+            self.entries[0] == OT_END,
+            "end_with_draw_done needs an empty slot 0: call it right after clear"
+        );
+        self.entries[0] = node as u32 & OT_ADDR_MASK;
+    }
+
     /// Pointer to the slot where DMA starts (`[N-1]`). Passed to
     /// [`submit_via_dma`] as the linked-list entry point.
     #[inline]
@@ -1243,6 +1278,62 @@ mod tests {
         assert!(iter.next().is_none());
         assert_eq!(first, b.as_ptr() as usize);
         assert_eq!(second, a.as_ptr() as usize);
+    }
+
+    /// The draw-done node is the last thing walked, after every slot and
+    /// after packets inserted at slot 0 once it is linked.
+    #[test]
+    fn end_with_node_puts_the_node_after_every_packet() {
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        ot.clear();
+        let node = [(1u32 << 24) | OT_END, 0x1F00_0000];
+        let mut far: [u32; 2] = [0, 0xF];
+        let mut near: [u32; 2] = [0, 0xE];
+        unsafe {
+            ot.end_with_node(node.as_ptr());
+            ot.insert(0, far.as_mut_ptr(), 1);
+            ot.insert(3, near.as_mut_ptr(), 1);
+        }
+        let walked: [usize; 3] = {
+            let mut iter = unsafe { ot.iter_packets() };
+            let order = [
+                iter.next().expect("near").0 as usize,
+                iter.next().expect("far").0 as usize,
+                iter.next().expect("node").0 as usize,
+            ];
+            assert!(iter.next().is_none());
+            order
+        };
+        assert_eq!(
+            walked,
+            [
+                near.as_ptr() as usize,
+                far.as_ptr() as usize,
+                node.as_ptr() as usize
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "empty slot 0")]
+    fn end_with_node_refuses_a_used_slot_0() {
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        ot.clear();
+        let node = [(1u32 << 24) | OT_END, 0x1F00_0000];
+        let mut packet: [u32; 2] = [0, 0xF];
+        unsafe {
+            ot.insert(0, packet.as_mut_ptr(), 1);
+            ot.end_with_node(node.as_ptr());
+        }
+    }
+
+    #[test]
+    fn the_shared_draw_done_node_is_one_gp0_1f_word_then_the_end() {
+        let node = unsafe { core::slice::from_raw_parts(crate::DRAW_DONE_NODE.as_ptr(), 2) };
+        assert_eq!(node[0] >> 24, 1);
+        assert_eq!(node[0] & OT_ADDR_MASK, OT_END);
+        assert_eq!(node[1], psx_hw::gpu::gp0::REQUEST_IRQ);
+        assert_eq!(node[1] >> 24, 0x1F);
     }
 
     /// Multiple primitives in the same slot chain via the most-
