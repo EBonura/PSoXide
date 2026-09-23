@@ -200,11 +200,17 @@ const _: () = assert!(AFFINE_BATCH_WORKSPACE_BYTES <= psx_engine::scratchpad::SI
 /// most re-read, so `flush_pxbsp_batch` runs it on the bytes above the batch.
 /// The batch gives up fourteen more slots for that: nineteen is the most that
 /// leaves the writer's linked call tree room (296 bytes, which
-/// `tools/stack_guard.py` proves). A face wider than the batch is not drawn;
-/// Cortex's cook has none wider than six vertices, so a flush still groups
-/// four quads.
+/// `tools/stack_guard.py` proves). A face wider than the batch cannot be
+/// drawn, so the cooker splits every face down to [`PXBSP_MAX_FACE_VERTICES`]
+/// and the face pass skips (never breaks on) anything wider. Cortex's cook is
+/// all quads (measured 2026-09-23), so a flush still groups four of them.
 const PXBSP_CLIP_PLANE_BYTES: usize = core::mem::size_of::<[([i32; 3], i32); 5]>();
 const PXBSP_BATCH_MAX_VERTICES: usize = 19;
+/// The widest PXBSP face the renderer draws exactly: the near-plane clip can
+/// add one vertex, and the clipped polygon must still fit the batch. The
+/// cooker imports this as its face limit, so it never emits a face the
+/// runtime would drop.
+pub const PXBSP_MAX_FACE_VERTICES: usize = PXBSP_BATCH_MAX_VERTICES - 1;
 const PXBSP_BATCH_MAX_SURFACES: usize = 13;
 const PXBSP_AFFINE_BATCH_VERTEX_CAPACITY: usize =
     PXBSP_BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES;
@@ -2060,8 +2066,10 @@ impl Renderer {
 
             let source_count = face.vertex_count();
             if source_count > PXBSP_BATCH_MAX_VERTICES {
+                // The cooker never emits one (see PXBSP_MAX_FACE_VERTICES).
+                // Skip only this face; the rest of the frame still draws.
                 stats.packet_overflow_avoided = true;
-                break;
+                continue;
             }
             // Classify all five planes in one vertex pass. The historical
             // path rescanned the polygon once per plane and then a sixth time
@@ -4828,6 +4836,89 @@ mod tests {
                 &mut packets,
             )
             .is_none());
+    }
+
+    #[test]
+    fn face_wider_than_the_batch_skips_only_itself() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        let mut push = |position: [i16; 3]| {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
+        };
+        for position in [[64i16, -16, -16], [64, 16, -16], [64, 0, 16]] {
+            push(position);
+        }
+        // A 20-vertex square (five collinear steps per edge) on the same
+        // plane: one vertex wider than the batch.
+        let wide = PXBSP_BATCH_MAX_VERTICES + 1;
+        for step in 0..wide as i16 {
+            let (edge, along) = (step / 5, (step % 5) * 8 - 20);
+            push(match edge {
+                0 => [64, along, -20],
+                1 => [64, 20, along],
+                2 => [64, -along, 20],
+                _ => [64, -20, -along],
+            });
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        // The wide face first, then the triangle every fixture draws.
+        let triangle = lumps[PxbspLumpKind::Faces as usize].clone();
+        let mut faces = triangle.clone();
+        faces[2..4].copy_from_slice(&3u16.to_le_bytes());
+        faces[7] = wide as u8;
+        faces.extend_from_slice(&triangle);
+        lumps[PxbspLumpKind::Faces as usize] = faces;
+        let mut model = lumps[PxbspLumpKind::Models as usize].clone();
+        let count = model.len() - 2;
+        model[count..].copy_from_slice(&2u16.to_le_bytes());
+        lumps[PxbspLumpKind::Models as usize].extend_from_slice(&model);
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(8, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        assert_eq!(map.faces().get(0).expect("wide face").vertex_count, 20);
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
+            texture_size: [64; 2],
+        };
+        let mut packets = [0u32; 512];
+        let mut renderer = Renderer::new();
+        let frame = renderer
+            .draw_pxbsp_model(
+                &map,
+                1,
+                BrushTransform::translated(Vec3I32 { x: 0, y: 0, z: 0 }),
+                camera,
+                load_pxbsp_view(camera),
+                &[Some(binding)],
+                0,
+                &mut packets,
+            )
+            .expect("brush model");
+
+        assert!(frame.stats.packet_overflow_avoided);
+        assert_eq!(
+            frame.stats.visible_faces, 1,
+            "the face after the wide one must still draw"
+        );
+        assert!(frame.stats.packets > 0);
     }
 }
 
