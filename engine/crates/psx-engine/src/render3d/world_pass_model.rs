@@ -1,6 +1,15 @@
 use super::*;
 use psx_math::int32::InvariantDivisor31;
 
+/// The back-culled extent-safe model face walker runs with its stack in the
+/// scratchpad (per drawn face it reloads a dozen spilled loop invariants).
+/// It starts after the blended-vertex chunk, the model pass's only
+/// scratchpad reservation, has been flushed, and it never clips or splits,
+/// so nothing it calls claims scratchpad bytes either.
+type ModelFaceWalkerStack = crate::scratchpad::ScratchpadStack<0, { crate::scratchpad::SIZE }>;
+// Regions live around the walker: none but its own stack.
+const _: () = crate::scratchpad::assert_disjoint(&[ModelFaceWalkerStack::REGION]);
+
 // Gather the independent face words before decoding any index. LLVM's
 // ordinary field loads interleave each load with its dependent index math,
 // inserting an R3000 load-delay NOP three times per face.
@@ -1156,18 +1165,28 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let projected_vertices = &projected_vertices[..project_count];
             let overflow = if packed_average_unclamped_extent_safe_faces {
                 if options.cull_mode == CullMode::Back {
-                    self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
-                        triangles,
-                        projected_vertices,
-                        faces,
-                        packet_material,
-                        camera_crystal_materials,
-                        authored_uv_offset.unwrap_or_default(),
-                        true,
-                        options,
-                        &mut stats,
-                        &mut faces_considered,
-                    )
+                    let stats = &mut stats;
+                    let faces_considered = &mut faces_considered;
+                    // SAFETY: the blended-vertex chunk was flushed above, so
+                    // no scratchpad bytes are live (see ModelFaceWalkerStack);
+                    // the walker installs no exception handler, and
+                    // tools/stack_guard.py proves its call tree fits.
+                    unsafe {
+                        ModelFaceWalkerStack::run(|| {
+                            self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                                triangles,
+                                projected_vertices,
+                                faces,
+                                packet_material,
+                                camera_crystal_materials,
+                                authored_uv_offset.unwrap_or_default(),
+                                true,
+                                options,
+                                stats,
+                                faces_considered,
+                            )
+                        })
+                    }
                 } else {
                     self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
                         triangles,

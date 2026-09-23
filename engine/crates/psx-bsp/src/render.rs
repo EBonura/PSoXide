@@ -7,6 +7,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use psx_engine::scratchpad::{assert_disjoint, Region, ScratchpadStack};
 use psx_engine::{
     attributed_clip::{
         clip_convex_plane, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
@@ -210,6 +211,22 @@ const _: () = assert!(
 // A `ClassicAffineVertex` is four-aligned and the plane block is a multiple
 // of both its own eight-byte alignment and four.
 const _: () = assert!(PXBSP_CLIP_PLANE_BYTES.is_multiple_of(8));
+/// The PXBSP face pass's scratchpad bytes, live only inside
+/// `draw_pxbsp_faces`.
+const PXBSP_CLIP_PLANES: Region = Region::new(0, PXBSP_CLIP_PLANE_BYTES);
+const PXBSP_BATCH: Region = Region::new(
+    PXBSP_CLIP_PLANE_BYTES,
+    PXBSP_CLIP_PLANE_BYTES
+        + PXBSP_AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>(),
+);
+const _: () = assert_disjoint(&[PXBSP_CLIP_PLANES, PXBSP_BATCH]);
+/// Face selection runs with its stack in the scratchpad (its spills and the
+/// node walk's frame are its hottest loads). It returns before the face pass
+/// claims `PXBSP_CLIP_PLANES` and `PXBSP_BATCH`, and nothing else holds
+/// scratchpad bytes across it, so it may use all of them.
+type PxbspSelectionStack = ScratchpadStack<0, { psx_engine::scratchpad::SIZE }>;
+// Regions live around the selection call: none but its own stack.
+const _: () = assert_disjoint(&[PxbspSelectionStack::REGION]);
 const MAX_ALIAS_VERTICES: usize = 512;
 const MAX_RENDER_ENTITIES: usize = 512;
 const CLUT_DEFAULT: u16 = 240 << 6;
@@ -1789,8 +1806,15 @@ impl Renderer {
             }
             true
         } else {
+            // SAFETY: no scratchpad bytes are live here (see
+            // PxbspSelectionStack), selection installs no exception handler,
+            // and tools/stack_guard.py proves its call tree fits.
             let ok = self.mark_visible_pxbsp_faces(map, visibility_origin)
-                && self.select_frame_pxbsp_faces(map, camera.origin, &frustum);
+                && unsafe {
+                    PxbspSelectionStack::run(|| {
+                        self.select_frame_pxbsp_faces(map, camera.origin, &frustum)
+                    })
+                };
             if self.selection_reuse {
                 self.reuse_pxbsp_faces.clear();
                 if ok {

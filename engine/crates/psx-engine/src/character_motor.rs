@@ -181,10 +181,37 @@ impl<'provider, 'blockers, P: CollisionTraceProvider + ?Sized>
     }
 }
 
+/// Collision traces run with their stack in the scratchpad: the hull
+/// walker's explicit continuation stack lives in its frame, so on the RAM
+/// stack every push and pop is a main-RAM access. Every scratchpad
+/// reservation in the engine lives inside one render function that never
+/// traces (the BSP face passes, the blended model vertex chunk), so the stack
+/// may use all of the scratchpad.
+type TraceStack = crate::scratchpad::ScratchpadStack<0, { crate::scratchpad::SIZE }>;
+// Regions live around a trace: none but its own stack.
+const _: () = crate::scratchpad::assert_disjoint(&[TraceStack::REGION]);
+
 impl<P: CollisionTraceProvider + ?Sized> CollisionTraceProvider
     for CharacterBlockerTraceProvider<'_, '_, P>
 {
+    // Out of line so the stack switch is set up once here rather than in
+    // every caller.
+    #[inline(never)]
     fn trace_into(&mut self, query: CollisionTraceQuery, output: &mut CollisionTrace) -> bool {
+        // SAFETY: no scratchpad bytes are live around a trace (see
+        // TraceStack), tracing installs no exception handler, and
+        // tools/stack_guard.py proves the call tree fits.
+        unsafe { TraceStack::run(|| self.trace_into_on_current_stack(query, output)) }
+    }
+}
+
+impl<P: CollisionTraceProvider + ?Sized> CharacterBlockerTraceProvider<'_, '_, P> {
+    #[inline(always)]
+    fn trace_into_on_current_stack(
+        &mut self,
+        query: CollisionTraceQuery,
+        output: &mut CollisionTrace,
+    ) -> bool {
         if self.aabb_blockers.len() > psx_level::MAX_STATIC_PROP_AABB_BLOCKERS
             || self
                 .aabb_blockers

@@ -11,8 +11,16 @@
 //! shared allocator would add bookkeeping to the console's hottest paths and
 //! make otherwise valid overlapping phase reservations impossible.
 
+/// Named byte ranges, compile-time overlap checks for the ranges live
+/// together, and running a scratchpad-free phase with its stack here
+/// (psx-rt's runtime helpers; see `psx_rt::scratchpad`). Every guest that
+/// runs a [`ScratchpadStack`] must pass `tools/stack_guard.py` on its linked
+/// image; the editor guest build runs it after the hazard patch.
+pub use psx_rt::scratchpad::{assert_disjoint, Region, ScratchpadStack};
+
 /// Total hardware scratchpad capacity in bytes.
 pub const SIZE: usize = 1024;
+const _: () = assert!(SIZE == psx_rt::scratchpad::SIZE);
 
 #[repr(C, align(16))]
 struct AlignedScratchpad([u8; SIZE]);
