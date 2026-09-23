@@ -3,7 +3,8 @@
 //!
 //! Sits on top of `psx-io::gpu` + `psx-hw::gpu` constructors to expose
 //! a friendlier API: `init()` to set up display mode, a small
-//! primitives kit, and synchronisation (`draw_sync`, `vsync`).
+//! primitives kit, and synchronisation (`draw_sync`, `vsync`, and the
+//! GP0(1Fh) completion flag `draw_done` that psx-rt's queued flip tests).
 //!
 //! ## Primitives
 //!
@@ -167,12 +168,88 @@ pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
     write_gp1(gp1::v_display_range(v_start as u32, v_end));
 }
 
-/// Block until the GPU has drained its command queue.
+/// Block until the GPU has finished drawing everything sent to it.
+///
+/// Waits for DMA channel 2 to finish its walk, then for GPUSTAT bit 28
+/// (ready for a DMA block), then for bit 26 (ready for a command word).
+/// Bit 28 alone is not a drawing-complete test: on silicon it rises when
+/// the walk has pushed its last packet, about one large primitive before
+/// the drawing ends. Hardware-tests v1.24 cases 219-226 put bit 28's final
+/// rise at the channel's completion (586,354 and 275,124 clocks on the two
+/// large-triangle lists) and bit 26's at the list's closing GP0(1Fh)
+/// (625,348 and 314,075). PSn00bSDK's `DrawSync` waits the same way.
+///
+/// Every wait is bounded, with the recovery of
+/// [`submit_linked_list_wait`] and `psx_io::gpu::wait_cmd_ready`, so a
+/// wedged GPU costs a reset instead of a hang.
+///
+/// For presenting through psx-rt's queued flip, which must not block, use
+/// [`arm_draw_done`] and a closing GP0(1Fh) instead; see [`draw_done`].
 #[inline]
 pub fn draw_sync() {
-    // Same bounded-with-recovery contract as `psx_io::gpu::wait_cmd_ready`.
+    submit_linked_list_wait();
     psx_io::gpu::wait_dma_ready();
+    wait_cmd_ready();
 }
+
+/// Clear GPUSTAT bit 24 (the GPU's IRQ1 flag) with GP1(02h).
+///
+/// Call it right before kicking a frame's work whose last command is
+/// GP0(1Fh) (see [`draw_done`]), and only once the previous frame's queued
+/// flip has been applied: acknowledging earlier hides the previous frame's
+/// completion from psx-rt's VBlank handler.
+#[inline]
+pub fn arm_draw_done() {
+    write_gp1(gp1::ACK_IRQ);
+}
+
+/// True once the GPU has executed the GP0(1Fh) that closes the work kicked
+/// after the last [`arm_draw_done`], so everything before it is drawn.
+///
+/// This is the completion test psx-rt's queued display flip
+/// (`psx_rt::interrupts::queue_gp1_at_vblank`) applies at each VBlank edge.
+/// GP0(1Fh) raises GPUSTAT bit 24 only when the GPU reaches it in its
+/// command stream, after the drawing before it; the flag stays set until
+/// GP1(02h). The v1.24 present-queue probe flipped on this flag with 120 of
+/// 120 frames complete on a console. End a DMA chain with it through
+/// [`ot::OrderingTable::end_with_draw_done`] or [`DRAW_DONE_NODE`], an
+/// ordered stream with `push_packet([gp0::REQUEST_IRQ])`, and port drawing
+/// with [`signal_draw_done`].
+///
+/// GP0(1Fh) also raises interrupt source 1 (GPU) in `I_STAT`; keep it masked
+/// in `I_MASK`, since psx-rt's handler does not acknowledge it.
+#[inline]
+pub fn draw_done() -> bool {
+    psx_io::gpu::gpustat().contains(psx_hw::gpu::GpuStat::IRQ1)
+}
+
+/// Send GP0(1Fh) through the command port, closing work drawn with the
+/// immediate `draw_*` functions (see [`draw_done`]). Like them it waits for
+/// the GPU to accept a command first.
+#[inline]
+pub fn signal_draw_done() {
+    wait_cmd_ready();
+    write_gp0(gp0::REQUEST_IRQ);
+}
+
+/// A linked-list DMA node holding only GP0(1Fh), for the end of a chain.
+///
+/// Link it as the chain's last node and the GPU raises [`draw_done`] when
+/// it gets there. It is immutable and shared: every chain can end on
+/// [`DRAW_DONE_NODE`].
+#[repr(C, align(4))]
+pub struct DrawDoneNode([u32; 2]);
+
+impl DrawDoneNode {
+    /// The node's tag word, the address a chain links to.
+    #[inline]
+    pub fn as_ptr(&self) -> *const u32 {
+        self.0.as_ptr()
+    }
+}
+
+/// The shared GP0(1Fh) node: one payload word, then the end of the list.
+pub static DRAW_DONE_NODE: DrawDoneNode = DrawDoneNode([(1 << 24) | 0x00FF_FFFF, gp0::REQUEST_IRQ]);
 
 /// Configure Timer 1 as an HBlank-counting scanline counter.
 ///
