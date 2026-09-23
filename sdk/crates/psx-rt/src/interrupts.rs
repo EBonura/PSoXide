@@ -113,9 +113,36 @@ __psx_rt_exception_handler:
     addiu $26, $26, 4
     jr    $26
     .word 0x42000010
+
+    # Interrupt return: EPC, or EPC + 4 when the word at EPC is a GTE
+    # command (top seven bits 0100101). An interrupt taken on a GTE command
+    # lets the command run and still leaves EPC on it, so returning to EPC
+    # runs it a second time (hardware-tests v1.24 on silicon: case 0xC9,
+    # 38 of 38 such interrupts ran an RTPS twice; with this step, case 0xCB,
+    # 61 skips, none doubled or lost). This is psx-spx's fix and the Sony
+    # kernel's. With Cause.BD set EPC holds the branch, never a GTE command,
+    # so a GTE command in a delay slot is not stepped over and does run twice:
+    # psx-spx's answer is to keep GTE commands out of delay slots, and
+    # tools/hazard_scan.py warns about any it finds. `interrupt_resume_pc`
+    # below is the same decision in Rust, unit-tested on host.
 2:
     mfc0  $26, $14
     nop
+    lw    $27, 0($26)
+    nop
+    srl   $27, $27, 25
+    xori  $27, $27, 0x0025
+    bnez  $27, 5f
+    nop
+    lui   $27, %hi(__psx_rt_gte_skip_count)
+    lw    $26, %lo(__psx_rt_gte_skip_count)($27)
+    nop
+    addiu $26, $26, 1
+    sw    $26, %lo(__psx_rt_gte_skip_count)($27)
+    mfc0  $26, $14
+    nop
+    addiu $26, $26, 4
+5:
     jr    $26
     .word 0x42000010
 3:
@@ -144,6 +171,11 @@ pub static mut __psx_rt_vblank_count: u32 = 0;
 /// all three instead of entering unreachable or non-executable code.
 #[no_mangle]
 pub static mut __psx_rt_fault_count: u32 = 0;
+
+/// Interrupts the handler returned from at EPC + 4 because the word at EPC
+/// was a GTE command (see [`interrupt_resume_pc`]).
+#[no_mangle]
+pub static mut __psx_rt_gte_skip_count: u32 = 0;
 
 /// Raw COP0 Cause captured for the latest unexpected exception.
 #[no_mangle]
@@ -205,6 +237,46 @@ pub fn install_vblank_counter() {}
 #[inline]
 pub fn fault_count() -> u32 {
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_count) }
+}
+
+/// Interrupts that landed on a GTE command, whose return the handler moved
+/// to EPC + 4 so the command did not run twice.
+#[inline]
+pub fn gte_skip_count() -> u32 {
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_gte_skip_count) }
+}
+
+/// True when `word` is a GTE command (a COP2 `cofun`: opcode 0x12 with bit
+/// 25 set, so the top seven bits are `0100101`). psx-spx's test is
+/// `(word & 0xFE00_0000) == 0x4A00_0000`. GTE register moves (`mfc2`,
+/// `mtc2`, `cfc2`, `ctc2`), `lwc2`/`swc2` and the `bc2` branches are not
+/// commands: an interrupt on them is taken before they run.
+#[inline]
+pub const fn is_gte_command(word: u32) -> bool {
+    word >> 25 == 0x25
+}
+
+/// Where psx-rt's exception handler resumes after an interrupt: `epc`, or
+/// `epc + 4` when `word_at_epc` is a GTE command.
+///
+/// On silicon an interrupt taken on a GTE command lets the command run and
+/// still reports EPC at it, so resuming at EPC runs it twice
+/// (hardware-tests v1.24, case 0xC9: 38 of 38; with this rule, case 0xCB:
+/// 61 skips, none doubled or lost). The handler's assembly makes exactly
+/// this decision.
+///
+/// With Cause.BD set, EPC is the branch whose delay slot was interrupted,
+/// so `word_at_epc` is a branch and the result is `epc`: the branch and a
+/// GTE command in its delay slot both run again. psx-spx documents that
+/// the fix cannot cover delay slots; keep GTE commands out of them
+/// (`tools/hazard_scan.py` warns about any in an image).
+#[inline]
+pub const fn interrupt_resume_pc(epc: u32, word_at_epc: u32) -> u32 {
+    if is_gte_command(word_at_epc) {
+        epc.wrapping_add(4)
+    } else {
+        epc
+    }
 }
 
 /// Raw COP0 Cause captured for the latest unexpected exception.
@@ -418,4 +490,90 @@ unsafe fn enable_cpu_interrupts() {
     unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr) };
     sr |= STATUS_IE | STATUS_IM2 | STATUS_CU2;
     unsafe { core::arch::asm!("mtc0 $8, $12", in("$8") sr) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPC: u32 = 0x8001_2340;
+
+    /// GTE commands the SDK issues, as their encoded words.
+    const RTPS: u32 = 0x4A18_0001;
+    const RTPT: u32 = 0x4A28_0030;
+    const NCLIP: u32 = 0x4B40_0006;
+    const MVMVA: u32 = 0x4A48_6012;
+    const AVSZ3: u32 = 0x4B58_002D;
+    const GPF: u32 = 0x4B90_003D;
+
+    #[test]
+    fn an_interrupt_on_a_gte_command_resumes_after_it() {
+        for word in [RTPS, RTPT, NCLIP, MVMVA, AVSZ3, GPF] {
+            assert!(is_gte_command(word), "{word:#010x}");
+            assert_eq!(interrupt_resume_pc(EPC, word), EPC + 4, "{word:#010x}");
+        }
+    }
+
+    #[test]
+    fn psx_spx_mask_and_seven_bit_test_agree() {
+        // Every top byte, with the rest of the word set both ways.
+        for top in 0u32..=0xFF {
+            for low in [0, 0x00FF_FFFF] {
+                let word = (top << 24) | low;
+                assert_eq!(
+                    is_gte_command(word),
+                    word & 0xFE00_0000 == 0x4A00_0000,
+                    "{word:#010x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gte_register_moves_and_loads_resume_at_epc() {
+        let not_commands = [
+            0x480C_6000, // mfc2 $12, SXY0
+            0x4889_6000, // mtc2 $9, SXY0
+            0x4842_F800, // cfc2 $2, FLAG
+            0x48C2_C000, // ctc2 $2, OFX
+            0xC885_0000, // lwc2 $5, 0($4)
+            0xE8AC_0000, // swc2 $12, 0($5)
+            0x4900_0003, // bc2f
+            0x4901_0003, // bc2t
+            0x4080_6000, // mtc0 $0, SR
+            0x0000_0000, // nop
+            0x8C82_0000, // lw $2, 0($4)
+            0x03E0_0008, // jr $ra
+        ];
+        for word in not_commands {
+            assert!(!is_gte_command(word), "{word:#010x}");
+            assert_eq!(interrupt_resume_pc(EPC, word), EPC, "{word:#010x}");
+        }
+    }
+
+    #[test]
+    fn a_gte_command_in_a_delay_slot_is_not_stepped_over() {
+        // Cause.BD set: EPC names the branch, the RTPS sits at EPC + 4. The
+        // handler reads the branch, so it resumes at EPC and the branch and
+        // its RTPS both run again (psx-spx: the fix does not cover delay
+        // slots). Stepping to EPC + 4 would drop the branch instead, and
+        // EPC + 8 would drop the branch target; neither is safe, which is
+        // why the answer is to keep GTE commands out of delay slots.
+        let branches = [
+            0x1509_FFF0, // bne $8, $9, back
+            0x1000_0004, // b forward
+            0x0C00_4000, // jal
+            0x0800_4000, // j
+            0x0100_F809, // jalr $8
+            0x03E0_0008, // jr $ra
+        ];
+        for branch in branches {
+            assert_eq!(interrupt_resume_pc(EPC, branch), EPC, "{branch:#010x}");
+        }
+    }
+
+    #[test]
+    fn the_resume_address_wraps_like_the_hardware_add() {
+        assert_eq!(interrupt_resume_pc(0xFFFF_FFFC, RTPS), 0);
+    }
 }

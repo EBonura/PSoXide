@@ -35,7 +35,6 @@ mod mem;
 #[cfg(target_arch = "mips")]
 pub mod bios;
 pub mod cache;
-#[cfg(target_arch = "mips")]
 pub mod interrupts;
 pub mod scratchpad;
 #[cfg(target_arch = "mips")]
