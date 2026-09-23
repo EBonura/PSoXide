@@ -1324,9 +1324,21 @@ fn hma1_section_valid(
     if hma_bones == 0 || hma_clips < n_clips.max(1) {
         return false;
     }
+    if blob_off + 4 + hma_bones > end {
+        return false;
+    }
     let mut b = 0usize;
     while b < n_bones {
         if data[map_off + b] as usize >= hma_bones {
+            return false;
+        }
+        b += 1;
+    }
+    // The decoder composes parents first without bounds checks.
+    let mut b = 0usize;
+    while b < hma_bones {
+        let parent = data[blob_off + 4 + b] as usize;
+        if parent != 0xff && parent >= b {
             return false;
         }
         b += 1;
