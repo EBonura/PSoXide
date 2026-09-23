@@ -92,6 +92,23 @@ unsafe fn read12(d: *const u8, o: usize) -> [i32; 4] {
     }
 }
 
+/// Segment index, Q8 fraction and key count of rate `r` for the clip at
+/// `off`: the position maps to each rate with one multiply.
+#[inline(never)]
+unsafe fn seg(d: *const u8, off: usize, r: usize, pos_q8: u32) -> (usize, i32, usize) {
+    unsafe {
+        let s = u16_at(d, off + 4 + r * 2) as usize;
+        let factor = u16_at(d, off + 4 + N_RATES * 2 + r * 2);
+        let sp = (pos_q8 * factor) >> 15;
+        let i = (sp >> 8) as usize;
+        if i >= s {
+            (s.saturating_sub(1), 256, s + 1)
+        } else {
+            (i, (sp & 255) as i32, s + 1)
+        }
+    }
+}
+
 #[inline(always)]
 fn lerp4(a: [i32; 4], b: [i32; 4], f: i32) -> [i32; 4] {
     [
@@ -312,23 +329,10 @@ impl Model {
         unsafe {
             let d = self.d;
             let off = ptr::read_unaligned(d.add(self.clips_off + clip * 4).cast::<u32>()) as usize;
-            let mut segi = [0usize; N_RATES];
-            let mut segf = [0i32; N_RATES];
-            let mut nkeys = [0usize; N_RATES];
-            for r in 0..N_RATES {
-                let s = u16_at(d, off + 4 + r * 2);
-                let factor = u16_at(d, off + 4 + N_RATES * 2 + r * 2);
-                let sp = (pos_q8 * factor) >> 15;
-                let (mut i, mut f) = ((sp >> 8) as usize, (sp & 255) as i32);
-                if i >= s as usize {
-                    i = (s as usize).saturating_sub(1);
-                    f = 256;
-                }
-                segi[r] = i;
-                segf[r] = f;
-                nkeys[r] = s as usize + 1;
-            }
             let nb = self.n_bones;
+            if out.len() < nb {
+                return;
+            }
             let modes = off + CLIP_HEADER;
             let mut p = (modes + nb + 1) & !1;
             let mut loaded = usize::MAX;
@@ -348,6 +352,7 @@ impl Model {
                         q
                     }
                 } else if !hi {
+                    let (i, f, nk) = seg(d, off, rc, pos_q8);
                     let kb = u8_at(d, p + 4) as usize;
                     let w = (kb as u32) << 1;
                     let mask = (1u32 << w) - 1;
@@ -358,7 +363,6 @@ impl Model {
                         i8_at(d, p + 3),
                     );
                     let ks = p + 6;
-                    let i = segi[rc];
                     let wa = u32_unaligned(d, ks + i * kb);
                     let wb = u32_unaligned(d, ks + (i + 1) * kb);
                     let ex = |word: u32| -> [i32; 4] {
@@ -369,12 +373,12 @@ impl Model {
                             (b3 + ((word >> (3 * w)) & mask) as i32) << 5,
                         ]
                     };
-                    p = ks + nkeys[rc] * kb;
-                    lerp4(ex(wa), ex(wb), segf[rc])
+                    p = ks + nk * kb;
+                    lerp4(ex(wa), ex(wb), f)
                 } else {
-                    let i = segi[rc];
-                    let q = lerp4(read12(d, p + i * 6), read12(d, p + i * 6 + 6), segf[rc]);
-                    p += nkeys[rc] * 6;
+                    let (i, f, nk) = seg(d, off, rc, pos_q8);
+                    let q = lerp4(read12(d, p + i * 6), read12(d, p + i * 6 + 6), f);
+                    p += nk * 6;
                     q
                 };
                 let t = if pc == 7 {
@@ -388,8 +392,7 @@ impl Model {
                     let base = [i16_at(d, p), i16_at(d, p + 2), i16_at(d, p + 4)];
                     let kb = u8_at(d, p + 6) as usize;
                     let ks = p + 8;
-                    let i = segi[pc];
-                    let f = segf[pc];
+                    let (i, f, nk) = seg(d, off, pc, pos_q8);
                     let v = if kb == 6 {
                         let a = [
                             i16_at(d, ks + i * 6) & 0xffff,
@@ -431,7 +434,7 @@ impl Model {
                             base[2] + a[2] + (((c[2] - a[2]) * f) >> 8),
                         ]
                     };
-                    p = ks + nkeys[pc] * kb;
+                    p = ks + nk * kb;
                     v
                 };
                 let q = if b == jaw.bone {
@@ -445,17 +448,17 @@ impl Model {
                 };
                 let r = quat_to_mat(q);
                 let parent = u8_at(d, 4 + b) as usize;
+                // Parents precede children (checked when the HMD8 loads) and
+                // `out` holds `nb` bones (checked above).
                 if parent == 0xff {
-                    out[b] = Aff { r, _pad: 0, t };
+                    *out.get_unchecked_mut(b) = Aff { r, _pad: 0, t };
                 } else {
+                    let pa = *out.get_unchecked(parent);
                     if loaded != parent {
-                        load_rot(&out[parent].r);
+                        load_rot(&pa.r);
                         loaded = parent;
                     }
-                    let pa = out[parent];
-                    let mut o = Aff::ZERO;
-                    compose_loaded(&pa, &r, t, &mut o);
-                    out[b] = o;
+                    compose_loaded(&pa, &r, t, out.get_unchecked_mut(b));
                 }
             }
         }
