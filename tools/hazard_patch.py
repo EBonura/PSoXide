@@ -46,6 +46,14 @@ The trampolines live in a `.data` array the guest declares:
 
     python3 hazard_patch.py game.exe          # patch in place
     python3 hazard_patch.py game.exe --check  # report only, exit 1 on hazards
+    python3 hazard_patch.py game.exe --map game.map
+
+With `--map` (ld.lld's `-Map` output for the same link) a switch's jump
+table is proven and bounded to its own function, as the stack guard does
+(see `jump_table`); without it tables are found as before and may read into
+the next function's table, which only adds harmless detours. Scan an image
+patched with `--map` with `hazard_scan.py --map` too: without the map the
+scanner reads into the next tables again and reports the detours it skipped.
 
 Exit status is non-zero when a hazard cannot be patched, the array is missing
 or full, or the rescan after patching still finds one. Needs
@@ -59,6 +67,7 @@ tools/test_hazard_tools.py fails if their reports ever differ. It stays
 self-contained, so a one-file copy still works; a game should still call the
 SDK's copy from its hydrated `.psoxide/tools/` rather than vendor it.
 """
+import bisect
 import os
 import re
 import struct
@@ -145,13 +154,22 @@ def reads(op, args, reg):
     return False
 
 
-def jump_table(listing, jr_addr, word_at, image_end, base=LOAD_ADDR):
+def jump_table(listing, jr_addr, word_at, image_end, base=LOAD_ADDR, link_map=None):
     """Resolve the table a `jr rs` dispatches through: (entry address, target)
-    pairs. LLVM lowers a switch as `sll idx,idx,2 ; lui t,%hi(T) ; addu ;
-    lw rs,%lo(T)(...) ; jr rs`; the table is at the last `lui` before that load
-    plus the load's offset. Entries run until a word stops being a code
-    address (the next table's entries are code addresses too, so a few extra
-    targets may be examined; a spurious match only costs one detour)."""
+    pairs, or None. LLVM lowers a switch as `sll idx,idx,2 ; lui t,%hi(T) ;
+    addu ; lw rs,%lo(T)(...) ; jr rs`.
+
+    With the image's `link_map` (a LinkMap) the answer is proven; see
+    `Flow`. Without one the table is at the last `lui` before that load plus
+    the load's offset, and entries run until a word stops being a code
+    address, at most 64. That reads on into the next table, whose entries
+    are code addresses too; nothing without function bounds can tell whose
+    table a word is, so it never stops early and never drops a real entry.
+    For the patcher an extra entry costs one detour when its target happens
+    to read the slot load; the stack guard always has a map."""
+    if link_map is not None:
+        fn = link_map.function(jr_addr)
+        return flow_of(listing, word_at, base, image_end, link_map).jump_table(jr_addr, fn[:2]) if fn else None
     op, args = listing[jr_addr]
     rs = args.strip()
     load = None
@@ -188,7 +206,392 @@ def jump_table(listing, jr_addr, word_at, image_end, base=LOAD_ADDR):
     return entries or None
 
 
-def find_hazards(listing, word_at=None, image_end=0, base=LOAD_ADDR, is_code=looks_like_code):
+# Registers a callee preserves (o32): their value survives a call.
+CALLEE_SAVED = {"s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "fp", "sp"}
+# Registers whose value on entry a function may use: the arguments, the
+# stack and the return address ($gp is never set up in a PS-EXE).
+INCOMING = {"a0", "a1", "a2", "a3", "sp", "ra", "gp"}
+# Instructions that write no general register (besides READS_ALL).
+NO_DEST = {"nop", "break", "syscall", "rfe", "sync", "teq", "tne", "tge", "tgeu", "tlt", "tltu", "j", "b"}
+
+
+def branch_target(op, args):
+    """The immediate target of a branch or jump, or None."""
+    if op not in COND and op not in ("j", "jal", "bal", "bltzal", "bgezal"):
+        return None
+    m = re.search(r"0x([0-9a-f]+)$", args)
+    return int(m.group(1), 16) if m else None
+
+
+def writes(op, args, reg):
+    if op in ("jal", "bal", "bltzal", "bgezal"):
+        return reg == "ra"
+    if op == "jalr":
+        parts = [p.strip() for p in args.split(",")]
+        return reg == (parts[0] if len(parts) == 2 else "ra")
+    if op in READS_ALL or op in NO_DEST or not args:
+        return False
+    return args.split(",")[0].strip() == reg
+
+
+class Flow:
+    """Proves where a `jr` switch dispatch reads its target, from the
+    control flow of one function of a linked image and its link map.
+
+    The table address is a constant LLVM loads once per switch (`lui`, maybe
+    `addiu`, often hoisted out of a loop into a callee-saved register), and
+    it holds on every path the compiler laid out to the dispatch. So the
+    proof walks back from the `jr` along edges that are certainly in the
+    compiled code, and every write of the base register it reaches must
+    compute the same constant. The edges:
+
+    * fall-through, and branches and jumps within the function or through
+      its hazard trampolines;
+    * past a call, only for a callee-saved register and only when the
+      callee can return (it has a `jr` or jumps out); after a noreturn call
+      (a panic) the next word is some other block, often a switch case;
+    * from a switch whose table is already proven to each case it lists.
+
+    A path that reaches something the image cannot show is unknown, and the
+    dispatch stays unresolved: an argument, $sp or $ra at the function's
+    first instruction, a branch in from other code, an undecodable word.
+    A path is dropped when the o32 ABI says compiled code never reads a
+    value along it (a register a call may change, a register that carries
+    nothing into the function). Dropping a real edge can only lose a proof;
+    following one that is not real could find a wrong write, which is why
+    the edges above are restricted to ones the code has. The last kind can
+    overshoot: until the next table of the function is proven, a table seems
+    to run on into it and lends that table's cases to the wrong switch. The
+    writes such a path finds must still agree with every other; a wrong
+    proof needs every real path to dead-end and the lent ones to agree on
+    another constant whose table also jumps only into the function.
+
+    Nothing bounds a table in the image: an index that is an enum tag has
+    no range check (hk-psx frame::simulate). A proven table runs to the
+    next proven table's start or its first word that does not jump into the
+    function past its first instruction (a switch never jumps to its
+    function's entry, and a function pointer names nothing else); tables
+    sit back to back in the function's `.rodata`, and reading on would take
+    the next function's table for this one's (hk-psx, 2026-09-23:
+    presentation::service's table ran into menu::run's). An entry may be a
+    `nop ; j T ; nop` trampoline into the function: an earlier patch
+    pointed it there. Every switch of a function is proven together, round
+    by round (one that sits in another's case is only reached through that
+    one's table); then each proof is checked again with the final tables,
+    and one that no longer holds is dropped and the rounds resume.
+
+    On the hk-psx, Quake and GoldSrc images it was checked against
+    (2026-09-23), every table proven this way lies inside its function's own
+    `.rodata.<function>` section, and together they cover each such section
+    exactly."""
+
+    def __init__(self, listing, word_at, base, image_end, link_map):
+        self.listing = listing
+        self.word_at, self.base, self.image_end = word_at, base, image_end
+        self.map = link_map
+        self.text = link_map.text
+        self.tramps = link_map.trampolines
+        self.sources = {}
+        for addr, (op, args) in listing.items():
+            target = branch_target(op, args)
+            if target is not None:
+                self.sources.setdefault(target, []).append(addr)
+        self.tables = {}
+        self.returning = {}
+
+    def instruction(self, addr):
+        """The listing entry at `addr`; objdump prints a run of zero words
+        as `...`, so a word missing from the listing is a nop if it is zero."""
+        entry = self.listing.get(addr)
+        if entry is None and self.base <= addr < self.image_end and self.word_at(addr) == 0:
+            return ("nop", "")
+        return entry
+
+    def in_tramps(self, addr):
+        return self.tramps is not None and self.tramps[0] <= addr < self.tramps[1]
+
+    def trampoline_target(self, addr):
+        """T when `addr` is a `nop ; j T ; nop` hazard trampoline."""
+        if not self.in_tramps(addr):
+            return None
+        op, args = self.listing.get(addr + 4, ("", ""))
+        m = re.fullmatch(r"0x([0-9a-f]+)", args.strip()) if op == "j" else None
+        if m and self.listing.get(addr, ("",))[0] == "nop" and self.listing.get(addr + 8, ("",))[0] == "nop":
+            return int(m.group(1), 16)
+        return None
+
+    def returns(self, call):
+        """False when the call at `call` certainly does not come back: its
+        callee has no `jr` and never jumps out of itself."""
+        op, args = self.instruction(call)
+        target = branch_target(op, args)
+        if target is None:
+            return True
+        target = self.trampoline_target(target) or target
+        if target not in self.returning:
+            fn = self.map.function(target)
+            if fn is None:
+                self.returning[target] = True
+            else:
+                start, end, _ = fn
+                self.returning[target] = any(
+                    op == "jr" or ((op == "j" or op in COND) and not start <= (branch_target(op, args) or start) < end)
+                    for op, args in (self.instruction(a) or ("", "") for a in range(start, end, 4)))
+        return self.returning[target]
+
+    def preds(self, x, reg, fn):
+        """Instructions that can run just before `x` with `reg` still
+        holding the value that reaches `x`, or None when one is unknown."""
+        start, end = fn
+        if x == start:
+            return None if reg in INCOMING else []
+        found = [j + 4 for j, (_, targets) in self.tables.get(fn, {}).items() if x in targets]
+        for source in self.sources.get(x, ()):
+            if start <= source < end or self.in_tramps(source):
+                found.append(source + 4)
+            elif self.text[0] <= source < self.text[1]:
+                return None
+            # Otherwise a data word that decodes as a branch: data never runs.
+        area = fn if start <= x < end else self.tramps
+        if area is not None and area[0] <= x - 4 < area[1]:
+            before = (self.instruction(x - 8) or ("",))[0] if area[0] <= x - 8 else ""
+            if before in LINKING:
+                if reg in CALLEE_SAVED and self.returns(x - 8):
+                    found.append(x - 4)
+            elif before not in ("j", "b", "jr"):
+                found.append(x - 4)
+        return found
+
+    def reaching(self, reg, at, fn):
+        """The instructions whose write of `reg` the walk carries to `at`,
+        or None when a path leads somewhere unknown first."""
+        todo = self.preds(at, reg, fn)
+        if todo is None:
+            return None
+        defs, seen = set(), set()
+        while todo:
+            y = todo.pop()
+            if y in seen:
+                continue
+            seen.add(y)
+            entry = self.instruction(y)
+            if entry is None or entry[0] == ".word":
+                return None
+            if writes(entry[0], entry[1], reg):
+                defs.add(y)
+                continue
+            more = self.preds(y, reg, fn)
+            if more is None:
+                return None
+            todo.extend(more)
+        return defs
+
+    def value(self, reg, at, fn, depth=0):
+        """The constant `reg` holds when `at` runs, or None. Only lui, li,
+        addiu, ori and move are followed, and every reaching write must agree."""
+        if reg == "zero":
+            return 0
+        defs = self.reaching(reg, at, fn) if depth < 8 else None
+        if not defs:
+            return None
+        values = set()
+        for d in defs:
+            op, args = self.instruction(d)
+            parts = [p.strip() for p in args.split(",")]
+            try:
+                if op == "lui":
+                    v = int(parts[1], 0) << 16
+                elif op == "li":
+                    v = int(parts[1], 0)
+                elif op in ("addiu", "ori", "move"):
+                    v = self.value(parts[1], d, fn, depth + 1)
+                    if v is not None and op == "addiu":
+                        v += int(parts[2], 0)
+                    elif v is not None and op == "ori":
+                        v |= int(parts[2], 0)
+                else:
+                    return None
+            except (IndexError, ValueError):
+                return None
+            if v is None:
+                return None
+            values.add(v & 0xFFFFFFFF)
+        return values.pop() if len(values) == 1 else None
+
+    def table_address(self, jr_addr, fn):
+        """Where `jr rs` reads its target: `rs` must come from one
+        `lw rs, off(b)` whose `b` is always `addu b, x, y` with exactly one of
+        x, y a constant C (the other is the scaled index). The table is at C
+        + off."""
+        rs = self.listing[jr_addr][1].strip()
+        loads = self.reaching(rs, jr_addr, fn)
+        if not loads or len(loads) != 1:
+            return None
+        (load,) = loads
+        op, args = self.instruction(load)
+        m = re.fullmatch(r"[a-z0-9]+,(-?\d+)\(([a-z0-9]+)\)", args.replace(" ", ""))
+        if op != "lw" or m is None:
+            return None
+        offset, pointer = int(m.group(1)), m.group(2)
+        sums = self.reaching(pointer, load, fn)
+        if not sums:
+            return None
+        tables = set()
+        for d in sums:
+            op, args = self.instruction(d)
+            parts = [p.strip() for p in args.split(",")]
+            if op != "addu" or len(parts) != 3:
+                return None
+            known = [v for v in (self.value(parts[1], d, fn), self.value(parts[2], d, fn)) if v is not None]
+            if len(known) != 1:
+                return None
+            tables.add((known[0] + offset) & 0xFFFFFFFF)
+        return tables.pop() if len(tables) == 1 else None
+
+    def jump_table(self, jr_addr, fn):
+        """The proven (entry, target) pairs of `jr_addr`'s table, or None."""
+        if fn not in self.tables:
+            self.solve(fn)
+        got = self.tables[fn].get(jr_addr)
+        return got[0] if got else None
+
+    def solve(self, fn):
+        """Prove every switch of the function together (see the class)."""
+        start, end = fn
+        sites = [a for a in range(start, end, 4) if self.is_switch(a)]
+        if self.tramps is not None:
+            # A patched `jr` moved into a trampoline the function jumps to.
+            sites += [a for a in range(self.tramps[0], self.tramps[1], 4) if self.is_switch(a)
+                      and any(start <= s < end for s in self.sources.get(a - 4, ()))]
+        proven = {}
+        for _ in range(4 * len(sites) + 4):
+            starts = sorted(set(proven.values()))
+            self.tables[fn] = {j: self.extent(t, starts, fn) for j, t in proven.items()}
+            fresh = {}
+            for j in sites:
+                if j not in proven:
+                    table = self.table_address(j, fn)
+                    if table is not None and self.extent(table, starts, fn)[0]:
+                        fresh[j] = table
+            if fresh:
+                proven.update(fresh)
+                continue
+            stale = [j for j, t in proven.items() if self.table_address(j, fn) != t]
+            if not stale:
+                return
+            for j in stale:
+                del proven[j]
+        self.tables[fn] = {}
+
+    def extent(self, table, starts, fn):
+        """(entries, targets) of the table at `table`, up to the next of
+        `starts` or its first word that does not jump into the function past
+        its first instruction."""
+        start, end = fn
+        stop = min(next((s for s in starts if s > table), self.image_end), self.image_end)
+        entries = []
+        addr = table
+        while self.base <= addr < stop:
+            target = self.word_at(addr)
+            into = self.trampoline_target(target) or target
+            if target & 3 or not start < into < end:
+                break
+            entries.append((addr, target))
+            addr += 4
+        return entries, {target for _, target in entries}
+
+    def is_switch(self, addr):
+        op, args = self.listing.get(addr, ("", ""))
+        return op == "jr" and args.strip() != "ra"
+
+
+_FLOW = [None, None]
+
+
+def flow_of(listing, word_at, base, image_end, link_map):
+    """The Flow of the last listing asked about (built once per image)."""
+    if _FLOW[0] is not listing:
+        _FLOW[:] = [listing, Flow(listing, word_at, base, image_end, link_map)]
+    return _FLOW[1]
+
+
+class MapError(Exception):
+    pass
+
+
+MAP_LINE = re.compile(r"^([0-9a-f]+) +([0-9a-f]+) +([0-9a-f]+) +(\d+) (.*)$")
+
+
+class LinkMap:
+    """Function bounds and the trampoline array from ld.lld's `-Map` output
+    for the link that made an image (psoxide.ld's layout). Symbols sit 16
+    columns in, input sections 8."""
+
+    def __init__(self, path):
+        symbols, sections, text, trampolines = [], [], {}, None
+        with open(path, errors="replace") as lines:
+            text_lines = lines.read().splitlines()
+        for line in text_lines:
+            m = MAP_LINE.match(line)
+            if not m:
+                continue
+            address, size = int(m.group(1), 16), int(m.group(3), 16)
+            rest = m.group(5)
+            depth = len(rest) - len(rest.lstrip(" "))
+            name = rest.strip()
+            if name in ("__text_start = .", "__text_end = .", "__bss_start = ."):
+                text[name.split()[0]] = address
+            elif depth == 16 and name == "HAZARD_TRAMPOLINES":
+                trampolines = (address, address + size)
+            elif depth == 8 and name.endswith(")") and ":(.text" in name:
+                sections.append((address, size))
+            elif depth == 16 and not name.startswith(".L") and " = " not in name:
+                symbols.append((address, size, name))
+        if "__text_start" not in text or "__text_end" not in text:
+            raise MapError(f"{path}: no __text_start/__text_end, not an ld.lld map of psoxide.ld")
+        lo, hi = text["__text_start"], text["__text_end"]
+        self.path = path
+        self.text = (lo, hi)
+        self.bss = text.get("__bss_start")
+        self.trampolines = trampolines
+        self.names = {}
+        for address, size, name in symbols:
+            if lo <= address < hi:
+                self.names.setdefault(address, []).append((size, name))
+        sections = [s for s in sections if lo <= s[0] < hi]
+        # Every symbol or section start ends the function before it.
+        self.bounds = sorted(set(self.names) | {a for a, _ in sections} | {s + n for s, n in sections} | {hi})
+        self.starts = sorted(self.names)
+
+    def check(self, data):
+        """Refuse a map from another link (a stale one, or another example's):
+        the header's payload size is __bss_start - __text_start."""
+        base = load_address(data)
+        lo = self.text[0]
+        if data[:8] == b"PS-X EXE" and self.bss is not None:
+            payload = struct.unpack_from("<I", data, 0x1C)[0]
+            if payload != self.bss - lo or base != lo:
+                raise MapError(f"{self.path} does not describe this image (payload {payload:#x}, map says "
+                               f"{self.bss - lo:#x} at {lo:#x}); relink so both come from one link")
+
+    def function(self, addr):
+        """(start, end, name) of the function containing `addr`. A function
+        is a named symbol, or runs from `addr` to the next boundary."""
+        starts = self.starts
+        i = bisect.bisect_right(starts, addr) - 1
+        if i >= 0:
+            start = starts[i]
+            size, name = max(self.names[start])
+            end = start + size if size else self.bounds[bisect.bisect_right(self.bounds, start)]
+            if addr < end:
+                return start, end, name
+        if self.text[0] <= addr < self.text[1]:
+            end = self.bounds[bisect.bisect_right(self.bounds, addr)]
+            return addr, end, f"<unnamed {addr:08x}>"
+        return None
+
+
+def find_hazards(listing, word_at=None, image_end=0, base=LOAD_ADDR, is_code=looks_like_code, link_map=None):
     """Every (branch address, op, args, slot op, slot args, consumer address,
     table entry address), in address order. The entry address is the
     jump-table word that names the consumer for a `jr` switch dispatch and
@@ -198,7 +601,9 @@ def find_hazards(listing, word_at=None, image_end=0, base=LOAD_ADDR, is_code=loo
 
     `is_code` is the data guard. Both CLIs pass the `looks_like_code` they
     look up at call time, so a game that loads either file as a module and
-    replaces it (to never skip proven .text) still reaches the detector."""
+    replaces it (to never skip proven .text) still reaches the detector.
+    `link_map`, a LinkMap of the same link, makes `jump_table` prove each
+    table and bound it to its own function."""
     found = []
     for addr in sorted(listing):
         op, args = listing[addr]
@@ -228,7 +633,11 @@ def find_hazards(listing, word_at=None, image_end=0, base=LOAD_ADDR, is_code=loo
             # A switch dispatch: the table words are data, so an entry whose
             # target consumes the slot load can be pointed at a trampoline.
             # An unresolved table leaves the target unknown, like a return.
-            entries = jump_table(listing, addr, word_at, image_end, base) if word_at else None
+            entries = None
+            if word_at and link_map is None:
+                entries = jump_table(listing, addr, word_at, image_end, base)
+            elif word_at:
+                entries = jump_table(listing, addr, word_at, image_end, base, link_map)
             if entries is None:
                 found.append((addr, op, args, slot_op, slot_args, None, None))
                 continue
@@ -277,14 +686,45 @@ def encode_j(target, link=False):
     return ((3 if link else 2) << 26) | ((target >> 2) & 0x03FFFFFF)
 
 
+def cli_args(argv):
+    """(paths, --check given, --map path or None), or None when malformed."""
+    paths, check_only, map_path = [], False, None
+    it = iter(argv)
+    for arg in it:
+        if arg == "--check":
+            check_only = True
+        elif arg == "--map":
+            map_path = next(it, None)
+            if map_path is None:
+                return None
+        elif arg.startswith("--"):
+            continue
+        else:
+            paths.append(arg)
+    return paths, check_only, map_path
+
+
+def open_map(map_path, data):
+    """The LinkMap for `data`, or None; exits on a map from another link."""
+    if map_path is None:
+        return None
+    try:
+        link_map = LinkMap(map_path)
+        link_map.check(bytes(data))
+    except (MapError, OSError) as error:
+        print(error)
+        sys.exit(1)
+    return link_map
+
+
 def main():
-    argv = [a for a in sys.argv[1:] if not a.startswith("--")]
-    check_only = "--check" in sys.argv
-    if len(argv) != 1:
+    args = cli_args(sys.argv[1:])
+    if args is None or len(args[0]) != 1:
         print(__doc__)
         return 2
-    path = argv[0]
+    (path,), check_only, map_path = args
     data = bytearray(open(path, "rb").read())
+    link_map = open_map(map_path, data)
     base = load_address(data)
     listing = disassemble(path, base)
     image_end = base + len(data) - HEADER
@@ -293,7 +733,7 @@ def main():
         off = addr - base + HEADER
         return struct.unpack_from("<I", data, off)[0]
 
-    hazards = find_hazards(listing, word_at, image_end, base, looks_like_code)
+    hazards = find_hazards(listing, word_at, image_end, base, looks_like_code, link_map)
     for h in hazards:
         via = " via table entry %08x" % h[6] if h[6] is not None else ""
         if h[5] is not None:
@@ -432,7 +872,7 @@ def main():
         print("patched %08x -> trampoline %08x (%d words)" % (addr, tramp, len(words)))
 
     open(path, "wb").write(data)
-    remaining = find_hazards(disassemble(path, base), word_at, image_end, base, looks_like_code)
+    remaining = find_hazards(disassemble(path, base), word_at, image_end, base, looks_like_code, link_map)
     for h in remaining:
         print("still hazardous %08x: %s %s" % (h[0], h[1], h[2]))
     print("%d patched, %d remaining, %d/%d trampoline words used in %s" % (patched, len(remaining), cursor, capacity, path))

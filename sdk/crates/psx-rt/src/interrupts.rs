@@ -316,12 +316,83 @@ pub fn wait_vblank() {}
 /// one that never touches `$sp` (so interrupts are safe on any stack).
 #[cfg(target_arch = "mips")]
 pub fn handler_installed() -> bool {
-    const EXCEPTION_VECTOR: *const u32 = 0x8000_0080 as *const u32;
     let handler = __psx_rt_exception_handler as *const () as usize as u32;
-    // SAFETY: a read of the kernel's vector word.
+    vector_word() == jump_word(handler)
+}
+
+/// The vector word of a game's exception handler declared with
+/// [`declare_stack_safe_handler`]; zero when none is.
+#[cfg(target_arch = "mips")]
+static mut STACK_SAFE_HANDLER: u32 = 0;
+
+/// Declare that the game's own exception handler at `handler` is safe to
+/// take an interrupt on any stack, including a
+/// [`ScratchpadStack`](crate::scratchpad::ScratchpadStack).
+///
+/// With the `scratchpad-stack-check` feature, a stack switch traps when
+/// interrupts are on and the general exception vector jumps anywhere but
+/// psx-rt's handler, because a handler that pushes onto the interrupted
+/// stack would write below the scratchpad stack's frames. A game that
+/// installs its own vector (hk-psx wraps psx-rt's handler to service CD
+/// interrupts, then jumps to it) calls this once with the address it puts
+/// in the vector; the check then accepts exactly that vector word, and
+/// still traps any other handler, such as a BIOS vector restored behind the
+/// game's back. Declaring does not install anything.
+///
+/// ```no_run
+/// unsafe extern "C" fn game_exception_wrapper() {}
+/// // SAFETY: game_exception_wrapper switches to its own stack before it
+/// // stores anything and restores $sp before it hands back.
+/// unsafe { psx_rt::interrupts::declare_stack_safe_handler(game_exception_wrapper) };
+/// ```
+///
+/// # Safety
+///
+/// `handler`, and everything it calls or jumps to, must leave `$sp` and the
+/// memory below it alone: it uses only `$k0`/`$k1` or saves state to memory
+/// of its own and runs on a stack of its own, and it returns (or chains to
+/// psx-rt's handler) with `$sp` unchanged.
+#[cfg(target_arch = "mips")]
+pub unsafe fn declare_stack_safe_handler(handler: unsafe extern "C" fn()) {
+    // SAFETY: a plain store; nothing reads it from an interrupt.
     unsafe {
-        core::ptr::read_volatile(EXCEPTION_VECTOR) == 0x0800_0000 | ((handler >> 2) & 0x03ff_ffff)
+        core::ptr::write_volatile(
+            &raw mut STACK_SAFE_HANDLER,
+            jump_word(handler as *const () as usize as u32),
+        )
     }
+}
+
+/// Declare a stack-safe exception handler. Host no-op: there are no
+/// exception vectors off-target.
+///
+/// # Safety
+///
+/// As on the target.
+#[cfg(not(target_arch = "mips"))]
+pub unsafe fn declare_stack_safe_handler(_handler: unsafe extern "C" fn()) {}
+
+/// True when the general exception vector jumps to psx-rt's handler or to
+/// the one declared with [`declare_stack_safe_handler`].
+#[cfg(target_arch = "mips")]
+pub fn stack_safe_handler_installed() -> bool {
+    // SAFETY: a plain read of a word only this module writes.
+    let declared = unsafe { core::ptr::read_volatile(&raw const STACK_SAFE_HANDLER) };
+    handler_installed() || (declared != 0 && vector_word() == declared)
+}
+
+/// The `j handler` word psx-rt writes into the vector.
+#[cfg(target_arch = "mips")]
+fn jump_word(handler: u32) -> u32 {
+    0x0800_0000 | ((handler >> 2) & 0x03ff_ffff)
+}
+
+/// The first word of the general exception vector.
+#[cfg(target_arch = "mips")]
+fn vector_word() -> u32 {
+    const EXCEPTION_VECTOR: *const u32 = 0x8000_0080 as *const u32;
+    // SAFETY: a read of the kernel's vector word.
+    unsafe { core::ptr::read_volatile(EXCEPTION_VECTOR) }
 }
 
 /// True when COP0 SR has interrupts enabled (IEc).
