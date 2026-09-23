@@ -742,7 +742,89 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // active blend samples both clips unpacked (the packed translations
         // carry per-clip shifts that cannot be lerped directly).
         let active_blend = blend_from.filter(|blend| blend.alpha_q12 < 1 << 12);
-        if let Some(sample) = pose_sample {
+        let transform_pose = |pose: JointPose| {
+            if MODEL_GTE_JOINT_TRANSLATION {
+                textured_model_part_gte_transform_with_view_gte_translation(
+                    view_instance,
+                    view_origin_translation,
+                    pose,
+                    local_to_world,
+                )
+            } else if MODEL_GTE_JOINT_COMPOSE {
+                textured_model_part_gte_transform_with_view_gte_compose(
+                    camera_view,
+                    view_instance,
+                    camera.position,
+                    pose,
+                    instance_rotation,
+                    local_to_world,
+                    origin,
+                )
+            } else {
+                textured_model_part_gte_transform_with_view(
+                    camera_view,
+                    camera.position,
+                    pose,
+                    instance_rotation,
+                    local_to_world,
+                    origin,
+                )
+            }
+        };
+        let packed_joints = MODEL_GTE_JOINT_TRANSLATION
+            && MODEL_GTE_JOINT_PACKED_TRANSLATION
+            && active_blend.is_none();
+        if let Some(sample) = pose_sample.filter(|_| !packed_joints && joint_count <= 32) {
+            // Loop fission for the I-cache. `pose()` is about 3.3 KiB of
+            // straight-line decode and the joint transform most of another
+            // 2 KiB, and they collide in the 4 KiB direct-mapped I-cache, so
+            // decoding and transforming joint by joint refilled both on every
+            // joint. Decode every pose first, staged in its joint's output
+            // slot (a JointViewTransform holds the same matrix and
+            // translation), then transform them all. Decoding, the crossfade
+            // and the pose translation touch no GTE state, so the GTE sees the
+            // same commands in the same order. `present` needs one bit per
+            // joint; more than 32 joints take the fused loop below.
+            let mut present = 0u32;
+            for (joint, joint_view_transform) in joint_view_transforms
+                .iter_mut()
+                .enumerate()
+                .take(joint_count)
+            {
+                let joint_index = joint as u16;
+                if let Some(pose) = sample.pose(joint_index) {
+                    let pose = match &active_blend {
+                        Some(blend) => blend.blend_toward(pose, joint_index),
+                        None => pose,
+                    };
+                    let pose = apply_model_pose_translation(pose, pose_translation);
+                    *joint_view_transform = JointViewTransform {
+                        rotation: Mat3I16 { m: pose.matrix },
+                        translation: pose.translation,
+                    };
+                    present |= 1 << joint;
+                }
+            }
+            for (joint, joint_view_transform) in joint_view_transforms
+                .iter_mut()
+                .enumerate()
+                .take(joint_count)
+            {
+                super::player_vert_debug::set_joint_slot(joint as u8);
+                *joint_view_transform = if present & (1 << joint) != 0 {
+                    let (rotation, translation) = transform_pose(JointPose {
+                        matrix: joint_view_transform.rotation.m,
+                        translation: joint_view_transform.translation,
+                    });
+                    JointViewTransform {
+                        rotation,
+                        translation,
+                    }
+                } else {
+                    JointViewTransform::default()
+                };
+            }
+        } else if let Some(sample) = pose_sample {
             for (joint, joint_view_transform) in joint_view_transforms
                 .iter_mut()
                 .enumerate()
@@ -750,10 +832,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             {
                 let joint_index = joint as u16;
                 super::player_vert_debug::set_joint_slot(joint as u8);
-                let joint_transform = if MODEL_GTE_JOINT_TRANSLATION
-                    && MODEL_GTE_JOINT_PACKED_TRANSLATION
-                    && active_blend.is_none()
-                {
+                let joint_transform = if packed_joints {
                     sample
                         .gte_pose(joint_index)
                         .and_then(|pose| {
@@ -781,34 +860,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             Some(blend) => blend.blend_toward(pose, joint_index),
                             None => pose,
                         };
-                        let pose = apply_model_pose_translation(pose, pose_translation);
-                        if MODEL_GTE_JOINT_TRANSLATION {
-                            textured_model_part_gte_transform_with_view_gte_translation(
-                                view_instance,
-                                view_origin_translation,
-                                pose,
-                                local_to_world,
-                            )
-                        } else if MODEL_GTE_JOINT_COMPOSE {
-                            textured_model_part_gte_transform_with_view_gte_compose(
-                                camera_view,
-                                view_instance,
-                                camera.position,
-                                pose,
-                                instance_rotation,
-                                local_to_world,
-                                origin,
-                            )
-                        } else {
-                            textured_model_part_gte_transform_with_view(
-                                camera_view,
-                                camera.position,
-                                pose,
-                                instance_rotation,
-                                local_to_world,
-                                origin,
-                            )
-                        }
+                        transform_pose(apply_model_pose_translation(pose, pose_translation))
                     })
                 };
 
