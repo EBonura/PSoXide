@@ -14,9 +14,15 @@
 //! The verdict goes to the TTY (`SPSTACK PASS ...` or `SPSTACK FAIL ...`)
 //! and on screen, so the same disc reads out on a console.
 //! `tools/stack_guard.py` checks the linked call tree fits the region.
+//!
+//! With the `chained-vector` feature the exception vector jumps to a
+//! handler of the example's own that hands straight on to psx-rt's, the
+//! way hk-psx's CD wrapper does, declared with
+//! `interrupts::declare_stack_safe_handler`; the run must still pass.
 
 #![no_std]
 #![no_main]
+#![cfg_attr(feature = "chained-vector", feature(asm_experimental_arch))]
 
 extern crate psx_rt;
 
@@ -139,9 +145,37 @@ fn as_str(text: &[u8]) -> &str {
     core::str::from_utf8(text).unwrap_or("?")
 }
 
+// A handler of the game's own in the vector: it leaves $sp alone and
+// chains to psx-rt's.
+#[cfg(feature = "chained-vector")]
+core::arch::global_asm!(
+    ".set noreorder",
+    ".section .text.hello_spstack_vector",
+    ".globl hello_spstack_vector",
+    "hello_spstack_vector:",
+    "j __psx_rt_exception_handler",
+    "nop",
+    ".set reorder"
+);
+
+#[cfg(feature = "chained-vector")]
+extern "C" {
+    fn hello_spstack_vector();
+}
+
 #[no_mangle]
 fn main() {
     interrupts::install_vblank_counter();
+    #[cfg(feature = "chained-vector")]
+    // SAFETY: the vector is one `j` and a nop; the handler touches no
+    // register but psx-rt's own $k0/$k1.
+    unsafe {
+        let handler = hello_spstack_vector as *const () as usize as u32;
+        (0x8000_0080 as *mut u32).write_volatile(0x0800_0000 | ((handler >> 2) & 0x03ff_ffff));
+        (0x8000_0084 as *mut u32).write_volatile(0);
+        psx_rt::cache::flush_i_cache();
+        interrupts::declare_stack_safe_handler(hello_spstack_vector);
+    }
     for i in 0..TABLE_WORDS {
         unsafe { table().add(i).write_volatile(table_word(i)) };
     }
