@@ -32,7 +32,8 @@ instructions before the dispatch could not be resolved at all.
     python3 tools/stack_guard.py game.exe game.map --root REGEX --budget BYTES
 
 The map is ld.lld's `-Map` output for the same link (the editor writes it
-with PSOXIDE_GUEST_LINK_MAP; an SDK example's build.rs adds the flag). The
+with PSOXIDE_GUEST_LINK_MAP; psoxide-pgo has every link it builds write one
+and runs this tool with it, which covers `make example`). The
 exe may be hazard-patched: calls rerouted through HAZARD_TRAMPOLINES are
 followed to their targets. `--root`/`--budget` check a game's own stack
 switch instead (an entry name regex and its byte budget), for code that
