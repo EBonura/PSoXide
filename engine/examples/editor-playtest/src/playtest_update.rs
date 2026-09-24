@@ -256,7 +256,7 @@ impl Playtest {
             // this pre-motor value only feeds the shared tick-input contract.
             // `resolve_enemy_melee` re-queries invulnerability after the motor
             // update, pairing it with the same retained pose contact uses.
-            let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
+            let player_invulnerable = self.player_invulnerable();
             let mut mover = SceneEntityMover {
                 bsp: self.bsp.as_mut(),
                 destructibles: &self.destructibles,

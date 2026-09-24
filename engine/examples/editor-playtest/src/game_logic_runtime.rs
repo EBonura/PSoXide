@@ -496,7 +496,7 @@ impl Playtest {
             None if self.bsp.is_some() => (BSP_PLAYER_RADIUS, BSP_PLAYER_HEIGHT),
             None => (0, 0),
         };
-        let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
+        let player_invulnerable = self.player_invulnerable();
         let player_capsules = self
             .character
             .as_ref()
