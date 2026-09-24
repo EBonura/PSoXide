@@ -122,7 +122,12 @@ const GAMEPLAY_SFX_VOICE_COUNT: u8 = 3;
 #[cfg(target_arch = "mips")]
 const COMBAT_VOICE: u8 = 19;
 const CDDA_RETRY_TICKS: u32 = 60;
-const CDDA_STATUS_TICKS: u32 = 30;
+// Loop poll period. The drive's auto-pause at the end of the track is only
+// seen through GetStat, so this bounds the silence before the replay's seek
+// starts. At 30 ticks, with the confirming poll another 30 ticks later, the
+// menu loop measured ~0.63 s of detection before a ~0.32 s seek. A GetStat is
+// dispatched without waiting and its reply is read on a later tick.
+const CDDA_STATUS_TICKS: u32 = 4;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
 #[cfg(any(target_arch = "mips", test))]
 const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE;
@@ -133,8 +138,9 @@ const CDDA_COMMAND_SPINS: u32 = 131_072;
 const CDDA_STATUS_TIMEOUT_TICKS: u32 = 60;
 /// Consecutive definite "stopped" reads required before we treat the track as
 /// finished and loop it. Guards against one stray/garbled status read triggering
-/// a mid-playback reseek (which kills the audio on real hardware). Used by
-/// `maybe_loop`, which is compiled on host too, so it is not target-gated.
+/// a mid-playback reseek (which kills the audio on real hardware). The
+/// confirming poll goes out on the next tick. Used by `maybe_loop_with`, which
+/// is compiled on host too, so it is not target-gated.
 const CDDA_STOPPED_CONFIRMATIONS: u8 = 2;
 
 /// The implicit single-state flow every plain [`App::run`] call uses.
@@ -488,6 +494,21 @@ impl CddaPlayer {
 
     #[inline(never)]
     fn update(&mut self, tick: u32) {
+        self.update_with(
+            tick,
+            cdda_begin_status,
+            cdda_finish_status,
+            cdda_cancel_status,
+        );
+    }
+
+    fn update_with(
+        &mut self,
+        tick: u32,
+        begin: impl FnMut() -> Option<u8>,
+        finish: impl FnMut(u8) -> Option<Option<bool>>,
+        cancel: impl FnMut(),
+    ) {
         if self.requested.track == 0 {
             return;
         }
@@ -496,8 +517,11 @@ impl CddaPlayer {
             return;
         }
         if self.current_track == self.requested.track {
-            self.maybe_loop(tick);
-            return;
+            self.maybe_loop_with(tick, begin, finish, cancel);
+            // A confirmed track end replays in this same tick.
+            if self.current_track == self.requested.track {
+                return;
+            }
         }
         if tick < self.next_retry_tick {
             return;
@@ -571,15 +595,6 @@ impl CddaPlayer {
         }
     }
 
-    fn maybe_loop(&mut self, tick: u32) {
-        self.maybe_loop_with(
-            tick,
-            cdda_begin_status,
-            cdda_finish_status,
-            cdda_cancel_status,
-        );
-    }
-
     fn maybe_loop_with(
         &mut self,
         tick: u32,
@@ -596,8 +611,13 @@ impl CddaPlayer {
         if let Some(irq_enable) = self.status_irq_enable {
             if let Some(stopped) = finish(irq_enable) {
                 self.status_irq_enable = None;
-                self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
                 self.handle_drive_status(stopped, tick);
+                // Confirm a first "stopped" read on the very next tick.
+                self.next_status_tick = tick.saturating_add(if self.stopped_polls > 0 {
+                    1
+                } else {
+                    CDDA_STATUS_TICKS
+                });
             } else if tick >= self.next_status_tick {
                 cancel();
                 self.status_irq_enable = None;
@@ -619,9 +639,12 @@ impl CddaPlayer {
             Some(true) => {
                 self.stopped_polls = self.stopped_polls.saturating_add(1);
                 if self.stopped_polls >= CDDA_STOPPED_CONFIRMATIONS {
+                    // The drive auto-paused at the end of the track it was
+                    // playing. Mode and demute still hold, so only the Play
+                    // (and its seek back to the track start) is needed.
                     self.stopped_polls = 0;
                     self.current_track = 0;
-                    self.step = CddaStartStep::SetMode;
+                    self.step = CddaStartStep::Play;
                     self.next_retry_tick = tick;
                 }
             }
@@ -784,7 +807,19 @@ fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
 
 #[cfg(not(target_arch = "mips"))]
 fn cdda_issue_step(_step: CddaStartStep, _track: u8, _second: u32) -> Option<u32> {
+    #[cfg(test)]
+    HOST_CDDA_STEPS.with(|steps| steps.borrow_mut().push(_step));
     Some(0)
+}
+
+#[cfg(all(test, not(target_arch = "mips")))]
+extern crate std;
+
+// Host tests read back the drive commands the player issued, in order.
+#[cfg(all(test, not(target_arch = "mips")))]
+std::thread_local! {
+    static HOST_CDDA_STEPS: core::cell::RefCell<std::vec::Vec<CddaStartStep>> =
+        const { core::cell::RefCell::new(std::vec::Vec::new()) };
 }
 
 #[cfg(all(target_arch = "mips", feature = "boot-trace"))]
@@ -5504,14 +5539,12 @@ mod tests {
             player.handle_drive_status(Some(true), 260 + u32::from(i) * 30);
         }
         assert_eq!(player.current_track, 0);
-        player.update(500);
-        player.update(502);
         assert_eq!(
             player.step,
             CddaStartStep::Play,
             "loop from the track start, not another seek"
         );
-        player.update(504);
+        player.update(500);
         assert_eq!(player.current_track, 2);
         assert_eq!(player.random_state, seed);
     }
@@ -5557,8 +5590,59 @@ mod tests {
             "do not reissue GetStat while its response is pending"
         );
         assert_eq!(player.current_track, 0);
-        assert_eq!(player.step, CddaStartStep::SetMode);
+        assert_eq!(player.step, CddaStartStep::Play);
         assert_eq!(player.status_irq_enable, None);
+    }
+
+    #[test]
+    fn a_finished_track_replays_within_a_few_ticks() {
+        extern crate std;
+        use core::cell::Cell;
+        // The track ends at END. GetStat answers on the tick after it is
+        // sent, "stopped" from END until the replay's Play goes out.
+        const END: u32 = 1_000;
+        let mut player = CddaPlayer::new();
+        player.request(
+            MusicCue {
+                track: 2,
+                volume_percent: 80,
+                loop_track: true,
+            },
+            0,
+        );
+        let sent = Cell::new(None::<u32>);
+        let replayed = Cell::new(None::<u32>);
+        let mut loop_steps = std::vec::Vec::new();
+        for tick in 0..END + 300 {
+            let stopped = tick >= END && replayed.get().is_none();
+            player.update_with(
+                tick,
+                || {
+                    sent.set(Some(tick));
+                    Some(0)
+                },
+                |_| sent.get().filter(|&at| tick > at).map(|_| Some(stopped)),
+                || {},
+            );
+            let steps = HOST_CDDA_STEPS.with(|steps| core::mem::take(&mut *steps.borrow_mut()));
+            if tick >= END && replayed.get().is_none() {
+                loop_steps.extend(steps);
+                if loop_steps.contains(&CddaStartStep::Play) {
+                    replayed.set(Some(tick));
+                }
+            }
+        }
+        let gap = replayed.get().expect("the track never replayed") - END;
+        assert!(
+            gap <= 8,
+            "replay went out {gap} ticks after the track ended"
+        );
+        assert_eq!(
+            loop_steps,
+            std::vec![CddaStartStep::Play],
+            "a loop replays the track; mode and demute still hold"
+        );
+        assert_eq!(player.current_track, 2);
     }
 
     #[test]
