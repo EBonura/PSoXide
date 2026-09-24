@@ -329,6 +329,13 @@ impl InstanceActorPoseSnapshot {
         self.model
     }
 
+    /// The same pose drawn through `material` instead of the model's own
+    /// atlas material, e.g. a recoloured palette of the same atlas.
+    pub const fn with_atlas_material(mut self, material: TextureMaterial) -> Self {
+        self.model.material = material;
+        self
+    }
+
     /// Model-local clip selected after applying the live override policy.
     pub const fn clip_local(self) -> ModelClipIndex {
         self.clip_local

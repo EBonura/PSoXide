@@ -475,6 +475,9 @@ pub enum VramSlotClutMode {
     TransparentZero,
     /// Indexed model atlas palette (4bpp or 8bpp).
     ModelAtlas,
+    /// Recoloured palette copy of a resident texture. Owns only its CLUT; the
+    /// number tells one texture's copies apart.
+    ModelAtlasVariant(u8),
     /// Streamed sky panorama band palettes.
     SkyPanorama,
     /// Three-page, six-face scenic cube environment.
@@ -2281,6 +2284,69 @@ impl<
         self.slot_count += 1;
         let _ = self.residency.mark_vram_resident(asset_id);
         Some(slot)
+    }
+
+    /// Upload a recoloured copy of a resident indexed texture's palette (a
+    /// model atlas or any other uploaded texture) and return its GP0 CLUT
+    /// word. Only the palette is copied: a draw that pairs this CLUT word with
+    /// the texture's own current tpage recolours it with no per-frame cost,
+    /// and the copy stays valid if the texture's pixels move.
+    ///
+    /// `variant` tells one texture's copies apart and makes the call
+    /// idempotent: a second call returns the resident copy without running
+    /// `recolor`. `recolor` rewrites the raw BGR555 entries; the model-atlas
+    /// STP stamping is applied to the result. Returns `None` if the texture
+    /// is not resident or the slot table or CLUT band is full. The copy lives
+    /// until `release_gameplay_vram`.
+    pub fn ensure_clut_variant(
+        &mut self,
+        asset_id: AssetId,
+        asset_bytes: &[u8],
+        variant: u8,
+        recolor: impl FnOnce(&mut [u16]),
+    ) -> Option<u16> {
+        let mode = VramSlotClutMode::ModelAtlasVariant(variant);
+        if let Some(slot) = self.find_vram_slot(asset_id, mode) {
+            return Some(slot.clut_word);
+        }
+        let base = self.slots.iter().filter_map(|slot| *slot).find(|slot| {
+            slot.ready
+                && slot.asset == asset_id
+                && !matches!(slot.clut_mode, VramSlotClutMode::ModelAtlasVariant(_))
+        })?;
+        let texture = Texture::from_bytes(asset_bytes).ok()?;
+        let source = texture.clut_bytes();
+        let entries = usize::from(texture.clut_entries());
+        let mut clut = [0u16; 256];
+        if entries == 0 || entries > clut.len() || source.len() != entries * 2 {
+            return None;
+        }
+        for (index, entry) in clut[..entries].iter_mut().enumerate() {
+            *entry = u16::from_le_bytes([source[index * 2], source[index * 2 + 1]]);
+        }
+        recolor(&mut clut[..entries]);
+        let mut bytes = [0u8; 512];
+        for (index, entry) in clut[..entries].iter().enumerate() {
+            bytes[index * 2..index * 2 + 2].copy_from_slice(&entry.to_le_bytes());
+        }
+        let idx = self.next_vram_slot()?;
+        let (position, clut_region) = self.allocator.alloc_clut(texture.clut_entries())?;
+        upload_model_clut(
+            VramRect::new(position.x(), position.y(), texture.clut_entries(), 1),
+            &bytes[..entries * 2],
+            texture.index_zero_transparent(),
+        );
+        let slot = VramSlot {
+            clut_mode: mode,
+            clut_word: position.uv_clut_word(),
+            // The pixels belong to the base atlas slot.
+            region: VramHandle::Empty,
+            clut_region,
+            ..base
+        };
+        self.slots[idx] = Some(slot);
+        self.slot_count += 1;
+        Some(slot.clut_word)
     }
 
     /// Upload the active UI scene's streamed images into VRAM from the RAM cache.
