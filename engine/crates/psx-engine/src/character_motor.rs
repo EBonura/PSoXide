@@ -822,6 +822,13 @@ impl CharacterMotorState {
         self.remainder_z_q8 = 0;
     }
 
+    /// Turn the body to `yaw` at once. Position, stamina and any in-progress
+    /// action are untouched; a lock-on attack uses this to square up to its
+    /// target on its first frame.
+    pub fn face(&mut self, yaw: Angle) {
+        self.yaw = yaw;
+    }
+
     /// Interrupt a fixed action without refunding stamina or changing gravity.
     pub fn interrupt_action(&mut self) {
         self.action = CharacterMotorAction::Idle;
