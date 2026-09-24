@@ -141,8 +141,22 @@ fn scale_brush(brush: &mut Brush) {
             }
         }
         for axis in face.uv.scale_q8.iter_mut() {
-            *axis = div_i16(*axis).max(1);
+            *axis = scale_uv_axis_q8(*axis);
         }
+    }
+}
+
+/// One face UV scale axis at engine scale. The sign is the Flip H/V
+/// mirror and must survive; the magnitude keeps at least one Q8 step so
+/// a tiny authored scale cannot collapse to zero. Zero already means
+/// identity in [`crate::brush::FaceUv`], so it maps to identity here too.
+fn scale_uv_axis_q8(q8: i16) -> i16 {
+    let identity = crate::brush::FaceUv::default().scale_q8[0];
+    let q8 = if q8 == 0 { identity } else { q8 };
+    let scaled = div_i16(q8);
+    match scaled {
+        0 => q8.signum(),
+        _ => scaled,
     }
 }
 
@@ -676,6 +690,21 @@ mod tests {
                 "light reach must survive authored-to-engine normalization"
             );
         }
+    }
+
+    #[test]
+    fn brush_uv_scale_keeps_the_flip_sign_through_the_cook() {
+        // Flip H/V negate `scale_q8`; the cook must mirror the texture
+        // exactly as the editor preview does, not reset it to +1/256.
+        let mut brush = Brush::cuboid([0, 0, 0], [1024, 1024, 1024]);
+        brush.faces[0].uv.scale_q8 = [-256, 256];
+        brush.faces[1].uv.scale_q8 = [512, -512];
+        brush.faces[2].uv.scale_q8 = [-4, 4];
+        scale_brush(&mut brush);
+        assert_eq!(brush.faces[0].uv.scale_q8, [-16, 16]);
+        assert_eq!(brush.faces[1].uv.scale_q8, [32, -32]);
+        // Tiny magnitudes keep the smallest non-zero step and their sign.
+        assert_eq!(brush.faces[2].uv.scale_q8, [-1, 1]);
     }
 
     #[test]
