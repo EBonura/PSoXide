@@ -149,8 +149,18 @@ const GAME_ENTITY_STANCE_ZENITH: u8 = 1 << 7;
 /// Duration of the enemy guard-colour sweep in 60 Hz simulation ticks.
 pub const GAME_ENTITY_STANCE_SWAP_DURATION_TICKS: u8 = 12;
 
-/// Damage against the channel an enemy currently guards (Q12 = 0.5x).
-pub const GAME_ENTITY_GUARDED_DAMAGE_Q12: u16 = 2048;
+/// Damage against the channel an enemy currently guards: a token 1 to 3
+/// points whatever the attack's authored value, so a wrong-stance hit reads
+/// at once as pointless and pushes the player to swap. The value is the
+/// authored damage divided by [`GAME_ENTITY_GUARDED_DAMAGE_DIVISOR`] and
+/// clamped into this range, so heavier swings still chip a little harder.
+pub const GAME_ENTITY_GUARDED_DAMAGE_MIN: u16 = 1;
+
+/// Upper bound of the guarded-channel chip damage.
+pub const GAME_ENTITY_GUARDED_DAMAGE_MAX: u16 = 3;
+
+/// Authored damage per point of guarded-channel chip damage.
+pub const GAME_ENTITY_GUARDED_DAMAGE_DIVISOR: u16 = 16;
 
 /// Damage against the channel an enemy leaves exposed (Q12 = 1.5x).
 pub const GAME_ENTITY_OPPOSED_DAMAGE_Q12: u16 = 6144;
@@ -992,24 +1002,24 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             && self.stance_swap_elapsed(index) < GAME_ENTITY_STANCE_SWAP_DURATION_TICKS
     }
 
-    /// Defensive damage scale selected by the target's current guard.
-    pub fn stance_damage_scale_q12(&self, index: usize, attack: VitalityChannelId) -> u16 {
-        if attack == self.stance(index) {
-            GAME_ENTITY_GUARDED_DAMAGE_Q12
-        } else {
-            GAME_ENTITY_OPPOSED_DAMAGE_Q12
-        }
-    }
-
-    /// Apply the current enemy guard multiplier to one authored damage value.
+    /// Apply the current enemy guard to one authored damage value: the
+    /// exposed channel takes 1.5x, the guarded one a token 1 to 3 points.
+    /// A zero-damage hit stays zero.
     pub fn scaled_stance_damage(
         &self,
         index: usize,
         attack: VitalityChannelId,
         damage: u16,
     ) -> u16 {
-        let scale = self.stance_damage_scale_q12(index, attack);
-        ((u32::from(damage) * u32::from(scale)) / 4096).min(u32::from(u16::MAX)) as u16
+        if damage == 0 {
+            return 0;
+        }
+        if attack == self.stance(index) {
+            return (damage / GAME_ENTITY_GUARDED_DAMAGE_DIVISOR)
+                .clamp(GAME_ENTITY_GUARDED_DAMAGE_MIN, GAME_ENTITY_GUARDED_DAMAGE_MAX);
+        }
+        ((u32::from(damage) * u32::from(GAME_ENTITY_OPPOSED_DAMAGE_Q12)) / 4096)
+            .min(u32::from(u16::MAX)) as u16
     }
 
     fn stance_swap_elapsed(&self, index: usize) -> u8 {
@@ -1262,9 +1272,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         self.apply_scaled_hit(records, index, channel, damage, poise_damage)
     }
 
-    /// Apply a Cortex-style stance-aware hit. The guarded channel takes 50%
-    /// damage and the exposed channel takes 150%; routing and spill remain the
-    /// same as [`Self::apply_hit`]. Poise stays authored and unscaled.
+    /// Apply a Cortex-style stance-aware hit. The guarded channel takes a
+    /// token 1 to 3 points and the exposed channel takes 150%; routing and
+    /// spill remain the same as [`Self::apply_hit`]. Poise stays authored and
+    /// unscaled.
     pub fn apply_stance_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -4243,12 +4254,22 @@ mod tests {
     }
 
     #[test]
-    fn guarded_and_exposed_hits_use_half_and_half_again_damage() {
+    fn guarded_hits_chip_and_exposed_hits_use_half_again_damage() {
         let mut guarded = GameEntities::<8>::EMPTY;
         guarded.spawn_from_records(&DUAL_ENEMY);
         let hit = guarded.apply_stance_hit(&DUAL_ENEMY, 0, VitalityChannelId::One, 40, 0);
         assert!(hit.connected && !hit.died);
-        assert_eq!((guarded.health(0), guarded.health_secondary(0)), (40, 40));
+        // 40 / 16 = 2: a token scratch, nowhere near the 60 an exposed hit does.
+        assert_eq!((guarded.health(0), guarded.health_secondary(0)), (58, 40));
+        for (damage, chip) in [(1, 1), (15, 1), (16, 1), (25, 1), (38, 2), (48, 3), (999, 3)] {
+            assert_eq!(
+                guarded.scaled_stance_damage(0, VitalityChannelId::One, damage),
+                chip,
+                "authored {damage}"
+            );
+        }
+        assert_eq!(guarded.scaled_stance_damage(0, VitalityChannelId::One, 0), 0);
+        assert_eq!(guarded.scaled_stance_damage(0, VitalityChannelId::Two, 38), 57);
 
         let mut exposed = GameEntities::<8>::EMPTY;
         exposed.spawn_from_records(&DUAL_ENEMY);

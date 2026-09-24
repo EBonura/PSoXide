@@ -1071,6 +1071,7 @@ impl Playtest {
             self.spawn_melee_arc_damage_numbers(
                 swing_mask_before,
                 outgoing_damage,
+                vitality_channel,
                 damage_number_channel_for(channel),
                 gameplay_now,
             );
@@ -1112,13 +1113,15 @@ impl Playtest {
 
     /// Spawn a floating number over every entity this swing newly
     /// connected with. `before` is the swing mask as it stood prior to
-    /// the sweep; every bit set since is one fresh connection, all at
-    /// the same `damage` because the arc path applies one value.
+    /// the sweep; every bit set since is one fresh connection. The arc
+    /// applies one authored `damage`, and each number shows what the
+    /// target's guard made of it, the same value the sweep applied.
     fn spawn_melee_arc_damage_numbers(
         &mut self,
         // psx-numeric-allow-next-line: swing bitmask snapshot; bit ops only, two-word on R3000
         before: u64,
         damage: u16,
+        attack: VitalityChannelId,
         channel: DamageNumberChannel,
         now: SimTick,
     ) {
@@ -1139,7 +1142,8 @@ impl Playtest {
                     GAME_ENTITIES[entity].height,
                 ),
                 GAME_ENTITIES[entity].room,
-                damage,
+                self.game_entities
+                    .scaled_stance_damage(entity, attack, damage),
                 channel,
                 now,
             );
