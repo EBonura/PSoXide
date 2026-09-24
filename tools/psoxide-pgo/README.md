@@ -142,7 +142,7 @@ psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--lau
                     [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
 psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V] -- CARGO-ARGS...
 psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
-                    [--pack CMD] -- CARGO-ARGS...
+                    [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
 psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                     [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
 GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
@@ -329,11 +329,51 @@ under `measure`), `hot=1000` on hl-psx and cs-psx, and `accurate` with
 candidates add the variant the layout was collected on and that variant
 with `+order`.
 
-When the gate prints `work_cycles` (as `measure` does), `choose` ranks the
-passing rows by them, fastest first, and adds a `work` column: each row's
-work cycles against the `off` row, averaged over the gate's replays so every
-tape counts the same. Failed rows go last, unranked. Without `work_cycles` the
-rows stay in build order.
+When the gate prints what `measure` does, `choose` ranks the passing rows
+by the frames that miss their deadline. A game locked to the display shows
+every frame for a whole number of vblanks, and a frame whose work overruns
+the budget stays up a vblank longer, so the average work per frame is the
+wrong objective: a variant can lower it and still slow the heavy frames,
+which are the ones that miss. The deadline ranking orders the rows by
+
+1. `missed`: the frames each `NAME.vblanks` column shows for longer than the
+   frame budget, as a share of the frames presented;
+2. `p95`, then `p99`: the gate's `frame_work_p95` and `frame_work_p99`, the
+   work of the heavy frames;
+3. `work`: the gate's `work_cycles`, the average.
+
+The relative columns are against the `off` row (or the first passing row
+with every ranked column), and each is averaged over the gate's replays so
+every tape counts the same. The frame budget is the vblanks a frame may
+take: `--frame-budget 1` for 60 fps, 2 for 30. Without it each replay's
+budget is the `off` row's most common pacing, which is the rate the game is
+built for, and `choose` says which it used. A game that never misses (every
+row's `missed` equal) is ranked by its heavy frames, and only rows that tie
+on those fall to the average.
+
+`--rank work` orders the table by `work` alone, the ranking `choose` used
+before, and `choose` prints both rankings under the table either way.
+Failed rows and rows missing a ranked column go last, unranked. A gate
+without `vblanks` is ranked by `work`, and one with neither stays in build
+order.
+
+NitroXide 13f7c0e shows why (its `pgo-choose`: the six variants, the train
+tape over polls 396..1200, discs with the four CD-DA songs; the frame budget
+came out as 1 vblank from `off`'s pacing):
+
+| variant                    | frames at 60 | `missed` | frame work p95 | p99     | `work`  |
+|----------------------------|-------------:|---------:|---------------:|--------:|--------:|
+| `off`                      | 748 of 775   | 3.48%    | 551,458        | 626,608 | 323,407,463 cycles |
+| `hot=500+profi`            | 676 of 739   | 8.53%    | 561,066        | 617,028 | -4.74%  |
+| `accurate+nopgso+hot=1000` | 670 of 736   | 8.97%    | 561,789        | 613,121 | -5.90%  |
+| `accurate+nopgso+hot=1500` | 650 of 726   | 10.47%   | 562,868        | 617,027 | -6.75%  |
+| `hot=500`                  | 646 of 724   | 10.77%   | 565,134        | 619,411 | -6.55%  |
+| `default`                  | 606 of 704   | 13.92%   | 569,268        | 632,913 | -8.22%  |
+
+Ranked by average work, `default` won by 8.22%, and it shows the fewest
+frames at 60. Every profiled variant does less work on average and more on
+the frames at p95, and those decide which frames make the vblank (at p99,
+past the frames that miss, most do a little less).
 
 The gate is the game's own judgement, so it should replay a training tape
 *and* one the profile never saw, and check correctness (hashes, poll-bound
@@ -355,7 +395,7 @@ group covers the route ticks that ran wholly inside the `--polls` window
 | `cycles` | bus cycles in those ticks |
 | `icache` | I-cache refill stall cycles in those ticks |
 | `frame_p50`, `frame_p95` | bus cycles from one flip to the next (the median and 95th percentile): how long each frame stayed on screen, which is what a player sees |
-| `vblanks` | how many route ticks each frame stayed on screen, as `vblanks:frames` pairs (`2:937,3:6` is 937 frames at 30 fps and 6 at 20) |
+| `vblanks` | how many route ticks each frame stayed on screen, as `vblanks:frames` pairs (`2:937,3:6` is 937 frames at 30 fps and 6 at 20): the deadline `choose` ranks by |
 | `vram`, `display` | the frontend's `--dump-hash` at the stop: equal across builds only when the guest's simulation does not depend on its own speed (VoXide's `lockstep` feature, for example) |
 
 A game locked to the display (every frame two vblanks, like VoXide or
@@ -366,11 +406,24 @@ start of the window's first tick to the stop (the first flip after poll `TO`):
 
 | key      | meaning |
 |----------|---------|
-| `work_cycles` | bus cycles spent outside wait loops: the number `choose` ranks by |
+| `work_cycles` | bus cycles spent outside wait loops: the average `choose` breaks its last ties with |
 | `work_instr` | instructions retired outside wait loops |
-| `wait_cycles` | cycles inside wait loops: their instructions plus the MMIO and RAM-load stalls charged to them |
+| `wait_cycles` | cycles inside wait loops: their instructions plus every I-cache, RAM-load and MMIO stall charged to them |
 | `wait_share` | `wait_cycles` as a share of all cycles in that span |
 | `work_per_frame` | `work_cycles` over the frames presented in that span |
+| `frame_work_p50`, `frame_work_p95`, `frame_work_p99` | work cycles of the frames the window presented (the median, 95th and 99th percentile): what a frame costs before its wait, the heavy ones deciding which frames miss |
+
+A frame's work is the work of the route ticks after one flip up to and
+including the tick of the next. A flip lands late in its route tick, so the
+little that follows it there is the start of the next frame: in NitroXide's
+30 fps stretches a flip tick is about 15% work and the tick after it about
+94%. Waiting is split between ticks by PC samples, one every
+61 instructions, each standing for 61 instructions at its address and
+waiting what the exact counts say an instruction there waits on average; a
+spell of waiting is one run, so a tick is off by at most 61 instructions a
+spell. stderr compares the samples' total with the exact `wait_cycles`. On
+NitroXide 13f7c0e every frame that stayed up two vblanks had more than one
+vblank of work, and every other frame less.
 
 Wait loops are found in the code itself, not by name, so psx-rt's waits, a
 game's own (Quake's `gpu_end_frame`, VoXide's `frame_present`, HL's `play`)
@@ -441,16 +494,35 @@ and 3.90%).
 This costs a second replay: the per-line logs can only start at a route tick,
 so a short first replay (to 30 polls past `FROM`) finds the tick in which
 poll `FROM` lands, and the full one logs every retired instruction per
-16-byte I-cache line (`--pc-line-log`), or per word, with the MMIO and
-RAM-load stalls on the same key, then dumps RAM for the code. `measure`
+16-byte I-cache line (`--pc-line-log`), or per word, with the I-cache,
+RAM-load and MMIO stalls on the same key and a PC sample every 61
+instructions per route tick, then dumps RAM for the code. A frontend without
+`--icache-stall-line-log` leaves the wait loops' I-cache stalls in work and
+says so. `measure`
 stops if the two replays disagree at that tick. The frontend's own output
 goes to stderr so it cannot land in the table.
 
-Two approximations, both small next to the differences a variant makes:
-per line, a line the loop touches counts as wait in full (the instructions
-sharing it run once per call, not once per iteration; per word this one is
-gone), and a wait loop's I-cache and other stalls stay in `work_cycles` (a
-spin loop stays cached). A guest that
+One approximation, small next to the differences a variant makes: per line,
+a line the loop touches counts as wait in full (the instructions sharing it
+run once per call, not once per iteration; per word it is gone). The GTE,
+multiply and DMA-contention stalls have no per-line log, so they stay work
+wherever they fall; a spin loop does no GTE or multiply work.
+
+A spin loop's I-cache refills are waiting, too. A layout can put a wait loop
+in the same I-cache set as the hazard trampoline it jumps through, and then
+every spin refills both lines, as the flip wait at 0x80017d18 and its
+trampoline at 0x8008fd14 did in NitroXide builds made while tuning its
+60 fps path. Those refills end when the vblank comes, like the spin, so they
+are waiting. Two of those builds (36e9fa5 with two different `draw.rs`
+experiments, train polls 396..1200) kept the same pacing, 574 frames at 60
+and 114 at 30:
+
+| build                      | I-cache stalls | work per frame, refills as work | refills as waiting |
+|----------------------------|---------------:|--------------------------------:|-------------------:|
+| wait loop and trampoline apart | 13,232,661 | 420,929 | 420,881 |
+| in one I-cache set         | 50,701,974     | 535,552                         | 437,503            |
+
+A guest that
 renders a different number of frames per build (NitroXide without a
 lockstep build drew 394 to 396 in the same polls) does more work for the
 extra frames; compare `work_per_frame` there too.
@@ -561,8 +633,11 @@ after large changes, and whenever the game repins onto a different SDK.
   work instructions and 15% fewer I-cache stalls. Count `jal` to memcpy in the
   disassembly of the two builds before blaming the profile.
 - **`ticks` and `cycles` are the same for every variant.** The game is locked
-  to the display; rank by `work_cycles` (which `choose` does when the gate
-  prints it) and check `vblanks` for frames that got slower.
+  to the display; `vblanks` says how many frames missed, and `choose` ranks
+  by those, then by the heavy frames' work, then by `work_cycles`.
+- **`choose` picks a variant with more work on average.** It lost fewer
+  frames: the variant with the lower average made the heavy frames slower
+  (see "choose"). `--rank work` gives the old order.
 - **`measure` reports a wait loop that is not one, or misses one.** Its
   addresses are on stderr; look them up in the link map. The rule is in
   `src/work.rs` with a test per pattern it accepts or rejects; add the new
