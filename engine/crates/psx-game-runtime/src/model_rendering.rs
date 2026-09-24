@@ -10,12 +10,12 @@
 
 use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
 use psx_engine::{
-    telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping, ModelUvOffset,
-    PredecodedModelInfo, PrimitivePacketArena, PrimitiveSink, ProjectedLit, ProjectedVertex,
-    RoomPoint, SimTick, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
-    TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
-    WorldVertex,
+    projected_triangle_batchable, telemetry, Angle, CullMode, DepthPolicy, JointViewTransform,
+    JointWorldTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping,
+    ModelUvOffset, PredecodedModelInfo, PrimitivePacketArena, PrimitiveSink, ProjectedLit,
+    ProjectedVertex, RoomPoint, SimTick, TexturedModelGeometry, TexturedModelLayer,
+    TexturedModelRenderFace, TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass,
+    WorldSurfaceOptions, WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
@@ -39,7 +39,7 @@ use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 mod equipment;
 pub use equipment::ASSEMBLED_Q12;
 mod death_dissolve;
-pub use death_dissolve::ModelDeathDissolve;
+pub use death_dissolve::{ModelDeathCapture, ModelDeathDissolve};
 mod dash_assembly;
 pub use dash_assembly::PlayerDashAssembly;
 mod instances;

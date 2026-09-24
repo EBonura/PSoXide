@@ -880,6 +880,16 @@ pub(super) fn draw_player_equipment(
     out
 }
 
+/// One dissolving corpse at a time keeps its posed vertices here (about
+/// 3.7 KB); a second corpse dissolving at the same time takes the slower,
+/// per-frame path.
+fn death_capture() -> &'static mut mr::ModelDeathCapture<MODEL_VERTEX_CAP> {
+    static mut CAPTURE: mr::ModelDeathCapture<MODEL_VERTEX_CAP> = mr::ModelDeathCapture::new();
+    // SAFETY: the model draw pass runs on the one guest thread and holds the
+    // reference only for one instance draw.
+    unsafe { &mut *core::ptr::addr_of_mut!(CAPTURE) }
+}
+
 /// The entity timer keeps running offscreen, so culled corpses cannot restart.
 #[inline(never)]
 fn enemy_death_dissolve(
@@ -944,6 +954,7 @@ pub(super) fn draw_model_instances(
                 pose.pose().animation(),
                 video_hz,
             ),
+            Some(death_capture()),
             elapsed_tick,
             video_hz,
             camera,

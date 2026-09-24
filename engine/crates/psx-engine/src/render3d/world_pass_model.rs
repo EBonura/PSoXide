@@ -419,15 +419,40 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         material: TextureMaterial,
         options: WorldSurfaceOptions,
     ) -> TexturedModelRenderStats {
+        let safe = faces
+            .iter()
+            .all(|&face| projected_model_face_batchable(projected, face));
+        self.submit_projected_model_faces_checked(
+            triangles, projected, faces, material, options, safe,
+        )
+    }
+
+    /// [`Self::submit_projected_model_faces`] for faces the caller has already
+    /// found [`projected_model_face_batchable`], one by one, while it had
+    /// their corners in hand.
+    pub fn submit_batchable_projected_model_faces(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> TexturedModelRenderStats {
+        self.submit_projected_model_faces_checked(
+            triangles, projected, faces, material, options, true,
+        )
+    }
+
+    fn submit_projected_model_faces_checked(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        safe: bool,
+    ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
-        let safe = faces.iter().all(|face| {
-            let indices = face.vertex_indices().map(usize::from);
-            indices.iter().all(|&i| i < projected.len())
-                && indices
-                    .iter()
-                    .all(|&i| projected[i] != ProjectedVertex::INVALID && projected[i].sz > 0)
-                && projected_triangle_hw_safe(indices.map(|i| projected[i]))
-        });
         if safe
             && !material.is_translucent()
             && options.cull_mode == CullMode::Back
@@ -2707,6 +2732,36 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 options,
                 stats,
             )
+        }
+    }
+
+    /// Submit one already projected textured triangle from prepacked packet
+    /// words: no culling, no splitting, depth averaged from its corners,
+    /// `options.render_layer` as given. For effects that draw many loose
+    /// triangles, each with its own colour. `false` once the primitive or
+    /// command arena is full; `stats` records which.
+    #[inline(always)]
+    pub fn submit_projected_packed_triangle(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        material: TexturedPacketMaterial,
+        options: &WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        match self.submit_projected_model_triangle_preclamped_packed_average_untracked(
+            triangles, verts, uv_words, material, *options,
+        ) {
+            ModelTrianglePacketResult::Submitted => true,
+            ModelTrianglePacketResult::CommandOverflow => {
+                stats.command_overflow = true;
+                false
+            }
+            ModelTrianglePacketResult::PrimitiveOverflow => {
+                stats.primitive_overflow = true;
+                false
+            }
         }
     }
 
