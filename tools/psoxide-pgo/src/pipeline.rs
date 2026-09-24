@@ -58,7 +58,7 @@ pub const USAGE: &str = "\
                            [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
        psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V] -- CARGO-ARGS...
        psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
-                           [--pack CMD] -- CARGO-ARGS...
+                           [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
                            [--launch-arg ARG]... [--name NAME] [--wait-range START..END]...
   GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-guard PATH]
@@ -116,6 +116,8 @@ struct Options {
     image: Option<PathBuf>,
     name: Option<String>,
     wait_ranges: Vec<(u32, u32)>,
+    frame_budget: Option<u64>,
+    objective: Objective,
     cargo: Vec<String>,
 }
 
@@ -193,6 +195,28 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
             "--profile" => options.profile = Some(path(value()?)?),
             "--variant" => options.variants.push(value()?),
             "--gate" => options.gate = Some(value()?),
+            "--frame-budget" => {
+                let text = value()?;
+                match text.parse() {
+                    Ok(vblanks) if vblanks > 0 => options.frame_budget = Some(vblanks),
+                    _ => {
+                        return Err(format!(
+                            "--frame-budget wants the vblanks a frame may take (1 for 60 fps, \
+                             2 for 30), not {text:?}"
+                        )
+                        .into())
+                    }
+                }
+            }
+            "--rank" => {
+                options.objective = match value()?.as_str() {
+                    "deadline" => Objective::Deadline,
+                    "work" => Objective::Work,
+                    other => {
+                        return Err(format!("--rank wants deadline or work, not {other:?}").into())
+                    }
+                }
+            }
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -789,6 +813,10 @@ fn window_histogram(
     Ok((kept.values().filter(|keep| **keep).count(), kept.len()))
 }
 
+/// Retired instructions between the measuring replay's PC samples, which
+/// place its waiting in route ticks. A prime, like [`SAMPLE_INTERVAL`].
+const TICK_SAMPLE_INTERVAL: u64 = 61;
+
 /// Polls past the window's first one that the locating replay runs to, so
 /// the route tick in which poll FROM lands is logged before it stops.
 const LOCATE_LEAD_POLLS: u64 = 30;
@@ -909,6 +937,112 @@ struct Work {
     wait_cycles: u64,
     span_cycles: u64,
     frames: u64,
+    /// Work cycles each whole route tick of the span spent, by route-log
+    /// index (see [`tick_wait`]).
+    tick_work: HashMap<usize, u64>,
+}
+
+/// Cycles spent waiting: the waiting instructions' issue plus every stall
+/// charged to them (`stalls`: I-cache refills, RAM loads, MMIO), in
+/// proportion where only part of a unit's count waited. A layout can put a
+/// wait loop in the same I-cache set as its hazard trampoline, and the
+/// refills that costs on every spin wait for the same event as the spin.
+fn wait_cycles(
+    wait: &HashMap<u32, u64>,
+    counts: &HashMap<u32, u64>,
+    stalls: &[&HashMap<u32, u64>],
+) -> u64 {
+    let on = |log: &HashMap<u32, u64>, at: u32| log.get(&at).copied().unwrap_or(0);
+    wait.iter()
+        .map(|(&at, &count)| {
+            let stalled: u128 = stalls.iter().map(|log| u128::from(on(log, at))).sum();
+            count + (stalled * u128::from(count) / u128::from(on(counts, at).max(1))) as u64
+        })
+        .sum()
+}
+
+/// Wait cycles per retired instruction at each unit that waited, on the
+/// same terms as [`wait_cycles`].
+fn wait_per_instruction(
+    wait: &HashMap<u32, u64>,
+    counts: &HashMap<u32, u64>,
+    stalls: &[&HashMap<u32, u64>],
+) -> HashMap<u32, f64> {
+    let on = |log: &HashMap<u32, u64>, at: u32| log.get(&at).copied().unwrap_or(0);
+    wait.iter()
+        .filter_map(|(&at, &count)| {
+            let total = on(counts, at);
+            if total == 0 {
+                return None;
+            }
+            let stalled: u64 = stalls.iter().map(|log| on(log, at)).sum();
+            let cycles = count as f64 * (total + stalled) as f64 / total as f64;
+            Some((at, cycles / total as f64))
+        })
+        .collect()
+}
+
+/// A `--pc-sample-window-log` with one route tick per window, as
+/// (route-log index, PC, samples). Samples taken while `start` ticks had
+/// completed belong to route-log row `start + 1`.
+fn read_tick_samples(path: &Path) -> Result<Vec<(usize, u32, u64)>> {
+    let mut samples = Vec::new();
+    for row in fs::read_to_string(path)?.lines().skip(1) {
+        let mut fields = row.split(',');
+        let (Some(start), Some(pc), Some(count)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        samples.push((
+            start.parse::<usize>()? + 1,
+            u32::from_str_radix(pc.trim_start_matches("0x"), 16)?,
+            count.parse()?,
+        ));
+    }
+    Ok(samples)
+}
+
+/// Cycles each route tick spent waiting, estimated from PC samples taken
+/// every `interval` retired instructions: a sample stands for `interval`
+/// instructions at its unit, and each of those waits what the exact counts
+/// say an instruction there waits on average. A spell of waiting is one run
+/// of instructions, so a tick's estimate is off by at most `interval`
+/// instructions for each spell in it.
+fn tick_wait(
+    samples: &[(usize, u32, u64)],
+    interval: u64,
+    unit: u32,
+    per_instruction: &HashMap<u32, f64>,
+) -> HashMap<usize, u64> {
+    let mut wait: HashMap<usize, f64> = HashMap::new();
+    for &(tick, pc, count) in samples {
+        if let Some(cycles) = per_instruction.get(&(pc & !(unit - 1))) {
+            *wait.entry(tick).or_default() += (count * interval) as f64 * cycles;
+        }
+    }
+    wait.into_iter()
+        .map(|(tick, cycles)| (tick, cycles.round() as u64))
+        .collect()
+}
+
+/// Work cycles of each frame the window presented, sorted: the route ticks
+/// after one flip up to and including the tick of the next.
+fn frame_work(ticks: &[Tick], window: &[usize], tick_work: &HashMap<usize, u64>) -> Vec<u64> {
+    let flips: Vec<usize> = window
+        .iter()
+        .copied()
+        .filter(|&tick| ticks[tick].flipped)
+        .collect();
+    let mut frames: Vec<u64> = flips
+        .windows(2)
+        .map(|pair| {
+            (pair[0] + 1..=pair[1])
+                .map(|tick| tick_work.get(&tick).copied().unwrap_or(0))
+                .sum()
+        })
+        .collect();
+    frames.sort_unstable();
+    frames
 }
 
 /// Split the replay's span into work and wait (see work.rs), and list the
@@ -922,10 +1056,14 @@ fn split_work(
     to: u64,
     unit: u32,
     ranges: &[(u32, u32)],
+    icache_lines: bool,
 ) -> Result<Work> {
     let counts = read_line_log(&logs.lines)?;
-    let mmio = read_line_log(&logs.mmio)?;
-    let ram_load = read_line_log(&logs.ram_load)?;
+    let mut stall_logs = vec![read_line_log(&logs.mmio)?, read_line_log(&logs.ram_load)?];
+    if icache_lines {
+        stall_logs.push(read_line_log(&logs.icache)?);
+    }
+    let stalls: Vec<&HashMap<u32, u64>> = stall_logs.iter().collect();
     let ram = fs::read(&logs.ram)?;
     let (Some(end_instructions), Some(end_cycles)) = (report.instructions, report.cycles) else {
         return Err("the frontend printed no final tick= and cycles=".into());
@@ -939,7 +1077,6 @@ fn split_work(
         )
         .into());
     }
-    let on = |log: &HashMap<u32, u64>, at: u32| log.get(&at).copied().unwrap_or(0);
     let percent = |count: u64| 100.0 * count as f64 / span_instructions as f64;
     let split = crate::work::split(&ram, &counts, unit, ranges)?;
     for (found, count) in &split.loops {
@@ -974,18 +1111,7 @@ fn split_work(
     }
     let wait = split.wait;
     let wait_instructions: u64 = wait.values().sum();
-    // Issue plus the stalls charged to the waiting instructions, in
-    // proportion where only part of a word's count waited. A spin loop
-    // stays in the I-cache and does no GTE or multiply work, so the other
-    // stall kinds are negligible there.
-    let wait_cycles = wait_instructions
-        + wait
-            .iter()
-            .map(|(&at, &count)| {
-                let stalls = u128::from(on(&mmio, at) + on(&ram_load, at));
-                (stalls * u128::from(count) / u128::from(on(&counts, at).max(1))) as u64
-            })
-            .sum::<u64>();
+    let wait_cycles = wait_cycles(&wait, &counts, &stalls);
     let span_cycles = end_cycles - ticks[start].cycles_total;
     // Frames presented in the span: the flips in its whole ticks, and the
     // one the replay stops on once it has passed poll `to`.
@@ -995,12 +1121,37 @@ fn split_work(
             .last()
             .is_some_and(|last| last.instructions_total < end_instructions);
     let frames = tail.iter().filter(|tick| tick.flipped).count() as u64 + u64::from(stop_flip);
+    let samples: Vec<(usize, u32, u64)> = read_tick_samples(&logs.windows)?
+        .into_iter()
+        .filter(|&(tick, _, _)| tick > start && tick < ticks.len())
+        .collect();
+    let waits = tick_wait(
+        &samples,
+        TICK_SAMPLE_INTERVAL,
+        unit,
+        &wait_per_instruction(&wait, &counts, &stalls),
+    );
+    let estimated: u64 = waits.values().sum();
+    let in_ticks: u64 = tail.iter().map(|tick| tick.cycles).sum();
+    eprintln!(
+        "psoxide-pgo: waiting per route tick, from 1-in-{TICK_SAMPLE_INTERVAL} PC samples: \
+         {estimated} cycles in the span's whole ticks; exactly {wait_cycles} in the span, \
+         which runs {} cycles past its last whole tick",
+        span_cycles - in_ticks
+    );
+    let tick_work = (start + 1..ticks.len())
+        .map(|tick| {
+            let waited = waits.get(&tick).copied().unwrap_or(0);
+            (tick, ticks[tick].cycles.saturating_sub(waited))
+        })
+        .collect();
     Ok(Work {
         instructions: span_instructions - wait_instructions,
         cycles: span_cycles.saturating_sub(wait_cycles),
         wait_cycles,
         span_cycles,
         frames,
+        tick_work,
     })
 }
 
@@ -1011,6 +1162,8 @@ struct MeasureLogs {
     lines: PathBuf,
     mmio: PathBuf,
     ram_load: PathBuf,
+    icache: PathBuf,
+    windows: PathBuf,
     ram: PathBuf,
 }
 
@@ -1024,6 +1177,8 @@ impl MeasureLogs {
             lines: file("lines.csv"),
             mmio: file("mmio.csv"),
             ram_load: file("ram-load.csv"),
+            icache: file("icache.csv"),
+            windows: file("windows.csv"),
             ram: file("ram.bin"),
         }
     }
@@ -1035,6 +1190,8 @@ impl MeasureLogs {
             &self.lines,
             &self.mmio,
             &self.ram_load,
+            &self.icache,
+            &self.windows,
             &self.ram,
         ] {
             let _ = fs::remove_file(path);
@@ -1081,14 +1238,18 @@ fn same_at(ticks: &[Tick], start: usize, located: Tick) -> Result<()> {
     Ok(())
 }
 
-/// Whether the frontend can count every word (`--pc-log-words`) instead
-/// of every 16-byte line.
-fn counts_words(frontend: &Path) -> Result<bool> {
+/// Whether `frontend launch` lists `flag`: `--pc-log-words` counts every
+/// word instead of every 16-byte line, and `--icache-stall-line-log`
+/// charges I-cache refills to the fetch that missed.
+fn lists(frontend: &Path, flag: &str) -> Result<bool> {
     let help = Command::new(frontend)
         .args(["launch", "--help"])
         .stderr(Stdio::null())
         .output()?;
-    Ok(String::from_utf8_lossy(&help.stdout).contains("--pc-log-words"))
+    let help = String::from_utf8_lossy(&help.stdout);
+    Ok(help
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .any(|word| word == flag))
 }
 
 /// Run one replay and print its gameplay-window totals as `key=value` lines
@@ -1118,7 +1279,8 @@ fn measure_with(options: &Options, logs: &MeasureLogs) -> Result<()> {
 
     // Per-word counts, where the frontend has them, make the split exact
     // and let a wait loop's calls count (see work::attribute).
-    let words = counts_words(frontend)?;
+    let words = lists(frontend, "--pc-log-words")?;
+    let icache_lines = lists(frontend, "--icache-stall-line-log")?;
     let mut command = launch(frontend, image, spec, &options.launch_args);
     if !options.launch_args.iter().any(|arg| arg == "--dump-hash") {
         command.arg("--dump-hash");
@@ -1138,8 +1300,27 @@ fn measure_with(options: &Options, logs: &MeasureLogs) -> Result<()> {
         .arg("--ram-load-stall-line-log")
         .arg(&logs.ram_load)
         .args(["--ram-load-stall-line-start-route-tick", &start_tick])
+        .arg("--pc-sample-window-log")
+        .arg(&logs.windows)
+        .args(["--pc-sample-window-ticks", "1"])
+        .args([
+            "--pc-sample-instructions",
+            &TICK_SAMPLE_INTERVAL.to_string(),
+        ])
         .arg("--dump-ram")
         .arg(&logs.ram);
+    if icache_lines {
+        command
+            .arg("--icache-stall-line-log")
+            .arg(&logs.icache)
+            .args(["--icache-stall-line-start-route-tick", &start_tick]);
+    } else {
+        eprintln!(
+            "psoxide-pgo: {} has no --icache-stall-line-log, so the wait loops' I-cache \
+             refills count as work",
+            frontend.display()
+        );
+    }
     let report = replay(command, "measuring replay")?;
     let ticks = read_route_log(&logs.route)?;
     same_at(&ticks, start, located)?;
@@ -1169,6 +1350,7 @@ fn measure_with(options: &Options, logs: &MeasureLogs) -> Result<()> {
         polls.1,
         unit,
         &options.wait_ranges,
+        icache_lines,
     )?;
     println!("{name}.work_instr={}", work.instructions);
     println!("{name}.work_cycles={}", work.cycles);
@@ -1179,6 +1361,12 @@ fn measure_with(options: &Options, logs: &MeasureLogs) -> Result<()> {
     );
     if let Some(per_frame) = work.cycles.checked_div(work.frames) {
         println!("{name}.work_per_frame={per_frame}");
+    }
+    let frames = frame_work(&ticks, &window, &work.tick_work);
+    if !frames.is_empty() {
+        for (key, q) in [("p50", 0.5), ("p95", 0.95), ("p99", 0.99)] {
+            println!("{name}.frame_work_{key}={}", percentile(&frames, q));
+        }
     }
     // Final-state hashes at the stop poll: equal across builds only for a
     // guest whose simulation does not depend on its own speed.
@@ -1425,7 +1613,7 @@ fn order(guest: &Guest, options: &Options) -> Result<()> {
     if options.runs.is_empty() || options.runs.iter().any(|run| run.polls.is_none()) {
         return Err("order needs --polls FROM..TO for every --tape (or one without a tape)".into());
     }
-    if !counts_words(frontend)? {
+    if !lists(frontend, "--pc-log-words")? {
         return Err(format!("{} has no --pc-log-words", frontend.display()).into());
     }
     let linked = apply(guest, options.profile.as_deref(), None, &compile)?;
@@ -1505,6 +1693,7 @@ fn gate_values(output: &str) -> Vec<(String, String)> {
 }
 
 /// One variant's gate result.
+#[derive(Clone)]
 struct GateRow {
     variant: String,
     passed: bool,
@@ -1558,70 +1747,355 @@ fn format_table(rows: &[GateRow]) -> String {
     out
 }
 
-/// Whether a gate column holds work cycles (`work_cycles` or `NAME.work_cycles`).
-fn is_work_column(key: &str) -> bool {
-    key == "work_cycles" || key.ends_with(".work_cycles")
+/// What `choose` ranks the passing variants by (`--rank`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Objective {
+    /// Frames that miss their deadline, then p95 and p99 frame work, then
+    /// average work. A game locked to the display shows every frame for a
+    /// whole number of vblanks, so what a player sees is how many frames
+    /// overrun the budget, and those are the heavy ones.
+    #[default]
+    Deadline,
+    /// Average work cycles alone.
+    Work,
 }
 
-/// Order the passing rows by work cycles, fastest first, and give each a
-/// `work` column: its work cycles against the `off` row (or the first
-/// passing row with every work column), averaged over the gate's replays so
-/// each tape counts the same. Returns that baseline's name, or `None` when
-/// the gate reports no work cycles. Failed rows and rows missing a work
-/// column keep their order at the end.
-fn rank_by_work(rows: &mut Vec<GateRow>) -> Option<String> {
+/// The value of gate column `key` in `row`, as a number.
+fn number(row: &GateRow, key: &str) -> Option<f64> {
+    row.values
+        .iter()
+        .find(|(column, _)| column == key)
+        .and_then(|(_, value)| value.parse().ok())
+}
+
+/// A `vblanks` column (`1:748,2:27`) as (vblanks, frames) pairs.
+fn parse_vblanks(text: &str) -> Option<Vec<(u64, u64)>> {
+    text.split(',')
+        .map(|pair| {
+            let (vblanks, frames) = pair.split_once(':')?;
+            Some((vblanks.parse().ok()?, frames.parse().ok()?))
+        })
+        .collect()
+}
+
+/// The pacing most frames kept, the fewer vblanks on a tie.
+fn modal_budget(histogram: &[(u64, u64)]) -> Option<u64> {
+    histogram
+        .iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+        .map(|&(vblanks, _)| vblanks)
+}
+
+/// Frames on screen for more than `budget` vblanks, and all frames.
+fn missed(histogram: &[(u64, u64)], budget: u64) -> (u64, u64) {
+    let over = histogram
+        .iter()
+        .filter(|(vblanks, _)| *vblanks > budget)
+        .map(|(_, frames)| frames)
+        .sum();
+    (over, histogram.iter().map(|(_, frames)| frames).sum())
+}
+
+/// The gate columns named `key` or `NAME.key`, in the order they appear.
+fn columns_named(rows: &[GateRow], key: &str) -> Vec<String> {
+    let dotted = format!(".{key}");
     let mut columns: Vec<String> = Vec::new();
-    for row in rows.iter() {
-        for (key, _) in &row.values {
-            if is_work_column(key) && !columns.contains(key) {
-                columns.push(key.clone());
+    for row in rows {
+        for (column, _) in &row.values {
+            if (column == key || column.ends_with(&dotted)) && !columns.contains(column) {
+                columns.push(column.clone());
             }
         }
     }
-    if columns.is_empty() {
+    columns
+}
+
+/// One passing row's scores. Relative ones are against the baseline row,
+/// averaged over the gate's replays so every tape counts the same.
+#[derive(Clone, Debug, Default)]
+struct Scores {
+    /// Missed frames as a share of the frames presented, averaged.
+    missed: Option<f64>,
+    p95: Option<f64>,
+    p99: Option<f64>,
+    work: Option<f64>,
+}
+
+impl Scores {
+    fn deadline_order(&self, other: &Self) -> std::cmp::Ordering {
+        let by = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(a), Some(b)) => a.total_cmp(&b),
+            _ => std::cmp::Ordering::Equal,
+        };
+        by(self.missed, other.missed)
+            .then(by(self.p95, other.p95))
+            .then(by(self.p99, other.p99))
+            .then(by(self.work, other.work))
+    }
+
+    fn work_order(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.work, other.work) {
+            (Some(a), Some(b)) => a.total_cmp(&b),
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+
+    /// The columns these scores add to the table, in order.
+    fn columns(&self) -> Vec<(String, String)> {
+        let relative = |key: &str, value: Option<f64>| {
+            value.map(|value| (key.to_string(), format!("{:+.2}%", 100.0 * value)))
+        };
+        [
+            self.missed
+                .map(|value| ("missed".to_string(), format!("{:.2}%", 100.0 * value))),
+            relative("p95", self.p95),
+            relative("p99", self.p99),
+            relative("work", self.work),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+/// How `choose` ranked its rows.
+#[derive(Debug)]
+struct Ranking {
+    /// The row the relative columns are against.
+    baseline: String,
+    /// Each `vblanks` column, its frame budget and whether that came from
+    /// the baseline's pacing rather than `--frame-budget`.
+    budgets: Vec<(String, u64, bool)>,
+    /// The objective the table is ordered by.
+    objective: Objective,
+    /// Variants best first by each objective, with their added columns.
+    by_deadline: Vec<(String, Vec<(String, String)>)>,
+    by_work: Vec<(String, Vec<(String, String)>)>,
+}
+
+/// Score the passing rows against `off` (or the first passing row with
+/// every ranked column) and order them by `objective`, adding the `missed`,
+/// `p95`, `p99` and `work` columns in front of each. `missed` counts the
+/// frames each `vblanks` column shows on screen for longer than `budget`
+/// vblanks, or than the baseline's most common pacing with no budget
+/// given. `p95` and `p99` are the gate's `frame_work_p95` and
+/// `frame_work_p99`, and `work` its `work_cycles`, against the baseline.
+/// Returns `None` when the gate reports neither pacing nor work. Failed
+/// rows and rows missing a ranked column keep their order at the end.
+fn rank(rows: &mut Vec<GateRow>, budget: Option<u64>, objective: Objective) -> Option<Ranking> {
+    let work_columns = columns_named(rows, "work_cycles");
+    let pacing_columns = columns_named(rows, "vblanks");
+    if work_columns.is_empty() && pacing_columns.is_empty() {
         return None;
     }
-    let work = |row: &GateRow| -> Option<Vec<f64>> {
-        if !row.passed {
-            return None;
-        }
-        columns
+    let pacing = |row: &GateRow| -> Option<Vec<Vec<(u64, u64)>>> {
+        pacing_columns
             .iter()
             .map(|column| {
-                row.values
-                    .iter()
-                    .find(|(key, _)| key == column)
-                    .and_then(|(_, value)| value.parse::<f64>().ok())
+                let (_, text) = row.values.iter().find(|(key, _)| key == column)?;
+                parse_vblanks(text)
             })
             .collect()
+    };
+    let complete = |row: &GateRow| {
+        row.passed
+            && pacing(row).is_some()
+            && work_columns
+                .iter()
+                .all(|column| number(row, column).is_some())
     };
     let baseline = rows
         .iter()
         .filter(|row| row.variant == "off")
         .chain(rows.iter())
-        .find_map(|row| Some((row.variant.clone(), work(row)?)))?;
-    let mut scored = Vec::new();
+        .find(|row| complete(row))?
+        .clone();
+    let baseline = &baseline;
+    let base_pacing = pacing(baseline).expect("the baseline is complete");
+    let budgets: Vec<(String, u64, bool)> = pacing_columns
+        .iter()
+        .zip(&base_pacing)
+        .map(|(column, histogram)| match budget {
+            Some(budget) => (column.clone(), budget, false),
+            None => (column.clone(), modal_budget(histogram).unwrap_or(1), true),
+        })
+        .collect();
+    // Frame work of each replay, where the baseline has it.
+    let frame_columns = |key: &str| -> Vec<String> {
+        columns_named(rows, key)
+            .into_iter()
+            .filter(|column| number(baseline, column).is_some())
+            .collect()
+    };
+    let (p95_columns, p99_columns) = (
+        frame_columns("frame_work_p95"),
+        frame_columns("frame_work_p99"),
+    );
+    let relative = |row: &GateRow, columns: &[String]| -> Option<f64> {
+        if columns.is_empty() {
+            return None;
+        }
+        let mut sum = 0.0;
+        for column in columns {
+            sum += number(row, column)? / number(baseline, column)? - 1.0;
+        }
+        Some(sum / columns.len() as f64)
+    };
+    let score = |row: &GateRow| -> Option<Scores> {
+        if !complete(row) {
+            return None;
+        }
+        let missed = (!pacing_columns.is_empty()).then(|| {
+            let shares: f64 = pacing(row)
+                .expect("the row is complete")
+                .iter()
+                .zip(&budgets)
+                .map(|(histogram, (_, budget, _))| {
+                    let (over, frames) = missed(histogram, *budget);
+                    over as f64 / frames.max(1) as f64
+                })
+                .sum();
+            shares / pacing_columns.len() as f64
+        });
+        Some(Scores {
+            missed,
+            p95: relative(row, &p95_columns),
+            p99: relative(row, &p99_columns),
+            work: relative(row, &work_columns),
+        })
+    };
+    let baseline_name = baseline.variant.clone();
+    let mut scored: Vec<(Scores, GateRow)> = Vec::new();
     let mut unscored = Vec::new();
-    for mut row in rows.drain(..) {
-        match work(&row) {
-            Some(values) => {
-                let score = values
-                    .iter()
-                    .zip(&baseline.1)
-                    .map(|(value, base)| value / base - 1.0)
-                    .sum::<f64>()
-                    / values.len() as f64;
-                row.values
-                    .insert(0, ("work".to_string(), format!("{:+.2}%", 100.0 * score)));
-                scored.push((score, row));
-            }
+    for row in rows.drain(..) {
+        match score(&row) {
+            Some(scores) => scored.push((scores, row)),
             None => unscored.push(row),
         }
     }
-    scored.sort_by(|a, b| a.0.total_cmp(&b.0));
-    rows.extend(scored.into_iter().map(|(_, row)| row));
+    // Without pacing there is no deadline, and without work cycles no
+    // average: rank by what the gate gave.
+    let objective = match objective {
+        Objective::Deadline if pacing_columns.is_empty() => Objective::Work,
+        Objective::Work if work_columns.is_empty() => Objective::Deadline,
+        objective => objective,
+    };
+    let listed = |order: &dyn Fn(&Scores, &Scores) -> std::cmp::Ordering| {
+        let mut sorted: Vec<&(Scores, GateRow)> = scored.iter().collect();
+        sorted.sort_by(|a, b| order(&a.0, &b.0));
+        sorted
+            .into_iter()
+            .map(|(scores, row)| (row.variant.clone(), scores.columns()))
+            .collect::<Vec<_>>()
+    };
+    let by_deadline = if pacing_columns.is_empty() {
+        Vec::new()
+    } else {
+        listed(&Scores::deadline_order)
+    };
+    let by_work = if work_columns.is_empty() {
+        Vec::new()
+    } else {
+        listed(&Scores::work_order)
+    };
+    scored.sort_by(|a, b| match objective {
+        Objective::Deadline => a.0.deadline_order(&b.0),
+        Objective::Work => a.0.work_order(&b.0),
+    });
+    for (scores, mut row) in scored {
+        for (at, column) in scores.columns().into_iter().enumerate() {
+            row.values.insert(at, column);
+        }
+        rows.push(row);
+    }
     rows.extend(unscored);
-    Some(baseline.0)
+    Some(Ranking {
+        baseline: baseline_name,
+        budgets,
+        objective,
+        by_deadline,
+        by_work,
+    })
+}
+
+/// The rankings under the table: the budgets, then both orders, best first.
+fn format_ranking(ranking: &Ranking, rows: &[GateRow]) -> String {
+    let mut out = String::new();
+    let base = &ranking.baseline;
+    for (column, budget, derived) in &ranking.budgets {
+        let plural = if *budget == 1 { "" } else { "s" };
+        let source = if *derived {
+            let pacing = rows
+                .iter()
+                .find(|row| &row.variant == base)
+                .and_then(|row| row.values.iter().find(|(key, _)| key == column))
+                .map_or("-", |(_, value)| value.as_str());
+            format!("{base}'s most common pacing, {pacing}; --frame-budget N sets it")
+        } else {
+            "--frame-budget".to_string()
+        };
+        let _ = writeln!(
+            out,
+            "Frame budget for {column}: {budget} vblank{plural} a frame ({source})."
+        );
+    }
+    let list = |out: &mut String, ranked: &[(String, Vec<(String, String)>)]| {
+        let width = ranked
+            .iter()
+            .map(|(variant, _)| variant.len())
+            .max()
+            .unwrap_or(0);
+        for (place, (variant, columns)) in ranked.iter().enumerate() {
+            let columns: Vec<String> = columns
+                .iter()
+                .map(|(key, value)| format!("{key} {value}"))
+                .collect();
+            let _ = writeln!(
+                out,
+                "  {}. {variant:<width$}  {}",
+                place + 1,
+                columns.join("  ")
+            );
+        }
+    };
+    if !ranking.by_deadline.is_empty() {
+        let _ = writeln!(
+            out,
+            "By deadline: frames shown longer than the budget (`missed`), then frame work at \
+             p95 and p99 (`p95`, `p99`), then average work (`work`), each against {base}:"
+        );
+        list(&mut out, &ranking.by_deadline);
+    }
+    if !ranking.by_work.is_empty() {
+        let _ = writeln!(out, "By average work (`work`, against {base}):");
+        let work_only: Vec<(String, Vec<(String, String)>)> = ranking
+            .by_work
+            .iter()
+            .map(|(variant, columns)| {
+                let work = columns.iter().filter(|(key, _)| key == "work").cloned();
+                (variant.clone(), work.collect())
+            })
+            .collect();
+        list(&mut out, &work_only);
+    }
+    let _ = writeln!(
+        out,
+        "The table follows the {} ranking{}.",
+        match ranking.objective {
+            Objective::Deadline => "deadline",
+            Objective::Work => "average-work",
+        },
+        match (
+            ranking.objective,
+            ranking.by_deadline.is_empty(),
+            ranking.by_work.is_empty()
+        ) {
+            (Objective::Deadline, _, false) => "; --rank work orders it by average work",
+            (Objective::Work, false, _) => "; --rank deadline orders it by missed frames",
+            _ => "",
+        }
+    );
+    out
 }
 
 fn choose(guest: &Guest, options: &Options) -> Result<()> {
@@ -1706,13 +2180,10 @@ fn choose(guest: &Guest, options: &Options) -> Result<()> {
             values: gate_values(&output),
         });
     }
-    let ranked = rank_by_work(&mut rows);
+    let ranking = rank(&mut rows, options.frame_budget, options.objective);
     print!("\n{}", format_table(&rows));
-    if let Some(baseline) = ranked {
-        println!(
-            "Ranked by work cycles (the `work` column is against {baseline}); a faster \
-             variant that draws the same frames needs fewer."
-        );
+    if let Some(ranking) = ranking {
+        print!("{}", format_ranking(&ranking, &rows));
     }
     println!(
         "The last variant built is {}; build the winner with `apply --variant`.",
@@ -1970,7 +2441,8 @@ mod tests {
                 &[("a.work_cycles", "98"), ("b.work_cycles", "194")],
             ),
         ];
-        assert_eq!(rank_by_work(&mut rows).as_deref(), Some("off"));
+        let ranking = rank(&mut rows, None, Objective::Work).unwrap();
+        assert_eq!(ranking.baseline, "off");
         let order: Vec<(&str, &str)> = rows
             .iter()
             .map(|row| {
@@ -1992,7 +2464,7 @@ mod tests {
             ]
         );
         let mut plain = vec![row("off", true, &[("cycles", "1")])];
-        assert_eq!(rank_by_work(&mut plain), None);
+        assert!(rank(&mut plain, None, Objective::Deadline).is_none());
         assert_eq!(plain[0].values.len(), 1);
     }
 
@@ -2018,7 +2490,13 @@ mod tests {
                 ],
             ),
         ];
-        assert_eq!(rank_by_work(&mut rows).as_deref(), Some("base"));
+        let ranking = rank(&mut rows, None, Objective::Deadline).unwrap();
+        assert_eq!(ranking.baseline, "base");
+        assert_eq!(
+            ranking.objective,
+            Objective::Work,
+            "a gate without pacing ranks by work"
+        );
         let order: Vec<&str> = rows.iter().map(|row| row.variant.as_str()).collect();
         assert_eq!(order, vec!["base", "base+order"]);
         assert_eq!(
@@ -2090,5 +2568,250 @@ mod tests {
         fs::remove_file(&path).unwrap();
         assert_eq!(lines.get(&0x8003_3490), Some(&57_217_069));
         assert_eq!(lines.get(&0xbfc0_0180), Some(&3));
+    }
+
+    fn variants(rows: &[GateRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.variant.as_str()).collect()
+    }
+
+    fn value<'a>(row: &'a GateRow, key: &str) -> &'a str {
+        row.values
+            .iter()
+            .find(|(column, _)| column == key)
+            .map_or("-", |(_, value)| value.as_str())
+    }
+
+    /// A 60 fps game where the profiled build does less work on average
+    /// but more on its heavy frames, which are the ones that miss a vblank.
+    fn sixty_fps_rows() -> Vec<GateRow> {
+        vec![
+            row(
+                "hot=500+profi",
+                true,
+                &[
+                    ("train.vblanks", "1:700,2:50"),
+                    ("train.work_cycles", "990"),
+                    ("train.frame_work_p95", "580"),
+                    ("train.frame_work_p99", "640"),
+                ],
+            ),
+            row(
+                "off",
+                true,
+                &[
+                    ("train.vblanks", "1:750,2:25"),
+                    ("train.work_cycles", "1000"),
+                    ("train.frame_work_p95", "550"),
+                    ("train.frame_work_p99", "620"),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn choose_ranks_missed_frames_before_average_work() {
+        let mut rows = sixty_fps_rows();
+        let ranking = rank(&mut rows, None, Objective::Deadline).unwrap();
+        assert_eq!(
+            ranking.budgets,
+            vec![("train.vblanks".to_string(), 1, true)]
+        );
+        assert_eq!(variants(&rows), vec!["off", "hot=500+profi"]);
+        assert_eq!(value(&rows[0], "missed"), "3.23%");
+        assert_eq!(value(&rows[1], "missed"), "6.67%");
+        assert_eq!(value(&rows[1], "p95"), "+5.45%");
+        assert_eq!(value(&rows[1], "work"), "-1.00%");
+        let deadline: Vec<&str> = ranking
+            .by_deadline
+            .iter()
+            .map(|(v, _)| v.as_str())
+            .collect();
+        let work: Vec<&str> = ranking.by_work.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(deadline, vec!["off", "hot=500+profi"]);
+        assert_eq!(work, vec!["hot=500+profi", "off"]);
+        let text = format_ranking(&ranking, &rows);
+        assert!(
+            text.contains("train.vblanks: 1 vblank a frame (off's most common pacing, 1:750,2:25")
+        );
+        assert!(text.contains("--rank work orders it by average work"));
+
+        // The old order stays one flag away.
+        let mut rows = sixty_fps_rows();
+        let ranking = rank(&mut rows, None, Objective::Work).unwrap();
+        assert_eq!(ranking.objective, Objective::Work);
+        assert_eq!(variants(&rows), vec!["hot=500+profi", "off"]);
+    }
+
+    #[test]
+    fn equal_misses_fall_to_frame_work_then_average_work() {
+        // Locked at 30 fps: no frame misses two vblanks, so the heavy
+        // frames decide, and the average only once those tie too.
+        let locked = |p95: &str, p99: &str, work: &str| {
+            [
+                ("a.vblanks".to_string(), "2:900".to_string()),
+                ("a.frame_work_p95".to_string(), p95.to_string()),
+                ("a.frame_work_p99".to_string(), p99.to_string()),
+                ("a.work_cycles".to_string(), work.to_string()),
+            ]
+        };
+        let row_of = |variant: &str, values: [(String, String); 4]| GateRow {
+            variant: variant.to_string(),
+            passed: true,
+            values: values.to_vec(),
+        };
+        let mut rows = vec![
+            row_of("off", locked("900", "990", "1000")),
+            row_of("cheap-average", locked("910", "990", "900")),
+            row_of("cheap-p99", locked("900", "980", "1010")),
+            row_of("same-heavy", locked("900", "990", "990")),
+        ];
+        let ranking = rank(&mut rows, None, Objective::Deadline).unwrap();
+        assert_eq!(ranking.budgets, vec![("a.vblanks".to_string(), 2, true)]);
+        assert_eq!(
+            variants(&rows),
+            vec!["cheap-p99", "same-heavy", "off", "cheap-average"]
+        );
+        assert!(rows.iter().all(|row| value(row, "missed") == "0.00%"));
+    }
+
+    #[test]
+    fn a_frame_budget_overrides_the_observed_pacing() {
+        let mut rows = sixty_fps_rows();
+        let ranking = rank(&mut rows, Some(2), Objective::Deadline).unwrap();
+        assert_eq!(
+            ranking.budgets,
+            vec![("train.vblanks".to_string(), 2, false)]
+        );
+        // Nothing takes three vblanks, so frame work decides.
+        assert_eq!(variants(&rows), vec!["off", "hot=500+profi"]);
+        assert_eq!(value(&rows[1], "missed"), "0.00%");
+        assert!(format_ranking(&ranking, &rows).contains("2 vblanks a frame (--frame-budget)"));
+    }
+
+    #[test]
+    fn missed_frames_average_over_replays_and_skip_failures() {
+        let mut rows = vec![
+            row(
+                "off",
+                true,
+                &[("a.vblanks", "1:90,2:10"), ("b.vblanks", "1:100")],
+            ),
+            row(
+                "default",
+                true,
+                &[("a.vblanks", "1:100"), ("b.vblanks", "1:80,3:20")],
+            ),
+            row(
+                "hot=500",
+                false,
+                &[("a.vblanks", "1:100"), ("b.vblanks", "1:100")],
+            ),
+        ];
+        let ranking = rank(&mut rows, None, Objective::Deadline).unwrap();
+        assert_eq!(variants(&rows), vec!["off", "default", "hot=500"]);
+        assert_eq!(value(&rows[0], "missed"), "5.00%");
+        assert_eq!(value(&rows[1], "missed"), "10.00%");
+        assert_eq!(value(&rows[2], "missed"), "-");
+        assert!(ranking.by_work.is_empty());
+    }
+
+    #[test]
+    fn pacing_histograms_parse_and_count_misses() {
+        let histogram = parse_vblanks("1:748,2:27,3:1").unwrap();
+        assert_eq!(histogram, vec![(1, 748), (2, 27), (3, 1)]);
+        assert_eq!(missed(&histogram, 1), (28, 776));
+        assert_eq!(missed(&histogram, 2), (1, 776));
+        assert_eq!(modal_budget(&histogram), Some(1));
+        assert_eq!(modal_budget(&[(2, 5), (3, 5)]), Some(2));
+        assert!(parse_vblanks("1:2,x").is_none());
+    }
+
+    #[test]
+    fn frame_budget_and_rank_flags_parse() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let options = parse(
+            "choose",
+            &args(&["--frame-budget", "2", "--rank", "work", "--", "build"]),
+        )
+        .unwrap();
+        assert_eq!(options.frame_budget, Some(2));
+        assert_eq!(options.objective, Objective::Work);
+        assert_eq!(
+            parse("choose", &args(&["--", "build"])).unwrap().objective,
+            Objective::Deadline
+        );
+        assert!(parse("choose", &args(&["--frame-budget", "0", "--", "build"])).is_err());
+        assert!(parse("choose", &args(&["--rank", "fps", "--", "build"])).is_err());
+    }
+
+    #[test]
+    fn a_wait_loops_stalls_are_waiting() {
+        // A flip wait whose line an I-cache set shares with its hazard
+        // trampoline refills on every spin (NitroXide, 0x80017d18 against
+        // 0x8008fd14). Those refills wait for the same vblank.
+        let (spin, work) = (0x8001_7d18, 0x8003_0000);
+        let counts = HashMap::from([(spin, 1000), (work, 2000)]);
+        let mmio = HashMap::from([(spin, 30)]);
+        let ram_load = HashMap::from([(work, 400)]);
+        let icache = HashMap::from([(spin, 5000), (work, 100)]);
+        let wait = HashMap::from([(spin, 1000)]);
+        assert_eq!(wait_cycles(&wait, &counts, &[&mmio, &ram_load]), 1030);
+        assert_eq!(
+            wait_cycles(&wait, &counts, &[&mmio, &ram_load, &icache]),
+            6030
+        );
+        // Where a quarter of a word's count waited, so do a quarter of its
+        // stalls.
+        let quarter = HashMap::from([(spin, 250)]);
+        assert_eq!(
+            wait_cycles(&quarter, &counts, &[&mmio, &ram_load, &icache]),
+            250 + 5030 / 4
+        );
+        let per = wait_per_instruction(&quarter, &counts, &[&mmio, &ram_load, &icache]);
+        assert!((per[&spin] - 0.25 * 6030.0 / 1000.0).abs() < 1e-9);
+        assert!(!per.contains_key(&work));
+    }
+
+    #[test]
+    fn frames_carry_the_work_of_their_ticks() {
+        // Ticks of 100 cycles; a spin at 0x100 waits 2 cycles an
+        // instruction; samples every 10 instructions.
+        let per_instruction = HashMap::from([(0x100, 2.0)]);
+        let samples = vec![
+            (1, 0x100, 3),
+            (1, 0x200, 4),
+            (2, 0x100, 1),
+            (3, 0x104, 5),
+            (4, 0x100, 0),
+        ];
+        let waits = tick_wait(&samples, 10, 16, &per_instruction);
+        assert_eq!(waits.get(&1), Some(&60));
+        assert_eq!(waits.get(&2), Some(&20));
+        assert_eq!(waits.get(&3), Some(&100), "0x104 shares 0x100's line");
+        let route: Vec<Tick> = (0..6u64)
+            .map(|tick| Tick {
+                cycles: 100,
+                flipped: matches!(tick, 1 | 3 | 4),
+                ..Tick::default()
+            })
+            .collect();
+        let work: HashMap<usize, u64> = (1..6)
+            .map(|tick| (tick, 100 - waits.get(&tick).copied().unwrap_or(0)))
+            .collect();
+        // Frames end at the flips in ticks 3 and 4: ticks 2..=3 and 4.
+        assert_eq!(frame_work(&route, &[1, 2, 3, 4, 5], &work), vec![80, 100]);
+    }
+
+    #[test]
+    fn tick_samples_belong_to_the_next_route_row() {
+        let path = env::temp_dir().join(format!("psoxide-pgo-ticks-{}.csv", std::process::id()));
+        fs::write(
+            &path,
+            "window_start_tick,pc,samples,percent_window\n0,0x80010000,5,50.0\n7,0x8001fffc,2,1.0\n",
+        )
+        .unwrap();
+        let samples = read_tick_samples(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(samples, vec![(1, 0x8001_0000, 5), (8, 0x8001_fffc, 2)]);
     }
 }
