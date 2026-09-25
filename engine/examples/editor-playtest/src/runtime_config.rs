@@ -623,18 +623,22 @@ pub(super) type RuntimeVram = VramRuntime<
     VRAM_CLUT_ROWS,
 >;
 
-/// Font-pack staging length in u16s, sized to the larger of the two scratch
-/// uses (font atlas packing vs the streamed sky chunk); see the doc on
-/// `psx_game_runtime::vram::FontPackScratch`.
+/// Font-pack staging length in u16s, sized to the largest of the scratch
+/// uses (font atlas packing, the streamed sky chunk, and one boot-time UI SFX
+/// sample); see the doc on `psx_game_runtime::vram::FontPackScratch`.
 const FONT_PACK_U16: usize = MAX_RUNTIME_UI_FONTS * 64 * FONT_ATLAS_MAX_ROWS;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const FONT_PACK_SCRATCH_LEN: usize = {
     let sky_u16 = (GAMEPLAY_PACK_MAX_CHUNK_BYTES + 1) / 2;
-    if FONT_PACK_U16 > sky_u16 {
-        FONT_PACK_U16
-    } else {
-        sky_u16
+    let sfx_u16 = (UI_SFX_MAX_SAMPLE_BYTES + 3) / 4 * 2;
+    let mut len = FONT_PACK_U16;
+    if sky_u16 > len {
+        len = sky_u16;
     }
+    if sfx_u16 > len {
+        len = sfx_u16;
+    }
+    len
 };
 #[cfg(not(feature = "cd-stream-bench"))]
 pub(super) const FONT_PACK_SCRATCH_LEN: usize = FONT_PACK_U16;

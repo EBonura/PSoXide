@@ -10,12 +10,12 @@
 
 use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
 use psx_engine::{
-    telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping, ModelUvOffset,
-    PredecodedModelInfo, PrimitivePacketArena, PrimitiveSink, ProjectedLit, ProjectedVertex,
-    RoomPoint, SimTick, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
-    TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
-    WorldVertex,
+    projected_triangle_batchable, telemetry, Angle, CullMode, DepthPolicy, JointViewTransform,
+    JointWorldTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping,
+    ModelUvOffset, PredecodedModelInfo, PrimitivePacketArena, PrimitiveSink, ProjectedLit,
+    ProjectedVertex, RoomPoint, SimTick, TexturedModelGeometry, TexturedModelLayer,
+    TexturedModelRenderFace, TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass,
+    WorldSurfaceOptions, WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
@@ -39,7 +39,7 @@ use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 mod equipment;
 pub use equipment::ASSEMBLED_Q12;
 mod death_dissolve;
-pub use death_dissolve::ModelDeathDissolve;
+pub use death_dissolve::{ModelDeathCapture, ModelDeathDissolve};
 mod dash_assembly;
 pub use dash_assembly::PlayerDashAssembly;
 mod instances;
@@ -204,6 +204,32 @@ impl EquipmentMaterializationSkin {
     }
 }
 
+/// Pull a model's lit modulation tint toward a colour after room lighting.
+///
+/// Room lighting shades a model with one tint, so this is one lerp per draw:
+/// it keeps a colour identity readable under strongly coloured room light
+/// without touching any packet.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LitTintBias {
+    /// Colour the lit tint moves toward.
+    pub color: (u8, u8, u8),
+    /// How far it moves, Q8 (256 replaces the lit tint).
+    pub strength_q8: u16,
+}
+
+impl LitTintBias {
+    /// `material` with its lit tint moved toward [`Self::color`].
+    pub fn apply(self, material: TextureMaterial) -> TextureMaterial {
+        let (r, g, b) = material.tint();
+        let strength = i32::from(self.strength_q8.min(256));
+        material.with_tint((
+            lerp_tint_channel(r, self.color.0, strength),
+            lerp_tint_channel(g, self.color.1, strength),
+            lerp_tint_channel(b, self.color.2, strength),
+        ))
+    }
+}
+
 /// Model draw policy knobs, as one value: the split threshold and
 /// per-frame draw caps the game selects. The culling/profiling
 /// TOGGLES ride as `const` parameters on the draw functions instead
@@ -329,6 +355,13 @@ impl PlayerActorPoseSnapshot {
     /// Runtime model whose skeleton the pose samples.
     pub const fn model(self) -> RuntimeModelAsset {
         self.model
+    }
+
+    /// The same pose drawn through `material` instead of the model's own
+    /// atlas material, e.g. a recoloured palette of the same atlas.
+    pub const fn with_atlas_material(mut self, material: TextureMaterial) -> Self {
+        self.model.material = material;
+        self
     }
 
     /// Gameplay action that produced this pose.
@@ -1447,6 +1480,7 @@ pub fn draw_player<
         resolve_override_texture,
         None,
         None,
+        None,
         triangles,
         world,
     )
@@ -1481,6 +1515,7 @@ pub fn draw_player_from_pose<
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     phase_assembly: Option<ModelPhaseAssembly>,
     mut dash_assembly: Option<&mut PlayerDashAssembly>,
+    lit_tint: Option<LitTintBias>,
     triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
@@ -1610,6 +1645,7 @@ pub fn draw_player_from_pose<
         character.visual_scale_q8,
         base_material,
     );
+    let material = lit_tint.map_or(material, |bias| bias.apply(material));
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(cull_mode)

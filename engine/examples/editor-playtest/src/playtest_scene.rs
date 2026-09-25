@@ -277,6 +277,15 @@ impl Scene for Playtest {
         core::mem::take(&mut self.gameplay_sfx_events)
     }
 
+    #[cfg(feature = "cd-stream-bench")]
+    fn with_streamed_ui_sfx_sample(
+        &mut self,
+        index: usize,
+        consume: &mut dyn FnMut(&[u8]),
+    ) -> bool {
+        with_streamed_ui_sfx_sample(index, consume)
+    }
+
     /// Lend the uploaded HUD font to the flow driver so front-end UI
     /// scenes (the cooked Main Menu) draw their labels and buttons with
     /// the same glyphs the in-game HUD uses.
@@ -1686,6 +1695,18 @@ impl Scene for Playtest {
                         );
                     }
                 }
+                // A free camera backed into a wall collapses its arm into the
+                // player's body; drawing her from inside fills the screen with
+                // near-plane slivers and dash wireframe streaks. Hide her (and
+                // what she holds) until the arm is clear again.
+                // Only for the follow camera: the intro shots and debug
+                // sweeps render from elsewhere.
+                let follow = self.camera.position();
+                let camera_in_player = camera.position.x == follow.x
+                    && camera.position.y == follow.y
+                    && camera.position.z == follow.z
+                    && self.camera.distance() < self.camera_config().min_distance;
+                let player_lighting = player_lighting.filter(|_| !camera_in_player);
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         let phase_assembly = player_phase_assembly(
@@ -1694,6 +1715,9 @@ impl Scene for Playtest {
                             player,
                             player_phase_height(character),
                         );
+                        let stance_clut = self
+                            .stance_cluts
+                            .player_override_clut(character, self.player_stance.active());
                         draw_player(
                             self.room_index,
                             character,
@@ -1708,6 +1732,8 @@ impl Scene for Playtest {
                             &lighting,
                             phase_assembly,
                             &mut self.player_dash_assembly,
+                            stance_clut,
+                            Some(player_stance_lit_tint(self.player_stance.active())),
                             &mut primitive_packets,
                             &mut world,
                         )
@@ -2601,6 +2627,7 @@ impl Playtest {
         let stats = draw_model_instances(
             room,
             &self.game_entities,
+            &self.stance_cluts,
             &self.instance_actor_poses,
             self.gameplay_tick(ctx.sim_tick),
             ctx.video_hz,

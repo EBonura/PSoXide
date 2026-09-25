@@ -222,8 +222,9 @@ use generated::{
 use generated::{
     GAMEPLAY_PACK_MAX_CHUNK_BYTES, PERSISTENT_ASSET_PAGE_COUNT, PERSISTENT_ASSET_SLOT_COUNT,
     UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES, UI_PACK_START_LBA, UI_PACK_TOC,
-    WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
-    WORLD_RESIDENT_PAGE_COUNT, WORLD_STREAM_SLOT_COUNT,
+    UI_SFX_MAX_SAMPLE_BYTES, UI_SFX_PACK_FIRST_CHUNK, WORLD_PACK_MAX_CHUNK_BYTES,
+    WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT, WORLD_RESIDENT_PAGE_COUNT,
+    WORLD_STREAM_SLOT_COUNT,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
@@ -642,6 +643,9 @@ struct Playtest {
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Persistent model bytes are resident and the parsed runtime tables are valid.
     runtime_models_loaded: bool,
+    /// Horizon/Zenith palette copies of the player's and enemies' atlases.
+    /// All-zero (the `init_zeroed` state) is empty.
+    stance_cluts: model_rendering::StanceCluts,
     /// The front-end/gameplay RAM union currently belongs to gameplay. False
     /// while menu/loading images own it, and reset on every gameplay exit.
     gameplay_asset_arena_active: bool,

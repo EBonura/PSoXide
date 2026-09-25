@@ -1089,6 +1089,61 @@ impl LoadedWorldCameraGte {
     }
 }
 
+/// GTE projector for points given relative to a world-space anchor.
+///
+/// [`LoadedWorldCameraGte`] needs absolute world coordinates in `i16` range;
+/// this one loads the camera rotation with the anchor's view-space position
+/// as translation, so any point within `i16` of the anchor projects on the
+/// GTE wherever the anchor is in the level. With a zero anchor it installs
+/// exactly the state [`LoadedWorldCameraGte::load`] does.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LoadedAnchoredCameraGte {
+    near_z: i32,
+}
+
+impl LoadedAnchoredCameraGte {
+    /// Load `camera` into the GTE with `anchor` as the origin of input points.
+    #[inline(never)]
+    pub fn load(camera: WorldCamera, anchor: WorldVertex) -> Self {
+        load_world_projection_gte(camera.projection);
+        let view = camera_gte_view_matrix(camera);
+        let delta = WorldVertex::new(
+            anchor.x.saturating_sub(camera.position.x),
+            anchor.y.saturating_sub(camera.position.y),
+            anchor.z.saturating_sub(camera.position.z),
+        );
+        scene::load_rotation(&view);
+        scene::load_translation(Vec3I32::new(
+            dot_world_q12(view.m[0], delta),
+            dot_world_q12(view.m[1], delta),
+            dot_world_q12(view.m[2], delta),
+        ));
+        Self {
+            near_z: camera.projection.near_z,
+        }
+    }
+
+    /// Project three anchor-relative points with one `RTPT`; a point behind
+    /// the near plane comes back as [`ProjectedVertex::INVALID`].
+    #[inline]
+    pub fn project_points(self, points: [Vec3I16; 3]) -> [ProjectedVertex; 3] {
+        let tri = scene::project_triangle_scheduled(points[0], points[1], points[2]);
+        tri.map(|p| valid_projected_from_gte(p, self.near_z))
+    }
+
+    /// Project three anchor-relative points with one `RTPT`. `None` when any
+    /// of them is behind the near plane, like [`WorldCamera::project_world`].
+    #[inline]
+    pub fn project_triangle(self, points: [Vec3I16; 3]) -> Option<[ProjectedVertex; 3]> {
+        let tri = scene::project_triangle_scheduled(points[0], points[1], points[2]);
+        Some([
+            projected_option_from_gte(tri[0], self.near_z)?,
+            projected_option_from_gte(tri[1], self.near_z)?,
+            projected_option_from_gte(tri[2], self.near_z)?,
+        ])
+    }
+}
+
 pub(crate) fn project_world_vertex_indices_gte(
     camera: WorldCamera,
     vertices: &[WorldVertex],
@@ -3748,6 +3803,31 @@ fn projected_textured_gouraud_needs_split(
             ],
             options.textured_split_max_edge,
         )
+}
+
+/// Whether `face` can share one [`WorldRenderPass::submit_projected_model_faces`]
+/// call with other faces without changing how any of them is drawn: every
+/// corner resolves, sits in front of the camera, and the triangle fits the
+/// GPU's vertex and extent limits. A slice made only of such faces takes the
+/// same packed path as each face submitted on its own.
+#[inline]
+pub fn projected_model_face_batchable(
+    projected: &[ProjectedVertex],
+    face: TexturedModelRenderFace,
+) -> bool {
+    let indices = face.vertex_indices().map(usize::from);
+    indices.iter().all(|&i| i < projected.len())
+        && indices
+            .iter()
+            .all(|&i| projected[i] != ProjectedVertex::INVALID)
+        && projected_triangle_batchable(indices.map(|i| projected[i]))
+}
+
+/// [`projected_model_face_batchable`] for corners already looked up and known
+/// not to be [`ProjectedVertex::INVALID`].
+#[inline]
+pub fn projected_triangle_batchable(verts: [ProjectedVertex; 3]) -> bool {
+    verts.iter().all(|v| v.sz > 0) && projected_triangle_hw_safe(verts)
 }
 
 fn projected_triangle_hw_safe(verts: [ProjectedVertex; 3]) -> bool {

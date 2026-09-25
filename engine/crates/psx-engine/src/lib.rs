@@ -184,14 +184,14 @@ pub use render::{
 pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_basis,
     compute_joint_world_transform, project_model_vertex_with_joint_transforms,
-    AdaptiveSubdivisionKindMask, AdaptiveSubdivisionProfile, CullMode, DepthPolicy,
-    GouraudMeshOptions, GouraudRenderPass, GouraudTriCommand, JointViewTransform,
-    JointWorldTransform, LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats,
-    ModelPoseTranslation, ModelUvMapping, ModelUvOffset, PredecodedModelInfo, ProjectedLit,
-    ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector, TexturedModelGeometry,
-    TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex,
-    ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
-    WorldSurfaceOptions, WorldTriCommand,
+    projected_model_face_batchable, projected_triangle_batchable, AdaptiveSubdivisionKindMask,
+    AdaptiveSubdivisionProfile, CullMode, DepthPolicy, GouraudMeshOptions, GouraudRenderPass,
+    GouraudTriCommand, JointViewTransform, JointWorldTransform, LoadedAnchoredCameraGte,
+    LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ModelUvMapping,
+    ModelUvOffset, PredecodedModelInfo, ProjectedLit, ProjectedTexturedVertex, ProjectedVertex,
+    SkyDirectionProjector, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
+    TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection,
+    WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
 };
 pub use scheduler::{
     collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,
@@ -202,7 +202,7 @@ pub use scratch::{BoundedSink, FixedScratch, SliceSink};
 // Re-export the GTE math types callers need to construct model render
 // arguments (instance rotation, joint transforms) without pulling in
 // `psx-gte` directly.
-pub use psx_gte::math::Mat3I16;
+pub use psx_gte::math::{Mat3I16, Vec3I16};
 pub use scene::{Ctx, RenderSubmission, Scene, SceneStateRef};
 pub use third_person_camera::{
     ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,

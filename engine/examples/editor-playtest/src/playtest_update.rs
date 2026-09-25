@@ -256,7 +256,7 @@ impl Playtest {
             // this pre-motor value only feeds the shared tick-input contract.
             // `resolve_enemy_melee` re-queries invulnerability after the motor
             // update, pairing it with the same retained pose contact uses.
-            let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
+            let player_invulnerable = self.player_invulnerable();
             let mut mover = SceneEntityMover {
                 bsp: self.bsp.as_mut(),
                 destructibles: &self.destructibles,
@@ -1416,6 +1416,17 @@ impl Playtest {
                 .as_ref()
                 .is_some_and(|character| character.action_clip(anim.action()).is_some());
             if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
+                // The attack owns the motor input until it ends, so the
+                // lock-on turn in the motor never runs during the swing. A
+                // dodge or sprint leaves the body on its old heading (the
+                // locked dodge keeps its facing while the target's bearing
+                // changes under it), so square up to the target here.
+                if let Some(yaw) = self
+                    .lock_target_position()
+                    .and_then(|target| psx_engine::yaw_to_point(self.motor.position(), target))
+                {
+                    self.motor.face(yaw);
+                }
                 telemetry::debug_log("player attack:start");
                 telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
             }

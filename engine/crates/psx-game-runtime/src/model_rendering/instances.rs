@@ -329,6 +329,13 @@ impl InstanceActorPoseSnapshot {
         self.model
     }
 
+    /// The same pose drawn through `material` instead of the model's own
+    /// atlas material, e.g. a recoloured palette of the same atlas.
+    pub const fn with_atlas_material(mut self, material: TextureMaterial) -> Self {
+        self.model.material = material;
+        self
+    }
+
     /// Model-local clip selected after applying the live override policy.
     pub const fn clip_local(self) -> ModelClipIndex {
         self.clip_local
@@ -538,6 +545,7 @@ pub fn draw_model_instance_from_pose<
     current_room: RoomIndex,
     instance_pose: &InstanceActorPoseSnapshot,
     dissolve: Option<ModelDeathDissolve>,
+    death_capture: Option<&mut ModelDeathCapture<MODEL_VERTEX_CAP>>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -646,30 +654,52 @@ pub fn draw_model_instance_from_pose<
             );
             layer
         });
-    let mut stats = submit_runtime_model_predecoded(
-        world,
-        triangles,
-        runtime_model,
-        anim,
-        phase,
-        pose.blend_from(),
-        *camera,
-        origin,
-        model_rotation,
-        local_to_world,
-        pose_translation,
-        material,
-        secondary_material,
-        model_options,
-        if dissolve.is_some() { &[] } else { faces },
-        model_parts,
-        model_vertices,
-        PROFILE,
-        scratch,
-    );
+    // A corpse whose whole frozen pose is captured projects that capture
+    // instead of animating and skinning the model again.
+    let captured = dissolve.is_some_and(|effect| {
+        death_capture.as_deref().is_some_and(|capture| {
+            capture.holds_whole(
+                instance_pose.instance_index(),
+                effect,
+                elapsed_tick.as_u32(),
+            )
+        })
+    });
+    let mut stats = if let (true, Some(capture)) = (captured, death_capture.as_deref()) {
+        TexturedModelRenderStats {
+            projected_vertices: capture.project(*camera, &mut scratch.vertices) as u16,
+            ..TexturedModelRenderStats::default()
+        }
+    } else {
+        submit_runtime_model_predecoded(
+            world,
+            triangles,
+            runtime_model,
+            anim,
+            phase,
+            pose.blend_from(),
+            *camera,
+            origin,
+            model_rotation,
+            local_to_world,
+            pose_translation,
+            material,
+            secondary_material,
+            model_options,
+            if dissolve.is_some() { &[] } else { faces },
+            model_parts,
+            model_vertices,
+            PROFILE,
+            scratch,
+        )
+    };
     if let Some(effect) = dissolve {
         let fragments = death_dissolve::draw(
             effect,
+            death_capture,
+            instance_pose.instance_index(),
+            elapsed_tick.as_u32(),
+            origin,
             &scratch.vertices[..usize::from(stats.projected_vertices)],
             faces,
             *camera,
@@ -749,6 +779,7 @@ pub fn draw_model_instances<
             scratch,
             current_room,
             &instance_pose,
+            None,
             None,
             elapsed_tick,
             video_hz,
