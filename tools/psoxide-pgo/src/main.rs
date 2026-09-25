@@ -46,6 +46,7 @@ use std::{env, fs};
 
 mod layout;
 mod pipeline;
+mod ram;
 mod work;
 
 use gimli::{AttributeValue, DebuggingInformationEntry, EndianSlice, RunTimeEndian, UnitOffset};
@@ -850,10 +851,12 @@ const USAGE: &str = "usage: psoxide-pgo <elf-with-dwarf> <pc.csv>... <out.prof>
        psoxide-pgo portable <in.prof> <out.prof>
        psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
        psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>
-       psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>";
+       psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
+       psoxide-pgo ram <link.map> [--floor BYTES]";
 
-const MODES: [&str; 9] = [
+const MODES: [&str; 10] = [
     "portable", "rebind", "layout", "place", "collect", "order", "apply", "choose", "measure",
+    "ram",
 ];
 
 /// A layout profile from one link and per-word logs (`--pc-log-words
@@ -906,6 +909,22 @@ fn place_order(
     Ok(())
 }
 
+/// Print a link's free RAM; below `floor`, fail, so a game driving its own
+/// PGO builds can step its inlining down (as `apply --ram-fallback` does).
+fn ram_report(map: &Path, floor: Option<u32>) -> Result<()> {
+    let text = fs::read_to_string(map)?;
+    let free = ram::free_ram(&text).ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+    println!("free {free} B");
+    match floor {
+        Some(floor) if free < floor => Err(format!(
+            "{} leaves {free} B of RAM free, under the {floor} B floor",
+            map.display()
+        )
+        .into()),
+        _ => Ok(()),
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -913,6 +932,11 @@ fn main() -> ExitCode {
         [mode @ ("collect" | "order" | "apply" | "choose" | "measure"), ..] => {
             pipeline::main(mode, &args[1..])
         }
+        ["ram", map] => ram_report(Path::new(map), None),
+        ["ram", map, "--floor", floor] => match floor.parse() {
+            Ok(floor) => ram_report(Path::new(map), Some(floor)),
+            Err(_) => Err(format!("--floor wants a byte count, not {floor:?}").into()),
+        },
         ["portable", input, output] => portable(Path::new(input), Path::new(output)),
         ["rebind", input, elf, output] => {
             rebind(Path::new(input), Path::new(elf), Path::new(output))
