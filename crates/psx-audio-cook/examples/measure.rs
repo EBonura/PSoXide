@@ -273,11 +273,27 @@ fn main() {
         "match" => {
             // measure match <old_rate> <wav>... : lowest ladder rate at which the
             // new pipeline's fwSNRseg reaches the hl pipeline's at old_rate.
-            let old_rate: u32 = args[1].parse().unwrap();
+            // old_rate may be prefixed "psxed:" to use the linear psxed pipeline.
+            let (psxed, old_rate): (bool, u32) = match args[1].strip_prefix("psxed:") {
+                Some(r) => (true, r.parse().unwrap()),
+                None => (false, args[1].parse().unwrap()),
+            };
             for path in &args[2..] {
                 let w = load(path);
                 let reference = pac::reference_44k(&w);
-                let (_, old_q) = e2e(&w, &reference, &hl_cooked(&w, old_rate));
+                let old_c = if psxed {
+                    let p = legacy::resample_linear(&src_i16(&w), w.rate, old_rate);
+                    let a = legacy::encode_psxed(&p);
+                    Cooked {
+                        rate: old_rate,
+                        pcm: p,
+                        adpcm: a,
+                        loop_block: None,
+                    }
+                } else {
+                    hl_cooked(&w, old_rate)
+                };
+                let (_, old_q) = e2e(&w, &reference, &old_c);
                 let mut best = (
                     old_rate,
                     e2e(
@@ -349,6 +365,116 @@ fn main() {
                     w.samples.len() as f64 / rate as f64
                 );
             }
+        }
+        "pair" => {
+            // measure pair <sound_dir> <outdir> <name> <wav[+wav]> <current> <new_rate>
+            // current: hl:RATE | psxed:RATE | file:PATH:RATE | none
+            // Writes original / current / new playback WAVs (44.1 kHz, through the
+            // SPU interpolator model) and prints one index line.
+            let dir = std::path::Path::new(&args[1]);
+            let out = std::path::Path::new(&args[2]);
+            std::fs::create_dir_all(out).unwrap();
+            let name = &args[3];
+            let sinc = resample::Sinc::new();
+            let parts: Vec<Wav> = args[4]
+                .split('+')
+                .map(|p| load(dir.join(p).to_str().unwrap()))
+                .collect();
+            let rate = parts.iter().map(|w| w.rate).max().unwrap();
+            let mut samples = Vec::new();
+            for p in &parts {
+                if p.rate == rate {
+                    samples.extend_from_slice(&p.samples)
+                } else {
+                    samples.extend(sinc.resample(&p.samples, p.rate, rate))
+                }
+            }
+            let w = Wav {
+                rate,
+                samples,
+                loop_start: None,
+                loop_end: None,
+                bits: parts[0].bits,
+            };
+            let reference = pac::reference_44k(&w);
+            let max_hz = (w.rate as f64 / 2.0).min(11_025.0);
+            let score = |played: &[f64]| {
+                let n = reference.len().min(played.len());
+                (
+                    metrics::fw_snr_seg_db(&reference[..n], &played[..n], max_hz),
+                    metrics::si_snr_db(&reference[..n], &played[..n]),
+                )
+            };
+            std::fs::write(
+                out.join(format!("{name}__0-original.wav")),
+                pac::wav::write_mono16(44_100, &resample::to_i16(&reference)),
+            )
+            .unwrap();
+            let spec: Vec<&str> = args[5].split(':').collect();
+            let current: Option<(String, Cooked)> = match spec[0] {
+                "hl" => {
+                    let r = spec[1].parse().unwrap();
+                    Some((format!("hl-{r}hz"), hl_cooked(&w, r)))
+                }
+                "psxed" => {
+                    let r: u32 = spec[1].parse().unwrap();
+                    let p = legacy::resample_linear(&src_i16(&w), w.rate, r);
+                    let a = legacy::encode_psxed(&p);
+                    Some((
+                        format!("psxed-{r}hz"),
+                        Cooked {
+                            rate: r,
+                            pcm: p,
+                            adpcm: a,
+                            loop_block: None,
+                        },
+                    ))
+                }
+                "file" => {
+                    let r: u32 = spec[2].parse().unwrap();
+                    let a = std::fs::read(spec[1]).unwrap();
+                    Some((
+                        format!("shipped-{r}hz"),
+                        Cooked {
+                            rate: r,
+                            pcm: Vec::new(),
+                            adpcm: a,
+                            loop_block: None,
+                        },
+                    ))
+                }
+                _ => None,
+            };
+            let new_rate: u32 = args[6].parse().unwrap();
+            let new = new_cooked(&w, new_rate, Looping::None, adpcm::Effort::Trellis);
+            let mut line = format!("{name} | {:.2} s |", w.samples.len() as f64 / w.rate as f64);
+            if let Some((label, c)) = current {
+                let played = spu_play::play(&c.decoded(), c.rate);
+                let (fw, si) = score(&played.iter().map(|&v| v as f64).collect::<Vec<_>>());
+                std::fs::write(
+                    out.join(format!("{name}__A-current-{label}.wav")),
+                    pac::wav::write_mono16(44_100, &played),
+                )
+                .unwrap();
+                line += &format!(
+                    " current {label} {} B fwSNRseg {fw:.2} SI-SNR {si:.2} |",
+                    c.adpcm.len()
+                );
+            } else {
+                line += " current: not in the bank |";
+            }
+            let played = spu_play::play(&new.decoded(), new.rate);
+            let (fw, si) = score(&played.iter().map(|&v| v as f64).collect::<Vec<_>>());
+            std::fs::write(
+                out.join(format!("{name}__B-new-{new_rate}hz.wav")),
+                pac::wav::write_mono16(44_100, &played),
+            )
+            .unwrap();
+            line += &format!(
+                " new {new_rate}hz {} B fwSNRseg {fw:.2} SI-SNR {si:.2}",
+                new.adpcm.len()
+            );
+            println!("{line}");
         }
         "debug" => {
             let w = load(&args[1]);
