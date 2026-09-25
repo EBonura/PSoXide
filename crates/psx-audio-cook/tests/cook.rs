@@ -336,3 +336,30 @@ fn score_measures_shipped_bytes_like_the_cook_itself() {
     let p = psx_audio_cook::score(&src, &padded, rate, adpcm::BLOCK_SAMPLES);
     assert!((p.fw_snr_seg_db - s.fw_snr_seg_db).abs() < 1e-9);
 }
+
+#[test]
+fn gauss_compensation_keeps_the_normalised_level() {
+    // A full-scale sound with a lot of energy near the playback Nyquist (a
+    // gunshot's crack): the pre-emphasis overshoots full scale. The level is
+    // kept and the overshoot clamped, not paid for with the whole sound.
+    let src = wav_of(
+        22_050,
+        tone(22_050, 0.5, &[300.0, 3_900.0, 4_700.0])
+            .iter()
+            .map(|v| v * 3.6)
+            .collect(),
+    );
+    let rms =
+        |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+    let with = cook(&src, &CookOptions::one_shot(11_025));
+    let mut plain = CookOptions::one_shot(11_025);
+    plain.compensate_gauss = false;
+    let without = cook(&src, &plain);
+    let level = |c: &psx_audio_cook::Cooked| rms(&spu_play::play(&c.decoded(), c.rate));
+    let db = 20.0 * (level(&with) / level(&without)).log10();
+    assert!(db > -1.0, "compensation cost {db:.2} dB of playback level");
+    assert!(
+        with.pcm.iter().any(|&v| v == i16::MAX || v == i16::MIN),
+        "overshoot is clamped"
+    );
+}
