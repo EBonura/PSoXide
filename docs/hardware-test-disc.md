@@ -17,7 +17,7 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.23**, schema PX8. Not comparable with v0.18 captures, whose timing
+Current: **v1.25**, schema PX8. Not comparable with v0.18 captures, whose timing
 was sampled without interrupt masking.
 
 ## Test tiers
@@ -264,6 +264,7 @@ hardware state until the operator chooses an entry. Menus fit without scrolling:
    | `VIDEO LEVELS (TV/CAPTURE)` | Grey ramp and flat fields for display-chain checks |
    | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
    | `RESUME FROM TEST` | Restarts a long battery after a selected test index |
+   | `FMV STREAM TEST` | 75 s of 2x STR video with XA audio, every sector checked, then a PASS/FAIL summary (see below). Shows the last result inline; UP from the top row reaches it |
 
 Up/Down moves, Cross runs, and START backs out one level. During the standing
 battery a progress bar names the in-flight case; after it completes, the capture
@@ -667,6 +668,48 @@ expensive list. `221` against `220` says whether GPUSTAT bit 28 going idle
 means the drawing has finished, which the present-queue gate (`0xCD`) relies
 on. `227` failing, or `224` reading never, says silicon loses words from a node
 larger than its FIFO while it draws, and `223` then times some other workload.
+
+## FMV stream test (MAIN MENU last row, records `1F0`-`1F5`, v1.25)
+
+The SDK's FMV console test (`sdk/examples/hello-fmv`, run as a library; the
+suite's side is `src/fmv_test.rs`). The disc carries `MOVIE.STR` at LBA 1024:
+75 s of synthetic 320x240 15 fps video at the full double-speed sector budget
+with interleaved XA-ADPCM stereo beeps (440 Hz left, 660 Hz right, one a
+second), built by the SDK's `tools/fmv_test_movie.py` (FFmpeg and psxavenc;
+`make hardware-tests-disc` builds it once into `build/`, `PSXAVENC=` names the
+encoder). Every video sector carries its ordinal, the file's total and a
+checksum, and the player streams all 9,826 of them through the SDK's polled
+PIO path.
+
+An overlay over the video counts frames shown (FR), frames skipped because the
+decoder was still busy (LATE), sectors that never arrived (LOST) and sectors
+that arrived corrupt, repeated or out of order (BAD), with the LBA and the
+time. The summary screen stays up until CROSS or START returns to the menu,
+whose row then shows PASS or FAIL.
+
+**PASS** means every video sector arrived intact (SECT 9826/9826), LOST 0, BAD
+0, DROP 0, CDERR 0 and DECERR 0. LATE and the KCYC line are measurements, not
+pass criteria. LATE is higher here than on the standalone FMV disc (headless,
+same emulator: SHW 741 / LATE 382 against 889 / 234) because the bitstream
+decode costs more per frame inside this program (KCYC VLC 1375 against 1222; it
+moves with code layout, and this suite builds without the SDK's delay-slot
+filler flags); the sectors, and so the verdict, do not depend on it.
+
+The result joins the capture as six timing-block records whose three fields
+are counters, not min/median/max: `1F0` pass, good, total; `1F1` lost, bad,
+dropped; `1F2` drive errors, decode errors, first problem LBA (FFFF none);
+`1F3` shown, late, VBlanks; `1F4` kilocycles per frame for the bitstream, MDEC
+plus upload, and waiting; `1F5` last good LBA, run count, setup failure code.
+`hwtest-report.py` prints them as an `fmv` table and re-derives the verdict
+from the counters. A capture taken before the run is re-encoded with them at
+once (and so carries the timing block even if it was a routine one); a capture
+taken after it picks them up from its own timing scan. Run it after FULL
+CHARACTERISATION, so the characterisation still describes a console nothing
+has touched: the player resets the SPU and reprograms the drive.
+
+The movie moves the CD-DA track outward by 11,230 sectors. No probe names an
+LBA past the CDTEST region, but `0x9B` (a read at LBA 424 while track 2 plays)
+now starts from further away, so it is not comparable with v1.24's.
 
 ## CD-DA contention (records `0x9B`-`0x9E`)
 

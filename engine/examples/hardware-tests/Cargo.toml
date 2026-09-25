@@ -44,4 +44,5 @@ psx-rt     = { path = "../../../sdk/crates/psx-rt" }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
 hello-memcard-recovery = { package = "hello-memcard", path = "../../../sdk/examples/hello-memcard" }
+hello-fmv  = { path = "../../../sdk/examples/hello-fmv" }
 qrcodegen-no-heap = "1.8.1"
