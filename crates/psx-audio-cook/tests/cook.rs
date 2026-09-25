@@ -389,3 +389,17 @@ fn normalisation_follows_the_source_not_what_survives_the_resample() {
         "quiet tone peak {peak_out:.0}, expected about {expected:.0}"
     );
 }
+
+#[test]
+fn restart_keeps_the_length_and_starts_history_free() {
+    // 1,000 samples: not whole blocks, so a whole loop would stretch it.
+    let w = wav_of(11_025, tone(11_025, 1_000.0 / 11_025.0, &[900.0, 2_300.0]));
+    let mut o = CookOptions::one_shot(11_025);
+    o.looping = Looping::Restart;
+    let c = cook(&w, &o);
+    assert_eq!(c.pcm.len(), 1_000, "no stretch");
+    assert_eq!(c.adpcm.len(), adpcm_bytes(1_000));
+    assert_eq!(c.adpcm[0] >> 4, 0, "first block ignores history");
+    assert_eq!(c.loop_block, None);
+    assert_eq!(c.adpcm[c.adpcm.len() - 15], adpcm::FLAG_END);
+}

@@ -8,15 +8,18 @@
 //!
 //! ```text
 //! psx-audio-cook encode IN.wav OUT --rate HZ [--format psau|raw]
-//!                [--loop none|whole|source] [--peak F|--no-normalize]
-//!                [--no-gauss-comp] [--greedy]
+//!                [--loop none|whole|source|restart] [--peak F|--no-normalize]
+//!                [--no-gauss-comp] [--greedy] [--no-flags]
 //! psx-audio-cook rates IN.wav            predicted loss per candidate rate
 //! psx-audio-cook score SRC.wav ADPCM [--rate HZ] [--skip N]
 //!                [--play OUT.wav] [--original OUT.wav]
 //! ```
 //!
 //! `raw` writes bare ADPCM blocks (flags set); `psau` wraps them in the PSAU
-//! container. One line of JSON describing the result goes to stdout.
+//! container. `--loop restart` keeps a one-shot's length but makes the first
+//! block history-free, for a stream its transport restarts or rings;
+//! `--no-flags` writes every block's flags as zero for a transport that sets
+//! its own. One line of JSON describing the result goes to stdout.
 //!
 //! `score` measures any ADPCM (raw blocks, or a PSAU whose header supplies
 //! the rate) against the source it was cooked from, as the SPU plays it:
@@ -29,7 +32,7 @@ use std::process::ExitCode;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  psx-audio-cook encode IN.wav OUT --rate HZ [--format psau|raw] [--loop none|whole|source] [--peak F|--no-normalize] [--no-gauss-comp] [--greedy]\n  psx-audio-cook rates IN.wav\n  psx-audio-cook score SRC.wav ADPCM [--rate HZ] [--skip N] [--play OUT.wav] [--original OUT.wav]"
+        "usage:\n  psx-audio-cook encode IN.wav OUT --rate HZ [--format psau|raw] [--loop none|whole|source|restart] [--peak F|--no-normalize] [--no-gauss-comp] [--greedy] [--no-flags]\n  psx-audio-cook rates IN.wav\n  psx-audio-cook score SRC.wav ADPCM [--rate HZ] [--skip N] [--play OUT.wav] [--original OUT.wav]"
     );
     ExitCode::from(2)
 }
@@ -127,6 +130,7 @@ fn encode(input: &str, output: &str, flags: &[String]) -> ExitCode {
     };
     let mut opts = CookOptions::one_shot(0);
     let mut raw = false;
+    let mut no_flags = false;
     let mut i = 0;
     while i < flags.len() {
         let value = flags.get(i + 1).map(String::as_str);
@@ -143,6 +147,7 @@ fn encode(input: &str, output: &str, flags: &[String]) -> ExitCode {
                 opts.looping = match v {
                     "whole" => Looping::Whole,
                     "source" => Looping::Source,
+                    "restart" => Looping::Restart,
                     _ => Looping::None,
                 };
                 i += 1;
@@ -154,6 +159,7 @@ fn encode(input: &str, output: &str, flags: &[String]) -> ExitCode {
             ("--no-normalize", _) => opts.normalize_peak = None,
             ("--no-gauss-comp", _) => opts.compensate_gauss = false,
             ("--greedy", _) => opts.encode.effort = adpcm::Effort::Greedy,
+            ("--no-flags", _) => no_flags = true,
             _ => return usage(),
         }
         i += 1;
@@ -161,7 +167,12 @@ fn encode(input: &str, output: &str, flags: &[String]) -> ExitCode {
     if opts.rate == 0 {
         return usage();
     }
-    let cooked = cook(&source, &opts);
+    let mut cooked = cook(&source, &opts);
+    if no_flags {
+        for flag in cooked.adpcm.iter_mut().skip(1).step_by(adpcm::BLOCK_BYTES) {
+            *flag = 0;
+        }
+    }
     let bytes = if raw {
         cooked.adpcm.clone()
     } else {
