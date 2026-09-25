@@ -858,6 +858,30 @@ pub struct ClassicAffineProfile {
     /// Zero disables the error trigger. This must be no smaller than
     /// [`Self::subdivide_once_error_texels`] when both are enabled.
     pub subdivide_twice_error_texels: u8,
+    /// Screen-space affine error budget in 1/8 pixel. Non-zero selects the
+    /// error-bounded policy (see [`crate::tess`]): a face whose screen extent
+    /// and depth range cannot exceed the budget keeps the historical
+    /// unsplit fan; any other face is split as a fan of quads (plus at most
+    /// one triangle), each quad as a lattice with a level per axis from its
+    /// own edges. The depth bands then only gate crack-sealing underdraw
+    /// (and should be zero or the historical fan splits too): a split
+    /// boundary edge is sealed when a corner's depth reaches
+    /// [`Self::subdivide_once_at`] (level one) or
+    /// [`Self::subdivide_twice_at`] (level two). Zero keeps the historical
+    /// schedule.
+    pub subdivide_error_px_q3: u8,
+    /// Band schedule only ([`Self::subdivide_error_px_q3`] zero): split
+    /// four-corner faces as a quad lattice (GT4 cells) instead of two
+    /// triangle lattices. The face takes the deeper of its two roots' band
+    /// levels, on each axis whose edges change depth.
+    pub quad_lattice: bool,
+    /// Error-bounded policy only: faces whose nearest vertex is at least this
+    /// deep (GTE SZ units) take level zero without the screen-extent pass.
+    /// Sound when it is at least `F * sqrt(H / (2 * budget_px))` for the
+    /// largest face extent `F` the cooker emits (camera-space units) and
+    /// projection distance `H`: such a face's affine displacement cannot
+    /// reach the budget. Zero tests every face.
+    pub error_gate_depth: u16,
     /// OT slot bias applied to crack-sealing underdraw triangles.
     pub underdraw_slot_bias: u16,
     /// Key each emitted packet at its farthest vertex instead of the vertex
@@ -880,6 +904,9 @@ impl ClassicAffineProfile {
         subdivide_twice_at: 60,
         subdivide_once_error_texels: 0,
         subdivide_twice_error_texels: 0,
+        subdivide_error_px_q3: 0,
+        quad_lattice: false,
+        error_gate_depth: 0,
         underdraw_slot_bias: 8,
         farthest_depth_key: false,
     };
@@ -905,19 +932,40 @@ impl ClassicAffineProfile {
         subdivide_twice_at: 60,
         subdivide_once_error_texels: 4,
         subdivide_twice_error_texels: 8,
+        subdivide_error_px_q3: 0,
+        quad_lattice: false,
+        error_gate_depth: 0,
         underdraw_slot_bias: 8,
         farthest_depth_key: false,
     };
 
     /// PSoXide brush-world profile: the same topology as
-    /// [`Self::QUAKE_REFERENCE`] but each subdivision band reaches twice as
-    /// far. Quake's first-person camera looks at walls square-on; a
+    /// [`Self::QUAKE_REFERENCE`] but each subdivision band reaches 2.5 times
+    /// as far. Quake's first-person camera looks at walls square-on; a
     /// third-person camera looks down at the floor from a few dozen units
     /// up, and 128-unit patches split only within ~80 units left ~100 px
     /// affine triangles underfoot that swim whenever the view pitches.
+    /// 340/170 (from 272/136) measured on the Cortex 0.4 whole-level tape:
+    /// textured pixels over one texel of warp 47.6% -> 36.8%, over two
+    /// 30.4% -> 18.8%, -3.5% gameplay fps; the bands are compile-time
+    /// constants, so the writer's stack and RAM are unchanged.
     pub const PXBSP_THIRD_PERSON: Self = Self {
-        subdivide_once_at: 272,
-        subdivide_twice_at: 136,
+        subdivide_once_at: 340,
+        subdivide_twice_at: 170,
+        ..Self::QUAKE_REFERENCE
+    };
+
+    /// quake-psx's world profile with feature `classic-affine-lattice`:
+    /// [`Self::QUAKE_REFERENCE`]'s viewport and OT with the error-bounded
+    /// fan policy at a 16-pixel budget, every split edge sealed. The gate
+    /// (930 SZ) is `F * sqrt(H / (2 * 16))` for qbsp's 240-unit face cuts
+    /// (`F` = 416, a 240-unit cube's diagonal) at `H` = 160; zoomed views
+    /// (larger `H`) can leave faces just past it a little under-split.
+    pub const QUAKE_ERROR_BOUNDED: Self = Self {
+        subdivide_once_at: 0,
+        subdivide_twice_at: 0,
+        subdivide_error_px_q3: 128,
+        error_gate_depth: 930,
         ..Self::QUAKE_REFERENCE
     };
 }
@@ -2883,6 +2931,393 @@ unsafe fn subdivide_twice<W: AffinePacketWriter>(
     }
 }
 
+/// Sentinel for "no face-wide level": the historical per-root schedule.
+const PER_ROOT_LEVEL: u8 = u8::MAX;
+
+/// The error-bounded and quad-lattice fan paths (feature
+/// `classic-affine-lattice`). Everything here is inlined into the fan
+/// submitter on purpose: lending the writer to an out-of-line call takes its
+/// address, and LLVM then keeps it in memory across the historical fan loop
+/// as well (measured +15% to +42% Quake frame work). The feature is off
+/// where code size or stack depth binds (Cortex's PXBSP writer runs on a
+/// scratchpad stack with 8 bytes to spare).
+#[cfg(feature = "classic-affine-lattice")]
+mod lattice {
+    use super::*;
+
+    /// Largest span, in pixels, of a primitive the GPU draws: it drops any
+    /// triangle two of whose vertices lie more than 1023 pixels apart across
+    /// or 511 down (psx-spx "GPU Render Polygon Commands"; PSoXide's
+    /// rasteriser gates on the same rule in `triangle_exceeds_hw_extent`).
+    const GPU_MAX_SPAN_X: i32 = 1023;
+    const GPU_MAX_SPAN_Y: i32 = 511;
+
+    /// Level a face needs so that no primitive it emits breaks the GPU's
+    /// extent limit: 2 when its screen box is wider or taller than one
+    /// primitive may be, else 0. The warp bound alone leaves a face that
+    /// faces the camera unsplit however large it is on screen, and the GPU
+    /// would drop it whole (the wall strips beside a wall the player stands
+    /// at). Two levels match the depth bands' finest split.
+    #[inline(always)]
+    fn gpu_extent_level(dx: i32, dy: i32) -> u8 {
+        if dx > GPU_MAX_SPAN_X || dy > GPU_MAX_SPAN_Y {
+            2
+        } else {
+            0
+        }
+    }
+
+    /// Error-bounded lattice level shared by every root of a face.
+    ///
+    /// An edge's affine displacement is `L |zb - za| / (2 (za + zb))`. Of all
+    /// the face's edges and diagonals, the pair of extreme depths has the
+    /// largest depth ratio, and the screen bounding box's diagonal is at
+    /// least as long as any of them, so one test bounds every root at once,
+    /// and the whole face sharing one level leaves no T-junction on its
+    /// internal diagonals. Faces beyond `gate_depth` skip the screen pass
+    /// (see [`ClassicAffineProfile::error_gate_depth`]); in front of it the
+    /// level is at least [`gpu_extent_level`] of the screen box.
+    #[inline(always)]
+    pub(super) unsafe fn error_bounded_face_level(
+        vertices: *const ClassicAffineVertex,
+        vertex_count: usize,
+        budget_q3: u32,
+        gate_depth: u16,
+    ) -> u8 {
+        let end = unsafe { vertices.add(vertex_count) };
+        let first = unsafe { &*vertices };
+        let (mut z0, mut z1) = (first.depth, first.depth);
+        let mut vertex = unsafe { vertices.add(1) };
+        while vertex != end {
+            let z = unsafe { (*vertex).depth };
+            if z < z0 {
+                z0 = z;
+            } else if z > z1 {
+                z1 = z;
+            }
+            vertex = unsafe { vertex.add(1) };
+        }
+        if z0 <= 0 || (gate_depth != 0 && z0 >= i32::from(gate_depth)) {
+            return 0;
+        }
+        // i32 accumulators: the loads sign-extend once and the compares need
+        // no re-extension.
+        let (mut x0, mut y0) = (i32::from(first.screen[0]), i32::from(first.screen[1]));
+        let (mut x1, mut y1) = (x0, y0);
+        let mut vertex = unsafe { vertices.add(1) };
+        while vertex != end {
+            let v = unsafe { &*vertex };
+            let (x, y) = (i32::from(v.screen[0]), i32::from(v.screen[1]));
+            if x < x0 {
+                x0 = x;
+            } else if x > x1 {
+                x1 = x;
+            }
+            if y < y0 {
+                y0 = y;
+            } else if y > y1 {
+                y1 = y;
+            }
+            vertex = unsafe { vertex.add(1) };
+        }
+        let extent = gpu_extent_level(x1 - x0, y1 - y0);
+        // No edge inside the guard band is longer than 2813 px.
+        if crate::tess::error_level(2813, z0, z1, budget_q3) == 0 {
+            return extent;
+        }
+        let (dx, dy) = ((x1 - x0).min(4095) as u32, (y1 - y0).min(4095) as u32);
+        let span = if dx > dy {
+            dx + ((dy * 3) >> 3)
+        } else {
+            dy + ((dx * 3) >> 3)
+        };
+        crate::tess::error_level(span, z0, z1, budget_q3).max(extent)
+    }
+
+    #[inline(always)]
+    fn edge_error_level(a: &ClassicAffineVertex, b: &ClassicAffineVertex, budget_q3: u32) -> u8 {
+        crate::tess::error_level(
+            crate::tess::screen_span(a.screen, b.screen),
+            a.depth,
+            b.depth,
+            budget_q3,
+        )
+    }
+
+    /// Point `j / n` of the way from `a` to `b` (`n` is 2 or 4, `0 < j < n`)
+    /// by the same recursive midpoints the triangle lattice takes, so both
+    /// faces sharing an edge that is split as often generate identical
+    /// vertices.
+    #[inline(always)]
+    fn lattice_edge_point(
+        a: &ClassicAffineVertex,
+        b: &ClassicAffineVertex,
+        j: usize,
+        n: usize,
+    ) -> ClassicAffineVertex {
+        let half = midpoint(a, b);
+        if n == 2 || j == 2 {
+            half
+        } else if j == 1 {
+            midpoint(a, &half)
+        } else {
+            midpoint(&half, b)
+        }
+    }
+
+    /// Fill `row[0..=n]` with the points from `a` to `b` and project the ones
+    /// that are new (`ends_projected`: `a` and `b` already carry
+    /// projections).
+    #[inline(always)]
+    unsafe fn fill_lattice_row(
+        row: *mut ClassicAffineVertex,
+        a: ClassicAffineVertex,
+        b: ClassicAffineVertex,
+        n: usize,
+        ends_projected: bool,
+    ) {
+        unsafe {
+            ptr::write(row, a);
+            ptr::write(row.add(n), b);
+            if n == 2 {
+                ptr::write(row.add(1), midpoint(&a, &b));
+            } else if n == 4 {
+                let half = midpoint(&a, &b);
+                ptr::write(row.add(1), midpoint(&a, &half));
+                ptr::write(row.add(2), half);
+                ptr::write(row.add(3), midpoint(&half, &b));
+            }
+            if ends_projected {
+                if n == 2 {
+                    project_one(row.add(1));
+                } else if n == 4 {
+                    project_three_consecutive(row.add(1));
+                }
+            } else if n == 1 {
+                project_one(row);
+                project_one(row.add(1));
+            } else if n == 2 {
+                project_three_consecutive(row);
+            } else {
+                project_three_consecutive(row);
+                project_three_consecutive(row.add(2));
+            }
+        }
+    }
+
+    /// Seal the crack between a split boundary edge `p[0..=n]` and a
+    /// neighbour that drew it as one chord: the slivers between the chord
+    /// and the split polyline, the same shapes the triangle lattice's
+    /// underdraw takes.
+    #[inline(always)]
+    unsafe fn seal_split_edge<W: AffinePacketWriter>(
+        writer: &mut W,
+        p: [&ClassicAffineVertex; 5],
+        n: usize,
+        otz: u16,
+        visible: bool,
+    ) {
+        unsafe {
+            if n == 2 {
+                emit_classified_tri(writer, [p[0], p[2], p[1]], [p[0], p[2], p[1]], otz, visible);
+            } else if n == 4 {
+                emit_classified_quad(
+                    writer,
+                    [p[4], p[2], p[0], p[1]],
+                    [p[4], p[2], p[0], p[1]],
+                    otz,
+                    visible,
+                );
+                emit_classified_tri(writer, [p[2], p[4], p[3]], [p[2], p[4], p[3]], otz, visible);
+            }
+        }
+    }
+
+    /// Submission of a four-corner face (fan order `v0 v1 v2 v3`) as a quad
+    /// lattice: `2^la` cells along `v0 -> v1` and `2^lb` along `v0 -> v3`,
+    /// each axis split only as far as it needs, so a wall receding sideways
+    /// takes a 4x1 strip where the triangle lattice would spend twenty
+    /// packets on its two roots. Cells are GT4 in the GPU's Z order
+    /// (`[p(i+1,j), p(i+1,j+1), p(i,j), p(i,j+1)]`), which puts the GPU's
+    /// split on the same `v0 v2` diagonal the fan pairing uses. Rows are
+    /// generated two at a time in `scratch` (at most ten records, inside the
+    /// fan's twelve). Split boundary edges are sealed when a corner reaches
+    /// the band depth ([`ClassicAffineProfile::subdivide_error_px_q3`]).
+    ///
+    /// Error-bounded (`subdivide_error_px_q3` set): each axis from its own
+    /// two edges, the `v0 v2` diagonal counted on the axis with the larger
+    /// depth change. Band mode: the face level on each axis whose edges
+    /// change depth (a constant-depth edge maps affinely without error).
+    #[inline(always)]
+    pub(super) unsafe fn submit_quad_lattice<W: AffinePacketWriter>(
+        vertices: *mut ClassicAffineVertex,
+        scratch: *mut ClassicAffineVertex,
+        writer: &mut W,
+        face_level: u8,
+    ) {
+        let profile = writer.profile();
+        let c = unsafe {
+            [
+                &*vertices,
+                &*vertices.add(1),
+                &*vertices.add(2),
+                &*vertices.add(3),
+            ]
+        };
+        let depth_sum = c.iter().map(|v| v.depth as u16 as u32).sum::<u32>();
+        let face_otz = (depth_sum >> 4) as u16;
+        if face_otz == 0 || face_otz >= profile.ot_depth {
+            writer.topology_event(0);
+            return;
+        }
+        let dz = |a: &ClassicAffineVertex, b: &ClassicAffineVertex| a.depth.abs_diff(b.depth);
+        let dz_a = dz(c[0], c[1]) + dz(c[3], c[2]);
+        let dz_b = dz(c[1], c[2]) + dz(c[0], c[3]);
+        let (mut la, mut lb) = (0u8, 0u8);
+        if face_level != 0 && profile.subdivide_error_px_q3 == 0 {
+            if dz_a * 16 > depth_sum {
+                la = face_level;
+            }
+            if dz_b * 16 > depth_sum {
+                lb = face_level;
+            }
+        } else if face_level != 0 {
+            let budget = u32::from(profile.subdivide_error_px_q3);
+            la = edge_error_level(c[0], c[1], budget).max(edge_error_level(c[3], c[2], budget));
+            lb = edge_error_level(c[1], c[2], budget).max(edge_error_level(c[0], c[3], budget));
+            let diagonal = edge_error_level(c[0], c[2], budget);
+            if diagonal > la.max(lb) {
+                if dz_a >= dz_b {
+                    la = diagonal;
+                } else {
+                    lb = diagonal;
+                }
+            }
+            // The edges' warp can be zero on a face the GPU would still drop
+            // for its size: split both axes as far as the face needs.
+            let span = |axis: usize| {
+                let values = c.map(|v| i32::from(v.screen[axis]));
+                values.iter().max().unwrap_or(&0) - values.iter().min().unwrap_or(&0)
+            };
+            let extent = gpu_extent_level(span(0), span(1));
+            la = la.max(extent);
+            lb = lb.max(extent);
+        }
+        if la == 0 && lb == 0 {
+            writer.topology_event(2);
+            let quad = [c[1], c[2], c[0], c[3]];
+            let otz = if profile.farthest_depth_key {
+                (c.iter().map(|v| v.depth as u16).max().unwrap_or(0) >> 2).min(profile.ot_depth - 1)
+            } else {
+                face_otz
+            };
+            unsafe { writer.emit_quad(quad, quad, otz) };
+            return;
+        }
+        writer.topology_event(if la.max(lb) == 2 { 5 } else { 3 });
+
+        let na = 1usize << la;
+        let nb = 1usize << lb;
+        let visible = unsafe { projected_lattice_inside(writer, [c[0], c[1], c[2]], scratch, 10) };
+        let seal_at = i32::from(if la.max(lb) == 2 {
+            profile.subdivide_twice_at
+        } else {
+            profile.subdivide_once_at
+        });
+        let seal = c.iter().any(|v| v.depth >= seal_at);
+        let seal_otz = face_otz.saturating_add(profile.underdraw_slot_bias);
+        let ends = |r: &[ClassicAffineVertex]| -> [*const ClassicAffineVertex; 5] {
+            let at = |k: usize| &r[k.min(na)] as *const ClassicAffineVertex;
+            [at(0), at(1), at(2), at(3), at(na)]
+        };
+
+        let rows = [scratch, unsafe { scratch.add(5) }];
+        unsafe { fill_lattice_row(rows[0], *c[0], *c[1], na, true) };
+        if seal && na > 1 {
+            let r = unsafe { core::slice::from_raw_parts(rows[0], na + 1) };
+            let e = ends(r);
+            unsafe { seal_split_edge(writer, e.map(|v| &*v), na, seal_otz, visible) };
+        }
+        let mut j = 1usize;
+        while j <= nb {
+            let prev = rows[(j - 1) & 1];
+            let cur = rows[j & 1];
+            if j == nb {
+                unsafe { fill_lattice_row(cur, *c[3], *c[2], na, true) };
+            } else {
+                let left = lattice_edge_point(c[0], c[3], j, nb);
+                let right = lattice_edge_point(c[1], c[2], j, nb);
+                unsafe { fill_lattice_row(cur, left, right, na, false) };
+            }
+            let p = unsafe { core::slice::from_raw_parts(prev, na + 1) };
+            let q = unsafe { core::slice::from_raw_parts(cur, na + 1) };
+            let mut i = 0usize;
+            while i < na {
+                let cell = [&p[i + 1], &q[i + 1], &p[i], &q[i]];
+                unsafe { sorted_quad(writer, cell, cell, visible) };
+                i += 1;
+            }
+            if seal && nb > 1 {
+                // Column edges v0-v3 (row starts) and v1-v2 (row ends): their
+                // slivers need rows 1 and 2 (the quad) or rows 2 and 3 (the
+                // triangle) of a four-row lattice, or row 1 of a two-row one.
+                unsafe {
+                    if nb == 2 && j == 1 {
+                        let (s0, s1) = ([c[0], c[3], &q[0]], [c[1], c[2], &q[na]]);
+                        emit_classified_tri(writer, s0, s0, seal_otz, visible);
+                        emit_classified_tri(writer, s1, s1, seal_otz, visible);
+                    } else if nb == 4 && j == 2 {
+                        let s0 = [c[3], &q[0], c[0], &p[0]];
+                        let s1 = [c[2], &q[na], c[1], &p[na]];
+                        emit_classified_quad(writer, s0, s0, seal_otz, visible);
+                        emit_classified_quad(writer, s1, s1, seal_otz, visible);
+                    } else if nb == 4 && j == 3 {
+                        let (s0, s1) = ([&p[0], c[3], &q[0]], [&p[na], c[2], &q[na]]);
+                        emit_classified_tri(writer, s0, s0, seal_otz, visible);
+                        emit_classified_tri(writer, s1, s1, seal_otz, visible);
+                    }
+                }
+            }
+            if j == nb && seal && na > 1 {
+                let e = ends(q);
+                unsafe { seal_split_edge(writer, e.map(|v| &*v), na, seal_otz, visible) };
+            }
+            j += 1;
+        }
+    }
+
+    /// Band-mode face level of a four-corner face: the deeper of its two
+    /// roots' band levels (zero when a root falls outside the OT, so the
+    /// historical fan handles it).
+    #[inline(always)]
+    pub(super) unsafe fn band_quad_level(
+        vertices: *const ClassicAffineVertex,
+        profile: ClassicAffineProfile,
+    ) -> u8 {
+        let z = unsafe { [0, 1, 2, 3].map(|k| (*vertices.add(k)).depth as u16) };
+        let band = |otz: u16| {
+            if otz == 0 || otz >= profile.ot_depth {
+                PER_ROOT_LEVEL
+            } else if otz < profile.subdivide_twice_at {
+                2
+            } else if otz < profile.subdivide_once_at {
+                1
+            } else {
+                0
+            }
+        };
+        let (first, second) = (
+            band(average3_depths(z[0], z[1], z[2])),
+            band(average3_depths(z[0], z[2], z[3])),
+        );
+        if first == PER_ROOT_LEVEL || second == PER_ROOT_LEVEL {
+            0
+        } else {
+            first.max(second)
+        }
+    }
+}
+
 /// Project and submit a convex triangle fan through the compact classic
 /// affine path.
 ///
@@ -3021,10 +3456,39 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
     }
     writer.topology_event(14);
 
+    #[cfg(feature = "classic-affine-lattice")]
+    let face_level = if profile.subdivide_error_px_q3 != 0 {
+        let level = unsafe {
+            lattice::error_bounded_face_level(
+                vertices,
+                vertex_count,
+                u32::from(profile.subdivide_error_px_q3),
+                profile.error_gate_depth,
+            )
+        };
+        if vertex_count == 4 {
+            unsafe { lattice::submit_quad_lattice(vertices, generated, writer, level) };
+            return;
+        }
+        level
+    } else {
+        if profile.quad_lattice && vertex_count == 4 {
+            let level = unsafe { lattice::band_quad_level(vertices, profile) };
+            if level != 0 {
+                unsafe { lattice::submit_quad_lattice(vertices, generated, writer, level) };
+                return;
+            }
+        }
+        PER_ROOT_LEVEL
+    };
+    #[cfg(not(feature = "classic-affine-lattice"))]
+    let face_level = PER_ROOT_LEVEL;
+
     let root = unsafe { &*vertices };
     let root_depth = root.depth as u16;
     let end = unsafe { vertices.add(vertex_count) };
-    let mut previous = unsafe { vertices.add(1) };
+    let first_previous = unsafe { vertices.add(1) };
+    let mut previous = first_previous;
     let mut current = unsafe { vertices.add(2) };
 
     while current != end {
@@ -3046,18 +3510,25 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
             otz
         };
         if otz > 0 && otz < profile.ot_depth {
-            let subdivision_level =
-                classic_affine_subdivision_level([root, previous_ref, current_ref], otz, profile);
+            let subdivision_level = if face_level != PER_ROOT_LEVEL {
+                face_level
+            } else {
+                classic_affine_subdivision_level([root, previous_ref, current_ref], otz, profile)
+            };
             let next = unsafe { current.add(1) };
             if subdivision_level == 0 && next != end {
                 let next_ref = unsafe { &*next };
                 let next_otz =
                     average3_depths(root_depth, current_ref.depth as u16, next_ref.depth as u16);
-                let next_level = classic_affine_subdivision_level(
-                    [root, current_ref, next_ref],
-                    next_otz,
-                    profile,
-                );
+                let next_level = if face_level != PER_ROOT_LEVEL {
+                    face_level
+                } else {
+                    classic_affine_subdivision_level(
+                        [root, current_ref, next_ref],
+                        next_otz,
+                        profile,
+                    )
+                };
                 let compatible_depth = next_otz == otz;
                 if next_otz > 0
                     && next_otz < profile.ot_depth
@@ -3091,7 +3562,14 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
                 }
             }
 
-            let underdraw_edges = 7;
+            // A face-wide level splits every internal diagonal the same way
+            // on both sides, so only the face's own edges can meet a
+            // neighbour split differently.
+            let underdraw_edges = if face_level == PER_ROOT_LEVEL {
+                7
+            } else {
+                2 | u8::from(previous == first_previous) | (u8::from(next == end) << 2)
+            };
             if subdivision_level == 2 {
                 let underdraw_at = i32::from(profile.subdivide_twice_at);
                 let underdraw = root.depth >= underdraw_at
@@ -3523,7 +4001,11 @@ pub unsafe fn submit_quake_classic_affine_batch(
             surfaces,
             surface_count,
             output,
-            ClassicAffineProfile::QUAKE_REFERENCE,
+            if cfg!(feature = "classic-affine-lattice") {
+                ClassicAffineProfile::QUAKE_ERROR_BOUNDED
+            } else {
+                ClassicAffineProfile::QUAKE_REFERENCE
+            },
         )
     }
 }
@@ -5686,6 +6168,310 @@ mod tests {
         assert_eq!((once.packets, once.hardware_triangles), (6, 7));
         assert_eq!((twice.packets, twice.hardware_triangles), (16, 25));
         assert!(twice.packets <= 19, "packet-capacity contract changed");
+    }
+
+    #[cfg(feature = "classic-affine-lattice")]
+    mod lattice_tests {
+        use super::*;
+
+        /// Records what a submitter emits: `(screens, otz)` per packet.
+        struct RecordingWriter {
+            profile: ClassicAffineProfile,
+            tris: [([[i16; 2]; 3], u16); 64],
+            quads: [([[i16; 2]; 4], u16); 64],
+            tri_count: usize,
+            quad_count: usize,
+        }
+
+        impl RecordingWriter {
+            fn new(profile: ClassicAffineProfile) -> Self {
+                Self {
+                    profile,
+                    tris: [([[0; 2]; 3], 0); 64],
+                    quads: [([[0; 2]; 4], 0); 64],
+                    tri_count: 0,
+                    quad_count: 0,
+                }
+            }
+        }
+
+        impl AffinePacketWriter for RecordingWriter {
+            fn profile(&self) -> ClassicAffineProfile {
+                self.profile
+            }
+
+            unsafe fn emit_tri(
+                &mut self,
+                projected: [&ClassicAffineVertex; 3],
+                _attributes: [&ClassicAffineVertex; 3],
+                otz: u16,
+            ) {
+                self.tris[self.tri_count] = (projected.map(|v| v.screen), otz);
+                self.tri_count += 1;
+            }
+
+            unsafe fn emit_quad(
+                &mut self,
+                projected: [&ClassicAffineVertex; 4],
+                _attributes: [&ClassicAffineVertex; 4],
+                otz: u16,
+            ) {
+                self.quads[self.quad_count] = (projected.map(|v| v.screen), otz);
+                self.quad_count += 1;
+            }
+        }
+
+        const ERROR_BOUNDED: ClassicAffineProfile = ClassicAffineProfile {
+            subdivide_once_at: 0,
+            subdivide_twice_at: 0,
+            subdivide_error_px_q3: 64,
+            quad_lattice: true,
+            ..ClassicAffineProfile::QUAKE_REFERENCE
+        };
+
+        /// Project a camera-space face (fan order) with the host GTE and submit
+        /// it through the error-bounded fan path.
+        fn submit_error_bounded_face(
+            corners: &[[i16; 3]],
+            profile: ClassicAffineProfile,
+        ) -> RecordingWriter {
+            psx_gte::host::reset();
+            scene::set_screen_offset(160 << 16, 120 << 16);
+            scene::set_projection_plane(160);
+            scene::set_avsz_weights(0x155, 0x100);
+            scene::load_rotation(&Mat3I16::IDENTITY);
+            scene::load_translation(Vec3I32::ZERO);
+            let mut vertices = [ClassicAffineVertex::default(); 6 + EXTRA_VERTICES];
+            for (index, position) in corners.iter().enumerate() {
+                vertices[index] = ClassicAffineVertex {
+                    position: *position,
+                    uv: [(index as u8 & 1) * 63, (index as u8 >> 1) * 63],
+                    color: 0x0080_8080,
+                    ..ClassicAffineVertex::default()
+                };
+                unsafe { project_one(vertices.as_mut_ptr().add(index)) };
+            }
+            let mut writer = RecordingWriter::new(profile);
+            unsafe {
+                submit_classic_affine_projected_fan_into_writer(
+                    vertices.as_mut_ptr(),
+                    corners.len(),
+                    vertices.as_mut_ptr().add(corners.len()),
+                    &mut writer,
+                )
+            };
+            writer
+        }
+
+        /// Twice the signed area of the GPU's two triangles of a Z-ordered quad
+        /// `[a, b, c, d]` (`a b c` then `b d c`): equal signs mean the quad is
+        /// drawn without a bow-tie.
+        fn z_order_halves(q: [[i16; 2]; 4]) -> (i32, i32) {
+            let cross = |o: [i16; 2], p: [i16; 2], r: [i16; 2]| {
+                (p[0] as i32 - o[0] as i32) * (r[1] as i32 - o[1] as i32)
+                    - (p[1] as i32 - o[1] as i32) * (r[0] as i32 - o[0] as i32)
+            };
+            (cross(q[0], q[1], q[2]), cross(q[1], q[3], q[2]))
+        }
+
+        #[test]
+        fn error_bounded_floor_splits_only_along_its_depth_axis() {
+            // A floor receding from z = 150 to z = 1500: its near and far edges
+            // have constant depth, so only the receding axis may split.
+            let floor = [
+                [-200, 100, 150],
+                [200, 100, 150],
+                [200, 100, 1500],
+                [-200, 100, 1500],
+            ];
+            let unsealed = ClassicAffineProfile {
+                subdivide_once_at: u16::MAX,
+                subdivide_twice_at: u16::MAX,
+                ..ERROR_BOUNDED
+            };
+            let w = submit_error_bounded_face(&floor, unsealed);
+            assert_eq!((w.quad_count, w.tri_count), (4, 0), "a 1x4 strip of quads");
+            for (q, _) in &w.quads[..w.quad_count] {
+                let (a, b) = z_order_halves(*q);
+                assert!(
+                    a != 0 && b != 0 && (a > 0) == (b > 0),
+                    "bow-tie or sliver {q:?}"
+                );
+            }
+            // Consecutive rows share their edge exactly: cell k's far edge is
+            // cell k+1's near edge (Z order [p(1,j), p(1,j+1), p(0,j), p(0,j+1)]).
+            for k in 0..w.quad_count - 1 {
+                let (a, _) = w.quads[k];
+                let (b, _) = w.quads[k + 1];
+                assert_eq!([a[1], a[3]], [b[0], b[2]]);
+            }
+            // Sealed, both receding edges get their crack slivers.
+            let sealed = submit_error_bounded_face(&floor, ERROR_BOUNDED);
+            assert_eq!((sealed.quad_count, sealed.tri_count), (4 + 2, 2));
+        }
+
+        #[test]
+        fn error_bounded_quad_edges_use_the_triangle_lattice_midpoints() {
+            // A wall receding sideways: its near-to-far edges split twice. The
+            // generated edge vertices must be the recursive midpoints the
+            // triangle lattice produces on a shared edge (mid, then the
+            // midpoints of each half), or a neighbour split the same way would
+            // meet it at a T-junction.
+            let wall = [
+                [-100, -120, 200],
+                [-100, -120, 1400],
+                [-100, 120, 1400],
+                [-100, 120, 200],
+            ];
+            let w = submit_error_bounded_face(&wall, ERROR_BOUNDED);
+            assert!(w.quad_count >= 4);
+            let corner = |p: [i16; 3]| ClassicAffineVertex {
+                position: p,
+                ..ClassicAffineVertex::default()
+            };
+            let (a, b) = (corner(wall[0]), corner(wall[1]));
+            let half = midpoint(&a, &b);
+            let mut expected = [midpoint(&a, &half), half, midpoint(&half, &b)];
+            for v in &mut expected {
+                unsafe { project_one(v) };
+            }
+            for v in &expected {
+                let found = w.quads[..w.quad_count]
+                    .iter()
+                    .any(|(q, _)| q.contains(&v.screen));
+                assert!(
+                    found,
+                    "edge point {:?} missing from the quad lattice",
+                    v.screen
+                );
+            }
+        }
+
+        /// Every emitted primitive that covers pixels keeps its vertices
+        /// within the GPU's 1023 x 511 extent (a quad is two triangles sharing
+        /// its vertices). Zero-area crack seals along a split edge are skipped:
+        /// on a face this flat they cover nothing either way.
+        fn assert_within_gpu_extent(w: &RecordingWriter) {
+            let fits = |points: &[[i16; 2]]| {
+                points.iter().all(|a| {
+                    points.iter().all(|b| {
+                        (i32::from(a[0]) - i32::from(b[0])).abs() <= 1023
+                            && (i32::from(a[1]) - i32::from(b[1])).abs() <= 511
+                    })
+                })
+            };
+            let flat = |points: &[[i16; 2]]| {
+                let cross = |o: [i16; 2], p: [i16; 2], r: [i16; 2]| {
+                    (i32::from(p[0]) - i32::from(o[0])) * (i32::from(r[1]) - i32::from(o[1]))
+                        - (i32::from(p[1]) - i32::from(o[1])) * (i32::from(r[0]) - i32::from(o[0]))
+                };
+                points.windows(3).all(|w| cross(w[0], w[1], w[2]) == 0)
+            };
+            let mut covering = 0;
+            for (q, _) in &w.quads[..w.quad_count] {
+                if !flat(q) {
+                    assert!(fits(q), "quad {q:?} exceeds the GPU extent");
+                    covering += 1;
+                }
+            }
+            for (t, _) in &w.tris[..w.tri_count] {
+                if !flat(t) {
+                    assert!(fits(t), "triangle {t:?} exceeds the GPU extent");
+                    covering += 1;
+                }
+            }
+            assert!(covering > 1, "the face must split into several primitives");
+        }
+
+        #[test]
+        fn error_bounded_face_taller_than_the_gpu_extent_splits() {
+            // A wall strip square to the camera, 640 px tall on screen: no
+            // depth change, so no warp, but one primitive over 511 px tall is
+            // dropped by the GPU. Four corners take the quad lattice.
+            let strip = [
+                [-50, -200, 100],
+                [50, -200, 100],
+                [50, 200, 100],
+                [-50, 200, 100],
+            ];
+            let w = submit_error_bounded_face(&strip, ERROR_BOUNDED);
+            assert!(w.quad_count + w.tri_count > 1, "the strip must split");
+            assert_within_gpu_extent(&w);
+            // Five corners take the fan with the face-wide level.
+            let pentagon = [
+                [-50, -200, 100],
+                [50, -200, 100],
+                [60, 0, 100],
+                [50, 200, 100],
+                [-50, 200, 100],
+            ];
+            let w = submit_error_bounded_face(&pentagon, ERROR_BOUNDED);
+            assert!(w.quad_count + w.tri_count > 3, "the fan must split");
+            assert_within_gpu_extent(&w);
+        }
+
+        #[test]
+        fn error_bounded_face_within_the_gpu_extent_stays_whole() {
+            // The same strip three times as deep is 213 px tall: one quad.
+            let strip = [
+                [-50, -200, 300],
+                [50, -200, 300],
+                [50, 200, 300],
+                [-50, 200, 300],
+            ];
+            let w = submit_error_bounded_face(&strip, ERROR_BOUNDED);
+            assert_eq!((w.quad_count, w.tri_count), (1, 0));
+        }
+
+        #[test]
+        fn error_bounded_gate_skips_only_faces_beyond_it() {
+            // The same floor pushed out beyond the gate keeps the historical
+            // unsplit fan (two roots); in front of it the error bound splits it.
+            let near = [
+                [-200, 100, 150],
+                [200, 100, 150],
+                [200, 100, 1500],
+                [-200, 100, 1500],
+            ];
+            let far = near.map(|[x, y, z]| [x, y, z + 1000]);
+            let gated = ClassicAffineProfile {
+                error_gate_depth: 1000,
+                ..ERROR_BOUNDED
+            };
+            assert!(submit_error_bounded_face(&near, gated).quad_count > 1);
+            let w = submit_error_bounded_face(&far, gated);
+            assert!(w.quad_count + w.tri_count <= 2, "unsplit fan");
+        }
+
+        #[test]
+        fn banded_quad_lattice_splits_only_receding_axes() {
+            // Band mode: a floor inside the two-level band splits only along
+            // its receding axis (4 cells); a wall facing the camera at the same
+            // depth has no receding axis and keeps the historical pairing.
+            let banded = ClassicAffineProfile {
+                subdivide_once_at: u16::MAX,
+                subdivide_twice_at: u16::MAX,
+                quad_lattice: true,
+                ..ClassicAffineProfile::QUAKE_REFERENCE
+            };
+            let floor = [
+                [-200, 100, 150],
+                [200, 100, 150],
+                [200, 100, 600],
+                [-200, 100, 600],
+            ];
+            let w = submit_error_bounded_face(&floor, banded);
+            // Bands this deep also gate sealing (depth >= band), so none here.
+            assert_eq!((w.quad_count, w.tri_count), (4, 0), "a 1x4 strip");
+            let wall = [
+                [-200, -100, 300],
+                [200, -100, 300],
+                [200, 100, 300],
+                [-200, 100, 300],
+            ];
+            let w = submit_error_bounded_face(&wall, banded);
+            assert_eq!((w.quad_count, w.tri_count), (1, 0));
+        }
     }
 
     #[test]

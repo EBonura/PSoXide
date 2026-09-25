@@ -76,6 +76,7 @@ pub mod scratch;
 pub mod scratchpad;
 pub mod sfx;
 pub mod telemetry;
+pub mod tess;
 pub mod third_person_camera;
 mod time;
 pub mod transform;

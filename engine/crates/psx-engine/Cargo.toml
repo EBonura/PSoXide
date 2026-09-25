@@ -53,6 +53,11 @@ classic-affine-gpu-polygon-clip = ["classic-affine-gpu-lattice-clip"]
 # Monomorphize the ordinary batch submitter around Quake's one fixed profile
 # so depth/error policy and viewport constants are compile-time facts.
 classic-affine-quake-specialized-kernel = []
+# Error-bounded / quad-lattice fan tessellation (profile fields
+# `subdivide_error_px_q3` and `quad_lattice`). Opt-in: the dispatch alone
+# grows every fan submitter's frame, and Cortex's PXBSP writer runs on a
+# scratchpad stack with 8 bytes to spare. Without it those fields are ignored.
+classic-affine-lattice = []
 # Player skinned-vertex live-capture instrument (the HWB-008..011
 # explosion-hunt channel). Off by default: the per-vertex observe and
 # per-joint compose recording cost real cycles and must not ride along
