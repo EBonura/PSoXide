@@ -493,9 +493,19 @@ fn lerp_sv(a: &SVert, b: &SVert, axis: Axis, bound: i32) -> SVert {
         (a.y, b.y)
     };
     let t = t_q12(bound - ca, cb - ca);
+    let (x, y) = (mix(a.x, b.x, t), mix(a.y, b.y, t));
+    #[cfg(feature = "warp-probe")]
+    {
+        // The emitted depth is interpolated in screen space; the surface's
+        // true depth there is 1/z-linear. Measurement builds announce that.
+        let (za, zb) = (a.z.clamp(1, 0xFFFF) as u32, b.z.clamp(1, 0xFFFF) as u32);
+        let t = t.clamp(0, 4096) as u32;
+        let den = (((4096 - t) * zb + t * za) >> 12).max(1);
+        warp_probe_announce(x, y, ((za * zb) / den) as i32);
+    }
     SVert {
-        x: mix(a.x, b.x, t),
-        y: mix(a.y, b.y, t),
+        x,
+        y,
         z: mix(a.z, b.z, t),
         rgb: (
             mix(a.rgb.0, b.rgb.0, t),
@@ -612,6 +622,7 @@ fn lerp_view_plane(a: &SVert, b: &SVert, mut da: i32, mut db: i32, plane: ViewPl
     if matches!(plane, ViewPlane::Near) {
         v.z = NEAR_Z;
     }
+    warp_probe_announce(v.x, v.y, v.z);
     v
 }
 
