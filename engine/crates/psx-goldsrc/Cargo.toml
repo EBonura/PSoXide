@@ -21,3 +21,8 @@ psx-engine = { path = "../psx-engine" }
 # to nothing.
 emulator-telemetry = []
 performance-telemetry = []
+# Measurement builds only: announce every CPU-projected vertex (screen word +
+# view depth) to PSoXide's texture-warp probe through its emulator-only port,
+# so `frontend launch --warp-log` can score soft-projected geometry too.
+# Retail hardware ignores the writes; shipping builds compile them out.
+warp-probe = []
