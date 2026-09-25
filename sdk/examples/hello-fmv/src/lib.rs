@@ -26,11 +26,14 @@
 //! the decoder is slower than the stream, which costs smoothness, not
 //! data). When the stream ends a summary screen stays up. The same numbers
 //! go to the TTY as one `FMV PASS ...` / `FMV FAIL ...` line.
+//!
+//! [`run`] is the whole test and returns once the summary is on screen, so
+//! the same player runs from this example's own boot (`src/bin.rs`) and from
+//! the hardware-test suite's menu. The caller owns the VBlank counter: it
+//! must already be installed, because reinstalling it would reset a count
+//! the caller may be pacing on.
 
 #![no_std]
-#![no_main]
-
-extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
 use psx_fmv::{bs, iso, mdec, str::FrameAssembler};
@@ -377,6 +380,43 @@ struct Summary {
     kcyc: [u32; 3],
 }
 
+/// Everything the summary screen shows, for a caller that records it.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Outcome {
+    /// The PASS criteria: every video sector arrived intact and in order,
+    /// every frame decoded, and the drive reported no error.
+    pub pass: bool,
+    /// Set when the test could not start (drive, file or MDEC setup); the
+    /// counters below are then all zero.
+    pub setup_error: Option<&'static str>,
+    /// Video sectors that passed their checks, and the file's total.
+    pub good: u32,
+    pub total: u32,
+    /// Video sectors never delivered, and ones delivered corrupt, repeated
+    /// or out of order.
+    pub lost: u32,
+    pub bad: u32,
+    /// Frames lost to bad sectors.
+    pub dropped: u32,
+    /// Drive error IRQs, and MDEC or bitstream failures.
+    pub cd_errors: u32,
+    pub decode_errors: u32,
+    /// Frames shown, and frames skipped because the decoder was still busy
+    /// (informational: CPU speed, not the disc).
+    pub shown: u32,
+    pub late: u32,
+    /// Stream duration in VBlanks.
+    pub vblanks: u32,
+    /// Absolute LBA of the last good sector, and of the first problem.
+    pub lba: u32,
+    pub first_err_lba: Option<u32>,
+    /// CPU cost per frame in kilocycles: bitstream decode, MDEC plus
+    /// upload, and waiting.
+    pub kcyc_vlc: u32,
+    pub kcyc_mdec: u32,
+    pub kcyc_wait: u32,
+}
+
 /// Final screen: stays up after the stream ends.
 fn draw_summary(font: &FontAtlas, small: &FontAtlas, st: &Stream, s: &Summary) {
     gpu::fill_rect(0, 0, WIDTH, HEIGHT, 0, 0, 0);
@@ -464,13 +504,15 @@ fn draw_summary(font: &FontAtlas, small: &FontAtlas, st: &Stream, s: &Summary) {
     psx_io::gpu::write_gp1(0x0500_0000);
 }
 
-fn fail(what: &str) -> ! {
+/// The test could not start: a red screen, and the reason on the TTY.
+fn fail(what: &'static str) -> Outcome {
     tty::print("FMV FAIL ");
     tty::println(what);
     gpu::fill_rect(0, 0, WIDTH, HEIGHT, 160, 0, 0);
     psx_io::gpu::write_gp1(0x0500_0000);
-    loop {
-        interrupts::wait_vblank();
+    Outcome {
+        setup_error: Some(what),
+        ..Outcome::default()
     }
 }
 
@@ -482,9 +524,11 @@ fn wait_vblank_pumping(st: &mut Stream) {
     }
 }
 
-#[no_mangle]
-fn main() {
-    interrupts::install_vblank_counter();
+/// Run the whole test: stream, check, and leave the summary (or, when the
+/// test could not start, a red screen) on the displayed buffer at VRAM row 0.
+/// Takes over the GPU, SPU, CD drive, MDEC and root counter 2; a caller that
+/// carries on afterwards restores what it needs.
+pub fn run() -> Outcome {
     gpu::init(VideoMode::Ntsc, Resolution::R320X240);
     gpu::fill_rect(0, 0, WIDTH, 512, 0, 0, 0);
     let font = FontAtlas::upload(&WIDE, FONT_TPAGE, FONT_CLUT);
@@ -495,12 +539,13 @@ fn main() {
     spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
     spu::enable_cd_audio(true);
 
-    // SAFETY: first and only prepare; nothing else drives the CD.
+    // SAFETY: nothing else drives the CD while the test runs; prepare also
+    // takes the drive over from whatever used it before.
     if !unsafe { (*addr_of_mut!(READER)).prepare() } {
-        fail("cd prepare");
+        return fail("cd prepare");
     }
     let Some((lba, _size)) = find_movie() else {
-        fail("MOVIE.STR not found");
+        return fail("MOVIE.STR not found");
     };
     // SAFETY: the reader is prepared and idle.
     let xa_ok = unsafe {
@@ -508,12 +553,12 @@ fn main() {
         r.prepare_mode(CD_MODE) && r.set_filter(XA_FILE, XA_CHANNEL)
     };
     if !xa_ok {
-        fail("cd xa mode");
+        return fail("cd xa mode");
     }
     psx_io::cdrom::set_audio_mixer(0x80, 0, 0x80, 0);
     mdec::reset();
     if !mdec::load_tables() {
-        fail("mdec tables");
+        return fail("mdec tables");
     }
 
     let mut st = Stream {
@@ -536,7 +581,7 @@ fn main() {
     };
     // SAFETY: the reader was prepared above.
     if !unsafe { (*addr_of_mut!(READER)).start_read(lba) } {
-        fail("cd start");
+        return fail("cd start");
     }
 
     let mut shown = 0u32;
@@ -544,6 +589,9 @@ fn main() {
     let mut back_y: u16 = 256;
     psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0x0200);
     clock(Some(PHASE_WAIT));
+    // SAFETY: single-threaded profiling statics; a second run from a menu
+    // starts its profile from zero.
+    unsafe { *addr_of_mut!(ACC) = [0; 3] };
     let start = interrupts::vblank_count();
     let mut next_flip = start;
     // SAFETY: RLE is only touched by this loop.
@@ -651,7 +699,23 @@ fn main() {
     print_num("kcyc_wait", summary.kcyc[PHASE_WAIT]);
     tty::println("");
     draw_summary(&font, &small, &st, &summary);
-    loop {
-        interrupts::wait_vblank();
+    Outcome {
+        pass: summary.pass,
+        setup_error: None,
+        good: st.good,
+        total: st.total,
+        lost: st.lost,
+        bad: st.bad,
+        dropped: summary.dropped,
+        cd_errors: st.cd_errors,
+        decode_errors: summary.errors,
+        shown: summary.shown,
+        late: st.late,
+        vblanks: summary.vblanks,
+        lba: st.lba,
+        first_err_lba: st.first_err_lba,
+        kcyc_vlc: summary.kcyc[PHASE_VLC],
+        kcyc_mdec: summary.kcyc[PHASE_MDEC],
+        kcyc_wait: summary.kcyc[PHASE_WAIT],
     }
 }
