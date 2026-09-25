@@ -190,6 +190,16 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
             )?;
         }
     }
+    // The UI SFX bank rides in UI.PAK too, after every asset chunk id. The
+    // guest uploads it to SPU RAM once at boot, so the streaming build reads
+    // it off the disc instead of linking a copy that is dead after boot. The
+    // `ui_sfx/` files above still back the linked (non-streaming) build.
+    for (chunk_id, bytes) in ui_sfx_pack_chunks(package) {
+        std::fs::write(
+            ui_stream_chunks_dir.join(format!("ui_{chunk_id:03}.psxt")),
+            bytes,
+        )?;
+    }
     for room_index in world_pack_order(package) {
         let payload = streamed_room_chunk_payload(package, room_index)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -718,9 +728,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             write_aligned_asset_bytes_static(&mut out, &asset_static_name(asset, i), &include_path);
         }
     }
+    // UI SFX samples stream off UI.PAK under `cd-stream-bench` (see
+    // `ui_sfx_pack_chunks`), so that build links empty bytes for them.
     for (i, sample) in package.ui_sfx_samples.iter().enumerate() {
         let static_name = ui_sfx_sample_static_name(i);
         let _ = writeln!(out, "/// {static_name} - {}", sample.source_path);
+        let _ = writeln!(out, "#[cfg(feature = \"cd-stream-bench\")]");
+        let _ = writeln!(out, "pub static {static_name}: &[u8] = &[];");
+        let _ = writeln!(out, "#[cfg(not(feature = \"cd-stream-bench\"))]");
         write_aligned_asset_bytes_static(
             &mut out,
             &static_name,
@@ -1111,6 +1126,25 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(
         out,
         "pub const UI_PACK_IMAGE_CACHE_SLOTS: usize = {ui_pack_image_cache_slots};",
+    );
+    out.push('\n');
+
+    out.push_str("/// UI.PAK chunk id of UI SFX sample 0; sample `i` is this plus `i`.\n");
+    let _ = writeln!(
+        out,
+        "pub const UI_SFX_PACK_FIRST_CHUNK: u32 = {};",
+        ui_sfx_pack_first_chunk(package),
+    );
+    out.push_str("/// Largest UI SFX sample in bytes (boot-time staging size).\n");
+    let _ = writeln!(
+        out,
+        "pub const UI_SFX_MAX_SAMPLE_BYTES: usize = {};",
+        package
+            .ui_sfx_samples
+            .iter()
+            .map(|sample| sample.bytes.len())
+            .max()
+            .unwrap_or(0),
     );
     out.push('\n');
 
@@ -2592,7 +2626,24 @@ fn ui_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
         .enumerate()
         .filter(|(_, asset)| asset.is_streamed())
         .map(|(index, asset)| (index as u32, asset.bytes.as_slice()))
+        .chain(ui_sfx_pack_chunks(package))
         .collect()
+}
+
+/// UI.PAK chunk id of the first UI SFX sample: the first id past every asset
+/// index, so no asset chunk can collide with it.
+fn ui_sfx_pack_first_chunk(package: &PlaytestPackage) -> u32 {
+    package.assets.len() as u32
+}
+
+/// UI SFX samples as UI.PAK chunks, after every streamed asset.
+fn ui_sfx_pack_chunks(package: &PlaytestPackage) -> impl Iterator<Item = (u32, &[u8])> {
+    let first = ui_sfx_pack_first_chunk(package);
+    package
+        .ui_sfx_samples
+        .iter()
+        .enumerate()
+        .map(move |(index, sample)| (first + index as u32, sample.bytes.as_slice()))
 }
 
 /// Largest payload in bytes across the streamed assets of one class.

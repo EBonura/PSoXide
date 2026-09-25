@@ -584,6 +584,51 @@ fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
 }
 
 #[test]
+fn ui_sfx_bank_streams_from_ui_pack_after_every_asset_chunk() {
+    let sample = |bytes: Vec<u8>, name: &str| PlaytestUiSfxSample {
+        bytes,
+        filename: name.into(),
+        source_path: name.into(),
+    };
+    let package = PlaytestPackage {
+        assets: vec![
+            test_room_asset(static_lit_test_room_bytes(), 0),
+            test_room_asset(static_lit_test_room_bytes(), 1),
+        ],
+        ui_sfx_samples: vec![
+            sample(vec![1; 40], "a.psau"),
+            sample(vec![2; 3000], "b.psau"),
+        ],
+        ..Default::default()
+    };
+
+    // Sample i is chunk assets.len() + i, after every asset id.
+    let chunks = ui_pack_chunks(&package);
+    assert_eq!(
+        chunks,
+        vec![(2, &[1u8; 40][..]), (3, &[2u8; 3000][..])],
+        "room assets are not UI.PAK chunks; the two samples follow the asset ids"
+    );
+    let toc = ui_pack_toc(&package);
+    assert_eq!(
+        toc.iter().map(|entry| entry.chunk_id).collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert_eq!(toc[1].byte_size, 3000);
+
+    let src = render_manifest_source(&package);
+    assert!(src.contains("pub const UI_SFX_PACK_FIRST_CHUNK: u32 = 2;"));
+    assert!(src.contains("pub const UI_SFX_MAX_SAMPLE_BYTES: usize = 3000;"));
+    assert!(src.contains(
+        "#[cfg(feature = \"cd-stream-bench\")]\npub static UI_SFX_SAMPLE_001_BYTES: &[u8] = &[];"
+    ));
+    assert!(src.contains(
+        "#[cfg(not(feature = \"cd-stream-bench\"))]\npub static UI_SFX_SAMPLE_001_BYTES: &[u8] = {"
+    ));
+    assert!(src.contains("bytes: *include_bytes!(\"ui_sfx/b.psau\") };"));
+}
+
+#[test]
 fn streamed_room_chunk_payload_splits_collision_and_render_cache_records() {
     let mut package = PlaytestPackage {
         assets: vec![test_room_asset(static_lit_test_room_bytes(), 0)],
