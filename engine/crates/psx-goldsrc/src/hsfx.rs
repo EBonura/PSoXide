@@ -29,9 +29,89 @@ pub struct Hsfx<const N: usize, const HEALTH: u8, const SUIT: u8> {
     voice_addrs: [u32; MAX_VOICES],
     voice_rates: [u32; MAX_VOICES],
     voice_count: usize,
-    map_loop_owner: [u16; MAP_LOOP_VOICE_COUNT],
-    next_map_loop: usize,
+    map_loops: MapLoops,
     ear: [i32; 3],
+}
+
+/// Which owner holds each map-loop voice, the level last written to it, and
+/// when it was keyed. Bookkeeping only (no SPU access), so the allocation order
+/// is host-testable.
+///
+/// A new loop takes a free voice when there is one (lowest index first).
+/// Only when all seven are held does it evict one: the quietest, as last set
+/// by a key or a level change, and the one keyed longest ago among equally
+/// quiet voices. A loop muted in place is therefore the first to go, and the
+/// nearest (loudest) loops are the last. The new loop always starts; GoldSrc
+/// has no priority to compare it by.
+#[derive(Clone, Copy)]
+struct MapLoops {
+    owner: [u16; MAP_LOOP_VOICE_COUNT],
+    level: [i16; MAP_LOOP_VOICE_COUNT],
+    keyed_at: [u16; MAP_LOOP_VOICE_COUNT],
+    key_count: u16,
+}
+
+impl MapLoops {
+    const fn new() -> Self {
+        Self {
+            owner: [MAP_LOOP_OWNER_NONE; MAP_LOOP_VOICE_COUNT],
+            level: [0; MAP_LOOP_VOICE_COUNT],
+            keyed_at: [0; MAP_LOOP_VOICE_COUNT],
+            key_count: 0,
+        }
+    }
+
+    fn slot_of(&self, owner: u16) -> Option<usize> {
+        let mut slot = 0usize;
+        while slot < MAP_LOOP_VOICE_COUNT {
+            if self.owner[slot] == owner {
+                return Some(slot);
+            }
+            slot += 1;
+        }
+        None
+    }
+
+    /// Assign `owner` a slot keyed at `level`: a free one, else the eviction
+    /// order above. The caller keys the voice. Keys are rare, so size wins
+    /// over speed here.
+    #[inline(never)]
+    #[optimize(size)]
+    fn claim(&mut self, owner: u16, level: Volume) -> usize {
+        let mut best = 0usize;
+        let mut best_rank = u32::MAX;
+        let mut slot = 0usize;
+        while slot < MAP_LOOP_VOICE_COUNT {
+            // Lowest rank goes: a free voice (0), else by level magnitude,
+            // then by age in keys. The u16 age is exact across the counter's
+            // wrap for any voice keyed within the last 65,535 keys.
+            let rank = if self.owner[slot] == MAP_LOOP_OWNER_NONE {
+                0
+            } else {
+                let age = self.key_count.wrapping_sub(self.keyed_at[slot]);
+                ((self.level[slot].unsigned_abs() as u32 + 1) << 16) | !age as u32
+            };
+            if rank < best_rank {
+                best = slot;
+                best_rank = rank;
+            }
+            slot += 1;
+        }
+        self.owner[best] = owner;
+        self.level[best] = level.0;
+        self.keyed_at[best] = self.key_count;
+        self.key_count = self.key_count.wrapping_add(1);
+        best
+    }
+
+    fn release(&mut self, slot: usize) {
+        self.owner[slot] = MAP_LOOP_OWNER_NONE;
+    }
+
+    /// Free every voice. Levels and ages of free voices are never read.
+    fn clear(&mut self) {
+        self.owner = [MAP_LOOP_OWNER_NONE; MAP_LOOP_VOICE_COUNT];
+    }
 }
 
 #[inline(never)]
@@ -101,8 +181,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             voice_addrs: [0; MAX_VOICES],
             voice_rates: [0; MAX_VOICES],
             voice_count: 0,
-            map_loop_owner: [MAP_LOOP_OWNER_NONE; MAP_LOOP_VOICE_COUNT],
-            next_map_loop: 0,
+            map_loops: MapLoops::new(),
             ear: [0; 3],
         }
     }
@@ -132,10 +211,9 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             let voice = Voice::new(MAP_LOOP_VOICE_FIRST + index as u8);
             voice.set_volume(Volume::SILENCE, Volume::SILENCE);
             Voice::key_off(voice.mask());
-            self.map_loop_owner[index] = MAP_LOOP_OWNER_NONE;
             index += 1;
         }
-        self.next_map_loop = 0;
+        self.map_loops.clear();
     }
 
     /// Leave every voice owned by hl-psx inaudible when gameplay exits. This is a
@@ -152,12 +230,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         Voice::key_off((1u32 << 24) - 1);
         self.next_voice = 0;
         self.voice_count = 0;
-        let mut loop_index = 0usize;
-        while loop_index < MAP_LOOP_VOICE_COUNT {
-            self.map_loop_owner[loop_index] = MAP_LOOP_OWNER_NONE;
-            loop_index += 1;
-        }
-        self.next_map_loop = 0;
+        self.map_loops.clear();
     }
 
     /// Parse a staged HSFX pack and upload every sample to SPU RAM.
@@ -441,13 +514,55 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
     pub unsafe fn play_map_loop_world(&mut self, local_id: u8, pos: [i32; 3], owner: u16) {
+        let gain = self.map_loop_world_gain(pos);
+        self.play_map_loop_with_volume(local_id, owner, gain);
+    }
+
+    /// The map loop's own falloff: 1 / (1 + distance / 300), 1/16 from 2,400.
+    #[inline]
+    fn map_loop_world_gain(&self, pos: [i32; 3]) -> Volume {
         let distance = integer_distance(pos, self.ear);
         let den = if distance >= 2400 {
             16
         } else {
             1 + distance / 300
         } as u16;
-        self.play_map_loop_with_volume(local_id, owner, Volume::linear(1, den));
+        Volume::linear(1, den)
+    }
+
+    /// GoldSrc's SND_CHANGE_VOL for a map loop: set the level of the voice
+    /// `owner` holds in place, without re-keying it, so the loop keeps its
+    /// phase and no other loop is evicted. Hsfx voices are mono (equal left
+    /// and right), so there is no pan to change. Returns false, touching no
+    /// voice, when `owner` holds none (never keyed, stopped, or evicted); the
+    /// caller then keys it with a `play_map_loop_*` call.
+    /// # Safety
+    /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
+    pub unsafe fn set_map_loop_volume(&mut self, owner: u16, gain: Volume) -> bool {
+        let Some(slot) = self.map_loops.slot_of(owner) else {
+            return false;
+        };
+        self.map_loops.level[slot] = gain.0;
+        Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8).set_volume(gain, gain);
+        true
+    }
+
+    /// [`Self::set_map_loop_volume`] at [`Self::play_map_loop_world`]'s level
+    /// for `pos` against the last `set_ear`, for a loop whose source moves.
+    /// # Safety
+    /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
+    pub unsafe fn set_map_loop_world(&mut self, owner: u16, pos: [i32; 3]) -> bool {
+        let gain = self.map_loop_world_gain(pos);
+        self.set_map_loop_volume(owner, gain)
+    }
+
+    /// The SPU voice `owner`'s map loop holds, if any.
+    pub fn map_loop_voice(&self, owner: u16) -> Option<u8> {
+        self.map_loops
+            .slot_of(owner)
+            .map(|slot| MAP_LOOP_VOICE_FIRST + slot as u8)
     }
 
     /// # Safety
@@ -466,23 +581,18 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     }
 
     #[inline(never)]
+    #[optimize(size)]
     unsafe fn play_map_loop_with_volume(&mut self, local_id: u8, owner: u16, gain: Volume) {
         let Some((addr, rate)) = self.map_sample(local_id) else {
             return;
         };
-        let mut index = 0usize;
-        while index < MAP_LOOP_VOICE_COUNT {
-            if self.map_loop_owner[index] == owner {
-                return;
-            }
-            index += 1;
+        if self.map_loops.slot_of(owner).is_some() {
+            return;
         }
-        let slot = self.next_map_loop;
-        self.next_map_loop = (self.next_map_loop + 1) % MAP_LOOP_VOICE_COUNT;
+        let slot = self.map_loops.claim(owner, gain);
         let voice = Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8);
         voice.set_volume(Volume::SILENCE, Volume::SILENCE);
         Voice::key_off(voice.mask());
-        self.map_loop_owner[slot] = owner;
 
         // A genuine WAV loop still sustains forever because its ADPCM END block
         // carries REPEAT and this envelope holds at full level. Some GoldSrc
@@ -497,15 +607,11 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// Serialize calls with all users of this bank and its SPU voice channels.
     #[inline(never)]
     pub unsafe fn stop_map_loop(&mut self, owner: u16) {
-        let mut index = 0usize;
-        while index < MAP_LOOP_VOICE_COUNT {
-            if self.map_loop_owner[index] == owner {
-                let voice = Voice::new(MAP_LOOP_VOICE_FIRST + index as u8);
-                voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-                Voice::key_off(voice.mask());
-                self.map_loop_owner[index] = MAP_LOOP_OWNER_NONE;
-            }
-            index += 1;
+        if let Some(slot) = self.map_loops.slot_of(owner) {
+            let voice = Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8);
+            voice.set_volume(Volume::SILENCE, Volume::SILENCE);
+            Voice::key_off(voice.mask());
+            self.map_loops.release(slot);
         }
     }
 
@@ -638,5 +744,108 @@ mod tests {
         assert_eq!(bounded_square_root(1_599 * 1_599, 1_600), 1_599);
         assert_eq!(bounded_square_root(1_600 * 1_600, 1_600), 1_600);
         assert_eq!(bounded_square_root(-1, 1_600), 1_600);
+    }
+
+    fn full_table(levels: [i16; MAP_LOOP_VOICE_COUNT]) -> MapLoops {
+        let mut loops = MapLoops::new();
+        for (owner, level) in levels.into_iter().enumerate() {
+            assert_eq!(loops.claim(owner as u16, Volume(level)), owner);
+        }
+        loops
+    }
+
+    #[test]
+    fn map_loop_takes_a_free_voice_before_evicting() {
+        // Three held loops, then the middle one stops: the next loop reuses
+        // that free voice rather than the next voice in key order, and the
+        // two held loops keep theirs.
+        let mut loops = MapLoops::new();
+        assert_eq!(loops.claim(10, Volume::MAX), 0);
+        assert_eq!(loops.claim(11, Volume::MAX), 1);
+        assert_eq!(loops.claim(12, Volume::MAX), 2);
+        loops.release(1);
+        assert_eq!(loops.claim(13, Volume::SILENCE), 1);
+        assert_eq!(loops.slot_of(10), Some(0));
+        assert_eq!(loops.slot_of(12), Some(2));
+        assert_eq!(loops.slot_of(11), None);
+        // A free voice wins over a held one, even a silent held one earlier
+        // in the table.
+        let mut loops = full_table([0; MAP_LOOP_VOICE_COUNT]);
+        loops.release(3);
+        assert_eq!(loops.claim(14, Volume::MAX), 3);
+        assert_eq!(loops.slot_of(0), Some(0));
+        // clear frees every voice.
+        loops.clear();
+        assert_eq!(loops.slot_of(14), None);
+        assert_eq!(loops.claim(15, Volume::MAX), 0);
+        // Seven keys fill the table; none of them evicts.
+        let mut loops = MapLoops::new();
+        for owner in 0..MAP_LOOP_VOICE_COUNT as u16 {
+            loops.claim(owner, Volume::MAX);
+        }
+        for owner in 0..MAP_LOOP_VOICE_COUNT as u16 {
+            assert_eq!(loops.slot_of(owner), Some(owner as usize));
+        }
+    }
+
+    #[test]
+    fn full_map_loop_table_evicts_the_quietest_voice() {
+        let mut loops = full_table([4000, 900, 3000, 200, 3000, 16383, 700]);
+        assert_eq!(loops.claim(100, Volume::MAX), 3);
+        assert_eq!(loops.slot_of(3), None);
+        // The newcomer's own level counts once it holds a voice.
+        assert_eq!(loops.claim(101, Volume::MAX), 6);
+        assert_eq!(loops.claim(102, Volume::MAX), 1);
+    }
+
+    #[test]
+    fn equally_quiet_map_loops_evict_the_oldest_first() {
+        let mut loops = full_table([500; MAP_LOOP_VOICE_COUNT]);
+        // Re-keying slot 0 makes it the newest; slot 1 is now the oldest.
+        loops.release(0);
+        assert_eq!(loops.claim(20, Volume(500)), 0);
+        assert_eq!(loops.claim(21, Volume(500)), 1);
+        assert_eq!(loops.claim(22, Volume(500)), 2);
+        // Age survives the key counter's wrap.
+        let mut loops = MapLoops::new();
+        loops.key_count = u16::MAX - 2;
+        for owner in 0..MAP_LOOP_VOICE_COUNT as u16 {
+            loops.claim(owner, Volume(500));
+        }
+        assert_eq!(loops.claim(30, Volume(500)), 0);
+        assert_eq!(loops.claim(31, Volume(500)), 1);
+    }
+
+    #[test]
+    fn a_level_change_moves_a_loop_in_the_eviction_order() {
+        // Muting a loop in place (set_map_loop_volume's bookkeeping) makes it
+        // the first to go; raising the old quietest one protects it.
+        let mut loops = full_table([100, 2000, 2000, 2000, 2000, 2000, 2000]);
+        loops.level[4] = Volume::SILENCE.0;
+        loops.level[0] = Volume::MAX.0;
+        assert_eq!(loops.claim(40, Volume::MAX), 4);
+        assert_eq!(loops.slot_of(0), Some(0));
+    }
+
+    #[test]
+    fn map_loop_level_follows_the_play_falloff() {
+        let mut sfx = Hsfx::<1, 0, 0>::new();
+        // SAFETY: neither call reaches the SPU: set_ear stores the listener,
+        // and no owner holds a voice for set_map_loop_volume to write.
+        unsafe { sfx.set_ear([0, 0, 0]) };
+        assert_eq!(sfx.map_loop_world_gain([0, 0, 0]), Volume::MAX);
+        assert_eq!(sfx.map_loop_world_gain([600, 0, 0]), Volume::linear(1, 3));
+        assert_eq!(sfx.map_loop_world_gain([0, 2_399, 0]), Volume::linear(1, 8));
+        assert_eq!(
+            sfx.map_loop_world_gain([0, 0, 2_400]),
+            Volume::linear(1, 16)
+        );
+        assert_eq!(
+            sfx.map_loop_world_gain([90_000, 0, 0]),
+            Volume::linear(1, 16)
+        );
+        // With no loop keyed, changing a level touches no voice.
+        assert!(!unsafe { sfx.set_map_loop_volume(7, Volume::MAX) });
+        assert_eq!(sfx.map_loop_voice(7), None);
     }
 }
