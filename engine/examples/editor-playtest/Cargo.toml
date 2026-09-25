@@ -49,6 +49,10 @@ codegen-units = 1
 lto           = true
 
 [features]
+# Measurement builds only: tag projections with a primitive class through
+# PSoXide's emulator-only class port so `frontend launch --sort-log` splits
+# depth-sort errors by class pair. Retail hardware ignores the writes.
+sort-probe = []
 default = [
     "cd-stream-bench",
     # Alternate-frame world selection reuse (see the feature below): -6.7%
