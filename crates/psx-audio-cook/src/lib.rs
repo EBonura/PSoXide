@@ -215,14 +215,19 @@ pub fn cook(wav: &Wav, opts: &CookOptions) -> Cooked {
             ));
         }
     }
-    // The normalising gain comes from the uncompensated signal so loudness
-    // matches the old pipeline, and the pre-emphasis does not change it: the
-    // few samples it pushes past full scale are clamped (to_i16). Lowering
-    // the gain to fit them instead cost loud, bright sounds up to 7.5 dB of
-    // playback level (Counter-Strike's gunshots) and measured no better.
+    // The normalising gain comes from the source's own peak, as the old
+    // pipelines' did in effect (a nearest or linear resample keeps the
+    // source's samples, so its peak). The band-limited resample's peak is
+    // lower whenever the sound has energy above the new Nyquist, and
+    // normalising that would turn up what is left: a flashlight click at
+    // 5 kHz came out 8 dB louder. The pre-emphasis does not change the gain
+    // either: the few samples it pushes past full scale are clamped
+    // (to_i16). Lowering the gain to fit them cost loud, bright sounds up to
+    // 7.5 dB of playback level (Counter-Strike's gunshots) and measured no
+    // better.
     let peak_of = |v: &[f64]| v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     let gain = match opts.normalize_peak {
-        Some(target) if peak_of(&pcm) > 0.0 => target.clamp(0.0, 1.0) * 32767.0 / peak_of(&pcm),
+        Some(target) if peak_of(src) > 0.0 => target.clamp(0.0, 1.0) * 32767.0 / peak_of(src),
         _ => 1.0,
     };
     if opts.compensate_gauss {
