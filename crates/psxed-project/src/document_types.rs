@@ -220,6 +220,53 @@ impl Default for EditorViewportState {
     }
 }
 
+/// Name of the per-user view file beside `project.ron`. It is gitignored:
+/// where one person was looking is not part of the project.
+pub const EDITOR_VIEW_STATE_FILE: &str = ".psxed-view.ron";
+
+/// Where the editor was looking: camera, overlay visibility, workspace and
+/// 2D layout. Kept in [`EDITOR_VIEW_STATE_FILE`] beside the project, so
+/// looking around never edits the project, marks it unsaved, or enters undo.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct EditorViewState {
+    #[serde(default)]
+    pub camera: EditorCameraState,
+    #[serde(default)]
+    pub visibility: EditorVisibilityState,
+    #[serde(default)]
+    pub workspace: EditorWorkspaceState,
+    #[serde(default)]
+    pub viewport: EditorViewportState,
+}
+
+impl EditorViewState {
+    /// The view a project opens with before it has a view file: the
+    /// starting view authored into `project.ron`.
+    pub fn starting_view(project: &ProjectDocument) -> Self {
+        Self {
+            camera: project.editor_camera,
+            visibility: project.editor_visibility,
+            workspace: project.editor_workspace,
+            viewport: project.editor_viewport,
+        }
+    }
+
+    /// Read the view file in `project_dir`. `None` when there is none or it
+    /// does not parse (the project then opens at its starting view).
+    pub fn load(project_dir: &Path) -> Option<Self> {
+        let source = std::fs::read_to_string(project_dir.join(EDITOR_VIEW_STATE_FILE)).ok()?;
+        ron::from_str(&source).ok()
+    }
+
+    /// Write the view file in `project_dir`.
+    pub fn save(&self, project_dir: &Path) -> Result<(), ProjectIoError> {
+        let text = ron::ser::to_string_pretty(self, PrettyConfig::new())
+            .map_err(ProjectIoError::Serialize)?;
+        std::fs::write(project_dir.join(EDITOR_VIEW_STATE_FILE), text)?;
+        Ok(())
+    }
+}
+
 /// Runtime depth sorting policy for cooked cached room geometry.
 ///
 /// This affects embedded play and generated runtime manifests. The editor
@@ -377,16 +424,18 @@ impl RuntimeRoomDrawOrderMode {
 pub struct ProjectDocument {
     /// Display name.
     pub name: String,
-    /// Editor-only viewport camera state.
+    /// Starting 3D camera for a project opened without a view file
+    /// ([`EDITOR_VIEW_STATE_FILE`]). Generators author it; the editor keeps
+    /// the live view in the view file and never writes these four fields.
     #[serde(default)]
     pub editor_camera: EditorCameraState,
-    /// Editor-only overlay visibility preferences.
+    /// Starting overlay visibility, see [`Self::editor_camera`].
     #[serde(default)]
     pub editor_visibility: EditorVisibilityState,
-    /// Editor-only workspace preferences.
+    /// Starting workspace, see [`Self::editor_camera`].
     #[serde(default)]
     pub editor_workspace: EditorWorkspaceState,
-    /// Editor-only 2D/orthographic viewport layout.
+    /// Starting 2D/orthographic layout, see [`Self::editor_camera`].
     #[serde(default)]
     pub editor_viewport: EditorViewportState,
     /// BSP compiler quality used by Build, Play, and Rebuild. Persisting this
