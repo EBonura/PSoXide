@@ -185,6 +185,9 @@ pub struct ThirdPersonCameraState {
     last_rotated: bool,
     solve_phase: u8,
     cached_solve: CollisionSolve,
+    /// The orbit was swung off a wall by [`clear_orbit_yaw`]; lock-on and
+    /// recentering hold that yaw until the direction they steer to is clear.
+    clear_orbit_hold: bool,
 }
 
 impl ThirdPersonCameraState {
@@ -210,6 +213,7 @@ impl ThirdPersonCameraState {
                 distance: 0,
                 pull_in: false,
             },
+            clear_orbit_hold: false,
         }
     }
 
@@ -253,6 +257,7 @@ impl ThirdPersonCameraState {
         );
         self.manual_cooldown = 0;
         self.collision_release_delay = 0;
+        self.clear_orbit_hold = false;
         self.initialized = true;
         self.last_pull_in = false;
         self.last_rotated = false;
@@ -419,6 +424,8 @@ impl ThirdPersonCameraState {
         }
 
         let focus_goal = camera_focus_goal(target, config, self.distance);
+        // The orbit the previous frame settled on, before input and steering.
+        let previous_yaw = self.yaw;
 
         if input.recenter {
             self.recenter_active = true;
@@ -539,21 +546,66 @@ impl ThirdPersonCameraState {
         if self.solve_phase >= config.collision_solve_interval.max(1) {
             self.solve_phase = 0;
         }
+        let mut swung = false;
         let collision_solve = if solve_now {
-            let solve = collision.solve(
+            let mut solve = collision.solve(
                 self.focus,
                 self.yaw,
                 self.pitch_q12,
                 locked_camera_y_goal,
                 config,
             )?;
+            let wanted = clear_orbit_distance(config);
+            if input.yaw_delta_q12 != 0 || solve.distance >= wanted {
+                // The player turned the camera, or the steered orbit is clear.
+                self.clear_orbit_hold = false;
+            } else if self.clear_orbit_hold && self.yaw != previous_yaw {
+                // Steering would walk the arm back into the wall a step at a
+                // time until it collapses and swings out again. Hold still.
+                let held = collision.solve(
+                    self.focus,
+                    previous_yaw,
+                    self.pitch_q12,
+                    locked_camera_y_goal,
+                    config,
+                )?;
+                if held.distance > solve.distance {
+                    self.yaw = previous_yaw;
+                    solve = held;
+                }
+            }
+            if solve.distance < clear_orbit_trigger(config) {
+                // The arm is blocked at the player's own body (back to a wall
+                // or pillar): the eye would sit in or against her head. Swing
+                // the orbit to a clear side instead.
+                if let Some((yaw, clear)) = clear_orbit_yaw(
+                    collision,
+                    self.focus,
+                    self.yaw,
+                    previous_yaw.shortest_delta_q12(self.yaw),
+                    self.pitch_q12,
+                    locked_camera_y_goal,
+                    config,
+                )? {
+                    swung = true;
+                    self.yaw = yaw;
+                    self.recenter_active = false;
+                    self.clear_orbit_hold = true;
+                    solve = clear;
+                }
+            }
             self.cached_solve = solve;
             solve
         } else {
             self.cached_solve
         };
 
-        if collision_solve.distance < self.distance {
+        if swung {
+            // A cut to the clear side: easing the arm or the eye from the
+            // collapsed spot would drag the camera through the wall.
+            self.distance = collision_solve.distance;
+            self.collision_release_delay = config.collision_release_delay_frames;
+        } else if collision_solve.distance < self.distance {
             self.distance = collision_solve.distance;
             self.collision_release_delay = config.collision_release_delay_frames;
         } else if self.collision_release_delay != 0 {
@@ -586,7 +638,7 @@ impl ThirdPersonCameraState {
             self.pitch_q12,
             base_camera_y_goal,
         );
-        if collision_solve.pull_in {
+        if collision_solve.pull_in || swung {
             self.position.x = desired_base_position.x;
             self.position.z = desired_base_position.z;
             self.base_position_y = base_camera_y_goal;
@@ -678,6 +730,66 @@ impl ThirdPersonCameraState {
     pub const fn focus(&self) -> RoomPoint {
         self.focus
     }
+}
+
+/// Orbit step tried when the arm collapses inside the player (1/16 turn).
+const CLEAR_ORBIT_STEP_Q12: i16 = 256;
+/// Steps tried each way, so the search reaches all the way round.
+const CLEAR_ORBIT_STEPS: i16 = 8;
+
+/// Arm length below which the camera looks for a clearer orbit: twice
+/// `min_distance`, where the eye is already against the player's head.
+fn clear_orbit_trigger(config: ThirdPersonCameraConfig) -> i32 {
+    config.min_distance.saturating_mul(2)
+}
+
+/// Arm length an orbit swung off a wall should reach: half the preferred
+/// distance, and at least twice `min_distance`.
+fn clear_orbit_distance(config: ThirdPersonCameraConfig) -> i32 {
+    (config.distance / 2)
+        .max(config.min_distance.saturating_mul(2))
+        .min(config.distance)
+}
+
+/// A nearby orbit yaw whose arm clears the player's body, for an arm that
+/// collapsed below [`clear_orbit_trigger`]. The search fans out from `yaw`, turning
+/// first against `steering_q12` (the way steering just moved it), and takes
+/// the first arm of [`clear_orbit_distance`], else the longest one past
+/// the trigger. `None` keeps the collapsed arm: every
+/// direction is blocked, as in a narrow vent.
+fn clear_orbit_yaw<C: CameraCollisionBackend>(
+    collision: &mut C,
+    focus: RoomPoint,
+    yaw: Angle,
+    steering_q12: i16,
+    pitch_q12: i16,
+    camera_y: i32,
+    config: ThirdPersonCameraConfig,
+) -> Result<Option<(Angle, CollisionSolve)>, CollisionQueryError> {
+    let wanted = clear_orbit_distance(config);
+    let away: i16 = if steering_q12 > 0 { -1 } else { 1 };
+    let mut best: Option<(Angle, CollisionSolve)> = None;
+    let mut step = 1;
+    while step <= CLEAR_ORBIT_STEPS {
+        for side in [away, -away] {
+            if step == CLEAR_ORBIT_STEPS && side != away {
+                // Both ways meet at the half turn; trace it once.
+                continue;
+            }
+            let candidate = yaw.add_signed_q12(side * step * CLEAR_ORBIT_STEP_Q12);
+            let solve = collision.solve(focus, candidate, pitch_q12, camera_y, config)?;
+            if solve.distance >= wanted {
+                return Ok(Some((candidate, solve)));
+            }
+            if solve.distance >= clear_orbit_trigger(config)
+                && best.is_none_or(|(_, longest)| solve.distance > longest.distance)
+            {
+                best = Some((candidate, solve));
+            }
+        }
+        step += 1;
+    }
+    Ok(best)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1863,6 +1975,84 @@ mod tests {
             *output = trace;
             true
         }
+    }
+
+    /// A wall 8 units behind (-z) the start of every trace. Camera traces
+    /// start at the focus, so this is a wall flush against the player's back,
+    /// the way Aletha stands after dashing along a pillar.
+    struct WallBehindTraceProvider;
+
+    const WALL_GAP: i32 = 8;
+
+    impl CollisionTraceProvider for WallBehindTraceProvider {
+        fn trace_into(
+            &mut self,
+            query: CollisionTraceQuery,
+            output: &mut crate::CollisionTrace,
+        ) -> bool {
+            let mut trace = crate::CollisionTrace::unobstructed(query.end);
+            let wall = query.start.z - WALL_GAP;
+            if query.end.z < wall {
+                let span = query.start.z - query.end.z;
+                trace.fraction_q12 = WALL_GAP * COLLISION_FRACTION_ONE_Q12 / span;
+                trace.end = RoomPoint::new(
+                    query.start.x + (query.end.x - query.start.x) * WALL_GAP / span,
+                    query.start.y + (query.end.y - query.start.y) * WALL_GAP / span,
+                    wall,
+                );
+            }
+            *output = trace;
+            true
+        }
+    }
+
+    #[test]
+    fn arm_blocked_inside_the_body_swings_to_a_clear_side_and_holds_it() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut config = ThirdPersonCameraConfig::character(400, 100, 50);
+        config.collision_margin = 12;
+        // Locked on an enemy straight ahead (+z), so lock-on keeps steering
+        // the camera to straight behind (-z), which is inside the wall.
+        let target = ThirdPersonCameraTarget {
+            lock_target: Some(RoomPoint::new(0, 0, 1000)),
+            ..trace_target()
+        };
+        let behind = yaw_to_point(target.player, RoomPoint::new(0, 0, 1000)).add(Angle::HALF);
+        assert!(camera_position(RoomPoint::ZERO, 100, behind, 0).z < 0);
+        let blocked = solve_camera_collision_trace(
+            &mut WallBehindTraceProvider,
+            RoomPoint::new(0, 50, 0),
+            behind,
+            0,
+            100,
+            config,
+        )
+        .unwrap();
+        assert!(blocked.distance < config.min_distance, "{blocked:?}");
+
+        let mut camera = ThirdPersonCameraState::new(behind);
+        camera.snap_to_player_with_yaw(target, config, behind);
+        let mut yaws = [Angle::ZERO; 8];
+        for yaw in &mut yaws {
+            let frame = camera
+                .update_vblanks_with_trace_provider(
+                    projection,
+                    &mut WallBehindTraceProvider,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                    1,
+                )
+                .expect("wall camera update");
+            assert!(frame.distance >= config.distance / 2, "{frame:?}");
+            let (eye, focus) = (camera.position(), camera.focus());
+            assert!(eye.z >= focus.z - WALL_GAP, "{eye:?} behind {focus:?}");
+            *yaw = camera.yaw();
+        }
+        // Swung clear once, then held: lock-on steering does not drag it back
+        // into the wall and bounce it out again.
+        assert_ne!(yaws[0], behind);
+        assert!(yaws.iter().all(|&yaw| yaw == yaws[0]), "{yaws:?}");
     }
 
     fn trace_target() -> ThirdPersonCameraTarget {
