@@ -10,6 +10,16 @@ use psxed_project::{
 
 const FLOOR_SOURCE: &str = "assets/textures/courtyard_cobbles.psxt";
 const WALL_SOURCE: &str = "assets/textures/courtyard_brick.psxt";
+/// Authored corridor length along Z.
+const ROOM_DEPTH: i32 = 2048;
+/// The lava pool runs from the -Z wall to here; everything past it is the
+/// dry landing. The characterless player walks -Z under forward input.
+const LAVA_END_Z: i32 = 1024;
+/// Spawn on the landing, clear of the pool by more than the fallback
+/// player hull (Quake's 16-unit radius, 256 authored).
+const SPAWN_Z: f32 = 1664.0;
+/// Wall top. Above the 640-unit step-up, so forward input cannot climb out.
+const WALL_TOP: i32 = 1088;
 
 #[derive(Debug, PartialEq, Eq)]
 enum GeneratorAction {
@@ -37,8 +47,8 @@ fn generate(output_dir: &Path) {
     copy_texture(output_dir, WALL_SOURCE);
 
     let mut project = ProjectDocument::new("BSP Liquid Runtime Proof");
-    project.editor_camera.orbit_target = [512, 160, 512];
-    project.editor_camera.orbit_radius = 1500;
+    project.editor_camera.orbit_target = [512, 160, ROOM_DEPTH / 2];
+    project.editor_camera.orbit_radius = 2500;
     let floor = project.add_resource(
         "Courtyard Cobbles",
         ResourceData::Material(MaterialResource::opaque(Some(FLOOR_SOURCE.to_string()))),
@@ -49,23 +59,29 @@ fn generate(output_dir: &Path) {
     );
 
     let scene = project.active_scene_mut();
-    let mut floor_brush = Brush::cuboid([0, 0, 0], [1024, 64, 1024]);
+    // One corridor, ROOM_DEPTH long in +Z: a dry landing where the player
+    // spawns and respawns, then the lava pool up to the far wall.
+    let mut floor_brush = Brush::cuboid([0, 0, 0], [1024, 64, ROOM_DEPTH]);
     paint(&mut floor_brush, floor);
     scene.brushes.push(floor_brush);
     for (mins, maxs) in [
-        ([0, 64, 0], [64, 512, 1024]),
-        ([960, 64, 0], [1024, 512, 1024]),
-        ([64, 64, 0], [960, 512, 64]),
-        ([64, 64, 960], [960, 512, 1024]),
+        ([0, 64, 0], [64, WALL_TOP, ROOM_DEPTH]),
+        ([960, 64, 0], [1024, WALL_TOP, ROOM_DEPTH]),
+        ([64, 64, 0], [960, WALL_TOP, 64]),
+        ([64, 64, ROOM_DEPTH - 64], [960, WALL_TOP, ROOM_DEPTH]),
     ] {
         let mut wall = Brush::cuboid(mins, maxs);
         paint(&mut wall, walls);
         scene.brushes.push(wall);
     }
 
-    // Enclose the full fallback player hull at spawn so all three ordered
-    // contents samples report lava. This volume is deliberately nonblocking.
-    let mut lava = Brush::cuboid([128, 64, 128], [896, 384, 896]);
+    // The pool fills the -Z half of the corridor up to the wall, so a
+    // player walked forward into it stays inside once the input stops and
+    // all three ordered contents samples report lava. The volume is
+    // deliberately nonblocking. The spawn stands on the dry landing: the
+    // respawn after the lava death must leave the player out of the pool,
+    // so the gate proves exactly one death rather than a death loop.
+    let mut lava = Brush::cuboid([128, 64, 64], [896, 384, LAVA_END_Z]);
     lava.contents = BrushContents::Lava;
     paint(&mut lava, floor);
     scene.brushes.push(lava);
@@ -79,7 +95,7 @@ fn generate(output_dir: &Path) {
         },
     );
     scene.node_mut(spawn).expect("spawn node").transform = Transform3 {
-        translation: [512.0, 65.0, 512.0],
+        translation: [512.0, 65.0, SPAWN_Z],
         ..Transform3::default()
     };
 
@@ -142,7 +158,7 @@ mod tests {
     };
 
     #[test]
-    fn generated_project_has_one_nonblocking_lava_volume_around_spawn() {
+    fn generated_project_spawns_on_dry_land_facing_a_nonblocking_lava_pool() {
         let generated = std::env::temp_dir().join(format!(
             "psxed-liquid-runtime-{}-{}",
             std::process::id(),
@@ -187,15 +203,26 @@ mod tests {
         map.load(0, &mut SliceReader::new(&compiled.pxbsp.bytes))
             .expect("load generated PXBSP");
         let hull = map.model_collision_hull(0, 0).expect("point hull");
+        let engine = |authored: i32| authored / psxed_project::units::WORLD_UNIT_DIVISOR * 4096;
+        let spawn_z = engine(SPAWN_Z as i32);
+        let pool_z = engine((64 + LAVA_END_Z) / 2);
         for y in [5, 6, 7] {
-            assert_eq!(
+            let sample = |z| {
                 hull.point_contents(Vec3I32 {
                     x: 32 * 4096,
                     y: y * 4096,
-                    z: 32 * 4096,
-                }),
+                    z,
+                })
+            };
+            assert_ne!(
+                sample(spawn_z),
                 Some(psx_bsp::collision::CONTENTS_LAVA),
-                "spawn sample y={y}"
+                "spawn sample y={y} must be dry: the respawn lands here"
+            );
+            assert_eq!(
+                sample(pool_z),
+                Some(psx_bsp::collision::CONTENTS_LAVA),
+                "pool sample y={y}"
             );
         }
         let _ = std::fs::remove_dir_all(generated);
