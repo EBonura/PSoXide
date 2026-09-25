@@ -1371,23 +1371,36 @@ impl<'a, S: Scene> GameApp<'a, S> {
     fn upload_ui_sfx_samples(&mut self) {
         let mut addr = UI_SFX_SAMPLE_BASE_BYTES;
         self.ui_sfx_runtime_len = 0;
-        for (index, sample) in self
-            .ui_sfx_samples
-            .iter()
-            .take(MAX_UI_SFX_SAMPLES)
-            .enumerate()
-        {
-            let audio = psx_asset::Audio::from_bytes(sample.bytes).expect("ui psau sample");
-            let spu_addr = psx_spu::SpuAddr::new(addr);
-            let adpcm = audio.adpcm_bytes();
-            psx_spu::upload_adpcm(spu_addr, adpcm);
-            self.ui_sfx_runtime_samples[index] = UiSfxRuntimeSample {
-                addr_bytes: addr,
-                base_pitch_q12: psx_spu::Pitch::for_sample_rate(audio.sample_rate_hz()).as_u16(),
-                loaded: true,
+        let samples = self.ui_sfx_samples;
+        for (index, sample) in samples.iter().take(MAX_UI_SFX_SAMPLES).enumerate() {
+            // (ADPCM length, base pitch) once the sample is in SPU RAM.
+            let mut uploaded = None;
+            let mut upload = |bytes: &[u8]| {
+                let audio = psx_asset::Audio::from_bytes(bytes).expect("ui psau sample");
+                let adpcm = audio.adpcm_bytes();
+                psx_spu::upload_adpcm(psx_spu::SpuAddr::new(addr), adpcm);
+                uploaded = Some((
+                    adpcm.len() as u32,
+                    psx_spu::Pitch::for_sample_rate(audio.sample_rate_hz()).as_u16(),
+                ));
             };
+            // The cook streams the bank off disc (empty linked bytes) when the
+            // guest has a CD reader; otherwise the bytes are linked.
+            if sample.bytes.is_empty() {
+                self.gameplay
+                    .with_streamed_ui_sfx_sample(index, &mut upload);
+            } else {
+                upload(sample.bytes);
+            }
             self.ui_sfx_runtime_len = index + 1;
-            addr = addr.saturating_add(adpcm.len() as u32);
+            if let Some((adpcm_len, base_pitch_q12)) = uploaded {
+                self.ui_sfx_runtime_samples[index] = UiSfxRuntimeSample {
+                    addr_bytes: addr,
+                    base_pitch_q12,
+                    loaded: true,
+                };
+                addr = addr.saturating_add(adpcm_len);
+            }
         }
     }
 

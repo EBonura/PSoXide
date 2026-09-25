@@ -277,6 +277,15 @@ impl Scene for Playtest {
         core::mem::take(&mut self.gameplay_sfx_events)
     }
 
+    #[cfg(feature = "cd-stream-bench")]
+    fn with_streamed_ui_sfx_sample(
+        &mut self,
+        index: usize,
+        consume: &mut dyn FnMut(&[u8]),
+    ) -> bool {
+        with_streamed_ui_sfx_sample(index, consume)
+    }
+
     /// Lend the uploaded HUD font to the flow driver so front-end UI
     /// scenes (the cooked Main Menu) draw their labels and buttons with
     /// the same glyphs the in-game HUD uses.

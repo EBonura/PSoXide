@@ -709,6 +709,43 @@ fn with_transient_gameplay_asset_bytes<R>(
     Some(consume(scratch.staged_bytes(result.bytes)?))
 }
 
+/// Read UI SFX sample `index` off UI.PAK into the font/sky staging scratch
+/// and hand its bytes to `consume`. Runs once per sample at boot, before the
+/// first font pack, so the scratch is free; the bank then lives in SPU RAM
+/// only.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn with_streamed_ui_sfx_sample(index: usize, consume: &mut dyn FnMut(&[u8])) -> bool {
+    let chunk = UI_SFX_PACK_FIRST_CHUNK + index as u32;
+    let Some(entry) = UI_PACK_TOC
+        .iter()
+        .find(|entry| u32::from(entry.room.raw()) == chunk)
+    else {
+        return false;
+    };
+    let byte_count = entry.byte_size as usize;
+    let scratch = font_scratch_arena();
+    let Some(stage) = scratch.stage_words_mut(byte_count.div_ceil(4)) else {
+        return false;
+    };
+    let result = psx_game_runtime::cd_stream::read_chunk_blocking(
+        cd_arena(),
+        UI_PACK_START_LBA,
+        UI_PACK_TOC,
+        chunk,
+        stage,
+    );
+    if result.status != psx_game_runtime::cd_stream::ROOM_CHUNK_STATUS_OK
+        || result.bytes != byte_count
+    {
+        return false;
+    }
+    let Some(bytes) = scratch.staged_bytes(result.bytes) else {
+        return false;
+    };
+    consume(bytes);
+    true
+}
+
 fn room_reflection_probe_slot(room: RoomIndex) -> Option<VramSlot> {
     let asset = ROOM_REFLECTION_PROBES
         .get(room.to_usize())
