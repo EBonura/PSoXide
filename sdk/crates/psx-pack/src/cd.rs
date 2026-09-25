@@ -603,6 +603,47 @@ impl SectorReader {
         }
     }
 
+    /// Non-blocking [`read_sector`](Self::read_sector): check the controller
+    /// once and, if the next sector of the running ReadN stream is ready,
+    /// pop its 2048 bytes into `buffer` and ack it.
+    ///
+    /// `Ok(true)` means `buffer` holds a new sector, `Ok(false)` that none
+    /// has arrived yet. `Err(())` is a drive error; the stream is acked and
+    /// the caller should [`stop`](Self::stop) (the diag snapshot is set as
+    /// for `read_sector`).
+    ///
+    /// Streaming consumers (FMV) call this between units of other work so
+    /// the drive never runs ahead of the CPU by more than the controller can
+    /// hold. At double speed a sector lands every ~6.7 ms.
+    ///
+    /// # Safety
+    /// Same contract as [`read_sector`](Self::read_sector).
+    #[allow(clippy::result_unit_err)]
+    pub unsafe fn try_read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> Result<bool, ()> {
+        unsafe {
+            let flag = self.irq_flag();
+            if flag == IRQ_ERROR {
+                self.wr_index(0);
+                let r0 = psx_io::read8(CD_RESPONSE);
+                let r1 = psx_io::read8(CD_RESPONSE);
+                self.diag = [DIAG_CD_ERROR, r0, DIAG_SITE_READ, r1];
+                self.drain_responses();
+                self.ack_all();
+                return Err(());
+            }
+            if flag != IRQ_DATA_READY && !self.data_fifo_ready() {
+                if flag != 0 {
+                    self.ack_unexpected(flag);
+                }
+                return Ok(false);
+            }
+            self.dma_read_sector(buffer.as_mut_ptr());
+            self.drain_responses();
+            self.ack(IRQ_DATA_READY);
+            Ok(true)
+        }
+    }
+
     /// Pause the ReadN stream (keeps the drive spun up) and ack everything.
     /// Safe to call after failures; it tolerates a drive with no active read.
     ///
