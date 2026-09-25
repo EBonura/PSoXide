@@ -165,7 +165,7 @@ impl IsoBuilder {
     /// Mode 2 file. Returns `None` if `raw` is not a whole number of
     /// sectors.
     pub fn add_xa_file(&mut self, name: &str, raw: Vec<u8>) -> Option<&mut Self> {
-        if raw.is_empty() || raw.len() % XA_SECTOR_SIZE != 0 {
+        if raw.is_empty() || !raw.len().is_multiple_of(XA_SECTOR_SIZE) {
             return None;
         }
         let mut content = Vec::with_capacity(raw.len() / XA_SECTOR_SIZE * SECTOR_SIZE);
