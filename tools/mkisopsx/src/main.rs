@@ -49,6 +49,7 @@ struct Args {
     cdda_tracks: Vec<PathBuf>,
     system_area: Option<PathBuf>,
     files: Vec<PathBuf>,
+    xa_files: Vec<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -64,6 +65,7 @@ fn parse_args() -> Result<Args, String> {
     let mut ui_pack_dir = None;
     let mut ui_pack_order_file = None;
     let mut files = Vec::new();
+    let mut xa_files = Vec::new();
     let mut cdda_tracks = Vec::new();
     let mut system_area = env::var_os("PSOXIDE_SYSTEM_AREA").map(PathBuf::from);
     let mut it = env::args().skip(1);
@@ -156,6 +158,12 @@ fn parse_args() -> Result<Args, String> {
                     it.next().ok_or_else(|| "--file takes a path".to_string())?,
                 ));
             }
+            "--xa-file" => {
+                xa_files.push(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--xa-file takes a path".to_string())?,
+                ));
+            }
             "--help" | "-h" => {
                 return Err(String::from("help"));
             }
@@ -179,6 +187,7 @@ fn parse_args() -> Result<Args, String> {
         cdda_tracks,
         system_area,
         files,
+        xa_files,
     })
 }
 
@@ -229,6 +238,10 @@ fn print_usage() {
                          file name, after the fixed layout. Plain 2048-byte\n\
                          data sectors (e.g. a video-only .STR). May be\n\
                          repeated.\n\
+         --xa-file PATH  Like --file, for raw 2336-byte CD-XA sectors\n\
+                         (psxavenc -t str / -t xa output): each sector\n\
+                         keeps its subheader, EDC/ECC is rebuilt at the\n\
+                         final LBA. Raw .bin output only.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );
@@ -349,6 +362,35 @@ fn main() -> ExitCode {
                 eprintln!("read {}: {e}", path.display());
                 return ExitCode::from(1);
             }
+        }
+    }
+
+    if args.cooked_iso && !args.xa_files.is_empty() {
+        eprintln!("--xa-file requires raw .bin output");
+        return ExitCode::from(2);
+    }
+    for path in &args.xa_files {
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_ascii_uppercase(),
+            None => {
+                eprintln!("--xa-file {}: no usable file name", path.display());
+                return ExitCode::from(2);
+            }
+        };
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("read {}: {e}", path.display());
+                return ExitCode::from(1);
+            }
+        };
+        if builder.add_xa_file(&name, bytes).is_none() {
+            eprintln!(
+                "--xa-file {}: size is not a multiple of {} bytes",
+                path.display(),
+                psx_iso::XA_SECTOR_SIZE
+            );
+            return ExitCode::from(1);
         }
     }
 

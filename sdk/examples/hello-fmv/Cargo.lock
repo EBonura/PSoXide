@@ -13,10 +13,12 @@ name = "hello-fmv"
 version = "0.1.0"
 dependencies = [
  "psx-fmv",
+ "psx-font",
  "psx-gpu",
  "psx-io",
  "psx-pack",
  "psx-rt",
+ "psx-spu",
  "psx-vram",
 ]
 
@@ -25,6 +27,17 @@ name = "psx-fmv"
 version = "0.1.0"
 dependencies = [
  "psx-io",
+]
+
+[[package]]
+name = "psx-font"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-hw",
+ "psx-io",
+ "psx-math",
+ "psx-vram",
 ]
 
 [[package]]
@@ -50,6 +63,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-math"
+version = "0.1.0"
+
+[[package]]
 name = "psx-pack"
 version = "0.1.0"
 dependencies = [
@@ -58,6 +75,14 @@ dependencies = [
 
 [[package]]
 name = "psx-rt"
+version = "0.1.0"
+dependencies = [
+ "psx-hw",
+ "psx-io",
+]
+
+[[package]]
+name = "psx-spu"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
