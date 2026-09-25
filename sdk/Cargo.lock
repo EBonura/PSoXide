@@ -36,6 +36,13 @@ name = "psx-cache"
 version = "0.1.0"
 
 [[package]]
+name = "psx-fmv"
+version = "0.1.0"
+dependencies = [
+ "psx-io",
+]
+
+[[package]]
 name = "psx-font"
 version = "0.1.0"
 dependencies = [
