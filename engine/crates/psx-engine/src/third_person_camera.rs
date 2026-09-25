@@ -574,10 +574,17 @@ impl ThirdPersonCameraState {
                     solve = held;
                 }
             }
-            if solve.distance < clear_orbit_trigger(config) {
-                // The arm is blocked at the player's own body (back to a wall
-                // or pillar): the eye would sit in or against her head. Swing
-                // the orbit to a clear side instead.
+            if target.lock_target.is_some()
+                && solve.distance < clear_orbit_trigger(config, self.clear_orbit_hold)
+            {
+                // Locked on, with the arm blocked at the player's own body
+                // (back to a wall or pillar): the eye would sit in or against
+                // her head. Lock-on already owns the orbit yaw, so swing it to
+                // a clear side. A free camera keeps its yaw, and with it the
+                // stick directions the player steers by (swinging it even for
+                // a player standing still re-routed the whole-level tape at
+                // its first pause); the scene hides the player model instead
+                // while the arm is that short.
                 if let Some((yaw, clear)) = clear_orbit_yaw(
                     collision,
                     self.focus,
@@ -730,6 +737,12 @@ impl ThirdPersonCameraState {
     pub const fn focus(&self) -> RoomPoint {
         self.focus
     }
+
+    /// Current arm length after collision. Under the config's
+    /// `min_distance` the eye is inside the player's body.
+    pub const fn distance(&self) -> i32 {
+        self.distance
+    }
 }
 
 /// Orbit step tried when the arm collapses inside the player (1/16 turn).
@@ -737,10 +750,18 @@ const CLEAR_ORBIT_STEP_Q12: i16 = 256;
 /// Steps tried each way, so the search reaches all the way round.
 const CLEAR_ORBIT_STEPS: i16 = 8;
 
-/// Arm length below which the camera looks for a clearer orbit: twice
-/// `min_distance`, where the eye is already against the player's head.
-fn clear_orbit_trigger(config: ThirdPersonCameraConfig) -> i32 {
-    config.min_distance.saturating_mul(2)
+/// Arm length below which the camera looks for a clearer orbit. From a
+/// normal orbit only a collapse under `min_distance` (the eye inside the
+/// player) swings it, so ordinary close walls and corridors keep the plain
+/// spring arm and the stick directions it gives. Once swung, the camera keeps
+/// looking while its arm is under twice that, so it settles on a view of the
+/// whole body rather than the first spot that clears her head.
+fn clear_orbit_trigger(config: ThirdPersonCameraConfig, swung: bool) -> i32 {
+    if swung {
+        config.min_distance.saturating_mul(2)
+    } else {
+        config.min_distance
+    }
 }
 
 /// Arm length an orbit swung off a wall should reach: half the preferred
@@ -755,7 +776,7 @@ fn clear_orbit_distance(config: ThirdPersonCameraConfig) -> i32 {
 /// collapsed below [`clear_orbit_trigger`]. The search fans out from `yaw`, turning
 /// first against `steering_q12` (the way steering just moved it), and takes
 /// the first arm of [`clear_orbit_distance`], else the longest one past
-/// the trigger. `None` keeps the collapsed arm: every
+/// `min_distance`. `None` keeps the collapsed arm: every
 /// direction is blocked, as in a narrow vent.
 fn clear_orbit_yaw<C: CameraCollisionBackend>(
     collision: &mut C,
@@ -781,7 +802,7 @@ fn clear_orbit_yaw<C: CameraCollisionBackend>(
             if solve.distance >= wanted {
                 return Ok(Some((candidate, solve)));
             }
-            if solve.distance >= clear_orbit_trigger(config)
+            if solve.distance >= config.min_distance
                 && best.is_none_or(|(_, longest)| solve.distance > longest.distance)
             {
                 best = Some((candidate, solve));
@@ -2053,6 +2074,41 @@ mod tests {
         // into the wall and bounce it out again.
         assert_ne!(yaws[0], behind);
         assert!(yaws.iter().all(|&yaw| yaw == yaws[0]), "{yaws:?}");
+    }
+
+    #[test]
+    fn free_camera_blocked_inside_the_body_keeps_its_yaw() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut config = ThirdPersonCameraConfig::character(400, 100, 50);
+        config.collision_margin = 12;
+        let behind = Angle::HALF;
+        let update = |moving: bool| {
+            let target = ThirdPersonCameraTarget {
+                moving,
+                ..trace_target()
+            };
+            let mut camera = ThirdPersonCameraState::new(behind);
+            camera.snap_to_player_with_yaw(target, config, behind);
+            let frame = camera
+                .update_vblanks_with_trace_provider(
+                    projection,
+                    &mut WallBehindTraceProvider,
+                    target,
+                    ThirdPersonCameraInput::default(),
+                    config,
+                    1,
+                )
+                .expect("wall camera update");
+            (camera, frame)
+        };
+        // Running or standing, no lock-on: the stick directions stay put and
+        // the arm collapses; the scene hides the player below min_distance.
+        for moving in [true, false] {
+            let (camera, frame) = update(moving);
+            assert_eq!(camera.yaw(), behind);
+            assert!(frame.distance < config.min_distance, "{frame:?}");
+            assert_eq!(camera.distance(), frame.distance);
+        }
     }
 
     fn trace_target() -> ThirdPersonCameraTarget {

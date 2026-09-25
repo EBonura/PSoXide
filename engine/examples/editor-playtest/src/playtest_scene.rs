@@ -1696,6 +1696,18 @@ impl Scene for Playtest {
                         );
                     }
                 }
+                // A free camera backed into a wall collapses its arm into the
+                // player's body; drawing her from inside fills the screen with
+                // near-plane slivers and dash wireframe streaks. Hide her (and
+                // what she holds) until the arm is clear again.
+                // Only for the follow camera: the intro shots and debug
+                // sweeps render from elsewhere.
+                let follow = self.camera.position();
+                let camera_in_player = camera.position.x == follow.x
+                    && camera.position.y == follow.y
+                    && camera.position.z == follow.z
+                    && self.camera.distance() < self.camera_config().min_distance;
+                let player_lighting = player_lighting.filter(|_| !camera_in_player);
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         let phase_assembly = player_phase_assembly(
