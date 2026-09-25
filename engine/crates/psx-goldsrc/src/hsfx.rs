@@ -17,6 +17,18 @@ const MAX_VOICES: usize = 96;
 const MAP_LOOP_VOICE_FIRST: u8 = 17;
 const MAP_LOOP_VOICE_COUNT: usize = 7;
 const MAP_LOOP_OWNER_NONE: u16 = u16::MAX;
+/// Authored loops remembered per map. Half-Life's busiest map (c1a4f) places
+/// 31 looping ambient_generics; a map with more keys the extras once, at
+/// their level when they start, and never changes it.
+const AUTHORED_LOOP_CAPACITY: usize = 32;
+/// [`Hsfx::update_map_loops`] calls between two re-levels. At a 20 Hz
+/// simulation that is every 100 ms; walking speed then moves a loop's level
+/// by a few percent per step.
+const AUTHORED_LOOP_PERIOD: u8 = 2;
+/// GoldSrc's mixer skips a looped channel while both sides are below 8/255
+/// of full scale. An authored loop without a voice is keyed only from this
+/// gain (thousandths) up.
+const AUDIBLE_GAIN_MILLI: u16 = 32;
 
 /// Caller-owned bank/voice state; no allocation and no additional SPU owner.
 /// `HEALTH` and `SUIT` select the two resident charger samples.
@@ -30,6 +42,10 @@ pub struct Hsfx<const N: usize, const HEALTH: u8, const SUIT: u8> {
     voice_rates: [u32; MAX_VOICES],
     voice_count: usize,
     map_loops: MapLoops,
+    /// Bit `i` set: map sample `i` loops in hardware (its last ADPCM block
+    /// repeats).
+    map_sample_loops: [u32; MAX_VOICES / 32],
+    authored: AuthoredLoops,
     ear: [i32; 3],
 }
 
@@ -49,6 +65,9 @@ struct MapLoops {
     level: [i16; MAP_LOOP_VOICE_COUNT],
     keyed_at: [u16; MAP_LOOP_VOICE_COUNT],
     key_count: u16,
+    /// Bit per slot: the voice plays a finite authored sample, so its owner
+    /// gives it up once the SPU reports the sample's end.
+    finite: u8,
 }
 
 impl MapLoops {
@@ -58,6 +77,7 @@ impl MapLoops {
             level: [0; MAP_LOOP_VOICE_COUNT],
             keyed_at: [0; MAP_LOOP_VOICE_COUNT],
             key_count: 0,
+            finite: 0,
         }
     }
 
@@ -78,6 +98,33 @@ impl MapLoops {
     #[inline(never)]
     #[optimize(size)]
     fn claim(&mut self, owner: u16, level: Volume) -> usize {
+        let slot = self.candidate();
+        self.assign(slot, owner, level);
+        slot
+    }
+
+    /// [`Self::claim`] for a loop that may wait for a voice: it takes a free
+    /// one, or evicts the quietest only when `level` is louder than that
+    /// voice by more than a quarter. The margin keeps two loops of nearly
+    /// equal level from trading one voice (and restarting) on every re-level.
+    #[inline(never)]
+    #[optimize(size)]
+    fn claim_if_louder(&mut self, owner: u16, level: Volume) -> Option<usize> {
+        let slot = self.candidate();
+        if self.owner[slot] != MAP_LOOP_OWNER_NONE {
+            let held = self.level[slot].unsigned_abs() as u32;
+            if level.0.unsigned_abs() as u32 <= held + held / 4 {
+                return None;
+            }
+        }
+        self.assign(slot, owner, level);
+        Some(slot)
+    }
+
+    /// The slot a new loop takes: a free voice, else the eviction order above.
+    #[inline(never)]
+    #[optimize(size)]
+    fn candidate(&self) -> usize {
         let mut best = 0usize;
         let mut best_rank = u32::MAX;
         let mut slot = 0usize;
@@ -97,20 +144,127 @@ impl MapLoops {
             }
             slot += 1;
         }
-        self.owner[best] = owner;
-        self.level[best] = level.0;
-        self.keyed_at[best] = self.key_count;
-        self.key_count = self.key_count.wrapping_add(1);
         best
+    }
+
+    fn assign(&mut self, slot: usize, owner: u16, level: Volume) {
+        self.owner[slot] = owner;
+        self.level[slot] = level.0;
+        self.keyed_at[slot] = self.key_count;
+        self.key_count = self.key_count.wrapping_add(1);
+        self.finite &= !(1 << slot);
+    }
+
+    /// Free every finite slot whose bit is set in `ended` (voice bits from
+    /// the first loop voice up).
+    fn release_ended(&mut self, ended: u32) {
+        let done = self.finite & ended as u8;
+        let mut slot = 0usize;
+        while slot < MAP_LOOP_VOICE_COUNT {
+            if done & (1 << slot) != 0 {
+                self.release(slot);
+            }
+            slot += 1;
+        }
     }
 
     fn release(&mut self, slot: usize) {
         self.owner[slot] = MAP_LOOP_OWNER_NONE;
+        self.finite &= !(1 << slot);
     }
 
     /// Free every voice. Levels and ages of free voices are never read.
     fn clear(&mut self) {
         self.owner = [MAP_LOOP_OWNER_NONE; MAP_LOOP_VOICE_COUNT];
+    }
+}
+
+/// One authored looping sound (an ambient_generic) and its cooked parameters.
+#[derive(Clone, Copy)]
+struct AuthoredLoop {
+    pos: [i32; 3],
+    owner: u16,
+    local_id: u8,
+    volume_percent: u8,
+    packed_attenuation: u8,
+}
+
+/// Every authored loop the map has started and not stopped, whether or not it
+/// holds a voice. GoldSrc keeps each ambient on its own channel and
+/// re-spatializes all of them every frame; one out of range is only muted.
+/// With seven loop voices this port instead re-levels the remembered loops
+/// periodically: a held loop changes level in place, and one without a voice
+/// is keyed once it becomes audible and a voice is free or quieter
+/// ([`MapLoops::claim_if_louder`]). A loop that falls out of range keeps its
+/// voice at level 0, so walking back restarts nothing, until a louder loop
+/// needs that voice.
+#[derive(Clone, Copy)]
+struct AuthoredLoops {
+    entry: [AuthoredLoop; AUTHORED_LOOP_CAPACITY],
+    count: u8,
+    phase: u8,
+}
+
+impl AuthoredLoops {
+    const fn new() -> Self {
+        Self {
+            entry: [AuthoredLoop {
+                pos: [0; 3],
+                owner: MAP_LOOP_OWNER_NONE,
+                local_id: 0,
+                volume_percent: 0,
+                packed_attenuation: 0,
+            }; AUTHORED_LOOP_CAPACITY],
+            count: 0,
+            phase: AUTHORED_LOOP_PERIOD - 1,
+        }
+    }
+
+    #[inline(never)]
+    #[optimize(size)]
+    fn index_of(&self, owner: u16) -> Option<usize> {
+        let mut index = 0usize;
+        while index < self.count as usize {
+            if self.entry[index].owner == owner {
+                return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// Remember `entry`; false when the table is full.
+    #[optimize(size)]
+    fn push(&mut self, entry: AuthoredLoop) -> bool {
+        if self.count as usize >= AUTHORED_LOOP_CAPACITY {
+            return false;
+        }
+        self.entry[self.count as usize] = entry;
+        self.count += 1;
+        true
+    }
+
+    #[inline(never)]
+    #[optimize(size)]
+    fn remove(&mut self, owner: u16) {
+        if let Some(index) = self.index_of(owner) {
+            self.count -= 1;
+            self.entry[index] = self.entry[self.count as usize];
+        }
+    }
+
+    /// True on every [`AUTHORED_LOOP_PERIOD`]th call, the first included.
+    fn due(&mut self) -> bool {
+        self.phase += 1;
+        if self.phase < AUTHORED_LOOP_PERIOD {
+            return false;
+        }
+        self.phase = 0;
+        true
+    }
+
+    fn clear(&mut self) {
+        self.count = 0;
     }
 }
 
@@ -138,15 +292,34 @@ fn bounded_square_root(d2: i32, limit: i32) -> i32 {
 }
 
 #[inline]
-fn integer_distance(from: [i32; 3], to: [i32; 3]) -> i32 {
+fn clamped_distance_squared(from: [i32; 3], to: [i32; 3]) -> i32 {
     // Authored falloff reaches zero by 1,250 source units and the one legacy
     // caller caps at 2,400. Clamp beyond that before squaring, avoiding 64-bit
     // arithmetic (expensive on MIPS-I) without changing any audible result.
     let dx = (from[0] - to[0]).clamp(-2_401, 2_401);
     let dy = (from[1] - to[1]).clamp(-2_401, 2_401);
     let dz = (from[2] - to[2]).clamp(-2_401, 2_401);
-    let d2 = dx * dx + dy * dy + dz * dz;
-    bounded_square_root(d2, 4_159) // ceil(sqrt(3 * 2401^2))
+    dx * dx + dy * dy + dz * dz
+}
+
+#[inline]
+fn integer_distance(from: [i32; 3], to: [i32; 3]) -> i32 {
+    bounded_square_root(clamped_distance_squared(from, to), 4_159) // ceil(sqrt(3 * 2401^2))
+}
+
+/// The cooked distance from which [`authored_gain_milli`] is exactly zero for
+/// this attenuation byte, or `None` when it never is (ATTN_NONE).
+#[inline]
+fn silent_distance(packed_attenuation: u8) -> Option<i32> {
+    let source = match packed_attenuation & 7 {
+        0 => 500,   // 2 * 500 = 1000
+        2 => 1_250, // 1250 * 4 / 5 = 1000
+        3 => return None,
+        4 => 3_334, // 3334 * 3 / 10 = 1000 (3333 leaves 1)
+        _ => 800,   // 800 * 5 / 4 = 1000
+    };
+    let shift = (packed_attenuation >> 3).min(20);
+    Some((source + (1 << shift) - 1) >> shift)
 }
 
 /// GoldSrc channel gain in tenths of a percent. Its mixer uses
@@ -182,6 +355,8 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             voice_rates: [0; MAX_VOICES],
             voice_count: 0,
             map_loops: MapLoops::new(),
+            map_sample_loops: [0; MAX_VOICES / 32],
+            authored: AuthoredLoops::new(),
             ear: [0; 3],
         }
     }
@@ -214,6 +389,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             index += 1;
         }
         self.map_loops.clear();
+        self.authored.clear();
     }
 
     /// Leave every voice owned by hl-psx inaudible when gameplay exits. This is a
@@ -231,6 +407,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         self.next_voice = 0;
         self.voice_count = 0;
         self.map_loops.clear();
+        self.authored.clear();
     }
 
     /// Parse a staged HSFX pack and upload every sample to SPU RAM.
@@ -311,6 +488,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         let n = (rd_u32(pack, 4) as usize).min(MAX_VOICES);
         let mut next_addr = self.dialogue_base;
         let mut ready = 0usize;
+        self.map_sample_loops = [0; MAX_VOICES / 32];
         for i in 0..n {
             let off = rd_u32(pack, 8 + i * 8) as usize;
             let len = rd_u32(pack, 12 + i * 8) as usize;
@@ -332,6 +510,11 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             // Low 16 bits retain the SPU rate; high 16 bits reuse the same word for
             // the 20 Hz duration used by facial animation (zero extra RAM).
             self.voice_rates[i] = rate | (ticks << 16);
+            // The cooker marks a sample whose WAV declares a loop with
+            // LOOP-END + REPEAT on its last block (flag byte 1 of 16).
+            if bytes.len() >= 16 && bytes[bytes.len() - 15] & 0x02 != 0 {
+                self.map_sample_loops[i / 32] |= 1 << (i % 32);
+            }
             // Same parking block as the core bank: dialogue lines are packed
             // consecutively too, so a voice reading past one runs into the next.
             next_addr = (next_addr + bytes.len() as u32 + 15) & !15;
@@ -565,9 +748,18 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             .map(|slot| MAP_LOOP_VOICE_FIRST + slot as u8)
     }
 
+    /// Start an authored loop (an ambient_generic) with its cooked volume and
+    /// attenuation. A sample that loops is remembered until
+    /// [`Self::stop_map_loop`] and follows the listener through
+    /// [`Self::update_map_loops`]; it holds a voice only while audible or
+    /// until a louder loop needs one (see `AuthoredLoops`). A finite sample
+    /// plays once, from its level now, and only when audible, and gives its
+    /// voice back when it ends: GoldSrc frees such a channel once it ends or
+    /// stays inaudible.
     /// # Safety
     /// Serialize calls with all users of this bank and its SPU voice channels.
     #[inline(never)]
+    #[optimize(size)]
     pub unsafe fn play_map_loop_authored(
         &mut self,
         local_id: u8,
@@ -576,20 +768,122 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         volume_percent: u8,
         packed_attenuation: u8,
     ) {
-        let gain = self.authored_volume(volume_percent, packed_attenuation, pos);
-        self.play_map_loop_with_volume(local_id, owner, gain);
+        if self.map_sample(local_id).is_none()
+            || self.map_loops.slot_of(owner).is_some()
+            || self.authored.index_of(owner).is_some()
+        {
+            return;
+        }
+        let entry = AuthoredLoop {
+            pos,
+            owner,
+            local_id,
+            volume_percent,
+            packed_attenuation,
+        };
+        let index = local_id as usize;
+        if self.map_sample_loops[index / 32] & (1 << (index % 32)) == 0 {
+            let milli = self.authored_gain(&entry);
+            if milli >= AUDIBLE_GAIN_MILLI {
+                self.play_map_loop_with_volume(local_id, owner, Volume::linear(milli, 1_000));
+                if let Some(slot) = self.map_loops.slot_of(owner) {
+                    self.map_loops.finite |= 1 << slot;
+                }
+            }
+        } else if self.authored.push(entry) {
+            self.level_authored_loop(entry);
+        } else {
+            let gain = self.authored_volume(volume_percent, packed_attenuation, pos);
+            self.play_map_loop_with_volume(local_id, owner, gain);
+        }
+    }
+
+    /// Re-level every remembered authored loop against the last `set_ear`,
+    /// keying any that became audible (see `AuthoredLoops`). Call once per
+    /// simulation tick after `set_ear`; the work runs on every
+    /// [`AUTHORED_LOOP_PERIOD`]th call.
+    /// # Safety
+    /// Serialize calls with all users of this bank and its SPU voice channels.
+    #[inline(never)]
+    #[optimize(size)]
+    pub unsafe fn update_map_loops(&mut self) {
+        if !self.authored.due() {
+            return;
+        }
+        // A finished finite sample holds its voice only in this bookkeeping,
+        // at the level it was keyed at, where it would outrank every waiting
+        // loop. Key-on clears a voice's ENDX bit, so a set bit is this key's
+        // end.
+        if self.map_loops.finite != 0 {
+            self.map_loops
+                .release_ended(Voice::voices_ended() >> MAP_LOOP_VOICE_FIRST);
+        }
+        let mut index = 0usize;
+        while index < self.authored.count as usize {
+            self.level_authored_loop(self.authored.entry[index]);
+            index += 1;
+        }
+    }
+
+    /// [`authored_gain_milli`] for `entry` at the current ear. Most of a map's
+    /// loops are out of range at any moment; for those the squared distance
+    /// already shows a zero gain, and the square root (most of a re-level's
+    /// cost) is skipped. The result is the same either way.
+    #[inline]
+    fn authored_gain(&self, entry: &AuthoredLoop) -> u16 {
+        if let Some(silent) = silent_distance(entry.packed_attenuation) {
+            if clamped_distance_squared(entry.pos, self.ear) >= silent * silent {
+                return 0;
+            }
+        }
+        authored_gain_milli(
+            entry.volume_percent,
+            entry.packed_attenuation,
+            integer_distance(entry.pos, self.ear),
+        )
+    }
+
+    /// One authored loop at its level for the current ear: in place on the
+    /// voice it holds, else keyed when audible and a voice can be had.
+    #[inline(never)]
+    #[optimize(size)]
+    unsafe fn level_authored_loop(&mut self, entry: AuthoredLoop) {
+        let milli = self.authored_gain(&entry);
+        let gain = Volume::linear(milli, 1_000);
+        match self.map_loops.slot_of(entry.owner) {
+            Some(slot) => {
+                if self.map_loops.level[slot] != gain.0 {
+                    self.map_loops.level[slot] = gain.0;
+                    Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8).set_volume(gain, gain);
+                }
+            }
+            None => {
+                if milli >= AUDIBLE_GAIN_MILLI {
+                    if let Some(slot) = self.map_loops.claim_if_louder(entry.owner, gain) {
+                        self.key_map_loop(slot, entry.local_id, gain);
+                    }
+                }
+            }
+        }
     }
 
     #[inline(never)]
     #[optimize(size)]
     unsafe fn play_map_loop_with_volume(&mut self, local_id: u8, owner: u16, gain: Volume) {
-        let Some((addr, rate)) = self.map_sample(local_id) else {
-            return;
-        };
-        if self.map_loops.slot_of(owner).is_some() {
+        if self.map_sample(local_id).is_none() || self.map_loops.slot_of(owner).is_some() {
             return;
         }
         let slot = self.map_loops.claim(owner, gain);
+        self.key_map_loop(slot, local_id, gain);
+    }
+
+    /// Key map sample `local_id` on loop voice `slot` at `gain`.
+    #[inline(never)]
+    #[optimize(size)]
+    unsafe fn key_map_loop(&mut self, slot: usize, local_id: u8, gain: Volume) {
+        let Some((addr, rate)) = self.map_sample(local_id) else {
+            return;
+        };
         let voice = Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8);
         voice.set_volume(Volume::SILENCE, Volume::SILENCE);
         Voice::key_off(voice.mask());
@@ -607,6 +901,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     /// Serialize calls with all users of this bank and its SPU voice channels.
     #[inline(never)]
     pub unsafe fn stop_map_loop(&mut self, owner: u16) {
+        self.authored.remove(owner);
         if let Some(slot) = self.map_loops.slot_of(owner) {
             let voice = Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8);
             voice.set_volume(Volume::SILENCE, Volume::SILENCE);
@@ -847,5 +1142,130 @@ mod tests {
         // With no loop keyed, changing a level touches no voice.
         assert!(!unsafe { sfx.set_map_loop_volume(7, Volume::MAX) });
         assert_eq!(sfx.map_loop_voice(7), None);
+    }
+
+    #[test]
+    fn a_waiting_loop_takes_a_voice_only_when_free_or_clearly_louder() {
+        let mut loops = MapLoops::new();
+        assert_eq!(loops.claim_if_louder(50, Volume(100)), Some(0));
+        // Full table whose quietest voice (slot 3) is at 1,000.
+        let mut loops = full_table([4000, 3000, 2000, 1000, 3000, 16383, 1500]);
+        assert_eq!(loops.claim_if_louder(60, Volume(900)), None);
+        assert_eq!(loops.claim_if_louder(61, Volume(1250)), None);
+        assert_eq!(loops.slot_of(3), Some(3));
+        assert_eq!(loops.claim_if_louder(62, Volume(1251)), Some(3));
+        assert_eq!(loops.slot_of(62), Some(3));
+        // A voice muted in place is taken by any audible loop.
+        loops.level[5] = Volume::SILENCE.0;
+        assert_eq!(loops.claim_if_louder(63, Volume(1)), Some(5));
+    }
+
+    #[test]
+    fn an_ended_finite_sample_gives_its_voice_back() {
+        let mut loops = full_table([16383; MAP_LOOP_VOICE_COUNT]);
+        loops.finite = 0b000_0100;
+        // Loops (slot 0) and a finite sample still playing (slot 2 without
+        // its end bit) keep their voices.
+        loops.release_ended(0b000_0011);
+        assert_eq!(loops.slot_of(0), Some(0));
+        assert_eq!(loops.slot_of(2), Some(2));
+        loops.release_ended(0b000_0101);
+        assert_eq!(loops.slot_of(0), Some(0));
+        assert_eq!(loops.slot_of(2), None);
+        assert_eq!(loops.finite, 0);
+        // Re-keying a slot forgets that it was finite.
+        loops.finite = 0b000_1000;
+        loops.assign(3, 9, Volume::MAX);
+        assert_eq!(loops.finite, 0);
+    }
+
+    fn authored(owner: u16) -> AuthoredLoop {
+        AuthoredLoop {
+            pos: [owner as i32, 0, 0],
+            owner,
+            local_id: owner as u8,
+            volume_percent: 100,
+            packed_attenuation: 1,
+        }
+    }
+
+    #[test]
+    fn authored_loops_are_remembered_until_stopped() {
+        let mut table = AuthoredLoops::new();
+        for owner in 0..AUTHORED_LOOP_CAPACITY as u16 {
+            assert!(table.push(authored(owner)));
+        }
+        assert!(!table.push(authored(99)));
+        table.remove(4);
+        assert_eq!(table.index_of(4), None);
+        // The last entry fills the hole; every other owner is still there.
+        assert_eq!(table.index_of(AUTHORED_LOOP_CAPACITY as u16 - 1), Some(4));
+        for owner in (0..AUTHORED_LOOP_CAPACITY as u16 - 1).filter(|&o| o != 4) {
+            assert_eq!(table.index_of(owner), Some(owner as usize));
+        }
+        assert!(table.push(authored(99)));
+        table.remove(1234);
+        assert_eq!(table.count as usize, AUTHORED_LOOP_CAPACITY);
+        table.clear();
+        assert_eq!(table.index_of(0), None);
+    }
+
+    #[test]
+    fn authored_loops_relevel_on_every_period_th_update() {
+        let mut table = AuthoredLoops::new();
+        assert!(table.due());
+        let due = (0..AUTHORED_LOOP_PERIOD as usize * 3)
+            .filter(|_| table.due())
+            .count();
+        assert_eq!(due, 3);
+    }
+
+    #[test]
+    fn the_silent_distance_shortcut_matches_the_full_gain() {
+        let mut sfx = Hsfx::<1, 0, 0>::new();
+        // SAFETY: set_ear only stores the listener.
+        unsafe { sfx.set_ear([0, 0, 0]) };
+        for shift in [0u8, 1, 3] {
+            for mode in 0u8..8 {
+                let attenuation = mode | (shift << 3);
+                for x in (0..5_000)
+                    .step_by(7)
+                    .chain([499, 500, 799, 800, 1_249, 1_250, 3_333, 3_334])
+                {
+                    for pos in [[x, 0, 0], [x, x / 3, -x / 2], [0, 0, x]] {
+                        let mut entry = authored(0);
+                        entry.packed_attenuation = attenuation;
+                        entry.pos = pos;
+                        let full =
+                            authored_gain_milli(100, attenuation, integer_distance(pos, sfx.ear));
+                        assert_eq!(sfx.authored_gain(&entry), full, "{attenuation} {pos:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn authored_loop_audibility_follows_the_ambient_radius() {
+        let mut sfx = Hsfx::<1, 0, 0>::new();
+        // SAFETY: set_ear only stores the listener.
+        unsafe { sfx.set_ear([0, 0, 0]) };
+        let at = |mode: u8, x: i32| {
+            let mut entry = authored(0);
+            entry.packed_attenuation = mode;
+            entry.pos = [x, 0, 0];
+            sfx.authored_gain(&entry)
+        };
+        // Medium radius (ATTN_STATIC 1.25) is audible to 775 units, small
+        // (ATTN_IDLE 2) to 484, large (ATTN_NORM 0.8) to 1,211.
+        assert!(at(1, 774) >= AUDIBLE_GAIN_MILLI);
+        assert!(at(1, 776) < AUDIBLE_GAIN_MILLI);
+        assert!(at(0, 484) >= AUDIBLE_GAIN_MILLI);
+        assert!(at(0, 485) < AUDIBLE_GAIN_MILLI);
+        assert!(at(2, 1_211) >= AUDIBLE_GAIN_MILLI);
+        assert!(at(2, 1_212) < AUDIBLE_GAIN_MILLI);
+        // Play everywhere (ATTN_NONE) keeps its full level at any distance.
+        assert_eq!(at(3, 0), 1_000);
+        assert_eq!(at(3, 90_000), 1_000);
     }
 }
