@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/psx-anim-cook", "crates/psx-hw", "crates/psx-iso", "crates/psx-trace", "crates/psxed-format", "tools/mkisopsx", "tools/psoxide-link", "tools/psoxide-pgo"]
+members = ["crates/psx-anim-cook", "crates/psx-audio-cook", "crates/psx-hw", "crates/psx-iso", "crates/psx-trace", "crates/psxed-format", "tools/mkisopsx", "tools/psoxide-link", "tools/psoxide-pgo"]
 exclude = ["sdk", "build"]
 
 [workspace.package]

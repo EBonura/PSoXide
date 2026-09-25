@@ -94,6 +94,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-audio-cook"
+version = "0.1.0"
+dependencies = [
+ "psxed-format",
+]
+
+[[package]]
 name = "psx-gte"
 version = "0.1.0"
 dependencies = [
