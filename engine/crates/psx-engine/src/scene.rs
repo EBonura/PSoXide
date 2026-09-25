@@ -345,7 +345,11 @@ pub trait Scene {
     /// after boot does not also keep a dead copy in main RAM. Returns `false`
     /// when the sample could not be read; that sample then stays silent.
     #[allow(unused_variables)]
-    fn with_streamed_ui_sfx_sample(&mut self, index: usize, consume: &mut dyn FnMut(&[u8])) -> bool {
+    fn with_streamed_ui_sfx_sample(
+        &mut self,
+        index: usize,
+        consume: &mut dyn FnMut(&[u8]),
+    ) -> bool {
         false
     }
 
