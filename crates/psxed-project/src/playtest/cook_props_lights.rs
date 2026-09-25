@@ -1,4 +1,5 @@
 use super::*;
+use crate::prop_surfaces::bake_prop_uv;
 use crate::{generate_material_texture_psxt, UiFontChoice};
 
 pub(crate) fn resolve_material_texture_asset(
@@ -646,10 +647,8 @@ pub(crate) fn push_box_prop(
         };
         texture_asset_indices[face] = Some(texture_asset_index);
         if let Ok(texture) = psx_asset::Texture::from_bytes(&assets[texture_asset_index].bytes) {
-            let u_max = texture.width().saturating_sub(1).min(255) as u8;
-            let v_max = texture.height().saturating_sub(1).min(255) as u8;
             cooked_uvs[face] =
-                uvs[face].apply_to_quad([(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]);
+                crate::prop_surfaces::prop_uv_corners(uvs[face], texture.width(), texture.height());
         }
         tint_rgb[face] = tint;
         blend_modes[face] = project
@@ -701,24 +700,9 @@ pub(crate) fn push_box_prop(
         return false;
     }
     for quad in generated {
-        let mut world_vertices = [[0i32; 3]; 4];
-        for (index, local) in quad.vertices.iter().enumerate() {
-            let rotated = crate::spatial::rotate_euler_local_q12(
-                [
-                    i32::from(local[0]),
-                    i32::from(local[1]),
-                    i32::from(local[2]),
-                ],
-                pitch as u16,
-                yaw as u16,
-                roll as u16,
-            );
-            world_vertices[index] = [
-                pos[0].saturating_add(rotated[0]),
-                pos[1].saturating_add(rotated[1]),
-                pos[2].saturating_add(rotated[2]),
-            ];
-        }
+        let world_vertices = quad
+            .vertices
+            .map(|local| crate::prop_surfaces::prop_local_to_world(pos, local, pitch, yaw, roll));
         let center = box_prop_surface_center(world_vertices);
         let normal = box_prop_surface_normal(world_vertices);
         let face = usize::from(quad.source_face).min(crate::BOX_PROP_FACE_COUNT - 1);
@@ -841,10 +825,8 @@ pub(crate) fn push_cylinder_prop(
         };
         texture_asset_indices[slot] = Some(texture_asset_index);
         if let Ok(texture) = psx_asset::Texture::from_bytes(&assets[texture_asset_index].bytes) {
-            let u_max = texture.width().saturating_sub(1).min(255) as u8;
-            let v_max = texture.height().saturating_sub(1).min(255) as u8;
             cooked_uvs[slot] =
-                uvs[slot].apply_to_quad([(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]);
+                crate::prop_surfaces::prop_uv_corners(uvs[slot], texture.width(), texture.height());
         }
         tint_rgb[slot] = tint;
         blend_modes[slot] = project
@@ -881,28 +863,13 @@ pub(crate) fn push_cylinder_prop(
     let mut bounds_max = [i32::MIN; 3];
     for surface in generated {
         let vertex_count = usize::from(surface.vertex_count.clamp(3, 4));
-        let mut world_vertices = [[0i32; 3]; 4];
-        for (index, local) in surface.vertices.iter().enumerate() {
-            let rotated = crate::spatial::rotate_euler_local_q12(
-                [
-                    i32::from(local[0]),
-                    i32::from(local[1]),
-                    i32::from(local[2]),
-                ],
-                pitch as u16,
-                yaw as u16,
-                roll as u16,
-            );
-            world_vertices[index] = [
-                pos[0].saturating_add(rotated[0]),
-                pos[1].saturating_add(rotated[1]),
-                pos[2].saturating_add(rotated[2]),
-            ];
-            if index < vertex_count {
-                for axis in 0..3 {
-                    bounds_min[axis] = bounds_min[axis].min(world_vertices[index][axis]);
-                    bounds_max[axis] = bounds_max[axis].max(world_vertices[index][axis]);
-                }
+        let world_vertices = surface
+            .vertices
+            .map(|local| crate::prop_surfaces::prop_local_to_world(pos, local, pitch, yaw, roll));
+        for world_vertex in &world_vertices[..vertex_count] {
+            for axis in 0..3 {
+                bounds_min[axis] = bounds_min[axis].min(world_vertex[axis]);
+                bounds_max[axis] = bounds_max[axis].max(world_vertex[axis]);
             }
         }
         let center = polygon_surface_center(world_vertices, vertex_count);
@@ -963,34 +930,6 @@ pub(crate) fn push_cylinder_prop(
     true
 }
 
-fn bake_prop_uv(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> [u8; 2] {
-    let u = u32::from(uv_q8[0]);
-    let v = u32::from(uv_q8[1]);
-    let inv_u = 255 - u;
-    let inv_v = 255 - v;
-    let interpolate = |axis: usize| {
-        let values = if axis == 0 {
-            [
-                u32::from(corners[0].0),
-                u32::from(corners[1].0),
-                u32::from(corners[2].0),
-                u32::from(corners[3].0),
-            ]
-        } else {
-            [
-                u32::from(corners[0].1),
-                u32::from(corners[1].1),
-                u32::from(corners[2].1),
-                u32::from(corners[3].1),
-            ]
-        };
-        let top = values[0] * inv_u + values[1] * u;
-        let bottom = values[3] * inv_u + values[2] * u;
-        ((top * inv_v + bottom * v + 32_512) / 65_025).min(255) as u8
-    };
-    [interpolate(0), interpolate(1)]
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_arch_prop(
     project: &ProjectDocument,
@@ -1040,10 +979,8 @@ pub(crate) fn push_arch_prop(
         };
         texture_asset_indices[slot] = Some(texture_asset_index);
         if let Ok(texture) = psx_asset::Texture::from_bytes(&assets[texture_asset_index].bytes) {
-            let u_max = texture.width().saturating_sub(1).min(255) as u8;
-            let v_max = texture.height().saturating_sub(1).min(255) as u8;
             cooked_uvs[slot] =
-                uvs[slot].apply_to_quad([(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]);
+                crate::prop_surfaces::prop_uv_corners(uvs[slot], texture.width(), texture.height());
         }
         tint_rgb[slot] = tint;
         blend_modes[slot] = project
