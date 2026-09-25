@@ -6,6 +6,7 @@ runtime; they are the lowest common layer the rest of the repo builds on.
 
 | Crate | Purpose |
 |-------|---------|
+| [`psx-audio-cook`](psx-audio-cook) | Host-side SPU-ADPCM cooker for every game: band-limited resampling, Gaussian-interpolation pre-compensation, a trellis encoder evaluated against the exact SPU decoder, seamless block-aligned loops, and a distortion-aware rate allocator for SPU RAM budgets. |
 | [`psx-hw`](psx-hw) | PlayStation 1 hardware model: register addresses, bitfield layouts, and command packet formats. Shared by emulator and SDK. |
 | [`psx-iso`](psx-iso) | BIN/CUE and ISO9660 parsing for PS1 disc images. Shared by emulator, SDK, and disc-builder. |
 | [`psx-trace`](psx-trace) | Instruction trace record format emitted by the emulator core (originally shared with the retired PCSX-Redux parity oracle). |
