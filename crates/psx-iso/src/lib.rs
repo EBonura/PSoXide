@@ -26,6 +26,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -104,8 +105,74 @@ pub enum TrackType {
     Audio,
 }
 
+/// Where a track's raw bytes come from.
+///
+/// A source can hold the whole image in memory (a `Vec<u8>` is one), read a
+/// file on demand, or decode a packed image lazily, so a disc no longer has to
+/// live in memory to be played. Reads copy out; nothing borrows the source.
+///
+/// A source that fetches asynchronously (the web build reads the picked file
+/// a slice at a time) answers [`TrackSource::ready`] with `false` for bytes
+/// that have not arrived, and fails [`TrackSource::read_at`] on them.
+/// Synchronous sources keep the defaults: always ready, nothing to prefetch.
+pub trait TrackSource: Send + Sync {
+    /// Length in bytes.
+    fn len(&self) -> u64;
+
+    /// Whether the source is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Copy `out.len()` bytes starting at `offset` into `out`. Returns
+    /// `false`, with `out` unspecified, when any of them lie outside the
+    /// source or cannot be read right now.
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> bool;
+
+    /// Whether [`TrackSource::read_at`] over this range would succeed now.
+    fn ready(&self, offset: u64, len: u64) -> bool {
+        let _ = (offset, len);
+        true
+    }
+
+    /// Ask for this range to be made ready soon.
+    fn prefetch(&self, offset: u64, len: u64) {
+        let _ = (offset, len);
+    }
+
+    /// The bytes themselves, when the source is a plain in-memory buffer.
+    /// Lets a caller patch a track in place (the web build streams CD-DA
+    /// payloads into zero-filled placeholders).
+    fn bytes_mut(&mut self) -> Option<&mut [u8]> {
+        None
+    }
+}
+
+impl TrackSource for Vec<u8> {
+    fn len(&self) -> u64 {
+        self.as_slice().len() as u64
+    }
+
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> bool {
+        let Ok(start) = usize::try_from(offset) else {
+            return false;
+        };
+        let Some(bytes) = start
+            .checked_add(out.len())
+            .and_then(|end| self.get(start..end))
+        else {
+            return false;
+        };
+        out.copy_from_slice(bytes);
+        true
+    }
+
+    fn bytes_mut(&mut self) -> Option<&mut [u8]> {
+        Some(self.as_mut_slice())
+    }
+}
+
 /// One track in a loaded disc image.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Track {
     /// 1-based track number.
     pub number: u8,
@@ -117,13 +184,33 @@ pub struct Track {
     pub sector_count: u32,
     /// Pregap sectors before INDEX 01.
     pub pregap: u32,
-    /// Pregap sectors physically present at the start of `bytes`.
+    /// Pregap sectors physically present at the start of `source`.
     /// This differs from `pregap` when a CUE uses `PREGAP` to describe
     /// silence that lives in disc space but not in the track file.
     pub file_pregap: u32,
     /// Raw 2352-byte sectors backing this track.
-    pub bytes: Vec<u8>,
+    pub source: Box<dyn TrackSource>,
 }
+
+impl core::fmt::Debug for Track {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Track")
+            .field("number", &self.number)
+            .field("track_type", &self.track_type)
+            .field("start_lba", &self.start_lba)
+            .field("sector_count", &self.sector_count)
+            .field("pregap", &self.pregap)
+            .field("file_pregap", &self.file_pregap)
+            .field("source_len", &self.source.len())
+            .finish()
+    }
+}
+
+/// One raw 2352-byte sector, copied out of a disc.
+pub type Sector = [u8; SECTOR_BYTES];
+
+/// The 2048-byte user-data payload of one sector.
+pub type SectorUserData = [u8; SECTOR_USER_DATA_BYTES];
 
 /// Physical play position for `GetlocP`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,19 +439,32 @@ fn write_le_u32_at(dst: &mut [u8], offset: usize, value: u32) {
     dst[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-/// A loaded disc image. Holds the raw sector data plus enough TOC
-/// metadata to answer track and SubQ-style position queries.
-#[derive(Clone)]
+/// A loaded disc image: the TOC plus one [`TrackSource`] per track, enough to
+/// answer sector reads and SubQ-style position queries.
 pub struct Disc {
     tracks: Vec<Track>,
 }
 
 impl Disc {
-    /// Construct a disc from a raw BIN image.
+    /// Construct a disc from a raw BIN image held in memory.
     pub fn from_bin(bytes: Vec<u8>) -> Self {
-        let pregap = detect_track1_pregap(&bytes);
-        let file_sectors = bytes.len() / SECTOR_BYTES;
-        let sector_count = file_sectors.saturating_sub(pregap as usize) as u32;
+        Self::from_source(Box::new(bytes))
+    }
+
+    /// Construct a single-track disc from a raw BIN image behind `source`.
+    /// The track-1 pregap is detected from the first sector, which must be
+    /// readable now.
+    pub fn from_source(source: Box<dyn TrackSource>) -> Self {
+        let mut first = [0u8; SECTOR_BYTES];
+        let pregap = if source.read_at(0, &mut first) {
+            detect_track1_pregap(&first)
+        } else {
+            0
+        };
+        let file_sectors = source.len() / SECTOR_BYTES as u64;
+        let sector_count = file_sectors
+            .saturating_sub(pregap as u64)
+            .min(u32::MAX as u64) as u32;
         Self {
             tracks: vec![Track {
                 number: 1,
@@ -373,7 +473,7 @@ impl Disc {
                 sector_count,
                 pregap,
                 file_pregap: pregap,
-                bytes,
+                source,
             }],
         }
     }
@@ -392,6 +492,11 @@ impl Disc {
     /// Number of tracks on the disc.
     pub fn track_count(&self) -> usize {
         self.tracks.len()
+    }
+
+    /// Tracks in number order.
+    pub fn tracks(&self) -> &[Track] {
+        &self.tracks
     }
 
     /// First track number on the disc, if any.
@@ -421,12 +526,13 @@ impl Disc {
     /// payloads in after the disc is mounted (the web build boots on the data
     /// track and fills the CD-DA tracks as their downloads land). The track's
     /// geometry is fixed at construction; only the bytes may be patched, and
-    /// a zero-filled span plays as digital silence until it is.
+    /// a zero-filled span plays as digital silence until it is. `None` for a
+    /// track that is not held in memory.
     pub fn track_bytes_mut(&mut self, number: u8) -> Option<&mut [u8]> {
         self.tracks
             .iter_mut()
             .find(|track| track.number == number)
-            .map(|track| track.bytes.as_mut_slice())
+            .and_then(|track| track.source.bytes_mut())
     }
 
     /// Track start LBA by 1-based track number.
@@ -459,8 +565,10 @@ impl Disc {
         })
     }
 
-    /// Read a raw 2352-byte sector. Returns `None` past end-of-disc.
-    pub fn read_sector_raw(&self, lba: u32) -> Option<&[u8]> {
+    /// The track holding `lba` in its source and the sector's byte offset
+    /// there. `None` past end-of-disc and for pregap sectors the track's file
+    /// does not contain.
+    fn locate(&self, lba: u32) -> Option<(&Track, u64)> {
         for track in &self.tracks {
             if !track_contains_lba(track, lba) {
                 continue;
@@ -475,20 +583,79 @@ impl Disc {
                 }
                 lba.checked_sub(file_start_lba)?
             };
-            let start = (file_sector as usize).checked_mul(SECTOR_BYTES)?;
-            let end = start.checked_add(SECTOR_BYTES)?;
-            if end <= track.bytes.len() {
-                return Some(&track.bytes[start..end]);
+            let start = u64::from(file_sector) * SECTOR_BYTES as u64;
+            if start + SECTOR_BYTES as u64 <= track.source.len() {
+                return Some((track, start));
             }
         }
         None
+    }
+
+    /// Read a raw 2352-byte sector. Returns `None` past end-of-disc, and for
+    /// a sector an asynchronous source has not delivered yet (see
+    /// [`Disc::sectors_ready`]).
+    pub fn read_sector_raw(&self, lba: u32) -> Option<Sector> {
+        let (track, offset) = self.locate(lba)?;
+        let mut sector = [0u8; SECTOR_BYTES];
+        track.source.read_at(offset, &mut sector).then_some(sector)
+    }
+
+    /// Bytes 12..20 of a raw sector: the header (MSF + mode) and the first
+    /// subheader copy. Sources that fetch asynchronously can answer this from
+    /// an index before the sector itself has arrived.
+    pub fn read_sector_header(&self, lba: u32) -> Option<[u8; 8]> {
+        let (track, offset) = self.locate(lba)?;
+        let mut header = [0u8; 8];
+        track
+            .source
+            .read_at(offset + 12, &mut header)
+            .then_some(header)
+    }
+
+    /// Whether sectors `lba..lba + count` that exist on the disc can be read
+    /// now. Sectors past the end, or in a pregap the image does not hold,
+    /// count as ready: reading them answers `None` without waiting.
+    pub fn sectors_ready(&self, lba: u32, count: u32) -> bool {
+        (lba..lba.saturating_add(count)).all(|lba| match self.locate(lba) {
+            Some((track, offset)) => track.source.ready(offset, SECTOR_BYTES as u64),
+            None => true,
+        })
+    }
+
+    /// Hint that sectors `lba..lba + count` will be read soon.
+    pub fn prefetch_sectors(&self, lba: u32, count: u32) {
+        let mut next = lba;
+        let end = lba.saturating_add(count);
+        while next < end {
+            let Some((track, offset)) = self.locate(next) else {
+                next += 1;
+                continue;
+            };
+            // One request per run of sectors in the same track.
+            let mut run = 1u32;
+            while next + run < end {
+                match self.locate(next + run) {
+                    Some((t, o))
+                        if core::ptr::eq(t, track)
+                            && o == offset + u64::from(run) * SECTOR_BYTES as u64 =>
+                    {
+                        run += 1
+                    }
+                    _ => break,
+                }
+            }
+            track
+                .source
+                .prefetch(offset, u64::from(run) * SECTOR_BYTES as u64);
+            next += run;
+        }
     }
 
     /// Read one raw CD-DA audio frame from an audio track.
     ///
     /// CD-DA track files are 2352 bytes per 1/75 s frame: stereo
     /// 16-bit little-endian PCM with no CD-ROM sync/header/subheader.
-    pub fn read_cdda_sector(&self, lba: u32) -> Option<&[u8]> {
+    pub fn read_cdda_sector(&self, lba: u32) -> Option<Sector> {
         let track = self.track_for_lba(lba)?;
         if track.track_type != TrackType::Audio || lba < track.start_lba {
             return None;
@@ -497,22 +664,27 @@ impl Disc {
     }
 
     /// Read the 2048-byte user-data payload of a sector.
-    pub fn read_sector_user(&self, lba: u32) -> Option<&[u8]> {
+    pub fn read_sector_user(&self, lba: u32) -> Option<SectorUserData> {
         let sector = self.read_sector_raw(lba)?;
-        let start = if sector.get(15).copied().unwrap_or(2) == 1 {
+        let start = if sector[15] == 1 {
             16
         } else {
             SECTOR_USER_DATA_OFFSET
         };
-        Some(&sector[start..start + SECTOR_USER_DATA_BYTES])
+        let mut user = [0u8; SECTOR_USER_DATA_BYTES];
+        user.copy_from_slice(&sector[start..start + SECTOR_USER_DATA_BYTES]);
+        Some(user)
     }
 }
 
-fn detect_track1_pregap(bytes: &[u8]) -> u32 {
-    if bytes.len() < SECTOR_BYTES {
+/// Track-1 pregap sectors held at the start of a raw image, from the MSF in
+/// its first sector's header (a dump that starts at 00:00:00 holds the full
+/// 150-sector pregap; one that starts at 00:02:00 holds none).
+pub fn detect_track1_pregap(first_sector: &[u8]) -> u32 {
+    if first_sector.len() < SECTOR_BYTES {
         return 0;
     }
-    let sector = &bytes[..SECTOR_BYTES];
+    let sector = &first_sector[..SECTOR_BYTES];
     if sector[0] != 0x00 || sector[11] != 0x00 || sector[1..11] != [0xFF; 10] {
         return 0;
     }
@@ -706,6 +878,103 @@ mod tests {
         );
     }
 
+    /// A source whose bytes arrive later: reads fail until `deliver`.
+    struct LateSource {
+        bytes: Vec<u8>,
+        delivered: core::sync::atomic::AtomicBool,
+    }
+
+    impl LateSource {
+        fn new(bytes: Vec<u8>, delivered: bool) -> Self {
+            Self {
+                bytes,
+                delivered: core::sync::atomic::AtomicBool::new(delivered),
+            }
+        }
+        fn delivered(&self) -> bool {
+            self.delivered.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl TrackSource for LateSource {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn read_at(&self, offset: u64, out: &mut [u8]) -> bool {
+            let header_only = offset % SECTOR_BYTES as u64 == 12 && out.len() == 8;
+            (self.delivered() || header_only) && self.bytes.read_at(offset, out)
+        }
+        fn ready(&self, _offset: u64, _len: u64) -> bool {
+            self.delivered()
+        }
+    }
+
+    #[test]
+    fn late_source_reports_readiness_and_serves_headers_early() {
+        let mut bytes = vec![0u8; SECTOR_BYTES * 4];
+        bytes[2 * SECTOR_BYTES + 12..2 * SECTOR_BYTES + 20]
+            .copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        bytes[2 * SECTOR_BYTES + 100] = 0x5A;
+        let late = LateSource::new(bytes, false);
+        let disc = Disc::from_tracks(vec![Track {
+            number: 1,
+            track_type: TrackType::Data,
+            start_lba: 0,
+            sector_count: 4,
+            pregap: 0,
+            file_pregap: 0,
+            source: Box::new(late),
+        }]);
+        assert!(!disc.sectors_ready(1, 2));
+        assert!(disc.read_sector_raw(2).is_none());
+        assert_eq!(disc.read_sector_header(2), Some([1, 2, 3, 4, 5, 6, 7, 8]));
+        // Past the end counts as ready: nothing will ever arrive there.
+        assert!(disc.sectors_ready(4, 10));
+    }
+
+    #[test]
+    fn prefetch_merges_a_run_into_one_request_per_track() {
+        extern crate std;
+        use std::sync::{Arc, Mutex};
+        type Hints = Arc<Mutex<Vec<(u64, u64)>>>;
+        struct Hint(Vec<u8>, Hints);
+        impl TrackSource for Hint {
+            fn len(&self) -> u64 {
+                self.0.len() as u64
+            }
+            fn read_at(&self, offset: u64, out: &mut [u8]) -> bool {
+                self.0.read_at(offset, out)
+            }
+            fn prefetch(&self, offset: u64, len: u64) {
+                self.1.lock().unwrap().push((offset, len));
+            }
+        }
+        let hints = Hints::default();
+        let disc = Disc::from_tracks(vec![Track {
+            number: 1,
+            track_type: TrackType::Data,
+            start_lba: 0,
+            sector_count: 8,
+            pregap: 0,
+            file_pregap: 0,
+            source: Box::new(Hint(vec![0u8; SECTOR_BYTES * 8], hints.clone())),
+        }]);
+        disc.prefetch_sectors(2, 20);
+        let sector = SECTOR_BYTES as u64;
+        assert_eq!(*hints.lock().unwrap(), [(2 * sector, 6 * sector)]);
+    }
+
+    #[test]
+    fn only_memory_tracks_can_be_patched_in_place() {
+        let mut disc = Disc::from_bin(vec![0u8; SECTOR_BYTES * 2]);
+        disc.track_bytes_mut(1).unwrap()[0] = 9;
+        assert_eq!(disc.read_sector_raw(0).unwrap()[0], 9);
+        let late = LateSource::new(vec![0u8; SECTOR_BYTES], true);
+        let mut disc = Disc::from_source(Box::new(late));
+        assert!(disc.track_bytes_mut(1).is_none());
+        assert!(disc.read_sector_raw(0).is_some());
+    }
+
     #[test]
     fn read_past_end_returns_none() {
         let d = Disc::from_bin(vec![0u8; SECTOR_BYTES]);
@@ -732,7 +1001,7 @@ mod tests {
                 sector_count: 10,
                 pregap: 0,
                 file_pregap: 0,
-                bytes: vec![0u8; SECTOR_BYTES * 10],
+                source: Box::new(vec![0u8; SECTOR_BYTES * 10]),
             },
             Track {
                 number: 2,
@@ -741,7 +1010,7 @@ mod tests {
                 sector_count: 4,
                 pregap: 2,
                 file_pregap: 2,
-                bytes: vec![0u8; SECTOR_BYTES * 6],
+                source: Box::new(vec![0u8; SECTOR_BYTES * 6]),
             },
         ];
         let disc = Disc::from_tracks(tracks);
@@ -762,7 +1031,7 @@ mod tests {
                 sector_count: 10,
                 pregap: 0,
                 file_pregap: 0,
-                bytes: vec![0u8; SECTOR_BYTES * 10],
+                source: Box::new(vec![0u8; SECTOR_BYTES * 10]),
             },
             Track {
                 number: 2,
@@ -771,7 +1040,7 @@ mod tests {
                 sector_count: 4,
                 pregap: 2,
                 file_pregap: 2,
-                bytes: vec![0u8; SECTOR_BYTES * 6],
+                source: Box::new(vec![0u8; SECTOR_BYTES * 6]),
             },
         ];
         let disc = Disc::from_tracks(tracks);
@@ -794,7 +1063,7 @@ mod tests {
                 sector_count: 10,
                 pregap: 0,
                 file_pregap: 0,
-                bytes: vec![0u8; SECTOR_BYTES * 10],
+                source: Box::new(vec![0u8; SECTOR_BYTES * 10]),
             },
             Track {
                 number: 2,
@@ -803,7 +1072,7 @@ mod tests {
                 sector_count: 4,
                 pregap: 2,
                 file_pregap: 2,
-                bytes: track2,
+                source: Box::new(track2),
             },
         ]);
         assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xAB);
@@ -821,7 +1090,7 @@ mod tests {
                 sector_count: 10,
                 pregap: 0,
                 file_pregap: 0,
-                bytes: vec![0u8; SECTOR_BYTES * 10],
+                source: Box::new(vec![0u8; SECTOR_BYTES * 10]),
             },
             Track {
                 number: 2,
@@ -830,7 +1099,7 @@ mod tests {
                 sector_count: 4,
                 pregap: 2,
                 file_pregap: 0,
-                bytes: track2,
+                source: Box::new(track2),
             },
         ]);
         assert!(disc.read_sector_raw(10).is_none());
@@ -849,7 +1118,7 @@ mod tests {
                 sector_count: 10,
                 pregap: 0,
                 file_pregap: 0,
-                bytes: vec![0u8; SECTOR_BYTES * 10],
+                source: Box::new(vec![0u8; SECTOR_BYTES * 10]),
             },
             Track {
                 number: 2,
@@ -858,7 +1127,7 @@ mod tests {
                 sector_count: 4,
                 pregap: 2,
                 file_pregap: 0,
-                bytes: track2,
+                source: Box::new(track2),
             },
         ]);
 
