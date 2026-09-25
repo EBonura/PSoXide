@@ -363,3 +363,29 @@ fn gauss_compensation_keeps_the_normalised_level() {
         "overshoot is clamped"
     );
 }
+
+#[test]
+fn normalisation_follows_the_source_not_what_survives_the_resample() {
+    // A quiet 300 Hz tone under a loud 4.5 kHz one, cooked at 5 kHz: the
+    // resampler removes the loud part, and the quiet tone must keep its
+    // level (peak 0.9 of the source, not of what is left).
+    let mut samples = tone(22_050, 0.4, &[4_500.0]);
+    let quiet = tone(22_050, 0.4, &[300.0]);
+    for (s, q) in samples.iter_mut().zip(&quiet) {
+        *s = *s * 3.0 + q * 0.3;
+    }
+    let src = wav_of(22_050, samples.clone());
+    let mut o = CookOptions::one_shot(5_000);
+    o.compensate_gauss = false;
+    let c = cook(&src, &o);
+    let peak_src = samples.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let expected = 9_000.0 * 0.3 * 0.9 * 32_767.0 / peak_src;
+    // Away from the ends, where the loud tone's abrupt start and stop leave
+    // some band-limited energy.
+    let steady = &c.pcm[200..c.pcm.len() - 200];
+    let peak_out = steady.iter().map(|&v| (v as f64).abs()).fold(0.0, f64::max);
+    assert!(
+        (peak_out / expected - 1.0).abs() < 0.1,
+        "quiet tone peak {peak_out:.0}, expected about {expected:.0}"
+    );
+}
