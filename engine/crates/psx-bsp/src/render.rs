@@ -4948,8 +4948,8 @@ mod frustum_tests {
             PXBSP_RENDER_PROFILE,
             ClassicAffineProfile::PXBSP_THIRD_PERSON
         );
-        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_once_at, 272);
-        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_twice_at, 136);
+        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_once_at, 340);
+        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_twice_at, 170);
         assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);
     }
 
