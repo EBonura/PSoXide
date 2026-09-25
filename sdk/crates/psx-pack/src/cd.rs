@@ -99,6 +99,8 @@ const CMD_SETMODE: u8 = 0x0E;
 #[cfg(target_arch = "mips")]
 const CMD_SETFILTER: u8 = 0x0D;
 #[cfg(target_arch = "mips")]
+const CMD_DEMUTE: u8 = 0x0C;
+#[cfg(target_arch = "mips")]
 const CMD_SEEKL: u8 = 0x15;
 #[cfg(target_arch = "mips")]
 const CD_MODE_DOUBLE_SPEED_2048: u8 = 0x80;
@@ -478,6 +480,16 @@ impl SectorReader {
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn set_filter(&mut self, file: u8, channel: u8) -> bool {
         unsafe { self.send_command(CMD_SETFILTER, &[file, channel], IRQ_ACK, ACK_POLL) }
+    }
+
+    /// Demute: let CD-DA and XA-ADPCM reach the SPU. The drive stays muted
+    /// across programs, so a stream that plays XA audio must not assume the
+    /// last tenant left it demuted.
+    ///
+    /// # Safety
+    /// Same contract as [`prepare`](Self::prepare).
+    pub unsafe fn demute(&mut self) -> bool {
+        unsafe { self.send_command(CMD_DEMUTE, &[], IRQ_ACK, ACK_POLL) }
     }
 
     unsafe fn prepare_with_mode(&mut self, mode: u8) -> bool {
