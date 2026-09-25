@@ -97,6 +97,10 @@ const CMD_PAUSE: u8 = 0x09;
 #[cfg(target_arch = "mips")]
 const CMD_SETMODE: u8 = 0x0E;
 #[cfg(target_arch = "mips")]
+const CMD_SETFILTER: u8 = 0x0D;
+#[cfg(target_arch = "mips")]
+const CMD_DEMUTE: u8 = 0x0C;
+#[cfg(target_arch = "mips")]
 const CMD_SEEKL: u8 = 0x15;
 #[cfg(target_arch = "mips")]
 const CD_MODE_DOUBLE_SPEED_2048: u8 = 0x80;
@@ -458,6 +462,36 @@ impl SectorReader {
         unsafe { self.prepare_with_mode(0x00) }
     }
 
+    /// [`prepare`](Self::prepare) with an explicit Setmode byte, for
+    /// streams that need more than plain data: e.g. `0x80 | 0x40 | 0x08`
+    /// (double speed, XA-ADPCM on, file/channel filter) plays interleaved
+    /// XA audio through the SPU while video sectors still arrive as data.
+    ///
+    /// # Safety
+    /// Same contract as [`prepare`](Self::prepare).
+    pub unsafe fn prepare_mode(&mut self, mode: u8) -> bool {
+        unsafe { self.prepare_with_mode(mode) }
+    }
+
+    /// Setfilter: the XA file and channel whose audio sectors the drive
+    /// plays when the mode has the filter bit set.
+    ///
+    /// # Safety
+    /// Same contract as [`prepare`](Self::prepare).
+    pub unsafe fn set_filter(&mut self, file: u8, channel: u8) -> bool {
+        unsafe { self.send_command(CMD_SETFILTER, &[file, channel], IRQ_ACK, ACK_POLL) }
+    }
+
+    /// Demute: let CD-DA and XA-ADPCM reach the SPU. The drive stays muted
+    /// across programs, so a stream that plays XA audio must not assume the
+    /// last tenant left it demuted.
+    ///
+    /// # Safety
+    /// Same contract as [`prepare`](Self::prepare).
+    pub unsafe fn demute(&mut self) -> bool {
+        unsafe { self.send_command(CMD_DEMUTE, &[], IRQ_ACK, ACK_POLL) }
+    }
+
     unsafe fn prepare_with_mode(&mut self, mode: u8) -> bool {
         self.mode = mode;
         unsafe {
@@ -600,6 +634,47 @@ impl SectorReader {
             self.drain_responses();
             self.ack(IRQ_DATA_READY);
             true
+        }
+    }
+
+    /// Non-blocking [`read_sector`](Self::read_sector): check the controller
+    /// once and, if the next sector of the running ReadN stream is ready,
+    /// pop its 2048 bytes into `buffer` and ack it.
+    ///
+    /// `Ok(true)` means `buffer` holds a new sector, `Ok(false)` that none
+    /// has arrived yet. `Err(())` is a drive error; the stream is acked and
+    /// the caller should [`stop`](Self::stop) (the diag snapshot is set as
+    /// for `read_sector`).
+    ///
+    /// Streaming consumers (FMV) call this between units of other work so
+    /// the drive never runs ahead of the CPU by more than the controller can
+    /// hold. At double speed a sector lands every ~6.7 ms.
+    ///
+    /// # Safety
+    /// Same contract as [`read_sector`](Self::read_sector).
+    #[allow(clippy::result_unit_err)]
+    pub unsafe fn try_read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> Result<bool, ()> {
+        unsafe {
+            let flag = self.irq_flag();
+            if flag == IRQ_ERROR {
+                self.wr_index(0);
+                let r0 = psx_io::read8(CD_RESPONSE);
+                let r1 = psx_io::read8(CD_RESPONSE);
+                self.diag = [DIAG_CD_ERROR, r0, DIAG_SITE_READ, r1];
+                self.drain_responses();
+                self.ack_all();
+                return Err(());
+            }
+            if flag != IRQ_DATA_READY && !self.data_fifo_ready() {
+                if flag != 0 {
+                    self.ack_unexpected(flag);
+                }
+                return Ok(false);
+            }
+            self.dma_read_sector(buffer.as_mut_ptr());
+            self.drain_responses();
+            self.ack(IRQ_DATA_READY);
+            Ok(true)
         }
     }
 
