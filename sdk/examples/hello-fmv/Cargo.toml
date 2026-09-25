@@ -7,9 +7,16 @@ license = "GPL-2.0-or-later"
 
 [workspace]
 
+# The player is a library as well, so another program (the hardware-test
+# suite) can run the same console test from its own menu.
+[lib]
+name = "hello_fmv"
+path = "src/lib.rs"
+
 [[bin]]
 name = "hello-fmv"
-path = "src/main.rs"
+path = "src/bin.rs"
+test = false
 
 [profile.release]
 panic = "abort"
