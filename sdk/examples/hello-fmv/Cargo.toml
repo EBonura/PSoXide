@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-fmv"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+# The player is a library as well, so another program (the hardware-test
+# suite) can run the same console test from its own menu.
+[lib]
+name = "hello_fmv"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hello-fmv"
+path = "src/bin.rs"
+test = false
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-gpu  = { path = "../../crates/psx-gpu" }
+psx-io   = { path = "../../crates/psx-io" }
+psx-rt   = { path = "../../crates/psx-rt" }
+psx-vram = { path = "../../crates/psx-vram" }
+psx-pack = { path = "../../crates/psx-pack" }
+psx-fmv  = { path = "../../crates/psx-fmv" }
+psx-font = { path = "../../crates/psx-font" }
+psx-spu  = { path = "../../crates/psx-spu" }

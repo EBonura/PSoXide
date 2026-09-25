@@ -69,9 +69,32 @@ pub struct IsoFile {
     pub content: Vec<u8>,
 }
 
+/// Raw CD-XA sector size without sync and header: 8-byte subheader plus
+/// 2328 bytes (Form 1 data + EDC/ECC, or Form 2 data + EDC).
+pub const XA_SECTOR_SIZE: usize = 2336;
+
 enum IsoEntry {
     File(IsoFile),
-    Padding { sectors: u32 },
+    /// A file whose sectors carry their own subheaders (interleaved STR /
+    /// XA audio). `file.content` holds the first 2048 bytes of each
+    /// sector's data for the cooked image; `raw` is the 2336-byte form
+    /// `build_bin` writes back.
+    Xa {
+        file: IsoFile,
+        raw: Vec<u8>,
+    },
+    Padding {
+        sectors: u32,
+    },
+}
+
+impl IsoEntry {
+    fn file(&self) -> Option<&IsoFile> {
+        match self {
+            IsoEntry::File(file) | IsoEntry::Xa { file, .. } => Some(file),
+            IsoEntry::Padding { .. } => None,
+        }
+    }
 }
 
 /// Build a cooked ISO 9660 image from a set of root-directory files.
@@ -133,6 +156,32 @@ impl IsoBuilder {
         self
     }
 
+    /// Add a CD-XA file from raw 2336-byte sectors (subheader + 2328
+    /// bytes), such as psxavenc's `-t str` / `-t xa` output. The raw
+    /// build writes each sector's own subheader and recomputes EDC/ECC
+    /// (Form 1) or EDC (Form 2, submode bit 5) at the file's final LBA,
+    /// so interleaved video + XA-ADPCM audio streams play from the disc.
+    /// The directory records `2048 * sectors` as the size, as for any
+    /// Mode 2 file. Returns `None` if `raw` is not a whole number of
+    /// sectors.
+    pub fn add_xa_file(&mut self, name: &str, raw: Vec<u8>) -> Option<&mut Self> {
+        if raw.is_empty() || !raw.len().is_multiple_of(XA_SECTOR_SIZE) {
+            return None;
+        }
+        let mut content = Vec::with_capacity(raw.len() / XA_SECTOR_SIZE * SECTOR_SIZE);
+        for sector in raw.chunks_exact(XA_SECTOR_SIZE) {
+            content.extend_from_slice(&sector[8..8 + SECTOR_SIZE]);
+        }
+        self.entries.push(IsoEntry::Xa {
+            file: IsoFile {
+                name: name.to_ascii_uppercase(),
+                content,
+            },
+            raw,
+        });
+        Some(self)
+    }
+
     /// Reserve invisible file-area sectors. These sectors are not listed in the
     /// root directory, but they do consume LBAs, allowing later files to land at
     /// fixed positions without cluttering the ISO file tree.
@@ -165,7 +214,7 @@ impl IsoBuilder {
         let mut placements: Vec<FilePlacement> = Vec::new();
         for entry in &self.entries {
             match entry {
-                IsoEntry::File(file) => {
+                IsoEntry::File(file) | IsoEntry::Xa { file, .. } => {
                     let entry_name = iso_file_identifier(&file.name);
                     let size = file.content.len() as u32;
                     let sectors = size.div_ceil(SECTOR_SIZE as u32).max(1);
@@ -269,7 +318,7 @@ impl IsoBuilder {
 
         let mut placement_index = 0usize;
         for entry in &self.entries {
-            let IsoEntry::File(file) = entry else {
+            let Some(file) = entry.file() else {
                 continue;
             };
             let placement = &placements[placement_index];
@@ -329,6 +378,31 @@ impl IsoBuilder {
             sector[24..24 + SECTOR_SIZE]
                 .copy_from_slice(&cooked[cooked_start..cooked_start + SECTOR_SIZE]);
             encode_mode2_form1_edc_ecc(sector, &edc_table, &gf8_product);
+        }
+        // CD-XA files: put back each sector's own subheader and data, then
+        // redo EDC/ECC for its form. File LBAs follow build()'s layout.
+        let mut lba = 21usize;
+        for entry in &self.entries {
+            match entry {
+                IsoEntry::Padding { sectors } => lba += *sectors as usize,
+                IsoEntry::File(file) => {
+                    lba += file.content.len().div_ceil(SECTOR_SIZE).max(1);
+                }
+                IsoEntry::Xa { file, raw } => {
+                    for (i, xa) in raw.chunks_exact(XA_SECTOR_SIZE).enumerate() {
+                        let start = (lba + i) * RAW_SECTOR_SIZE;
+                        let sector = &mut bin[start..start + RAW_SECTOR_SIZE];
+                        sector[16..].copy_from_slice(xa);
+                        if xa[2] & 0x20 != 0 {
+                            let edc = compute_edc(&sector[0x10..0x92C], &edc_table);
+                            sector[0x92C..0x930].copy_from_slice(&edc.to_le_bytes());
+                        } else {
+                            encode_mode2_form1_edc_ecc(sector, &edc_table, &gf8_product);
+                        }
+                    }
+                    lba += file.content.len().div_ceil(SECTOR_SIZE).max(1);
+                }
+            }
         }
         bin
     }
@@ -579,6 +653,42 @@ fn encode_path_table_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xa_file_keeps_subheaders_and_form_edc() {
+        let mut raw = vec![0u8; 2 * XA_SECTOR_SIZE];
+        // Sector 0: Form 1 video (submode 0x48), sector 1: Form 2 audio (0x64).
+        raw[..8].copy_from_slice(&[1, 0, 0x48, 0, 1, 0, 0x48, 0]);
+        raw[8..8 + 2048].fill(0xAB);
+        let s1 = XA_SECTOR_SIZE;
+        raw[s1..s1 + 8].copy_from_slice(&[1, 0, 0x64, 0x01, 1, 0, 0x64, 0x01]);
+        raw[s1 + 8..s1 + 8 + 2324].fill(0xCD);
+        let mut b = IsoBuilder::new();
+        b.add_xa_file("movie.str", raw).unwrap();
+        let cooked = b.build();
+        // File lands at LBA 21, size 2 * 2048, cooked data = Form 1 payload.
+        assert_eq!(cooked[21 * SECTOR_SIZE], 0xAB);
+        let bin = b.build_bin();
+        let v = &bin[21 * RAW_SECTOR_SIZE..22 * RAW_SECTOR_SIZE];
+        let a = &bin[22 * RAW_SECTOR_SIZE..23 * RAW_SECTOR_SIZE];
+        assert_eq!(&v[16..24], &[1, 0, 0x48, 0, 1, 0, 0x48, 0]);
+        assert_eq!(&a[16..24], &[1, 0, 0x64, 0x01, 1, 0, 0x64, 0x01]);
+        assert_eq!(a[24], 0xCD);
+        assert_eq!(v[24], 0xAB);
+        let t = build_edc_table();
+        assert_eq!(
+            &v[0x818..0x81C],
+            &compute_edc(&v[0x10..0x818], &t).to_le_bytes()
+        );
+        assert_eq!(
+            &a[0x92C..0x930],
+            &compute_edc(&a[0x10..0x92C], &t).to_le_bytes()
+        );
+        // Headers still carry the absolute MSF of LBA 21 / 22 in mode 2.
+        assert_eq!(&v[12..16], &[0x00, 0x02, 0x21, 0x02]);
+        assert_eq!(&a[12..16], &[0x00, 0x02, 0x22, 0x02]);
+        assert!(b.add_xa_file("bad", vec![0; 100]).is_none());
+    }
 
     #[test]
     fn empty_builder_produces_minimal_image() {
