@@ -290,5 +290,49 @@ fn cli_encodes_a_wav_to_psau_and_raw() {
             adpcm::FLAG_END | adpcm::FLAG_REPEAT
         );
     }
+    // score reads the rate from a PSAU header and writes the playback.
+    let played = dir.join("played.wav");
+    let out = std::process::Command::new(bin)
+        .args([
+            "score",
+            input.to_str().unwrap(),
+            dir.join("out.psau").to_str().unwrap(),
+            "--play",
+            played.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let line = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        line.contains("\"fwsnrseg\":") && line.contains("\"rate\":6000"),
+        "{line}"
+    );
+    let w = wav::read(&std::fs::read(&played).unwrap()).unwrap();
+    assert_eq!(w.rate, 44_100);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn score_measures_shipped_bytes_like_the_cook_itself() {
+    let src = wav_of(22_050, tone(22_050, 0.8, &[220.0, 1_700.0, 4_100.0]));
+    let rate = 11_025;
+    let new = cook(&src, &CookOptions::one_shot(rate));
+    let s = psx_audio_cook::score(&src, &new.adpcm, rate, 0);
+    // Same measurement as the playback path the rate study used.
+    let reference = psx_audio_cook::reference_44k(&src);
+    let played = psx_audio_cook::playback(&new);
+    let n = reference.len().min(played.len());
+    let direct = metrics::fw_snr_seg_db(&reference[..n], &played[..n], 11_025.0);
+    assert!((s.fw_snr_seg_db - direct).abs() < 1e-9);
+    // The previous pipeline's bytes at the same rate score lower.
+    let pcm: Vec<i16> = src.samples.iter().map(|&v| v as i16).collect();
+    let (_, old) = legacy::hl_cook(&pcm, src.rate, rate, 0.9);
+    let o = psx_audio_cook::score(&src, &old, rate, 0);
+    assert!(s.fw_snr_seg_db > o.fw_snr_seg_db);
+    // A leading silent block, skipped, measures the same as without it.
+    let mut padded = vec![0u8; adpcm::BLOCK_BYTES];
+    padded.extend_from_slice(&new.adpcm);
+    let p = psx_audio_cook::score(&src, &padded, rate, adpcm::BLOCK_SAMPLES);
+    assert!((p.fw_snr_seg_db - s.fw_snr_seg_db).abs() < 1e-9);
 }
