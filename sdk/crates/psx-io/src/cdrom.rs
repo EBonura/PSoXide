@@ -704,6 +704,22 @@ fn read_status() -> u8 {
     read_byte(REG_INDEX)
 }
 
+/// Program the drive's audio mixer (CD-DA and XA-ADPCM on their way to
+/// the SPU's CD input) and apply it. Volumes are 0..=0xFF with 0x80 as
+/// unity; `(0x80, 0, 0x80, 0)` is plain stereo. The SPU side still needs
+/// its CD input enabled and a CD volume (`psx-spu`).
+pub fn set_audio_mixer(left_to_left: u8, left_to_right: u8, right_to_right: u8, right_to_left: u8) {
+    select_index(2);
+    write_byte(REG_PARAMETER, left_to_left);
+    write_byte(REG_REQUEST_IRQ, left_to_right);
+    select_index(3);
+    write_byte(REG_COMMAND_RESPONSE, right_to_right);
+    write_byte(REG_PARAMETER, right_to_left);
+    // Apply the new volumes (index 3, register 3, bit 5), un-muting ADPCM.
+    write_byte(REG_REQUEST_IRQ, 0x20);
+    select_index(0);
+}
+
 fn select_index(index: u8) {
     write_byte(REG_INDEX, index & 0x03);
 }
