@@ -547,10 +547,12 @@ pub fn run() -> Outcome {
     let Some((lba, _size)) = find_movie() else {
         return fail("MOVIE.STR not found");
     };
-    // SAFETY: the reader is prepared and idle.
+    // SAFETY: the reader is prepared and idle. Demute first: a muted drive
+    // plays no XA, and the program that ran before may have left it muted
+    // (the hardware-test CD battery does).
     let xa_ok = unsafe {
         let r = &mut *addr_of_mut!(READER);
-        r.prepare_mode(CD_MODE) && r.set_filter(XA_FILE, XA_CHANNEL)
+        r.demute() && r.prepare_mode(CD_MODE) && r.set_filter(XA_FILE, XA_CHANNEL)
     };
     if !xa_ok {
         return fail("cd xa mode");
