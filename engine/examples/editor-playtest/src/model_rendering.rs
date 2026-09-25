@@ -45,12 +45,15 @@ const HORIZON_TEXTURE_RGB: (u8, u8, u8) = (214, 75, 48);
 const ZENITH_TEXTURE_RGB: (u8, u8, u8) = (67, 169, 154);
 
 /// How far the player's stance palette moves each entry toward the stance
-/// hue, Q8. The entry keeps its own brightness; 256 would be the pure hue.
-const PLAYER_STANCE_PALETTE_MIX_Q8: i32 = 192;
+/// hue, Q8. The entry keeps its own brightness; 256 is the pure hue. Any of
+/// the crystal's blue-grey left in the entry turns Horizon brown.
+const PLAYER_STANCE_PALETTE_MIX_Q8: i32 = 256;
 
 /// How far the player's lit tint moves toward the stance colour after room
 /// lighting, Q8, so the stance still reads under strongly coloured light.
-const PLAYER_STANCE_LIT_TINT_Q8: u16 = 128;
+/// At 128 the green arena light kept half its say and mixed with the red
+/// palette into brown; 208 leaves room light a fifth of the tint.
+const PLAYER_STANCE_LIT_TINT_Q8: u16 = 208;
 
 /// The player's lit tint pulled toward the active stance colour.
 pub(super) fn player_stance_lit_tint(stance: VitalityChannelId) -> mr::LitTintBias {
@@ -196,12 +199,11 @@ impl StanceCluts {
             .into_iter()
             .enumerate()
         {
-            let Some(word) = ensure_clut_variant(
-                texture_asset,
-                atlas_bytes,
-                variant as u8,
-                |entries| enemy_stance_palette(entries, color),
-            ) else {
+            let Some(word) =
+                ensure_clut_variant(texture_asset, atlas_bytes, variant as u8, |entries| {
+                    enemy_stance_palette(entries, color)
+                })
+            else {
                 return;
             };
             words[1 + variant] = word;
@@ -234,9 +236,8 @@ impl StanceCluts {
             .ok()
             .and_then(game_entity_for_instance);
         match entity {
-            Some(entity) => pose.with_atlas_material(
-                self.material(pose.model().material, entities.stance(entity)),
-            ),
+            Some(entity) => pose
+                .with_atlas_material(self.material(pose.model().material, entities.stance(entity))),
             None => pose,
         }
     }
@@ -1416,4 +1417,68 @@ pub(super) fn draw_model_instance_projected_shadows(
         triangles,
         world,
     );
+}
+
+#[cfg(test)]
+mod stance_colour_tests {
+    use super::*;
+
+    /// PS1 texture modulation: 128 is unity, clamped to 8 bits.
+    fn lit(entry: u16, tint: (u8, u8, u8)) -> [i32; 3] {
+        let [r, g, b] = bgr555(entry).map(|channel| channel * 8);
+        [
+            (r * i32::from(tint.0) / 128).min(255),
+            (g * i32::from(tint.1) / 128).min(255),
+            (b * i32::from(tint.2) / 128).min(255),
+        ]
+    }
+
+    /// The crystal's blue-grey ramp (generated base 28,36,46 to noise
+    /// 180,200,216), as the covering texture's palette holds it.
+    fn crystal_ramp() -> [u16; 8] {
+        core::array::from_fn(|i| {
+            let i = i as i32;
+            pack_bgr555([
+                (28 + (180 - 28) * i / 7) >> 3,
+                (36 + (200 - 36) * i / 7) >> 3,
+                (46 + (216 - 46) * i / 7) >> 3,
+            ])
+        })
+    }
+
+    fn stance_lit(stance: VitalityChannelId, room_tint: (u8, u8, u8)) -> [[i32; 3]; 8] {
+        let mut palette = crystal_ramp();
+        player_stance_palette(&mut palette, stance_texture_rgb(stance));
+        let material =
+            player_stance_lit_tint(stance).apply(TextureMaterial::opaque(0, 0, room_tint));
+        palette.map(|entry| lit(entry, material.tint()))
+    }
+
+    // The crystal's own tint (116,132,152) at reflection strength 232, under
+    // the green arena light and under neutral light.
+    const GREEN_ARENA: (u8, u8, u8) = (52, 118, 86);
+    const NEUTRAL: (u8, u8, u8) = (105, 120, 138);
+
+    #[test]
+    fn horizon_reads_red_not_brown_in_green_and_neutral_light() {
+        for room in [GREEN_ARENA, NEUTRAL] {
+            // The upper half of the ramp is what the body mostly shows.
+            for [r, g, b] in &stance_lit(VitalityChannelId::One, room)[4..] {
+                assert!(*r >= 150, "{room:?}: dark red reads brown ({r},{g},{b})");
+                assert!(
+                    *r >= 3 * g && *r >= 3 * b,
+                    "{room:?}: not red ({r},{g},{b})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zenith_stays_teal() {
+        for room in [GREEN_ARENA, NEUTRAL] {
+            for [r, g, b] in &stance_lit(VitalityChannelId::Two, room)[4..] {
+                assert!(*g > 2 * r && *b > 2 * r, "{room:?}: not teal ({r},{g},{b})");
+            }
+        }
+    }
 }
