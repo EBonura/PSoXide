@@ -48,6 +48,7 @@ struct Args {
     ui_pack_order_file: Option<PathBuf>,
     cdda_tracks: Vec<PathBuf>,
     system_area: Option<PathBuf>,
+    files: Vec<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -62,6 +63,7 @@ fn parse_args() -> Result<Args, String> {
     let mut world_pack_order_file = None;
     let mut ui_pack_dir = None;
     let mut ui_pack_order_file = None;
+    let mut files = Vec::new();
     let mut cdda_tracks = Vec::new();
     let mut system_area = env::var_os("PSOXIDE_SYSTEM_AREA").map(PathBuf::from);
     let mut it = env::args().skip(1);
@@ -149,6 +151,11 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| "--system-area takes a path".to_string())?,
                 ));
             }
+            "--file" => {
+                files.push(PathBuf::from(
+                    it.next().ok_or_else(|| "--file takes a path".to_string())?,
+                ));
+            }
             "--help" | "-h" => {
                 return Err(String::from("help"));
             }
@@ -171,6 +178,7 @@ fn parse_args() -> Result<Args, String> {
         ui_pack_order_file,
         cdda_tracks,
         system_area,
+        files,
     })
 }
 
@@ -217,6 +225,10 @@ fn print_usage() {
                          Inject the first 16 sectors from a local PS1\n\
                          system-area file or disc image. May also be\n\
                          supplied by PSOXIDE_SYSTEM_AREA.\n\
+         --file PATH     Add PATH to the root directory under its upper-cased\n\
+                         file name, after the fixed layout. Plain 2048-byte\n\
+                         data sectors (e.g. a video-only .STR). May be\n\
+                         repeated.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );
@@ -319,6 +331,25 @@ fn main() -> ExitCode {
     ) {
         eprintln!("playtest disc layout error: {error:?}");
         return ExitCode::from(1);
+    }
+
+    for path in &args.files {
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_ascii_uppercase(),
+            None => {
+                eprintln!("--file {}: no usable file name", path.display());
+                return ExitCode::from(2);
+            }
+        };
+        match fs::read(path) {
+            Ok(bytes) => {
+                builder.add_file(&name, bytes);
+            }
+            Err(e) => {
+                eprintln!("read {}: {e}", path.display());
+                return ExitCode::from(1);
+            }
+        }
     }
 
     let (mut image, sector_size, format_label) = if args.cooked_iso {
