@@ -1015,11 +1015,32 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
             return 0;
         }
         if attack == self.stance(index) {
-            return (damage / GAME_ENTITY_GUARDED_DAMAGE_DIVISOR)
-                .clamp(GAME_ENTITY_GUARDED_DAMAGE_MIN, GAME_ENTITY_GUARDED_DAMAGE_MAX);
+            return (damage / GAME_ENTITY_GUARDED_DAMAGE_DIVISOR).clamp(
+                GAME_ENTITY_GUARDED_DAMAGE_MIN,
+                GAME_ENTITY_GUARDED_DAMAGE_MAX,
+            );
         }
         ((u32::from(damage) * u32::from(GAME_ENTITY_OPPOSED_DAMAGE_Q12)) / 4096)
             .min(u32::from(u16::MAX)) as u16
+    }
+
+    /// Poise damage for one hit, scaled like [`Self::scaled_stance_damage`]:
+    /// a hit on the guarded channel keeps the same fraction of its authored
+    /// poise as of its authored damage, so a 1-point chip cannot stagger and
+    /// the only way to break an enemy's poise is to match its open channel.
+    /// The exposed channel and zero-damage hits keep their authored poise.
+    pub fn scaled_stance_poise(
+        &self,
+        index: usize,
+        attack: VitalityChannelId,
+        damage: u16,
+        poise_damage: u16,
+    ) -> u16 {
+        if damage == 0 || attack != self.stance(index) {
+            return poise_damage;
+        }
+        let applied = self.scaled_stance_damage(index, attack, damage);
+        (u32::from(poise_damage) * u32::from(applied) / u32::from(damage)) as u16
     }
 
     fn stance_swap_elapsed(&self, index: usize) -> u8 {
@@ -1273,9 +1294,10 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
     }
 
     /// Apply a Cortex-style stance-aware hit. The guarded channel takes a
-    /// token 1 to 3 points and the exposed channel takes 150%; routing and
-    /// spill remain the same as [`Self::apply_hit`]. Poise stays authored and
-    /// unscaled.
+    /// token 1 to 3 points, with poise scaled by the same fraction (see
+    /// [`Self::scaled_stance_poise`]); the exposed channel takes 150% damage
+    /// and its authored poise. Routing and spill remain the same as
+    /// [`Self::apply_hit`].
     pub fn apply_stance_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
@@ -1284,6 +1306,7 @@ impl<const MAX_ENTITIES: usize, const STANCE_BOUND_ATTACKS: bool>
         damage: u16,
         poise_damage: u16,
     ) -> GameEntityHitOutcome {
+        let poise_damage = self.scaled_stance_poise(index, channel, damage, poise_damage);
         let damage = self.scaled_stance_damage(index, channel, damage);
         self.apply_scaled_hit(records, index, channel, damage, poise_damage)
     }
@@ -4254,6 +4277,44 @@ mod tests {
     }
 
     #[test]
+    fn guarded_hits_scale_poise_with_the_chip_and_never_stagger() {
+        // IDLE_ENEMY guards Horizon (One) and has a 50 poise pool.
+        let mut guarded = GameEntities::<8>::EMPTY;
+        guarded.spawn_from_records(&IDLE_ENEMY);
+        // Light swing 25/25 chips 1 health and 1 poise; heavy 38/50 chips 2 and 2.
+        assert_eq!(
+            guarded.scaled_stance_poise(0, VitalityChannelId::One, 25, 25),
+            1
+        );
+        assert_eq!(
+            guarded.scaled_stance_poise(0, VitalityChannelId::One, 38, 50),
+            2
+        );
+        // The exposed channel and poise-only hits keep the authored poise.
+        assert_eq!(
+            guarded.scaled_stance_poise(0, VitalityChannelId::Two, 38, 50),
+            50
+        );
+        assert_eq!(
+            guarded.scaled_stance_poise(0, VitalityChannelId::One, 0, 50),
+            50
+        );
+        // Two 40-poise swings broke the 50 pool before; on the guard they chip.
+        for _ in 0..2 {
+            let hit = guarded.apply_stance_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 60, 40);
+            assert!(hit.connected && !hit.staggered);
+        }
+        assert_ne!(guarded.state(0), GameEntityState::Staggered);
+
+        let mut exposed = GameEntities::<8>::EMPTY;
+        exposed.spawn_from_records(&IDLE_ENEMY);
+        exposed.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
+        let first = exposed.apply_stance_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
+        let second = exposed.apply_stance_hit(&IDLE_ENEMY, 0, VitalityChannelId::One, 20, 40);
+        assert!(!first.staggered && second.staggered);
+    }
+
+    #[test]
     fn guarded_hits_chip_and_exposed_hits_use_half_again_damage() {
         let mut guarded = GameEntities::<8>::EMPTY;
         guarded.spawn_from_records(&DUAL_ENEMY);
@@ -4261,15 +4322,29 @@ mod tests {
         assert!(hit.connected && !hit.died);
         // 40 / 16 = 2: a token scratch, nowhere near the 60 an exposed hit does.
         assert_eq!((guarded.health(0), guarded.health_secondary(0)), (58, 40));
-        for (damage, chip) in [(1, 1), (15, 1), (16, 1), (25, 1), (38, 2), (48, 3), (999, 3)] {
+        for (damage, chip) in [
+            (1, 1),
+            (15, 1),
+            (16, 1),
+            (25, 1),
+            (38, 2),
+            (48, 3),
+            (999, 3),
+        ] {
             assert_eq!(
                 guarded.scaled_stance_damage(0, VitalityChannelId::One, damage),
                 chip,
                 "authored {damage}"
             );
         }
-        assert_eq!(guarded.scaled_stance_damage(0, VitalityChannelId::One, 0), 0);
-        assert_eq!(guarded.scaled_stance_damage(0, VitalityChannelId::Two, 38), 57);
+        assert_eq!(
+            guarded.scaled_stance_damage(0, VitalityChannelId::One, 0),
+            0
+        );
+        assert_eq!(
+            guarded.scaled_stance_damage(0, VitalityChannelId::Two, 38),
+            57
+        );
 
         let mut exposed = GameEntities::<8>::EMPTY;
         exposed.spawn_from_records(&DUAL_ENEMY);
