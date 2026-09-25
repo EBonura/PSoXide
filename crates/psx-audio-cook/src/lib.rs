@@ -277,3 +277,36 @@ pub fn playback(c: &Cooked) -> Vec<f64> {
 pub fn reference_44k(wav: &Wav) -> Vec<f64> {
     Sinc::new().resample(&wav.samples, wav.rate, 44_100)
 }
+
+/// End-to-end quality of ADPCM that plays at `rate` Hz, against its source.
+#[derive(Clone, Debug)]
+pub struct Score {
+    /// fwSNRseg (dB, higher is better) of the playback against
+    /// [`reference_44k`], over the band up to half the source rate, capped
+    /// at 11,025 Hz: the measure every rollout comparison uses.
+    pub fw_snr_seg_db: f64,
+    /// Scale-invariant SNR (dB) over the same span.
+    pub si_snr_db: f64,
+    /// The playback at 44.1 kHz through the SPU interpolator model.
+    pub played: Vec<i16>,
+}
+
+/// Score any ADPCM (a shipped bank entry, or a cook) against its source:
+/// decode it as the SPU does, drop `skip` leading samples (at `rate`, e.g.
+/// the pre-roll padding a source loop adds), play it through the voice's
+/// Gaussian interpolator, and measure against the band-limited source. Flags
+/// are ignored, so a loop is measured over one pass; a loop stretched to
+/// whole blocks drifts against its source by under half a block.
+pub fn score(source: &Wav, adpcm: &[u8], rate: u32, skip: usize) -> Score {
+    let decoded = adpcm::decode(adpcm);
+    let played = spu_play::play(&decoded[skip.min(decoded.len())..], rate);
+    let reference = reference_44k(source);
+    let test: Vec<f64> = played.iter().map(|&v| v as f64).collect();
+    let n = reference.len().min(test.len());
+    let max_hz = (source.rate as f64 / 2.0).min(11_025.0);
+    Score {
+        fw_snr_seg_db: metrics::fw_snr_seg_db(&reference[..n], &test[..n], max_hz),
+        si_snr_db: metrics::si_snr_db(&reference[..n], &test[..n]),
+        played,
+    }
+}
