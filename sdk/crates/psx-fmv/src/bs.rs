@@ -256,7 +256,7 @@ const fn build_long() -> [u32; 96] {
     while c < AC_CODES.len() {
         let (len, code, run, level) = AC_CODES[c];
         if len >= 10 {
-            let significant = 16 - (code as u16).leading_zeros(); // bits from the top one
+            let significant = 16 - code.leading_zeros(); // bits from the top one
             let lz = len as u32 - significant;
             let suffix_bits = significant - 1;
             let suffix = (code as u32) & ((1 << suffix_bits) - 1);
@@ -580,7 +580,7 @@ mod tests {
         for &(len, code, run, level) in AC_CODES.iter() {
             let hw = ((run as u32) << 10) | level as u32;
             let e = if len <= 8 {
-                SHORT[((code as usize) << (8 - len)) as usize]
+                SHORT[(code as usize) << (8 - len)]
             } else {
                 let significant = 16 - code.leading_zeros();
                 let lz = len as u32 - significant;
