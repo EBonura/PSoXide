@@ -255,3 +255,40 @@ fn wav_reader_expands_8_bit_and_reads_smpl_loops() {
     assert_eq!(w.samples, vec![0.0, 127.0 * 256.0, -128.0 * 256.0, 0.0]);
     assert_eq!((w.loop_start, w.loop_end), (Some(1), Some(3)));
 }
+
+#[test]
+fn cli_encodes_a_wav_to_psau_and_raw() {
+    let dir = std::env::temp_dir().join(format!("psx-audio-cook-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let samples = resample::to_i16(&tone(11_025, 0.3, &[440.0]));
+    let input = dir.join("in.wav");
+    std::fs::write(&input, wav::write_mono16(11_025, &samples)).unwrap();
+    let bin = env!("CARGO_BIN_EXE_psx-audio-cook");
+    for (format, header) in [("psau", 32usize), ("raw", 0)] {
+        let out = dir.join(format!("out.{format}"));
+        let status = std::process::Command::new(bin)
+            .args([
+                "encode",
+                input.to_str().unwrap(),
+                out.to_str().unwrap(),
+                "--rate",
+                "6000",
+                "--format",
+                format,
+                "--loop",
+                "whole",
+            ])
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{status:?}");
+        let bytes = std::fs::read(&out).unwrap();
+        let adpcm = &bytes[header..];
+        assert_eq!(adpcm.len() % 16, 0);
+        assert_eq!(adpcm[1], adpcm::FLAG_LOOP_START);
+        assert_eq!(
+            adpcm[adpcm.len() - 15],
+            adpcm::FLAG_END | adpcm::FLAG_REPEAT
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
