@@ -1991,6 +1991,12 @@ trait AffinePacketWriter {
     /// to delegate the projected whole-surface reject to the GPU draw area.
     const SURFACE_USES_GPU_CLIP: bool = false;
 
+    /// False when this writer's fans always subdivide by depth band, so the
+    /// error-bounded and quad-lattice paths (feature
+    /// `classic-affine-lattice`) need not be compiled into it. Its profiles
+    /// must then leave `subdivide_error_px_q3` at 0 and `quad_lattice` off.
+    const USES_LATTICE: bool = true;
+
     fn profile(&self) -> ClassicAffineProfile;
 
     #[inline(always)]
@@ -2288,6 +2294,12 @@ struct WindowedPacketWriter<const RESTORE_WINDOW: bool> {
 }
 
 impl<const RESTORE_WINDOW: bool> AffinePacketWriter for WindowedPacketWriter<RESTORE_WINDOW> {
+    // Texture-window fans draw special surfaces (liquids, animated and
+    // windowed textures) on band subdivision. With the lattice inlined, this
+    // one writer grew by about 30 KB of code, which on Quake left the
+    // shipping heap under its floor.
+    const USES_LATTICE: bool = false;
+
     #[inline(always)]
     fn profile(&self) -> ClassicAffineProfile {
         self.profile
@@ -3457,7 +3469,14 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
     writer.topology_event(14);
 
     #[cfg(feature = "classic-affine-lattice")]
-    let face_level = if profile.subdivide_error_px_q3 != 0 {
+    debug_assert!(
+        W::USES_LATTICE || (profile.subdivide_error_px_q3 == 0 && !profile.quad_lattice),
+        "this writer is built without the lattice paths"
+    );
+    #[cfg(feature = "classic-affine-lattice")]
+    let face_level = if !W::USES_LATTICE {
+        PER_ROOT_LEVEL
+    } else if profile.subdivide_error_px_q3 != 0 {
         let level = unsafe {
             lattice::error_bounded_face_level(
                 vertices,
