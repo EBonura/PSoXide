@@ -1995,6 +1995,7 @@ trait AffinePacketWriter {
     /// error-bounded and quad-lattice paths (feature
     /// `classic-affine-lattice`) need not be compiled into it. Its profiles
     /// must then leave `subdivide_error_px_q3` at 0 and `quad_lattice` off.
+    #[cfg_attr(not(feature = "classic-affine-lattice"), allow(dead_code))]
     const USES_LATTICE: bool = true;
 
     fn profile(&self) -> ClassicAffineProfile;
@@ -4005,7 +4006,7 @@ pub unsafe fn submit_classic_affine_batch(
 /// The pointer, capacity and scratch contracts are identical to
 /// [`submit_classic_affine_batch`].
 #[cfg(feature = "classic-affine-quake-specialized-kernel")]
-#[inline(never)]
+#[inline(always)]
 pub unsafe fn submit_quake_classic_affine_batch(
     vertices: *mut ClassicAffineVertex,
     vertex_count: usize,
@@ -4014,6 +4015,48 @@ pub unsafe fn submit_quake_classic_affine_batch(
     output: *mut u32,
 ) -> ClassicAffineSubmit {
     unsafe {
+        submit_quake_classic_affine_batch_budget(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            ClassicAffineProfile::QUAKE_ERROR_BOUNDED.subdivide_error_px_q3,
+        )
+    }
+}
+
+/// Error budget, in eighths of a pixel, that
+/// [`submit_quake_classic_affine_batch_budget`] callers can switch to when
+/// their packet space runs short: four times the normal 16-pixel budget.
+/// Faces still split as far as the GPU's extent limit needs.
+pub const QUAKE_COARSE_ERROR_BUDGET_Q3: u8 = 255;
+
+/// [`submit_quake_classic_affine_batch`] with the error-bounded budget
+/// (`subdivide_error_px_q3`, eighths of a pixel) chosen per batch, so a
+/// caller close to the end of its packet arena can trade warp for packets
+/// (see [`QUAKE_COARSE_ERROR_BUDGET_Q3`]) instead of dropping faces. The
+/// rest of the profile stays compile-time. Zero selects the depth bands of
+/// [`ClassicAffineProfile::QUAKE_REFERENCE`]. Without the
+/// `classic-affine-lattice` feature the budget is ignored and the kernel is
+/// the reference one.
+///
+/// # Safety
+/// The pointer, capacity and scratch contracts are identical to
+/// [`submit_classic_affine_batch`].
+#[cfg(feature = "classic-affine-quake-specialized-kernel")]
+#[inline(never)]
+pub unsafe fn submit_quake_classic_affine_batch_budget(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    budget_q3: u8,
+) -> ClassicAffineSubmit {
+    #[cfg(not(feature = "classic-affine-lattice"))]
+    let _ = budget_q3;
+    unsafe {
         submit_classic_affine_batch(
             vertices,
             vertex_count,
@@ -4021,11 +4064,25 @@ pub unsafe fn submit_quake_classic_affine_batch(
             surface_count,
             output,
             if cfg!(feature = "classic-affine-lattice") {
-                ClassicAffineProfile::QUAKE_ERROR_BOUNDED
+                quake_error_bounded_profile(budget_q3)
             } else {
                 ClassicAffineProfile::QUAKE_REFERENCE
             },
         )
+    }
+}
+
+/// [`ClassicAffineProfile::QUAKE_ERROR_BOUNDED`] with `budget_q3` as its
+/// error budget; zero keeps the reference bands.
+#[inline(always)]
+pub const fn quake_error_bounded_profile(budget_q3: u8) -> ClassicAffineProfile {
+    if budget_q3 == 0 {
+        ClassicAffineProfile::QUAKE_REFERENCE
+    } else {
+        ClassicAffineProfile {
+            subdivide_error_px_q3: budget_q3,
+            ..ClassicAffineProfile::QUAKE_ERROR_BOUNDED
+        }
     }
 }
 
@@ -6440,6 +6497,41 @@ mod tests {
             ];
             let w = submit_error_bounded_face(&strip, ERROR_BOUNDED);
             assert_eq!((w.quad_count, w.tri_count), (1, 0));
+        }
+
+        #[test]
+        fn coarse_budget_emits_fewer_primitives_but_keeps_the_extent_floor() {
+            // The receding floor splits less under the coarse budget than the
+            // normal one, and the tall strip still splits for the GPU.
+            let unsealed = |budget: u8| ClassicAffineProfile {
+                subdivide_once_at: u16::MAX,
+                subdivide_twice_at: u16::MAX,
+                quad_lattice: true,
+                ..quake_error_bounded_profile(budget)
+            };
+            let floor = [
+                [-200, 100, 150],
+                [200, 100, 150],
+                [200, 100, 1500],
+                [-200, 100, 1500],
+            ];
+            let normal = ClassicAffineProfile::QUAKE_ERROR_BOUNDED.subdivide_error_px_q3;
+            let fine = submit_error_bounded_face(&floor, unsealed(normal));
+            let coarse = submit_error_bounded_face(&floor, unsealed(QUAKE_COARSE_ERROR_BUDGET_Q3));
+            assert!(
+                coarse.quad_count + coarse.tri_count < fine.quad_count + fine.tri_count,
+                "coarse {} vs fine {}",
+                coarse.quad_count + coarse.tri_count,
+                fine.quad_count + fine.tri_count
+            );
+            let strip = [
+                [-50, -200, 100],
+                [50, -200, 100],
+                [50, 200, 100],
+                [-50, 200, 100],
+            ];
+            let w = submit_error_bounded_face(&strip, unsealed(QUAKE_COARSE_ERROR_BUDGET_Q3));
+            assert_within_gpu_extent(&w);
         }
 
         #[test]

@@ -127,8 +127,6 @@ pub use character_motor::{
     CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
     CharacterMotorInput, CharacterMotorState,
 };
-#[cfg(feature = "classic-affine-quake-specialized-kernel")]
-pub use classic_affine::submit_quake_classic_affine_batch;
 pub use classic_affine::{
     census_classic_affine_projected_batch_topology,
     collect_classic_affine_indexed_projection_slots,
@@ -155,6 +153,11 @@ pub use classic_affine::{
     ClassicAffineTopologyCensus, ClassicAffineTopologyKey, ClassicAffineVertex,
     ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
     ClassicAliasProjectedVertex, ClassicAliasVertex,
+};
+pub use classic_affine::{quake_error_bounded_profile, QUAKE_COARSE_ERROR_BUDGET_Q3};
+#[cfg(feature = "classic-affine-quake-specialized-kernel")]
+pub use classic_affine::{
+    submit_quake_classic_affine_batch, submit_quake_classic_affine_batch_budget,
 };
 
 pub use collision_query::{
