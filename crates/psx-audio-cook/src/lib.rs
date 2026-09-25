@@ -216,20 +216,18 @@ pub fn cook(wav: &Wav, opts: &CookOptions) -> Cooked {
         }
     }
     // The normalising gain comes from the uncompensated signal so loudness
-    // matches the old pipeline; the pre-emphasis may only lower it to avoid
-    // clipping.
+    // matches the old pipeline, and the pre-emphasis does not change it: the
+    // few samples it pushes past full scale are clamped (to_i16). Lowering
+    // the gain to fit them instead cost loud, bright sounds up to 7.5 dB of
+    // playback level (Counter-Strike's gunshots) and measured no better.
     let peak_of = |v: &[f64]| v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    let mut gain = match opts.normalize_peak {
+    let gain = match opts.normalize_peak {
         Some(target) if peak_of(&pcm) > 0.0 => target.clamp(0.0, 1.0) * 32767.0 / peak_of(&pcm),
         _ => 1.0,
     };
     if opts.compensate_gauss {
         let loop_start = p.loop_block.map(|b| b * BLOCK_SAMPLES);
         pcm = resample::compensate_gauss(&pcm, loop_start);
-        let peak = peak_of(&pcm);
-        if peak * gain > 32_700.0 {
-            gain = 32_700.0 / peak;
-        }
     }
     pcm.iter_mut().for_each(|v| *v *= gain);
     let pcm = resample::to_i16(&pcm);
