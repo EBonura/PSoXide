@@ -13,6 +13,7 @@
 //! * [`metrics`], [`spu_play`]: SNR, log-spectral distance, and a model of
 //!   the voice's Gaussian interpolation so measurements reflect playback.
 //! * [`legacy`]: the previous pipelines, bit-exact, for A/B only.
+//! * [`cli`]: the command line, callable from any workspace.
 //!
 //! [`cook`] runs the whole chain for one sound and [`psau`] wraps the result
 //! in the PSAU container every runtime already parses.
@@ -20,6 +21,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod adpcm;
+pub mod cli;
 pub mod legacy;
 pub mod metrics;
 pub mod rate;
