@@ -129,10 +129,18 @@ fn div_f32(value: f32) -> f32 {
     value / WORLD_UNIT_DIVISOR as f32
 }
 
-/// Scale one authored brush: vertex positions divide; each face's UV
-/// scale divides with them so texel density on the surface is
-/// unchanged (`uv = world / scale`, both numerator and denominator
-/// shrink together).
+/// Paraxial units per texel for brush geometry at engine scale. The cook
+/// divides brush points by [`WORLD_UNIT_DIVISOR`] and keeps every face's
+/// authored UV scale, so the texture projection divides by this instead of
+/// [`crate::brush::BRUSH_UV_UNITS_PER_TEXEL`]: the same texels land on the
+/// same surface, and the authored scale stays exact. (Dividing the Q8 scale
+/// by 16 instead rounded it to 6.25% steps: 110% cooked as 112.5%.)
+pub const ENGINE_UV_UNITS_PER_TEXEL: f64 =
+    crate::brush::BRUSH_UV_UNITS_PER_TEXEL / WORLD_UNIT_DIVISOR as f64;
+
+/// Scale one authored brush: plane points divide by [`WORLD_UNIT_DIVISOR`].
+/// Face UV mappings stay as authored; the cook projects them with
+/// [`ENGINE_UV_UNITS_PER_TEXEL`].
 fn scale_brush(brush: &mut Brush) {
     for face in &mut brush.faces {
         for point in &mut face.points {
@@ -140,23 +148,6 @@ fn scale_brush(brush: &mut Brush) {
                 *axis = div_i32(*axis);
             }
         }
-        for axis in face.uv.scale_q8.iter_mut() {
-            *axis = scale_uv_axis_q8(*axis);
-        }
-    }
-}
-
-/// One face UV scale axis at engine scale. The sign is the Flip H/V
-/// mirror and must survive; the magnitude keeps at least one Q8 step so
-/// a tiny authored scale cannot collapse to zero. Zero already means
-/// identity in [`crate::brush::FaceUv`], so it maps to identity here too.
-fn scale_uv_axis_q8(q8: i16) -> i16 {
-    let identity = crate::brush::FaceUv::default().scale_q8[0];
-    let q8 = if q8 == 0 { identity } else { q8 };
-    let scaled = div_i16(q8);
-    match scaled {
-        0 => q8.signum(),
-        _ => scaled,
     }
 }
 
@@ -693,18 +684,35 @@ mod tests {
     }
 
     #[test]
-    fn brush_uv_scale_keeps_the_flip_sign_through_the_cook() {
+    fn brush_uv_scale_cooks_exactly_and_keeps_the_flip_sign() {
+        use crate::brush::{paraxial_uv, BRUSH_UV_UNITS_PER_TEXEL};
         // Flip H/V negate `scale_q8`; the cook must mirror the texture
-        // exactly as the editor preview does, not reset it to +1/256.
+        // exactly as the editor preview does. A 110% scale used to cook
+        // as 112.5% (the Q8 scale divided by 16 rounds to 1/16 steps).
         let mut brush = Brush::cuboid([0, 0, 0], [1024, 1024, 1024]);
         brush.faces[0].uv.scale_q8 = [-256, 256];
-        brush.faces[1].uv.scale_q8 = [512, -512];
+        brush.faces[1].uv.scale_q8 = [282, -282];
         brush.faces[2].uv.scale_q8 = [-4, 4];
+        let authored = brush.clone();
         scale_brush(&mut brush);
-        assert_eq!(brush.faces[0].uv.scale_q8, [-16, 16]);
-        assert_eq!(brush.faces[1].uv.scale_q8, [32, -32]);
-        // Tiny magnitudes keep the smallest non-zero step and their sign.
-        assert_eq!(brush.faces[2].uv.scale_q8, [-1, 1]);
+        for (cooked, authored) in brush.faces.iter().zip(&authored.faces) {
+            assert_eq!(cooked.uv, authored.uv, "face UV mappings cook as authored");
+        }
+        // Same texel at the same surface point, authored vs engine scale.
+        let plane = crate::brush::Plane::from_points(authored.faces[1].points).unwrap();
+        let engine_plane = crate::brush::Plane::from_points(brush.faces[1].points).unwrap();
+        let point = [1024.0, 512.0, 320.0];
+        let raw = paraxial_uv(&plane, point);
+        let engine_raw = paraxial_uv(&engine_plane, point.map(|v| v / WORLD_UNIT_DIVISOR as f64));
+        let preview = authored.faces[1].uv.apply([
+            raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+            raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+        ]);
+        let cooked = brush.faces[1].uv.apply([
+            engine_raw[0] / ENGINE_UV_UNITS_PER_TEXEL,
+            engine_raw[1] / ENGINE_UV_UNITS_PER_TEXEL,
+        ]);
+        assert!((preview[0] - cooked[0]).abs() < 1e-9 && (preview[1] - cooked[1]).abs() < 1e-9);
     }
 
     #[test]

@@ -1,11 +1,12 @@
 //! PS1 record packing for compiled brush BSP geometry.
 
-use crate::brush::{paraxial_uv, BRUSH_UV_UNITS_PER_TEXEL};
+use crate::brush::paraxial_uv;
 use crate::brush_compile::{
     pack_plane, BspChild, BspLeafContents, CompiledSurface, CompiledSurfaceBsp,
 };
 use crate::brush_portal::CompiledPortal;
 use crate::brush_vis::{quake_portal_fast_rows, quake_portal_flow_rows};
+use crate::units::ENGINE_UV_UNITS_PER_TEXEL;
 use crate::ResourceId;
 
 use psx_bsp::{
@@ -150,8 +151,8 @@ pub fn pack_bsp_geometry_with_visibility(
             .map(|&vertex| {
                 let raw_uv = paraxial_uv(&surface.plane, vertex);
                 surface.uv.apply([
-                    raw_uv[0] / BRUSH_UV_UNITS_PER_TEXEL,
-                    raw_uv[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                    raw_uv[0] / ENGINE_UV_UNITS_PER_TEXEL,
+                    raw_uv[1] / ENGINE_UV_UNITS_PER_TEXEL,
                 ])
             })
             .collect();
@@ -796,12 +797,12 @@ mod tests {
 
     #[test]
     fn straddling_surface_uvs_rebase_onto_the_u8_window() {
-        // World x/z 3968..4224 = texels 248..264: every big face
-        // straddles the 256 wrap. Packed without texture dimensions the
-        // wrap survives (some face spans nearly the whole u8 range);
-        // with 64x64 dims each face's UVs rebase into one contiguous
-        // window so the GPU never rasterizes a backwards gradient.
-        let brushes = [Brush::cuboid([3968, 0, 3968], [4224, 128, 4224])];
+        // Engine x/z 248..264 = texels 248..264 (one texel per engine
+        // unit): every big face straddles the 256 wrap. Packed without
+        // texture dimensions the wrap survives (some face spans nearly the
+        // whole u8 range); with 64x64 dims each face's UVs rebase into one
+        // contiguous window so the GPU never rasterizes a backwards gradient.
+        let brushes = [Brush::cuboid([248, 0, 248], [264, 8, 264])];
         let surfaces = compile_csg_surfaces(&brushes);
         let mut bsp = build_surface_bsp(&surfaces);
         let portals = portalize_surface_bsp(&bsp);
@@ -856,7 +857,7 @@ mod tests {
     fn faces_inside_one_texture_copy_are_marked_page_local() {
         // Offset from a repeat seam so every signed paraxial axis remains
         // strictly inside one 64x64 copy after whole-repeat rebasing.
-        let brushes = [Brush::cuboid([16, 16, 16], [144, 80, 272])];
+        let brushes = [Brush::cuboid([1, 1, 1], [9, 5, 17])];
         let surfaces = compile_csg_surfaces(&brushes);
         let mut bsp = build_surface_bsp(&surfaces);
         let portals = portalize_surface_bsp(&bsp);
