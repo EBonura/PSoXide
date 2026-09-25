@@ -639,6 +639,9 @@ struct Playtest {
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Persistent model bytes are resident and the parsed runtime tables are valid.
     runtime_models_loaded: bool,
+    /// Horizon/Zenith palette copies of the player's and enemies' atlases.
+    /// All-zero (the `init_zeroed` state) is empty.
+    stance_cluts: model_rendering::StanceCluts,
     /// The front-end/gameplay RAM union currently belongs to gameplay. False
     /// while menu/loading images own it, and reset on every gameplay exit.
     gameplay_asset_arena_active: bool,

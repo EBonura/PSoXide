@@ -1695,6 +1695,9 @@ impl Scene for Playtest {
                             player,
                             player_phase_height(character),
                         );
+                        let stance_clut = self
+                            .stance_cluts
+                            .player_override_clut(character, self.player_stance.active());
                         draw_player(
                             self.room_index,
                             character,
@@ -1709,6 +1712,8 @@ impl Scene for Playtest {
                             &lighting,
                             phase_assembly,
                             &mut self.player_dash_assembly,
+                            stance_clut,
+                            Some(player_stance_lit_tint(self.player_stance.active())),
                             &mut primitive_packets,
                             &mut world,
                         )
@@ -2602,6 +2607,7 @@ impl Playtest {
         let stats = draw_model_instances(
             room,
             &self.game_entities,
+            &self.stance_cluts,
             &self.instance_actor_poses,
             self.gameplay_tick(ctx.sim_tick),
             ctx.video_hz,

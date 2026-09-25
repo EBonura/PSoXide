@@ -1071,6 +1071,20 @@ impl Playtest {
         true
     }
 
+    /// Whether enemy melee and projectiles pass through the player this tick.
+    ///
+    /// The dodge's window is `roll_invulnerable_frames` motor ticks from its
+    /// first frame. A stance change bursts the body apart the same way, so it
+    /// grants the same count of ticks from the swap. The swap is pressed
+    /// before `CombatStance::tick` in the same update, so contact resolution
+    /// first sees elapsed = 1: `1..=frames` is `frames` ticks, the dodge's
+    /// count, press tick included.
+    pub(super) fn player_invulnerable(&self) -> bool {
+        let config = self.motor_config();
+        self.motor.is_action_invulnerable(config)
+            || self.player_stance.swap_elapsed_ticks() <= u16::from(config.roll_invulnerable_frames)
+    }
+
     pub(super) fn motor_config(&self) -> CharacterMotorConfig {
         let mut config = match &self.character {
             Some(c) => c.motor_config(),

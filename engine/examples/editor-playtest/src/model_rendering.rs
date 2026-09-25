@@ -40,6 +40,208 @@ fn stance_rgb(stance: VitalityChannelId) -> (u8, u8, u8) {
     }
 }
 
+/// Stance colours the stance palettes are built from.
+const HORIZON_TEXTURE_RGB: (u8, u8, u8) = (214, 75, 48);
+const ZENITH_TEXTURE_RGB: (u8, u8, u8) = (67, 169, 154);
+
+/// How far the player's stance palette moves each entry toward the stance
+/// hue, Q8. The entry keeps its own brightness; 256 would be the pure hue.
+const PLAYER_STANCE_PALETTE_MIX_Q8: i32 = 192;
+
+/// How far the player's lit tint moves toward the stance colour after room
+/// lighting, Q8, so the stance still reads under strongly coloured light.
+const PLAYER_STANCE_LIT_TINT_Q8: u16 = 128;
+
+/// The player's lit tint pulled toward the active stance colour.
+pub(super) fn player_stance_lit_tint(stance: VitalityChannelId) -> mr::LitTintBias {
+    mr::LitTintBias {
+        color: stance_texture_rgb(stance),
+        strength_q8: PLAYER_STANCE_LIT_TINT_Q8,
+    }
+}
+
+fn stance_texture_rgb(stance: VitalityChannelId) -> (u8, u8, u8) {
+    match stance {
+        VitalityChannelId::One => HORIZON_TEXTURE_RGB,
+        VitalityChannelId::Two => ZENITH_TEXTURE_RGB,
+    }
+}
+
+const fn bgr555(entry: u16) -> [i32; 3] {
+    [
+        (entry & 31) as i32,
+        ((entry >> 5) & 31) as i32,
+        ((entry >> 10) & 31) as i32,
+    ]
+}
+
+const fn pack_bgr555(rgb: [i32; 3]) -> u16 {
+    (rgb[0] as u16) | ((rgb[1] as u16) << 5) | ((rgb[2] as u16) << 10)
+}
+
+/// The stance colour at `level` of 31, in 5-bit channels.
+fn stance_color5(color: (u8, u8, u8), level: i32) -> [i32; 3] {
+    [color.0, color.1, color.2].map(|channel| (i32::from(channel) * level / 31) >> 3)
+}
+
+/// Player palette: every entry moves toward the stance hue at the entry's
+/// own brightness (relative to the brightest entry), so the body keeps its
+/// shading ramp but reads as the stance colour instead of neutral. A
+/// transparent entry stays the cut-out.
+fn player_stance_palette(entries: &mut [u16], color: (u8, u8, u8)) {
+    let brightest = entries
+        .iter()
+        .map(|&entry| bgr555(entry).into_iter().max().unwrap_or(0))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    for entry in entries.iter_mut() {
+        if *entry & 0x7fff == 0 {
+            continue;
+        }
+        let source = bgr555(*entry);
+        let level = source.into_iter().max().unwrap_or(0) * 31 / brightest;
+        let target = stance_color5(color, level);
+        let mut mixed = [0; 3];
+        for channel in 0..3 {
+            mixed[channel] = (source[channel]
+                + (target[channel] - source[channel]) * PLAYER_STANCE_PALETTE_MIX_Q8 / 256)
+                .clamp(0, 31);
+        }
+        *entry = pack_bgr555(mixed);
+    }
+}
+
+/// Enemy palette: only the saturated red accents and their pink highlights
+/// (eye lenses, lights, warning paint) take the stance colour, at the
+/// accent's own brightness. The rest of the texture keeps its authored rust
+/// and steel.
+fn enemy_stance_palette(entries: &mut [u16], color: (u8, u8, u8)) {
+    for entry in entries.iter_mut() {
+        let [r, g, b] = bgr555(*entry);
+        if r >= 12 && r >= g + 8 && r >= b + 8 {
+            *entry = pack_bgr555(stance_color5(color, r));
+        }
+    }
+}
+
+/// Stance palette copies. Drawing through a copy swaps one CLUT word, so the
+/// stance colour costs nothing per frame.
+///
+/// `rows` holds the enemies' model atlases keyed by the atlas's own CLUT word,
+/// `[base, Horizon, Zenith]`. `player` holds the Horizon and Zenith copies of
+/// the player's covering texture (its material override), built on the first
+/// frame that texture is resident. Zero means not built.
+#[derive(Copy, Clone)]
+pub(super) struct StanceCluts {
+    rows: [[u16; 3]; STANCE_CLUT_ATLASES],
+    player: [u16; 2],
+}
+
+/// Distinct enemy atlases (Cortex shares one between all its enemies).
+const STANCE_CLUT_ATLASES: usize = 2;
+
+impl StanceCluts {
+    pub(super) const EMPTY: Self = Self {
+        rows: [[0; 3]; STANCE_CLUT_ATLASES],
+        player: [0; 2],
+    };
+
+    /// The player's covering texture and the CLUT word of its `stance` copy.
+    /// Characters without a covering texture keep their own look.
+    pub(super) fn player_override_clut(
+        &mut self,
+        character: &RuntimeCharacter,
+        stance: VitalityChannelId,
+    ) -> Option<(AssetId, u16)> {
+        let texture = character.material_override?.texture_asset?;
+        let index = stance.index();
+        if self.player[index] == 0 {
+            // The texture streams with the rooms, so this waits for it.
+            model_texture_slot(texture)?;
+            self.player[index] = ensure_resident_clut_variant(texture, index as u8, |entries| {
+                player_stance_palette(entries, stance_texture_rgb(stance))
+            })?;
+        }
+        Some((texture, self.player[index]))
+    }
+
+    /// Build the Horizon and Zenith palette copies of one freshly uploaded
+    /// model atlas, when an enemy wears it.
+    pub(super) fn upload_for_atlas(
+        &mut self,
+        texture_asset: AssetId,
+        atlas_bytes: &[u8],
+        atlas_slot: VramSlot,
+    ) {
+        let enemy = GAME_ENTITIES.iter().any(|entity| {
+            MODEL_INSTANCES
+                .get(usize::from(entity.model_instance))
+                .and_then(|instance| MODELS.get(instance.model.to_usize()))
+                .is_some_and(|model| model.texture_asset == Some(texture_asset))
+        });
+        if !enemy {
+            return;
+        }
+        let base = atlas_slot.clut_word;
+        let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row[0] == base || row[0] == 0)
+        else {
+            return;
+        };
+        let mut words = [base; 3];
+        for (variant, color) in [HORIZON_TEXTURE_RGB, ZENITH_TEXTURE_RGB]
+            .into_iter()
+            .enumerate()
+        {
+            let Some(word) = ensure_clut_variant(
+                texture_asset,
+                atlas_bytes,
+                variant as u8,
+                |entries| enemy_stance_palette(entries, color),
+            ) else {
+                return;
+            };
+            words[1 + variant] = word;
+        }
+        *row = words;
+    }
+
+    /// `material` redirected to its `stance` palette copy, if it has one.
+    fn material(&self, material: TextureMaterial, stance: VitalityChannelId) -> TextureMaterial {
+        let base = material.clut_word();
+        match self.rows.iter().find(|row| row[0] == base && base != 0) {
+            // Runtime atlas materials are plain `opaque` materials over the
+            // slot's CLUT and tpage, so this rebuilds exactly that with the
+            // copy's CLUT word.
+            Some(row) => TextureMaterial::opaque(
+                row[1 + stance.index()],
+                material.tpage_word(),
+                material.tint(),
+            ),
+            None => material,
+        }
+    }
+
+    fn enemy_pose(
+        &self,
+        entities: &RuntimeGameEntities,
+        pose: InstanceActorPoseSnapshot,
+    ) -> InstanceActorPoseSnapshot {
+        let entity = u16::try_from(pose.instance_index())
+            .ok()
+            .and_then(game_entity_for_instance);
+        match entity {
+            Some(entity) => pose.with_atlas_material(
+                self.material(pose.model().material, entities.stance(entity)),
+            ),
+            None => pose,
+        }
+    }
+}
+
 /// This example's model draw knobs (the `MODEL_*`/`MAX_*` consts in
 /// `runtime_config`, as the crate value struct).
 const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
@@ -326,7 +528,12 @@ impl Playtest {
             &mut self.model_vertices,
             &mut self.model_vertex_count,
             runtime_model_asset_bytes,
-            ensure_model_atlas_uploaded,
+            |texture_asset, atlas_bytes| {
+                let slot = ensure_model_atlas_uploaded(texture_asset, atlas_bytes)?;
+                self.stance_cluts
+                    .upload_for_atlas(texture_asset, atlas_bytes, slot);
+                Some(slot)
+            },
         );
         #[cfg(feature = "cd-stream-bench")]
         self.load_streamed_runtime_models();
@@ -357,10 +564,15 @@ impl Playtest {
             let Some(texture_asset) = record.texture_asset else {
                 continue;
             };
+            let stance_cluts = &mut self.stance_cluts;
             let Some(atlas_slot) = with_transient_gameplay_asset_bytes(
                 texture_asset,
                 AssetKind::Texture,
-                |atlas_bytes| ensure_model_atlas_uploaded(texture_asset, atlas_bytes),
+                |atlas_bytes| {
+                    let slot = ensure_model_atlas_uploaded(texture_asset, atlas_bytes)?;
+                    stance_cluts.upload_for_atlas(texture_asset, atlas_bytes, slot);
+                    Some(slot)
+                },
             )
             .flatten() else {
                 continue;
@@ -401,6 +613,7 @@ impl Playtest {
         self.model_part_count = 0;
         self.model_vertex_count = 0;
         self.runtime_models_loaded = false;
+        self.stance_cluts = StanceCluts::EMPTY;
         self.clear_actor_pose_snapshots();
     }
 
@@ -672,6 +885,8 @@ pub(super) fn draw_player(
     lighting: &RuntimeRoomLighting,
     phase_assembly: Option<mr::ModelPhaseAssembly>,
     dash_assembly: &mut mr::PlayerDashAssembly,
+    stance_clut: Option<(AssetId, u16)>,
+    stance_tint: Option<mr::LitTintBias>,
     triangles: &mut PrimitivePacketArena<'_>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
@@ -704,9 +919,17 @@ pub(super) fn draw_player(
         options,
         lighting,
         room_reflection_probe_slot(current_room),
-        &mut model_texture_slot,
+        &mut |asset| {
+            // The covering texture is drawn through its stance palette copy.
+            let mut slot = model_texture_slot(asset)?;
+            if let Some((_, clut_word)) = stance_clut.filter(|(texture, _)| *texture == asset) {
+                slot.clut_word = clut_word;
+            }
+            Some(slot)
+        },
         phase_assembly.filter(|effect| !effect.is_assembled()),
         Some(dash_assembly),
+        stance_tint,
         triangles,
         world,
     );
@@ -917,6 +1140,7 @@ fn enemy_death_dissolve(
 pub(super) fn draw_model_instances(
     current_room: RoomIndex,
     entities: &RuntimeGameEntities,
+    stance_cluts: &StanceCluts,
     instance_poses: &[Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     elapsed_tick: SimTick,
     video_hz: VideoHz,
@@ -935,6 +1159,9 @@ pub(super) fn draw_model_instances(
         .take(MODEL_DRAW_KNOBS.max_model_instances)
         .flatten()
     {
+        // An enemy wears its guard: the accents of its atlas are drawn
+        // through the palette copy of its current stance.
+        let pose = &stance_cluts.enemy_pose(entities, *pose);
         let first_slot = triangles.used_slots();
         let stats = mr::draw_model_instance_from_pose::<
             MODEL_VERTEX_CAP,
