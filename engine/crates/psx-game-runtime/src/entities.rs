@@ -4566,6 +4566,9 @@ mod tests {
     fn an_overwhelming_arc_hit_kills_outright() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&EVEN_ENEMY);
+        // Guard Zenith so the Horizon (One) swings below land on the exposed
+        // channel (1.5x); these tests are about arc mechanics, not the chip.
+        entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
         let arc = MeleeArc {
             room: RoomIndex(0),
             x: 1000,
@@ -4712,6 +4715,9 @@ mod tests {
     fn occluded_melee_arc_blocks_without_latching_the_swing_bit() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        // Guard Zenith so the Horizon (One) swings below land on the exposed
+        // channel (1.5x); these tests are about arc mechanics, not the chip.
+        entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
         let arc = MeleeArc {
             room: RoomIndex(0),
             x: 1200,
@@ -4729,7 +4735,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            30,
+            10,
             40,
             &mut swing,
             |_, _| true,
@@ -4745,7 +4751,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            30,
+            10,
             40,
             &mut swing,
             |entity, position| {
@@ -4770,6 +4776,9 @@ mod tests {
     fn melee_arc_hits_once_per_swing_and_skips_dead_and_other_rooms() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
+        // Guard Zenith so the Horizon (One) swings below land on the exposed
+        // channel (1.5x); these tests are about arc mechanics, not the chip.
+        entities.combat_flags[0] |= GAME_ENTITY_STANCE_ZENITH;
         // Player at (1200, 1000) facing -X: the enemy at (1000, 1000)
         // sits dead ahead, 200 units out.
         let arc = MeleeArc {
@@ -4787,7 +4796,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            60,
+            20,
             40,
             &mut swing,
         );
@@ -4805,7 +4814,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            60,
+            20,
             40,
             &mut swing,
         );
@@ -4816,7 +4825,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            60,
+            20,
             40,
             &mut swing,
         );
@@ -4828,7 +4837,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            60,
+            20,
             40,
             &mut swing,
         );
@@ -4837,7 +4846,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            30,
+            10,
             40,
             &mut swing,
         );
@@ -4849,7 +4858,7 @@ mod tests {
             &IDLE_ENEMY,
             &arc,
             VitalityChannelId::One,
-            30,
+            10,
             40,
             &mut swing,
         );
@@ -4868,7 +4877,7 @@ mod tests {
             &IDLE_ENEMY,
             &wrong_room,
             VitalityChannelId::One,
-            30,
+            10,
             40,
             &mut swing,
         );
@@ -4888,7 +4897,7 @@ mod tests {
             &IDLE_ENEMY,
             &away,
             VitalityChannelId::One,
-            30,
+            10,
             40,
             &mut swing,
         );
@@ -4899,7 +4908,7 @@ mod tests {
             &IDLE_ENEMY,
             &toward,
             VitalityChannelId::One,
-            30,
+            10,
             40,
             &mut swing,
         );
