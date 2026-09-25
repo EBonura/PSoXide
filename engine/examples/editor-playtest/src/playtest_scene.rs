@@ -953,6 +953,7 @@ impl Scene for Playtest {
         self.player_poise.tick(1);
         self.dash_wake.tick();
         self.update_gameplay(ctx);
+        self.tick_poi_presentation();
         // This tail runs after every intentional early return in
         // `update_gameplay`: freeze final actor state once, then run combat
         // from the same snapshots the next body/equipment render consumes.
@@ -966,11 +967,9 @@ impl Scene for Playtest {
     fn render(&mut self, ctx: &mut Ctx) {
         let camera = self.render_camera;
         self.resolve_poi_floors();
-        self.advance_poi_presentation_frame();
         self.prepared_overlay_camera = camera;
         self.prepared_overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
-        self.prepared_poi_panel_frame = self.poi_panel_frame;
-        self.prepared_poi_page_type_frame = self.poi_page_type_frame;
+        self.snapshot_poi_presentation_for_render();
 
         #[cfg(feature = "fps-overlay")]
         {

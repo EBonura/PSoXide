@@ -609,7 +609,8 @@ struct Playtest {
     /// downward BSP trace so the beacon stands on the floor whatever height
     /// the point was authored at. `i32::MIN` until resolved.
     poi_floor_y: [i32; INTERACTABLES.len()],
-    /// Presented-frame progress for the active POI panel and page type-on.
+    /// Presentation-step progress for the active POI panel and page type-on,
+    /// advanced by the simulation (see `tick_poi_presentation`).
     /// Prepared/overlay copies keep deferred UI matched to its world frame.
     poi_panel_frame: u16,
     /// Keep the current content alive until its reverse transition finishes.
@@ -619,6 +620,8 @@ struct Playtest {
     prepared_poi_page_type_frame: u16,
     overlay_poi_panel_frame: u16,
     overlay_poi_page_type_frame: u16,
+    /// Sim ticks since the last POI presentation step.
+    poi_presentation_subtick: u8,
     /// Unique reward currently replacing the just-closed POI message panel.
     acquired_module: BoostModuleId,
     /// Save-persistent point-of-interest read/reward state.
@@ -811,6 +814,7 @@ impl Playtest {
         self.prepared_poi_page_type_frame = 0;
         self.overlay_poi_panel_frame = 0;
         self.overlay_poi_page_type_frame = 0;
+        self.poi_presentation_subtick = 0;
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
         self.selected_power_up_item = BoostModuleId::NONE;
         self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;

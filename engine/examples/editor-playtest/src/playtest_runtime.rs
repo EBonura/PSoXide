@@ -81,6 +81,12 @@ fn apply_bsp_debug_body_fallback(
     }
 }
 
+/// Sim ticks per POI panel/type-on step. The panel and type-on timings were
+/// tuned at the playtest's 30 Hz visual cadence, one presented frame every
+/// second 60 Hz tick, so a step every two ticks keeps that look while making
+/// it independent of how fast frames are actually presented.
+pub(super) const POI_PRESENTATION_TICKS_PER_STEP: u8 = 2;
+
 /// Deterministic damage cadence for shared PXBSP hazard contents. Water is
 /// non-damaging; slime deals four health twice per second, lava deals ten
 /// health four times per second at the 60 Hz simulation rate.
@@ -455,9 +461,31 @@ impl Playtest {
         self.overlay_poi_page_type_frame = page;
     }
 
-    /// Advance Archive presentation only when a new frame is actually being
-    /// prepared. This preserves visible intermediate geometry when the fixed
-    /// simulation gets several ticks ahead of displayed PS1 frames.
+    /// Advance the POI panel and type-on from the fixed simulation, one
+    /// presentation step every `POI_PRESENTATION_TICKS_PER_STEP` sim ticks.
+    ///
+    /// This used to run from `render`, once per prepared frame. The type-on
+    /// gates input (the first press only completes unfinished copy), so a
+    /// slower render left the copy unfinished when a press arrived and the
+    /// same press did something else: on the souls gate, a heavier world pass
+    /// kept a message open and the tape walked into the wrong fight. Driving it
+    /// from the sim makes the press behave the same at every render rate.
+    pub(super) fn tick_poi_presentation(&mut self) {
+        self.poi_presentation_subtick = self.poi_presentation_subtick.saturating_add(1);
+        if self.poi_presentation_subtick < POI_PRESENTATION_TICKS_PER_STEP {
+            return;
+        }
+        self.poi_presentation_subtick = 0;
+        self.advance_poi_presentation_frame();
+    }
+
+    /// Freeze the presentation progress the frame being prepared will draw.
+    pub(super) fn snapshot_poi_presentation_for_render(&mut self) {
+        self.prepared_poi_panel_frame = self.poi_panel_frame;
+        self.prepared_poi_page_type_frame = self.poi_page_type_frame;
+    }
+
+    /// One presentation step of the POI panel and type-on.
     pub(super) fn advance_poi_presentation_frame(&mut self) {
         if self.poi_closing {
             self.poi_panel_frame = self.poi_panel_frame.saturating_sub(1);
@@ -2375,6 +2403,52 @@ mod life_reset_tests {
         scene.advance_poi_presentation_frame();
         assert!(!scene.poi_closing);
         assert!(scene.message_overlay.is_none());
+    }
+
+    #[test]
+    fn message_press_behaves_the_same_at_every_render_rate() {
+        // One message and one Cross press on a fixed sim tick, replayed with a
+        // frame presented every 1, 2, 3, 5 and 9 sim ticks. On the sim clock
+        // the copy has finished typing by the press, so the press must start
+        // the close at every render rate and the panel must be gone on the
+        // same tick. Advancing the type-on per presented frame fails this.
+        fn run(ticks_per_frame: u32) -> (bool, Option<u32>) {
+            const PRESS_TICK: u32 = 44;
+            let mut scene = test_scene();
+            scene.message_overlay = Some(RuntimeMessageOverlay {
+                title: "",
+                body: "Relay synchronized.",
+            });
+            let mut closing_after_press = false;
+            let mut closed_at = None;
+            for tick in 0..120u32 {
+                if tick == PRESS_TICK {
+                    scene.dismiss_legacy_message();
+                    closing_after_press = scene.poi_closing;
+                }
+                scene.tick_poi_presentation();
+                if tick % ticks_per_frame == 0 {
+                    scene.snapshot_poi_presentation_for_render();
+                }
+                if closed_at.is_none() && scene.message_overlay.is_none() {
+                    closed_at = Some(tick);
+                }
+            }
+            (closing_after_press, closed_at)
+        }
+        let reference = run(2);
+        assert!(
+            reference.0,
+            "the press lands after the copy finished typing"
+        );
+        assert!(reference.1.is_some(), "the panel closes");
+        for ticks_per_frame in [1, 3, 5, 9] {
+            assert_eq!(
+                run(ticks_per_frame),
+                reference,
+                "a frame every {ticks_per_frame} sim ticks"
+            );
+        }
     }
 
     #[test]
