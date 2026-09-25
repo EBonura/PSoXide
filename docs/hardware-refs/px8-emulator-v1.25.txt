@@ -1,0 +1,14 @@
+# PSoXide hardware-test capture baseline
+#
+# SOURCE: PSoXide EMULATOR, headless. This is NOT a silicon capture.
+#   It detects emulator-side drift only. It is not hardware truth and
+#   must never be cited as a console measurement.
+#
+# captured:  2026-09-25
+# git:       source-2026.09.05-146-g4690ac4c
+# guest exe: sha256:eba02339d27457a9
+# emulator:  frontend launch --steps 480000000 (menu Cross pulse)
+# frontend:  PSoXide-emulator 987a6ae (the pinned 5d916ea plus the MDEC end-of-frame fix)
+# schema:    PX8 conformance, 1 page(s)
+#
+PX8/0101/UFg4QgQBGQMBAeoAswALAMAAAwNTLYbo2iUDq62yz1c3bAAABBwAeKGhPAAAAAABBBYAudz1QQAAAAABBKgANzSZUagAAAABSZIkCZMkYZKECZMkJEkyCcMwIUkmSRKSZJIkSZIkJJMkScIkYZIkSZIkSZIkSZKQJEmSJJUkSZIkSZIkSUImSRKSTJIkSZIkJEmSFJOQCUmSJEmSJEOSJAIAiwBaFgAAOg8AAMkARAAAAEQAAADDJAgm/C:6FE24AA4

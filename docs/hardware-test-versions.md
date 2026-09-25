@@ -33,6 +33,24 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.25 (2026-09-25, schema PX8)
+
+The FMV console test joins the disc as MAIN MENU's last row, `FMV STREAM
+TEST`, so one burn carries it with everything else. The player is the SDK's
+`hello-fmv`, run as a library, with its overlay, summary screen and pass
+criteria unchanged; the disc gains `MOVIE.STR` (raw CD-XA sectors, `mkisopsx
+--xa-file`) after CDTEST.BIN, which moves the CD-DA track outward. Its result
+travels in the capture as six new timing-block records, `1F0`-`1F5`, present
+only once the test has run (see [hardware-test-disc.md](hardware-test-disc.md)).
+
+No existing record changed meaning, hence MINOR. Every probe's machine code is
+identical to v1.24 (`hwtest-verify-code`, drift 0), and every conformance
+verdict matches the same source built without the FMV test, captured on the
+same emulator. Against the v1.24 baseline one case moves: `0xC9` now fails,
+because the emulator has since modelled an interrupt on a GTE command running
+it twice, as the v1.24 console showed; the v1.24 image fails it the same way on
+today's emulator. `0x9B` is not comparable with v1.24 (the CD-DA track moved).
+
 ### v1.24 (2026-09-23, schema PX8)
 
 Console gates for three performance levers that measured well in the emulator

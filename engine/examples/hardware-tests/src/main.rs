@@ -36,6 +36,7 @@ mod audio_probe;
 mod cd_chain_probe;
 mod controller_test;
 mod cpu_tests;
+mod fmv_test;
 mod gpu_probes;
 mod handoff_probe;
 mod lever_probes;
@@ -193,9 +194,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 24;
+const SUITE_VERSION_MINOR: u8 = 25;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.24";
+const SUITE_VERSION: &str = "HWTEST v1.25";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -737,9 +738,11 @@ enum MenuAction {
     RunFromIndex,
     /// Timing scan in the given performance scope, then a full capture.
     RunPerf(TimingScope),
+    /// The FMV console test, then back to this menu.
+    RunFmv,
 }
 
-const ROOT_MENU: [(&str, MenuAction); 11] = [
+const ROOT_MENU: [(&str, MenuAction); 12] = [
     // Row 0 is pinned: `make hwtest-capture` selects it by firing CROSS at a
     // fixed tick with the cursor still at its boot position. Move this row and
     // the capture opens whatever took its place, which produces an empty log
@@ -782,6 +785,10 @@ const ROOT_MENU: [(&str, MenuAction); 11] = [
     // the operator power-cycles, resumes past the offender, and keeps
     // enumerating the rest in one session.
     ("RESUME FROM TEST", MenuAction::RunFromIndex),
+    // Last on purpose: every headless pulse train counts DOWN from row 0, so a
+    // row added at the end moves none of them, and UP from row 0 reaches it in
+    // one press. 75 s of streaming, so it is never part of RUN ALL.
+    ("FMV STREAM TEST", MenuAction::RunFmv),
 ];
 
 const RESULTS_MENU: [(&str, MenuAction); 12] = [
@@ -2437,6 +2444,10 @@ struct HardwareTests {
     resume_index: u16,
     /// Which menu page is showing.
     menu_page: MenuPage,
+    /// The last FMV STREAM TEST outcome, folded into every later capture that
+    /// carries the timing block.
+    fmv: Option<hello_fmv::Outcome>,
+    fmv_runs: u8,
 }
 
 #[cfg(target_arch = "mips")]
@@ -2499,6 +2510,8 @@ impl HardwareTests {
             menu_cursor: 0,
             resume_index: 0,
             menu_page: MenuPage::Root,
+            fmv: None,
+            fmv_runs: 0,
         }
     }
 
@@ -2538,6 +2551,7 @@ impl HardwareTests {
         print_scan_report(Mode::SpuScan, self.spu_scan);
         self.draw_running_label(TEST_COUNT, "scan", "timing map  START SKIPS");
         self.timing_scan = run_timing_scan(self.timing_scope);
+        self.merge_fmv_records();
         self.encode_capture(0);
         print_scan_report(Mode::TimingScan, self.timing_scan.summary);
     }
@@ -2604,6 +2618,85 @@ impl HardwareTests {
         self.run_all();
         self.run_startup_scans();
         self.prepare_audio_readout();
+    }
+
+    /// Put the last FMV run's records into the timing report, and fold them
+    /// into its digest so the capture header still names what it carries.
+    /// False when there is no FMV result or no room for it.
+    fn merge_fmv_records(&mut self) -> bool {
+        let Some(outcome) = self.fmv else {
+            return false;
+        };
+        let records = fmv_test::records(&outcome, self.fmv_runs);
+        if !fmv_test::merge(&mut self.timing_scan.records, &records) {
+            tty::println("hardware-tests: fmv records did not fit the timing report");
+            return false;
+        }
+        let mut hash = self.timing_scan.summary.hash;
+        for record in records {
+            hash = mix32(hash, record.id as u32);
+            hash = mix32(hash, record.min as u32);
+            hash = mix32(hash, record.med as u32);
+            hash = mix32(hash, record.max as u32);
+        }
+        self.timing_scan.summary.hash = hash;
+        true
+    }
+
+    /// MAIN MENU "FMV STREAM TEST". The SDK's player owns the GPU, SPU, CD
+    /// drive, MDEC and root counter 2 for the run; what the suite relies on
+    /// afterwards is put back here, and the result joins the capture.
+    fn run_fmv(&mut self, ctx: &mut Ctx) {
+        tty::println("hardware-tests: run fmv stream test");
+        if self.audio_prepared {
+            audio_link::stop();
+            self.audio_rate = 0;
+        }
+        let timer2_mode = timers::mode(timers::Timer::Timer2) & 0x03FF;
+        // SAFETY: plain SPU register reads.
+        let (spucnt, cd_left, cd_right) = unsafe {
+            (
+                psx_io::read16(psx_io::spu::SPUCNT),
+                psx_io::read16(0x1F80_1DB0),
+                psx_io::read16(0x1F80_1DB2),
+            )
+        };
+
+        let outcome = hello_fmv::run();
+        // The player's fonts went over the suite's atlas.
+        let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
+        fmv_test::wait_for_exit(&font);
+        self.font = Some(font);
+
+        timers::set_mode(timers::Timer::Timer2, timer2_mode);
+        psx_spu::set_cd_volume(
+            psx_spu::CdVolume(cd_left as i16),
+            psx_spu::CdVolume(cd_right as i16),
+        );
+        psx_spu::enable_cd_audio(spucnt & 1 != 0);
+        // The player drew into rows 0 and 256; clear what the engine will show
+        // next and point drawing back at the engine's own buffer. Its clock
+        // kept counting VBlanks while no tick ran, so drop that debt too.
+        gpu::fill_rect(0, 0, 320, 512, 6, 8, 18);
+        ctx.fb.apply_draw_target();
+        ctx.request_timing_realign();
+
+        self.fmv = Some(outcome);
+        self.fmv_runs = self.fmv_runs.wrapping_add(1);
+        tty::println(if outcome.pass {
+            "hardware-tests: fmv PASS"
+        } else {
+            "hardware-tests: fmv FAIL"
+        });
+        // A capture taken before this run gets the result now. The records
+        // live in the timing block, so the re-encoded capture carries it even
+        // if it was a routine one.
+        if !matches!(self.timing_scan.summary.status, Status::Pending) && self.merge_fmv_records() {
+            self.capture_flags |= photo::blocks::TIMING;
+            self.encode_capture(0);
+            self.prepare_audio_readout();
+        }
+        self.open_menu_page(MenuPage::Root);
     }
 
     fn encode_capture(&mut self, page: usize) {
@@ -2935,6 +3028,7 @@ impl Scene for HardwareTests {
                         self.prepare_audio_readout();
                         self.enter_mode(Mode::TimingScan);
                     }
+                    MenuAction::RunFmv => self.run_fmv(ctx),
                 }
             }
             return;
@@ -3197,6 +3291,14 @@ fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
         if matches!(entries[row].1, MenuAction::RunFromIndex) {
             font.draw_text(180, y, dec3(suite.resume_index).as_str(), (255, 232, 128));
             font.draw_text(212, y, "<> 1  L1R1 10", (140, 160, 190));
+        }
+        if matches!(entries[row].1, MenuAction::RunFmv) {
+            let (text, colour) = match suite.fmv {
+                None => ("NOT RUN", (176, 190, 210)),
+                Some(outcome) if outcome.pass => ("PASS", Status::Pass.color()),
+                Some(_) => ("FAIL", Status::Fail.color()),
+            };
+            font.draw_text(180, y, text, colour);
         }
         if matches!(entries[row].1, MenuAction::CycleAudio) {
             if !suite.audio_prepared {
