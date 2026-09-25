@@ -97,6 +97,8 @@ const CMD_PAUSE: u8 = 0x09;
 #[cfg(target_arch = "mips")]
 const CMD_SETMODE: u8 = 0x0E;
 #[cfg(target_arch = "mips")]
+const CMD_SETFILTER: u8 = 0x0D;
+#[cfg(target_arch = "mips")]
 const CMD_SEEKL: u8 = 0x15;
 #[cfg(target_arch = "mips")]
 const CD_MODE_DOUBLE_SPEED_2048: u8 = 0x80;
@@ -456,6 +458,26 @@ impl SectorReader {
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn prepare_single_speed(&mut self) -> bool {
         unsafe { self.prepare_with_mode(0x00) }
+    }
+
+    /// [`prepare`](Self::prepare) with an explicit Setmode byte, for
+    /// streams that need more than plain data: e.g. `0x80 | 0x40 | 0x08`
+    /// (double speed, XA-ADPCM on, file/channel filter) plays interleaved
+    /// XA audio through the SPU while video sectors still arrive as data.
+    ///
+    /// # Safety
+    /// Same contract as [`prepare`](Self::prepare).
+    pub unsafe fn prepare_mode(&mut self, mode: u8) -> bool {
+        unsafe { self.prepare_with_mode(mode) }
+    }
+
+    /// Setfilter: the XA file and channel whose audio sectors the drive
+    /// plays when the mode has the filter bit set.
+    ///
+    /// # Safety
+    /// Same contract as [`prepare`](Self::prepare).
+    pub unsafe fn set_filter(&mut self, file: u8, channel: u8) -> bool {
+        unsafe { self.send_command(CMD_SETFILTER, &[file, channel], IRQ_ACK, ACK_POLL) }
     }
 
     unsafe fn prepare_with_mode(&mut self, mode: u8) -> bool {

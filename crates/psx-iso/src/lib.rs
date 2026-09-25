@@ -34,7 +34,7 @@ pub mod exe;
 pub mod iso9660;
 pub use boot::{load_boot_exe_from_disc, BootError, BootExe};
 pub use exe::{Exe, ExeError, EXE_HEADER_BYTES};
-pub use iso9660::{default_system_cnf, IsoBuilder, IsoFile};
+pub use iso9660::{default_system_cnf, IsoBuilder, IsoFile, XA_SECTOR_SIZE};
 
 /// One raw CD-ROM sector -- always 2352 bytes on a PS1 disc regardless
 /// of track mode.
