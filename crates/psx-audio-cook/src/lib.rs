@@ -67,6 +67,10 @@ pub enum Looping {
     /// front by under one block so the loop starts on a block boundary, and
     /// the loop is stretched to whole blocks.
     Source,
+    /// One-shot length (padded to whole blocks, no stretch) whose first
+    /// block ignores history, for a stream a transport restarts or rings
+    /// (its flags are the transport's, so they are left as a one-shot's).
+    Restart,
 }
 
 /// Settings for [`cook`].
@@ -151,7 +155,7 @@ fn round_blocks(n: usize) -> usize {
 fn plan(wav: &Wav, rate: u32, looping: Looping) -> Plan {
     let n = wav.samples.len();
     let source_loop = match looping {
-        Looping::None => None,
+        Looping::None | Looping::Restart => None,
         Looping::Whole => Some((0, n)),
         Looping::Source => wav.loop_start.map(|s| (s, wav.loop_end.unwrap_or(n))),
     };
@@ -236,7 +240,11 @@ pub fn cook(wav: &Wav, opts: &CookOptions) -> Cooked {
     }
     pcm.iter_mut().for_each(|v| *v *= gain);
     let pcm = resample::to_i16(&pcm);
-    let mut adpcm = adpcm::encode(&pcm, p.loop_block, &opts.encode);
+    let history_free = match opts.looping {
+        Looping::Restart => Some(0),
+        _ => p.loop_block,
+    };
+    let mut adpcm = adpcm::encode(&pcm, history_free, &opts.encode);
     adpcm::set_flags(&mut adpcm, p.loop_block);
     Cooked {
         rate: opts.rate,
