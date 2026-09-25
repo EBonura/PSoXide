@@ -2945,6 +2945,28 @@ const PER_ROOT_LEVEL: u8 = u8::MAX;
 mod lattice {
     use super::*;
 
+    /// Largest span, in pixels, of a primitive the GPU draws: it drops any
+    /// triangle two of whose vertices lie more than 1023 pixels apart across
+    /// or 511 down (psx-spx "GPU Render Polygon Commands"; PSoXide's
+    /// rasteriser gates on the same rule in `triangle_exceeds_hw_extent`).
+    const GPU_MAX_SPAN_X: i32 = 1023;
+    const GPU_MAX_SPAN_Y: i32 = 511;
+
+    /// Level a face needs so that no primitive it emits breaks the GPU's
+    /// extent limit: 2 when its screen box is wider or taller than one
+    /// primitive may be, else 0. The warp bound alone leaves a face that
+    /// faces the camera unsplit however large it is on screen, and the GPU
+    /// would drop it whole (the wall strips beside a wall the player stands
+    /// at). Two levels match the depth bands' finest split.
+    #[inline(always)]
+    fn gpu_extent_level(dx: i32, dy: i32) -> u8 {
+        if dx > GPU_MAX_SPAN_X || dy > GPU_MAX_SPAN_Y {
+            2
+        } else {
+            0
+        }
+    }
+
     /// Error-bounded lattice level shared by every root of a face.
     ///
     /// An edge's affine displacement is `L |zb - za| / (2 (za + zb))`. Of all
@@ -2953,7 +2975,8 @@ mod lattice {
     /// least as long as any of them, so one test bounds every root at once,
     /// and the whole face sharing one level leaves no T-junction on its
     /// internal diagonals. Faces beyond `gate_depth` skip the screen pass
-    /// (see [`ClassicAffineProfile::error_gate_depth`]).
+    /// (see [`ClassicAffineProfile::error_gate_depth`]); in front of it the
+    /// level is at least [`gpu_extent_level`] of the screen box.
     #[inline(always)]
     pub(super) unsafe fn error_bounded_face_level(
         vertices: *const ClassicAffineVertex,
@@ -2977,10 +3000,6 @@ mod lattice {
         if z0 <= 0 || (gate_depth != 0 && z0 >= i32::from(gate_depth)) {
             return 0;
         }
-        // No edge inside the guard band is longer than 2813 px.
-        if crate::tess::error_level(2813, z0, z1, budget_q3) == 0 {
-            return 0;
-        }
         // i32 accumulators: the loads sign-extend once and the compares need
         // no re-extension.
         let (mut x0, mut y0) = (i32::from(first.screen[0]), i32::from(first.screen[1]));
@@ -3001,13 +3020,18 @@ mod lattice {
             }
             vertex = unsafe { vertex.add(1) };
         }
+        let extent = gpu_extent_level(x1 - x0, y1 - y0);
+        // No edge inside the guard band is longer than 2813 px.
+        if crate::tess::error_level(2813, z0, z1, budget_q3) == 0 {
+            return extent;
+        }
         let (dx, dy) = ((x1 - x0).min(4095) as u32, (y1 - y0).min(4095) as u32);
         let span = if dx > dy {
             dx + ((dy * 3) >> 3)
         } else {
             dy + ((dx * 3) >> 3)
         };
-        crate::tess::error_level(span, z0, z1, budget_q3)
+        crate::tess::error_level(span, z0, z1, budget_q3).max(extent)
     }
 
     #[inline(always)]
@@ -3169,6 +3193,15 @@ mod lattice {
                     lb = diagonal;
                 }
             }
+            // The edges' warp can be zero on a face the GPU would still drop
+            // for its size: split both axes as far as the face needs.
+            let span = |axis: usize| {
+                let values = c.map(|v| i32::from(v.screen[axis]));
+                values.iter().max().unwrap_or(&0) - values.iter().min().unwrap_or(&0)
+            };
+            let extent = gpu_extent_level(span(0), span(1));
+            la = la.max(extent);
+            lb = lb.max(extent);
         }
         if la == 0 && lb == 0 {
             writer.topology_event(2);
@@ -6312,6 +6345,82 @@ mod tests {
                     v.screen
                 );
             }
+        }
+
+        /// Every emitted primitive that covers pixels keeps its vertices
+        /// within the GPU's 1023 x 511 extent (a quad is two triangles sharing
+        /// its vertices). Zero-area crack seals along a split edge are skipped:
+        /// on a face this flat they cover nothing either way.
+        fn assert_within_gpu_extent(w: &RecordingWriter) {
+            let fits = |points: &[[i16; 2]]| {
+                points.iter().all(|a| {
+                    points.iter().all(|b| {
+                        (i32::from(a[0]) - i32::from(b[0])).abs() <= 1023
+                            && (i32::from(a[1]) - i32::from(b[1])).abs() <= 511
+                    })
+                })
+            };
+            let flat = |points: &[[i16; 2]]| {
+                let cross = |o: [i16; 2], p: [i16; 2], r: [i16; 2]| {
+                    (i32::from(p[0]) - i32::from(o[0])) * (i32::from(r[1]) - i32::from(o[1]))
+                        - (i32::from(p[1]) - i32::from(o[1])) * (i32::from(r[0]) - i32::from(o[0]))
+                };
+                points.windows(3).all(|w| cross(w[0], w[1], w[2]) == 0)
+            };
+            let mut covering = 0;
+            for (q, _) in &w.quads[..w.quad_count] {
+                if !flat(q) {
+                    assert!(fits(q), "quad {q:?} exceeds the GPU extent");
+                    covering += 1;
+                }
+            }
+            for (t, _) in &w.tris[..w.tri_count] {
+                if !flat(t) {
+                    assert!(fits(t), "triangle {t:?} exceeds the GPU extent");
+                    covering += 1;
+                }
+            }
+            assert!(covering > 1, "the face must split into several primitives");
+        }
+
+        #[test]
+        fn error_bounded_face_taller_than_the_gpu_extent_splits() {
+            // A wall strip square to the camera, 640 px tall on screen: no
+            // depth change, so no warp, but one primitive over 511 px tall is
+            // dropped by the GPU. Four corners take the quad lattice.
+            let strip = [
+                [-50, -200, 100],
+                [50, -200, 100],
+                [50, 200, 100],
+                [-50, 200, 100],
+            ];
+            let w = submit_error_bounded_face(&strip, ERROR_BOUNDED);
+            assert!(w.quad_count + w.tri_count > 1, "the strip must split");
+            assert_within_gpu_extent(&w);
+            // Five corners take the fan with the face-wide level.
+            let pentagon = [
+                [-50, -200, 100],
+                [50, -200, 100],
+                [60, 0, 100],
+                [50, 200, 100],
+                [-50, 200, 100],
+            ];
+            let w = submit_error_bounded_face(&pentagon, ERROR_BOUNDED);
+            assert!(w.quad_count + w.tri_count > 3, "the fan must split");
+            assert_within_gpu_extent(&w);
+        }
+
+        #[test]
+        fn error_bounded_face_within_the_gpu_extent_stays_whole() {
+            // The same strip three times as deep is 213 px tall: one quad.
+            let strip = [
+                [-50, -200, 300],
+                [50, -200, 300],
+                [50, 200, 300],
+                [-50, 200, 300],
+            ];
+            let w = submit_error_bounded_face(&strip, ERROR_BOUNDED);
+            assert_eq!((w.quad_count, w.tri_count), (1, 0));
         }
 
         #[test]
