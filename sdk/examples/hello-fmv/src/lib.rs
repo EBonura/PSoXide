@@ -67,7 +67,7 @@ const SLOTS: usize = 3;
 /// MDEC run-length buffer: 64K halfwords.
 const RLE_WORDS: usize = 32 * 1024;
 /// End the stream if no sector arrives for this long (2 s).
-const STALL_VBLANKS: u32 = 120;
+pub const STALL_VBLANKS: u32 = 120;
 /// Checksum seed; must match tools/fmv_test_movie.py.
 const SEED: u32 = 0x9E37_79B9;
 /// First word of every STR video sector: 0x0160, 0x8001.
@@ -176,6 +176,8 @@ struct Stream {
     late: u32,
     cd_errors: u32,
     last_sector_vblank: u32,
+    /// Stop after this many video sectors (0: the whole file).
+    cut: u32,
 }
 
 fn slot_bytes(i: usize) -> &'static mut [u8] {
@@ -250,6 +252,9 @@ impl Stream {
         }
         self.expected = ordinal + 1;
         self.total = w[5] >> 16;
+        if self.cut != 0 && self.cut < self.total {
+            self.total = self.cut;
+        }
         self.lba = self.file_lba + w[6];
         self.good += 1;
         if self.expected >= self.total {
@@ -355,7 +360,14 @@ fn target(y: u16) {
 }
 
 /// Live counters, drawn over the bottom of the video frame.
-fn draw_overlay(font: &FontAtlas, y: u16, st: &Stream, shown: u32, vblanks: u32) {
+fn draw_overlay(
+    font: &FontAtlas,
+    y: u16,
+    st: &Stream,
+    shown: u32,
+    vblanks: u32,
+    label: &str,
+) {
     gpu::fill_rect(0, y + 172, WIDTH, 68, 0, 0, 0);
     target(y);
     let l1 = Text::new().s("FR ").n(shown, 4).s("  LATE ").n(st.late, 4);
@@ -369,6 +381,11 @@ fn draw_overlay(font: &FontAtlas, y: u16, st: &Stream, shown: u32, vblanks: u32)
     font.draw_text(X0, 176, l1.as_str(), WHITE);
     font.draw_text(X0, 194, l2.as_str(), health);
     font.draw_text(X0, 212, l3.as_str(), WHITE);
+    if !label.is_empty() {
+        // A band over the top of the picture: the counters fill the bottom.
+        gpu::fill_rect(0, y, WIDTH, 20, 0, 0, 0);
+        font.draw_text(X0, 2, label, YELLOW);
+    }
 }
 
 struct Summary {
@@ -415,15 +432,64 @@ pub struct Outcome {
     pub kcyc_vlc: u32,
     pub kcyc_mdec: u32,
     pub kcyc_wait: u32,
+    /// Why the stream ended.
+    pub stop: Stop,
+    /// Video sectors the run was cut at (`Options::max_sectors`), or the
+    /// file's total for a whole-movie run.
+    pub target: u32,
 }
 
+/// Why a run ended.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Stop {
+    /// Every video sector of the run arrived (the file's, or the cut's).
+    #[default]
+    End = 0,
+    /// No sector for [`STALL_VBLANKS`]: the drive stopped delivering.
+    Stall = 1,
+    /// The MDEC failed [`WEDGE_ERRORS`] frames in a row.
+    Wedged = 2,
+    /// The drive reported an error.
+    CdError = 3,
+    /// Setup failed; nothing streamed.
+    Setup = 4,
+}
+
+/// How a run is set up and how long it lasts.
+#[derive(Copy, Clone)]
+pub struct Options {
+    /// MDEC setup (reset, tables, DMA requests), run at the start and again
+    /// after a decode error; `false` when DMA0 decodes cannot run.
+    pub setup: fn() -> bool,
+    /// Stop after this many video sectors; 0 plays the whole file. The pass
+    /// criteria then apply to the cut: every sector up to it intact.
+    pub max_sectors: u32,
+    /// Shown on the overlay and the summary, so a filmed run says which
+    /// setup it used. Up to 12 characters; "" for none.
+    pub label: &'static str,
+}
+
+impl Options {
+    /// The whole movie behind the SDK's own setup.
+    pub const DEFAULT: Options = Options {
+        setup: mdec_setup,
+        max_sectors: 0,
+        label: "",
+    };
+}
+
+/// Consecutive MDEC failures that end a run as [`Stop::Wedged`].
+pub const WEDGE_ERRORS: u32 = 8;
+
 /// Final screen: stays up after the stream ends.
-fn draw_summary(font: &FontAtlas, small: &FontAtlas, st: &Stream, s: &Summary) {
+fn draw_summary(font: &FontAtlas, small: &FontAtlas, st: &Stream, s: &Summary, label: &str) {
     gpu::fill_rect(0, 0, WIDTH, HEIGHT, 0, 0, 0);
     target(0);
     let verdict = if s.pass { "PASS" } else { "FAIL" };
     let tint = if s.pass { GREEN } else { RED };
     font.draw_text(32, 12, "FMV CONSOLE TEST", WHITE);
+    small.draw_text(X0, 2, label, YELLOW);
     // Verdict banner: a solid block reads from across the room.
     gpu::fill_rect(16, 32, 288, 32, tint.0, tint.1, tint.2);
     let ink = if s.pass { (0, 0, 0) } else { (255, 255, 255) };
@@ -512,6 +578,7 @@ fn fail(what: &'static str) -> Outcome {
     psx_io::gpu::write_gp1(0x0500_0000);
     Outcome {
         setup_error: Some(what),
+        stop: Stop::Setup,
         ..Outcome::default()
     }
 }
@@ -524,11 +591,24 @@ fn wait_vblank_pumping(st: &mut Stream) {
     }
 }
 
+/// The SDK's MDEC setup: reset, then the tables. `false` unless DMA0 can
+/// feed the decoder afterwards, which every frame needs.
+pub fn mdec_setup() -> bool {
+    mdec::reset() && mdec::load_tables().is_some_and(|t| t.enable_writes != 0)
+}
+
 /// Run the whole test: stream, check, and leave the summary (or, when the
 /// test could not start, a red screen) on the displayed buffer at VRAM row 0.
 /// Takes over the GPU, SPU, CD drive, MDEC and root counter 2; a caller that
 /// carries on afterwards restores what it needs.
 pub fn run() -> Outcome {
+    run_with(Options::DEFAULT)
+}
+
+/// [`run`] with the caller's MDEC setup and length. The hardware-test suite
+/// plays a short cut behind each of its diagnostic sequences that worked.
+pub fn run_with(options: Options) -> Outcome {
+    let setup = options.setup;
     gpu::init(VideoMode::Ntsc, Resolution::R320X240);
     gpu::fill_rect(0, 0, WIDTH, 512, 0, 0, 0);
     let font = FontAtlas::upload(&WIDE, FONT_TPAGE, FONT_CLUT);
@@ -558,8 +638,7 @@ pub fn run() -> Outcome {
         return fail("cd xa mode");
     }
     psx_io::cdrom::set_audio_mixer(0x80, 0, 0x80, 0);
-    mdec::reset();
-    if !mdec::load_tables() {
+    if !setup() {
         return fail("mdec tables");
     }
 
@@ -580,6 +659,7 @@ pub fn run() -> Outcome {
         late: 0,
         cd_errors: 0,
         last_sector_vblank: interrupts::vblank_count(),
+        cut: options.max_sectors,
     };
     // SAFETY: the reader was prepared above.
     if !unsafe { (*addr_of_mut!(READER)).start_read(lba) } {
@@ -588,6 +668,8 @@ pub fn run() -> Outcome {
 
     let mut shown = 0u32;
     let mut errors = 0u32;
+    let mut in_a_row = 0u32;
+    let mut wedged = false;
     let mut back_y: u16 = 256;
     psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0x0200);
     clock(Some(PHASE_WAIT));
@@ -639,12 +721,17 @@ pub fn run() -> Outcome {
         }
         if !mdec::decode_finish() || !ok {
             errors += 1;
-            mdec::reset();
-            let _ = mdec::load_tables();
+            in_a_row += 1;
+            if in_a_row >= WEDGE_ERRORS {
+                wedged = true;
+                break;
+            }
+            let _ = setup();
             continue;
         }
+        in_a_row = 0;
         let elapsed = interrupts::vblank_count().wrapping_sub(start);
-        draw_overlay(&font, back_y, &st, shown + 1, elapsed);
+        draw_overlay(&font, back_y, &st, shown + 1, elapsed, options.label);
         gpu::draw_sync();
         clock(Some(PHASE_WAIT));
         // Pace to 15 fps, then flip at the VBlank; the drive keeps draining.
@@ -660,6 +747,15 @@ pub fn run() -> Outcome {
     // SAFETY: stop the stream we started (also ends the XA audio).
     unsafe { (*addr_of_mut!(READER)).stop() };
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
+    let stop = if wedged {
+        Stop::Wedged
+    } else if st.cd_errors != 0 {
+        Stop::CdError
+    } else if st.done {
+        Stop::End
+    } else {
+        Stop::Stall
+    };
     if st.expected < st.total {
         st.lost += st.total - st.expected;
         st.first_err_lba.get_or_insert(st.lba);
@@ -699,8 +795,10 @@ pub fn run() -> Outcome {
     print_num("kcyc_vlc", summary.kcyc[PHASE_VLC]);
     print_num("kcyc_mdec_upload", summary.kcyc[PHASE_MDEC]);
     print_num("kcyc_wait", summary.kcyc[PHASE_WAIT]);
+    print_num("stop", stop as u32);
+    print_num("target", st.total);
     tty::println("");
-    draw_summary(&font, &small, &st, &summary);
+    draw_summary(&font, &small, &st, &summary, options.label);
     Outcome {
         pass: summary.pass,
         setup_error: None,
@@ -719,5 +817,138 @@ pub fn run() -> Outcome {
         kcyc_vlc: summary.kcyc[PHASE_VLC],
         kcyc_mdec: summary.kcyc[PHASE_MDEC],
         kcyc_wait: summary.kcyc[PHASE_WAIT],
+        stop,
+        target: st.total,
     }
+}
+
+/// A one-frame control decode: the movie's first frame through the MDEC
+/// twice, once fed and drained by CPU writes and reads, once over DMA0 and
+/// DMA1 as the player does. Equal sums mean both paths decode the same
+/// pixels. The sums add the output words, so they do not depend on the
+/// block order, which DMA1 rearranges and CPU reads do not.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FrameControl {
+    /// The frame was read and its bitstream decoded.
+    pub read: bool,
+    /// Run-length words the MDEC was given, and output words expected.
+    pub rle_words: u32,
+    pub expected: u32,
+    /// CPU path: finished, output words drained, their sum.
+    pub cpu_ok: bool,
+    pub cpu_words: u32,
+    pub cpu_sum: u32,
+    /// DMA path (behind `dma_setup`): finished, words, sum.
+    pub dma_ok: bool,
+    pub dma_words: u32,
+    pub dma_sum: u32,
+}
+
+/// Spins without progress before the CPU decode gives up.
+const CPU_STALL_SPINS: u32 = 100_000;
+
+/// Run [`FrameControl`]. Takes the CD drive and the MDEC; `dma_setup` is the
+/// MDEC setup for the DMA half.
+pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
+    let mut out = FrameControl::default();
+    // SAFETY: single-threaded use of the reader, its sector buffer and the
+    // frame buffers, as in `run`.
+    let reader = unsafe { &mut *addr_of_mut!(READER) };
+    if !unsafe { reader.prepare() } {
+        return out;
+    }
+    let Some((lba, _)) = find_movie() else {
+        return out;
+    };
+    // Plain data reads: the XA audio sectors come back too and are skipped.
+    if !unsafe { reader.start_read(lba) } {
+        return out;
+    }
+    let mut asm = FrameAssembler::new();
+    let mut frame = None;
+    for _ in 0..48 {
+        // SAFETY: as above.
+        if !unsafe { reader.read_sector(&mut *addr_of_mut!(SECTOR)) } {
+            break;
+        }
+        let words = unsafe { &*addr_of_mut!(SECTOR) };
+        if words[0] != STR_MAGIC {
+            continue;
+        }
+        let sector =
+            unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, SECTOR_WORDS * 4) };
+        if let Some(f) = asm.add(sector, slot_bytes(0)) {
+            frame = Some(f);
+            break;
+        }
+    }
+    unsafe { reader.stop() };
+    let Some(frame) = frame else {
+        return out;
+    };
+    let rle = unsafe { &mut *addr_of_mut!(RLE) };
+    let rle16 =
+        unsafe { core::slice::from_raw_parts_mut(rle.as_mut_ptr() as *mut u16, RLE_WORDS * 2) };
+    let bytes = &slot_bytes(0)[..(frame.size as usize).min(SLOT_WORDS * 4)];
+    let Ok(words) = bs::decode_frame(bytes, rle16, COLUMNS as u32 * ROWS, ROWS, &mut || {}) else {
+        return out;
+    };
+    out.read = true;
+    out.rle_words = words as u32;
+    out.expected = COLUMNS as u32 * ROWS * 128;
+
+    // CPU: feed while the input FIFO has room, drain whatever comes out.
+    if mdec::reset() && mdec::load_tables_cpu() {
+        mdec::write_command(mdec::DECODE_15BPP | (words as u32 & 0xFFFF));
+        let mut fed = 0usize;
+        let mut idle = 0u32;
+        while (fed < words || out.cpu_words < out.expected) && idle < CPU_STALL_SPINS {
+            let status = mdec::status();
+            let mut progress = false;
+            if fed < words && status & mdec::STATUS_IN_FULL == 0 {
+                mdec::write_command(rle[fed]);
+                fed += 1;
+                progress = true;
+            }
+            if status & mdec::STATUS_OUT_EMPTY == 0 {
+                out.cpu_sum = out.cpu_sum.wrapping_add(mdec::read_data());
+                out.cpu_words += 1;
+                progress = true;
+            }
+            idle = if progress { 0 } else { idle + 1 };
+        }
+        out.cpu_ok = fed == words && out.cpu_words == out.expected;
+    }
+
+    // DMA, the player's way.
+    if dma_setup() {
+        // SAFETY: RLE stays untouched until decode_finish.
+        unsafe { mdec::decode_start(rle, words, mdec::DECODE_15BPP) };
+        let column = unsafe { &mut *addr_of_mut!(COLUMN) };
+        let mut ok = true;
+        for _ in 0..COLUMNS {
+            if !mdec::read_column(column) {
+                ok = false;
+                break;
+            }
+            for &w in column.iter() {
+                out.dma_sum = out.dma_sum.wrapping_add(w);
+            }
+            out.dma_words += COLUMN_WORDS as u32;
+        }
+        out.dma_ok = mdec::decode_finish() && ok;
+    }
+    tty::print("FMV CONTROL");
+    print_num("read", out.read as u32);
+    print_num("rle_words", out.rle_words);
+    print_num("cpu_ok", out.cpu_ok as u32);
+    print_num("cpu_words", out.cpu_words);
+    print_num("cpu_sum", out.cpu_sum);
+    print_num("dma_ok", out.dma_ok as u32);
+    print_num("dma_words", out.dma_words);
+    print_num("dma_sum", out.dma_sum);
+    tty::println("");
+    // Leave the MDEC as the player expects to find it.
+    let _ = mdec::reset();
+    out
 }
