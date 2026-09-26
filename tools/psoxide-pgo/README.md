@@ -312,6 +312,25 @@ stopping it.
 4. Runs the hazard patcher, scanner and stack guard on the relinked image
    with its own map.
 
+**RAM floor.** Profile-guided inlining is chaotic in size: on hl-psx a
+profile that differed by under 1% per function inlined one more call site
+and cost 3.5 KB, and one final-7 source left 5,500 B free at `hot=1000`,
+17,788 B at `hot=500` and 28,028 B at `hot=250`. A game that must keep RAM
+free passes `--ram-floor BYTES` and a ladder of `--ram-fallback` variants:
+
+```make
+compile:
+	$(PGO) apply --crate game --profile "$(PGO_PROFILE)" --variant accurate+hot=1000 \
+		--ram-floor 16384 --ram-fallback accurate+hot=500 --ram-fallback accurate+hot=250 \
+		-- $(GAME_CARGO)
+```
+
+`apply` reads `__bss_end` from each link's map (free = 0x801F8000, the end
+of psoxide.ld's RAM region, minus `__bss_end`), ships the first variant that
+keeps the floor, prints which, and writes it to `shipped-variant.txt` in the
+work directory. When none does, the build stops. Record the shipped variant
+with the build: a later profile can land on another rung.
+
 ### choose
 
 Builds each `--variant` in turn, packs it if `--pack` is given, and runs
@@ -652,7 +671,12 @@ psoxide-pgo portable <in.prof> <out.prof>                  strip disambiguators
 psoxide-pgo rebind <in.prof> <target-elf-with-dwarf> <out.prof>
 psoxide-pgo layout <link.map> <image.exe> <words.csv>... <out.layout>   layout profile from per-word logs
 psoxide-pgo place <in.layout> <link.map> <image.exe> <linker-script> <out.order>
+psoxide-pgo ram <link.map> [--floor BYTES]                  free RAM; fails under the floor
 ```
+
+`ram` is the floor check on its own, for a game whose build driver makes its
+PGO links itself (hl-psx's `hl-build pgo`): link, check, and step the
+hot-callsite threshold down while it fails.
 
 `layout` reads `--pc-log-words --pc-line-log` logs of replays of that
 image; `place` binds, places and writes the ordering file without linking.
