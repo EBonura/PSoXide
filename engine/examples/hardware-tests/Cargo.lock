@@ -16,6 +16,7 @@ dependencies = [
  "hello-memcard",
  "psx-asset",
  "psx-engine",
+ "psx-fmv",
  "psx-font",
  "psx-gpu",
  "psx-gte",

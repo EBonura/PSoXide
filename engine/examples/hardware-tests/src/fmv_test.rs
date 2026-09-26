@@ -66,6 +66,14 @@ pub(crate) fn wait_for_exit(font: &FontAtlas) {
     }
 }
 
+/// A setup failure's record code (1-based, 0 = none), as 0x1F5 carries it.
+pub(crate) fn setup_error_code(what: &str) -> Option<u32> {
+    SETUP_ERRORS
+        .iter()
+        .position(|&known| known == what)
+        .map(|index| index as u32 + 1)
+}
+
 fn clamp(value: u32) -> u16 {
     value.min(0xFFFF) as u16
 }
@@ -82,10 +90,7 @@ fn record(offset: u16, a: u32, b: u32, c: u32) -> TimingRecord {
 
 /// The outcome as timing-block records.
 pub(crate) fn records(outcome: &Outcome, runs: u8) -> [TimingRecord; RECORD_COUNT] {
-    let setup = outcome
-        .setup_error
-        .and_then(|what| SETUP_ERRORS.iter().position(|&known| known == what))
-        .map_or(0, |index| index as u32 + 1);
+    let setup = outcome.setup_error.and_then(setup_error_code).unwrap_or(0);
     [
         record(0, outcome.pass as u32, outcome.good, outcome.total),
         record(1, outcome.lost, outcome.bad, outcome.dropped),

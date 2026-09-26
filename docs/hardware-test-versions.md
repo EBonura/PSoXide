@@ -33,6 +33,41 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.26 (2026-09-26, schema PX8)
+
+v1.25's FMV test never started on a PAL SCPH-9002: the SDK player's DMA0
+upload of the MDEC tables did not finish ("mdec tables", record `1F5`), while
+PSoXide and a SuperStation One played the movie. v1.26 adds `MDEC
+DIAGNOSTIC` as MAIN MENU's second-to-last row (two UP from row 0; `FMV STREAM
+TEST` stays last) and runs the same diagnostic first when FMV STREAM TEST
+finds none (`src/fmv_diag.rs`):
+
+* Six MDEC setup sequences, eight runs each (runs 1, 3, 5, 7 from an idle MDEC,
+  runs 2, 4, 6, 8 reset in the middle of a table command, run 1 of A from
+  whatever the console held), each followed by a one-macroblock DMA0/DMA1 probe decode:
+  A the v1.25 driver verbatim (then a late enable write, to test whether the
+  first was lost), B settle on not-busy then enable, C a fixed delay, D
+  CPU-written tables, E PSn00bSDK's order, F the SDK driver on this build.
+* MDEC1 traced over time after a reset from idle, from busy, and from busy
+  with the enable written straight after (reset latency, timer-stamped).
+* A one-frame control: the movie's first frame decoded by CPU writes and
+  reads, and again over DMA0/DMA1; equal word sums mean both paths agree.
+  PSoXide only decodes the first macroblock on the CPU path, so the CPU half
+  fails in the emulator; it is aimed at the console.
+
+FMV STREAM TEST then plays a 15-second cut (1,965 video sectors) behind each
+sequence that worked, the chosen one first (the SDK driver when it held every
+run). The pass criteria apply to the cut. Every result goes on screen and into
+the capture, which is now encoded after either row even without a timing scan,
+and the QR pages open straight after. New timing-block ids, all packed
+halfword streams rather than timings (layout in `fmv_diag::records`, decoded
+by `tools/hwtest-report.py`): `200`-`25D` per sequence, `260` overview,
+`270`-`287` playbacks, `290`-`29E` reset traces, `2A0`-`2A2` the control
+decode. `1F0`-`1F5` keep their meaning and describe the first playback.
+TIMING_RECORD_COUNT grows to 336 and CAPTURE_PAGE_MAX to 12.
+
+No existing record changed meaning, hence MINOR.
+
 ### v1.25 (2026-09-25, schema PX8)
 
 The FMV console test joins the disc as MAIN MENU's last row, `FMV STREAM
