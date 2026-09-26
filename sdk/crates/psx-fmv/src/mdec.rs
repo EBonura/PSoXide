@@ -4,6 +4,7 @@
 //! Decode protocol, as commercial players drive it:
 //!
 //! 1. [`reset`] once, then [`load_tables`] (quantization + IDCT tables).
+//!    Neither assumes the MDEC reacts at once: see "Reset latency" below.
 //! 2. Per frame, [`decode_start`] writes the decode command (output depth +
 //!    run-length word count) to MDEC0 and kicks DMA0 with the whole
 //!    run-length buffer. It does not wait: the MDEC throttles DMA0 as its
@@ -16,6 +17,20 @@
 //!
 //! Every wait is bounded (`psx_io::dma::wait_done`), and every kick aborts
 //! the channel first, per the SDK rule for silicon DMA wedges.
+//!
+//! # Reset latency
+//!
+//! On a PAL SCPH-9002 the MDEC does not finish a reset within the next bus
+//! access: the status read straight after writing the reset still shows the
+//! state from before it (0x6401_0000: busy, data-in full), where the
+//! SuperStation One FPGA and PSoXide already read the documented reset state.
+//! Writing the DMA-request enable right behind the reset, as this driver used
+//! to, left the table upload waiting on DMA0 forever on that console while
+//! both of the others played the movie. So [`reset`] waits for the reset to
+//! settle before enabling requests, and [`load_tables`] checks that the MDEC
+//! actually raised its data-in request (status bit 28) after each command,
+//! re-writing the enable if it did not, and falls back to CPU writes when
+//! DMA0 still will not take the table.
 
 use psx_io::dma::{self, Channel};
 
@@ -60,7 +75,7 @@ const ZIGZAG_TO_ROW_MAJOR: [u8; 64] = [
 ];
 
 /// Luma then chroma table, zigzag order, as the 32 words command 2 takes.
-static QUANT_WORDS: [u32; 32] = build_quant();
+pub static QUANT_WORDS: [u32; 32] = build_quant();
 
 const fn build_quant() -> [u32; 32] {
     let mut bytes = [0u8; 128];
@@ -107,7 +122,8 @@ const SCALE: [i16; 64] = [
     SF7, -SF5, SF3, -SF1, SF1, -SF3, SF5, -SF7,
 ];
 
-static SCALE_WORDS: [u32; 32] = build_scale();
+/// The IDCT basis as the 32 words command 3 takes.
+pub static SCALE_WORDS: [u32; 32] = build_scale();
 
 const fn build_scale() -> [u32; 32] {
     let mut words = [0u32; 32];
@@ -119,15 +135,75 @@ const fn build_scale() -> [u32; 32] {
     words
 }
 
-/// Reset the MDEC and enable its DMA requests on both channels.
-pub fn reset() {
-    // SAFETY: MDEC control register writes.
-    unsafe {
-        psx_io::write32(MDEC1, 0x8000_0000);
-        psx_io::write32(MDEC1, 0x6000_0000);
+/// MDEC1 status: data-out FIFO empty.
+pub const STATUS_OUT_EMPTY: u32 = 1 << 31;
+/// MDEC1 status: data-in FIFO full.
+pub const STATUS_IN_FULL: u32 = 1 << 30;
+/// MDEC1 status: a command is receiving or processing parameters.
+pub const STATUS_BUSY: u32 = 1 << 29;
+/// MDEC1 status: data-in request (DMA0 enabled and the MDEC wants data).
+pub const STATUS_IN_REQUEST: u32 = 1 << 28;
+/// MDEC1 status: data-out request.
+pub const STATUS_OUT_REQUEST: u32 = 1 << 27;
+
+/// MDEC1 control: abort everything and reset. Tables survive it.
+pub const CONTROL_RESET: u32 = 0x8000_0000;
+/// MDEC1 control: enable the DMA0 and DMA1 requests.
+pub const CONTROL_ENABLE_DMA: u32 = 0x6000_0000;
+/// Command 2 for luma and chroma: 32 parameter words follow.
+pub const COMMAND_SET_QUANT: u32 = 0x4000_0001;
+/// Command 3: 32 parameter words follow.
+pub const COMMAND_SET_SCALE: u32 = 0x6000_0000;
+
+/// Spin budget for one status wait (reset settle, request, FIFO room).
+/// The console settles a reset in tens of cycles; this is a few ms.
+pub const SETTLE_SPINS: u32 = 20_000;
+/// Status reads to spend after a reset looks settled. A reset from an idle
+/// MDEC can read idle before it has finished, so waiting for busy to drop
+/// is not enough on its own. Each read is an MMIO access, several cycles,
+/// so this is a few hundred cycles against the tens a reset takes.
+const RESET_TAIL_READS: u32 = 64;
+/// Enable writes to try before giving up on the data-in request.
+const ENABLE_ATTEMPTS: u8 = 4;
+
+/// Raw MDEC1 status word.
+#[inline(always)]
+pub fn status() -> u32 {
+    // SAFETY: MDEC status register read.
+    unsafe { psx_io::read32(MDEC1) }
+}
+
+/// Wait until `status() & mask == want`. `false` on timeout.
+fn wait_status(mask: u32, want: u32, spins: u32) -> bool {
+    let mut n = 0;
+    while status() & mask != want {
+        if n >= spins {
+            return false;
+        }
+        n += 1;
     }
+    true
+}
+
+/// Reset the MDEC, wait for the reset to finish, then enable its DMA
+/// requests on both channels. `false` if the MDEC stayed busy after the
+/// reset (the enable is still written).
+pub fn reset() -> bool {
+    dma::abort(Channel::MdecIn);
+    dma::abort(Channel::MdecOut);
     dma::enable_channel(Channel::MdecIn);
     dma::enable_channel(Channel::MdecOut);
+    // SAFETY: MDEC control register write.
+    unsafe { psx_io::write32(MDEC1, CONTROL_RESET) };
+    let settled = wait_status(STATUS_BUSY, 0, SETTLE_SPINS);
+    let mut n = 0;
+    while n < RESET_TAIL_READS {
+        let _ = status();
+        n += 1;
+    }
+    // SAFETY: MDEC control register write.
+    unsafe { psx_io::write32(MDEC1, CONTROL_ENABLE_DMA) };
+    settled
 }
 
 /// Send `words` (a multiple of 32) to the MDEC over DMA0 without waiting.
@@ -145,25 +221,123 @@ unsafe fn dma_in(words: *const u32, count: usize) {
     dma::set_chcr(Channel::MdecIn, CHCR_IN);
 }
 
-/// Upload the standard quantization tables and the IDCT basis.
-/// `false` if a DMA0 transfer wedged.
-pub fn load_tables() -> bool {
-    // SAFETY: both tables are statics; each transfer is waited out.
-    unsafe {
-        psx_io::write32(MDEC0, 0x4000_0001);
-        dma_in(QUANT_WORDS.as_ptr(), 32);
-        if !dma::wait_done(Channel::MdecIn, DMA_SPINS) {
-            dma::abort(Channel::MdecIn);
+/// How [`load_tables`] got the tables in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tables {
+    /// Enable writes, summed over both commands, before the MDEC raised its
+    /// data-in request: 2 when every first write held. 0 means it never
+    /// asked for data, so DMA0 decodes will not run either.
+    pub enable_writes: u8,
+    /// Tables that went in over the CPU because the MDEC never asked for
+    /// DMA0 data or DMA0 wedged part way (0, 1 or 2).
+    pub cpu_uploads: u8,
+}
+
+impl Tables {
+    /// The MDEC asked for data on both commands, so DMA0 feeds it.
+    pub fn dma_ready(&self) -> bool {
+        self.enable_writes != 0 && self.cpu_uploads == 0
+    }
+}
+
+/// Write `command`, then feed its 32 parameter words: over DMA0 when the
+/// MDEC asks for data, else over the CPU. Returns (enable writes before the
+/// request rose, 0 if never; went over the CPU), or `None` if the MDEC
+/// would not take the words at all.
+fn upload(command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
+    if !wait_status(STATUS_BUSY, 0, SETTLE_SPINS) {
+        return None;
+    }
+    // SAFETY: MDEC command write.
+    unsafe { psx_io::write32(MDEC0, command) };
+    let mut writes = 0u8;
+    let mut asked = wait_status(STATUS_IN_REQUEST, STATUS_IN_REQUEST, SETTLE_SPINS);
+    while !asked && writes + 1 < ENABLE_ATTEMPTS {
+        // The enable can be lost to a reset that had not finished.
+        // SAFETY: MDEC control register write, no reset bit.
+        unsafe { psx_io::write32(MDEC1, CONTROL_ENABLE_DMA) };
+        writes += 1;
+        asked = wait_status(STATUS_IN_REQUEST, STATUS_IN_REQUEST, SETTLE_SPINS);
+    }
+    let enable_writes = if asked { writes + 1 } else { 0 };
+    if asked {
+        // SAFETY: `words` is a static table; the transfer is waited out.
+        unsafe { dma_in(words.as_ptr(), 32) };
+        if dma::wait_done(Channel::MdecIn, DMA_SPINS) {
+            return Some((enable_writes, false));
+        }
+        // Part of the table went in: start the command over.
+        dma::abort(Channel::MdecIn);
+        reset();
+        if !wait_status(STATUS_BUSY, 0, SETTLE_SPINS) {
+            return None;
+        }
+        // SAFETY: MDEC command write.
+        unsafe { psx_io::write32(MDEC0, command) };
+    }
+    for &word in words {
+        if !wait_status(STATUS_IN_FULL, 0, SETTLE_SPINS) {
+            return None;
+        }
+        // SAFETY: MDEC parameter write.
+        unsafe { psx_io::write32(MDEC0, word) };
+    }
+    Some((enable_writes, true))
+}
+
+/// Upload the standard quantization tables and the IDCT basis. `None` if
+/// the MDEC would take them neither over DMA0 nor over the CPU.
+pub fn load_tables() -> Option<Tables> {
+    let (quant_writes, quant_cpu) = upload(COMMAND_SET_QUANT, &QUANT_WORDS)?;
+    let (scale_writes, scale_cpu) = upload(COMMAND_SET_SCALE, &SCALE_WORDS)?;
+    if !wait_status(STATUS_BUSY, 0, SETTLE_SPINS) {
+        return None;
+    }
+    Some(Tables {
+        enable_writes: if quant_writes == 0 || scale_writes == 0 {
+            0
+        } else {
+            quant_writes + scale_writes
+        },
+        cpu_uploads: quant_cpu as u8 + scale_cpu as u8,
+    })
+}
+
+/// Upload both tables over CPU writes to MDEC0 only, after [`reset`]. No
+/// DMA involved: the control path for a console whose DMA0 will not feed
+/// the MDEC. `false` if the input FIFO never made room.
+pub fn load_tables_cpu() -> bool {
+    for (command, words) in [
+        (COMMAND_SET_QUANT, &QUANT_WORDS),
+        (COMMAND_SET_SCALE, &SCALE_WORDS),
+    ] {
+        if !wait_status(STATUS_BUSY, 0, SETTLE_SPINS) {
             return false;
         }
-        psx_io::write32(MDEC0, 0x6000_0000);
-        dma_in(SCALE_WORDS.as_ptr(), 32);
-        if !dma::wait_done(Channel::MdecIn, DMA_SPINS) {
-            dma::abort(Channel::MdecIn);
-            return false;
+        write_command(command);
+        for &word in words {
+            if !wait_status(STATUS_IN_FULL, 0, SETTLE_SPINS) {
+                return false;
+            }
+            write_command(word);
         }
     }
-    true
+    wait_status(STATUS_BUSY, 0, SETTLE_SPINS)
+}
+
+/// Write one word to MDEC0: a command, or a parameter the CPU feeds itself.
+#[inline(always)]
+pub fn write_command(word: u32) {
+    // SAFETY: MDEC command/parameter write.
+    unsafe { psx_io::write32(MDEC0, word) }
+}
+
+/// Read one word of decoded output from MDEC0 (the CPU path; DMA1 is the
+/// usual one). Garbage when the output FIFO is empty.
+#[inline(always)]
+pub fn read_data() -> u32 {
+    // SAFETY: MDEC data read.
+    unsafe { psx_io::read32(MDEC0) }
 }
 
 /// Start decoding `words` 32-bit words of run-length data (a multiple of 32,
