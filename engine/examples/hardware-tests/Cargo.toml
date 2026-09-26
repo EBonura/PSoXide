@@ -45,4 +45,10 @@ psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
 hello-memcard-recovery = { package = "hello-memcard", path = "../../../sdk/examples/hello-memcard" }
 hello-fmv  = { path = "../../../sdk/examples/hello-fmv" }
+psx-fmv    = { path = "../../../sdk/crates/psx-fmv" }
 qrcodegen-no-heap = "1.8.1"
+
+[features]
+# Headless-only fault injection for the MDEC diagnostic (src/fmv_diag.rs).
+# Never on a burned disc.
+diag-fault = []

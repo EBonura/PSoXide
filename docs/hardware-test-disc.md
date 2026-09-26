@@ -264,7 +264,8 @@ hardware state until the operator chooses an entry. Menus fit without scrolling:
    | `VIDEO LEVELS (TV/CAPTURE)` | Grey ramp and flat fields for display-chain checks |
    | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
    | `RESUME FROM TEST` | Restarts a long battery after a selected test index |
-   | `FMV STREAM TEST` | 75 s of 2x STR video with XA audio, every sector checked, then a PASS/FAIL summary (see below). Shows the last result inline; UP from the top row reaches it |
+   | `MDEC DIAGNOSTIC` | v1.26: six MDEC setup sequences x 8 runs, each with a probe decode, reset-latency traces and a one-frame CPU-vs-DMA control decode; result pages, then the QR pages (`src/fmv_diag.rs`, see hardware-test-versions.md). Two UP from the top row |
+   | `FMV STREAM TEST` | A 15 s cut (1,965 video sectors) of 2x STR video with XA audio behind each MDEC setup sequence that worked, every sector checked, each with a PASS/FAIL summary (see below); runs MDEC DIAGNOSTIC first if it has not run. Shows the last result inline; UP from the top row reaches it |
 
 Up/Down moves, Cross runs, and START backs out one level. During the standing
 battery a progress bar names the in-flight case; after it completes, the capture

@@ -36,6 +36,7 @@ mod audio_probe;
 mod cd_chain_probe;
 mod controller_test;
 mod cpu_tests;
+mod fmv_diag;
 mod fmv_test;
 mod gpu_probes;
 mod handoff_probe;
@@ -194,9 +195,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 25;
+const SUITE_VERSION_MINOR: u8 = 26;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.25";
+const SUITE_VERSION: &str = "HWTEST v1.26";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -670,7 +671,9 @@ struct ScanReport {
     runs: u8,
 }
 
-const TIMING_RECORD_COUNT: usize = 208;
+/// v1.26 added up to 127 MDEC diagnostic records (fmv_diag.rs) on top of the
+/// 189 a characterisation plus an FMV run fills.
+const TIMING_RECORD_COUNT: usize = 336;
 
 /// Which records a timing scan takes.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -738,11 +741,13 @@ enum MenuAction {
     RunFromIndex,
     /// Timing scan in the given performance scope, then a full capture.
     RunPerf(TimingScope),
-    /// The FMV console test, then back to this menu.
+    /// The MDEC setup diagnostic (fmv_diag.rs), then the QR pages.
+    RunMdecDiag,
+    /// The FMV console test, then the QR pages.
     RunFmv,
 }
 
-const ROOT_MENU: [(&str, MenuAction); 12] = [
+const ROOT_MENU: [(&str, MenuAction); 13] = [
     // Row 0 is pinned: `make hwtest-capture` selects it by firing CROSS at a
     // fixed tick with the cursor still at its boot position. Move this row and
     // the capture opens whatever took its place, which produces an empty log
@@ -788,6 +793,9 @@ const ROOT_MENU: [(&str, MenuAction); 12] = [
     // Last on purpose: every headless pulse train counts DOWN from row 0, so a
     // row added at the end moves none of them, and UP from row 0 reaches it in
     // one press. 75 s of streaming, so it is never part of RUN ALL.
+    // v1.26: second to last, so FMV STREAM TEST stays one UP from row 0 and
+    // this is two.
+    ("MDEC DIAGNOSTIC", MenuAction::RunMdecDiag),
     ("FMV STREAM TEST", MenuAction::RunFmv),
 ];
 
@@ -2448,6 +2456,8 @@ struct HardwareTests {
     /// carries the timing block.
     fmv: Option<hello_fmv::Outcome>,
     fmv_runs: u8,
+    /// The last MDEC diagnostic, with the playbacks FMV STREAM TEST added.
+    mdec_diag: Option<fmv_diag::Diag>,
 }
 
 #[cfg(target_arch = "mips")]
@@ -2512,6 +2522,7 @@ impl HardwareTests {
             menu_page: MenuPage::Root,
             fmv: None,
             fmv_runs: 0,
+            mdec_diag: None,
         }
     }
 
@@ -2620,34 +2631,58 @@ impl HardwareTests {
         self.prepare_audio_readout();
     }
 
-    /// Put the last FMV run's records into the timing report, and fold them
-    /// into its digest so the capture header still names what it carries.
-    /// False when there is no FMV result or no room for it.
+    /// Put the last FMV run's and MDEC diagnostic's records into the timing
+    /// report, and fold them into its digest so the capture header still
+    /// names what it carries. False when there was nothing to add or no room.
     fn merge_fmv_records(&mut self) -> bool {
-        let Some(outcome) = self.fmv else {
-            return false;
-        };
-        let records = fmv_test::records(&outcome, self.fmv_runs);
-        if !fmv_test::merge(&mut self.timing_scan.records, &records) {
-            tty::println("hardware-tests: fmv records did not fit the timing report");
-            return false;
-        }
         let mut hash = self.timing_scan.summary.hash;
-        for record in records {
-            hash = mix32(hash, record.id as u32);
-            hash = mix32(hash, record.min as u32);
-            hash = mix32(hash, record.med as u32);
-            hash = mix32(hash, record.max as u32);
+        let mut any = false;
+        let mix = |hash: &mut u32, record: &TimingRecord| {
+            *hash = mix32(*hash, record.id as u32);
+            *hash = mix32(*hash, record.min as u32);
+            *hash = mix32(*hash, record.med as u32);
+            *hash = mix32(*hash, record.max as u32);
+        };
+        if let Some(outcome) = self.fmv {
+            let records = fmv_test::records(&outcome, self.fmv_runs);
+            if !fmv_test::merge(&mut self.timing_scan.records, &records) {
+                tty::println("hardware-tests: fmv records did not fit the timing report");
+                return false;
+            }
+            for record in &records {
+                mix(&mut hash, record);
+            }
+            any = true;
+        }
+        if let Some(diag) = self.mdec_diag.as_ref() {
+            let records = fmv_diag::records(diag);
+            if !fmv_diag::merge(&mut self.timing_scan.records, &records) {
+                tty::println("hardware-tests: mdec diagnostic records did not fit the timing report");
+                return false;
+            }
+            for record in records.iter().filter(|r| r.id != TIMING_RECORD_UNUSED) {
+                mix(&mut hash, record);
+            }
+            any = true;
         }
         self.timing_scan.summary.hash = hash;
-        true
+        any
     }
 
-    /// MAIN MENU "FMV STREAM TEST". The SDK's player owns the GPU, SPU, CD
-    /// drive, MDEC and root counter 2 for the run; what the suite relies on
-    /// afterwards is put back here, and the result joins the capture.
-    fn run_fmv(&mut self, ctx: &mut Ctx) {
-        tty::println("hardware-tests: run fmv stream test");
+    /// MAIN MENU "MDEC DIAGNOSTIC" (`play` false) and "FMV STREAM TEST"
+    /// (`play` true). The diagnostic battery runs first unless an earlier
+    /// MDEC DIAGNOSTIC left its result; FMV STREAM TEST then plays a short
+    /// cut behind each sequence that worked. The SDK's player owns the GPU,
+    /// SPU, CD drive, MDEC and root counter 2 for the run; what the suite
+    /// relies on afterwards is put back here. Either way the result joins
+    /// the capture, which is encoded even without a timing scan, and the
+    /// QR pages open.
+    fn run_fmv(&mut self, ctx: &mut Ctx, play: bool) {
+        tty::println(if play {
+            "hardware-tests: run fmv stream test"
+        } else {
+            "hardware-tests: run mdec diagnostic"
+        });
         if self.audio_prepared {
             audio_link::stop();
             self.audio_rate = 0;
@@ -2662,11 +2697,30 @@ impl HardwareTests {
             )
         };
 
-        let outcome = hello_fmv::run();
-        // The player's fonts went over the suite's atlas.
         let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
-        fmv_test::wait_for_exit(&font);
-        self.font = Some(font);
+        if !play || self.mdec_diag.is_none() {
+            let diag = fmv_diag::run_battery(&font);
+            // The control decode moved the drive; the font is still ours.
+            fmv_diag::show(&font, &diag);
+            self.mdec_diag = Some(diag);
+        }
+        if play {
+            if let Some(mut diag) = self.mdec_diag {
+                let outcome = fmv_diag::play_all(&mut diag);
+                self.mdec_diag = Some(diag);
+                self.fmv = Some(outcome);
+                self.fmv_runs = self.fmv_runs.wrapping_add(1);
+                tty::println(if outcome.pass {
+                    "hardware-tests: fmv PASS"
+                } else {
+                    "hardware-tests: fmv FAIL"
+                });
+            }
+            // The player's fonts went over the suite's atlas.
+            let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
+            fmv_test::wait_for_exit(&font);
+        }
+        self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
 
         timers::set_mode(timers::Timer::Timer2, timer2_mode);
         psx_spu::set_cd_volume(
@@ -2681,22 +2735,14 @@ impl HardwareTests {
         ctx.fb.apply_draw_target();
         ctx.request_timing_realign();
 
-        self.fmv = Some(outcome);
-        self.fmv_runs = self.fmv_runs.wrapping_add(1);
-        tty::println(if outcome.pass {
-            "hardware-tests: fmv PASS"
-        } else {
-            "hardware-tests: fmv FAIL"
-        });
-        // A capture taken before this run gets the result now. The records
-        // live in the timing block, so the re-encoded capture carries it even
-        // if it was a routine one.
-        if !matches!(self.timing_scan.summary.status, Status::Pending) && self.merge_fmv_records() {
-            self.capture_flags |= photo::blocks::TIMING;
-            self.encode_capture(0);
-            self.prepare_audio_readout();
-        }
-        self.open_menu_page(MenuPage::Root);
+        // The capture carries the result now, with or without a timing scan
+        // before it: the QR pages must be reachable straight after this,
+        // whatever the playback did.
+        self.capture_flags |= photo::blocks::TIMING;
+        self.merge_fmv_records();
+        self.encode_capture(0);
+        self.prepare_audio_readout();
+        self.enter_mode(Mode::TimingScan);
     }
 
     fn encode_capture(&mut self, page: usize) {
@@ -3028,7 +3074,8 @@ impl Scene for HardwareTests {
                         self.prepare_audio_readout();
                         self.enter_mode(Mode::TimingScan);
                     }
-                    MenuAction::RunFmv => self.run_fmv(ctx),
+                    MenuAction::RunMdecDiag => self.run_fmv(ctx, false),
+                    MenuAction::RunFmv => self.run_fmv(ctx, true),
                 }
             }
             return;
