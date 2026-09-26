@@ -42,9 +42,9 @@ DIAGNOSTIC` as MAIN MENU's second-to-last row (two UP from row 0; `FMV STREAM
 TEST` stays last) and runs the same diagnostic first when FMV STREAM TEST
 finds none (`src/fmv_diag.rs`):
 
-* Six MDEC setup sequences, eight runs each (even runs from an idle MDEC, odd
-  runs reset in the middle of a table command, run 1 of A from whatever the
-  console held), each followed by a one-macroblock DMA0/DMA1 probe decode:
+* Six MDEC setup sequences, eight runs each (runs 1, 3, 5, 7 from an idle MDEC,
+  runs 2, 4, 6, 8 reset in the middle of a table command, run 1 of A from
+  whatever the console held), each followed by a one-macroblock DMA0/DMA1 probe decode:
   A the v1.25 driver verbatim (then a late enable write, to test whether the
   first was lost), B settle on not-busy then enable, C a fixed delay, D
   CPU-written tables, E PSn00bSDK's order, F the SDK driver on this build.

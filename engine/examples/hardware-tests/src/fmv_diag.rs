@@ -35,8 +35,8 @@
 //! Every sequence is followed by the same probe decode: one DC-only colour
 //! macroblock in over DMA0, 128 words of 15bpp out over DMA1. A run WORKS
 //! when its tables went in and the probe came back whole. Each sequence runs
-//! eight times: even runs start from an idle MDEC, odd runs reset it in the
-//! middle of a table command. Run 1 of A instead starts from whatever state
+//! eight times: runs 1, 3, 5 and 7 start from an idle MDEC, runs 2, 4, 6 and
+//! 8 reset it in the middle of a table command. Run 1 of A instead starts from whatever state
 //! the console was in, which from a fresh boot is the condition that failed.
 //! Interrupts are masked for each run so a VBlank cannot stretch a race.
 //!
@@ -1286,7 +1286,7 @@ fn draw_variant(font: &FontAtlas, diag: &Diag, v: usize) {
         .dec(RUNS as u32)
         .s(" WORKED");
     font.draw_text(X0, 28, mask.as_str(), WHITE);
-    font.draw_text(X0, 40, "(RUN 1 LEFT; EVEN IDLE, ODD BUSY)", WHITE);
+    font.draw_text(X0, 40, "RUN 1 LEFT. ODD RUNS IDLE, EVEN BUSY", WHITE);
     let fail = run.fail as usize;
     let detail = Line::new()
         .s("DETAIL RUN ")
