@@ -290,5 +290,116 @@ fn cli_encodes_a_wav_to_psau_and_raw() {
             adpcm::FLAG_END | adpcm::FLAG_REPEAT
         );
     }
+    // score reads the rate from a PSAU header and writes the playback.
+    let played = dir.join("played.wav");
+    let out = std::process::Command::new(bin)
+        .args([
+            "score",
+            input.to_str().unwrap(),
+            dir.join("out.psau").to_str().unwrap(),
+            "--play",
+            played.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let line = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        line.contains("\"fwsnrseg\":") && line.contains("\"rate\":6000"),
+        "{line}"
+    );
+    let w = wav::read(&std::fs::read(&played).unwrap()).unwrap();
+    assert_eq!(w.rate, 44_100);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn score_measures_shipped_bytes_like_the_cook_itself() {
+    let src = wav_of(22_050, tone(22_050, 0.8, &[220.0, 1_700.0, 4_100.0]));
+    let rate = 11_025;
+    let new = cook(&src, &CookOptions::one_shot(rate));
+    let s = psx_audio_cook::score(&src, &new.adpcm, rate, 0);
+    // Same measurement as the playback path the rate study used.
+    let reference = psx_audio_cook::reference_44k(&src);
+    let played = psx_audio_cook::playback(&new);
+    let n = reference.len().min(played.len());
+    let direct = metrics::fw_snr_seg_db(&reference[..n], &played[..n], 11_025.0);
+    assert!((s.fw_snr_seg_db - direct).abs() < 1e-9);
+    // The previous pipeline's bytes at the same rate score lower.
+    let pcm: Vec<i16> = src.samples.iter().map(|&v| v as i16).collect();
+    let (_, old) = legacy::hl_cook(&pcm, src.rate, rate, 0.9);
+    let o = psx_audio_cook::score(&src, &old, rate, 0);
+    assert!(s.fw_snr_seg_db > o.fw_snr_seg_db);
+    // A leading silent block, skipped, measures the same as without it.
+    let mut padded = vec![0u8; adpcm::BLOCK_BYTES];
+    padded.extend_from_slice(&new.adpcm);
+    let p = psx_audio_cook::score(&src, &padded, rate, adpcm::BLOCK_SAMPLES);
+    assert!((p.fw_snr_seg_db - s.fw_snr_seg_db).abs() < 1e-9);
+}
+
+#[test]
+fn gauss_compensation_keeps_the_normalised_level() {
+    // A full-scale sound with a lot of energy near the playback Nyquist (a
+    // gunshot's crack): the pre-emphasis overshoots full scale. The level is
+    // kept and the overshoot clamped, not paid for with the whole sound.
+    let src = wav_of(
+        22_050,
+        tone(22_050, 0.5, &[300.0, 3_900.0, 4_700.0])
+            .iter()
+            .map(|v| v * 3.6)
+            .collect(),
+    );
+    let rms =
+        |v: &[i16]| (v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+    let with = cook(&src, &CookOptions::one_shot(11_025));
+    let mut plain = CookOptions::one_shot(11_025);
+    plain.compensate_gauss = false;
+    let without = cook(&src, &plain);
+    let level = |c: &psx_audio_cook::Cooked| rms(&spu_play::play(&c.decoded(), c.rate));
+    let db = 20.0 * (level(&with) / level(&without)).log10();
+    assert!(db > -1.0, "compensation cost {db:.2} dB of playback level");
+    assert!(
+        with.pcm.iter().any(|&v| v == i16::MAX || v == i16::MIN),
+        "overshoot is clamped"
+    );
+}
+
+#[test]
+fn normalisation_follows_the_source_not_what_survives_the_resample() {
+    // A quiet 300 Hz tone under a loud 4.5 kHz one, cooked at 5 kHz: the
+    // resampler removes the loud part, and the quiet tone must keep its
+    // level (peak 0.9 of the source, not of what is left).
+    let mut samples = tone(22_050, 0.4, &[4_500.0]);
+    let quiet = tone(22_050, 0.4, &[300.0]);
+    for (s, q) in samples.iter_mut().zip(&quiet) {
+        *s = *s * 3.0 + q * 0.3;
+    }
+    let src = wav_of(22_050, samples.clone());
+    let mut o = CookOptions::one_shot(5_000);
+    o.compensate_gauss = false;
+    let c = cook(&src, &o);
+    let peak_src = samples.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let expected = 9_000.0 * 0.3 * 0.9 * 32_767.0 / peak_src;
+    // Away from the ends, where the loud tone's abrupt start and stop leave
+    // some band-limited energy.
+    let steady = &c.pcm[200..c.pcm.len() - 200];
+    let peak_out = steady.iter().map(|&v| (v as f64).abs()).fold(0.0, f64::max);
+    assert!(
+        (peak_out / expected - 1.0).abs() < 0.1,
+        "quiet tone peak {peak_out:.0}, expected about {expected:.0}"
+    );
+}
+
+#[test]
+fn restart_keeps_the_length_and_starts_history_free() {
+    // 1,000 samples: not whole blocks, so a whole loop would stretch it.
+    let w = wav_of(11_025, tone(11_025, 1_000.0 / 11_025.0, &[900.0, 2_300.0]));
+    let mut o = CookOptions::one_shot(11_025);
+    o.looping = Looping::Restart;
+    let c = cook(&w, &o);
+    assert_eq!(c.pcm.len(), 1_000, "no stretch");
+    assert_eq!(c.adpcm.len(), adpcm_bytes(1_000));
+    assert_eq!(c.adpcm[0] >> 4, 0, "first block ignores history");
+    assert_eq!(c.loop_block, None);
+    assert_eq!(c.adpcm[c.adpcm.len() - 15], adpcm::FLAG_END);
 }
