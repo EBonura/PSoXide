@@ -557,10 +557,10 @@ pub enum Pacing {
     NoAckWait,
     /// Wait for the device's `/ACK` (DSR) pulse after each non-final byte before
     /// clocking the next one. Matches the BIOS pacing, but corrupted frames on a
-    /// third-party clone pad, so no default path uses it anymore: [`poll_port1`]
-    /// and the analog-enable handshake pace with a post-select setup delay and
-    /// no `/ACK` wait instead (see [`DEFAULT_SETUP_SPINS`]). Kept so the
-    /// on-console diagnostic can compare both pacings side-by-side.
+    /// third-party clone pad, so this IRQ-latched path remains diagnostic.
+    /// Production polling observes live ACK without rewriting CTRL between
+    /// bytes; the analog-enable handshake retains its separate fixed timing.
+    /// Kept so on-console diagnostics can compare the legacy pacings.
     AckWait,
 }
 
@@ -674,14 +674,17 @@ const ACK_WAIT_SPINS: u32 = 2_048;
 /// 2026-06-22). The on-console sweep put the floor between 384 (no response) and
 /// 768 (clean) under a 5-polls-per-frame stress harder than the in-game one poll
 /// per frame, so 1024 is a comfortable margin while keeping the per-poll
-/// busy-wait small. (The BIOS uses ~7us of setup but also paces every byte; our
-/// setup-only path trades a bigger setup for no inter-byte delay.)
+/// busy-wait small. Production retains this measured setup margin and also
+/// waits for each non-final byte's ACK readiness; the BIOS likewise paces bytes.
 pub const DEFAULT_SETUP_SPINS: u32 = 1_024;
 
 /// Poll the controller in port 1 once.
 ///
 /// The returned [`PadState`] always contains active-high buttons; in
-/// analog mode it also contains the four DualShock stick bytes.
+/// analog mode it also contains the four DualShock stick bytes. A packet
+/// that cannot be completed after bounded retries reports [`PadMode::Unknown`]
+/// rather than synthetic button bytes. A consistently absent device reports
+/// [`PadMode::Disconnected`] after the bounded acquisition attempts.
 #[doc(alias = "PadRead")]
 pub fn poll_port1() -> PadState {
     poll_state(false)
@@ -752,21 +755,27 @@ pub fn enable_analog_port2() -> bool {
 /// button released", which makes a *held* button (jump, Start) look like a fresh
 /// press the next frame. So: when a controller answered but the DualShock ID
 /// handshake didn't validate, retry a few times and take the first clean read.
-/// A genuinely empty port returns immediately (no wasted retries).
+/// Transport failures are retried as whole transactions. Four address-byte
+/// replies of FF without ACK report Disconnected; a failure at any other
+/// stage reports Unknown instead of accepting partial button bytes.
 fn poll_state(port2: bool) -> PadState {
     let mut last = PadState::NONE;
+    let mut all_absent = true;
     let mut tries = 0;
     while tries < 4 {
         // SAFETY: `poll_once` only drives SIO0, under the SIO0 access contract above.
         let s = unsafe { poll_once(port2) }.to_state();
-        if !s.is_connected() {
-            return s; // nothing attached -- not a glitch, don't retry
+        if matches!(s.mode, PadMode::Digital | PadMode::Analog | PadMode::Config) {
+            return s;
         }
-        if s.mode != PadMode::Unknown {
-            return s; // valid digital/analog response
-        }
-        last = s; // answered but ID garbled -- retry
+        all_absent &= s.mode == PadMode::Disconnected;
+        last = s;
         tries += 1;
+    }
+    // Only four complete address-byte replies of FF without ACK establish
+    // an absent device. Any other failed stage means an invalid transaction.
+    if !all_absent {
+        last.mode = PadMode::Unknown;
     }
     last
 }
@@ -887,22 +896,119 @@ unsafe fn ex(
     }
 }
 
-/// The production poll every game reaches through [`poll_port1`] and
-/// [`poll_port2`]: [`DEFAULT_SETUP_SPINS`] of setup delay after select (the
-/// original SCPH-1200 will not answer without it, silicon-confirmed; clones are
-/// fine with it) and no inter-byte delay.
-///
-/// Its own function so the fixed timing is a compile-time fact rather than
-/// something constant propagation happens to recover: a build that also calls
-/// [`poll_port1_diagnostics`] (the hardware-test suite) still gets this specialised
-/// copy for its normal polling, and profiles stop charging every game's pad
-/// cost to a function named `diag`. Nearly all of that cost is the setup loop
-/// itself (1024 STAT reads, four instructions each); its machine code is what
-/// the silicon sweep measured, so keep its shape.
+/// The production poll: retain the measured post-select setup delay, then
+/// wait for each non-final byte's live ACK assertion and release. RX-ready
+/// only establishes that the current byte arrived, not that the controller
+/// is ready for the next one. No IRQ enable or CTRL rewrite is needed.
 unsafe fn poll_once(port2: bool) -> RawPoll {
-    // SAFETY: `poll_once_timed` drives SIO0 only; the caller's exclusive use of SIO0 (SIO0 access
-    // contract) covers it.
-    unsafe { poll_once_timed(port2, DEFAULT_SETUP_SPINS, 0) }
+    unsafe {
+        select(port2, false);
+        delay_reads(DEFAULT_SETUP_SPINS);
+        drain_rx();
+        // A previous aborted transaction may have left ACK asserted.
+        // Never count that old pulse as the new address byte's ACK.
+        let result = if wait_stat_low(STAT_DSR_LEVEL, ACK_WAIT_SPINS) {
+            poll_selected()
+        } else {
+            None
+        };
+        // End the transaction on every path, including a timed-out byte.
+        // The next retry drains any late RX byte after its setup delay.
+        deselect();
+        result.unwrap_or(RawPoll {
+            mode: PadMode::Unknown,
+            ..RawPoll::NONE
+        })
+    }
+}
+
+/// A complete selected-port poll, or no usable packet. The current ID
+/// determines the length; a mode toggle never reuses an earlier length.
+unsafe fn poll_selected() -> Option<RawPoll> {
+    unsafe {
+        match exchange_poll(0x01, false) {
+            Ok(_) => {}
+            Err(PollByteError::AckTimeout(0xFF)) => return Some(RawPoll::NONE),
+            Err(_) => return None,
+        }
+        let id_low = exchange_poll(0x42, false).ok()?;
+        let mode = mode_from_id_low(id_low);
+        if matches!(mode, PadMode::Unknown | PadMode::Disconnected) {
+            return None;
+        }
+        let id_high = exchange_poll(0x00, false).ok()?;
+        if id_high != 0x5A {
+            return None;
+        }
+        let analog = mode.has_sticks();
+        let buttons_low = exchange_poll(0x00, false).ok()?;
+        let buttons_high = exchange_poll(0x00, !analog).ok()?;
+        let sticks = if analog {
+            AnalogSticks {
+                right_x: exchange_poll(0x00, false).ok()?,
+                right_y: exchange_poll(0x00, false).ok()?,
+                left_x: exchange_poll(0x00, false).ok()?,
+                left_y: exchange_poll(0x00, true).ok()?,
+            }
+        } else {
+            AnalogSticks::CENTERED
+        };
+        Some(RawPoll {
+            id_low,
+            id_high,
+            buttons_low,
+            buttons_high,
+            sticks,
+            mode,
+            ack_seen: if analog { 0xff } else { 0x0f },
+            exchanges: if analog { 9 } else { 5 },
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PollByteError {
+    TxTimeout,
+    RxTimeout,
+    AckTimeout(u8),
+    AckStuck,
+}
+
+/// Transfer one production byte. Observe ACK during the RX wait as well
+/// as afterward, so an early pulse is not discarded when RX becomes ready.
+/// The preceding byte's ACK must have released before this DATA write.
+#[inline]
+unsafe fn exchange_poll(tx: u8, is_last: bool) -> Result<u8, PollByteError> {
+    unsafe {
+        if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
+            return Err(PollByteError::TxTimeout);
+        }
+        psx_io::write8(sio::DATA, tx);
+        let mut ack_seen = false;
+        let mut spins = EXCHANGE_WAIT_SPINS;
+        loop {
+            let stat = psx_io::read32(sio::STAT);
+            ack_seen |= stat & STAT_DSR_LEVEL != 0;
+            if stat & STAT_RX_NOT_EMPTY != 0 {
+                break;
+            }
+            if spins == 0 {
+                return Err(PollByteError::RxTimeout);
+            }
+            spins -= 1;
+            core::hint::spin_loop();
+        }
+        let rx = psx_io::read8(sio::DATA);
+        if !is_last {
+            if !ack_seen && !wait_stat(STAT_DSR_LEVEL, ACK_WAIT_SPINS) {
+                return Err(PollByteError::AckTimeout(rx));
+            }
+            if !wait_stat_low(STAT_DSR_LEVEL, ACK_WAIT_SPINS) {
+                return Err(PollByteError::AckStuck);
+            }
+        }
+        Ok(rx)
+    }
 }
 
 /// Diagnostic poll with caller-chosen setup and inter-byte delays, reached only
