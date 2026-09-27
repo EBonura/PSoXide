@@ -9,6 +9,16 @@ fn main() {
         reset(id,Fault::None,3,false);let p=poll_port1();let m=psx_io::state();
         check(&format!("ready-{id:02x}"),m.early==0&&m.mid_ctrl==0&&p.buttons.bits()==0&&!m.selected,format!("mode={:?} early_tx={} sends={} attempts={} mid_ctrl={}",p.mode,m.early,m.sends,m.attempts,m.mid_ctrl));
     }
+    for (name,rx_delay,ack_delay,ack_width) in [("early-ack",12,3,3),("coincident-ack",3,3,5)] {
+        reset(0x73,Fault::None,3,false);
+        {let mut m=psx_io::state();m.rx_delay=rx_delay;m.ack_delay=ack_delay;m.ack_width=ack_width;}
+        let p=poll_port1();let m=psx_io::state();
+        check(name,p.mode==PadMode::Analog&&p.buttons.bits()==0&&m.attempts==1&&m.sends==9&&m.early==0&&m.tx_errors==0,format!("mode={:?} attempts={} early={} tx_errors={}",p.mode,m.attempts,m.early,m.tx_errors));
+    }
+    reset(0x73,Fault::LateRx,3,true);let p=poll_port1();{
+        let m=psx_io::state();
+        check("late-rx-abort-reset",p.mode==PadMode::Analog&&p.buttons.bits()==0&&m.attempts==2&&m.resets==1&&m.pending.is_empty()&&m.tx_errors==0,format!("mode={:?} buttons={:04x} attempts={} resets={} pending={} tx_errors={}",p.mode,p.buttons.bits(),m.attempts,m.resets,m.pending.len(),m.tx_errors));
+    }
     for fault in [Fault::Tx,Fault::Rx,Fault::Ack,Fault::AckHeld] {
         for byte in [2,3,4,5,6,7] {
             reset(0x73,fault,byte,false);let p=poll_port1();let m=psx_io::state();
