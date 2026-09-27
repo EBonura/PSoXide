@@ -912,9 +912,14 @@ unsafe fn poll_once(port2: bool) -> RawPoll {
         } else {
             None
         };
-        // End the transaction on every path, including a timed-out byte.
-        // The next retry drains any late RX byte after its setup delay.
+        // End the peripheral transaction on every path. On a failed byte,
+        // also reset the deselected UART: deselect alone need not cancel a
+        // late RX byte still in its shifter/FIFO. The next select restores
+        // MODE and BAUD before asserting the port again.
         deselect();
+        if result.is_none() {
+            psx_io::write16(sio::CTRL, sio0::ctrl::RESET);
+        }
         result.unwrap_or(RawPoll {
             mode: PadMode::Unknown,
             ..RawPoll::NONE
