@@ -19,6 +19,7 @@ psx-level = { path = "../psx-level" }
 psx-math  = { path = "../../../sdk/crates/psx-math" }
 psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
 psx-pad   = { path = "../../../sdk/crates/psx-pad" }
+psx-tick  = { path = "../../../sdk/crates/psx-tick" }
 psx-spu   = { path = "../../../sdk/crates/psx-spu" }
 psx-sfx   = { path = "../../../sdk/crates/psx-sfx" }
 psx-settings = { path = "../../../sdk/crates/psx-settings", default-features = false }
