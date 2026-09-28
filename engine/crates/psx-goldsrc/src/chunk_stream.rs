@@ -553,6 +553,22 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
         self.stream.active
     }
 
+    /// Resolve `chunk_id` to (sector offset in the pack, stored byte size) the way
+    /// [`Self::stream_begin`] does, for a caller that drives its own transport
+    /// (an interrupt-driven reader). Closes any pump session first; may read the
+    /// pack header when neither cache holds the entry.
+    ///
+    /// # Safety
+    /// Same contract as [`Self::stream_begin`].
+    pub unsafe fn resolve_entry(&mut self, chunk_id: u32) -> Option<(u32, usize)> {
+        self.stream_abort();
+        let rd = &mut *core::ptr::addr_of_mut!(self.reader);
+        let scratch = &mut *core::ptr::addr_of_mut!(self.scratch);
+        let (sector_offset, byte_size) = self.cache.lookup_entry(rd, scratch, chunk_id)?;
+        self.cache.persist_store(chunk_id, sector_offset, byte_size as u32);
+        Some((sector_offset, byte_size))
+    }
+
     /// Close an in-flight pump session (pause the drive, ack everything). Safe
     /// to call when idle. Runs automatically ahead of every blocking load.
     pub fn stream_abort(&mut self) {
