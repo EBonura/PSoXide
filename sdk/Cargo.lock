@@ -176,6 +176,10 @@ name = "psx-telemetry"
 version = "0.1.0"
 
 [[package]]
+name = "psx-tick"
+version = "0.1.0"
+
+[[package]]
 name = "psx-vram"
 version = "0.1.0"
 dependencies = [
