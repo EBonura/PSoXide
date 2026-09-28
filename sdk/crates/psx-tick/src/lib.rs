@@ -121,7 +121,7 @@ pub struct TickStats {
 }
 
 /// Fixed-timestep clock. See the crate docs.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct FixedClock {
     rate: u16,
     cap: u16,
