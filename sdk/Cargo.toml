@@ -20,6 +20,7 @@ members = [
     "crates/psx-settings",
     "crates/psx-pack",
     "crates/psx-osk",
+    "crates/psx-tick",
 ]
 
 # The examples are built against the MIPS target via a separate
