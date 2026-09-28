@@ -187,11 +187,25 @@ impl FixedClock {
                 .wrapping_add(behind.wrapping_mul(u32::from(self.rate)));
             return false;
         }
+        self.consume();
+        true
+    }
+
+    /// `true` when a tick is due at VBlank `now`, without running it and
+    /// ignoring the catch-up policy. For schedulers that decide first and
+    /// commit later with [`consume`](Self::consume); game loops use
+    /// [`due`](Self::due).
+    pub fn is_due(&self, now: u32) -> bool {
+        reached(now, self.next_due)
+    }
+
+    /// Record one tick as run: advance the deadline and the counters. The
+    /// caller has already decided it was due (see [`is_due`](Self::is_due)).
+    pub fn consume(&mut self) {
         self.next_due = self.next_due.wrapping_add(u32::from(self.rate));
         self.tick = self.tick.wrapping_add(1);
         self.frame_ticks = self.frame_ticks.saturating_add(1);
         self.stats.ticks = self.stats.ticks.saturating_add(1);
-        true
     }
 
     /// Close the current frame: record how many ticks it ran and start
@@ -322,6 +336,17 @@ mod tests {
         assert_eq!(run(&mut c, 11), 3); // 9..=11: caught up
         assert_eq!(c.tick(), 12);
         assert_eq!(c.stats().dropped, 0);
+    }
+
+    #[test]
+    fn is_due_and_consume_split_the_decision_from_the_commit() {
+        let mut c = FixedClock::new(TickConfig::new(TickRate::HZ60), 5);
+        assert!(!c.is_due(4));
+        assert!(c.is_due(5));
+        assert!(c.is_due(5)); // a query does not run the tick
+        c.consume();
+        assert!(!c.is_due(5));
+        assert_eq!((c.tick(), c.frame_ticks(), c.next_due()), (1, 1, 6));
     }
 
     #[test]
