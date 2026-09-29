@@ -1,4 +1,4 @@
 +++
 title = "PSoXide"
-description = "PSoXide is a Rust SDK, engine, editor and BIOS-free emulator for the original PlayStation, built to get the most out of the hardware."
+description = "PSoXide provides a Rust SDK, engine, scene editor and emulator for developing and running software on the original PlayStation."
 +++
