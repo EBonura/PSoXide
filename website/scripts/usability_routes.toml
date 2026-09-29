@@ -1,0 +1,168 @@
+# Questions real visitors ask, and where the site answers them.
+# Each route is a list of [page, selector] steps: every step but the last is a
+# link to click, the last is the answer. A page with "#fragment" means the link
+# opened the page at that anchor. Selectors are CSS, or "text=Start of text"
+# for the first visible heading/link/paragraph starting with that text.
+# "before" = the first prototype (commit 50226bf); "after" = the current site.
+# Run: python3 scripts/usability_check.py --set after
+
+[[q]]
+id = "browser"
+audience = "Player"
+question = "Can I play it in my browser?"
+before = [[["/", "a.nav-play"]]]
+after = [[["/", "a.nav-play"]]]
+
+[[q]]
+id = "games"
+audience = "Player"
+question = "What games are there?"
+before = [[["/", "text=Original games, built for the real hardware"]], [["/", ".nav a[href*='/projects']"], ["/projects/", "text=Original work"]]]
+after = [[["/", ".nav a[href*='/projects']"], ["/projects/", "text=Games, tools and collections"]], [["/", "#made-with"]]]
+
+[[q]]
+id = "bios"
+audience = "Player"
+question = "Do I need a BIOS?"
+before = [[["/", "text=Firmware files needed"]]]
+after = [[["/", "#faq-bios .qa-a"]], [["/", "#faq-bios"], ["=", "#faq-bios .qa-a"]]]
+
+[[q]]
+id = "legal"
+audience = "Player"
+question = "Is this legal?"
+before = [[["/", ".nav a[href*='/ethos']"], ["/ethos/", "#the-short-version"]]]
+after = [[["/", "#faq-legal .qa-a"]], [["/", "#faq-legal"], ["=", "#faq-legal .qa-a"]], [["/", ".nav a[href*='/ethos']"], ["/ethos/", "#the-short-version"]]]
+
+[[q]]
+id = "hardware"
+audience = "Player"
+question = "What do I need to run it on a real PS1?"
+before = [[["/", "text=Build your first PS1 program"], ["/docs/first-ps1-program/", "text=The CUE works in other"]]]
+after = [[["/", "#faq-hardware .qa-a"]], [["/", "#faq-hardware"], ["=", "#faq-hardware .qa-a"]], [["/", ".nav a[href*='/faq']"], ["/faq/", "#hardware"], ["=", "#hardware"]]]
+
+[[q]]
+id = "download"
+audience = "Player"
+question = "Where do I download the games?"
+before = [[["/", ".nav a[href*='/projects']"], ["/projects/", "text=Download the disc image"]]]
+after = [[["/", "#faq-download .qa-a"]], [["/", "#faq-download"], ["=", "#faq-download .qa-a"]], [["/", ".nav a[href*='/projects']"], ["/projects/", "text=Download the disc image"]]]
+
+[[q]]
+id = "videos"
+audience = "Player"
+question = "Where are the videos?"
+before = [[["/", "text=On a real console, on camera"]]]
+after = [[["/", "#faq-videos .qa-a"]], [["/", "#faq-videos"], ["=", "#faq-videos .qa-a"]], [["/", ".nav a[href*='/faq']"], ["/faq/", "#videos"], ["=", "#videos"]]]
+
+[[q]]
+id = "ports"
+audience = "Player"
+question = "Can I play Half-Life or Quake on it?"
+before = [[["/", "text=Games nobody expected on a PS1"]]]
+after = [[["/", "#faq-ports .qa-a"]], [["/", "#faq-ports"], ["=", "#faq-ports .qa-a"]], [["/", ".nav a[href*='/faq']"], ["/faq/", "#ports"], ["=", "#ports"]]]
+
+[[q]]
+id = "compat"
+audience = "Emulator"
+question = "Which commercial games work?"
+before = [[["/", "a[href$='#compatibility']"], ["/emulator/compare/#compatibility", "#compatibility"]]]
+after = [[["/", "#faq-compat .qa-a"]], [["/", "#faq-compat"], ["=", "#faq-compat .qa-a"]], [["/", "#faq-compat"], ["=", "#faq-compat a[href$='#compatibility']"], ["/emulator/compare/#compatibility", "#compatibility"]]]
+
+[[q]]
+id = "speed"
+audience = "Emulator"
+question = "How fast is it compared to DuckStation?"
+before = [[["/", "text=Smallest footprint. Not the fastest yet."]], [["/", ".nav a[href*='/emulator/compare']"], ["/emulator/compare/", "#performance"]]]
+after = [[["/", "#faq-speed .qa-a"]], [["/", "#faq-speed"], ["=", "#faq-speed .qa-a"]], [["/", ".nav a[href*='/emulator/compare']"], ["/emulator/compare/", "#performance"]]]
+
+[[q]]
+id = "memory"
+audience = "Emulator"
+question = "How much memory does it use?"
+before = [[["/", "text=Emulator memory at full speed"]]]
+after = [[["/", "#faq-speed .qa-a"]], [["/", "#faq-speed"], ["=", "#faq-speed .qa-a"]]]
+
+[[q]]
+id = "accuracy"
+audience = "Emulator"
+question = "How accurate is it?"
+before = [[["/", ".nav a[href*='/emulator/compare']"], ["/emulator/compare/", "#accuracy"]]]
+after = [[["/", ".nav a[href*='/faq']"], ["/faq/", "#accuracy"], ["=", "#accuracy"]], [["/", ".nav a[href*='/emulator/compare']"], ["/emulator/compare/", "a[href='#accuracy']"], ["/emulator/compare/#accuracy", "#accuracy"]]]
+
+[[q]]
+id = "hle"
+audience = "Emulator"
+question = "How does it boot games without a BIOS?"
+before = [[["/", ".nav a[href*='/ethos']"], ["/ethos/", "#no-bios"]], [["/", "text=None needed. None accepted."]]]
+after = [[["/", "#faq-bios"], ["=", "#faq-bios a[href*='#no-bios']"], ["/ethos/#no-bios", "#no-bios"]], [["/", ".nav a[href*='/ethos']"], ["/ethos/", "#no-bios"]]]
+
+[[q]]
+id = "platforms"
+audience = "Emulator"
+question = "What does the emulator run on?"
+before = [[["/", "text=No BIOS, ever"]]]
+after = [[["/", "text=For playing, debugging and profiling"]], [["/", ".nav a[href*='/faq']"], ["/faq/", "#platforms"], ["=", "#platforms"]]]
+
+[[q]]
+id = "build-emu"
+audience = "Emulator"
+question = "How do I build the emulator from source?"
+before = [[["/", "text=Build your first PS1 program"], ["/docs/first-ps1-program/", "#4-get-the-emulator"]]]
+after = [[["/", ".nav a[href*='/faq']"], ["/faq/", "#build-emulator"], ["=", "#build-emulator"]], [["/", "text=Build your first PS1 program"], ["/docs/first-ps1-program/", "#4-get-the-emulator"]]]
+
+[[q]]
+id = "first-program"
+audience = "Developer"
+question = "How do I build my first PS1 program?"
+before = [[["/", "text=Build your first PS1 program"], ["/docs/first-ps1-program/", "h1"]]]
+after = [[["/", "text=Build your first PS1 program"], ["/docs/first-ps1-program/", "h1"]]]
+
+[[q]]
+id = "tools"
+audience = "Developer"
+question = "What do I need installed?"
+before = [[["/", "text=Build your first PS1 program"], ["/docs/first-ps1-program/", "#1-install-the-tools"]]]
+after = [[["/", "text=Build your first PS1 program"], ["/docs/first-ps1-program/", "#1-install-the-tools"]]]
+
+[[q]]
+id = "licence"
+audience = "Developer"
+question = "Is the code open source, and under what licence?"
+before = [[["/", "text=SDK, engine, editor and emulator for the original PlayStation. Code under"]], [["/", ".nav a[href*='/ethos']"], ["/ethos/", "#code-and-licences"]]]
+after = [[["/", "#faq-licence .qa-a"]], [["/", "#faq-licence"], ["=", "#faq-licence .qa-a"]], [["/", ".nav a[href*='/faq']"], ["/faq/", "#licence"], ["=", "#licence"]]]
+
+[[q]]
+id = "own-game"
+audience = "Developer"
+question = "Can I release my own game made with it?"
+before = [[["/", ".nav a[href*='/ethos']"], ["/ethos/", "text=If you build a game on PSoXide"]]]
+after = [[["/", ".nav a[href*='/faq']"], ["/faq/", "#own-game"], ["=", "#own-game"]]]
+
+[[q]]
+id = "editor"
+audience = "Developer"
+question = "Is there an editor, or is it all bare-metal code?"
+before = [[["/", "text=Scenes to disc"]]]
+after = [[["/", "#toolkit"]], [["/", ".nav a[href*='/faq']"], ["/faq/", "#editor"], ["=", "#editor"]]]
+
+[[q]]
+id = "contribute"
+audience = "Developer"
+question = "How do I report a bug or contribute?"
+before = []
+after = [[["/", ".nav a[href*='/faq']"], ["/faq/", "#contribute"], ["=", "#contribute"]]]
+
+[[q]]
+id = "repos"
+audience = "Developer"
+question = "Which repository do I need?"
+before = [[["/", "text=Four parts, one target"]]]
+after = [[["/", "#toolkit"]], [["/", ".nav a[href*='/faq']"], ["/faq/", "#repos"], ["=", "#repos"]]]
+
+[[q]]
+id = "sony"
+audience = "Emulator"
+question = "Is it affiliated with Sony?"
+before = [[["/", "text=PlayStation is a trademark of Sony"]]]
+after = [[["/", "#faq-legal .qa-a"]], [["/", "#faq-legal"], ["=", "#faq-legal .qa-a"]]]

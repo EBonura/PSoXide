@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="wrap">
+  <header class="page-head">
+    <span class="eyebrow">Docs</span>
+    <h1>{{ section.title }}</h1>
+    <p class="lede">{{ section.description }}</p>
+  </header>
+  <div class="grid two">
+    {% for p in section.pages %}
+    <a class="card" href="{{ p.permalink }}">
+      <span class="badge accent">{{ p.extra.kind | default(value="Walkthrough") }}</span>
+      <h3>{{ p.title }}</h3>
+      <p>{{ p.description }}</p>
+    </a>
+    {% endfor %}
+    {% for resource in section.extra.resources %}
+    <a class="card" href="{{ resource.url }}">
+      <span class="badge">Repository guide</span>
+      <h3>{{ resource.title }}</h3>
+      <p>{{ resource.blurb }}</p>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endblock content %}
