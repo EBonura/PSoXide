@@ -146,7 +146,7 @@
     {
       "name": "hello-gteirq",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-gteirq",
-      "shows": "RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice (a console run is the real test: the emulator never interrupts one)."
+      "shows": "RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice. The emulator models this since its commit c7e3ea8; a console run remains the reference."
     },
     {
       "name": "hello-present",
