@@ -7,7 +7,7 @@ kind = "Walkthrough"
 eyebrow = "Walkthrough · SDK"
 +++
 
-By the end of this page you'll have `hello-tri`, the smallest PSoXide program, running as a real PlayStation disc image. It clears the screen to dark blue and draws one Gouraud-shaded triangle that bounces a little each frame, so you can see the render loop is alive. No editor is involved: this is the bare-metal SDK on its own.
+By the end of this page you'll have `hello-tri`, a minimal PSoXide program, running as a real PlayStation disc image. It clears the screen to dark blue and draws one triangle with its vertex colours blended across it (Gouraud shading) that bounces a little each frame, so you can see the render loop is alive. No editor is involved: this is the bare-metal SDK on its own.
 
 {{<figure src="img/shots/hello-tri.png" alt="hello-tri running: a red, green and blue shaded triangle on a dark blue background" native={true} width={320} height={240} caption="hello-tri at the PlayStation's native 320×240." />}}
 
@@ -17,7 +17,9 @@ You need three things on your machine:
 
 - **Rust through [rustup](https://rustup.rs).** You don't pick the version yourself. The repository's `rust-toolchain.toml` pins the nightly it needs (the `mipsel-sony-psx` target and `build-std` are nightly-only) and rustup installs it with `rust-src` and the other components. If yours doesn't do that on first use, run `rustup toolchain install` inside the checkout.
 - **A C/C++ build toolchain** for your host (Xcode command line tools on macOS, `build-essential` or similar on Linux).
-- **Python 3 and `mipsel-none-elf-objdump`.** The instruction-hazard check uses them. It disassembles the finished executable to catch MIPS load-delay hazards before they reach a console.
+- **Python 3 and a MIPS `objdump`.** The build disassembles the finished executable to check for instruction-ordering bugs that the original CPU won't catch for you (more on that below).
+  - macOS: install `mipsel-none-elf-binutils` with the [Homebrew formula PCSX-Redux publishes](https://github.com/grumpycoders/pcsx-redux/blob/main/tools/macos-mips/mipsel-none-elf-binutils.rb) (see [their instructions](https://github.com/grumpycoders/pcsx-redux/blob/main/src/mips/psyqo/GETTING_STARTED.md)). This gives you `mipsel-none-elf-objdump`, which the build looks for by default.
+  - Debian or Ubuntu: `sudo apt install binutils-mipsel-linux-gnu`, then `export OBJDUMP=mipsel-linux-gnu-objdump` so the build uses it.
 
 ## 2. Clone the SDK and check it builds
 
@@ -44,7 +46,7 @@ This compiles `sdk/examples/hello-tri` for `mipsel-sony-psx`, links it into a PS
 Keep the BIN and the CUE together. The CUE is the file you open; it points at the BIN.
 
 {% <callout title="What the build does to your code"> %}
-The SDK's build turns on LLVM's wider delay-slot search, then runs `tools/hazard_patch.py` over the linked program and rescans it. Any load left in a delay slot whose result is used too early gets rerouted, because the R3000 won't stall for you. `tools/stack_guard.py` also proves every scratchpad stack fits its region.
+The PlayStation's CPU (a MIPS R3000) doesn't wait for a value loaded from memory to arrive: the instruction straight after a load still sees the old register contents. Compilers normally schedule around this, but not always. After linking, `tools/hazard_patch.py` finds any instruction that reads a loaded value too early, reroutes it, and scans the program again. `tools/stack_guard.py` then checks that every stack placed in the CPU's small, fast scratchpad RAM fits its space.
 {% </callout> %}
 
 ## 4. Get the emulator
@@ -68,7 +70,7 @@ To see the triangle, start the desktop app from the emulator checkout:
 ./target/release/frontend --windowed
 ```
 
-In **Settings**, choose your games directory and select the SDK's `build/examples/mipsel-sony-psx/release/` folder. In **Games**, refresh the library if needed and select `hello-tri`. Expand any collapsed folder with a click or Enter. The triangle should appear on a dark blue background.
+Open the **Library** menu and choose **Choose games folder**, then select the SDK's `build/examples/mipsel-sony-psx/release/` folder. Back in **Library**, use **Refresh library** if `hello-tri` isn't listed yet, then select it. Expand any collapsed folder with a click or Enter. The triangle should appear on a dark blue background.
 
 For an automated check instead, run this from the SDK checkout:
 
@@ -82,18 +84,21 @@ The CUE works in other PlayStation emulators too, and you can burn the image to 
 
 ## What the program does
 
-Here's the heart of `sdk/examples/hello-tri/src/main.rs`, trimmed of comments:
+Here's `sdk/examples/hello-tri/src/main.rs` with most comments removed:
 
 ```rust
 #![no_std]
 #![no_main]
 
-extern crate psx_rt; // brings in _start, the panic handler and the heap
+extern crate psx_rt; // keeps _start, the panic handler and (if enabled) the heap
 
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_rt::tty;
 
 #[no_mangle]
 fn main() {
+    tty::println("hello-tri: booted via HLE BIOS");
+
     gpu::init(VideoMode::Ntsc, Resolution::R320X240);
 
     // Two buffers: draw into one while the TV shows the other.
@@ -101,6 +106,7 @@ fn main() {
     gpu::set_draw_area(0, 0, 319, 239);
     gpu::set_draw_offset(0, 0);
 
+    tty::println("hello-tri: entering render loop");
     let mut frame: u16 = 0;
     loop {
         fb.clear(0, 0, 64);
@@ -118,7 +124,7 @@ fn main() {
 }
 ```
 
-There's no operating system underneath. `psx_rt` provides `_start`, clears BSS and calls `main`. From there it's you and the hardware: set the video mode, then loop forever. Clear the back buffer, send one triangle to the GPU, wait for the GPU to finish and for vertical blank, and swap buffers. Double buffering keeps the displayed frame separate from the one being drawn.
+There's no operating system underneath. `psx_rt` provides `_start`, zeroes the program's uninitialised globals and calls `main`. `tty::println` writes to the kernel's debug text output, which the emulator shows in its log; it doesn't appear on screen. From there it's you and the hardware: set the video mode, then loop forever. Clear the back buffer, send one triangle to the GPU, wait for the GPU to finish and for vertical blank, and swap buffers. Double buffering keeps the displayed frame separate from the one being drawn.
 
 ## Where to go next
 
@@ -127,10 +133,10 @@ Build any other example the same way with `make disc EXAMPLE=<name>`:
 | Example | Shows |
 |---|---|
 | `hello-input` | Controller polling through `psx-pad` |
-| `hello-tex` | Textured primitives and a CLUT upload |
+| `hello-tex` | Textured sprites using a colour palette (CLUT) uploaded to video memory |
 | `hello-ot` | Depth sorting with an ordering table |
 | `hello-gte` | Transforms on the GTE, the PS1's geometry coprocessor |
-| `hello-audio` | Playing a voice on the SPU |
+| `hello-audio` | Playing sound effects on the SPU, the PS1's sound chip |
 
 Examples that use CD audio or a `WORLD.PAK` need their own pack inputs; the generic `disc` target only makes a data-only image. The full list is in the [SDK's README](https://github.com/EBonura/PSoXide/blob/main/sdk/README.md).
 

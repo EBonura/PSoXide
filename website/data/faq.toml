@@ -53,7 +53,7 @@ id = "speed"
 group = "emulator"
 home = true
 q = "How fast is it compared to DuckStation?"
-a = "Speed comparisons are not currently published on this site. In the recorded headless benchmark, memory use was [[psx_mem]] MB against DuckStation's [[ds_mem]] MB; desktop use includes additional graphics and audio costs."
+a = "The speed and memory comparison against DuckStation, Beetle PSX and PCSX-Redux is being measured again on a current build. The results will be published on the comparison page with how they were measured, whichever emulator comes out ahead."
 link_text = "Full comparison"
 link = "@/emulator/compare.md"
 
@@ -179,6 +179,6 @@ link = "https://github.com/EBonura/PSoXide/blob/main/docs/downstream-licensing.m
 id = "contribute"
 group = "project"
 q = "How do I report a bug or contribute?"
-a = "Open an issue on the repository it's about. For a change to the emulator, run `make check`, `make test` and `make fmt-check`, add a focused regression test, and say whether your evidence comes from emulation or real hardware. Never commit BIOS files or game images."
+a = "Open an issue on the repository it's about: [the SDK or this website](https://github.com/EBonura/PSoXide/issues), [the emulator](https://github.com/EBonura/PSoXide-emulator/issues), or [the editor and engine](https://github.com/EBonura/PSoXide-editor/issues). For a change to the emulator, run `make check`, `make test` and `make fmt-check`, add a focused regression test, and say whether your evidence comes from emulation or real hardware. Never commit BIOS files or game images."
 link_text = "Contributing guide"
 link = "https://github.com/EBonura/PSoXide-emulator/blob/main/CONTRIBUTING.md"
