@@ -14,6 +14,7 @@ eyebrow = "About PSoXide"
 - Celeste Classic Collection is an unofficial fan port, credited to its creators.
 - Music by Just Music and by magikAAAAArp is used with permission, for non-commercial releases only.
 - The code is licensed GPL-2.0-or-later (the Quake port GPL-2.0-only).
+- Much of the code was written with AI coding assistants under human direction. That isn't a clean-room process, so provenance is tracked file by file.
 
 ## What PSoXide is for
 
@@ -25,6 +26,12 @@ The project uses the following practices:
 - **Recorded measurements.** The [comparison page](@/emulator/compare.md) ties its figures to recorded builds, explains the limits of the benchmark and separates measured results from work still in progress.
 - **No firmware, no game data.** PSoXide doesn't need Sony's BIOS and can't load one. It does not distribute commercial disc images. Half-Life, Counter-Strike and Hollow Knight require your own game data; Quake uses the separately licensed shareware episode.
 - **Source and provenance.** The SDK, emulator and editor source is public under GPL-2.0-or-later, with provenance written down. Some experiments have no public release yet.
+
+## How it's built
+
+PSoXide was developed with heavy use of AI coding assistants. A person directs the architecture, debugging and hardware verification; a large part of the code was written by an assistant under that direction, then reviewed and integrated.
+
+That isn't a clean-room process. Language models are trained on large amounts of existing code, so code they write can carry influence from that training data that neither the tool nor the author can fully audit. Saying so is a disclosure, not a guarantee of clean-room provenance or non-infringement. The project's answer is to track provenance explicitly, file by file, as described in [downstream-licensing.md](https://github.com/EBonura/PSoXide/blob/main/docs/downstream-licensing.md) and in the sections below.
 
 ## No BIOS
 
@@ -61,7 +68,7 @@ Some PSoXide projects start from a game that belongs to someone else. Their dist
 
 **Hollow Knight.** An experiment that cooks rooms, sprites, text and audio from a local install. Those files belong to their owners, the project's licence gives no rights to them or to their converted form, and footage is public on Bonnie Studios' YouTube channel, but there is no public build.
 
-**Quake.** The engine code is GPL. The game data is the Quake shareware episode, which comes with its own licence, SLICNSE.TXT. That file is being added, verbatim, to every package that carries the Quake data. The licence also restricts screenshots and other public display of the game, so this site doesn't show any.
+**Quake.** The engine code is GPL. The game data is the Quake shareware episode, which comes with its own licence, SLICNSE.TXT. Every package that carries the Quake data includes that file, verbatim. The licence also restricts screenshots and other public display of the game, so this site doesn't show any.
 
 
 **Celeste Classic Collection.** An unofficial, non-commercial fan port of the two PICO-8 games, Celeste (2016) and Celeste 2: Lani's Trek (2021) by Maddy Thorson and Noel Berry, with Celeste 2's music by Lena Raine. The levels, art and music are theirs. PICO-8 is by Lexaloffle Games. The port isn't affiliated with or endorsed by any of them.
@@ -81,7 +88,7 @@ PlayStation is a trademark of Sony Interactive Entertainment Inc. Half-Life and 
 
 ## Contact
 
-If you own something that appears here and think it shouldn't, open an issue at [github.com/EBonura/ebonura.github.io/issues](https://github.com/EBonura/ebonura.github.io/issues) and it will be looked at.
+If you own something that appears here and think it shouldn't, open an issue at [github.com/EBonura/PSoXide/issues](https://github.com/EBonura/PSoXide/issues) and it will be looked at.
 
 
 ## Not legal advice
