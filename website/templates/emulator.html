@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="wrap">
+  <header class="page-head">
+    <span class="eyebrow">Emulator</span>
+    <h1>{{ section.title }}</h1>
+    <p class="lede">{{ section.description }}</p>
+    <div class="btn-row">
+      <a class="btn btn-primary" href="{{ config.extra.web_player }}">Open the browser player</a>
+      <a class="btn" href="#build-the-desktop-app">Build the desktop app</a>
+      <a class="btn" href="{{ get_url(path='@/emulator/compare.md') }}">How PSoXide compares</a>
+    </div>
+  </header>
+  <div class="with-toc">
+    <article class="prose">
+      {{ section.content | safe }}
+    </article>
+    {% if section.toc %}
+    <aside class="toc" aria-label="On this page">
+      <div class="toc-inner">
+        <p class="footer-h">On this page</p>
+        <ol>
+          {% for h in section.toc %}<li><a href="{{ h.permalink | safe }}">{{ h.title }}</a></li>{% endfor %}
+        </ol>
+      </div>
+    </aside>
+    {% endif %}
+  </div>
+</div>
+{% endblock content %}
