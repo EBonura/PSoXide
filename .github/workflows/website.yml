@@ -1,10 +1,13 @@
-# Build the site with Zola and deploy it to GitHub Pages.
-# Pages uses the GitHub Actions deployment source.
-name: pages
+# Build the website in website/ with Zola and deploy it to GitHub Pages
+# (https://ebonura.github.io/PSoXide/). Pages uses the GitHub Actions source.
+name: website
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/website.yml'
   workflow_dispatch:
 
 permissions:
@@ -22,6 +25,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +56,7 @@ jobs:
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: public
+          path: website/public
 
   deploy:
     needs: build

@@ -1,7 +1,9 @@
 # PSoXide website
 
 The public site for the PSoXide SDK, editor, emulator and PlayStation projects:
-[ebonura.github.io](https://ebonura.github.io/).
+[ebonura.github.io/PSoXide](https://ebonura.github.io/PSoXide/). It lives in the
+SDK repository under `website/` and deploys from `.github/workflows/website.yml`
+at the repository root. Run the commands below from this directory.
 
 Built with **Zola 0.23.6**. Python scripts require Python 3.11 or newer.
 
@@ -11,7 +13,7 @@ Next work: [first-game tutorial, embedded emulator and measurements](ROADMAP.md)
 zola serve
 # Production build and deterministic checks:
 zola build
-python3 scripts/check_site.py --base-url https://ebonura.github.io/
+python3 scripts/check_site.py --base-url https://ebonura.github.io/PSoXide/
 ```
 
 The Pages workflow checks generated data, builds with the actual Pages base URL,
@@ -57,7 +59,7 @@ python3 scripts/usability_check.py --set after --json review/usability.json
 Each accepts `--zola /path/to/zola`. Review outputs stay under ignored `review/`.
 The browser check covers seven pages at four widths in both themes, broken
 images, horizontal overflow, JavaScript errors, FAQ deep links, theme persistence
-and the emulator and legacy URL redirects. The screenshot script produces 28 full-page captures
+and the emulator redirect. The screenshot script produces 28 full-page captures
 and a contact sheet. These are browser checks, not a new emulator-accuracy run.
 
 ## Media credits
@@ -68,6 +70,6 @@ site's about and licensing page for attribution. The VT323 font is by the VT323 
 and is distributed with its [SIL Open Font License](static/fonts/OFL.txt).
 Videos link to [Bonnie Studios](https://www.youtube.com/@bonnie-studios-dev).
 
-The former `/psoxide-site/` routes redirect to the root site. Their small HTML
-files in `static/psoxide-site/` retain query strings and anchors when JavaScript
-is enabled, with a meta-refresh and link fallback. Keep these for shared links.
+Earlier addresses (`ebonura.github.io/`, `/psoxide-site/` and the root-level
+pages) redirect here from the `EBonura/ebonura.github.io` repository, which now
+holds only those redirects.
