@@ -1,0 +1,38 @@
+# Public videos verified against YouTube channel and oEmbed on 2026-09-29.
+channel = "https://www.youtube.com/@bonnie-studios-dev"
+status_note = "Published videos from Bonnie Studios: original-hardware footage and a tour of the browser emulator."
+
+[[video]]
+title = "Hollow Knight on a Real PlayStation 1 | Early Work in Progress"
+blurb = "Early work in progress, recorded on an original PlayStation."
+url = "https://www.youtube.com/watch?v=qwAME_xVGhw"
+
+[[video]]
+title = "Half-Life on a Real PlayStation 1 | Black Mesa Inbound + Anomalous Materials"
+blurb = "Black Mesa Inbound and Anomalous Materials on original hardware."
+url = "https://www.youtube.com/watch?v=MDgTYEEx75k"
+
+[[video]]
+title = "Quake on a Real PlayStation 1 | E1M1 + E1M2, Uncut"
+blurb = "An uncut run through the first two Quake maps on original hardware."
+url = "https://www.youtube.com/watch?v=ZRIeECN9bQU"
+
+[[video]]
+title = "Introducing the PSoXide Browser Emulator"
+blurb = "An introduction to playing PSoXide homebrew in the browser."
+url = "https://www.youtube.com/watch?v=elT_beUKItw"
+
+[[video]]
+title = "A Rocket League Clone on a Real PlayStation 1 | NitroXide"
+blurb = "Rocket-powered car soccer running on original hardware."
+url = "https://www.youtube.com/watch?v=IUf6ATfRsh8"
+
+[[video]]
+title = "A Minecraft Clone on a Real PlayStation 1 | VoXide"
+blurb = "The survival sandbox running on original hardware."
+url = "https://www.youtube.com/watch?v=nFbGu18VGz8"
+
+[[video]]
+title = "Half-Life on a Real PlayStation 1 | Full Hazard Course, Uncut"
+blurb = "An uncut run through the Hazard Course on original hardware."
+url = "https://www.youtube.com/watch?v=aEaa9CeCsbQ"

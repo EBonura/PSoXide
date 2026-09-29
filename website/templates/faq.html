@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+{% set bench = load_data(path="data/emu-bench.json") %}
+{% set compat = load_data(path="data/compat.json") %}
+{% set faq = load_data(path="data/faq.toml") %}
+<div class="wrap">
+  <header class="page-head compact">
+    <h1>{{ page.title }}</h1>
+    <p class="muted" style="margin:0">Tap a question for the short answer; each links to the detail.</p>
+  </header>
+  {% for g in faq.group %}
+  <section class="faq-group" id="{{ g.id }}">
+    <h2>{{ g.title }}</h2>
+    <div class="qa-list">
+      {{<faq items={[i for i in faq.item if i.group == g.id]} bench={bench} compat={compat} style="full" />}}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+<script>
+  // A link to /faq/#question opens that answer.
+  function openFromHash() {
+    var el = location.hash && document.getElementById(location.hash.slice(1));
+    if (el && el.tagName === "DETAILS") { el.open = true; el.scrollIntoView(); }
+  }
+  addEventListener("hashchange", openFromHash);
+  openFromHash();
+</script>
+{% endblock content %}

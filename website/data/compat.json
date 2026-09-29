@@ -1,0 +1,245 @@
+{
+ "source": "PSoXide-emulator docs/COMPATIBILITY.md",
+ "run_on": "668e66f02",
+ "tiers": [
+  "none",
+  "boots",
+  "intro",
+  "menu",
+  "in-game",
+  "playable",
+  "perfect"
+ ],
+ "counts": {
+  "none": 0,
+  "boots": 0,
+  "intro": 0,
+  "menu": 0,
+  "in-game": 20,
+  "playable": 0,
+  "perfect": 0
+ },
+ "total": 20,
+ "games": [
+  {
+   "name": "Crash Bandicoot (USA)",
+   "serial": "SCUS-94900",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "n/a",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "CTR - Crash Team Racing (USA)",
+   "serial": "SCUS-94426",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "n/a",
+   "issues": "Adventure, New, a typed name, save to card 1, then the hub; the HLE is about 0.04 s ahead of the real kernel after 20 s of loading (was 0.13 s before the CD head fix)",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Gran Turismo 2 (USA) (Arcade Mode) (Rev 1)",
+   "serial": "SCUS-94455",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Metal Gear Solid (USA) (Disc 1) (Rev 1)",
+   "serial": "SLUS-00594",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "none seen",
+   "issues": "Circle confirms in its menus and Cross cancels (the old 'Start ignored' was the scripted Cross backing out); FMV not reached in the run",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Metal Slug X (USA)",
+   "serial": "SLUS-01212",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "n/a",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Marvel vs. Capcom - Clash of Super Heroes (USA)",
+   "serial": "SLUS-01059",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "the arcade opponent is random, so the fight differs between the kernels",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)",
+   "serial": "SLUS-00748",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Resident Evil 3 - Nemesis (USA)",
+   "serial": "SLUS-00923",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Street Fighter Collection - Street Fighter Alpha 2 Gold (USA) (Disc 2)",
+   "serial": "SLUS-00584",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Spider-Man (USA)",
+   "serial": "SLUS-00875",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Tekken 3 (USA)",
+   "serial": "SLUS-00402",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "the arcade opponent differs between the kernels; the HLE is about 0.05 s ahead after the first 6 s of loading (was 0.22 s before the CD head fix)",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Tomb Raider (USA) (Greatest Hits)",
+   "serial": "SLUS-00152",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "was black after Start Game under both kernels: the CloneCD loader put track 2's pregap in track 1, and CD-DA play could not start in a pregap; both fixed",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "WipEout (Europe) (v1.1)",
+   "serial": "SCES-00010",
+   "region": "PAL",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "WipEout 2097 (Europe)",
+   "serial": "SLES-00327",
+   "region": "PAL",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "n/a",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "WipEout 3 - Special Edition (Europe)",
+   "serial": "SCES-02845",
+   "region": "PAL",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "none known",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Chrono Cross (USA) (Disc 1)",
+   "serial": "SLUS-01041",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "no BIOS: the name-entry grid and default name come from the HLE kernel's own font (original glyphs, Latin and digits so far), so they look different from a console's",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Valkyrie Profile (USA) (Disc 1)",
+   "serial": "SLUS-01156",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "none seen",
+   "issues": "3600-frame run: the opening cutscene; the first controllable scene is several minutes of cutscene later",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Nightmare Creatures (USA)",
+   "serial": "SLUS-00582",
+   "region": "NTSC-U",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "the first fight differs between the kernels",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Formula One 2001 (Europe) (En,Fi)",
+   "serial": "SCES-03404",
+   "region": "PAL",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "not LibCrypt-protected (only self-modifying code, which the I-cache model serves as the console does: 6 stale-cache executions at 80027F00h in 7200 frames, all matching the cached routine)",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  },
+  {
+   "name": "Legacy of Kain - Soul Reaver (Europe)",
+   "serial": "SLES-01301",
+   "region": "PAL",
+   "tier": "in-game",
+   "bios_tier": "in-game",
+   "fmv": "plays",
+   "issues": "LibCrypt: the .sbi (32 sectors) is read; the game asks GetlocP about 16 of them at frame 886, and the run diverges from a no-.sbi run afterwards, so the key is consumed; the late-game hang without the key is not reachable headless",
+   "measured_on": "668e66f02",
+   "evidence": "headless frames"
+  }
+ ]
+}
