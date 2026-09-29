@@ -23,7 +23,12 @@ to `main`. No browser player or game data is hosted here; Play links to itch.io.
 Follow the [writing guide and research notes](WRITING.md) for site copy.
 
 - `content/`: guides and prose.
-- `data/projects.toml`: project descriptions, public links and screenshots.
+- `data/projects.toml`: project descriptions, public links, screenshots and
+  individual games inside collections.
+- `data/demo-disc.json`: verified public release contents, used for the contents
+  list and all demo-disc badges. See [inventory evidence](data/demo-disc-source.md)
+  before updating it; build options and old release descriptions can differ from
+  the published image.
 - `data/videos.toml`: published Bonnie Studios videos, verified on 29 September 2026.
 - `data/compat-source.md`: snapshot of the emulator compatibility report; run
   `python3 scripts/import_compat.py` after replacing it.
