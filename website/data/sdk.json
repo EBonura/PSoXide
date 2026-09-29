@@ -1,0 +1,187 @@
+{
+  "source": "sdk/README.md",
+  "crates": [
+    {
+      "name": "psx-rt",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-rt",
+      "purpose": "Bare-metal runtime: `_start`, BIOS calls, panic, heap, VBlank IRQ counter, corrected i64 builtins, scratchpad regions and scratchpad stacks."
+    },
+    {
+      "name": "psx-io",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-io",
+      "purpose": "Volatile MMIO primitives for target code, plus the CD-ROM command surface."
+    },
+    {
+      "name": "psx-gpu",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-gpu",
+      "purpose": "High-level GPU API: init, primitives, framebuffers, display-window shifting."
+    },
+    {
+      "name": "psx-vram",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-vram",
+      "purpose": "Typed VRAM layout primitives: color, rect, tpage, CLUT, upload helpers."
+    },
+    {
+      "name": "psx-spu",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-spu",
+      "purpose": "High-level SPU API: typed voices, volume, pitch, ADSR, ADPCM upload, key-on/off, loop chaining, noise."
+    },
+    {
+      "name": "psx-sfx",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-sfx",
+      "purpose": "One-shot sample banks, voice allocation and playback cutoff for SPU effects."
+    },
+    {
+      "name": "psx-settings",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-settings",
+      "purpose": "Versioned game preferences with optional memory-card persistence."
+    },
+    {
+      "name": "psx-gte",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-gte",
+      "purpose": "GTE (COP2) wrappers. MIPS emits inline-asm coprocessor ops; host routes through `psx-gte-core`."
+    },
+    {
+      "name": "psx-gte-core",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-gte-core",
+      "purpose": "Pure-Rust GTE state machine and fixed-point math. Shared by `psx-gte` and the emulator; bit-exact against a real-console conformance corpus."
+    },
+    {
+      "name": "psx-math",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-math",
+      "purpose": "Fixed-point math: Q0.12 angles + sin/cos/atan2, int32 helpers, decimal text formatting."
+    },
+    {
+      "name": "psx-pad",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-pad",
+      "purpose": "SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing."
+    },
+    {
+      "name": "psx-font",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-font",
+      "purpose": "Bitmap-font atlas: 1bpp source → 4bpp CLUT VRAM texture, GP0 textured-rect draw path."
+    },
+    {
+      "name": "psx-fx",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-fx",
+      "purpose": "Arcade-style visual effects: particle pools, screen shake, deterministic RNG."
+    },
+    {
+      "name": "psx-asset",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-asset",
+      "purpose": "Runtime parsers for cooked-asset blobs. Consumes `psxed-format` layouts produced by the editor."
+    },
+    {
+      "name": "psx-cache",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-cache",
+      "purpose": "Generic no_std slot cache: keyed residency pool with LRU eviction and pinning."
+    },
+    {
+      "name": "psx-mc",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-mc",
+      "purpose": "Memory-card driver: SIO0 transport, on-card filesystem format interoperable with the console's card manager, optional LZSS compression."
+    },
+    {
+      "name": "psx-osk",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-osk",
+      "purpose": "On-screen keyboard for pad-driven text entry: QWERTY/symbols pages, shift, PS4-style boxed keys."
+    },
+    {
+      "name": "psx-pack",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-pack",
+      "purpose": "Guest-side WORLD.PAK parsing + in-place HLZC/LZ4 decompression (reader half of `psx-iso`)."
+    },
+    {
+      "name": "psx-telemetry",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-telemetry",
+      "purpose": "Shared guest/host telemetry id tables for the emulator profiling hooks."
+    },
+    {
+      "name": "psx-fmv",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-fmv",
+      "purpose": "FMV playback building blocks: STR sector demux, BS v2 bitstream to MDEC run-length decode, MDEC upload/decode via DMA0/DMA1 (guest only), ISO9660 root-file lookup."
+    }
+  ],
+  "examples": [
+    {
+      "name": "hello-tri",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-tri",
+      "shows": "A single GPU triangle."
+    },
+    {
+      "name": "hello-tex",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-tex",
+      "shows": "Textured primitives + CLUT upload."
+    },
+    {
+      "name": "hello-ot",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-ot",
+      "shows": "Ordering-table depth sorting."
+    },
+    {
+      "name": "hello-input",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-input",
+      "shows": "Controller polling via `psx-pad`."
+    },
+    {
+      "name": "hello-gte",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-gte",
+      "shows": "GTE-accelerated transforms."
+    },
+    {
+      "name": "hello-audio",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-audio",
+      "shows": "SPU voice playback."
+    },
+    {
+      "name": "hello-cdda",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-cdda",
+      "shows": "CD-DA audio tracks."
+    },
+    {
+      "name": "hello-spstack",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-spstack",
+      "shows": "A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `tools/stack_guard.py` proves it fits."
+    },
+    {
+      "name": "hello-gteirq",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-gteirq",
+      "shows": "RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice (a console run is the real test: the emulator never interrupts one)."
+    },
+    {
+      "name": "hello-present",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-present",
+      "shows": "psx-rt's queued display flip, held until the frame's closing GP0(1Fh) sets GPUSTAT bit 24 (`arm_draw_done`, `end_with_draw_done`, `signal_draw_done`)."
+    },
+    {
+      "name": "hello-fmv",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-fmv",
+      "shows": "FMV console test: streams a 2x STR with XA audio, decodes it with `psx-fmv`, and shows sector counts (LOST/BAD) over the video."
+    },
+    {
+      "name": "hello-memcard",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-memcard",
+      "shows": "Non-destructive memory-card diagnostic: reads and hashes all 1024 frames, then (L1+R1+Cross) writes and verifies one test save."
+    },
+    {
+      "name": "hello-memprobe",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-memprobe",
+      "shows": "Checks psx-rt's `memcpy`/`memset`/`memcmp` against reference loops for every size and alignment; prints `MEMPROBE PASS` or `FAIL`."
+    },
+    {
+      "name": "hello-pack",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-pack",
+      "shows": "`psx_pack::cd` smoke test: streams raw and compressed WORLD.PAK chunks off the disc and checks them."
+    },
+    {
+      "name": "hello-i64probe",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-i64probe",
+      "shows": "Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides."
+    },
+    {
+      "name": "cdda-read-contention",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/cdda-read-contention",
+      "shows": "CD-ROM conformance probe: issues a data read while CD-DA is playing and records which IRQ the drive raises."
+    }
+  ]
+}

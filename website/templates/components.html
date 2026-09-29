@@ -41,6 +41,18 @@
 {% if caption %}<p class="muted small">{{ caption }}</p>{% endif %}
 {% endcomponent figure %}
 
+{#
+  The SDK's crates or examples, from data/sdk.json (scripts/import_sdk.py reads
+  the tables in sdk/README.md). what: "crates" or "examples".
+#}
+{% component sdk_index(what: string) %}
+{% set sdk = load_data(path="data/sdk.json") %}
+<div class="table-wrap"><table>
+<thead><tr><th>{% if what == "crates" %}Crate{% else %}Example{% endif %}</th><th>{% if what == "crates" %}Purpose{% else %}Shows{% endif %}</th></tr></thead>
+<tbody>{% for row in sdk[what] %}<tr><td><a href="{{ row.url }}"><code>{{ row.name }}</code></a></td><td>{% if what == "crates" %}{{ row.purpose | markdown(inline=true) | safe }}{% else %}{{ row.shows | markdown(inline=true) | safe }}{% endif %}</td></tr>{% endfor %}</tbody>
+</table></div>
+{% endcomponent sdk_index %}
+
 {% component callout(kind: string = "", title: string = "") %}
 <div class="callout{% if kind %} {{ kind }}{% endif %}">{% if title %}<span class="callout-title">{{ title }}</span>{% endif %}{{ body | markdown | safe }}</div>
 {% endcomponent callout %}
