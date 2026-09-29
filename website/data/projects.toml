@@ -1,0 +1,195 @@
+# Showcase data. Every link here was checked with an anonymous request
+# (HTTP 200) on 2026-09-26. Repos that return 404 anonymously are private:
+# leave `repo` empty for them rather than linking a page visitors can't open.
+# `shot` paths are under static/. Only a project's own captures go here.
+# Disc badges are derived from data/demo-disc.json, never separate flags.
+
+[[original]]
+slug = "cortex-ignition"
+name = "Cortex Ignition"
+kind = "Original game"
+tagline = "A souls-like tech demo for the PS1. Aletha, a light-sword fighter, against the custodians of a fog-bound industrial city. Two stances, poise and lock-on."
+shot = "img/shots/cortex.png"
+shot_alt = "Cortex Ignition: Aletha standing in a dim industrial room, health and stamina bars at the top left"
+itch = "https://bonnie-studios.itch.io/cortex-ignition"
+repo = "https://github.com/EBonura/PSoXide-editor"
+repo_note = "Lives in the editor repo"
+source = "PSoXide-editor/README.md; itch-round PLAN.md (Cortex draft)"
+
+[[original]]
+slug = "nitroxide"
+video = "https://www.youtube.com/watch?v=IUf6ATfRsh8"
+name = "NitroXide"
+kind = "Original game"
+tagline = "Car soccer with rocket boosts and two-player split-screen."
+shot = "img/shots/nitroxide.png"
+shot_alt = "NitroXide: a blue car on a green pitch in a night-time stadium"
+itch = "https://bonnie-studios.itch.io/nitroxide"
+repo = "https://github.com/EBonura/nitroxide"
+source = "nitroxide/README.md"
+
+[[original]]
+slug = "voxide"
+video = "https://www.youtube.com/watch?v=nFbGu18VGz8"
+name = "VoXide"
+kind = "Original game"
+tagline = "A Minecraft-style survival sandbox with procedurally generated terrain, loaded in chunks as you explore."
+shot = "img/shots/voxide.png"
+shot_alt = "VoXide: trees, flowers and grass under a blue sky, health and hotbar at the bottom"
+itch = "https://bonnie-studios.itch.io/voxide"
+repo = "https://github.com/EBonura/voxide"
+source = "voxide/README.md"
+
+[[original]]
+slug = "psxcel"
+name = "PSXcel"
+kind = "Original app"
+tagline = "A spreadsheet that boots on a real PlayStation. Formulas, charts, themes and memory-card saves, all on a gamepad."
+shot = "img/shots/psxcel.png"
+shot_alt = "PSXcel: a green bar chart of monthly values"
+itch = "https://bonnie-studios.itch.io/psxcel"
+repo = "https://github.com/EBonura/psxcel"
+source = "psxcel/README.md"
+
+[[original]]
+slug = "gh-psx"
+name = "GH-PSX"
+kind = "Original game, early alpha"
+tagline = "A Guitar Hero style rhythm game. Notes scroll down a GTE-projected 5-fret highway in time with CD audio streamed off the disc."
+shot = "img/shots/ghpsx.png"
+shot_alt = "GH-PSX: a five-lane note highway in perspective"
+itch = ""
+repo = ""
+source = "gh-psx/README.md"
+
+[[original]]
+slug = "arcade"
+name = "PSoXide Arcade"
+kind = "Original collection"
+tagline = "Breakout, Space Invaders and Magikarp Pong behind a cabinet-style selector. Each game is its own PS-X EXE, so only the one you pick sits in RAM."
+shot = "img/shots/arcade.png"
+shot_alt = "PSoXide Arcade selector with Space Invaders, Breakout and Credits and Links"
+itch = ""
+repo = ""
+source = "psoxide-arcade/README.md"
+
+[[original]]
+slug = "celeste"
+name = "Celeste Classic Collection"
+kind = "Unofficial fan port"
+tagline = "The PICO-8 originals, Celeste and Celeste 2: Lani's Trek, on one disc with a cover-art launcher. Levels, art and music are the creators'; the port is fan work."
+shot = "img/shots/celeste-collection.png"
+shot_alt = "Celeste Classic Collection menu with separate Celeste and Celeste 2 choices"
+itch = "https://bonnie-studios.itch.io/celeste-classic-collection-psx"
+repo = "https://github.com/EBonura/celeste-collection-psx"
+source = "pico8-psx/README.md; pico8-psx/release/CREDITS.txt"
+
+[[original]]
+slug = "demo-disc"
+name = "PSoXide Demo Disc"
+kind = "Collection"
+tagline = "Games and examples collected on one disc with a launch menu. Runs on a PlayStation that supports burned CD-Rs and in the browser player."
+shot = "img/shots/demo-disc.png"
+shot_alt = "The PSoXide Demo Disc carousel menu"
+itch = "https://bonnie-studios.itch.io/psoxide-demo-disc"
+repo = "https://github.com/EBonura/PSoXide-demo-disc"
+source = "psx-demo-disc/README.md"
+
+[[original]]
+slug = "hardware-tests"
+name = "Hardware Tests"
+kind = "Test suite"
+tagline = "PS1 hardware and emulator checks with on-screen results and QR capture. Covers graphics, audio, timing and controller behaviour."
+shot = "img/shots/hwtests.png"
+shot_alt = "PS1 Hardware Tests v1.16 menu with test, controller and QR capture options"
+itch = ""
+repo = "https://github.com/EBonura/PSoXide-editor/tree/main/engine/examples/hardware-tests"
+disc_note = "Available from source; not included in the public Demo Disc v0.40."
+source = "PSoXide-editor/docs/hardware-test-disc.md; verified v0.40 disc inventory"
+
+# Ports of games that belong to someone else. These cards use text and
+# published video links; game assets are not distributed by this site.
+[[port]]
+slug = "quake"
+video = "https://www.youtube.com/watch?v=ZRIeECN9bQU"
+name = "Quake (shareware episode)"
+hook = "Start and E1M1 to E1M8 with the shareware weapons and monsters, BSP collision, moving brushes, layered sky and turbulent water, tested on original hardware."
+data = "Ships with the shareware data and its licence (SLICNSE.TXT). That licence restricts screenshots, so there are none here."
+itch = "https://bonnie-studios.itch.io/quake-psx"
+repo = "https://github.com/EBonura/quake-psx"
+source = "quake-psx/README.md; itch-round PLAN.md (Decisions)"
+
+[[port]]
+slug = "half-life"
+video = "https://www.youtube.com/watch?v=MDgTYEEx75k"
+name = "Half-Life"
+hook = "Maps, models, sounds, dialogue and music converted from your own copy of Half-Life and packed into a PS1 disc image."
+data = "Source only and noncommercial. You bring a lawfully obtained Half-Life install; no Valve data or disc image is distributed."
+itch = "https://bonnie-studios.itch.io/hl-psx"
+repo = "https://github.com/EBonura/hl-psx"
+source = "hl-psx/README.md; hl-psx/LICENSING.md"
+
+[[port]]
+slug = "counter-strike"
+name = "Counter-Strike 1.6"
+hook = "Two-player split-screen against bots on one console."
+data = "Bring-your-own-assets, like Half-Life. No public build yet."
+itch = ""
+repo = ""
+source = "cs-psx/README.md"
+
+[[port]]
+slug = "hollow-knight"
+video = "https://www.youtube.com/watch?v=qwAME_xVGhw"
+name = "Hollow Knight"
+hook = "An experimental native port that converts rooms, sprites, text, audio and gameplay data from a local installation."
+data = "Needs your own copy of the game. No public build yet."
+itch = ""
+repo = ""
+source = "hk-psx/README.md"
+
+# Games selected from the collection menus rather than the outer carousel.
+[[collection_game]]
+slug = "breakout"
+name = "Breakout"
+collection = "arcade"
+tagline = "Move the paddle, keep the ball in play and clear the brick wall."
+shot = "img/shots/breakout.png"
+shot_alt = "Breakout with coloured bricks, a paddle and a bouncing ball"
+source = "psx-demo-disc v0.40 embedded Arcade table; psoxide-arcade/games/breakout"
+
+[[collection_game]]
+slug = "space-invaders"
+name = "Space Invaders"
+collection = "arcade"
+tagline = "Move beneath the alien formation and shoot through successive waves while avoiding enemy fire."
+shot = "img/shots/invaders.png"
+shot_alt = "Space Invaders with rows of coloured aliens above the player ship"
+source = "psx-demo-disc v0.40 embedded Arcade table; psoxide-arcade/games/invaders"
+
+[[collection_game]]
+slug = "magikarp-pong"
+name = "Magikaaaaarp Pong"
+collection = "arcade"
+tagline = "A two-paddle game with music and artwork from magikAAAAArp. Goncharov is included with the band's permission."
+shot = "img/shots/pong.png"
+shot_alt = "Magikaaaaarp Pong with two paddles, a centre line and the band's artwork"
+source = "psx-demo-disc v0.40 embedded Arcade table; psoxide-arcade/README.md"
+
+[[collection_game]]
+slug = "celeste-classic"
+name = "Celeste Classic"
+collection = "celeste"
+tagline = "The original PICO-8 platformer: climb the mountain using jumps, wall jumps and an air dash."
+shot = "img/shots/celeste.png"
+shot_alt = "Celeste Classic with Madeline at the bottom left of a snowy level"
+source = "celeste-collection-psx 76bb26b, games/celeste-collection/src/main.rs"
+
+[[collection_game]]
+slug = "celeste-2"
+name = "Celeste 2: Lani's Trek"
+collection = "celeste"
+tagline = "The PICO-8 sequel, with a grappling hook for climbing and swinging between platforms."
+shot = "img/shots/celeste2.png"
+shot_alt = "Celeste 2 with Lani above a purple chasm and a floating grapple point"
+source = "celeste-collection-psx 76bb26b, games/celeste-collection/src/main.rs"

@@ -1,0 +1,91 @@
+{
+  "version": "v0.40",
+  "verified": "2026-09-29",
+  "image_sha256": "d1e16f5deca68351b8361ab61bc7db90298497dc93817e72f8d7fe5be6657940",
+  "menu": [
+    "PSXCEL",
+    "GH-PSX",
+    "PSOXIDE ARCADE",
+    "CELESTE COLLECTION",
+    "NITROXIDE",
+    "VOXIDE",
+    "QUAKE SHAREWARE",
+    "CORTEX IGNITION",
+    "CREDITS"
+  ],
+  "program": [
+    {
+      "slug": "psxcel",
+      "name": "PSXcel",
+      "disc_name": "PSXCEL",
+      "version": "0.2.0"
+    },
+    {
+      "slug": "gh-psx",
+      "name": "GH-PSX",
+      "disc_name": "GH-PSX",
+      "version": "0.1.0"
+    },
+    {
+      "slug": "arcade",
+      "name": "PSoXide Arcade",
+      "disc_name": "PSOXIDE ARCADE",
+      "version": "0.1.1"
+    },
+    {
+      "slug": "celeste",
+      "name": "Celeste Classic Collection",
+      "disc_name": "CELESTE COLLECTION",
+      "version": "0.2.5"
+    },
+    {
+      "slug": "nitroxide",
+      "name": "NitroXide",
+      "disc_name": "NITROXIDE",
+      "version": "0.3.0"
+    },
+    {
+      "slug": "voxide",
+      "name": "VoXide",
+      "disc_name": "VOXIDE",
+      "version": "0.2.1"
+    },
+    {
+      "slug": "quake",
+      "name": "Quake (shareware episode)",
+      "disc_name": "QUAKE SHAREWARE",
+      "version": "0.1.1"
+    },
+    {
+      "slug": "cortex-ignition",
+      "name": "Cortex Ignition",
+      "disc_name": "CORTEX IGNITION",
+      "version": "0.4b"
+    }
+  ],
+  "collections": [
+    {
+      "slug": "arcade",
+      "name": "PSoXide Arcade",
+      "games": [
+        "breakout",
+        "space-invaders",
+        "magikarp-pong"
+      ],
+      "disc_names": [
+        "BREAKOUT",
+        "SPACE INVADERS",
+        "MAGIKAAAAARP PONG"
+      ]
+    },
+    {
+      "slug": "celeste",
+      "name": "Celeste Classic Collection",
+      "games": [
+        "celeste-classic",
+        "celeste-2"
+      ],
+      "source_revision": "76bb26b8779f2df2c91b9d8dfeec05f91f7e829b"
+    }
+  ]
+}

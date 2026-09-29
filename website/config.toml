@@ -1,0 +1,38 @@
+# Zola config. Build with `zola build`, preview with `zola serve`.
+# CI also passes the Pages URL with --base-url (see .github/workflows/pages.yml).
+base_url = "https://ebonura.github.io"
+title = "PSoXide"
+description = "A Rust toolkit for the original PlayStation: SDK, engine and editor, and an emulator that needs no BIOS."
+default_language = "en"
+compile_sass = false
+minify_html = false
+build_search_index = false
+generate_feeds = false
+
+[markdown]
+external_links_target_blank = false
+smart_punctuation = false
+
+[extra]
+# Speed charts stay hidden until PSoXide leads on CPU (Manny, 2026-09-25).
+show_speed = false
+github = "https://github.com/EBonura"
+youtube = "https://www.youtube.com/@bonnie-studios-dev"
+itch = "https://bonnie-studios.itch.io"
+web_player = "https://bonnie-studios.itch.io/psoxide"
+demo_disc = "https://bonnie-studios.itch.io/psoxide-demo-disc"
+repo_sdk = "https://github.com/EBonura/PSoXide"
+repo_emulator = "https://github.com/EBonura/PSoXide-emulator"
+repo_editor = "https://github.com/EBonura/PSoXide-editor"
+repo_demo_disc = "https://github.com/EBonura/PSoXide-demo-disc"
+# Main navigation. Pages that don't exist yet stay out of the nav.
+# `path` is a content file; `match` marks the item current for paths under it.
+nav = [
+  { name = "Emulator", path = "@/emulator/compare.md", match = "/emulator/" },
+  { name = "Projects", path = "@/projects/_index.md", match = "/projects/" },
+  { name = "Docs", path = "@/docs/_index.md", match = "/docs/" },
+  { name = "FAQ", path = "@/faq.md", match = "/faq/" },
+  { name = "About & licensing", path = "@/ethos.md", match = "/ethos/" },
+]
+issues = "https://github.com/EBonura/PSoXide-emulator/issues"
+contributing = "https://github.com/EBonura/PSoXide-emulator/blob/main/CONTRIBUTING.md"

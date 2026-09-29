@@ -1,0 +1,66 @@
+# Build the site with Zola and deploy it to GitHub Pages.
+# Pages uses the GitHub Actions deployment source.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # Pin the exact release and its published sha256 (from the GitHub release asset digest).
+  ZOLA_VERSION: v0.23.6
+  ZOLA_SHA256: 8f5132b3522412d04e395e0b25f6d68613ad272a873e54a2b3ebf664873024a4
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zola
+        run: |
+          curl -sSL -o zola.tgz "https://github.com/getzola/zola/releases/download/${ZOLA_VERSION}/zola-${ZOLA_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZOLA_SHA256}  zola.tgz" | sha256sum -c -
+          tar xzf zola.tgz zola
+          sudo mv zola /usr/local/bin/zola
+
+      - name: Check data files are current
+        # The JSON the pages read must match what the importers produce from the committed sources.
+        run: |
+          python3 scripts/import_emu_bench.py
+          python3 scripts/import_compat.py
+          git diff --exit-code data/
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build
+        run: zola build --base-url "${{ steps.pages.outputs.base_url }}"
+
+      - name: Check links, assets, anchors and publication flags
+        run: python3 scripts/check_site.py --base-url "${{ steps.pages.outputs.base_url }}"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block content %}
+{% set bench = load_data(path="data/emu-bench.json") %}
+{% set compat = load_data(path="data/compat.json") %}
+{% set projects = load_data(path="data/projects.toml") %}
+{% set faq = load_data(path="data/faq.toml") %}
+
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow">Rust for the original PlayStation</span>
+      <h1>Development tools for the original PlayStation.</h1>
+      <p class="lede">PSoXide is a Rust SDK, engine, scene editor and emulator for PS1 software. Build for the console, then test and debug on desktop or in the browser. The emulator uses its own kernel and requires no BIOS file.</p>
+      <div class="btn-row">
+        <a class="btn btn-primary" href="{{ config.extra.web_player }}">Play in your browser</a>
+        <a class="btn" href="{{ get_url(path='@/docs/first-ps1-program.md') }}">Build your first PS1 program</a>
+      </div>
+    </div>
+    <figure class="hero-shot">
+      <div class="screen"><img src="{{ get_url(path='img/shots/nitroxide-hires.jpg') }}" alt="NitroXide: a car flies towards the ball in a sunset stadium" width="640" height="480"></div>
+      <figcaption>NitroXide, an original PSoXide game, through the emulator's hardware renderer.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="section" id="faq" aria-labelledby="faq-title">
+  <div class="wrap">
+    <div class="section-head row-head">
+      <h2 id="faq-title">Quick answers</h2>
+      <a href="{{ get_url(path='@/faq.md') }}">All questions →</a>
+    </div>
+    <div class="qa-grid">
+      {{<faq items={[i for i in faq.item if i.home]} bench={bench} compat={compat} />}}
+    </div>
+    <script>
+      // Phones get the questions as a compact list; tap one to read the answer.
+      if (matchMedia("(max-width: 719px)").matches)
+        document.querySelectorAll("#faq details[open]").forEach(function (d) { d.open = false; });
+    </script>
+  </div>
+</section>
+
+<section class="section" id="toolkit">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>The toolkit</h2>
+      <p>Write Rust programs with the SDK or build scenes in the editor. Create a disc image, test it in the emulator and run it on a PlayStation that supports burned CD-Rs.</p>
+    </div>
+    <div class="grid four">
+      <a class="card pillar" href="{{ config.extra.repo_sdk }}">
+        <div class="screen native"><img src="{{ get_url(path='img/shots/hello-tri.png') }}" alt="The hello-tri example: one shaded triangle on dark blue" width="320" height="240" loading="lazy"></div>
+        <div class="body"><h3>SDK</h3><p>Rust APIs for graphics, audio, controllers, CDs and memory cards, plus fixed-point maths and disc-building tools.</p><span class="repo">EBonura/PSoXide</span></div>
+      </a>
+      <a class="card pillar" href="{{ config.extra.repo_editor }}">
+        <div class="screen"><img src="{{ get_url(path='img/shots/editor.jpg') }}" alt="The PSoXide editor with a character model in the 3D viewport" width="1200" height="779" loading="lazy"></div>
+        <div class="body"><h3>Editor and engine</h3><p>Build and test scenes with geometry, materials, animation, audio and UI, then export them as a PS1 disc image.</p><span class="repo">EBonura/PSoXide-editor</span></div>
+      </a>
+      <a class="card pillar" href="{{ config.extra.repo_emulator }}">
+        <div class="screen"><img src="{{ get_url(path='img/shots/emulator.jpg') }}" alt="The PSoXide emulator running the Celeste Classic Collection menu" width="1200" height="779" loading="lazy"></div>
+        <div class="body"><h3>Emulator</h3><p>For playing, debugging and profiling, on desktop and in the browser. Its own kernel boots discs.</p><span class="repo">EBonura/PSoXide-emulator</span></div>
+      </a>
+      <a class="card pillar" href="{{ config.extra.demo_disc }}">
+        <div class="screen native"><img src="{{ get_url(path='img/shots/demo-disc.png') }}" alt="The PSoXide Demo Disc menu" width="640" height="480" loading="lazy"></div>
+        <div class="body"><h3>Demo disc</h3><p>A collection of games and examples with a launch menu, available for the console and browser player.</p><span class="repo">EBonura/PSoXide-demo-disc</span></div>
+      </a>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="made-with">
+  <div class="wrap">
+    <div class="section-head row-head">
+      <h2>Made with PSoXide</h2>
+      <a href="{{ get_url(path='@/projects/_index.md') }}">All projects →</a>
+    </div>
+    <div class="grid four">
+      {% for p in projects.original[:4] %}
+      <a class="card" href="{{ p.itch or p.repo }}">
+        <div class="screen native"><img src="{{ get_url(path=p.shot) }}" alt="{{ p.shot_alt }}" width="320" height="240" loading="lazy"></div>
+        <h3>{{ p.name }}</h3>
+        <p>{{ p.tagline }}</p>
+      </a>
+      {% endfor %}
+    </div>
+    <h3 class="subhead">Game ports</h3>
+    <ul class="port-list">
+      {% for p in projects.port %}
+      <li><strong>{{ p.name }}.</strong> {{ p.hook }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+{% endblock content %}
