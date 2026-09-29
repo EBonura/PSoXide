@@ -40,6 +40,8 @@ Follow the [writing guide and research notes](WRITING.md) for site copy.
   disabled in `config.toml` until a new comparison is ready.
 - `data/accuracy.toml`: no cross-emulator accuracy results yet. Placeholder rows
   remain out of the rendered site.
+- `data/sdk.json`: the SDK crate and example index, generated from `../sdk/README.md`
+  by `python3 scripts/import_sdk.py`. Edit the README, not the JSON.
 - `data/media-provenance.toml`: screenshot sources and fresh capture hashes.
 
 Use original captures, label emulator versus console evidence, and verify that
