@@ -443,3 +443,10 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   *, *::before, *::after { transition: none !important; animation: none !important; }
   a.card:hover, .btn:hover { transform: none; }
 }
+
+/* Demo-disc contents and the games reached through collection menus. */
+.disc-contents { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem 2rem; padding-left: 1.2rem; margin: 0 0 1.2rem; }
+.disc-contents > li > a { font-weight: 600; }
+.disc-contents ul { padding-left: 1.2rem; margin-top: 0.35rem; font-size: 0.9rem; }
+.collection-links { padding-left: 1.2rem; margin: 0; font-size: 0.9rem; }
+@media (max-width: 719px) { .disc-contents { grid-template-columns: 1fr; } }

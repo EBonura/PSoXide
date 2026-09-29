@@ -44,7 +44,7 @@ sha256 = "5cd227a5c7b56c2e988b50c8e58f398257ac586b135ee174979ecbef0386e4cc"
 files = ["nitroxide-hires.jpg"]
 source = "nitroxide/readme-assets/gameplay-sunset-aerial.png (resized)"
 [[retained]]
-files = ["celeste.png", "psxcel.png", "ghpsx.png"]
+files = ["psxcel.png", "ghpsx.png"]
 source = "psx-demo-disc/assets/shots/"
 [[retained]]
 files = ["cortex.png"]
@@ -58,3 +58,52 @@ source = "psx-demo-disc/assets/readme/arcade-selector.png"
 [[retained]]
 files = ["editor.jpg", "emulator.jpg"]
 source = "PSoXide-editor/assets/media/readme/ (resized)"
+
+# Existing emulator captures, reviewed for the projects inventory update.
+# These illustrate each program, not a new capture of the v0.40 release.
+[[retained]]
+files = ["breakout.png"]
+source = "psx-demo-disc/assets/shots/breakout.png"
+sha256 = "ebd59133147279c1c0e0a32e87611fb927f98cb811a9bded34440d629fc99b7e"
+[[retained]]
+files = ["invaders.png"]
+source = "psx-demo-disc/assets/shots/invaders.png"
+sha256 = "e455bfa9269e3503b7614eef61170c117e7c35783fde3c7382a768a8b4463a31"
+[[retained]]
+files = ["pong.png"]
+source = "psx-demo-disc/assets/shots/pong.png"
+sha256 = "1924a0b4801e5a9f6891002493303eaa2b5f571a319d015152b5b9640866c967"
+[[retained]]
+files = ["hwtests.png"]
+source = "psx-demo-disc/assets/shots/hwtests.png"
+sha256 = "78c0c35beb0df19f2cf7beee6e8096592241a89608b484b8c138302bb6fb138f"
+
+[[capture]]
+file = "static/img/shots/celeste-collection.png"
+source = "game library: Celeste Classic Collection/Celeste Classic Collection.cue"
+frame = "celeste-classic/tick-000360.ppm"
+steps = 300000000
+press = "500:cross:20,800:cross:20"
+interval = 180
+sha256 = "4769c518c2c4e3bd8279c15f02259a4d9aee1bb6a35939c4ad95dd2b62f66409"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
+
+[[capture]]
+file = "static/img/shots/celeste.png"
+source = "game library: Celeste Classic Collection/Celeste Classic Collection.cue"
+frame = "celeste-classic-long/tick-001500.ppm"
+steps = 500000000
+press = "500:cross:20,800:cross:20"
+interval = 300
+sha256 = "ebe396c988bddd3b595d42594f2035741335c3a804393bec1f7cba310afe5ab5"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
+
+[[capture]]
+file = "static/img/shots/celeste2.png"
+source = "game library: Celeste Classic Collection/Celeste Classic Collection.cue"
+frame = "celeste-2/tick-001500.ppm"
+steps = 500000000
+press = "430:right:12,500:cross:20,800:cross:20"
+interval = 300
+sha256 = "dcc3dace0f760f8c19a3ad5546d027dbb27302a48460b206ec81853228e8b252"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
