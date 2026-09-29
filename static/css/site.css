@@ -450,3 +450,7 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .disc-contents ul { padding-left: 1.2rem; margin-top: 0.35rem; font-size: 0.9rem; }
 .collection-links { padding-left: 1.2rem; margin: 0; font-size: 0.9rem; }
 @media (max-width: 719px) { .disc-contents { grid-template-columns: 1fr; } }
+#disc-contents, #collection-games, .card[id] { scroll-margin-top: 76px; }
+@media (max-width: 719px) {
+  #disc-contents, #collection-games, .card[id] { scroll-margin-top: 180px; }
+}
