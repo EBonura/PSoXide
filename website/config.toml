@@ -1,6 +1,7 @@
 # Zola config. Build with `zola build`, preview with `zola serve`.
-# CI also passes the Pages URL with --base-url (see .github/workflows/pages.yml).
-base_url = "https://ebonura.github.io"
+# CI also passes the Pages URL with --base-url (see .github/workflows/website.yml
+# at the repository root).
+base_url = "https://ebonura.github.io/PSoXide"
 title = "PSoXide"
 description = "A Rust toolkit for the original PlayStation: SDK, engine and editor, and an emulator that needs no BIOS."
 default_language = "en"

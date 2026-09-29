@@ -55,17 +55,12 @@ def main():
             assert browser.evaluate('document.documentElement.dataset.theme') == theme, 'theme did not persist'
             browser.open(base + '/emulator/', 1440, 900)
             assert browser.evaluate('location.pathname') == '/emulator/compare/', 'emulator redirect'
-            # Previously shared project-site links keep query strings and anchors.
-            for route in ('/', '/projects/', '/docs/', '/docs/first-ps1-program/', '/faq/', '/ethos/', '/emulator/', '/emulator/compare/'):
-                browser.open(base + '/psoxide-site' + route + '?from=old#videos', 390, 844, mobile=True)
-                expected = '/emulator/compare/' if route == '/emulator/' else route
-                assert browser.evaluate('location.pathname + location.search + location.hash') == expected + '?from=old#videos', ('legacy redirect', route)
         finally:
             browser.close()
             httpd.shutdown()
     (ROOT / 'review').mkdir(exist_ok=True)
     (ROOT / 'review/browser-check.json').write_text(json.dumps(results, indent=2) + '\n')
-    print(f'{len(results)} page/viewport/theme checks passed; FAQ, theme persistence and current/legacy redirects passed')
+    print(f'{len(results)} page/viewport/theme checks passed; FAQ, theme persistence and emulator redirect passed')
 
 
 if __name__ == '__main__':
