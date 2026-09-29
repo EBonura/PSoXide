@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check built HTML, assets and fragments, including GitHub Pages subpaths.
 
-Usage: python3 scripts/check_site.py --base-url https://ebonura.github.io/psoxide-site/
+Usage: python3 scripts/check_site.py --base-url https://ebonura.github.io/
 External availability is deliberately checked separately from deterministic CI.
 """
 import argparse

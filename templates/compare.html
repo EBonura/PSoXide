@@ -16,7 +16,7 @@
   <header class="page-head">
     <span class="eyebrow">Emulator</span>
     <h1>{{ page.title }}</h1>
-    <p class="lede">PSoXide has the smallest memory footprint of the four emulators we measured, and it's the only one that boots these games without a BIOS. Speed numbers go up once the current speed work lands.</p>
+    <p class="lede">Recorded memory measurements, compatibility results and hardware validation for the PSoXide emulator. The results below describe specific builds and test conditions. Speed results are not currently published on this site.</p>
     <nav class="jumpbar" aria-label="On this page">
       {% if config.extra.show_speed %}<a href="#performance">Speed and memory</a><a href="#progress">Progress</a><a href="#per-game">Per game</a>{% endif %}<a href="#accuracy">Accuracy</a><a href="#compatibility">Compatibility</a><a href="#method">Method</a>
     </nav>
@@ -24,19 +24,19 @@
 
   <div class="grid three">
     <div class="card">
-      <span class="badge">Memory: leads</span>
+      <span class="badge">Headless memory</span>
       <span class="stat-num">{{ current.mean.mem | round(precision=1) }}<small>MB</small></span>
       <p>Headless footprint at 1× speed for build <code>{{ current.build }}</code>. The next smallest is {{ smallest_peer.label }} at {{ smallest_peer.mean.mem | round | int }}&nbsp;MB. PSoXide reads the disc as the game asks for it instead of loading the whole image.</p>
     </div>
     {% if config.extra.show_speed %}
     <div class="card">
-      <span class="badge">Speed: behind</span>
+      <span class="badge">Emulation speed</span>
       <span class="stat-num">{{ current.mean.fps | round | int }}<small>fps per CPU-s</small></span>
-      <p>Other interpreters manage {{ slowest_peer_interp.mean.fps | round | int }} to {{ fastest_peer_interp.mean.fps | round | int }}. PSoXide still runs {{ current.mean.headroom }}× faster than real time on one core on average. A cached interpreter and a recompiler are next.</p>
+      <p>The other measured interpreters ran at {{ slowest_peer_interp.mean.fps | round | int }} to {{ fastest_peer_interp.mean.fps | round | int }}. PSoXide ran {{ current.mean.headroom }}× faster than real time on one core on average.</p>
     </div>
     {% endif %}
     <div class="card">
-      <span class="badge">BIOS: none</span>
+      <span class="badge">BIOS requirement</span>
       <span class="stat-num">0<small>files</small></span>
       <p>The others were given a Sony BIOS (SCPH-5501 for NTSC, SCPH-5502 for PAL) with fast boot. PSoXide booted every game on its own HLE kernel.</p>
     </div>
@@ -46,7 +46,7 @@
   <section class="section" id="performance">
     <div class="section-head">
       <h2>Speed, CPU and memory</h2>
-      <p>Geometric mean over {% for g in bench.average_over %}{% set gm = [x for x in bench.games if x.id == g] | first %}{{ gm.name }}{% if not loop.last %}{% if loop.index == bench.average_over | length - 1 %} and {% else %}, {% endif %}{% endif %}{% endfor %}. Each number is the median of 3 runs. Compare PSoXide with the solid interpreter bars: it has no recompiler yet, so the hatched rows are there for context, not as a like-for-like race.</p>
+      <p>Geometric mean over {% for g in bench.average_over %}{% set gm = [x for x in bench.games if x.id == g] | first %}{{ gm.name }}{% if not loop.last %}{% if loop.index == bench.average_over | length - 1 %} and {% else %}, {% endif %}{% endif %}{% endfor %}. Each number is the median of 3 runs. Compare PSoXide with the solid interpreter bars: it has no recompiler yet, and the hatched rows show results from recompilers for context.</p>
     </div>
     <div class="grid" style="gap:18px">
       <div class="chart-card">
@@ -74,7 +74,7 @@
     <div class="split">
       <div>
         <h2>Three builds of PSoXide</h2>
-        <p>Two leanness passes took the interpreter from {{ history[0].mean.fps | round | int }} to {{ history[2].mean.fps | round | int }} frames per CPU-second with bit-identical frames. Most of its time goes to the per-instruction step and the cycle scheduler it advances after every instruction, which is what keeps its timing close to the console.</p>
+        <p>Two optimization passes increased throughput from {{ history[0].mean.fps | round | int }} to {{ history[2].mean.fps | round | int }} frames per CPU-second with bit-identical frames. Most of its time goes to the per-instruction step and the cycle scheduler it advances after every instruction, which is what keeps its timing close to the console.</p>
         <p>Memory fell for a different reason: {{ history[2].build }} stopped loading the whole disc image into RAM. Before that, the footprint followed the size of the disc.</p>
       </div>
       <div class="grid" style="gap:18px">
@@ -162,7 +162,7 @@
     </div>
     {% endfor %}
     {% endif %}
-    <p class="muted small" style="margin-top:1rem">PSoXide's own check against silicon: a hardware test battery runs on a real PlayStation, the results come back through a video recording, and every value is compared with what the emulator produces. Gaps found that way are written up with how to reproduce them in <a href="{{ config.extra.repo_emulator }}/blob/main/docs/emulator-accuracy-from-silicon.md">emulator-accuracy-from-silicon.md</a>.</p>
+    <p class="muted small" style="margin-top:1rem">Hardware validation: a hardware test battery runs on a real PlayStation, the results come back through a video recording, and every value is compared with what the emulator produces. Gaps found that way are written up with how to reproduce them in <a href="{{ config.extra.repo_emulator }}/blob/main/docs/emulator-accuracy-from-silicon.md">emulator-accuracy-from-silicon.md</a>.</p>
   </section>
 
   <section class="section" id="compatibility">
@@ -193,14 +193,14 @@
         <h2 style="margin-top:0">How it was measured</h2>
         <p>All four emulators ran headless on one Apple M3 Max MacBook Pro (14 cores, 36 GB, macOS 26.6.2, on AC power). Nothing opened a window or played audio, and each rendered in software at native resolution. Every game started from power-on with the same pad schedule PSoXide's compatibility runs use, and captured frames confirmed each emulator had reached the same part of the game before the measuring window opened.</p>
         <ul>
-          <li><strong>Frames per CPU-second:</strong> emulated frames in a 1200-frame window (600 for Resident Evil 2) at unlimited speed, divided by the process's user plus system CPU time. Every thread counts, so an emulator that renders on a second thread pays for it.</li>
+          <li><strong>Frames per CPU-second:</strong> emulated frames in a 1200-frame window (600 for Resident Evil 2) at unlimited speed, divided by the process's user plus system CPU time. The calculation includes CPU time from every thread, including rendering threads.</li>
           <li><strong>CPU and memory at 1×:</strong> each emulator paced to the console's field rate (59.83 Hz NTSC, 49.76 Hz PAL). CPU is CPU time over wall time; memory is the median physical footprint, sampled every 0.25 s.</li>
           <li><strong>Real-time headroom:</strong> frames per CPU-second divided by {{ bench.field_hz }}.</li>
           <li><strong>Versions:</strong> PSoXide {% for e in history %}<code>{{ e.build }}</code>{% if not loop.last %}, {% endif %}{% endfor %} (release profile), DuckStation <code>459a6fc</code>, Beetle PSX HW 0.9.44.1 (<code>ee042b7</code>) through a minimal libretro frontend, PCSX-Redux <code>1b7a4f1d</code> in <code>-cli</code> mode.</li>
         </ul>
         <h3>Caveats</h3>
         <ul>
-          <li>Memory is measured without a frontend for every emulator, so real use costs more once a window, a GPU and audio are added. DuckStation's number includes about 360 MB of graphics allocations its regression runner keeps open; PSoXide would still be the smallest without them.</li>
+          <li>Memory is measured without a frontend for every emulator, so real use costs more once a window, a GPU and audio are added. DuckStation's number includes about 360 MB of graphics allocations its regression runner keeps open.</li>
           <li>Disc data read on demand sits in the OS file cache, outside the process, for every emulator that streams. None of the footprints count it.</li>
           <li>Boot timing differs slightly between a BIOS boot and PSoXide's HLE boot, so Tekken 3 picks a different opponent and stage on each emulator. The other games reach the same scene with small differences.</li>
           <li>PCSX-Redux paces itself to real time while CD audio streams, so in Tekken 3, WipEout 2097 and Resident Evil 2 its speed was measured at 1×, not unlimited.</li>

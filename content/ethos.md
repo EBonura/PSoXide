@@ -1,14 +1,14 @@
 +++
-title = "Ethos and legal"
+title = "About and licensing"
 description = "Why PSoXide needs no BIOS, what it will and won't distribute, and how the ports handle game data that belongs to other people."
 [extra]
-eyebrow = "Ethos"
+eyebrow = "About PSoXide"
 +++
 
 ## The short version
 
 - PSoXide contains no Sony code or data and doesn't load a BIOS. Its own kernel boots discs.
-- No commercial game, disc image or game data is distributed by the project, and this site won't help you find one.
+- No commercial game, disc image or game data is distributed by the project, and the browser player includes only the public demo disc.
 - Half-Life, Counter-Strike and Hollow Knight ports are source-only or private. You build them from a copy of the game you own.
 - The Quake port ships the shareware episode together with its licence, which restricts screenshots, so this site shows none.
 - Celeste Classic Collection is an unofficial fan port, credited to its creators.
@@ -17,12 +17,12 @@ eyebrow = "Ethos"
 
 ## What PSoXide is for
 
-PSoXide is built to get the last bit of performance out of the original PlayStation. It isn't about porting games for their own sake. It's about making ports that looked impossible work on a 33&nbsp;MHz machine with 2&nbsp;MB of RAM, and about finding out where the hardware's real limits are.
+PSoXide provides Rust tools for developing and running software on the original PlayStation. The SDK, engine, editor and emulator are developed alongside games and porting experiments, which help test their behaviour within the console's 33&nbsp;MHz CPU and 2&nbsp;MB of main RAM.
 
-A few rules follow from that:
+The project uses the following practices:
 
-- **The console is the reference.** Emulator checks complement testing on original hardware; they don't replace it. When the emulator and a real PlayStation disagree, the PlayStation is right.
-- **Numbers are measured, not claimed.** The [comparison page](@/emulator/compare.md) ties its figures to recorded builds, explains the limits of the benchmark and separates measured results from work still in progress.
+- **Hardware testing.** Emulator checks complement testing on original hardware; they don't replace it. When the emulator and a real PlayStation disagree, the PlayStation is right.
+- **Recorded measurements.** The [comparison page](@/emulator/compare.md) ties its figures to recorded builds, explains the limits of the benchmark and separates measured results from work still in progress.
 - **No firmware, no game data.** PSoXide doesn't need Sony's BIOS and can't load one. It does not distribute commercial disc images. Half-Life, Counter-Strike and Hollow Knight require your own game data; Quake uses the separately licensed shareware episode.
 - **Source and provenance.** The SDK, emulator and editor source is public under GPL-2.0-or-later, with provenance written down. Some experiments have no public release yet.
 
@@ -81,7 +81,7 @@ PlayStation is a trademark of Sony Interactive Entertainment Inc. Half-Life and 
 
 ## Contact
 
-If you own something that appears here and think it shouldn't, open an issue at [github.com/EBonura/psoxide-site/issues](https://github.com/EBonura/psoxide-site/issues) and it will be looked at.
+If you own something that appears here and think it shouldn't, open an issue at [github.com/EBonura/ebonura.github.io/issues](https://github.com/EBonura/ebonura.github.io/issues) and it will be looked at.
 
 
 ## Not legal advice
