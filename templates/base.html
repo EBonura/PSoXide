@@ -19,7 +19,7 @@
   <meta name="color-scheme" content="dark light">
   <link rel="icon" href="{{ get_url(path='favicon.png') }}" type="image/png">
   <link rel="apple-touch-icon" href="{{ get_url(path='img/brand/apple-touch-icon.png') }}">
-  <link rel="stylesheet" href="{{ get_url(path='css/site.css') }}">
+  <link rel="stylesheet" href="{{ get_url(path='css/site.css', cachebust=true) }}">
   <script>
     // Remembered theme choice. Storage can throw (private mode); the page works without it.
     try { var t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
