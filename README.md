@@ -1,15 +1,17 @@
 # PSoXide website
 
 The public site for the PSoXide SDK, editor, emulator and PlayStation projects:
-[ebonura.github.io/psoxide-site](https://ebonura.github.io/psoxide-site/).
+[ebonura.github.io](https://ebonura.github.io/).
 
 Built with **Zola 0.23.6**. Python scripts require Python 3.11 or newer.
+
+Next work: [first-game tutorial, embedded emulator and measurements](ROADMAP.md).
 
 ```sh
 zola serve
 # Production build and deterministic checks:
 zola build
-python3 scripts/check_site.py --base-url https://ebonura.github.io/psoxide-site/
+python3 scripts/check_site.py --base-url https://ebonura.github.io/
 ```
 
 The Pages workflow checks generated data, builds with the actual Pages base URL,
@@ -17,6 +19,8 @@ checks internal links, assets, fragments and review flags, then deploys on pushe
 to `main`. No browser player or game data is hosted here; Play links to itch.io.
 
 ## Editing content
+
+Follow the [writing guide and research notes](WRITING.md) for site copy.
 
 - `content/`: guides and prose.
 - `data/projects.toml`: project descriptions, public links and screenshots.
@@ -48,13 +52,17 @@ python3 scripts/usability_check.py --set after --json review/usability.json
 Each accepts `--zola /path/to/zola`. Review outputs stay under ignored `review/`.
 The browser check covers seven pages at four widths in both themes, broken
 images, horizontal overflow, JavaScript errors, FAQ deep links, theme persistence
-and the emulator redirect. The screenshot script produces 28 full-page captures
+and the emulator and legacy URL redirects. The screenshot script produces 28 full-page captures
 and a contact sheet. These are browser checks, not a new emulator-accuracy run.
 
 ## Media credits
 
 Game and editor captures belong to the credited projects and their respective
 asset creators. Celeste Classic Collection is an unofficial fan port; see the
-site's ethos page for attribution. The VT323 font is by the VT323 Project Authors
+site's about and licensing page for attribution. The VT323 font is by the VT323 Project Authors
 and is distributed with its [SIL Open Font License](static/fonts/OFL.txt).
 Videos link to [Bonnie Studios](https://www.youtube.com/@bonnie-studios-dev).
+
+The former `/psoxide-site/` routes redirect to the root site. Their small HTML
+files in `static/psoxide-site/` retain query strings and anchors when JavaScript
+is enabled, with a meta-refresh and link fallback. Keep these for shared links.

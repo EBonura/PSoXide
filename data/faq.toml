@@ -26,7 +26,7 @@ id = "browser"
 group = "playing"
 home = true
 q = "Can I play it in my browser?"
-a = "Yes. The PSoXide player runs the public demo disc on its itch.io page. Nothing to install and no BIOS to find."
+a = "Yes. The PSoXide player runs the public demo disc on its itch.io page. It requires no installation or BIOS file."
 link_text = "Open the browser player"
 link = "https://bonnie-studios.itch.io/psoxide"
 
@@ -53,7 +53,7 @@ id = "speed"
 group = "emulator"
 home = true
 q = "How fast is it compared to DuckStation?"
-a = "Speed numbers against DuckStation, Beetle PSX and PCSX-Redux go up here once the current speed work lands. In the recorded headless benchmark, memory use was [[psx_mem]] MB against DuckStation's [[ds_mem]] MB; desktop use includes additional graphics and audio costs."
+a = "Speed comparisons are not currently published on this site. In the recorded headless benchmark, memory use was [[psx_mem]] MB against DuckStation's [[ds_mem]] MB; desktop use includes additional graphics and audio costs."
 link_text = "Full comparison"
 link = "@/emulator/compare.md"
 
@@ -63,7 +63,7 @@ group = "project"
 home = true
 q = "Is this legal?"
 a = "PSoXide contains no Sony code or data and never distributes commercial games. Half-Life, Counter-Strike and Hollow Knight use your own copy; Quake uses separately licensed shareware data. It isn't affiliated with or endorsed by Sony."
-link_text = "Ethos and legal"
+link_text = "About and licensing"
 link = "@/ethos.md"
 
 [[item]]
@@ -115,7 +115,7 @@ link = "@/projects/_index.md#videos"
 id = "accuracy"
 group = "emulator"
 q = "How accurate is it?"
-a = "We don't have a cross-emulator accuracy comparison yet, so we don't claim one. PSoXide is checked against a real console with its own hardware test battery, and every gap found that way is written up."
+a = "A cross-emulator accuracy comparison is not available yet. PSoXide is tested against a real console using a hardware test battery, with documented differences and reproduction steps."
 link_text = "Accuracy section"
 link = "@/emulator/compare.md#accuracy"
 
