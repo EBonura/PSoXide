@@ -17,7 +17,7 @@ These tables are generated from the [SDK's README](https://github.com/EBonura/PS
 
 ## Examples
 
-Each example is its own small workspace. Build any of them into a disc image with `make disc EXAMPLE=<name>`, as in the [first-program walkthrough](@/docs/first-ps1-program.md). The first six are the ones to read when learning. The rest are console tests: they exist to check a specific piece of the runtime or the hardware and print a result, so they're more useful as references than as starting points. `hello-cdda`, `cdda-read-contention`, `hello-fmv` and `hello-pack` need more on the disc than the program (CD audio tracks, a movie or a `WORLD.PAK`), which the generic `disc` target doesn't add.
+Each example is its own small workspace. Build any of them into a disc image with `make disc EXAMPLE=<name>`, as in the [first-program walkthrough](@/docs/first-ps1-program.md). The first six are the ones to read when learning. The rest are console tests: they exist to check a specific piece of the runtime or the hardware and print a result, so they're more useful as references than as starting points. [Checking code against PlayStation hardware](@/docs/hardware-checks.md) explains what several of them found. `hello-cdda`, `cdda-read-contention`, `hello-fmv` and `hello-pack` need more on the disc than the program (CD audio tracks, a movie or a `WORLD.PAK`), which the generic `disc` target doesn't add.
 
 {{<sdk_index what="examples" />}}
 

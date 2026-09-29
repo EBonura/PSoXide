@@ -29,7 +29,7 @@ repo_demo_disc = "https://github.com/EBonura/PSoXide-demo-disc"
 # Main navigation. Pages that don't exist yet stay out of the nav.
 # `path` is a content file; `match` marks the item current for paths under it.
 nav = [
-  { name = "Emulator", path = "@/emulator/compare.md", match = "/emulator/" },
+  { name = "Emulator", path = "@/emulator/_index.md", match = "/emulator/" },
   { name = "Projects", path = "@/projects/_index.md", match = "/projects/" },
   { name = "Docs", path = "@/docs/_index.md", match = "/docs/" },
   { name = "FAQ", path = "@/faq.md", match = "/faq/" },
