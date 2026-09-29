@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block content %}
+{% set bench = load_data(path="data/emu-bench.json") %}
+{% set acc = load_data(path="data/accuracy.toml") %}
+{% set compat = load_data(path="data/compat.json") %}
+{% set current = [e for e in bench.emulators if e.role == "current"] | first %}
+{% set peers = [e for e in bench.emulators if e.role == "peer"] %}
+{% set peer_interp = [e for e in peers if e.core == "interpreter"] %}
+{% set main_rows = [e for e in bench.emulators if e.role != "history"] %}
+{% set history = [e for e in bench.emulators if e.psoxide] | reverse %}
+{% set smallest_peer = peers | sort(attribute="mean.mem") | first %}
+{% set slowest_peer_interp = peer_interp | sort(attribute="mean.fps") | first %}
+{% set fastest_peer_interp = peer_interp | sort(attribute="mean.fps") | last %}
+
+<div class="wrap">
+  <header class="page-head">
+    <span class="eyebrow">Emulator</span>
+    <h1>{{ page.title }}</h1>
+    <p class="lede">PSoXide has the smallest memory footprint of the four emulators we measured, and it's the only one that boots these games without a BIOS. Speed numbers go up once the current speed work lands.</p>
+    <nav class="jumpbar" aria-label="On this page">
+      {% if config.extra.show_speed %}<a href="#performance">Speed and memory</a><a href="#progress">Progress</a><a href="#per-game">Per game</a>{% endif %}<a href="#accuracy">Accuracy</a><a href="#compatibility">Compatibility</a><a href="#method">Method</a>
+    </nav>
+  </header>
+
+  <div class="grid three">
+    <div class="card">
+      <span class="badge">Memory: leads</span>
+      <span class="stat-num">{{ current.mean.mem | round(precision=1) }}<small>MB</small></span>
+      <p>Headless footprint at 1× speed for build <code>{{ current.build }}</code>. The next smallest is {{ smallest_peer.label }} at {{ smallest_peer.mean.mem | round | int }}&nbsp;MB. PSoXide reads the disc as the game asks for it instead of loading the whole image.</p>
+    </div>
+    {% if config.extra.show_speed %}
+    <div class="card">
+      <span class="badge">Speed: behind</span>
+      <span class="stat-num">{{ current.mean.fps | round | int }}<small>fps per CPU-s</small></span>
+      <p>Other interpreters manage {{ slowest_peer_interp.mean.fps | round | int }} to {{ fastest_peer_interp.mean.fps | round | int }}. PSoXide still runs {{ current.mean.headroom }}× faster than real time on one core on average. A cached interpreter and a recompiler are next.</p>
+    </div>
+    {% endif %}
+    <div class="card">
+      <span class="badge">BIOS: none</span>
+      <span class="stat-num">0<small>files</small></span>
+      <p>The others were given a Sony BIOS (SCPH-5501 for NTSC, SCPH-5502 for PAL) with fast boot. PSoXide booted every game on its own HLE kernel.</p>
+    </div>
+  </div>
+
+  {% if config.extra.show_speed %}
+  <section class="section" id="performance">
+    <div class="section-head">
+      <h2>Speed, CPU and memory</h2>
+      <p>Geometric mean over {% for g in bench.average_over %}{% set gm = [x for x in bench.games if x.id == g] | first %}{{ gm.name }}{% if not loop.last %}{% if loop.index == bench.average_over | length - 1 %} and {% else %}, {% endif %}{% endif %}{% endfor %}. Each number is the median of 3 runs. Compare PSoXide with the solid interpreter bars: it has no recompiler yet, so the hatched rows are there for context, not as a like-for-like race.</p>
+    </div>
+    <div class="grid" style="gap:18px">
+      <div class="chart-card">
+        <h3>Emulation speed</h3>
+        <p class="sub">Emulated frames per second of CPU time, all threads counted. Higher is better.</p>
+        {{<hbar rows={main_rows} metric="fps" max={bench.axis.fps} title="Frames per CPU-second" />}}
+        {{<legend />}}
+      </div>
+      <div class="grid two">
+        <div class="chart-card">
+          <h3>CPU at 1× speed</h3>
+          <p class="sub">Percent of one core while paced to the console's field rate. Lower is better.</p>
+          {{<hbar rows={main_rows} metric="cpu" max={bench.axis.cpu} unit="%" title="CPU use at 1x speed" />}}
+        </div>
+        <div class="chart-card">
+          <h3>Memory at 1× speed</h3>
+          <p class="sub">Median physical footprint, MB. Lower is better.</p>
+          {{<hbar rows={main_rows} metric="mem" max={bench.axis.mem} title="Memory footprint at 1x speed" />}}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="progress">
+    <div class="split">
+      <div>
+        <h2>Three builds of PSoXide</h2>
+        <p>Two leanness passes took the interpreter from {{ history[0].mean.fps | round | int }} to {{ history[2].mean.fps | round | int }} frames per CPU-second with bit-identical frames. Most of its time goes to the per-instruction step and the cycle scheduler it advances after every instruction, which is what keeps its timing close to the console.</p>
+        <p>Memory fell for a different reason: {{ history[2].build }} stopped loading the whole disc image into RAM. Before that, the footprint followed the size of the disc.</p>
+      </div>
+      <div class="grid" style="gap:18px">
+        <div class="chart-card">
+          <h3>Speed by build</h3>
+          <p class="sub">Frames per CPU-second. Higher is better.</p>
+          {{<hbar rows={history} metric="fps" max={bench.axis_history.fps} title="PSoXide speed by build" />}}
+        </div>
+        <div class="chart-card">
+          <h3>Memory by build</h3>
+          <p class="sub">MB at 1× speed. Lower is better.</p>
+          {{<hbar rows={history} metric="mem" max={bench.axis_history.mem} title="PSoXide memory by build" />}}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="per-game">
+    <div class="section-head">
+      <h2>Per game</h2>
+      <p>Medians, with the lowest and highest of the runs underneath. The spread is up to about 20% for the interpreters because the machine was shared with other work.</p>
+    </div>
+    {% set tables = [
+      {"key": "fps", "title": "Frames per CPU-second (higher is better)", "open": true, "dec": 0},
+      {"key": "cpu", "title": "CPU at 1× speed, % of one core (lower is better)", "open": false, "dec": 1},
+      {"key": "mem", "title": "Memory at 1× speed, MB (lower is better)", "open": false, "dec": 1}
+    ] %}
+    {% for t in tables %}
+    <details {% if t.open %}open{% endif %} style="margin-bottom:14px">
+      <summary style="cursor:pointer;font-weight:600;margin-bottom:10px">{{ t.title }}</summary>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Emulator</th>{% for g in bench.games %}<th class="num">{{ g.name }}</th>{% endfor %}</tr></thead>
+          <tbody>
+          {% for e in main_rows %}
+            <tr{% if e.psoxide %} class="is-psx"{% endif %}>
+              <td>{{ e.label }}</td>
+              {% for pg in e.per_game %}
+              {% if pg.measured %}
+              {% set lo = t.key ~ "_min" %}{% set hi = t.key ~ "_max" %}
+              {% if t.dec == 0 %}<td class="num">{{ pg[t.key] | round | int }}<span class="range">{{ pg[lo] | round | int }}–{{ pg[hi] | round | int }}</span></td>{% else %}<td class="num">{{ pg[t.key] | round(precision=t.dec) }}<span class="range">{{ pg[lo] | round(precision=t.dec) }}–{{ pg[hi] | round(precision=t.dec) }}</span></td>{% endif %}
+              {% else %}
+              <td class="num muted">did not boot</td>
+              {% endif %}
+              {% endfor %}
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+    {% endfor %}
+    <p class="muted small">Half-Life is a homebrew disc built with PSoXide. It's left out of the averages because Beetle PSX couldn't boot it.</p>
+  </section>
+
+  {% endif %}
+
+  <section class="section" id="accuracy">
+    <div class="section-head">
+      <h2>Accuracy</h2>
+      {% if acc.status == "placeholder" %}
+      <div class="callout warn"><span class="callout-title">Not measured yet</span>No cross-emulator accuracy comparison has been published yet. PSoXide is checked against original hardware, but those checks do not establish an accuracy ranking against other emulators.</div>
+      {% endif %}
+    </div>
+    {% if acc.status != "placeholder" %}
+    {% for s in acc.suite %}
+    <h3 style="margin-top:1.6rem">{{ s.name }}</h3>
+    <p class="muted small">{{ s.covers }}{% if s.url %} <a href="{{ s.url }}">Details</a>{% endif %}</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Emulator</th><th class="num">Passed</th><th class="num">Failed</th><th class="num">Skipped or crashed</th><th>Build</th><th>Run date</th></tr></thead>
+        <tbody>
+        {% for r in [x for x in acc.result if x.suite == s.id] %}
+          <tr{% if r.emulator == "PSoXide" %} class="is-psx"{% endif %}>
+            <td>{{ r.emulator }}</td>
+            {% if r.placeholder %}
+            <td class="num placeholder-cell" colspan="5">not measured</td>
+            {% else %}
+            <td class="num">{{ r.passed }}</td><td class="num">{{ r.failed }}</td><td class="num">{{ r.skipped }}</td><td>{{ r.build }}</td><td>{{ r.date }}</td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+    {% endif %}
+    <p class="muted small" style="margin-top:1rem">PSoXide's own check against silicon: a hardware test battery runs on a real PlayStation, the results come back through a video recording, and every value is compared with what the emulator produces. Gaps found that way are written up with how to reproduce them in <a href="{{ config.extra.repo_emulator }}/blob/main/docs/emulator-accuracy-from-silicon.md">emulator-accuracy-from-silicon.md</a>.</p>
+  </section>
+
+  <section class="section" id="compatibility">
+    <div class="section-head">
+      <h2>{{ compat.counts["in-game"] }} of {{ compat.total }} commercial games reach the in-game tier</h2>
+      <p>With no BIOS. The in-game tier includes gameplay or an in-engine opening scene after New Game; it does not mean a full playthrough. These are headless runs: a fixed schedule of Start and Cross presses, then the frames are checked by eye. A headless run can show at most "in-game"; "playable" and "perfect" need a person to play through a real stretch, and none of these has that rating yet.</p>
+    </div>
+    <div class="tierbar" role="img" aria-label="{{ compat.counts['in-game'] }} of {{ compat.total }} games at in-game">
+      {% for tier in compat.tiers %}{% set n = compat.counts[tier] %}{% if n > 0 %}<span style="width:{{ n / compat.total * 100 }}%" title="{{ tier }}: {{ n }}"></span>{% endif %}{% endfor %}
+    </div>
+    <div class="tier-legend">{% for tier in compat.tiers %}<span>{{ tier }}: {{ compat.counts[tier] }}</span>{% endfor %}</div>
+    <div class="table-wrap" style="margin-top:1.2rem">
+      <table>
+        <thead><tr><th>Game</th><th>Region</th><th>PSoXide</th><th>Real BIOS (recorded)</th><th>FMV</th><th>Known issues</th></tr></thead>
+        <tbody>
+        {% for g in compat.games %}
+          <tr><td>{{ g.name }}</td><td>{{ g.region }}</td><td><span class="tier">{{ g.tier }}</span></td><td>{{ g.bios_tier }}</td><td>{{ g.fmv }}</td><td class="small">{{ g.issues }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="muted small" style="margin-top:0.8rem">Measured on {{ compat.run_on }}. "Real BIOS (recorded)" is a run made with the same input before BIOS support was removed. Source: <a href="{{ config.extra.repo_emulator }}/blob/main/docs/COMPATIBILITY.md">docs/COMPATIBILITY.md</a>. No game data or images are distributed.</p>
+  </section>
+
+  <section class="section" id="method">
+    <div class="with-toc">
+      <div class="prose">
+        <h2 style="margin-top:0">How it was measured</h2>
+        <p>All four emulators ran headless on one Apple M3 Max MacBook Pro (14 cores, 36 GB, macOS 26.6.2, on AC power). Nothing opened a window or played audio, and each rendered in software at native resolution. Every game started from power-on with the same pad schedule PSoXide's compatibility runs use, and captured frames confirmed each emulator had reached the same part of the game before the measuring window opened.</p>
+        <ul>
+          <li><strong>Frames per CPU-second:</strong> emulated frames in a 1200-frame window (600 for Resident Evil 2) at unlimited speed, divided by the process's user plus system CPU time. Every thread counts, so an emulator that renders on a second thread pays for it.</li>
+          <li><strong>CPU and memory at 1×:</strong> each emulator paced to the console's field rate (59.83 Hz NTSC, 49.76 Hz PAL). CPU is CPU time over wall time; memory is the median physical footprint, sampled every 0.25 s.</li>
+          <li><strong>Real-time headroom:</strong> frames per CPU-second divided by {{ bench.field_hz }}.</li>
+          <li><strong>Versions:</strong> PSoXide {% for e in history %}<code>{{ e.build }}</code>{% if not loop.last %}, {% endif %}{% endfor %} (release profile), DuckStation <code>459a6fc</code>, Beetle PSX HW 0.9.44.1 (<code>ee042b7</code>) through a minimal libretro frontend, PCSX-Redux <code>1b7a4f1d</code> in <code>-cli</code> mode.</li>
+        </ul>
+        <h3>Caveats</h3>
+        <ul>
+          <li>Memory is measured without a frontend for every emulator, so real use costs more once a window, a GPU and audio are added. DuckStation's number includes about 360 MB of graphics allocations its regression runner keeps open; PSoXide would still be the smallest without them.</li>
+          <li>Disc data read on demand sits in the OS file cache, outside the process, for every emulator that streams. None of the footprints count it.</li>
+          <li>Boot timing differs slightly between a BIOS boot and PSoXide's HLE boot, so Tekken 3 picks a different opponent and stage on each emulator. The other games reach the same scene with small differences.</li>
+          <li>PCSX-Redux paces itself to real time while CD audio streams, so in Tekken 3, WipEout 2097 and Resident Evil 2 its speed was measured at 1×, not unlimited.</li>
+          <li>Beetle's recompiler couldn't reserve its fast memory map on macOS and warned it would run slower. It deadlocked once in 30 runs; that run was repeated.</li>
+          <li>Standalone Mednafen has no windowless mode, so Beetle PSX, the libretro fork of its PS1 core, stands in for it.</li>
+        </ul>
+        <p class="muted small">The raw per-run CSV and the harness are kept with the benchmark. This page reads <code>data/emu-bench.json</code>, generated from the harness's summary CSV by <code>scripts/import_emu_bench.py</code>.</p>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock content %}

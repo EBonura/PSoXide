@@ -1,0 +1,60 @@
+# Captures taken with the headless software display output, not console photographs.
+# PPM to PNG conversion only; no generated or retouched gameplay.
+captured = "2026-09-29"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
+
+[[capture]]
+file = "static/img/shots/hello-tri.png"
+source = "PSoXide/build/examples/mipsel-sony-psx/release/hello-tri.cue"
+frame = "hello-tri/tick-000060.ppm"
+steps = 24000000
+press = ""
+interval = 60
+sha256 = "7309c694995a9922341308271b92f0cc5790433fd54b8412192f8c89af530f57"
+
+[[capture]]
+file = "static/img/shots/voxide.png"
+source = "voxide/dist/voxide.cue"
+frame = "voxide-gameplay/tick-000720.ppm"
+steps = 300000000
+press = "500:cross:20"
+interval = 180
+sha256 = "f7844b365576967334784b933659ca84f3dd01324234d55f76c1d22a9eb73728"
+
+[[capture]]
+file = "static/img/shots/nitroxide.png"
+source = "game library: NitroXide/NitroXide.cue"
+frame = "nitroxide/tick-000720.ppm"
+steps = 250000000
+press = "500:start:20,650:cross:20"
+interval = 180
+sha256 = "7c416d4ae8ebced94ef65985d63c2b7afb1b973faa7eaf453023a4a6ffc67810"
+
+[[capture]]
+file = "static/img/shots/demo-disc.png"
+source = "game library: PSoXide Demo Disc v0.40.cue"
+frame = "demo-disc/tick-000240.ppm"
+steps = 250000000
+press = ""
+interval = 240
+sha256 = "5cd227a5c7b56c2e988b50c8e58f398257ac586b135ee174979ecbef0386e4cc"
+
+# Other images retained from the prototype; these are emulator/editor captures.
+[[retained]]
+files = ["nitroxide-hires.jpg"]
+source = "nitroxide/readme-assets/gameplay-sunset-aerial.png (resized)"
+[[retained]]
+files = ["celeste.png", "psxcel.png", "ghpsx.png"]
+source = "psx-demo-disc/assets/shots/"
+[[retained]]
+files = ["cortex.png"]
+source = "PSoXide-editor/docs/comicon-first-look-2026-09-04/cortex-final.png"
+[[retained]]
+files = ["cortex-hires.jpg"]
+source = "psx-demo-disc/assets/readme/cortex-current.png"
+[[retained]]
+files = ["arcade.png"]
+source = "psx-demo-disc/assets/readme/arcade-selector.png"
+[[retained]]
+files = ["editor.jpg", "emulator.jpg"]
+source = "PSoXide-editor/assets/media/readme/ (resized)"

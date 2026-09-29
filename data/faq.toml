@@ -1,0 +1,184 @@
+# Quick answers. `home = true` puts a question in the home page strip (keep it
+# to about ten); every question appears on /faq/, grouped, with its id as anchor.
+# Answers are markdown. Tokens in [[double brackets]] are filled from the data
+# files at build time (see templates/components.html), so numbers
+# never go stale and are never typed in by hand.
+# `link` is a site path ("@/...") or a full URL.
+
+[[group]]
+id = "playing"
+title = "Playing"
+
+[[group]]
+id = "emulator"
+title = "The emulator"
+
+[[group]]
+id = "making"
+title = "Making PS1 software"
+
+[[group]]
+id = "project"
+title = "Licence and legal"
+
+[[item]]
+id = "browser"
+group = "playing"
+home = true
+q = "Can I play it in my browser?"
+a = "Yes. The PSoXide player runs the public demo disc on its itch.io page. Nothing to install and no BIOS to find."
+link_text = "Open the browser player"
+link = "https://bonnie-studios.itch.io/psoxide"
+
+[[item]]
+id = "bios"
+group = "emulator"
+home = true
+q = "Do I need a BIOS?"
+a = "No. PSoXide uses its own kernel to boot discs, written from public documentation and black-box observation. It can't load a BIOS at all."
+link_text = "How it works"
+link = "@/ethos.md#no-bios"
+
+[[item]]
+id = "compat"
+group = "emulator"
+home = true
+q = "Which commercial games work?"
+a = "[[compat_ok]] of the [[compat_total]] games on the compatibility list reach the in-game tier in headless runs, with no BIOS. None has been played through and rated \"playable\" by a person yet."
+link_text = "See the list"
+link = "@/emulator/compare.md#compatibility"
+
+[[item]]
+id = "speed"
+group = "emulator"
+home = true
+q = "How fast is it compared to DuckStation?"
+a = "Speed numbers against DuckStation, Beetle PSX and PCSX-Redux go up here once the current speed work lands. In the recorded headless benchmark, memory use was [[psx_mem]] MB against DuckStation's [[ds_mem]] MB; desktop use includes additional graphics and audio costs."
+link_text = "Full comparison"
+link = "@/emulator/compare.md"
+
+[[item]]
+id = "legal"
+group = "project"
+home = true
+q = "Is this legal?"
+a = "PSoXide contains no Sony code or data and never distributes commercial games. Half-Life, Counter-Strike and Hollow Knight use your own copy; Quake uses separately licensed shareware data. It isn't affiliated with or endorsed by Sony."
+link_text = "Ethos and legal"
+link = "@/ethos.md"
+
+[[item]]
+id = "download"
+group = "playing"
+home = true
+q = "Where do I download the games?"
+a = "On itch.io. The PSoXide Demo Disc puts most of them on one image, and several also have their own download."
+link_text = "All projects"
+link = "@/projects/_index.md"
+
+[[item]]
+id = "hardware"
+group = "playing"
+home = true
+q = "What do I need to run it on a real PS1?"
+a = "A PlayStation that boots burned CD-Rs, such as a modchipped console, and a blank CD-R. Burn the BIN/CUE and boot it. The demo disc is built to start this way and chain-load everything on it."
+link_text = "About the demo disc"
+link = "https://github.com/EBonura/PSoXide-demo-disc"
+
+[[item]]
+id = "licence"
+group = "project"
+home = true
+q = "Is it open source?"
+a = "Yes. The SDK, emulator, editor, engine and most games are GPL-2.0-or-later; the Quake port is GPL-2.0-only."
+link_text = "Licences in detail"
+link = "@/ethos.md#code-and-licences"
+
+[[item]]
+id = "ports"
+group = "playing"
+home = true
+q = "Can I play Half-Life or Quake on it?"
+a = "Quake's shareware episode is on itch.io. Half-Life, Counter-Strike and Hollow Knight are never distributed as disc images: Half-Life's source is public and builds a disc from your own copy of the game, and the other two have no public build yet."
+link_text = "The ports"
+link = "@/projects/_index.md#ports"
+
+[[item]]
+id = "videos"
+group = "playing"
+home = true
+q = "Where are the videos?"
+a = "Watch Bonnie Studios on YouTube for Half-Life, Hollow Knight, Quake, NitroXide and VoXide running on original hardware, plus the browser emulator introduction."
+link_text = "Watch the videos"
+link = "@/projects/_index.md#videos"
+
+[[item]]
+id = "accuracy"
+group = "emulator"
+q = "How accurate is it?"
+a = "We don't have a cross-emulator accuracy comparison yet, so we don't claim one. PSoXide is checked against a real console with its own hardware test battery, and every gap found that way is written up."
+link_text = "Accuracy section"
+link = "@/emulator/compare.md#accuracy"
+
+[[item]]
+id = "platforms"
+group = "emulator"
+q = "What does the emulator run on?"
+a = "It builds from source as a desktop app (the README lists the extra packages Ubuntu needs), and it has a browser build, which is the player on itch.io."
+link_text = "Emulator README"
+link = "https://github.com/EBonura/PSoXide-emulator"
+
+[[item]]
+id = "build-emulator"
+group = "emulator"
+q = "How do I build the emulator?"
+a = """
+```sh
+git clone https://github.com/EBonura/PSoXide-emulator.git
+cd PSoXide-emulator
+make bootstrap
+make build
+./target/release/frontend
+```
+You need Rust through rustup, Python 3 and your host's C/C++ build tools."""
+link_text = "Emulator README"
+link = "https://github.com/EBonura/PSoXide-emulator"
+
+[[item]]
+id = "first-program"
+group = "making"
+q = "How do I build my first PS1 program?"
+a = "Clone the SDK and run `make hello-tri-disc`. You get a bootable BIN/CUE with one shaded triangle. The walkthrough covers the tools you need and how to run it."
+link_text = "The walkthrough"
+link = "@/docs/first-ps1-program.md"
+
+[[item]]
+id = "editor"
+group = "making"
+q = "Do I have to write bare-metal code?"
+a = "No. You can write bare-metal Rust against the SDK, or build scenes in the editor and let the engine and cooker turn them into a disc. Cortex Ignition is made that way."
+link_text = "The editor"
+link = "https://github.com/EBonura/PSoXide-editor"
+
+[[item]]
+id = "repos"
+group = "making"
+q = "Which repository do I need?"
+a = "The SDK is EBonura/PSoXide, the emulator EBonura/PSoXide-emulator, and the editor, engine and Cortex Ignition EBonura/PSoXide-editor. The editor and emulator pin their source dependencies, and `make bootstrap` fetches them. The SDK builds independently."
+link_text = "The SDK"
+link = "https://github.com/EBonura/PSoXide"
+
+[[item]]
+id = "own-game"
+group = "project"
+q = "Can I release my own game made with it?"
+a = "Yes. The PSoXide code you ship, and your changes to it, stay under the GPL, and you can charge for your game as long as the people you give it to can get that source. Your own art, music, levels and writing stay yours."
+link_text = "Downstream licensing"
+link = "https://github.com/EBonura/PSoXide/blob/main/docs/downstream-licensing.md"
+
+[[item]]
+id = "contribute"
+group = "project"
+q = "How do I report a bug or contribute?"
+a = "Open an issue on the repository it's about. For a change to the emulator, run `make check`, `make test` and `make fmt-check`, add a focused regression test, and say whether your evidence comes from emulation or real hardware. Never commit BIOS files or game images."
+link_text = "Contributing guide"
+link = "https://github.com/EBonura/PSoXide-emulator/blob/main/CONTRIBUTING.md"

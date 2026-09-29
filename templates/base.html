@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% set page_title = config.title %}
+  {% if page and page.title %}{% set page_title = page.title ~ " | " ~ config.title %}
+  {% elif section and section.title and not section.path == "/" %}{% set page_title = section.title ~ " | " ~ config.title %}{% endif %}
+  <title>{% block title %}{{ page_title }}{% endblock title %}</title>
+  {% set desc = config.description %}
+  {% if page and page.description %}{% set desc = page.description %}{% elif section and section.description %}{% set desc = section.description %}{% endif %}
+  <meta name="description" content="{{ desc }}">
+  <link rel="canonical" href="{{ current_url }}">
+  <meta property="og:url" content="{{ current_url }}">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="{{ get_url(path='img/shots/nitroxide-hires.jpg') }}">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ desc }}">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="{{ get_url(path='favicon.png') }}" type="image/png">
+  <link rel="apple-touch-icon" href="{{ get_url(path='img/brand/apple-touch-icon.png') }}">
+  <link rel="stylesheet" href="{{ get_url(path='css/site.css') }}">
+  <script>
+    // Remembered theme choice. Storage can throw (private mode); the page works without it.
+    try { var t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-row">
+      <a class="brand" href="{{ get_url(path='/') }}" aria-label="PSoXide home">{% include "partials/logo.html" %}</a>
+      <nav class="nav" aria-label="Main">
+        {% for item in config.extra.nav %}
+        {% set href = get_url(path=item.path) %}
+        <a href="{{ href }}"{% if current_path and current_path is starting_with(pat=item.match) %} aria-current="page"{% endif %}>{{ item.name }}</a>
+        {% endfor %}
+        <a class="nav-play" href="{{ config.extra.web_player }}">Play</a>
+      </nav>
+      <button class="theme-toggle" type="button" aria-label="Switch colour theme" title="Switch colour theme">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 1 0 0 18V3z"/><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main">
+    {% block content %}{% endblock content %}
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-grid">
+      <div>
+        <a class="brand small" href="{{ get_url(path='/') }}" aria-label="PSoXide home">{% include "partials/logo.html" %}</a>
+        <p class="muted">SDK, engine, editor and emulator for the original PlayStation. Code under GPL-2.0-or-later.</p>
+      </div>
+      <div>
+        <h2 class="footer-h">Source</h2>
+        <ul class="plain">
+          <li><a href="{{ config.extra.repo_sdk }}">SDK</a></li>
+          <li><a href="{{ config.extra.repo_emulator }}">Emulator</a></li>
+          <li><a href="{{ config.extra.repo_editor }}">Editor, engine, Cortex</a></li>
+          <li><a href="{{ config.extra.repo_demo_disc }}">Demo disc</a></li>
+        </ul>
+      </div>
+      <div>
+        <h2 class="footer-h">Play</h2>
+        <ul class="plain">
+          <li><a href="{{ config.extra.web_player }}">Browser player</a></li>
+          <li><a href="{{ config.extra.demo_disc }}">Demo disc download</a></li>
+          <li><a href="{{ config.extra.itch }}">All games on itch.io</a></li>
+          <li><a href="{{ config.extra.youtube }}">Videos on YouTube</a></li>
+        </ul>
+      </div>
+      <div>
+        <h2 class="footer-h">Help</h2>
+        <ul class="plain">
+          <li><a href="{{ get_url(path='@/faq.md') }}">Questions</a></li>
+          <li><a href="{{ get_url(path='@/ethos.md') }}">Ethos &amp; legal</a></li>
+          <li><a href="{{ config.extra.issues }}">Report a bug</a></li>
+          <li><a href="{{ config.extra.contributing }}">Contributing</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="wrap fine">
+      <p>PlayStation is a trademark of Sony Interactive Entertainment Inc. PSoXide is not affiliated with or endorsed by Sony. Other game names belong to their owners.</p>
+    </div>
+  </footer>
+  <script>
+    document.querySelector(".theme-toggle").addEventListener("click", function () {
+      var root = document.documentElement;
+      var dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+      root.dataset.theme = dark ? "light" : "dark";
+      try { localStorage.setItem("theme", root.dataset.theme); } catch (e) {}
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+{% set projects = load_data(path="data/projects.toml") %}
+{% set videos = load_data(path="data/videos.toml") %}
+<div class="wrap">
+  <header class="page-head">
+    <h1>Projects</h1>
+    <p class="lede">Everything here is built for the original PlayStation. Most of it is on the PSoXide Demo Disc, which you can play in the browser or burn to a CD-R.</p>
+    <div class="btn-row">
+      <a class="btn btn-primary" href="{{ config.extra.web_player }}">Play the demo disc in your browser</a>
+      <a class="btn" href="{{ config.extra.demo_disc }}">Download the disc image</a>
+    </div>
+  </header>
+
+  <section>
+    <div class="section-head">
+      <h2>Games, tools and collections</h2>
+      <p>Original projects and an unofficial Celeste fan port. Screenshots below are emulator captures; the linked console videos show original hardware. Code, music and third-party assets are credited on each project's page.</p>
+    </div>
+    <div class="grid three">
+      {% for p in projects.original %}
+      <article class="card" id="{{ p.slug }}">
+        <figure class="screen native" style="margin:0"><img src="{{ get_url(path=p.shot) }}" alt="{{ p.shot_alt }}" width="320" height="240" loading="lazy"></figure>
+        <div class="card-meta">
+          <span class="badge">{{ p.kind }}</span>
+          {% if p.on_demo_disc %}<span class="badge accent">On the demo disc</span>{% endif %}
+        </div>
+        <h3>{{ p.name }}</h3>
+        <p>{{ p.tagline }}</p>
+        {% if p.flag %}<span class="flag">For Manny: {{ p.flag }}</span>{% endif %}
+        <div class="card-links">
+          {% if p.itch %}<a href="{{ p.itch }}">itch.io page</a>{% endif %}
+          {% if p.video %}<a href="{{ p.video }}">Watch on YouTube</a>{% endif %}
+          {% if p.on_demo_disc and not p.itch %}<a href="{{ config.extra.demo_disc }}">Get the demo disc</a>{% endif %}
+          {% if p.repo %}<a href="{{ p.repo }}">Source{% if p.repo_note %} ({{ p.repo_note | lower }}){% endif %}</a>{% endif %}
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="section" id="ports">
+    <div class="section-head">
+      <span class="eyebrow">Impossible ports</span>
+      <h2>Other people's games, on a PS1</h2>
+      <p>These are fan ports of games whose data belongs to someone else, so they work differently. Half-Life, Counter-Strike and Hollow Knight are built from your own copy of the game and are never distributed as disc images. Quake ships the shareware episode with its licence, which restricts screenshots, so there are none on this site. Full write-ups on how each one fits in 2&nbsp;MB are planned.</p>
+    </div>
+    <div class="grid two">
+      {% for p in projects.port %}
+      <article class="card port" id="{{ p.slug }}">
+        <h3>{{ p.name }}</h3>
+        <p>{{ p.hook }}</p>
+        <p class="data">{{ p.data }}</p>
+        <div class="card-links">
+          {% if p.repo %}<a href="{{ p.repo }}">Source</a>{% endif %}
+          {% if p.itch %}<a href="{{ p.itch }}">itch.io page</a>{% endif %}
+          {% if p.video %}<a href="{{ p.video }}">Watch on YouTube</a>{% endif %}
+          {% if not p.repo and not p.itch %}<span class="muted">No public build yet</span>{% endif %}
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    <p class="muted small" style="margin-top:1.2rem">Read <a href="{{ get_url(path='@/ethos.md') }}#ports-built-from-other-people-s-games">how the ports handle game data</a> on the ethos page.</p>
+  </section>
+
+  <section class="section" id="videos">
+    <div class="section-head">
+      <h2>Videos</h2>
+      <p>{{ videos.status_note }}</p>
+      <a href="{{ videos.channel }}">Bonnie Studios on YouTube →</a>
+    </div>
+    <ul class="video-list">
+      {% for v in videos.video %}
+      <li><a href="{{ v.url }}">{{ v.title }}</a><br><span class="muted small">{{ v.blurb }}</span></li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>
+{% endblock content %}

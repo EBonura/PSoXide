@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+{% if page.extra.draft %}
+<div class="draft-banner"><div class="wrap"><strong>Draft, not for publication.</strong> {{ page.extra.draft }}</div></div>
+{% endif %}
+<div class="wrap">
+  <header class="page-head">
+    {% if page.extra.eyebrow %}<span class="eyebrow">{{ page.extra.eyebrow }}</span>{% endif %}
+    <h1>{{ page.title }}</h1>
+    {% if page.description %}<p class="lede">{{ page.description }}</p>{% endif %}
+  </header>
+  <div class="with-toc">
+    <article class="prose">
+      {{ page.content | safe }}
+    </article>
+    {% if page.toc %}
+    <aside class="toc" aria-label="On this page">
+      <div class="toc-inner">
+        <p class="footer-h">On this page</p>
+        <ol>
+          {% for h in page.toc %}<li><a href="{{ h.permalink | safe }}">{{ h.title }}</a></li>{% endfor %}
+        </ol>
+      </div>
+    </aside>
+    {% endif %}
+  </div>
+</div>
+{% endblock content %}
