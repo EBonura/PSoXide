@@ -37,7 +37,7 @@ home = true
 q = "Do I need a BIOS?"
 a = "No. PSoXide uses its own kernel to boot discs, written from public documentation and black-box observation. It can't load a BIOS at all."
 link_text = "How it works"
-link = "@/ethos.md#no-bios"
+link = "@/legal.md#no-bios"
 
 [[item]]
 id = "compat"
@@ -61,10 +61,10 @@ link = "@/emulator/compare.md"
 id = "legal"
 group = "project"
 home = true
-q = "Is this legal?"
-a = "PSoXide contains no Sony code or data and never distributes commercial games. Half-Life, Counter-Strike and Hollow Knight use your own copy; Quake uses separately licensed shareware data. It isn't affiliated with or endorsed by Sony."
-link_text = "About and licensing"
-link = "@/ethos.md"
+q = "What licences and permissions apply?"
+a = "PSoXide’s SDK, engine, editor and emulator are released under GPL-2.0-or-later, with third-party notices where applicable. Games, music, artwork and other assets may have different terms. The emulator does not require or load a Sony BIOS. Check each project’s licence and distribution notes before reusing or sharing it."
+link_text = "Legal & licensing"
+link = "@/legal.md"
 
 [[item]]
 id = "download"
@@ -80,9 +80,9 @@ id = "hardware"
 group = "playing"
 home = true
 q = "What do I need to run it on a real PS1?"
-a = "A PlayStation that boots burned CD-Rs, such as a modchipped console, and a blank CD-R. Burn the BIN/CUE and boot it. The demo disc is built to start this way and chain-load everything on it."
-link_text = "About the demo disc"
-link = "https://github.com/EBonura/PSoXide-demo-disc"
+a = "A standard, unmodified retail PlayStation cannot directly boot a burned PSoXide disc. You need a modchipped console or another compatible homebrew boot method. PSoXide does not endorse modchipping or provide installation help. Modifying a console can permanently damage or brick it; any modification is at your own risk."
+link_text = "Hardware requirements and warning"
+link = "@/legal.md#running-burned-discs-on-original-hardware"
 
 [[item]]
 id = "licence"
@@ -91,16 +91,16 @@ home = true
 q = "Is it open source?"
 a = "Yes. The SDK, emulator, editor, engine and most games are GPL-2.0-or-later; the Quake port is GPL-2.0-only."
 link_text = "Licences in detail"
-link = "@/ethos.md#code-and-licences"
+link = "@/legal.md#code-and-licences"
 
 [[item]]
 id = "ports"
 group = "playing"
 home = true
 q = "Can I play Half-Life or Quake on it?"
-a = "Quake's shareware episode is on itch.io. Half-Life, Counter-Strike and Hollow Knight are never distributed as disc images: Half-Life's source is public and builds a disc from your own copy of the game, and the other two have no public build yet."
-link_text = "The ports"
-link = "@/projects/_index.md#ports"
+a = "Half-Life’s source is public, but Valve has not provided express authorization as of 30 September 2026. It requires your own game data and offers no disc-image download. Counter-Strike and Hollow Knight have no public builds. The Quake port is available, but permission to distribute converted shareware data remains unresolved in this review."
+link_text = "Port status and content rights"
+link = "@/legal.md#ports-built-from-other-people-s-games"
 
 [[item]]
 id = "videos"
@@ -171,9 +171,9 @@ link = "https://github.com/EBonura/PSoXide"
 id = "own-game"
 group = "project"
 q = "Can I release my own game made with it?"
-a = "Yes. The PSoXide code you ship, and your changes to it, stay under the GPL, and you can charge for your game as long as the people you give it to can get that source. Your own art, music, levels and writing stay yours."
-link_text = "Downstream licensing"
-link = "https://github.com/EBonura/PSoXide/blob/main/docs/downstream-licensing.md"
+a = "Using the tools does not automatically license their output under the GPL. Distributing a program incorporating or linking PSoXide’s GPL runtime or SDK generally requires GPL-compatible licensing of the combined program and complete corresponding source, including required build material. Independent art, music and other content keep their own terms; bundled demo assets may not be reusable in your release."
+link_text = "Releasing games made with PSoXide"
+link = "@/legal.md#code-and-licences"
 
 [[item]]
 id = "contribute"

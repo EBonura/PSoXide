@@ -33,6 +33,6 @@ nav = [
   { name = "Projects", path = "@/projects/_index.md", match = "/projects/" },
   { name = "Docs", path = "@/docs/_index.md", match = "/docs/" },
   { name = "FAQ", path = "@/faq.md", match = "/faq/" },
-  { name = "About & licensing", path = "@/ethos.md", match = "/ethos/" },
+  { name = "About", path = "@/ethos.md", match = "/ethos/" },
 ]
 contributing = "https://github.com/EBonura/PSoXide-emulator/blob/main/CONTRIBUTING.md"

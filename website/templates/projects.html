@@ -13,6 +13,7 @@
       <a class="btn btn-primary" href="{{ config.extra.web_player }}">Play the demo disc in your browser</a>
       <a class="btn" href="{{ config.extra.demo_disc }}">Download the disc image</a>
     </div>
+    <p class="small">Burned discs require a modchipped console or another compatible homebrew boot method. PSoXide does not endorse modchipping or provide installation help; modifications can permanently damage or brick your console and are at your own risk. <a href="{{ get_url(path='@/legal.md') }}#running-burned-discs-on-original-hardware">Hardware requirements and warning</a>.</p>
   </header>
 
   <section id="disc-contents" aria-labelledby="disc-contents-title">
@@ -37,7 +38,7 @@
   <section class="section" id="original-projects">
     <div class="section-head">
       <h2>Games, tools and collections</h2>
-      <p>Original projects and an unofficial Celeste fan port. Screenshots below are emulator captures; the linked console videos show original hardware. Code, music and third-party assets are credited in each project's repository and on the <a href="{{ get_url(path='@/ethos.md') }}#music-and-other-assets">about and licensing page</a>.</p>
+      <p>Original projects and an unofficial Celeste fan port. Screenshots below are emulator captures; the linked console videos show original hardware. Code, music and third-party assets are credited in each project's repository and on the <a href="{{ get_url(path='@/legal.md') }}#music-and-other-assets">legal and licensing page</a>.</p>
     </div>
     <div class="grid three">
       {% for p in projects.original %}
@@ -58,6 +59,7 @@
         {% if p.flag %}<span class="flag">For Manny: {{ p.flag }}</span>{% endif %}
         <div class="card-links">
           {% if p.itch %}<a href="{{ p.itch }}">itch.io page</a>{% endif %}
+          <a href="{{ get_url(path='@/legal.md') }}#music-and-other-assets">Licences and credits</a>
           {% if p.video %}<a href="{{ p.video }}">Watch on YouTube</a>{% endif %}
           {% if p.slug in disc_slugs and not p.itch %}<a href="{{ config.extra.demo_disc }}">Get the demo disc</a>{% endif %}
           {% if p.repo %}<a href="{{ p.repo }}">Source{% if p.repo_note %} ({{ p.repo_note | lower }}){% endif %}</a>{% endif %}
@@ -87,14 +89,14 @@
       </article>
       {% endfor %}
     </div>
-    <p class="muted small" style="margin-top:1.2rem">Celeste (2016) and Celeste 2: Lani's Trek (2021) are by Maddy Thorson and Noel Berry; Celeste 2's music is by Lena Raine. These are unofficial fan ports. <a href="{{ get_url(path='@/ethos.md') }}#ports-built-from-other-people-s-games">Credits and licensing</a>.</p>
+    <p class="muted small" style="margin-top:1.2rem">Celeste (2016) and Celeste 2: Lani's Trek (2021) are by Maddy Thorson and Noel Berry; Celeste 2's music is by Lena Raine. These are unofficial fan ports. <a href="{{ get_url(path='@/legal.md') }}#ports-built-from-other-people-s-games">Credits and licensing</a>.</p>
   </section>
 
   <section class="section" id="ports">
     <div class="section-head">
       <span class="eyebrow">Game ports</span>
       <h2>Ports and experiments</h2>
-      <p>These projects adapt existing games for the PS1. Each has its own requirements for game data. Half-Life, Counter-Strike and Hollow Knight are built from your own copy of the game and are never distributed as disc images. Quake ships the shareware episode with its licence, which restricts screenshots, so there are none on this site.</p>
+      <p>These projects adapt existing games for the PS1. Owning a copy does not by itself grant permission to adapt or redistribute its content. Half-Life, Counter-Strike and Hollow Knight do not offer disc-image downloads. Quake’s converted shareware data has unresolved distribution-permission questions. Read the project-specific terms before reusing or sharing these works.</p>
     </div>
     <div class="grid two">
       {% for p in projects.port %}
@@ -104,6 +106,7 @@
         <p>{{ p.hook }}</p>
         <p class="data">{{ p.data }}</p>
         <div class="card-links">
+          <a href="{{ get_url(path='@/legal.md') }}#{{ p.slug }}">Rights and distribution</a>
           {% if p.repo %}<a href="{{ p.repo }}">Source</a>{% endif %}
           {% if p.itch %}<a href="{{ p.itch }}">itch.io page</a>{% endif %}
           {% if p.video %}<a href="{{ p.video }}">Watch on YouTube</a>{% endif %}
@@ -112,7 +115,7 @@
       </article>
       {% endfor %}
     </div>
-    <p class="muted small" style="margin-top:1.2rem">Read <a href="{{ get_url(path='@/ethos.md') }}#ports-built-from-other-people-s-games">how the ports handle game data</a> on the about and licensing page.</p>
+    <p class="muted small" style="margin-top:1.2rem">Read <a href="{{ get_url(path='@/legal.md') }}#ports-built-from-other-people-s-games">how the ports handle game data</a> on the legal and licensing page.</p>
   </section>
 
   <section class="section" id="videos">
