@@ -417,6 +417,9 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .prose table { margin: 1.2rem 0; }
 .prose .table-wrap table { margin: 0; }
 .prose img { border-radius: 8px; }
+.source-file { margin: 1rem 0; border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; min-width: 0; }
+.source-file > summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+.source-file pre { max-height: 38rem; overflow: auto; tab-size: 4; }
 .with-toc { display: grid; gap: 2.5rem; }
 @media (min-width: 1000px) { .with-toc { grid-template-columns: minmax(0, 1fr) 230px; } }
 .toc { font-size: 0.88rem; }

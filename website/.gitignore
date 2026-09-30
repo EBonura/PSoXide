@@ -7,3 +7,4 @@ __pycache__/
 # Generated from pinned sources by scripts/stage_examples.py.
 /static/player/
 /static/examples/
+/static/api/
