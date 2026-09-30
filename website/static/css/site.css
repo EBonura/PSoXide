@@ -89,21 +89,24 @@
 
 /* ---------- base ---------- */
 *, *::before, *::after { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+/* Compact defaults; percentage sizing preserves the reader's font preference
+   and normal browser zoom. Phones retain a 16px-equivalent reading size. */
+html { font-size: 93.75%; -webkit-text-size-adjust: 100%; }
+@media (max-width: 719px) { html { font-size: 100%; } }
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 17px/1.62 var(--font);
+  font: 1rem/1.55 var(--font);
   overflow-x: hidden;
 }
 img { max-width: 100%; height: auto; display: block; }
 a { color: var(--accent); text-underline-offset: 3px; text-decoration-thickness: 1px; }
 a:hover { color: var(--accent-strong); }
 h1, h2, h3, h4 { line-height: 1.15; letter-spacing: -0.015em; margin: 0 0 0.5em; }
-h1 { font-size: clamp(2.1rem, 5.4vw, 3.6rem); letter-spacing: -0.03em; }
-h2 { font-size: clamp(1.5rem, 3vw, 2.1rem); margin-top: 0; }
-h3 { font-size: 1.2rem; }
+h1 { font-size: clamp(1.9rem, 4.6vw, 3.2rem); letter-spacing: -0.03em; }
+h2 { font-size: clamp(1.4rem, 2.6vw, 1.85rem); margin-top: 0; }
+h3 { font-size: 1.15rem; }
 p { margin: 0 0 1em; }
 code, pre, kbd { font-family: var(--mono); font-size: 0.9em; }
 :not(pre) > code { overflow-wrap: anywhere; background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 0.08em 0.35em; }
@@ -114,8 +117,9 @@ pre {
   padding: 14px 16px;
   overflow-x: auto;
   line-height: 1.5;
-  font-size: 0.86rem;
+  font-size: 0.9rem;
 }
+pre code { font-size: inherit; }
 hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
 .muted { color: var(--muted); }
 .small { font-size: 0.88rem; }
@@ -136,7 +140,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
   margin: 0 0 0.4rem;
   display: block;
 }
-.lede { font-size: 1.16rem; color: var(--muted); max-width: 44em; }
+.lede { font-size: 1.1rem; color: var(--muted); max-width: 44em; }
 
 /* ---------- header / footer ---------- */
 .site-header {
@@ -145,7 +149,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line);
 }
-.header-row { display: flex; align-items: center; gap: 12px; min-height: 60px; flex-wrap: wrap; }
+.header-row { display: flex; align-items: center; gap: 12px; min-height: 54px; flex-wrap: wrap; }
 .brand { color: var(--text); display: inline-flex; }
 .logo { height: 22px; width: auto; }
 .brand.small .logo { height: 18px; }
@@ -186,7 +190,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
 /* ---------- buttons, badges, callouts ---------- */
 .btn {
   display: inline-flex; align-items: center; gap: 8px;
-  padding: 11px 18px; border-radius: 8px; font-weight: 600; text-decoration: none;
+  padding: 9px 16px; min-height: 40px; border-radius: 8px; font-weight: 600; text-decoration: none;
   border: 1px solid var(--line); color: var(--text); background: var(--surface);
   transition: background 0.15s ease;
 }
@@ -218,8 +222,8 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
 }
 
 /* ---------- sections ---------- */
-.section { padding: 3.5rem 0 0; }
-.section-head { max-width: 46em; margin-bottom: 2rem; }
+.section { padding: 2.75rem 0 0; }
+.section-head { max-width: 46em; margin-bottom: 1.6rem; }
 .section-head p { color: var(--muted); }
 
 /* PS1 ordered dithering, used as a texture behind the hero. */
@@ -232,7 +236,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
 }
 
 /* ---------- hero ---------- */
-.hero { padding: 3.5rem 0 3rem; border-bottom: 1px solid var(--line); }
+.hero { padding: 3rem 0 2.5rem; border-bottom: 1px solid var(--line); }
 .hero-grid { display: grid; gap: 2.5rem; align-items: center; }
 @media (min-width: 960px) { .hero-grid { grid-template-columns: 1.15fr 1fr; } }
 .hero h1 { margin-bottom: 1rem; }
@@ -407,11 +411,11 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .tier-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.85rem; color: var(--muted); margin-top: 0.6rem; }
 
 /* ---------- prose (markdown pages) ---------- */
-.page-head { padding: 3.5rem 0 1.5rem; border-bottom: 1px solid var(--line); margin-bottom: 2.5rem; }
+.page-head { padding: 2.5rem 0 1.2rem; border-bottom: 1px solid var(--line); margin-bottom: 1.75rem; }
 .page-head .lede { margin-bottom: 0; }
 .prose { min-width: 0; max-width: 760px; }
-.prose h2 { margin-top: 2.6rem; padding-top: 0.4rem; font-size: 1.55rem; }
-.prose h3 { margin-top: 1.8rem; }
+.prose h2 { margin-top: 2rem; padding-top: 0.4rem; font-size: 1.45rem; }
+.prose h3 { margin-top: 1.5rem; }
 .prose ul, .prose ol { padding-left: 1.3rem; }
 .prose li { margin: 0.3rem 0; }
 .prose table { margin: 1.2rem 0; }
@@ -420,7 +424,7 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .source-file { margin: 1rem 0; border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; min-width: 0; }
 .source-file > summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
 .source-file pre { max-height: 38rem; overflow: auto; tab-size: 4; }
-.with-toc { display: grid; gap: 2.5rem; }
+.with-toc { display: grid; gap: 2rem; }
 @media (min-width: 1000px) { .with-toc { grid-template-columns: minmax(0, 1fr) 230px; } }
 .toc { font-size: 0.88rem; }
 .toc-inner { position: sticky; top: 84px; max-height: calc(100vh - 104px); overflow-y: auto; border-left: 1px solid var(--line); padding-left: 16px; }
@@ -491,7 +495,7 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .breadcrumbs ol { display: flex; flex-wrap: wrap; gap: .4rem .6rem; list-style: none; margin: 0; padding: 0; }
 .breadcrumbs li + li::before { content: "/"; margin-right: .6rem; color: var(--muted); }
 .breadcrumbs a { color: var(--muted); }
-.breadcrumbs + .wrap > .page-head { padding-top: 1.7rem; }
+.breadcrumbs + .wrap > .page-head { padding-top: 1.4rem; }
 @media (max-width: 1099px) {
   section[id], h2[id], .card[id], .qa, .faq-group, .prose [id], #disc-contents, #collection-games { scroll-margin-top: 24px; }
 }
