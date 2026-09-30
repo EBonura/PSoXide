@@ -1,6 +1,6 @@
 +++
 title = "Release source references"
-description = "Verified source revisions for the public Demo Disc v0.40, with source-availability checks and their limits."
+description = "Source revisions for the website examples and public Demo Disc v0.40, with source-availability checks and their limits."
 weight = 30
 [extra]
 kind = "Reference"
@@ -36,9 +36,21 @@ accessible during this check. A separate corresponding-source package for those
 entries has not been verified. This is an outstanding source-availability check;
 the table above is not a complete source package for the disc.
 
-## Browser player and other downloads
+## Website example players
 
-The browser player is deployed separately. Its current WebAssembly artifact has
+The [six interactive SDK examples](@/docs/browser-examples.md) are built from
+pinned public sources by the website workflow. Their
+[build manifest](../../examples/build.json) records the SDK revision, emulator
+revision, Rust toolchain and executable hashes. The
+[player build record](../../player/psoxide-player-build.json) records its source,
+locked SDK dependency, build tools and bundle hashes. Build instructions live
+beside the pinned emulator source; the website repository contains the staging
+script and workflow. [Licence texts and third-party notices](../../player/THIRD-PARTY-NOTICES.txt)
+are served with the player.
+
+## itch.io browser player and other downloads
+
+The demo-disc browser player on itch.io is deployed separately. Its current WebAssembly artifact has
 not been matched to an exact source revision in this website review. The emulator
 revision above belongs to the disc’s build receipt; it must not be taken as the
 revision of the live browser player. Standalone game downloads also need their

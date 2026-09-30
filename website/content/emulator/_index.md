@@ -8,7 +8,7 @@ The PSoXide emulator runs original PlayStation software: commercial discs, homeb
 
 If you're writing PS1 software, the emulator is also the place you'll debug it. The desktop app has a debugger sidebar, a performance panel that works on unmodified programs, save states and input recording, and a headless mode that runs a disc from the command line and prints hashes of what it drew. A debugging server lets an MCP client drive a running session.
 
-<!-- embed: hello-tri -->
+{{<example_player name="hello-tri" />}}
 
 ## Run it in the browser
 
