@@ -222,8 +222,9 @@ use generated::{
 use generated::{
     GAMEPLAY_PACK_MAX_CHUNK_BYTES, PERSISTENT_ASSET_PAGE_COUNT, PERSISTENT_ASSET_SLOT_COUNT,
     UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES, UI_PACK_START_LBA, UI_PACK_TOC,
-    WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
-    WORLD_RESIDENT_PAGE_COUNT, WORLD_STREAM_SLOT_COUNT,
+    UI_SFX_MAX_SAMPLE_BYTES, UI_SFX_PACK_FIRST_CHUNK, WORLD_PACK_MAX_CHUNK_BYTES,
+    WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT, WORLD_RESIDENT_PAGE_COUNT,
+    WORLD_STREAM_SLOT_COUNT,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
@@ -611,7 +612,8 @@ struct Playtest {
     /// downward BSP trace so the beacon stands on the floor whatever height
     /// the point was authored at. `i32::MIN` until resolved.
     poi_floor_y: [i32; INTERACTABLES.len()],
-    /// Presented-frame progress for the active POI panel and page type-on.
+    /// Presentation-step progress for the active POI panel and page type-on,
+    /// advanced by the simulation (see `tick_poi_presentation`).
     /// Prepared/overlay copies keep deferred UI matched to its world frame.
     poi_panel_frame: u16,
     /// Keep the current content alive until its reverse transition finishes.
@@ -621,6 +623,8 @@ struct Playtest {
     prepared_poi_page_type_frame: u16,
     overlay_poi_panel_frame: u16,
     overlay_poi_page_type_frame: u16,
+    /// Sim ticks since the last POI presentation step.
+    poi_presentation_subtick: u8,
     /// Unique reward currently replacing the just-closed POI message panel.
     acquired_module: BoostModuleId,
     /// Save-persistent point-of-interest read/reward state.
@@ -641,6 +645,9 @@ struct Playtest {
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Persistent model bytes are resident and the parsed runtime tables are valid.
     runtime_models_loaded: bool,
+    /// Horizon/Zenith palette copies of the player's and enemies' atlases.
+    /// All-zero (the `init_zeroed` state) is empty.
+    stance_cluts: model_rendering::StanceCluts,
     /// The front-end/gameplay RAM union currently belongs to gameplay. False
     /// while menu/loading images own it, and reset on every gameplay exit.
     gameplay_asset_arena_active: bool,
@@ -813,6 +820,7 @@ impl Playtest {
         self.prepared_poi_page_type_frame = 0;
         self.overlay_poi_panel_frame = 0;
         self.overlay_poi_page_type_frame = 0;
+        self.poi_presentation_subtick = 0;
         self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
         self.selected_power_up_item = BoostModuleId::NONE;
         self.inventory_ui_state = crate::playtest_scene::INVENTORY_UI_SOCKETS;

@@ -263,10 +263,11 @@ pub struct FixedUpdateOutcome {
 pub struct FrameScheduler {
     config: SchedulerConfig,
     visual_interval: u16,
-    next_fixed_tick: u32,
+    /// Fixed ticks run on the shared psx-tick clock, one per elapsed VBlank.
+    /// Its `frame_ticks` is the burst since the last visual frame.
+    clock: psx_tick::FixedClock,
     next_visual_tick: u32,
     due_visual_intervals: u16,
-    fixed_ticks_since_visual: u16,
 }
 
 impl FrameScheduler {
@@ -281,23 +282,25 @@ impl FrameScheduler {
         Self {
             config,
             visual_interval,
-            next_fixed_tick: 0,
+            clock: psx_tick::FixedClock::new(
+                psx_tick::TickConfig::new(psx_tick::TickRate::HZ60),
+                0,
+            ),
             next_visual_tick: 0,
             due_visual_intervals: 0,
-            fixed_ticks_since_visual: 0,
         }
     }
 
     /// Next action to run for the supplied elapsed VBlank count.
     pub fn next_action(&self, elapsed_vblank_ticks: u32) -> SchedulerAction {
-        let fixed_ticks_ready = self.next_fixed_tick <= elapsed_vblank_ticks;
+        let fixed_ticks_ready = self.clock.is_due(elapsed_vblank_ticks);
         let visual_due = self.due_visual_intervals != 0;
 
         if self.config.visual_lockstep {
-            if self.fixed_ticks_since_visual < self.visual_interval {
+            if self.clock.frame_ticks() < self.visual_interval {
                 return if fixed_ticks_ready {
                     SchedulerAction::RunFixedUpdate {
-                        tick: SimTick::from_u32(self.next_fixed_tick),
+                        tick: SimTick::from_u32(self.clock.tick()),
                     }
                 } else {
                     SchedulerAction::WaitForVBlank
@@ -313,11 +316,11 @@ impl FrameScheduler {
 
         let fixed_burst_open = !visual_due
             || self.config.max_fixed_ticks_before_visual == 0
-            || self.fixed_ticks_since_visual < self.config.max_fixed_ticks_before_visual;
+            || self.clock.frame_ticks() < self.config.max_fixed_ticks_before_visual;
 
         if fixed_ticks_ready && fixed_burst_open {
             return SchedulerAction::RunFixedUpdate {
-                tick: SimTick::from_u32(self.next_fixed_tick),
+                tick: SimTick::from_u32(self.clock.tick()),
             };
         }
 
@@ -333,10 +336,9 @@ impl FrameScheduler {
 
     /// Mark the fixed update returned by [`FrameScheduler::next_action`] as complete.
     pub fn complete_fixed_update(&mut self) -> FixedUpdateOutcome {
-        let due = self.mark_due_visual_intervals(self.next_fixed_tick);
+        let due = self.mark_due_visual_intervals(self.clock.tick());
         self.due_visual_intervals = self.due_visual_intervals.saturating_add(due);
-        self.next_fixed_tick = self.next_fixed_tick.wrapping_add(1);
-        self.fixed_ticks_since_visual = self.fixed_ticks_since_visual.saturating_add(1);
+        self.clock.consume();
         FixedUpdateOutcome {
             visual_intervals_due: due,
         }
@@ -345,12 +347,19 @@ impl FrameScheduler {
     /// Mark the visual frame returned by [`FrameScheduler::next_action`] as complete.
     pub fn complete_visual_frame(&mut self) {
         self.due_visual_intervals = 0;
-        self.fixed_ticks_since_visual = 0;
+        self.clock.end_frame();
+    }
+
+    /// Frame-consistency counters from the shared psx-tick clock: fixed ticks
+    /// per visual frame, the worst burst, and dropped ticks (always 0 here:
+    /// the burst limit defers ticks, it never drops them).
+    pub const fn tick_stats(&self) -> psx_tick::TickStats {
+        self.clock.stats()
     }
 
     /// Next fixed tick that has not completed.
     pub const fn next_fixed_tick(&self) -> SimTick {
-        SimTick::from_u32(self.next_fixed_tick)
+        SimTick::from_u32(self.clock.tick())
     }
 
     /// Pending visual intervals that have been simulated but not presented.
@@ -375,9 +384,9 @@ impl FrameScheduler {
     }
 
     fn missed_visual_intervals(&self, elapsed_vblank_ticks: u32) -> u16 {
-        let pending_ticks = if self.next_fixed_tick <= elapsed_vblank_ticks {
+        let pending_ticks = if self.clock.is_due(elapsed_vblank_ticks) {
             elapsed_vblank_ticks
-                .wrapping_sub(self.next_fixed_tick)
+                .wrapping_sub(self.clock.next_due())
                 .saturating_add(1)
         } else {
             0

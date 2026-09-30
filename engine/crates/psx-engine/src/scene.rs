@@ -339,6 +339,20 @@ pub trait Scene {
     #[allow(unused_variables)]
     fn load_shared_assets(&mut self, ctx: &mut Ctx) {}
 
+    /// Stage UI SFX sample `index` from disc and hand its `.psau` bytes to
+    /// `consume`. The boot-time SFX upload calls this for every sample whose
+    /// cooked record carries no linked bytes, so a bank that lives in SPU RAM
+    /// after boot does not also keep a dead copy in main RAM. Returns `false`
+    /// when the sample could not be read; that sample then stays silent.
+    #[allow(unused_variables)]
+    fn with_streamed_ui_sfx_sample(
+        &mut self,
+        index: usize,
+        consume: &mut dyn FnMut(&[u8]),
+    ) -> bool {
+        false
+    }
+
     /// Initialise a gameplay session, after its resources are acquired.
     /// A front-end StartGameplay action calls this again for a new game;
     /// returning from a gameplay overlay does not. Shared boot-only assets

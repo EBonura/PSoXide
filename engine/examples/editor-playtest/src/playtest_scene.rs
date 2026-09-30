@@ -277,6 +277,15 @@ impl Scene for Playtest {
         core::mem::take(&mut self.gameplay_sfx_events)
     }
 
+    #[cfg(feature = "cd-stream-bench")]
+    fn with_streamed_ui_sfx_sample(
+        &mut self,
+        index: usize,
+        consume: &mut dyn FnMut(&[u8]),
+    ) -> bool {
+        with_streamed_ui_sfx_sample(index, consume)
+    }
+
     /// Lend the uploaded HUD font to the flow driver so front-end UI
     /// scenes (the cooked Main Menu) draw their labels and buttons with
     /// the same glyphs the in-game HUD uses.
@@ -953,6 +962,7 @@ impl Scene for Playtest {
         self.player_poise.tick(1);
         self.dash_wake.tick();
         self.update_gameplay(ctx);
+        self.tick_poi_presentation();
         // This tail runs after every intentional early return in
         // `update_gameplay`: freeze final actor state once, then run combat
         // from the same snapshots the next body/equipment render consumes.
@@ -966,11 +976,9 @@ impl Scene for Playtest {
     fn render(&mut self, ctx: &mut Ctx) {
         let camera = self.render_camera;
         self.resolve_poi_floors();
-        self.advance_poi_presentation_frame();
         self.prepared_overlay_camera = camera;
         self.prepared_overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
-        self.prepared_poi_panel_frame = self.poi_panel_frame;
-        self.prepared_poi_page_type_frame = self.poi_page_type_frame;
+        self.snapshot_poi_presentation_for_render();
 
         #[cfg(feature = "fps-overlay")]
         {
@@ -1027,6 +1035,7 @@ impl Scene for Playtest {
         let mut world_object_visibility = WorldObjectVisibility::ALL;
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
+            sort_probe_class(SORT_CLASS_WORLD);
             world_object_visibility = bsp.visible_world_objects(camera, &self.destructibles);
             let cinematic_visibility = (self.opening.active() && !self.opening.gameplay_camera())
                 .then(|| {
@@ -1049,6 +1058,7 @@ impl Scene for Playtest {
         // execute the sky first and keeps even a slot-2047 wall in front.
         if let Some(room_record) = room_record {
             telemetry::stage_begin(telemetry::stage::SKY);
+            sort_probe_class(SORT_CLASS_SKY);
             draw_scene_sky(
                 room_record.sky,
                 camera,
@@ -1058,6 +1068,7 @@ impl Scene for Playtest {
                 &mut ot,
             );
             telemetry::stage_end(telemetry::stage::SKY);
+            sort_probe_class(SORT_CLASS_WORLD);
         }
 
         let mut world = begin_world_render_pass(&mut ot, &mut render_scratch.world_commands);
@@ -1657,6 +1668,7 @@ impl Scene for Playtest {
                 let player_lighting = self.current_room_lighting(camera);
                 let actor_options = current_actor_surface_options(self.room_index, USES_PXBSP);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
+                sort_probe_class(SORT_CLASS_PLAYER);
                 #[cfg(feature = "actor-shadows-projected")]
                 {
                     draw_player_projected_shadow(
@@ -1687,6 +1699,18 @@ impl Scene for Playtest {
                         );
                     }
                 }
+                // A free camera backed into a wall collapses its arm into the
+                // player's body; drawing her from inside fills the screen with
+                // near-plane slivers and dash wireframe streaks. Hide her (and
+                // what she holds) until the arm is clear again.
+                // Only for the follow camera: the intro shots and debug
+                // sweeps render from elsewhere.
+                let follow = self.camera.position();
+                let camera_in_player = camera.position.x == follow.x
+                    && camera.position.y == follow.y
+                    && camera.position.z == follow.z
+                    && self.camera.distance() < self.camera_config().min_distance;
+                let player_lighting = player_lighting.filter(|_| !camera_in_player);
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         let phase_assembly = player_phase_assembly(
@@ -1695,6 +1719,9 @@ impl Scene for Playtest {
                             player,
                             player_phase_height(character),
                         );
+                        let stance_clut = self
+                            .stance_cluts
+                            .player_override_clut(character, self.player_stance.active());
                         draw_player(
                             self.room_index,
                             character,
@@ -1709,6 +1736,8 @@ impl Scene for Playtest {
                             &lighting,
                             phase_assembly,
                             &mut self.player_dash_assembly,
+                            stance_clut,
+                            Some(player_stance_lit_tint(self.player_stance.active())),
                             &mut primitive_packets,
                             &mut world,
                         )
@@ -1871,6 +1900,7 @@ impl Scene for Playtest {
                     telemetry::stage_end(telemetry::stage::EQUIPMENT);
                 }
             }
+            sort_probe_class(SORT_CLASS_WORLD);
 
             let _ = self.draw_archive_beacons_world(
                 camera,
@@ -2039,6 +2069,7 @@ impl Scene for Playtest {
         telemetry::stage_begin(telemetry::stage::WORLD_FLUSH);
         world.flush();
         telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
+        sort_probe_class(SORT_CLASS_SPRITE);
         let _ = self.draw_particle_emitters(
             camera,
             self.gameplay_tick(ctx.sim_tick),
@@ -2555,6 +2586,7 @@ impl Playtest {
         box_prop_profile_end(telemetry::stage::IMAGE_CARDS);
         telemetry::stage_end(telemetry::stage::IMAGE_PROPS);
         telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
+        sort_probe_class(SORT_CLASS_MODEL);
         #[cfg(feature = "actor-shadows-projected")]
         {
             draw_model_instance_projected_shadows(
@@ -2602,6 +2634,7 @@ impl Playtest {
         let stats = draw_model_instances(
             room,
             &self.game_entities,
+            &self.stance_cluts,
             &self.instance_actor_poses,
             self.gameplay_tick(ctx.sim_tick),
             ctx.video_hz,
@@ -2615,6 +2648,29 @@ impl Playtest {
             world,
         );
         telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
+        sort_probe_class(SORT_CLASS_WORLD);
         stats
     }
+}
+
+// Primitive classes for PSoXide's depth-sort probe (`--sort-log`).
+const SORT_CLASS_WORLD: u32 = 1;
+const SORT_CLASS_MODEL: u32 = 2;
+const SORT_CLASS_SPRITE: u32 = 4;
+const SORT_CLASS_PLAYER: u32 = 5;
+const SORT_CLASS_SKY: u32 = 7;
+
+/// Tag the projections that follow with a primitive class for PSoXide's
+/// depth-sort probe (`sort-probe` measurement builds only; nothing
+/// otherwise).
+#[inline(always)]
+fn sort_probe_class(class: u32) {
+    #[cfg(feature = "sort-probe")]
+    // SAFETY: emulator-only port in Expansion Region 2 (PSoXide telemetry
+    // slice + 0x28); retail hardware ignores the write.
+    unsafe {
+        core::ptr::write_volatile(0x1F80_2F28 as *mut u32, class);
+    }
+    #[cfg(not(feature = "sort-probe"))]
+    let _ = class;
 }

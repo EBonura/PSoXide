@@ -86,11 +86,61 @@ engine/Cargo.toml
 engine/crates
 $GUEST_DIR"
 
+# Post-link proof shared by both build paths: reroute load-delay hazards and
+# prove the scratchpad stacks. $1 = executable, $2 = link map, $3 = directory
+# for the reports. An unpatched image runs differently from a patched one
+# (the souls gate's second layout diverged at its first sword swing), so the
+# in-tree escape hatch has to get the same treatment as the canonical stage.
+patch_and_prove() {
+    # LLVM's delay-slot filler leaves loads in branch delay slots whose
+    # consumer runs inside the R3000 load delay. Rather than disabling the
+    # filler (tens of kilobytes of nops), reroute those branches through the
+    # guest's HAZARD_TRAMPOLINES array post-link and prove the image clean
+    # (tools/hazard_patch.py). The MIPS binutils are required for that proof.
+    command -v mipsel-none-elf-objdump >/dev/null 2>&1 || {
+        echo "[guest-build] mipsel-none-elf-objdump missing; cannot patch load-delay hazards" >&2
+        exit 1
+    }
+    python3 "$ROOT/tools/hazard_patch.py" "$1" >"$3/hazard-patch.txt" 2>&1 || {
+        cat "$3/hazard-patch.txt" >&2
+        echo "[guest-build] load-delay hazards remain in $EXE_RELATIVE; refusing to stage it" >&2
+        exit 1
+    }
+    # Every psx_rt::scratchpad::ScratchpadStack call tree must fit its
+    # region. An inlining change can deepen one with no source change, so
+    # this is proved on the patched image after every link, never assumed.
+    python3 "$ROOT/tools/stack_guard.py" "$1" "$2" >"$3/stack-guard.txt" 2>&1 || {
+        cat "$3/stack-guard.txt" >&2
+        echo "[guest-build] a scratchpad stack call tree is unproven in $EXE_RELATIVE; refusing to stage it" >&2
+        exit 1
+    }
+}
+
 if [ "${PSOXIDE_GUEST_STAGE:-1}" = "0" ]; then
     echo "[guest-build] PSOXIDE_GUEST_STAGE=0: building in-tree (artifact is checkout-specific)"
-    cd "$ROOT/$GUEST_DIR"
-    CARGO_TARGET_DIR="$ROOT/build/examples" RUSTFLAGS="$RUSTFLAGS_VALUE" \
-        exec cargo build --release "$@"
+    # Relative to the guest crate directory, like the linker script, so a
+    # checkout path with spaces cannot split the RUSTFLAGS word list.
+    in_tree_map="build/examples/editor-playtest.map"
+    if [ -z "${PSOXIDE_GUEST_LINK_MAP:-}" ]; then
+        RUSTFLAGS_VALUE="$RUSTFLAGS_VALUE -Clink-arg=-Map=../../../$in_tree_map"
+    else
+        in_tree_map="$PSOXIDE_GUEST_LINK_MAP"
+    fi
+    (
+        cd "$ROOT/$GUEST_DIR"
+        CARGO_TARGET_DIR="$ROOT/build/examples" RUSTFLAGS="$RUSTFLAGS_VALUE" \
+            cargo build --release "$@"
+    )
+    if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
+        mkdir -p "$(dirname "$PSOXIDE_GUEST_LINK_ELF")"
+        cp "$ROOT/$EXE_RELATIVE" "$PSOXIDE_GUEST_LINK_ELF"
+        echo "[guest-build] DWARF ELF -> $PSOXIDE_GUEST_LINK_ELF"
+        exit 0
+    fi
+    cd "$ROOT"
+    patch_and_prove "$ROOT/$EXE_RELATIVE" "$in_tree_map" "$ROOT/build/examples"
+    echo "[guest-build] $(shasum -a 256 "$EXE_RELATIVE")"
+    exit 0
 fi
 
 STAGE_ROOT="${PSOXIDE_GUEST_STAGE_ROOT:-/tmp/psoxide-psx-guest-v1}"
@@ -181,28 +231,7 @@ if [ -n "${PSOXIDE_GUEST_LINK_ELF:-}" ]; then
     echo "[guest-build] DWARF ELF -> $PSOXIDE_GUEST_LINK_ELF"
     exit 0
 fi
-# LLVM's delay-slot filler leaves loads in branch delay slots whose consumer
-# runs inside the R3000 load delay. Rather than disabling the filler (tens of
-# kilobytes of nops), reroute those branches through the guest's
-# HAZARD_TRAMPOLINES array post-link and prove the image clean
-# (tools/hazard_patch.py). The MIPS binutils are required for that proof.
-command -v mipsel-none-elf-objdump >/dev/null 2>&1 || {
-    echo "[guest-build] mipsel-none-elf-objdump missing; cannot patch load-delay hazards" >&2
-    exit 1
-}
-python3 "$ROOT/tools/hazard_patch.py" "$staged_exe" >"$STAGE/hazard-patch.txt" 2>&1 || {
-    cat "$STAGE/hazard-patch.txt" >&2
-    echo "[guest-build] load-delay hazards remain in $EXE_RELATIVE; refusing to stage it" >&2
-    exit 1
-}
-# Every psx_rt::scratchpad::ScratchpadStack call tree must fit its region.
-# An inlining change can deepen one with no source change, so this is proved
-# on the patched image after every link, never assumed.
-python3 "$ROOT/tools/stack_guard.py" "$staged_exe" "$GUEST_MAP" >"$STAGE/stack-guard.txt" 2>&1 || {
-    cat "$STAGE/stack-guard.txt" >&2
-    echo "[guest-build] a scratchpad stack call tree is unproven in $EXE_RELATIVE; refusing to stage it" >&2
-    exit 1
-}
+patch_and_prove "$staged_exe" "$GUEST_MAP" "$STAGE"
 mkdir -p "$ROOT/$(dirname "$EXE_RELATIVE")"
 cp "$staged_exe" "$ROOT/$EXE_RELATIVE"
 echo "[guest-build] canonical stage $STAGE"

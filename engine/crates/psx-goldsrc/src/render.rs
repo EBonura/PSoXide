@@ -141,10 +141,16 @@ pub fn perspective_screen_midpoint(a: SVert, b: SVert) -> SVert {
     let lo = za.min(zb);
     let hi = za.max(zb);
     let uv = |a: i32, b: i32| ((a as u32 * zb + b as u32 * za + d / 2) / d) as i32;
+    let (x, y, z) = (
+        (a.x + b.x) >> 1,
+        (a.y + b.y) >> 1,
+        (lo + lo * (hi - lo) / d) as i32,
+    );
+    warp_probe_announce(x, y, z);
     SVert {
-        x: (a.x + b.x) >> 1,
-        y: (a.y + b.y) >> 1,
-        z: (lo + lo * (hi - lo) / d) as i32,
+        x,
+        y,
+        z,
         uv: (uv(a.uv.0, b.uv.0), uv(a.uv.1, b.uv.1)),
         rgb: (
             (a.rgb.0 + b.rgb.0 + 1) >> 1,
@@ -361,6 +367,25 @@ impl AttributedClipPlane<CVert> for NearPlane {
     }
 }
 
+/// Announce a CPU-projected vertex to PSoXide's texture-warp probe
+/// (`warp-probe` measurement builds only; nothing otherwise). `z` is view
+/// depth in GTE SZ units.
+#[inline(always)]
+pub fn warp_probe_announce(x: i32, y: i32, z: i32) {
+    #[cfg(feature = "warp-probe")]
+    // SAFETY: emulator-only ports in Expansion Region 2 (PSoXide telemetry
+    // slice + 0x20/0x24); retail hardware ignores the writes.
+    unsafe {
+        core::ptr::write_volatile(0x1F80_2F20 as *mut u32, z.max(0) as u32);
+        core::ptr::write_volatile(
+            0x1F80_2F24 as *mut u32,
+            ((y as u32) << 16) | (x as u32 & 0xFFFF),
+        );
+    }
+    #[cfg(not(feature = "warp-probe"))]
+    let _ = (x, y, z);
+}
+
 /// Project a clipped view-space vertex to true screen coords (one reciprocal
 /// `H/z` in Q12 shared by X and Y).
 pub fn project_soft<V: View>(view: &V, cv: &CVert) -> SVert {
@@ -382,6 +407,7 @@ pub fn project_soft<V: View>(view: &V, cv: &CVert) -> SVert {
         // first, then divide; this is algebraically identical and stays i32.
         (cv.v[0] * h / z + view.ofx(), cv.v[1] * h / z + view.ofy())
     };
+    warp_probe_announce(x, y, cv.v[2]);
     SVert {
         x,
         y,
@@ -467,9 +493,19 @@ fn lerp_sv(a: &SVert, b: &SVert, axis: Axis, bound: i32) -> SVert {
         (a.y, b.y)
     };
     let t = t_q12(bound - ca, cb - ca);
+    let (x, y) = (mix(a.x, b.x, t), mix(a.y, b.y, t));
+    #[cfg(feature = "warp-probe")]
+    {
+        // The emitted depth is interpolated in screen space; the surface's
+        // true depth there is 1/z-linear. Measurement builds announce that.
+        let (za, zb) = (a.z.clamp(1, 0xFFFF) as u32, b.z.clamp(1, 0xFFFF) as u32);
+        let t = t.clamp(0, 4096) as u32;
+        let den = (((4096 - t) * zb + t * za) >> 12).max(1);
+        warp_probe_announce(x, y, ((za * zb) / den) as i32);
+    }
     SVert {
-        x: mix(a.x, b.x, t),
-        y: mix(a.y, b.y, t),
+        x,
+        y,
         z: mix(a.z, b.z, t),
         rgb: (
             mix(a.rgb.0, b.rgb.0, t),
@@ -586,6 +622,7 @@ fn lerp_view_plane(a: &SVert, b: &SVert, mut da: i32, mut db: i32, plane: ViewPl
     if matches!(plane, ViewPlane::Near) {
         v.z = NEAR_Z;
     }
+    warp_probe_announce(v.x, v.y, v.z);
     v
 }
 

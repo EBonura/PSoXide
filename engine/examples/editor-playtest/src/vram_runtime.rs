@@ -377,6 +377,27 @@ pub(super) fn release_gameplay_vram() {
     vram_arena().release_gameplay_vram();
 }
 
+/// Upload (once) a recoloured palette copy of a resident texture.
+pub(super) fn ensure_clut_variant(
+    asset_id: AssetId,
+    asset_bytes: &[u8],
+    variant: u8,
+    recolor: impl FnOnce(&mut [u16]),
+) -> Option<u16> {
+    vram_arena().ensure_clut_variant(asset_id, asset_bytes, variant, recolor)
+}
+
+/// [`ensure_clut_variant`] for a texture whose bytes stay resolvable after
+/// load (static or persistent-arena textures, e.g. material overrides).
+pub(super) fn ensure_resident_clut_variant(
+    asset_id: AssetId,
+    variant: u8,
+    recolor: impl FnOnce(&mut [u16]),
+) -> Option<u16> {
+    let bytes = upload_bytes_for(asset_id)?;
+    ensure_clut_variant(asset_id, bytes, variant, recolor)
+}
+
 /// Upload an 8bpp model atlas to the dedicated model VRAM region.
 pub(super) fn ensure_model_atlas_uploaded(
     asset_id: AssetId,
