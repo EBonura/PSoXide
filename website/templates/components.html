@@ -105,6 +105,7 @@
 {% set example = [e for e in examples.example if e.name == name] | first %}
 {% set player_url = get_url(path="player/") ~ "/?embed=1&disc=../examples/" ~ name ~ ".exe" %}
 <section class="example-player" aria-label="{{ example.title }} interactive example">
+  <p class="small"><strong>PS1 homebrew, running in your browser.</strong> This player runs the compiled PS1 executable in the PSoXide emulator.</p>
   <iframe src="{{ player_url }}" title="{{ name }} running in PSoXide" loading="lazy" allow="autoplay; gamepad; fullscreen" width="640" height="480"></iframe>
   <div class="player-controls">
     <button type="button" class="btn" data-command="toggle" disabled>Pause</button>
