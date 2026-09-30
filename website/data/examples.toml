@@ -1,0 +1,38 @@
+emulator_revision = "3b1b04f644a76e45cf92631c81ce8a232df7e9df"
+sdk_revision = "df69b8946f71e81e96d3f8b49a46c5cd856d9ea1"
+
+[[example]]
+name = "hello-tri"
+title = "Draw your first triangle"
+description = "Initialize the display, draw a shaded triangle and swap buffers."
+guide = "@/docs/first-ps1-program.md"
+
+[[example]]
+name = "hello-input"
+title = "Read controller input"
+description = "Poll buttons and change the picture in response."
+guide = "@/docs/controller-input.md"
+
+[[example]]
+name = "hello-tex"
+title = "Draw textured sprites"
+description = "Upload texture pixels and palettes, then animate two sprites."
+guide = "@/docs/draw-textures.md"
+
+[[example]]
+name = "hello-ot"
+title = "Control drawing order"
+description = "Sort overlapping triangles with an ordering table."
+guide = "@/docs/drawing-order.md"
+
+[[example]]
+name = "hello-gte"
+title = "Project a 3D cube"
+description = "Use fixed-point rotations and the GTE to draw a wireframe cube."
+guide = "@/docs/project-3d.md"
+
+[[example]]
+name = "hello-audio"
+title = "Play sound effects"
+description = "Upload samples to sound RAM and trigger them on a button press."
+guide = "@/docs/sound-effects.md"
