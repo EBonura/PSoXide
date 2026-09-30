@@ -1053,6 +1053,96 @@ pub(crate) fn cook_player_character(
         action_pushes[action.to_index()] = push;
     }
 
+    let mut action_chains =
+        [psx_level::CharacterActionChain::NONE; psx_level::MAX_CHARACTER_ACTION_CHAINS];
+    if let Some((set_id, _, set)) = animation_set {
+        if set.action_chains.len() > action_chains.len() {
+            report.error_at(
+                PlaytestValidationTarget::Resource(set_id),
+                "Too many action chains".to_owned(),
+            );
+            return None;
+        }
+        for (index, chain) in set.action_chains.iter().enumerate() {
+            let fail = |report: &mut PlaytestValidationReport, message: &str| {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(set_id),
+                    format!("Invalid {:?} chain: {message}", chain.action),
+                );
+            };
+            let supported = matches!(
+                (chain.action, chain.next_action),
+                (
+                    CharacterAnimationAction::LightAttack,
+                    CharacterAnimationAction::LightAttackFollowup
+                ) | (
+                    CharacterAnimationAction::LightAttackFollowup,
+                    CharacterAnimationAction::LightAttackFinisher
+                )
+            );
+            if !supported
+                || set.action_chains[..index]
+                    .iter()
+                    .any(|c| c.action == chain.action)
+            {
+                fail(report, "expected unique Light -> Light 2 -> Light 3 links");
+                return None;
+            }
+            let source = action_clips[chain.action.to_index()];
+            let target = action_clips[chain.next_action.to_index()];
+            if source == CHARACTER_CLIP_NONE
+                || target == CHARACTER_CLIP_NONE
+                || !set
+                    .action_clips
+                    .iter()
+                    .any(|binding| binding.action == chain.action)
+                || !set
+                    .action_clips
+                    .iter()
+                    .any(|binding| binding.action == chain.next_action)
+            {
+                fail(report, "both clips must be explicitly bound");
+                return None;
+            }
+            let clip = model_clips.get(usize::from(model.clip_first + source))?;
+            if chain.input_start > chain.input_end
+                || chain.input_end > chain.handoff_frame
+                || chain.input_start < clip.source_frame_first
+                || chain.handoff_frame >= clip.source_frame_last
+                || chain.blend_ticks == 0
+                || chain.blend_ticks > 12
+                || action_flags[chain.action.to_index()]
+                    & psx_level::character_action_flags::LOOPING
+                    != 0
+                || action_flags[chain.next_action.to_index()]
+                    & psx_level::character_action_flags::LOOPING
+                    != 0
+            {
+                fail(
+                    report,
+                    "invalid input/handoff range, looping clip, or blend (1..12 ticks)",
+                );
+                return None;
+            }
+            let remap = |frame| {
+                remap_authored_frame(
+                    frame,
+                    clip.source_frame_first,
+                    clip.source_frame_last,
+                    clip.cooked_frame_count,
+                )
+            };
+            action_chains[index] = psx_level::CharacterActionChain {
+                action: chain.action.to_index() as u8,
+                next_action: chain.next_action.to_index() as u8,
+                input_start: remap(chain.input_start),
+                input_end: remap(chain.input_end),
+                handoff_frame: remap(chain.handoff_frame),
+                blend_ticks: chain.blend_ticks,
+            };
+        }
+    }
+
     if settings.radius == 0 {
         report.error_maybe_at(
             character_id.map(PlaytestValidationTarget::Resource),
@@ -1205,6 +1295,7 @@ pub(crate) fn cook_player_character(
         action_speeds,
         action_frame_ranges,
         action_pushes,
+        action_chains,
         combat_capsule_first,
         combat_capsule_count,
         visual_offset,
@@ -1897,6 +1988,13 @@ fn resample_under_budget(bytes: Vec<u8>, budget_degrees: u8, label: &str) -> Vec
         return bytes;
     };
     let out = compact_animation_bytes(&parsed);
+    // Interpolated poses may lose the source's dictionary reuse. A lower
+    // sample rate is not a RAM saving when its encoded payload grows.
+    // Keep the higher-fidelity source, including its original duration.
+    if out.len() >= bytes.len() {
+        return bytes;
+    }
+
     // Reported rather than silent: a resample changes what ships on disc and
     // what plays on screen, and the per-clip choice is the whole audit trail.
     //
@@ -3739,6 +3837,40 @@ mod socket_anchor_tests {
         let compacted =
             psx_asset::Animation::from_bytes(&compacted_bytes).expect("compacted animation");
         (version, compacted.pose(0, 0).expect("compacted pose"))
+    }
+
+    #[test]
+    fn resampling_never_expands_resident_animation_payloads() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default");
+        let project = crate::ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+        let mut rejected_expansions = 0;
+        for resource in &project.resources {
+            let crate::ResourceData::AnimationClip(clip) = &resource.data else {
+                continue;
+            };
+            let mut bytes = std::fs::read(root.join(&clip.psxanim_path)).unwrap();
+            crate::units::scale_animation_blob_to_engine_units(&mut bytes);
+            let parsed = psx_asset::Animation::from_bytes(&bytes).unwrap();
+            let input = super::compact_animation_bytes(&parsed);
+            let source = psx_asset::Animation::from_bytes(&input).unwrap();
+            let rate = crate::animation_resample::chosen_rate_hz(
+                &source,
+                project.animation_error_budget_degrees,
+            );
+            let output = super::resample_under_budget(
+                input.clone(),
+                project.animation_error_budget_degrees,
+                &resource.name,
+            );
+            assert!(output.len() <= input.len(), "{}", resource.name);
+            if rate < source.sample_rate_hz() && output == input {
+                rejected_expansions += 1;
+            }
+        }
+        assert!(
+            rejected_expansions > 0,
+            "fixture must include expanding resamples"
+        );
     }
 
     #[test]

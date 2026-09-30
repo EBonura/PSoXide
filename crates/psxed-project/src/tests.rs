@@ -3409,6 +3409,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             backstep_clip: None,
             action_clips: Vec::new(),
             weapon_appearance_tracks: Vec::new(),
+            action_chains: Vec::new(),
             clips: Vec::new(),
         }),
     );
@@ -4626,3 +4627,59 @@ fn a_weapon_reachable_only_through_a_loadout_is_still_a_reference() {
 // by the runtime in editor-playtest's overlay::draw_player_vitality_hud, which
 // owns the Triangle stance swap and is covered by that module's own tests. Only
 // the enemy/target bars stay authored as UI scene Bars.
+
+#[test]
+fn action_chains_default_empty_for_legacy_sets() {
+    let set: AnimationSetResource = ron::from_str("(clips: [])").unwrap();
+    assert!(set.action_chains.is_empty());
+    assert_eq!(CharacterAnimationAction::RangedAttack.to_index(), 33);
+    assert_eq!(CharacterAnimationAction::LightAttackFollowup.to_index(), 34);
+    assert_eq!(CharacterAnimationAction::LightAttackFinisher.to_index(), 35);
+}
+
+#[test]
+fn action_chains_cook_and_reject_missing_targets_bad_windows_and_duplicates() {
+    let root = default_project_dir();
+    let project = ProjectDocument::load_from_path(root.join("project.ron")).unwrap();
+    let set_id = project
+        .resources
+        .iter()
+        .find(|r| r.name == "Aletha Delivered Animation Set")
+        .unwrap()
+        .id;
+    let (package, report) = playtest::build_package(&project, &root);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    let package = package.unwrap();
+    let player = package
+        .characters
+        .iter()
+        .find(|c| c.source_resource == ResourceId(62))
+        .unwrap();
+    assert_eq!(player.action_chains[0].action, 6);
+    assert_eq!(player.action_chains[0].next_action, 34);
+    assert_eq!(player.action_chains[0].handoff_frame, 34);
+    assert_eq!(player.action_chains[0].input_start, 12);
+    assert_eq!(player.action_chains[0].input_end, 34);
+    assert_eq!(player.action_chains[1], psx_level::CharacterActionChain::NONE);
+    for case in 0..4 {
+        let mut broken = project.clone();
+        let ResourceData::AnimationSet(set) = &mut broken.resource_mut(set_id).unwrap().data else {
+            panic!()
+        };
+        match case {
+            0 => set
+                .action_clips
+                .retain(|b| b.action != CharacterAnimationAction::LightAttackFollowup),
+            1 => set.action_chains[0].input_end = 61,
+            2 => set.action_chains.push(set.action_chains[0]),
+            _ => set.action_chains[0].next_action = CharacterAnimationAction::LightAttack,
+        }
+        let (_, report) = playtest::build_package(&broken, &root);
+        assert!(!report.is_ok(), "invalid chain case {case} was accepted");
+        assert!(
+            report.errors.iter().any(|e| e.contains("chain")),
+            "{:?}",
+            report.errors
+        );
+    }
+}

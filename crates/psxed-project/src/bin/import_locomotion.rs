@@ -62,7 +62,7 @@ use psxed_project::{
 /// Pack filename stem, the gameplay action it binds, its clip role, and
 /// whether gameplay loops it. Only looping clips are cycle-trimmed; a
 /// one-shot has no cycle to find and must keep its full length.
-const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 21] = [
+const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 23] = [
     (
         "walk_fwd_winddown_mirror",
         CharacterAnimationAction::WalkWinddownAlt,
@@ -138,6 +138,18 @@ const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 21] = [
     (
         "combo_attack",
         CharacterAnimationAction::ComboAttack,
+        AnimationRole::Attack,
+        false,
+    ),
+    (
+        "light_attack_followup",
+        CharacterAnimationAction::LightAttackFollowup,
+        AnimationRole::Attack,
+        false,
+    ),
+    (
+        "light_attack_finisher",
+        CharacterAnimationAction::LightAttackFinisher,
         AnimationRole::Attack,
         false,
     ),

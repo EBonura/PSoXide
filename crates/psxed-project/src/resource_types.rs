@@ -273,6 +273,8 @@ pub enum CharacterAnimationAction {
     /// so the Animation Studio can author projectile release events against a
     /// stable, unambiguous timeline.
     RangedAttack,
+    LightAttackFollowup,
+    LightAttackFinisher,
 }
 
 impl CharacterAnimationAction {
@@ -319,6 +321,8 @@ impl CharacterAnimationAction {
         Self::VertHeavyAttack,
         Self::VertComboAttack,
         Self::RangedAttack,
+        Self::LightAttackFollowup,
+        Self::LightAttackFinisher,
     ];
 
     /// Actions exposed by current editor authoring. `StunRecovery` remains in
@@ -357,6 +361,8 @@ impl CharacterAnimationAction {
         Self::VertHeavyAttack,
         Self::VertComboAttack,
         Self::RangedAttack,
+        Self::LightAttackFollowup,
+        Self::LightAttackFinisher,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -397,6 +403,8 @@ impl CharacterAnimationAction {
             Self::VertHeavyAttack => "Zenith Heavy",
             Self::VertComboAttack => "Legacy Zenith Combo",
             Self::RangedAttack => "Ranged Attack",
+            Self::LightAttackFollowup => "Horizon Light 2",
+            Self::LightAttackFinisher => "Horizon Light 3",
         }
     }
 
@@ -436,6 +444,8 @@ impl CharacterAnimationAction {
             Self::VertHeavyAttack => 31,
             Self::VertComboAttack => 32,
             Self::RangedAttack => 33,
+            Self::LightAttackFollowup => 34,
+            Self::LightAttackFinisher => 35,
         }
     }
 
@@ -470,7 +480,11 @@ impl CharacterAnimationAction {
             // No role hint on purpose: a vertical level binds only when it is
             // authored, so an axis can ship one clip at a time without the
             // other levels quietly adopting some other Attack-role clip.
-            Self::VertLightAttack | Self::VertHeavyAttack | Self::VertComboAttack => None,
+            Self::VertLightAttack
+            | Self::VertHeavyAttack
+            | Self::VertComboAttack
+            | Self::LightAttackFollowup
+            | Self::LightAttackFinisher => None,
         }
     }
 
@@ -494,6 +508,12 @@ impl CharacterAnimationAction {
 
     pub fn guess_from_name(name: &str) -> Option<Self> {
         let name = name.to_ascii_lowercase();
+        if name.contains("light_attack_followup") {
+            return Some(Self::LightAttackFollowup);
+        }
+        if name.contains("light_attack_finisher") {
+            return Some(Self::LightAttackFinisher);
+        }
         // Directional shorthands (lft/rgt/fwd/bwd/bkw) follow the delivered
         // Aletha clip naming; spelled-out forms keep matching below.
         let left = name.contains("left") || name.contains("_lft");
@@ -653,7 +673,8 @@ pub struct WeaponAppearanceTrack {
     pub weapon: ResourceId,
     #[serde(default = "default_character_socket")]
     pub character_socket: String,
-    /// Sampled frame at which materialisation has completed.
+    /// Sampled frame at which materialisation has completed. Zero starts fully
+    /// materialized, allowing a continuation to keep the same weapon visible.
     #[serde(default)]
     pub fully_visible_frame: u16,
     /// Sampled frame at which dematerialisation has completed.
@@ -1044,6 +1065,17 @@ impl AnimationClipResource {
     }
 }
 
+/// Authorable Horizon light chain. Entry poses are authored at target frame zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnimationActionChain {
+    pub action: CharacterAnimationAction,
+    pub next_action: CharacterAnimationAction,
+    pub input_start: u16,
+    pub input_end: u16,
+    pub handoff_frame: u16,
+    pub blend_ticks: u8,
+}
+
 /// Reusable role mapping for one skeleton. Characters combine a
 /// visual model with an Animation Set rather than raw clip indices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1073,6 +1105,9 @@ pub struct AnimationSetResource {
     /// appearance) and each track matches one equipped weapon/socket pair.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub weapon_appearance_tracks: Vec<WeaponAppearanceTrack>,
+    /// Optional R1 handoffs, expressed on the source action timeline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_chains: Vec<AnimationActionChain>,
     /// Extra clips included with the set, such as attacks, hit
     /// reactions, death clips, emotes, and experiments.
     #[serde(default)]
@@ -1091,6 +1126,7 @@ impl AnimationSetResource {
             backstep_clip: None,
             action_clips: Vec::new(),
             weapon_appearance_tracks: Vec::new(),
+            action_chains: Vec::new(),
             clips: Vec::new(),
         }
     }

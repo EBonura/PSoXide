@@ -2436,13 +2436,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, stance_aligned_damage_q12: {}, stance_opposed_damage_q12: {}, stance_regen_delay_ticks: {}, stance_broken_regen_delay_ticks: {}, stance_regen_per_tick_q12: {}, stance_break_threshold_q12: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], action_chains: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, stance_aligned_damage_q12: {}, stance_opposed_damage_q12: {}, stance_regen_delay_ticks: {}, stance_broken_regen_delay_ticks: {}, stance_regen_per_tick_q12: {}, stance_break_threshold_q12: {}, stance_swap_cooldown_ticks: {}, stance_swap_duration_ticks: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
             action_speeds,
             action_frame_ranges,
             action_pushes,
+            character.action_chains.iter().map(|c| format!("psx_level::CharacterActionChain {{ action: {}, next_action: {}, input_start: {}, input_end: {}, handoff_frame: {}, blend_ticks: {} }}", c.action, c.next_action, c.input_start, c.input_end, c.handoff_frame, c.blend_ticks)).collect::<Vec<_>>().join(", "),
             character.combat_capsule_first,
             character.combat_capsule_count,
             character.visual_offset[0],
