@@ -1,16 +1,20 @@
 +++
-title = "Examples you can run in your browser"
-description = "Six small PS1 programs, each with its source, build command and a practical how-to."
+title = "PS1 homebrew, running in your browser"
+description = "Six actual PS1 programs running in the PSoXide emulator, right on this page. Try them, read the source and build your own."
 weight = 2
 [extra]
 kind = "Interactive examples"
 eyebrow = "Learn by trying"
 +++
 
+The SDK builds each example as a PS1 executable. The PSoXide emulator runs that
+executable right here in the page, using the same emulation core as the desktop
+app. Download the EXE below any player to run the same program locally.
+
 Start with a triangle, then explore input, sprites, drawing order, 3D projection
-and sound. Each player runs the actual compiled PS1 program in PSoXide. It does
-not compile edits in the browser: make a change locally, rebuild, and run your
-new EXE or disc image in the desktop emulator.
+and sound. Each example links to its source and a practical how-to. To change
+one, edit and rebuild it locally, then run your new EXE or disc image in the
+emulator.
 
 **Click to run inside an example to start it.** Players load on demand and start
 muted. Starting another example unloads the previous one; scrolling a running
