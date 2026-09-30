@@ -112,6 +112,10 @@ Browsers keep audio off until you click or press a key on the page. Clearing the
 
 ## Compatibility and accuracy
 
+Read the [development methodology](@/docs/development-methodology.md) for the
+console test loop: record hardware measurements, compare them with the emulator,
+correct the model and preserve a repeatable test.
+
 The [comparison page](@/emulator/compare.md) has the measured headless memory use, how far each tested commercial game gets, and what's been checked against original hardware. For how the SDK and emulator are checked against a real console, see [Checking code against PlayStation hardware](@/docs/hardware-checks.md).
 
 {% <callout kind="warn" title="Test on a console too"> %}
