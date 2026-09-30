@@ -6,14 +6,29 @@
     <h1>{{ section.title }}</h1>
     <p class="lede">{{ section.description }}</p>
   </header>
+  <div class="callout">
+    <span class="callout-title">Start here</span>
+    <p><a href="{{ get_url(path='@/docs/first-ps1-program.md') }}">Build your first PS1 program</a>, or <a href="{{ get_url(path='@/docs/browser-examples.md') }}">try the six browser examples</a> before installing anything. Each example links to a focused how-to and matching source.</p>
+  </div>
+  <nav class="jumpbar" aria-label="Guide sections"><a href="#learn">Learn and try</a><a href="#reference">Workflow and reference</a><a href="#repositories">Repository guides</a></nav>
+  <h2 id="learn">Learn and try</h2>
   <div class="grid two">
-    {% for p in section.pages %}
+    {% for p in section.pages %}{% if p.extra.kind in ['Walkthrough', 'How-to', 'Interactive examples'] %}
     <a class="card" href="{{ p.permalink }}">
       <span class="badge accent">{{ p.extra.kind | default(value="Walkthrough") }}</span>
       <h3>{{ p.title }}</h3>
       <p>{{ p.description }}</p>
     </a>
-    {% endfor %}
+    {% endif %}{% endfor %}
+  </div>
+  <h2 id="reference">Workflow and reference</h2>
+  <div class="grid two">
+    {% for p in section.pages %}{% if p.extra.kind not in ['Walkthrough', 'How-to', 'Interactive examples'] %}
+    <a class="card" href="{{ p.permalink }}"><span class="badge">{{ p.extra.kind }}</span><h3>{{ p.title }}</h3><p>{{ p.description }}</p></a>
+    {% endif %}{% endfor %}
+  </div>
+  <h2 id="repositories">Repository guides</h2>
+  <div class="grid two">
     {% for resource in section.extra.resources %}
     <a class="card" href="{{ resource.url }}">
       <span class="badge">Repository guide</span>
