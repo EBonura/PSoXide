@@ -1,24 +1,56 @@
 +++
 title = "About and licensing"
-description = "Why PSoXide needs no BIOS, what it will and won't distribute, and how the ports handle game data that belongs to other people."
+description = "Why PSoXide keeps developing for the original PlayStation: new games, ports, efficient reimplementations, shared tools and documented provenance."
 [extra]
 eyebrow = "About PSoXide"
 +++
 
-## The short version
-
-- PSoXide contains no Sony code or data and doesn't load a BIOS. Its own kernel boots discs.
-- No commercial game, disc image or game data is distributed by the project, and the browser player includes only the public demo disc.
-- Half-Life, Counter-Strike and Hollow Knight ports are source-only or private. You build them from a copy of the game you own.
-- The Quake port ships the shareware episode together with its licence, which restricts screenshots, so this site shows none.
-- Celeste Classic Collection is an unofficial fan port, credited to its creators.
-- Music by Just Music and by magikAAAAArp is used with permission, for non-commercial releases only.
-- The code is licensed GPL-2.0-or-later (the Quake port GPL-2.0-only).
-- Much of the code was written with AI coding assistants under human direction. That isn't a clean-room process, so provenance is tracked file by file.
-
 ## What PSoXide is for
 
-PSoXide provides Rust tools for developing and running software on the original PlayStation. The SDK, engine, editor and emulator are developed alongside games and porting experiments, which help test their behaviour within the console's 33&nbsp;MHz CPU and 2&nbsp;MB of main RAM.
+**What if we never stopped developing for the original PlayStation?**
+
+Late in a console's commercial life, developers have had years to learn its
+hardware. PSoXide asks what happens when that learning continues: new games,
+shared tools and further experiments on the same machine.
+
+I'm Manny, the developer behind Bonnie Studios. PSoXide brings together three
+pursuits:
+
+- **Create:** brand-new PS1 games using modern software engineering practices.
+- **Port:** games brought to the console that were never released on it.
+- **Optimize:** existing PS1 games reimplemented by rewriting their original source
+  for greater efficiency.
+
+The Rust SDK, engine, editor and emulator support this work. A useful discovery
+in one project can become a tool for the next: PSXcel's on-screen keyboard, for
+example, became the shared `psx-osk` SDK component.
+[See the PSXcel development notes](https://github.com/EBonura/psxcel).
+
+PSoXide builds on the work and knowledge shared by the PlayStation homebrew
+community. The [projects page](@/projects/_index.md) records what you can play or
+build today, alongside experiments that are still in development.
+
+## Reimplementing existing games
+
+The Optimize strand explores rewriting an existing PS1 game's source into a more
+efficient implementation for the same hardware. The aim is to learn what a
+different implementation can achieve, with changes to behaviour and presentation
+recorded alongside performance and memory measurements.
+
+This is a development direction. There is no released example of this work listed
+on the site yet. Any future result needs a comparison against the original
+implementation on equivalent scenes and hardware.
+
+## How the work is developed
+
+The tools support a repeatable cycle: build, run, inspect and test. Command-line
+workflows and emulator debugging interfaces also let developers work with coding
+assistants. The [development workflow](@/docs/development-workflow.md) explains how
+to connect these steps.
+
+I direct the architecture, review and integrate changes, and validate results
+with automated tests and original-hardware checks. Read [how it is built](#how-it-s-built)
+for the project's use of AI assistance and how provenance is tracked.
 
 The project uses the following practices:
 
@@ -32,6 +64,17 @@ The project uses the following practices:
 PSoXide was developed with heavy use of AI coding assistants. A person directs the architecture, debugging and hardware verification; a large part of the code was written by an assistant under that direction, then reviewed and integrated.
 
 That isn't a clean-room process. Language models are trained on large amounts of existing code, so code they write can carry influence from that training data that neither the tool nor the author can fully audit. Saying so is a disclosure, not a guarantee of clean-room provenance or non-infringement. The project's answer is to track provenance explicitly, file by file, as described in [downstream-licensing.md](https://github.com/EBonura/PSoXide/blob/main/docs/downstream-licensing.md) and in the sections below.
+
+## Licensing at a glance
+
+- PSoXide contains no Sony code or data and doesn't load a BIOS. Its own kernel boots discs.
+- No commercial game, disc image or game data is distributed by the project, and the browser player includes only the public demo disc.
+- Half-Life, Counter-Strike and Hollow Knight ports are source-only or private. You build them from a copy of the game you own.
+- The Quake port ships the shareware episode together with its licence, which restricts screenshots, so this site shows none.
+- Celeste Classic Collection is an unofficial fan port, credited to its creators.
+- Music by Just Music and by magikAAAAArp is used with permission, for non-commercial releases only.
+- The code is licensed GPL-2.0-or-later (the Quake port GPL-2.0-only).
+- Much of the code was written with AI coding assistants under human direction. That isn't a clean-room process, so provenance is tracked file by file.
 
 ## No BIOS
 

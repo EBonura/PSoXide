@@ -8,9 +8,9 @@
 <section class="hero">
   <div class="wrap hero-grid">
     <div>
-      <span class="eyebrow">Rust for the original PlayStation</span>
-      <h1>Development tools for the original PlayStation.</h1>
-      <p class="lede">PSoXide is a Rust SDK, engine, scene editor and emulator for PS1 software. Build for the console, then test and debug on desktop or in the browser. The emulator uses its own kernel and requires no BIOS file.</p>
+      <span class="eyebrow">Modern tools for original hardware</span>
+      <h1>What if we never stopped developing for the original PlayStation?</h1>
+      <p class="lede">PSoXide brings together games, a Rust SDK, engine, editor and emulator to keep exploring the same console. Build, inspect and test each change, then carry what you learn into the next project.</p>
       <div class="btn-row">
         <a class="btn btn-primary" href="{{ config.extra.web_player }}">Play in your browser</a>
         <a class="btn" href="{{ get_url(path='@/docs/first-ps1-program.md') }}">Build your first PS1 program</a>
@@ -18,8 +18,34 @@
     </div>
     <figure class="hero-shot">
       <div class="screen"><img src="{{ get_url(path='img/shots/nitroxide-hires.jpg') }}" alt="NitroXide: a car flies towards the ball in a sunset stadium" width="640" height="480"></div>
-      <figcaption>NitroXide, an original PSoXide game, through the emulator's hardware renderer.</figcaption>
+      <figcaption>NitroXide through the emulator's hardware renderer. <a href="https://www.youtube.com/watch?v=IUf6ATfRsh8">Watch it on an original PlayStation</a>.</figcaption>
     </figure>
+  </div>
+</section>
+
+<section class="section" id="approach" aria-labelledby="approach-title">
+  <div class="wrap">
+    <div class="section-head">
+      <h2 id="approach-title">Create. Port. Optimize.</h2>
+      <p>Three ways to keep developing for the PlayStation. The hardware stays the same. We keep learning.</p>
+    </div>
+    <div class="grid three">
+      <article class="card">
+        <h3>Create</h3>
+        <p>Make brand-new PS1 games using modern software engineering practices, reusable tools and tests on the console.</p>
+        <a href="{{ get_url(path='@/projects/_index.md') }}#original-projects">Explore the games →</a>
+      </article>
+      <article class="card">
+        <h3>Port</h3>
+        <p>Bring games to the PlayStation that were never released on it, adapting their code and data to the hardware.</p>
+        <a href="{{ get_url(path='@/projects/_index.md') }}#ports">Explore the ports →</a>
+      </article>
+      <article class="card">
+        <h3>Optimize</h3>
+        <p>Reimplement existing PS1 games by rewriting their original source for greater efficiency on the same console.</p>
+        <a href="{{ get_url(path='@/ethos.md') }}#reimplementing-existing-games">About this direction →</a>
+      </article>
+    </div>
   </div>
 </section>
 
@@ -43,8 +69,10 @@
 <section class="section" id="toolkit">
   <div class="wrap">
     <div class="section-head">
-      <h2>The toolkit</h2>
-      <p>Write Rust programs with the SDK or build scenes in the editor. Create a disc image, test it in the emulator and run it on a PlayStation that supports burned CD-Rs.</p>
+      <span class="eyebrow">The toolkit</span>
+      <h2>Built for fast, testable iteration</h2>
+      <p>Write Rust programs with the SDK or build scenes in the editor. Create a disc image, inspect it in the emulator and test it on the console. Command-line workflows and debugging tools help you repeat the process.</p>
+      <a href="{{ get_url(path='@/docs/development-workflow.md') }}">Build, run, inspect and test →</a>
     </div>
     <div class="grid four">
       <a class="card pillar" href="{{ config.extra.repo_sdk }}">
