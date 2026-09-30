@@ -65,6 +65,12 @@ for the development approach. Explain coding-assistant interfaces in developer
 material, with the AI-use and provenance disclosure on the Legal & licensing page.
 Keep original-hardware results, emulator enhancements, plans and releases distinct.
 
+For embedded examples, use “PS1 homebrew, running in your browser.” Explain that
+the SDK produces a PS1 executable and the PSoXide emulator runs it in the page;
+the downloadable EXE is the same program. Let the working player demonstrate
+the capability. Browser availability alone is not a performance measurement;
+claims about speed or resource use still need a workload and recorded conditions.
+
 ## Legal summaries
 
 Use `/legal/` as the canonical public wording. Keep summaries in FAQs, project
