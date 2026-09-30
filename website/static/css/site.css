@@ -106,7 +106,7 @@ h2 { font-size: clamp(1.5rem, 3vw, 2.1rem); margin-top: 0; }
 h3 { font-size: 1.2rem; }
 p { margin: 0 0 1em; }
 code, pre, kbd { font-family: var(--mono); font-size: 0.9em; }
-:not(pre) > code { background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 0.08em 0.35em; }
+:not(pre) > code { overflow-wrap: anywhere; background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 0.08em 0.35em; }
 pre {
   background: var(--bg-2);
   border: 1px solid var(--line);
@@ -452,5 +452,9 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 @media (max-width: 719px) { .disc-contents { grid-template-columns: 1fr; } }
 #disc-contents, #collection-games, .card[id] { scroll-margin-top: 76px; }
 @media (max-width: 719px) {
-  section[id], h2[id], .card[id] { scroll-margin-top: 180px; }
+  section[id], h2[id], .card[id], .qa, .faq-group { scroll-margin-top: 180px; }
 }
+
+/* Retained About-page fragment links stay below the sticky header. */
+.prose [id] { scroll-margin-top: 100px; }
+@media (max-width:719px) { .prose [id] { scroll-margin-top: 180px; } }

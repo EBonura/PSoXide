@@ -62,5 +62,21 @@ the third strand as modding or claim efficiency gains without measurements.
 
 Use “Modern tools for original hardware” and “Built for fast, testable iteration”
 for the development approach. Explain coding-assistant interfaces in developer
-material, with the existing AI-use and provenance disclosure on the About page.
+material, with the AI-use and provenance disclosure on the Legal & licensing page.
 Keep original-hardware results, emulator enhancements, plans and releases distinct.
+
+## Legal summaries
+
+Use `/legal/` as the canonical public wording. Keep summaries in FAQs, project
+cards and future profile drafts consistent with it. Distinguish source and binary
+availability, asset rights and express permission; silence is not approval.
+Do not describe the whole project as clean-room, imply GPL covers unrelated game
+content, or treat source-only/noncommercial distribution as legal clearance.
+Recheck dated permission statements when new evidence arrives. Keep uncertain
+Quake data permissions visible; do not add a source-rewrite showcase until its
+provenance and rights have been reviewed. Do not publish private review material.
+
+Burned-disc links and console instructions must explain the need for a modchipped
+console or another homebrew boot method, the lack of modchip installation support,
+and the risk of permanent hardware damage. The qualified liability notice remains
+on the legal page. Keep old About-page licensing fragments working.

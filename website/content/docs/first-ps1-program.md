@@ -143,3 +143,14 @@ Examples that use CD audio or a `WORLD.PAK` need their own pack inputs; the gene
 {% <callout kind="warn" title="Pre-1.0"> %}
 The SDK is pre-1.0. Formats and APIs still change, and downstream games pin an exact revision. Emulator checks don't replace testing on original hardware.
 {% </callout> %}
+
+## Running on original hardware
+
+A standard, unmodified retail PlayStation cannot directly boot a burned PSoXide
+disc. You need a modchipped console or another compatible homebrew boot method.
+PSoXide does not endorse modchipping or provide installation instructions or help.
+Modifications can permanently damage or brick your console and are undertaken at
+your own risk. Read the [hardware warning](@/legal.md#running-burned-discs-on-original-hardware).
+
+Before distributing a program built with the SDK, read the
+[code and content licensing requirements](@/legal.md#code-and-licences).
