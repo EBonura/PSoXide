@@ -4,7 +4,7 @@ description = "A PlayStation emulator for playing, debugging and profiling homeb
 template = "emulator.html"
 +++
 
-The PSoXide emulator runs original PlayStation software: commercial discs, homebrew disc images and bare PS-X EXE files. It's written in Rust and has two frontends built from the same core, a desktop app and a browser build. Instead of Sony's BIOS it uses its own high-level emulation (HLE) of the kernel services programs call, so there's no firmware file to find, and none can be loaded. The [About page](@/ethos.md#no-bios) explains where that kernel's behaviour comes from.
+The PSoXide emulator runs original PlayStation software: commercial discs, homebrew disc images and bare PS-X EXE files. It's written in Rust and has two frontends built from the same core, a desktop app and a browser build. Instead of Sony's BIOS it uses its own high-level emulation (HLE) of the kernel services programs call, so there's no firmware file to find, and none can be loaded. The [Legal & licensing page](@/legal.md#no-bios) explains where that kernel's behaviour comes from.
 
 If you're writing PS1 software, the emulator is also the place you'll debug it. The desktop app has a debugger sidebar, a performance panel that works on unmodified programs, save states and input recording, and a headless mode that runs a disc from the command line and prints hashes of what it drew. A debugging server lets an MCP client drive a running session.
 
@@ -79,7 +79,7 @@ Some of the options that are most useful for homebrew:
 | `--memcard PATH` | Uses a 128 KiB `.mcd` file as the port 1 memory card and writes changes back |
 | `--savestate PATH` | Restores a save state after mounting the game |
 
-`validate` runs exact-hash checkpoints from a manifest and can write new baselines with `--bless`. `preburn-check` checks an authored CUE/BIN before you burn it: the volume ID, required files, a CD audio track, and strings that shouldn't be in the EXE. On macOS the desktop app can also burn a disc image to CD-R through the system's `drutil`.
+`validate` runs exact-hash checkpoints from a manifest and can write new baselines with `--bless`. `preburn-check` checks an authored CUE/BIN before you burn it: the volume ID, required files, a CD audio track, and strings that shouldn't be in the EXE. On macOS the desktop app can also burn a disc image to CD-R through the system's `drutil`. Burned discs need a modchipped console or another compatible homebrew boot method. PSoXide does not endorse modchipping or provide installation help; modifications can permanently damage or brick hardware and are at your own risk. Read the [hardware warning](@/legal.md#running-burned-discs-on-original-hardware).
 
 The SDK uses `launch` directly: `make run-tri FRONTEND=...` builds `hello-tri` and runs it headlessly.
 
