@@ -7,7 +7,8 @@
 <div class="wrap">
   <header class="page-head">
     <h1>Projects</h1>
-    <p class="lede">Games, tools and collections built for the original PlayStation. The public PSoXide Demo Disc {{ disc.version }} includes {{ disc.program | length }} programs, including two collections with five games between them. Play it in the browser or download a disc image.</p>
+    <span class="eyebrow">Create. Port. Optimize.</span>
+    <p class="lede">Original games, ports and experiments for the original PlayStation. The public PSoXide Demo Disc {{ disc.version }} has {{ disc.program | length }} program entries in its launcher, including two collections with five games between them. Play it in the browser or download a disc image.</p>
     <div class="btn-row">
       <a class="btn btn-primary" href="{{ config.extra.web_player }}">Play the demo disc in your browser</a>
       <a class="btn" href="{{ config.extra.demo_disc }}">Download the disc image</a>
@@ -33,7 +34,7 @@
     <p class="muted small">Contents checked against the released {{ disc.version }} image. Credits also appear in the menu. Half-Life, Counter-Strike, Hollow Knight and Hardware Tests are not included in this public release.</p>
   </section>
 
-  <section class="section">
+  <section class="section" id="original-projects">
     <div class="section-head">
       <h2>Games, tools and collections</h2>
       <p>Original projects and an unofficial Celeste fan port. Screenshots below are emulator captures; the linked console videos show original hardware. Code, music and third-party assets are credited in each project's repository and on the <a href="{{ get_url(path='@/ethos.md') }}#music-and-other-assets">about and licensing page</a>.</p>
