@@ -49,7 +49,7 @@
 {% set sdk = load_data(path="data/sdk.json") %}
 <div class="table-wrap"><table>
 <thead><tr><th>{% if what == "crates" %}Crate{% else %}Example{% endif %}</th><th>{% if what == "crates" %}Purpose{% else %}Shows{% endif %}</th></tr></thead>
-<tbody>{% for row in sdk[what] %}<tr><td><a href="{{ row.url }}"><code>{{ row.name }}</code></a></td><td>{% if what == "crates" %}{{ row.purpose | markdown(inline=true) | safe }}{% else %}{{ row.shows | markdown(inline=true) | safe }}{% endif %}</td></tr>{% endfor %}</tbody>
+<tbody>{% for row in sdk[what] %}<tr><td><a href="{{ get_url(path='@/docs/' ~ what ~ '/' ~ row.name ~ '.md') }}"><code>{{ row.name }}</code></a></td><td>{% if what == "crates" %}{{ row.purpose | markdown(inline=true) | safe }}{% else %}{{ row.shows | markdown(inline=true) | safe }}{% endif %}</td></tr>{% endfor %}</tbody>
 </table></div>
 {% endcomponent sdk_index %}
 
@@ -117,3 +117,43 @@
   <p class="small player-links"><a href="{{ player_url }}">Open player separately</a> · <a href="{{ get_url(path='examples/' ~ name ~ '.exe') }}" download>Download EXE</a> · <a href="https://github.com/EBonura/PSoXide/blob/{{ examples.sdk_revision }}/sdk/examples/{{ name }}/src/main.rs">Matching source</a> · <a href="{{ get_url(path='@/docs/browser-examples.md') }}#builds-and-credits">Builds and credits</a></p>
 </section>
 {% endcomponent example_player %}
+
+{% component sdk_crate(name: string) %}
+{% set reference = load_data(path="data/sdk-reference.json") %}
+{% set crate = [c for c in reference.crates if c.name == name] | first %}
+{% set source = "https://github.com/EBonura/PSoXide/blob/" ~ reference.revision ~ "/sdk/crates/" ~ name ~ "/" %}
+<p class="small muted">SDK revision <code>{{ reference.revision | truncate(length=12, end="") }}</code>. Structure, dependencies and features below come from this revision.</p>
+<div class="btn-row">
+  <a class="btn btn-primary" href="{{ get_url(path='api/ps1/' ~ name | replace(from='-', to='_') ~ '/index.html') }}">Search the PS1 API</a>
+  <a class="btn" href="{{ source }}src/lib.rs">Crate source</a>
+  {% if name in ['psx-gte', 'psx-gte-core'] %}<a class="btn" href="{{ get_url(path='api/host/' ~ name | replace(from='-', to='_') ~ '/index.html') }}">Host GTE API</a>{% endif %}
+</div>
+<p>The PS1 reference includes all Cargo features. The manifest below shows which features are enabled by default.</p>
+<h3>Dependencies</h3>
+{% if crate.dependencies %}
+<ul>{% for dep in crate.dependencies %}<li>{% if dep.sdk %}<a href="{{ get_url(path='@/docs/crates/' ~ dep.name ~ '.md') }}"><code>{{ dep.name }}</code></a>{% else %}<code>{{ dep.name }}</code> (shared repository crate){% endif %} — {{ dep.target }}{% if dep.optional %}; optional{% endif %}{% if dep.features %}; features: <code>{{ dep.features | join(sep=', ') }}</code>{% endif %}</li>{% endfor %}</ul>
+{% else %}<p>No runtime Cargo dependencies.</p>{% endif %}
+<h3>Cargo features</h3>
+{% if crate.features %}<div class="table-wrap"><table><thead><tr><th>Feature</th><th>Enables</th></tr></thead><tbody>{% for feature, enables in crate.features %}<tr><td><code>{{ feature }}</code></td><td>{% if enables %}<code>{{ enables | join(sep=', ') }}</code>{% else %}No additional dependency features{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p>This crate declares no Cargo features.</p>{% endif %}
+<p><a href="{{ source }}Cargo.toml">Read the complete manifest and feature comments</a>.</p>
+<h3>Source layout</h3>
+<p>The list includes internal implementation and test files. Public modules, types, functions and their signatures are indexed in the API reference above.</p>
+<details class="source-file" open><summary>{{ crate.files | length }} source and manifest files</summary>
+<ul>{% for file in crate.files %}<li><a href="{{ source }}{{ file.path }}"><code>{{ file.path }}</code></a>{% if file.summary %} — {{ file.summary | markdown(inline=true) | safe }}{% endif %}</li>{% endfor %}</ul>
+</details>
+{% endcomponent sdk_crate %}
+
+{% component sdk_example_source(name: string) %}
+{% set reference = load_data(path="data/sdk-reference.json") %}
+{% set example = [e for e in reference.examples if e.name == name] | first %}
+{% set source = "https://github.com/EBonura/PSoXide/blob/" ~ reference.revision ~ "/sdk/examples/" ~ name ~ "/" %}
+<p>Complete, unabridged files from SDK revision <code>{{ reference.revision | truncate(length=12, end="") }}</code>. Build inside the repository checkout: the manifest uses relative SDK paths, and some programs embed assets from elsewhere in the repository.</p>
+<p>Runtime dependencies: {% for dep in example.dependencies %}{% if dep.sdk %}<a href="{{ get_url(path='@/docs/crates/' ~ dep.name ~ '.md') }}"><code>{{ dep.name }}</code></a>{% else %}<code>{{ dep.name }}</code>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+{% for file in example.files %}
+<details class="source-file"{% if file.lines < 100 %} open{% endif %}>
+  <summary>{{ file.path }} · {{ file.lines }} lines</summary>
+  <p><a href="{{ source }}{{ file.path }}">View this file on GitHub</a></p>
+  <pre tabindex="0" aria-label="{{ file.path }} source"><code class="language-{{ file.language }}">{{ file.code | escape | replace(from="\n", to="&#10;") | safe }}</code></pre>
+</details>
+{% endfor %}
+{% endcomponent sdk_example_source %}

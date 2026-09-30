@@ -49,8 +49,13 @@
     <nav class="wrap breadcrumbs" aria-label="Breadcrumb">
       <ol>
         <li><a href="{{ get_url(path='/') }}">Home</a></li>
-        {% if page and current_path is starting_with(pat="/docs/") %}
+        {% if current_path is starting_with(pat="/docs/") and current_path != "/docs/" %}
         <li><a href="{{ get_url(path='@/docs/_index.md') }}">Guides</a></li>
+        {% if current_path is starting_with(pat="/docs/crates/") or current_path is starting_with(pat="/docs/examples/") %}
+        <li><a href="{{ get_url(path='@/docs/sdk.md') }}">SDK</a></li>
+        {% if page and current_path is starting_with(pat="/docs/crates/") %}<li><a href="{{ get_url(path='@/docs/crates/_index.md') }}">Crates</a></li>{% endif %}
+        {% if page and current_path is starting_with(pat="/docs/examples/") %}<li><a href="{{ get_url(path='@/docs/examples/_index.md') }}">Examples</a></li>{% endif %}
+        {% endif %}
         {% elif page and current_path is starting_with(pat="/emulator/") %}
         <li><a href="{{ get_url(path='@/emulator/_index.md') }}">Emulator</a></li>
         {% endif %}

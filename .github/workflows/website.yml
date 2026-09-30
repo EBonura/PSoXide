@@ -116,6 +116,15 @@ jobs:
       - id: pages
         uses: actions/configure-pages@v5
 
+      - name: Verify complete SDK source listings
+        run: python3 scripts/import_sdk_reference.py --sdk-root ../.site-build/sdk --check
+
+      - name: Build SDK API references
+        run: |
+          python3 scripts/build_sdk_docs.py --sdk-root ../.site-build/sdk \
+            --target-dir "$RUNNER_TEMP/psoxide-sdk-api" \
+            --base-url "${{ steps.pages.outputs.base_url }}"
+
       - name: Build
         run: zola build --base-url "${{ steps.pages.outputs.base_url }}"
 
