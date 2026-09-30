@@ -1471,7 +1471,7 @@ fn embedded_default_project_ron_deserializes() {
         })
         .expect("starter Run clip resource missing");
     assert_eq!(run.psxanim_path, "assets/animations/gen/run_fwd.psxanim");
-    // Replacements retain the generated-pack paths; the strafes remain original.
+    // Approved replacements retain their stable generated-pack paths.
     for (action, stem) in [
         (CharacterAnimationAction::WalkBackward, "walk_bwd"),
         (CharacterAnimationAction::StrafeLeft, "walk_lft"),
