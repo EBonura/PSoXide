@@ -11,6 +11,9 @@ An emulator is a model of the console, and a model can be wrong in ways that let
 
 This page describes each level and the bugs it has found. Dates are when a capture was recorded or a change landed; statuses are as of the linked document or commit.
 
+For the complete process from a testable question to a console capture, emulator
+correction and regression test, read the [development methodology](@/docs/development-methodology.md).
+
 ## Checks after every link
 
 The build for `hello-tri` and the other SDK examples doesn't stop at the linker. `make example` goes through the SDK's profile-guided build driver (see [below](#profile-guided-builds)), which runs three tools on the finished executable, using the linker map the link writes. `make test` runs the tools' own tests, and `make lint` runs a fourth check over the SDK's assembly.

@@ -51,7 +51,8 @@ implementation on equivalent scenes and hardware.
 The tools support a repeatable cycle: build, run, inspect and test. Command-line
 workflows and emulator debugging interfaces also let developers work with coding
 assistants. The [development workflow](@/docs/development-workflow.md) explains how
-to connect these steps.
+to connect these steps. The [development methodology](@/docs/development-methodology.md)
+shows how measurements from real consoles improve the emulator and SDK.
 
 I direct the architecture, review and integrate changes, and validate results
 with automated tests and original-hardware checks. Read [the provenance disclosure](@/legal.md#provenance)

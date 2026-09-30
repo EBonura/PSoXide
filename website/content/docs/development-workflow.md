@@ -59,6 +59,10 @@ explains the project's use of AI assistance and developer review.
 
 ## Verify on the console
 
+The [development methodology](@/docs/development-methodology.md) explains the
+hardware feedback loop: prepare a probe, capture its results on a console,
+compare them with the emulator and retain the findings as regression tests.
+
 Emulator checks help find problems and make them repeatable. Test relevant changes
 on original hardware too, especially when they affect timing, rendering, audio or
 disc access. Record the console model, game build, scene and known limitations.
