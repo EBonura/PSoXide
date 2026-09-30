@@ -17,6 +17,7 @@ pub mod actor_pose;
 pub mod arch_props;
 #[cfg(feature = "cd-stream-bench")]
 pub mod asset_streaming;
+pub mod attack_chain;
 pub mod box_props;
 pub mod cd_stream;
 pub mod character;

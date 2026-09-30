@@ -35,9 +35,11 @@ const PLAYER_PROJECTILE_TARGET: u16 = u16::MAX - 1;
 fn weapon_swing_sfx(action: psx_level::CharacterAnimationAction) -> Option<LevelGameplaySfxEvent> {
     use psx_level::CharacterAnimationAction as Action;
     match action {
-        Action::LightAttack | Action::VertLightAttack | Action::AltLightAttack => {
-            Some(LevelGameplaySfxEvent::LightWeaponSwing)
-        }
+        Action::LightAttack
+        | Action::LightAttackFollowup
+        | Action::LightAttackFinisher
+        | Action::VertLightAttack
+        | Action::AltLightAttack => Some(LevelGameplaySfxEvent::LightWeaponSwing),
         Action::HeavyAttack
         | Action::VertHeavyAttack
         | Action::AltHeavyAttack

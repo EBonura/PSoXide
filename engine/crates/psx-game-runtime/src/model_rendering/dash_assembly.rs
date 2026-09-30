@@ -109,6 +109,8 @@ impl PlayerDashAssembly {
             CharacterAnimationAction::HitReact
                 | CharacterAnimationAction::Death
                 | CharacterAnimationAction::LightAttack
+                | CharacterAnimationAction::LightAttackFollowup
+                | CharacterAnimationAction::LightAttackFinisher
                 | CharacterAnimationAction::HeavyAttack
                 | CharacterAnimationAction::VertLightAttack
                 | CharacterAnimationAction::VertHeavyAttack

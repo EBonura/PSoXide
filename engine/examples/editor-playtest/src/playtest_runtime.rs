@@ -592,6 +592,8 @@ impl Playtest {
         let modifiers = self.vitality_modifiers();
         for anim in [
             PlayerAnim::LightAttack,
+            PlayerAnim::LightAttackFollowup,
+            PlayerAnim::LightAttackFinisher,
             PlayerAnim::HeavyAttack,
             PlayerAnim::VertLightAttack,
             PlayerAnim::VertHeavyAttack,
@@ -769,6 +771,7 @@ impl Playtest {
         self.combat_projectile_impacts.clear();
         self.dash_wake = psx_game_runtime::combat_feedback::DashWake::EMPTY;
         self.attack_buffer.clear();
+        self.attack_chain.clear();
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
@@ -806,6 +809,7 @@ impl Playtest {
         self.deferred_enemy_attacks.clear();
         self.dash_wake = psx_game_runtime::combat_feedback::DashWake::EMPTY;
         self.attack_buffer.clear();
+        self.attack_chain.clear();
         self.evade_buffer_vblanks = 0;
         self.swing_hit_mask = 0;
         self.camera_recenter_requested = false;
@@ -898,6 +902,8 @@ impl Playtest {
     /// Switch the player animation state, recording the outgoing
     /// pose so the renderer can crossfade instead of hard-cutting.
     pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick, video_hz: VideoHz) {
+        self.attack_chain.clear();
+        self.chain_blend_ticks = 0;
         let old = self.anim_state;
         self.anim_blend_from = Some((old, now.saturating_sub(self.anim_start_tick), now));
         // Gait to gait, enter the incoming cycle at the phase the outgoing one
@@ -954,7 +960,11 @@ impl Playtest {
     /// that stride would show extra steps after the motor is already still.
     pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<PlayerAnimBlend> {
         let (anim, local_tick, switch_tick) = self.anim_blend_from?;
-        let duration = player_blend_ticks(anim, self.anim_state);
+        let duration = if self.chain_blend_ticks != 0 {
+            u32::from(self.chain_blend_ticks)
+        } else {
+            player_blend_ticks(anim, self.anim_state)
+        };
         let elapsed = now.saturating_sub(switch_tick);
         if elapsed >= duration {
             return None;
@@ -1002,6 +1012,7 @@ impl Playtest {
         }
         self.motor.interrupt_action();
         self.attack_buffer.clear();
+        self.attack_chain.clear();
         self.evade_buffer_vblanks = 0;
         self.loco = LocoPhase::Idle;
         let now = self.gameplay_tick(ctx.sim_tick);

@@ -622,6 +622,7 @@ impl Playtest {
             let config = self.player_stance_config;
             if self.player_stance.request_swap(&config).is_some() {
                 self.attack_buffer.clear();
+                self.attack_chain.clear();
                 self.queue_gameplay_sfx(LevelGameplaySfxEvent::StanceSwap);
                 telemetry::debug_log("player stance:swap");
             }
@@ -735,6 +736,9 @@ impl Playtest {
         {
             self.evade_latched_move = (stick_input.move_x, stick_input.move_z);
         }
+        if circle.evade {
+            self.attack_chain.clear();
+        }
         let actor_free = !action_locked && self.motor.action().is_idle();
         let evade = if circle.evade && !actor_free {
             // Recovery cancel: a tap during the last stretch of an attack,
@@ -802,6 +806,7 @@ impl Playtest {
         if input.evade {
             // An explicit dodge wins over a remembered attack.
             self.attack_buffer.clear();
+            self.attack_chain.clear();
         } else if self.update_attack_input(ctx, now, action_locked) {
             input = CharacterMotorInput::default();
         }
@@ -1386,9 +1391,11 @@ impl Playtest {
     /// Capture its stance at press time; a later swap cannot change intent.
     ///
     /// Returns true while an attack owns the player's input.
+    #[inline(never)]
     fn update_attack_input(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
         if self.hazard_death_ticks_remaining != 0 {
             self.attack_buffer.clear();
+            self.attack_chain.clear();
             return false;
         }
         let stance_offset = if self.player_stance.active() == VitalityChannelId::Two {
@@ -1396,6 +1403,78 @@ impl Playtest {
         } else {
             0
         };
+        // Chain inputs are scoped to this strike. A rejected/terminal press
+        // cannot leak into the ordinary late-recovery attack buffer.
+        let action = self.anim_state.action();
+        let chain = self.character.as_ref().and_then(|c| {
+            c.action_chains
+                .iter()
+                .copied()
+                .find(|c| c.action == action.to_index() as u8)
+        });
+        let is_followup = matches!(
+            self.anim_state,
+            PlayerAnim::LightAttackFollowup | PlayerAnim::LightAttackFinisher
+        );
+        if action_locked && (chain.is_some() || is_followup) {
+            self.attack_buffer.clear();
+            if stance_offset == 0 && self.evade_buffer_vblanks == 0 {
+                if let (Some(rule), Some(character)) = (chain, self.character.as_ref()) {
+                    let phase = self
+                        .models
+                        .get(character.model.to_usize())
+                        .copied()
+                        .flatten()
+                        .and_then(|model| {
+                            model.clip(&self.clips, character.clip_for(self.anim_state))
+                        })
+                        .map(|clip| {
+                            psx_game_runtime::model_rendering::animation_phase_at_tick_q12(
+                                clip,
+                                now.saturating_sub(self.anim_start_tick),
+                                ctx.video_hz,
+                                false,
+                                self.player_action_speed_q8(character, self.anim_state),
+                                character.action_frame_range(action),
+                            )
+                        });
+                    if let Some(phase) = phase {
+                        let next = self.attack_chain.update(
+                            action.to_index() as u8,
+                            phase,
+                            ctx.just_pressed(ACTIVE_LIGHT_ATTACK_BUTTON)
+                                && !ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON),
+                            rule,
+                        );
+                        let anim = match next {
+                            Some(index)
+                                if usize::from(index)
+                                    == CharacterAnimationAction::LightAttackFollowup.to_index() =>
+                            {
+                                Some(PlayerAnim::LightAttackFollowup)
+                            }
+                            Some(index)
+                                if usize::from(index)
+                                    == CharacterAnimationAction::LightAttackFinisher.to_index() =>
+                            {
+                                Some(PlayerAnim::LightAttackFinisher)
+                            }
+                            _ => None,
+                        };
+                        if let Some(anim) = anim {
+                            if self.start_player_anim_action(anim, now, ctx.video_hz) {
+                                self.chain_blend_ticks = rule.blend_ticks;
+                                telemetry::debug_log("player combo:handoff");
+                                telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
+                            }
+                        }
+                    }
+                }
+            } else {
+                self.attack_chain.clear();
+            }
+            return true;
+        }
         if ctx.just_pressed(ACTIVE_HEAVY_ATTACK_BUTTON) {
             self.attack_buffer.request(2 + stance_offset, now.as_u32());
         } else if ctx.just_pressed(ACTIVE_LIGHT_ATTACK_BUTTON) {

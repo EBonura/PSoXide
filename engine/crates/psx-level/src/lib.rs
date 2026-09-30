@@ -3719,7 +3719,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 34;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 36;
 
 /// Runtime animation action slot.
 ///
@@ -3801,6 +3801,10 @@ pub enum CharacterAnimationAction {
     /// Dedicated NPC/projectile attack. Appended to preserve every pre-existing
     /// cooked action index.
     RangedAttack = 33,
+    /// Second Horizon light strike, entered through an authored chain.
+    LightAttackFollowup = 34,
+    /// Final Horizon light strike.
+    LightAttackFinisher = 35,
 }
 
 impl CharacterAnimationAction {
@@ -3840,6 +3844,8 @@ impl CharacterAnimationAction {
         Self::VertHeavyAttack,
         Self::VertComboAttack,
         Self::RangedAttack,
+        Self::LightAttackFollowup,
+        Self::LightAttackFinisher,
     ];
 
     /// Convert to the cooked action slot index.
@@ -3889,6 +3895,37 @@ impl CharacterActionPush {
     };
 }
 
+/// Maximum authored handoffs per character; no runtime allocation.
+pub const MAX_CHARACTER_ACTION_CHAINS: usize = 4;
+
+/// A single R1 continuation, in cooked source-clip frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterActionChain {
+    /// Source action index, or 255 for an unused entry.
+    pub action: u8,
+    /// Incoming action index.
+    pub next_action: u8,
+    /// Inclusive input acceptance window.
+    pub input_start: u16,
+    /// Inclusive last accepted input frame; never after the handoff.
+    pub input_end: u16,
+    /// Frame where a queued continuation replaces recovery.
+    pub handoff_frame: u16,
+    /// Crossfade duration in fixed simulation ticks (60 Hz).
+    pub blend_ticks: u8,
+}
+impl CharacterActionChain {
+    /// Disabled chain; safe for projects predating combos.
+    pub const NONE: Self = Self {
+        action: 255,
+        next_action: 255,
+        input_start: 0,
+        input_end: 0,
+        handoff_frame: 0,
+        blend_ticks: 0,
+    };
+}
+
 /// Gameplay character -- backing model + role-clip mapping +
 /// capsule / camera / controller defaults. Layered on top of
 /// a [`LevelModelRecord`]; the player spawn references one of
@@ -3915,6 +3952,8 @@ pub struct LevelCharacterRecord {
     pub action_frame_ranges: [CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Per-action forward push applied by locked one-shot actions.
     pub action_pushes: [CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Bounded, optional attack handoffs. Empty entries use `CharacterActionChain::NONE`.
+    pub action_chains: [CharacterActionChain; MAX_CHARACTER_ACTION_CHAINS],
     /// First rig-attached volume in `COMBAT_CAPSULES`.
     pub combat_capsule_first: CombatCapsuleIndex,
     /// Number of rig-attached volumes (bounded by

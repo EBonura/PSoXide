@@ -193,7 +193,12 @@ fn wire_for_appearance(
     if phase_q12 < open_q12 || phase_q12 >= until_q12 {
         return 0;
     }
-    let rising = (phase_q12 - open_q12) / transition;
+    // A zero visible marker means the blade is already cast on entry.
+    let rising = if visible_q12 == 0 {
+        u32::from(mr::ASSEMBLED_Q12)
+    } else {
+        (phase_q12 - open_q12) / transition
+    };
     let falling = (until_q12 - phase_q12) / transition;
     rising.min(falling).min(u32::from(mr::ASSEMBLED_Q12)) as u16
 }
@@ -1141,4 +1146,51 @@ pub(super) fn draw_model_instance_projected_shadows(
         triangles,
         world,
     );
+}
+
+#[cfg(test)]
+mod combo_appearance_tests {
+    use super::*;
+    #[test]
+    fn followup_starts_solid_and_dissolves_only_at_recovery() {
+        let track = psx_level::WeaponAppearanceRecord {
+            character: psx_level::CharacterIndex::ZERO,
+            action: psx_level::CharacterAnimationAction::LightAttackFollowup,
+            weapon: psx_level::WeaponIndex::ZERO,
+            character_socket: "right_hand_grip",
+            fully_visible_frame: 0,
+            hidden_frame: 50,
+            transition_frames: 6,
+            trail_start_frame: 16,
+            trail_end_frame: 23,
+            trail_history_frames: 5,
+            trail_segments: 4,
+            trail_blend_mode: 1,
+            trail_root_color: [96, 20, 8],
+            trail_tip_color: [255, 176, 64],
+            flags: 1,
+        };
+        assert_eq!(wire_for_appearance(&track, 0, 61), mr::ASSEMBLED_Q12);
+        assert_eq!(wire_for_appearance(&track, 28 << 12, 61), mr::ASSEMBLED_Q12);
+        assert_eq!(wire_for_appearance(&track, 44 << 12, 61), mr::ASSEMBLED_Q12);
+        assert_eq!(
+            wire_for_appearance(&track, 47 << 12, 61),
+            mr::ASSEMBLED_Q12 / 2
+        );
+        assert_eq!(wire_for_appearance(&track, 50 << 12, 61), 0);
+        let opener = psx_level::WeaponAppearanceRecord {
+            fully_visible_frame: 12,
+            hidden_frame: 48,
+            ..track
+        };
+        assert_eq!(wire_for_appearance(&opener, 0, 61), 0);
+        assert_eq!(
+            wire_for_appearance(&opener, 9 << 12, 61),
+            mr::ASSEMBLED_Q12 / 2
+        );
+        assert_eq!(
+            wire_for_appearance(&opener, 34 << 12, 61),
+            mr::ASSEMBLED_Q12
+        );
+    }
 }

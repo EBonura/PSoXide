@@ -415,6 +415,8 @@ struct Playtest {
     combat_projectile_impacts: RuntimeProjectileImpactEffects,
     dash_wake: psx_game_runtime::combat_feedback::DashWake,
     attack_buffer: combat_input::AttackBuffer,
+    attack_chain: psx_game_runtime::attack_chain::AttackChainState,
+    chain_blend_ticks: u8,
     /// Floating damage numbers for hits dealt and taken. Purely
     /// presentational: spawned from the damage sites, expired by their
     /// own clock, and read only by the overlay pass. All-zero is a

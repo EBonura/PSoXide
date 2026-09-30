@@ -28,6 +28,8 @@ pub enum PlayerAnim {
     DashRight,
     LightAttack,
     HeavyAttack,
+    LightAttackFollowup,
+    LightAttackFinisher,
     /// Zenith axis: overhead strikes.
     VertLightAttack,
     VertHeavyAttack,
@@ -67,6 +69,8 @@ impl PlayerAnim {
             Self::DashRight => CharacterAnimationAction::DashRight,
             Self::LightAttack => CharacterAnimationAction::LightAttack,
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
+            Self::LightAttackFollowup => CharacterAnimationAction::LightAttackFollowup,
+            Self::LightAttackFinisher => CharacterAnimationAction::LightAttackFinisher,
             Self::VertLightAttack => CharacterAnimationAction::VertLightAttack,
             Self::VertHeavyAttack => CharacterAnimationAction::VertHeavyAttack,
             Self::Intro => CharacterAnimationAction::Intro,
@@ -105,6 +109,8 @@ pub const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
     matches!(
         anim,
         PlayerAnim::LightAttack
+            | PlayerAnim::LightAttackFollowup
+            | PlayerAnim::LightAttackFinisher
             | PlayerAnim::HeavyAttack
             | PlayerAnim::VertLightAttack
             | PlayerAnim::VertHeavyAttack
@@ -144,6 +150,7 @@ pub struct RuntimeCharacter {
     pub action_frame_ranges:
         [psx_level::CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
     pub action_pushes: [psx_level::CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
+    pub action_chains: [psx_level::CharacterActionChain; psx_level::MAX_CHARACTER_ACTION_CHAINS],
     pub combat_capsule_first: psx_level::CombatCapsuleIndex,
     pub combat_capsule_count: u8,
     pub visual_offset: [i16; 3],
@@ -201,6 +208,7 @@ impl RuntimeCharacter {
             action_speeds: c.action_speeds,
             action_frame_ranges: c.action_frame_ranges,
             action_pushes: c.action_pushes,
+            action_chains: c.action_chains,
             combat_capsule_first: c.combat_capsule_first,
             combat_capsule_count: c.combat_capsule_count,
             visual_offset: c.visual_offset,
@@ -376,6 +384,10 @@ impl RuntimeCharacter {
             CharacterAnimationAction::VertComboAttack => self
                 .action_clip(CharacterAnimationAction::VertComboAttack)
                 .unwrap_or(idle),
+            CharacterAnimationAction::LightAttackFollowup
+            | CharacterAnimationAction::LightAttackFinisher => {
+                self.action_clip(anim.action()).to_option().unwrap_or(idle)
+            }
             CharacterAnimationAction::RangedAttack => self
                 .action_clip(CharacterAnimationAction::RangedAttack)
                 .unwrap_or(idle),
