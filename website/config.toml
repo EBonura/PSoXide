@@ -3,7 +3,7 @@
 # at the repository root).
 base_url = "https://ebonura.github.io/PSoXide"
 title = "PSoXide"
-description = "A Rust toolkit for the original PlayStation: SDK, engine and editor, and an emulator that needs no BIOS."
+description = "Create new PS1 games, port games that never reached the console, and rewrite existing games more efficiently. Modern tools for original hardware."
 default_language = "en"
 compile_sass = false
 minify_html = false

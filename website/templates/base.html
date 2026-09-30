@@ -6,6 +6,7 @@
   {% set page_title = config.title %}
   {% if page and page.title %}{% set page_title = page.title ~ " | " ~ config.title %}
   {% elif section and section.title and not section.path == "/" %}{% set page_title = section.title ~ " | " ~ config.title %}{% endif %}
+  {% if section and section.path == "/" %}{% set page_title = "PSoXide | Modern tools for original hardware" %}{% endif %}
   <title>{% block title %}{{ page_title }}{% endblock title %}</title>
   {% set desc = config.description %}
   {% if page and page.description %}{% set desc = page.description %}{% elif section and section.description %}{% set desc = section.description %}{% endif %}
@@ -51,7 +52,7 @@
     <div class="wrap footer-grid">
       <div>
         <a class="brand small" href="{{ get_url(path='/') }}" aria-label="PSoXide home">{% include "partials/logo.html" %}</a>
-        <p class="muted">SDK, engine, editor and emulator for the original PlayStation. Code under GPL-2.0-or-later.</p>
+        <p class="muted">Create. Port. Optimize.<br>Modern tools for the original PlayStation. SDK, engine, editor and emulator code under GPL-2.0-or-later.</p>
       </div>
       <div>
         <h2 class="footer-h">Source</h2>

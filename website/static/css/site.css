@@ -406,7 +406,7 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 /* ---------- prose (markdown pages) ---------- */
 .page-head { padding: 3.5rem 0 1.5rem; border-bottom: 1px solid var(--line); margin-bottom: 2.5rem; }
 .page-head .lede { margin-bottom: 0; }
-.prose { max-width: 760px; }
+.prose { min-width: 0; max-width: 760px; }
 .prose h2 { margin-top: 2.6rem; padding-top: 0.4rem; font-size: 1.55rem; }
 .prose h3 { margin-top: 1.8rem; }
 .prose ul, .prose ol { padding-left: 1.3rem; }
@@ -452,5 +452,5 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 @media (max-width: 719px) { .disc-contents { grid-template-columns: 1fr; } }
 #disc-contents, #collection-games, .card[id] { scroll-margin-top: 76px; }
 @media (max-width: 719px) {
-  #disc-contents, #collection-games, .card[id] { scroll-margin-top: 180px; }
+  section[id], h2[id], .card[id] { scroll-margin-top: 180px; }
 }

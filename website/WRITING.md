@@ -51,3 +51,16 @@ practices, not a claim that all technical sites use the same voice.
 
 Check the rendered page after editing. A factual sentence still needs to fit the
 layout, and a shorter label must still make its destination clear.
+
+## Project framing
+
+Lead with “What if we never stopped developing for the original PlayStation?”
+and explain three strands: **Create. Port. Optimize.** Create means new games;
+Port means games never released on PS1; Optimize means rewriting the original
+source of existing PS1 games into more efficient implementations. Do not describe
+the third strand as modding or claim efficiency gains without measurements.
+
+Use “Modern tools for original hardware” and “Built for fast, testable iteration”
+for the development approach. Explain coding-assistant interfaces in developer
+material, with the existing AI-use and provenance disclosure on the About page.
+Keep original-hardware results, emulator enhancements, plans and releases distinct.

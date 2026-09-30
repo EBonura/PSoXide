@@ -1,5 +1,5 @@
 +++
 title = "Projects"
-description = "Games and tools built with PSoXide for the original PlayStation, and the ports that run from your own game data."
+description = "Explore PSoXide's original PlayStation games, ports and development experiments, with playable demos, source code and project status."
 template = "projects.html"
 +++
