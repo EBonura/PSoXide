@@ -12,19 +12,14 @@
     </div>
   </header>
   <div class="with-toc">
+    {% if section.toc %}
+    {% set toc_items = section.toc %}
+    {% include "partials/toc.html" %}
+    {% endif %}
     <article class="prose">
       {{ section.content | safe }}
     </article>
-    {% if section.toc %}
-    <aside class="toc" aria-label="On this page">
-      <div class="toc-inner">
-        <p class="footer-h">On this page</p>
-        <ol>
-          {% for h in section.toc %}<li><a href="{{ h.permalink | safe }}">{{ h.title }}</a></li>{% endfor %}
-        </ol>
-      </div>
-    </aside>
-    {% endif %}
+
   </div>
 </div>
 {% endblock content %}
