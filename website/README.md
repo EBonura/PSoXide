@@ -106,3 +106,29 @@ Before publishing a new pin, check all six programs, keyboard focus, pause,
 restart, switching examples, the missing-file fallback and mobile layout.
 Physical gamepads and console behaviour require separate checks. The manual
 website workflow can build a feature branch; only `main` deploys to Pages.
+
+## SDK documentation
+
+`content/docs/crates/` contains a usage and architecture guide for every SDK
+workspace member; `content/docs/examples/` contains build notes and complete
+source listings for every SDK example. `scripts/import_sdk_reference.py` reads
+the manifests and sources into `data/sdk-reference.json`, using the SDK revision
+in `data/examples.toml`. It rejects source changes relative to that pin and
+requires a guide for every crate and example. After updating the pin, regenerate
+the data and review the prose. CI checks it with `--check` against the pinned
+checkout.
+
+Build the API files before running the normal site/link check:
+
+```sh
+python3 scripts/import_sdk_reference.py
+python3 scripts/build_sdk_docs.py --sdk-root .. --target-dir /tmp/psoxide-sdk-api
+zola build
+python3 scripts/check_site.py --base-url https://ebonura.github.io/PSoXide/
+```
+
+The API builder uses the pinned nightly to document all SDK crates for the PS1
+target, with all Cargo features, and the GTE crates for the host. Shared repository dependency
+documentation is included so local API links resolve. Generated rustdoc files
+under `static/api/` are ignored by Git and published by Pages. This generates
+documentation, not an execution test of every example or a console validation.
