@@ -31,8 +31,9 @@ repo_demo_disc = "https://github.com/EBonura/PSoXide-demo-disc"
 nav = [
   { name = "Emulator", path = "@/emulator/_index.md", match = "/emulator/" },
   { name = "Projects", path = "@/projects/_index.md", match = "/projects/" },
-  { name = "Docs", path = "@/docs/_index.md", match = "/docs/" },
+  { name = "Guides", path = "@/docs/_index.md", match = "/docs/" },
   { name = "FAQ", path = "@/faq.md", match = "/faq/" },
   { name = "About", path = "@/ethos.md", match = "/ethos/" },
+  { name = "Legal & licensing", path = "@/legal.md", match = "/legal/" },
 ]
 contributing = "https://github.com/EBonura/PSoXide-emulator/blob/main/CONTRIBUTING.md"

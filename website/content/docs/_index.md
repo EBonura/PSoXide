@@ -1,5 +1,5 @@
 +++
-title = "Docs"
+title = "Guides and documentation"
 description = "Walkthroughs and how-tos for building PlayStation software with PSoXide."
 template = "docs.html"
 sort_by = "weight"

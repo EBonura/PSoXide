@@ -10,19 +10,14 @@
     {% if page.description %}<p class="lede">{{ page.description }}</p>{% endif %}
   </header>
   <div class="with-toc">
+    {% if page.toc %}
+    {% set toc_items = page.toc %}
+    {% include "partials/toc.html" %}
+    {% endif %}
     <article class="prose">
       {{ page.content | safe }}
     </article>
-    {% if page.toc %}
-    <aside class="toc" aria-label="On this page">
-      <div class="toc-inner">
-        <p class="footer-h">On this page</p>
-        <ol>
-          {% for h in page.toc %}<li><a href="{{ h.permalink | safe }}">{{ h.title }}</a></li>{% endfor %}
-        </ol>
-      </div>
-    </aside>
-    {% endif %}
+
   </div>
 </div>
 {% endblock content %}

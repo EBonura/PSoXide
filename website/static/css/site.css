@@ -145,7 +145,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line);
 }
-.header-row { display: flex; align-items: center; gap: 18px; min-height: 60px; flex-wrap: wrap; }
+.header-row { display: flex; align-items: center; gap: 12px; min-height: 60px; flex-wrap: wrap; }
 .brand { color: var(--text); display: inline-flex; }
 .logo { height: 22px; width: auto; }
 .brand.small .logo { height: 18px; }
@@ -155,19 +155,22 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 2.5rem 0; }
   padding: 6px 10px; border-radius: 6px;
 }
 .nav a:hover { color: var(--text); background: var(--surface-2); }
-.nav a[aria-current="page"] { color: var(--text); background: var(--surface-2); }
-.nav .nav-play { color: var(--on-accent); background: var(--accent); font-weight: 600; margin-left: 6px; }
-.nav .nav-play:hover { color: var(--on-accent); background: var(--accent-strong); }
+.nav a[aria-current] { color: var(--text); background: var(--surface-2); }
+.nav-play { text-decoration: none; padding: 8px 10px; border-radius: 6px; font-size: .9rem; white-space: nowrap; color: var(--on-accent); background: var(--accent); font-weight: 600; margin-left: 6px; }
+.nav-play:hover { color: var(--on-accent); background: var(--accent-strong); }
 .theme-toggle {
   border: 1px solid var(--line); background: var(--surface); color: var(--muted);
   width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; cursor: pointer;
 }
 .theme-toggle:hover { color: var(--text); }
-@media (max-width: 719px) {
+@media (max-width: 1099px) {
+  .site-header { position: static; }
   .header-row { padding-top: 10px; padding-bottom: 8px; gap: 10px; }
-  .nav { order: 3; width: 100%; margin-left: -10px; }
-  .nav a { padding: 5px 9px; font-size: 0.9rem; }
-  .theme-toggle { margin-left: auto; }
+  .nav { order: 4; width: 100%; margin: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .nav-play { margin-left: auto; }
+  .logo { height: 20px; }
+  .nav a { padding: 7px 4px; font-size: 0.9rem; min-height: 40px; display: flex; align-items: center; }
+  .theme-toggle { margin-left: 0; flex-shrink: 0; }
 }
 
 .site-footer { border-top: 1px solid var(--line); margin-top: 5rem; padding: 2.5rem 0 1.5rem; background: var(--bg-2); }
@@ -417,12 +420,25 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .with-toc { display: grid; gap: 2.5rem; }
 @media (min-width: 1000px) { .with-toc { grid-template-columns: minmax(0, 1fr) 230px; } }
 .toc { font-size: 0.88rem; }
-.toc-inner { position: sticky; top: 84px; border-left: 1px solid var(--line); padding-left: 16px; }
+.toc-inner { position: sticky; top: 84px; max-height: calc(100vh - 104px); overflow-y: auto; border-left: 1px solid var(--line); padding-left: 16px; }
 .toc ol { list-style: none; margin: 0; padding: 0; }
 .toc li { margin: 0.35rem 0; }
 .toc a { color: var(--muted); text-decoration: none; }
 .toc a:hover { color: var(--accent); }
-@media (max-width: 999px) { .toc { display: none; } }
+@media (min-width: 1000px) {
+  .with-toc > .prose { grid-column: 1; grid-row: 1; }
+  .with-toc > .toc { grid-column: 2; grid-row: 1; }
+}
+.toc ol ol { padding-left: 12px; border-left: 1px solid var(--line); font-size: .84rem; }
+.toc-mobile { display: none; }
+@media (max-width: 999px) {
+  .toc { display: none; }
+  .toc-mobile { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; background: var(--surface); }
+  .toc-mobile summary { cursor: pointer; font-weight: 600; }
+  .toc-mobile ol { list-style: none; padding-left: 0; margin-bottom: 0; }
+  .toc-mobile ol ol { padding-left: 16px; }
+  .toc-mobile a { display: block; padding: 7px 0; }
+}
 
 .steps { counter-reset: step; list-style: none; padding: 0 !important; }
 .steps > li { counter-increment: step; position: relative; padding-left: 44px; margin: 1.4rem 0 !important; }
@@ -458,3 +474,21 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 /* Retained About-page fragment links stay below the sticky header. */
 .prose [id] { scroll-margin-top: 100px; }
 @media (max-width:719px) { .prose [id] { scroll-margin-top: 180px; } }
+
+/* Keep top-level destinations visible; short screens use the document's scroll. */
+@media (max-width: 359px) {
+  .header-row { gap: 8px; }
+  .logo { height: 18px; }
+  .nav-play { font-size: .8rem; padding: 8px; }
+}
+@media (min-width: 600px) and (max-width: 1099px) {
+  .nav { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+.breadcrumbs { padding-top: 1.1rem; font-size: .85rem; color: var(--muted); }
+.breadcrumbs ol { display: flex; flex-wrap: wrap; gap: .4rem .6rem; list-style: none; margin: 0; padding: 0; }
+.breadcrumbs li + li::before { content: "/"; margin-right: .6rem; color: var(--muted); }
+.breadcrumbs a { color: var(--muted); }
+.breadcrumbs + .wrap > .page-head { padding-top: 1.7rem; }
+@media (max-width: 1099px) {
+  section[id], h2[id], .card[id], .qa, .faq-group, .prose [id], #disc-contents, #collection-games { scroll-margin-top: 24px; }
+}
