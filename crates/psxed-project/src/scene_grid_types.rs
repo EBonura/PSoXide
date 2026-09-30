@@ -792,6 +792,19 @@ impl MaterialFaceSidedness {
         }
     }
 
+    /// The side a BSP brush face actually draws in game. The PXBSP runtime
+    /// draws brush faces front only even for `Both`: a brush is closed, so
+    /// the back of a two-sided face is another face of the same brush with
+    /// its own bake, and drawing both tied a dark and a lit face in the
+    /// ordering table (`psx-bsp` `pxbsp_policy_face_draws`). `Both` still
+    /// applies to model material overrides.
+    pub const fn brush_face_drawn(self) -> Self {
+        match self {
+            Self::Back => Self::Back,
+            Self::Front | Self::Both => Self::Front,
+        }
+    }
+
     /// Convert the old checkbox value into the new enum.
     pub const fn from_double_sided(double_sided: bool) -> Self {
         if double_sided {
@@ -3319,5 +3332,18 @@ mod wall_dedupe_tests {
         assert_eq!(walls.north.len(), 1);
         assert_eq!(walls.east.len(), 1);
         assert_eq!(walls.west.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod sidedness_tests {
+    use super::MaterialFaceSidedness;
+
+    #[test]
+    fn brush_faces_draw_front_for_both_like_the_pxbsp_runtime() {
+        use MaterialFaceSidedness::*;
+        assert_eq!(Front.brush_face_drawn(), Front);
+        assert_eq!(Both.brush_face_drawn(), Front);
+        assert_eq!(Back.brush_face_drawn(), Back);
     }
 }

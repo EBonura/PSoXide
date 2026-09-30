@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::brush::{paraxial_uv, rebase_texel_uvs, Brush, BrushContents, BRUSH_UV_UNITS_PER_TEXEL};
+use crate::brush::{paraxial_uv, rebase_texel_uvs, Brush, BrushContents};
 use crate::brush_collision_hulls::{
     compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
 };
@@ -28,6 +28,7 @@ use crate::brush_pxbsp::{
     PxbspEntityInput, PxbspMapPayloads, PxbspSubmodel,
 };
 use crate::units::ENGINE_SURFACE_EXTENT_UNITS;
+use crate::units::ENGINE_UV_UNITS_PER_TEXEL;
 use crate::{
     resolve_material_texture_psxt, LogicNodeKind, MaterialAnimationMode, MaterialFaceSidedness,
     NodeId, NodeKind, ProjectDocument, PsxBlendMode, ResourceData, ResourceId, Scene,
@@ -871,8 +872,8 @@ fn surface_fits_uv_window(surface: &CompiledSurface, dims: Option<&[u16; 2]>) ->
         .map(|&vertex| {
             let raw_uv = paraxial_uv(&surface.plane, vertex);
             surface.uv.apply([
-                raw_uv[0] / BRUSH_UV_UNITS_PER_TEXEL,
-                raw_uv[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                raw_uv[0] / ENGINE_UV_UNITS_PER_TEXEL,
+                raw_uv[1] / ENGINE_UV_UNITS_PER_TEXEL,
             ])
         })
         .collect();
@@ -1900,7 +1901,7 @@ fn translate_brushes(brushes: &[Brush], origin: [i32; 3]) -> Vec<Brush> {
         .map(|mut brush| {
             brush.translate_with_uv_lock(
                 [-origin[0], -origin[1], -origin[2]],
-                BRUSH_UV_UNITS_PER_TEXEL,
+                ENGINE_UV_UNITS_PER_TEXEL,
             );
             brush
         })
@@ -2627,9 +2628,11 @@ mod tests {
     fn uv_window_fit_splits_only_surfaces_that_wrap() {
         let mut dims = std::collections::HashMap::new();
         dims.insert(None, [64u16, 64u16]);
-        // 8192 units at 16 units per texel is a 512-texel span: wraps.
+        // Surfaces here are in engine units, one texel per unit
+        // (`ENGINE_UV_UNITS_PER_TEXEL`): a 512-unit floor is a 512-texel
+        // span and wraps.
         let (pieces, stats) =
-            fit_surfaces_to_uv_window(vec![floor_surface(4096)], &dims, &Default::default());
+            fit_surfaces_to_uv_window(vec![floor_surface(256)], &dims, &Default::default());
         assert_eq!(stats.split_surfaces, 1);
         assert_eq!(stats.unfixable_surfaces, 0);
         assert!(
@@ -2641,15 +2644,15 @@ mod tests {
         for piece in &pieces {
             assert_eq!(surface_fits_uv_window(piece, dims.get(&None)), Some(true));
         }
-        // 2048 units is a 128-texel span: untouched, byte-identical cook.
-        let small = floor_surface(1024);
+        // 128 units is a 128-texel span: untouched, byte-identical cook.
+        let small = floor_surface(64);
         let (pieces, stats) =
             fit_surfaces_to_uv_window(vec![small.clone()], &dims, &Default::default());
         assert_eq!(stats, UvWindowStats::default());
         assert_eq!(pieces, vec![small]);
         // Unknown texture dimensions keep the historic wrap and are counted.
         let (_, stats) = fit_surfaces_to_uv_window(
-            vec![floor_surface(4096)],
+            vec![floor_surface(256)],
             &Default::default(),
             &Default::default(),
         );
