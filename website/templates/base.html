@@ -34,10 +34,10 @@
       <nav class="nav" aria-label="Main">
         {% for item in config.extra.nav %}
         {% set href = get_url(path=item.path) %}
-        <a href="{{ href }}"{% if current_path and current_path is starting_with(pat=item.match) %} aria-current="page"{% endif %}>{{ item.name }}</a>
+        <a href="{{ href }}"{% if current_path and current_path is starting_with(pat=item.match) %} aria-current="{% if current_path == item.match %}page{% else %}location{% endif %}"{% endif %}>{{ item.name }}</a>
         {% endfor %}
-        <a class="nav-play" href="{{ config.extra.web_player }}">Play</a>
       </nav>
+      <a class="nav-play" href="{{ config.extra.web_player }}">Play on itch.io <span aria-hidden="true">↗</span></a>
       <button class="theme-toggle" type="button" aria-label="Switch colour theme" title="Switch colour theme">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 1 0 0 18V3z"/><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
       </button>
@@ -45,6 +45,19 @@
   </header>
 
   <main id="main">
+    {% if current_path and current_path != "/" %}
+    <nav class="wrap breadcrumbs" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="{{ get_url(path='/') }}">Home</a></li>
+        {% if page and current_path is starting_with(pat="/docs/") %}
+        <li><a href="{{ get_url(path='@/docs/_index.md') }}">Guides</a></li>
+        {% elif page and current_path is starting_with(pat="/emulator/") %}
+        <li><a href="{{ get_url(path='@/emulator/_index.md') }}">Emulator</a></li>
+        {% endif %}
+        <li aria-current="page">{% if page %}{{ page.title }}{% elif section %}{{ section.title }}{% endif %}</li>
+      </ol>
+    </nav>
+    {% endif %}
     {% block content %}{% endblock content %}
   </main>
 
@@ -73,14 +86,16 @@
         </ul>
       </div>
       <div>
-        <h2 class="footer-h">Help</h2>
-        <ul class="plain">
-          <li><a href="{{ get_url(path='@/faq.md') }}">Questions</a></li>
-          <li><a href="{{ get_url(path='@/ethos.md') }}">About</a></li>
-          <li><a href="{{ get_url(path='@/legal.md') }}">Legal &amp; licensing</a></li>
-          <li><a href="{{ get_url(path='@/faq.md') }}#contribute">Report a bug</a></li>
-          <li><a href="{{ config.extra.contributing }}">Contributing</a></li>
-        </ul>
+        <h2 class="footer-h">Explore</h2>
+        <nav aria-label="Footer">
+          <ul class="plain">
+            <li><a href="{{ get_url(path='/') }}">Home</a></li>
+            {% for item in config.extra.nav %}
+            <li><a href="{{ get_url(path=item.path) }}">{{ item.name }}</a></li>
+            {% endfor %}
+            <li><a href="{{ get_url(path='@/faq.md') }}#contribute">Report a bug or contribute</a></li>
+          </ul>
+        </nav>
       </div>
     </div>
     <div class="wrap fine">
