@@ -1433,8 +1433,8 @@ fn embedded_default_project_ron_deserializes() {
     );
     assert_eq!(
         character.combat_capsules.len(),
-        7,
-        "starter Aletha carries two hurtboxes plus five swing capsules"
+        8,
+        "starter Aletha carries two hurtboxes plus six swing capsules, including the light follow-up"
     );
 
     let animation_set_id = character
@@ -1450,8 +1450,7 @@ fn embedded_default_project_ron_deserializes() {
     let ResourceData::AnimationSet(animation_set) = &animation_set_resource.data else {
         panic!("starter animation set has the wrong resource kind");
     };
-    // Walk is the approved generated gait (MoMask candidate C, cooked by
-    // import-locomotion); the rest are the artist moveset's native takes.
+    // The approved cybernetic Walk retains the stable generated-pack path.
     let walk_clip = animation_set
         .action_clip(CharacterAnimationAction::Walk)
         .expect("starter animation set is missing Walk");
@@ -1472,8 +1471,7 @@ fn embedded_default_project_ron_deserializes() {
         })
         .expect("starter Run clip resource missing");
     assert_eq!(run.psxanim_path, "assets/animations/gen/run_fwd.psxanim");
-    // The whole locked set is baked into the gen pack (the strafes are the
-    // artist's takes, un-turned by the study's face-forward pass).
+    // Replacements retain the generated-pack paths; the strafes remain original.
     for (action, stem) in [
         (CharacterAnimationAction::WalkBackward, "walk_bwd"),
         (CharacterAnimationAction::StrafeLeft, "walk_lft"),
@@ -1505,8 +1503,7 @@ fn embedded_default_project_ron_deserializes() {
             format!("assets/animations/gen/{stem}.psxanim")
         );
     }
-    // v0.4b's moveset drops the combo and alternate-weapon slots: the ladder
-    // is light/heavy on each of the two axes.
+    // Idle, evade and death still use the original delivered clips.
     for (action, stem) in [
         (CharacterAnimationAction::Idle, "aletha_idle"),
         (CharacterAnimationAction::Roll, "aletha_dash_fwd"),
