@@ -9,7 +9,7 @@ eyebrow = "Walkthrough · SDK"
 
 By the end of this page you'll have `hello-tri`, a minimal PSoXide program, running as a real PlayStation disc image. It clears the screen to dark blue and draws one triangle with its vertex colours blended across it (Gouraud shading) that bounces a little each frame, so you can see the render loop is alive. No editor is involved: this is the bare-metal SDK on its own.
 
-{{<figure src="img/shots/hello-tri.png" alt="hello-tri running: a red, green and blue shaded triangle on a dark blue background" native={true} width={320} height={240} caption="hello-tri at the PlayStation's native 320×240." />}}
+{{<example_player name="hello-tri" />}}
 
 ## 1. Install the tools
 
