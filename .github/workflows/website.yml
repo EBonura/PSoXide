@@ -47,6 +47,72 @@ jobs:
           python3 scripts/import_sdk.py
           git diff --exit-code data/
 
+      - name: Read example source pins
+        id: examples
+        run: |
+          python3 - <<'PYTHON'
+          import os, tomllib
+          from pathlib import Path
+          pins = tomllib.loads(Path('data/examples.toml').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f"sdk={pins['sdk_revision']}\n")
+              out.write(f"emulator={pins['emulator_revision']}\n")
+          PYTHON
+
+      - uses: actions/checkout@v4
+        with:
+          repository: EBonura/PSoXide-emulator
+          ref: ${{ steps.examples.outputs.emulator }}
+          path: .site-build/emulator
+
+      - uses: actions/checkout@v4
+        with:
+          repository: EBonura/PSoXide
+          ref: ${{ steps.examples.outputs.sdk }}
+          path: .site-build/sdk
+
+      - name: Cache player and example compilers
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/trunk
+            .site-build/emulator/target
+            .site-build/sdk/target
+            .site-build/sdk/build/examples
+          key: site-player-${{ runner.os }}-${{ steps.examples.outputs.emulator }}-${{ steps.examples.outputs.sdk }}
+          restore-keys: site-player-${{ runner.os }}-
+
+      - name: Install example build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y binutils-mipsel-linux-gnu
+          curl -fLsS -o trunk.tar.gz https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz
+          curl -fLsS -o trunk.sha256 https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz.sha256
+          echo "$(cut -d ' ' -f1 trunk.sha256)  trunk.tar.gz" | sha256sum -c -
+          tar xzf trunk.tar.gz trunk
+          sudo mv trunk /usr/local/bin/trunk
+
+      - name: Build pinned WebAssembly player
+        working-directory: .site-build/emulator
+        run: python3 tools/build-web-player.py --out "$RUNNER_TEMP/psoxide-player"
+
+      - name: Build pinned SDK examples
+        working-directory: .site-build/sdk
+        env:
+          OBJDUMP: mipsel-linux-gnu-objdump
+        run: |
+          for example in hello-tri hello-input hello-tex hello-ot hello-gte hello-audio; do
+            make disc EXAMPLE="$example"
+          done
+
+      - name: Stage player, examples and build records
+        run: |
+          python3 scripts/stage_examples.py --player "$RUNNER_TEMP/psoxide-player" \
+            --sdk ../.site-build/sdk \
+            --examples ../.site-build/sdk/build/examples/mipsel-sony-psx/release
+
       - id: pages
         uses: actions/configure-pages@v5
 
@@ -61,6 +127,7 @@ jobs:
           path: website/public
 
   deploy:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:

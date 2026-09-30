@@ -24,6 +24,12 @@ small platformer, with each published checkpoint verified against its source.
 
 ## 2. Embed the emulator throughout the site
 
+Implemented on 30 September 2026: six SDK examples, an examples gallery, five
+focused how-tos, and players in the first-program guide and emulator page.
+Sources are pinned, builds include hashes, players load on demand and only one
+instance remains started per page. The first-game tutorial checkpoints and
+touch controls are still future work.
+
 Let visitors play the outcome of the code directly beside the explanation.
 Use the tutorial checkpoints first, then selected SDK examples and showcases.
 

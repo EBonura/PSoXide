@@ -492,3 +492,15 @@ tr.is-psx td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 @media (max-width: 1099px) {
   section[id], h2[id], .card[id], .qa, .faq-group, .prose [id], #disc-contents, #collection-games { scroll-margin-top: 24px; }
 }
+
+/* Runnable SDK examples: controls stay outside the game framebuffer. */
+.example-player { margin: 1.5rem 0 2rem; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.example-player iframe { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; border: 0; background: #080b10; border-radius: 6px; }
+.example-player iframe:fullscreen { width: 100%; height: 100%; border-radius: 0; }
+.player-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.player-controls .btn { font: inherit; font-size: .85rem; padding: 8px 12px; cursor: pointer; }
+.player-controls .btn:disabled { opacity: .45; cursor: default; }
+.player-status { font-size: .85rem; color: var(--muted); }
+.example-player p { margin: .8rem 0 0; }
+.player-links { line-height: 1.9; }
+.example-player[data-state="error"] .player-status { color: var(--text); }

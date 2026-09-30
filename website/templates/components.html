@@ -99,3 +99,20 @@
 {% endif %}
 {% endfor %}
 {% endcomponent faq %}
+
+{% component example_player(name: string) %}
+{% set examples = load_data(path="data/examples.toml") %}
+{% set example = [e for e in examples.example if e.name == name] | first %}
+{% set player_url = get_url(path="player/") ~ "/?embed=1&disc=../examples/" ~ name ~ ".exe" %}
+<section class="example-player" aria-label="{{ example.title }} interactive example">
+  <iframe src="{{ player_url }}" title="{{ name }} running in PSoXide" loading="lazy" allow="autoplay; gamepad; fullscreen" width="640" height="480"></iframe>
+  <div class="player-controls">
+    <button type="button" class="btn" data-command="toggle" disabled>Pause</button>
+    <button type="button" class="btn" data-command="reset" disabled>Restart</button>
+    <button type="button" class="btn" data-command="fullscreen">Full screen</button>
+    <span class="player-status" role="status">Click to run inside the player.</span>
+  </div>
+  <p class="small muted">Focus the game to use the keyboard. Arrows: D-pad. F / G / H / X: Cross / Circle / Square / Triangle. Enter: Start. Sound starts muted; use the speaker button in the game. No touch controls.</p>
+  <p class="small player-links"><a href="{{ player_url }}">Open player separately</a> · <a href="{{ get_url(path='examples/' ~ name ~ '.exe') }}" download>Download EXE</a> · <a href="https://github.com/EBonura/PSoXide/blob/{{ examples.sdk_revision }}/sdk/examples/{{ name }}/src/main.rs">Matching source</a> · <a href="{{ get_url(path='@/docs/browser-examples.md') }}#builds-and-credits">Builds and credits</a></p>
+</section>
+{% endcomponent example_player %}

@@ -18,7 +18,7 @@ python3 scripts/check_site.py --base-url https://ebonura.github.io/PSoXide/
 
 The Pages workflow checks generated data, builds with the actual Pages base URL,
 checks internal links, assets, fragments and review flags, then deploys on pushes
-to `main`. No browser player or game data is hosted here; Play links to itch.io.
+to `main`. The browser example gallery hosts the pinned emulator and six SDK executables. The main Play button links to the demo disc on itch.io.
 
 ## Editing content
 
@@ -75,3 +75,34 @@ Videos link to [Bonnie Studios](https://www.youtube.com/@bonnie-studios-dev).
 Earlier addresses (`ebonura.github.io/`, `/psoxide-site/` and the root-level
 pages) redirect here from the `EBonura/ebonura.github.io` repository, which now
 holds only those redirects.
+
+## Runnable examples
+
+`data/examples.toml` pins the SDK and emulator sources and lists the six programs
+allowed in the browser gallery. Pages builds the player from the exact emulator
+commit, compiles the examples from the exact SDK commit, then runs
+`scripts/stage_examples.py`. Generated WASM, EXEs and build records are ignored
+by Git and included only in the deployed site. Both builds retain their source
+links and licence notices. No demo-disc or commercial-game data is staged.
+
+For a local preview, build the pinned emulator with
+`python3 tools/build-web-player.py --out /tmp/player`, build each listed SDK
+example with `make disc EXAMPLE=<name>`, then run from `website/`:
+
+```sh
+python3 scripts/stage_examples.py --player /tmp/player \
+  --sdk /path/to/pinned-sdk \
+  --examples /path/to/pinned-sdk/build/examples/mipsel-sony-psx/release
+zola serve
+```
+
+Use `example_player` in a guide to place a player beside its explanation.
+`static/js/examples.js` handles pause/resume, restart, fullscreen, offscreen
+pausing, load failures and unloading the previous instance when a new one starts.
+The iframe performs click-to-load, starts muted, and accepts commands only from
+its same-origin parent. There are no touch controls or in-browser compiler.
+
+Before publishing a new pin, check all six programs, keyboard focus, pause,
+restart, switching examples, the missing-file fallback and mobile layout.
+Physical gamepads and console behaviour require separate checks. The manual
+website workflow can build a feature branch; only `main` deploys to Pages.
