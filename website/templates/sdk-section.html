@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="wrap">
+  <header class="page-head"><span class="eyebrow">SDK documentation</span><h1>{{ section.title }}</h1><p class="lede">{{ section.description }}</p></header>
+  <nav class="jumpbar" aria-label="SDK documentation"><a href="{{ get_url(path='@/docs/sdk.md') }}">SDK overview</a><a href="{{ get_url(path='@/docs/crates/_index.md') }}">Crate guides</a><a href="{{ get_url(path='@/docs/examples/_index.md') }}">Complete examples</a><a href="{{ get_url(path='@/docs/browser-examples.md') }}">Run in your browser</a></nav>
+  <div class="prose">{{ section.content | safe }}</div>
+  <div class="grid two">{% for p in section.pages %}<a class="card" href="{{ p.permalink }}"><h2>{{ p.title }}</h2><p>{{ p.description }}</p></a>{% endfor %}</div>
+</div>
+{% endblock content %}

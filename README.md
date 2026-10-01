@@ -38,7 +38,7 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
 
 ## Layout
 
-- [sdk/](sdk/README.md): 19 device crates, linker script and examples.
+- [sdk/](sdk/README.md): the device crates, linker script and examples.
 - `crates/`: shared hardware, disc, trace and cooked-asset format contracts.
 - `tools/mkisopsx`: host-side BIN/CUE mastering.
 - `tools/psoxide-link`: source hydration for pinned downstream builds.
@@ -74,6 +74,22 @@ Code remains [GPL-2.0-or-later](LICENSE). Preserve existing attribution and
 provenance; extraction does not change licensing. Example assets have their
 own [provenance records](docs/asset-provenance.md). See
 [downstream licensing](docs/downstream-licensing.md) before distribution.
+
+## How This Was Built
+
+PSoXide was developed with heavy use of AI coding assistants, with a human
+directing the architecture, debugging and hardware verification. A large part
+of the code was written by an AI assistant under human direction, review and
+integration.
+
+This is not a clean-room implementation. An LLM is trained on large amounts of
+existing code, so AI-written code can carry influence from its training data
+that neither the tool nor the author can fully audit. Disclosing AI assistance
+is therefore not a warranty of clean-room provenance or of non-infringement.
+Parts of the emulator core are derived from PCSX-Redux (GPL-2.0-or-later), and
+those derivations are tracked file by file. See
+[downstream licensing](docs/downstream-licensing.md) and the
+[license audit](docs/license-audit.md).
 
 ## Recent changes
 

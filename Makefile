@@ -12,6 +12,7 @@ test:
 	python3 -m unittest discover -s tools -p test_bootstrap_components.py
 	python3 -m unittest discover -s tools -p test_hazard_tools.py
 	python3 -m unittest discover -s tools -p test_stack_guard.py
+	python3 -m unittest discover -s tools -p test_readme_tables.py
 	cargo test --locked --workspace
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
 fmt:
