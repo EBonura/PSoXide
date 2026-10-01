@@ -154,10 +154,9 @@ for this separate project.
 
 The port's engine code is GPL-2.0-only. Its current disc image includes converted
 Quake shareware data and SLICNSE.TXT. That data has separate terms covering
-modification, derivative works, distribution and public display. Including the
-licence file does not establish permission to distribute converted PS1 data.
-That permission remains unresolved in this review. This site does not show Quake
-screenshots. See the [bundled shareware licence](https://github.com/EBonura/quake-psx/blob/main/release/SLICNSE.TXT)
+modification, derivative works and distribution. Including the licence file
+does not establish permission to distribute converted PS1 data. That permission
+remains unresolved in this review. See the [bundled shareware licence](https://github.com/EBonura/quake-psx/blob/main/release/SLICNSE.TXT)
 and [port provenance](https://github.com/EBonura/quake-psx/blob/main/PROVENANCE.md).
 
 
