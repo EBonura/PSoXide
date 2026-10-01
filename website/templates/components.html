@@ -131,7 +131,7 @@
 <p>The PS1 reference includes all Cargo features. The manifest below shows which features are enabled by default.</p>
 <h3>Dependencies</h3>
 {% if crate.dependencies %}
-<ul>{% for dep in crate.dependencies %}<li>{% if dep.sdk %}<a href="{{ get_url(path='@/docs/crates/' ~ dep.name ~ '.md') }}"><code>{{ dep.name }}</code></a>{% else %}<code>{{ dep.name }}</code> (shared repository crate){% endif %} — {{ dep.target }}{% if dep.optional %}; optional{% endif %}{% if dep.features %}; features: <code>{{ dep.features | join(sep=', ') }}</code>{% endif %}</li>{% endfor %}</ul>
+<ul>{% for dep in crate.dependencies %}<li>{% if dep.sdk %}<a href="{{ get_url(path='@/docs/crates/' ~ dep.name ~ '.md') }}"><code>{{ dep.name }}</code></a>{% else %}<code>{{ dep.name }}</code> (shared repository crate){% endif %}: {{ dep.target }}{% if dep.optional %}; optional{% endif %}{% if dep.features %}; features: <code>{{ dep.features | join(sep=', ') }}</code>{% endif %}</li>{% endfor %}</ul>
 {% else %}<p>No runtime Cargo dependencies.</p>{% endif %}
 <h3>Cargo features</h3>
 {% if crate.features %}<div class="table-wrap"><table><thead><tr><th>Feature</th><th>Enables</th></tr></thead><tbody>{% for feature, enables in crate.features %}<tr><td><code>{{ feature }}</code></td><td>{% if enables %}<code>{{ enables | join(sep=', ') }}</code>{% else %}No additional dependency features{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p>This crate declares no Cargo features.</p>{% endif %}
@@ -139,7 +139,7 @@
 <h3>Source layout</h3>
 <p>The list includes internal implementation and test files. Public modules, types, functions and their signatures are indexed in the API reference above.</p>
 <details class="source-file" open><summary>{{ crate.files | length }} source and manifest files</summary>
-<ul>{% for file in crate.files %}<li><a href="{{ source }}{{ file.path }}"><code>{{ file.path }}</code></a>{% if file.summary %} — {{ file.summary | markdown(inline=true) | safe }}{% endif %}</li>{% endfor %}</ul>
+<ul>{% for file in crate.files %}<li><a href="{{ source }}{{ file.path }}"><code>{{ file.path }}</code></a>{% if file.summary %}: {{ file.summary | markdown(inline=true) | safe }}{% endif %}</li>{% endfor %}</ul>
 </details>
 {% endcomponent sdk_crate %}
 
