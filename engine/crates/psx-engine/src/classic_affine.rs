@@ -727,7 +727,11 @@ pub struct ClassicAffinePosition {
 }
 
 /// One fan inside a contiguous classic-affine vertex batch.
+///
+/// Quake's kernel reads a descriptor as two words (the descriptors live in
+/// RAM, where every load stalls), so its feature aligns them to four bytes.
 #[repr(C)]
+#[cfg_attr(feature = "classic-affine-quake-specialized-kernel", repr(align(4)))]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClassicAffineBatchSurface {
     /// First vertex in the batch vertex array.
@@ -2712,6 +2716,9 @@ unsafe fn emit_classified_quad<W: AffinePacketWriter>(
     }
 }
 
+// Quake's split-fan function calls this once per root: inlined there, a
+// face pays one register save rather than one per root.
+#[cfg_attr(feature = "classic-affine-quake-specialized-kernel", inline(always))]
 unsafe fn subdivide_once<W: AffinePacketWriter>(
     writer: &mut W,
     root0: &ClassicAffineVertex,
@@ -2791,6 +2798,9 @@ unsafe fn subdivide_once<W: AffinePacketWriter>(
     }
 }
 
+// Quake's split-fan function calls this once per root: inlined there, a
+// face pays one register save rather than one per root.
+#[cfg_attr(feature = "classic-affine-quake-specialized-kernel", inline(always))]
 unsafe fn subdivide_twice<W: AffinePacketWriter>(
     writer: &mut W,
     root0: &ClassicAffineVertex,
@@ -4039,21 +4049,414 @@ pub unsafe fn submit_quake_classic_affine_batch_budget(
     output: *mut u32,
     budget_q3: u8,
 ) -> ClassicAffineSubmit {
+    #[cfg(feature = "classic-affine-lattice")]
+    {
+        if budget_q3 != 0 {
+            return unsafe {
+                quake_kernel::submit_error_bounded(
+                    vertices,
+                    vertex_count,
+                    surfaces,
+                    surface_count,
+                    output,
+                    budget_q3,
+                )
+            };
+        }
+        unsafe {
+            quake_kernel::submit_reference(vertices, vertex_count, surfaces, surface_count, output)
+        }
+    }
     #[cfg(not(feature = "classic-affine-lattice"))]
-    let _ = budget_q3;
-    unsafe {
-        submit_classic_affine_batch(
-            vertices,
-            vertex_count,
-            surfaces,
-            surface_count,
-            output,
-            if cfg!(feature = "classic-affine-lattice") {
-                quake_error_bounded_profile(budget_q3)
-            } else {
-                ClassicAffineProfile::QUAKE_REFERENCE
-            },
-        )
+    {
+        let _ = budget_q3;
+        unsafe {
+            submit_classic_affine_batch(
+                vertices,
+                vertex_count,
+                surfaces,
+                surface_count,
+                output,
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            )
+        }
+    }
+}
+
+/// Quake's error-bounded world kernel, laid out for the PS1's 4 KB
+/// direct-mapped instruction cache.
+///
+/// [`submit_classic_affine_batch`] inlines every fan, lattice and
+/// subdivision path into one 18 KB body. On the E1M1 chain bench a call ran
+/// up to 5.7 KB of it and refilled about 3 KB, because its surface loop
+/// shared cache sets with its own split paths 4 KB and 8 KB further on.
+/// Here the per-call path (projection, surface rejection,
+/// the face's error level, unsplit quads and unsplit fans) is a 2 KB entry
+/// function plus two frameless packet leaves. A fan that splits (under half
+/// a face per call) runs one out-of-line function per face with the split
+/// bodies inlined, and a split quad (rarer still) another. The packets are
+/// the same, in the same order, as the generic kernel's with
+/// [`quake_error_bounded_profile`].
+#[cfg(all(
+    feature = "classic-affine-quake-specialized-kernel",
+    feature = "classic-affine-lattice"
+))]
+mod quake_kernel {
+    use super::*;
+
+    type V = ClassicAffineVertex;
+
+    // A batch descriptor is read as two words, low halfword first.
+    const _: () = assert!(cfg!(target_endian = "little"));
+
+    /// Budget zero: the historical depth bands, kept out of the hot body.
+    #[cold]
+    #[inline(never)]
+    pub(super) unsafe fn submit_reference(
+        vertices: *mut ClassicAffineVertex,
+        vertex_count: usize,
+        surfaces: *const ClassicAffineBatchSurface,
+        surface_count: usize,
+        output: *mut u32,
+    ) -> ClassicAffineSubmit {
+        unsafe {
+            submit_classic_affine_batch(
+                vertices,
+                vertex_count,
+                surfaces,
+                surface_count,
+                output,
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            )
+        }
+    }
+
+    /// A surface's GP0 material as one word: tpage in the low half, CLUT in
+    /// the high half, which is the second word of a
+    /// [`ClassicAffineBatchSurface`] as it lies in memory. One register
+    /// instead of two keeps both out of the RAM stack in the fan loop.
+    #[inline(always)]
+    fn material_writer(next: *mut u32, material: u32, profile: ClassicAffineProfile) -> PacketWriter {
+        PacketWriter {
+            next,
+            packets: 0,
+            clut_high_word: material & 0xffff_0000,
+            tpage_high_word: material << 16,
+            profile,
+        }
+    }
+
+    /// The writer of a packet leaf. A single packet reads only the screen
+    /// size of its profile (in the CPU rejection the GPU-clip features
+    /// remove), and every Quake budget shares it.
+    #[inline(always)]
+    fn leaf_writer(next: *mut u32, material: u32) -> PacketWriter {
+        material_writer(next, material, ClassicAffineProfile::QUAKE_ERROR_BOUNDED)
+    }
+
+    /// The error-bounded batch (`budget_q3 != 0`).
+    #[inline(always)]
+    pub(super) unsafe fn submit_error_bounded(
+        vertices: *mut ClassicAffineVertex,
+        vertex_count: usize,
+        surfaces: *const ClassicAffineBatchSurface,
+        surface_count: usize,
+        output: *mut u32,
+        budget_q3: u8,
+    ) -> ClassicAffineSubmit {
+        if vertices.is_null()
+            || surfaces.is_null()
+            || output.is_null()
+            || vertex_count == 0
+            || surface_count == 0
+        {
+            return ClassicAffineSubmit {
+                next_packet: output,
+                packets: 0,
+                hardware_triangles: 0,
+            };
+        }
+
+        let mut vertex = 0usize;
+        while vertex + 2 < vertex_count {
+            unsafe { project_three_consecutive(vertices.add(vertex)) };
+            vertex += 3;
+        }
+        while vertex < vertex_count {
+            unsafe { project_one(vertices.add(vertex)) };
+            vertex += 1;
+        }
+
+        let profile = quake_error_bounded_profile(budget_q3);
+        let budget = u32::from(budget_q3);
+        let generated = unsafe { vertices.add(vertex_count) };
+        let mut next_packet = output;
+        let mut packets = 0u32;
+        let surface_end = unsafe { surfaces.add(surface_count) };
+        let mut surface_ptr = surfaces;
+        while surface_ptr != surface_end {
+            // Two word loads instead of four halfword ones: the descriptors
+            // sit in RAM, where each load stalls.
+            let [range, material] = unsafe { ptr::read(surface_ptr.cast::<[u32; 2]>()) };
+            surface_ptr = unsafe { surface_ptr.add(1) };
+            // Opaque per surface, so the loops below address the vertices
+            // from it instead of from hoisted copies parked on the RAM stack.
+            let first = unsafe { opaque(vertices).add((range & 0xffff) as usize) };
+            let count = (range >> 16) as usize;
+            debug_assert!(count >= 3);
+            debug_assert!((range & 0xffff) as usize + count <= vertex_count);
+
+            // Whole-surface screen rejection.
+            let mut surface_clip = 0x0fu8;
+            let mut clip_index = 0usize;
+            while clip_index < count && surface_clip != 0 {
+                surface_clip &=
+                    classic_clip_code(unsafe { (*first.add(clip_index)).screen }, profile);
+                clip_index += 1;
+            }
+            if surface_clip != 0 {
+                continue;
+            }
+
+            let level = unsafe {
+                lattice::error_bounded_face_level(first, count, budget, profile.error_gate_depth)
+            };
+            if level != 0 {
+                // The split paths read the budget from the profile.
+                let mut lent = material_writer(next_packet, material, profile);
+                unsafe {
+                    if count == 4 {
+                        split_quad(first, generated, &mut lent, level);
+                    } else {
+                        split_fan(first, count, generated, &mut lent, level);
+                    }
+                }
+                next_packet = lent.next;
+                packets += lent.packets;
+                continue;
+            }
+            if count == 4 {
+                // `lattice::submit_quad_lattice` at face level zero: one GT4
+                // in the GPU's Z order when the face is in the OT.
+                let c = unsafe { [&*first, &*first.add(1), &*first.add(2), &*first.add(3)] };
+                let depth_sum = c[0].depth as u16 as u32
+                    + c[1].depth as u16 as u32
+                    + c[2].depth as u16 as u32
+                    + c[3].depth as u16 as u32;
+                let face_otz = (depth_sum >> 4) as u16;
+                if face_otz != 0 && face_otz < profile.ot_depth {
+                    let next = unsafe {
+                        leaf_quad(next_packet, [c[1], c[2], c[0], c[3]], face_otz, material)
+                    };
+                    packets += u32::from(next != next_packet);
+                    next_packet = next;
+                }
+                continue;
+            }
+
+            // Unsplit fan: adjacent roots at one OT key pair into a GT4
+            // (see `submit_classic_affine_projected_fan_into_writer`).
+            // `previous` is always the vertex before `current` (a pair steps
+            // both by two), and the root's depth is a one-cycle scratchpad
+            // load: neither needs a register across the leaf calls.
+            let root = unsafe { &*first };
+            let end = unsafe { first.add(count) };
+            let mut current = unsafe { first.add(2) };
+            while current != end {
+                let previous_ref = unsafe { &*current.sub(1) };
+                let current_ref = unsafe { &*current };
+                let root_depth = unsafe { ptr::read_volatile(ptr::addr_of!(root.depth)) } as u16;
+                let otz = average3_depths(
+                    root_depth,
+                    previous_ref.depth as u16,
+                    current_ref.depth as u16,
+                );
+                if otz > 0 && otz < profile.ot_depth {
+                    let next = unsafe { current.add(1) };
+                    if next != end {
+                        let next_ref = unsafe { &*next };
+                        let next_otz = average3_depths(
+                            root_depth,
+                            current_ref.depth as u16,
+                            next_ref.depth as u16,
+                        );
+                        if next_otz > 0 && next_otz < profile.ot_depth && next_otz == otz {
+                            let emitted = unsafe {
+                                leaf_quad(
+                                    next_packet,
+                                    [previous_ref, current_ref, root, next_ref],
+                                    otz,
+                                    material,
+                                )
+                            };
+                            packets += u32::from(emitted != next_packet);
+                            next_packet = emitted;
+                            current = unsafe { next.add(1) };
+                            continue;
+                        }
+                    }
+                    let emitted = unsafe {
+                        leaf_tri(next_packet, [root, previous_ref, current_ref], otz, material)
+                    };
+                    packets += u32::from(emitted != next_packet);
+                    next_packet = emitted;
+                }
+                current = unsafe { current.add(1) };
+            }
+        }
+
+        let writer = leaf_writer(next_packet, 0);
+        unsafe { PacketWriter { packets, ..writer }.finish(output) }
+    }
+
+    /// The hot loop's packet emitters as frameless leaf calls. Inlined, LLVM
+    /// merged the GT3 and GT4 store tails into one sequence addressed through
+    /// a register per packet word, and the registers that took pushed the
+    /// material words onto the RAM stack, reloaded for every packet. Each
+    /// returns the cursor after its packet (unmoved when the writer rejects
+    /// the primitive).
+    #[inline(always)]
+    unsafe fn leaf_tri(next: *mut u32, tri: [&V; 3], otz: u16, material: u32) -> *mut u32 {
+        unsafe { leaf_tri_words(next, tri[0], tri[1], tri[2], otz, material) }
+    }
+
+    #[inline(always)]
+    unsafe fn leaf_quad(next: *mut u32, quad: [&V; 4], otz: u16, material: u32) -> *mut u32 {
+        unsafe { leaf_quad_words(next, quad[0], quad[1], quad[2], quad[3], otz, material) }
+    }
+
+    #[inline(never)]
+    unsafe fn leaf_tri_words(
+        next: *mut u32,
+        a: *const V,
+        b: *const V,
+        c: *const V,
+        otz: u16,
+        material: u32,
+    ) -> *mut u32 {
+        let mut writer = leaf_writer(next, material);
+        let tri = unsafe { [&*a, &*b, &*c] };
+        unsafe { writer.emit_tri(tri, tri, otz) };
+        writer.next
+    }
+
+    #[inline(never)]
+    unsafe fn leaf_quad_words(
+        next: *mut u32,
+        a: *const V,
+        b: *const V,
+        c: *const V,
+        d: *const V,
+        otz: u16,
+        material: u32,
+    ) -> *mut u32 {
+        let mut writer = leaf_writer(next, material);
+        let quad = unsafe { [&*a, &*b, &*c, &*d] };
+        unsafe { writer.emit_quad(quad, quad, otz) };
+        writer.next
+    }
+
+    /// A four-corner face whose error level is not zero: the quad lattice.
+    #[cold]
+    #[inline(never)]
+    unsafe fn split_quad(
+        first: *mut ClassicAffineVertex,
+        generated: *mut ClassicAffineVertex,
+        writer: &mut PacketWriter,
+        level: u8,
+    ) {
+        unsafe { lattice::submit_quad_lattice(first, generated, writer, level) };
+    }
+
+    /// The same pointer, opaque to the optimiser, so addresses derived from
+    /// it are recomputed where they are used instead of hoisted out of a
+    /// loop and spilled to the RAM stack.
+    #[inline(always)]
+    fn opaque(pointer: *mut V) -> *mut V {
+        #[cfg(target_arch = "mips")]
+        {
+            let mut pointer = pointer;
+            unsafe {
+                core::arch::asm!(
+                    "# {0}",
+                    inout(reg) pointer,
+                    options(nomem, nostack, preserves_flags)
+                )
+            };
+            pointer
+        }
+        #[cfg(not(target_arch = "mips"))]
+        pointer
+    }
+
+    /// A fan whose error level is not zero: every root splits the same way
+    /// (`submit_classic_affine_projected_fan_into_writer` with a face-wide
+    /// level, which never pairs roots). The split bodies inline here, so a
+    /// face pays one call and one register save, not one per root.
+    #[inline(never)]
+    unsafe fn split_fan(
+        first: *mut ClassicAffineVertex,
+        count: usize,
+        generated: *mut ClassicAffineVertex,
+        lent: &mut PacketWriter,
+        level: u8,
+    ) {
+        // A local copy, so the cursor stays in registers across the roots.
+        let mut writer = PacketWriter { ..*lent };
+        let writer = &mut writer;
+        let root = unsafe { &*first };
+        let ot_depth = ClassicAffineProfile::QUAKE_ERROR_BOUNDED.ot_depth;
+        let end = unsafe { first.add(count) };
+        let first_previous = unsafe { first.add(1) };
+        let mut previous = first_previous;
+        let mut current = unsafe { first.add(2) };
+        while current != end {
+            let scratch = opaque(generated);
+            let previous_ref = unsafe { &*previous };
+            let current_ref = unsafe { &*current };
+            let otz = average3_depths(
+                root.depth as u16,
+                previous_ref.depth as u16,
+                current_ref.depth as u16,
+            );
+            if otz > 0 && otz < ot_depth {
+                let next = unsafe { current.add(1) };
+                let underdraw_edges =
+                    2 | u8::from(previous == first_previous) | (u8::from(next == end) << 2);
+                if level == 2 {
+                    unsafe {
+                        subdivide_twice(
+                            writer,
+                            root,
+                            previous_ref,
+                            current_ref,
+                            scratch,
+                            otz,
+                            underdraw_edges,
+                        )
+                    };
+                } else if level == 1 {
+                    unsafe {
+                        subdivide_once(
+                            writer,
+                            root,
+                            previous_ref,
+                            current_ref,
+                            scratch,
+                            otz,
+                            underdraw_edges,
+                        )
+                    };
+                } else {
+                    let root_refs = [root, previous_ref, current_ref];
+                    unsafe { writer.emit_tri(root_refs, root_refs, otz) };
+                }
+            }
+            previous = current;
+            current = unsafe { current.add(1) };
+        }
+        lent.next = writer.next;
+        lent.packets = writer.packets;
     }
 }
 
@@ -5285,7 +5688,14 @@ mod tests {
         assert_eq!(size_of::<ClassicAffinePosition>(), 6);
         assert_eq!(core::mem::align_of::<ClassicAffinePosition>(), 2);
         assert_eq!(size_of::<ClassicAffineBatchSurface>(), 8);
-        assert_eq!(core::mem::align_of::<ClassicAffineBatchSurface>(), 2);
+        assert_eq!(
+            core::mem::align_of::<ClassicAffineBatchSurface>(),
+            if cfg!(feature = "classic-affine-quake-specialized-kernel") {
+                4
+            } else {
+                2
+            }
+        );
         assert_eq!(size_of::<ClassicAffineWindowedBatchSurface>(), 20);
         assert_eq!(
             core::mem::align_of::<ClassicAffineWindowedBatchSurface>(),
@@ -7006,6 +7416,114 @@ mod tests {
             ),
             (rotation, translation)
         );
+    }
+
+    /// Quake's split kernel against the generic batch it replaces, on
+    /// random batches that reach every path: rejected and partly visible
+    /// surfaces, unsplit and paired fans, one- and two-level splits, quad
+    /// lattices, and roots outside the OT.
+    #[cfg(all(
+        feature = "classic-affine-quake-specialized-kernel",
+        feature = "classic-affine-lattice"
+    ))]
+    #[test]
+    fn quake_kernel_matches_the_generic_batch_packet_for_packet() {
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(160);
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::new(0, 0, 0));
+        let mut seed = 0x2545_f491u32;
+        let mut random = move |bound: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % bound
+        };
+        const VERTICES: usize = 39;
+        const WORDS: usize = 16 * 1024;
+        let mut packets = 0u32;
+        for batch in 0..3000u32 {
+            let budget_q3 = [128u8, 255, 0, 1][batch as usize % 4];
+            let mut vertices = [ClassicAffineVertex::default(); VERTICES + EXTRA_VERTICES];
+            let mut surfaces = [ClassicAffineBatchSurface::default(); 13];
+            let mut vertex_count = 0usize;
+            let mut surface_count = 0usize;
+            while surface_count < surfaces.len() {
+                let count = 3 + random(6) as usize;
+                if vertex_count + count > VERTICES {
+                    break;
+                }
+                // A plane-ish face: one depth and a random slope, near or
+                // far, sometimes reaching behind the eye.
+                let depth = [24, 60, 140, 400, 1200, 3000][random(6) as usize] as i32;
+                let slope = random(5) as i32 * depth / 3;
+                let (cx, cy) = (random(900) as i32 - 450, random(700) as i32 - 350);
+                let span = 20 + random(600) as i32;
+                for corner in 0..count {
+                    let (x, y) = (
+                        cx + random(span as u32) as i32 - span / 2,
+                        cy + random(span as u32) as i32 - span / 2,
+                    );
+                    let z = depth + slope * (x - cx) / span.max(1) - random(8) as i32;
+                    vertices[vertex_count + corner] = ClassicAffineVertex {
+                        position: [
+                            x.clamp(-32000, 32000) as i16,
+                            y.clamp(-32000, 32000) as i16,
+                            z.clamp(-200, 32000) as i16,
+                        ],
+                        uv: [random(256) as u8, random(256) as u8],
+                        color: random(0x0100_0000),
+                        screen: [0; 2],
+                        depth: 0,
+                    };
+                }
+                surfaces[surface_count] = ClassicAffineBatchSurface {
+                    first_vertex: vertex_count as u16,
+                    vertex_count: count as u16,
+                    tpage: random(0x1_0000) as u16,
+                    clut: random(0x1_0000) as u16,
+                };
+                vertex_count += count;
+                surface_count += 1;
+            }
+            let mut generic_vertices = vertices;
+            let mut quake_output = [0u32; WORDS];
+            let mut generic_output = [0u32; WORDS];
+            let (quake, generic) = unsafe {
+                (
+                    submit_quake_classic_affine_batch_budget(
+                        vertices.as_mut_ptr(),
+                        vertex_count,
+                        surfaces.as_ptr(),
+                        surface_count,
+                        quake_output.as_mut_ptr(),
+                        budget_q3,
+                    ),
+                    submit_classic_affine_batch(
+                        generic_vertices.as_mut_ptr(),
+                        vertex_count,
+                        surfaces.as_ptr(),
+                        surface_count,
+                        generic_output.as_mut_ptr(),
+                        quake_error_bounded_profile(budget_q3),
+                    ),
+                )
+            };
+            let words = unsafe { generic.next_packet.offset_from(generic_output.as_ptr()) };
+            assert_eq!(
+                unsafe { quake.next_packet.offset_from(quake_output.as_ptr()) },
+                words,
+                "batch {batch}"
+            );
+            assert_eq!(
+                (quake.packets, quake.hardware_triangles),
+                (generic.packets, generic.hardware_triangles),
+                "batch {batch}"
+            );
+            assert_eq!(quake_output[..words as usize], generic_output[..words as usize], "batch {batch}");
+            packets += generic.packets;
+        }
+        assert!(packets > 100_000, "{packets} packets: the batches barely draw");
     }
 
     #[test]
