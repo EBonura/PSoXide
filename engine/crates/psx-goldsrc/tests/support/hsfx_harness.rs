@@ -1,3 +1,4 @@
+#![feature(optimize_attribute)]
 #![allow(dead_code,unused_imports,static_mut_refs)]
 use std::{cell::RefCell, panic::{catch_unwind,AssertUnwindSafe}};
 mod spu; mod sfx; mod shared; mod old_hl; mod old_cs; mod new_hl; mod new_cs;
@@ -31,15 +32,12 @@ macro_rules! scenario {($m:ident,$pack:expr)=>{{
   record(Op::Return($m::play_voice_authored(id,[id as i32*100,0,0],id, id%8|8)));
   $m::play_map(id);$m::play_map_vol(id,0);$m::play_map_world(id,[0,100,0]);
   $m::play_map_authored(id,[200,0,0],80,id%8);
-  $m::play_map_loop_world(id,[0,0,0],id as u16%11);
-  $m::play_map_loop_authored(id,[0,0,0],id as u16%11,70,2);
-  if id%3==0 {$m::stop_map_loop(id as u16%11);}
   snapshot!($m);
  }
  $m::charger_stop();$m::stop_dialogue();snapshot!($m);
  record(Op::Return($m::load_dialogue_pack(b"bad") as u16));snapshot!($m);
  record(Op::Return($m::load_dialogue_pack(&dialogue) as u16));
- $m::play_map_loop_world(2,[0,0,0],99);$m::play_voice(1,1);
+ $m::play_voice(1,1);
  record(Op::Return($m::load_dialogue_pack(&dialogue) as u16));snapshot!($m);
  $m::stop_map_loops();$m::stop_all();snapshot!($m);
  }take()

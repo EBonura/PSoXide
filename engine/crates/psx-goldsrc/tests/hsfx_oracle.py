@@ -4,6 +4,11 @@
 Only MMIO read/write, device init, and ADPCM transfer endpoints are replaced by
 recorders. The current SDK Voice/OneShot implementations compute every register
 value and preserve write order. No retail assets or emulator are required.
+
+Map-loop voice allocation is out of scope: the shared runtime deliberately
+replaced the legacy round-robin with free-voice-first, quietest-eviction and
+listener re-levelling (73ff8eaa, fe95bd46), so it no longer matches the frozen
+originals. The hsfx.rs host tests pin that behaviour instead.
 """
 from pathlib import Path
 import argparse, hashlib, json, re, subprocess, tempfile
@@ -49,8 +54,7 @@ impl<const N:usize,const H:u8,const S:u8> Hsfx<N,H,S> {
   for n in self.addrs {v.push(n as u64)} for n in self.rates {v.push(n as u64)}
   v.extend([self.count as u64,self.next_voice as u64,self.dialogue_base as u64]);
   for n in self.voice_addrs {v.push(n as u64)} for n in self.voice_rates {v.push(n as u64)}
-  v.push(self.voice_count as u64);for n in self.map_loop_owner {v.push(n as u64)}
-  v.push(self.next_map_loop as u64);for n in self.ear {v.push(n as u64)} v
+  v.push(self.voice_count as u64);for n in self.ear {v.push(n as u64)} v
  }
 }
 '''
@@ -59,7 +63,7 @@ impl<const N:usize,const H:u8,const S:u8> Hsfx<N,H,S> {
             old = hardware_imports(((HERE/'oracles'/(game+'-ids.rs')).read_text() + (HERE/'oracles/legacy-hsfx-runtime.rs').read_text()))
             old += '''
 pub unsafe fn reset() { ADDRS=[0;MAX_SFX]; RATES=[0;MAX_SFX]; COUNT=0; NEXT_VOICE=0; DIALOGUE_BASE=0; VOICE_ADDRS=[0;MAX_VOICES];VOICE_RATES=[0;MAX_VOICES];VOICE_COUNT=0;MAP_LOOP_OWNER=[MAP_LOOP_OWNER_NONE;MAP_LOOP_VOICE_COUNT];NEXT_MAP_LOOP=0;EAR=[0;3]; }
-pub unsafe fn snapshot()->Vec<u64>{let mut v=Vec::new();for n in ADDRS {v.push(n as u64)}for n in RATES{v.push(n as u64)}v.extend([COUNT as u64,NEXT_VOICE as u64,DIALOGUE_BASE as u64]);for n in VOICE_ADDRS{v.push(n as u64)}for n in VOICE_RATES{v.push(n as u64)}v.push(VOICE_COUNT as u64);for n in MAP_LOOP_OWNER{v.push(n as u64)}v.push(NEXT_MAP_LOOP as u64);for n in EAR{v.push(n as u64)}v}
+pub unsafe fn snapshot()->Vec<u64>{let mut v=Vec::new();for n in ADDRS {v.push(n as u64)}for n in RATES{v.push(n as u64)}v.extend([COUNT as u64,NEXT_VOICE as u64,DIALOGUE_BASE as u64]);for n in VOICE_ADDRS{v.push(n as u64)}for n in VOICE_RATES{v.push(n as u64)}v.push(VOICE_COUNT as u64);for n in EAR{v.push(n as u64)}v}
 '''
             (p/f'src/old_{short}.rs').write_text(old)
             n = re.search(r'const MAX_SFX: usize = (\d+)', old)[1]

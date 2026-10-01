@@ -1,5 +1,11 @@
 Frozen test-only HSFX implementations: HL 70072ce and CS 988f308, before extraction. They have no production callers. The oracle rewires hardware access for recording; all parser, ownership, gain, upload ordering and sample configuration bodies are retained. Directory truncation is a known legacy panic, tested separately from tolerant invalid payloads.
 
+Map-loop voice allocation is no longer compared: the shared runtime now takes a
+free voice first, evicts the quietest loop and re-levels authored loops as the
+listener moves (73ff8eaa, fe95bd46), where the originals were round-robin. The
+scenario leaves map-loop starts and stops out, and the `hsfx.rs` host tests pin
+the new allocation. `stop_map_loops` and `stop_all` are still compared.
+
 ## Chunk streamer
 
 `legacy-cdstream.rs` is the exact public HL 70072 source. CS 988f differs only
