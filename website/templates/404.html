@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Page not found | {{ config.title }}{% endblock title %}
+{% block content %}
+<div class="wrap">
+  <header class="page-head">
+    <span class="eyebrow">404</span>
+    <h1>Page not found</h1>
+    <p class="lede">This address doesn't match a page on the PSoXide site. It may have moved when the site was reorganised.</p>
+  </header>
+  <ul>
+    <li><a href="{{ get_url(path='/') }}">Home</a></li>
+    <li><a href="{{ get_url(path='@/emulator/_index.md') }}">Emulator</a></li>
+    <li><a href="{{ get_url(path='@/projects/_index.md') }}">Projects</a></li>
+    <li><a href="{{ get_url(path='@/docs/_index.md') }}">Guides</a></li>
+    <li><a href="{{ get_url(path='@/faq.md') }}">FAQ</a></li>
+  </ul>
+</div>
+{% endblock content %}
