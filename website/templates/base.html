@@ -11,8 +11,8 @@
   {% set desc = config.description %}
   {% if page and page.description %}{% set desc = page.description %}{% elif section and section.description %}{% set desc = section.description %}{% endif %}
   <meta name="description" content="{{ desc }}">
-  <link rel="canonical" href="{{ current_url }}">
-  <meta property="og:url" content="{{ current_url }}">
+  {% if current_url %}<link rel="canonical" href="{{ current_url }}">
+  <meta property="og:url" content="{{ current_url }}">{% endif %}
   <meta property="og:type" content="website">
   <meta property="og:image" content="{{ get_url(path='img/shots/nitroxide-hires.jpg') }}">
   <meta property="og:title" content="{{ page_title }}">
