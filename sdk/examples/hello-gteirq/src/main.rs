@@ -15,9 +15,9 @@
 //! The verdict goes to the TTY (`GTEIRQ PASS ...` or `GTEIRQ FAIL ...`) and
 //! on screen. `gte_skips` counts the interrupts the handler stepped over a
 //! GTE command for: about one in forty VBlanks on silicon, where the loop is
-//! mostly RTPS-adjacent instructions, and always zero in PSoXide, which
-//! never takes an interrupt in front of a GTE command, so the emulator
-//! passes whether or not the fix is present. Only a console run tests it.
+//! mostly RTPS-adjacent instructions. Since emulator commit c7e3ea8 PSoXide
+//! also takes an interrupt with EPC on a GTE command, as silicon does, so
+//! the probe can fail there too; a console run remains the reference.
 
 #![no_std]
 #![no_main]

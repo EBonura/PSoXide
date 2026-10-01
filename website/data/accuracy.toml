@@ -1,0 +1,57 @@
+# Accuracy comparison: PLACEHOLDER.
+#
+# No cross-emulator accuracy run exists yet. Until one lands, `status` stays
+# "placeholder" and the page shows every cell as "not measured". Never type a
+# result in by hand: each result row must come from a logged run, with the log
+# committed next to this file.
+#
+# What a measurement run should fill in, per suite:
+#   [[suite]]  id, name, url, version (commit or release), what it covers,
+#              total test count, how a pass is decided
+#   [[result]] suite id, emulator (same display names as emu-bench.json),
+#              emulator build, passed, failed, skipped/crashed, run date,
+#              log path (relative to data/accuracy/), notes
+status = "placeholder"
+updated = ""
+
+[[suite]]
+id = "suite-a"
+name = "[Test suite to be chosen by the measurement run]"
+url = ""
+version = ""
+covers = "CPU, GTE, GPU, SPU, timers, DMA or CD-ROM: whichever the chosen suite exercises"
+total = ""
+
+[[suite]]
+id = "silicon"
+name = "PSoXide hardware test battery against a real console"
+url = "https://github.com/EBonura/PSoXide-emulator/blob/main/docs/emulator-accuracy-from-silicon.md"
+version = ""
+covers = "Values captured on a real PS1 and compared with PSoXide. Other emulators can only join this row if the battery runs on them too."
+total = ""
+
+# One row per emulator per suite. All placeholders for now.
+[[result]]
+suite = "suite-a"
+emulator = "PSoXide"
+placeholder = true
+
+[[result]]
+suite = "suite-a"
+emulator = "DuckStation"
+placeholder = true
+
+[[result]]
+suite = "suite-a"
+emulator = "Beetle PSX"
+placeholder = true
+
+[[result]]
+suite = "suite-a"
+emulator = "PCSX-Redux"
+placeholder = true
+
+[[result]]
+suite = "silicon"
+emulator = "PSoXide"
+placeholder = true

@@ -32,12 +32,12 @@ the editor and emulator share one simulation.
 | [`psx-osk`](crates/psx-osk) | On-screen keyboard for pad-driven text entry: QWERTY/symbols pages, shift, PS4-style boxed keys. |
 | [`psx-pack`](crates/psx-pack) | Guest-side WORLD.PAK parsing + in-place HLZC/LZ4 decompression (reader half of `psx-iso`). |
 | [`psx-telemetry`](crates/psx-telemetry) | Shared guest/host telemetry id tables for the emulator profiling hooks. |
+| [`psx-fmv`](crates/psx-fmv) | FMV playback building blocks: STR sector demux, BS v2 bitstream to MDEC run-length decode, MDEC upload/decode via DMA0/DMA1 (guest only), ISO9660 root-file lookup. |
 
 There is no umbrella crate: games depend on the subsystem crates they use.
-The workspace currently has 19 crates. A standalone game should use the
-pinned bootstrap workflow described in the root README, rather than
-copying SDK directories by hand; several shared dependencies still live
-outside `sdk/`.
+A standalone game should use the pinned bootstrap workflow described in the
+root README, rather than copying SDK directories by hand; several shared
+dependencies still live outside `sdk/`.
 
 ## Examples
 
@@ -55,8 +55,14 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-audio` | SPU voice playback. |
 | `hello-cdda` | CD-DA audio tracks. |
 | `hello-spstack` | A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `tools/stack_guard.py` proves it fits. |
-| `hello-gteirq` | RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice (a console run is the real test: the emulator never interrupts one). |
+| `hello-gteirq` | RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice. The emulator models this since its commit c7e3ea8; a console run remains the reference. |
 | `hello-present` | psx-rt's queued display flip, held until the frame's closing GP0(1Fh) sets GPUSTAT bit 24 (`arm_draw_done`, `end_with_draw_done`, `signal_draw_done`). |
+| `hello-fmv` | FMV console test: streams a 2x STR with XA audio, decodes it with `psx-fmv`, and shows sector counts (LOST/BAD) over the video. |
+| `hello-memcard` | Non-destructive memory-card diagnostic: reads and hashes all 1024 frames, then (L1+R1+Cross) writes and verifies one test save. |
+| `hello-memprobe` | Checks psx-rt's `memcpy`/`memset`/`memcmp` against reference loops for every size and alignment; prints `MEMPROBE PASS` or `FAIL`. |
+| `hello-pack` | `psx_pack::cd` smoke test: streams raw and compressed WORLD.PAK chunks off the disc and checks them. |
+| `hello-i64probe` | Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides. |
+| `cdda-read-contention` | CD-ROM conformance probe: issues a data read while CD-DA is playing and records which IRQ the drive raises. |
 
 ## See also
 

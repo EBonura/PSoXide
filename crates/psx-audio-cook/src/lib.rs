@@ -13,6 +13,7 @@
 //! * [`metrics`], [`spu_play`]: SNR, log-spectral distance, and a model of
 //!   the voice's Gaussian interpolation so measurements reflect playback.
 //! * [`legacy`]: the previous pipelines, bit-exact, for A/B only.
+//! * [`cli`]: the command line, callable from any workspace.
 //!
 //! [`cook`] runs the whole chain for one sound and [`psau`] wraps the result
 //! in the PSAU container every runtime already parses.
@@ -20,6 +21,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod adpcm;
+pub mod cli;
 pub mod legacy;
 pub mod metrics;
 pub mod rate;
@@ -65,6 +67,10 @@ pub enum Looping {
     /// front by under one block so the loop starts on a block boundary, and
     /// the loop is stretched to whole blocks.
     Source,
+    /// One-shot length (padded to whole blocks, no stretch) whose first
+    /// block ignores history, for a stream a transport restarts or rings
+    /// (its flags are the transport's, so they are left as a one-shot's).
+    Restart,
 }
 
 /// Settings for [`cook`].
@@ -149,7 +155,7 @@ fn round_blocks(n: usize) -> usize {
 fn plan(wav: &Wav, rate: u32, looping: Looping) -> Plan {
     let n = wav.samples.len();
     let source_loop = match looping {
-        Looping::None => None,
+        Looping::None | Looping::Restart => None,
         Looping::Whole => Some((0, n)),
         Looping::Source => wav.loop_start.map(|s| (s, wav.loop_end.unwrap_or(n))),
     };
@@ -213,25 +219,32 @@ pub fn cook(wav: &Wav, opts: &CookOptions) -> Cooked {
             ));
         }
     }
-    // The normalising gain comes from the uncompensated signal so loudness
-    // matches the old pipeline; the pre-emphasis may only lower it to avoid
-    // clipping.
+    // The normalising gain comes from the source's own peak, as the old
+    // pipelines' did in effect (a nearest or linear resample keeps the
+    // source's samples, so its peak). The band-limited resample's peak is
+    // lower whenever the sound has energy above the new Nyquist, and
+    // normalising that would turn up what is left: a flashlight click at
+    // 5 kHz came out 8 dB louder. The pre-emphasis does not change the gain
+    // either: the few samples it pushes past full scale are clamped
+    // (to_i16). Lowering the gain to fit them cost loud, bright sounds up to
+    // 7.5 dB of playback level (Counter-Strike's gunshots) and measured no
+    // better.
     let peak_of = |v: &[f64]| v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    let mut gain = match opts.normalize_peak {
-        Some(target) if peak_of(&pcm) > 0.0 => target.clamp(0.0, 1.0) * 32767.0 / peak_of(&pcm),
+    let gain = match opts.normalize_peak {
+        Some(target) if peak_of(src) > 0.0 => target.clamp(0.0, 1.0) * 32767.0 / peak_of(src),
         _ => 1.0,
     };
     if opts.compensate_gauss {
         let loop_start = p.loop_block.map(|b| b * BLOCK_SAMPLES);
         pcm = resample::compensate_gauss(&pcm, loop_start);
-        let peak = peak_of(&pcm);
-        if peak * gain > 32_700.0 {
-            gain = 32_700.0 / peak;
-        }
     }
     pcm.iter_mut().for_each(|v| *v *= gain);
     let pcm = resample::to_i16(&pcm);
-    let mut adpcm = adpcm::encode(&pcm, p.loop_block, &opts.encode);
+    let history_free = match opts.looping {
+        Looping::Restart => Some(0),
+        _ => p.loop_block,
+    };
+    let mut adpcm = adpcm::encode(&pcm, history_free, &opts.encode);
     adpcm::set_flags(&mut adpcm, p.loop_block);
     Cooked {
         rate: opts.rate,
@@ -276,4 +289,37 @@ pub fn playback(c: &Cooked) -> Vec<f64> {
 /// end-to-end measurements.
 pub fn reference_44k(wav: &Wav) -> Vec<f64> {
     Sinc::new().resample(&wav.samples, wav.rate, 44_100)
+}
+
+/// End-to-end quality of ADPCM that plays at `rate` Hz, against its source.
+#[derive(Clone, Debug)]
+pub struct Score {
+    /// fwSNRseg (dB, higher is better) of the playback against
+    /// [`reference_44k`], over the band up to half the source rate, capped
+    /// at 11,025 Hz: the measure every rollout comparison uses.
+    pub fw_snr_seg_db: f64,
+    /// Scale-invariant SNR (dB) over the same span.
+    pub si_snr_db: f64,
+    /// The playback at 44.1 kHz through the SPU interpolator model.
+    pub played: Vec<i16>,
+}
+
+/// Score any ADPCM (a shipped bank entry, or a cook) against its source:
+/// decode it as the SPU does, drop `skip` leading samples (at `rate`, e.g.
+/// the pre-roll padding a source loop adds), play it through the voice's
+/// Gaussian interpolator, and measure against the band-limited source. Flags
+/// are ignored, so a loop is measured over one pass; a loop stretched to
+/// whole blocks drifts against its source by under half a block.
+pub fn score(source: &Wav, adpcm: &[u8], rate: u32, skip: usize) -> Score {
+    let decoded = adpcm::decode(adpcm);
+    let played = spu_play::play(&decoded[skip.min(decoded.len())..], rate);
+    let reference = reference_44k(source);
+    let test: Vec<f64> = played.iter().map(|&v| v as f64).collect();
+    let n = reference.len().min(test.len());
+    let max_hz = (source.rate as f64 / 2.0).min(11_025.0);
+    Score {
+        fw_snr_seg_db: metrics::fw_snr_seg_db(&reference[..n], &test[..n], max_hz),
+        si_snr_db: metrics::si_snr_db(&reference[..n], &test[..n]),
+        played,
+    }
 }

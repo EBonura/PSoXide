@@ -185,7 +185,7 @@ fn read_extent(disc: &Disc, extent_lba: u32, size: u32) -> Result<Vec<u8>, BootE
         let data = disc
             .read_sector_user(lba)
             .ok_or(BootError::DirectoryExtentUnreadable { extent_lba, size })?;
-        out.extend_from_slice(data);
+        out.extend_from_slice(&data);
     }
     out.truncate(size as usize);
     Ok(out)

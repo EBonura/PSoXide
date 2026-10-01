@@ -1,0 +1,159 @@
+{#
+  Site components (Zola 0.23 / Tera 2). Registered globally: usable from any
+  template and from markdown content without an import.
+#}
+
+{#
+  Horizontal bar chart built at build time from data/emu-bench.json.
+  rows:   emulator objects (see scripts/import_emu_bench.py)
+  metric: a key of emulator.mean: "fps", "cpu", "mem" or "headroom"
+  max:    the value a full-length bar stands for (the data file's axis ends)
+  Plain HTML and CSS, no JavaScript: values are text, labels stack on phones.
+#}
+{% component hbar(rows, metric: string, max, unit: string = "", decimals: integer = 0, title: string = "") %}
+<div class="bars" role="table" aria-label="{{ title }}">
+  {% for e in rows %}
+  {% set v = e.mean[metric] %}
+  {% if e.psoxide and e.role == "current" %}{% set cls = "bar-psx" %}
+  {% elif e.psoxide %}{% set cls = "bar-hist" %}
+  {% elif e.core == "recompiler" %}{% set cls = "bar-jit" %}
+  {% else %}{% set cls = "bar-peer" %}{% endif %}
+  <div class="bar-row" role="row">
+    <span class="bar-label{% if not e.psoxide and e.core == 'recompiler' %} dim{% endif %}" role="rowheader">{{ e.label }}</span>
+    <span class="bar-track" role="cell"><span class="bar {{ cls }}" style="width:{{ v / max * 84 }}%"></span><span class="bar-val">{% if decimals == 0 %}{{ v | round | int }}{% else %}{{ v | round(precision=decimals) }}{% endif %}{{ unit }}</span></span>
+  </div>
+  {% endfor %}
+</div>
+{% endcomponent hbar %}
+
+{% component legend(history: bool = false) %}
+<div class="legend">
+  <span><i class="k-psx"></i>PSoXide (current main)</span>
+  {% if history %}<span><i class="k-hist"></i>PSoXide, earlier builds</span>{% endif %}
+  <span><i class="k-peer"></i>Other emulators, interpreter</span>
+  <span><i class="k-jit"></i>Recompiler (JIT), for context</span>
+</div>
+{% endcomponent legend %}
+
+{# A screenshot in the CRT frame. native=true keeps pixels sharp when scaled up. #}
+{% component figure(src: string, alt: string, native: bool = false, width: integer = 0, height: integer = 0, caption: string = "") %}
+<figure class="screen{% if native %} native figure-native{% else %} wide{% endif %}" style="margin:1.4rem 0 0.4rem"><img src="{{ get_url(path=src) }}" alt="{{ alt }}"{% if width %} width="{{ width }}" height="{{ height }}"{% endif %} loading="lazy"></figure>
+{% if caption %}<p class="muted small">{{ caption }}</p>{% endif %}
+{% endcomponent figure %}
+
+{#
+  The SDK's crates or examples, from data/sdk.json (scripts/import_sdk.py reads
+  the tables in sdk/README.md). what: "crates" or "examples".
+#}
+{% component sdk_index(what: string) %}
+{% set sdk = load_data(path="data/sdk.json") %}
+<div class="table-wrap"><table>
+<thead><tr><th>{% if what == "crates" %}Crate{% else %}Example{% endif %}</th><th>{% if what == "crates" %}Purpose{% else %}Shows{% endif %}</th></tr></thead>
+<tbody>{% for row in sdk[what] %}<tr><td><a href="{{ get_url(path='@/docs/' ~ what ~ '/' ~ row.name ~ '.md') }}"><code>{{ row.name }}</code></a></td><td>{% if what == "crates" %}{{ row.purpose | markdown(inline=true) | safe }}{% else %}{{ row.shows | markdown(inline=true) | safe }}{% endif %}</td></tr>{% endfor %}</tbody>
+</table></div>
+{% endcomponent sdk_index %}
+
+{% component callout(kind: string = "", title: string = "") %}
+<div class="callout{% if kind %} {{ kind }}{% endif %}">{% if title %}<span class="callout-title">{{ title }}</span>{% endif %}{{ body | markdown | safe }}</div>
+{% endcomponent callout %}
+
+{# Notes for Manny. Search the output for class="flag" before publishing: none should remain. #}
+{% component flag() %}
+<p><span class="flag">For Manny: {{ body }}</span></p>
+{% endcomponent flag %}
+
+{#
+  Quick answers from data/faq.toml. Fills [[tokens]] from the benchmark and
+  compatibility data, so the numbers always match the comparison page.
+  style: "card" for the home strip, "full" for the FAQ page.
+#}
+{% component faq(items, bench, compat, style: string = "card") %}
+{% set cur = [e for e in bench.emulators if e.role == "current"] | first %}
+{% set ds = [e for e in bench.emulators if e.id == "duckstation-interp"] | first %}
+{% for item in items %}
+{% set a = item.a
+  | replace(from="[[psx_fps]]", to=cur.mean.fps | round | int | str)
+  | replace(from="[[psx_mem]]", to=cur.mean.mem | round | int | str)
+  | replace(from="[[psx_headroom]]", to=cur.mean.headroom | str)
+  | replace(from="[[ds_fps]]", to=ds.mean.fps | round | int | str)
+  | replace(from="[[ds_mem]]", to=ds.mean.mem | round | int | str)
+  | replace(from="[[compat_ok]]", to=compat.counts["in-game"] | str)
+  | replace(from="[[compat_total]]", to=compat.total | str) %}
+{% if item.link is starting_with(pat="@/") %}
+  {% set parts = item.link | split(pat="#") %}
+  {% set href = get_url(path=parts[0]) %}
+  {% if parts | length > 1 %}{% set href = href ~ "#" ~ parts[1] %}{% endif %}
+{% else %}{% set href = item.link %}{% endif %}
+{% if style == "full" %}
+<details class="qa qa-full" id="{{ item.id }}">
+  <summary class="qa-q">{{ item.q }}</summary>
+  <div class="qa-a">{{ a | markdown | safe }}</div>
+  <a class="qa-link" href="{{ href }}">{{ item.link_text }} <span aria-hidden="true">→</span></a>
+</details>
+{% else %}
+<details class="qa qa-card" id="faq-{{ item.id }}" open>
+  <summary class="qa-q">{{ item.q }}</summary>
+  <div class="qa-a">{{ a | markdown | safe }}</div>
+  <a class="qa-link" href="{{ href }}">{{ item.link_text }} <span aria-hidden="true">→</span></a>
+</details>
+{% endif %}
+{% endfor %}
+{% endcomponent faq %}
+
+{% component example_player(name: string) %}
+{% set examples = load_data(path="data/examples.toml") %}
+{% set example = [e for e in examples.example if e.name == name] | first %}
+{% set player_url = get_url(path="player/") ~ "/?embed=1&disc=../examples/" ~ name ~ ".exe" %}
+<section class="example-player" aria-label="{{ example.title }} interactive example">
+  <p class="small"><strong>PS1 homebrew, running in your browser.</strong> This player runs the compiled PS1 executable in the PSoXide emulator.</p>
+  <iframe src="{{ player_url }}" title="{{ name }} running in PSoXide" loading="lazy" allow="autoplay; gamepad; fullscreen" width="640" height="480"></iframe>
+  <div class="player-controls">
+    <button type="button" class="btn" data-command="toggle" disabled>Pause</button>
+    <button type="button" class="btn" data-command="reset" disabled>Restart</button>
+    <button type="button" class="btn" data-command="fullscreen">Full screen</button>
+    <span class="player-status" role="status">Click to run inside the player.</span>
+  </div>
+  <p class="small muted">Focus the game to use the keyboard. Arrows: D-pad. F / G / H / X: Cross / Circle / Square / Triangle. Enter: Start. Sound starts muted; use the speaker button in the game. No touch controls.</p>
+  <p class="small player-links"><a href="{{ player_url }}">Open player separately</a> · <a href="{{ get_url(path='examples/' ~ name ~ '.exe') }}" download>Download EXE</a> · <a href="https://github.com/EBonura/PSoXide/blob/{{ examples.sdk_revision }}/sdk/examples/{{ name }}/src/main.rs">Matching source</a> · <a href="{{ get_url(path='@/docs/browser-examples.md') }}#builds-and-credits">Builds and credits</a></p>
+</section>
+{% endcomponent example_player %}
+
+{% component sdk_crate(name: string) %}
+{% set reference = load_data(path="data/sdk-reference.json") %}
+{% set crate = [c for c in reference.crates if c.name == name] | first %}
+{% set source = "https://github.com/EBonura/PSoXide/blob/" ~ reference.revision ~ "/sdk/crates/" ~ name ~ "/" %}
+<p class="small muted">SDK revision <code>{{ reference.revision | truncate(length=12, end="") }}</code>. Structure, dependencies and features below come from this revision.</p>
+<div class="btn-row">
+  <a class="btn btn-primary" href="{{ get_url(path='api/ps1/' ~ name | replace(from='-', to='_') ~ '/index.html') }}">Search the PS1 API</a>
+  <a class="btn" href="{{ source }}src/lib.rs">Crate source</a>
+  {% if name in ['psx-gte', 'psx-gte-core'] %}<a class="btn" href="{{ get_url(path='api/host/' ~ name | replace(from='-', to='_') ~ '/index.html') }}">Host GTE API</a>{% endif %}
+</div>
+<p>The PS1 reference includes all Cargo features. The manifest below shows which features are enabled by default.</p>
+<h3>Dependencies</h3>
+{% if crate.dependencies %}
+<ul>{% for dep in crate.dependencies %}<li>{% if dep.sdk %}<a href="{{ get_url(path='@/docs/crates/' ~ dep.name ~ '.md') }}"><code>{{ dep.name }}</code></a>{% else %}<code>{{ dep.name }}</code> (shared repository crate){% endif %} — {{ dep.target }}{% if dep.optional %}; optional{% endif %}{% if dep.features %}; features: <code>{{ dep.features | join(sep=', ') }}</code>{% endif %}</li>{% endfor %}</ul>
+{% else %}<p>No runtime Cargo dependencies.</p>{% endif %}
+<h3>Cargo features</h3>
+{% if crate.features %}<div class="table-wrap"><table><thead><tr><th>Feature</th><th>Enables</th></tr></thead><tbody>{% for feature, enables in crate.features %}<tr><td><code>{{ feature }}</code></td><td>{% if enables %}<code>{{ enables | join(sep=', ') }}</code>{% else %}No additional dependency features{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p>This crate declares no Cargo features.</p>{% endif %}
+<p><a href="{{ source }}Cargo.toml">Read the complete manifest and feature comments</a>.</p>
+<h3>Source layout</h3>
+<p>The list includes internal implementation and test files. Public modules, types, functions and their signatures are indexed in the API reference above.</p>
+<details class="source-file" open><summary>{{ crate.files | length }} source and manifest files</summary>
+<ul>{% for file in crate.files %}<li><a href="{{ source }}{{ file.path }}"><code>{{ file.path }}</code></a>{% if file.summary %} — {{ file.summary | markdown(inline=true) | safe }}{% endif %}</li>{% endfor %}</ul>
+</details>
+{% endcomponent sdk_crate %}
+
+{% component sdk_example_source(name: string) %}
+{% set reference = load_data(path="data/sdk-reference.json") %}
+{% set example = [e for e in reference.examples if e.name == name] | first %}
+{% set source = "https://github.com/EBonura/PSoXide/blob/" ~ reference.revision ~ "/sdk/examples/" ~ name ~ "/" %}
+<p>Complete, unabridged files from SDK revision <code>{{ reference.revision | truncate(length=12, end="") }}</code>. Build inside the repository checkout: the manifest uses relative SDK paths, and some programs embed assets from elsewhere in the repository.</p>
+<p>Runtime dependencies: {% for dep in example.dependencies %}{% if dep.sdk %}<a href="{{ get_url(path='@/docs/crates/' ~ dep.name ~ '.md') }}"><code>{{ dep.name }}</code></a>{% else %}<code>{{ dep.name }}</code>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+{% for file in example.files %}
+<details class="source-file"{% if file.lines < 100 %} open{% endif %}>
+  <summary>{{ file.path }} · {{ file.lines }} lines</summary>
+  <p><a href="{{ source }}{{ file.path }}">View this file on GitHub</a></p>
+  <pre tabindex="0" aria-label="{{ file.path }} source"><code class="language-{{ file.language }}">{{ file.code | escape | replace(from="\n", to="&#10;") | safe }}</code></pre>
+</details>
+{% endfor %}
+{% endcomponent sdk_example_source %}
