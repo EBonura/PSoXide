@@ -391,6 +391,8 @@ section[id], h2[id] { scroll-margin-top: 76px; }
 
 /* ---------- tables ---------- */
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.compat-table { min-width: 760px; }
+td.nowrap { white-space: nowrap; }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
 th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
 thead th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); background: var(--surface-2); white-space: nowrap; }

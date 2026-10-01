@@ -175,11 +175,11 @@
     </div>
     <div class="tier-legend">{% for tier in compat.tiers %}<span>{{ tier }}: {{ compat.counts[tier] }}</span>{% endfor %}</div>
     <div class="table-wrap" style="margin-top:1.2rem">
-      <table>
+      <table class="compat-table">
         <thead><tr><th>Game</th><th>Region</th><th>PSoXide</th><th>Real BIOS (recorded)</th><th>FMV</th><th>Known issues</th></tr></thead>
         <tbody>
         {% for g in compat.games %}
-          <tr><td>{{ g.name }}</td><td>{{ g.region }}</td><td><span class="tier">{{ g.tier }}</span></td><td>{{ g.bios_tier }}</td><td>{{ g.fmv }}</td><td class="small">{{ g.issues }}</td></tr>
+          <tr><td>{{ g.name }}</td><td class="nowrap">{{ g.region }}</td><td><span class="tier">{{ g.tier }}</span></td><td>{{ g.bios_tier }}</td><td>{{ g.fmv }}</td><td class="small">{{ g.issues }}</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -193,9 +193,9 @@
         <h2 style="margin-top:0">How it was measured</h2>
         <p>All four emulators ran headless on one Apple M3 Max MacBook Pro (14 cores, 36 GB, macOS 26.6.2, on AC power). Nothing opened a window or played audio, and each rendered in software at native resolution. Every game started from power-on with the same pad schedule PSoXide's compatibility runs use, and captured frames confirmed each emulator had reached the same part of the game before the measuring window opened.</p>
         <ul>
-          <li><strong>Frames per CPU-second:</strong> emulated frames in a 1200-frame window (600 for Resident Evil 2) at unlimited speed, divided by the process's user plus system CPU time. The calculation includes CPU time from every thread, including rendering threads.</li>
+          {% if config.extra.show_speed %}<li><strong>Frames per CPU-second:</strong> emulated frames in a 1200-frame window (600 for Resident Evil 2) at unlimited speed, divided by the process's user plus system CPU time. The calculation includes CPU time from every thread, including rendering threads.</li>{% endif %}
           <li><strong>CPU and memory at 1×:</strong> each emulator paced to the console's field rate (59.83 Hz NTSC, 49.76 Hz PAL). CPU is CPU time over wall time; memory is the median physical footprint, sampled every 0.25 s.</li>
-          <li><strong>Real-time headroom:</strong> frames per CPU-second divided by {{ bench.field_hz }}.</li>
+          {% if config.extra.show_speed %}<li><strong>Real-time headroom:</strong> frames per CPU-second divided by {{ bench.field_hz }}.</li>{% endif %}
           <li><strong>Versions:</strong> PSoXide {% for e in history %}<code>{{ e.build }}</code>{% if not loop.last %}, {% endif %}{% endfor %} (release profile), DuckStation <code>459a6fc</code>, Beetle PSX HW 0.9.44.1 (<code>ee042b7</code>) through a minimal libretro frontend, PCSX-Redux <code>1b7a4f1d</code> in <code>-cli</code> mode.</li>
         </ul>
         <h3>Caveats</h3>
@@ -203,7 +203,7 @@
           <li>Memory is measured without a frontend for every emulator, so real use costs more once a window, a GPU and audio are added. DuckStation's number includes about 360 MB of graphics allocations its regression runner keeps open.</li>
           <li>Disc data read on demand sits in the OS file cache, outside the process, for every emulator that streams. None of the footprints count it.</li>
           <li>Boot timing differs slightly between a BIOS boot and PSoXide's HLE boot, so Tekken 3 picks a different opponent and stage on each emulator. The other games reach the same scene with small differences.</li>
-          <li>PCSX-Redux paces itself to real time while CD audio streams, so in Tekken 3, WipEout 2097 and Resident Evil 2 its speed was measured at 1×, not unlimited.</li>
+          {% if config.extra.show_speed %}<li>PCSX-Redux paces itself to real time while CD audio streams, so in Tekken 3, WipEout 2097 and Resident Evil 2 its speed was measured at 1×, not unlimited.</li>{% endif %}
           <li>Beetle's recompiler couldn't reserve its fast memory map on macOS and warned it would run slower. It deadlocked once in 30 runs; that run was repeated.</li>
           <li>Standalone Mednafen has no windowless mode, so Beetle PSX, the libretro fork of its PS1 core, stands in for it.</li>
         </ul>
