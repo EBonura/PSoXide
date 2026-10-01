@@ -1,5 +1,5 @@
 {
-  "revision": "df69b8946f71e81e96d3f8b49a46c5cd856d9ea1",
+  "revision": "74a7b48cfbc58581d3becbf378a5a7ac06587d90",
   "crates": [
     {
       "name": "psx-io",
@@ -1028,6 +1028,22 @@
         {
           "path": "tests/encoder_stream.rs",
           "summary": "Round trip against real encoder output: demux every frame of a"
+        }
+      ]
+    },
+    {
+      "name": "psx-tick",
+      "description": "Fixed-timestep game clock: per-game tick rate and catch-up policy, render phase, consistency stats.",
+      "features": {},
+      "dependencies": [],
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "summary": ""
+        },
+        {
+          "path": "src/lib.rs",
+          "summary": "Fixed-timestep game clock shared by every PSoXide game."
         }
       ]
     }

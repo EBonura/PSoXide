@@ -1,6 +1,6 @@
 +++
 title = "PSoXide SDK documentation"
-description = "20 crate guides, searchable Rust APIs and 16 complete example programs for building PS1 homebrew."
+description = "21 crate guides, searchable Rust APIs and 16 complete example programs for building PS1 homebrew."
 weight = 3
 [extra]
 kind = "Reference"
@@ -22,7 +22,7 @@ The crates form a few practical layers. Choose the pieces your program needs:
 
 | Work | Start with | Supporting layer |
 |---|---|---|
-| Boot, panic, interrupts and frame timing | [psx-rt](@/docs/crates/psx-rt.md) | [psx-io](@/docs/crates/psx-io.md) for hardware access |
+| Boot, panic, interrupts and frame timing | [psx-rt](@/docs/crates/psx-rt.md) | [psx-io](@/docs/crates/psx-io.md) for hardware access, [psx-tick](@/docs/crates/psx-tick.md) for fixed-rate game logic |
 | Draw primitives and submit a frame | [psx-gpu](@/docs/crates/psx-gpu.md) | [psx-vram](@/docs/crates/psx-vram.md) for texture and palette layout |
 | Transform and project geometry | [psx-gte](@/docs/crates/psx-gte.md) | [psx-gte-core](@/docs/crates/psx-gte-core.md), [psx-math](@/docs/crates/psx-math.md) |
 | Read controls and build a UI | [psx-pad](@/docs/crates/psx-pad.md), [psx-font](@/docs/crates/psx-font.md) | [psx-osk](@/docs/crates/psx-osk.md), [psx-settings](@/docs/crates/psx-settings.md) |
@@ -42,13 +42,13 @@ framework is a separate layer and is not required for these examples.
 ## Build the documented revision
 
 The crate structures, full example listings and API reference use the same SDK
-revision as the embedded players: `df69b8946f71e81e96d3f8b49a46c5cd856d9ea1`.
+revision as the embedded players: `74a7b48cfbc58581d3becbf378a5a7ac06587d90`.
 After [installing the tools](@/docs/first-ps1-program.md#1-install-the-tools):
 
 ```sh
 git clone https://github.com/EBonura/PSoXide.git
 cd PSoXide
-git checkout df69b8946f71e81e96d3f8b49a46c5cd856d9ea1
+git checkout 74a7b48cfbc58581d3becbf378a5a7ac06587d90
 make disc EXAMPLE=hello-tri
 ```
 
@@ -66,7 +66,7 @@ PSoXide/
   rust-toolchain.toml         pinned compiler and components
   crates/                    shared formats and host tools
   sdk/
-    Cargo.toml               workspace containing the 20 SDK crates
+    Cargo.toml               workspace containing the 21 SDK crates
     psoxide.ld               target linker script
     crates/<crate>/src/      subsystem implementations
     examples/hello-tri/
@@ -83,7 +83,7 @@ compiling. Other examples keep data on the disc and load it at runtime; an EXE
 download alone does not contain those files or CD audio tracks.
 
 For a separate game repository, use the repository's
-[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/df69b8946f71e81e96d3f8b49a46c5cd856d9ea1/README.md)
+[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/74a7b48cfbc58581d3becbf378a5a7ac06587d90/README.md)
 to retain the shared dependencies and matching SDK revision.
 
 ## API reference

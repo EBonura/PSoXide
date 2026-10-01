@@ -25,7 +25,7 @@ New to the SDK? Follow [Build and run your first PS1 program](@/docs/first-ps1-p
 for the tool installation and build steps. The downloadable EXEs are executables,
 not disc images: use `make disc EXAMPLE=<name>` to create a BIN/CUE.
 
-For deeper reference, browse [all 20 SDK crate guides](@/docs/crates/_index.md)
+For deeper reference, browse [all 21 SDK crate guides](@/docs/crates/_index.md)
 or the [16 complete example programs](@/docs/examples/_index.md), including their
 Cargo manifests and every Rust source file.
 

@@ -57,6 +57,11 @@
       "purpose": "SIO0 controller polling: digital + DualShock analog, `PadTracker` edges/repeat, diagnostic pacing."
     },
     {
+      "name": "psx-tick",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-tick",
+      "purpose": "Fixed-timestep game clock: per-game tick rate and catch-up policy, a render phase for interpolation, and consistency counters. Callers pass the VBlank count, so every rule is host-testable."
+    },
+    {
       "name": "psx-font",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/crates/psx-font",
       "purpose": "Bitmap-font atlas: 1bpp source → 4bpp CLUT VRAM texture, GP0 textured-rect draw path."

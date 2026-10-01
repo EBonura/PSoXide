@@ -24,7 +24,7 @@ cargo run --locked --release -p mkisopsx -- \
   --cdda-track /path/to/track.raw
 ```
 
-Open the resulting CUE with the BIN beside it. A generic `make disc` image has no audio track. See the [audio cooker's source and formats](https://github.com/EBonura/PSoXide/tree/df69b8946f71e81e96d3f8b49a46c5cd856d9ea1/crates/psx-audio-cook) when preparing your source audio.
+Open the resulting CUE with the BIN beside it. A generic `make disc` image has no audio track. See the [audio cooker's source and formats](https://github.com/EBonura/PSoXide/tree/74a7b48cfbc58581d3becbf378a5a7ac06587d90/crates/psx-audio-cook) when preparing your source audio.
 
 For original hardware, read the [burned-disc requirements and warning](@/legal.md#running-burned-discs-on-original-hardware).
 
