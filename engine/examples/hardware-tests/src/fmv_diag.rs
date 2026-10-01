@@ -997,7 +997,7 @@ pub(crate) fn records(diag: &Diag) -> [TimingRecord; RECORD_MAX] {
         };
         let setup = o
             .setup_error
-            .and_then(|what| crate::fmv_test::setup_error_code(what))
+            .and_then(crate::fmv_test::setup_error_code)
             .unwrap_or(0) as u16;
         let mut s = Stream::new();
         s.h(o.stop as u16 | ((o.pass as u16) << 4) | (setup << 8));
@@ -1295,8 +1295,8 @@ fn draw_variant(font: &FontAtlas, diag: &Diag, v: usize) {
         .s(if run.fail == 0 { "WORKED" } else { "FAIL " })
         .s(if run.fail == 0 { "" } else { STEP_NAMES[fail.min(STEP_NAMES.len() - 1)] });
     font.draw_text(X0, 54, detail.as_str(), if run.fail == 0 { GREEN } else { RED });
-    for slot in 0..SNAPS {
-        let line = Line::new().s("MDEC1 ").s(SNAP_NAMES[slot]).s(" ");
+    for (slot, name) in SNAP_NAMES.iter().enumerate() {
+        let line = Line::new().s("MDEC1 ").s(name).s(" ");
         let line = if run.taken & (1 << slot) != 0 {
             line.hex(run.snaps[slot], 8)
         } else {
