@@ -1,5 +1,5 @@
 emulator_revision = "3b1b04f644a76e45cf92631c81ce8a232df7e9df"
-sdk_revision = "df69b8946f71e81e96d3f8b49a46c5cd856d9ea1"
+sdk_revision = "74a7b48cfbc58581d3becbf378a5a7ac06587d90"
 
 [[example]]
 name = "hello-tri"
