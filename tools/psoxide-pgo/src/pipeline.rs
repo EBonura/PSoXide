@@ -56,7 +56,8 @@ pub const USAGE: &str = "\
                            [--launch-arg ARG]... [--pack CMD] --out PROFILE -- CARGO-ARGS...
        psoxide-pgo order   [GUEST] --frontend PATH (--tape PATH --polls A..B)... [--launch-arg ARG]...
                            [--pack CMD] [--profile PROFILE] [--variant V] --out LAYOUT -- CARGO-ARGS...
-       psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V] -- CARGO-ARGS...
+       psoxide-pgo apply   [GUEST] [--profile PROFILE] [--layout LAYOUT] [--variant V]
+                           [--ram-floor BYTES [--ram-fallback V]...] -- CARGO-ARGS...
        psoxide-pgo choose  [GUEST] --profile PROFILE [--layout LAYOUT] --gate CMD [--variant V]...
                            [--pack CMD] [--frame-budget VBLANKS] [--rank deadline|work] -- CARGO-ARGS...
        psoxide-pgo measure --frontend PATH --image PATH [--tape PATH] --polls A..B
@@ -66,6 +67,9 @@ pub const USAGE: &str = "\
   CARGO-ARGS: what follows `cargo` in the guest's own build, starting with `build`
   V: off | default | accurate | noreplay | nopgso | profi | hot=N | llvm=-FLAG, joined with +;
      add +order to link in the order the layout profile gives (off+order, hot=500+order)
+  BYTES: RAM the image must leave free below the stack reserve; a variant that leaves less
+         is rebuilt as each --ram-fallback in turn (hot=500, hot=250, ...) and the first
+         that fits ships
   A..B: the gameplay window in port-1 polls, loads excluded
   START..END: guest addresses in hex (one build's layout) of a loop to count as waiting";
 
@@ -117,6 +121,8 @@ struct Options {
     name: Option<String>,
     wait_ranges: Vec<(u32, u32)>,
     frame_budget: Option<u64>,
+    ram_floor: Option<u32>,
+    ram_fallbacks: Vec<String>,
     objective: Objective,
     cargo: Vec<String>,
 }
@@ -194,6 +200,14 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
             "--out" => options.out = Some(path(value()?)?),
             "--profile" => options.profile = Some(path(value()?)?),
             "--variant" => options.variants.push(value()?),
+            "--ram-floor" => {
+                let text = value()?;
+                options.ram_floor = Some(
+                    text.parse()
+                        .map_err(|_| format!("--ram-floor wants a byte count, not {text:?}"))?,
+                );
+            }
+            "--ram-fallback" => options.ram_fallbacks.push(value()?),
             "--gate" => options.gate = Some(value()?),
             "--frame-budget" => {
                 let text = value()?;
@@ -219,6 +233,9 @@ fn parse(mode: &str, args: &[String]) -> Result<Options> {
             }
             other => return Err(format!("unknown argument {other}").into()),
         }
+    }
+    if !options.ram_fallbacks.is_empty() && options.ram_floor.is_none() {
+        return Err("--ram-fallback needs --ram-floor".into());
     }
     if mode != "measure" && options.cargo.first().map(String::as_str) != Some("build") {
         return Err("give the guest's cargo arguments after --, starting with `build`".into());
@@ -272,13 +289,8 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
         "order" => order(&guest, &options),
         "apply" => {
             let variant = one_variant(&options, "apply")?;
-            let linked = apply(
-                &guest,
-                options.profile.as_deref(),
-                options.layout.as_deref(),
-                variant,
-            )?;
-            println!("psoxide-pgo: {variant} -> {}", linked.exe.display());
+            let (shipped, linked) = apply_within_floor(&guest, &options, variant)?;
+            println!("psoxide-pgo: {shipped} -> {}", linked.exe.display());
             Ok(())
         }
         "choose" => choose(&guest, &options),
@@ -1537,6 +1549,63 @@ fn apply(
     );
     guest.patch(&relinked.exe, relinked.map.as_deref())?;
     Ok(relinked)
+}
+
+/// `apply` the variant, then, while its link leaves less RAM free than
+/// `--ram-floor`, each `--ram-fallback` in turn. Profile-guided inlining is
+/// chaotic in size (a few percent of samples moving one call site over the
+/// hot cutoff has cost hl-psx 3.5 KB), so a fixed variant cannot promise a
+/// game its headroom; this ships the first variant that keeps it and writes
+/// which one to `shipped-variant.txt` in the work directory.
+fn apply_within_floor(guest: &Guest, options: &Options, variant: &str) -> Result<(String, Linked)> {
+    let Some(floor) = options.ram_floor else {
+        let linked = apply(
+            guest,
+            options.profile.as_deref(),
+            options.layout.as_deref(),
+            variant,
+        )?;
+        return Ok((variant.to_string(), linked));
+    };
+    let mut tried = Vec::new();
+    for candidate in
+        std::iter::once(variant).chain(options.ram_fallbacks.iter().map(String::as_str))
+    {
+        let linked = apply(
+            guest,
+            options.profile.as_deref(),
+            options.layout.as_deref(),
+            candidate,
+        )?;
+        let map = linked
+            .map
+            .as_deref()
+            .ok_or("--ram-floor needs the link map, and the link wrote none")?;
+        let free = crate::ram::free_ram(&fs::read_to_string(map)?)
+            .ok_or_else(|| format!("{} has no __bss_end", map.display()))?;
+        tried.push(format!("{candidate}: {free} B"));
+        if free >= floor {
+            let record = format!(
+                "variant {candidate}\nfree {free}\nfloor {floor}\ntried {}\n",
+                tried.join(", ")
+            );
+            fs::write(
+                guest.work_dir(&linked.exe)?.join("shipped-variant.txt"),
+                record,
+            )?;
+            println!(
+                "psoxide-pgo: {candidate} leaves {free} B free (floor {floor}; tried {})",
+                tried.join(", ")
+            );
+            return Ok((candidate.to_string(), linked));
+        }
+        println!("psoxide-pgo: {candidate} leaves {free} B free, under the {floor} B floor");
+    }
+    Err(format!(
+        "no variant leaves {floor} B of RAM free ({})",
+        tried.join(", ")
+    )
+    .into())
 }
 
 /// An ordering file written for one link.

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+{% if page.extra.draft %}
+<div class="draft-banner"><div class="wrap"><strong>Draft, not for publication.</strong> {{ page.extra.draft }}</div></div>
+{% endif %}
+<div class="wrap">
+  <header class="page-head">
+    {% if page.extra.eyebrow %}<span class="eyebrow">{{ page.extra.eyebrow }}</span>{% endif %}
+    <h1>{{ page.title }}</h1>
+    {% if page.description %}<p class="lede">{{ page.description }}</p>{% endif %}
+  </header>
+  <div class="with-toc">
+    {% if page.toc %}
+    {% set toc_items = page.toc %}
+    {% include "partials/toc.html" %}
+    {% endif %}
+    <article class="prose">
+      {{ page.content | safe }}
+    </article>
+
+  </div>
+</div>
+{% endblock content %}

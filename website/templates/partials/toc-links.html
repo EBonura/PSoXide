@@ -1,0 +1,9 @@
+<ol>
+  {% for h in toc_items %}
+  <li><a href="{{ h.permalink | safe }}">{{ h.title }}</a>
+    {% if h.children %}<ol>{% for child in h.children %}
+      <li><a href="{{ child.permalink | safe }}">{{ child.title }}</a></li>
+    {% endfor %}</ol>{% endif %}
+  </li>
+  {% endfor %}
+</ol>

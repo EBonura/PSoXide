@@ -1,5 +1,9 @@
 name: SDK
-on: [push, pull_request]
+on:
+  push:
+    paths-ignore: ['website/**', '.github/workflows/website.yml']
+  pull_request:
+    paths-ignore: ['website/**', '.github/workflows/website.yml']
 jobs:
   sdk:
     runs-on: ubuntu-latest
