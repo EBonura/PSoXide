@@ -7464,7 +7464,7 @@ mod tests {
                 }
                 // A plane-ish face: one depth and a random slope, near or
                 // far, sometimes reaching behind the eye.
-                let depth = [24, 60, 140, 400, 1200, 3000][random(6) as usize] as i32;
+                let depth: i32 = [24, 60, 140, 400, 1200, 3000][random(6) as usize];
                 let slope = random(5) as i32 * depth / 3;
                 let (cx, cy) = (random(900) as i32 - 450, random(700) as i32 - 350);
                 let span = 20 + random(600) as i32;
