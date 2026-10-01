@@ -44,17 +44,11 @@ sha256 = "5cd227a5c7b56c2e988b50c8e58f398257ac586b135ee174979ecbef0386e4cc"
 files = ["nitroxide-hires.jpg"]
 source = "nitroxide/readme-assets/gameplay-sunset-aerial.png (resized)"
 [[retained]]
-files = ["psxcel.png", "ghpsx.png"]
-source = "psx-demo-disc/assets/shots/"
-[[retained]]
 files = ["cortex.png"]
 source = "PSoXide-editor/docs/comicon-first-look-2026-09-04/cortex-final.png"
 [[retained]]
 files = ["cortex-hires.jpg"]
 source = "psx-demo-disc/assets/readme/cortex-current.png"
-[[retained]]
-files = ["arcade.png"]
-source = "psx-demo-disc/assets/readme/arcade-selector.png"
 [[retained]]
 files = ["editor.jpg", "emulator.jpg"]
 source = "PSoXide-editor/assets/media/readme/ (resized)"
@@ -73,10 +67,6 @@ sha256 = "e455bfa9269e3503b7614eef61170c117e7c35783fde3c7382a768a8b4463a31"
 files = ["pong.png"]
 source = "psx-demo-disc/assets/shots/pong.png"
 sha256 = "1924a0b4801e5a9f6891002493303eaa2b5f571a319d015152b5b9640866c967"
-[[retained]]
-files = ["hwtests.png"]
-source = "psx-demo-disc/assets/shots/hwtests.png"
-sha256 = "78c0c35beb0df19f2cf7beee6e8096592241a89608b484b8c138302bb6fb138f"
 
 [[capture]]
 file = "static/img/shots/celeste-collection.png"
@@ -106,4 +96,44 @@ steps = 500000000
 press = "430:right:12,500:cross:20,800:cross:20"
 interval = 300
 sha256 = "dcc3dace0f760f8c19a3ad5546d027dbb27302a48460b206ec81853228e8b252"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
+
+[[capture]]
+file = "static/img/shots/arcade.png"
+source = "game library: psoxide-arcade.cue (PSoXide Arcade 0.1.1, the image embedded in PSoXide Demo Disc v0.40)"
+frame = "arcade/tick-000600.ppm"
+steps = 300000000
+press = ""
+interval = 60
+sha256 = "56342155fb5238c1c152534e922e3786319c7334340baa1b46345d0f2cab5d19"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
+
+[[capture]]
+file = "static/img/shots/psxcel.png"
+source = "game library: PSXcel/PSXcel.cue (PSXcel 0.2.0)"
+frame = "psxcel2/tick-000600.ppm"
+steps = 400000000
+press = "300:down:8,400:down:8,500:cross:8"
+interval = 30
+sha256 = "f72bb503168133501604f94069441e2deb2aa2b759d839595c1f357657cd87a5"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
+
+[[capture]]
+file = "static/img/shots/ghpsx.png"
+source = "game library: GH-PSX 3D Rhythm Attack (gh-psx)/GH-PSX 3D Rhythm Attack (gh-psx).cue (GH-PSX 0.1.0)"
+frame = "ghpsx3/tick-002130.ppm"
+steps = 1300000000
+press = "300:start:8,600:cross:8,900:cross:8"
+interval = 30
+sha256 = "059e5a7237232f87b4ff9dc99053f56c7aa365e37d17863245f680362d538385"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
+
+[[capture]]
+file = "static/img/shots/hwtests.png"
+source = "PSoXide-editor/build/examples/mipsel-sony-psx/release/hardware-tests.cue (HWTEST v1.24, built from PSoXide-editor main at 44d1f52b)"
+frame = "hw1/tick-000180.ppm"
+steps = 60000000
+press = ""
+interval = 15
+sha256 = "b7146790eae4ad56b68fe8be55b776bed97766a66ab84a3748c11cb5b6e8a458"
 emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
