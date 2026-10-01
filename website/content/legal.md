@@ -132,10 +132,6 @@ provenance record identifies adaptations from GPL-licensed Quake code. Users
 provide their own lawfully obtained Half-Life installation; project releases do
 not include Valve game assets, converted asset packs or completed disc images.
 
-Permission has been requested from Valve. As of **30 September 2026**, no response
-or express authorization has been received. Public availability of the source
-should not be understood as Valve approval.
-
 Valve’s [Half-Life SDK licence](https://github.com/ValveSoftware/halflife/blob/master/LICENSE)
 has its own scope and conditions. HL-PSX runs on a separate runtime; the project’s
 distribution policy does not establish that Valve’s terms authorize every aspect
