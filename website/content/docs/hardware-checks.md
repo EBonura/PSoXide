@@ -82,7 +82,7 @@ A console capture then showed the demo disc menu's browse sound playing the star
 
 The [Hardware Tests disc](https://github.com/EBonura/PSoXide-editor/tree/main/engine/examples/hardware-tests) runs the same executable in PSoXide and on a real PlayStation. The current version in source is **v1.26** (26 September 2026). It lives in the editor repository and isn't on the public demo disc. Build it there with `make hardware-tests-disc`, then burn the BIN/CUE from `build/examples/mipsel-sony-psx/release/`.
 
-{{<figure src="img/shots/hwtests.png" alt="The Hardware Tests v1.16 main menu, listing RUN ALL TESTS + CAPTURE, FULL CHARACTERISATION CAPTURE, CONTROLLER TEST and other entries" native={true} width={320} height={240} caption="The main menu in v1.16. Later versions add MDEC DIAGNOSTIC and FMV STREAM TEST rows." />}}
+{{<figure src="img/shots/hwtests.png" alt="The Hardware Tests v1.24 main menu, listing RUN ALL TESTS + CAPTURE, FULL CHARACTERISATION CAPTURE, CONTROLLER TEST and other entries" native={true} width={320} height={240} caption="The main menu in v1.24. Later versions add MDEC DIAGNOSTIC and FMV STREAM TEST rows." />}}
 
 The disc boots to a menu and measures nothing until you pick an entry. **RUN ALL TESTS + CAPTURE** runs the standing battery of conformance cases; **FULL CHARACTERISATION CAPTURE** adds timing records, precision values and a register snapshot. There are also targeted probes for the SPU, controller timing and CD, hardware scans of the CPU, GTE and SPU registers, a controller and analog-drift test, video levels for checking a capture chain, and a memory card diagnostic behind a consent screen.
 
