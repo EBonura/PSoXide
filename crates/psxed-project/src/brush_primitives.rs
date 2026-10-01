@@ -170,11 +170,7 @@ pub fn primitive_thickness(settings: BrushDrawSettings, step: i32) -> i32 {
 }
 
 /// Triangular prism filling the box, rising towards `direction`.
-pub fn ramp(
-    min: [i32; 3],
-    max: [i32; 3],
-    direction: BrushCardinalDirection,
-) -> Option<Brush> {
+pub fn ramp(min: [i32; 3], max: [i32; 3], direction: BrushCardinalDirection) -> Option<Brush> {
     use BrushCardinalDirection::{East, North, South, West};
     match direction {
         East => Brush::convex_prism(
@@ -208,12 +204,7 @@ pub fn ramp(
 ///
 /// Vertices are snapped individually, so the result can have fewer sides than
 /// requested. [`generate`] reports when that happens.
-pub fn cylinder(
-    min: [i32; 3],
-    max: [i32; 3],
-    sides: u8,
-    step: i32,
-) -> Option<Brush> {
+pub fn cylinder(min: [i32; 3], max: [i32; 3], sides: u8, step: i32) -> Option<Brush> {
     let sides = usize::from(sides.clamp(3, 32));
     let center_x = (f64::from(min[0]) + f64::from(max[0])) * 0.5;
     let center_z = (f64::from(min[2]) + f64::from(max[2])) * 0.5;
@@ -278,9 +269,7 @@ pub fn doorway_arch(
             point(a1, radius, vertical_radius),
             point(a1, inner_radius, inner_vertical_radius),
         ];
-        if let Some(brush) =
-            Brush::convex_prism(&polygon, plane_axes, depth_axis, depth)
-        {
+        if let Some(brush) = Brush::convex_prism(&polygon, plane_axes, depth_axis, depth) {
             brushes.push(brush);
         }
     }
@@ -302,9 +291,7 @@ pub fn doorway_arch(
             [inner_right, spring],
         ],
     ] {
-        if let Some(brush) =
-            Brush::convex_prism(&polygon, plane_axes, depth_axis, depth)
-        {
+        if let Some(brush) = Brush::convex_prism(&polygon, plane_axes, depth_axis, depth) {
             brushes.push(brush);
         }
     }
@@ -354,9 +341,7 @@ pub fn curved_wall(
             point(a1, radius_x, radius_z),
             point(a1, inner_x, inner_z),
         ];
-        if let Some(brush) =
-            Brush::convex_prism(&polygon, [0, 2], 1, [min[1], max[1]])
-        {
+        if let Some(brush) = Brush::convex_prism(&polygon, [0, 2], 1, [min[1], max[1]]) {
             brushes.push(brush);
         }
     }
@@ -364,12 +349,7 @@ pub fn curved_wall(
 }
 
 /// Stack of box steps climbing the box towards `direction`.
-pub fn stairs(
-    min: [i32; 3],
-    max: [i32; 3],
-    settings: BrushDrawSettings,
-    step: i32,
-) -> Vec<Brush> {
+pub fn stairs(min: [i32; 3], max: [i32; 3], settings: BrushDrawSettings, step: i32) -> Vec<Brush> {
     let (run_axis, positive) = match settings.direction {
         BrushCardinalDirection::North => (2, false),
         BrushCardinalDirection::East => (0, true),
@@ -400,9 +380,7 @@ pub fn stairs(
         step_min[run_axis] = run0;
         step_max[run_axis] = run1;
         step_max[1] = top;
-        if let Some(brush) =
-            Brush::cuboid_from_corners(step_min, step_max)
-        {
+        if let Some(brush) = Brush::cuboid_from_corners(step_min, step_max) {
             brushes.push(brush);
         }
     }
@@ -611,8 +589,13 @@ mod tests {
         };
 
         // A box always works, and is six faces.
-        let boxed = generate([0, 0, 0], [512, 512, 512], settings(BrushDrawShape::Box), 64)
-            .expect("a box with volume builds");
+        let boxed = generate(
+            [0, 0, 0],
+            [512, 512, 512],
+            settings(BrushDrawShape::Box),
+            64,
+        )
+        .expect("a box with volume builds");
         assert_eq!(boxed.face_count(), 6);
         assert!(boxed.warnings.is_empty());
 
@@ -629,7 +612,10 @@ mod tests {
         .expect("it still builds, it is just not an octagon");
         assert_eq!(squashed.face_count(), 6, "4 sides + 2 caps");
         assert!(
-            squashed.warnings.iter().any(|w| w.contains("asked for a 8-sided")),
+            squashed
+                .warnings
+                .iter()
+                .any(|w| w.contains("asked for a 8-sided")),
             "{:?}",
             squashed.warnings
         );

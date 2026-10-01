@@ -4657,7 +4657,10 @@ fn action_chains_cook_and_reject_missing_targets_bad_windows_and_duplicates() {
     assert_eq!(player.action_chains[0].handoff_frame, 34);
     assert_eq!(player.action_chains[0].input_start, 12);
     assert_eq!(player.action_chains[0].input_end, 34);
-    assert_eq!(player.action_chains[1], psx_level::CharacterActionChain::NONE);
+    assert_eq!(
+        player.action_chains[1],
+        psx_level::CharacterActionChain::NONE
+    );
     for case in 0..4 {
         let mut broken = project.clone();
         let ResourceData::AnimationSet(set) = &mut broken.resource_mut(set_id).unwrap().data else {

@@ -71,8 +71,10 @@ pub fn walk_player_hull(
     leg_authored: i32,
 ) -> Result<WalkResult, String> {
     let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
-        return Err("this project did not cook to a PXBSP world, so there is nothing to walk on"
-            .to_string());
+        return Err(
+            "this project did not cook to a PXBSP world, so there is nothing to walk on"
+                .to_string(),
+        );
     };
     if waypoints.len() < 2 {
         return Err("give at least a start and an end waypoint".to_string());
@@ -121,13 +123,17 @@ pub fn walk_player_hull(
             let before = position;
             let mut scratch = TraceScratch::new();
             let shape = CollisionTraceShape::Body { radius, height };
-            let mut provider =
-                PxbspCollisionProvider::new(&map, hull, &[], shape, &mut scratch)
-                    .ok_or("the cooked world would not open a collision provider")?;
+            let mut provider = PxbspCollisionProvider::new(&map, hull, &[], shape, &mut scratch)
+                .ok_or("the cooked world would not open a collision provider")?;
             let mut composed =
                 CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], &[]);
             let outcome = commit_body_step_with_trace_provider(
-                &mut composed, position, step_x, step_z, radius, height,
+                &mut composed,
+                position,
+                step_x,
+                step_z,
+                radius,
+                height,
             )
             .map_err(|error| format!("the collision trace failed: {error:?}"))?;
             position = outcome.position;
