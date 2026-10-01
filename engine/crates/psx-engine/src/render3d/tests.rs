@@ -1984,7 +1984,7 @@ fn grounding_probe_player_lowest_vertex_matches_reference() {
     let mut lowest = (i32::MAX, 0u16, first);
     for part_index in 0..model.part_count() {
         let part = model.part(part_index).unwrap();
-        let joint = part.joint_index() as u16;
+        let joint = part.joint_index();
         let pose = clip.pose(0, joint).unwrap();
         for v in part.first_vertex()..part.first_vertex() + part.vertex_count() {
             let vertex = model.vertex(v).unwrap();
