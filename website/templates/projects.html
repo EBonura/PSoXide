@@ -103,11 +103,12 @@
     <div class="section-head">
       <span class="eyebrow">Game ports</span>
       <h2>Ports and experiments</h2>
-      <p>These projects adapt existing games for the PS1. Owning a copy does not by itself grant permission to adapt or redistribute its content. Half-Life, Counter-Strike and Hollow Knight do not offer disc-image downloads. Quake’s converted shareware data has unresolved distribution-permission questions. Read the project-specific terms before reusing or sharing these works.</p>
+      <p>These projects adapt existing games for the PS1. Owning a copy does not by itself grant permission to adapt or redistribute its content. Half-Life, Counter-Strike and Hollow Knight do not offer disc-image downloads. Quake’s converted shareware data has unresolved distribution-permission questions. Its screenshot is an emulator capture. Read the project-specific terms before reusing or sharing these works.</p>
     </div>
     <div class="grid two">
       {% for p in projects.port %}
       <article class="card port" id="{{ p.slug }}">
+        {% if p.shot %}<figure class="screen native" style="margin:0"><img src="{{ get_url(path=p.shot) }}" alt="{{ p.shot_alt }}" width="320" height="240" loading="lazy"></figure>{% endif %}
         {% if p.slug in disc_slugs %}<span class="badge accent">On the demo disc {{ disc.version }}</span>{% endif %}
         <h3>{{ p.name }}</h3>
         <p>{{ p.hook }}</p>

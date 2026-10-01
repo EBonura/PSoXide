@@ -137,3 +137,13 @@ press = ""
 interval = 15
 sha256 = "b7146790eae4ad56b68fe8be55b776bed97766a66ab84a3748c11cb5b6e8a458"
 emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"
+
+[[capture]]
+file = "static/img/shots/quake.png"
+source = "game library: quake-psx.cue (quake-psx aebdb52a, built from PSoXide-editor 6188e908; bin sha256 38345fdf56b6aa79d30925a87bb86516f68e1edb8bce8cbd01b7f839e325d58b)"
+frame = "quake/tick-002400.ppm"
+steps = 800000000
+press = "1500:cross:8"
+interval = 60
+sha256 = "260e86c2facfe12fdeb93fb8b8ac47ff342488fd11ea4a24ef130170015cf330"
+emulator_sha256 = "dc04257de84b5520d99af0d6c15cdfe38444e4d985d47c1e3b924a73b5feebcf"

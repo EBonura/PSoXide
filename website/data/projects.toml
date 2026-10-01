@@ -1,7 +1,8 @@
 # Showcase data. Every link here was checked with an anonymous request
 # (HTTP 200) on 2026-09-26. Repos that return 404 anonymously are private:
 # leave `repo` empty for them rather than linking a page visitors can't open.
-# `shot` paths are under static/. Only a project's own captures go here.
+# `shot` paths are under static/. Only a project's own captures go here,
+# including captures of a port running on PSoXide.
 # Disc badges are derived from data/demo-disc.json, never separate flags.
 
 [[original]]
@@ -107,14 +108,17 @@ repo = "https://github.com/EBonura/PSoXide-editor/tree/main/engine/examples/hard
 disc_note = "Available from source; not included in the public Demo Disc v0.40."
 source = "PSoXide-editor/docs/hardware-test-disc.md; verified v0.40 disc inventory"
 
-# Ports of games that belong to someone else. These cards use text and
-# published video links; game assets are not distributed by this site.
+# Ports of games that belong to someone else. These cards use text, published
+# video links and, where set, an emulator capture (`shot`); game data is not
+# distributed by this site.
 [[port]]
 slug = "quake"
 video = "https://www.youtube.com/watch?v=ZRIeECN9bQU"
 name = "Quake (shareware episode)"
 hook = "Start and E1M1 to E1M8 with the shareware weapons and monsters, BSP collision, moving brushes, layered sky and turbulent water, tested on original hardware."
-data = "The current disc image includes converted shareware data and SLICNSE.TXT. The data licence restricts modification and distribution; including it does not establish permission for this converted release. That permission remains unresolved in this review. No screenshots are shown here."
+data = "The current disc image includes converted shareware data and SLICNSE.TXT. The data licence restricts modification and distribution; including it does not establish permission for this converted release. That permission remains unresolved in this review."
+shot = "img/shots/quake.png"
+shot_alt = "Quake on PS1: the Start map facing the QUAKE archway, shotgun and status bar showing 100 health and 25 shells"
 itch = "https://bonnie-studios.itch.io/quake-psx"
 repo = "https://github.com/EBonura/quake-psx"
 source = "quake-psx/README.md; itch-round PLAN.md (Decisions)"
