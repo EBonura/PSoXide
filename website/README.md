@@ -61,7 +61,7 @@ python3 scripts/usability_check.py --set after --json review/usability.json
 Each accepts `--zola /path/to/zola`. Review outputs stay under ignored `review/`.
 The browser check covers seven pages at four widths in both themes, broken
 images, horizontal overflow, JavaScript errors, FAQ deep links, theme persistence
-and the emulator redirect. The screenshot script produces 28 full-page captures
+and the emulator page. The screenshot script produces 28 full-page captures
 and a contact sheet. These are browser checks, not a new emulator-accuracy run.
 
 ## Media credits
