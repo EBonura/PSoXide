@@ -54,13 +54,13 @@ def main():
             browser.open(base + '/projects/', 390, 844, mobile=True)
             assert browser.evaluate('document.documentElement.dataset.theme') == theme, 'theme did not persist'
             browser.open(base + '/emulator/', 1440, 900)
-            assert browser.evaluate('location.pathname') == '/emulator/compare/', 'emulator redirect'
+            assert browser.evaluate("location.pathname === '/emulator/' && document.querySelectorAll('h1').length === 1"), 'emulator page'
         finally:
             browser.close()
             httpd.shutdown()
     (ROOT / 'review').mkdir(exist_ok=True)
     (ROOT / 'review/browser-check.json').write_text(json.dumps(results, indent=2) + '\n')
-    print(f'{len(results)} page/viewport/theme checks passed; FAQ, theme persistence and emulator redirect passed')
+    print(f'{len(results)} page/viewport/theme checks passed; FAQ, theme persistence and emulator page passed')
 
 
 if __name__ == '__main__':
