@@ -565,7 +565,8 @@ impl<R: ChunkReader, A: PacketArena, const P: usize> CachedStreamer<R, A, P> {
         let rd = &mut *core::ptr::addr_of_mut!(self.reader);
         let scratch = &mut *core::ptr::addr_of_mut!(self.scratch);
         let (sector_offset, byte_size) = self.cache.lookup_entry(rd, scratch, chunk_id)?;
-        self.cache.persist_store(chunk_id, sector_offset, byte_size as u32);
+        self.cache
+            .persist_store(chunk_id, sector_offset, byte_size as u32);
         Some((sector_offset, byte_size))
     }
 

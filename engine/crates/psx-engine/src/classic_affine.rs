@@ -4136,7 +4136,11 @@ mod quake_kernel {
     /// [`ClassicAffineBatchSurface`] as it lies in memory. One register
     /// instead of two keeps both out of the RAM stack in the fan loop.
     #[inline(always)]
-    fn material_writer(next: *mut u32, material: u32, profile: ClassicAffineProfile) -> PacketWriter {
+    fn material_writer(
+        next: *mut u32,
+        material: u32,
+        profile: ClassicAffineProfile,
+    ) -> PacketWriter {
         PacketWriter {
             next,
             packets: 0,
@@ -4296,7 +4300,12 @@ mod quake_kernel {
                         }
                     }
                     let emitted = unsafe {
-                        leaf_tri(next_packet, [root, previous_ref, current_ref], otz, material)
+                        leaf_tri(
+                            next_packet,
+                            [root, previous_ref, current_ref],
+                            otz,
+                            material,
+                        )
                     };
                     packets += u32::from(emitted != next_packet);
                     next_packet = emitted;
@@ -7520,10 +7529,17 @@ mod tests {
                 (generic.packets, generic.hardware_triangles),
                 "batch {batch}"
             );
-            assert_eq!(quake_output[..words as usize], generic_output[..words as usize], "batch {batch}");
+            assert_eq!(
+                quake_output[..words as usize],
+                generic_output[..words as usize],
+                "batch {batch}"
+            );
             packets += generic.packets;
         }
-        assert!(packets > 100_000, "{packets} packets: the batches barely draw");
+        assert!(
+            packets > 100_000,
+            "{packets} packets: the batches barely draw"
+        );
     }
 
     #[test]
