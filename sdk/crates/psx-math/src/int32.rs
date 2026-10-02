@@ -175,7 +175,7 @@ const RSQRT_KNOTS: [u32; 193] = {
         let target = (1u128 << 68) / (i as u128 + 64);
         let (mut lo, mut hi) = (0u128, 1u128 << 35);
         while lo < hi {
-            let mid = (lo + hi + 1) / 2;
+            let mid = (lo + hi).div_ceil(2);
             if mid * mid <= target {
                 lo = mid;
             } else {
@@ -253,7 +253,7 @@ pub const fn isqrt_u64(value: u64) -> u32 {
         root -= 1;
         square -= 2 * root as u64 + 1;
     }
-    while root != u32::MAX && square + 2 * root as u64 + 1 <= value {
+    while root != u32::MAX && square + 2 * (root as u64) < value {
         square += 2 * root as u64 + 1;
         root += 1;
     }
