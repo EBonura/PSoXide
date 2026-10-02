@@ -4,7 +4,7 @@
 # opened the page at that anchor. Selectors are CSS, or "text=Start of text"
 # for the first visible heading/link/paragraph starting with that text.
 # "before" = the first prototype (commit 50226bf); "after" = the current site.
-# Run: python3 scripts/usability_check.py --set after
+# Run: cargo run -q -p xtask -- site usability --set after
 
 [[q]]
 id = "browser"
