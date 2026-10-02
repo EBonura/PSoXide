@@ -60,6 +60,11 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   scratchpad region, from the exe and its ld.lld `-Map`. psoxide-pgo runs all
   three in-process.
 
+- `tools/xtask`: repository tasks, `cargo run -p xtask -- <task>`:
+  `check-mfc0` (`make lint`), `material-audit` (CI), `fmv-test-movie`
+  (hello-fmv's movie) and the website's `site` tasks. The repository runs no
+  Python.
+
 The root host workspace and `sdk/` device workspace intentionally remain
 separate. Existing `sdk/crates/*` and `sdk/psoxide.ld` paths are retained.
 The dependency-free `psxed-format` package now lives in `crates/psxed-format`;
@@ -71,6 +76,44 @@ Pin a full Git revision and commit lockfiles. SDK-only hydration contains this
 repository; engine-based games additionally pin the editor/runtime component.
 The demo-disc repository owns the tested component combination for each disc.
 See `components.json` for the SDK package layout and extraction provenance.
+
+### Repinning a game onto the Rust tools
+
+From `ceabbac8f` the post-link checks are Rust, and from `8a7252089` the
+component bootstrap is too; this repository no longer ships the Python
+versions. The Rust tools patch, scan and report exactly as the Python ones
+did (checked on the WipEout, Half-Life and Quake builds), so after a repin any
+difference in a game's image comes from other SDK changes in the range. A game
+moving its SDK pin past them changes four things:
+
+1. Its build driver runs `hazard-patch`, `hazard-scan` and `stack-guard`,
+   built from the hydrated tree (`cargo build --release -p psoxide-hazard` in
+   `.psoxide`), where it ran `python3 .psoxide/tools/hazard_patch.py`,
+   `hazard_scan.py` and `stack_guard.py`. The arguments are unchanged.
+   psoxide-pgo runs them in-process, so a PGO build needs nothing.
+2. Its `components.lock.json` lists `tools/psoxide-hazard` for the SDK
+   component in place of the three `.py` paths (`crates` already brings
+   `crates/psx-disasm`).
+3. It builds against an editor revision whose `Cargo.lock` includes
+   `psoxide-hazard` and `psx-disasm`, because games build `--locked` against
+   the editor's lock.
+4. Its emulator component is a revision that compiles against the new SDK:
+   since `3a7c21a05` (psx-iso reads tracks through a `TrackSource`), emulator
+   `3d49e63` or later.
+
+It also replaces its copy of `tools/bootstrap-components.py` with
+`psoxide-components` (`tools/psoxide-link`): same arguments, lock, receipt
+and files. A Rust build driver that already depends on `psoxide-link` can
+call `psoxide_link::components::materialize` instead; otherwise install the
+binary from the pinned revision with `cargo install --locked --git
+https://github.com/EBonura/PSoXide --rev REV psoxide-link`.
+
+A driver that extracts SDK files itself (for example by untarring `git
+archive`) must give them a fresh modification time, or clean its guest
+target directory when the pin changes. An archive dates files at their
+commit, and Cargo, which compares mtimes, can otherwise link objects built
+from the previous SDK. `psoxide-link` and `psoxide-components` always write
+fresh files.
 
 The project is pre-1.0. Format/API changes require coordinated consumer updates.
 Device code uses bounded memory and 32-bit fixed-point arithmetic. Emulator
