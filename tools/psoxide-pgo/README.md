@@ -80,7 +80,7 @@ does not change the emitted bytes) to
 crate, the cargo arguments and the rustflags, so a build cargo finds fresh
 still has the map of its own link. The patcher and scanner get it as
 `--map`, which proves every jump table instead of guessing from the
-dispatch's block, and `tools/stack_guard.py` gets it to prove every
+dispatch's block, and the stack guard gets it to prove every
 scratchpad stack call tree fits its region. A `-Map` the guest's own
 `build.rs` adds comes later on the link line and wins; the driver then warns
 and runs the tools without a map (and the stack guard refuses an image that
@@ -151,10 +151,12 @@ GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-gua
 
 `CARGO-ARGS` is what follows `cargo` in the guest's own build, starting with
 `build`. `--crate` is where cargo runs (default: the current directory).
-`--patcher`, `--scanner` and `--stack-guard` default to this SDK's
-`tools/hazard_patch.py`, `tools/hazard_scan.py` and `tools/stack_guard.py`; a
-game with its own copy, or a wrapper that hands the tool the map its own
-`build.rs` asks the link for, passes it here. Every tool refuses a map that
+The patcher, scanner and stack guard are this SDK's `tools/psoxide-hazard`
+(`hazard-patch`, `hazard-scan`, `stack-guard`), run in-process: no Python or
+objdump. `--patcher`, `--scanner` and `--stack-guard` swap one for a program
+run as `PROGRAM EXE --map MAP` (`PROGRAM EXE MAP` for the stack guard; a
+`.py` runs through python3): a game with its own copy, or a wrapper that hands
+the tool the map its own `build.rs` asks the link for, passes it here. Every tool refuses a map that
 does not match the image. `--linker-script` (default: this SDK's
 `sdk/psoxide.ld`, which is the one a game's `.psoxide` links) tells `+order`
 which sections the script places ahead of its catch-all `*(.text .text.*)`,

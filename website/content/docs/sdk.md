@@ -122,7 +122,7 @@ The same repository holds the tools that run on your computer rather than on the
 - [`psx-audio-cook`](https://github.com/EBonura/PSoXide/tree/main/crates/psx-audio-cook) converts audio to the SPU's ADPCM format. It resamples, encodes against an exact model of the SPU decoder, keeps loops seamless, and can share out a fixed amount of sound RAM between samples.
 - [`psx-anim-cook`](https://github.com/EBonura/PSoXide/tree/main/crates/psx-anim-cook) encodes skeletal animation for the engine's model format.
 - [`psoxide-pgo`](https://github.com/EBonura/PSoXide/tree/main/tools/psoxide-pgo) turns an emulator profile of a game into a profile-guided optimisation build.
-- `tools/hazard_patch.py`, `tools/hazard_scan.py` and `tools/stack_guard.py` check every linked program for instruction-ordering hazards and stack overflows before it reaches a disc.
+- [`psoxide-hazard`](https://github.com/EBonura/PSoXide/tree/main/tools/psoxide-hazard) (`hazard-patch`, `hazard-scan`, `stack-guard`) checks every linked program for instruction-ordering hazards and stack overflows before it reaches a disc.
 
 {% <callout kind="warn" title="Pre-1.0"> %}
 Crates, formats and APIs still change. Games pin an exact SDK revision, and so should yours.

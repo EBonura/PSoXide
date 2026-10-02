@@ -91,6 +91,7 @@ version = "0.1.0"
 dependencies = [
  "gimli",
  "object",
+ "psoxide-hazard",
  "rustc-demangle",
  "serde_json",
 ]
