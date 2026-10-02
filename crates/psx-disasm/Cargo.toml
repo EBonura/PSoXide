@@ -1,0 +1,11 @@
+[package]
+name = "psx-disasm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "R3000 (MIPS I) instruction decoder that prints GNU objdump's mips:3000 syntax, for the post-link guest checks."
+
+[lints]
+workspace = true
