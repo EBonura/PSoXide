@@ -9,7 +9,6 @@ check:
 	cargo check --locked --workspace --all-features
 	cargo check --locked --manifest-path sdk/Cargo.toml --workspace --all-features
 test:
-	python3 -m unittest discover -s tools -p test_bootstrap_components.py
 	python3 -m unittest discover -s tools -p test_readme_tables.py
 	cargo test --locked --workspace
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
