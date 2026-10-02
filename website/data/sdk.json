@@ -146,7 +146,7 @@
     {
       "name": "hello-spstack",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-spstack",
-      "shows": "A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `tools/stack_guard.py` proves it fits."
+      "shows": "A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `stack-guard` (`tools/psoxide-hazard`) proves it fits."
     },
     {
       "name": "hello-gteirq",
