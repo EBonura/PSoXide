@@ -7,6 +7,7 @@
 //! check-mfc0 [PATHS...]                 MFC0/MFC2 load-delay hazards in guest asm
 //! material-audit [--repo P] [--history] firmware artifacts and vendor EXE text
 //! fmv-test-movie --psxavenc P --out F   hello-fmv's synthetic STR movie
+//! site <task> ...                       website data, checks and builds (`site --help`)
 //! ```
 
 mod fmv_movie;
@@ -15,10 +16,11 @@ mod mfc0;
 pub mod pyjson;
 #[cfg(test)]
 mod readme_tables;
+mod site;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: xtask <check-mfc0|material-audit|fmv-test-movie> [args]";
+const USAGE: &str = "usage: xtask <check-mfc0|material-audit|fmv-test-movie|site> [args]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,6 +32,7 @@ fn main() -> ExitCode {
         "check-mfc0" => mfc0::main(rest),
         "material-audit" => material_audit::main(rest),
         "fmv-test-movie" => report(fmv_movie::main(rest)),
+        "site" => report(site::main(rest)),
         _ => {
             eprintln!("{USAGE}");
             2

@@ -8,6 +8,7 @@ on:
     paths:
       - 'website/**'
       - 'sdk/README.md'
+      - 'tools/xtask/**'
       - '.github/workflows/website.yml'
   workflow_dispatch:
 
@@ -19,6 +20,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # The site tasks run from tools/xtask: `cargo run -p xtask -- site <task>`.
+  SITE: cargo run --locked -q -p xtask -- site
   # Pin the exact release and its published sha256 (from the GitHub release asset digest).
   ZOLA_VERSION: v0.23.6
   ZOLA_SHA256: 8f5132b3522412d04e395e0b25f6d68613ad272a873e54a2b3ebf664873024a4
@@ -42,22 +45,14 @@ jobs:
       - name: Check data files are current
         # The JSON the pages read must match what the importers produce from the committed sources.
         run: |
-          python3 scripts/import_emu_bench.py
-          python3 scripts/import_compat.py
-          python3 scripts/import_sdk.py
+          $SITE import-emu-bench
+          $SITE import-compat
+          $SITE import-sdk
           git diff --exit-code data/
 
       - name: Read example source pins
         id: examples
-        run: |
-          python3 - <<'PYTHON'
-          import os, tomllib
-          from pathlib import Path
-          pins = tomllib.loads(Path('data/examples.toml').read_text())
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write(f"sdk={pins['sdk_revision']}\n")
-              out.write(f"emulator={pins['emulator_revision']}\n")
-          PYTHON
+        run: $SITE pins >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -78,6 +73,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cache/trunk
+            target
             .site-build/emulator/target
             .site-build/sdk/target
             .site-build/sdk/build/examples
@@ -95,8 +91,7 @@ jobs:
           sudo mv trunk /usr/local/bin/trunk
 
       - name: Build pinned WebAssembly player
-        working-directory: .site-build/emulator
-        run: python3 tools/build-web-player.py --out "$RUNNER_TEMP/psoxide-player"
+        run: $SITE player --emulator ../.site-build/emulator --out "$RUNNER_TEMP/psoxide-player"
 
       - name: Build pinned SDK examples
         working-directory: .site-build/sdk
@@ -109,7 +104,7 @@ jobs:
 
       - name: Stage player, examples and build records
         run: |
-          python3 scripts/stage_examples.py --player "$RUNNER_TEMP/psoxide-player" \
+          $SITE stage-examples --player "$RUNNER_TEMP/psoxide-player" \
             --sdk ../.site-build/sdk \
             --examples ../.site-build/sdk/build/examples/mipsel-sony-psx/release
 
@@ -117,11 +112,11 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Verify complete SDK source listings
-        run: python3 scripts/import_sdk_reference.py --sdk-root ../.site-build/sdk --check
+        run: $SITE import-sdk-reference --sdk-root ../.site-build/sdk --check
 
       - name: Build SDK API references
         run: |
-          python3 scripts/build_sdk_docs.py --sdk-root ../.site-build/sdk \
+          $SITE sdk-docs --sdk-root ../.site-build/sdk \
             --target-dir "$RUNNER_TEMP/psoxide-sdk-api" \
             --base-url "${{ steps.pages.outputs.base_url }}"
 
@@ -129,7 +124,7 @@ jobs:
         run: zola build --base-url "${{ steps.pages.outputs.base_url }}"
 
       - name: Check links, assets, anchors and publication flags
-        run: python3 scripts/check_site.py --base-url "${{ steps.pages.outputs.base_url }}"
+        run: $SITE check --base-url "${{ steps.pages.outputs.base_url }}"
 
       - uses: actions/upload-pages-artifact@v3
         with:
