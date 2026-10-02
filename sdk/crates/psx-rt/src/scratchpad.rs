@@ -53,7 +53,7 @@
 //!   traps a call made with interrupts enabled and any other handler in
 //!   the vector.
 //! * Stack depth. The whole call tree of `f` must fit in the region minus
-//!   [`STACK_OVERHEAD`] ([`ScratchpadStack::BUDGET`]). `tools/stack_guard.py`
+//!   [`STACK_OVERHEAD`] ([`ScratchpadStack::BUDGET`]). `stack-guard`
 //!   proves it from the linked image after every build: it finds each
 //!   monomorphised [`ScratchpadStack`] entry, sums frame sizes down the static
 //!   call graph, and fails on overflow, recursion, calls through a register
@@ -196,7 +196,7 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
         region
     };
 
-    /// Bytes of frames the call tree may use; `tools/stack_guard.py` fails
+    /// Bytes of frames the call tree may use; `stack-guard` fails
     /// the build when the linked tree needs more.
     pub const BUDGET: usize = Self::REGION.len() - STACK_OVERHEAD;
 
@@ -213,7 +213,7 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
     ///   Record the regions that are live around the call with
     ///   [`assert_disjoint`].
     /// * The linked call tree of `f` must fit in [`Self::BUDGET`]. Run
-    ///   `tools/stack_guard.py` on every linked image that calls this.
+    ///   `stack-guard` on every linked image that calls this.
     /// * Any exception handler installed while interrupts are enabled must
     ///   leave `$sp` and the memory below it alone (psx-rt's does; declare
     ///   another with
@@ -248,7 +248,7 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
         unsafe { frame.result.assume_init() }
     }
 
-    /// First function on the scratchpad stack. `tools/stack_guard.py` finds
+    /// First function on the scratchpad stack. `stack-guard` finds
     /// every monomorphised copy by this name and reads `START`/`END` from
     /// the symbol, so do not rename it without updating the tool.
     unsafe extern "C" fn stack_entry<R, F: FnOnce() -> R>(frame: *mut u8) {
@@ -315,7 +315,7 @@ __psx_rt_call_on_stack:
 
     # Its own section: the panic handler keeps this one in every guest, and
     # only guests that use a ScratchpadStack should carry the switch above
-    # (tools/stack_guard.py asks for a link map when it finds it).
+    # (stack-guard asks for a link map when it finds it).
     .section .text.psx_rt_scratchpad_panic,"ax",@progbits
     .globl __psx_rt_jump_on_stack
     .type __psx_rt_jump_on_stack,@function

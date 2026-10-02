@@ -21,7 +21,7 @@
 //! **Entry nop.** LLVM's delay-slot filler may hoist an argument load into
 //! the caller's `jal`/`jalr` delay slot, so the callee's first instruction
 //! runs inside that load's delay and would read the stale register. The
-//! post-link trampoline patch (`tools/hazard_patch.py`) fixes the `jal` sites
+//! post-link trampoline patch (`hazard-patch`) fixes the `jal` sites
 //! it can see, but a register call (`jalr`) has no static target. One `nop`
 //! at each entry makes these routines immune regardless of who calls them;
 //! it costs one cycle per call against loops that move sixteen bytes per
