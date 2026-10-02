@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Repository tasks for the PSoXide SDK and its website: `cargo run -p xtask -- <task>`."
+
+[dependencies]
+psoxide-link = { path = "../psoxide-link" }
+regex = "1"
+serde_json = { workspace = true }
+# Python's tomllib keeps document order, and the generated site data follows it.
+toml = { version = "1", features = ["preserve_order"] }

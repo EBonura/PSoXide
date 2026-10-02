@@ -9,13 +9,12 @@ check:
 	cargo check --locked --workspace --all-features
 	cargo check --locked --manifest-path sdk/Cargo.toml --workspace --all-features
 test:
-	python3 -m unittest discover -s tools -p test_readme_tables.py
 	cargo test --locked --workspace
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
 fmt:
 	cargo fmt --all
 	cargo fmt --manifest-path sdk/Cargo.toml --all
 lint:
-	python3 tools/check_mfc0.py sdk
+	cargo run --locked -q -p xtask -- check-mfc0 sdk
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --all-targets --all-features -- -D warnings
