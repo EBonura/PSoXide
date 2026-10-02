@@ -5,7 +5,7 @@
 
 {#
   Horizontal bar chart built at build time from data/emu-bench.json.
-  rows:   emulator objects (see scripts/import_emu_bench.py)
+  rows:   emulator objects (see `site import-emu-bench` in tools/xtask)
   metric: a key of emulator.mean: "fps", "cpu", "mem" or "headroom"
   max:    the value a full-length bar stands for (the data file's axis ends)
   Plain HTML and CSS, no JavaScript: values are text, labels stack on phones.
@@ -42,7 +42,7 @@
 {% endcomponent figure %}
 
 {#
-  The SDK's crates or examples, from data/sdk.json (scripts/import_sdk.py reads
+  The SDK's crates or examples, from data/sdk.json (`site import-sdk` reads
   the tables in sdk/README.md). what: "crates" or "examples".
 #}
 {% component sdk_index(what: string) %}
