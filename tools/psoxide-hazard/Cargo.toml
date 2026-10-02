@@ -1,0 +1,24 @@
+[package]
+name = "psoxide-hazard"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Post-link guest checks for PS1 executables: the R3000 load-delay hazard patcher and scanner, and the scratchpad stack guard."
+
+[dependencies]
+psx-disasm = { path = "../../crates/psx-disasm" }
+regex = "1"
+
+[[bin]]
+name = "hazard-patch"
+path = "src/bin/hazard-patch.rs"
+
+[[bin]]
+name = "hazard-scan"
+path = "src/bin/hazard-scan.rs"
+
+[[bin]]
+name = "stack-guard"
+path = "src/bin/stack-guard.rs"
