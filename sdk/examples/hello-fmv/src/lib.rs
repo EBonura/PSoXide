@@ -1,12 +1,12 @@
 //! `hello-fmv` -- FMV console test: stream a 2x STR with XA audio, check
 //! every sector, and show the counts over the video.
 //!
-//! The disc carries `MOVIE.STR`, built by `tools/fmv_test_movie.py` from
+//! The disc carries `MOVIE.STR`, built by `cargo run -p xtask -- fmv-test-movie` from
 //! synthetic content only: a 320x240 15 fps test pattern with temporal
 //! noise (so every frame fills the 2x sector budget) and interleaved XA
 //! stereo beeps, one per second. Each video sector carries its ordinal,
 //! the file's video-sector total, its index in the file and a checksum
-//! (see the script), so the player can tell a skipped sector (LOST) from a
+//! (see tools/xtask), so the player can tell a skipped sector (LOST) from a
 //! corrupt one (BAD) while the drive streams for 75 seconds.
 //!
 //! Pipeline per frame:
@@ -68,7 +68,7 @@ const SLOTS: usize = 3;
 const RLE_WORDS: usize = 32 * 1024;
 /// End the stream if no sector arrives for this long (2 s).
 pub const STALL_VBLANKS: u32 = 120;
-/// Checksum seed; must match tools/fmv_test_movie.py.
+/// Checksum seed; must match tools/xtask/src/fmv_movie.rs.
 const SEED: u32 = 0x9E37_79B9;
 /// First word of every STR video sector: 0x0160, 0x8001.
 const STR_MAGIC: u32 = 0x8001_0160;
