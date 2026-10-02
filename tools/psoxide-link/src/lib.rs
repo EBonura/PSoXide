@@ -33,6 +33,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+pub mod components;
+pub mod sha256;
+
 /// Boxed-error result, since every failure here ends a build.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

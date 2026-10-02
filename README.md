@@ -42,7 +42,9 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
 - [sdk/](sdk/README.md): the device crates, linker script and examples.
 - `crates/`: shared hardware, disc, trace and cooked-asset format contracts.
 - `tools/mkisopsx`: host-side BIN/CUE mastering.
-- `tools/psoxide-link`: source hydration for pinned downstream builds.
+- `tools/psoxide-link`: source hydration for pinned downstream builds, and
+  `psoxide-components`, which brings a consumer's imported paths to its
+  `components.lock.json` and records a content receipt.
 - `tools/psoxide-pgo`: emulator PC histogram to LLVM sample profile, for
   profile-guided guest builds with no instrumentation. `portable` writes a
   profile that can be committed, and `rebind` applies it to a build made in
