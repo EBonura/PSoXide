@@ -176,10 +176,18 @@ const RSQRT_KNOTS: [u32; 193] = {
         let (mut lo, mut hi) = (0u128, 1u128 << 35);
         while lo < hi {
             let mid = (lo + hi + 1) / 2;
-            if mid * mid <= target { lo = mid; } else { hi = mid - 1; }
+            if mid * mid <= target {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
         }
         // 1 / sqrt(0.25) is exactly 2: one unit less keeps y^2 below 2^32.
-        out[i] = if lo >= 1 << 31 { (1 << 31) - 1 } else { lo as u32 };
+        out[i] = if lo >= 1 << 31 {
+            (1 << 31) - 1
+        } else {
+            lo as u32
+        };
         i += 1;
     }
     out
@@ -214,7 +222,11 @@ pub const fn isqrt_u64(value: u64) -> u32 {
     // Normalize by halving steps (the R3000 has no count-leading-zeros):
     // shift left by an even amount until the top word reaches 2^30.
     let high = (value >> 32) as u32;
-    let (mut top, mut low, mut shift) = if high != 0 { (high, value as u32, 0) } else { (value as u32, 0, 32) };
+    let (mut top, mut low, mut shift) = if high != 0 {
+        (high, value as u32, 0)
+    } else {
+        (value as u32, 0, 32)
+    };
     let mut step = 16;
     while step >= 2 {
         if top >> (32 - step) == 0 {
