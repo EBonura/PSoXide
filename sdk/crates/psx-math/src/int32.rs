@@ -96,7 +96,8 @@ pub fn isqrt_u32(mut value: u32) -> u32 {
     root
 }
 
-/// Floor square roots of `0..=255`, the seed of [`isqrt_u64`].
+/// Floor square roots of `0..=255`, the seed of the nibble root.
+#[cfg(test)]
 const ROOT8: [u8; 256] = {
     let mut out = [0u8; 256];
     let mut n = 0;
@@ -125,6 +126,7 @@ const ROOT8: [u8; 256] = {
 /// `integer_root`. Through it, [`isqrt_u64`] below `2^48` takes 218 cycles a
 /// call on the emulator microbench against 908 for the 32-step `u64`
 /// restoring loop it replaced.
+#[cfg(test)]
 #[inline(always)]
 const fn isqrt_below_2_48(high: u32, low: u32) -> u32 {
     debug_assert!(high >> 16 == 0);
@@ -163,55 +165,85 @@ const fn isqrt_below_2_48(high: u32, low: u32) -> u32 {
     root
 }
 
+/// `1 / sqrt(t)` for `t = k / 256`, `k` in `64..=256`, in Q2.30: the knots
+/// [`isqrt_u64`] interpolates its seed between.
+const RSQRT_KNOTS: [u32; 193] = {
+    let mut out = [0u32; 193];
+    let mut i = 0;
+    while i < 193 {
+        // 2^30 * 16 / sqrt(k) = sqrt(2^68 / k), floor root by bisection.
+        let target = (1u128 << 68) / (i as u128 + 64);
+        let (mut lo, mut hi) = (0u128, 1u128 << 35);
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            if mid * mid <= target { lo = mid; } else { hi = mid - 1; }
+        }
+        // 1 / sqrt(0.25) is exactly 2: one unit less keeps y^2 below 2^32.
+        out[i] = if lo >= 1 << 31 { (1 << 31) - 1 } else { lo as u32 };
+        i += 1;
+    }
+    out
+};
+
+/// One `multu`: the full 64-bit product of two words.
+#[inline(always)]
+const fn mul32(a: u32, b: u32) -> u64 {
+    // psx-numeric-allow-next-line: MULTU high/low product, no helper
+    (a as u64) * (b as u64)
+}
+
 /// Exact `floor(sqrt(value))` across the complete unsigned 64-bit domain,
-/// with 32-bit operations and native `multu`/`divu` only.
+/// with 32-bit operations and native `multu` only (no divide).
 ///
-/// Inputs below `2^48` (every squared distance of two coordinates under
-/// `2^23`) take the table-seeded nibble root. Larger inputs take the same
-/// root of `value >> 16`, scale it back up (`(seed + 1) * 256` exceeds
-/// `sqrt(value)` by at most 256) and take one Newton step through
-/// [`div_u64_by_u32`]. The step lands on the floor or one past it, and a
-/// single `multu` check settles which.
+/// The value is shifted left by an even amount until its top word `t` lies
+/// in `[2^30, 2^32)`. A chord between two of 193 knots seeds
+/// `y = 1 / sqrt(t / 2^32)` (Q2.30) and one Newton step `y = y (3 - t y^2) / 2`
+/// brings it to about 29 bits.
+/// `t * y` is then the root of the shifted value, so shifting it back gives
+/// the root within a couple of units, and `multu` checks of `r^2 <= value <
+/// (r + 1)^2` settle it exactly. Six products in all. In a boot-time bench in
+/// Hollow Knight (512 squared lengths of random 3D vectors, Timer2) a call
+/// took 226 cycles against 300 for the table-seeded nibble root it replaced,
+/// loop and call overhead included, with identical results.
 #[inline]
 // psx-numeric-allow-next-line: HL/CS/HK squared-distance roots require full u64 input; the body splits it into two words.
 pub const fn isqrt_u64(value: u64) -> u32 {
+    if value == 0 {
+        return 0;
+    }
+    // Normalize by halving steps (the R3000 has no count-leading-zeros):
+    // shift left by an even amount until the top word reaches 2^30.
     let high = (value >> 32) as u32;
-    let low = value as u32;
-    let wide = high >> 16 != 0;
-    if high == u32::MAX {
-        // value >= (2^32 - 1)^2 + 2^33 - 2, so the floor is the top root,
-        // and the Newton divide below would need high < divisor.
-        return u32::MAX;
+    let (mut top, mut low, mut shift) = if high != 0 { (high, value as u32, 0) } else { (value as u32, 0, 32) };
+    let mut step = 16;
+    while step >= 2 {
+        if top >> (32 - step) == 0 {
+            top = (top << step) | (low >> (32 - step));
+            low <<= step;
+            shift += step;
+        }
+        step /= 2;
     }
-    // One inlined copy of the nibble root (about 1 KB unrolled) serves both
-    // paths: the value itself below 2^48, else `value >> 16` as the Newton
-    // seed. The operands are selected with masks rather than a branch, which
-    // LLVM would thread into two copies of the root.
-    let mask = (wide as u32).wrapping_neg();
-    let shift = mask & 16;
-    let seed = isqrt_below_2_48(
-        high >> shift,
-        (((high << 16) | (low >> 16)) & mask) | (low & !mask),
-    );
-    if !wide {
-        return seed;
-    }
-    // The seed is at least 2^16 here. (seed + 1) * 256 exceeds sqrt(value),
-    // and high < sqrt(value) because value < 2^64, so the divide's
-    // hi < divisor precondition holds. Seed + 1 reaches 2^24 only for
-    // value >= 2^64 - 2^41; u32::MAX still exceeds high there, and a Newton
-    // step from it cannot fall below the floor root.
-    let start = if seed >= (1 << 24) - 1 {
-        u32::MAX
-    } else {
-        (seed + 1) << 8
-    };
-    let quotient = div_u64_by_u32(high, low, start);
-    // (start + quotient) / 2 without the 33rd bit.
-    let mut root = (start >> 1) + (quotient >> 1) + (start & quotient & 1);
-    // psx-numeric-allow-next-line: MULTU high/low product compared as two words, no helper
-    if (root as u64) * (root as u64) > value {
+    // The seed: the chord between the two knots around t's top byte, good
+    // to about 15 bits, so one Newton step reaches about 29.
+    let knot = (top >> 24) as usize - 64;
+    let (left, right) = (RSQRT_KNOTS[knot], RSQRT_KNOTS[knot + 1]);
+    let mut y = left - (((left - right) >> 8) * ((top >> 16) & 0xff));
+    // y^2 in Q2.30 (y < 2, so below 4); t y^2 in Q2.30; y (3 - t y^2) / 2.
+    let square = (mul32(y, y) >> 30) as u32;
+    let scaled = (mul32(top, square) >> 32) as u32;
+    y = (mul32(y, (3u32 << 30).wrapping_sub(scaled)) >> 31) as u32;
+    let mut root = (mul32(top, y) >> (30 + shift / 2)) as u32;
+    // Within a few units (a few more near the top of the domain): one
+    // product, then neighbouring squares by adds, (r +- 1)^2 = r^2 +- 2r + 1.
+    let mut square = mul32(root, root);
+    while square > value {
         root -= 1;
+        square -= 2 * root as u64 + 1;
+    }
+    while root != u32::MAX && square + 2 * root as u64 + 1 <= value {
+        square += 2 * root as u64 + 1;
+        root += 1;
     }
     root
 }
@@ -723,6 +755,20 @@ mod tests {
             r * r <= n128 && (r + 1) * (r + 1) > n128,
             "isqrt_u64({n}) = {r}"
         );
+    }
+
+    /// The nibble root this replaced, below 2^48: the two must agree.
+    #[test]
+    fn isqrt_u64_matches_the_nibble_root_below_2_48() {
+        let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+        for i in 0..4_000_000u64 {
+            let n = (next() >> 16) >> (i % 48);
+            let old = isqrt_below_2_48((n >> 32) as u32, n as u32);
+            assert_eq!(isqrt_u64(n), old, "{n}");
+        }
+        for n in 0..1u64 << 22 {
+            assert_eq!(isqrt_u64(n), isqrt_below_2_48(0, n as u32), "{n}");
+        }
     }
 
     #[test]
