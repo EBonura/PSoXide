@@ -74,9 +74,6 @@ emu/crates/frontend/dist/
 # Validation run outputs (make validate writes failure artifacts here).
 /validation/artifacts/
 
-# Python bytecode from the hwtest tooling
-__pycache__/
-*.pyc
 
 # Local headless/console capture dirs (hwtest inputs, screenshot sweeps).
 /captures/
