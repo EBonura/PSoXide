@@ -13,7 +13,7 @@
 //!
 //! The verdict goes to the TTY (`SPSTACK PASS ...` or `SPSTACK FAIL ...`)
 //! and on screen, so the same disc reads out on a console.
-//! `tools/stack_guard.py` checks the linked call tree fits the region.
+//! `stack-guard` checks the linked call tree fits the region.
 //!
 //! With the `chained-vector` feature the exception vector jumps to a
 //! handler of the example's own that hands straight on to psx-rt's, the

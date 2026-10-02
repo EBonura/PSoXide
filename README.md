@@ -14,7 +14,8 @@ history and existing pre-split Git revisions remain available.
 
 Install Rust through rustup and a C/C++ build toolchain for your host. The
 checked-in `rust-toolchain.toml` selects the required nightly and components.
-Python 3 and `mipsel-none-elf-objdump` are used by the instruction-hazard check.
+The post-link hazard and stack checks are Rust (`tools/psoxide-hazard`): no
+Python or MIPS binutils needed to build.
 
 ```sh
 git clone https://github.com/EBonura/PSoXide.git
@@ -47,10 +48,15 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   profile that can be committed, and `rebind` applies it to a build made in
   any other checkout. `order` and the `+order` variants link functions in an
   I-cache-aware order from exact per-word counts, gated per game by `choose`.
-- `tools/hazard_scan.py`, `hazard_patch.py` (the scanner imports the patcher's detector), `guest_symbol_gate.sh`: guest checks.
-  Given the link's `-Map` (`--map`), both bound each switch's jump table to its own function.
-- `tools/stack_guard.py`: proves every `psx_rt::scratchpad::ScratchpadStack` call tree in a
-  linked exe fits its scratchpad region, from the exe and its ld.lld `-Map`.
+- `tools/psoxide-hazard` (`hazard-patch`, `hazard-scan`, `stack-guard`) and
+  `guest_symbol_gate.sh` (a link-map grep for 64-bit helpers): guest checks.
+  psoxide-hazard decodes the image with `crates/psx-disasm`, no objdump. The
+  patcher and scanner share one detector; given the link's `-Map` (`--map`),
+  both bound each switch's jump table to its own function, and `--text-only`
+  limits them to the map's `.text`. `stack-guard` proves every
+  `psx_rt::scratchpad::ScratchpadStack` call tree in a linked exe fits its
+  scratchpad region, from the exe and its ld.lld `-Map`. psoxide-pgo runs all
+  three in-process.
 
 The root host workspace and `sdk/` device workspace intentionally remain
 separate. Existing `sdk/crates/*` and `sdk/psoxide.ld` paths are retained.

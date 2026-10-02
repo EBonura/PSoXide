@@ -13,13 +13,10 @@ By the end of this page you'll have `hello-tri`, a minimal PSoXide program, runn
 
 ## 1. Install the tools
 
-You need three things on your machine:
+You need two things on your machine:
 
 - **Rust through [rustup](https://rustup.rs).** You don't pick the version yourself. The repository's `rust-toolchain.toml` pins the nightly it needs (the `mipsel-sony-psx` target and `build-std` are nightly-only) and rustup installs it with `rust-src` and the other components. If yours doesn't do that on first use, run `rustup toolchain install` inside the checkout.
 - **A C/C++ build toolchain** for your host (Xcode command line tools on macOS, `build-essential` or similar on Linux).
-- **Python 3 and a MIPS `objdump`.** The build disassembles the finished executable to check for instruction-ordering bugs that the original CPU won't catch for you (more on that below).
-  - macOS: install `mipsel-none-elf-binutils` with the [Homebrew formula PCSX-Redux publishes](https://github.com/grumpycoders/pcsx-redux/blob/main/tools/macos-mips/mipsel-none-elf-binutils.rb) (see [their macOS instructions](https://github.com/grumpycoders/pcsx-redux#macos)). This gives you `mipsel-none-elf-objdump`, which the build looks for by default.
-  - Debian or Ubuntu: `sudo apt install binutils-mipsel-linux-gnu`, then `export OBJDUMP=mipsel-linux-gnu-objdump` so the build uses it.
 
 ## 2. Clone the SDK and check it builds
 
@@ -46,7 +43,7 @@ This compiles `sdk/examples/hello-tri` for `mipsel-sony-psx`, links it into a PS
 Keep the BIN and the CUE together. The CUE is the file you open; it points at the BIN.
 
 {% <callout title="What the build does to your code"> %}
-The PlayStation's CPU (a MIPS R3000) doesn't wait for a value loaded from memory to arrive: the instruction straight after a load still sees the old register contents. Compilers normally schedule around this, but not always. After linking, `tools/hazard_patch.py` finds any instruction that reads a loaded value too early, reroutes it, and scans the program again. `tools/stack_guard.py` then checks that every stack placed in the CPU's small, fast scratchpad RAM fits its space.
+The PlayStation's CPU (a MIPS R3000) doesn't wait for a value loaded from memory to arrive: the instruction straight after a load still sees the old register contents. Compilers normally schedule around this, but not always. After linking, `hazard-patch` (from `tools/psoxide-hazard`) finds any instruction that reads a loaded value too early, reroutes it, and scans the program again. `stack-guard` then checks that every stack placed in the CPU's small, fast scratchpad RAM fits its space.
 {% </callout> %}
 
 ## 4. Get the emulator

@@ -25,7 +25,7 @@ hazard-trampolines-256 = []
 # of the region, checked after the call, and a trap when interrupts are on
 # with an exception handler other than psx-rt's or one the game declared
 # with `interrupts::declare_stack_safe_handler`. A few instructions and a
-# few RAM loads per call; the build-time proof is tools/stack_guard.py.
+# few RAM loads per call; the build-time proof is stack-guard.
 scratchpad-stack-check = []
 
 [lints.rust]

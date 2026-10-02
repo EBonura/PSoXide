@@ -8,9 +8,9 @@ FRONTEND ?=
 # slots: hl-psx measured 7% of executed instructions as delay-slot nops, and
 # +2.3% rendered FPS with 10.9 KB less .text from these two switches. Every
 # search can leave a load in a slot whose consumer runs inside the load delay,
-# so the link is always followed by tools/hazard_patch.py, which reroutes
-# those branches through psx-rt's HAZARD_TRAMPOLINES and rescans. The PGO
-# driver runs it, tools/hazard_scan.py and tools/stack_guard.py with the link
+# so the link is always followed by hazard-patch (tools/psoxide-hazard), which
+# reroutes those branches through psx-rt's HAZARD_TRAMPOLINES and rescans. The
+# PGO driver runs it, hazard-scan and stack-guard in-process with the link
 # map it has the link write, so every jump table is proven from the map and
 # every scratchpad stack call tree is proven to fit its region.
 PSX_DELAY_SLOT_FLAGS := "-Cllvm-args=-disable-mips-df-succbb-search=false","-Cllvm-args=-disable-mips-df-forward-search=false"

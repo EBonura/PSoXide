@@ -142,7 +142,7 @@ __psx_rt_exception_handler:
     # kernel's. With Cause.BD set EPC holds the branch, never a GTE command,
     # so a GTE command in a delay slot is not stepped over and does run twice:
     # psx-spx's answer is to keep GTE commands out of delay slots, and
-    # tools/hazard_scan.py warns about any it finds. `interrupt_resume_pc`
+    # hazard-scan warns about any it finds. `interrupt_resume_pc`
     # below is the same decision in Rust, unit-tested on host.
 2:
     mfc0  $26, $14
@@ -297,7 +297,7 @@ pub const fn is_gte_command(word: u32) -> bool {
 /// so `word_at_epc` is a branch and the result is `epc`: the branch and a
 /// GTE command in its delay slot both run again. psx-spx documents that
 /// the fix cannot cover delay slots; keep GTE commands out of them
-/// (`tools/hazard_scan.py` warns about any in an image).
+/// (`hazard-scan` warns about any in an image).
 #[inline]
 pub const fn interrupt_resume_pc(epc: u32, word_at_epc: u32) -> u32 {
     if is_gte_command(word_at_epc) {

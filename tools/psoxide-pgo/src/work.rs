@@ -190,7 +190,7 @@ impl<'a> Code<'a> {
         self.word(pc).map_or(Op::Effect, |word| decode(word, pc))
     }
 
-    /// When `pc` is a site `hazard_patch.py` rerouted, the instruction it
+    /// When `pc` is a site `hazard-patch` rerouted, the instruction it
     /// replaced and the trampoline (its first word and length in words):
     ///
     /// - `j`/`jal TRAMP`, `TRAMP: nop ; j T ; nop` stands for `j`/`jal T`;
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn a_loop_through_a_hazard_trampoline_still_waits() {
-        // NitroXide's flip wait after hazard_patch.py: the slot load of the
+        // NitroXide's flip wait after hazard-patch: the slot load of the
         // exit branch raced `subu`, so the branch became `j TRAMP`, and the
         // trampoline re-evaluates it and jumps back to the fall-through.
         let v1_minus_a2 = r(V1, 6, AT, 0x23); // subu at, v1, a2

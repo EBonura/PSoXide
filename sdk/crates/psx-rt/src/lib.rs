@@ -47,7 +47,7 @@ pub mod heap;
 ///
 /// LLVM's MIPS delay-slot filler leaves loads in branch delay slots whose
 /// consumer runs one instruction later, inside the load delay, and so reads
-/// the stale register. `tools/hazard_patch.py` rewrites each such branch to
+/// the stale register. `hazard-patch` rewrites each such branch to
 /// jump through a short trampoline it writes here after the link (magic,
 /// capacity, then code words), which the staged guest build runs and verifies
 /// instead of disabling the filler's backward search at a cost of tens of
@@ -199,7 +199,7 @@ pub fn halt() -> ! {
 ///
 /// A panic raised on a [`scratchpad::ScratchpadStack`] first moves back to
 /// the RAM stack, so reporting (BIOS `putchar` included) never runs on the
-/// scratchpad. `tools/stack_guard.py` counts this function's own frame and
+/// scratchpad. `stack-guard` counts this function's own frame and
 /// nothing below it, which is only sound while the report stays out of line.
 ///
 /// Only registered when targeting PS1 hardware. Host builds of the

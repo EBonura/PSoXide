@@ -78,9 +78,11 @@ struct Guest {
     crate_dir: PathBuf,
     cargo: Vec<String>,
     work: Option<PathBuf>,
-    patcher: PathBuf,
-    scanner: PathBuf,
-    stack_guard: PathBuf,
+    /// Replacements for the in-process post-link checks (psoxide-hazard),
+    /// each run as `PROGRAM EXE [--map] MAP` (a `.py` through python3).
+    patcher: Option<PathBuf>,
+    scanner: Option<PathBuf>,
+    stack_guard: Option<PathBuf>,
     /// The guest's linker script, for the sections it places ahead of the
     /// catch-all `*(.text .text.*)`, which no ordering file can move.
     linker_script: PathBuf,
@@ -257,18 +259,9 @@ pub fn main(mode: &str, args: &[String]) -> Result<()> {
         },
         cargo: std::mem::take(&mut options.cargo),
         work: options.work.take(),
-        patcher: options
-            .patcher
-            .take()
-            .unwrap_or_else(|| tools.join("hazard_patch.py")),
-        scanner: options
-            .scanner
-            .take()
-            .unwrap_or_else(|| tools.join("hazard_scan.py")),
-        stack_guard: options
-            .stack_guard
-            .take()
-            .unwrap_or_else(|| tools.join("stack_guard.py")),
+        patcher: options.patcher.take(),
+        scanner: options.scanner.take(),
+        stack_guard: options.stack_guard.take(),
         linker_script: options
             .linker_script
             .take()
@@ -601,23 +594,68 @@ impl Guest {
     /// Reroute the load-delay hazards the delay-slot filler leaves, prove
     /// the image clean, and prove every scratchpad stack call tree fits its
     /// region. With the link's map every jump table is proven from it (and
-    /// the stack guard needs it for an image that switches stacks). Never
-    /// piped: a swallowed failure ships an unpatched exe.
+    /// the stack guard needs it for an image that switches stacks). The
+    /// checks are psoxide-hazard's, run in this process and writing to its
+    /// stdout; `--patcher`, `--scanner` and `--stack-guard` swap one for a
+    /// program. Never piped: a swallowed failure ships an unpatched exe.
     fn patch(&self, exe: &Path, map: Option<&Path>) -> Result<()> {
-        let tool = |script: &Path, map_flag: bool| {
-            let mut command = Command::new("python3");
-            command.arg(script).arg(exe);
+        let args = |map_flag: bool| {
+            let mut args = vec![exe.display().to_string()];
             if let Some(map) = map {
                 if map_flag {
-                    command.arg("--map");
+                    args.push("--map".to_string());
                 }
-                command.arg(map);
+                args.push(map.display().to_string());
             }
-            command
+            args
         };
-        run(&mut tool(&self.patcher, true), "hazard patch")?;
-        run(&mut tool(&self.scanner, true), "hazard scan")?;
-        run(&mut tool(&self.stack_guard, false), "stack guard")
+        let check = |program: Option<&PathBuf>,
+                     builtin: fn(&[String], &mut dyn std::io::Write) -> i32,
+                     map_flag: bool,
+                     what: &str|
+         -> Result<()> {
+            let args = args(map_flag);
+            match program {
+                Some(program) => {
+                    let mut command = if program.extension().is_some_and(|ext| ext == "py") {
+                        let mut command = Command::new("python3");
+                        command.arg(program);
+                        command
+                    } else {
+                        Command::new(program)
+                    };
+                    run(command.args(&args), what)
+                }
+                None => {
+                    let stdout = std::io::stdout();
+                    let mut out = stdout.lock();
+                    let status = builtin(&args, &mut out);
+                    std::io::Write::flush(&mut out)?;
+                    if status != 0 {
+                        return Err(format!("{what} failed (exit status: {status})").into());
+                    }
+                    Ok(())
+                }
+            }
+        };
+        check(
+            self.patcher.as_ref(),
+            psoxide_hazard::patch::main,
+            true,
+            "hazard patch",
+        )?;
+        check(
+            self.scanner.as_ref(),
+            psoxide_hazard::scan::main,
+            true,
+            "hazard scan",
+        )?;
+        check(
+            self.stack_guard.as_ref(),
+            psoxide_hazard::stack_guard::main,
+            false,
+            "stack guard",
+        )
     }
 }
 
@@ -2272,9 +2310,9 @@ mod tests {
             crate_dir: PathBuf::from("/game"),
             cargo: cargo.iter().map(|arg| arg.to_string()).collect(),
             work: None,
-            patcher: PathBuf::new(),
-            scanner: PathBuf::new(),
-            stack_guard: PathBuf::new(),
+            patcher: None,
+            scanner: None,
+            stack_guard: None,
             linker_script: PathBuf::new(),
         };
         let spaced = guest(&["build", "--target-dir", target.to_str().unwrap()]);
