@@ -79,7 +79,7 @@ struct Guest {
     cargo: Vec<String>,
     work: Option<PathBuf>,
     /// Replacements for the in-process post-link checks (psoxide-hazard),
-    /// each run as `PROGRAM EXE [--map] MAP` (a `.py` through python3).
+    /// each run as `PROGRAM EXE [--map] MAP`.
     patcher: Option<PathBuf>,
     scanner: Option<PathBuf>,
     stack_guard: Option<PathBuf>,
@@ -616,16 +616,7 @@ impl Guest {
          -> Result<()> {
             let args = args(map_flag);
             match program {
-                Some(program) => {
-                    let mut command = if program.extension().is_some_and(|ext| ext == "py") {
-                        let mut command = Command::new("python3");
-                        command.arg(program);
-                        command
-                    } else {
-                        Command::new(program)
-                    };
-                    run(command.args(&args), what)
-                }
+                Some(program) => run(Command::new(program).args(&args), what),
                 None => {
                     let stdout = std::io::stdout();
                     let mut out = stdout.lock();

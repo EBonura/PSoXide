@@ -154,8 +154,8 @@ GUEST: [--crate DIR] [--work DIR] [--patcher PATH] [--scanner PATH] [--stack-gua
 The patcher, scanner and stack guard are this SDK's `tools/psoxide-hazard`
 (`hazard-patch`, `hazard-scan`, `stack-guard`), run in-process: no Python or
 objdump. `--patcher`, `--scanner` and `--stack-guard` swap one for a program
-run as `PROGRAM EXE --map MAP` (`PROGRAM EXE MAP` for the stack guard; a
-`.py` runs through python3): a game with its own copy, or a wrapper that hands
+run as `PROGRAM EXE --map MAP` (`PROGRAM EXE MAP` for the stack guard): a
+game with its own copy, or a wrapper that hands
 the tool the map its own `build.rs` asks the link for, passes it here. Every tool refuses a map that
 does not match the image. `--linker-script` (default: this SDK's
 `sdk/psoxide.ld`, which is the one a game's `.psoxide` links) tells `+order`
