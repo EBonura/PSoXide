@@ -42,13 +42,13 @@ framework is a separate layer and is not required for these examples.
 ## Build the documented revision
 
 The crate structures, full example listings and API reference use the same SDK
-revision as the embedded players: `74a7b48cfbc58581d3becbf378a5a7ac06587d90`.
+revision as the embedded players: `e37dfe425a21b4475a131e094005622dfb98bc39`.
 After [installing the tools](@/docs/first-ps1-program.md#1-install-the-tools):
 
 ```sh
 git clone https://github.com/EBonura/PSoXide.git
 cd PSoXide
-git checkout 74a7b48cfbc58581d3becbf378a5a7ac06587d90
+git checkout e37dfe425a21b4475a131e094005622dfb98bc39
 make disc EXAMPLE=hello-tri
 ```
 
@@ -83,7 +83,7 @@ compiling. Other examples keep data on the disc and load it at runtime; an EXE
 download alone does not contain those files or CD audio tracks.
 
 For a separate game repository, use the repository's
-[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/74a7b48cfbc58581d3becbf378a5a7ac06587d90/README.md)
+[pinned component bootstrap workflow](https://github.com/EBonura/PSoXide/blob/e37dfe425a21b4475a131e094005622dfb98bc39/README.md)
 to retain the shared dependencies and matching SDK revision.
 
 ## API reference
