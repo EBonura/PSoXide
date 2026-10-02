@@ -34,7 +34,7 @@ The R3000 has no data cache. Its 1 KiB scratchpad is the only data memory that l
 
 ### Coprocessor moves in assembly
 
-`mfc0` and `mfc2` have a load delay too. [`check_mfc0.py`](https://github.com/EBonura/PSoXide/blob/main/tools/check_mfc0.py) reads Rust source for inline assembly where the next instruction uses the destination register. Its header records that this shipped twice: once in psx-rt's `enable_cpu_interrupts`, and once in the demo disc's loader, where the stale value landed in the status register with the boot-vector bit set and every interrupt went to ROM. The emulator models this hazard, but only code that runs gets caught, so the check reads the source instead.
+`mfc0` and `mfc2` have a load delay too. [`check-mfc0`](https://github.com/EBonura/PSoXide/blob/main/tools/xtask/src/mfc0.rs) reads Rust source for inline assembly where the next instruction uses the destination register. Its documentation records that this shipped twice: once in psx-rt's `enable_cpu_interrupts`, and once in the demo disc's loader, where the stale value landed in the status register with the boot-vector bit set and every interrupt went to ROM. The emulator models this hazard, but only code that runs gets caught, so the check reads the source instead.
 
 ### 64-bit arithmetic
 

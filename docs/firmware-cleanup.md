@@ -42,7 +42,7 @@ No 512 KiB blobs or suspicious firmware/SDK artifact paths were found. A separat
 scan of tracked binary contents found the bundled EXE header strings above;
 filename checks alone did not detect them.
 
-Run `python3 tools/sony-material-audit.py` for the current working files, and
+Run `cargo run --locked -q -p xtask -- material-audit` for the current working files, and
 add `--history` for fetched remote refs and tags. Use `--repo PATH` to audit a
 sibling checkout. Fetch remote refs and tags before interpreting history results.
 The check fails on suspicious artifact paths, 512 KiB blobs or vendor text in
