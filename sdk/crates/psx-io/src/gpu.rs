@@ -96,8 +96,9 @@ pub fn is_capturing() -> bool {
 /// Record every [`write_gp0`] into `buffer` instead of the port, until
 /// [`end_capture`], so immediate-mode drawing can be replayed by a DMA walk
 /// (a frame's HUD, queued behind its world). The ready-waits return at once
-/// while recording. GP1 writes and DMA are not recorded: do not upload images
-/// or change display state inside a recording.
+/// while recording. GP1 writes and DMA are not recorded: do not change
+/// display state inside a recording, and upload images only through
+/// [`with_capture_suspended`] (psx-vram's uploads do).
 ///
 /// # Safety
 /// `buffer` must be valid for `words` writes, word aligned, and stay live
@@ -114,6 +115,26 @@ pub unsafe fn begin_capture(buffer: *mut u32, words: usize) {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CAPTURE.active), true);
     }
     refresh_slow_path();
+}
+
+/// Run `direct` with any recording paused, so its GP0 writes go to the port
+/// (behind the direct-access guard) instead of into the buffer, then resume
+/// recording where it left off. For VRAM uploads, which a recording cannot
+/// carry: a texture first drawn by a recorded HUD is uploaded at once, before
+/// the recording is walked, which is all a draw of it needs.
+#[inline]
+pub fn with_capture_suspended<R>(direct: impl FnOnce() -> R) -> R {
+    let capturing = is_capturing();
+    if capturing {
+        unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(CAPTURE.active), false) };
+        refresh_slow_path();
+    }
+    let result = direct();
+    if capturing {
+        unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(CAPTURE.active), true) };
+        refresh_slow_path();
+    }
+    result
 }
 
 /// Stop recording. `Ok(None)` when nothing was written.
@@ -357,6 +378,17 @@ mod tests {
         let mut empty = [0u32; 4];
         unsafe { begin_capture(empty.as_mut_ptr(), empty.len()) };
         assert!(end_capture().expect("no overflow").is_none());
+
+        // A suspended stretch bypasses the recording, which then carries on.
+        let mut resumed = [0u32; 8];
+        unsafe { begin_capture(resumed.as_mut_ptr(), resumed.len()) };
+        write_gp0(0xAA);
+        assert!(with_capture_suspended(|| !is_capturing()));
+        assert!(is_capturing());
+        write_gp0(0xBB);
+        let recording = end_capture().expect("fits").expect("words recorded");
+        assert_eq!(recording.words, 3);
+        assert_eq!(&resumed[1..3], &[0xAA, 0xBB]);
     }
     #[test]
     fn readiness_budget_includes_initial_probe() {
