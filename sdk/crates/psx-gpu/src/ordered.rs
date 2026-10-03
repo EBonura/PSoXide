@@ -7,6 +7,7 @@
 
 use core::marker::PhantomData;
 use core::ptr::NonNull;
+use psx_io::periph::GpuDma;
 
 /// Conservative merged primitive payload limit, excluding the DMA tag.
 pub const NODE_PAYLOAD_WORDS: usize = 15;
@@ -59,23 +60,11 @@ pub unsafe trait CommandStreamDma {
     }
 }
 
-/// SDK channel-2 transport for [`OrderedCommandStream`].
-pub struct GpuChannel;
-
-/// Renamed to [`GpuChannel`].
-#[deprecated(note = "renamed to `GpuChannel`")]
-pub type GpuDma = GpuChannel;
-
-/// Renamed to [`GpuChannel`].
-// A type alias cannot name a unit struct's value, so the old value spelling
-// (`with_dma(words, GpuDma)`) keeps working through this constant.
-#[deprecated(note = "renamed to `GpuChannel`")]
-#[allow(non_upper_case_globals)]
-pub const GpuDma: GpuChannel = GpuChannel;
-// SAFETY: `is_busy` reads the channel-2 CHCR start bit, which stays set until the
-// walk ends. `wait` returns only after that bit clears or after it aborts the
-// channel (and resets the GPU) on timeout, so no walk outlives it.
-unsafe impl CommandStreamDma for GpuChannel {
+// SAFETY: the token is the channel-2 transport. `is_busy` reads the
+// channel's CHCR start bit, which stays set until the walk ends. `wait`
+// returns only after that bit clears or after it aborts the channel (and
+// resets the GPU) on timeout, so no walk outlives it.
+unsafe impl CommandStreamDma for GpuDma {
     #[inline]
     fn is_busy(&mut self) -> bool {
         psx_io::dma::is_busy(psx_io::dma::Channel::Gpu)
@@ -103,11 +92,12 @@ unsafe impl CommandStreamDma for GpuChannel {
 /// exhaustion performs that same synchronization before reusing storage.
 /// Dropping the stream waits for in-flight DMA and discards unsent commands.
 ///
-/// To present through psx-rt's queued flip, call [`crate::arm_draw_done`]
+/// To present through psx-rt's queued flip, arm the draw-done flag
+/// ([`crate::Gpu::arm_draw_done`] on the transport [`Self::flush`] returns)
 /// before the frame's first packet (nodes can start walking as soon as they
 /// close) and end the frame with `push_packet([gp0::REQUEST_IRQ])` and
 /// [`Self::submit`]; see [`crate::is_draw_done`].
-pub struct OrderedCommandStream<D: CommandStreamDma = GpuChannel> {
+pub struct OrderedCommandStream<D: CommandStreamDma = GpuDma> {
     // One base pointer for the whole `'static` buffer rather than the
     // `&mut [u32]` itself: every access goes through it, so writing the open
     // node never reborrows the nodes a walk is still reading.
@@ -130,14 +120,22 @@ unsafe impl<D: CommandStreamDma + Send> Send for OrderedCommandStream<D> {}
 unsafe impl<D: CommandStreamDma + Sync> Sync for OrderedCommandStream<D> {}
 
 impl OrderedCommandStream {
-    /// Use a static, word-aligned RAM buffer of at least 17 words.
+    /// A stream over `words` that drives channel 2 without holding its
+    /// token.
+    #[deprecated(
+        note = "use `OrderedCommandStream::with_dma(words, gpu_dma)` with the `GpuDma` token"
+    )]
     pub fn new(words: &'static mut [u32]) -> Self {
-        Self::with_dma(words, GpuChannel)
+        // SAFETY: a token is a logic guard, not a memory-safety one (see
+        // `psx_io::periph`); this constructor has always driven channel 2
+        // without one, and keeps doing so for one stage.
+        Self::with_dma(words, unsafe { GpuDma::steal() })
     }
 }
 
 impl<D: CommandStreamDma> OrderedCommandStream<D> {
-    /// Construct a stream with an explicit DMA transport.
+    /// A stream over `words`, at least 17 word-aligned RAM words, driven by
+    /// `dma`: the `GpuDma` token on the console, a test double on the host.
     pub fn with_dma(words: &'static mut [u32], dma: D) -> Self {
         assert!(
             words.len() >= NODE_PAYLOAD_WORDS + 2,
@@ -300,8 +298,12 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
     }
 
     /// Submit, wait for DMA and GPU, and reset the buffer for reuse.
+    ///
+    /// Returns the transport, idle, for work that must not overlap the
+    /// stream: `Gpu::from_dma_mut(stream.flush())` draws immediately or
+    /// arms the draw-done flag before the next frame's first packet.
     #[doc(alias = "DrawSync")]
-    pub fn flush(&mut self) {
+    pub fn flush(&mut self) -> &mut D {
         self.submit();
         if self.submitted {
             self.dma.wait();
@@ -312,13 +314,30 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         self.sent = 0;
         *self.word_mut(0) = END;
         self.dma.wait_idle();
+        &mut self.dma
+    }
+
+    /// Flush, then hand back the buffer and the transport.
+    pub fn release(self) -> (&'static mut [u32], D) {
+        let mut this = core::mem::ManuallyDrop::new(self);
+        this.flush();
+        // SAFETY: `this` is never dropped, so the transport is read out of
+        // it exactly once; the buffer is the `&'static mut [u32]` the stream
+        // was built from, rebuilt from its base and length now that nothing
+        // walks it.
+        unsafe {
+            (
+                core::slice::from_raw_parts_mut(this.words.as_ptr(), this.capacity),
+                core::ptr::read(&this.dma),
+            )
+        }
     }
 
     /// Renamed to [`flush`](Self::flush).
     #[deprecated(note = "renamed to `flush`")]
     #[inline(always)]
     pub fn draw_sync(&mut self) {
-        self.flush()
+        self.flush();
     }
 }
 
