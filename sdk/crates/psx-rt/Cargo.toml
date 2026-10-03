@@ -27,6 +27,12 @@ hazard-trampolines-256 = []
 # with `interrupts::declare_stack_safe_handler`. A few instructions and a
 # few RAM loads per call; the build-time proof is stack-guard.
 scratchpad-stack-check = []
+# Halt on every fault instead of stepping over the faulting instruction:
+# a misaligned or bus-erroring load or store stops the program with Cause,
+# EPC and BadVAddr recorded, rather than costing one silently wrong value.
+# For development and test builds; one `b` in the fault path, nothing on
+# the interrupt path.
+strict-faults = []
 
 [lints.rust]
 missing_docs = "warn"

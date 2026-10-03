@@ -121,9 +121,14 @@ __psx_rt_exception_handler:
     # EPC + 4 would re-run it as if the branch had fallen through. Resuming
     # correctly means evaluating that branch, which costs every game code
     # for a path only a bug reaches, so halt on it like a fatal fault, with
-    # Cause, EPC and BadVAddr recorded. `fault_resume_pc` below is the same
-    # decision in Rust, unit-tested on host.
+    # Cause, EPC and BadVAddr recorded. With the `strict-faults` feature
+    # nothing is stepped over: every fault halts here. `fault_resume_pc`
+    # below is the same decision in Rust, unit-tested on host.
 4:
+    .if {strict}
+    b     3f
+    nop
+    .endif
     mfc0  $27, $13
     mfc0  $26, $14
     nop
@@ -168,8 +173,14 @@ __psx_rt_exception_handler:
     b     3b
     nop
     .set reorder
-    "#
+    "#,
+    strict = const STRICT_FAULTS as u32,
 );
+
+/// True when psx-rt was built with the `strict-faults` feature: the
+/// exception handler halts on every fault instead of stepping over the
+/// faulting instruction (see [`fault_resume_pc`]).
+pub const STRICT_FAULTS: bool = cfg!(feature = "strict-faults");
 
 /// Monotonic VBlank IRQ count.
 #[no_mangle]
@@ -190,6 +201,12 @@ pub static mut __psx_rt_vblank_count: u32 = 0;
 /// all three instead of entering unreachable or non-executable code. It also
 /// halts on any fault in a branch delay slot, where skipping one word would
 /// drop the branch (see [`fault_resume_pc`]).
+///
+/// Stepping over hides bugs: a misaligned store that is skipped leaves the
+/// program running on a wrong value, and only this count says so (one such
+/// store in WipEout drew wrong geometry in one build and, landing in a delay
+/// slot, hung another). Build development and test discs with the
+/// `strict-faults` feature to halt on the first fault instead.
 #[no_mangle]
 pub static mut __psx_rt_fault_count: u32 = 0;
 
@@ -322,11 +339,20 @@ pub const CAUSE_BD: u32 = 1 << 31;
 /// `epc + 4` would run the faulting instruction again as if the branch had
 /// fallen through, and resuming where the branch goes would take decoding
 /// it, handler code every game carries for a path only a bug reaches.
-/// Every other fault is stepped over (`epc + 4`) and counted. The
+/// Every other fault is stepped over (`epc + 4`) and counted, unless
+/// [`STRICT_FAULTS`] is set, in which case every fault halts. The
 /// handler's assembly makes exactly this decision; before halting it
 /// records Cause, EPC and BadVAddr ([`fault_cause`], [`fault_epc`],
 /// [`fault_badvaddr`]).
 pub const fn fault_resume_pc(cause: u32, epc: u32, badvaddr: u32) -> Option<u32> {
+    resume_after_fault(STRICT_FAULTS, cause, epc, badvaddr)
+}
+
+/// [`fault_resume_pc`] for either policy, so host tests cover both.
+const fn resume_after_fault(strict: bool, cause: u32, epc: u32, badvaddr: u32) -> Option<u32> {
+    if strict {
+        return None;
+    }
     match (cause >> 2) & 0x1F {
         // Break, IBE
         9 | 6 => return None,
@@ -664,7 +690,7 @@ mod tests {
     #[test]
     fn the_resume_address_wraps_like_the_hardware_add() {
         assert_eq!(interrupt_resume_pc(0xFFFF_FFFC, RTPS), 0);
-        assert_eq!(fault_resume_pc(DBE, 0xFFFF_FFFC, 0), Some(0));
+        assert_eq!(resume_after_fault(false, DBE, 0xFFFF_FFFC, 0), Some(0));
     }
 
     // Fault path. Cause values are ExcCode << 2, plus CAUSE_BD.
@@ -684,7 +710,7 @@ mod tests {
     fn a_fault_outside_a_delay_slot_resumes_after_it() {
         for cause in [ADEL, ADES, DBE, RI, CPU, OV] {
             assert_eq!(
-                fault_resume_pc(cause, EPC, BAD_DATA),
+                resume_after_fault(false, cause, EPC, BAD_DATA),
                 Some(EPC + 4),
                 "{cause:#x}"
             );
@@ -698,7 +724,7 @@ mod tests {
         // branch would fall through), so the handler halts instead.
         for cause in [ADEL, ADES, DBE, RI, CPU, OV] {
             assert_eq!(
-                fault_resume_pc(cause | CAUSE_BD, EPC, BAD_DATA),
+                resume_after_fault(false, cause | CAUSE_BD, EPC, BAD_DATA),
                 None,
                 "{cause:#x}"
             );
@@ -708,9 +734,9 @@ mod tests {
     #[test]
     fn fatal_faults_halt_in_or_out_of_a_delay_slot() {
         for bd in [0, CAUSE_BD] {
-            assert_eq!(fault_resume_pc(BREAK | bd, EPC, 0), None);
-            assert_eq!(fault_resume_pc(IBE | bd, EPC, 0), None);
-            assert_eq!(fault_resume_pc(ADEL | bd, EPC, EPC), None);
+            assert_eq!(resume_after_fault(false, BREAK | bd, EPC, 0), None);
+            assert_eq!(resume_after_fault(false, IBE | bd, EPC, 0), None);
+            assert_eq!(resume_after_fault(false, ADEL | bd, EPC, EPC), None);
         }
     }
 
@@ -721,8 +747,32 @@ mod tests {
         // fault there (Coprocessor Unusable with SR.CU2 clear, say) halts.
         let bne = 0x1509_FFFC;
         assert_eq!(interrupt_resume_pc(EPC, bne), EPC);
-        assert_eq!(fault_resume_pc(CPU | CAUSE_BD, EPC, 0), None);
+        assert_eq!(resume_after_fault(false, CPU | CAUSE_BD, EPC, 0), None);
         // Outside a delay slot the same fault steps over the RTPS.
-        assert_eq!(fault_resume_pc(CPU, EPC, 0), Some(EPC + 4));
+        assert_eq!(resume_after_fault(false, CPU, EPC, 0), Some(EPC + 4));
+    }
+
+    #[test]
+    fn strict_faults_halt_on_every_fault() {
+        for bd in [0, CAUSE_BD] {
+            for cause in [ADEL, ADES, IBE, DBE, BREAK, RI, CPU, OV] {
+                assert_eq!(
+                    resume_after_fault(true, cause | bd, EPC, BAD_DATA),
+                    None,
+                    "{cause:#x} {bd:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_public_decision_follows_the_feature() {
+        for cause in [ADEL, ADES, DBE, RI, CPU, OV] {
+            assert_eq!(
+                fault_resume_pc(cause, EPC, BAD_DATA),
+                resume_after_fault(STRICT_FAULTS, cause, EPC, BAD_DATA),
+                "{cause:#x}"
+            );
+        }
     }
 }
