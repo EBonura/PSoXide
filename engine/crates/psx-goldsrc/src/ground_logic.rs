@@ -16,11 +16,11 @@ pub const fn settle_vertical(vertical: i32, was_airborne: bool) -> (i32, i32) {
     (0, landing_impact)
 }
 
-/// GoldSrc's grounded duck interpolation lasts 0.4 seconds. The fixed player
-/// simulation runs at 20 Hz, so the collision hull changes after eight whole
-/// ticks. `PM_Duck` completes the change immediately while airborne, but it
-/// runs before `PM_Jump`: a ground duck+jump therefore moves once with hull 1
-/// and changes to hull 3 at the start of the following tick.
+/// In Half-Life a duck on the ground takes 0.4 seconds to finish. The fixed
+/// player simulation runs at 20 Hz, so the collision hull changes after eight
+/// whole ticks. In the air the duck completes at once, but a duck and jump
+/// pressed together on the ground still leave the ground with the standing
+/// hull: the crouching hull takes over at the start of the following tick.
 pub const DUCK_TRANSITION_TICKS: u8 = 8;
 
 /// Advance the pending standing -> crouch collision-hull transition.
@@ -160,8 +160,8 @@ pub const fn integrate_planar_q6(velocity_q6: i32, carry_q6: i8) -> (i32, i8) {
 
 /// Remaining integer displacement for one axis after a partial slide trace.
 ///
-/// `PM_FlyMove` partitions one floating-point frame displacement at every
-/// impact. The PS1 mover has already quantized that complete displacement to
+/// A sliding move splits one frame's displacement at every impact. The PS1
+/// mover has already quantized that complete displacement to
 /// an integer before tracing, so independently scaling both partitions would
 /// round twice. In particular, arithmetic right shift turns a one-quantum
 /// remainder of any negative velocity into `-1`, even when the first
@@ -237,8 +237,7 @@ pub const fn slide_remainder_needs_nearest(
 
 /// One lattice-unit nudge toward the clear side of a diagonal contact.
 ///
-/// GoldSrc retains the fractional contact position returned by `PM_FlyMove`.
-/// An integer hull can instead back off to the exact same lattice point on two
+/// GoldSrc keeps a fractional contact position after a slide. An integer hull can instead back off to the exact same lattice point on two
 /// consecutive bumps. Move along the strongest horizontal component of the
 /// contact normal so the caller can represent that sub-unit separation without
 /// inventing vertical motion or bypassing a trace.
@@ -279,7 +278,7 @@ pub const fn clip_slide_component(value: i32, normal_q12: i32, projection: i32) 
 /// empty/upward side of that contact (ceil in Y-up space), and retain the
 /// negative Q6 remainder for the next movement/step calculation. Nearest
 /// rounding can put the integer point *inside* the supporting slope, turning a
-/// legal upward PM_WalkMove probe into `startsolid`.
+/// legal upward walk probe into `startsolid`.
 #[inline]
 pub const fn ground_contact_q6(start_y: i32, end_y: i32, frac_q12: i32) -> (i32, i8) {
     const ONE: i32 = 64;
@@ -417,10 +416,10 @@ pub const fn player_inside_actor(
 
 /// Sweep a centred player box against one GoldSrc `SOLID_SLIDEBOX` AABB.
 ///
-/// This is the same Minkowski expansion used by GoldSrc's `PM_HullForBox`:
-/// actor mins minus player maxs, actor maxs minus player mins.  Fractions use
-/// the engine's Q0.12 convention.  The 1/32-unit entry backoff is GoldSrc's
-/// `DIST_EPSILON`; retaining it in fraction space costs no fractional origins.
+/// The actor box is grown by the player box (Minkowski sum): actor mins minus
+/// player maxs, actor maxs minus player mins. Fractions use the engine's Q0.12
+/// convention. Entries back off 1/32 unit, the same margin the hull tracer
+/// keeps off a plane; doing it in fraction space costs no fractional origins.
 ///
 /// A move beginning strictly inside an actor is ignored so an actor that moved
 /// into the player cannot freeze them forever.

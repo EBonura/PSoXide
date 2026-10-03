@@ -1,7 +1,8 @@
 //! Small, allocation-free ladder contact correction.
 //!
-//! GoldSrc never snaps the player through or away from the ladder plane: the
-//! contacted origin is preserved and `PM_LadderMove` changes velocity only.
+//! In Half-Life the player is never snapped through or away from the ladder
+//! plane: the contacted origin is preserved and climbing changes velocity
+//! only.
 //! The PS1's whole-unit movement can first touch a thin ladder volume just past
 //! a tangential corner, so the sole mount correction clamps that tangential
 //! coordinate back inside the authored width.
@@ -15,14 +16,14 @@ pub fn wants_descend(pitch: i16) -> bool {
     pitch < DESCEND_PITCH
 }
 
-/// AABB equivalent of GoldSrc `PM_Ladder`: `PM_HullForBsp` expands the ladder
-/// model by the active player hull, then `PM_HullPointContents` tests the
-/// current origin. There is no forward probe or special airborne branch.
+/// Whether the player is on the ladder: the ladder box grown by the player's
+/// hull contains the current origin. There is no forward probe or special
+/// airborne branch.
 #[inline]
 pub fn touches(pos: [i32; 3], center: [i32; 3], half: [i32; 3]) -> bool {
     (pos[0] - center[0]).abs() <= half[0] + PLAYER_HALF_WIDTH
-        // PM_HullPointContents classifies the axial exit plane as outside the
-        // ladder hull. Cooked odd-height bounds round both their midpoint and
+        // A point exactly on the grown box's top plane counts as outside the
+        // ladder. Cooked odd-height bounds round both their midpoint and
         // half-extent, which can otherwise add one unit to the reconstructed
         // top (c1a1's -148..805 ladder becomes center 329, half 477). Remove
         // that quantization unit from the vertical reach: without it the world
@@ -109,14 +110,19 @@ pub fn mul_q12_nearest(a: i32, b: i32) -> i32 {
     }
 }
 
-/// Fixed-point form of GoldSrc's `PM_LadderMove` velocity decomposition.
+/// Climbing velocity on a ladder whose face normal is the cardinal axis
+/// `normal_axis` (0 = X, 2 = Z) pointing `normal_sign` toward the player.
 ///
-/// `forward` and `right` are Q12 view vectors, `normal_axis` is the ladder's
-/// thin horizontal axis (0 = X, 2 = Z), and `normal_sign` points from the
-/// ladder towards the player. The result is Q6 world units per 20 Hz tick.
-/// GoldSrc treats ladder input as buttons, so any non-zero semantic axis uses
-/// the full authored speed; crouching supplies the smaller speed at the call
-/// site.
+/// This reproduces how ladders behave in Half-Life play, with speeds in
+/// Q6 units per tick. Ladder input works like buttons: any forward input
+/// moves at the full climb speed `speed_q6` along the view direction (pitch
+/// included), and any strafe input at the full speed along the view's right
+/// vector. That view-relative wish velocity keeps its motion along the
+/// ladder face. Its motion through the face becomes
+/// vertical: heading into the ladder climbs, heading away descends, by the
+/// same amount. Nothing moves the player through the face, except that a
+/// player standing on the floor who heads away from the ladder steps off it
+/// at the climb speed.
 #[inline]
 pub fn goldsrc_velocity_q6(
     forward: [i32; 3],
@@ -128,28 +134,21 @@ pub fn goldsrc_velocity_q6(
     normal_sign: i32,
     on_floor: bool,
 ) -> [i32; 3] {
-    let fwd_speed = fwd.signum() * speed_q6;
-    let right_speed = strafe.signum() * speed_q6;
-    let mut intended = [0; 3];
-    let mut axis = 0;
-    while axis < 3 {
-        intended[axis] =
-            mul_q12_nearest(forward[axis], fwd_speed) + mul_q12_nearest(right[axis], right_speed);
-        axis += 1;
+    let forward_speed = fwd.signum() * speed_q6;
+    let strafe_speed = strafe.signum() * speed_q6;
+    let wish = |axis: usize| {
+        mul_q12_nearest(forward[axis], forward_speed) + mul_q12_nearest(right[axis], strafe_speed)
+    };
+    let tangent_axis = 2 - normal_axis;
+    // Positive when the wish points away from the ladder, toward the player.
+    let away = normal_sign * wish(normal_axis);
+    let mut velocity = [0; 3];
+    velocity[tangent_axis] = wish(tangent_axis);
+    velocity[1] = wish(1) - away;
+    if on_floor && away > 0 {
+        velocity[normal_axis] = normal_sign * speed_q6;
     }
-
-    // PM_LadderMove removes the component through the ladder face, then turns
-    // that same component upward. For a vertical cardinal plane,
-    // normal x (up x normal) is exactly world-up, so no cross products or
-    // normalization are needed at runtime.
-    let normal = intended[normal_axis] * normal_sign;
-    intended[normal_axis] = 0;
-    intended[1] -= normal;
-    if on_floor && normal > 0 {
-        // Walking away while grounded releases the player from the face.
-        intended[normal_axis] = speed_q6 * normal_sign;
-    }
-    intended
+    velocity
 }
 
 #[inline]
@@ -262,7 +261,7 @@ pub fn mount_target(pos: [i32; 3], center: [i32; 3], half: [i32; 3]) -> [i32; 3]
     if half[0] <= half[2] {
         // X is the face normal. Preserve it exactly; moving it even two units
         // away from the t0a0 ladder was the opposite-direction mount kick that
-        // does not exist in the captured GoldSrc PM_LadderMove trace.
+        // does not exist in the captured GoldSrc ladder trace.
         target[2] = clamp_inside(pos[2], center[2], half[2]);
     } else {
         // Z is the face normal; clamp only X, the tangential axis.
@@ -390,7 +389,7 @@ mod tests {
     #[test]
     fn t0a0_mount_preserves_goldsrc_ladder_normal_origin() {
         // Authoritative GoldSrc trace: the player begins at Gold Y=764 against
-        // the ladder centred at Y=778 and every PM_LadderMove preparation
+        // the ladder centred at Y=778 and every ladder tick that follows
         // remains on Y=764. The runtime mapping stores Gold Y in PSX Z.
         let pos = [-692, -348, 764];
         assert_eq!(mount_target(pos, [-692, -168, 778], [16, 216, 2]), pos);
