@@ -181,7 +181,7 @@ mod tests {
     extern crate std;
 
     use super::{exact_legacy_size_target, repair_exact_legacy_size};
-    use psx_mc::{Card, Entry, Error, RamCard, CARD_SIZE, DATA_BLOCKS, FRAME_SIZE, MAX_NAME};
+    use psx_mc::{Card, Entry, Error, RamCard, CARD_SIZE, DATA_BLOCKS, FRAME_SIZE, MAX_NAME_LEN};
     use std::vec::Vec;
 
     const TARGET: &str = "BESLES-00000PSXMC01";
@@ -264,7 +264,7 @@ mod tests {
 
     const fn blank_entry() -> Entry {
         Entry {
-            name: [0; MAX_NAME + 1],
+            name: [0; MAX_NAME_LEN + 1],
             name_len: 0,
             blocks: 0,
         }

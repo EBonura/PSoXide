@@ -18,7 +18,7 @@ use psx_font::FontAtlas;
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_mc::{
     Block, Card, Entry, Error, HardwareCard, SaveIcon, Slot, TransportFault, TransportTrace,
-    DATA_BLOCKS, FRAME_COUNT, FRAME_SIZE, MAX_NAME,
+    DATA_BLOCKS, FRAME_COUNT, FRAME_SIZE, MAX_NAME_LEN,
 };
 #[cfg(target_arch = "mips")]
 use psx_pad::{button, poll_port1, ButtonState};
@@ -736,7 +736,7 @@ fn pressed(now: ButtonState, previous: ButtonState, mask: u16) -> bool {
 
 const fn empty_entry() -> Entry {
     Entry {
-        name: [0; MAX_NAME + 1],
+        name: [0; MAX_NAME_LEN + 1],
         name_len: 0,
         blocks: 0,
     }
