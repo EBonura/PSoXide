@@ -116,6 +116,7 @@ impl TextureWindow {
     }
 
     /// Apply this texture window to the GPU state.
+    #[deprecated(note = "use `Gpu::set_texture_window`")]
     pub fn apply(self) {
         wait_command_ready();
         write_command(self.word());
@@ -469,10 +470,9 @@ impl TextureMaterial {
     }
 
     /// Apply this material's tpage, blend, depth, dither, and texture-window state.
+    #[deprecated(note = "use `Gpu::set_draw_mode`")]
     pub fn apply_draw_mode(self) {
-        wait_command_ready();
-        write_command(self.draw_mode_word());
-        write_command(self.texture_window.word());
+        crate::gpu::set_draw_mode(self);
     }
 }
 

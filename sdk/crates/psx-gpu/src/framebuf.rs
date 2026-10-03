@@ -127,15 +127,11 @@ impl FrameBuffer {
 
     /// Clear the back-buffer (the one currently being drawn to) to `(r, g, b)`.
     pub fn clear(&self, r: u8, g: u8, b: u8) {
-        super::fill_rect(
-            0,
-            self.buffer_y(self.drawing),
-            self.width,
-            self.height,
-            r,
-            g,
-            b,
-        );
+        crate::gpu::draw(&crate::prim::FillRect::new(
+            (0, self.buffer_y(self.drawing)),
+            (self.width, self.height),
+            (r, g, b),
+        ));
     }
 }
 
