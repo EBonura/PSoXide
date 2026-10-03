@@ -13,6 +13,7 @@ description  = "FMV playback building blocks: STR sector demux, BS v2 bitstream 
 # and only exists on the MIPS guest.
 
 [target.'cfg(target_arch = "mips")'.dependencies]
+psx-hw = { workspace = true }
 psx-io = { workspace = true }
 psx-hw = { workspace = true }
 
