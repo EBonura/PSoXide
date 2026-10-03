@@ -1,4 +1,6 @@
-//! Double-buffered framebuffer management.
+//! The pre-`Gpu` double buffer, kept for one stage: use
+//! [`crate::display::DoubleBuffer`], whose methods take the [`crate::Gpu`]
+//! they write to.
 //!
 //! A `FrameBuffer` tracks two on-screen regions in VRAM -- one being
 //! displayed, one being drawn into. `swap()` flips them at a VBlank
@@ -6,11 +8,14 @@
 //! That fits 2×(640×240) side-by-side inside the 1024×512 VRAM on
 //! standard NTSC resolutions and gives the engine a natural tear-free
 //! presentation.
+#![allow(deprecated, reason = "the module implements the deprecated type")]
 
 use psx_hw::gpu::{gp0, gp1};
 use psx_io::gpu::{write_command, write_display_control};
 
 /// Tracks display-start between two vertically stacked buffers.
+#[deprecated(note = "use `psx_gpu::display::DoubleBuffer`, whose methods take the `Gpu`")]
+#[derive(Debug)]
 pub struct FrameBuffer {
     /// Display width in pixels (set by [`FrameBuffer::new`]).
     pub width: u16,

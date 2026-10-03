@@ -167,6 +167,138 @@ impl DisplayConfig {
     }
 }
 
+/// VRAM lines the GPU has; two buffers must fit in them.
+const VRAM_LINES: u16 = 512;
+
+/// Two framebuffers stacked in VRAM: the GPU shows one while the other is
+/// drawn, and [`swap`](Self::swap) exchanges them.
+///
+/// The first buffer sits at VRAM line 0 and the second `stride` lines
+/// below it, so a 320×240 pair fits beside textures in the 1024×512 VRAM.
+///
+/// ```
+/// use psx_gpu::display::{DoubleBuffer, Resolution};
+/// let buffers = DoubleBuffer::with_stride(Resolution::R320X240, 256);
+/// assert_eq!(buffers.draw_origin(), (0, 0));
+/// assert_eq!(buffers.display_origin(), (0, 256));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DoubleBuffer {
+    size: (u16, u16),
+    stride: u16,
+    drawing_second: bool,
+}
+
+impl DoubleBuffer {
+    /// Buffers of `resolution`, the second directly below the first.
+    pub const fn new(resolution: Resolution) -> Self {
+        Self::with_stride(resolution, resolution.height)
+    }
+
+    /// Buffers `stride` VRAM lines apart, leaving the lines between them
+    /// free (palettes, say). A stride below the height is raised to it so
+    /// the buffers never overlap.
+    ///
+    /// # Panics
+    ///
+    /// If the second buffer would end past VRAM line 512 (a 480-line
+    /// resolution can't be double-buffered this way).
+    pub const fn with_stride(resolution: Resolution, stride: u16) -> Self {
+        let height = resolution.height;
+        let stride = if stride < height { height } else { stride };
+        assert!(
+            stride + height <= VRAM_LINES,
+            "two buffers must fit in VRAM's 512 lines"
+        );
+        Self {
+            size: (resolution.width, height),
+            stride,
+            drawing_second: false,
+        }
+    }
+
+    /// Width and height of each buffer, in pixels.
+    pub const fn size(&self) -> (u16, u16) {
+        self.size
+    }
+
+    /// VRAM lines between the two buffers' top edges.
+    pub const fn stride(&self) -> u16 {
+        self.stride
+    }
+
+    /// Top-left VRAM corner of the buffer being drawn.
+    pub const fn draw_origin(&self) -> (u16, u16) {
+        (0, self.top(self.drawing_second))
+    }
+
+    /// Top-left VRAM corner of the buffer being shown.
+    pub const fn display_origin(&self) -> (u16, u16) {
+        (0, self.top(!self.drawing_second))
+    }
+
+    const fn top(&self, second: bool) -> u16 {
+        if second {
+            self.stride
+        } else {
+            0
+        }
+    }
+
+    /// Show the buffer just drawn and draw into the other one from now on.
+    ///
+    /// Flips at once (GP1(05h)); the hardware latches the start at the next
+    /// frame. Drawing must be finished ([`crate::Gpu::wait_idle`]) first.
+    #[doc(alias = "PutDispEnv")]
+    pub fn swap(&mut self, gpu: &mut crate::Gpu) {
+        let shown = self.draw_origin();
+        self.drawing_second = !self.drawing_second;
+        gpu.set_display_start(shown);
+        self.apply_draw_target(gpu);
+    }
+
+    /// Switch the draw side now and program its draw area and offset, and
+    /// return the GP1(05h) word that shows the finished buffer, for the
+    /// caller to apply at a blank edge (psx-rt's queued flip). Drawing must
+    /// be finished ([`crate::Gpu::wait_idle`]) first.
+    pub fn begin_swap(&mut self, gpu: &mut crate::Gpu) -> u32 {
+        let display = self.begin_deferred_swap();
+        self.apply_draw_target(gpu);
+        display
+    }
+
+    /// Select the next draw buffer without touching the GPU, and return the
+    /// GP1(05h) word that shows the finished one.
+    ///
+    /// The non-blocking first half of a pipelined swap: queue the word for a
+    /// VBlank edge whose handler applies it once the frame's closing
+    /// GP0(1Fh) has run (`psx_rt::interrupts::queue_display_control_at_vblank`,
+    /// see [`crate::is_draw_done`]), wait until it has been applied, then
+    /// call [`apply_draw_target`](Self::apply_draw_target) before drawing.
+    /// Safe to call while the previous frame still rasterises.
+    pub fn begin_deferred_swap(&mut self) -> u32 {
+        let (x, y) = self.draw_origin();
+        self.drawing_second = !self.drawing_second;
+        gp1::display_start(x as u32, y as u32)
+    }
+
+    /// Program the draw area and draw offset for the buffer being drawn.
+    pub fn apply_draw_target(&self, _gpu: &mut crate::Gpu) {
+        let (_, top) = self.draw_origin();
+        let (width, height) = self.size;
+        crate::gpu::write_draw_target(top, width, height);
+    }
+
+    /// Fill the buffer being drawn with `color` (GP0(02h)).
+    pub fn clear(&self, gpu: &mut crate::Gpu, color: (u8, u8, u8)) {
+        gpu.draw(&crate::prim::FillRect::new(
+            self.draw_origin(),
+            self.size,
+            color,
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +358,28 @@ mod tests {
             clamped.vertical_range_command(),
             gp1::v_display_range(0, 256)
         );
+    }
+
+    #[test]
+    fn a_deferred_swap_alternates_buffers_without_touching_the_gpu() {
+        let mut buffers = DoubleBuffer::with_stride(Resolution::R320X240, 256);
+        assert_eq!(buffers.begin_deferred_swap(), gp1::display_start(0, 0));
+        assert_eq!(buffers.draw_origin(), (0, 256));
+        assert_eq!(buffers.display_origin(), (0, 0));
+        assert_eq!(buffers.begin_deferred_swap(), gp1::display_start(0, 256));
+        assert_eq!(buffers.draw_origin(), (0, 0));
+    }
+
+    #[test]
+    fn a_short_stride_is_raised_so_buffers_never_overlap() {
+        let buffers = DoubleBuffer::with_stride(Resolution::R320X240, 128);
+        assert_eq!(buffers.stride(), 240);
+        assert_eq!(buffers.size(), (320, 240));
+    }
+
+    #[test]
+    #[should_panic(expected = "two buffers must fit")]
+    fn a_480_line_double_buffer_does_not_fit_vram() {
+        let _ = DoubleBuffer::new(Resolution::R640X480);
     }
 }
