@@ -123,18 +123,18 @@ enum Wait {
     Timeout,
 }
 
-/// `diag()` cause byte: the drive raised INT5; the snapshot carries the
+/// [`SectorReader::diagnostics`] cause byte: the drive raised INT5; the snapshot carries the
 /// error response's status and error-code bytes.
 #[cfg(target_arch = "mips")]
 pub const DIAG_CD_ERROR: u8 = 0x05;
-/// `diag()` cause byte: the wait spun out; the snapshot carries the raw
+/// [`SectorReader::diagnostics`] cause byte: the wait spun out; the snapshot carries the raw
 /// `CD_STATUS` register and the last IRQ flag seen.
 #[cfg(target_arch = "mips")]
 pub const DIAG_TIMEOUT: u8 = 0xFF;
-/// `diag()` cause byte: the parameter FIFO never freed up.
+/// [`SectorReader::diagnostics`] cause byte: the parameter FIFO never freed up.
 #[cfg(target_arch = "mips")]
 pub const DIAG_PARAM_STUCK: u8 = 0xFE;
-/// `diag()` command byte standing in for a `read_sector` wait (ReadN is
+/// [`SectorReader::diagnostics`] command byte standing in for a `read_sector` wait (ReadN is
 /// streaming; no command byte is in flight).
 #[cfg(target_arch = "mips")]
 pub const DIAG_SITE_READ: u8 = 0xD0;
@@ -184,8 +184,15 @@ impl SectorReader {
     /// [`DIAG_CD_ERROR`] the status/flag bytes are the INT5 response pair,
     /// otherwise status is the raw `CD_STATUS` register at failure and the
     /// low byte is the last IRQ flag seen.
-    pub fn diag(&self) -> u32 {
+    pub fn diagnostics(&self) -> u32 {
         u32::from_be_bytes(self.diag)
+    }
+
+    /// Renamed to [`SectorReader::diagnostics`].
+    #[deprecated(note = "renamed to `diagnostics`")]
+    #[inline(always)]
+    pub fn diag(&self) -> u32 {
+        self.diagnostics()
     }
 
     // --- register helpers (exact hl-psx port) ---
@@ -538,15 +545,27 @@ impl SectorReader {
         unsafe { self.send_command(CMD_SETFILTER, &[file, channel], IRQ_ACK, ACK_POLL) }
     }
 
-    /// Demute: let CD-DA and XA-ADPCM reach the SPU. The drive stays muted
-    /// across programs, so a stream that plays XA audio must not assume the
-    /// last tenant left it demuted.
+    /// Unmute the drive: let CD-DA and XA-ADPCM reach the SPU. The drive
+    /// stays muted across programs, so a stream that plays XA audio must not
+    /// assume the last tenant left it unmuted.
     ///
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
-    pub unsafe fn demute(&mut self) -> bool {
+    #[doc(alias = "Demute")]
+    pub unsafe fn unmute(&mut self) -> bool {
         // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
         unsafe { self.send_command(CMD_DEMUTE, &[], IRQ_ACK, ACK_POLL) }
+    }
+
+    /// Renamed to [`SectorReader::unmute`].
+    ///
+    /// # Safety
+    /// See [`SectorReader::unmute`].
+    #[deprecated(note = "renamed to `unmute`")]
+    #[inline(always)]
+    pub unsafe fn demute(&mut self) -> bool {
+        // SAFETY: same contract as the renamed function.
+        unsafe { self.unmute() }
     }
 
     unsafe fn prepare_with_mode(&mut self, mode: u8) -> bool {
