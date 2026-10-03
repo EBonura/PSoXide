@@ -61,7 +61,7 @@
 
 use psx_hw::gpu::{gp0, gp1, pack_xy};
 use psx_io::dma::{self, Channel};
-use psx_io::gpu::{wait_cmd_ready, write_gp0, write_gp1};
+use psx_io::gpu::{wait_cmd_ready, with_capture_suspended, write_gp0, write_gp1};
 
 /// VRAM framebuffer width in pixels.
 pub const VRAM_WIDTH: u16 = 1024;
@@ -1095,14 +1095,16 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
     // During GP0(0xA0) image transfer the GPU is waiting for data,
     // not normal commands; DuckStation clears READY_CMD in this
     // state, so stream payload words without polling command-ready.
-    copy_to_vram_header(rect);
-    let mut i = 0;
-    while i + 1 < pixels.len() {
-        let lo = pixels[i] as u32;
-        let hi = pixels[i + 1] as u32;
-        write_gp0(lo | (hi << 16));
-        i += 2;
-    }
+    with_capture_suspended(|| {
+        copy_to_vram_header(rect);
+        let mut i = 0;
+        while i + 1 < pixels.len() {
+            let lo = pixels[i] as u32;
+            let hi = pixels[i + 1] as u32;
+            write_gp0(lo | (hi << 16));
+            i += 2;
+        }
+    });
 }
 
 /// Upload raw byte-stream pixel data, interpreted as halfwords in
@@ -1134,12 +1136,14 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
     // consume one complete final word; its unused high halfword is ignored by
     // the GPU, so zero-pad it. See upload_16bpp: image payload writes must not
     // wait on the normal command-ready bit.
-    copy_to_vram_header(rect);
-    let mut i = 0;
-    while i < bytes.len() {
-        write_gp0(packed_upload_word(bytes, i));
-        i += 4;
-    }
+    with_capture_suspended(|| {
+        copy_to_vram_header(rect);
+        let mut i = 0;
+        while i < bytes.len() {
+            write_gp0(packed_upload_word(bytes, i));
+            i += 4;
+        }
+    });
 }
 
 #[inline]
@@ -1191,10 +1195,12 @@ pub fn upload_words(rect: VramRect, words: &[u32]) {
     );
     assert!(!words.is_empty(), "upload_words: empty upload");
 
-    copy_to_vram_header(rect);
-    for &word in words {
-        write_gp0(word);
-    }
+    with_capture_suspended(|| {
+        copy_to_vram_header(rect);
+        for &word in words {
+            write_gp0(word);
+        }
+    });
 }
 
 /// Emit the GP0(0xA0) "copy CPU→VRAM" command header: destination
@@ -1232,6 +1238,10 @@ fn copy_to_vram_header(rect: VramRect) {
 /// and this function's completion wait would then spin unboundedly.
 /// Callers who opt in accept that risk on their own boot path.
 pub fn dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
+    with_capture_suspended(|| dma_copy_to_vram_direct(rect, src))
+}
+
+fn dma_copy_to_vram_direct(rect: VramRect, src: *const u32) -> bool {
     if !(src as usize).is_multiple_of(4) || !rect.w.is_multiple_of(2) || rect.w == 0 || rect.h == 0
     {
         return false;
