@@ -62,6 +62,7 @@
 use psx_hw::gpu::{gp0, gp1, pack_xy};
 use psx_io::dma::{self, Channel};
 use psx_io::gpu::{wait_cmd_ready, write_gp0, write_gp1};
+use psx_io::periph::GpuDma;
 
 /// VRAM framebuffer width in pixels.
 pub const VRAM_WIDTH: u16 = 1024;
@@ -1218,23 +1219,22 @@ fn copy_to_vram_header(rect: VramRect) {
     write_gp0(pack_xy(rect.w, rect.h));
 }
 
-/// Fast path: stream the pixel payload to the GPU over block-mode DMA
-/// (channel 2) instead of word-at-a-time FIFO writes. Returns `false`
-/// (leaving the GPU untouched) when the transfer can't be expressed as
-/// whole 32-bit words from a word-aligned source, so the caller can
-/// fall back to the FIFO loop.
+/// Upload `words` to `rect` over block-mode DMA (channel 2) instead of
+/// word-at-a-time FIFO writes, and wait for it. This mirrors PsyQ's
+/// `LoadImage`: `BS = words-per-row`, `BA = rows`.
 ///
-/// `src` must point at `(rect.w / 2) * rect.h` little-endian words. The
-/// DMA controller is word-addressed, so a non-word-aligned `src` (or an
-/// odd halfword row stride) can't be DMA'd and takes the FIFO path. This
-/// mirrors PsyQ's `LoadImage`: `BS = words-per-row`, `BA = rows`.
-/// Opt-in DMA upload. No longer the default: on real hardware the DMA
-/// controller can wedge a channel busy-forever (CL2 probe, 2026-07-31),
-/// and this function's completion wait would then spin unboundedly.
-/// Callers who opt in accept that risk on their own boot path.
-pub fn dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
-    if !(src as usize).is_multiple_of(4) || !rect.w.is_multiple_of(2) || rect.w == 0 || rect.h == 0
-    {
+/// `words` holds the pixels as little-endian 32-bit words, two 16-bit
+/// halfwords each, row after row: `(rect.w / 2) * rect.h` words, and only
+/// that many are sent. Returns `false`, leaving the GPU untouched, when the
+/// transfer cannot be expressed this way: an odd or zero width, a zero
+/// height, a row wider than the GPU's 16-word FIFO, or a slice shorter than
+/// the rectangle. Use [`upload_16bpp`] (the FIFO path) for those.
+///
+/// Opt-in: on real hardware the DMA controller can latch a channel
+/// busy-forever (CL2 probe, 2026-07-31). The completion wait is bounded,
+/// so a wedge costs a `false` and a partial upload rather than a hang.
+pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> bool {
+    if !rect.w.is_multiple_of(2) || rect.w == 0 || rect.h == 0 {
         return false;
     }
     let words_per_row = rect.w / 2;
@@ -1245,14 +1245,20 @@ pub fn dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
     if words_per_row > 16 {
         return false;
     }
+    if words.len() < words_per_row as usize * rect.h as usize {
+        return false;
+    }
+    let src = words.as_ptr();
 
     copy_to_vram_header(rect);
     // GP1(04h) = 2: route DMA words CPU→GP0. `psx-gpu::init` sets this,
     // but a VRAM readback could have flipped it to GPUREAD→CPU.
     write_gp1(gp1::dma_direction(2));
     dma::enable_channel(Channel::Gpu);
-    // SAFETY: none yet; this function's caller supplies `src` unchecked.
-    // The channel was drained by `copy_to_vram_header`.
+    // SAFETY: the channel was drained by `copy_to_vram_header`. The transfer
+    // reads `words_per_row * rect.h` words from `src`, which the check above
+    // proved lie inside `words`, borrowed until this function returns; the
+    // wait below, or the abort on a wedge, ends it before then.
     unsafe {
         dma::start(
             Channel::Gpu,
@@ -1294,6 +1300,51 @@ pub fn upload_clut(clut: Clut, entries: &[Color555]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dma_copy_to_vram_refuses_what_it_cannot_send_whole() {
+        // Every case returns before touching the GPU, so this runs on the host.
+        // SAFETY: the only token in this test.
+        let mut dma = unsafe { GpuDma::steal() };
+        let words = [0u32; 8];
+        // Four words per row, two rows: the slice is one word short.
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect::new(0, 0, 8, 2),
+            &words[..7]
+        ));
+        // Odd, zero or FIFO-overflowing widths, and a zero height.
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect::new(0, 0, 3, 1),
+            &words
+        ));
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 1
+            },
+            &words
+        ));
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect::new(0, 0, 34, 1),
+            &[0; 17]
+        ));
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 0
+            },
+            &words
+        ));
+    }
 
     #[test]
     fn byte_upload_word_zero_pads_an_odd_final_halfword() {
