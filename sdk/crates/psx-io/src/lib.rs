@@ -33,6 +33,8 @@ pub mod timers;
 /// the address mapping and any side effects.
 #[inline(always)]
 pub unsafe fn read32(addr: u32) -> u32 {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 32-bit volatile read
+    // (this fn's `# Safety`).
     unsafe { core::ptr::read_volatile(addr as *const u32) }
 }
 
@@ -42,6 +44,8 @@ pub unsafe fn read32(addr: u32) -> u32 {
 /// See [`read32`].
 #[inline(always)]
 pub unsafe fn read16(addr: u32) -> u16 {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 16-bit volatile read
+    // (this fn's `# Safety`).
     unsafe { core::ptr::read_volatile(addr as *const u16) }
 }
 
@@ -51,6 +55,8 @@ pub unsafe fn read16(addr: u32) -> u16 {
 /// See [`read32`].
 #[inline(always)]
 pub unsafe fn read8(addr: u32) -> u8 {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an 8-bit volatile read (this
+    // fn's `# Safety`).
     unsafe { core::ptr::read_volatile(addr as *const u8) }
 }
 
@@ -60,6 +66,8 @@ pub unsafe fn read8(addr: u32) -> u8 {
 /// See [`read32`].
 #[inline(always)]
 pub unsafe fn write32(addr: u32, value: u32) {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 32-bit volatile write
+    // (this fn's `# Safety`).
     unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
 }
 
@@ -69,6 +77,8 @@ pub unsafe fn write32(addr: u32, value: u32) {
 /// See [`read32`].
 #[inline(always)]
 pub unsafe fn write16(addr: u32, value: u16) {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 16-bit volatile write
+    // (this fn's `# Safety`).
     unsafe { core::ptr::write_volatile(addr as *mut u16, value) }
 }
 
@@ -78,5 +88,7 @@ pub unsafe fn write16(addr: u32, value: u16) {
 /// See [`read32`].
 #[inline(always)]
 pub unsafe fn write8(addr: u32, value: u8) {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an 8-bit volatile write (this
+    // fn's `# Safety`).
     unsafe { core::ptr::write_volatile(addr as *mut u8, value) }
 }
