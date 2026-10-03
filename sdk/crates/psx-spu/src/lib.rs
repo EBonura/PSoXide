@@ -24,7 +24,7 @@
 //! v.set_pitch(Pitch::UNITY);
 //! v.set_start_addr(SpuAddr::new(0x1010));
 //! v.set_adsr(Adsr::default_tone());
-//! Voice::key_on(v.mask());                  // start the tone
+//! Voice::start(v.mask());                   // start the tone
 //! ```
 //!
 //! ## What this crate owns vs doesn't
@@ -144,7 +144,7 @@ const SPUCNT_CD_AUDIO_ENABLE: u16 = 1 << 0;
 /// Call once at boot before any voice operations.
 #[doc(alias = "SpuInit")]
 pub fn init() {
-    // Silence everything immediately -- key_off on all 24 voices
+    // Silence everything immediately -- key-off on all 24 voices
     // before we touch any other state, so nothing glitches audibly
     // on cold boot.
     write_reg16(KEY_OFF_LO, 0xFFFF);
@@ -444,8 +444,15 @@ impl SpuAddr {
 
     /// The 16-bit field value the SPU registers actually want
     /// (`addr / 8`).
-    pub const fn reg_field(self) -> u16 {
+    pub const fn register_value(self) -> u16 {
         (self.0 / 8) as u16
+    }
+
+    /// Renamed to [`register_value`](Self::register_value).
+    #[deprecated(note = "renamed to `register_value`")]
+    #[inline(always)]
+    pub const fn reg_field(self) -> u16 {
+        self.register_value()
     }
 }
 
@@ -485,7 +492,7 @@ pub struct Adsr {
 
 impl Adsr {
     /// Generic sustained-tone envelope: instant attack to full, hold at
-    /// max sustain until [`Voice::key_off`], then an exponential release
+    /// max sustain until [`Voice::release`], then an exponential release
     /// (~100ms). The right default for melodies and held notes.
     ///
     /// The original version packed "attack shift 0x7F" into ADSR1's
@@ -509,7 +516,7 @@ impl Adsr {
 
     /// Percussive one-shot -- blips, UI clicks, hit SFX. Instant attack
     /// to full, then a snappy exponential fade in the sustain phase
-    /// (~150ms), so the voice silences itself without a key_off.
+    /// (~150ms), so the voice silences itself without a key-off.
     pub const fn percussive() -> Self {
         Self {
             // Instant attack, no decay, sustain level max.
@@ -538,9 +545,9 @@ impl Adsr {
     /// rate -- which is the slowest the hardware encodes -- while the
     /// voice loops from the repeat address. A one-shot keyed under this
     /// envelope therefore repeats at full volume indefinitely, and
-    /// key_off does not audibly help. Measured by hardware-tests SB1 on
+    /// key-off does not audibly help. Measured by hardware-tests SB1 on
     /// console (2026-08-02): envelope 7FFF at 4.7 s with ENDX long set,
-    /// 3.7 s after key_off. The emulator zeroes the envelope at the
+    /// 3.7 s after key-off. The emulator zeroes the envelope at the
     /// terminator instead, so only silicon shows it. Use
     /// [`Adsr::percussive`] for one-shots; SB1 measured it silent within
     /// two frames on the same console.
@@ -635,7 +642,7 @@ impl Voice {
     /// Point the voice at the ADPCM sample starting at `addr`.
     /// Voice will begin playing from this address at the next key-on.
     pub fn set_start_addr(self, addr: SpuAddr) {
-        write_reg16(self.reg_base() + VOICE_START_ADDR, addr.reg_field());
+        write_reg16(self.reg_base() + VOICE_START_ADDR, addr.register_value());
     }
 
     /// Set the voice's loop (repeat) address: where playback jumps when a
@@ -644,7 +651,7 @@ impl Voice {
     /// so set it AFTER key-on to override; chaining two buffers' loop
     /// addresses is how streamed audio ping-pongs without a key-off.
     pub fn set_loop_addr(self, addr: SpuAddr) {
-        write_reg16(self.reg_base() + VOICE_REPEAT_ADDR, addr.reg_field());
+        write_reg16(self.reg_base() + VOICE_REPEAT_ADDR, addr.register_value());
     }
 
     /// Install ADSR envelope parameters on this voice.
@@ -683,10 +690,19 @@ impl Voice {
     /// begins playing each voice from its configured start address,
     /// applying its ADSR attack phase.
     ///
-    /// Example: `Voice::key_on(Voice::V0.mask() | Voice::V3.mask())`.
-    pub fn key_on(mask: u32) {
+    /// Example: `Voice::start(Voice::V0.mask() | Voice::V3.mask())`.
+    #[doc(alias = "KON")]
+    #[doc(alias = "SpuSetKey")]
+    pub fn start(mask: u32) {
         write_reg16(KEY_ON_LO, mask as u16);
         write_reg16(KEY_ON_HI, (mask >> 16) as u16);
+    }
+
+    /// Renamed to [`start`](Self::start).
+    #[deprecated(note = "renamed to `start`")]
+    #[inline(always)]
+    pub fn key_on(mask: u32) {
+        Self::start(mask)
     }
 
     /// Which voices have decoded a block carrying the END flag since ENDX was
@@ -697,12 +713,20 @@ impl Voice {
     /// repeat address says where the hardware *would* jump, not whether it
     /// did, and the 2026-08-03 SB2 capture read that register back as correct
     /// while voices were audibly running into the next sample anyway.
-    pub fn voices_ended() -> u32 {
+    #[doc(alias = "ENDX")]
+    pub fn ended_voices() -> u32 {
         read_reg16(ENDX_LO) as u32 | ((read_reg16(ENDX_HI) as u32) << 16)
     }
 
+    /// Renamed to [`ended_voices`](Self::ended_voices).
+    #[deprecated(note = "renamed to `ended_voices`")]
+    #[inline(always)]
+    pub fn voices_ended() -> u32 {
+        Self::ended_voices()
+    }
+
     /// Clear the sticky END flags for the voices in `mask`, so the next
-    /// [`Voice::voices_ended`] reports only what happened after this call.
+    /// [`Voice::ended_voices`] reports only what happened after this call.
     pub fn clear_ended(mask: u32) {
         write_reg16(ENDX_LO, mask as u16);
         write_reg16(ENDX_HI, (mask >> 16) as u16);
@@ -710,9 +734,18 @@ impl Voice {
 
     /// Stop the voices whose bits are set in `mask` -- fires the
     /// release phase of the ADSR.
-    pub fn key_off(mask: u32) {
+    #[doc(alias = "KOFF")]
+    #[doc(alias = "SpuSetKey")]
+    pub fn release(mask: u32) {
         write_reg16(KEY_OFF_LO, mask as u16);
         write_reg16(KEY_OFF_HI, (mask >> 16) as u16);
+    }
+
+    /// Renamed to [`release`](Self::release).
+    #[deprecated(note = "renamed to `release`")]
+    #[inline(always)]
+    pub fn key_off(mask: u32) {
+        Self::release(mask)
     }
 
     /// Route the voices whose bits are set in `mask` to the noise generator
@@ -733,7 +766,7 @@ impl Voice {
 /// Set the sound RAM address that raises the SPU IRQ when accessed.
 /// Address units are encoded by [`SpuAddr`]; this does not enable the IRQ.
 pub fn set_irq_address(address: SpuAddr) {
-    write_reg16(0x1F80_1DA4, address.reg_field());
+    write_reg16(0x1F80_1DA4, address.register_value());
 }
 
 /// Enable or disable the SPU's address IRQ without changing other controls.
@@ -752,8 +785,15 @@ pub fn enable_irq(enabled: bool) {
 }
 
 /// Whether the SPU's address IRQ latch is set.
-pub fn irq_pending() -> bool {
+pub fn is_irq_pending() -> bool {
     read_reg16(SPUSTAT) & (1 << 6) != 0
+}
+
+/// Renamed to [`is_irq_pending`].
+#[deprecated(note = "renamed to `is_irq_pending`")]
+#[inline(always)]
+pub fn irq_pending() -> bool {
+    is_irq_pending()
 }
 
 // ======================================================================
@@ -877,7 +917,7 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
     write_reg16(SPUCNT, spucnt);
     wait_spu_status(spucnt);
     write_reg16(TRANSFER_CTRL, 0x0004);
-    write_reg16(TRANSFER_ADDR, dest.reg_field());
+    write_reg16(TRANSFER_ADDR, dest.register_value());
     // SPUCNT transfer mode = DMA Write (bits 5..4 = 10), then wait for
     // the SPU to enter it. Without this the DMA can deliver the whole
     // payload to an SPU still in Stop mode -- and the smaller the
@@ -924,7 +964,7 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
     write_reg16(SPUCNT, spucnt);
     wait_spu_status(spucnt);
     write_reg16(TRANSFER_CTRL, 0x0004);
-    write_reg16(TRANSFER_ADDR, dest.reg_field());
+    write_reg16(TRANSFER_ADDR, dest.register_value());
     // Manual Write (bits 5..4 = 01), and wait for the SPU to be in it
     // before pushing a single halfword. Same reason as the DMA path.
     write_reg16(SPUCNT, spucnt | 0x0010);
@@ -1024,9 +1064,9 @@ mod tests {
     }
 
     #[test]
-    fn spu_addr_reg_field_divides_by_8() {
-        assert_eq!(SpuAddr::new(0x1000).reg_field(), 0x0200);
-        assert_eq!(SpuAddr::new(0x1008).reg_field(), 0x0201);
+    fn spu_addr_register_value_divides_by_8() {
+        assert_eq!(SpuAddr::new(0x1000).register_value(), 0x0200);
+        assert_eq!(SpuAddr::new(0x1008).register_value(), 0x0201);
     }
 
     #[test]

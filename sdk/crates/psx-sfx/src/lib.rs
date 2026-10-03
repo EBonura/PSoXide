@@ -288,12 +288,12 @@ impl OneShot {
     /// Key this one-shot on `voice`.
     ///
     /// Volume is set on every key-on rather than once at upload, because the
-    /// cutoff silences a voice by writing volume 0 and `key_on` does not
+    /// cutoff silences a voice by writing volume 0 and `start` does not
     /// restore it. Omitting this is how the demo disc's v0.11 pressing ended
     /// up with a browse blip that played exactly once and never again.
     pub fn play(&self, voice: Voice) {
         self.configure(voice);
-        Voice::key_on(voice.mask());
+        Voice::start(voice.mask());
     }
 }
 
@@ -360,13 +360,13 @@ impl LoopingSample {
     /// Configure and start this hardware loop on `voice`.
     pub fn play(&self, voice: Voice) {
         self.configure(voice);
-        Voice::key_on(voice.mask());
+        Voice::start(voice.mask());
     }
 
     /// Stop a loop and silence its voice immediately.
     pub fn stop(voice: Voice) {
         voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-        Voice::key_off(voice.mask());
+        Voice::release(voice.mask());
     }
 }
 
