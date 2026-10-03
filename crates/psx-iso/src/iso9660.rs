@@ -342,8 +342,6 @@ impl IsoBuilder {
         let cooked = self.build();
         let total_sectors = cooked.len() / SECTOR_SIZE;
         let mut bin = vec![0u8; total_sectors * RAW_SECTOR_SIZE];
-        let edc_table = build_edc_table();
-        let gf8_product = build_gf8_product_table();
         for lba in 0..total_sectors {
             let cooked_start = lba * SECTOR_SIZE;
             let raw_start = lba * RAW_SECTOR_SIZE;
@@ -377,7 +375,7 @@ impl IsoBuilder {
             // User data -- copy the cooked sector's 2048 bytes.
             sector[24..24 + SECTOR_SIZE]
                 .copy_from_slice(&cooked[cooked_start..cooked_start + SECTOR_SIZE]);
-            encode_mode2_form1_edc_ecc(sector, &edc_table, &gf8_product);
+            encode_mode2_sector(sector);
         }
         // CD-XA files: put back each sector's own subheader and data, then
         // redo EDC/ECC for its form. File LBAs follow build()'s layout.
@@ -393,12 +391,7 @@ impl IsoBuilder {
                         let start = (lba + i) * RAW_SECTOR_SIZE;
                         let sector = &mut bin[start..start + RAW_SECTOR_SIZE];
                         sector[16..].copy_from_slice(xa);
-                        if xa[2] & 0x20 != 0 {
-                            let edc = compute_edc(&sector[0x10..0x92C], &edc_table);
-                            sector[0x92C..0x930].copy_from_slice(&edc.to_le_bytes());
-                        } else {
-                            encode_mode2_form1_edc_ecc(sector, &edc_table, &gf8_product);
-                        }
+                        encode_mode2_sector(sector);
                     }
                     lba += file.content.len().div_ceil(SECTOR_SIZE).max(1);
                 }
@@ -408,129 +401,215 @@ impl IsoBuilder {
     }
 }
 
-fn encode_mode2_form1_edc_ecc(
-    sector: &mut [u8],
-    edc_table: &[u32; 256],
-    gf8_product: &[[u16; 256]; 43],
-) {
-    let edc = compute_edc(&sector[0x10..0x818], edc_table);
-    sector[0x818..0x81C].copy_from_slice(&edc.to_le_bytes());
+// ---------- Mode 2 sector protection (ECMA-130) -------------------------
+//
+// ECMA-130 gives a Mode 2 sector two protection layers on top of the
+// disc's own CIRC:
+//
+// * EDC: a 32-bit CRC over the subheader and user data. Form 1 covers
+//   0x10..0x818 and stores the CRC at 0x818; Form 2 covers 0x10..0x92C
+//   and stores it at 0x92C, the sector's last four bytes.
+// * ECC, Form 1 only: a Reed-Solomon product code over GF(2^8). The 2340
+//   bytes from the header (0x0C) to the end of the sector are read as
+//   1170 16-bit words. The low and high bytes of each word belong to two
+//   independent planes that use the same code. P parity protects 43
+//   columns of 24 words; Q parity protects 26 diagonals of 43 words that
+//   run through the data and the P parity. In Mode 2 the four header
+//   bytes count as zero for both, so a sector's ECC doesn't depend on
+//   where it sits on the disc.
 
-    let header = [sector[0x0C], sector[0x0D], sector[0x0E], sector[0x0F]];
-    sector[0x0C..0x10].fill(0);
-    calc_parity(sector, 0, 43, 19, 2 * 43, 2, gf8_product);
-    calc_parity(sector, 43 * 4, 26, 0, 2 * 44, 2 * 43, gf8_product);
-    sector[0x0C..0x10].copy_from_slice(&header);
-}
+/// Raw-sector offset of the four header bytes (BCD MSF, mode).
+const HEADER_AT: usize = 0x0C;
+/// Raw-sector offset of the first subheader copy; EDC coverage starts here.
+const SUBHEADER_AT: usize = 0x10;
+/// Raw-sector offset of the submode byte in the first subheader copy.
+const SUBMODE_AT: usize = 0x12;
+/// Submode bit 5: the sector is Form 2 (2324 data bytes, EDC only).
+const SUBMODE_FORM2: u8 = 1 << 5;
+/// Where the EDC goes in a Form 1 sector (after 2048 data bytes).
+const FORM1_EDC_AT: usize = 0x818;
+/// Where the EDC goes in a Form 2 sector (after 2324 data bytes).
+const FORM2_EDC_AT: usize = 0x92C;
 
-fn compute_edc(bytes: &[u8], table: &[u32; 256]) -> u32 {
-    let mut edc = 0u32;
-    for &byte in bytes {
-        edc = (edc >> 8) ^ table[((edc as u8) ^ byte) as usize];
-    }
-    edc
-}
+/// The EDC generator, as ECMA-130 writes it:
+/// (x^16 + x^15 + x^2 + 1) * (x^16 + x^2 + x + 1). Each factor is
+/// written here with bit n standing for x^n.
+const EDC_GENERATOR: u64 = carryless_mul(0x1_8005, 0x1_0007);
 
-fn build_edc_table() -> [u32; 256] {
+/// The generator's low 32 coefficients, bit-reversed, for a CRC that
+/// takes each byte least significant bit first.
+const EDC_POLY_LSB_FIRST: u32 = (EDC_GENERATOR as u32).reverse_bits();
+const _: () = assert!(EDC_POLY_LSB_FIRST == 0xD801_8001);
+
+/// CRC of every byte value, for the byte-at-a-time EDC loop.
+const EDC_TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
-    for (i, entry) in table.iter_mut().enumerate() {
-        let mut x = i as u32;
-        for _ in 0..8 {
-            let carry = x & 1 != 0;
-            x >>= 1;
-            if carry {
-                x ^= 0xD801_8001;
-            }
+    let mut byte = 0;
+    while byte < 256 {
+        let mut crc = byte as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ EDC_POLY_LSB_FIRST
+            } else {
+                crc >> 1
+            };
+            bit += 1;
         }
-        *entry = x;
+        table[byte] = crc;
+        byte += 1;
     }
     table
-}
+};
 
-fn build_gf8_product_table() -> [[u16; 256]; 43] {
-    let mut gf8_log = [0u8; 256];
-    let mut gf8_ilog = [0u8; 256];
-    gf8_ilog[0xFF] = 0;
-    let mut x = 1u16;
-    for (i, entry) in gf8_ilog.iter_mut().enumerate().take(0xFF) {
-        gf8_log[x as usize] = i as u8;
-        *entry = x as u8;
-        x <<= 1;
-        if x & 0x100 != 0 {
-            x ^= 0x11D;
+/// Polynomial product over GF(2): `a * b` with XOR instead of add.
+const fn carryless_mul(a: u64, b: u64) -> u64 {
+    let mut product = 0;
+    let mut bit = 0;
+    while bit < 32 {
+        if b & (1 << bit) != 0 {
+            product ^= a << bit;
         }
-    }
-
-    let mut product = [[0u16; 256]; 43];
-    for j in 0..43 {
-        let base = gf8_ilog[44 - j];
-        let yy = gf8_subfunc(base ^ 1, 0x19, &gf8_log, &gf8_ilog);
-        let xx = gf8_subfunc(
-            gf8_subfunc(base, 0x01, &gf8_log, &gf8_ilog) ^ 1,
-            0x18,
-            &gf8_log,
-            &gf8_ilog,
-        );
-        let xx = gf8_log[xx as usize] as u16;
-        let yy = gf8_log[yy as usize] as u16;
-        for i in 1..256 {
-            let log = gf8_log[i] as u16;
-            let mut px = xx + log;
-            let mut py = yy + log;
-            if px >= 255 {
-                px -= 255;
-            }
-            if py >= 255 {
-                py -= 255;
-            }
-            product[j][i] = gf8_ilog[px as usize] as u16 | ((gf8_ilog[py as usize] as u16) << 8);
-        }
+        bit += 1;
     }
     product
 }
 
-fn gf8_subfunc(mut a: u8, b: u8, gf8_log: &[u8; 256], gf8_ilog: &[u8; 256]) -> u8 {
-    if a > 0 {
-        let mut value = gf8_log[a as usize] as i16 - b as i16;
-        if value < 0 {
-            value += 255;
-        }
-        a = gf8_ilog[value as usize];
-    }
-    a
+/// ECMA-130 EDC of `bytes`: the CRC above, starting from zero, with no
+/// final inversion.
+fn edc(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0u32, |crc, &byte| {
+        (crc >> 8) ^ EDC_TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize]
+    })
 }
 
-fn calc_parity(
-    sector: &mut [u8],
-    offs: usize,
+/// GF(2^8) field polynomial x^8 + x^4 + x^3 + x^2 + 1, without its x^8
+/// term: what a doubling that overflows bit 7 folds back in.
+const GF_REDUCE: u8 = 0x1D;
+
+/// Multiply a field element by alpha (x), the field's primitive element.
+const fn gf_times_alpha(a: u8) -> u8 {
+    if a & 0x80 != 0 {
+        (a << 1) ^ GF_REDUCE
+    } else {
+        a << 1
+    }
+}
+
+/// General GF(2^8) product, by shift and add.
+const fn gf_mul(mut a: u8, mut b: u8) -> u8 {
+    let mut product = 0;
+    while b != 0 {
+        if b & 1 != 0 {
+            product ^= a;
+        }
+        a = gf_times_alpha(a);
+        b >>= 1;
+    }
+    product
+}
+
+/// The inverse of (alpha + 1), found by search. Solving the two parity
+/// equations below divides by it.
+const INV_ALPHA_PLUS_ONE: u8 = {
+    let mut candidate = 1u8;
+    while gf_mul(candidate, gf_times_alpha(1) ^ 1) != 1 {
+        candidate += 1;
+    }
+    candidate
+};
+
+/// One of the two Reed-Solomon codes, described by where its symbols sit.
+///
+/// Vector `v` takes `len` data words; data word `i` of it is word
+/// `(v * vector_step + i * symbol_step) % wrap` of the 1170-word area.
+/// Its two parity words go to `parity_at + v` and
+/// `parity_at + vectors + v`.
+struct ParityCode {
+    vectors: usize,
     len: usize,
-    j0: usize,
-    step1: usize,
-    step2: usize,
-    gf8_product: &[[u16; 256]; 43],
-) {
-    let mut src = 0x0C;
-    let mut dst = 0x81C + offs;
-    let srcmax = dst;
-    for _ in 0..len {
-        let base = src;
-        let mut x = 0u16;
-        let mut y = 0u16;
-        for row in gf8_product.iter().take(43).skip(j0) {
-            x ^= row[sector[src] as usize];
-            y ^= row[sector[src + 1] as usize];
-            src += step1;
-            if step1 == 2 * 44 && src >= srcmax {
-                src -= 2 * 1118;
+    vector_step: usize,
+    symbol_step: usize,
+    wrap: usize,
+    parity_at: usize,
+}
+
+/// P parity: 43 columns down 24 rows of 43 words (header,
+/// subheader, user data and EDC), parity words in rows 24 and 25.
+const P_CODE: ParityCode = ParityCode {
+    vectors: 43,
+    len: 24,
+    vector_step: 1,
+    symbol_step: 43,
+    wrap: 43 * 24,
+    parity_at: 43 * 24,
+};
+
+/// Q parity: 26 diagonals of 43 words over the data and P parity
+/// (26 rows of 43 words), each diagonal stepping one row down and one
+/// column right, parity words after the P parity.
+const Q_CODE: ParityCode = ParityCode {
+    vectors: 26,
+    len: 43,
+    vector_step: 43,
+    symbol_step: 44,
+    wrap: 43 * 26,
+    parity_at: 43 * 26,
+};
+
+impl ParityCode {
+    /// Compute and store both parity words of every vector, for both
+    /// byte planes, in the 2340-byte area that starts at the header.
+    ///
+    /// For a codeword `c[0..n]` (the `n - 2` data symbols, then the two
+    /// parity symbols) ECMA-130 requires
+    /// `sum c[k] = 0` and `sum alpha^(n-1-k) * c[k] = 0`.
+    /// With `s0` and `s1` those two sums over the data alone, and `p0`,
+    /// `p1` the parity symbols at alpha^1 and alpha^0:
+    /// `p0 + p1 = s0` and `alpha*p0 + p1 = s1`, so
+    /// `p0 = (s0 + s1) / (alpha + 1)` and `p1 = s0 + p0`.
+    fn encode(&self, area: &mut [u8]) {
+        for plane in 0..2 {
+            for v in 0..self.vectors {
+                let mut s0 = 0u8;
+                let mut horner = 0u8;
+                for i in 0..self.len {
+                    let word = (v * self.vector_step + i * self.symbol_step) % self.wrap;
+                    let symbol = area[2 * word + plane];
+                    s0 ^= symbol;
+                    horner = gf_times_alpha(horner) ^ symbol;
+                }
+                // Horner weighted the last data symbol by alpha^0; in the
+                // full codeword it sits two places before the end.
+                let s1 = gf_times_alpha(gf_times_alpha(horner));
+                let p0 = gf_mul(s0 ^ s1, INV_ALPHA_PLUS_ONE);
+                let p1 = s0 ^ p0;
+                area[2 * (self.parity_at + v) + plane] = p0;
+                area[2 * (self.parity_at + self.vectors + v) + plane] = p1;
             }
         }
-        sector[dst + 2 * len] = (x & 0xFF) as u8;
-        sector[dst] = (x >> 8) as u8;
-        sector[dst + 2 * len + 1] = (y & 0xFF) as u8;
-        sector[dst + 1] = (y >> 8) as u8;
-        dst += 2;
-        src = base + step2;
     }
+}
+
+/// Fill in a raw Mode 2 sector's EDC, and for Form 1 its P and Q parity.
+/// The submode byte (bit 5) picks the form; everything up to the EDC
+/// must already be in place.
+fn encode_mode2_sector(sector: &mut [u8]) {
+    debug_assert_eq!(sector.len(), RAW_SECTOR_SIZE);
+    if sector[SUBMODE_AT] & SUBMODE_FORM2 != 0 {
+        let crc = edc(&sector[SUBHEADER_AT..FORM2_EDC_AT]);
+        sector[FORM2_EDC_AT..FORM2_EDC_AT + 4].copy_from_slice(&crc.to_le_bytes());
+        return;
+    }
+    let crc = edc(&sector[SUBHEADER_AT..FORM1_EDC_AT]);
+    sector[FORM1_EDC_AT..FORM1_EDC_AT + 4].copy_from_slice(&crc.to_le_bytes());
+    let mut header = [0u8; 4];
+    header.copy_from_slice(&sector[HEADER_AT..HEADER_AT + 4]);
+    sector[HEADER_AT..HEADER_AT + 4].fill(0);
+    let area = &mut sector[HEADER_AT..];
+    P_CODE.encode(area);
+    Q_CODE.encode(area);
+    sector[HEADER_AT..HEADER_AT + 4].copy_from_slice(&header);
 }
 
 fn bin_to_bcd(value: u8) -> u8 {
@@ -675,15 +754,8 @@ mod tests {
         assert_eq!(&a[16..24], &[1, 0, 0x64, 0x01, 1, 0, 0x64, 0x01]);
         assert_eq!(a[24], 0xCD);
         assert_eq!(v[24], 0xAB);
-        let t = build_edc_table();
-        assert_eq!(
-            &v[0x818..0x81C],
-            &compute_edc(&v[0x10..0x818], &t).to_le_bytes()
-        );
-        assert_eq!(
-            &a[0x92C..0x930],
-            &compute_edc(&a[0x10..0x92C], &t).to_le_bytes()
-        );
+        assert_eq!(&v[0x818..0x81C], &edc(&v[0x10..0x818]).to_le_bytes());
+        assert_eq!(&a[0x92C..0x930], &edc(&a[0x10..0x92C]).to_le_bytes());
         // Headers still carry the absolute MSF of LBA 21 / 22 in mode 2.
         assert_eq!(&v[12..16], &[0x00, 0x02, 0x21, 0x02]);
         assert_eq!(&a[12..16], &[0x00, 0x02, 0x22, 0x02]);
@@ -856,9 +928,8 @@ mod tests {
         let mut b = IsoBuilder::new();
         b.add_file("X.DAT", b"PAYLOAD-BYTES".to_vec());
         let raw = b.build_bin();
-        let edc_table = build_edc_table();
         let sector = &raw[16 * RAW_SECTOR_SIZE..17 * RAW_SECTOR_SIZE];
-        let expected_edc = compute_edc(&sector[0x10..0x818], &edc_table).to_le_bytes();
+        let expected_edc = edc(&sector[0x10..0x818]).to_le_bytes();
         assert_eq!(&sector[0x818..0x81C], &expected_edc);
         assert!(sector[0x81C..].iter().any(|&byte| byte != 0));
     }
@@ -875,5 +946,130 @@ mod tests {
         assert_eq!(img[b16 + 12], 0x00);
         assert_eq!(img[b16 + 13], 0x02);
         assert_eq!(img[b16 + 14], 0x16);
+    }
+
+    /// FNV-1a 64 over a whole image, used to pin `build_bin` output.
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        h
+    }
+
+    /// Deterministic filler bytes (a 32-bit LCG), so payloads vary per byte.
+    fn filler(seed: u32, len: usize) -> Vec<u8> {
+        let mut s = seed;
+        (0..len)
+            .map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (s >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// Raw XA sectors: one per `(submode, seed)`, payload from `filler`.
+    fn xa_sectors(kinds: &[(u8, u32)]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for (i, &(submode, seed)) in kinds.iter().enumerate() {
+            let sub = [1, i as u8, submode, 0x01];
+            raw.extend_from_slice(&sub);
+            raw.extend_from_slice(&sub);
+            raw.extend_from_slice(&filler(seed, XA_SECTOR_SIZE - 8));
+        }
+        raw
+    }
+
+    /// Images built before the EDC/ECC encoder was rewritten from
+    /// ECMA-130, hashed. The rewrite must reproduce them byte for byte.
+    #[test]
+    fn build_bin_matches_golden_images() {
+        let empty = IsoBuilder::new().build_bin();
+
+        let mut one = IsoBuilder::new().volume_id("GOLDEN");
+        one.add_file("ONE.DAT", filler(1, 5000));
+        let one = one.build_bin();
+
+        let mut many = IsoBuilder::new();
+        many.add_file("SYSTEM.CNF", default_system_cnf());
+        many.add_file("ZERO.BIN", vec![0; 2048]);
+        many.add_file("ONES.BIN", vec![0xFF; 4097]);
+        many.add_padding_sectors(3);
+        many.add_file("TINY.TXT", b"x".to_vec());
+        many.add_file("RAND.BIN", filler(7, 3 * 2048 + 11));
+        let many = many.build_bin();
+
+        let mut xa = IsoBuilder::new();
+        xa.add_file("LEAD.DAT", filler(3, 100));
+        xa.add_xa_file(
+            "MOVIE.STR",
+            xa_sectors(&[
+                (0x08, 11),
+                (0x48, 12),
+                (0x64, 13),
+                (0x20, 14),
+                (0x08, 15),
+                (0x24, 16),
+                (0xE4, 17),
+                (0x48, 18),
+            ]),
+        )
+        .unwrap();
+        xa.add_file("TAIL.DAT", filler(5, 2048 * 2));
+        let xa = xa.build_bin();
+
+        let got = [
+            (empty.len(), fnv1a64(&empty)),
+            (one.len(), fnv1a64(&one)),
+            (many.len(), fnv1a64(&many)),
+            (xa.len(), fnv1a64(&xa)),
+        ];
+        let want: [(usize, u64); 4] = [
+            (21 * RAW_SECTOR_SIZE, 0x78C8_015E_E9F9_01A3),
+            (24 * RAW_SECTOR_SIZE, 0x5AFC_1554_D3AB_B66D),
+            (34 * RAW_SECTOR_SIZE, 0x92F9_30D2_6F43_49B0),
+            (32 * RAW_SECTOR_SIZE, 0x6643_03E0_863B_B740),
+        ];
+        assert_eq!(got, want);
+    }
+
+    /// Check every P and Q codeword of a built Form 1 sector the way a
+    /// decoder would: both ECMA-130 parity-check sums must be zero, with
+    /// the weights raised to their powers directly rather than by Horner.
+    #[test]
+    fn form1_codewords_have_zero_syndromes() {
+        let mut b = IsoBuilder::new();
+        b.add_file("RAND.BIN", filler(99, 2048));
+        let bin = b.build_bin();
+        let mut sector = bin[21 * RAW_SECTOR_SIZE..22 * RAW_SECTOR_SIZE].to_vec();
+        sector[HEADER_AT..HEADER_AT + 4].fill(0);
+        let area = &sector[HEADER_AT..];
+        let alpha_pow = |e: usize| (0..e).fold(1u8, |a, _| gf_times_alpha(a));
+        for code in [&P_CODE, &Q_CODE] {
+            let n = code.len + 2;
+            for plane in 0..2 {
+                for v in 0..code.vectors {
+                    let mut words: Vec<usize> = (0..code.len)
+                        .map(|i| (v * code.vector_step + i * code.symbol_step) % code.wrap)
+                        .collect();
+                    words.push(code.parity_at + v);
+                    words.push(code.parity_at + code.vectors + v);
+                    let (mut s0, mut s1) = (0u8, 0u8);
+                    for (k, &w) in words.iter().enumerate() {
+                        let c = area[2 * w + plane];
+                        s0 ^= c;
+                        s1 ^= gf_mul(alpha_pow(n - 1 - k), c);
+                    }
+                    assert_eq!((s0, s1), (0, 0), "vector {v} plane {plane}");
+                }
+            }
+        }
+        // P and Q together write every byte from 0x81C to the end.
+        assert_eq!(
+            2 * (Q_CODE.parity_at + 2 * Q_CODE.vectors),
+            RAW_SECTOR_SIZE - HEADER_AT
+        );
+        assert_eq!(2 * P_CODE.parity_at, 0x81C - HEADER_AT);
     }
 }
