@@ -10,5 +10,5 @@ description  = "Typed VRAM layout primitives for PS1 SDK: color, rect, tpage, CL
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

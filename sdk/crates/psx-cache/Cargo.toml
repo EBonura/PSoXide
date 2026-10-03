@@ -6,5 +6,5 @@ license.workspace = true
 repository.workspace = true
 description  = "Generic no_std/no-heap slot cache: keyed residency pool with LRU eviction and pinning."
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

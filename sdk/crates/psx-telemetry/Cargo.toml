@@ -12,5 +12,5 @@ description  = "Shared guest/host telemetry id tables plus the guest-side event 
 # it off every emitter compiles to a no-op, so shipping builds pay nothing.
 emit = []
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

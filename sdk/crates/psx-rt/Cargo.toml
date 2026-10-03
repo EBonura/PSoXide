@@ -34,5 +34,5 @@ scratchpad-stack-check = []
 # the interrupt path.
 strict-faults = []
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

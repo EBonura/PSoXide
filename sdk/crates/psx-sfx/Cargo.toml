@@ -10,5 +10,5 @@ description  = "One-shot sample playback on the PS1 SPU: a sequential sample ban
 psx-spu   = { path = "../psx-spu" }
 psx-asset = { path = "../psx-asset" }
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

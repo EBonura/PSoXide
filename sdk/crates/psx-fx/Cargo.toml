@@ -9,5 +9,5 @@ description  = "Arcade-style visual effects for the PS1 SDK: particle pools, scr
 [dependencies]
 psx-gpu = { path = "../psx-gpu" }
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true
