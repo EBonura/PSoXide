@@ -80,6 +80,9 @@ pub const CHCR_TRIGGER: u32 = 1 << 28;
 /// Write `MADR` (memory address that DMA will source from or drain to).
 #[inline(always)]
 pub fn set_madr(ch: Channel, addr: u32) {
+    if matches!(ch, Channel::Gpu) {
+        crate::gpu::run_direct_access_guard();
+    }
     unsafe { crate::write32(ch.base() + MADR_OFF, addr) }
 }
 
