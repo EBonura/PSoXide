@@ -1951,7 +1951,7 @@ fn trim_still_ends(bytes: Vec<u8>, still_percent: u8, label: &str) -> Vec<u8> {
     };
     let out = compact_animation_bytes(&parsed);
     let hz = animation.sample_rate_hz().max(1) as u32;
-    println!(
+    crate::playtest::emit_cook_output(format_args!(
         "[cook] trimmed {label}: {frames} -> {} frames (head {first}, tail {}), \
          {} -> {} B, {} -> {} ms",
         parsed.frame_count(),
@@ -1960,7 +1960,7 @@ fn trim_still_ends(bytes: Vec<u8>, still_percent: u8, label: &str) -> Vec<u8> {
         out.len(),
         1000 * frames.saturating_sub(1) as u32 / hz,
         1000 * parsed.frame_count().saturating_sub(1) as u32 / hz,
-    );
+    ));
     out
 }
 
@@ -2010,7 +2010,7 @@ fn resample_under_budget(bytes: Vec<u8>, budget_degrees: u8, label: &str) -> Vec
         1000 * (animation.frame_count().saturating_sub(1)) as u32 / source_hz.max(1) as u32;
     let target_ms =
         1000 * (parsed.frame_count().saturating_sub(1)) as u32 / target_hz.max(1) as u32;
-    println!(
+    crate::playtest::emit_cook_output(format_args!(
         "[cook] resampled {label}: {source_hz} -> {target_hz} Hz, {} -> {} frames, \
          {} -> {} B, {source_ms} -> {target_ms} ms ({:+.1}%)",
         animation.frame_count(),
@@ -2018,7 +2018,7 @@ fn resample_under_budget(bytes: Vec<u8>, budget_degrees: u8, label: &str) -> Vec
         bytes.len(),
         out.len(),
         100.0 * (target_ms as f32 - source_ms as f32) / source_ms.max(1) as f32,
-    );
+    ));
     out
 }
 

@@ -100,12 +100,12 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     let resident = super::budget::validate_resident_assets(package)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if resident.near_cap() {
-        println!(
+        crate::playtest::emit_cook_output(format_args!(
             "warning: {} (over {}% of the ceiling){}",
             resident.summary(),
             crate::playtest::budget::PLAYTEST_RESIDENT_ASSET_WARN_PERCENT,
             resident.breakdown(6),
-        );
+        ));
     }
 
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);

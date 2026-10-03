@@ -5,6 +5,11 @@
 //! then later cooker stages flatten it into PS1-friendly world surfaces,
 //! texture pages, entity spawns, and engine data.
 
+// The cook runs inside psxed-mcp, whose stdout IS the MCP JSON-RPC stream, so a
+// stray println! there breaks the client. Diagnostics go through
+// `playtest::emit_cook_output` (stderr plus the editor's capture).
+#![deny(clippy::print_stdout)]
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
