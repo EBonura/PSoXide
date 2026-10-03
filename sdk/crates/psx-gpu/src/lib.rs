@@ -124,6 +124,7 @@ const fn v_display_window_start(mode: VideoMode) -> u32 {
 
 /// Initialise the GPU: reset, set display mode, set display ranges,
 /// configure DMA direction, enable display output.
+#[doc(alias = "ResetGraph")]
 pub fn init(mode: VideoMode, res: Resolution) {
     write_gp1(gp1::RESET);
 
@@ -189,6 +190,7 @@ pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
 /// For presenting through psx-rt's queued flip, which must not block, use
 /// [`arm_draw_done`] and a closing GP0(1Fh) instead; see [`draw_done`].
 #[inline]
+#[doc(alias = "DrawSync")]
 pub fn draw_sync() {
     submit_linked_list_wait();
     psx_io::gpu::wait_dma_ready();
