@@ -1,8 +1,8 @@
-//! XBSP world rendering through PSoXide's classic-affine path.
+//! PXBSP world rendering through PSoXide's classic-affine path.
 //!
-//! Lifted from quake-psx `game/src/renderer.rs` commit 83a6349, same GPL-2
-//! authorship. Frame lifecycle, packet storage and entity ownership are
-//! caller-supplied so this module can serve both runtimes.
+//! Frame lifecycle, packet storage and entity ownership are caller-supplied,
+//! so the runtime that owns the frame decides when packets are built and
+//! when the GPU consumes them.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -14,18 +14,14 @@ use psx_engine::{
         ClipTraversal,
     },
     compose_classic_alias_transform, materialize_classic_affine_baked_light_vertices,
-    materialize_classic_affine_word_vertices, submit_classic_affine_batch,
-    submit_classic_affine_mixed_batch, submit_classic_affine_scoped_windowed_fan,
-    submit_classic_alias_model, ClassicAffineBatchSurface, ClassicAffineMixedBatchSurface,
-    ClassicAffineProfile, ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWordSourceVertex,
-    ClassicAliasFace, ClassicAliasProjectedVertex, ClassicAliasVertex,
+    materialize_classic_affine_word_vertices, submit_classic_affine_mixed_batch,
+    ClassicAffineMixedBatchSurface, ClassicAffineProfile, ClassicAffineSubmit, ClassicAffineVertex,
+    ClassicAffineWordSourceVertex,
 };
-use psx_gpu::material::TextureWindow;
-use psx_gpu::prim::ClassicTriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
-use psx_gte::scene::{self, AabbClipPlane};
+use psx_gte::scene;
 use psx_math::int32::{isqrt_i32, mul_q12_i32};
-use psx_math::{cos_q12, sin_q12};
+use psx_math::sin_q12;
 
 use crate::collision::BrushTransform;
 use crate::pxbsp::{
@@ -33,19 +29,13 @@ use crate::pxbsp::{
     PXBSP_MAX_VISIBILITY_BYTES,
 };
 use crate::pxbsp_resident::{FaceRef, PxbspResidentMap};
-use crate::resident::ResidentMap;
 use crate::{
-    CompactPlane, Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT,
-    FACE_BAKED_UV, FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID,
-    TEXTURE_NULL, TEXTURE_SKY,
+    CompactPlane, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_BAKED_UV,
+    FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED,
 };
 
 /// Packet storage used by the original renderer's double-buffered arenas.
 pub const DEFAULT_PACKET_WORDS: usize = 0x30000 / core::mem::size_of::<u32>();
-
-// ponytail: these fixed arrays match the first XBSP format and PS1 budget;
-// the PXBSP cook reports them and region paging removes the global ceilings.
-const MAX_FACE_COUNT: usize = 32_767;
 /// Initial PXBSP face-chain storage. Typical leaf PVS sets are far smaller
 /// than the whole map (E1M1 is 484/5,724); vectors may still grow for denser
 /// maps without permanently reserving two complete face tables on PS1.
@@ -176,15 +166,7 @@ fn box_fits(ancestors: &[(Vec3I16, Vec3I16)], mins: Vec3I16, maxs: Vec3I16) -> b
             || maxs.z > amaxs.z
     })
 }
-const BATCH_MAX_VERTICES: usize = 39;
-const BATCH_MAX_SURFACES: usize = 13;
 const SUBDIVISION_SCRATCH_VERTICES: usize = 12;
-const AFFINE_BATCH_VERTEX_CAPACITY: usize = BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES;
-#[cfg(target_arch = "mips")]
-const AFFINE_BATCH_WORKSPACE_BYTES: usize =
-    AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>();
-#[cfg(target_arch = "mips")]
-const _: () = assert!(AFFINE_BATCH_WORKSPACE_BYTES <= psx_engine::scratchpad::SIZE);
 
 /// PXBSP scratchpad layout: the five clip-plane records, the batch vertex
 /// workspace, then the mixed-batch writer's stack.
@@ -242,29 +224,18 @@ const _: () = assert_disjoint(&[PXBSP_CLIP_PLANES, PXBSP_BATCH, PxbspWriterStack
 type PxbspSelectionStack = ScratchpadStack<0, { psx_engine::scratchpad::SIZE }>;
 // Regions live around the selection call: none but its own stack.
 const _: () = assert_disjoint(&[PxbspSelectionStack::REGION]);
-const MAX_ALIAS_VERTICES: usize = 512;
-const MAX_RENDER_ENTITIES: usize = 512;
-const CLUT_DEFAULT: u16 = 240 << 6;
 const DUMMY_LIGHT_STYLE: usize = 64;
 // Two-level subdivision emits at most 19 packets for one source triangle;
 // 13 words covers the larger textured-Gouraud quad packet.
 const WORST_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 13;
 // A scoped windowed polygon adds its GP0(E2) selector and full-window reset.
 const WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 15;
-const ALIAS_PACKET_WORDS: usize =
-    core::mem::size_of::<ClassicTriTextured>() / core::mem::size_of::<u32>();
-const ANIMATION_FRAMES_PER_SECOND: u32 = 30;
-const SKY_SCROLL_TEXELS_PER_SECOND: u32 = 4;
-const WATER_PHASE_PER_TEXEL_Q12: u32 = 326;
-const WATER_PHASE_PER_FRAME_Q12: u32 = 22;
-const WATER_AMPLITUDE_TEXELS: i32 = 2;
-const ALIAS_MODEL_ROTATES: u8 = 8;
 const PXBSP_MATERIAL_TICKS_PER_SECOND: u16 = 60;
 const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
 const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
 /// The third-person camera exposes large, oblique floor polygons much farther
-/// from the near plane than Quake's first-person view. Keep one profile
-/// authority for every world, special-surface and alias submission so their
+/// from the near plane than a first-person view does. Keep one profile
+/// authority for every world, special-surface and model submission so their
 /// shared edges cross subdivision bands together.
 const PXBSP_RENDER_PROFILE: ClassicAffineProfile = ClassicAffineProfile::PXBSP_THIRD_PERSON;
 
@@ -275,26 +246,11 @@ pub struct Camera {
     pub angles: [i16; 3],
 }
 
-/// Camera transform retained for composing model-local alias transforms.
+/// Camera transform retained for composing model-local transforms.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ViewTransform {
     pub rotation: Mat3I16,
     pub translation: GteVec3I32,
-}
-
-/// Runtime-neutral input for one retained alias-style model instance.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct AliasEntity {
-    pub origin: Vec3I32,
-    pub angles: Vec3I16,
-    pub model_id: i16,
-    pub model_index: u16,
-    pub frame: u16,
-    pub skin: u8,
-    pub clip_mins: [i16; 3],
-    pub clip_maxs: [i16; 3],
-    pub leaf_index: u16,
-    pub light: u8,
 }
 
 /// VRAM binding resolved by the PSoXide runtime for one PXBSP material slot.
@@ -317,8 +273,6 @@ pub struct RenderStats {
     /// Visible brush faces that reveal the caller-owned scene sky.
     pub visible_sky_apertures: u16,
     pub surface_batches: u16,
-    pub visible_entities: u16,
-    pub alias_packets: u32,
     pub packets: u32,
     pub hardware_triangles: u32,
     pub unresolved_material_faces: u16,
@@ -360,7 +314,10 @@ impl PxbspFaceSelection {
     }
 }
 
-/// Configure the 320x240 projection used by the lifted XBSP renderer.
+/// Configure the 320x240 GTE projection the PXBSP world renderer assumes:
+/// screen centre (160, 120), projection-plane distance 160, and average-Z
+/// weights that turn the three- and four-vertex `SZ` sums into a quarter of
+/// their mean (`0x155 / 4096` is 1/12, `0x100 / 4096` is 1/16).
 pub fn configure_projection() {
     scene::set_screen_offset(160 << 16, 120 << 16);
     scene::set_projection_plane(160);
@@ -389,20 +346,6 @@ pub const fn pxbsp_classic_far_depth(ot_depth: u16) -> i32 {
 }
 
 const XBSP_VIEW_SCALE: i16 = XBSP_VIEW_SCALE_Q12 as i16;
-
-/// Build and load the classic XBSP camera transform.
-pub fn load_view(camera: Camera) -> ViewTransform {
-    load_view_with_coordinates(
-        camera,
-        Mat3I16 {
-            m: [
-                [0, -XBSP_VIEW_SCALE, 0],
-                [0, 0, -XBSP_VIEW_SCALE],
-                [XBSP_VIEW_SCALE, 0, 0],
-            ],
-        },
-    )
-}
 
 /// Build and load the Y-up camera transform used by PSoXide brush worlds.
 ///
@@ -1305,7 +1248,6 @@ fn lerp_vertex(
 
 pub struct Renderer {
     frame: u32,
-    face_visible: Vec<u8>,
     /// Two-bit PXBSP face state: 0 hidden, 1 PVS fallback, 2 node-owned PVS.
     pxbsp_face_state: Vec<u8>,
     pxbsp_face_count: usize,
@@ -1360,9 +1302,6 @@ pub struct Renderer {
     visible_leaf_count: usize,
     cached_visibility: Option<(u32, usize)>,
     cached_pxbsp_visibility: Option<(u32, usize)>,
-    alias_projected: Vec<ClassicAliasProjectedVertex>,
-    visible_entity_indices: Vec<u16>,
-    cached_frustum: Option<(Camera, [AabbClipPlane; 4])>,
     light_styles: [u16; DUMMY_LIGHT_STYLE + 1],
     /// Projection the brush-face frustum clip assumes (see
     /// [`Renderer::set_view_projection`]).
@@ -1386,7 +1325,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        Self::with_capacities(MAX_FACE_COUNT, MAX_ALIAS_VERTICES, MAX_RENDER_ENTITIES)
+        Self::empty()
     }
 
     /// Declare the projection the caller renders with (GTE H and screen
@@ -1476,7 +1415,7 @@ impl Renderer {
         visible_pxbsp_faces: Vec<u16>,
         frame_pxbsp_faces: Vec<u16>,
     ) -> Self {
-        let mut renderer = Self::with_capacities(0, 0, 0);
+        let mut renderer = Self::empty();
         // These chains are persistent world scratch. Allocate their exact
         // upper bound once: a first full-level PVS can exceed a small starter
         // capacity, and repeated Vec growth leaks peak space from the PS1's
@@ -1501,16 +1440,11 @@ impl Renderer {
         renderer
     }
 
-    fn with_capacities(
-        face_count: usize,
-        alias_vertex_count: usize,
-        render_entity_count: usize,
-    ) -> Self {
+    fn empty() -> Self {
         let mut light_styles = [256; DUMMY_LIGHT_STYLE + 1];
         light_styles[DUMMY_LIGHT_STYLE] = 0;
         Self {
             frame: 0,
-            face_visible: vec![0; face_count],
             pxbsp_face_state: Vec::new(),
             pxbsp_face_count: 0,
             visible_pxbsp_faces: Vec::new(),
@@ -1533,9 +1467,6 @@ impl Renderer {
             visible_leaf_count: 0,
             cached_visibility: None,
             cached_pxbsp_visibility: None,
-            alias_projected: vec![ClassicAliasProjectedVertex::default(); alias_vertex_count],
-            visible_entity_indices: Vec::with_capacity(render_entity_count),
-            cached_frustum: None,
             view_projection: ViewProjection::DEFAULT,
             pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
             frame_plane_side: Vec::new(),
@@ -1543,208 +1474,6 @@ impl Renderer {
             pxbsp_baked_overflow: (0, 0, false),
             track_sky_apertures: true,
             light_styles,
-        }
-    }
-
-    /// Materialize one world and alias-entity frame into caller-owned packets.
-    pub fn draw_frame(
-        &mut self,
-        map: &ResidentMap,
-        camera: Camera,
-        view: ViewTransform,
-        entities: &[AliasEntity],
-        rotating_yaw: i16,
-        packet_storage: &mut [u32],
-    ) -> RenderFrame {
-        scene::load_rotation(&view.rotation);
-        scene::load_translation(view.translation);
-
-        let start = packet_storage.as_mut_ptr();
-        let end = unsafe { start.add(packet_storage.len()) };
-        let mut next = start;
-        let mut stats = RenderStats::default();
-
-        let visibility_valid = self.mark_visible_faces(map, camera.origin);
-        if visibility_valid {
-            // This hot CPU-only workspace lives in the PS1's 1 KiB
-            // scratchpad while GPU DMA reads packet data from main RAM. Host
-            // builds retain an ordinary local array for parallel-safe tests.
-            #[cfg(target_arch = "mips")]
-            let batch_vertices = unsafe {
-                core::slice::from_raw_parts_mut(
-                    psx_engine::scratchpad::ptr_at::<ClassicAffineVertex>(0),
-                    AFFINE_BATCH_VERTEX_CAPACITY,
-                )
-            };
-            #[cfg(not(target_arch = "mips"))]
-            let mut batch_vertex_storage =
-                [ClassicAffineVertex::default(); AFFINE_BATCH_VERTEX_CAPACITY];
-            #[cfg(not(target_arch = "mips"))]
-            let batch_vertices = &mut batch_vertex_storage[..];
-            let mut batch_surfaces = [ClassicAffineBatchSurface::default(); BATCH_MAX_SURFACES];
-            let mut batch_vertex_count = 0usize;
-            let mut batch_surface_count = 0usize;
-            let mut batch_worst_words = 0usize;
-
-            let faces = map.faces();
-            for face_index in 0..faces.len() {
-                if self.face_visible[face_index] == 0 {
-                    continue;
-                }
-                let face = unsafe { faces.get_unchecked(face_index) };
-                let texture = unsafe { map.textures().get_unchecked(face.texture as usize) };
-                if texture.flags & (TEXTURE_INVISIBLE | TEXTURE_NULL) != 0
-                    || !front_facing(map, face, camera.origin)
-                {
-                    continue;
-                }
-
-                let vertex_count = face.vertex_count as usize;
-                if vertex_count > BATCH_MAX_VERTICES {
-                    stats.packet_overflow_avoided = true;
-                    break;
-                }
-                if texture.flags & (TEXTURE_LIQUID | TEXTURE_SKY) != 0 {
-                    if batch_surface_count != 0 {
-                        stats.surface_batches = stats.surface_batches.saturating_add(1);
-                    }
-                    let submitted = unsafe {
-                        flush_batch(
-                            batch_vertices,
-                            batch_vertex_count,
-                            &batch_surfaces,
-                            batch_surface_count,
-                            next,
-                        )
-                    };
-                    next = submitted.next_packet;
-                    stats.packets = stats.packets.wrapping_add(submitted.packets);
-                    stats.hardware_triangles = stats
-                        .hardware_triangles
-                        .wrapping_add(submitted.hardware_triangles);
-                    batch_vertex_count = 0;
-                    batch_surface_count = 0;
-                    batch_worst_words = 0;
-
-                    let face_worst_words =
-                        (vertex_count - 2) * WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE;
-                    if !packet_capacity(next, end, face_worst_words) {
-                        stats.packet_overflow_avoided = true;
-                        break;
-                    }
-                    self.materialize_face(map, face, texture, &mut batch_vertices[..vertex_count]);
-                    animate_special_surface(
-                        &mut batch_vertices[..vertex_count],
-                        texture,
-                        self.frame,
-                    );
-                    let submitted = unsafe {
-                        submit_classic_affine_scoped_windowed_fan(
-                            batch_vertices.as_mut_ptr(),
-                            vertex_count,
-                            next,
-                            texture.texture_page,
-                            CLUT_DEFAULT,
-                            special_texture_window(texture).word(),
-                            PXBSP_RENDER_PROFILE,
-                        )
-                    };
-                    next = submitted.next_packet;
-                    stats.surface_batches = stats.surface_batches.saturating_add(1);
-                    stats.packets = stats.packets.wrapping_add(submitted.packets);
-                    stats.hardware_triangles = stats
-                        .hardware_triangles
-                        .wrapping_add(submitted.hardware_triangles);
-                    stats.visible_faces = stats.visible_faces.saturating_add(1);
-                    continue;
-                }
-
-                let face_worst_words = (vertex_count - 2) * WORST_PACKET_WORDS_PER_TRIANGLE;
-                if batch_vertex_count + vertex_count > BATCH_MAX_VERTICES
-                    || batch_surface_count == BATCH_MAX_SURFACES
-                    || !packet_capacity(next, end, batch_worst_words + face_worst_words)
-                {
-                    if batch_surface_count != 0 {
-                        stats.surface_batches = stats.surface_batches.saturating_add(1);
-                    }
-                    let submitted = unsafe {
-                        flush_batch(
-                            batch_vertices,
-                            batch_vertex_count,
-                            &batch_surfaces,
-                            batch_surface_count,
-                            next,
-                        )
-                    };
-                    next = submitted.next_packet;
-                    stats.packets = stats.packets.wrapping_add(submitted.packets);
-                    stats.hardware_triangles = stats
-                        .hardware_triangles
-                        .wrapping_add(submitted.hardware_triangles);
-                    batch_vertex_count = 0;
-                    batch_surface_count = 0;
-                    batch_worst_words = 0;
-                }
-                if !packet_capacity(next, end, face_worst_words) {
-                    stats.packet_overflow_avoided = true;
-                    break;
-                }
-
-                batch_surfaces[batch_surface_count] = ClassicAffineBatchSurface {
-                    first_vertex: batch_vertex_count as u16,
-                    vertex_count: vertex_count as u16,
-                    tpage: texture.texture_page,
-                    clut: CLUT_DEFAULT,
-                };
-                self.materialize_face(
-                    map,
-                    face,
-                    texture,
-                    &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
-                );
-                batch_vertex_count += vertex_count;
-                batch_surface_count += 1;
-                batch_worst_words += face_worst_words;
-                stats.visible_faces = stats.visible_faces.saturating_add(1);
-            }
-
-            if batch_surface_count != 0 {
-                stats.surface_batches = stats.surface_batches.saturating_add(1);
-            }
-            let submitted = unsafe {
-                flush_batch(
-                    batch_vertices,
-                    batch_vertex_count,
-                    &batch_surfaces,
-                    batch_surface_count,
-                    next,
-                )
-            };
-            next = submitted.next_packet;
-            stats.packets = stats.packets.wrapping_add(submitted.packets);
-            stats.hardware_triangles = stats
-                .hardware_triangles
-                .wrapping_add(submitted.hardware_triangles);
-        }
-
-        if visibility_valid && !stats.packet_overflow_avoided {
-            next = self.draw_entities(
-                map,
-                entities,
-                rotating_yaw,
-                camera,
-                view,
-                next,
-                end,
-                &mut stats,
-            );
-        }
-
-        let packet_words = unsafe { next.offset_from(start) as usize };
-        self.frame = self.frame.wrapping_add(1);
-        RenderFrame {
-            stats,
-            packet_words,
         }
     }
 
@@ -2227,54 +1956,6 @@ impl Renderer {
         }
     }
 
-    fn materialize_face(
-        &self,
-        map: &ResidentMap,
-        face: Face,
-        texture: TextureInfo,
-        output: &mut [ClassicAffineVertex],
-    ) {
-        let first = face.first_vertex as usize;
-        let baked_uv = face.flags & FACE_BAKED_UV != 0;
-        let baked_light = face.flags & FACE_BAKED_LIGHT != 0;
-        let style0 = self.light_styles[face.light_styles[0] as usize];
-        let style1 = self.light_styles[face.light_styles[1] as usize];
-        let source = map.vertex_data();
-        let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
-        let source_ptr = unsafe { source.as_ptr().add(source_offset) };
-        debug_assert_eq!(source_ptr as usize & 3, 0);
-        if baked_light && !baked_uv {
-            unsafe {
-                materialize_classic_affine_baked_light_vertices(
-                    source_ptr.cast::<ClassicAffineWordSourceVertex>(),
-                    output.len(),
-                    output.as_mut_ptr(),
-                    [texture.atlas.x, texture.atlas.y],
-                );
-            }
-        } else {
-            unsafe {
-                materialize_classic_affine_word_vertices(
-                    source_ptr.cast::<ClassicAffineWordSourceVertex>(),
-                    output.len(),
-                    output.as_mut_ptr(),
-                    [texture.atlas.x, texture.atlas.y],
-                    [style0, style1],
-                    baked_uv,
-                    baked_light,
-                );
-            }
-        }
-        if baked_light {
-            // ponytail: commit 83a6349 maps can carry grayscale bake overflow
-            // in the GP0 command byte; saturate until the cooker clamps and
-            // regenerated assets make every baked color a clean RGB24 word.
-            for vertex in output {
-                vertex.color = normalize_baked_color(vertex.color);
-            }
-        }
-    }
-
     /// Whether this map's baked vertex colours carry the legacy overflow
     /// marker (see [`normalize_baked_color`]). One scan of the vertex lump
     /// the first time a map is drawn; the answer is cached on the lump's
@@ -2579,203 +2260,6 @@ impl Renderer {
             let z = core::ptr::read(base.add(1).cast::<i16>());
             [xy as i16, (xy >> 16) as i16, z]
         })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_entities(
-        &mut self,
-        map: &ResidentMap,
-        entities: &[AliasEntity],
-        rotating_yaw: i16,
-        camera: Camera,
-        view: ViewTransform,
-        mut next: *mut u32,
-        end: *mut u32,
-        stats: &mut RenderStats,
-    ) -> *mut u32 {
-        self.visible_entity_indices.clear();
-        let frustum = if let Some((cached_camera, cached_frustum)) = self.cached_frustum {
-            if cached_camera == camera {
-                cached_frustum
-            } else {
-                let frustum = view_frustum(camera);
-                self.cached_frustum = Some((camera, frustum));
-                frustum
-            }
-        } else {
-            let frustum = view_frustum(camera);
-            self.cached_frustum = Some((camera, frustum));
-            frustum
-        };
-        scene::load_aabb_clip4(&frustum);
-        for (index, entity) in entities.iter().enumerate() {
-            if !self.point_visible(entity.leaf_index as usize) {
-                continue;
-            }
-            if !scene::is_aabb_outside_clip4(entity.clip_mins, entity.clip_maxs, &frustum, 0x0f) {
-                if self.visible_entity_indices.len() == self.visible_entity_indices.capacity() {
-                    stats.packet_overflow_avoided = true;
-                    break;
-                }
-                self.visible_entity_indices.push(index as u16);
-            }
-        }
-
-        let models = map.alias_models();
-        for visible in 0..self.visible_entity_indices.len() {
-            let entity = &entities[self.visible_entity_indices[visible] as usize];
-            let Some(model) = models.model_at(entity.model_index as usize) else {
-                continue;
-            };
-            debug_assert_eq!(model.header().id, entity.model_id);
-            let header = model.header();
-            let face_count = header.triangle_count as usize;
-            let Some(worst_words) = face_count.checked_mul(ALIAS_PACKET_WORDS) else {
-                stats.packet_overflow_avoided = true;
-                break;
-            };
-            if !packet_capacity(next, end, worst_words) {
-                stats.packet_overflow_avoided = true;
-                break;
-            }
-
-            let frame = (entity.frame as usize).min(header.frame_count as usize - 1);
-            let skin = (entity.skin as usize).min(header.skin_count as usize - 1);
-            let vertices = model
-                .frame_bytes(frame)
-                .expect("validated alias-model frame");
-            let faces = model
-                .triangle_bytes(skin)
-                .expect("validated alias-model skin");
-            debug_assert_eq!(vertices.len(), header.vertex_count as usize * 3);
-            debug_assert_eq!(
-                faces.len(),
-                face_count * core::mem::size_of::<ClassicAliasFace>()
-            );
-            debug_assert_eq!(faces.as_ptr() as usize & 3, 0);
-
-            let yaw = if header.flags & ALIAS_MODEL_ROTATES != 0 {
-                rotating_yaw
-            } else {
-                entity.angles.y
-            };
-            let model_rotation = Mat3I16::rotate_z((yaw as u16) >> 4)
-                .mul(&Mat3I16::rotate_y((entity.angles.x as u16) >> 4));
-            let (rotation, translation) = compose_classic_alias_transform(
-                view.rotation,
-                view.translation,
-                model_rotation,
-                GteVec3I16::new(header.offset.x, header.offset.y, header.offset.z),
-                GteVec3I32::new(
-                    entity.origin.x >> 12,
-                    entity.origin.y >> 12,
-                    entity.origin.z >> 12,
-                ),
-                GteVec3I16::new(header.scale.x, header.scale.y, header.scale.z),
-            );
-            scene::load_rotation(&rotation);
-            scene::load_translation(translation);
-            let light = entity.light as u32;
-            let tint = light | (light << 8) | (light << 16);
-            let submitted = unsafe {
-                submit_classic_alias_model(
-                    vertices.as_ptr().cast::<ClassicAliasVertex>(),
-                    header.vertex_count as usize,
-                    faces.as_ptr().cast::<ClassicAliasFace>(),
-                    face_count,
-                    self.alias_projected.as_mut_ptr(),
-                    next,
-                    header.skins[skin].texture_page,
-                    CLUT_DEFAULT,
-                    tint,
-                    PXBSP_RENDER_PROFILE,
-                )
-            };
-            next = submitted.next_packet;
-            stats.visible_entities = stats.visible_entities.saturating_add(1);
-            stats.alias_packets = stats.alias_packets.wrapping_add(submitted.packets);
-            stats.packets = stats.packets.wrapping_add(submitted.packets);
-            stats.hardware_triangles = stats
-                .hardware_triangles
-                .wrapping_add(submitted.hardware_triangles);
-        }
-        next
-    }
-
-    fn point_visible(&self, leaf_index: usize) -> bool {
-        if leaf_index == 0 {
-            return false;
-        }
-        let visible_index = leaf_index - 1;
-        visible_index < self.visible_leaf_count
-            && self.visibility[visible_index >> 3] & (1 << (visible_index & 7)) != 0
-    }
-
-    fn mark_visible_faces(&mut self, map: &ResidentMap, point: Vec3I32) -> bool {
-        self.cached_pxbsp_visibility = None;
-        let faces = map.faces();
-        if faces.len() > self.face_visible.len() {
-            return false;
-        }
-        let Some(leaf_index) = map.point_leaf_index(point) else {
-            self.cached_visibility = None;
-            self.visible_leaf_count = 0;
-            return false;
-        };
-        if leaf_index == 0 {
-            self.cached_visibility = None;
-            self.visible_leaf_count = 0;
-            return false;
-        }
-        if self.cached_visibility == Some((map.generation(), leaf_index)) {
-            return true;
-        }
-        self.face_visible[..faces.len()].fill(0);
-        let leaf = map.leaves().get(leaf_index).expect("validated leaf");
-        if leaf.visibility_offset < 0 {
-            self.cached_visibility = None;
-            self.visible_leaf_count = 0;
-            return false;
-        }
-
-        let world = map.brush_models().get(0).expect("validated world model");
-        let visible_leaves = world.visible_leaves.max(0) as usize;
-        let row_bytes = (visible_leaves + 7) >> 3;
-        if row_bytes > self.visibility.len() {
-            self.cached_visibility = None;
-            self.visible_leaf_count = 0;
-            return false;
-        }
-        self.visibility.fill(0);
-        if !decompress_visibility(
-            map.visibility(),
-            leaf.visibility_offset as usize,
-            &mut self.visibility[..row_bytes],
-        ) {
-            self.cached_visibility = None;
-            self.visible_leaf_count = 0;
-            return false;
-        }
-
-        let leaves = map.leaves();
-        let marks = map.mark_surfaces();
-        for visible_index in 0..visible_leaves {
-            if self.visibility[visible_index >> 3] & (1 << (visible_index & 7)) == 0 {
-                continue;
-            }
-            let Some(leaf) = leaves.get(visible_index + 1) else {
-                return false;
-            };
-            let start = leaf.first_mark_surface as usize;
-            let end = start + leaf.mark_surface_count as usize;
-            for mark_index in start..end {
-                let face = marks.get(mark_index).expect("validated mark surface") as usize;
-                self.face_visible[face] = 1;
-            }
-        }
-        self.visible_leaf_count = visible_leaves;
-        self.cached_visibility = Some((map.generation(), leaf_index));
-        true
     }
 
     // Out of line on purpose: inlined into the scene render these per-frame
@@ -3371,118 +2855,6 @@ impl Default for Renderer {
     }
 }
 
-fn view_frustum(camera: Camera) -> [AabbClipPlane; 4] {
-    let yaw = camera.angles[1] as u16 & 0x0fff;
-    let pitch = camera.angles[0] as u16 & 0x0fff;
-    let roll = camera.angles[2] as u16 & 0x0fff;
-    let sy = sin_q12(yaw);
-    let cy = cos_q12(yaw);
-    let sp = sin_q12(pitch);
-    let cp = cos_q12(pitch);
-    let sr = sin_q12(roll);
-    let cr = cos_q12(roll);
-    let multiply = |left: i32, right: i32| mul_q12_i32(left, right);
-    let clamp = |value: i32| value.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-
-    let forward = [clamp(multiply(cp, cy)), clamp(multiply(cp, sy)), clamp(-sp)];
-    let right = [
-        clamp(multiply(multiply(-sr, sp), cy) + multiply(-cr, -sy)),
-        clamp(multiply(multiply(-sr, sp), sy) + multiply(-cr, cy)),
-        clamp(multiply(-sr, cp)),
-    ];
-    let up = [
-        clamp(multiply(multiply(cr, sp), cy) + multiply(-sr, -sy)),
-        clamp(multiply(multiply(cr, sp), sy) + multiply(-sr, cy)),
-        clamp(multiply(cr, cp)),
-    ];
-    let normals = [
-        add_normal(forward, right),
-        subtract_normal(forward, right),
-        add_normal(forward, up),
-        subtract_normal(forward, up),
-    ];
-    normals.map(|normal| {
-        let distance = mul_q12_i32(camera.origin.x, normal[0] as i32)
-            .saturating_add(mul_q12_i32(camera.origin.y, normal[1] as i32))
-            .saturating_add(mul_q12_i32(camera.origin.z, normal[2] as i32));
-        let signbits = u8::from(normal[0] < 0)
-            | (u8::from(normal[1] < 0) << 1)
-            | (u8::from(normal[2] < 0) << 2);
-        AabbClipPlane {
-            normal,
-            kind: 3,
-            signbits,
-            distance,
-        }
-    })
-}
-
-fn add_normal(left: [i16; 3], right: [i16; 3]) -> [i16; 3] {
-    [
-        left[0].saturating_add(right[0]),
-        left[1].saturating_add(right[1]),
-        left[2].saturating_add(right[2]),
-    ]
-}
-
-fn subtract_normal(left: [i16; 3], right: [i16; 3]) -> [i16; 3] {
-    [
-        left[0].saturating_sub(right[0]),
-        left[1].saturating_sub(right[1]),
-        left[2].saturating_sub(right[2]),
-    ]
-}
-
-fn animate_special_surface(vertices: &mut [ClassicAffineVertex], texture: TextureInfo, frame: u32) {
-    if texture.flags & TEXTURE_LIQUID != 0 {
-        let time_phase = frame.wrapping_mul(WATER_PHASE_PER_FRAME_Q12);
-        for vertex in vertices {
-            let local_u = vertex.uv[0].wrapping_sub(texture.atlas.x) as u32;
-            let local_v = vertex.uv[1].wrapping_sub(texture.atlas.y) as u32;
-            let u_phase = ((local_v
-                .wrapping_mul(WATER_PHASE_PER_TEXEL_Q12)
-                .wrapping_add(time_phase))
-                & 0x0fff) as u16;
-            let v_phase = ((local_u
-                .wrapping_mul(WATER_PHASE_PER_TEXEL_Q12)
-                .wrapping_add(time_phase))
-                & 0x0fff) as u16;
-            let u_offset = (sin_q12(u_phase) * WATER_AMPLITUDE_TEXELS) >> 12;
-            let v_offset = (sin_q12(v_phase) * WATER_AMPLITUDE_TEXELS) >> 12;
-            vertex.uv[0] = vertex.uv[0].wrapping_add(u_offset as u8);
-            vertex.uv[1] = vertex.uv[1].wrapping_add(v_offset as u8);
-        }
-    } else if texture.flags & TEXTURE_SKY != 0 {
-        let scroll = frame.wrapping_mul(SKY_SCROLL_TEXELS_PER_SECOND) / ANIMATION_FRAMES_PER_SECOND;
-        for vertex in vertices {
-            vertex.uv[0] = vertex.uv[0].wrapping_add(scroll as u8);
-        }
-    }
-}
-
-fn special_texture_window(texture: TextureInfo) -> TextureWindow {
-    let width = (texture.size.x.max(4) as u16 * 2).min(128) as u8;
-    let mask_x = texture_window_mask(width);
-    let offset_x = texture.atlas.x / 8;
-    if texture.flags & TEXTURE_LIQUID != 0 {
-        let height = (texture.size.y.max(8) as u16).min(128) as u8;
-        TextureWindow::new(
-            mask_x,
-            texture_window_mask(height),
-            offset_x,
-            texture.atlas.y / 8,
-        )
-    } else {
-        // The legacy atlas may place sky rows at a non-window-aligned Y.
-        // Only U scrolls, so leave V unmasked and preserve its exact address.
-        TextureWindow::new(mask_x, 0, offset_x, 0)
-    }
-}
-
-fn texture_window_mask(size: u8) -> u8 {
-    (((!(size - 1)) as u16 & 0x00ff) as u8) / 8
-}
-
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct PxbspMaterialState {
     texture_page: u16,
@@ -3689,32 +3061,6 @@ fn packet_capacity(next: *mut u32, end: *mut u32, needed_words: usize) -> bool {
     remaining >= 0 && needed_words <= remaining as usize
 }
 
-unsafe fn flush_batch(
-    vertices: &mut [ClassicAffineVertex],
-    vertex_count: usize,
-    surfaces: &[ClassicAffineBatchSurface],
-    surface_count: usize,
-    output: *mut u32,
-) -> ClassicAffineSubmit {
-    if vertex_count == 0 || surface_count == 0 {
-        return ClassicAffineSubmit {
-            next_packet: output,
-            packets: 0,
-            hardware_triangles: 0,
-        };
-    }
-    unsafe {
-        submit_classic_affine_batch(
-            vertices.as_mut_ptr(),
-            vertex_count,
-            surfaces.as_ptr(),
-            surface_count,
-            output,
-            PXBSP_RENDER_PROFILE,
-        )
-    }
-}
-
 unsafe fn flush_pxbsp_batch(
     vertices: &mut [ClassicAffineVertex],
     vertex_count: usize,
@@ -3744,12 +3090,6 @@ unsafe fn flush_pxbsp_batch(
             )
         })
     }
-}
-
-fn front_facing(map: &ResidentMap, face: Face, point: Vec3I32) -> bool {
-    let plane = unsafe { map.planes().get_unchecked(face.plane as usize) };
-    let behind = plane_distance(plane, point) < 0;
-    behind == (face.flags & FACE_BACKSIDE != 0)
 }
 
 /// `MVMVA(mx=LLM, vx=V0, cv=none, sf=0, lm=0)`: three plane dots at once.
@@ -3859,18 +3199,6 @@ fn front_facing_pxbsp(map: &PxbspResidentMap, plane: usize, flags: u16, point: V
     plane_behind_point(map, plane, point) == (flags & FACE_BACKSIDE != 0)
 }
 
-fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
-    let dot = match plane.kind {
-        0 => point.x,
-        1 => point.y,
-        2 => point.z,
-        _ => mul_q12_i32(point.x, plane.normal.x as i32)
-            .saturating_add(mul_q12_i32(point.y, plane.normal.y as i32))
-            .saturating_add(mul_q12_i32(point.z, plane.normal.z as i32)),
-    };
-    dot.saturating_sub(plane.distance)
-}
-
 #[inline(always)]
 fn compact_plane_distance(plane: CompactPlane, point: Vec3I32) -> i32 {
     let dot = match plane.kind {
@@ -3905,6 +3233,8 @@ fn scale_baked_color_q7(color: u32, scale_q7: u8) -> u32 {
 mod tests {
     use super::*;
     use crate::pxbsp::PxbspLumpKind;
+    use psx_gpu::material::TextureWindow;
+    use psx_math::cos_q12;
 
     #[test]
     fn exact_view_rotation_matches_the_table_form_at_table_angles() {
@@ -4486,7 +3816,6 @@ mod tests {
     #[test]
     fn pxbsp_renderer_allocates_exact_world_scratch() {
         let renderer = Renderer::new_pxbsp_with_capacities(37, 11, 9);
-        assert!(renderer.face_visible.is_empty());
         assert_eq!(renderer.pxbsp_face_count, 37);
         assert_eq!(renderer.pxbsp_face_state.len(), 10);
         assert_eq!(renderer.visible_pxbsp_faces.len(), 0);
@@ -4496,8 +3825,6 @@ mod tests {
         assert_eq!(renderer.frame_pxbsp_face_state.len(), 10);
         assert_eq!(renderer.pxbsp_node_visible.len(), 2);
         assert_eq!(renderer.pxbsp_node_discovered.len(), 2);
-        assert!(renderer.alias_projected.is_empty());
-        assert_eq!(renderer.visible_entity_indices.capacity(), 0);
     }
 
     #[test]
