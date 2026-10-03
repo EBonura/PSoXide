@@ -2,7 +2,7 @@
 //!
 //! Each tone is a single 16-byte ADPCM block with self-loop flags
 //! set (0x07 = loop end + repeat + loop start), so the SPU
-//! sustains the waveform until [`crate::Voice::key_off`]. Native
+//! sustains the waveform until [`crate::Voice::release`]. Native
 //! playback frequency at [`crate::Pitch::UNITY`] is ~1575 Hz
 //! (44100 / 28 samples per loop); use [`crate::Pitch::for_frequency`]
 //! to tune to a specific note.

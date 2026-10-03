@@ -166,7 +166,7 @@ fn main() {
 
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
 
-    // Edge-detect pad state so we only key_on / key_off on transitions
+    // Edge-detect pad state so we only start voices on transitions
     // -- otherwise we'd retrigger the attack phase every frame, which
     // sounds like a constant click.
     let mut prev_pad = ButtonState::NONE;
@@ -186,7 +186,7 @@ fn main() {
             }
         }
         if on_mask != 0 {
-            Voice::key_on(on_mask);
+            Voice::start(on_mask);
         }
         prev_pad = pad;
         for flash in flashes.iter_mut() {
