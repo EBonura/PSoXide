@@ -1,12 +1,10 @@
-//! Quake's view-direction layered-sky projection.
+//! View-direction sky projection: the two-layer scrolling sky and the cube
+//! sky.
 //!
 //! Sky brush polygons define only the aperture through which the sky is seen.
 //! Their authored surface UVs must not make the sky appear attached to nearby
-//! geometry. This module is kept renderer-neutral so PSoXide and Quake-PSX can
-//! use one integer projection and one seam-safe packet UV policy.
-//!
-//! Ported from `quake-core/src/sky.rs` at Quake-PSX revision
-//! `e32f6f66cff1759954f224846ce0b326c3d55d30` (GPL-2, same authorship).
+//! geometry. This module is kept renderer-neutral so every runtime uses one
+//! integer projection and one seam-safe packet UV policy.
 
 use psx_math::int32::isqrt_i32;
 
@@ -135,40 +133,29 @@ const _: () = assert!(
 const _: () =
     assert!(core::mem::size_of::<QuadTextured>() == SKY_QUAD_WORDS * core::mem::size_of::<u32>());
 
-/// Return signed material-relative texel coordinates for a Quake sky ray.
+/// Signed material-relative texel offsets for a sky view ray (X, Y
+/// horizontal, Z up).
 ///
-/// Keeping this signed until a small raster cell is emitted is important.
-/// Casting a whole dome corner to `u8` can cross the byte seam and make the
-/// PS1 interpolate through most of the texture between adjacent vertices.
-pub fn directional_texel(mut direction: [i32; 3], layer_width: u8) -> [i32; 2] {
-    direction[2] = direction[2].saturating_mul(3);
-
-    // Keep the squared length inside i32 without changing the direction.
-    while direction[0]
-        .unsigned_abs()
-        .max(direction[1].unsigned_abs())
-        .max(direction[2].unsigned_abs())
-        > 16_000
-    {
-        direction[0] >>= 1;
-        direction[1] >>= 1;
-        direction[2] >>= 1;
+/// The sky reads as a dome flattened toward the horizon: the ray's vertical
+/// component is weighted three times before the ray is normalised, so rays
+/// near the horizon spread across the layer while rays near the zenith
+/// barely move. A unit horizontal component then spans 378 texels of a
+/// 128-texel layer, scaled to `layer_width`.
+///
+/// The result stays signed until a small raster cell is emitted. Casting a
+/// whole dome corner to `u8` can cross the byte seam and make the PS1
+/// interpolate through most of the texture between adjacent vertices.
+pub fn directional_texel(direction: [i32; 3], layer_width: u8) -> [i32; 2] {
+    let mut ray = [direction[0], direction[1], direction[2].saturating_mul(3)];
+    // Only the direction matters: halve the ray until every component is
+    // below 2^14, which keeps the squared length and the scaled products
+    // below in 32 bits.
+    while ray.iter().any(|c| c.unsigned_abs() >= 1 << 14) {
+        ray = [ray[0] >> 1, ray[1] >> 1, ray[2] >> 1];
     }
-
-    let length_squared = direction[0]
-        .saturating_mul(direction[0])
-        .saturating_add(direction[1].saturating_mul(direction[1]))
-        .saturating_add(direction[2].saturating_mul(direction[2]));
-    let length = isqrt_i32(length_squared).max(1);
-    let denominator = length * 128;
-    let project = |component: i32| {
-        // Original Quake uses `6 * 63 / length` against a 128-texel layer.
-        // Preserve that projection while scaling it to the selected sky mip.
-        let numerator = component * 378 * i32::from(layer_width);
-        numerator / denominator
-    };
-
-    [project(direction[0]), project(direction[1])]
+    let length = isqrt_i32(ray[0] * ray[0] + ray[1] * ray[1] + ray[2] * ray[2]).max(1);
+    let scale = |component: i32| component * 378 * i32::from(layer_width) / (128 * length);
+    [scale(ray[0]), scale(ray[1])]
 }
 
 /// Recover a world-space viewing ray from one screen coordinate.
