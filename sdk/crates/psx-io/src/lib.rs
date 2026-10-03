@@ -25,6 +25,7 @@ pub mod dma;
 pub mod gpu;
 pub mod gte;
 pub mod irq;
+pub mod periph;
 pub mod sio;
 pub mod spu;
 pub mod timers;
