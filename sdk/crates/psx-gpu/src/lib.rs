@@ -53,6 +53,7 @@ use psx_hw::gpu::pack_texcoord;
 use psx_hw::gpu::{gp0, gp1, pack_color, pack_vertex, pack_xy};
 use psx_io::dma::{self, Channel};
 use psx_io::gpu::{wait_cmd_ready, write_gp0, write_gp1};
+use psx_io::periph::GpuDma;
 use psx_io::timers;
 
 /// Video standard.
@@ -706,15 +707,22 @@ pub const MAX_NODE_WORDS: usize = 16;
 ///
 /// Returns as soon as the DMA transfer is started, so the CPU can do
 /// other work (build the next frame, run a sim tick) while the GPU
-/// rasterises this one. The caller MUST call [`submit_linked_list_wait`]
-/// before reusing the chain's backing storage or the ordering table,
-/// and the chain memory must stay live until that wait returns.
+/// rasterises this one. A walk already running on the channel is waited
+/// out first (or aborted if it wedged).
 ///
-/// `head` must point at a 4-byte-aligned RAM address; the DMA
-/// controller clocks bits 23..=0 of the 32-bit tag as the next-
-/// node address and bits 31..=24 as that packet's data-word count,
-/// which must not exceed [`MAX_NODE_WORDS`].
-pub fn submit_linked_list_async(head: *const u32) {
+/// This is the unchecked layer under [`ot::OtFrame`], [`ot::FrameStorage`]
+/// and [`submit_static`], which prove the contract below with lifetimes.
+///
+/// # Safety
+///
+/// `head` must point at a 4-byte-aligned node tag in RAM. Each tag holds
+/// the next node's address in bits 23..=0 (`0x00FF_FFFF` ends the list) and
+/// its payload word count, at most [`MAX_NODE_WORDS`], in bits 31..=24.
+/// Every node reachable from `head`, and its payload, must stay live and
+/// unmodified until [`submit_linked_list_wait`] returns (or a later kick,
+/// which waits for this walk first).
+#[doc(alias = "DrawOTag")]
+pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
     // A completed DMA walk does not imply that the GPU has finished
     // rasterising the commands it consumed. Do not call `draw_sync()` here:
     // channel 2's request handshake can queue the next list behind that work,
@@ -737,9 +745,10 @@ pub fn submit_linked_list_async(head: *const u32) {
     // VRAM readback and forget to reset it.
     write_gp1(gp1::dma_direction(2));
     dma::enable_channel(Channel::Gpu);
-    // SAFETY: none yet; this function's caller supplies `head` unchecked.
-    // The channel is idle (waited out or aborted above). `dma::start`
-    // publishes the payload and tag stores before the CHCR store.
+    // SAFETY: the channel is idle (waited out or aborted above); the caller
+    // keeps the chain live and unmodified until the walk is waited out.
+    // `dma::start` publishes the payload and tag stores before the CHCR
+    // store.
     unsafe {
         dma::start(
             Channel::Gpu,
@@ -752,6 +761,19 @@ pub fn submit_linked_list_async(head: *const u32) {
             },
         )
     };
+}
+
+/// Safe-signature form of [`submit_linked_list_raw_async`].
+///
+/// Nothing ties `head` to live memory, which is why
+/// [`ot::OrderingTable::frame`] replaces it. The contract of
+/// [`submit_linked_list_raw_async`] applies all the same.
+// Kept safe for existing callers until they move to the frame API; this
+// is exactly the hole the lint names.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn submit_linked_list_async(head: *const u32) {
+    // SAFETY: none; the caller carries the raw contract unchecked.
+    unsafe { submit_linked_list_raw_async(head) }
 }
 
 /// Block until the GPU-DMA linked-list walk kicked by
@@ -788,16 +810,110 @@ fn dma_memory_barrier() {
 
 /// Submit a linked-list chain starting at `head` to GPU GP0 via
 /// DMA channel 2 in linked-list mode. Blocks until the walker hits
-/// the `0x00FFFFFF` terminator.
+/// the `0x00FFFFFF` terminator (or aborts a wedged walk).
 ///
-/// This is [`submit_linked_list_async`] immediately followed by
-/// [`submit_linked_list_wait`]; callers that want to overlap the GPU
-/// draw with CPU work should use the two halves directly.
+/// This is [`submit_linked_list_raw_async`] immediately followed by
+/// [`submit_linked_list_wait`].
 ///
-/// `head` must point at a 4-byte-aligned RAM address; the DMA
-/// controller clocks bits 23..=0 of the 32-bit tag as the next-
-/// node address and bits 31..=24 as that packet's data-word count.
-pub fn submit_linked_list(head: *const u32) {
-    submit_linked_list_async(head);
+/// # Safety
+///
+/// As [`submit_linked_list_raw_async`], for the duration of this call.
+#[doc(alias = "DrawOTag")]
+pub unsafe fn submit_linked_list_raw(head: *const u32) {
+    // SAFETY: forwarded contract; the wait below ends the walk before return.
+    unsafe { submit_linked_list_raw_async(head) };
     submit_linked_list_wait();
+}
+
+/// Safe-signature form of [`submit_linked_list_raw`].
+///
+/// Nothing ties `head` to live memory, which is why
+/// [`ot::OrderingTable::frame`] replaces it. The contract of
+/// [`submit_linked_list_raw`] applies all the same.
+// Kept safe for existing callers until they move to the frame API; this
+// is exactly the hole the lint names.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn submit_linked_list(head: *const u32) {
+    // SAFETY: none; the caller carries the raw contract unchecked.
+    unsafe { submit_linked_list_raw(head) }
+}
+
+/// One immutable linked-list node: `W` GP0 words, then the end of the list.
+///
+/// Built in a `static`, it is a chain that stays valid for the whole run, so
+/// [`submit_static`] can kick it from safe code without waiting.
+///
+/// ```
+/// use psx_gpu::StaticPacket;
+/// // GP0(E1h) draw mode, then GP0(1Fh).
+/// static MODE_THEN_IRQ: StaticPacket<2> = StaticPacket::new([0xE100_0000, 0x1F00_0000]);
+/// assert_eq!(MODE_THEN_IRQ.words(), &[0xE100_0000, 0x1F00_0000]);
+/// ```
+#[repr(C, align(4))]
+pub struct StaticPacket<const W: usize> {
+    tag: u32,
+    words: [u32; W],
+}
+
+impl<const W: usize> StaticPacket<W> {
+    /// A node carrying `words` that ends the list.
+    pub const fn new(words: [u32; W]) -> Self {
+        const { assert!(W <= MAX_NODE_WORDS, "packet longer than one GPU DMA node") };
+        Self {
+            tag: ((W as u32) << 24) | 0x00FF_FFFF,
+            words,
+        }
+    }
+
+    /// The payload words.
+    pub const fn words(&self) -> &[u32; W] {
+        &self.words
+    }
+
+    /// The node's tag word, the address a chain links to.
+    #[inline]
+    pub fn as_ptr(&self) -> *const u32 {
+        &self.tag
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A complete, immutable linked list: [`StaticPacket`] or [`DrawDoneNode`].
+///
+/// Sealed: implementors guarantee that a shared reference to them is a
+/// whole chain whose nodes never change while the reference lives.
+pub trait StaticChain: sealed::Sealed {
+    /// Address of the first node's tag.
+    fn head(&self) -> *const u32;
+}
+
+impl sealed::Sealed for DrawDoneNode {}
+impl StaticChain for DrawDoneNode {
+    #[inline]
+    fn head(&self) -> *const u32 {
+        self.as_ptr()
+    }
+}
+
+impl<const W: usize> sealed::Sealed for StaticPacket<W> {}
+impl<const W: usize> StaticChain for StaticPacket<W> {
+    #[inline]
+    fn head(&self) -> *const u32 {
+        self.as_ptr()
+    }
+}
+
+/// Kick a `'static`, immutable chain, such as [`DRAW_DONE_NODE`], without
+/// waiting for it.
+///
+/// The chain outlives any walk, so there is nothing to wait for before
+/// reusing memory; a later kick waits for this walk on its own.
+#[inline]
+pub fn submit_static(_dma: &mut GpuDma, chain: &'static impl StaticChain) {
+    // SAFETY: `StaticChain` guarantees a well-formed single-node list that
+    // stays live and unmodified for 'static.
+    unsafe { submit_linked_list_raw_async(chain.head()) }
 }
