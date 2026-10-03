@@ -33,5 +33,9 @@ extern "C" {
 /// Write one byte to TTY via BIOS `putchar`.
 #[inline(always)]
 pub fn putchar(ch: u8) {
+    // SAFETY: `__bios_putchar` tail-jumps into the BIOS A-table dispatcher at 0xA0 with function
+    // 0x3C (putchar), which takes the byte in $a0 and clobbers only O32 caller-saved registers.
+    // Assumes the program has not overwritten kernel RAM (the first 64 KiB), where the A-table
+    // lives.
     unsafe { __bios_putchar(ch as u32) }
 }
