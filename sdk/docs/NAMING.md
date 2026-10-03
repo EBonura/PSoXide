@@ -161,6 +161,21 @@ A rename never breaks a game that has not repinned:
    compiles with warnings that point at the new name.
 3. Once no game's main uses the old name, it is removed.
 
+The forwarder takes the form the item allows:
+
+- function or method: an `#[inline(always)]` wrapper (unsafe ones keep their
+  `# Safety` section);
+- type: a `pub type` alias; a unit struct also gets a `const` of the old
+  name so `with_dma(words, GpuDma)` still compiles;
+- enum variant: an associated `const` of the old name, which works in
+  expressions and patterns;
+- trait method: the new method is required and the old one becomes a
+  provided method that calls it;
+- module: a module of the old name whose every item is a deprecated
+  forwarder (`#[deprecated]` on a module itself warns nobody);
+- macro: a `#[macro_export]` macro of the old name that expands to the new
+  one.
+
 Public fields cannot be aliased; a field that breaks the convention gains an
 accessor method under the new name and the field itself is marked
-`#[deprecated]`.
+`#[deprecated]`. Fields of a type no game uses yet are renamed outright.
