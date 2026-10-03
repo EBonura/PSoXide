@@ -19,7 +19,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod cd;
+pub mod cop0;
 pub mod gpu;
 pub mod hash;
+pub mod irq;
+pub mod mdec;
 pub mod memory;
 pub mod sio;
+pub mod spu;
