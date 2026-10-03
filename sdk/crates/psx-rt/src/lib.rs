@@ -35,13 +35,46 @@ mod mem;
 #[cfg(target_arch = "mips")]
 pub mod bios;
 pub mod cache;
+pub mod critical_section;
 pub mod interrupts;
+mod peripherals;
 pub mod scratchpad;
 #[cfg(target_arch = "mips")]
 pub mod tty;
 
 #[cfg(feature = "alloc")]
 pub mod heap;
+
+pub use peripherals::Peripherals;
+
+/// Registers psx-rt's critical section as the `critical-section` crate's
+/// implementation, so `critical_section::with` anywhere in the program masks
+/// interrupts. Off by default: a program links at most one implementation.
+#[cfg(feature = "critical-section")]
+mod critical_section_impl {
+    struct PsxRt;
+    critical_section::set_impl!(PsxRt);
+
+    // SAFETY: psx-rt's acquire/release pair masks interrupts and restores
+    // the previous state, nesting like brackets, which is the crate's
+    // contract.
+    unsafe impl critical_section::Impl for PsxRt {
+        unsafe fn acquire() -> critical_section::RawRestoreState {
+            // SAFETY: the crate pairs every acquire with one release.
+            let state = unsafe { crate::critical_section::acquire() };
+            crate::critical_section::RestoreState::was_enabled(state)
+        }
+
+        unsafe fn release(restore: critical_section::RawRestoreState) {
+            // SAFETY: `restore` came from the matching acquire.
+            unsafe {
+                crate::critical_section::release(
+                    crate::critical_section::RestoreState::from_enabled(restore),
+                )
+            }
+        }
+    }
+}
 
 /// Post-link home for R3000 load-delay hazard trampolines.
 ///
