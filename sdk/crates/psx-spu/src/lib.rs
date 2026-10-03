@@ -897,13 +897,15 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
         dma::start(
             Channel::Spu,
             dma::Transfer {
-                madr: src,
-                bcr: dma::bcr_blocks(block_size as u16, block_count as u16),
-                chcr: dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+                address: src,
+                size: dma::size_blocks(block_size as u16, block_count as u16),
+                control: psx_hw::dma::CHCR_TO_DEVICE
+                    | psx_hw::dma::CHCR_SYNC_BLOCK
+                    | psx_hw::dma::CHCR_START,
             },
         )
     };
-    dma::wait_or_abort(Channel::Spu, dma::DEFAULT_DMA_SPINS);
+    dma::wait_or_abort(Channel::Spu, dma::DEFAULT_SPINS);
     // The channel is done handing bytes over; the SPU is still writing
     // them into sound RAM.
     wait_transfer_idle();

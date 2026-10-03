@@ -51,8 +51,9 @@ pub const DMA_BLOCK_WORDS: usize = 32;
 pub const DMA_SPINS: u32 = 400_000;
 
 // CHCR: to device / from device, block sync, start.
-const CHCR_IN: u32 = dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START;
-const CHCR_OUT: u32 = dma::CHCR_SYNC_BLOCK | dma::CHCR_START;
+const CHCR_IN: u32 =
+    psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START;
+const CHCR_OUT: u32 = psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START;
 
 /// Standard intra quantization matrix (row-major), DC entry 2.
 const QUANT_ROW_MAJOR: [u8; 64] = [
@@ -218,9 +219,9 @@ unsafe fn dma_in(words: *const u32, count: usize) {
         dma::start(
             Channel::MdecIn,
             dma::Transfer {
-                madr: words as u32,
-                bcr: dma::bcr_blocks(DMA_BLOCK_WORDS as u16, (count / DMA_BLOCK_WORDS) as u16),
-                chcr: CHCR_IN,
+                address: words as u32,
+                size: dma::size_blocks(DMA_BLOCK_WORDS as u16, (count / DMA_BLOCK_WORDS) as u16),
+                control: CHCR_IN,
             },
         )
     };
@@ -422,9 +423,9 @@ pub fn read_column(dst: &mut [u32]) -> bool {
         dma::start(
             Channel::MdecOut,
             dma::Transfer {
-                madr: dst.as_mut_ptr() as u32,
-                bcr: dma::bcr_blocks(DMA_BLOCK_WORDS as u16, blocks),
-                chcr: CHCR_OUT,
+                address: dst.as_mut_ptr() as u32,
+                size: dma::size_blocks(DMA_BLOCK_WORDS as u16, blocks),
+                control: CHCR_OUT,
             },
         )
     };

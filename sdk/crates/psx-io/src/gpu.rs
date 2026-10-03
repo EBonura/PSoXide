@@ -107,27 +107,21 @@ fn try_wait_ready(flag: GpuStat, spin_limit: u32) -> bool {
 }
 
 /// Renamed to [`write_command`].
-///
-/// Deprecation is held until psx-gpu and psx-vram, which the DMA rework
-/// owns, move to the new name.
+#[deprecated(note = "renamed to `write_command`")]
 #[inline(always)]
 pub fn write_gp0(word: u32) {
     write_command(word)
 }
 
 /// Renamed to [`write_display_control`].
-///
-/// Deprecation is held until psx-gpu and psx-vram, which the DMA rework
-/// owns, move to the new name.
+#[deprecated(note = "renamed to `write_display_control`")]
 #[inline(always)]
 pub fn write_gp1(word: u32) {
     write_display_control(word)
 }
 
 /// Renamed to [`status`].
-///
-/// Deprecation is held until psx-gpu and psx-vram, which the DMA rework
-/// owns, move to the new name.
+#[deprecated(note = "renamed to `status`")]
 #[inline(always)]
 pub fn gpustat() -> GpuStat {
     status()
@@ -141,9 +135,7 @@ pub fn gpuread() -> u32 {
 }
 
 /// Renamed to [`wait_command_ready`].
-///
-/// Deprecation is held until psx-gpu and psx-vram, which the DMA rework
-/// owns, move to the new name.
+#[deprecated(note = "renamed to `wait_command_ready`")]
 #[inline(always)]
 pub fn wait_cmd_ready() {
     wait_command_ready()

@@ -21,6 +21,7 @@
 
 pub mod cd;
 pub mod cop0;
+pub mod dma;
 pub mod gpu;
 pub mod hash;
 pub mod irq;
