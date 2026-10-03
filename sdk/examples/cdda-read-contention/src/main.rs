@@ -22,7 +22,7 @@
 
 extern crate psx_rt;
 
-use psx_io::{read8, write32, write8};
+use psx_io::{read_u8, write_u32, write_u8};
 use psx_rt::tty;
 
 const CD_BASE: u32 = 0x1F80_1800;
@@ -65,10 +65,10 @@ fn main() {
 unsafe fn run() {
     // Mask CDROM at the CPU IRQ controller and poll the controller flag
     // directly, exactly like the engine's polled read path.
-    psx_io::irq::set_mask(1 << psx_io::irq::source::VBLANK);
+    psx_io::irq::set_mask(1 << psx_hw::irq::source::VBLANK);
     cd_set_index(1);
-    write8(CD_PARAM, 0x00); // controller IRQ enable = 0 (poll only)
-    write8(CD_IRQ, 0x1F); // ack any pending
+    write_u8(CD_PARAM, 0x00); // controller IRQ enable = 0 (poll only)
+    write_u8(CD_IRQ, 0x1F); // ack any pending
     cd_set_index(0);
 
     write_result(0x14, 1);
@@ -94,7 +94,7 @@ unsafe fn run() {
     cd_ack_all();
     cd_set_index(0);
     drain_responses();
-    write8(CD_CMD, 0x06); // ReadN
+    write_u8(CD_CMD, 0x06); // ReadN
 
     let mut irq_seen = 0u32;
     let mut last_stat = 0u8;
@@ -152,9 +152,9 @@ unsafe fn cd_command(cmd: u8, params: &[u8]) -> Resp {
     cd_set_index(0);
     drain_responses();
     for &p in params {
-        write8(CD_PARAM, p);
+        write_u8(CD_PARAM, p);
     }
-    write8(CD_CMD, cmd);
+    write_u8(CD_CMD, cmd);
     let irq = poll_irq(POLL_LIMIT); // INT3 ack, or INT5 error
     let stat = read_first_response();
     cd_ack(irq);
@@ -165,7 +165,7 @@ unsafe fn poll_irq(limit: u32) -> u8 {
     let mut i = 0u32;
     loop {
         cd_set_index(1);
-        let flag = read8(CD_IRQ) & 0x1F;
+        let flag = read_u8(CD_IRQ) & 0x1F;
         cd_set_index(0);
         if flag != 0 {
             return flag;
@@ -182,7 +182,7 @@ unsafe fn read_first_response() -> u8 {
     let mut first = 0u8;
     let mut got = false;
     while cd_status() & STAT_RESP_NOT_EMPTY != 0 {
-        let b = read8(CD_CMD);
+        let b = read_u8(CD_CMD);
         if !got {
             first = b;
             got = true;
@@ -197,7 +197,7 @@ unsafe fn drain_responses() {
 
 unsafe fn cd_ack(bits: u8) {
     cd_set_index(1);
-    write8(CD_IRQ, bits & 0x1F);
+    write_u8(CD_IRQ, bits & 0x1F);
     cd_set_index(0);
 }
 
@@ -206,15 +206,15 @@ unsafe fn cd_ack_all() {
 }
 
 unsafe fn cd_status() -> u8 {
-    read8(CD_STATUS)
+    read_u8(CD_STATUS)
 }
 
 unsafe fn cd_set_index(index: u8) {
-    write8(CD_STATUS, index & 0x03);
+    write_u8(CD_STATUS, index & 0x03);
 }
 
 unsafe fn write_result(offset: u32, value: u32) {
-    write32(RESULT_BASE + offset, value);
+    write_u32(RESULT_BASE + offset, value);
 }
 
 fn bcd(v: u8) -> u8 {

@@ -18,6 +18,7 @@ lto = true
 [dependencies]
 psx-font = { path = "../../crates/psx-font" }
 psx-gpu  = { path = "../../crates/psx-gpu" }
+psx-hw   = { path = "../../../crates/psx-hw" }
 psx-io   = { path = "../../crates/psx-io" }
 psx-pad  = { path = "../../crates/psx-pad" }
 psx-rt   = { path = "../../crates/psx-rt" }

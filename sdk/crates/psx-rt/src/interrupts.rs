@@ -270,10 +270,10 @@ pub fn install_vblank_counter() {
         crate::cache::flush_i_cache();
 
         core::ptr::write_volatile(&raw mut __psx_rt_vblank_count, 0);
-        irq::ack(1 << irq::source::VBLANK);
+        irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
         // This handler services VBlank only. After a BIOS disc boot, do not
         // preserve CD-ROM/DMA/etc. bits the BIOS may have left enabled.
-        irq::set_mask(1 << irq::source::VBLANK);
+        irq::set_mask(1 << psx_hw::irq::source::VBLANK);
         enable_cpu_interrupts();
         core::ptr::write_volatile(&raw mut INSTALLED, true);
     }

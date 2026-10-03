@@ -27,14 +27,14 @@ pub fn counter(t: Timer) -> u16 {
     // SAFETY: `t.base()` is 0x1F80_1100 + 0x10 * n for n in 0..=2 (the `Timer` discriminants), so
     // it and the +0x4 / +0x8 offsets used below are root counter n's counter, mode and target
     // registers: aligned MMIO on every PS1. Reading the counter has no side effects.
-    unsafe { crate::read32(t.base()) as u16 }
+    unsafe { crate::read_u32(t.base()) as u16 }
 }
 
 /// Set the counter directly.
 #[inline(always)]
 pub fn set_counter(t: Timer, value: u16) {
     // SAFETY: root counter `t`'s counter register (see `counter`); a write only reloads the count.
-    unsafe { crate::write32(t.base(), value as u32) }
+    unsafe { crate::write_u32(t.base(), value as u32) }
 }
 
 /// Mode / control register. See PSX-SPX for bit details; key bits:
@@ -51,7 +51,7 @@ pub fn set_counter(t: Timer, value: u16) {
 pub fn set_mode(t: Timer, mode: u16) {
     // SAFETY: `t.base() + 0x4` is root counter `t`'s mode register (see `counter`); a write
     // reconfigures and resets that counter only.
-    unsafe { crate::write32(t.base() + 0x4, mode as u32) }
+    unsafe { crate::write_u32(t.base() + 0x4, mode as u32) }
 }
 
 /// Read the mode register (includes "reached target" / "reached wrap"
@@ -60,12 +60,12 @@ pub fn set_mode(t: Timer, mode: u16) {
 pub fn mode(t: Timer) -> u16 {
     // SAFETY: `t.base() + 0x4` is root counter `t`'s mode register (see `counter`); the read clears
     // the sticky reached bits and touches no memory.
-    unsafe { crate::read32(t.base() + 0x4) as u16 }
+    unsafe { crate::read_u32(t.base() + 0x4) as u16 }
 }
 
 /// Target value for `reset-on-target` mode.
 #[inline(always)]
 pub fn set_target(t: Timer, value: u16) {
     // SAFETY: `t.base() + 0x8` is root counter `t`'s target register (see `counter`).
-    unsafe { crate::write32(t.base() + 0x8, value as u32) }
+    unsafe { crate::write_u32(t.base() + 0x8, value as u32) }
 }

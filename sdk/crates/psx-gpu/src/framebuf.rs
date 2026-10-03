@@ -8,7 +8,7 @@
 //! presentation.
 
 use psx_hw::gpu::{gp0, gp1};
-use psx_io::gpu::{write_gp0, write_gp1};
+use psx_io::gpu::{write_command, write_display_control};
 
 /// Tracks display-start between two vertically stacked buffers.
 pub struct FrameBuffer {
@@ -65,16 +65,16 @@ impl FrameBuffer {
         let show = self.drawing;
         self.drawing ^= 1;
         let show_y = self.buffer_y(show);
-        write_gp1(gp1::display_start(0, show_y as u32));
+        write_display_control(gp1::display_start(0, show_y as u32));
 
         // Re-set the draw-area / draw-offset to match the new target buffer.
         let target_y = self.buffer_y(self.drawing);
-        write_gp0(gp0::draw_area_top_left(0, target_y as u32));
-        write_gp0(gp0::draw_area_bottom_right(
+        write_command(gp0::draw_area_top_left(0, target_y as u32));
+        write_command(gp0::draw_area_bottom_right(
             (self.width - 1) as u32,
             (target_y + self.height - 1) as u32,
         ));
-        write_gp0(gp0::draw_offset(0, target_y as i32));
+        write_command(gp0::draw_offset(0, target_y as i32));
     }
 
     /// Deferred-present half of [`FrameBuffer::swap`]: switch the DRAW side
@@ -117,12 +117,12 @@ impl FrameBuffer {
     /// CPU wait at the start of the next frame.
     pub fn apply_draw_target(&self) {
         let target_y = self.buffer_y(self.drawing);
-        write_gp0(gp0::draw_area_top_left(0, target_y as u32));
-        write_gp0(gp0::draw_area_bottom_right(
+        write_command(gp0::draw_area_top_left(0, target_y as u32));
+        write_command(gp0::draw_area_bottom_right(
             (self.width - 1) as u32,
             (target_y + self.height - 1) as u32,
         ));
-        write_gp0(gp0::draw_offset(0, target_y as i32));
+        write_command(gp0::draw_offset(0, target_y as i32));
     }
 
     /// Clear the back-buffer (the one currently being drawn to) to `(r, g, b)`.

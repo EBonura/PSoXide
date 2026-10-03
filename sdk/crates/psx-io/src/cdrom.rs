@@ -1,861 +1,331 @@
-//! CD-ROM controller MMIO helpers.
+//! Renamed to [`crate::cd`].
 //!
-//! The controller exposes four byte registers selected by the low two
-//! bits of the index register at [`BASE`]. These helpers cover the
-//! command subset needed for CD-DA playback demos.
+//! Every item here forwards to its new name and is deprecated; the
+//! register constants moved to [`psx_hw::cd`].
 
-use crate::{irq, read8, write8};
+use crate::cd;
 
-/// CD-ROM register base.
-pub const BASE: u32 = 0x1F80_1800;
+/// Moved to [`cd::Response`].
+#[deprecated(note = "moved to `psx_io::cd::Response`")]
+pub type Response = cd::Response;
+/// Moved to [`cd::PlayPosition`].
+#[deprecated(note = "moved to `psx_io::cd::PlayPosition`")]
+pub type PlayPosition = cd::PlayPosition;
+/// Moved to [`cd::SectorPollError`].
+#[deprecated(note = "moved to `psx_io::cd::SectorPollError`")]
+pub type SectorPollError = cd::SectorPollError;
 
-/// Setmode bit: allow CD-DA playback via `Play`.
-pub const MODE_CDDA: u8 = 1 << 0;
-/// Setmode bit: auto-pause at the end of a CD-DA track. The drive stops on its
-/// own at the track boundary (reporting a clear PLAYING bit) instead of running
-/// on into the next track / lead-out, so software can detect end-of-track and
-/// loop without seeking the laser mid-playback.
-pub const MODE_AUTO_PAUSE: u8 = 1 << 1;
-/// Setmode bit: emit periodic play-report IRQs.
-pub const MODE_REPORT: u8 = 1 << 2;
-/// Setmode bit: double-speed data reads.
-pub const MODE_DOUBLE_SPEED: u8 = 1 << 7;
-
-/// CdlPlay command.
-pub const CMD_PLAY: u8 = 0x03;
-/// CdlSetloc command.
-pub const CMD_SETLOC: u8 = 0x02;
-/// CdlReadN command.
-pub const CMD_READN: u8 = 0x06;
-/// CdlGetStat command.
-pub const CMD_GETSTAT: u8 = 0x01;
-/// CdlStop command.
-pub const CMD_STOP: u8 = 0x08;
-/// CdlPause command.
-pub const CMD_PAUSE: u8 = 0x09;
-/// CdlMute command.
-pub const CMD_MUTE: u8 = 0x0B;
-/// CdlDemute command.
-pub const CMD_DEMUTE: u8 = 0x0C;
-/// CdlSetmode command.
-pub const CMD_SETMODE: u8 = 0x0E;
-/// CdlGetlocP command: current physical play position.
-pub const CMD_GETLOCP: u8 = 0x11;
-/// CdlSeekL command: seek in data mode, homing on the data-sector headers.
-pub const CMD_SEEKL: u8 = 0x15;
-/// CdlInit command: reset mode, abort pending reads, spin the motor up.
-pub const CMD_INIT: u8 = 0x0A;
-
-const REG_INDEX: u32 = BASE;
-const REG_COMMAND_RESPONSE: u32 = BASE + 1;
-const REG_PARAMETER: u32 = BASE + 2;
-const REG_REQUEST_IRQ: u32 = BASE + 3;
-
-const STATUS_PARAM_NOT_FULL: u8 = 1 << 4;
-const STATUS_RESPONSE_NOT_EMPTY: u8 = 1 << 5;
-const IRQ_ACK: u8 = 3;
-const IRQ_DATA_READY: u8 = 1;
-const IRQ_COMPLETE: u8 = 2;
-const IRQ_ERROR: u8 = 5;
-const IRQ_ACK_ALL: u8 = 0x1F;
-const IRQ_PARAM_FIFO_RESET: u8 = 0x40;
-
-/// Fixed-size command response.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Response {
-    bytes: [u8; 16],
-    len: usize,
+/// Moved to [`cd::command`].
+#[deprecated(note = "moved to `psx_io::cd::command`")]
+#[inline(always)]
+pub fn command(command: u8, params: &[u8]) -> cd::Response {
+    cd::command(command, params)
 }
 
-impl Response {
-    /// Number of response bytes captured.
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Whether no response bytes were captured.
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Response bytes in FIFO order.
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
+/// Moved to [`cd::try_command`].
+#[deprecated(note = "moved to `psx_io::cd::try_command`")]
+#[inline(always)]
+pub fn try_command(command: u8, params: &[u8], spin_limit: u32) -> Option<cd::Response> {
+    cd::try_command(command, params, spin_limit)
 }
 
-/// Send a command and return its first response packet.
-pub fn command(command: u8, params: &[u8]) -> Response {
-    let irq_enable = begin_polled_command();
-    select_index(0);
-    for &param in params {
-        wait_param_room();
-        write_byte(REG_PARAMETER, param);
-    }
-    write_byte(REG_COMMAND_RESPONSE, command);
-    let irq = wait_irq(IRQ_ACK);
-    finish_polled_command(irq_enable, irq)
-}
-
-/// Try to send a command and capture its first response packet.
-///
-/// Returns `None` if the controller does not expose parameter room or
-/// a response within `spin_limit` polls. Use this for gameplay paths
-/// where a not-ready drive should not stall rendering forever. If a
-/// dispatched command times out, CD-ROM IRQ output remains masked so a
-/// late ACK cannot interrupt a polling caller.
-pub fn try_command(command: u8, params: &[u8], spin_limit: u32) -> Option<Response> {
-    let irq_enable = begin_polled_command();
-    select_index(0);
-    for &param in params {
-        if !wait_param_room_bounded(spin_limit) {
-            restore_irq_enable(irq_enable);
-            select_index(0);
-            return None;
-        }
-        write_byte(REG_PARAMETER, param);
-    }
-    write_byte(REG_COMMAND_RESPONSE, command);
-    let irq = wait_irq_bounded(IRQ_ACK, spin_limit)?;
-    Some(finish_polled_command(irq_enable, irq))
-}
-
-/// Current CD-ROM IRQ flag value (0 = none, 1 = data ready, 2 = complete,
-/// 3 = ack, 5 = error).
-///
-/// Exposed so callers can build their own wait loops bounded by a hardware
-/// timer rather than by a poll count. A poll budget is only a proxy for time
-/// and drifts with CPU and bus speed, which matters when the thing being
-/// measured is mechanical.
+/// Moved to [`cd::irq_flag_value`].
+#[deprecated(note = "moved to `psx_io::cd::irq_flag_value`")]
+#[inline(always)]
 pub fn irq_flag_value() -> u8 {
-    irq_flag()
+    cd::irq_flag_value()
 }
 
-/// Acknowledge the given CD-ROM IRQ bits.
+/// Moved to [`cd::acknowledge_irq`].
+#[deprecated(note = "moved to `psx_io::cd::acknowledge_irq`")]
+#[inline(always)]
 pub fn acknowledge_irq(bits: u8) {
-    ack_irq(bits);
+    cd::acknowledge_irq(bits)
 }
 
-/// Drain any pending response bytes, discarding them.
+/// Moved to [`cd::discard_response`].
+#[deprecated(note = "moved to `psx_io::cd::discard_response`")]
+#[inline(always)]
 pub fn discard_response() {
-    drain_response_fifo();
+    cd::discard_response()
 }
 
-/// Send a command without waiting for any response. Pairs with
-/// [`irq_flag_value`] for caller-timed waits.
-///
-/// Returns `false` if the parameter FIFO never made room. Leaves CD-ROM IRQ
-/// output masked exactly as the polled helpers do, so a late ACK cannot
-/// interrupt the caller mid-measurement; call [`restore_irq_output`] when done.
+/// Moved to [`cd::dispatch_command`].
+#[deprecated(note = "moved to `psx_io::cd::dispatch_command`")]
+#[inline(always)]
 pub fn dispatch_command(command: u8, params: &[u8], spin_limit: u32) -> Option<u8> {
-    let irq_enable = begin_polled_command();
-    select_index(0);
-    for &param in params {
-        if !wait_param_room_bounded(spin_limit) {
-            finish_failed_polled_command(irq_enable);
-            return None;
-        }
-        write_byte(REG_PARAMETER, param);
-    }
-    write_byte(REG_COMMAND_RESPONSE, command);
-    Some(irq_enable)
+    cd::dispatch_command(command, params, spin_limit)
 }
 
-/// Restore the CD-ROM IRQ enable saved by [`dispatch_command`].
+/// Moved to [`cd::restore_irq_output`].
+#[deprecated(note = "moved to `psx_io::cd::restore_irq_output`")]
+#[inline(always)]
 pub fn restore_irq_output(saved: u8) {
-    drain_response_fifo();
-    ack_irq(IRQ_ACK_ALL);
-    restore_irq_enable(saved);
-    select_index(0);
+    cd::restore_irq_output(saved)
 }
 
-/// A drive error reported while polling for the next streamed sector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SectorPollError;
-
-/// Nonblocking readiness probe for a sector reader that owns the INT1 ACK.
-/// Data-ready is never acknowledged here. Other completion responses are
-/// drained (at most 256 bytes) and acknowledged; drive errors also reset the
-/// parameter FIFO. A ready data FIFO is accepted if no classified IRQ remains.
-pub fn poll_data_sector() -> Result<bool, SectorPollError> {
-    poll_sector(&mut SectorPollMmio)
+/// Moved to [`cd::poll_data_sector`].
+#[deprecated(note = "moved to `psx_io::cd::poll_data_sector`")]
+#[inline(always)]
+pub fn poll_data_sector() -> Result<bool, cd::SectorPollError> {
+    cd::poll_data_sector()
 }
 
-trait SectorPollIo {
-    fn flag(&mut self) -> u8;
-    fn drain(&mut self);
-    fn acknowledge(&mut self, flag: u8, reset: bool);
-    fn data_ready(&mut self) -> bool;
-}
-struct SectorPollMmio;
-impl SectorPollIo for SectorPollMmio {
-    #[inline]
-    fn flag(&mut self) -> u8 {
-        irq_flag()
-    }
-    #[inline]
-    fn drain(&mut self) {
-        select_index(0);
-        let mut drained = 0;
-        while read_status() & STATUS_RESPONSE_NOT_EMPTY != 0 && drained < 256 {
-            let _ = read_byte(REG_COMMAND_RESPONSE);
-            drained += 1;
-        }
-    }
-    #[inline]
-    fn acknowledge(&mut self, flag: u8, reset: bool) {
-        if reset {
-            select_index(1);
-            write_byte(REG_REQUEST_IRQ, IRQ_ACK_ALL | IRQ_PARAM_FIFO_RESET);
-            irq::ack(1 << irq::source::CDROM);
-            select_index(0);
-        } else {
-            ack_irq(flag);
-        }
-    }
-    #[inline]
-    fn data_ready(&mut self) -> bool {
-        select_index(0);
-        read_status() & (1 << 6) != 0
-    }
-}
-#[inline]
-fn poll_sector(io: &mut impl SectorPollIo) -> Result<bool, SectorPollError> {
-    match io.flag() {
-        IRQ_DATA_READY => Ok(true),
-        IRQ_ERROR => {
-            io.drain();
-            io.acknowledge(IRQ_ACK_ALL, true);
-            Err(SectorPollError)
-        }
-        flag @ (IRQ_COMPLETE | IRQ_ACK | 4) => {
-            io.drain();
-            io.acknowledge(flag, false);
-            Ok(false)
-        }
-        _ => Ok(io.data_ready()),
-    }
-}
-
-/// Wait for the next streamed data sector (INT1) and acknowledge it.
-///
-/// Use between [`try_read_n`] and [`try_pause_until_complete`] to step through
-/// a sector stream. Unrelated pending IRQs are drained and acknowledged so a
-/// stale response cannot be mistaken for a sector arrival. Returns `false` on
-/// a drive error or if no sector arrives within `spin_limit` polls.
+/// Moved to [`cd::try_wait_data_sector`].
+#[deprecated(note = "moved to `psx_io::cd::try_wait_data_sector`")]
+#[inline(always)]
 pub fn try_wait_data_sector(spin_limit: u32) -> bool {
-    let mut spins = spin_limit;
-    loop {
-        let flag = irq_flag();
-        if flag == IRQ_DATA_READY {
-            ack_irq(flag);
-            return true;
-        }
-        if flag == IRQ_ERROR {
-            let _ = read_response_fifo();
-            ack_irq(flag);
-            return false;
-        }
-        if flag != 0 {
-            let _ = read_response_fifo();
-            ack_irq(flag);
-        }
-        if spins == 0 {
-            return false;
-        }
-        spins -= 1;
-        core::hint::spin_loop();
-    }
+    cd::try_wait_data_sector(spin_limit)
 }
 
-/// GetStat: CD-DA playback in progress.
-///
-/// The drive sets at most one of the three activity bits
-/// ([`STAT_PLAYING`], [`STAT_SEEKING`], [`STAT_READING`]) at a time;
-/// between activities (stopping, spinning up before a seek engages) it
-/// reports NONE of them for a second or two on real hardware, a window
-/// emulators currently skip past.
-pub const STAT_PLAYING: u8 = 0x80;
-/// GetStat: a seek is in progress. See [`STAT_PLAYING`] for the
-/// at-most-one-activity-bit rule.
-pub const STAT_SEEKING: u8 = 0x40;
-/// GetStat: a sector read is in progress. See [`STAT_PLAYING`] for the
-/// at-most-one-activity-bit rule.
-pub const STAT_READING: u8 = 0x20;
-/// GetStat: the spindle motor is running. Independent of the activity
-/// bits: the motor stays on between them.
-pub const STAT_MOTOR_ON: u8 = 0x02;
-
-/// Get the CD-ROM drive status byte.
-pub fn get_stat() -> Response {
-    command(CMD_GETSTAT, &[])
+/// Renamed to [`cd::status`].
+#[deprecated(note = "renamed to `psx_io::cd::status`")]
+#[inline(always)]
+pub fn get_stat() -> cd::Response {
+    cd::status()
 }
 
-/// Try to get the CD-ROM drive status byte.
-pub fn try_get_stat(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_GETSTAT, &[], spin_limit)
+/// Renamed to [`cd::try_status`].
+#[deprecated(note = "renamed to `psx_io::cd::try_status`")]
+#[inline(always)]
+pub fn try_get_stat(spin_limit: u32) -> Option<cd::Response> {
+    cd::try_status(spin_limit)
 }
 
-/// Set the CD-ROM controller mode byte.
-pub fn set_mode(mode: u8) -> Response {
-    command(CMD_SETMODE, &[mode])
+/// Moved to [`cd::set_mode`].
+#[deprecated(note = "moved to `psx_io::cd::set_mode`")]
+#[inline(always)]
+pub fn set_mode(mode: u8) -> cd::Response {
+    cd::set_mode(mode)
 }
 
-/// Try to set the CD-ROM controller mode byte.
-pub fn try_set_mode(mode: u8, spin_limit: u32) -> Option<Response> {
-    try_command(CMD_SETMODE, &[mode], spin_limit)
+/// Moved to [`cd::try_set_mode`].
+#[deprecated(note = "moved to `psx_io::cd::try_set_mode`")]
+#[inline(always)]
+pub fn try_set_mode(mode: u8, spin_limit: u32) -> Option<cd::Response> {
+    cd::try_set_mode(mode, spin_limit)
 }
 
-/// Seek to a logical data-sector LBA (the command receives absolute BCD MSF).
-pub fn try_set_loc_lba(lba: u32, spin_limit: u32) -> Option<Response> {
-    let [minute, second, frame] = lba_to_bcd_msf(lba);
-    try_command(CMD_SETLOC, &[minute, second, frame], spin_limit)
+/// Renamed to [`cd::try_set_target_lba`].
+#[deprecated(note = "renamed to `psx_io::cd::try_set_target_lba`")]
+#[inline(always)]
+pub fn try_set_loc_lba(lba: u32, spin_limit: u32) -> Option<cd::Response> {
+    cd::try_set_target_lba(lba, spin_limit)
 }
 
-const fn lba_to_bcd_msf(lba: u32) -> [u8; 3] {
-    let absolute = lba.saturating_add(150);
-    let raw_minute = absolute / (60 * 75);
-    let minute = if raw_minute > 99 {
-        99
-    } else {
-        raw_minute as u8
-    };
-    let second = ((absolute / 75) % 60) as u8;
-    let frame = (absolute % 75) as u8;
-    [bin_to_bcd(minute), bin_to_bcd(second), bin_to_bcd(frame)]
+/// Renamed to [`cd::try_start_reading`].
+#[deprecated(note = "renamed to `psx_io::cd::try_start_reading`")]
+#[inline(always)]
+pub fn try_read_n(spin_limit: u32) -> Option<cd::Response> {
+    cd::try_start_reading(spin_limit)
 }
 
-/// Begin a normal data-sector stream at the most recently selected location.
-pub fn try_read_n(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_READN, &[], spin_limit)
+/// Renamed to [`cd::unmute`].
+#[deprecated(note = "renamed to `psx_io::cd::unmute`")]
+#[inline(always)]
+pub fn demute() -> cd::Response {
+    cd::unmute()
 }
 
-/// Route CD-DA/XA output out of the CD-ROM controller.
-pub fn demute() -> Response {
-    command(CMD_DEMUTE, &[])
+/// Renamed to [`cd::try_unmute`].
+#[deprecated(note = "renamed to `psx_io::cd::try_unmute`")]
+#[inline(always)]
+pub fn try_demute(spin_limit: u32) -> Option<cd::Response> {
+    cd::try_unmute(spin_limit)
 }
 
-/// Try to route CD-DA/XA output out of the CD-ROM controller.
-pub fn try_demute(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_DEMUTE, &[], spin_limit)
+/// Moved to [`cd::mute`].
+#[deprecated(note = "moved to `psx_io::cd::mute`")]
+#[inline(always)]
+pub fn mute() -> cd::Response {
+    cd::mute()
 }
 
-/// Mute CD-DA/XA output at the CD-ROM controller.
-pub fn mute() -> Response {
-    command(CMD_MUTE, &[])
+/// Moved to [`cd::try_mute`].
+#[deprecated(note = "moved to `psx_io::cd::try_mute`")]
+#[inline(always)]
+pub fn try_mute(spin_limit: u32) -> Option<cd::Response> {
+    cd::try_mute(spin_limit)
 }
 
-/// Try to mute CD-DA/XA output at the CD-ROM controller.
-pub fn try_mute(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_MUTE, &[], spin_limit)
+/// Moved to [`cd::play_track`].
+#[deprecated(note = "moved to `psx_io::cd::play_track`")]
+#[inline(always)]
+pub fn play_track(track: u8) -> cd::Response {
+    cd::play_track(track)
 }
 
-/// Start CD-DA playback at a 1-based track number.
-///
-/// The number is relative to this program's own tracks; on a multi-program
-/// disc [`crate::disc_base`] shifts it past whatever came before.
-pub fn play_track(track: u8) -> Response {
-    command(
-        CMD_PLAY,
-        &[bin_to_bcd(crate::disc_base::shift_track(track))],
-    )
+/// Moved to [`cd::try_play_track`].
+#[deprecated(note = "moved to `psx_io::cd::try_play_track`")]
+#[inline(always)]
+pub fn try_play_track(track: u8, spin_limit: u32) -> Option<cd::Response> {
+    cd::try_play_track(track, spin_limit)
 }
 
-/// Try to start CD-DA playback at a 1-based track number. Shifted like
-/// [`play_track`].
-pub fn try_play_track(track: u8, spin_limit: u32) -> Option<Response> {
-    try_command(
-        CMD_PLAY,
-        &[bin_to_bcd(crate::disc_base::shift_track(track))],
-        spin_limit,
-    )
+/// Moved to [`cd::pause`].
+#[deprecated(note = "moved to `psx_io::cd::pause`")]
+#[inline(always)]
+pub fn pause() -> cd::Response {
+    cd::pause()
 }
 
-/// Pause CD-DA/read playback.
-pub fn pause() -> Response {
-    command(CMD_PAUSE, &[])
+/// Moved to [`cd::try_pause`].
+#[deprecated(note = "moved to `psx_io::cd::try_pause`")]
+#[inline(always)]
+pub fn try_pause(spin_limit: u32) -> Option<cd::Response> {
+    cd::try_pause(spin_limit)
 }
 
-/// Try to pause CD-DA/read playback.
-pub fn try_pause(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_PAUSE, &[], spin_limit)
-}
-
-/// Try to pause CD-DA/read playback and wait for the completion IRQ.
-///
-/// Unlike [`try_stop`], this leaves the drive spun up, which makes it the
-/// right handoff before gameplay code starts issuing data-read commands.
+/// Moved to [`cd::try_pause_until_complete`].
+#[deprecated(note = "moved to `psx_io::cd::try_pause_until_complete`")]
+#[inline(always)]
 pub fn try_pause_until_complete(spin_limit: u32) -> bool {
-    try_command_until_complete_inner(CMD_PAUSE, &[], spin_limit)
+    cd::try_pause_until_complete(spin_limit)
 }
 
-/// Stop the CD-ROM motor/playback.
-pub fn stop() -> Response {
-    command(CMD_STOP, &[])
+/// Moved to [`cd::stop`].
+#[deprecated(note = "moved to `psx_io::cd::stop`")]
+#[inline(always)]
+pub fn stop() -> cd::Response {
+    cd::stop()
 }
 
-/// Try to stop the CD-ROM motor/playback.
-///
-/// **This returns when the command is ACCEPTED, not when the drive is
-/// done.** On real hardware the motor then winds down for one to two
-/// seconds, during which GetStat reports no activity bits and data-read
-/// commands fail; an emulator answers instantly and hides the window
-/// (proven by a demo-disc burn whose every chain-load died this way). If
-/// data reads follow, either call [`stop_and_settle`], or better, keep the
-/// drive spun up with [`try_pause_until_complete`].
-pub fn try_stop(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_STOP, &[], spin_limit)
+/// Moved to [`cd::try_stop`].
+#[deprecated(note = "moved to `psx_io::cd::try_stop`")]
+#[inline(always)]
+pub fn try_stop(spin_limit: u32) -> Option<cd::Response> {
+    cd::try_stop(spin_limit)
 }
 
-/// Stop playback and wait until the drive has genuinely gone quiet:
-/// GetStat reporting neither playing nor seeking on two consecutive polls,
-/// with a short pause between polls. Bounded by `max_polls` so a wedged
-/// drive cannot hang the caller; returns whether the drive settled.
-///
-/// This is the safe prelude to issuing data-read commands after CD-DA.
-/// [`try_pause_until_complete`] is the faster choice when the next reads
-/// are imminent, since it keeps the motor spinning.
+/// Moved to [`cd::stop_and_settle`].
+#[deprecated(note = "moved to `psx_io::cd::stop_and_settle`")]
+#[inline(always)]
 pub fn stop_and_settle(spin_limit: u32, max_polls: u32) -> bool {
-    let _ = try_stop(spin_limit);
-    let mut settled = 0u8;
-    for _ in 0..max_polls {
-        // Pace the polls: on silicon each takes real time anyway, but an
-        // emulator answers instantly and would burn the poll budget in
-        // microseconds. Volatile MMIO reads cannot be optimized out.
-        for _ in 0..20_000u32 {
-            // SAFETY: 0x1F80_1800 is the CD-ROM controller's index/status register, byte-wide MMIO
-            // on every PS1. Reading it has no side effects, so this is a pure delay.
-            unsafe { core::ptr::read_volatile(0x1F80_1800 as *const u8) };
-        }
-        let quiet = match try_get_stat(spin_limit) {
-            Some(r) => r
-                .bytes()
-                .first()
-                .is_some_and(|s| s & (STAT_PLAYING | STAT_SEEKING) == 0),
-            None => false,
-        };
-        settled = if quiet { settled + 1 } else { 0 };
-        if settled >= 2 {
-            return true;
-        }
-    }
-    false
+    cd::stop_and_settle(spin_limit, max_polls)
 }
 
-/// Convert binary `0..=99` to BCD for CD-ROM command parameters.
+/// Moved to [`cd::bin_to_bcd`].
+#[deprecated(note = "moved to `psx_io::cd::bin_to_bcd`")]
+#[inline(always)]
 pub const fn bin_to_bcd(v: u8) -> u8 {
-    let v = if v > 99 { 99 } else { v };
-    ((v / 10) << 4) | (v % 10)
+    cd::bin_to_bcd(v)
 }
 
-/// Convert a BCD byte back to binary. Inverse of [`bin_to_bcd`] for well-formed
-/// input; nibbles above 9 are not normalised (the drive never emits them).
+/// Moved to [`cd::bcd_to_bin`].
+#[deprecated(note = "moved to `psx_io::cd::bcd_to_bin`")]
+#[inline(always)]
 pub const fn bcd_to_bin(v: u8) -> u8 {
-    (v >> 4) * 10 + (v & 0x0F)
+    cd::bcd_to_bin(v)
 }
 
-/// Get the current physical play position (CdlGetlocP). The 8-byte reply is
-/// `[Track(bcd), Index(raw), RMM, RSS, RSECT, AMM, ASS, ASECT]`; parse it with
-/// [`PlayPosition::parse`].
-pub fn get_loc_p() -> Response {
-    command(CMD_GETLOCP, &[])
+/// Renamed to [`cd::play_position`].
+#[deprecated(note = "renamed to `psx_io::cd::play_position`")]
+#[inline(always)]
+pub fn get_loc_p() -> cd::Response {
+    cd::play_position()
 }
 
-/// Try to get the current physical play position, giving up after `spin_limit`.
-pub fn try_get_loc_p(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_GETLOCP, &[], spin_limit)
+/// Renamed to [`cd::try_play_position`].
+#[deprecated(note = "renamed to `psx_io::cd::try_play_position`")]
+#[inline(always)]
+pub fn try_get_loc_p(spin_limit: u32) -> Option<cd::Response> {
+    cd::try_play_position(spin_limit)
 }
 
-/// Decoded CdlGetlocP reply. The relative MSF (`relative_*`) is elapsed time
-/// into the current track, independent of the pregap, which makes it the source
-/// of truth for a music/song clock. The absolute MSF (`absolute_*`) is the raw
-/// disc position.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct PlayPosition {
-    /// 1-based track number the drive is currently in.
-    pub track: u8,
-    /// Track index (raw): 0 = pregap, 1 = program area.
-    pub index: u8,
-    /// Minutes elapsed into the current track.
-    pub relative_min: u8,
-    /// Seconds elapsed into the current track (0..=59).
-    pub relative_sec: u8,
-    /// MSF frames elapsed into the current track (0..=74, 75 per second).
-    pub relative_frame: u8,
-    /// Absolute disc position, minutes.
-    pub absolute_min: u8,
-    /// Absolute disc position, seconds (0..=59).
-    pub absolute_sec: u8,
-    /// Absolute disc position, MSF frames (0..=74).
-    pub absolute_frame: u8,
-}
-
-impl PlayPosition {
-    /// Parse a GetlocP [`Response`]. Returns `None` if fewer than 8 bytes came
-    /// back (drive not ready / no disc). Track and MSF fields are BCD; index is
-    /// raw.
-    pub fn parse(resp: &Response) -> Option<Self> {
-        let b = resp.bytes();
-        if b.len() < 8 {
-            return None;
-        }
-        Some(PlayPosition {
-            track: bcd_to_bin(b[0]),
-            index: b[1],
-            relative_min: bcd_to_bin(b[2]),
-            relative_sec: bcd_to_bin(b[3]),
-            relative_frame: bcd_to_bin(b[4]),
-            absolute_min: bcd_to_bin(b[5]),
-            absolute_sec: bcd_to_bin(b[6]),
-            absolute_frame: bcd_to_bin(b[7]),
-        })
-    }
-
-    /// Elapsed sectors into the current track (75 sectors per second).
-    pub fn relative_sectors(&self) -> u32 {
-        (self.relative_min as u32 * 60 + self.relative_sec as u32) * 75 + self.relative_frame as u32
-    }
-
-    /// Elapsed milliseconds into the current track. This is the song clock feed.
-    pub fn relative_millis(&self) -> u32 {
-        self.relative_sectors() * 1000 / 75
-    }
-}
-
-fn begin_polled_command() -> u8 {
-    let irq_enable = irq_enable();
-    set_irq_enable(0);
-    ack_irq(IRQ_ACK_ALL);
-    select_index(0);
-    drain_response_fifo();
-    clear_parameter_fifo();
-    irq_enable
-}
-
-fn finish_polled_command(irq_enable: u8, irq: u8) -> Response {
-    let response = read_response_fifo();
-    ack_irq(irq);
-    restore_irq_enable(irq_enable);
-    select_index(0);
-    response
-}
-
-fn wait_irq(expected: u8) -> u8 {
-    loop {
-        let irq = irq_flag();
-        if irq == expected || irq == IRQ_ERROR {
-            return irq;
-        }
-        if irq != 0 {
-            let _ = read_response_fifo();
-            ack_irq(irq);
-        }
-        core::hint::spin_loop();
-    }
-}
-
-fn wait_irq_bounded(expected: u8, mut spins: u32) -> Option<u8> {
-    loop {
-        let irq = irq_flag();
-        if irq == expected {
-            return Some(irq);
-        }
-        if irq == IRQ_ERROR {
-            return None;
-        }
-        if irq != 0 {
-            let _ = read_response_fifo();
-            ack_irq(irq);
-        }
-        if spins == 0 {
-            return None;
-        }
-        spins -= 1;
-        core::hint::spin_loop();
-    }
-}
-
-/// Send a command and wait for its SECOND response (the completion IRQ),
-/// not just the initial acknowledgement.
-///
-/// Seek, read and init all acknowledge immediately and finish much later, so
-/// timing them against the ack measures command dispatch rather than the
-/// mechanical operation. Returns `false` if either response fails to arrive
-/// within `spin_limit` polls.
+/// Moved to [`cd::try_command_until_complete`].
+#[deprecated(note = "moved to `psx_io::cd::try_command_until_complete`")]
+#[inline(always)]
 pub fn try_command_until_complete(command: u8, params: &[u8], spin_limit: u32) -> bool {
-    try_command_until_complete_inner(command, params, spin_limit)
+    cd::try_command_until_complete(command, params, spin_limit)
 }
 
-fn try_command_until_complete_inner(command: u8, params: &[u8], spin_limit: u32) -> bool {
-    let irq_enable = begin_polled_command();
-    select_index(0);
-    for &param in params {
-        if !wait_param_room_bounded(spin_limit) {
-            finish_failed_polled_command(irq_enable);
-            return false;
-        }
-        write_byte(REG_PARAMETER, param);
-    }
-    write_byte(REG_COMMAND_RESPONSE, command);
-
-    let ok = wait_ack_then_complete(spin_limit);
-    drain_response_fifo();
-    ack_irq(IRQ_ACK_ALL);
-    restore_irq_enable(irq_enable);
-    select_index(0);
-    ok
-}
-
-fn wait_ack_then_complete(spin_limit: u32) -> bool {
-    if wait_irq_bounded(IRQ_ACK, spin_limit).is_none() {
-        return false;
-    }
-    drain_response_fifo();
-    ack_irq(IRQ_ACK);
-
-    if wait_irq_bounded(IRQ_COMPLETE, spin_limit).is_none() {
-        return false;
-    }
-    drain_response_fifo();
-    ack_irq(IRQ_COMPLETE);
-    true
-}
-
-fn finish_failed_polled_command(irq_enable: u8) {
-    drain_response_fifo();
-    ack_irq(IRQ_ACK_ALL);
-    restore_irq_enable(irq_enable);
-    select_index(0);
-}
-
-fn read_response_fifo() -> Response {
-    select_index(0);
-
-    let mut bytes = [0u8; 16];
-    let mut len = 0;
-    while read_status() & STATUS_RESPONSE_NOT_EMPTY != 0 && len < bytes.len() {
-        bytes[len] = read_byte(REG_COMMAND_RESPONSE);
-        len += 1;
-    }
-    Response { bytes, len }
-}
-
-fn drain_response_fifo() {
-    let _ = read_response_fifo();
-}
-
-/// Spin budget for the blocking parameter-FIFO wait. The controller
-/// frees a slot in microseconds; this is purely a hang guard.
-const PARAM_ROOM_SPINS: u32 = 131_072;
-
-fn wait_param_room() {
-    // Bounded like every other hardware wait in the SDK: a controller
-    // that never frees the parameter FIFO must not hang the caller.
-    let _ = wait_param_room_bounded(PARAM_ROOM_SPINS);
-}
-
-fn wait_param_room_bounded(mut spins: u32) -> bool {
-    while read_status() & STATUS_PARAM_NOT_FULL == 0 {
-        if spins == 0 {
-            return false;
-        }
-        spins -= 1;
-        core::hint::spin_loop();
-    }
-    true
-}
-
-fn clear_parameter_fifo() {
-    select_index(1);
-    write_byte(REG_REQUEST_IRQ, IRQ_PARAM_FIFO_RESET);
-    select_index(0);
-}
-
-fn ack_irq(bits: u8) {
-    select_index(1);
-    write_byte(REG_REQUEST_IRQ, bits & IRQ_ACK_ALL);
-    irq::ack(1 << irq::source::CDROM);
-    select_index(0);
-}
-
-fn irq_flag() -> u8 {
-    select_index(1);
-    let flag = read_byte(REG_REQUEST_IRQ) & IRQ_ACK_ALL;
-    select_index(0);
-    flag
-}
-
-fn irq_enable() -> u8 {
-    select_index(0);
-    let enable = read_byte(REG_REQUEST_IRQ) & IRQ_ACK_ALL;
-    select_index(0);
-    enable
-}
-
-fn restore_irq_enable(enable: u8) {
-    set_irq_enable(enable);
-}
-
-fn set_irq_enable(enable: u8) {
-    select_index(1);
-    write_byte(REG_PARAMETER, enable & IRQ_ACK_ALL);
-    select_index(0);
-}
-
-fn read_status() -> u8 {
-    read_byte(REG_INDEX)
-}
-
-/// Program the drive's audio mixer (CD-DA and XA-ADPCM on their way to
-/// the SPU's CD input) and apply it. Volumes are 0..=0xFF with 0x80 as
-/// unity; `(0x80, 0, 0x80, 0)` is plain stereo. The SPU side still needs
-/// its CD input enabled and a CD volume (`psx-spu`).
+/// Moved to [`cd::set_audio_mixer`].
+#[deprecated(note = "moved to `psx_io::cd::set_audio_mixer`")]
+#[inline(always)]
 pub fn set_audio_mixer(left_to_left: u8, left_to_right: u8, right_to_right: u8, right_to_left: u8) {
-    select_index(2);
-    write_byte(REG_PARAMETER, left_to_left);
-    write_byte(REG_REQUEST_IRQ, left_to_right);
-    select_index(3);
-    write_byte(REG_COMMAND_RESPONSE, right_to_right);
-    write_byte(REG_PARAMETER, right_to_left);
-    // Apply the new volumes (index 3, register 3, bit 5), un-muting ADPCM.
-    write_byte(REG_REQUEST_IRQ, 0x20);
-    select_index(0);
+    cd::set_audio_mixer(left_to_left, left_to_right, right_to_right, right_to_left)
 }
 
-fn select_index(index: u8) {
-    write_byte(REG_INDEX, index & 0x03);
-}
+/// Moved to [`psx_hw::cd::BASE`].
+#[deprecated(note = "moved to `psx_hw::cd::BASE`")]
+pub const BASE: u32 = psx_hw::cd::BASE;
 
-fn read_byte(addr: u32) -> u8 {
-    // SAFETY: fixed CD-ROM MMIO register read.
-    unsafe { read8(addr) }
-}
+/// Moved to [`psx_hw::cd::MODE_CDDA`].
+#[deprecated(note = "moved to `psx_hw::cd::MODE_CDDA`")]
+pub const MODE_CDDA: u8 = psx_hw::cd::MODE_CDDA;
 
-fn write_byte(addr: u32, value: u8) {
-    // SAFETY: fixed CD-ROM MMIO register write.
-    unsafe { write8(addr, value) }
-}
+/// Moved to [`psx_hw::cd::MODE_AUTO_PAUSE`].
+#[deprecated(note = "moved to `psx_hw::cd::MODE_AUTO_PAUSE`")]
+pub const MODE_AUTO_PAUSE: u8 = psx_hw::cd::MODE_AUTO_PAUSE;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Moved to [`psx_hw::cd::MODE_REPORT`].
+#[deprecated(note = "moved to `psx_hw::cd::MODE_REPORT`")]
+pub const MODE_REPORT: u8 = psx_hw::cd::MODE_REPORT;
 
-    #[test]
-    fn sector_probe_leaves_int1_and_orders_other_acknowledgements() {
-        struct Fake {
-            flag: u8,
-            ready: bool,
-            events: [u8; 4],
-            len: usize,
-        }
-        impl Fake {
-            fn event(&mut self, e: u8) {
-                self.events[self.len] = e;
-                self.len += 1;
-            }
-        }
-        impl SectorPollIo for Fake {
-            fn flag(&mut self) -> u8 {
-                self.event(1);
-                self.flag
-            }
-            fn drain(&mut self) {
-                self.event(2);
-            }
-            fn acknowledge(&mut self, flag: u8, reset: bool) {
-                assert_eq!(flag, if reset { 31 } else { self.flag });
-                self.event(if reset { 4 } else { 3 });
-            }
-            fn data_ready(&mut self) -> bool {
-                self.event(5);
-                self.ready
-            }
-        }
-        for flag in 0..=5 {
-            for ready in [false, true] {
-                let mut io = Fake {
-                    flag,
-                    ready,
-                    events: [0; 4],
-                    len: 0,
-                };
-                let result = poll_sector(&mut io);
-                let expected = match flag {
-                    1 => Ok(true),
-                    5 => Err(SectorPollError),
-                    2..=4 => Ok(false),
-                    _ => Ok(ready),
-                };
-                assert_eq!(result, expected);
-                let events: &[u8] = match flag {
-                    1 => &[1],
-                    5 => &[1, 2, 4],
-                    2..=4 => &[1, 2, 3],
-                    _ => &[1, 5],
-                };
-                assert_eq!(&io.events[..io.len], events);
-            }
-        }
-    }
+/// Moved to [`psx_hw::cd::MODE_DOUBLE_SPEED`].
+#[deprecated(note = "moved to `psx_hw::cd::MODE_DOUBLE_SPEED`")]
+pub const MODE_DOUBLE_SPEED: u8 = psx_hw::cd::MODE_DOUBLE_SPEED;
 
-    #[test]
-    fn bcd_clamps_to_two_digits() {
-        assert_eq!(bin_to_bcd(2), 0x02);
-        assert_eq!(bin_to_bcd(42), 0x42);
-        assert_eq!(bin_to_bcd(100), 0x99);
-    }
+/// Moved to [`psx_hw::cd::CMD_PLAY`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_PLAY`")]
+pub const CMD_PLAY: u8 = psx_hw::cd::CMD_PLAY;
 
-    #[test]
-    fn bcd_to_bin_roundtrips() {
-        for v in 0u8..=99 {
-            assert_eq!(bcd_to_bin(bin_to_bcd(v)), v);
-        }
-    }
+/// Moved to [`psx_hw::cd::CMD_SETLOC`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_SETLOC`")]
+pub const CMD_SETLOC: u8 = psx_hw::cd::CMD_SETLOC;
 
-    #[test]
-    fn lba_to_msf_includes_the_lead_in() {
-        assert_eq!(lba_to_bcd_msf(0), [0x00, 0x02, 0x00]);
-        assert_eq!(lba_to_bcd_msf(424), [0x00, 0x07, 0x49]);
-        assert_eq!(lba_to_bcd_msf(992), [0x00, 0x15, 0x17]);
-    }
+/// Moved to [`psx_hw::cd::CMD_READN`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_READN`")]
+pub const CMD_READN: u8 = psx_hw::cd::CMD_READN;
 
-    fn response_from(bytes: &[u8]) -> Response {
-        let mut buf = [0u8; 16];
-        buf[..bytes.len()].copy_from_slice(bytes);
-        Response {
-            bytes: buf,
-            len: bytes.len(),
-        }
-    }
+/// Moved to [`psx_hw::cd::CMD_GETSTAT`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_GETSTAT`")]
+pub const CMD_GETSTAT: u8 = psx_hw::cd::CMD_GETSTAT;
 
-    #[test]
-    fn play_position_parses_and_converts() {
-        // Track 2, index 1, relative 01:23:45 (min:sec:frame), absolute 04:56:00.
-        let resp = response_from(&[
-            bin_to_bcd(2),
-            0x01,
-            bin_to_bcd(1),
-            bin_to_bcd(23),
-            bin_to_bcd(45),
-            bin_to_bcd(4),
-            bin_to_bcd(56),
-            bin_to_bcd(0),
-        ]);
-        let p = PlayPosition::parse(&resp).unwrap();
-        assert_eq!(p.track, 2);
-        assert_eq!(p.index, 1);
-        assert_eq!(
-            (p.relative_min, p.relative_sec, p.relative_frame),
-            (1, 23, 45)
-        );
-        // (1*60 + 23) * 75 + 45 = 6270 sectors.
-        assert_eq!(p.relative_sectors(), 6270);
-        // 6270 * 1000 / 75 = 83600 ms.
-        assert_eq!(p.relative_millis(), 83_600);
-    }
+/// Moved to [`psx_hw::cd::CMD_STOP`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_STOP`")]
+pub const CMD_STOP: u8 = psx_hw::cd::CMD_STOP;
 
-    #[test]
-    fn play_position_rejects_short_response() {
-        assert!(PlayPosition::parse(&response_from(&[0x02, 0x01, 0x00])).is_none());
-    }
-}
+/// Moved to [`psx_hw::cd::CMD_PAUSE`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_PAUSE`")]
+pub const CMD_PAUSE: u8 = psx_hw::cd::CMD_PAUSE;
+
+/// Moved to [`psx_hw::cd::CMD_MUTE`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_MUTE`")]
+pub const CMD_MUTE: u8 = psx_hw::cd::CMD_MUTE;
+
+/// Moved to [`psx_hw::cd::CMD_DEMUTE`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_DEMUTE`")]
+pub const CMD_DEMUTE: u8 = psx_hw::cd::CMD_DEMUTE;
+
+/// Moved to [`psx_hw::cd::CMD_SETMODE`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_SETMODE`")]
+pub const CMD_SETMODE: u8 = psx_hw::cd::CMD_SETMODE;
+
+/// Moved to [`psx_hw::cd::CMD_GETLOCP`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_GETLOCP`")]
+pub const CMD_GETLOCP: u8 = psx_hw::cd::CMD_GETLOCP;
+
+/// Moved to [`psx_hw::cd::CMD_SEEKL`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_SEEKL`")]
+pub const CMD_SEEKL: u8 = psx_hw::cd::CMD_SEEKL;
+
+/// Moved to [`psx_hw::cd::CMD_INIT`].
+#[deprecated(note = "moved to `psx_hw::cd::CMD_INIT`")]
+pub const CMD_INIT: u8 = psx_hw::cd::CMD_INIT;
+
+/// Moved to [`psx_hw::cd::STAT_PLAYING`].
+#[deprecated(note = "moved to `psx_hw::cd::STAT_PLAYING`")]
+pub const STAT_PLAYING: u8 = psx_hw::cd::STAT_PLAYING;
+
+/// Moved to [`psx_hw::cd::STAT_SEEKING`].
+#[deprecated(note = "moved to `psx_hw::cd::STAT_SEEKING`")]
+pub const STAT_SEEKING: u8 = psx_hw::cd::STAT_SEEKING;
+
+/// Moved to [`psx_hw::cd::STAT_READING`].
+#[deprecated(note = "moved to `psx_hw::cd::STAT_READING`")]
+pub const STAT_READING: u8 = psx_hw::cd::STAT_READING;
+
+/// Moved to [`psx_hw::cd::STAT_MOTOR_ON`].
+#[deprecated(note = "moved to `psx_hw::cd::STAT_MOTOR_ON`")]
+pub const STAT_MOTOR_ON: u8 = psx_hw::cd::STAT_MOTOR_ON;

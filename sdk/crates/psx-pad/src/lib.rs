@@ -43,7 +43,7 @@
 #![warn(missing_docs)]
 
 use psx_hw::sio::sio0;
-use psx_io::sio;
+use psx_hw::sio::sio0 as sio;
 
 pub mod tracker;
 pub use tracker::PadTracker;
@@ -597,7 +597,7 @@ impl RawPoll {
 }
 
 // SIO0 access contract. Every `unsafe` helper below, and every `unsafe` block that calls one,
-// touches only the SIO0 registers in `psx_io::sio` (0x1F80_1040..=0x1F80_104F), which are valid
+// touches only the SIO0 registers in `psx_hw::sio::sio0` (0x1F80_1040..=0x1F80_104F), which are valid
 // MMIO on every PS1 and are accessed at their natural width. No pointer or memory ownership is
 // involved. The one obligation is exclusive use of SIO0 for the length of a call: the guest is
 // single-threaded, a poll runs to completion before it returns, and no interrupt handler touches
@@ -731,8 +731,8 @@ unsafe fn drain_rx() {
     // SAFETY: STAT and DATA are SIO0 registers (SIO0 access contract). A DATA read pops one RX FIFO
     // byte, and the loop is bounded to 16 pops.
     unsafe {
-        while psx_io::read32(sio::STAT) & 0x2 != 0 && n < 16 {
-            let _ = psx_io::read8(sio::DATA);
+        while psx_io::read_u32(sio::STAT) & 0x2 != 0 && n < 16 {
+            let _ = psx_io::read_u8(sio::DATA);
             n += 1;
         }
     }
@@ -1011,12 +1011,12 @@ unsafe fn select(port2: bool, ack_irq: bool) {
     // SAFETY: MODE, BAUD and CTRL are SIO0's 16-bit registers (SIO0 access contract); these writes
     // configure the serial port and the select lines, nothing else.
     unsafe {
-        psx_io::write16(sio::MODE, MODE_8N1);
-        psx_io::write16(sio::BAUD, BAUD_PAD);
+        psx_io::write_u16(sio::MODE, MODE_8N1);
+        psx_io::write_u16(sio::BAUD, BAUD_PAD);
         // Clear any stale IRQ latch from the previous transaction, then assert
         // JOYN.
-        psx_io::write16(sio::CTRL, CTRL_ACK);
-        psx_io::write16(sio::CTRL, active_ctrl(port2, ack_irq));
+        psx_io::write_u16(sio::CTRL, CTRL_ACK);
+        psx_io::write_u16(sio::CTRL, active_ctrl(port2, ack_irq));
     }
 }
 
@@ -1057,7 +1057,7 @@ unsafe fn transaction(port2: bool, bytes: [u8; 8]) -> [u8; 8] {
 unsafe fn deselect() {
     // SAFETY: CTRL is SIO0's 16-bit control register (SIO0 access contract); zero releases the
     // select lines.
-    unsafe { psx_io::write16(sio::CTRL, 0) };
+    unsafe { psx_io::write_u16(sio::CTRL, 0) };
 }
 
 /// Clock one byte across the serial link without waiting for `/ACK`: wait for
@@ -1078,11 +1078,11 @@ unsafe fn exchange_nowait(tx: u8) -> u8 {
         if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
             return 0xFF;
         }
-        psx_io::write8(sio::DATA, tx);
+        psx_io::write_u8(sio::DATA, tx);
         if !wait_stat(STAT_RX_NOT_EMPTY, EXCHANGE_WAIT_SPINS) {
             return 0xFF;
         }
-        psx_io::read8(sio::DATA)
+        psx_io::read_u8(sio::DATA)
     }
 }
 
@@ -1106,7 +1106,7 @@ unsafe fn delay_reads(n: u32) {
     // contract).
     unsafe {
         while k > 0 {
-            let _ = psx_io::read32(sio::STAT);
+            let _ = psx_io::read_u32(sio::STAT);
             k -= 1;
             core::hint::spin_loop();
         }
@@ -1128,11 +1128,11 @@ unsafe fn exchange_ack(port2: bool, tx: u8) -> (u8, bool) {
         if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
             return (0xFF, false);
         }
-        psx_io::write8(sio::DATA, tx);
+        psx_io::write_u8(sio::DATA, tx);
         if !wait_stat(STAT_RX_NOT_EMPTY, EXCHANGE_WAIT_SPINS) {
             return (0xFF, false);
         }
-        let rx = psx_io::read8(sio::DATA);
+        let rx = psx_io::read_u8(sio::DATA);
         // Wait for the latched `/ACK` interrupt (STAT bit 9). The latch cannot be
         // missed, unlike the brief live level; the controller IRQ is masked in
         // `I_MASK`, so this never reaches the CPU.
@@ -1143,7 +1143,7 @@ unsafe fn exchange_ack(port2: bool, tx: u8) -> (u8, bool) {
             // pulse CTRL.ACK while keeping JOYN asserted so the device stays
             // selected for the next byte.
             let _ = wait_stat_low(STAT_DSR_LEVEL, ACK_WAIT_SPINS);
-            psx_io::write16(sio::CTRL, active_ctrl(port2, true) | CTRL_ACK);
+            psx_io::write_u16(sio::CTRL, active_ctrl(port2, true) | CTRL_ACK);
         }
         (rx, acked)
     }
@@ -1156,7 +1156,7 @@ unsafe fn wait_stat(mask: u32, spins: u32) -> bool {
     let mut spins = spins;
     // SAFETY: side-effect-free reads of SIO0 STAT (SIO0 access contract).
     unsafe {
-        while psx_io::read32(sio::STAT) & mask == 0 {
+        while psx_io::read_u32(sio::STAT) & mask == 0 {
             if spins == 0 {
                 return false;
             }
@@ -1174,7 +1174,7 @@ unsafe fn wait_stat_low(mask: u32, spins: u32) -> bool {
     let mut spins = spins;
     // SAFETY: side-effect-free reads of SIO0 STAT (SIO0 access contract).
     unsafe {
-        while psx_io::read32(sio::STAT) & mask != 0 {
+        while psx_io::read_u32(sio::STAT) & mask != 0 {
             if spins == 0 {
                 return false;
             }

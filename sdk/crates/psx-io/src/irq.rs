@@ -1,62 +1,36 @@
-//! Interrupt controller (I_STAT / I_MASK) MMIO.
+//! Interrupt controller: pending and enabled sources.
+//!
+//! The register addresses and source bit positions live in
+//! [`psx_hw::irq`].
 
-/// `I_STAT` -- pending interrupt set. Write-to-ack: writing 0 to a bit
-/// clears it (writing 1 preserves).
-pub const I_STAT: u32 = 0x1F80_1070;
+use psx_hw::irq as reg;
 
-/// `I_MASK` -- interrupt enable set. Straight write.
-pub const I_MASK: u32 = 0x1F80_1074;
-
-/// Source bits inside `I_STAT` / `I_MASK`.
-pub mod source {
-    /// Bit position of the VBlank IRQ.
-    pub const VBLANK: u32 = 0;
-    /// Bit position of the GPU IRQ (GP0 1Fh).
-    pub const GPU: u32 = 1;
-    /// Bit position of the CD-ROM IRQ.
-    pub const CDROM: u32 = 2;
-    /// Bit position of the DMA-completion IRQ.
-    pub const DMA: u32 = 3;
-    /// Bit position of root-counter 0.
-    pub const TIMER0: u32 = 4;
-    /// Bit position of root-counter 1.
-    pub const TIMER1: u32 = 5;
-    /// Bit position of root-counter 2.
-    pub const TIMER2: u32 = 6;
-    /// Bit position of the controller / memory-card IRQ.
-    pub const CONTROLLER: u32 = 7;
-    /// Bit position of the SIO1 (debug-serial) IRQ.
-    pub const SIO1: u32 = 8;
-    /// Bit position of the SPU IRQ.
-    pub const SPU: u32 = 9;
-    /// Bit position of the lightpen / controller-IRQ10 line.
-    pub const LIGHTPEN: u32 = 10;
-}
-
-/// Read `I_STAT`.
+/// Pending interrupt sources, one bit per [`psx_hw::irq::source`] position.
+#[doc(alias = "I_STAT")]
 #[inline(always)]
-pub fn stat() -> u32 {
+pub fn pending() -> u32 {
     // SAFETY: I_STAT (0x1F80_1070) is the interrupt controller's aligned 32-bit pending register on
     // every PS1; reading it has no side effects.
-    unsafe { crate::read32(I_STAT) }
+    unsafe { crate::read_u32(reg::I_STAT) }
 }
 
-/// Read `I_MASK`.
+/// Enabled interrupt sources (the mask register).
+#[doc(alias = "I_MASK")]
 #[inline(always)]
 pub fn mask() -> u32 {
     // SAFETY: I_MASK (0x1F80_1074) is the interrupt controller's aligned 32-bit mask register on
     // every PS1; reading it has no side effects.
-    unsafe { crate::read32(I_MASK) }
+    unsafe { crate::read_u32(reg::I_MASK) }
 }
 
 /// Acknowledge pending bits by writing `!(bits)` -- the hardware
 /// AND-accumulates, so any bit left 1 in the written value is
 /// preserved, any bit that was 0 is cleared.
 #[inline(always)]
-pub fn ack(bits: u32) {
+pub fn acknowledge(bits: u32) {
     // SAFETY: an aligned 32-bit write to I_STAT (0x1F80_1070). The hardware ANDs the value in, so
     // it can only clear pending bits.
-    unsafe { crate::write32(I_STAT, !bits) }
+    unsafe { crate::write_u32(reg::I_STAT, !bits) }
 }
 
 /// Set the mask register (who can interrupt the CPU).
@@ -64,5 +38,66 @@ pub fn ack(bits: u32) {
 pub fn set_mask(bits: u32) {
     // SAFETY: an aligned 32-bit write to I_MASK (0x1F80_1074). It only selects which sources raise
     // the CPU interrupt line and touches no memory.
-    unsafe { crate::write32(I_MASK, bits) }
+    unsafe { crate::write_u32(reg::I_MASK, bits) }
+}
+
+/// Renamed to [`pending`].
+#[deprecated(note = "renamed to `pending`")]
+#[inline(always)]
+pub fn stat() -> u32 {
+    pending()
+}
+
+/// Renamed to [`acknowledge`].
+#[deprecated(note = "renamed to `acknowledge`")]
+#[inline(always)]
+pub fn ack(bits: u32) {
+    acknowledge(bits)
+}
+
+/// Moved to [`psx_hw::irq::I_STAT`].
+#[deprecated(note = "moved to `psx_hw::irq::I_STAT`")]
+pub const I_STAT: u32 = reg::I_STAT;
+
+/// Moved to [`psx_hw::irq::I_MASK`].
+#[deprecated(note = "moved to `psx_hw::irq::I_MASK`")]
+pub const I_MASK: u32 = reg::I_MASK;
+
+/// Moved to [`psx_hw::irq::source`].
+pub mod source {
+    use psx_hw::irq::source as bit;
+
+    /// Moved to [`psx_hw::irq::source::VBLANK`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::VBLANK`")]
+    pub const VBLANK: u32 = bit::VBLANK;
+    /// Moved to [`psx_hw::irq::source::GPU`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::GPU`")]
+    pub const GPU: u32 = bit::GPU;
+    /// Moved to [`psx_hw::irq::source::CDROM`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::CDROM`")]
+    pub const CDROM: u32 = bit::CDROM;
+    /// Moved to [`psx_hw::irq::source::DMA`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::DMA`")]
+    pub const DMA: u32 = bit::DMA;
+    /// Moved to [`psx_hw::irq::source::TIMER0`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::TIMER0`")]
+    pub const TIMER0: u32 = bit::TIMER0;
+    /// Moved to [`psx_hw::irq::source::TIMER1`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::TIMER1`")]
+    pub const TIMER1: u32 = bit::TIMER1;
+    /// Moved to [`psx_hw::irq::source::TIMER2`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::TIMER2`")]
+    pub const TIMER2: u32 = bit::TIMER2;
+    /// Moved to [`psx_hw::irq::source::CONTROLLER`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::CONTROLLER`")]
+    pub const CONTROLLER: u32 = bit::CONTROLLER;
+    /// Moved to [`psx_hw::irq::source::SIO1`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::SIO1`")]
+    pub const SIO1: u32 = bit::SIO1;
+    /// Moved to [`psx_hw::irq::source::SPU`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::SPU`")]
+    pub const SPU: u32 = bit::SPU;
+    /// Moved to [`psx_hw::irq::source::LIGHTPEN`].
+    #[deprecated(note = "moved to `psx_hw::irq::source::LIGHTPEN`")]
+    pub const LIGHTPEN: u32 = bit::LIGHTPEN;
 }

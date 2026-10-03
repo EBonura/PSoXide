@@ -56,8 +56,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+use psx_hw::spu::{BASE as SPU_BASE, SPUCNT, SPUSTAT};
 use psx_io::dma::{self, Channel};
-use psx_io::spu::{SPUCNT, SPUSTAT, SPU_BASE};
 
 pub mod tones;
 
