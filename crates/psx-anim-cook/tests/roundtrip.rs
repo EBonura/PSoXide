@@ -57,7 +57,7 @@ fn runtime_decoder_matches_reference() {
     let mut blob = e.bytes.clone();
     blob.extend_from_slice(&[0; 4]);
     let leaked: &'static [u8] = Box::leak(blob.into_boxed_slice());
-    let runtime = psx_asset::hma1::Model::new(leaked);
+    let runtime = psx_asset::hma1::Model::new(leaked).expect("cooked HMA1 validates");
     let reference = hma_dec::ModelView::new(&e.bytes);
     for pos_q8 in (0..30 * 256).step_by(37) {
         let mut a = [psx_asset::hma1::Aff::ZERO; 3];
@@ -122,7 +122,7 @@ fn jaw_controller_matches_reference_both_ways() {
     let mut blob = e.bytes.clone();
     blob.extend_from_slice(&[0; 4]);
     let leaked: &'static [u8] = Box::leak(blob.into_boxed_slice());
-    let runtime = psx_asset::hma1::Model::new(leaked);
+    let runtime = psx_asset::hma1::Model::new(leaked).expect("cooked HMA1 validates");
     let reference = hma_dec::ModelView::new(&e.bytes);
     for post in [false, true] {
         for amount in [0u8, 17, 40, 64] {
