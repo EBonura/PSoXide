@@ -208,12 +208,16 @@ pub mod raw {
 }
 
 /// Write `MADR` (memory address that DMA will source from or drain to).
+///
+/// # Safety
+///
+/// The value arms or starts a transfer on `ch`; see [`start`]'s contract.
 #[deprecated(
     note = "a safe MADR store lets safe code aim DMA anywhere in RAM; use the unsafe `dma::start`, or `dma::raw::set_madr` for probes"
 )]
 #[inline(always)]
-pub fn set_madr(ch: Channel, addr: u32) {
-    // SAFETY: none; see `raw::set_madr`.
+pub unsafe fn set_madr(ch: Channel, addr: u32) {
+    // SAFETY: forwarded contract.
     unsafe { raw::set_madr(ch, addr) }
 }
 
@@ -226,33 +230,45 @@ pub fn madr(ch: Channel) -> u32 {
 
 /// Write `BCR` in manual / linked-list mode: just a 16-bit word count.
 /// For block-slice mode use [`set_bcr_block`].
+///
+/// # Safety
+///
+/// The value arms or starts a transfer on `ch`; see [`start`]'s contract.
 #[deprecated(
     note = "use the unsafe `dma::start` with `dma::bcr_words`, or `dma::raw::set_bcr` for probes"
 )]
 #[inline(always)]
-pub fn set_bcr_manual(ch: Channel, words: u16) {
-    // SAFETY: none; see `raw::set_bcr`.
+pub unsafe fn set_bcr_manual(ch: Channel, words: u16) {
+    // SAFETY: forwarded contract.
     unsafe { raw::set_bcr(ch, bcr_words(words)) }
 }
 
 /// Write `BCR` in block-slice mode:
 /// `BS × BA = blocks of block_size words`.
+///
+/// # Safety
+///
+/// The value arms or starts a transfer on `ch`; see [`start`]'s contract.
 #[deprecated(
     note = "use the unsafe `dma::start` with `dma::bcr_blocks`, or `dma::raw::set_bcr` for probes"
 )]
 #[inline(always)]
-pub fn set_bcr_block(ch: Channel, block_size: u16, block_count: u16) {
-    // SAFETY: none; see `raw::set_bcr`.
+pub unsafe fn set_bcr_block(ch: Channel, block_size: u16, block_count: u16) {
+    // SAFETY: forwarded contract.
     unsafe { raw::set_bcr(ch, bcr_blocks(block_size, block_count)) }
 }
 
 /// Write `CHCR` (control). Starts the transfer if `CHCR_START` is set.
+///
+/// # Safety
+///
+/// The value arms or starts a transfer on `ch`; see [`start`]'s contract.
 #[deprecated(
     note = "a safe CHCR store starts DMA from safe code; use the unsafe `dma::start`, `dma::abort` to stop a channel, or `dma::raw::set_chcr` for probes"
 )]
 #[inline(always)]
-pub fn set_chcr(ch: Channel, value: u32) {
-    // SAFETY: none; see `raw::set_chcr`.
+pub unsafe fn set_chcr(ch: Channel, value: u32) {
+    // SAFETY: forwarded contract.
     unsafe { raw::set_chcr(ch, value) }
 }
 

@@ -761,19 +761,16 @@ pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
     };
 }
 
-/// Safe-signature form of [`submit_linked_list_raw_async`].
+/// Old name of [`submit_linked_list_raw_async`].
 ///
-/// Nothing ties `head` to live memory, which is why
-/// [`ot::OrderingTable::frame`] replaces it. The contract of
-/// [`submit_linked_list_raw_async`] applies all the same.
-// Kept safe for existing callers until they move to the frame API; this
-// is exactly the hole the lint names.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// # Safety
+///
+/// As [`submit_linked_list_raw_async`].
 #[deprecated(
     note = "takes an unchecked pointer; use `OrderingTable::frame`, `submit_static`, or the unsafe `submit_linked_list_raw_async`"
 )]
-pub fn submit_linked_list_async(head: *const u32) {
-    // SAFETY: none; the caller carries the raw contract unchecked.
+pub unsafe fn submit_linked_list_async(head: *const u32) {
+    // SAFETY: forwarded contract.
     unsafe { submit_linked_list_raw_async(head) }
 }
 
@@ -826,19 +823,16 @@ pub unsafe fn submit_linked_list_raw(head: *const u32) {
     submit_linked_list_wait();
 }
 
-/// Safe-signature form of [`submit_linked_list_raw`].
+/// Old name of [`submit_linked_list_raw`].
 ///
-/// Nothing ties `head` to live memory, which is why
-/// [`ot::OrderingTable::frame`] replaces it. The contract of
-/// [`submit_linked_list_raw`] applies all the same.
-// Kept safe for existing callers until they move to the frame API; this
-// is exactly the hole the lint names.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// # Safety
+///
+/// As [`submit_linked_list_raw`].
 #[deprecated(
     note = "takes an unchecked pointer; use `OrderingTable::frame`, `submit_static`, or the unsafe `submit_linked_list_raw`"
 )]
-pub fn submit_linked_list(head: *const u32) {
-    // SAFETY: none; the caller carries the raw contract unchecked.
+pub unsafe fn submit_linked_list(head: *const u32) {
+    // SAFETY: forwarded contract.
     unsafe { submit_linked_list_raw(head) }
 }
 
