@@ -121,7 +121,7 @@ use psx_level::{
     LevelUiValueBinding, LevelWaterCellRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
     RuntimeDebugMask,
 };
-use psx_vram::{TexDepth, Tpage};
+use psx_vram::{TextureDepth, TexturePage};
 
 mod active_room_cache;
 mod active_room_streaming;

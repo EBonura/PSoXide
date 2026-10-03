@@ -947,7 +947,7 @@ impl BspRuntime {
             // features. An opaque material may still use CLUT entry zero as a
             // binary mask, so preserve an explicit PSXT transparent-zero flag
             // instead of forcing all opaque room materials to opaque-zero.
-            let slot = if texture.index_zero_transparent() {
+            let slot = if texture.is_index_zero_transparent() {
                 ensure_texture_uploaded(asset_id, asset.bytes)
             } else if material.blend_mode == material_blend::OPAQUE {
                 ensure_room_texture_uploaded(asset_id, asset.bytes)
@@ -1555,7 +1555,7 @@ impl BspRuntime {
         psx_gte::scene::set_projection_plane(
             PROJECTION.focal_length.clamp(1, i32::from(u16::MAX)) as u16
         );
-        psx_gte::scene::set_avsz_weights(0x155, 0x100);
+        psx_gte::scene::set_average_z_weights(0x155, 0x100);
         let view_rotation = pxbsp_view_rotation(camera);
         let camera = pxbsp_camera(camera);
         let view = load_pxbsp_view_rotation(camera.origin, view_rotation);

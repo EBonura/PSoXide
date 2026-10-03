@@ -25,11 +25,11 @@ use psx_gpu::{self as gpu, prim, Resolution, VideoMode};
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::ops as gte_ops;
 use psx_gte::regs::pack_xy as pack_gte_xy;
-use psx_gte::{cfc2, ctc2, mfc2, mtc2, scene as gte_scene};
-use psx_io::{cdrom, dma, gpu as gpu_io, irq, sio, timers};
+use psx_gte::{read_control, read_data, scene as gte_scene, write_control, write_data};
+use psx_io::{dma, gpu as gpu_io, irq, timers};
 use psx_rt::tty;
 use psx_spu::SpuAddr;
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 mod audio_link;
 mod audio_probe;
@@ -200,7 +200,7 @@ const SUITE_VERSION_MINOR: u8 = 26;
 const SUITE_VERSION: &str = "HWTEST v1.26";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
@@ -2581,11 +2581,11 @@ impl HardwareTests {
         let Some(font) = self.font.as_ref() else {
             return;
         };
-        gpu_io::wait_cmd_ready();
+        gpu_io::wait_command_ready();
         for buffer_y in [184u32, 424] {
-            gpu_io::write_gp0(0x0200_0000); // fill, black
-            gpu_io::write_gp0((buffer_y << 16) | 16);
-            gpu_io::write_gp0((12u32 << 16) | 288);
+            gpu_io::write_command(0x0200_0000); // fill, black
+            gpu_io::write_command((buffer_y << 16) | 16);
+            gpu_io::write_command((12u32 << 16) | 288);
         }
         gpu::set_draw_area(0, 0, 1023, 511);
         gpu::set_draw_offset(0, 0);
@@ -2608,7 +2608,7 @@ impl HardwareTests {
         let text = unsafe { core::str::from_utf8_unchecked(&label[..n]) };
         font.draw_text(24, 186, text, (255, 216, 96));
         font.draw_text(24, 426, text, (255, 216, 96));
-        gpu::draw_sync();
+        gpu::wait_idle();
     }
 
     fn prepare_audio_readout(&mut self) {
@@ -2657,7 +2657,9 @@ impl HardwareTests {
         if let Some(diag) = self.mdec_diag.as_ref() {
             let records = fmv_diag::records(diag);
             if !fmv_diag::merge(&mut self.timing_scan.records, &records) {
-                tty::println("hardware-tests: mdec diagnostic records did not fit the timing report");
+                tty::println(
+                    "hardware-tests: mdec diagnostic records did not fit the timing report",
+                );
                 return false;
             }
             for record in records.iter().filter(|r| r.id != TIMING_RECORD_UNUSED) {
@@ -2691,9 +2693,9 @@ impl HardwareTests {
         // SAFETY: plain SPU register reads.
         let (spucnt, cd_left, cd_right) = unsafe {
             (
-                psx_io::read16(psx_io::spu::SPUCNT),
-                psx_io::read16(0x1F80_1DB0),
-                psx_io::read16(0x1F80_1DB2),
+                psx_io::read_u16(psx_hw::spu::SPUCNT),
+                psx_io::read_u16(0x1F80_1DB0),
+                psx_io::read_u16(0x1F80_1DB2),
             )
         };
 
@@ -2998,7 +3000,7 @@ impl Scene for HardwareTests {
             let mut i = 0;
             while i < PROBE_VARIANT_COUNT {
                 let (_, setup, interbyte) = PROBE_VARIANTS[i];
-                self.probe_variants[i] = psx_pad::poll_port1_diag(setup, interbyte);
+                self.probe_variants[i] = psx_pad::poll_port1_diagnostics(setup, interbyte);
                 i += 1;
             }
         }
@@ -4181,7 +4183,7 @@ fn run_gte_scan() -> ScanReport {
             seed_gte_state();
             unsafe { $call };
             let snapshot = gte_snapshot_hash();
-            if cfc2!(31) & 0x8000_0000 != 0 {
+            if read_control!(31) & 0x8000_0000 != 0 {
                 flag_master_hits = flag_master_hits.wrapping_add(1);
             }
             hash = mix32(hash, $instr);
@@ -4190,28 +4192,28 @@ fn run_gte_scan() -> ScanReport {
         }};
     }
 
-    sample!(0x4A08_0001, gte_ops::rtps());
-    sample!(0x4A08_0030, gte_ops::rtpt());
-    sample!(0x4A00_0006, gte_ops::nclip());
-    sample!(0x4A08_000C, gte_ops::op_sf1());
-    sample!(0x4A00_002D, gte_ops::avsz3());
-    sample!(0x4A00_002E, gte_ops::avsz4());
-    sample!(0x4A08_0028, gte_ops::sqr());
-    sample!(0x4A08_0013, gte_ops::ncds());
-    sample!(0x4A08_001B, gte_ops::nccs());
-    sample!(0x4A08_001E, gte_ops::ncs());
-    sample!(0x4A08_0016, gte_ops::ncdt());
-    sample!(0x4A08_0020, gte_ops::nct());
-    sample!(0x4A08_003F, gte_ops::ncct());
-    sample!(0x4A08_0010, gte_ops::dpcs());
-    sample!(0x4A08_002A, gte_ops::dpct());
-    sample!(0x4A08_0011, gte_ops::intpl());
-    sample!(0x4A08_0029, gte_ops::dcpl());
-    sample!(0x4A08_001C, gte_ops::cc());
-    sample!(0x4A08_0014, gte_ops::cdp());
-    sample!(0x4A08_003D, gte_ops::gpf());
-    sample!(0x4A08_003E, gte_ops::gpl());
-    sample!(0x4A08_0012, gte_ops::mvmva_rt_v0_tr_sf1());
+    sample!(0x4A08_0001, gte_ops::project_single());
+    sample!(0x4A08_0030, gte_ops::project_triple());
+    sample!(0x4A00_0006, gte_ops::screen_winding());
+    sample!(0x4A08_000C, gte_ops::outer_product());
+    sample!(0x4A00_002D, gte_ops::average_z3());
+    sample!(0x4A00_002E, gte_ops::average_z4());
+    sample!(0x4A08_0028, gte_ops::square());
+    sample!(0x4A08_0013, gte_ops::light_color_depth_single());
+    sample!(0x4A08_001B, gte_ops::light_color_single());
+    sample!(0x4A08_001E, gte_ops::light_single());
+    sample!(0x4A08_0016, gte_ops::light_color_depth_triple());
+    sample!(0x4A08_0020, gte_ops::light_triple());
+    sample!(0x4A08_003F, gte_ops::light_color_triple());
+    sample!(0x4A08_0010, gte_ops::depth_cue_single());
+    sample!(0x4A08_002A, gte_ops::depth_cue_triple());
+    sample!(0x4A08_0011, gte_ops::interpolate_far_color());
+    sample!(0x4A08_0029, gte_ops::depth_cue_light());
+    sample!(0x4A08_001C, gte_ops::color_color());
+    sample!(0x4A08_0014, gte_ops::color_depth_cue());
+    sample!(0x4A08_003D, gte_ops::scale_vector());
+    sample!(0x4A08_003E, gte_ops::scale_vector_accumulate());
+    sample!(0x4A08_0012, gte_ops::rotate_translate_v0());
 
     ScanReport::info(items, hash, flag_master_hits, "documented cop2 ops")
 }
@@ -4226,16 +4228,16 @@ fn run_spu_scan() -> ScanReport {
 
     unsafe {
         for voice in 0..24u32 {
-            let base = psx_io::spu::SPU_BASE + voice * VOICE_STRIDE;
+            let base = psx_hw::spu::BASE + voice * VOICE_STRIDE;
             for offset in OFFSETS {
                 let addr = base + offset;
-                let old = psx_io::read16(addr);
+                let old = psx_io::read_u16(addr);
                 let pattern = 0x1000u16
                     ^ ((voice as u16).wrapping_mul(0x0111))
                     ^ ((offset as u16).wrapping_mul(0x0029));
-                psx_io::write16(addr, pattern);
-                let readback = psx_io::read16(addr);
-                psx_io::write16(addr, old);
+                psx_io::write_u16(addr, pattern);
+                let readback = psx_io::read_u16(addr);
+                psx_io::write_u16(addr, old);
                 if readback != old {
                     changed = changed.wrapping_add(1);
                 }
@@ -4264,7 +4266,8 @@ fn run_timing_scan(scope: TimingScope) -> TimingReport {
     if scope == TimingScope::PerfAb {
         perf_probes::push_risky(&mut records, &mut next);
     }
-    let memory_control = MEMORY_CONTROL_REGISTERS.map(|address| unsafe { psx_io::read32(address) });
+    let memory_control =
+        MEMORY_CONTROL_REGISTERS.map(|address| unsafe { psx_io::read_u32(address) });
 
     let mut hash = 0x5449_4D33;
     let mut jitter = 0u32;
@@ -4366,7 +4369,7 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
     push_timing_record(
         records,
         next,
-        sample_timing(0x0F, 64, || timed_load_hazards_at(irq::I_STAT)),
+        sample_timing(0x0F, 64, || timed_load_hazards_at(psx_hw::irq::I_STAT)),
     );
 
     for (set, spin_count) in SPINS.into_iter().enumerate() {
@@ -4494,35 +4497,35 @@ fn push_standard_records(records: &mut [TimingRecord; TIMING_RECORD_COUNT], next
         records,
         next,
         sample_timing(0x96, 1, || {
-            cd_timed(|| cdrom::try_get_stat(CD_SPINS).is_some())
+            cd_timed(|| psx_io::cd::try_status(CD_SPINS).is_some())
         }),
     );
     push_timing_record(
         records,
         next,
         sample_timing(0x97, 1, || {
-            cd_timed(|| cdrom::try_set_mode(0, CD_SPINS).is_some())
+            cd_timed(|| psx_io::cd::try_set_mode(0, CD_SPINS).is_some())
         }),
     );
     push_timing_record(
         records,
         next,
         sample_timing(0x98, 1, || {
-            cd_timed(|| cdrom::try_get_loc_p(CD_SPINS).is_some())
+            cd_timed(|| psx_io::cd::try_play_position(CD_SPINS).is_some())
         }),
     );
     push_timing_record(
         records,
         next,
         sample_timing(0x99, 1, || {
-            cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]))
+            cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]))
         }),
     );
     push_timing_record(
         records,
         next,
         sample_timing(0x9A, 1, || {
-            cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_INIT, &[]))
+            cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_INIT, &[]))
         }),
     );
     // CD-DA contention. 0x9B against 0x9C is the whole point: identical read
@@ -5158,14 +5161,14 @@ fn scan_heartbeat() {
     } else {
         0x00FF_E040
     };
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     // Absolute VRAM coordinates, like the bar: the battery blocks the
     // frame loop, so ordinary draws would land in the hidden buffer.
     // GP0(02h) snaps X and width to 16, hence the aligned geometry.
     for buffer_y in [200u32, 440] {
-        gpu_io::write_gp0(0x0200_0000 | rgb);
-        gpu_io::write_gp0((buffer_y << 16) | 304);
-        gpu_io::write_gp0((8u32 << 16) | 16);
+        gpu_io::write_command(0x0200_0000 | rgb);
+        gpu_io::write_command((buffer_y << 16) | 304);
+        gpu_io::write_command((8u32 << 16) | 16);
     }
 }
 
@@ -5186,15 +5189,15 @@ fn draw_record_id(id: u16) {
             } else {
                 0x0020_2020
             };
-            gpu_io::wait_cmd_ready();
-            gpu_io::write_gp0(0x0200_0000 | rgb);
-            gpu_io::write_gp0((buffer_y << 16) | (32 + bit * 16));
-            gpu_io::write_gp0((8u32 << 16) | 16);
+            gpu_io::wait_command_ready();
+            gpu_io::write_command(0x0200_0000 | rgb);
+            gpu_io::write_command((buffer_y << 16) | (32 + bit * 16));
+            gpu_io::write_command((8u32 << 16) | 16);
             // GP0(02h) rounds x down to 16 pixels, so cells stay 16 wide and
             // the row is 256 wide: it still fits the 320-pixel picture.
         }
     }
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
 }
 
 /// Draw a progress bar straight into the visible framebuffer.
@@ -5220,21 +5223,21 @@ fn draw_init_progress(done: usize, total: usize, colour: (u8, u8, u8)) {
     };
     let rgb = (colour.0 as u32) | ((colour.1 as u32) << 8) | ((colour.2 as u32) << 16);
 
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     for buffer_y in [200u32, 440] {
         // Track, then the filled portion. GP0 0x02 takes absolute VRAM
         // coordinates and ignores draw area and offset, which is what makes it
         // usable before any draw environment has been set up.
-        gpu_io::write_gp0(0x0200_0000 | 0x0020_2020);
-        gpu_io::write_gp0((buffer_y << 16) | BAR_X);
-        gpu_io::write_gp0((BAR_H << 16) | BAR_W);
+        gpu_io::write_command(0x0200_0000 | 0x0020_2020);
+        gpu_io::write_command((buffer_y << 16) | BAR_X);
+        gpu_io::write_command((BAR_H << 16) | BAR_W);
         if filled != 0 {
-            gpu_io::write_gp0(0x0200_0000 | rgb);
-            gpu_io::write_gp0((buffer_y << 16) | BAR_X);
-            gpu_io::write_gp0((BAR_H << 16) | filled);
+            gpu_io::write_command(0x0200_0000 | rgb);
+            gpu_io::write_command((buffer_y << 16) | BAR_X);
+            gpu_io::write_command((BAR_H << 16) | filled);
         }
     }
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
 }
 
 /// Repeat the probe with interrupts masked, then keep min/median/max.
@@ -5484,7 +5487,7 @@ fn cd_clock_reset() {
 /// passes `CD_DEADLINE_HBLANKS`. Assumes the caller has already reset the
 /// clock, so the deadline covers the whole operation being timed.
 fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
-    let Some(saved) = cdrom::dispatch_command(command, params, CD_SPINS) else {
+    let Some(saved) = psx_io::cd::dispatch_command(command, params, CD_SPINS) else {
         return false;
     };
     let mut seen_ack = false;
@@ -5492,30 +5495,30 @@ fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
         if timers::counter(timers::Timer::Timer1) >= CD_DEADLINE_HBLANKS {
             break false;
         }
-        match cdrom::irq_flag_value() {
+        match psx_io::cd::irq_flag_value() {
             0 => {}
             5 => {
-                cdrom::discard_response();
-                cdrom::acknowledge_irq(5);
+                psx_io::cd::discard_response();
+                psx_io::cd::acknowledge_irq(5);
                 break false;
             }
             3 => {
-                cdrom::discard_response();
-                cdrom::acknowledge_irq(3);
+                psx_io::cd::discard_response();
+                psx_io::cd::acknowledge_irq(3);
                 seen_ack = true;
             }
             2 if seen_ack => {
-                cdrom::discard_response();
-                cdrom::acknowledge_irq(2);
+                psx_io::cd::discard_response();
+                psx_io::cd::acknowledge_irq(2);
                 break true;
             }
             other => {
-                cdrom::discard_response();
-                cdrom::acknowledge_irq(other);
+                psx_io::cd::discard_response();
+                psx_io::cd::acknowledge_irq(other);
             }
         }
     };
-    cdrom::restore_irq_output(saved);
+    psx_io::cd::restore_irq_output(saved);
     ok
 }
 
@@ -5535,17 +5538,17 @@ fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
     // that ground record 0x9C into minutes of apparent freeze (the
     // operator had to START-skip); with the motor kept spinning the
     // ReadN starts like any other.
-    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+    let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
 
     if playing {
-        if cdrom::try_set_mode(cdrom::MODE_CDDA, CD_SPINS).is_none() {
+        if psx_io::cd::try_set_mode(psx_hw::cd::MODE_CDDA, CD_SPINS).is_none() {
             return CD_FAILED;
         }
         // Track 2 is the synthetic tone the disc build appends.
-        if cdrom::try_play_track(2, CD_SPINS).is_none() {
+        if psx_io::cd::try_play_track(2, CD_SPINS).is_none() {
             return CD_FAILED;
         }
-        let _ = cdrom::try_demute(CD_SPINS);
+        let _ = psx_io::cd::try_unmute(CD_SPINS);
         // Let playback actually establish before the read fights it; measuring
         // during spin-up would confuse start-up cost with contention.
         cd_clock_reset();
@@ -5553,12 +5556,12 @@ fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
     }
 
     // Data mode for the read itself.
-    if cdrom::try_set_mode(0, CD_SPINS).is_none()
-        || cdrom::try_set_loc_lba(CD_TEST_LBA, CD_SPINS).is_none()
-        || cdrom::try_read_n(CD_SPINS).is_none()
+    if psx_io::cd::try_set_mode(0, CD_SPINS).is_none()
+        || psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
+        || psx_io::cd::try_start_reading(CD_SPINS).is_none()
     {
         cd_clock_reset();
-        let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+        let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
         return CD_FAILED;
     }
     cd_clock_reset();
@@ -5574,8 +5577,8 @@ fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
         true
     });
     cd_clock_reset();
-    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
-    let _ = cdrom::try_mute(CD_SPINS);
+    let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
+    let _ = psx_io::cd::try_mute(CD_SPINS);
     if primed {
         elapsed
     } else {
@@ -5586,19 +5589,19 @@ fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
 /// Time CD-DA playback from the Play command to the first position report.
 fn cd_play_start() -> u16 {
     cd_clock_reset();
-    let _ = cd_command_until_complete_timed(cdrom::CMD_STOP, &[]);
-    if cdrom::try_set_mode(cdrom::MODE_CDDA, CD_SPINS).is_none() {
+    let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_STOP, &[]);
+    if psx_io::cd::try_set_mode(psx_hw::cd::MODE_CDDA, CD_SPINS).is_none() {
         return CD_FAILED;
     }
     let elapsed = cd_timed(|| {
-        if cdrom::try_play_track(2, CD_SPINS).is_none() {
+        if psx_io::cd::try_play_track(2, CD_SPINS).is_none() {
             return false;
         }
         // Position advancing is the first proof audio is actually streaming,
         // rather than the command merely having been accepted.
         let mut polls = 0;
         while polls < 64 {
-            if let Some(response) = cdrom::try_get_loc_p(CD_SPINS) {
+            if let Some(response) = psx_io::cd::try_play_position(CD_SPINS) {
                 if !response.is_empty() {
                     return true;
                 }
@@ -5608,27 +5611,28 @@ fn cd_play_start() -> u16 {
         false
     });
     cd_clock_reset();
-    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
-    let _ = cdrom::try_mute(CD_SPINS);
+    let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
+    let _ = psx_io::cd::try_mute(CD_SPINS);
     elapsed
 }
 
 /// Time GetLocP while CD-DA is genuinely streaming.
 fn cd_getlocp_during_playback() -> u16 {
     cd_clock_reset();
-    let _ = cd_command_until_complete_timed(cdrom::CMD_STOP, &[]);
-    if cdrom::try_set_mode(cdrom::MODE_CDDA, CD_SPINS).is_none()
-        || cdrom::try_play_track(2, CD_SPINS).is_none()
+    let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_STOP, &[]);
+    if psx_io::cd::try_set_mode(psx_hw::cd::MODE_CDDA, CD_SPINS).is_none()
+        || psx_io::cd::try_play_track(2, CD_SPINS).is_none()
     {
         return CD_FAILED;
     }
     cd_clock_reset();
     while timers::counter(timers::Timer::Timer1) < 1_000 {}
-    let elapsed =
-        cd_timed(|| cdrom::try_get_loc_p(CD_SPINS).is_some_and(|response| !response.is_empty()));
+    let elapsed = cd_timed(|| {
+        psx_io::cd::try_play_position(CD_SPINS).is_some_and(|response| !response.is_empty())
+    });
     cd_clock_reset();
-    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
-    let _ = cdrom::try_mute(CD_SPINS);
+    let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
+    let _ = psx_io::cd::try_mute(CD_SPINS);
     elapsed
 }
 
@@ -5638,20 +5642,20 @@ fn cd_sector_timed() -> bool {
         if timers::counter(timers::Timer::Timer1) >= CD_DEADLINE_HBLANKS {
             return false;
         }
-        match cdrom::irq_flag_value() {
+        match psx_io::cd::irq_flag_value() {
             1 => {
-                cdrom::acknowledge_irq(1);
+                psx_io::cd::acknowledge_irq(1);
                 return true;
             }
             0 => {}
             5 => {
-                cdrom::discard_response();
-                cdrom::acknowledge_irq(5);
+                psx_io::cd::discard_response();
+                psx_io::cd::acknowledge_irq(5);
                 return false;
             }
             other => {
-                cdrom::discard_response();
-                cdrom::acknowledge_irq(other);
+                psx_io::cd::discard_response();
+                psx_io::cd::acknowledge_irq(other);
             }
         }
     }
@@ -5662,8 +5666,8 @@ fn cd_sector_timed() -> bool {
 /// previous record happened to leave the head.
 fn cd_park(lba: u32) -> bool {
     cd_clock_reset();
-    cdrom::try_set_loc_lba(lba, CD_SPINS).is_some()
-        && cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[])
+    psx_io::cd::try_set_target_lba(lba, CD_SPINS).is_some()
+        && cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[])
 }
 
 /// Seek `distance` sectors BACKWARD onto the parked origin, timing only the
@@ -5673,10 +5677,10 @@ fn cd_seek_backward(distance: u32) -> u16 {
     if !cd_park(origin) {
         return CD_FAILED;
     }
-    if cdrom::try_set_loc_lba(CD_TEST_LBA, CD_SPINS).is_none() {
+    if psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none() {
         return CD_FAILED;
     }
-    cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[]))
+    cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[]))
 }
 
 /// Seek `distance` sectors away from the parked origin and time only the seek.
@@ -5685,27 +5689,27 @@ fn cd_seek_distance(distance: u32) -> u16 {
         return CD_FAILED;
     }
     let target = CD_TEST_LBA + distance;
-    if cdrom::try_set_loc_lba(target, CD_SPINS).is_none() {
+    if psx_io::cd::try_set_target_lba(target, CD_SPINS).is_none() {
         return CD_FAILED;
     }
-    cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[]))
+    cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[]))
 }
 
 /// Time `sectors` sequential sector arrivals once a read is already streaming,
 /// which isolates sustained throughput from the initial seek and spin-up.
 fn cd_read_throughput(double_speed: bool, sectors: u32) -> u16 {
     let mode = if double_speed {
-        cdrom::MODE_DOUBLE_SPEED
+        psx_hw::cd::MODE_DOUBLE_SPEED
     } else {
         0
     };
-    if cdrom::try_set_mode(mode, CD_SPINS).is_none()
+    if psx_io::cd::try_set_mode(mode, CD_SPINS).is_none()
         || !cd_park(CD_TEST_LBA)
-        || cdrom::try_set_loc_lba(CD_TEST_LBA, CD_SPINS).is_none()
-        || cdrom::try_read_n(CD_SPINS).is_none()
+        || psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
+        || psx_io::cd::try_start_reading(CD_SPINS).is_none()
     {
         cd_clock_reset();
-        let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+        let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
         return CD_FAILED;
     }
     // Discard the first sector: it carries the seek and spin-up settle.
@@ -5722,7 +5726,7 @@ fn cd_read_throughput(double_speed: bool, sectors: u32) -> u16 {
         true
     });
     cd_clock_reset();
-    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+    let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
     if primed {
         elapsed
     } else {
@@ -5751,22 +5755,22 @@ const FILL_X: u32 = 640;
 
 /// Set up a clean draw environment for a fill measurement.
 fn fill_env(dither: bool) {
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0xE300_0000);
-    gpu_io::write_gp0(0xE400_0000 | 1023 | (511 << 10));
-    gpu_io::write_gp0(0xE500_0000);
-    gpu_io::write_gp0(if dither { 0xE100_0200 } else { 0xE100_0000 });
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0xE300_0000);
+    gpu_io::write_command(0xE400_0000 | 1023 | (511 << 10));
+    gpu_io::write_command(0xE500_0000);
+    gpu_io::write_command(if dither { 0xE100_0200 } else { 0xE100_0000 });
     // Texture window covering the whole page, so texture records are not
     // silently clamped to a sub-rect.
-    gpu_io::write_gp0(0xE200_0000);
-    gpu_io::wait_cmd_ready();
+    gpu_io::write_command(0xE200_0000);
+    gpu_io::wait_command_ready();
 }
 
 /// Wait for the GPU to report command-ready, so the measured interval includes
 /// the actual raster work rather than only the CPU's FIFO writes.
 fn fill_drain() -> bool {
     let mut guard = 0u32;
-    while gpu_io::gpustat().bits() & (1 << 26) == 0 && guard < 1_000_000 {
+    while gpu_io::status().bits() & (1 << 26) == 0 && guard < 1_000_000 {
         guard += 1;
     }
     guard < 1_000_000
@@ -5784,53 +5788,53 @@ fn timed_fill_batch(count: u16, command: u32, size: u32, kind: FillKind, dither:
     while index < count {
         let y = FILL_Y + u32::from(index & 7);
         let x = FILL_X;
-        gpu_io::write_gp0(command);
+        gpu_io::write_command(command);
         match kind {
             FillKind::Flat | FillKind::Translucent => {
-                gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0(((y) << 16) | (x + size));
-                gpu_io::write_gp0(((y + size) << 16) | x);
+                gpu_io::write_command((y << 16) | x);
+                gpu_io::write_command(((y) << 16) | (x + size));
+                gpu_io::write_command(((y + size) << 16) | x);
                 if command & 0x0800_0000 != 0 {
-                    gpu_io::write_gp0(((y + size) << 16) | (x + size));
+                    gpu_io::write_command(((y + size) << 16) | (x + size));
                 }
             }
             FillKind::Gouraud => {
-                gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0(0x0000_FF00);
-                gpu_io::write_gp0(((y) << 16) | (x + size));
-                gpu_io::write_gp0(0x00FF_0000);
-                gpu_io::write_gp0(((y + size) << 16) | x);
+                gpu_io::write_command((y << 16) | x);
+                gpu_io::write_command(0x0000_FF00);
+                gpu_io::write_command(((y) << 16) | (x + size));
+                gpu_io::write_command(0x00FF_0000);
+                gpu_io::write_command(((y + size) << 16) | x);
                 if command & 0x0800_0000 != 0 {
-                    gpu_io::write_gp0(0x00FF_00FF);
-                    gpu_io::write_gp0(((y + size) << 16) | (x + size));
+                    gpu_io::write_command(0x00FF_00FF);
+                    gpu_io::write_command(((y + size) << 16) | (x + size));
                 }
             }
             FillKind::Textured { tpage, span } => {
                 // UV span is decoupled from screen size so a record can walk a
                 // wide texture (cache-hostile) or resample a small one
                 // (cache-friendly) at identical pixel cost.
-                gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0(u32::from(tpage) << 16);
-                gpu_io::write_gp0(((y) << 16) | (x + size));
-                gpu_io::write_gp0(u32::from(span) & 0xFF);
-                gpu_io::write_gp0(((y + size) << 16) | x);
-                gpu_io::write_gp0(u32::from(span) << 8);
+                gpu_io::write_command((y << 16) | x);
+                gpu_io::write_command(u32::from(tpage) << 16);
+                gpu_io::write_command(((y) << 16) | (x + size));
+                gpu_io::write_command(u32::from(span) & 0xFF);
+                gpu_io::write_command(((y + size) << 16) | x);
+                gpu_io::write_command(u32::from(span) << 8);
                 if command & 0x0800_0000 != 0 {
-                    gpu_io::write_gp0(((y + size) << 16) | (x + size));
-                    gpu_io::write_gp0((u32::from(span) << 8) | u32::from(span));
+                    gpu_io::write_command(((y + size) << 16) | (x + size));
+                    gpu_io::write_command((u32::from(span) << 8) | u32::from(span));
                 }
             }
             FillKind::Rect => {
-                gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0((size << 16) | size);
+                gpu_io::write_command((y << 16) | x);
+                gpu_io::write_command((size << 16) | size);
             }
             FillKind::TexturedRect { clut } => {
                 // GP0 0x64 takes an extra UV + CLUT word between position and
                 // extent. Omitting it shifts the extent into the UV slot and
                 // the GPU draws something unrelated to what was asked for.
-                gpu_io::write_gp0((y << 16) | x);
-                gpu_io::write_gp0(u32::from(clut) << 16);
-                gpu_io::write_gp0((size << 16) | size);
+                gpu_io::write_command((y << 16) | x);
+                gpu_io::write_command(u32::from(clut) << 16);
+                gpu_io::write_command((size << 16) | size);
             }
         }
         index += 1;
@@ -5882,20 +5886,20 @@ fn timed_mdec(command: u32, payload_words: u16) -> u16 {
     unsafe {
         // Reset: bit 31 aborts and clears the FIFOs, so each record starts
         // from the same state rather than inheriting the previous one's.
-        psx_io::write32(MDEC_CTRL, MDEC_RESET);
+        psx_io::write_u32(MDEC_CTRL, MDEC_RESET);
     }
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
     unsafe {
-        psx_io::write32(MDEC_CMD, command);
+        psx_io::write_u32(MDEC_CMD, command);
         let mut word = 0u16;
         while word < payload_words {
-            psx_io::write32(MDEC_CMD, 0x0000_0000);
+            psx_io::write_u32(MDEC_CMD, 0x0000_0000);
             word += 1;
         }
     }
     let mut guard = 0u32;
-    while unsafe { psx_io::read32(MDEC_CTRL) } & MDEC_BUSY != 0 && guard < 200_000 {
+    while unsafe { psx_io::read_u32(MDEC_CTRL) } & MDEC_BUSY != 0 && guard < 200_000 {
         guard += 1;
     }
     let elapsed = timers::counter(timers::Timer::Timer2);
@@ -5934,10 +5938,10 @@ fn timed_mdec_decode(macroblocks: u16) -> u16 {
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
     unsafe {
-        psx_io::write32(MDEC_CMD, command);
+        psx_io::write_u32(MDEC_CMD, command);
         let mut word = 0u16;
         while word < words {
-            psx_io::write32(MDEC_CMD, MDEC_BLOCK_DC_EOB);
+            psx_io::write_u32(MDEC_CMD, MDEC_BLOCK_DC_EOB);
             word += 1;
         }
     }
@@ -5953,9 +5957,9 @@ fn timed_mdec_decode(macroblocks: u16) -> u16 {
     let mut guard = 0u32;
     let mut drained = 0u32;
     while guard < 400_000 && drained < expected_out {
-        let status = unsafe { psx_io::read32(MDEC_CTRL) };
+        let status = unsafe { psx_io::read_u32(MDEC_CTRL) };
         if status & MDEC_OUT_FIFO_EMPTY == 0 {
-            let _ = unsafe { psx_io::read32(MDEC_CMD) };
+            let _ = unsafe { psx_io::read_u32(MDEC_CMD) };
             drained += 1;
             continue;
         }
@@ -5978,17 +5982,17 @@ fn timed_mdec_decode(macroblocks: u16) -> u16 {
 /// regardless of which record ran before it.
 fn mdec_load_tables() {
     unsafe {
-        psx_io::write32(MDEC_CTRL, MDEC_RESET);
-        psx_io::write32(MDEC_CMD, 0x4000_0001);
+        psx_io::write_u32(MDEC_CTRL, MDEC_RESET);
+        psx_io::write_u32(MDEC_CMD, 0x4000_0001);
         let mut word = 0;
         while word < 32 {
-            psx_io::write32(MDEC_CMD, 0x1010_1010);
+            psx_io::write_u32(MDEC_CMD, 0x1010_1010);
             word += 1;
         }
-        psx_io::write32(MDEC_CMD, 0x6000_0000);
+        psx_io::write_u32(MDEC_CMD, 0x6000_0000);
         word = 0;
         while word < 32 {
-            psx_io::write32(MDEC_CMD, 0x0000_1000);
+            psx_io::write_u32(MDEC_CMD, 0x0000_1000);
             word += 1;
         }
     }
@@ -5999,10 +6003,10 @@ fn timed_mdec_reset_settle() -> u16 {
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
     unsafe {
-        psx_io::write32(MDEC_CTRL, MDEC_RESET);
+        psx_io::write_u32(MDEC_CTRL, MDEC_RESET);
     }
     let mut guard = 0u32;
-    while unsafe { psx_io::read32(MDEC_CTRL) } & MDEC_BUSY != 0 && guard < 200_000 {
+    while unsafe { psx_io::read_u32(MDEC_CTRL) } & MDEC_BUSY != 0 && guard < 200_000 {
         guard += 1;
     }
     let elapsed = timers::counter(timers::Timer::Timer2);
@@ -6016,8 +6020,8 @@ fn timed_mdec_reset_settle() -> u16 {
 /// MDEC status word after a reset, as a raw observation.
 fn mdec_status() -> u32 {
     unsafe {
-        psx_io::write32(MDEC_CTRL, MDEC_RESET);
-        psx_io::read32(MDEC_CTRL)
+        psx_io::write_u32(MDEC_CTRL, MDEC_RESET);
+        psx_io::read_u32(MDEC_CTRL)
     }
 }
 
@@ -6035,7 +6039,7 @@ fn mdec_status() -> u32 {
 fn timed_pad_poll(setup: u32, interbyte: u32) -> u16 {
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
-    let poll = psx_pad::poll_port1_diag(setup, interbyte);
+    let poll = psx_pad::poll_port1_diagnostics(setup, interbyte);
     let elapsed = timers::counter(timers::Timer::Timer2);
     if probe_column_ok(poll) {
         elapsed
@@ -6048,26 +6052,26 @@ fn timed_pad_poll(setup: u32, interbyte: u32) -> u16 {
 
 fn gte_snapshot_hash() -> u32 {
     let mut hash = 0x9E37_79B9;
-    hash = mix32(hash, mfc2!(7));
-    hash = mix32(hash, mfc2!(8));
-    hash = mix32(hash, mfc2!(9));
-    hash = mix32(hash, mfc2!(10));
-    hash = mix32(hash, mfc2!(11));
-    hash = mix32(hash, mfc2!(12));
-    hash = mix32(hash, mfc2!(13));
-    hash = mix32(hash, mfc2!(14));
-    hash = mix32(hash, mfc2!(16));
-    hash = mix32(hash, mfc2!(17));
-    hash = mix32(hash, mfc2!(18));
-    hash = mix32(hash, mfc2!(19));
-    hash = mix32(hash, mfc2!(20));
-    hash = mix32(hash, mfc2!(21));
-    hash = mix32(hash, mfc2!(22));
-    hash = mix32(hash, mfc2!(24));
-    hash = mix32(hash, mfc2!(25));
-    hash = mix32(hash, mfc2!(26));
-    hash = mix32(hash, mfc2!(27));
-    mix32(hash, cfc2!(31))
+    hash = mix32(hash, read_data!(7));
+    hash = mix32(hash, read_data!(8));
+    hash = mix32(hash, read_data!(9));
+    hash = mix32(hash, read_data!(10));
+    hash = mix32(hash, read_data!(11));
+    hash = mix32(hash, read_data!(12));
+    hash = mix32(hash, read_data!(13));
+    hash = mix32(hash, read_data!(14));
+    hash = mix32(hash, read_data!(16));
+    hash = mix32(hash, read_data!(17));
+    hash = mix32(hash, read_data!(18));
+    hash = mix32(hash, read_data!(19));
+    hash = mix32(hash, read_data!(20));
+    hash = mix32(hash, read_data!(21));
+    hash = mix32(hash, read_data!(22));
+    hash = mix32(hash, read_data!(24));
+    hash = mix32(hash, read_data!(25));
+    hash = mix32(hash, read_data!(26));
+    hash = mix32(hash, read_data!(27));
+    mix32(hash, read_control!(31))
 }
 
 fn test_volatile_memory() -> TestResult {
@@ -6107,18 +6111,18 @@ fn test_irq_mask_roundtrip() -> TestResult {
 
 fn test_irq_gpu_ack_path() -> TestResult {
     let old_mask = irq::mask();
-    irq::set_mask(old_mask & !(1 << irq::source::GPU));
-    irq::ack(1 << irq::source::GPU);
-    gpu_io::write_gp1(0x0200_0000);
+    irq::set_mask(old_mask & !(1 << psx_hw::irq::source::GPU));
+    irq::acknowledge(1 << psx_hw::irq::source::GPU);
+    gpu_io::write_display_control(0x0200_0000);
 
-    gpu_io::write_gp0(0x1F00_0000);
-    let raised_gpu = gpu_io::gpustat().bits() & (1 << 24) != 0;
-    let raised_irq = irq::stat() & (1 << irq::source::GPU) != 0;
+    gpu_io::write_command(0x1F00_0000);
+    let raised_gpu = gpu_io::status().bits() & (1 << 24) != 0;
+    let raised_irq = irq::pending() & (1 << psx_hw::irq::source::GPU) != 0;
 
-    gpu_io::write_gp1(0x0200_0000);
-    irq::ack(1 << irq::source::GPU);
-    let cleared_gpu = gpu_io::gpustat().bits() & (1 << 24) == 0;
-    let cleared_irq = irq::stat() & (1 << irq::source::GPU) == 0;
+    gpu_io::write_display_control(0x0200_0000);
+    irq::acknowledge(1 << psx_hw::irq::source::GPU);
+    let cleared_gpu = gpu_io::status().bits() & (1 << 24) == 0;
+    let cleared_irq = irq::pending() & (1 << psx_hw::irq::source::GPU) == 0;
     irq::set_mask(old_mask);
 
     let observed = (raised_gpu as u32)
@@ -6141,15 +6145,15 @@ fn otc_kick_bounded(ptr: *mut u32, words: u16, chcr: u32, delay: bool) -> (bool,
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_chcr(dma::Channel::Otc, 0);
+        dma::raw::set_control(dma::Channel::OrderingTableClear, 0);
     }
     for _ in 0..1_000u32 {
-        unsafe { core::ptr::read_volatile(psx_io::dma::DPCR as *const u32) };
+        unsafe { core::ptr::read_volatile(psx_hw::dma::DPCR as *const u32) };
     }
-    dma::enable_channel(dma::Channel::Otc);
+    dma::enable_channel(dma::Channel::OrderingTableClear);
     if delay {
         for _ in 0..10_000u32 {
-            unsafe { core::ptr::read_volatile(psx_io::dma::DPCR as *const u32) };
+            unsafe { core::ptr::read_volatile(psx_hw::dma::DPCR as *const u32) };
         }
     }
     let last = unsafe { ptr.add(words as usize - 1) };
@@ -6157,15 +6161,15 @@ fn otc_kick_bounded(ptr: *mut u32, words: u16, chcr: u32, delay: bool) -> (bool,
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_madr(dma::Channel::Otc, last as u32);
-        dma::raw::set_bcr(dma::Channel::Otc, dma::bcr_words(words));
-        dma::raw::set_chcr(dma::Channel::Otc, chcr);
+        dma::raw::set_address(dma::Channel::OrderingTableClear, last as u32);
+        dma::raw::set_size(dma::Channel::OrderingTableClear, dma::size_words(words));
+        dma::raw::set_control(dma::Channel::OrderingTableClear, chcr);
     }
     let mut spins = 0u32;
-    while dma::is_busy(dma::Channel::Otc) && spins < 200_000 {
+    while dma::is_busy(dma::Channel::OrderingTableClear) && spins < 200_000 {
         spins += 1;
     }
-    let done = !dma::is_busy(dma::Channel::Otc);
+    let done = !dma::is_busy(dma::Channel::OrderingTableClear);
     let mut ok = unsafe { ptr::read_volatile(ptr) } == 0x00FF_FFFF;
     for i in 1..words as usize {
         let expected = unsafe { ptr.add(i - 1) } as u32 & 0x00FF_FFFF;
@@ -6209,36 +6213,40 @@ fn test_dma_otc_clear() -> TestResult {
 }
 
 fn test_dma_channel_register_roundtrip() -> TestResult {
-    let ch = dma::Channel::Pio;
-    let base = ch.base();
+    let ch = dma::Channel::Expansion;
+    let base = ch.register_base();
     unsafe {
-        let old_madr = psx_io::read32(base);
-        let old_bcr = psx_io::read32(base + 4);
-        let old_chcr = psx_io::read32(base + 8);
+        let old_madr = psx_io::read_u32(base);
+        let old_bcr = psx_io::read_u32(base + 4);
+        let old_chcr = psx_io::read_u32(base + 8);
 
-        psx_io::write32(base, 0x0012_3400);
-        psx_io::write32(base + 4, 0x0002_0034);
-        psx_io::write32(
+        psx_io::write_u32(base, 0x0012_3400);
+        psx_io::write_u32(base + 4, 0x0002_0034);
+        psx_io::write_u32(
             base + 8,
-            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_CHOPPING_ENABLE,
+            psx_hw::dma::CHCR_TO_DEVICE
+                | psx_hw::dma::CHCR_SYNC_BLOCK
+                | psx_hw::dma::CHCR_CHOPPING_ENABLE,
         );
 
         let mut observed = 0u32;
-        if psx_io::read32(base) == 0x0012_3400 {
+        if psx_io::read_u32(base) == 0x0012_3400 {
             observed |= 1 << 0;
         }
-        if psx_io::read32(base + 4) == 0x0002_0034 {
+        if psx_io::read_u32(base + 4) == 0x0002_0034 {
             observed |= 1 << 1;
         }
-        if psx_io::read32(base + 8)
-            == (dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_CHOPPING_ENABLE)
+        if psx_io::read_u32(base + 8)
+            == (psx_hw::dma::CHCR_TO_DEVICE
+                | psx_hw::dma::CHCR_SYNC_BLOCK
+                | psx_hw::dma::CHCR_CHOPPING_ENABLE)
         {
             observed |= 1 << 2;
         }
 
-        psx_io::write32(base, old_madr);
-        psx_io::write32(base + 4, old_bcr);
-        psx_io::write32(base + 8, old_chcr);
+        psx_io::write_u32(base, old_madr);
+        psx_io::write_u32(base + 4, old_bcr);
+        psx_io::write_u32(base + 8, old_chcr);
 
         expect_eq(0x07, observed, "dma regs")
     }
@@ -6246,10 +6254,10 @@ fn test_dma_channel_register_roundtrip() -> TestResult {
 
 fn test_dma_dpcr_roundtrip() -> TestResult {
     unsafe {
-        let old = psx_io::read32(dma::DPCR);
-        psx_io::write32(dma::DPCR, 0x0765_4321);
-        let readback = psx_io::read32(dma::DPCR) & 0x0FFF_FFFF;
-        psx_io::write32(dma::DPCR, old);
+        let old = psx_io::read_u32(psx_hw::dma::DPCR);
+        psx_io::write_u32(psx_hw::dma::DPCR, 0x0765_4321);
+        let readback = psx_io::read_u32(psx_hw::dma::DPCR) & 0x0FFF_FFFF;
+        psx_io::write_u32(psx_hw::dma::DPCR, old);
         expect_eq(0x0765_4321, readback, "dpcr")
     }
 }
@@ -6272,7 +6280,7 @@ fn test_timer1_scanline() -> TestResult {
     // advance on its own. (The old form read gpu::scanline_counter(), which
     // reconfigures Timer 1 before every read and so always returned ~0; the
     // `<= 340` range check passed vacuously.)
-    gpu::configure_vsync_timer();
+    gpu::configure_scanline_timer();
     let start = timers::counter(timers::Timer::Timer1);
     spin(65_536);
     let end = timers::counter(timers::Timer::Timer1);
@@ -6284,7 +6292,7 @@ fn test_timer1_scanline() -> TestResult {
 }
 
 fn test_gpu_status() -> TestResult {
-    let stat = gpu_io::gpustat();
+    let stat = gpu_io::status();
     let raw = stat.bits();
     let mut observed = 0u32;
     if stat.horizontal_resolution() == 320 {
@@ -6306,10 +6314,10 @@ fn test_gpu_status() -> TestResult {
 }
 
 fn test_gpu_irq_ack() -> TestResult {
-    gpu_io::write_gp0(0x1F00_0000);
-    let raised = gpu_io::gpustat().bits() & (1 << 24) != 0;
-    gpu_io::write_gp1(0x0200_0000);
-    let cleared = gpu_io::gpustat().bits() & (1 << 24) == 0;
+    gpu_io::write_command(0x1F00_0000);
+    let raised = gpu_io::status().bits() & (1 << 24) != 0;
+    gpu_io::write_display_control(0x0200_0000);
+    let cleared = gpu_io::status().bits() & (1 << 24) == 0;
     let observed = (raised as u32) | ((cleared as u32) << 1);
     // Racy on silicon: GPUSTAT.24 set/clear races the GPU command FIFO
     // (flipped FAIL->PASS between burns). Report until FIFO latency is
@@ -6332,20 +6340,20 @@ fn test_gpu_irq_latency_probe() -> TestResult {
     const MAX_POLLS: u32 = 0xFFFF;
 
     // Begin from a known-clear flag (GP1 is the immediate control port).
-    gpu_io::write_gp1(0x0200_0000);
+    gpu_io::write_display_control(0x0200_0000);
 
     // Latency for GP0(0x1F) to raise GPUSTAT.24.
-    gpu_io::write_gp0(0x1F00_0000);
+    gpu_io::write_command(0x1F00_0000);
     let mut set_polls = 0u32;
-    while set_polls < MAX_POLLS && gpu_io::gpustat().bits() & (1 << 24) == 0 {
+    while set_polls < MAX_POLLS && gpu_io::status().bits() & (1 << 24) == 0 {
         set_polls = set_polls.wrapping_add(1);
     }
 
     // Latency for GP1(0x02) to clear it again, now that the FIFO has
     // drained the 0x1F.
-    gpu_io::write_gp1(0x0200_0000);
+    gpu_io::write_display_control(0x0200_0000);
     let mut clr_polls = 0u32;
-    while clr_polls < MAX_POLLS && gpu_io::gpustat().bits() & (1 << 24) != 0 {
+    while clr_polls < MAX_POLLS && gpu_io::status().bits() & (1 << 24) != 0 {
         clr_polls = clr_polls.wrapping_add(1);
     }
 
@@ -6362,11 +6370,11 @@ fn test_gpu_irq_latency_probe() -> TestResult {
 fn test_gpu_dma_direction_readback() -> TestResult {
     let mut observed = 0u32;
     for dir in 0..4u32 {
-        gpu_io::write_gp1(0x0400_0000 | dir);
-        let read = (gpu_io::gpustat().bits() >> 29) & 0b11;
+        gpu_io::write_display_control(0x0400_0000 | dir);
+        let read = (gpu_io::status().bits() >> 29) & 0b11;
         observed |= read << (dir * 2);
     }
-    gpu_io::write_gp1(0x0400_0000 | 2);
+    gpu_io::write_display_control(0x0400_0000 | 2);
     TestResult::info(0xE4, observed, "dir 3..0")
 }
 
@@ -6401,10 +6409,10 @@ fn test_gpu_primitive_packet_encoding() -> TestResult {
 }
 
 fn test_gte_register_roundtrip() -> TestResult {
-    mtc2!(0, 0x2222_1111);
-    ctc2!(31, 0);
-    let data = mfc2!(0);
-    let flag = cfc2!(31);
+    write_data!(0, 0x2222_1111);
+    write_control!(31, 0);
+    let data = read_data!(0);
+    let flag = read_control!(31);
     let observed = ((data == 0x2222_1111) as u32) | (((flag & 0x7FFF_F000) == 0) as u32) << 1;
     expect_eq(0x3, observed, "gte regs")
 }
@@ -6423,134 +6431,134 @@ fn test_gte_all_ops_digest() -> TestResult {
     let mut observed = 0u32;
 
     seed_gte_state();
-    unsafe { gte_ops::rtps() };
-    if gte_flag_master_clear() && mfc2!(14) != 0 {
+    unsafe { gte_ops::project_single() };
+    if gte_flag_master_clear() && read_data!(14) != 0 {
         observed |= 1 << 0;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::rtpt() };
-    if gte_flag_master_clear() && mfc2!(12) != mfc2!(14) {
+    unsafe { gte_ops::project_triple() };
+    if gte_flag_master_clear() && read_data!(12) != read_data!(14) {
         observed |= 1 << 1;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::nclip() };
+    unsafe { gte_ops::screen_winding() };
     if gte_flag_master_clear() {
         observed |= 1 << 2;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::op_sf1() };
+    unsafe { gte_ops::outer_product() };
     if gte_flag_master_clear() {
         observed |= 1 << 3;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::avsz3() };
-    if gte_flag_master_clear() && mfc2!(7) != 0 {
+    unsafe { gte_ops::average_z3() };
+    if gte_flag_master_clear() && read_data!(7) != 0 {
         observed |= 1 << 4;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::avsz4() };
-    if gte_flag_master_clear() && mfc2!(7) != 0 {
+    unsafe { gte_ops::average_z4() };
+    if gte_flag_master_clear() && read_data!(7) != 0 {
         observed |= 1 << 5;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::sqr() };
-    if gte_flag_master_clear() && mfc2!(25) != 0 {
+    unsafe { gte_ops::square() };
+    if gte_flag_master_clear() && read_data!(25) != 0 {
         observed |= 1 << 6;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::ncds() };
+    unsafe { gte_ops::light_color_depth_single() };
     if gte_flag_master_clear() {
         observed |= 1 << 7;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::nccs() };
+    unsafe { gte_ops::light_color_single() };
     if gte_flag_master_clear() {
         observed |= 1 << 8;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::ncs() };
+    unsafe { gte_ops::light_single() };
     if gte_flag_master_clear() {
         observed |= 1 << 9;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::ncdt() };
+    unsafe { gte_ops::light_color_depth_triple() };
     if gte_flag_master_clear() {
         observed |= 1 << 10;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::nct() };
+    unsafe { gte_ops::light_triple() };
     if gte_flag_master_clear() {
         observed |= 1 << 11;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::ncct() };
+    unsafe { gte_ops::light_color_triple() };
     if gte_flag_master_clear() {
         observed |= 1 << 12;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::dpcs() };
+    unsafe { gte_ops::depth_cue_single() };
     if gte_flag_master_clear() {
         observed |= 1 << 13;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::dpct() };
+    unsafe { gte_ops::depth_cue_triple() };
     if gte_flag_master_clear() {
         observed |= 1 << 14;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::intpl() };
+    unsafe { gte_ops::interpolate_far_color() };
     if gte_flag_master_clear() {
         observed |= 1 << 15;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::dcpl() };
+    unsafe { gte_ops::depth_cue_light() };
     if gte_flag_master_clear() {
         observed |= 1 << 16;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::cc() };
+    unsafe { gte_ops::color_color() };
     if gte_flag_master_clear() {
         observed |= 1 << 17;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::cdp() };
+    unsafe { gte_ops::color_depth_cue() };
     if gte_flag_master_clear() {
         observed |= 1 << 18;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::gpf() };
+    unsafe { gte_ops::scale_vector() };
     if gte_flag_master_clear() {
         observed |= 1 << 19;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::gpl() };
+    unsafe { gte_ops::scale_vector_accumulate() };
     if gte_flag_master_clear() {
         observed |= 1 << 20;
     }
 
     seed_gte_state();
-    unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
-    if gte_flag_master_clear() && mfc2!(27) != 0 {
+    unsafe { gte_ops::rotate_translate_v0() };
+    if gte_flag_master_clear() && read_data!(27) != 0 {
         observed |= 1 << 21;
     }
 
@@ -6576,10 +6584,10 @@ macro_rules! gte_nops {
 /// SXY2=(0,10). The cross product is +100, so a faithful GTE leaves
 /// MAC0 = 0x64. Shared by every NCLIP MAC0 probe below.
 fn seed_nclip_pos_triangle() {
-    ctc2!(31, 0);
-    mtc2!(12, pack_gte_xy(0, 0));
-    mtc2!(13, pack_gte_xy(10, 0));
-    mtc2!(14, pack_gte_xy(0, 10));
+    write_control!(31, 0);
+    write_data!(12, pack_gte_xy(0, 0));
+    write_data!(13, pack_gte_xy(10, 0));
+    write_data!(14, pack_gte_xy(0, 10));
 }
 
 /// Probe GTE result-read latency for NCLIP. Runs the positive-winding
@@ -6594,12 +6602,12 @@ macro_rules! nclip_mac0_delay_test {
     ($name:ident, $delay:literal, $label:literal) => {
         fn $name() -> TestResult {
             seed_nclip_pos_triangle();
-            unsafe { gte_ops::nclip() };
+            unsafe { gte_ops::screen_winding() };
             #[cfg(target_arch = "mips")]
             unsafe {
                 core::arch::asm!($delay, options(nostack, nomem, preserves_flags));
             }
-            TestResult::info(100, mfc2!(24), $label)
+            TestResult::info(100, read_data!(24), $label)
         }
     };
 }
@@ -6616,21 +6624,21 @@ nclip_mac0_delay_test!(
 
 fn test_gte_nclip_mac0() -> TestResult {
     seed_nclip_pos_triangle();
-    unsafe { gte_ops::nclip() };
+    unsafe { gte_ops::screen_winding() };
     // This is the functional arithmetic check, not the result-latency
     // probe. Let MAC0 settle so real silicon's immediately-next-read hazard
     // does not turn correct NCLIP arithmetic into a headline failure.
     gte_nops!(64);
-    let positive = mfc2!(24) as i32;
+    let positive = read_data!(24) as i32;
     let positive_flag_clear = gte_flag_master_clear();
 
-    ctc2!(31, 0);
-    mtc2!(12, pack_gte_xy(0, 0));
-    mtc2!(13, pack_gte_xy(0, 10));
-    mtc2!(14, pack_gte_xy(10, 0));
-    unsafe { gte_ops::nclip() };
+    write_control!(31, 0);
+    write_data!(12, pack_gte_xy(0, 0));
+    write_data!(13, pack_gte_xy(0, 10));
+    write_data!(14, pack_gte_xy(10, 0));
+    unsafe { gte_ops::screen_winding() };
     gte_nops!(64);
-    let negative = mfc2!(24) as i32;
+    let negative = read_data!(24) as i32;
     let negative_flag_clear = gte_flag_master_clear();
 
     let observed = ((positive == 100) as u32)
@@ -6653,8 +6661,8 @@ fn test_gte_nclip_mac0() -> TestResult {
 /// shown as 100 for reference.
 fn test_gte_nclip_mac0_value() -> TestResult {
     seed_nclip_pos_triangle();
-    unsafe { gte_ops::nclip() };
-    let mac0 = mfc2!(24);
+    unsafe { gte_ops::screen_winding() };
+    let mac0 = read_data!(24);
     TestResult::info(100, mac0, "nclip mac0")
 }
 
@@ -6669,15 +6677,15 @@ fn test_gte_nclip_mac0_value() -> TestResult {
 // writes -- not NCLIP itself -- are the bug. INFO only.
 fn test_gte_nclip_in_sxy0() -> TestResult {
     seed_nclip_pos_triangle();
-    TestResult::info(0x0000_0000, mfc2!(12), "nclip in sxy0")
+    TestResult::info(0x0000_0000, read_data!(12), "nclip in sxy0")
 }
 fn test_gte_nclip_in_sxy1() -> TestResult {
     seed_nclip_pos_triangle();
-    TestResult::info(0x0000_000A, mfc2!(13), "nclip in sxy1")
+    TestResult::info(0x0000_000A, read_data!(13), "nclip in sxy1")
 }
 fn test_gte_nclip_in_sxy2() -> TestResult {
     seed_nclip_pos_triangle();
-    TestResult::info(0x000A_0000, mfc2!(14), "nclip in sxy2")
+    TestResult::info(0x000A_0000, read_data!(14), "nclip in sxy2")
 }
 
 /// Companion measurement for the GTE arithmetic surface. Projects a
@@ -6711,60 +6719,60 @@ fn test_gte_rtps_offcenter_value() -> TestResult {
 // captured frame; only the input vertex V0 differs. Translation and depth-cue
 // are zero, as in the scene.
 fn seed_scene_rtps() {
-    ctc2!(31, 0); // clear FLAG
-    ctc2!(0, 0x0000_0f19); // R11,R12
-    ctc2!(1, 0x016e_fab4); // R13,R21
-    ctc2!(2, 0x0411_f098); // R22,R23
-    ctc2!(3, 0xfbb1_fae7); // R31,R32
-    ctc2!(4, 0xffff_f177); // R33
-    ctc2!(5, 0); // TRX
-    ctc2!(6, 0); // TRY
-    ctc2!(7, 0); // TRZ
-    ctc2!(24, 0x00a0_0000); // OFX
-    ctc2!(25, 0x0078_0000); // OFY
-    ctc2!(26, 0x0000_0140); // H (projection plane distance)
-    ctc2!(27, 0); // DQA
-    ctc2!(28, 0); // DQB
+    write_control!(31, 0); // clear FLAG
+    write_control!(0, 0x0000_0f19); // R11,R12
+    write_control!(1, 0x016e_fab4); // R13,R21
+    write_control!(2, 0x0411_f098); // R22,R23
+    write_control!(3, 0xfbb1_fae7); // R31,R32
+    write_control!(4, 0xffff_f177); // R33
+    write_control!(5, 0); // TRX
+    write_control!(6, 0); // TRY
+    write_control!(7, 0); // TRZ
+    write_control!(24, 0x00a0_0000); // OFX
+    write_control!(25, 0x0078_0000); // OFY
+    write_control!(26, 0x0000_0140); // H (projection plane distance)
+    write_control!(27, 0); // DQA
+    write_control!(28, 0); // DQB
 }
 
 fn scene_rtps(vxy0: u32, vz0: u32) {
     seed_scene_rtps();
-    mtc2!(0, vxy0); // VXY0
-    mtc2!(1, vz0); // VZ0
-    unsafe { gte_ops::rtps() };
+    write_data!(0, vxy0); // VXY0
+    write_data!(1, vz0); // VZ0
+    unsafe { gte_ops::project_single() };
 }
 
 // Sample A: FLAG=0x80066000 (divide overflow + SX/SY + SZ3 saturation); SXY2 clamps to (-1024,-1024).
 fn test_gte_scene_rtps_a_sxy() -> TestResult {
     scene_rtps(0x0c3e_0000, 0x0000_0a4d);
-    expect_eq(0xfc00_fc00, mfc2!(14), "scene rtps A SXY2")
+    expect_eq(0xfc00_fc00, read_data!(14), "scene rtps A SXY2")
 }
 fn test_gte_scene_rtps_a_flag() -> TestResult {
     scene_rtps(0x0c3e_0000, 0x0000_0a4d);
-    expect_eq(0x8006_6000, cfc2!(31), "scene rtps A FLAG")
+    expect_eq(0x8006_6000, read_control!(31), "scene rtps A FLAG")
 }
 // Sample B: same FLAG; SX clamps high (+1023), SY clamps low (-1024).
 fn test_gte_scene_rtps_b_sxy() -> TestResult {
     scene_rtps(0x0c3e_0529, 0x0000_08eb);
-    expect_eq(0xfc00_03ff, mfc2!(14), "scene rtps B SXY2")
+    expect_eq(0xfc00_03ff, read_data!(14), "scene rtps B SXY2")
 }
 // Sample C: FLAG=0x80002000 (SY-only saturation); SZ3 survives (no divide overflow).
 fn test_gte_scene_rtps_c_sxy() -> TestResult {
     scene_rtps(0x0c3e_0526, 0xffff_f714);
-    expect_eq(0xfc00_03b4, mfc2!(14), "scene rtps C SXY2")
+    expect_eq(0xfc00_03b4, read_data!(14), "scene rtps C SXY2")
 }
 fn test_gte_scene_rtps_c_flag() -> TestResult {
     scene_rtps(0x0c3e_0526, 0xffff_f714);
-    expect_eq(0x8000_2000, cfc2!(31), "scene rtps C FLAG")
+    expect_eq(0x8000_2000, read_control!(31), "scene rtps C FLAG")
 }
 // Sample D: FLAG=0x80006000 (SX+SY saturation); negative-X vertex.
 fn test_gte_scene_rtps_d_sxy() -> TestResult {
     scene_rtps(0x099c_f335, 0x0000_0000);
-    expect_eq(0xfc00_fc00, mfc2!(14), "scene rtps D SXY2")
+    expect_eq(0xfc00_fc00, read_data!(14), "scene rtps D SXY2")
 }
 fn test_gte_scene_rtps_d_flag() -> TestResult {
     scene_rtps(0x099c_f335, 0x0000_0000);
-    expect_eq(0x8000_6000, cfc2!(31), "scene rtps D FLAG")
+    expect_eq(0x8000_6000, read_control!(31), "scene rtps D FLAG")
 }
 
 // ---------------------------------------------------------------------------
@@ -6787,30 +6795,30 @@ fn gte_tri_digest(a: u32, b: u32, c: u32) -> u32 {
 /// zeroed depth-cue (DQA/DQB) shared across the captured gameplay frame.
 /// Unlike `seed_scene_rtps`, TR is nonzero here (world geometry).
 fn seed_scene_xform() {
-    ctc2!(31, 0); // FLAG
-    ctc2!(0, 0x0000_0f19);
-    ctc2!(1, 0x016e_fab4);
-    ctc2!(2, 0x0411_f098);
-    ctc2!(3, 0xfbb1_fae7);
-    ctc2!(4, 0xffff_f177);
-    ctc2!(5, 0xffff_eabc); // TRX
-    ctc2!(6, 0xffff_fdb9); // TRY
-    ctc2!(7, 0x0000_35be); // TRZ
-    ctc2!(24, 0x00a0_0000); // OFX
-    ctc2!(25, 0x0078_0000); // OFY
-    ctc2!(26, 0x0000_0140); // H
-    ctc2!(27, 0); // DQA
-    ctc2!(28, 0); // DQB
+    write_control!(31, 0); // FLAG
+    write_control!(0, 0x0000_0f19);
+    write_control!(1, 0x016e_fab4);
+    write_control!(2, 0x0411_f098);
+    write_control!(3, 0xfbb1_fae7);
+    write_control!(4, 0xffff_f177);
+    write_control!(5, 0xffff_eabc); // TRX
+    write_control!(6, 0xffff_fdb9); // TRY
+    write_control!(7, 0x0000_35be); // TRZ
+    write_control!(24, 0x00a0_0000); // OFX
+    write_control!(25, 0x0078_0000); // OFY
+    write_control!(26, 0x0000_0140); // H
+    write_control!(27, 0); // DQA
+    write_control!(28, 0); // DQB
 }
 
 // Scene MVMVA: RT*V0 + TR, sf=1 (skinning/world transform). FLAG never fires
 // -- exact integer math -- so a divergence is a plain matrix-multiply miss.
 fn scene_mvmva_digest(vxy0: u32, vz0: u32) -> u32 {
     seed_scene_xform();
-    mtc2!(0, vxy0);
-    mtc2!(1, vz0);
-    unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
-    gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27))
+    write_data!(0, vxy0);
+    write_data!(1, vz0);
+    unsafe { gte_ops::rotate_translate_v0() };
+    gte_tri_digest(read_data!(25), read_data!(26), read_data!(27))
 }
 fn test_gte_scene_mvmva_a() -> TestResult {
     expect_eq(
@@ -6992,12 +7000,12 @@ macro_rules! rtpt_input_gap_probe {
             }
             gte_nops!(64);
             rtpt_result_digest(
-                mfc2!(12),
-                mfc2!(13),
-                mfc2!(14),
-                mfc2!(17),
-                mfc2!(18),
-                mfc2!(19),
+                read_data!(12),
+                read_data!(13),
+                read_data!(14),
+                read_data!(17),
+                read_data!(18),
+                read_data!(19),
             )
         }
     };
@@ -7134,17 +7142,17 @@ rtpt_characterisation_test!(
 
 fn scene_rtpt(v: [u32; 6]) {
     seed_scene_xform();
-    mtc2!(0, v[0]);
-    mtc2!(1, v[1]);
-    mtc2!(2, v[2]);
-    mtc2!(3, v[3]);
-    mtc2!(4, v[4]);
-    mtc2!(5, v[5]);
-    unsafe { gte_ops::rtpt() };
+    write_data!(0, v[0]);
+    write_data!(1, v[1]);
+    write_data!(2, v[2]);
+    write_data!(3, v[3]);
+    write_data!(4, v[4]);
+    write_data!(5, v[5]);
+    unsafe { gte_ops::project_triple() };
 }
 fn rtpt_sxy_digest(v: [u32; 6]) -> u32 {
     scene_rtpt(v);
-    gte_tri_digest(mfc2!(12), mfc2!(13), mfc2!(14))
+    gte_tri_digest(read_data!(12), read_data!(13), read_data!(14))
 }
 fn test_gte_scene_rtpt_a_sxy() -> TestResult {
     expect_eq(0xfc1f_e61f, rtpt_sxy_digest(RTPT_A), "rtpt A sxy")
@@ -7166,31 +7174,31 @@ fn test_gte_scene_rtpt_f_sxy() -> TestResult {
 }
 fn test_gte_scene_rtpt_a_flag() -> TestResult {
     scene_rtpt(RTPT_A);
-    expect_eq(0x8000_6000, cfc2!(31), "rtpt A FLAG")
+    expect_eq(0x8000_6000, read_control!(31), "rtpt A FLAG")
 }
 fn test_gte_scene_rtpt_b_flag() -> TestResult {
     scene_rtpt(RTPT_B);
-    expect_eq(0x8006_6000, cfc2!(31), "rtpt B FLAG")
+    expect_eq(0x8006_6000, read_control!(31), "rtpt B FLAG")
 }
 fn test_gte_scene_rtpt_a_sz3() -> TestResult {
     scene_rtpt(RTPT_A);
-    expect_eq(0x0000_02e9, mfc2!(19), "rtpt A SZ3")
+    expect_eq(0x0000_02e9, read_data!(19), "rtpt A SZ3")
 }
 fn test_gte_scene_rtpt_e_sz3() -> TestResult {
     scene_rtpt(RTPT_E);
-    expect_eq(0x0000_1fd9, mfc2!(19), "rtpt E SZ3")
+    expect_eq(0x0000_1fd9, read_data!(19), "rtpt E SZ3")
 }
 
 // Scene NCLIP: the REAL backface cross products the scene runs (large
 // projected screen coords), unlike the synthetic (0,0)/(10,0)/(0,10). MAC0
 // sign decides face culling -> the missing-wall divergence with real inputs.
 fn scene_nclip_mac0(s0: u32, s1: u32, s2: u32) -> u32 {
-    ctc2!(31, 0);
-    mtc2!(12, s0);
-    mtc2!(13, s1);
-    mtc2!(14, s2);
-    unsafe { gte_ops::nclip() };
-    mfc2!(24)
+    write_control!(31, 0);
+    write_data!(12, s0);
+    write_data!(13, s1);
+    write_data!(14, s2);
+    unsafe { gte_ops::screen_winding() };
+    read_data!(24)
 }
 // Scene NCLIP results are history-dependent (the SCPH-9902 sweep produced
 // 0x2764, 0xFFFFB964 and 0x7674 for the SAME scene depending on what
@@ -7224,9 +7232,9 @@ fn test_gte_scene_nclip_c() -> TestResult {
 // checks deliberately read a settled result; the dedicated +1..+6 cases
 // below measure the silicon stale-read window independently.
 fn lzcr(value: u32) -> u32 {
-    mtc2!(30, value);
+    write_data!(30, value);
     gte_nops!(64);
-    mfc2!(31)
+    read_data!(31)
 }
 fn test_gte_lzcr_zeros() -> TestResult {
     expect_eq(8, lzcr(0x00ff_ffff), "lzcr 00ffffff")
@@ -7253,34 +7261,34 @@ fn test_gte_lzcr_negmin() -> TestResult {
 // fix, so these PASS on silicon = confirmation the GTE core now matches.
 fn run_mvmva_fc() {
     seed_scene_xform();
-    ctc2!(21, 0x0000_1000); // FCX
-    ctc2!(22, 0x0000_2000); // FCY
-    ctc2!(23, 0x0000_3000); // FCZ
-    mtc2!(0, 0x2040_0340);
-    mtc2!(1, 0x0000_09c0);
-    unsafe { gte_ops::mvmva_rt_v0_fc_sf1() };
+    write_control!(21, 0x0000_1000); // FCX
+    write_control!(22, 0x0000_2000); // FCY
+    write_control!(23, 0x0000_3000); // FCZ
+    write_data!(0, 0x2040_0340);
+    write_data!(1, 0x0000_09c0);
+    unsafe { gte_ops::rotate_v0_far_color() };
 }
 fn test_gte_mvmva_fc_mac1() -> TestResult {
     run_mvmva_fc();
-    expect_eq(0xffff_fcc5, mfc2!(25), "mvmva FC MAC1")
+    expect_eq(0xffff_fcc5, read_data!(25), "mvmva FC MAC1")
 }
 fn test_gte_mvmva_fc_mac2() -> TestResult {
     run_mvmva_fc();
-    expect_eq(0xffff_e36c, mfc2!(26), "mvmva FC MAC2")
+    expect_eq(0xffff_e36c, read_data!(26), "mvmva FC MAC2")
 }
 fn test_gte_mvmva_fc_mac3() -> TestResult {
     run_mvmva_fc();
-    expect_eq(0xffff_ee75, mfc2!(27), "mvmva FC MAC3")
+    expect_eq(0xffff_ee75, read_data!(27), "mvmva FC MAC3")
 }
 fn test_gte_sqr() -> TestResult {
-    ctc2!(31, 0);
-    mtc2!(9, 0x0000_1234);
-    mtc2!(10, 0x0000_f8ee);
-    mtc2!(11, 0x0000_0567);
-    unsafe { gte_ops::sqr() };
+    write_control!(31, 0);
+    write_data!(9, 0x0000_1234);
+    write_data!(10, 0x0000_f8ee);
+    write_data!(11, 0x0000_0567);
+    unsafe { gte_ops::square() };
     expect_eq(
         0x7498_ecb5,
-        gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)),
+        gte_tri_digest(read_data!(25), read_data!(26), read_data!(27)),
         "sqr",
     )
 }
@@ -7292,14 +7300,14 @@ fn test_gte_sqr() -> TestResult {
 // captures the real number to fix `op_op` against. NOT latency (MAC1-3
 // reads are latency-free, proven by MVMVA/SQR).
 fn run_op() {
-    ctc2!(31, 0);
-    ctc2!(0, 0x0000_1000); // R11 (D1)
-    ctc2!(2, 0x0000_2000); // R22 (D2)
-    ctc2!(4, 0x0000_3000); // R33 (D3)
-    mtc2!(9, 0x0000_0400); // IR1
-    mtc2!(10, 0x0000_0500); // IR2
-    mtc2!(11, 0x0000_0600); // IR3
-    unsafe { gte_ops::op_sf1() };
+    write_control!(31, 0);
+    write_control!(0, 0x0000_1000); // R11 (D1)
+    write_control!(2, 0x0000_2000); // R22 (D2)
+    write_control!(4, 0x0000_3000); // R33 (D3)
+    write_data!(9, 0x0000_0400); // IR1
+    write_data!(10, 0x0000_0500); // IR2
+    write_data!(11, 0x0000_0600); // IR3
+    unsafe { gte_ops::outer_product() };
 }
 fn test_gte_op_mac1() -> TestResult {
     run_op();
@@ -7307,15 +7315,15 @@ fn test_gte_op_mac1() -> TestResult {
     // window (SCPH-9902: MAC3 reads 0 immediately, -768 settled), so the
     // observed value depends on issue timing, not arithmetic.
     // Characterisation, not conformance.
-    TestResult::info(0xffff_fd00, mfc2!(25), "op MAC1")
+    TestResult::info(0xffff_fd00, read_data!(25), "op MAC1")
 }
 fn test_gte_op_mac2() -> TestResult {
     run_op();
-    expect_eq(0x0000_0600, mfc2!(26), "op MAC2")
+    expect_eq(0x0000_0600, read_data!(26), "op MAC2")
 }
 fn test_gte_op_mac3() -> TestResult {
     run_op();
-    expect_eq(0xffff_fd00, mfc2!(27), "op MAC3")
+    expect_eq(0xffff_fd00, read_data!(27), "op MAC3")
 }
 
 // OP full-seed variant: identical diagonal + IR inputs to `run_op`, but with
@@ -7329,23 +7337,23 @@ fn test_gte_op_mac3() -> TestResult {
 // SY0-drop battery); BOTH fail identically = input-independent OP quirk.
 #[inline(always)]
 fn seed_op_full() {
-    ctc2!(31, 0);
-    ctc2!(0, 0x0000_1000); // R11=D1, R12=0
-    ctc2!(1, 0x0000_0000); // R13=0, R21=0
-    ctc2!(2, 0x0000_2000); // R22=D2, R23=0
-    ctc2!(3, 0x0000_0000); // R31=0, R32=0
-    ctc2!(4, 0x0000_3000); // R33=D3
-    mtc2!(9, 0x0000_0400); // IR1
-    mtc2!(10, 0x0000_0500); // IR2
-    mtc2!(11, 0x0000_0600); // IR3
-    mtc2!(25, 0); // MAC1
-    mtc2!(26, 0); // MAC2
-    mtc2!(27, 0); // MAC3
+    write_control!(31, 0);
+    write_control!(0, 0x0000_1000); // R11=D1, R12=0
+    write_control!(1, 0x0000_0000); // R13=0, R21=0
+    write_control!(2, 0x0000_2000); // R22=D2, R23=0
+    write_control!(3, 0x0000_0000); // R31=0, R32=0
+    write_control!(4, 0x0000_3000); // R33=D3
+    write_data!(9, 0x0000_0400); // IR1
+    write_data!(10, 0x0000_0500); // IR2
+    write_data!(11, 0x0000_0600); // IR3
+    write_data!(25, 0); // MAC1
+    write_data!(26, 0); // MAC2
+    write_data!(27, 0); // MAC3
 }
 
 fn run_op_full_seed() {
     seed_op_full();
-    unsafe { gte_ops::op_sf1() };
+    unsafe { gte_ops::outer_product() };
 }
 
 /// The prior console run produced the documented MAC1/MAC2 values but zero in
@@ -7355,30 +7363,30 @@ fn run_op_full_seed() {
 fn run_op_full_seed_settled() {
     seed_op_full();
     gte_nops!(64);
-    unsafe { gte_ops::op_sf1() };
+    unsafe { gte_ops::outer_product() };
 }
 fn test_gte_op_full_seed_mac1() -> TestResult {
     run_op_full_seed();
-    expect_eq(0xffff_fd00, mfc2!(25), "op fs MAC1")
+    expect_eq(0xffff_fd00, read_data!(25), "op fs MAC1")
 }
 fn test_gte_op_full_seed_mac2() -> TestResult {
     run_op_full_seed();
-    expect_eq(0x0000_0600, mfc2!(26), "op fs MAC2")
+    expect_eq(0x0000_0600, read_data!(26), "op fs MAC2")
 }
 fn test_gte_op_full_seed_mac3() -> TestResult {
     run_op_full_seed();
     // Same commitment-window dependence as op MAC1: both current platforms
     // read the immediate 0 here where the settled value is -768.
-    TestResult::info(0xffff_fd00, mfc2!(27), "op fs MAC3")
+    TestResult::info(0xffff_fd00, read_data!(27), "op fs MAC3")
 }
 fn test_gte_avsz3() -> TestResult {
-    ctc2!(31, 0);
-    ctc2!(29, 0x0000_0155); // ZSF3
-    mtc2!(17, 0x0000_1000); // SZ1
-    mtc2!(18, 0x0000_2000); // SZ2
-    mtc2!(19, 0x0000_3000); // SZ3
-    unsafe { gte_ops::avsz3() };
-    expect_eq(0x0000_07fe, mfc2!(7), "avsz3 OTZ")
+    write_control!(31, 0);
+    write_control!(29, 0x0000_0155); // ZSF3
+    write_data!(17, 0x0000_1000); // SZ1
+    write_data!(18, 0x0000_2000); // SZ2
+    write_data!(19, 0x0000_3000); // SZ3
+    unsafe { gte_ops::average_z3() };
+    expect_eq(0x0000_07fe, read_data!(7), "avsz3 OTZ")
 }
 
 // ---------------------------------------------------------------------------
@@ -7401,26 +7409,26 @@ const LAT_B_XY: u32 = 0xffc0_ff38; // (-200, -64)
 const LAT_B_Z: u32 = 0xffff_ff38; // -200
 
 fn seed_proj_latency() {
-    ctc2!(31, 0);
-    ctc2!(0, 0x0000_1000); // identity R11,R12
-    ctc2!(1, 0x0000_0000); // R13,R21
-    ctc2!(2, 0x0000_1000); // R22,R23
-    ctc2!(3, 0x0000_0000); // R31,R32
-    ctc2!(4, 0x0000_1000); // R33
-    ctc2!(5, 0);
-    ctc2!(6, 0);
-    ctc2!(7, 0x0000_1000); // TRZ
-    ctc2!(24, 0x00a0_0000); // OFX 160
-    ctc2!(25, 0x0078_0000); // OFY 120
-    ctc2!(26, 0x0000_0100); // H 256
-    ctc2!(27, 0x0000_0100); // DQA
-    ctc2!(28, 0);
+    write_control!(31, 0);
+    write_control!(0, 0x0000_1000); // identity R11,R12
+    write_control!(1, 0x0000_0000); // R13,R21
+    write_control!(2, 0x0000_1000); // R22,R23
+    write_control!(3, 0x0000_0000); // R31,R32
+    write_control!(4, 0x0000_1000); // R33
+    write_control!(5, 0);
+    write_control!(6, 0);
+    write_control!(7, 0x0000_1000); // TRZ
+    write_control!(24, 0x00a0_0000); // OFX 160
+    write_control!(25, 0x0078_0000); // OFY 120
+    write_control!(26, 0x0000_0100); // H 256
+    write_control!(27, 0x0000_0100); // DQA
+    write_control!(28, 0);
 }
 
 fn rtps_lat(vxy0: u32, vz0: u32) {
-    mtc2!(0, vxy0);
-    mtc2!(1, vz0);
-    unsafe { gte_ops::rtps() };
+    write_data!(0, vxy0);
+    write_data!(1, vz0);
+    unsafe { gte_ops::project_single() };
 }
 
 /// Burn ~16 cycles so an in-flight GTE result settles before the read.
@@ -7449,16 +7457,16 @@ fn gte_delay16() {
 //                    (a failure here = the writes were LOST during the
 //                    in-flight op, not merely late)
 fn load_matrix_b() {
-    ctc2!(0, pack_gte_xy(0x2000, 0));
-    ctc2!(1, pack_gte_xy(0, 0));
-    ctc2!(2, pack_gte_xy(0x2000, 0));
-    ctc2!(3, pack_gte_xy(0, 0));
-    ctc2!(4, 0x2000);
+    write_control!(0, pack_gte_xy(0x2000, 0));
+    write_control!(1, pack_gte_xy(0, 0));
+    write_control!(2, pack_gte_xy(0x2000, 0));
+    write_control!(3, pack_gte_xy(0, 0));
+    write_control!(4, 0x2000);
 }
 
 fn rt_sweep_vertex() {
-    mtc2!(0, pack_gte_xy(0x123, -0x222));
-    mtc2!(1, 0x0333);
+    write_data!(0, pack_gte_xy(0x123, -0x222));
+    write_data!(1, 0x0333);
 }
 
 /// Long-settled ground truth: matrix B fully landed, then MVMVA.
@@ -7467,9 +7475,9 @@ fn rt_sweep_reference() -> u32 {
     load_matrix_b();
     gte_nops!(64);
     rt_sweep_vertex();
-    unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+    unsafe { gte_ops::rotate_translate_v0() };
     gte_delay16();
-    gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27))
+    gte_tri_digest(read_data!(25), read_data!(26), read_data!(27))
 }
 
 macro_rules! rt_settle_case {
@@ -7478,14 +7486,14 @@ macro_rules! rt_settle_case {
             let expected = rt_sweep_reference();
             seed_scene_xform(); // matrix A in the GTE
             rt_sweep_vertex();
-            unsafe { gte_ops::mvmva_rt_v0_tr_sf1() }; // pipe warmed with A
+            unsafe { gte_ops::rotate_translate_v0() }; // pipe warmed with A
             gte_delay16();
-            let _ = mfc2!(25);
+            let _ = read_data!(25);
             load_matrix_b();
             gte_nops!($gap);
-            unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+            unsafe { gte_ops::rotate_translate_v0() };
             gte_delay16();
-            let got = gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27));
+            let got = gte_tri_digest(read_data!(25), read_data!(26), read_data!(27));
             expect_eq(expected, got, "rt settle gap")
         }
     };
@@ -7503,14 +7511,14 @@ macro_rules! rt_drop_case {
             let expected = rt_sweep_reference();
             seed_scene_xform();
             rt_sweep_vertex();
-            unsafe { gte_ops::rtps() }; // 15-cycle op now in flight
+            unsafe { gte_ops::project_single() }; // 15-cycle op now in flight
             gte_nops!($gap);
             load_matrix_b(); // writes land while RTPS may be executing
             gte_nops!(64); // long settle: a failure means LOST, not late
             rt_sweep_vertex();
-            unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+            unsafe { gte_ops::rotate_translate_v0() };
             gte_delay16();
-            let got = gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27));
+            let got = gte_tri_digest(read_data!(25), read_data!(26), read_data!(27));
             expect_eq(expected, got, "rt drop-during-exec")
         }
     };
@@ -7539,9 +7547,9 @@ fn compose_chain(mode: u8) -> u32 {
     let s_writes = s_all || mode == 2;
     let s_load = s_all || mode == 3;
     seed_scene_xform();
-    ctc2!(5, 0); // TR = 0, matching gte_compose_joint_rotation
-    ctc2!(6, 0);
-    ctc2!(7, 0);
+    write_control!(5, 0); // TR = 0, matching gte_compose_joint_rotation
+    write_control!(6, 0);
+    write_control!(7, 0);
     if s_all {
         gte_nops!(64);
     }
@@ -7557,32 +7565,32 @@ fn compose_chain(mode: u8) -> u32 {
         if s_writes {
             gte_nops!(64);
         }
-        mtc2!(0, cols[j].0);
-        mtc2!(1, cols[j].1);
-        unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+        write_data!(0, cols[j].0);
+        write_data!(1, cols[j].1);
+        unsafe { gte_ops::rotate_translate_v0() };
         if s_all {
             gte_nops!(64);
         }
-        c[0][j] = mfc2!(25) as i32 as i16;
-        c[1][j] = mfc2!(26) as i32 as i16;
-        c[2][j] = mfc2!(27) as i32 as i16;
+        c[0][j] = read_data!(25) as i32 as i16;
+        c[1][j] = read_data!(26) as i32 as i16;
+        c[2][j] = read_data!(27) as i32 as i16;
         j += 1;
     }
     if s_load {
         gte_nops!(64);
     }
-    ctc2!(0, pack_gte_xy(c[0][0], c[0][1]));
-    ctc2!(1, pack_gte_xy(c[0][2], c[1][0]));
-    ctc2!(2, pack_gte_xy(c[1][1], c[1][2]));
-    ctc2!(3, pack_gte_xy(c[2][0], c[2][1]));
-    ctc2!(4, c[2][2] as i32 as u32);
+    write_control!(0, pack_gte_xy(c[0][0], c[0][1]));
+    write_control!(1, pack_gte_xy(c[0][2], c[1][0]));
+    write_control!(2, pack_gte_xy(c[1][1], c[1][2]));
+    write_control!(3, pack_gte_xy(c[2][0], c[2][1]));
+    write_control!(4, c[2][2] as i32 as u32);
     if s_all {
         gte_nops!(64);
     }
     rt_sweep_vertex();
-    unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+    unsafe { gte_ops::rotate_translate_v0() };
     gte_delay16();
-    gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27))
+    gte_tri_digest(read_data!(25), read_data!(26), read_data!(27))
 }
 
 fn test_compose_chain_hot() -> TestResult {
@@ -7617,19 +7625,19 @@ macro_rules! mac0_settle_case {
         fn $name() -> TestResult {
             // Settled reference: positive winding, MAC0 = +100.
             seed_nclip_pos_triangle();
-            unsafe { gte_ops::nclip() };
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
-            let expected = mfc2!(24);
+            let expected = read_data!(24);
             // Poison the stale slot: reversed winding -> MAC0 = -100.
-            mtc2!(13, pack_gte_xy(0, 10));
-            mtc2!(14, pack_gte_xy(10, 0));
-            unsafe { gte_ops::nclip() };
+            write_data!(13, pack_gte_xy(0, 10));
+            write_data!(14, pack_gte_xy(10, 0));
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
             // Probe: restore positive winding, read after N nops.
             seed_nclip_pos_triangle();
-            unsafe { gte_ops::nclip() };
+            unsafe { gte_ops::screen_winding() };
             gte_nops!($gap);
-            let got = mfc2!(24);
+            let got = read_data!(24);
             expect_eq(expected, got, "nclip mac0 settle gap")
         }
     };
@@ -7644,13 +7652,13 @@ macro_rules! lzcr_settle_case {
     ($name:ident, $gap:tt, $want:expr) => {
         fn $name() -> TestResult {
             // Prime the stale slot: LZCS 0x00ffffff -> LZCR 8, settled.
-            mtc2!(30, 0x00ff_ffff);
+            write_data!(30, 0x00ff_ffff);
             gte_nops!(64);
-            let _ = mfc2!(31);
+            let _ = read_data!(31);
             // Probe: LZCS 0x00000001 -> LZCR 31, read after N nops.
-            mtc2!(30, 0x0000_0001);
+            write_data!(30, 0x0000_0001);
             gte_nops!($gap);
-            let got = mfc2!(31);
+            let got = read_data!(31);
             expect_eq($want, got, "lzcr settle gap")
         }
     };
@@ -7676,24 +7684,24 @@ macro_rules! mac0_big_settle_case {
     ($name:ident, $gap:tt) => {
         fn $name() -> TestResult {
             // Settled reference with the scene-A coordinates.
-            ctc2!(31, 0);
-            mtc2!(12, 0x006e_0095);
-            mtc2!(13, 0xffe2_0094);
-            mtc2!(14, 0xffde_00dc);
-            unsafe { gte_ops::nclip() };
+            write_control!(31, 0);
+            write_data!(12, 0x006e_0095);
+            write_data!(13, 0xffe2_0094);
+            write_data!(14, 0xffde_00dc);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
-            let expected = mfc2!(24);
+            let expected = read_data!(24);
             // Poison MAC0 with a different settled result (swap winding).
-            mtc2!(13, 0xffde_00dc);
-            mtc2!(14, 0xffe2_0094);
-            unsafe { gte_ops::nclip() };
+            write_data!(13, 0xffde_00dc);
+            write_data!(14, 0xffe2_0094);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
             // Probe at +N with the original large coordinates.
-            mtc2!(13, 0xffe2_0094);
-            mtc2!(14, 0xffde_00dc);
-            unsafe { gte_ops::nclip() };
+            write_data!(13, 0xffe2_0094);
+            write_data!(14, 0xffde_00dc);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!($gap);
-            let got = mfc2!(24);
+            let got = read_data!(24);
             // These probes MEASURE the settle window; on silicon the window
             // is real (partial sums at small gaps is the documented
             // behavior), so "settled == probed" can never be a pass
@@ -7722,24 +7730,24 @@ macro_rules! mac0_ctrl_case {
     ($name:ident, $finish:path, $gap:tt, $s0:literal, $s1:literal, $s2:literal) => {
         fn $name() -> TestResult {
             // Settled reference.
-            ctc2!(31, 0);
-            mtc2!(12, $s0);
-            mtc2!(13, $s1);
-            mtc2!(14, $s2);
-            unsafe { gte_ops::nclip() };
+            write_control!(31, 0);
+            write_data!(12, $s0);
+            write_data!(13, $s1);
+            write_data!(14, $s2);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
-            let expected = mfc2!(24);
+            let expected = read_data!(24);
             // Poison: swap the two far vertices (negated cross), settled.
-            mtc2!(13, $s2);
-            mtc2!(14, $s1);
-            unsafe { gte_ops::nclip() };
+            write_data!(13, $s2);
+            write_data!(14, $s1);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
             // Probe at +N.
-            mtc2!(13, $s1);
-            mtc2!(14, $s2);
-            unsafe { gte_ops::nclip() };
+            write_data!(13, $s1);
+            write_data!(14, $s2);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!($gap);
-            let got = mfc2!(24);
+            let got = read_data!(24);
             $finish(expected, got, "nclip controlled settle")
         }
     };
@@ -7859,26 +7867,26 @@ mac0_ctrl_case!(
 /// tracks the write port, this variant reads differently.
 fn test_mac0_ctrl_c_sxyp() -> TestResult {
     // Settled reference, all three vertices pushed in order.
-    ctc2!(31, 0);
-    mtc2!(15, 0x0079_011f);
-    mtc2!(15, 0xffd8_0130);
-    mtc2!(15, 0xffd2_0194);
-    unsafe { gte_ops::nclip() };
+    write_control!(31, 0);
+    write_data!(15, 0x0079_011f);
+    write_data!(15, 0xffd8_0130);
+    write_data!(15, 0xffd2_0194);
+    unsafe { gte_ops::screen_winding() };
     gte_nops!(64);
-    let expected = mfc2!(24);
+    let expected = read_data!(24);
     // Poison: far vertices swapped (negated cross), settled.
-    mtc2!(15, 0x0079_011f);
-    mtc2!(15, 0xffd2_0194);
-    mtc2!(15, 0xffd8_0130);
-    unsafe { gte_ops::nclip() };
+    write_data!(15, 0x0079_011f);
+    write_data!(15, 0xffd2_0194);
+    write_data!(15, 0xffd8_0130);
+    unsafe { gte_ops::screen_winding() };
     gte_nops!(64);
     // Probe at +2 via the same push path.
-    mtc2!(15, 0x0079_011f);
-    mtc2!(15, 0xffd8_0130);
-    mtc2!(15, 0xffd2_0194);
-    unsafe { gte_ops::nclip() };
+    write_data!(15, 0x0079_011f);
+    write_data!(15, 0xffd8_0130);
+    write_data!(15, 0xffd2_0194);
+    unsafe { gte_ops::screen_winding() };
     gte_nops!(2);
-    let got = mfc2!(24);
+    let got = read_data!(24);
     TestResult::info(expected, got, "nclip ctrl scene-C via SXYP")
 }
 
@@ -7893,8 +7901,8 @@ fn test_gte_nclip_read_interlock() -> TestResult {
     timers::set_mode(timers::Timer::Timer2, 0x0000);
     timers::set_counter(timers::Timer::Timer2, 0);
     let t0 = timers::counter(timers::Timer::Timer2);
-    unsafe { gte_ops::nclip() };
-    let _ = mfc2!(24);
+    unsafe { gte_ops::screen_winding() };
+    let _ = read_data!(24);
     let t1 = timers::counter(timers::Timer::Timer2);
     let with_gte = t1.wrapping_sub(t0);
     let t2 = timers::counter(timers::Timer::Timer2);
@@ -7928,11 +7936,11 @@ fn clut_stale_setup(clut: Clut) -> prim::TriTextured {
         *c = psx_vram::Color555::rgb5(n & 0x1f, (n >> 1) & 0x1f, (n >> 2) & 0x1f);
     }
     psx_vram::upload_clut(clut, &pal);
-    let tpage = Tpage::new(832, 256, TexDepth::Bit8).uv_tpage_word(0);
+    let tpage = TexturePage::new(832, 256, TextureDepth::Bit8).uv_word(0);
     prim::TriTextured::new(
         [(8, 8), (88, 16), (40, 88)],
         [(0, 32), (15, 32), (8, 47)],
-        clut.uv_clut_word(),
+        clut.uv_word(),
         tpage,
         (0x80, 0x80, 0x80),
     )
@@ -7983,11 +7991,11 @@ fn test_gpu_clut_stale_across_4bpp_interleave() -> TestResult {
     }
     let clut4 = Clut::new(0, 502);
     psx_vram::upload_clut(clut4, &pal16);
-    let tpage4 = Tpage::new(832, 256, TexDepth::Bit4).uv_tpage_word(0);
+    let tpage4 = TexturePage::new(832, 256, TextureDepth::Bit4).uv_word(0);
     let interleave = prim::TriTextured::new(
         [(4, 4), (12, 4), (8, 12)],
         [(0, 50), (7, 50), (4, 51)],
-        clut4.uv_clut_word(),
+        clut4.uv_word(),
         tpage4,
         (0x80, 0x80, 0x80),
     );
@@ -8012,7 +8020,7 @@ fn test_gpu_clut_stale_across_4bpp_interleave() -> TestResult {
 fn spleen_replica() -> FontAtlas {
     FontAtlas::upload(
         &SPLEEN_5X8,
-        Tpage::new(448, 0, TexDepth::Bit4),
+        TexturePage::new(448, 0, TextureDepth::Bit4),
         Clut::new(416, 256),
     )
 }
@@ -8032,7 +8040,7 @@ fn text_cache_glyph_pass(small: &FontAtlas) {
     gpu::set_draw_offset(512, 0);
     small.draw_text(2, 2, TEXT_LINE_1, (255, 255, 255));
     small.draw_text(2, 12, TEXT_LINE_2, (255, 255, 255));
-    gpu::draw_sync();
+    gpu::wait_idle();
 }
 
 /// GPU: the glyph pass must LAND in the cache region correctly.
@@ -8055,16 +8063,16 @@ fn test_gpu_text_cache_blit() -> TestResult {
     text_cache_glyph_pass(&small);
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
-    let tpage = Tpage::new(512, 0, TexDepth::Bit15);
+    let tpage = TexturePage::new(512, 0, TextureDepth::Bit15);
     gpu::draw_sprite_material(
         0,
         0,
         96,
         24,
         (0, 0),
-        psx_gpu::material::TextureMaterial::opaque(0, tpage.uv_tpage_word(0), (128, 128, 128)),
+        psx_gpu::material::TextureMaterial::opaque(0, tpage.uv_word(0), (128, 128, 128)),
     );
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     // Same value as the direct draw's hash: the blit round trip is
     // pixel-exact in the emulator, which is the property under test.
     expect_eq(0x3B20_8994, gpu_hash_scratch(), "text cache blit output")
@@ -8087,7 +8095,7 @@ fn draw_one_glyph_hash(ch: char) -> u32 {
     let mut buf = [0u8; 4];
     let s: &str = ch.encode_utf8(&mut buf);
     small.draw_text(2, 2, s, (255, 255, 255));
-    gpu::draw_sync();
+    gpu::wait_idle();
     gpu_hash_scratch()
 }
 
@@ -8134,7 +8142,7 @@ fn test_spu_read_is_repeatable() -> TestResult {
 /// and the readback is what diverges from expectation; a fail names the
 /// write path that is wrong.
 fn test_spu_dma_and_fifo_agree() -> TestResult {
-    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
     let src = spu_probe_pattern();
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
     psx_spu::upload_adpcm(SpuAddr::new(0x3800), bytes);
@@ -8142,23 +8150,23 @@ fn test_spu_dma_and_fifo_agree() -> TestResult {
     // The same 64 bytes again, by hand through the FIFO, at 0x3C00.
     let halfwords = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u16, 32) };
     unsafe {
-        psx_io::write16(TRANSFER_ADDR, (0x3C00u32 / 8) as u16);
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
-        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
-        psx_io::write16(SPUCNT, spucnt | 0x0010);
+        psx_io::write_u16(TRANSFER_ADDR, (0x3C00u32 / 8) as u16);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        let spucnt = psx_io::read_u16(SPUCNT) & !0x0030;
+        psx_io::write_u16(SPUCNT, spucnt | 0x0010);
         let mut settle = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0010) & 0x003F && settle < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x003F != (spucnt | 0x0010) & 0x003F && settle < 0xFFFF {
             settle += 1;
         }
         for &hw in halfwords.iter() {
-            psx_io::write16(TRANSFER_DATA, hw);
+            psx_io::write_u16(TRANSFER_DATA, hw);
         }
         let mut drain = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x0400 != 0 && drain < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x0400 != 0 && drain < 0xFFFF {
             drain += 1;
         }
-        psx_io::write16(SPUCNT, spucnt);
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(SPUCNT, spucnt);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
     }
 
     let mut via_dma = [0u32; 16];
@@ -8182,41 +8190,41 @@ fn test_spu_dma_and_fifo_agree() -> TestResult {
 /// write that never arrives. If this PASSES on console while 0xA6 fails, the
 /// ordering is the bug and psx-spu's `upload_adpcm` gets the same swap.
 fn test_spu_upload_addr_after_mode() -> TestResult {
-    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
     let src = spu_probe_pattern();
     let dest: u32 = 0x4400;
     unsafe {
-        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
-        psx_io::write16(SPUCNT, spucnt);
+        let spucnt = psx_io::read_u16(SPUCNT) & !0x0030;
+        psx_io::write_u16(SPUCNT, spucnt);
         let mut settle = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F && settle < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x003F != spucnt & 0x003F && settle < 0xFFFF {
             settle += 1;
         }
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
         // Mode first...
-        psx_io::write16(SPUCNT, spucnt | 0x0020);
+        psx_io::write_u16(SPUCNT, spucnt | 0x0020);
         let mut armed = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0020) & 0x003F && armed < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x003F != (spucnt | 0x0020) & 0x003F && armed < 0xFFFF {
             armed += 1;
         }
         // ...then the address.
-        psx_io::write16(TRANSFER_ADDR, (dest / 8) as u16);
+        psx_io::write_u16(TRANSFER_ADDR, (dest / 8) as u16);
 
         dma::enable_channel(dma::Channel::Spu);
-        dma::raw::set_madr(dma::Channel::Spu, src.as_ptr() as u32);
-        dma::raw::set_bcr(dma::Channel::Spu, dma::bcr_blocks(4, 4));
-        dma::raw::set_chcr(
+        dma::raw::set_address(dma::Channel::Spu, src.as_ptr() as u32);
+        dma::raw::set_size(dma::Channel::Spu, dma::size_blocks(4, 4));
+        dma::raw::set_control(
             dma::Channel::Spu,
-            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+            psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START,
         );
         if !dma::wait_done(dma::Channel::Spu, 200_000) {
             dma::abort(dma::Channel::Spu);
         }
         let mut idle = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x0400 != 0 && idle < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x0400 != 0 && idle < 0xFFFF {
             idle += 1;
         }
-        psx_io::write16(SPUCNT, spucnt);
+        psx_io::write_u16(SPUCNT, spucnt);
     }
     let mut back = [0u32; 16];
     spu_dma_read(dest, &mut back);
@@ -8241,39 +8249,39 @@ fn test_spu_upload_addr_after_mode() -> TestResult {
 /// passes on console while 0xA6 fails, block sizing is the bug and
 /// `upload_adpcm` should cap it rather than maximise it.
 fn test_spu_upload_small_blocks() -> TestResult {
-    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
     let src = spu_probe_pattern();
     let dest: u32 = 0x4800;
     unsafe {
-        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
-        psx_io::write16(SPUCNT, spucnt);
+        let spucnt = psx_io::read_u16(SPUCNT) & !0x0030;
+        psx_io::write_u16(SPUCNT, spucnt);
         let mut settle = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F && settle < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x003F != spucnt & 0x003F && settle < 0xFFFF {
             settle += 1;
         }
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
-        psx_io::write16(TRANSFER_ADDR, (dest / 8) as u16);
-        psx_io::write16(SPUCNT, spucnt | 0x0020);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(TRANSFER_ADDR, (dest / 8) as u16);
+        psx_io::write_u16(SPUCNT, spucnt | 0x0020);
         let mut armed = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0020) & 0x003F && armed < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x003F != (spucnt | 0x0020) & 0x003F && armed < 0xFFFF {
             armed += 1;
         }
         dma::enable_channel(dma::Channel::Spu);
-        dma::raw::set_madr(dma::Channel::Spu, src.as_ptr() as u32);
+        dma::raw::set_address(dma::Channel::Spu, src.as_ptr() as u32);
         // Four blocks of four words, rather than one block of sixteen.
-        dma::raw::set_bcr(dma::Channel::Spu, dma::bcr_blocks(4, 4));
-        dma::raw::set_chcr(
+        dma::raw::set_size(dma::Channel::Spu, dma::size_blocks(4, 4));
+        dma::raw::set_control(
             dma::Channel::Spu,
-            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+            psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START,
         );
         if !dma::wait_done(dma::Channel::Spu, 200_000) {
             dma::abort(dma::Channel::Spu);
         }
         let mut idle = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x0400 != 0 && idle < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x0400 != 0 && idle < 0xFFFF {
             idle += 1;
         }
-        psx_io::write16(SPUCNT, spucnt);
+        psx_io::write_u16(SPUCNT, spucnt);
     }
     let mut back = [0u32; 16];
     spu_dma_read(dest, &mut back);
@@ -8323,7 +8331,7 @@ fn test_gpu_glyph_f_after_r() -> TestResult {
     gpu_draw_env_scratch();
     small.draw_text(2, 2, "r", (255, 255, 255));
     small.draw_text(2, 12, "f", (255, 255, 255));
-    gpu::draw_sync();
+    gpu::wait_idle();
     expect_eq(0x98B4_BD65, gpu_hash_scratch(), "glyph f after r")
 }
 
@@ -8336,7 +8344,7 @@ fn test_gpu_text_direct_draw() -> TestResult {
     gpu_draw_env_scratch();
     small.draw_text(2, 2, TEXT_LINE_1, (255, 255, 255));
     small.draw_text(2, 12, TEXT_LINE_2, (255, 255, 255));
-    gpu::draw_sync();
+    gpu::wait_idle();
     expect_eq(0x3B20_8994, gpu_hash_scratch(), "direct glyph draw")
 }
 
@@ -8353,23 +8361,23 @@ macro_rules! sxy_dump_case {
     ($name:ident, $reg:tt, $expect:literal, $s0:literal, $s1:literal, $s2:literal) => {
         fn $name() -> TestResult {
             // Same shape as mac0_ctrl_case up to the probe writes.
-            ctc2!(31, 0);
-            mtc2!(12, $s0);
-            mtc2!(13, $s1);
-            mtc2!(14, $s2);
-            unsafe { gte_ops::nclip() };
+            write_control!(31, 0);
+            write_data!(12, $s0);
+            write_data!(13, $s1);
+            write_data!(14, $s2);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
-            let _ = mfc2!(24);
-            mtc2!(13, $s2);
-            mtc2!(14, $s1);
-            unsafe { gte_ops::nclip() };
+            let _ = read_data!(24);
+            write_data!(13, $s2);
+            write_data!(14, $s1);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
-            mtc2!(13, $s1);
-            mtc2!(14, $s2);
+            write_data!(13, $s1);
+            write_data!(14, $s2);
             // No NCLIP here: settle, then dump the register state the probe
             // NCLIP would have consumed.
             gte_nops!(64);
-            let got = mfc2!($reg);
+            let got = read_data!($reg);
             expect_eq($expect, got, "sxy state dump")
         }
     };
@@ -8429,22 +8437,22 @@ sxy_dump_case!(
 macro_rules! sxy_dump_post_nclip {
     ($name:ident, $expect:literal, $s0:literal, $s1:literal, $s2:literal) => {
         fn $name() -> TestResult {
-            ctc2!(31, 0);
-            mtc2!(12, $s0);
-            mtc2!(13, $s1);
-            mtc2!(14, $s2);
-            unsafe { gte_ops::nclip() };
+            write_control!(31, 0);
+            write_data!(12, $s0);
+            write_data!(13, $s1);
+            write_data!(14, $s2);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
-            let _ = mfc2!(24);
-            mtc2!(13, $s2);
-            mtc2!(14, $s1);
-            unsafe { gte_ops::nclip() };
+            let _ = read_data!(24);
+            write_data!(13, $s2);
+            write_data!(14, $s1);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
-            mtc2!(13, $s1);
-            mtc2!(14, $s2);
-            unsafe { gte_ops::nclip() };
+            write_data!(13, $s1);
+            write_data!(14, $s2);
+            unsafe { gte_ops::screen_winding() };
             gte_nops!(64);
-            let got = mfc2!(12);
+            let got = read_data!(12);
             expect_eq($expect, got, "sxy0 after probe nclip")
         }
     };
@@ -8472,14 +8480,14 @@ macro_rules! gte_result_latency_test {
             rtps_lat(LAT_A_XY, LAT_A_Z);
             gte_delay16();
             rtps_lat(LAT_B_XY, LAT_B_Z);
-            let immediate = mfc2!($reg);
+            let immediate = read_data!($reg);
             // Settled reference: identical sequence but wait before reading.
             seed_proj_latency();
             rtps_lat(LAT_A_XY, LAT_A_Z);
             gte_delay16();
             rtps_lat(LAT_B_XY, LAT_B_Z);
             gte_delay16();
-            let settled = mfc2!($reg);
+            let settled = read_data!($reg);
             expect_eq(settled, immediate, $label)
         }
     };
@@ -8505,30 +8513,30 @@ const GPU_SH: u16 = 96;
 
 /// GP0 0x02 fill rect (direct VRAM; ignores draw area/offset/mask).
 fn gpu_fill(x: u16, y: u16, w: u16, h: u16, rgb24: u32) {
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0x0200_0000 | (rgb24 & 0x00FF_FFFF));
-    gpu_io::write_gp0(((y as u32) << 16) | x as u32);
-    gpu_io::write_gp0(((h as u32) << 16) | w as u32);
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0x0200_0000 | (rgb24 & 0x00FF_FFFF));
+    gpu_io::write_command(((y as u32) << 16) | x as u32);
+    gpu_io::write_command(((h as u32) << 16) | w as u32);
 }
 
 /// Point the drawing area + offset at the scratch rect, so primitive coords
 /// are scratch-relative (0..GPU_SW / 0..GPU_SH).
 fn gpu_draw_env_scratch() {
     let (x, y) = (GPU_SX as u32, GPU_SY as u32);
-    gpu_io::write_gp0(0xE300_0000 | (x & 0x3FF) | ((y & 0x1FF) << 10));
+    gpu_io::write_command(0xE300_0000 | (x & 0x3FF) | ((y & 0x1FF) << 10));
     let (rx, ry) = (x + GPU_SW as u32 - 1, y + GPU_SH as u32 - 1);
-    gpu_io::write_gp0(0xE400_0000 | (rx & 0x3FF) | ((ry & 0x1FF) << 10));
-    gpu_io::write_gp0(0xE500_0000 | (x & 0x7FF) | ((y & 0x7FF) << 11));
+    gpu_io::write_command(0xE400_0000 | (rx & 0x3FF) | ((ry & 0x1FF) << 10));
+    gpu_io::write_command(0xE500_0000 | (x & 0x7FF) | ((y & 0x7FF) << 11));
 }
 
 /// Send a primitive's data words (skipping the leading OT tag) to GP0.
 fn gpu_send_prim<T>(prim_ref: &T, words: u8) {
     let base = (prim_ref as *const T).cast::<u32>();
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     for i in 0..words as usize {
         // +1 skips the `tag` word that only the OT/DMA path consumes.
         let word = unsafe { core::ptr::read(base.add(1 + i)) };
-        gpu_io::write_gp0(word);
+        gpu_io::write_command(word);
     }
 }
 
@@ -8540,19 +8548,19 @@ fn gpu_hash_scratch() -> u32 {
 /// FNV-hash an arbitrary VRAM rect over the C0 readback path. `w * h`
 /// must be even (two 16bpp pixels per GPUREAD word).
 fn gpu_hash_rect(x: u16, y: u16, w: u16, h: u16) -> u32 {
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0xC000_0000);
-    gpu_io::write_gp0(((y as u32) << 16) | x as u32);
-    gpu_io::write_gp0(((h as u32) << 16) | w as u32);
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0xC000_0000);
+    gpu_io::write_command(((y as u32) << 16) | x as u32);
+    gpu_io::write_command(((h as u32) << 16) | w as u32);
     let words = (w as u32 * h as u32) / 2;
     let mut hash = 0x811C_9DC5u32;
     for _ in 0..words {
         let mut guard = 0u32;
         // GPUSTAT bit 27 = ready to send VRAM->CPU data.
-        while gpu_io::gpustat().bits() & (1 << 27) == 0 && guard < 100_000 {
+        while gpu_io::status().bits() & (1 << 27) == 0 && guard < 100_000 {
             guard += 1;
         }
-        let w = gpu_io::gpuread();
+        let w = gpu_io::read_data();
         hash = (hash ^ (w & 0xFFFF)).wrapping_mul(0x0100_0193);
         hash = (hash ^ (w >> 16)).wrapping_mul(0x0100_0193);
     }
@@ -8564,7 +8572,7 @@ fn gpu_draw_and_hash<T>(prim_ref: &T, words: u8) -> u32 {
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
     gpu_send_prim(prim_ref, words);
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     gpu_hash_scratch()
 }
 
@@ -8649,7 +8657,7 @@ fn test_gpu_textured_gouraud_tri() -> TestResult {
         *texel = 0x8000 | (x << 10) | (y << 5) | ((x ^ y) & 0x1f);
     }
     psx_vram::upload_16bpp(psx_vram::VramRect::new(768, 256, 16, 16), &tex);
-    let tpage = Tpage::new(768, 256, TexDepth::Bit15).uv_tpage_word(0);
+    let tpage = TexturePage::new(768, 256, TextureDepth::Bit15).uv_word(0);
     let tri = prim::TriTexturedGouraud::new(
         [(8, 8), (88, 16), (40, 88)],
         [(0, 0), (15, 0), (8, 15)],
@@ -8685,7 +8693,7 @@ fn test_gpu_ot_dma_draw() -> TestResult {
     frame.add(2, &mut t1);
     frame.add(0, &mut t2);
     frame.submit(&mut probe_gpu_dma());
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     expect_eq(0xaffb_7c55, gpu_hash_scratch(), "gpu ot dma draw")
 }
 
@@ -8699,7 +8707,7 @@ fn gpu_upload_tex15() -> u16 {
         *t = 0x8000 | (x << 10) | (y << 5) | ((x ^ y) & 0x1f);
     }
     psx_vram::upload_16bpp(psx_vram::VramRect::new(768, 256, 16, 16), &tex);
-    Tpage::new(768, 256, TexDepth::Bit15).uv_tpage_word(0)
+    TexturePage::new(768, 256, TextureDepth::Bit15).uv_word(0)
 }
 
 // Polygon-too-large rule: real hardware DROPS any primitive whose X-span
@@ -8764,7 +8772,7 @@ fn test_gpu_texgouraud_ot_dma() -> TestResult {
     let mut frame = ot.frame();
     frame.add(0, &mut tri);
     frame.submit(&mut probe_gpu_dma());
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     expect_eq(0x6392_570b, gpu_hash_scratch(), "gpu texgouraud ot dma")
 }
 
@@ -8788,11 +8796,11 @@ fn test_gpu_8bpp_clut_tri() -> TestResult {
     // VRAM and it clears the scratch/textures/framebuffers.
     let clut = Clut::new(0, 500);
     psx_vram::upload_clut(clut, &pal);
-    let tpage = Tpage::new(832, 256, TexDepth::Bit8).uv_tpage_word(0);
+    let tpage = TexturePage::new(832, 256, TextureDepth::Bit8).uv_word(0);
     let tri = prim::TriTextured::new(
         [(8, 8), (88, 16), (40, 88)],
         [(0, 0), (15, 0), (8, 15)],
-        clut.uv_clut_word(),
+        clut.uv_word(),
         tpage,
         (0x80, 0x80, 0x80),
     );
@@ -8825,68 +8833,68 @@ fn test_gpu_big_ot() -> TestResult {
         frame.add(i % 7, t);
     }
     frame.submit(&mut probe_gpu_dma());
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     expect_eq(0x91a7_f548, gpu_hash_scratch(), "gpu big ot")
 }
 
 fn seed_gte_state() {
-    ctc2!(31, 0);
+    write_control!(31, 0);
 
-    mtc2!(0, pack_gte_xy(-0x80, 0x40));
-    mtc2!(1, 0x0400);
-    mtc2!(2, pack_gte_xy(0x80, -0x40));
-    mtc2!(3, 0x0500);
-    mtc2!(4, pack_gte_xy(0x20, 0x90));
-    mtc2!(5, 0x0600);
-    mtc2!(6, 0x0040_4040);
-    mtc2!(8, 0x0800);
-    mtc2!(9, 0x0100);
-    mtc2!(10, 0x0200);
-    mtc2!(11, 0x0300);
-    mtc2!(12, pack_gte_xy(-16, 20));
-    mtc2!(13, pack_gte_xy(24, 36));
-    mtc2!(14, pack_gte_xy(48, 72));
-    mtc2!(16, 0x0400);
-    mtc2!(17, 0x0500);
-    mtc2!(18, 0x0600);
-    mtc2!(19, 0x0700);
-    mtc2!(20, 0x0010_1010);
-    mtc2!(21, 0x0020_2020);
-    mtc2!(22, 0x0030_3030);
+    write_data!(0, pack_gte_xy(-0x80, 0x40));
+    write_data!(1, 0x0400);
+    write_data!(2, pack_gte_xy(0x80, -0x40));
+    write_data!(3, 0x0500);
+    write_data!(4, pack_gte_xy(0x20, 0x90));
+    write_data!(5, 0x0600);
+    write_data!(6, 0x0040_4040);
+    write_data!(8, 0x0800);
+    write_data!(9, 0x0100);
+    write_data!(10, 0x0200);
+    write_data!(11, 0x0300);
+    write_data!(12, pack_gte_xy(-16, 20));
+    write_data!(13, pack_gte_xy(24, 36));
+    write_data!(14, pack_gte_xy(48, 72));
+    write_data!(16, 0x0400);
+    write_data!(17, 0x0500);
+    write_data!(18, 0x0600);
+    write_data!(19, 0x0700);
+    write_data!(20, 0x0010_1010);
+    write_data!(21, 0x0020_2020);
+    write_data!(22, 0x0030_3030);
 
     gte_scene::set_screen_offset(160 << 16, 120 << 16);
     gte_scene::set_projection_plane(256);
     gte_scene::load_rotation(&Mat3I16::IDENTITY);
     gte_scene::load_translation(Vec3I32::new(0, 0, 0x1000));
 
-    ctc2!(8, pack_gte_xy(0x1000, 0));
-    ctc2!(9, pack_gte_xy(0, 0));
-    ctc2!(10, pack_gte_xy(0x1000, 0));
-    ctc2!(11, pack_gte_xy(0, 0));
-    ctc2!(12, 0x1000);
-    ctc2!(13, 0);
-    ctc2!(14, 0);
-    ctc2!(15, 0);
-    ctc2!(16, pack_gte_xy(0x1000, 0));
-    ctc2!(17, pack_gte_xy(0, 0));
-    ctc2!(18, pack_gte_xy(0x1000, 0));
-    ctc2!(19, pack_gte_xy(0, 0));
-    ctc2!(20, 0x1000);
-    ctc2!(21, 0x20);
-    ctc2!(22, 0x20);
-    ctc2!(23, 0x20);
-    ctc2!(27, 0);
-    ctc2!(28, 0);
-    ctc2!(29, 0x0555);
-    ctc2!(30, 0x0400);
+    write_control!(8, pack_gte_xy(0x1000, 0));
+    write_control!(9, pack_gte_xy(0, 0));
+    write_control!(10, pack_gte_xy(0x1000, 0));
+    write_control!(11, pack_gte_xy(0, 0));
+    write_control!(12, 0x1000);
+    write_control!(13, 0);
+    write_control!(14, 0);
+    write_control!(15, 0);
+    write_control!(16, pack_gte_xy(0x1000, 0));
+    write_control!(17, pack_gte_xy(0, 0));
+    write_control!(18, pack_gte_xy(0x1000, 0));
+    write_control!(19, pack_gte_xy(0, 0));
+    write_control!(20, 0x1000);
+    write_control!(21, 0x20);
+    write_control!(22, 0x20);
+    write_control!(23, 0x20);
+    write_control!(27, 0);
+    write_control!(28, 0);
+    write_control!(29, 0x0555);
+    write_control!(30, 0x0400);
 }
 
 fn gte_flag_master_clear() -> bool {
-    cfc2!(31) & 0x8000_0000 == 0
+    read_control!(31) & 0x8000_0000 == 0
 }
 
 fn test_spu_status_readable() -> TestResult {
-    let observed = unsafe { psx_io::read16(psx_io::spu::SPUSTAT) } as u32;
+    let observed = unsafe { psx_io::read_u16(psx_hw::spu::SPUSTAT) } as u32;
     if observed != 0xFFFF {
         TestResult::info(0, observed, "spustat")
     } else {
@@ -8897,33 +8905,33 @@ fn test_spu_status_readable() -> TestResult {
 fn test_spu_voice_registers() -> TestResult {
     const VOICE_STRIDE: u32 = 0x10;
     const VOICE: u32 = 23;
-    let base = psx_io::spu::SPU_BASE + VOICE * VOICE_STRIDE;
+    let base = psx_hw::spu::BASE + VOICE * VOICE_STRIDE;
     let mut observed = 0u32;
 
     unsafe {
-        psx_io::write16(base, 0x1234);
-        psx_io::write16(base + 2, 0x2345);
-        psx_io::write16(base + 4, 0x1000);
-        psx_io::write16(base + 6, 0x0040);
-        psx_io::write16(base + 8, 0x8F1F);
-        psx_io::write16(base + 10, 0x1F80);
+        psx_io::write_u16(base, 0x1234);
+        psx_io::write_u16(base + 2, 0x2345);
+        psx_io::write_u16(base + 4, 0x1000);
+        psx_io::write_u16(base + 6, 0x0040);
+        psx_io::write_u16(base + 8, 0x8F1F);
+        psx_io::write_u16(base + 10, 0x1F80);
 
-        if psx_io::read16(base) == 0x1234 {
+        if psx_io::read_u16(base) == 0x1234 {
             observed |= 1 << 0;
         }
-        if psx_io::read16(base + 2) == 0x2345 {
+        if psx_io::read_u16(base + 2) == 0x2345 {
             observed |= 1 << 1;
         }
-        if psx_io::read16(base + 4) == 0x1000 {
+        if psx_io::read_u16(base + 4) == 0x1000 {
             observed |= 1 << 2;
         }
-        if psx_io::read16(base + 6) == 0x0040 {
+        if psx_io::read_u16(base + 6) == 0x0040 {
             observed |= 1 << 3;
         }
-        if psx_io::read16(base + 8) == 0x8F1F {
+        if psx_io::read_u16(base + 8) == 0x8F1F {
             observed |= 1 << 4;
         }
-        if psx_io::read16(base + 10) == 0x1F80 {
+        if psx_io::read_u16(base + 10) == 0x1F80 {
             observed |= 1 << 5;
         }
     }
@@ -8932,26 +8940,26 @@ fn test_spu_voice_registers() -> TestResult {
 }
 
 fn test_spu_main_volume_roundtrip() -> TestResult {
-    const MAIN_VOL_LEFT: u32 = psx_io::spu::SPU_BASE + 0x180;
-    const MAIN_VOL_RIGHT: u32 = psx_io::spu::SPU_BASE + 0x182;
+    const MAIN_VOL_LEFT: u32 = psx_hw::spu::BASE + 0x180;
+    const MAIN_VOL_RIGHT: u32 = psx_hw::spu::BASE + 0x182;
 
     unsafe {
-        let old_left = psx_io::read16(MAIN_VOL_LEFT);
-        let old_right = psx_io::read16(MAIN_VOL_RIGHT);
+        let old_left = psx_io::read_u16(MAIN_VOL_LEFT);
+        let old_right = psx_io::read_u16(MAIN_VOL_RIGHT);
 
-        psx_io::write16(MAIN_VOL_LEFT, 0x1234);
-        psx_io::write16(MAIN_VOL_RIGHT, 0x2345);
+        psx_io::write_u16(MAIN_VOL_LEFT, 0x1234);
+        psx_io::write_u16(MAIN_VOL_RIGHT, 0x2345);
 
         let mut observed = 0u32;
-        if psx_io::read16(MAIN_VOL_LEFT) == 0x1234 {
+        if psx_io::read_u16(MAIN_VOL_LEFT) == 0x1234 {
             observed |= 1 << 0;
         }
-        if psx_io::read16(MAIN_VOL_RIGHT) == 0x2345 {
+        if psx_io::read_u16(MAIN_VOL_RIGHT) == 0x2345 {
             observed |= 1 << 1;
         }
 
-        psx_io::write16(MAIN_VOL_LEFT, old_left);
-        psx_io::write16(MAIN_VOL_RIGHT, old_right);
+        psx_io::write_u16(MAIN_VOL_LEFT, old_left);
+        psx_io::write_u16(MAIN_VOL_RIGHT, old_right);
 
         expect_eq(0x03, observed, "main vol")
     }
@@ -8963,17 +8971,17 @@ fn test_spu_main_volume_roundtrip() -> TestResult {
 /// 16 bits; hardware masks reserved bits in some registers, so the clear
 /// bits localize which offsets diverge. Old values restored. INFO only.
 fn test_spu_voice_writable_mask() -> TestResult {
-    let voice0 = psx_io::spu::SPU_BASE;
+    let voice0 = psx_hw::spu::BASE;
     let mut observed = 0u32;
     unsafe {
         for i in 0..8u32 {
             let addr = voice0 + i * 2;
-            let old = psx_io::read16(addr);
-            psx_io::write16(addr, 0xFFFF);
-            if psx_io::read16(addr) == 0xFFFF {
+            let old = psx_io::read_u16(addr);
+            psx_io::write_u16(addr, 0xFFFF);
+            if psx_io::read_u16(addr) == 0xFFFF {
                 observed |= 1 << i;
             }
-            psx_io::write16(addr, old);
+            psx_io::write_u16(addr, old);
         }
     }
     TestResult::info(0xFF, observed, "spu wr mask")
@@ -8984,16 +8992,16 @@ fn test_spu_voice_writable_mask() -> TestResult {
 /// the reserved-bit masks of two key registers are visible next to the
 /// writable-bit mask. Old values restored. INFO only.
 fn test_spu_voice_reg_readback() -> TestResult {
-    let voice0 = psx_io::spu::SPU_BASE;
+    let voice0 = psx_hw::spu::BASE;
     unsafe {
-        let old_pitch = psx_io::read16(voice0 + 0x4);
-        let old_adsr1 = psx_io::read16(voice0 + 0x8);
-        psx_io::write16(voice0 + 0x4, 0xFFFF);
-        psx_io::write16(voice0 + 0x8, 0xFFFF);
-        let pitch = psx_io::read16(voice0 + 0x4) as u32;
-        let adsr1 = psx_io::read16(voice0 + 0x8) as u32;
-        psx_io::write16(voice0 + 0x4, old_pitch);
-        psx_io::write16(voice0 + 0x8, old_adsr1);
+        let old_pitch = psx_io::read_u16(voice0 + 0x4);
+        let old_adsr1 = psx_io::read_u16(voice0 + 0x8);
+        psx_io::write_u16(voice0 + 0x4, 0xFFFF);
+        psx_io::write_u16(voice0 + 0x8, 0xFFFF);
+        let pitch = psx_io::read_u16(voice0 + 0x4) as u32;
+        let adsr1 = psx_io::read_u16(voice0 + 0x8) as u32;
+        psx_io::write_u16(voice0 + 0x4, old_pitch);
+        psx_io::write_u16(voice0 + 0x8, old_adsr1);
         TestResult::info(0xFFFF_FFFF, (pitch << 16) | adsr1, "pitch|adsr1")
     }
 }
@@ -9043,10 +9051,10 @@ pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
     // the boot-mode shape stays observable to the precision scan, which
     // calls spu_dma_read_shape directly.
     unsafe {
-        let boot = psx_io::read32(SPU_DELAY);
-        psx_io::write32(SPU_DELAY, boot | 0x0200_0000);
+        let boot = psx_io::read_u32(SPU_DELAY);
+        psx_io::write_u32(SPU_DELAY, boot | 0x0200_0000);
         let _ = spu_dma_read_shape(addr, out, block_size);
-        psx_io::write32(SPU_DELAY, boot);
+        psx_io::write_u32(SPU_DELAY, boot);
     }
 }
 
@@ -9054,25 +9062,26 @@ pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
 /// corrupts FIFO boundaries, so the precision capture must compare one large
 /// block with several small blocks while holding the payload constant.
 fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) -> u32 {
-    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
     let words = out.len() as u32;
     debug_assert!(block_size != 0 && words.is_multiple_of(block_size));
     let block_count = words / block_size;
     unsafe {
-        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
-        psx_io::write16(SPUCNT, spucnt);
+        let spucnt = psx_io::read_u16(SPUCNT) & !0x0030;
+        psx_io::write_u16(SPUCNT, spucnt);
         // SPUCNT is applied asynchronously. Starting DMA before SPUSTAT
         // reflects Stop returns FIFO/transition garbage even when the memory
         // control delay is configured for stable reads.
         let mut stop_guard = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F && stop_guard < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x003F != spucnt & 0x003F && stop_guard < 0xFFFF {
             stop_guard += 1;
         }
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
-        psx_io::write16(TRANSFER_ADDR, (addr / 8) as u16);
-        psx_io::write16(SPUCNT, spucnt | 0x0030); // transfer mode = DMA Read
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(TRANSFER_ADDR, (addr / 8) as u16);
+        psx_io::write_u16(SPUCNT, spucnt | 0x0030); // transfer mode = DMA Read
         let mut mode_guard = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0030) & 0x003F && mode_guard < 0xFFFF
+        while psx_io::read_u16(SPUSTAT) & 0x003F != (spucnt | 0x0030) & 0x003F
+            && mode_guard < 0xFFFF
         {
             mode_guard += 1;
         }
@@ -9080,13 +9089,16 @@ fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) -> u32 {
         // SCPH-9902 capture showed that the low-six mode mirror settles after
         // 24-27 polls, while bits 9/7 remain clear until the DMA side is armed.
         dma::enable_channel(dma::Channel::Spu);
-        dma::raw::set_madr(dma::Channel::Spu, out.as_ptr() as u32);
-        dma::raw::set_bcr(
+        dma::raw::set_address(dma::Channel::Spu, out.as_ptr() as u32);
+        dma::raw::set_size(
             dma::Channel::Spu,
-            dma::bcr_blocks(block_size as u16, block_count as u16),
+            dma::size_blocks(block_size as u16, block_count as u16),
         );
         // from-device (no CHCR_TO_DEVICE), block-sync, start.
-        dma::raw::set_chcr(dma::Channel::Spu, dma::CHCR_SYNC_BLOCK | dma::CHCR_START);
+        dma::raw::set_control(
+            dma::Channel::Spu,
+            psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START,
+        );
         // Bounded wait: never spin forever on silicon -- if SPU->RAM DMA
         // stalls the test fails gracefully (zeroed read-back) instead of
         // hanging the whole suite at a black screen.
@@ -9094,11 +9106,11 @@ fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) -> u32 {
         while dma::is_busy(dma::Channel::Spu) && guard < 1_000_000 {
             guard += 1;
         }
-        psx_io::write16(SPUCNT, spucnt); // back to Stop
-                                         // Preserve both bounded counters independently. A DMA-read mode that
-                                         // intentionally remains gated until channel arm reports `FFFF` in the
-                                         // low half while the preceding Stop transition still retains its
-                                         // useful sample-boundary count in the high half.
+        psx_io::write_u16(SPUCNT, spucnt); // back to Stop
+                                           // Preserve both bounded counters independently. A DMA-read mode that
+                                           // intentionally remains gated until channel arm reports `FFFF` in the
+                                           // low half while the preceding Stop transition still retains its
+                                           // useful sample-boundary count in the high half.
         (stop_guard << 16) | mode_guard
     }
 }
@@ -9127,7 +9139,7 @@ fn test_spu_ram_dma_roundtrip() -> TestResult {
 /// (it never armed Manual-Write mode, so the FIFO writes were dropped).
 /// Arm mode 01, push 8 halfwords, DMA them back, hash-compare.
 fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
-    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
     let mut src = [0u16; 8];
     let mut i = 0;
     while i < 8 {
@@ -9136,29 +9148,29 @@ fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
     }
     let dest: u32 = 0x3400;
     unsafe {
-        psx_io::write16(TRANSFER_ADDR, (dest / 8) as u16);
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
-        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
-        psx_io::write16(SPUCNT, spucnt | 0x0010); // transfer mode = Manual Write
-                                                  // The SPUCNT low-6-bit SPUSTAT mirror takes 24-27 polls to settle on
-                                                  // silicon; FIFO halfwords pushed before Manual-Write mode is active
-                                                  // are dropped -- the very bug this test exists to catch.
+        psx_io::write_u16(TRANSFER_ADDR, (dest / 8) as u16);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        let spucnt = psx_io::read_u16(SPUCNT) & !0x0030;
+        psx_io::write_u16(SPUCNT, spucnt | 0x0010); // transfer mode = Manual Write
+                                                    // The SPUCNT low-6-bit SPUSTAT mirror takes 24-27 polls to settle on
+                                                    // silicon; FIFO halfwords pushed before Manual-Write mode is active
+                                                    // are dropped -- the very bug this test exists to catch.
         let mut settle = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0010) & 0x003F && settle < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x003F != (spucnt | 0x0010) & 0x003F && settle < 0xFFFF {
             settle += 1;
         }
         for &hw in src.iter() {
-            psx_io::write16(TRANSFER_DATA, hw);
+            psx_io::write_u16(TRANSFER_DATA, hw);
         }
         // Let the FIFO drain (SPUSTAT bit 10) before leaving the mode.
         let mut drain = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x0400 != 0 && drain < 0xFFFF {
+        while psx_io::read_u16(SPUSTAT) & 0x0400 != 0 && drain < 0xFFFF {
             drain += 1;
         }
-        psx_io::write16(SPUCNT, spucnt); // back to Stop
-                                         // Leave the transfer type NORMAL (0004h): parking it at 0 poisons all
-                                         // later sample-RAM access on silicon (SB2 finding, 2026-08-02).
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(SPUCNT, spucnt); // back to Stop
+                                           // Leave the transfer type NORMAL (0004h): parking it at 0 poisons all
+                                           // later sample-RAM access on silicon (SB2 finding, 2026-08-02).
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
     }
     spin(4000); // let the FIFO drain to SPU RAM on hardware
     let mut back = [0u32; 4];
@@ -9217,14 +9229,14 @@ fn precision_identity_and_raster(values: &mut [u32; PRECISION_VALUE_COUNT], next
     for base in [0xBFC0_0100u32, 0xBFC7_FF30] {
         let mut offset = 0u32;
         while offset < 4 {
-            let word = unsafe { psx_io::read32(base + offset * 4) };
+            let word = unsafe { psx_io::read_u32(base + offset * 4) };
             push_precision(values, next, word);
             offset += 1;
         }
     }
     // GPUSTAT at rest, plus the MDEC status word after a reset. Both identify
     // silicon revision behaviour that timing alone cannot separate.
-    push_precision(values, next, gpu_io::gpustat().bits());
+    push_precision(values, next, gpu_io::status().bits());
     push_precision(values, next, mdec_status());
 
     // 22 raster hashes. Each draws into the off-screen 96x96 scratch through
@@ -9305,11 +9317,11 @@ fn push_precision(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize, v
 /// notes that 1F801014h bits 24..27 select whether the first FIFO halfword of
 /// each block is dirty. Capturing every returned word reveals the exact shape.
 fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
-    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
+    use psx_hw::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
 
-    let original_delay = unsafe { psx_io::read32(SPU_DELAY) };
+    let original_delay = unsafe { psx_io::read_u32(SPU_DELAY) };
     let packed_status =
-        || unsafe { ((psx_io::read16(SPUCNT) as u32) << 16) | psx_io::read16(SPUSTAT) as u32 };
+        || unsafe { ((psx_io::read_u16(SPUCNT) as u32) << 16) | psx_io::read_u16(SPUSTAT) as u32 };
     push_precision(values, next, original_delay);
     push_precision(values, next, packed_status());
 
@@ -9339,9 +9351,9 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     // nonzero nibble explicit for the stable comparison. Hashes are enough
     // here: the two boot-mode arrays above retain the exact corruption shape.
     let stable_delay = original_delay | 0x0200_0000;
-    unsafe { psx_io::write32(SPU_DELAY, stable_delay) };
+    unsafe { psx_io::write_u32(SPU_DELAY, stable_delay) };
     spin(64);
-    push_precision(values, next, unsafe { psx_io::read32(SPU_DELAY) });
+    push_precision(values, next, unsafe { psx_io::read_u32(SPU_DELAY) });
     let mut stable_single = [0u32; 16];
     let _ = spu_dma_read_shape(dest, &mut stable_single, 16);
     push_precision(values, next, fnv32_words(&stable_single));
@@ -9351,14 +9363,14 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
 
     let fifo_dest = 0x3C00;
     unsafe {
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
-        psx_io::write16(TRANSFER_ADDR, (fifo_dest / 8) as u16);
-        let stopped = psx_io::read16(SPUCNT) & !0x0030;
-        psx_io::write16(SPUCNT, stopped | 0x0010);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(TRANSFER_ADDR, (fifo_dest / 8) as u16);
+        let stopped = psx_io::read_u16(SPUCNT) & !0x0030;
+        psx_io::write_u16(SPUCNT, stopped | 0x0010);
         for index in 0..8u16 {
-            psx_io::write16(TRANSFER_DATA, 0xBEEFu16.wrapping_add(index * 0x101));
+            psx_io::write_u16(TRANSFER_DATA, 0xBEEFu16.wrapping_add(index * 0x101));
         }
-        psx_io::write16(SPUCNT, stopped);
+        psx_io::write_u16(SPUCNT, stopped);
     }
     spin(4000);
     let mut fifo_read = [0u32; 4];
@@ -9366,30 +9378,30 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     for word in fifo_read {
         push_precision(values, next, word);
     }
-    unsafe { psx_io::write32(SPU_DELAY, original_delay) };
+    unsafe { psx_io::write_u32(SPU_DELAY, original_delay) };
 }
 
 /// Values 43..60: raw GPUSTAT transitions. Three reads after each GP1 DMA
 /// direction write expose whether the D0-vs-E4 result is a delayed latch;
 /// the IRQ reads retain the command-FIFO set/ack transition shape.
 fn precision_gpu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
-    gpu_io::write_gp1(0x0200_0000);
-    push_precision(values, next, gpu_io::gpustat().bits());
-    gpu_io::write_gp0(0x1F00_0000);
+    gpu_io::write_display_control(0x0200_0000);
+    push_precision(values, next, gpu_io::status().bits());
+    gpu_io::write_command(0x1F00_0000);
     for _ in 0..3 {
-        push_precision(values, next, gpu_io::gpustat().bits());
+        push_precision(values, next, gpu_io::status().bits());
     }
-    gpu_io::write_gp1(0x0200_0000);
+    gpu_io::write_display_control(0x0200_0000);
     for _ in 0..2 {
-        push_precision(values, next, gpu_io::gpustat().bits());
+        push_precision(values, next, gpu_io::status().bits());
     }
     for dir in 0..4u32 {
-        gpu_io::write_gp1(0x0400_0000 | dir);
+        gpu_io::write_display_control(0x0400_0000 | dir);
         for _ in 0..3 {
-            push_precision(values, next, gpu_io::gpustat().bits());
+            push_precision(values, next, gpu_io::status().bits());
         }
     }
-    gpu_io::write_gp1(0x0400_0002);
+    gpu_io::write_display_control(0x0400_0002);
 }
 
 /// Values 61..72: exact Timer 2 state before and after target/FFFF events.
@@ -9398,7 +9410,7 @@ fn precision_gpu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
 /// avoiding a stale GPU IRQ and the open-bus upper half seen in the prior run.
 fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     const IRQ_SOURCE_MASK: u32 = 0x07FF;
-    irq::ack(IRQ_SOURCE_MASK);
+    irq::acknowledge(IRQ_SOURCE_MASK);
     timers::set_target(timers::Timer::Timer2, 32);
     timers::set_mode(
         timers::Timer::Timer2,
@@ -9411,9 +9423,9 @@ fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) 
     push_precision(values, next, timers::counter(timers::Timer::Timer2) as u32);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
-    push_precision(values, next, irq::stat() & IRQ_SOURCE_MASK);
+    push_precision(values, next, irq::pending() & IRQ_SOURCE_MASK);
 
-    irq::ack(IRQ_SOURCE_MASK);
+    irq::acknowledge(IRQ_SOURCE_MASK);
     timers::set_mode(timers::Timer::Timer2, TIMER_MODE_IRQ_ON_WRAP);
     timers::set_counter(timers::Timer::Timer2, 0xFFF0);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
@@ -9422,7 +9434,7 @@ fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) 
     push_precision(values, next, timers::counter(timers::Timer::Timer2) as u32);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
-    push_precision(values, next, irq::stat() & IRQ_SOURCE_MASK);
+    push_precision(values, next, irq::pending() & IRQ_SOURCE_MASK);
     timers::set_mode(timers::Timer::Timer2, 0);
 }
 
@@ -9437,25 +9449,25 @@ macro_rules! nclip_scene_a_settle_probe {
         const S1: u32 = 0xFFE2_0094;
         const S2: u32 = 0xFFDE_00DC;
 
-        ctc2!(31, 0);
-        mtc2!(12, S0);
-        mtc2!(13, S1);
-        mtc2!(14, S2);
-        unsafe { gte_ops::nclip() };
+        write_control!(31, 0);
+        write_data!(12, S0);
+        write_data!(13, S1);
+        write_data!(14, S2);
+        unsafe { gte_ops::screen_winding() };
         gte_nops!(64);
-        let _ = mfc2!(24);
+        let _ = read_data!(24);
 
         // Poison MAC0 with the reverse winding, then restore scene A using
         // the exact controlled-prestate sequence from cases 126..134.
-        mtc2!(13, S2);
-        mtc2!(14, S1);
-        unsafe { gte_ops::nclip() };
+        write_data!(13, S2);
+        write_data!(14, S1);
+        unsafe { gte_ops::screen_winding() };
         gte_nops!(64);
-        mtc2!(13, S1);
-        mtc2!(14, S2);
-        unsafe { gte_ops::nclip() };
+        write_data!(13, S1);
+        write_data!(14, S2);
+        unsafe { gte_ops::screen_winding() };
         gte_nops!($gap);
-        mfc2!(24)
+        read_data!(24)
     }};
 }
 
@@ -9488,24 +9500,24 @@ fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usi
         push_precision(values, next, mac0);
     }
     run_op_full_seed();
-    push_precision(values, next, mfc2!(25));
-    push_precision(values, next, mfc2!(26));
-    push_precision(values, next, mfc2!(27));
+    push_precision(values, next, read_data!(25));
+    push_precision(values, next, read_data!(26));
+    push_precision(values, next, read_data!(27));
     run_op_full_seed_settled();
-    push_precision(values, next, mfc2!(25));
-    push_precision(values, next, mfc2!(26));
-    push_precision(values, next, mfc2!(27));
+    push_precision(values, next, read_data!(25));
+    push_precision(values, next, read_data!(26));
+    push_precision(values, next, read_data!(27));
 
     // Voice 0 raw masks: case 164 says which offsets differ, but not what the
     // masked values are. Preserve all eight readbacks after writing FFFF.
-    let voice0 = psx_io::spu::SPU_BASE;
+    let voice0 = psx_hw::spu::BASE;
     unsafe {
         for index in 0..8u32 {
             let addr = voice0 + index * 2;
-            let old = psx_io::read16(addr);
-            psx_io::write16(addr, 0xFFFF);
-            push_precision(values, next, psx_io::read16(addr) as u32);
-            psx_io::write16(addr, old);
+            let old = psx_io::read_u16(addr);
+            psx_io::write_u16(addr, 0xFFFF);
+            push_precision(values, next, psx_io::read_u16(addr) as u32);
+            psx_io::write_u16(addr, old);
         }
     }
 
@@ -9518,23 +9530,30 @@ fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usi
         for index in 0..16 {
             ptr::write_volatile(ptr.add(index), 0);
         }
-        dma::enable_channel(dma::Channel::Otc);
-        dma::raw::set_madr(dma::Channel::Otc, ptr.add(15) as u32);
-        dma::raw::set_bcr(dma::Channel::Otc, dma::bcr_words(16));
-        push_precision(values, next, dma::chcr(dma::Channel::Otc));
-        dma::raw::set_chcr(
-            dma::Channel::Otc,
-            dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
+        dma::enable_channel(dma::Channel::OrderingTableClear);
+        dma::raw::set_address(dma::Channel::OrderingTableClear, ptr.add(15) as u32);
+        dma::raw::set_size(dma::Channel::OrderingTableClear, dma::size_words(16));
+        push_precision(values, next, dma::control(dma::Channel::OrderingTableClear));
+        dma::raw::set_control(
+            dma::Channel::OrderingTableClear,
+            psx_hw::dma::CHCR_STEP_BACKWARD
+                | psx_hw::dma::CHCR_SYNC_MANUAL
+                | psx_hw::dma::CHCR_START
+                | psx_hw::dma::CHCR_TRIGGER,
         );
         for _ in 0..6 {
-            push_precision(values, next, dma::chcr(dma::Channel::Otc));
+            push_precision(values, next, dma::control(dma::Channel::OrderingTableClear));
         }
         let mut guard = 0u32;
-        while dma::is_busy(dma::Channel::Otc) && guard < 0xFFFF {
+        while dma::is_busy(dma::Channel::OrderingTableClear) && guard < 0xFFFF {
             guard += 1;
         }
-        push_precision(values, next, dma::madr(dma::Channel::Otc));
-        push_precision(values, next, psx_io::read32(dma::Channel::Otc.base() + 4));
+        push_precision(values, next, dma::address(dma::Channel::OrderingTableClear));
+        push_precision(
+            values,
+            next,
+            psx_io::read_u32(dma::Channel::OrderingTableClear.register_base() + 4),
+        );
         push_precision(values, next, guard);
         push_precision(values, next, ptr::read_volatile(ptr));
         push_precision(values, next, ptr::read_volatile(ptr.add(15)));
@@ -9561,7 +9580,7 @@ fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usi
     // boundary, then retain a sequential A/B/C run to reveal carried state.
     for _ in 0..4 {
         scene_rtpt(RTPT_E);
-        let _ = mfc2!(19);
+        let _ = read_data!(19);
         push_precision(
             values,
             next,
@@ -9569,7 +9588,7 @@ fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usi
         );
     }
     scene_rtpt(RTPT_E);
-    let _ = mfc2!(19);
+    let _ = read_data!(19);
     push_precision(
         values,
         next,
@@ -9595,28 +9614,28 @@ fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usi
 /// Read one 32-bit VRAM word (two 15bpp pixels) at `(vx, vy)` via GP0 0xC0
 /// + GPUREAD: low halfword is `(vx, vy)`, high is `(vx + 1, vy)`.
 fn gpu_read_word_at(vx: u16, vy: u16) -> u32 {
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0xC000_0000);
-    gpu_io::write_gp0(((vy as u32) << 16) | vx as u32);
-    gpu_io::write_gp0((1u32 << 16) | 2); // 2 wide, 1 tall
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0xC000_0000);
+    gpu_io::write_command(((vy as u32) << 16) | vx as u32);
+    gpu_io::write_command((1u32 << 16) | 2); // 2 wide, 1 tall
     let mut guard = 0u32;
-    while gpu_io::gpustat().bits() & (1 << 27) == 0 && guard < 100_000 {
+    while gpu_io::status().bits() & (1 << 27) == 0 && guard < 100_000 {
         guard += 1;
     }
-    gpu_io::gpuread()
+    gpu_io::read_data()
 }
 
 /// CPU->VRAM block transfer (GP0 0xA0). Honours the current GP0 0xE6 mask
 /// state on silicon (and now in the emulator).
 fn gpu_cpu_to_vram(vx: u16, vy: u16, w: u16, h: u16, data: &[u32]) {
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0xA000_0000);
-    gpu_io::write_gp0(((vy as u32) << 16) | vx as u32);
-    gpu_io::write_gp0(((h as u32) << 16) | w as u32);
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0xA000_0000);
+    gpu_io::write_command(((vy as u32) << 16) | vx as u32);
+    gpu_io::write_command(((h as u32) << 16) | w as u32);
     for &d in data {
-        gpu_io::write_gp0(d);
+        gpu_io::write_command(d);
     }
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
 }
 
 /// VISUAL: ordered dither. With dithering on, a flat mid-grey Gouraud fill
@@ -9629,7 +9648,7 @@ fn gpu_cpu_to_vram(vx: u16, vy: u16, w: u16, h: u16, data: &[u32]) {
 fn test_gpu_dither_checkerboard() -> TestResult {
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
-    gpu_io::write_gp0(0xE100_0000 | (1 << 9)); // draw mode: dither ON
+    gpu_io::write_command(0xE100_0000 | (1 << 9)); // draw mode: dither ON
     let mid = (120u8, 120u8, 120u8);
     let tri0 = prim::TriGouraud::new(
         [(0, 0), (GPU_SW as i16 - 1, 0), (0, GPU_SH as i16 - 1)],
@@ -9645,8 +9664,8 @@ fn test_gpu_dither_checkerboard() -> TestResult {
     );
     gpu_send_prim(&tri0, prim::TriGouraud::WORDS);
     gpu_send_prim(&tri1, prim::TriGouraud::WORDS);
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0xE100_0000); // dither OFF (restore default)
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0xE100_0000); // dither OFF (restore default)
     let observed = gpu_read_word_at(GPU_SX + 4, GPU_SY + 4);
     expect_eq(0x3DEF_39CE, observed, "gpu dither")
 }
@@ -9661,11 +9680,11 @@ fn test_gpu_cpu_vram_upload_mask() -> TestResult {
     let a: u32 = 0x168A; // colour A (bgr15)
     let b: u32 = 0x7FFF; // colour B -- would overwrite if the mask were ignored
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
-    gpu_io::write_gp0(0xE600_0000 | 1); // set-mask on, check-mask off
+    gpu_io::write_command(0xE600_0000 | 1); // set-mask on, check-mask off
     gpu_cpu_to_vram(px, py, 2, 1, &[a | (a << 16)]);
-    gpu_io::write_gp0(0xE600_0000 | 2); // check-mask on
+    gpu_io::write_command(0xE600_0000 | 2); // check-mask on
     gpu_cpu_to_vram(px, py, 2, 1, &[b | (b << 16)]);
-    gpu_io::write_gp0(0xE600_0000); // restore
+    gpu_io::write_command(0xE600_0000); // restore
     let observed = gpu_read_word_at(px, py);
     expect_eq(0x968A_968A, observed, "gpu copy mask")
 }
@@ -9687,7 +9706,7 @@ fn pad_poll_result(pad: psx_engine::PadState) -> TestResult {
 /// (wrong magic / Unknown mode) is a hard FAIL, not the old benign "optional".
 /// An empty port stays optional -- absence is not a failure.
 fn test_pad_handshake_strict() -> TestResult {
-    let raw = psx_pad::poll_port1_diag(psx_pad::DEFAULT_SETUP_SPINS, 0);
+    let raw = psx_pad::poll_port1_diagnostics(psx_pad::DEFAULT_SETUP_SPINS, 0);
     let observed = ((raw.id_high as u32) << 8) | raw.id_low as u32;
     if !raw.mode.is_connected() {
         return TestResult::info(0, observed, "optional");
@@ -9704,7 +9723,7 @@ fn test_pad_handshake_strict() -> TestResult {
 /// fixed delays, no `/ACK`/CTRL machinery). PASS clean, WARN if a connected pad
 /// desyncs under the delays, optional when nothing is plugged in.
 fn test_pad_diag_timing() -> TestResult {
-    let raw = psx_pad::poll_port1_diag(2048, 2048);
+    let raw = psx_pad::poll_port1_diagnostics(2048, 2048);
     let observed = ((raw.id_high as u32) << 8) | raw.id_low as u32;
     if !raw.mode.is_connected() {
         return TestResult::info(0, observed, "optional");
@@ -9724,7 +9743,7 @@ fn test_pad_analog_handshake() -> TestResult {
         return TestResult::info(0, 0, "optional");
     }
     let became_analog = psx_pad::enable_analog_port1();
-    let raw = psx_pad::poll_port1_diag(psx_pad::DEFAULT_SETUP_SPINS, 0);
+    let raw = psx_pad::poll_port1_diagnostics(psx_pad::DEFAULT_SETUP_SPINS, 0);
     let observed =
         ((raw.id_low as u32) << 16) | ((raw.sticks.left_x as u32) << 8) | raw.sticks.left_y as u32;
     if became_analog && raw.id_low == 0x73 {
@@ -9738,28 +9757,28 @@ fn test_pad_analog_handshake() -> TestResult {
 
 fn test_sio_register_latches() -> TestResult {
     unsafe {
-        let old_mode = psx_io::read16(sio::MODE);
-        let old_ctrl = psx_io::read16(sio::CTRL);
-        let old_baud = psx_io::read16(sio::BAUD);
+        let old_mode = psx_io::read_u16(psx_hw::sio::sio0::MODE);
+        let old_ctrl = psx_io::read_u16(psx_hw::sio::sio0::CTRL);
+        let old_baud = psx_io::read_u16(psx_hw::sio::sio0::BAUD);
 
-        psx_io::write16(sio::MODE, 0x000D);
-        psx_io::write16(sio::BAUD, 0x0088);
-        psx_io::write16(sio::CTRL, 0x0003);
+        psx_io::write_u16(psx_hw::sio::sio0::MODE, 0x000D);
+        psx_io::write_u16(psx_hw::sio::sio0::BAUD, 0x0088);
+        psx_io::write_u16(psx_hw::sio::sio0::CTRL, 0x0003);
 
         let mut observed = 0u32;
-        if psx_io::read16(sio::MODE) == 0x000D {
+        if psx_io::read_u16(psx_hw::sio::sio0::MODE) == 0x000D {
             observed |= 1 << 0;
         }
-        if psx_io::read16(sio::BAUD) == 0x0088 {
+        if psx_io::read_u16(psx_hw::sio::sio0::BAUD) == 0x0088 {
             observed |= 1 << 1;
         }
-        if psx_io::read16(sio::CTRL) & 0x0003 == 0x0003 {
+        if psx_io::read_u16(psx_hw::sio::sio0::CTRL) & 0x0003 == 0x0003 {
             observed |= 1 << 2;
         }
 
-        psx_io::write16(sio::MODE, old_mode);
-        psx_io::write16(sio::BAUD, old_baud);
-        psx_io::write16(sio::CTRL, old_ctrl);
+        psx_io::write_u16(psx_hw::sio::sio0::MODE, old_mode);
+        psx_io::write_u16(psx_hw::sio::sio0::BAUD, old_baud);
+        psx_io::write_u16(psx_hw::sio::sio0::CTRL, old_ctrl);
 
         expect_eq(0x07, observed, "sio regs")
     }
@@ -9768,7 +9787,7 @@ fn test_sio_register_latches() -> TestResult {
 fn test_gpu_draw_area_command() -> TestResult {
     gpu::set_draw_area(0, 0, 319, 239);
     gpu::set_draw_offset(0, 0);
-    let observed = gpu_io::gpustat().bits() & ((1 << 26) | (1 << 28));
+    let observed = gpu_io::status().bits() & ((1 << 26) | (1 << 28));
     let expected = (1 << 26) | (1 << 28);
     expect_eq(expected, observed, "draw area")
 }
@@ -9779,20 +9798,20 @@ fn test_gpu_dma_direction_after_otc() -> TestResult {
     // of hanging the battery; bit 2 carries whether it completed.
     // SAFETY: single-threaded test battery, no other live borrow of OT.
     let cleared = dma::clear_ordering_table(unsafe { &mut OT });
-    gpu_io::write_gp1(0x0400_0000 | 2);
-    let observed = ((gpu_io::gpustat().bits() >> 29) & 0b11) | ((cleared as u32) << 2);
+    gpu_io::write_display_control(0x0400_0000 | 2);
+    let observed = ((gpu_io::status().bits() >> 29) & 0b11) | ((cleared as u32) << 2);
     expect_eq(0b110, observed, "dma dir | otc done")
 }
 
 fn test_gpu_dma_direction_mode_latch() -> TestResult {
     let mut observed = 0u32;
     for direction in 0..4u32 {
-        gpu_io::write_gp1(0x0400_0000 | direction);
-        if ((gpu_io::gpustat().bits() >> 29) & 0b11) == direction {
+        gpu_io::write_display_control(0x0400_0000 | direction);
+        if ((gpu_io::status().bits() >> 29) & 0b11) == direction {
             observed |= 1 << direction;
         }
     }
-    gpu_io::write_gp1(0x0400_0000 | 2);
+    gpu_io::write_display_control(0x0400_0000 | 2);
     // Racy on silicon: the GPUSTAT bits 29-30 readback lags the GP1(04)
     // write through the FIFO (the readback probe disagreed with this test
     // within one run). Report until FIFO latency is modelled.
@@ -9805,21 +9824,21 @@ fn test_gpu_gp1_info_environment_readback() -> TestResult {
     let draw_area_bottom_right = 0xE400_0000 | 300 | (220 << 10);
     let draw_offset = 0xE500_0000 | ((-12i32 as u32) & 0x7FF) | (34 << 11);
 
-    gpu_io::write_gp0(texture_window);
-    gpu_io::write_gp0(draw_area_top_left);
-    gpu_io::write_gp0(draw_area_bottom_right);
-    gpu_io::write_gp0(draw_offset);
+    gpu_io::write_command(texture_window);
+    gpu_io::write_command(draw_area_top_left);
+    gpu_io::write_command(draw_area_bottom_right);
+    gpu_io::write_command(draw_offset);
 
-    gpu_io::write_gp1(0x1000_0002);
-    let texture_window_read = gpu_io::gpuread();
-    gpu_io::write_gp1(0x1000_0003);
-    let top_left_read = gpu_io::gpuread();
-    gpu_io::write_gp1(0x1000_0004);
-    let bottom_right_read = gpu_io::gpuread();
-    gpu_io::write_gp1(0x1000_0005);
-    let offset_read = gpu_io::gpuread();
+    gpu_io::write_display_control(0x1000_0002);
+    let texture_window_read = gpu_io::read_data();
+    gpu_io::write_display_control(0x1000_0003);
+    let top_left_read = gpu_io::read_data();
+    gpu_io::write_display_control(0x1000_0004);
+    let bottom_right_read = gpu_io::read_data();
+    gpu_io::write_display_control(0x1000_0005);
+    let offset_read = gpu_io::read_data();
 
-    gpu_io::write_gp0(0xE200_0000);
+    gpu_io::write_command(0xE200_0000);
     gpu::set_draw_area(0, 0, 319, 239);
     gpu::set_draw_offset(0, 0);
 
@@ -9995,35 +10014,35 @@ fn test_scratchpad_roundtrip() -> TestResult {
     const SCRATCH1: u32 = 0x1F80_03F4;
 
     unsafe {
-        let old0 = psx_io::read32(SCRATCH0);
-        let old1 = psx_io::read32(SCRATCH1);
+        let old0 = psx_io::read_u32(SCRATCH0);
+        let old1 = psx_io::read_u32(SCRATCH1);
 
-        psx_io::write32(SCRATCH0, 0xA55A_C33C);
-        psx_io::write32(SCRATCH1, 0x1122_3344);
+        psx_io::write_u32(SCRATCH0, 0xA55A_C33C);
+        psx_io::write_u32(SCRATCH1, 0x1122_3344);
 
         let mut observed = 0u32;
-        if psx_io::read32(SCRATCH0) == 0xA55A_C33C {
+        if psx_io::read_u32(SCRATCH0) == 0xA55A_C33C {
             observed |= 1 << 0;
         }
-        if psx_io::read16(SCRATCH0) == 0xC33C {
+        if psx_io::read_u16(SCRATCH0) == 0xC33C {
             observed |= 1 << 1;
         }
-        if psx_io::read8(SCRATCH0) == 0x3C {
+        if psx_io::read_u8(SCRATCH0) == 0x3C {
             observed |= 1 << 2;
         }
-        if psx_io::read32(SCRATCH1) == 0x1122_3344 {
+        if psx_io::read_u32(SCRATCH1) == 0x1122_3344 {
             observed |= 1 << 3;
         }
 
-        psx_io::write32(SCRATCH0, old0);
-        psx_io::write32(SCRATCH1, old1);
+        psx_io::write_u32(SCRATCH0, old0);
+        psx_io::write_u32(SCRATCH1, old1);
 
         expect_eq(0x0F, observed, "scratch")
     }
 }
 
 fn test_cdrom_getstat_response() -> TestResult {
-    match cdrom::try_get_stat(200_000) {
+    match psx_io::cd::try_status(200_000) {
         Some(response) if !response.is_empty() => {
             TestResult::info(1, response.bytes()[0] as u32, "getstat")
         }
@@ -10036,13 +10055,13 @@ fn test_cdrom_index_latch() -> TestResult {
     unsafe {
         let mut observed = 0u32;
         for index in 0..4u8 {
-            psx_io::write8(cdrom::BASE, index);
-            let status_index = psx_io::read8(cdrom::BASE) & 0x03;
+            psx_io::write_u8(psx_hw::cd::BASE, index);
+            let status_index = psx_io::read_u8(psx_hw::cd::BASE) & 0x03;
             if status_index == index {
                 observed |= 1 << index;
             }
         }
-        psx_io::write8(cdrom::BASE, 0);
+        psx_io::write_u8(psx_hw::cd::BASE, 0);
         expect_eq(0x0F, observed, "cd index")
     }
 }
@@ -10098,7 +10117,7 @@ fn test_timer_target_register_roundtrip() -> TestResult {
 }
 
 fn timer_target(timer: timers::Timer) -> u16 {
-    unsafe { psx_io::read32(0x1F80_1108 + 0x10 * (timer as u32)) as u16 }
+    unsafe { psx_io::read_u32(0x1F80_1108 + 0x10 * (timer as u32)) as u16 }
 }
 
 fn timer_delta(timer: timers::Timer, mode: u16, spin_count: u32) -> u16 {
@@ -10627,7 +10646,7 @@ fn timed_divu_mflo() -> u16 {
 fn flush_icache_without_irq() {
     // flush_i_cache disables interrupts internally for the isolated
     // sequence, so no SR dance is needed around it.
-    psx_rt::cache::flush_i_cache();
+    psx_rt::cache::flush_instruction_cache();
 }
 
 /// Execute a timing wrapper through its KSEG1 alias. Cache probes must not run
@@ -10818,17 +10837,23 @@ fn timed_otc_dma_cycles(words: u16) -> u16 {
         for i in 0..words as usize {
             ptr::write_volatile(ptr.add(i), 0);
         }
-        dma::enable_channel(dma::Channel::Otc);
-        dma::raw::set_madr(dma::Channel::Otc, ptr.add(words as usize - 1) as u32);
-        dma::raw::set_bcr(dma::Channel::Otc, dma::bcr_words(words));
+        dma::enable_channel(dma::Channel::OrderingTableClear);
+        dma::raw::set_address(
+            dma::Channel::OrderingTableClear,
+            ptr.add(words as usize - 1) as u32,
+        );
+        dma::raw::set_size(dma::Channel::OrderingTableClear, dma::size_words(words));
         timers::set_mode(timers::Timer::Timer2, 0);
         timers::set_counter(timers::Timer::Timer2, 0);
-        dma::raw::set_chcr(
-            dma::Channel::Otc,
-            dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
+        dma::raw::set_control(
+            dma::Channel::OrderingTableClear,
+            psx_hw::dma::CHCR_STEP_BACKWARD
+                | psx_hw::dma::CHCR_SYNC_MANUAL
+                | psx_hw::dma::CHCR_START
+                | psx_hw::dma::CHCR_TRIGGER,
         );
         let mut polls = 0u16;
-        while dma::is_busy(dma::Channel::Otc) && polls != 0xFFFF {
+        while dma::is_busy(dma::Channel::OrderingTableClear) && polls != 0xFFFF {
             polls = polls.wrapping_add(1);
         }
         let elapsed = timers::counter(timers::Timer::Timer2);
@@ -10845,7 +10870,7 @@ fn timed_otc_dma_cycles(words: u16) -> u16 {
 /// transfer slope dominates fixed register and polling overhead while staying
 /// well below Timer 2's 16-bit wrap.
 fn timed_spu_dma_write_512_halfwords() -> u16 {
-    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
+    use psx_hw::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
     static mut SOURCE: [u32; 256] = [0; 256];
 
     unsafe {
@@ -10856,22 +10881,22 @@ fn timed_spu_dma_write_512_halfwords() -> u16 {
             index += 1;
         }
 
-        let old_spucnt = psx_io::read16(SPUCNT);
+        let old_spucnt = psx_io::read_u16(SPUCNT);
         let stopped = old_spucnt & !0x0030;
-        psx_io::write16(SPUCNT, stopped);
-        psx_io::write16(TRANSFER_CTRL, 0x0004);
-        psx_io::write16(TRANSFER_ADDR, 0x0800); // SPU RAM byte address 0x4000
-        psx_io::write16(SPUCNT, stopped | 0x0020); // DMA Write
+        psx_io::write_u16(SPUCNT, stopped);
+        psx_io::write_u16(TRANSFER_CTRL, 0x0004);
+        psx_io::write_u16(TRANSFER_ADDR, 0x0800); // SPU RAM byte address 0x4000
+        psx_io::write_u16(SPUCNT, stopped | 0x0020); // DMA Write
 
         dma::enable_channel(dma::Channel::Spu);
-        dma::raw::set_madr(dma::Channel::Spu, source as u32);
-        dma::raw::set_bcr(dma::Channel::Spu, dma::bcr_blocks(16, 16));
+        dma::raw::set_address(dma::Channel::Spu, source as u32);
+        dma::raw::set_size(dma::Channel::Spu, dma::size_blocks(16, 16));
 
         timers::set_mode(timers::Timer::Timer2, 0);
         timers::set_counter(timers::Timer::Timer2, 0);
-        dma::raw::set_chcr(
+        dma::raw::set_control(
             dma::Channel::Spu,
-            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+            psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START,
         );
 
         let mut polls = 0u32;
@@ -10879,7 +10904,7 @@ fn timed_spu_dma_write_512_halfwords() -> u16 {
             polls += 1;
         }
         let elapsed = timers::counter(timers::Timer::Timer2);
-        psx_io::write16(SPUCNT, old_spucnt);
+        psx_io::write_u16(SPUCNT, old_spucnt);
         if polls == 1_000_000 {
             0xFFFF
         } else {
@@ -10901,15 +10926,15 @@ fn timed_gpu_dma_block(block_size: u16, block_count: u16) -> u16 {
         return 0xFFFF;
     }
 
-    let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
-    gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
+    let old_direction = (gpu_io::status().bits() >> 29) & 3;
+    gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
     // SAFETY: silicon probe: the transfer touches only memory this probe
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_madr(dma::Channel::Gpu, SOURCE.as_ptr() as u32);
-        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_blocks(block_size, block_count));
+        dma::raw::set_address(dma::Channel::Gpu, SOURCE.as_ptr() as u32);
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_blocks(block_size, block_count));
     }
 
     timers::set_mode(timers::Timer::Timer2, 0);
@@ -10918,9 +10943,9 @@ fn timed_gpu_dma_block(block_size: u16, block_count: u16) -> u16 {
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_chcr(
+        dma::raw::set_control(
             dma::Channel::Gpu,
-            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+            psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_BLOCK | psx_hw::dma::CHCR_START,
         );
     }
 
@@ -10929,7 +10954,7 @@ fn timed_gpu_dma_block(block_size: u16, block_count: u16) -> u16 {
         polls += 1;
     }
     let elapsed = timers::counter(timers::Timer::Timer2);
-    gpu_io::write_gp1(0x0400_0000 | old_direction);
+    gpu_io::write_display_control(0x0400_0000 | old_direction);
     if polls == 1_000_000 {
         0xFFFF
     } else {
@@ -10954,17 +10979,17 @@ fn timed_gpu_dma_linked_2x128() -> u16 {
             index += 1;
         }
 
-        let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
-        gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
+        let old_direction = (gpu_io::status().bits() >> 29) & 3;
+        gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
         dma::enable_channel(dma::Channel::Gpu);
-        dma::raw::set_madr(dma::Channel::Gpu, list as u32);
-        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_words(0));
+        dma::raw::set_address(dma::Channel::Gpu, list as u32);
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
 
         timers::set_mode(timers::Timer::Timer2, 0);
         timers::set_counter(timers::Timer::Timer2, 0);
-        dma::raw::set_chcr(
+        dma::raw::set_control(
             dma::Channel::Gpu,
-            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
+            psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_LINKED | psx_hw::dma::CHCR_START,
         );
 
         let mut polls = 0u32;
@@ -10972,7 +10997,7 @@ fn timed_gpu_dma_linked_2x128() -> u16 {
             polls += 1;
         }
         let elapsed = timers::counter(timers::Timer::Timer2);
-        gpu_io::write_gp1(0x0400_0000 | old_direction);
+        gpu_io::write_display_control(0x0400_0000 | old_direction);
         if polls == 1_000_000 {
             0xFFFF
         } else {
@@ -10987,12 +11012,12 @@ fn timed_gpu_dma_linked_2x128() -> u16 {
 /// color-interpolation cost. The lines land in off-screen VRAM so the photo UI
 /// remains readable.
 fn timed_gpu_line_batch(shaded: bool, length: u16, count: u16) -> u16 {
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0xE300_0000); // draw area top-left = (0, 0)
-    gpu_io::write_gp0(0xE400_0000 | 1023 | (511 << 10));
-    gpu_io::write_gp0(0xE500_0000); // draw offset = (0, 0)
-    gpu_io::write_gp0(0xE100_0000); // dither off
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0xE300_0000); // draw area top-left = (0, 0)
+    gpu_io::write_command(0xE400_0000 | 1023 | (511 << 10));
+    gpu_io::write_command(0xE500_0000); // draw offset = (0, 0)
+    gpu_io::write_command(0xE100_0000); // dither off
+    gpu_io::wait_command_ready();
 
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
@@ -11002,20 +11027,20 @@ fn timed_gpu_line_batch(shaded: bool, length: u16, count: u16) -> u16 {
         let x0 = 640u32;
         let x1 = x0 + u32::from(length);
         if shaded {
-            gpu_io::write_gp0(0x5000_00FF); // red endpoint
-            gpu_io::write_gp0((y << 16) | x0);
-            gpu_io::write_gp0(0x00FF_0000); // blue endpoint
-            gpu_io::write_gp0((y << 16) | x1);
+            gpu_io::write_command(0x5000_00FF); // red endpoint
+            gpu_io::write_command((y << 16) | x0);
+            gpu_io::write_command(0x00FF_0000); // blue endpoint
+            gpu_io::write_command((y << 16) | x1);
         } else {
-            gpu_io::write_gp0(0x4000_FFFF);
-            gpu_io::write_gp0((y << 16) | x0);
-            gpu_io::write_gp0((y << 16) | x1);
+            gpu_io::write_command(0x4000_FFFF);
+            gpu_io::write_command((y << 16) | x0);
+            gpu_io::write_command((y << 16) | x1);
         }
         index += 1;
     }
 
     let mut guard = 0u32;
-    while gpu_io::gpustat().bits() & (1 << 26) == 0 && guard < 1_000_000 {
+    while gpu_io::status().bits() & (1 << 26) == 0 && guard < 1_000_000 {
         guard += 1;
     }
     let elapsed = timers::counter(timers::Timer::Timer2);
@@ -11029,7 +11054,7 @@ fn timed_gpu_line_batch(shaded: bool, length: u16, count: u16) -> u16 {
 fn timed_cdrom_getstat() -> u16 {
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
-    let response = cdrom::try_get_stat(200_000);
+    let response = psx_io::cd::try_status(200_000);
     let elapsed = timers::counter(timers::Timer::Timer2);
     if response.is_some_and(|value| !value.is_empty()) {
         elapsed
@@ -11039,16 +11064,16 @@ fn timed_cdrom_getstat() -> u16 {
 }
 
 fn timed_gpu_irq_settle() -> u16 {
-    gpu_io::write_gp1(0x0200_0000);
+    gpu_io::write_display_control(0x0200_0000);
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
-    gpu_io::write_gp0(0x1F00_0000);
+    gpu_io::write_command(0x1F00_0000);
     let mut guard = 0u16;
-    while gpu_io::gpustat().bits() & (1 << 24) == 0 && guard != 0xFFFF {
+    while gpu_io::status().bits() & (1 << 24) == 0 && guard != 0xFFFF {
         guard = guard.wrapping_add(1);
     }
     let elapsed = timers::counter(timers::Timer::Timer2);
-    gpu_io::write_gp1(0x0200_0000);
+    gpu_io::write_display_control(0x0200_0000);
     if guard == 0xFFFF {
         0xFFFF
     } else {
@@ -11063,15 +11088,18 @@ fn timed_otc_dma_wait() -> u16 {
         for i in 0..16 {
             ptr::write_volatile(ptr.add(i), 0);
         }
-        dma::enable_channel(dma::Channel::Otc);
-        dma::raw::set_madr(dma::Channel::Otc, ptr.add(15) as u32);
-        dma::raw::set_bcr(dma::Channel::Otc, dma::bcr_words(16));
-        dma::raw::set_chcr(
-            dma::Channel::Otc,
-            dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
+        dma::enable_channel(dma::Channel::OrderingTableClear);
+        dma::raw::set_address(dma::Channel::OrderingTableClear, ptr.add(15) as u32);
+        dma::raw::set_size(dma::Channel::OrderingTableClear, dma::size_words(16));
+        dma::raw::set_control(
+            dma::Channel::OrderingTableClear,
+            psx_hw::dma::CHCR_STEP_BACKWARD
+                | psx_hw::dma::CHCR_SYNC_MANUAL
+                | psx_hw::dma::CHCR_START
+                | psx_hw::dma::CHCR_TRIGGER,
         );
         let mut polls = 0u16;
-        while dma::is_busy(dma::Channel::Otc) && polls != 0xFFFF {
+        while dma::is_busy(dma::Channel::OrderingTableClear) && polls != 0xFFFF {
             polls = polls.wrapping_add(1);
         }
         let mut ok = ptr::read_volatile(ptr) == 0x00FF_FFFF;

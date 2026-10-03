@@ -229,7 +229,7 @@ impl RingProbe {
         }
         self.frame = self.frame.saturating_add(1);
         if self.frame == TONE_FRAMES {
-            Voice::key_off(all_used_mask());
+            Voice::release(all_used_mask());
             Voice::set_noise_mask(0);
         }
         if self.frame >= TONE_FRAMES + GAP_FRAMES {
@@ -373,7 +373,7 @@ impl RingProbe {
 /// (~12 ms) inside one frame, which the frame loop absorbs the same way it
 /// absorbs the other probes' blocking uploads.
 fn run_segment(segment: usize) -> Snapshot {
-    Voice::key_off(all_used_mask());
+    Voice::release(all_used_mask());
     Voice::set_noise_mask(0);
 
     let (voice, ring) = match segment {
@@ -418,7 +418,7 @@ fn run_segment(segment: usize) -> Snapshot {
     let Some(half) = wait_half_edge() else {
         return timeout_snapshot();
     };
-    Voice::key_on(voice.mask());
+    Voice::start(voice.mask());
     if wait_half_value(!half).is_none() {
         return timeout_snapshot();
     }
@@ -429,8 +429,8 @@ fn run_segment(segment: usize) -> Snapshot {
     let mut words = [0u32; HALF_WORDS];
     spu_dma_read(base, &mut words);
 
-    let stat = unsafe { psx_io::read16(psx_io::spu::SPUSTAT) };
-    let envx = unsafe { psx_io::read16(psx_io::spu::SPU_BASE + voice.index() as u32 * 16 + 12) };
+    let stat = unsafe { psx_io::read_u16(psx_hw::spu::SPUSTAT) };
+    let envx = unsafe { psx_io::read_u16(psx_hw::spu::BASE + voice.index() as u32 * 16 + 12) };
 
     let mut raw = [0i16; RAW_SAMPLES];
     let mut first = 0xFFFFu16;
@@ -471,7 +471,7 @@ fn timeout_snapshot() -> Snapshot {
 }
 
 fn current_half() -> bool {
-    unsafe { psx_io::read16(psx_io::spu::SPUSTAT) & STAT_HALF != 0 }
+    unsafe { psx_io::read_u16(psx_hw::spu::SPUSTAT) & STAT_HALF != 0 }
 }
 
 /// Wait for the half flag to move at all; returns the NEW value.

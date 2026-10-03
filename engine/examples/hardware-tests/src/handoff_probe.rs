@@ -47,8 +47,8 @@ const BINARY_LEN: usize = 320;
 const BASE64_LEN: usize = 428;
 const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
-const ENDX_LO: u32 = psx_io::spu::SPU_BASE + 0x19C;
-const ENDX_HI: u32 = psx_io::spu::SPU_BASE + 0x19E;
+const ENDX_LO: u32 = psx_hw::spu::BASE + 0x19C;
+const ENDX_HI: u32 = psx_hw::spu::BASE + 0x19E;
 
 #[derive(Copy, Clone)]
 struct StageRecord {
@@ -219,9 +219,9 @@ impl HandoffProbe {
         let tick = ctx.sim_tick.as_u32();
         if self.stage == 0 {
             if self.stage_frame == 15 {
-                Voice::key_on(Voice::V0.mask());
+                Voice::start(Voice::V0.mask());
             } else if self.stage_frame == 45 {
-                Voice::key_off(Voice::V0.mask());
+                Voice::release(Voice::V0.mask());
                 Voice::V0.set_volume(Volume::SILENCE, Volume::SILENCE);
             }
         } else if self.stage == 2 && self.stage_frame == 15 {
@@ -318,7 +318,7 @@ impl HandoffProbe {
         if self.variant.explicit_stop() {
             let menu = Voice::new(MENU_VOICE);
             menu.set_volume(Volume::SILENCE, Volume::SILENCE);
-            Voice::key_off(menu.mask());
+            Voice::release(menu.mask());
             for _ in 0..self.variant.wait_vblanks() {
                 interrupts::wait_vblank();
             }
@@ -398,7 +398,7 @@ impl HandoffProbe {
             Volume::linear(1, 8),
             Adsr::sample(),
         );
-        Voice::key_on(voice.mask());
+        Voice::start(voice.mask());
     }
 
     fn readback_map(&mut self) {
@@ -408,12 +408,12 @@ impl HandoffProbe {
 
     fn capture_stage(&mut self, tick: u32) {
         let stage = self.stage as usize;
-        let spucnt = unsafe { psx_io::read16(psx_io::spu::SPUCNT) };
-        let spustat = unsafe { psx_io::read16(psx_io::spu::SPUSTAT) };
-        let endx_lo = unsafe { psx_io::read16(ENDX_LO) };
-        let endx_hi = unsafe { psx_io::read16(ENDX_HI) };
-        let base = psx_io::spu::SPU_BASE + MENU_VOICE as u32 * 16;
-        let read = |offset| unsafe { psx_io::read16(base + offset) };
+        let spucnt = unsafe { psx_io::read_u16(psx_hw::spu::SPUCNT) };
+        let spustat = unsafe { psx_io::read_u16(psx_hw::spu::SPUSTAT) };
+        let endx_lo = unsafe { psx_io::read_u16(ENDX_LO) };
+        let endx_hi = unsafe { psx_io::read_u16(ENDX_HI) };
+        let base = psx_hw::spu::BASE + MENU_VOICE as u32 * 16;
+        let read = |offset| unsafe { psx_io::read_u16(base + offset) };
         let event_vblanks = self.event_vblank_after[stage]
             .wrapping_sub(self.event_vblank_before[stage])
             .min(u16::MAX as u32);
@@ -674,9 +674,9 @@ fn build_adpcm(output: &mut [u8], blocks: u32, looped: bool, pattern: SamplePatt
 fn nonzero_voice_volume_mask() -> u32 {
     let mut mask = 0u32;
     for voice in 0..24u32 {
-        let base = psx_io::spu::SPU_BASE + voice * 16;
-        let left = unsafe { psx_io::read16(base) };
-        let right = unsafe { psx_io::read16(base + 2) };
+        let base = psx_hw::spu::BASE + voice * 16;
+        let left = unsafe { psx_io::read_u16(base) };
+        let right = unsafe { psx_io::read_u16(base + 2) };
         if left != 0 || right != 0 {
             mask |= 1 << voice;
         }
@@ -685,13 +685,13 @@ fn nonzero_voice_volume_mask() -> u32 {
 }
 
 fn stable_read_hash(addr: u32) -> u32 {
-    let original_delay = unsafe { psx_io::read32(SPU_DELAY) };
-    unsafe { psx_io::write32(SPU_DELAY, original_delay | 0x0200_0000) };
+    let original_delay = unsafe { psx_io::read_u32(SPU_DELAY) };
+    unsafe { psx_io::write_u32(SPU_DELAY, original_delay | 0x0200_0000) };
     for _ in 0..64 {
         core::hint::spin_loop();
     }
     let mut back = [0u32; READBACK_BYTES / 4];
     spu_dma_read(addr, &mut back);
-    unsafe { psx_io::write32(SPU_DELAY, original_delay) };
+    unsafe { psx_io::write_u32(SPU_DELAY, original_delay) };
     fnv32_words(&back)
 }

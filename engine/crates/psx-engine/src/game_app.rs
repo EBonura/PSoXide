@@ -130,7 +130,7 @@ const CDDA_RETRY_TICKS: u32 = 60;
 const CDDA_STATUS_TICKS: u32 = 4;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
 #[cfg(any(target_arch = "mips", test))]
-const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE;
+const CDDA_PLAYBACK_MODE: u8 = psx_hw::cd::MODE_CDDA | psx_hw::cd::MODE_AUTO_PAUSE;
 #[cfg(target_arch = "mips")]
 const CDDA_COMMAND_SPINS: u32 = 131_072;
 // GetStat is asynchronous: allow a full second for its response without
@@ -760,38 +760,37 @@ fn cdda_toc_second(bytes: &[u8]) -> Option<u32> {
     {
         return None;
     }
-    let minutes = u32::from(psx_io::cdrom::bcd_to_bin(bytes[1]));
-    let seconds = u32::from(psx_io::cdrom::bcd_to_bin(bytes[2]));
+    let minutes = u32::from(psx_io::cd::bcd_to_bin(bytes[1]));
+    let seconds = u32::from(psx_io::cd::bcd_to_bin(bytes[2]));
     Some(minutes * 60 + seconds)
 }
 
 #[cfg(target_arch = "mips")]
 fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
-    use psx_io::cdrom;
     let mut params = [0; 3];
     let (command, count) = match step {
         CddaStartStep::SetMode => {
             params[0] = CDDA_PLAYBACK_MODE;
-            (cdrom::CMD_SETMODE, 1)
+            (psx_hw::cd::CMD_SETMODE, 1)
         }
-        CddaStartStep::Demute => (cdrom::CMD_DEMUTE, 0),
+        CddaStartStep::Demute => (psx_hw::cd::CMD_DEMUTE, 0),
         CddaStartStep::TrackCount => (0x13, 0),
         CddaStartStep::TrackStart | CddaStartStep::TrackEnd => {
-            params[0] = cdrom::bin_to_bcd(cdda_physical_track(track));
+            params[0] = psx_io::cd::bin_to_bcd(cdda_physical_track(track));
             (0x14, 1)
         }
         CddaStartStep::SetLocation => {
-            params[0] = cdrom::bin_to_bcd((second / 60) as u8);
-            params[1] = cdrom::bin_to_bcd((second % 60) as u8);
-            (cdrom::CMD_SETLOC, 3)
+            params[0] = psx_io::cd::bin_to_bcd((second / 60) as u8);
+            params[1] = psx_io::cd::bin_to_bcd((second % 60) as u8);
+            (psx_hw::cd::CMD_SETLOC, 3)
         }
-        CddaStartStep::PlayLocation => (cdrom::CMD_PLAY, 0),
+        CddaStartStep::PlayLocation => (psx_hw::cd::CMD_PLAY, 0),
         CddaStartStep::Play => {
-            params[0] = cdrom::bin_to_bcd(cdda_physical_track(track));
-            (cdrom::CMD_PLAY, 1)
+            params[0] = psx_io::cd::bin_to_bcd(cdda_physical_track(track));
+            (psx_hw::cd::CMD_PLAY, 1)
         }
     };
-    let response = cdrom::try_command(command, &params[..count], CDDA_COMMAND_SPINS)?;
+    let response = psx_io::cd::try_command(command, &params[..count], CDDA_COMMAND_SPINS)?;
     let bytes = response.bytes();
     if bytes.first().is_none_or(|status| status & 1 != 0) {
         return None;
@@ -799,7 +798,7 @@ fn cdda_issue_step(step: CddaStartStep, track: u8, second: u32) -> Option<u32> {
     match step {
         CddaStartStep::TrackCount => bytes
             .get(2)
-            .map(|value| u32::from(cdrom::bcd_to_bin(*value))),
+            .map(|value| u32::from(psx_io::cd::bcd_to_bin(*value))),
         CddaStartStep::TrackStart | CddaStartStep::TrackEnd => cdda_toc_second(bytes),
         _ => Some(0),
     }
@@ -834,7 +833,7 @@ fn flow_trace(_message: &str) {}
 
 #[cfg(target_arch = "mips")]
 fn cdda_begin_status() -> Option<u8> {
-    psx_io::cdrom::dispatch_command(psx_io::cdrom::CMD_GETSTAT, &[], 0)
+    psx_io::cd::dispatch_command(psx_hw::cd::CMD_GETSTAT, &[], 0)
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -844,7 +843,7 @@ fn cdda_begin_status() -> Option<u8> {
 
 #[cfg(any(target_arch = "mips", test))]
 fn cdda_status_stopped(status: u8) -> Option<bool> {
-    use psx_io::cdrom::{STAT_PLAYING, STAT_READING, STAT_SEEKING};
+    use psx_hw::cd::{STAT_PLAYING, STAT_READING, STAT_SEEKING};
     if status & 0x11 != 0 {
         // Error or open lid is not a confirmed track boundary.
         None
@@ -857,15 +856,14 @@ fn cdda_status_stopped(status: u8) -> Option<bool> {
 /// an error response without interpreting it as the end of the song.
 #[cfg(target_arch = "mips")]
 fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
-    use psx_io::cdrom;
-    let irq = cdrom::irq_flag_value();
+    let irq = psx_io::cd::irq_flag_value();
     if irq == 0 {
         return None;
     }
     if irq != 3 && irq != 5 {
         // Auto-pause can deliver INT4 before the outstanding GetStat ACK.
-        cdrom::discard_response();
-        cdrom::acknowledge_irq(irq);
+        psx_io::cd::discard_response();
+        psx_io::cd::acknowledge_irq(irq);
         return None;
     }
     // GetStat has one response byte. Select the response FIFO, read it once,
@@ -878,7 +876,7 @@ fn cdda_finish_status(irq_enable: u8) -> Option<Option<bool>> {
             None
         }
     };
-    cdrom::restore_irq_output(irq_enable);
+    psx_io::cd::restore_irq_output(irq_enable);
     Some(if irq == 3 {
         status.and_then(cdda_status_stopped)
     } else {
@@ -895,7 +893,7 @@ fn cdda_finish_status(_irq_enable: u8) -> Option<Option<bool>> {
 fn cdda_cancel_status() {
     // A cancelled command may still ACK later. Keep IRQ output masked, like
     // the SDK's timed-out polled commands, until the next CD command takes over.
-    psx_io::cdrom::restore_irq_output(0);
+    psx_io::cd::restore_irq_output(0);
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -904,7 +902,7 @@ fn cdda_cancel_status() {}
 #[cfg(target_arch = "mips")]
 fn cdda_release_for_data_reads() {
     psx_spu::enable_cd_audio(false);
-    let _ = psx_io::cdrom::try_pause_until_complete(CDDA_COMMAND_SPINS);
+    let _ = psx_io::cd::try_pause_until_complete(CDDA_COMMAND_SPINS);
 }
 
 #[cfg(not(target_arch = "mips"))]
@@ -5469,7 +5467,7 @@ mod tests {
         // detect end-of-track and re-play without seeking the laser mid-song.
         assert_eq!(
             CDDA_PLAYBACK_MODE,
-            psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE
+            psx_hw::cd::MODE_CDDA | psx_hw::cd::MODE_AUTO_PAUSE
         );
     }
 

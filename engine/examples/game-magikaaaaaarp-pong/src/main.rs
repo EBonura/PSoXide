@@ -21,7 +21,7 @@ use psx_io::cdrom;
 use psx_math::int32::clamp_i16;
 use psx_settings::Profile;
 use psx_spu::{self as spu, CdVolume, SpuAddr, Voice, Volume};
-use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
+use psx_vram::{upload_bytes, Clut, TextureDepth, TexturePage, VramRect};
 
 #[cfg(target_arch = "mips")]
 fn game_trace(message: &str) {
@@ -109,9 +109,9 @@ const SPECTRUM_MAX_H: u16 = 76;
 const SPECTRUM_OT_SLOT: usize = 15;
 const CENTER_DASH_RECTS: usize = 14;
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
-const CUBE_TPAGE: Tpage = Tpage::new(640, 0, TexDepth::Bit8);
+const CUBE_TPAGE: TexturePage = TexturePage::new(640, 0, TextureDepth::Bit8);
 const CUBE_CLUT: Clut = Clut::new(0, 480);
 const SCORE_FLYBY_CLUT: Clut = Clut::new(256, 480);
 const SCORE_FLYBY_TEX_X: u16 = CUBE_TPAGE.x() + 64;
@@ -422,20 +422,20 @@ impl Scene for MagikaaaaaarpPong {
         ctx.refresh_second_pad();
         self.two_player = ctx.pad_for(1).is_connected();
         let p1 = ctx.actions(0, &PONG_ACTIONS);
-        if p1.held(ACTION_UP) {
+        if p1.is_held(ACTION_UP) {
             self.p1_y -= PADDLE_SPEED;
         }
-        if p1.held(ACTION_DOWN) {
+        if p1.is_held(ACTION_DOWN) {
             self.p1_y += PADDLE_SPEED;
         }
         clamp_paddle(&mut self.p1_y);
 
         if self.two_player {
             let p2 = ctx.actions(1, &PONG_ACTIONS);
-            if p2.held(ACTION_UP) {
+            if p2.is_held(ACTION_UP) {
                 self.p2_y -= PADDLE_SPEED;
             }
-            if p2.held(ACTION_DOWN) {
+            if p2.is_held(ACTION_DOWN) {
                 self.p2_y += PADDLE_SPEED;
             }
         } else {
@@ -686,11 +686,7 @@ impl MagikaaaaaarpPong {
                         (projected[d].x, projected[d].y),
                     ],
                     CUBE_UVS,
-                    TextureMaterial::opaque(
-                        CUBE_CLUT.uv_clut_word(),
-                        CUBE_TPAGE.uv_tpage_word(0),
-                        tint,
-                    ),
+                    TextureMaterial::opaque(CUBE_CLUT.uv_word(), CUBE_TPAGE.uv_word(0), tint),
                 );
                 if let Some(quad) = quads.push(quad) {
                     frame.add(cube_depth_slot(avg_z), quad);
@@ -726,8 +722,8 @@ impl MagikaaaaaarpPong {
             verts,
             SCORE_FLYBY_UVS,
             TextureMaterial::opaque(
-                SCORE_FLYBY_CLUT.uv_clut_word(),
-                CUBE_TPAGE.uv_tpage_word(0),
+                SCORE_FLYBY_CLUT.uv_word(),
+                CUBE_TPAGE.uv_word(0),
                 (128, 128, 128),
             ),
         );
@@ -999,7 +995,7 @@ fn upload_cube_texture() {
 fn upload_score_flyby_texture() {
     let texture =
         Texture::from_bytes(include_bytes!("../assets/score_flyby.psxt")).expect("score flyby");
-    assert!(texture.index_zero_transparent());
+    assert!(texture.is_index_zero_transparent());
     upload_bytes(
         VramRect::new(
             SCORE_FLYBY_TEX_X,
@@ -1073,11 +1069,11 @@ fn trace_cdda_step_ack(step: CddaStartStep) {
 fn issue_cdda_step(step: CddaStartStep) -> bool {
     match step {
         CddaStartStep::SetMode => {
-            cdrom::try_set_mode(cdrom::MODE_CDDA, CDROM_COMMAND_SPINS).is_some()
+            psx_io::cd::try_set_mode(psx_hw::cd::MODE_CDDA, CDROM_COMMAND_SPINS).is_some()
         }
-        CddaStartStep::Demute => cdrom::try_demute(CDROM_COMMAND_SPINS).is_some(),
+        CddaStartStep::Demute => psx_io::cd::try_unmute(CDROM_COMMAND_SPINS).is_some(),
         CddaStartStep::Play => {
-            cdrom::try_play_track(TRACK_GONCHAROV, CDROM_COMMAND_SPINS).is_some()
+            psx_io::cd::try_play_track(TRACK_GONCHAROV, CDROM_COMMAND_SPINS).is_some()
         }
     }
 }

@@ -25,7 +25,7 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{material::TextureMaterial, ot::OrderingTable, prim::TriTextured};
-use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
+use psx_vram::{upload_bytes, Clut, TextureDepth, TexturePage, VramRect};
 
 struct ClipEntry {
     label: &'static str,
@@ -133,12 +133,12 @@ const WORLD_BAND: DepthBand = OtDepth::<OT_DEPTH>::band(0, OT_DEPTH - 2);
 
 /// Model texture lives in a dedicated 8bpp page well clear of the
 /// font atlas at x=320. Re-upload happens on every model swap.
-const TEX_TPAGE: Tpage = Tpage::new(640, 0, TexDepth::Bit8);
+const TEX_TPAGE: TexturePage = TexturePage::new(640, 0, TextureDepth::Bit8);
 const TEX_CLUT: Clut = Clut::new(0, 482);
 
 /// 4bpp 8x8 BIOS-style font atlas. Sits at x=320 (multiple of 64),
 /// clear of both display buffers and the model's 8bpp page at 640.
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const MODEL_WORLD_HEIGHT: i32 = 1024;
@@ -250,8 +250,8 @@ impl Scene for ModelShowcase {
         let entry = &MODELS[self.current_model];
         if let (Some(model), Some(animation)) = (self.model, self.animations[self.current_clip]) {
             let material = TextureMaterial::opaque(
-                TEX_CLUT.uv_clut_word(),
-                TEX_TPAGE.uv_tpage_word(0),
+                TEX_CLUT.uv_word(),
+                TEX_TPAGE.uv_word(0),
                 (0x80, 0x80, 0x80),
             )
             .with_raw_texture(true);

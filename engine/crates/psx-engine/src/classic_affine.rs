@@ -331,7 +331,7 @@ pub unsafe fn materialize_project_classic_affine_indexed_baked_vertices(
             lane += 1;
         }
 
-        let projected = scene::rtpt_kick(
+        let projected = scene::start_project_triple(
             position_vectors[0],
             position_vectors[1],
             position_vectors[2],
@@ -468,7 +468,7 @@ pub unsafe fn materialize_project_classic_affine_indexed_batch(
             lane += 1;
         }
 
-        let projected = scene::rtpt_kick(
+        let projected = scene::start_project_triple(
             position_vectors[0],
             position_vectors[1],
             position_vectors[2],
@@ -2548,7 +2548,7 @@ fn average3(vertices: [&ClassicAffineVertex; 3]) -> u16 {
 #[inline(always)]
 fn average3_depths(a: u16, b: u16, c: u16) -> u16 {
     {
-        scene::classic_otz3_from_sum(u32::from(a) + u32::from(b) + u32::from(c))
+        scene::classic_ordering_depth3_from_sum(u32::from(a) + u32::from(b) + u32::from(c))
     }
 }
 
@@ -3721,7 +3721,7 @@ pub unsafe fn census_classic_affine_projected_batch_topology(
         while current != end {
             let previous_ref = unsafe { &*previous };
             let current_ref = unsafe { &*current };
-            let otz = scene::classic_otz3_from_sum(
+            let otz = scene::classic_ordering_depth3_from_sum(
                 root_depth + previous_ref.depth as u16 as u32 + current_ref.depth as u16 as u32,
             );
             if otz == 0 || otz >= profile.ot_depth {
@@ -3737,7 +3737,7 @@ pub unsafe fn census_classic_affine_projected_batch_topology(
             let next = unsafe { current.add(1) };
             if level == 0 && next != end {
                 let next_ref = unsafe { &*next };
-                let next_otz = scene::classic_otz3_from_sum(
+                let next_otz = scene::classic_ordering_depth3_from_sum(
                     root_depth + current_ref.depth as u16 as u32 + next_ref.depth as u16 as u32,
                 );
                 if next_otz == otz
@@ -3852,7 +3852,7 @@ pub unsafe fn collect_classic_affine_projected_subdivision_requests(
             while current != end {
                 let previous_ref = unsafe { &*previous };
                 let current_ref = unsafe { &*current };
-                let otz = scene::classic_otz3_from_sum(
+                let otz = scene::classic_ordering_depth3_from_sum(
                     root_depth + previous_ref.depth as u16 as u32 + current_ref.depth as u16 as u32,
                 );
                 if otz != 0 && otz < profile.ot_depth {
@@ -5530,9 +5530,9 @@ unsafe fn submit_classic_alias_model_inner<const SCREEN_SPACE: bool>(
             (screens[2][0], screens[2][1]),
         ];
         let (area, cached_otz) = if SCREEN_SPACE {
-            (scene::screen_area_mac0(screen_points), u16::MAX)
+            (scene::screen_area(screen_points), u16::MAX)
         } else {
-            scene::screen_area_and_classic_otz3_scheduled(
+            scene::screen_area_and_classic_ordering_depth3_scheduled(
                 screen_points,
                 [a.depth, b.depth, c.depth],
             )
@@ -5877,7 +5877,7 @@ mod tests {
         psx_gte::host::reset();
         scene::set_screen_offset(160 << 16, 120 << 16);
         scene::set_projection_plane(160);
-        scene::set_avsz_weights(0x155, 0x100);
+        scene::set_average_z_weights(0x155, 0x100);
         scene::load_rotation(&Mat3I16::IDENTITY);
         scene::load_translation(Vec3I32::ZERO);
 
@@ -5996,7 +5996,7 @@ mod tests {
         psx_gte::host::reset();
         scene::set_screen_offset(160 << 16, 120 << 16);
         scene::set_projection_plane(160);
-        scene::set_avsz_weights(0x155, 0x100);
+        scene::set_average_z_weights(0x155, 0x100);
         scene::load_rotation(&Mat3I16::IDENTITY);
         scene::load_translation(Vec3I32::ZERO);
 
@@ -6602,7 +6602,7 @@ mod tests {
         psx_gte::host::reset();
         scene::set_screen_offset(160 << 16, 120 << 16);
         scene::set_projection_plane(160);
-        scene::set_avsz_weights(0x155, 0x100);
+        scene::set_average_z_weights(0x155, 0x100);
         scene::load_rotation(&Mat3I16::IDENTITY);
         scene::load_translation(Vec3I32::ZERO);
 
@@ -6716,7 +6716,7 @@ mod tests {
             psx_gte::host::reset();
             scene::set_screen_offset(160 << 16, 120 << 16);
             scene::set_projection_plane(160);
-            scene::set_avsz_weights(0x155, 0x100);
+            scene::set_average_z_weights(0x155, 0x100);
             scene::load_rotation(&Mat3I16::IDENTITY);
             scene::load_translation(Vec3I32::ZERO);
             let mut vertices = [ClassicAffineVertex::default(); 6 + EXTRA_VERTICES];
@@ -7089,7 +7089,7 @@ mod tests {
         psx_gte::host::reset();
         scene::set_screen_offset(160 << 16, 120 << 16);
         scene::set_projection_plane(160);
-        scene::set_avsz_weights(0x155, 0x100);
+        scene::set_average_z_weights(0x155, 0x100);
         scene::load_rotation(&Mat3I16::IDENTITY);
         scene::load_translation(Vec3I32::ZERO);
 
@@ -7140,7 +7140,7 @@ mod tests {
         psx_gte::host::reset();
         scene::set_screen_offset(160 << 16, 120 << 16);
         scene::set_projection_plane(160);
-        scene::set_avsz_weights(0x155, 0x100);
+        scene::set_average_z_weights(0x155, 0x100);
         scene::load_rotation(&Mat3I16::IDENTITY);
         scene::load_translation(Vec3I32::ZERO);
 
@@ -7220,7 +7220,7 @@ mod tests {
         psx_gte::host::reset();
         scene::set_screen_offset(160 << 16, 120 << 16);
         scene::set_projection_plane(160);
-        scene::set_avsz_weights(0x155, 0x100);
+        scene::set_average_z_weights(0x155, 0x100);
         scene::load_rotation(&Mat3I16::IDENTITY);
         scene::load_translation(Vec3I32::ZERO);
         let mut vertices = [ClassicAffineVertex::default(); 3 + EXTRA_VERTICES];
@@ -7261,7 +7261,7 @@ mod tests {
         assert_eq!(submit.packets, 1);
         assert_eq!(
             (packets[0] & 0xffff) as u16,
-            scene::classic_otz3_from_sum(1000 + 400 + 700)
+            scene::classic_ordering_depth3_from_sum(1000 + 400 + 700)
         );
     }
 

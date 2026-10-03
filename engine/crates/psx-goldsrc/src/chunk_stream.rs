@@ -46,7 +46,7 @@ pub trait ChunkReader {
     unsafe fn stop(&mut self);
     /// # Safety
     /// Caller exclusively owns the transport and serializes all CD operations.
-    unsafe fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError>;
+    unsafe fn ready(&mut self) -> Result<bool, psx_io::cd::SectorPollError>;
     /// # Safety
     /// Caller exclusively owns the transport and serializes all CD operations.
     unsafe fn find_entry(

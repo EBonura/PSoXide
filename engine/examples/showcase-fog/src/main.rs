@@ -55,13 +55,13 @@ extern crate psx_rt;
 
 use psx_asset::Texture;
 use psx_engine::{App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, Scene, SimTick};
-use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
+use psx_font::{fonts::BASIC_8X16, format_u16, FontAtlas};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, TriTexturedGouraud};
 use psx_gte::lighting::{project_triangle_fogged, Light, LightRig};
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene;
-use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
+use psx_vram::{upload_bytes, Clut, TextureDepth, TexturePage, VramRect};
 
 // ----------------------------------------------------------------------
 // Screen + projection constants
@@ -194,7 +194,7 @@ const BASE_RIG: LightRig = LightRig::new(
 /// double-buffered framebuffer region (two 320×240 buffers at
 /// Y=0..240 and 240..480). One 4bpp tpage holds up to 256 texels
 /// per row, so both 64×64 textures fit side-by-side.
-const TEX_TPAGE: Tpage = Tpage::new(640, 0, TexDepth::Bit4);
+const TEX_TPAGE: TexturePage = TexturePage::new(640, 0, TextureDepth::Bit4);
 
 /// Brick wall -- ceilings + left/right walls.
 static BRICK_BLOB: &[u8] = include_bytes!("../../../../assets/textures/brick-wall.psxt");
@@ -228,8 +228,8 @@ impl WallTex {
     }
     const fn clut_word(self) -> u16 {
         match self {
-            WallTex::Brick => BRICK_CLUT.uv_clut_word(),
-            WallTex::Floor => FLOOR_CLUT.uv_clut_word(),
+            WallTex::Brick => BRICK_CLUT.uv_word(),
+            WallTex::Floor => FLOOR_CLUT.uv_word(),
         }
     }
 }
@@ -318,7 +318,7 @@ static mut BG_QUAD: QuadGouraud = QuadGouraud {
 // HUD
 // ----------------------------------------------------------------------
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 // ----------------------------------------------------------------------
@@ -360,8 +360,8 @@ impl Scene for Corridor {
         // never change across frames -- load them once.
         scene::set_screen_offset((SCREEN_W as i32 / 2) << 16, (SCREEN_H as i32 / 2) << 16);
         scene::set_projection_plane(PROJ_H);
-        scene::set_avsz_weights(ZSF3, ZSF4);
-        scene::load_far_colour(FOG_FC);
+        scene::set_average_z_weights(ZSF3, ZSF4);
+        scene::load_far_color(FOG_FC);
         scene::set_depth_cue(DQA, DQB);
 
         // Upload both wall textures + CLUTs.
@@ -457,7 +457,7 @@ impl Corridor {
 
         // Tpage word embeds in every textured primitive's vertex-1 UV
         // slot. Semi-transparency bit = 0 (opaque).
-        let tpage_word = TEX_TPAGE.uv_tpage_word(0);
+        let tpage_word = TEX_TPAGE.uv_word(0);
 
         // Material `(128, 128, 128)` makes NCDS produce "identity" vertex
         // tints at full light -- the textured-Gouraud primitive's
@@ -537,7 +537,7 @@ impl Corridor {
         font.draw_text(SCREEN_W - 168, 4, "RTPS NCDS NCLIP AVSZ3", (160, 200, 240));
 
         font.draw_text(4, SCREEN_H - 20, "frame", (160, 160, 200));
-        let frame_hex = u16_hex((tick.as_u32() & 0xFFFF) as u16);
+        let frame_hex = format_u16((tick.as_u32() & 0xFFFF) as u16);
         font.draw_text(
             4 + 8 * 6,
             SCREEN_H - 20,
@@ -546,7 +546,7 @@ impl Corridor {
         );
 
         font.draw_text(SCREEN_W / 2 - 8 * 3, SCREEN_H - 20, "tri", (160, 160, 200));
-        let tri = u16_hex(self.tri_count);
+        let tri = format_u16(self.tri_count);
         font.draw_text(
             SCREEN_W / 2 + 8,
             SCREEN_H - 20,
@@ -555,7 +555,7 @@ impl Corridor {
         );
 
         font.draw_text(SCREEN_W - 104, SCREEN_H - 20, "cull", (160, 160, 200));
-        let cull = u16_hex(self.culled_count);
+        let cull = format_u16(self.culled_count);
         font.draw_text(SCREEN_W - 56, SCREEN_H - 20, cull.as_str(), (240, 160, 200));
     }
 }

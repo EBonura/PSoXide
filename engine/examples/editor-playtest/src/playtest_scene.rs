@@ -2364,7 +2364,7 @@ impl Scene for Playtest {
         // other table and the other end of the scratch.
         unsafe {
             let built = (*core::ptr::addr_of!(PACKET_FRAMES)).built_frame();
-            psx_gpu::submit_linked_list_raw_async((*core::ptr::addr_of!(OT[built])).submit_head());
+            psx_gpu::submit_linked_list_async_raw((*core::ptr::addr_of!(OT[built])).submit_head());
         }
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
     }

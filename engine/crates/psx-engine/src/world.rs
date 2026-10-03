@@ -869,13 +869,13 @@ impl<'a, 'b> RoomRender<'a, 'b> {
 
     /// Whether fog / depth cue is enabled for this world.
     pub fn fog_enabled(self) -> bool {
-        self.room.world().fog_enabled()
+        self.room.world().is_fog_enabled()
     }
 
     /// Whether this room carries baked static vertex lighting in
     /// its `.psxw` face records.
     pub fn static_vertex_lighting(self) -> bool {
-        self.room.world().static_vertex_lighting()
+        self.room.world().has_static_vertex_lighting()
     }
 
     /// Sector at `(x, z)` for render purposes, or `None` for
@@ -1005,7 +1005,7 @@ impl<'a, 'b> RoomCollision<'a, 'b> {
                 .map(|sector| SectorFloorCollision {
                     split: sector.split(),
                     triangle: sector.triangle() as u8,
-                    walkable: sector.walkable(),
+                    walkable: sector.is_walkable(),
                     floor_heights: sector.floor_heights(),
                     triangle_heights: sector.triangle_heights(),
                 }),
@@ -1086,7 +1086,7 @@ impl SectorRender {
 
     /// `true` if the floor split triangle is present.
     pub fn floor_triangle_present(self, index: usize) -> bool {
-        self.0.floor_triangle_present(index)
+        self.0.has_floor_triangle(index)
     }
 
     /// Ceiling material slot, if any.
@@ -1101,7 +1101,7 @@ impl SectorRender {
 
     /// `true` if the ceiling split triangle is present.
     pub fn ceiling_triangle_present(self, index: usize) -> bool {
-        self.0.ceiling_triangle_present(index)
+        self.0.has_ceiling_triangle(index)
     }
 
     /// Floor corner heights `[NW, NE, SE, SW]` for vertex emission.
@@ -1184,7 +1184,7 @@ impl SectorCollision {
     /// `true` if the floor face is walkable.
     pub fn floor_walkable(self) -> bool {
         match self {
-            Self::Runtime(sector) => sector.floor_walkable(),
+            Self::Runtime(sector) => sector.is_floor_walkable(),
             Self::Compact(sector) => {
                 sector.flags & compact_collision_sector_flags::FLOOR_WALKABLE != 0
             }
@@ -1194,7 +1194,7 @@ impl SectorCollision {
     /// `true` if the floor split triangle is present and walkable.
     pub fn floor_triangle_walkable(self, index: usize) -> bool {
         match self {
-            Self::Runtime(sector) => sector.floor_triangle_walkable(index),
+            Self::Runtime(sector) => sector.is_floor_triangle_walkable(index),
             Self::Compact(sector) => {
                 horizontal_triangle_present(sector.floor_triangle_flags, index)
                     && horizontal_triangle_walkable(sector.floor_triangle_flags, index)
@@ -1205,7 +1205,7 @@ impl SectorCollision {
     /// `true` if the floor split triangle is present.
     pub fn floor_triangle_present(self, index: usize) -> bool {
         match self {
-            Self::Runtime(sector) => sector.floor_triangle_present(index),
+            Self::Runtime(sector) => sector.has_floor_triangle(index),
             Self::Compact(sector) => {
                 horizontal_triangle_present(sector.floor_triangle_flags, index)
             }
@@ -1422,7 +1422,7 @@ impl WallCollision {
     /// `true` when this wall blocks character movement.
     pub fn solid(self) -> bool {
         match self {
-            Self::Runtime(wall) => wall.solid(),
+            Self::Runtime(wall) => wall.is_solid(),
             Self::Compact(wall) => wall.flags & compact_collision_wall_flags::SOLID != 0,
         }
     }

@@ -6,7 +6,7 @@
 //! recording and internal console state can be compared without transcription.
 
 use psx_font::FontAtlas;
-use psx_io::{cdrom, dma};
+use psx_io::dma;
 use psx_rt::tty;
 use psx_spu::{self as spu, Adsr, CdVolume, Pitch, SpuAddr, Voice, Volume};
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
@@ -30,13 +30,13 @@ const CALIBRATION_TONE: [u8; 16] = [
     0x00, 0x07, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78,
 ];
 
-const CD_STATUS: u32 = cdrom::BASE;
-const CD_REQUEST_IRQ: u32 = cdrom::BASE + 3;
+const CD_STATUS: u32 = psx_hw::cd::BASE;
+const CD_REQUEST_IRQ: u32 = psx_hw::cd::BASE + 3;
 const CD_STATUS_DATA_READY: u8 = 1 << 6;
 const CD_IRQ_DATA_READY: u8 = 1;
 
-const SPU_CD_VOL_LEFT: u32 = psx_io::spu::SPU_BASE + 0x1B0;
-const SPU_CD_VOL_RIGHT: u32 = psx_io::spu::SPU_BASE + 0x1B2;
+const SPU_CD_VOL_LEFT: u32 = psx_hw::spu::BASE + 0x1B0;
+const SPU_CD_VOL_RIGHT: u32 = psx_hw::spu::BASE + 0x1B2;
 
 const QR_VERSION: Version = Version::new(15);
 const QR_SIZE: usize = 77;
@@ -114,8 +114,8 @@ impl AudioProbe {
         Voice::V0.set_pitch(Pitch::UNITY);
         Voice::V0.set_start_addr(tone_addr);
         Voice::V0.set_adsr(Adsr::sample());
-        let _ = cdrom::try_pause_until_complete(200_000);
-        let _ = cdrom::try_demute(200_000);
+        let _ = psx_io::cd::try_pause_until_complete(200_000);
+        let _ = psx_io::cd::try_unmute(200_000);
         self.apply_stage();
         tty::println("hardware-tests: pa1 begin automatic CD/SPU probe");
     }
@@ -127,9 +127,9 @@ impl AudioProbe {
 
         if self.stage == 0 {
             if self.stage_frame == 15 {
-                Voice::key_on(Voice::V0.mask());
+                Voice::start(Voice::V0.mask());
             } else if self.stage_frame == 45 {
-                Voice::key_off(Voice::V0.mask());
+                Voice::release(Voice::V0.mask());
                 Voice::V0.set_volume(Volume::SILENCE, Volume::SILENCE);
             }
         }
@@ -166,30 +166,31 @@ impl AudioProbe {
         self.command_state = match self.stage {
             0 => {
                 spu::enable_cd_audio(false);
-                let _ = cdrom::try_demute(200_000);
+                let _ = psx_io::cd::try_unmute(200_000);
                 1
             }
             1 => {
                 spu::enable_cd_audio(false);
-                let demute = cdrom::try_demute(200_000).is_some();
-                let mode = cdrom::try_set_mode(cdrom::MODE_DOUBLE_SPEED, 200_000).is_some();
-                let loc = cdrom::try_set_loc_lba(CDTEST_LBA, 200_000).is_some();
-                let read = cdrom::try_read_n(200_000).is_some();
+                let demute = psx_io::cd::try_unmute(200_000).is_some();
+                let mode =
+                    psx_io::cd::try_set_mode(psx_hw::cd::MODE_DOUBLE_SPEED, 200_000).is_some();
+                let loc = psx_io::cd::try_set_target_lba(CDTEST_LBA, 200_000).is_some();
+                let read = psx_io::cd::try_start_reading(200_000).is_some();
                 demute as u8 | ((mode as u8) << 1) | ((loc as u8) << 2) | ((read as u8) << 3)
             }
             2 => {
                 spu::enable_cd_audio(false);
-                cdrom::try_mute(200_000).is_some() as u8
+                psx_io::cd::try_mute(200_000).is_some() as u8
             }
             3 => {
-                let demute = cdrom::try_demute(200_000).is_some();
+                let demute = psx_io::cd::try_unmute(200_000).is_some();
                 spu::enable_cd_audio(true);
                 demute as u8
             }
             _ => {
                 spu::enable_cd_audio(false);
-                let paused = cdrom::try_pause_until_complete(200_000);
-                let demute = cdrom::try_demute(200_000).is_some();
+                let paused = psx_io::cd::try_pause_until_complete(200_000);
+                let demute = psx_io::cd::try_unmute(200_000).is_some();
                 paused as u8 | ((demute as u8) << 1)
             }
         };
@@ -201,30 +202,30 @@ impl AudioProbe {
 
     fn service_cd_sector(&mut self) {
         let irq = cd_irq_flag();
-        let status = unsafe { psx_io::read8(CD_STATUS) };
+        let status = unsafe { psx_io::read_u8(CD_STATUS) };
         if irq != CD_IRQ_DATA_READY && status & CD_STATUS_DATA_READY == 0 {
             return;
         }
 
         cd_select(0);
-        unsafe { psx_io::write8(CD_REQUEST_IRQ, 0x80) };
-        dma::enable_channel(dma::Channel::Cdrom);
+        unsafe { psx_io::write_u8(CD_REQUEST_IRQ, 0x80) };
+        dma::enable_channel(dma::Channel::Cd);
         // SAFETY: silicon probe: the transfer touches only memory this probe
         // owns, which stays live and untouched until the probe waits the
         // channel idle or aborts it.
         unsafe {
-            dma::raw::set_madr(dma::Channel::Cdrom, self.sector_buffer.as_mut_ptr() as u32);
-            dma::raw::set_bcr(dma::Channel::Cdrom, dma::bcr_words(SECTOR_WORDS as u16));
-            dma::raw::set_chcr(dma::Channel::Cdrom, 0x1140_0100);
+            dma::raw::set_address(dma::Channel::Cd, self.sector_buffer.as_mut_ptr() as u32);
+            dma::raw::set_size(dma::Channel::Cd, dma::size_words(SECTOR_WORDS as u16));
+            dma::raw::set_control(dma::Channel::Cd, 0x1140_0100);
         }
         let mut guard = 0u32;
-        while dma::is_busy(dma::Channel::Cdrom) && guard < 1_000_000 {
+        while dma::is_busy(dma::Channel::Cd) && guard < 1_000_000 {
             guard += 1;
         }
-        psx_io::irq::ack(1 << psx_io::irq::source::DMA);
+        psx_io::irq::acknowledge(1 << psx_hw::irq::source::DMA);
         cd_select(1);
-        unsafe { psx_io::write8(CD_REQUEST_IRQ, CD_IRQ_DATA_READY) };
-        psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+        unsafe { psx_io::write_u8(CD_REQUEST_IRQ, CD_IRQ_DATA_READY) };
+        psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
         cd_select(0);
         self.sectors = self.sectors.saturating_add(1);
     }
@@ -237,11 +238,11 @@ impl AudioProbe {
         let right = &self.capture_buffer[CAPTURE_HALF_WORDS..];
         let left_stats = capture_stats(left);
         let right_stats = capture_stats(right);
-        let spucnt = unsafe { psx_io::read16(psx_io::spu::SPUCNT) };
-        let spustat = unsafe { psx_io::read16(psx_io::spu::SPUSTAT) };
-        let cd_left = unsafe { psx_io::read16(SPU_CD_VOL_LEFT) };
-        let cd_right = unsafe { psx_io::read16(SPU_CD_VOL_RIGHT) };
-        let cd_status = unsafe { psx_io::read8(CD_STATUS) };
+        let spucnt = unsafe { psx_io::read_u16(psx_hw::spu::SPUCNT) };
+        let spustat = unsafe { psx_io::read_u16(psx_hw::spu::SPUSTAT) };
+        let cd_left = unsafe { psx_io::read_u16(SPU_CD_VOL_LEFT) };
+        let cd_right = unsafe { psx_io::read_u16(SPU_CD_VOL_RIGHT) };
+        let cd_status = unsafe { psx_io::read_u8(CD_STATUS) };
         let irq = cd_irq_flag();
         self.records[self.stage as usize].fields = [
             ((self.stage as u32) << 24) | (tick & 0x00FF_FFFF),
@@ -458,12 +459,12 @@ fn stage_color(stage: u8) -> (u8, u8, u8) {
 }
 
 fn cd_select(index: u8) {
-    unsafe { psx_io::write8(CD_STATUS, index & 3) };
+    unsafe { psx_io::write_u8(CD_STATUS, index & 3) };
 }
 
 fn cd_irq_flag() -> u8 {
     cd_select(1);
-    let flag = unsafe { psx_io::read8(CD_REQUEST_IRQ) } & 0x1F;
+    let flag = unsafe { psx_io::read_u8(CD_REQUEST_IRQ) } & 0x1F;
     cd_select(0);
     flag
 }

@@ -127,11 +127,11 @@ mod platform {
     pub(super) fn queue_display_flip(display_start: u32) {
         psx_gpu::arm_draw_done();
         psx_gpu::signal_draw_done();
-        psx_rt::interrupts::queue_gp1_at_vblank(display_start);
+        psx_rt::interrupts::queue_display_control_at_vblank(display_start);
     }
 
     pub(super) fn display_flip_pending() -> bool {
-        psx_rt::interrupts::gp1_queue_pending()
+        psx_rt::interrupts::is_display_control_queued()
     }
 
     /// Write a still-queued display start straight to GP1. Called just after
@@ -139,9 +139,9 @@ mod platform {
     /// display side in step with the draw side is worth showing a frame whose
     /// GP0(1Fh) never arrived.
     pub(super) fn apply_pending_display_flip() {
-        let word = psx_rt::interrupts::take_pending_gp1();
+        let word = psx_rt::interrupts::take_queued_display_control();
         if word != 0 {
-            psx_io::gpu::write_gp1(word);
+            psx_io::gpu::write_display_control(word);
         }
     }
 }

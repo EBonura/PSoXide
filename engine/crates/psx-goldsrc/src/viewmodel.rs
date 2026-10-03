@@ -73,8 +73,8 @@ pub unsafe fn build_static(
     two_sided: impl Fn(usize) -> bool,
     shade: impl Fn([i8; 3]) -> u8,
 ) {
-    for i in 0..md.n_tris {
-        let tri = md.tri(i);
+    for i in 0..md.triangle_count() {
+        let tri = md.triangle(i);
         let packed = (tri.idx[0] as u32 & RENDER_FACE_INDEX_MASK)
             | ((tri.idx[1] as u32 & RENDER_FACE_INDEX_MASK) << 10)
             | ((tri.idx[2] as u32 & RENDER_FACE_INDEX_MASK) << 20);
@@ -166,7 +166,7 @@ unsafe fn tri_words(
         let m = material(((meta >> TEX_SHIFT) & 0xff) as usize);
         let shade = (meta >> SHADE_SHIFT) & 0xff;
         let rgb = shade | (shade << 8) | (shade << 16);
-        let uv = md.tri_uv_words(i);
+        let uv = md.triangle_uv_words(i);
         let words = [
             // Flat-shaded: the Gouraud bit is cleared and vertex 0 carries RGB.
             (m.color0_command_word & !0x1000_0000) | rgb,
@@ -276,7 +276,7 @@ pub unsafe fn emit_immediate(
     xy: *const u32,
     material: impl Fn(usize) -> TexturedGouraudPacketMaterial,
 ) -> usize {
-    use psx_io::gpu::{wait_cmd_ready, write_gp0};
+    use psx_io::gpu::{wait_command_ready, write_command};
     let mut window = u32::MAX;
     let mut tris = 0usize;
     unsafe {
@@ -284,13 +284,13 @@ pub unsafe fn emit_immediate(
             let mut link = *t.heads.add(b);
             while link != NONE {
                 let (next_window, words, next) = tri_words(md, t, xy, link as usize, &material);
-                wait_cmd_ready();
+                wait_command_ready();
                 if next_window != window {
-                    write_gp0(next_window);
+                    write_command(next_window);
                     window = next_window;
                 }
                 for word in words {
-                    write_gp0(word);
+                    write_command(word);
                 }
                 tris += 1;
                 link = next as u16;
@@ -341,7 +341,7 @@ mod tests {
             d.extend(normal.iter().map(|&c| c as u8));
             d.extend([0; 3]); // 20-byte records with i8x3 normals
         }
-        Model::load(Vec::leak(d))
+        Model::from_bytes(Vec::leak(d))
     }
 
     fn material(tex: usize) -> TexturedGouraudPacketMaterial {
@@ -371,8 +371,8 @@ mod tests {
     fn reference(md: &Model, xy: &[u32], z: &[u16], hidden: usize, two_sided: usize) -> Vec<u32> {
         let mut heads = [NONE; BUCKETS];
         let mut next = [NONE; 64];
-        for (t, next_t) in next.iter_mut().enumerate().take(md.n_tris) {
-            let tri = md.tri(t);
+        for (t, next_t) in next.iter_mut().enumerate().take(md.triangle_count()) {
+            let tri = md.triangle(t);
             if tri.tex == hidden {
                 continue;
             }
@@ -392,14 +392,14 @@ mod tests {
         for k in (0..BUCKETS).rev() {
             let mut t = heads[k];
             while t != NONE {
-                let tri = md.tri(t as usize);
+                let tri = md.triangle(t as usize);
                 let m = material(tri.tex);
                 if m.tex_window_word != window {
                     window = m.tex_window_word;
                     out.push(window);
                 }
                 let s = shade(tri.normal) as u32;
-                let uv = md.tri_uv_words(t as usize);
+                let uv = md.triangle_uv_words(t as usize);
                 let [a, b, c] = tri.idx.map(|i| xy[i as usize]);
                 out.extend([
                     (m.color0_command_word & !0x1000_0000) | s | (s << 8) | (s << 16),
@@ -448,7 +448,7 @@ mod tests {
             ([6, 1, 3], 3, [8, 3, 0]),
         ];
         let md = model(8, &tris);
-        assert_eq!(md.n_tris, tris.len());
+        assert_eq!(md.triangle_count(), tris.len());
         let xy = (0..8u32).map(|v| 0x0010_0020 * (v + 1)).collect();
         let z = [20, 50, 90, 40, 70, 30, 60, 5].to_vec();
         (md, xy, z)
@@ -472,8 +472,24 @@ mod tests {
         unsafe {
             build_static(&md, t, |tex| tex != 2, |tex| tex == 3, shade);
             // Sort twice: a second pose must not inherit the first one's links.
-            sort(md.n_tris, t, xy.as_ptr(), z.as_ptr(), NEAR, culled, |_| 0);
-            let linked = sort(md.n_tris, t, xy.as_ptr(), z.as_ptr(), NEAR, culled, bucket);
+            sort(
+                md.triangle_count(),
+                t,
+                xy.as_ptr(),
+                z.as_ptr(),
+                NEAR,
+                culled,
+                |_| 0,
+            );
+            let linked = sort(
+                md.triangle_count(),
+                t,
+                xy.as_ptr(),
+                z.as_ptr(),
+                NEAR,
+                culled,
+                bucket,
+            );
             assert_eq!(linked, 6);
             let mut out = [0u32; chain_words(6)];
             let (on, off) = (0xE500_1234, 0xE500_0000);
@@ -535,7 +551,15 @@ mod tests {
         let t = tables(&mut idx, &mut meta, &mut heads);
         unsafe {
             build_static(&md, t, |_| true, |_| false, shade);
-            let linked = sort(md.n_tris, t, xy.as_ptr(), z.as_ptr(), NEAR, culled, bucket);
+            let linked = sort(
+                md.triangle_count(),
+                t,
+                xy.as_ptr(),
+                z.as_ptr(),
+                NEAR,
+                culled,
+                bucket,
+            );
             assert_eq!(linked, 0);
             let mut out = [0u32; chain_words(0)];
             let r = write_chain(&md, t, xy.as_ptr(), material, 0, 1, 2, END, &mut out).unwrap();

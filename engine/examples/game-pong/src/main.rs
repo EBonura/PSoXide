@@ -42,7 +42,7 @@ use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::RectFlat;
 use psx_settings::Profile;
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 // ----------------------------------------------------------------------
 // Screen + gameplay constants
@@ -84,7 +84,7 @@ const PONG_ACTIONS: ActionMap<2> = ActionMap::new([
 // VRAM layout
 // ----------------------------------------------------------------------
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 // ----------------------------------------------------------------------
@@ -298,20 +298,20 @@ impl Scene for Pong {
 
         // Player paddle follows D-pad (held, so motion is smooth).
         let p1 = ctx.actions(0, &PONG_ACTIONS);
-        if p1.held(ACTION_UP) {
+        if p1.is_held(ACTION_UP) {
             self.p1_y -= PADDLE_SPEED;
         }
-        if p1.held(ACTION_DOWN) {
+        if p1.is_held(ACTION_DOWN) {
             self.p1_y += PADDLE_SPEED;
         }
         clamp_paddle(&mut self.p1_y);
 
         if self.two_player {
             let p2 = ctx.actions(1, &PONG_ACTIONS);
-            if p2.held(ACTION_UP) {
+            if p2.is_held(ACTION_UP) {
                 self.p2_y -= PADDLE_SPEED;
             }
-            if p2.held(ACTION_DOWN) {
+            if p2.is_held(ACTION_DOWN) {
                 self.p2_y += PADDLE_SPEED;
             }
         } else {

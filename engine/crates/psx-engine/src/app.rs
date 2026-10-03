@@ -814,7 +814,7 @@ impl App {
                     if submission.is_queued() && !published {
                         if let Some(previous_misses) = queued_previous {
                             telemetry::stage_begin(telemetry::stage::OT_WAIT);
-                            gpu::draw_sync();
+                            gpu::wait_idle();
                             telemetry::stage_end(telemetry::stage::OT_WAIT);
 
                             telemetry::stage_begin(telemetry::stage::RENDER);
@@ -926,7 +926,7 @@ impl App {
         // by the fixed updates that ran since the kick.
         telemetry::stage_begin(telemetry::stage::OT_WAIT);
         gpu::submit_linked_list_wait();
-        gpu::draw_sync();
+        gpu::wait_idle();
         telemetry::stage_end(telemetry::stage::OT_WAIT);
 
         telemetry::stage_begin(telemetry::stage::RENDER);

@@ -207,7 +207,7 @@ fn run(entry: &Case) -> u16 {
         // nocash: the GPU renders at full speed only while it is not also
         // fetching the picture, and a one-line display range removes nearly
         // all of that. The screen blanks for the length of the batch.
-        gpu_io::write_gp1(0x0700_0000 | 0x10 | (0x11 << 10));
+        gpu_io::write_display_control(0x0700_0000 | 0x10 | (0x11 << 10));
     }
     let elapsed = submit_and_time(head);
     if entry.letterboxed {
@@ -217,17 +217,17 @@ fn run(entry: &Case) -> u16 {
 }
 
 fn set_environment(entry: &Case) {
-    gpu_io::wait_cmd_ready();
+    gpu_io::wait_command_ready();
     if entry.clipped {
         // A drawing area nowhere near the primitives: all of them are
         // received and rejected, the price of leaving culling to the GPU.
-        gpu_io::write_gp0(0xE300_0000 | 960 | (DRAW_Y << 10));
-        gpu_io::write_gp0(0xE400_0000 | 975 | ((DRAW_Y + 15) << 10));
+        gpu_io::write_command(0xE300_0000 | 960 | (DRAW_Y << 10));
+        gpu_io::write_command(0xE400_0000 | 975 | ((DRAW_Y + 15) << 10));
     } else {
-        gpu_io::write_gp0(0xE300_0000);
-        gpu_io::write_gp0(0xE400_0000 | 1023 | (511 << 10));
+        gpu_io::write_command(0xE300_0000);
+        gpu_io::write_command(0xE400_0000 | 1023 | (511 << 10));
     }
-    gpu_io::write_gp0(0xE500_0000);
+    gpu_io::write_command(0xE500_0000);
     // Rects take their page from the draw mode; polygons carry their own.
     let depth = if entry.eight_bpp {
         DEPTH_8BPP
@@ -235,10 +235,10 @@ fn set_environment(entry: &Case) {
         DEPTH_4BPP
     };
     let dither = if entry.dither { 1 << 9 } else { 0 };
-    gpu_io::write_gp0(0xE100_0000 | TEX_PAGE_A | depth | BLEND_AVERAGE | dither);
-    gpu_io::write_gp0(0xE200_0000);
-    gpu_io::write_gp0(0xE600_0000);
-    gpu_io::wait_cmd_ready();
+    gpu_io::write_command(0xE100_0000 | TEX_PAGE_A | depth | BLEND_AVERAGE | dither);
+    gpu_io::write_command(0xE200_0000);
+    gpu_io::write_command(0xE600_0000);
+    gpu_io::wait_command_ready();
 }
 
 fn build_list(entry: &Case) -> u32 {
@@ -340,22 +340,22 @@ fn build_list(entry: &Case) -> u32 {
 }
 
 fn submit_and_time(head: u32) -> u16 {
-    let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
-    gpu_io::write_gp1(0x0200_0000); // acknowledge any stale GPU interrupt
-    gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
+    let old_direction = (gpu_io::status().bits() >> 29) & 3;
+    gpu_io::write_display_control(0x0200_0000); // acknowledge any stale GPU interrupt
+    gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
     // SAFETY: silicon probe: the transfer touches only memory this probe
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_madr(dma::Channel::Gpu, head);
-        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_words(0));
+        dma::raw::set_address(dma::Channel::Gpu, head);
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
     }
     // GP1 writes take a few cycles to reach GPUSTAT, and an acknowledge that
     // is still in flight when the list's interrupt request arrives cancels
     // it. Let both settle before the clock starts.
     for _ in 0..64 {
-        let _ = gpu_io::gpustat();
+        let _ = gpu_io::status();
     }
 
     timers::set_mode(timers::Timer::Timer2, 0);
@@ -364,19 +364,19 @@ fn submit_and_time(head: u32) -> u16 {
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_chcr(
+        dma::raw::set_control(
             dma::Channel::Gpu,
-            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
+            psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_LINKED | psx_hw::dma::CHCR_START,
         );
     }
     let mut polls = 0u32;
-    while gpu_io::gpustat().bits() & (1 << 24) == 0 && polls < 1_000_000 {
+    while gpu_io::status().bits() & (1 << 24) == 0 && polls < 1_000_000 {
         polls += 1;
     }
     let elapsed = timers::counter(timers::Timer::Timer2);
 
-    gpu_io::write_gp1(0x0200_0000);
-    gpu_io::write_gp1(0x0400_0000 | old_direction);
+    gpu_io::write_display_control(0x0200_0000);
+    gpu_io::write_display_control(0x0400_0000 | old_direction);
     if polls == 1_000_000 {
         0xFFFF
     } else {

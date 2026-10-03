@@ -49,15 +49,16 @@ pub(super) const fn cached_room_draw_order_mode() -> CachedRoomDrawOrderMode {
 // Every material carries its allocated tpage and optional texture window, so
 // placement is not hardcoded. One CLUT row per atlas starts at y=484.
 pub(super) const ROOM_TPAGE_BASE_X: u16 = 640;
-pub(super) const SHARED_TPAGE: Tpage = Tpage::new(ROOM_TPAGE_BASE_X, 0, TexDepth::Bit4);
-pub(super) const TPAGE_WORD: u16 = SHARED_TPAGE.uv_tpage_word(0);
+pub(super) const SHARED_TPAGE: TexturePage =
+    TexturePage::new(ROOM_TPAGE_BASE_X, 0, TextureDepth::Bit4);
+pub(super) const TPAGE_WORD: u16 = SHARED_TPAGE.uv_word(0);
 pub(super) const ROOM_TPAGE_STRIDE_HW: u16 = 64;
 pub(super) const ROOM_TPAGE_LIMIT_X: u16 = 1024;
 pub(super) const ROOM_TPAGE_COUNT: usize =
     ((ROOM_TPAGE_LIMIT_X - ROOM_TPAGE_BASE_X) / ROOM_TPAGE_STRIDE_HW) as usize;
 pub(super) const ROOM_TILE_TEXELS: u16 = 128;
 
-pub(super) const MODEL_TPAGE: Tpage = Tpage::new(384, 256, TexDepth::Bit8);
+pub(super) const MODEL_TPAGE: TexturePage = TexturePage::new(384, 256, TextureDepth::Bit8);
 /// Maximum halfword width addressable by one 8bpp texture page.
 pub(super) const MODEL_TPAGE_MAX_HALFWORDS: u16 = 128;
 

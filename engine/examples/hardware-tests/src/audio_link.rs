@@ -245,7 +245,7 @@ fn frame_bit(index: usize, payload: &[u8], crc: u32, total_bits: usize) -> bool 
 /// Play the uploaded stream on voice 0, looping in hardware.
 /// Silence the readout.
 pub(crate) fn stop() {
-    spu::Voice::key_off(spu::Voice::V0.mask());
+    spu::Voice::release(spu::Voice::V0.mask());
     spu::Voice::V0.set_volume(spu::Volume::SILENCE, spu::Volume::SILENCE);
 }
 
@@ -255,7 +255,7 @@ pub(crate) fn stop() {
 /// dropped to a slower one on the spot, instead of needing another burn.
 pub(crate) fn set_rate(index: usize) {
     let voice = spu::Voice::V0;
-    spu::Voice::key_off(voice.mask());
+    spu::Voice::release(voice.mask());
     voice.set_start_addr(spu::SpuAddr::new(SPU_BASE));
     voice.set_loop_addr(spu::SpuAddr::new(SPU_BASE));
     let divisor = RATE_DIVISORS[index % RATE_DIVISORS.len()];
@@ -278,5 +278,5 @@ pub(crate) fn set_rate(index: usize) {
     // happily, so the emulator could not have caught this.
     voice.set_adsr(spu::Adsr::sample());
     spu::set_main_volume(spu::Volume::HALF, spu::Volume::HALF);
-    spu::Voice::key_on(voice.mask());
+    spu::Voice::start(voice.mask());
 }

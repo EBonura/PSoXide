@@ -220,7 +220,7 @@ impl StanceCluts {
             // copy's CLUT word.
             Some(row) => TextureMaterial::opaque(
                 row[1 + stance.index()],
-                material.tpage_word(),
+                material.texture_page_word(),
                 material.tint(),
             ),
             None => material,

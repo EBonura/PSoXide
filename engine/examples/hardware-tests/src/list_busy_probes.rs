@@ -48,7 +48,8 @@ const GOURAUD_WORDS: usize = 6;
 const LIST_WORDS: usize = TRIANGLES * (GOURAUD_WORDS + 1) + 2;
 static mut LIST: [u32; LIST_WORDS] = [0; LIST_WORDS];
 
-const KICK: u32 = dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START;
+const KICK: u32 =
+    psx_hw::dma::CHCR_TO_DEVICE | psx_hw::dma::CHCR_SYNC_LINKED | psx_hw::dma::CHCR_START;
 /// A stamp that never happened.
 pub(crate) const NOT_SEEN: u32 = u32::MAX;
 /// Give up on a list after this many clocks (about half a second).
@@ -141,34 +142,34 @@ fn build_list(kind: Kind) -> (u32, u32) {
 /// flight when the list's interrupt request arrives cancels it (gpu_probes).
 fn settle() {
     for _ in 0..64 {
-        let _ = gpu_io::gpustat();
+        let _ = gpu_io::status();
     }
 }
 
 /// Draw environment for the 320x240 area at (0, 0), a black fill of it, and
 /// GP0(1Fh) as a fence so the fill is finished before any clock starts.
 fn set_environment() {
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0xE100_0400); // no dither, drawing to the display area allowed
-    gpu_io::write_gp0(0xE200_0000);
-    gpu_io::write_gp0(0xE300_0000);
-    gpu_io::write_gp0(0xE400_0000 | 319 | (239 << 10));
-    gpu_io::write_gp0(0xE500_0000);
-    gpu_io::write_gp0(0xE600_0000);
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0x0200_0000);
-    gpu_io::write_gp0(0);
-    gpu_io::write_gp0((240 << 16) | 320);
-    gpu_io::write_gp1(0x0200_0000);
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0xE100_0400); // no dither, drawing to the display area allowed
+    gpu_io::write_command(0xE200_0000);
+    gpu_io::write_command(0xE300_0000);
+    gpu_io::write_command(0xE400_0000 | 319 | (239 << 10));
+    gpu_io::write_command(0xE500_0000);
+    gpu_io::write_command(0xE600_0000);
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0x0200_0000);
+    gpu_io::write_command(0);
+    gpu_io::write_command((240 << 16) | 320);
+    gpu_io::write_display_control(0x0200_0000);
     settle();
-    gpu_io::wait_cmd_ready();
-    gpu_io::write_gp0(0x1F00_0000);
+    gpu_io::wait_command_ready();
+    gpu_io::write_command(0x1F00_0000);
     let mut polls = 0u32;
-    while gpu_io::gpustat().bits() & GPUSTAT_IRQ == 0 && polls < 1_000_000 {
+    while gpu_io::status().bits() & GPUSTAT_IRQ == 0 && polls < 1_000_000 {
         polls += 1;
     }
-    gpu_io::write_gp1(0x0200_0000);
-    irq::ack(1 << irq::source::GPU);
+    gpu_io::write_display_control(0x0200_0000);
+    irq::acknowledge(1 << psx_hw::irq::source::GPU);
 }
 
 /// A list built, the area cleared, channel 2 armed but not started.
@@ -180,16 +181,16 @@ struct Armed {
 fn arm(kind: Kind) -> Armed {
     let (head, shape) = build_list(kind);
     set_environment();
-    let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
-    gpu_io::write_gp1(0x0200_0000);
-    gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
+    let old_direction = (gpu_io::status().bits() >> 29) & 3;
+    gpu_io::write_display_control(0x0200_0000);
+    gpu_io::write_display_control(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
     // SAFETY: silicon probe: the transfer touches only memory this probe
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_madr(dma::Channel::Gpu, head);
-        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_words(0));
+        dma::raw::set_address(dma::Channel::Gpu, head);
+        dma::raw::set_size(dma::Channel::Gpu, dma::size_words(0));
     }
     settle();
     Armed {
@@ -202,14 +203,14 @@ fn arm(kind: Kind) -> Armed {
 fn disarm(armed: &Armed, irq_seen: bool) {
     if dma::is_busy(dma::Channel::Gpu) {
         dma::abort(dma::Channel::Gpu);
-        gpu_io::write_gp1(0x0100_0000);
+        gpu_io::write_display_control(0x0100_0000);
     } else if !irq_seen {
         // The GPU lost its place in the list: drop whatever it is waiting on.
-        gpu_io::write_gp1(0x0100_0000);
+        gpu_io::write_display_control(0x0100_0000);
     }
-    gpu_io::write_gp1(0x0200_0000);
-    irq::ack(1 << irq::source::GPU);
-    gpu_io::write_gp1(0x0400_0000 | armed.old_direction);
+    gpu_io::write_display_control(0x0200_0000);
+    irq::acknowledge(1 << psx_hw::irq::source::GPU);
+    gpu_io::write_display_control(0x0400_0000 | armed.old_direction);
 }
 
 /// Timer 2 at the system clock, widened to 32 bits by counting wraps. Every
@@ -274,12 +275,12 @@ fn kick_and_stamp(armed: &Armed) -> Stamps {
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_chcr(dma::Channel::Gpu, KICK);
+        dma::raw::set_control(dma::Channel::Gpu, KICK);
     }
     loop {
         let t = clock.now();
         let busy = dma::is_busy(dma::Channel::Gpu);
-        let stat = gpu_io::gpustat().bits();
+        let stat = gpu_io::status().bits();
         if !busy && s.chcr == NOT_SEEN {
             s.chcr = t;
         }
@@ -441,8 +442,8 @@ pub(crate) struct Throughput {
 fn throughput(kind: LoopKind) -> Throughput {
     let guard = IrqGuard::mask();
     timers::set_mode(timers::Timer::Timer2, 0);
-    let _ = run_loop(kind, dma::CHCR_START, IDLE_ITERATIONS);
-    let (_, idle) = run_loop(kind, dma::CHCR_START, IDLE_ITERATIONS);
+    let _ = run_loop(kind, psx_hw::dma::CHCR_START, IDLE_ITERATIONS);
+    let (_, idle) = run_loop(kind, psx_hw::dma::CHCR_START, IDLE_ITERATIONS);
     drop(guard);
 
     let armed = arm(Kind::Expensive);
@@ -452,13 +453,13 @@ fn throughput(kind: LoopKind) -> Throughput {
     // owns, which stays live and untouched until the probe waits the
     // channel idle or aborts it.
     unsafe {
-        dma::raw::set_chcr(dma::Channel::Gpu, KICK);
+        dma::raw::set_control(dma::Channel::Gpu, KICK);
     }
     let (iterations, cycles) = run_loop(kind, 0, WALK_CAP);
     // Let the drawing finish before anything else touches the GPU.
     let mut clock = Clock::start();
-    while gpu_io::gpustat().bits() & GPUSTAT_IRQ == 0 && clock.now() < POLL_LIMIT {}
-    let irq_seen = gpu_io::gpustat().bits() & GPUSTAT_IRQ != 0;
+    while gpu_io::status().bits() & GPUSTAT_IRQ == 0 && clock.now() < POLL_LIMIT {}
+    let irq_seen = gpu_io::status().bits() & GPUSTAT_IRQ != 0;
     drop(guard);
     disarm(&armed, irq_seen);
     Throughput {

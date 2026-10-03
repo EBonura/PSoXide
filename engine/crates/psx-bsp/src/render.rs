@@ -364,7 +364,7 @@ impl PxbspFaceSelection {
 pub fn configure_projection() {
     scene::set_screen_offset(160 << 16, 120 << 16);
     scene::set_projection_plane(160);
-    scene::set_avsz_weights(0x155, 0x100);
+    scene::set_average_z_weights(0x155, 0x100);
 }
 
 /// Uniform scale the XBSP view remaps bake into the rotation (3.0 in Q12).
@@ -2612,7 +2612,7 @@ impl Renderer {
             if !self.point_visible(entity.leaf_index as usize) {
                 continue;
             }
-            if !scene::aabb_outside_clip4(entity.clip_mins, entity.clip_maxs, &frustum, 0x0f) {
+            if !scene::is_aabb_outside_clip4(entity.clip_mins, entity.clip_maxs, &frustum, 0x0f) {
                 if self.visible_entity_indices.len() == self.visible_entity_indices.capacity() {
                     stats.packet_overflow_avoided = true;
                     break;
@@ -3780,7 +3780,7 @@ fn load_gte_clip_planes(planes: &[([i32; 3], i32); 5]) {
     scene::load_light_matrix(&Mat3I16 {
         m: [row(&planes[0]), row(&planes[1]), row(&planes[2])],
     });
-    scene::load_light_colour_matrix(&Mat3I16 {
+    scene::load_light_color_matrix(&Mat3I16 {
         m: [row(&planes[3]), row(&planes[4]), [0; 3]],
     });
 }
@@ -3950,7 +3950,7 @@ mod tests {
         }
         drop(ot);
 
-        let mut packets = unsafe { ot_storage.iter_packets() };
+        let mut packets = unsafe { ot_storage.packets() };
         assert_eq!(
             packets.next().expect("panorama packet").0,
             panorama_packet.as_ptr()

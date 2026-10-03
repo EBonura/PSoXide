@@ -372,7 +372,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     pub unsafe fn stop_dialogue(&mut self) {
         let voice = Voice::new(DIALOGUE_VOICE);
         voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-        Voice::key_off(voice.mask());
+        Voice::release(voice.mask());
         self.voice_count = 0;
     }
 
@@ -385,7 +385,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         while index < MAP_LOOP_VOICE_COUNT {
             let voice = Voice::new(MAP_LOOP_VOICE_FIRST + index as u8);
             voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-            Voice::key_off(voice.mask());
+            Voice::release(voice.mask());
             index += 1;
         }
         self.map_loops.clear();
@@ -403,7 +403,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
             Voice::new(index).set_volume(Volume::SILENCE, Volume::SILENCE);
             index += 1;
         }
-        Voice::key_off((1u32 << 24) - 1);
+        Voice::release((1u32 << 24) - 1);
         self.next_voice = 0;
         self.voice_count = 0;
         self.map_loops.clear();
@@ -816,7 +816,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         // end.
         if self.map_loops.finite != 0 {
             self.map_loops
-                .release_ended(Voice::voices_ended() >> MAP_LOOP_VOICE_FIRST);
+                .release_ended(Voice::ended_voices() >> MAP_LOOP_VOICE_FIRST);
         }
         let mut index = 0usize;
         while index < self.authored.count as usize {
@@ -886,7 +886,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         };
         let voice = Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8);
         voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-        Voice::key_off(voice.mask());
+        Voice::release(voice.mask());
 
         // A genuine WAV loop still sustains forever because its ADPCM END block
         // carries REPEAT and this envelope holds at full level. Some GoldSrc
@@ -905,7 +905,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
         if let Some(slot) = self.map_loops.slot_of(owner) {
             let voice = Voice::new(MAP_LOOP_VOICE_FIRST + slot as u8);
             voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-            Voice::key_off(voice.mask());
+            Voice::release(voice.mask());
             self.map_loops.release(slot);
         }
     }
@@ -940,7 +940,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
                 Adsr::default_tone()
             },
         );
-        Voice::key_on(v.mask());
+        Voice::start(v.mask());
     }
 
     /// Full-volume one-shot (player-local sounds: own weapon, pain, pickups).
@@ -959,7 +959,7 @@ impl<const N: usize, const HEALTH: u8, const SUIT: u8> Hsfx<N, HEALTH, SUIT> {
     pub unsafe fn charger_stop(&mut self) {
         let voice = Voice::new(CHARGER_VOICE);
         voice.set_volume(Volume::SILENCE, Volume::SILENCE);
-        Voice::key_off(voice.mask());
+        Voice::release(voice.mask());
     }
 
     /// Update the listener position (player) once per frame.

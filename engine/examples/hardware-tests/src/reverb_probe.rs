@@ -76,7 +76,7 @@ pub(crate) struct ReverbSnapshot {
 impl ReverbSnapshot {
     /// Read the BIOS-owned SPU state before `App::run` or any SDK reset.
     pub(crate) fn capture() -> Self {
-        let read = |addr| unsafe { psx_io::read16(addr) };
+        let read = |addr| unsafe { psx_io::read_u16(addr) };
         let mut cfg = [0u16; 32];
         let mut i = 0usize;
         while i < cfg.len() {
@@ -84,8 +84,8 @@ impl ReverbSnapshot {
             i += 1;
         }
         Self {
-            spucnt: read(psx_io::spu::SPUCNT),
-            spustat: read(psx_io::spu::SPUSTAT),
+            spucnt: read(psx_hw::spu::SPUCNT),
+            spustat: read(psx_hw::spu::SPUSTAT),
             reverb_vol_l: read(REVERB_VOL_L),
             reverb_vol_r: read(REVERB_VOL_R),
             reverb_base: read(REVERB_BASE),
@@ -272,9 +272,9 @@ impl ReverbProbe {
         let tick = ctx.sim_tick.as_u32();
         if self.stage == 0 {
             if self.stage_frame == 15 {
-                Voice::key_on(Voice::V0.mask());
+                Voice::start(Voice::V0.mask());
             } else if self.stage_frame == 45 {
-                Voice::key_off(Voice::V0.mask());
+                Voice::release(Voice::V0.mask());
                 Voice::V0.set_volume(Volume::SILENCE, Volume::SILENCE);
             }
         } else if self.stage == 2 && self.stage_frame == 15 {
@@ -404,8 +404,8 @@ impl ReverbProbe {
                 write16(EON_HI, 0);
                 write16(EXT_VOL_L, 0);
                 write16(EXT_VOL_R, 0);
-                let control = read16(psx_io::spu::SPUCNT);
-                write16(psx_io::spu::SPUCNT, control & !0x008F);
+                let control = read16(psx_hw::spu::SPUCNT);
+                write16(psx_hw::spu::SPUCNT, control & !0x008F);
                 write16(REVERB_BASE, 0);
                 let mut i = 0u32;
                 while i < 32 {
@@ -473,7 +473,7 @@ impl ReverbProbe {
             Volume::linear(1, 8),
             Adsr::sample(),
         );
-        Voice::key_on(voice.mask());
+        Voice::start(voice.mask());
     }
 
     fn readback_map(&mut self) {
@@ -745,22 +745,22 @@ fn build_adpcm(output: &mut [u8], blocks: u32, looped: bool, pattern: SamplePatt
 }
 
 fn stable_read_hash(addr: u32) -> u32 {
-    let original_delay = unsafe { psx_io::read32(SPU_DELAY) };
-    unsafe { psx_io::write32(SPU_DELAY, original_delay | 0x0200_0000) };
+    let original_delay = unsafe { psx_io::read_u32(SPU_DELAY) };
+    unsafe { psx_io::write_u32(SPU_DELAY, original_delay | 0x0200_0000) };
     for _ in 0..64 {
         core::hint::spin_loop();
     }
     let mut back = [0u32; READBACK_BYTES / 4];
     spu_dma_read(addr, &mut back);
-    unsafe { psx_io::write32(SPU_DELAY, original_delay) };
+    unsafe { psx_io::write_u32(SPU_DELAY, original_delay) };
     fnv32_words(&back)
 }
 
 fn read16(addr: u32) -> u16 {
-    unsafe { psx_io::read16(addr) }
+    unsafe { psx_io::read_u16(addr) }
 }
 fn write16(addr: u32, value: u16) {
-    unsafe { psx_io::write16(addr, value) }
+    unsafe { psx_io::write_u16(addr, value) }
 }
 
 fn fnv16_values(values: &[u16]) -> u32 {

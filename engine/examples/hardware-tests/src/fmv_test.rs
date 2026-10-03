@@ -48,7 +48,7 @@ const SETUP_ERRORS: [&str; 5] = [
 pub(crate) fn wait_for_exit(font: &FontAtlas) {
     // The player leaves the draw area on the displayed buffer at row 0.
     font.draw_text(16, 228, "CROSS OR START: BACK TO MENU", (140, 160, 190));
-    psx_gpu::draw_sync();
+    psx_gpu::wait_idle();
     let exit = |buttons: psx_pad::ButtonState| {
         buttons.is_held(button::CROSS)
             || buttons.is_held(button::START)
@@ -98,7 +98,9 @@ pub(crate) fn records(outcome: &Outcome, runs: u8) -> [TimingRecord; RECORD_COUN
             2,
             outcome.cd_errors,
             outcome.decode_errors,
-            outcome.first_err_lba.map_or(NO_ERROR_LBA as u32, |lba| lba.min(0xFFFE)),
+            outcome
+                .first_err_lba
+                .map_or(NO_ERROR_LBA as u32, |lba| lba.min(0xFFFE)),
         ),
         record(3, outcome.shown, outcome.late, outcome.vblanks),
         record(4, outcome.kcyc_vlc, outcome.kcyc_mdec, outcome.kcyc_wait),
@@ -117,7 +119,11 @@ pub(crate) fn merge(
         let slot = slots
             .iter()
             .position(|slot| slot.id == record.id)
-            .or_else(|| slots.iter().position(|slot| slot.id == TIMING_RECORD_UNUSED));
+            .or_else(|| {
+                slots
+                    .iter()
+                    .position(|slot| slot.id == TIMING_RECORD_UNUSED)
+            });
         match slot {
             Some(index) => slots[index] = *record,
             None => all = false,

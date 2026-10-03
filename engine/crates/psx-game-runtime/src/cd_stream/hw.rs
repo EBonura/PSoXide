@@ -24,11 +24,11 @@ pub(super) fn prepare_cd_read(cd: &mut CdController, polls: &mut u32) -> Result<
     // The engine installs a VBlank-only exception handler. After a real BIOS
     // disc boot, keep CD-ROM at the controller level and poll its IRQ flags
     // manually so DataReady cannot enter an unhandled CPU IRQ storm.
-    psx_io::irq::set_mask(1 << psx_io::irq::source::VBLANK);
-    psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+    psx_io::irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     cd_enable_irqs();
     cd_ack_all();
-    psx_io::dma::enable_channel(psx_io::dma::Channel::Cdrom);
+    psx_io::dma::enable_channel(psx_io::dma::Channel::Cd);
     if !cd.read_prepared {
         // BIOS disc boot has already finished its file load. Do not send Pause
         // before our first stream; on real BIOS boot paths some emulators have
@@ -115,7 +115,7 @@ pub(super) fn send_command(
     cd_write_index(1);
     // SAFETY: CD_IRQ is a valid CD controller register; 0x40 resets the
     // parameter FIFO (index-1 interrupt-flag register write).
-    unsafe { psx_io::write8(CD_IRQ, 0x40) };
+    unsafe { psx_io::write_u8(CD_IRQ, 0x40) };
     cd_write_index(0);
     for &param in params {
         if !wait_parameter_room(polls) {
@@ -124,10 +124,10 @@ pub(super) fn send_command(
             return false;
         }
         // SAFETY: CD_PARAM is the CD parameter-FIFO register (index 0).
-        unsafe { psx_io::write8(CD_PARAM, param) };
+        unsafe { psx_io::write_u8(CD_PARAM, param) };
     }
     // SAFETY: CD_RESPONSE at index 0 is the command register.
-    unsafe { psx_io::write8(CD_RESPONSE, command) };
+    unsafe { psx_io::write_u8(CD_RESPONSE, command) };
     let ok = match wait_irq(cd, expected_irq, poll_limit, polls) {
         WaitOutcome::Matched => {
             drain_responses();
@@ -152,7 +152,7 @@ pub(super) fn wait_parameter_room(polls: &mut u32) -> bool {
     let mut i = 0;
     while i < PARAMETER_ROOM_POLL_LIMIT {
         // SAFETY: CD_STATUS is the CD index/status register (read-only here).
-        if unsafe { psx_io::read8(CD_STATUS) } & STATUS_PARAMETER_FIFO_NOT_FULL != 0 {
+        if unsafe { psx_io::read_u8(CD_STATUS) } & STATUS_PARAMETER_FIFO_NOT_FULL != 0 {
             return true;
         }
         *polls = (*polls).saturating_add(1);
@@ -389,11 +389,11 @@ pub(super) unsafe fn dma_read_sector(buffer: *mut u32, polls: &mut u32) {
         )
     };
     let mut i = 0;
-    while psx_io::dma::is_busy(psx_io::dma::Channel::Cdrom) && i < DMA_POLL_LIMIT {
+    while psx_io::dma::is_busy(psx_io::dma::Channel::Cd) && i < DMA_POLL_LIMIT {
         *polls = (*polls).saturating_add(1);
         i += 1;
     }
-    psx_io::irq::ack(1 << psx_io::irq::source::DMA);
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::DMA);
 }
 
 /// Request the data transfer (BFRD) so the sector FIFO is DMA-readable.
@@ -401,7 +401,7 @@ pub(super) unsafe fn dma_read_sector(buffer: *mut u32, polls: &mut u32) {
 pub(super) fn cd_arm_data_transfer() {
     cd_write_index(0);
     // SAFETY: CD_IRQ at index 0 is the request register; 0x80 sets BFRD.
-    unsafe { psx_io::write8(CD_IRQ, 0x80) };
+    unsafe { psx_io::write_u8(CD_IRQ, 0x80) };
     cd_write_index(0);
 }
 
@@ -433,7 +433,7 @@ pub(super) fn classify_command_failure(timeout_status: u32) -> u32 {
 pub(super) fn cd_enable_irqs() {
     cd_write_index(1);
     // SAFETY: CD_PARAM at index 1 is the interrupt-enable register.
-    unsafe { psx_io::write8(CD_PARAM, 0x1F) };
+    unsafe { psx_io::write_u8(CD_PARAM, 0x1F) };
     cd_write_index(0);
 }
 
@@ -442,7 +442,7 @@ pub(super) fn cd_enable_irqs() {
 pub(super) fn cd_irq_enable() -> u8 {
     cd_write_index(0);
     // SAFETY: CD_IRQ is a valid CD controller register for reads.
-    let enable = unsafe { psx_io::read8(CD_IRQ) } & 0x1F;
+    let enable = unsafe { psx_io::read_u8(CD_IRQ) } & 0x1F;
     cd_write_index(0);
     enable
 }
@@ -452,7 +452,7 @@ pub(super) fn cd_irq_enable() -> u8 {
 pub(super) fn cd_set_irq_enable(mask: u8) {
     cd_write_index(1);
     // SAFETY: CD_PARAM at index 1 is the interrupt-enable register.
-    unsafe { psx_io::write8(CD_PARAM, mask & 0x1F) };
+    unsafe { psx_io::write_u8(CD_PARAM, mask & 0x1F) };
     cd_write_index(0);
 }
 
@@ -462,18 +462,18 @@ pub(super) fn cd_ack_all() {
     cd_write_index(1);
     // SAFETY: CD_IRQ at index 1 is the interrupt-flag register; 0x5F
     // acks all flags and resets the parameter FIFO.
-    unsafe { psx_io::write8(CD_IRQ, 0x5F) };
-    psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+    unsafe { psx_io::write_u8(CD_IRQ, 0x5F) };
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     cd_write_index(0);
 }
 
 /// Ack one controller IRQ flag (and the CPU-level CDROM IRQ).
 #[cfg(target_arch = "mips")]
-pub(super) use psx_io::cdrom::acknowledge_irq as cd_ack;
+pub(super) use psx_io::cd::acknowledge_irq as cd_ack;
 
 /// Read the latched controller IRQ flag (index-1 flag register).
 #[cfg(target_arch = "mips")]
-pub(super) use psx_io::cdrom::irq_flag_value as cd_irq_flag;
+pub(super) use psx_io::cd::irq_flag_value as cd_irq_flag;
 
 /// Drain the response FIFO until the status register reports it empty.
 #[cfg(target_arch = "mips")]
@@ -482,8 +482,8 @@ pub(super) fn drain_responses() {
     // SAFETY: CD_STATUS/CD_RESPONSE are valid CD controller registers;
     // reading RESPONSE pops the FIFO, which is exactly the intent.
     unsafe {
-        while psx_io::read8(CD_STATUS) & STATUS_RESPONSE_FIFO_NOT_EMPTY != 0 {
-            let _ = psx_io::read8(CD_RESPONSE);
+        while psx_io::read_u8(CD_STATUS) & STATUS_RESPONSE_FIFO_NOT_EMPTY != 0 {
+            let _ = psx_io::read_u8(CD_RESPONSE);
         }
     }
 }
@@ -493,7 +493,7 @@ pub(super) fn drain_responses() {
 pub(super) fn cd_data_fifo_ready() -> bool {
     cd_write_index(0);
     // SAFETY: CD_STATUS is a valid CD controller register for reads.
-    let ready = unsafe { psx_io::read8(CD_STATUS) } & STATUS_DATA_FIFO_NOT_EMPTY != 0;
+    let ready = unsafe { psx_io::read_u8(CD_STATUS) } & STATUS_DATA_FIFO_NOT_EMPTY != 0;
     cd_write_index(0);
     ready
 }
@@ -503,7 +503,7 @@ pub(super) fn cd_data_fifo_ready() -> bool {
 pub(super) fn cd_write_index(index: u8) {
     // SAFETY: CD_STATUS is the index/status register; writing selects
     // the register bank, a side-effect-free controller state change.
-    unsafe { psx_io::write8(CD_STATUS, index & 0x03) };
+    unsafe { psx_io::write_u8(CD_STATUS, index & 0x03) };
 }
 
 /// FNV-checksum one whole sector at `ptr`.

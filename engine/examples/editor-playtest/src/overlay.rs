@@ -1063,7 +1063,7 @@ pub(crate) fn draw_opening_skip(font: &FontAtlas, progress: u8) {
 pub(crate) fn draw_opening_fade(fb: &psx_gpu::framebuf::FrameBuffer, amount: u8) {
     use psx_gpu::material::TextureMaterial;
     use psx_gpu::{draw_quad_textured_material, draw_sprite_material};
-    use psx_io::gpu::{wait_cmd_ready, write_gp0};
+    use psx_io::gpu::{wait_command_ready, write_command};
     if amount == 0 {
         return;
     }
@@ -1077,8 +1077,8 @@ pub(crate) fn draw_opening_fade(fb: &psx_gpu::framebuf::FrameBuffer, amount: u8)
         return;
     }
     let tint = ((255 - u16::from(amount)) * 128 / 255) as u8;
-    wait_cmd_ready();
-    write_gp0(0x0100_0000); // Clear GPU texture cache after world rendering.
+    wait_command_ready();
+    write_command(0x0100_0000); // Clear GPU texture cache after world rendering.
     let base_y = fb.buffer_y(fb.drawing);
     let mut y = 0u16;
     while y < fb.height {

@@ -25,14 +25,14 @@
 extern crate psx_rt;
 
 use psx_engine::{button, sfx, App, Config, Ctx, MicrogameAction, MicrogameShell, Scene, SimTick};
-use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
+use psx_font::{fonts::BASIC_8X16, format_u16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
 use psx_settings::Profile;
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 #[cfg(target_arch = "mips")]
 fn game_trace(message: &str) {
@@ -92,7 +92,7 @@ const START_AUTO_FRAMES: u16 = 30;
 // VRAM + SPU layout
 // ----------------------------------------------------------------------
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const SPU_SAMPLE_BASE: SpuAddr = SpuAddr::new(0x1010);
@@ -695,7 +695,7 @@ impl Invaders {
             return;
         };
         font.draw_text(4, 4, "SCORE", (180, 220, 255));
-        let score = u16_hex(self.score);
+        let score = format_u16(self.score);
         font.draw_text(4 + 8 * 6, 4, score.as_str(), (240, 240, 140));
         font.draw_text(SCREEN_W / 2 - 8 * 4, 4, "WAVE", (180, 220, 255));
         let wave = digit_char(self.wave.min(9));
