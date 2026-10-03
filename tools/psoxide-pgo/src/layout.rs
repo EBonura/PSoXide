@@ -239,15 +239,74 @@ fn jump_target(word: u32, pc: u32) -> u32 {
     (pc & 0xf000_0000) | ((word & 0x03ff_ffff) << 2)
 }
 
-/// A hash of a function's code that the link order does not change.
+/// A hash of a function's code that neither the link order nor the size of
+/// the code before its data changes.
 ///
-/// Moving a function rewrites the fields the linker fills in: `j`/`jal`
-/// targets, `lui` halves of addresses, and the low half an instruction adds
-/// to a register a `lui` loaded. Those are masked (so are constants built
-/// the same way, such as MMIO addresses); opcodes, registers, branch offsets
-/// and every other immediate stay, so a function that gained, lost or
-/// reordered an instruction hashes differently and its counts are not used.
+/// Moving a function, or growing the code ahead of `.rodata` and `.data`,
+/// rewrites the fields the linker fills in: `j`/`jal` targets, `lui` halves
+/// of addresses, and the low half an instruction adds to an address
+/// register. Those are masked (so are constants built the same way, such as
+/// MMIO addresses); opcodes, registers, branch offsets and every other
+/// immediate stay, so a function that gained, lost or reordered an
+/// instruction hashes differently and its counts are not used.
+///
+/// An address register is one some `lui` in the function writes, or an
+/// `addu` of one (an indexed table: `lui t6, %hi(t)`, `addu t5, t5, t6`,
+/// `lw t5, %lo(t)(t5)`). The set is taken over the whole function, not along
+/// its paths: the compiler keeps a `lui` half live across blocks, so a block
+/// that uses it can follow one that overwrote the register on another path.
+/// That can mask a real offset off a register that a `lui` also loaded
+/// somewhere else; the cost is only that two such versions of a function
+/// share counts, which steers placement, never the code. [`code_hash_v1`]
+/// tracked the `lui` halves in program order and missed both cases, so any
+/// growth of `.text` unbound switch-heavy functions (WipEout's `play::run`).
 pub fn code_hash(words: &[u32]) -> u64 {
+    let mut address = 0u32;
+    for &word in words {
+        if word >> 26 == 0x0f {
+            address |= 1 << ((word >> 16) & 31);
+        }
+    }
+    loop {
+        let before = address;
+        for &word in words {
+            let (rs, rt, rd) = ((word >> 21) & 31, (word >> 16) & 31, (word >> 11) & 31);
+            let addu = word >> 26 == 0 && word & 0x3f == 0x21;
+            if addu && address & (1 << rs | 1 << rt) != 0 {
+                address |= 1 << rd;
+            }
+        }
+        if address == before {
+            break;
+        }
+    }
+    // $zero is never an address, and $sp offsets are frame slots.
+    address &= !(1 | 1 << 29);
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for &word in words {
+        let op = word >> 26;
+        let rs = (word >> 21) & 31;
+        let masked = match op {
+            2 | 3 => word & 0xfc00_0000,
+            0x0f => word & 0xffff_0000,
+            _ if is_low_half_op(op) && address & (1 << rs) != 0 => word & 0xffff_0000,
+            _ => word,
+        };
+        bytes.extend_from_slice(&masked.to_le_bytes());
+    }
+    crate::pipeline::fnv1a(&bytes)
+}
+
+/// `addiu`, `ori` and the loads and stores: the instructions whose 16-bit
+/// immediate can be a `%lo` the linker fills in.
+fn is_low_half_op(op: u32) -> bool {
+    matches!(op, 0x09 | 0x0d | 0x20..=0x26 | 0x28..=0x2e | 0x32 | 0x3a)
+}
+
+/// The hash layout profiles written before [`code_hash`] took address
+/// registers over the whole function. [`bind`] still accepts it, so those
+/// profiles bind as well as they did until they are regenerated.
+pub fn code_hash_v1(words: &[u32]) -> u64 {
     // Registers holding a `lui` half.
     let mut high: u32 = 0;
     let mut bytes = Vec::with_capacity(words.len() * 4);
@@ -256,8 +315,7 @@ pub fn code_hash(words: &[u32]) -> u64 {
         let rs = (word >> 21) & 31;
         let rt = (word >> 16) & 31;
         let rd = (word >> 11) & 31;
-        let low_half = matches!(op, 0x09 | 0x0d | 0x20..=0x26 | 0x28..=0x2e | 0x32 | 0x3a)
-            && high & (1 << rs) != 0;
+        let low_half = is_low_half_op(op) && high & (1 << rs) != 0;
         let masked = match op {
             2 | 3 => word & 0xfc00_0000,
             0x0f => word & 0xffff_0000,
@@ -627,9 +685,9 @@ pub fn bind(layout: &Layout, sections: &[Section], image: &Image) -> Bound {
             continue;
         };
         let same = sections[at].size / 4 == function.words
-            && image
-                .words(&sections[at])
-                .is_some_and(|words| code_hash(&words) == function.hash);
+            && image.words(&sections[at]).is_some_and(|words| {
+                code_hash(&words) == function.hash || code_hash_v1(&words) == function.hash
+            });
         if !same {
             coverage.changed += 1;
             continue;
@@ -1184,10 +1242,52 @@ mod tests {
         );
         assert_ne!(code_hash(&[LW_T0_SP]), code_hash(&[LW_T0_SP + 4]));
         assert_ne!(code_hash(&base), code_hash(&base[..3]));
-        // Once `at` is overwritten, its offsets are real again.
+        // Offsets off a register no `lui` writes stay real.
+        let lw_t0_a0 = 0x8c88_0000; // lw t0, 0(a0)
+        assert_ne!(code_hash(&[lw_t0_a0 | 4]), code_hash(&[lw_t0_a0 | 8]));
+    }
+
+    #[test]
+    fn an_indexed_table_hashes_the_same_wherever_the_table_lands() {
+        // lui t6, %hi(t); addu t5, t5, t6; lw t5, %lo(t)(t5), as a switch's
+        // jump table or a lookup array compiles. .rodata follows .text, so
+        // a few more words of code anywhere move the table.
+        let table = |hi: u32, lo: u32| [0x3c0e_0000 | hi, 0x01ae_6821, 0x8dad_0000 | lo];
+        let (here, moved) = (table(0x8007, 0x9d9c), table(0x8007, 0x9dac));
+        assert_eq!(code_hash(&here), code_hash(&moved));
+        // The program-order hash missed this one.
+        assert_ne!(code_hash_v1(&here), code_hash_v1(&moved));
+    }
+
+    #[test]
+    fn a_lui_half_kept_live_across_blocks_is_still_an_address() {
+        // The block at word 3 uses `at` as loaded by the lui at word 0, but
+        // in program order it follows a block that overwrote `at` (word 2).
+        let code = |lo: u32| [LUI_AT | 0x8007, 0x1000_0002, 0x0000_0821, 0x2422_0000 | lo];
+        assert_eq!(code_hash(&code(0x8594)), code_hash(&code(0x85a4)));
+        assert_ne!(code_hash_v1(&code(0x8594)), code_hash_v1(&code(0x85a4)));
+    }
+
+    #[test]
+    fn stack_offsets_stay_real_even_where_a_lui_writes_sp() {
+        let lui_sp = 0x3c1d_8020; // lui sp, 0x8020
+        let lw_t0_sp = |offset: u32| 0x8fa8_0000 | offset;
+        assert_ne!(
+            code_hash(&[lui_sp, lw_t0_sp(16)]),
+            code_hash(&[lui_sp, lw_t0_sp(20)])
+        );
+    }
+
+    #[test]
+    fn the_old_hash_is_kept_as_it_was() {
+        // bind still accepts it, so committed profiles keep their heat until
+        // they are regenerated; it must not drift.
+        let base = [LUI_AT | 0x8002, LW_T0_AT | 0x1234, JAL | 0x4000, ADDU];
+        let moved = [LUI_AT | 0x8003, LW_T0_AT | 0x0010, JAL | 0x4321, ADDU];
+        assert_eq!(code_hash_v1(&base), code_hash_v1(&moved));
         let reloaded = [LUI_AT, 0x2401_0000, LW_T0_AT | 4]; // li at, 0; lw t0, 4(at)
         let other = [LUI_AT, 0x2401_0000, LW_T0_AT | 8];
-        assert_ne!(code_hash(&reloaded), code_hash(&other));
+        assert_ne!(code_hash_v1(&reloaded), code_hash_v1(&other));
     }
 
     fn image(words: &[(u32, u32)]) -> Image {
