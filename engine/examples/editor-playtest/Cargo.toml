@@ -76,6 +76,10 @@ default = [
     # Fixed 3x3 one-level TR subdivision lattice. The Cortex v1 A/B reduced
     # matched room-surface work by 15.5% with bit-identical leaf packets.
     "tr-subdivision-lattice",
+    # VBlank-kicked presentation: +27% fps with one enemy on screen (19.8 to
+    # 25.1); with two melee, whose two frames overflow the packet arena, 1.6%
+    # slower (19.1 to 18.8). Stress harness, 2026-10-03.
+    "present-queue",
 ]
 cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
