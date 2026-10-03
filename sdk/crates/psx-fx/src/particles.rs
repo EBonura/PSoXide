@@ -71,8 +71,15 @@ impl Particle {
     }
 
     /// Is this particle currently alive and worth rendering?
-    pub const fn alive(&self) -> bool {
+    pub const fn is_alive(&self) -> bool {
         self.ttl != 0
+    }
+
+    /// Renamed to [`Particle::is_alive`].
+    #[deprecated(note = "renamed to `is_alive`")]
+    #[inline(always)]
+    pub const fn alive(&self) -> bool {
+        self.is_alive()
     }
 
     /// The rect this particle draws as: colour faded by `ttl / spawn_ttl`,
