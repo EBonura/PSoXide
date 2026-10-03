@@ -37,7 +37,7 @@ the milestone golden for `hello-tex` to match.
 
 The Makefile passes `--size 64x64 --depth 4 --resample lanczos3`
 for both textures. 64×64 at 4bpp is the classic PSX wall-tile size
-(one `Tpage` fits four of them comfortably). Lanczos3 downscales
+(one `TexturePage` fits four of them comfortably). Lanczos3 downscales
 cleanly from 512×512 and preserves enough detail to read the brick
 seams at native 4bpp palette size.
 

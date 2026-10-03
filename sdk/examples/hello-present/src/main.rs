@@ -9,7 +9,7 @@
 //! it. This example checks that contract end to end:
 //!
 //! 1. Held: a frame kicked without GP0(1Fh) keeps its flip queued, even
-//!    after `draw_sync` has seen the GPU idle (the old bit-28 test would
+//!    after `wait_idle` has seen the GPU idle (the old bit-28 test would
 //!    have flipped at the next edge).
 //! 2. Released: `signal_draw_done` then lets the flip land within a few
 //!    VBlanks.

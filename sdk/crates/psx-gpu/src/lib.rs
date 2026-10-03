@@ -540,7 +540,7 @@ pub fn draw_quad_flat(verts: [(i16, i16); 4], r: u8, g: u8, b: u8) {
 /// math is `output = texel * tint / 128`, so any value below 128
 /// darkens and above 128 brightens (clamped).
 ///
-/// `clut_word` is a packed CLUT handle (see `Clut::uv_clut_word`);
+/// `clut_word` is a packed CLUT handle (see `Clut::uv_word`);
 /// `tpage_word` is a packed tpage (see `TexturePage::uv_word`).
 pub fn draw_quad_textured(
     verts: [(i16, i16); 4],
@@ -572,7 +572,11 @@ pub fn draw_quad_textured_material(
     write_command(pack_vertex(verts[0].0, verts[0].1));
     write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
     write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.texture_page_word()));
+    write_command(pack_texcoord(
+        uvs[1].0,
+        uvs[1].1,
+        material.texture_page_word(),
+    ));
     write_command(pack_vertex(verts[2].0, verts[2].1));
     write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
     write_command(pack_vertex(verts[3].0, verts[3].1));
@@ -595,7 +599,11 @@ pub fn draw_tri_textured_material(
     write_command(pack_vertex(verts[0].0, verts[0].1));
     write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
     write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.texture_page_word()));
+    write_command(pack_texcoord(
+        uvs[1].0,
+        uvs[1].1,
+        material.texture_page_word(),
+    ));
     write_command(pack_vertex(verts[2].0, verts[2].1));
     write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
 }
@@ -648,7 +656,11 @@ pub fn draw_quad_textured_gouraud_material(
     write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
     write_command(pack_color(colors[1].0, colors[1].1, colors[1].2));
     write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.texture_page_word()));
+    write_command(pack_texcoord(
+        uvs[1].0,
+        uvs[1].1,
+        material.texture_page_word(),
+    ));
     write_command(pack_color(colors[2].0, colors[2].1, colors[2].2));
     write_command(pack_vertex(verts[2].0, verts[2].1));
     write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
@@ -744,7 +756,7 @@ pub const MAX_NODE_WORDS: usize = 16;
 #[doc(alias = "DrawOTag")]
 pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
     // A completed DMA walk does not imply that the GPU has finished
-    // rasterising the commands it consumed. Do not call `draw_sync()` here:
+    // rasterising the commands it consumed. Do not call `wait_idle()` here:
     // channel 2's request handshake can queue the next list behind that work,
     // which is how PsyQ/PSn00bSDK keep the GPU fed. Only the DMA channel and
     // the list's backing storage must be free before starting another walk.
