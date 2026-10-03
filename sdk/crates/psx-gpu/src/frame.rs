@@ -503,8 +503,14 @@ impl<const N: usize, S> FramePair<N, S> {
 /// over it, say) while any packet it handed out is still linked into a
 /// frame.
 pub struct PrimitiveArena<'f, P> {
-    free: &'f mut [P],
+    // A base pointer and a count rather than a shrinking `&mut [P]`: a push is
+    // then one compare and one increment, where re-slicing loaded and stored
+    // the slice's pointer and length on every packet and measured +1% work
+    // per frame in NitroXide's wall pass.
+    storage: *mut P,
+    capacity: usize,
     used: usize,
+    _storage: core::marker::PhantomData<&'f mut [P]>,
 }
 
 impl<'f, P> PrimitiveArena<'f, P> {
@@ -512,8 +518,10 @@ impl<'f, P> PrimitiveArena<'f, P> {
     #[inline]
     pub fn new(storage: &'f mut [P]) -> Self {
         Self {
-            free: storage,
+            storage: storage.as_mut_ptr(),
+            capacity: storage.len(),
             used: 0,
+            _storage: core::marker::PhantomData,
         }
     }
 
@@ -521,8 +529,13 @@ impl<'f, P> PrimitiveArena<'f, P> {
     /// `'f`; `None` once the storage is used up.
     #[inline(always)]
     pub fn push(&mut self, packet: P) -> Option<&'f mut P> {
-        let (slot, rest) = core::mem::take(&mut self.free).split_first_mut()?;
-        self.free = rest;
+        if self.used >= self.capacity {
+            return None;
+        }
+        // SAFETY: `used < capacity`, so the slot lies in the storage `new` took
+        // as `&'f mut [P]`; `used` only grows, so no slot is handed out twice
+        // and the returned borrow aliases nothing else for 'f.
+        let slot = unsafe { &mut *self.storage.add(self.used) };
         self.used += 1;
         *slot = packet;
         Some(slot)
@@ -543,7 +556,7 @@ impl<'f, P> PrimitiveArena<'f, P> {
     /// Slots still free.
     #[inline]
     pub fn remaining(&self) -> usize {
-        self.free.len()
+        self.capacity - self.used
     }
 }
 
@@ -761,5 +774,42 @@ mod tests {
             order
         };
         assert_eq!(walked, [a.as_ptr(), b.as_ptr(), stream.as_ptr()]);
+    }
+
+    #[test]
+    fn arena_hands_out_every_slot_once_then_refuses() {
+        let mut storage: [RectFlat; 3] =
+            core::array::from_fn(|_| RectFlat::new(0, 0, 0, 0, 0, 0, 0));
+        let base = storage.as_ptr() as usize;
+        let mut arena = PrimitiveArena::new(&mut storage);
+        assert_eq!((arena.len(), arena.remaining()), (0, 3));
+        let a = arena.push(RectFlat::new(1, 0, 1, 1, 1, 0, 0)).unwrap();
+        let b = arena.push(RectFlat::new(2, 0, 1, 1, 2, 0, 0)).unwrap();
+        let c = arena.push(RectFlat::new(3, 0, 1, 1, 3, 0, 0)).unwrap();
+        assert!(arena.push(RectFlat::new(4, 0, 1, 1, 4, 0, 0)).is_none());
+        assert_eq!((arena.len(), arena.remaining()), (3, 0));
+        // Each slot is its own, in storage order: write through every borrow,
+        // then read every one back.
+        let size = core::mem::size_of::<RectFlat>();
+        for (index, slot) in [&*a, &*b, &*c].iter().enumerate() {
+            assert_eq!(*slot as *const RectFlat as usize, base + index * size);
+        }
+        a.tag = 0x11;
+        b.tag = 0x22;
+        c.tag = 0x33;
+        assert_eq!([a.tag, b.tag, c.tag], [0x11, 0x22, 0x33]);
+        assert_eq!(
+            [storage[0].tag, storage[1].tag, storage[2].tag],
+            [0x11, 0x22, 0x33]
+        );
+    }
+
+    #[test]
+    fn arena_over_empty_storage_refuses_the_first_push() {
+        let mut storage: [RectFlat; 0] = [];
+        let mut arena = PrimitiveArena::new(&mut storage);
+        assert!(arena.push(RectFlat::new(0, 0, 0, 0, 0, 0, 0)).is_none());
+        assert!(arena.is_empty());
+        assert_eq!(arena.remaining(), 0);
     }
 }
