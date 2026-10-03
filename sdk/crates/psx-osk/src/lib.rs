@@ -10,13 +10,13 @@
 //! lines up sensibly with the narrow keys above it.
 //!
 //! Rendering assumes a 320-wide display and psx-font's 8x8 glyph cell; the
-//! keyboard occupies the bottom [`PANEL_H`] pixels. Colors come from a
+//! keyboard occupies the bottom [`PANEL_HEIGHT`] pixels. Colors come from a
 //! caller-supplied [`Palette`], so any game theme drops in.
 //!
 //! ```ignore
 //! let mut kb = Keyboard::new();
 //! // per frame:
-//! if pad.repeats(button::LEFT, 14, 3) { kb.step(Dir::Left); }
+//! if pad.repeats(button::LEFT, 14, 3) { kb.step(Direction::Left); }
 //! if pad.just_pressed(button::CROSS) {
 //!     match kb.activate() {
 //!         Action::Insert(ch) => text.push(ch),
@@ -49,7 +49,7 @@ pub enum Action {
 
 /// D-pad direction for [`Keyboard::step`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Dir {
+pub enum Direction {
     /// Move the highlight left (wraps).
     Left,
     /// Move the highlight right (wraps).
@@ -59,6 +59,10 @@ pub enum Dir {
     /// Move the highlight down (wraps, centre-aligned).
     Down,
 }
+
+/// Renamed to [`Direction`].
+#[deprecated(note = "renamed to `Direction`")]
+pub type Dir = Direction;
 
 /// Colors for the keyboard panel; all `(r, g, b)`.
 #[derive(Copy, Clone, Debug)]
@@ -120,9 +124,16 @@ const X0: i16 = 8;
 const UW: i16 = 30; // unit width (10 units = 300px)
 const KH: i16 = 18; // key height
 /// Height of the whole keyboard panel (keys + hint line).
-pub const PANEL_H: i16 = ROWS as i16 * KH + 14;
+pub const PANEL_HEIGHT: i16 = ROWS as i16 * KH + 14;
 /// Top edge of the keyboard panel on a 240-line display.
-pub const Y0: i16 = 240 - ROWS as i16 * KH - 14;
+pub const PANEL_TOP: i16 = 240 - ROWS as i16 * KH - 14;
+
+/// Renamed to [`PANEL_HEIGHT`].
+#[deprecated(note = "renamed to `PANEL_HEIGHT`")]
+pub const PANEL_H: i16 = PANEL_HEIGHT;
+/// Renamed to [`PANEL_TOP`].
+#[deprecated(note = "renamed to `PANEL_TOP`")]
+pub const Y0: i16 = PANEL_TOP;
 
 /// The keyboard state machine: highlight position + page/case toggles.
 pub struct Keyboard {
@@ -185,13 +196,13 @@ impl Keyboard {
     }
 
     /// Step the highlight one cell, wrapping across every edge.
-    pub fn step(&mut self, dir: Dir) {
+    pub fn step(&mut self, dir: Direction) {
         let n = self.row_len(self.row);
         match dir {
-            Dir::Left => self.col = (self.col + n - 1) % n,
-            Dir::Right => self.col = (self.col + 1) % n,
-            Dir::Up | Dir::Down => {
-                let nr = if dir == Dir::Up {
+            Direction::Left => self.col = (self.col + n - 1) % n,
+            Direction::Right => self.col = (self.col + 1) % n,
+            Direction::Up | Direction::Down => {
+                let nr = if dir == Direction::Up {
                     (self.row + ROWS - 1) % ROWS
                 } else {
                     (self.row + 1) % ROWS
@@ -239,20 +250,20 @@ impl Keyboard {
     pub fn draw(&self, font: &FontAtlas, p: &Palette, hint: &str) {
         draw_rect_flat(
             0,
-            Y0 - 14,
+            PANEL_TOP - 14,
             320,
-            (240 - (Y0 - 14)) as u16,
+            (240 - (PANEL_TOP - 14)) as u16,
             p.panel.0,
             p.panel.1,
             p.panel.2,
         );
-        font.draw_text(6, Y0 - 12, hint, p.dim);
+        font.draw_text(6, PANEL_TOP - 12, hint, p.dim);
 
         for r in 0..ROWS {
             for c in 0..self.row_len(r) {
                 let (s, w) = self.span(r, c);
                 let x = X0 + s * UW;
-                let y = Y0 + (r as i16) * KH;
+                let y = PANEL_TOP + (r as i16) * KH;
                 let kw = w * UW;
                 let sel = r == self.row && c == self.col;
                 let key = self.key_at(r, c);
@@ -336,11 +347,11 @@ mod tests {
         // Navigate to the function row's Shift key: home is (1,0); Up wraps
         // to the function row (row 0 is digits, so go down 3 to row 4 col 0).
         for _ in 0..3 {
-            kb.step(Dir::Down);
+            kb.step(Direction::Down);
         }
         assert!(matches!(kb.activate(), Action::None)); // Shift on
         for _ in 0..3 {
-            kb.step(Dir::Up);
+            kb.step(Direction::Up);
         }
         assert_eq!(insert_of(kb.activate()), Some(b'Q'));
     }
@@ -349,11 +360,11 @@ mod tests {
     fn sym_page_swaps_tables() {
         let mut kb = Keyboard::new();
         for _ in 0..3 {
-            kb.step(Dir::Down); // to function row
+            kb.step(Direction::Down); // to function row
         }
-        kb.step(Dir::Right); // Shift -> Sym
+        kb.step(Direction::Right); // Shift -> Sym
         assert!(matches!(kb.activate(), Action::None));
-        kb.step(Dir::Up); // back into the grid, symbols page
+        kb.step(Direction::Up); // back into the grid, symbols page
         let got = insert_of(kb.activate()).unwrap();
         assert!(SYMBOLS.iter().any(|row| row.contains(&got)));
     }
@@ -361,7 +372,7 @@ mod tests {
     #[test]
     fn horizontal_wrap() {
         let mut kb = Keyboard::new();
-        kb.step(Dir::Left); // from col 0 wraps to col 9
+        kb.step(Direction::Left); // from col 0 wraps to col 9
         assert_eq!(insert_of(kb.activate()), Some(b'p'));
     }
 
@@ -369,15 +380,15 @@ mod tests {
     fn space_del_ok_actions() {
         let mut kb = Keyboard::new();
         for _ in 0..3 {
-            kb.step(Dir::Down);
+            kb.step(Direction::Down);
         }
         // Function row: Shift(0-2) Sym(2-4) Space(4-7) Del(7-8) Ok(8-10)
-        kb.step(Dir::Right);
-        kb.step(Dir::Right);
+        kb.step(Direction::Right);
+        kb.step(Direction::Right);
         assert_eq!(insert_of(kb.activate()), Some(b' '));
-        kb.step(Dir::Right);
+        kb.step(Direction::Right);
         assert!(matches!(kb.activate(), Action::Backspace));
-        kb.step(Dir::Right);
+        kb.step(Direction::Right);
         assert!(matches!(kb.activate(), Action::Commit));
     }
 
@@ -387,11 +398,11 @@ mod tests {
         // Park on Space (function row, wide key), then go Up: should land
         // near the middle of the letter row above (col ~4-6), not col 2.
         for _ in 0..3 {
-            kb.step(Dir::Down);
+            kb.step(Direction::Down);
         }
-        kb.step(Dir::Right);
-        kb.step(Dir::Right); // Space
-        kb.step(Dir::Up);
+        kb.step(Direction::Right);
+        kb.step(Direction::Right); // Space
+        kb.step(Direction::Up);
         let got = insert_of(kb.activate()).unwrap();
         assert!(b"vbnm".contains(&got), "landed on {}", got as char);
     }
