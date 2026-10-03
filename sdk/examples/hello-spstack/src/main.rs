@@ -115,7 +115,7 @@ struct Outcome {
 
 #[inline(never)]
 fn workload(rounds: u32) -> Outcome {
-    let entered = scratchpad::on_scratchpad_stack();
+    let entered = scratchpad::is_on_scratchpad_stack();
     let start = interrupts::vblank_count();
     let mut checksum = 0x1234_5678u32;
     for round in 0..rounds {
@@ -124,7 +124,7 @@ fn workload(rounds: u32) -> Outcome {
     Outcome {
         checksum,
         irqs: interrupts::vblank_count().wrapping_sub(start),
-        on_scratchpad: [entered, scratchpad::on_scratchpad_stack()],
+        on_scratchpad: [entered, scratchpad::is_on_scratchpad_stack()],
     }
 }
 
@@ -173,7 +173,7 @@ fn main() {
         let handler = hello_spstack_vector as *const () as usize as u32;
         (0x8000_0080 as *mut u32).write_volatile(0x0800_0000 | ((handler >> 2) & 0x03ff_ffff));
         (0x8000_0084 as *mut u32).write_volatile(0);
-        psx_rt::cache::flush_i_cache();
+        psx_rt::cache::flush_instruction_cache();
         interrupts::declare_stack_safe_handler(hello_spstack_vector);
     }
     for i in 0..TABLE_WORDS {
@@ -198,7 +198,7 @@ fn main() {
     let spad = unsafe {
         WorkStack::run(|| {
             // A nested call runs in place, still on the scratchpad.
-            nested = WorkStack::run(|| [scratchpad::on_scratchpad_stack(), true]);
+            nested = WorkStack::run(|| [scratchpad::is_on_scratchpad_stack(), true]);
             workload(black_box(ROUNDS))
         })
     };
@@ -219,7 +219,7 @@ fn main() {
             "too few IRQs on the scratchpad stack",
         ),
         (nested == [true, true], "nested run did not run in place"),
-        (!scratchpad::on_scratchpad_stack(), "$sp not restored"),
+        (!scratchpad::is_on_scratchpad_stack(), "$sp not restored"),
         (
             black_box(ram_frame) == [0xA5A5_1111, 0x2222, 0x3333, 0x4444],
             "RAM frame changed",

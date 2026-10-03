@@ -12,14 +12,14 @@ use crate::bios;
 /// `putchar` trampoline.
 pub fn print(s: &str) {
     for b in s.bytes() {
-        bios::putchar(b);
+        bios::write_char(b);
     }
 }
 
 /// [`print`] + a trailing `\n`.
 pub fn println(s: &str) {
     print(s);
-    bios::putchar(b'\n');
+    bios::write_char(b'\n');
 }
 
 /// Write a single u32 as 8 hex digits, no prefix, uppercase.
@@ -27,6 +27,6 @@ pub fn print_hex_u32(v: u32) {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     for shift in (0..8).rev() {
         let nib = ((v >> (shift * 4)) & 0xF) as usize;
-        bios::putchar(DIGITS[nib]);
+        bios::write_char(DIGITS[nib]);
     }
 }

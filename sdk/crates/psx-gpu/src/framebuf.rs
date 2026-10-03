@@ -94,7 +94,7 @@ impl FrameBuffer {
     /// This is the non-blocking first half of a pipelined swap. Queue the
     /// returned GP1 word for a VBlank edge whose handler applies it only once
     /// the frame's closing GP0(1Fh) has run (psx-rt's
-    /// `interrupts::queue_gp1_at_vblank`; see [`crate::is_draw_done`]), wait
+    /// `interrupts::queue_display_control_at_vblank`; see [`crate::is_draw_done`]), wait
     /// until that queue entry is consumed, then call
     /// [`FrameBuffer::apply_draw_target`] before clearing or drawing into the
     /// newly selected buffer.

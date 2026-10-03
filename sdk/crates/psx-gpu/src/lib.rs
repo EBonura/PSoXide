@@ -218,7 +218,7 @@ pub fn arm_draw_done() {
 /// after the last [`arm_draw_done`], so everything before it is drawn.
 ///
 /// This is the completion test psx-rt's queued display flip
-/// (`psx_rt::interrupts::queue_gp1_at_vblank`) applies at each VBlank edge.
+/// (`psx_rt::interrupts::queue_display_control_at_vblank`) applies at each VBlank edge.
 /// GP0(1Fh) raises GPUSTAT bit 24 only when the GPU reaches it in its
 /// command stream, after the drawing before it; the flag stays set until
 /// GP1(02h). The v1.24 present-queue probe flipped on this flag with 120 of
