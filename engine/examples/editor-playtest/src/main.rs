@@ -75,12 +75,12 @@ use psx_engine::{
     CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAnim,
     CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand,
     DepthRange, LoadedWorldCameraGte, OtFrame, PacketFramePair, PrimitivePacketArena,
-    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, RenderSubmission, Rgb8, RoomPoint,
-    RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
+    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, QueuedFrame, RenderSubmission, Rgb8,
+    RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
     TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
     WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
-    WorldVertex, Q12,
+    WorldVertex, PRIMITIVE_PACKET_SLOT_WORDS, Q12,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -623,6 +623,12 @@ struct Playtest {
     prepared_poi_page_type_frame: u16,
     overlay_poi_panel_frame: u16,
     overlay_poi_page_type_frame: u16,
+    /// The frame the last render built for the present queue: its ordering
+    /// table's head and the arena words reserved for its recorded overlay.
+    /// Null when that render was not offered the queue.
+    queued_head: *const u32,
+    queued_overlay: *mut u32,
+    queued_overlay_words: usize,
     /// Sim ticks since the last POI presentation step.
     poi_presentation_subtick: u8,
     /// Unique reward currently replacing the just-closed POI message panel.
