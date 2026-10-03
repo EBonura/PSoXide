@@ -257,6 +257,12 @@ pub fn install_vblank_counter() {
     const EXCEPTION_VECTOR: *mut u32 = 0x8000_0080 as *mut u32;
     const J_OPCODE: u32 = 0x0800_0000;
 
+    // SAFETY: 0x8000_0080 is the R3000 general exception vector in KSEG0 kernel RAM, two aligned
+    // words written here as `j handler` plus a nop delay slot, then the I-cache is flushed so the
+    // CPU fetches them. The counter and INSTALLED are psx-rt-private statics written through raw
+    // pointers, so no reference aliases them. `enable_cpu_interrupts` runs only after the vector
+    // points at psx-rt's handler. Assumes nothing still depends on the vector this replaces (a game
+    // wrapper installed earlier is overwritten).
     unsafe {
         let handler = __psx_rt_exception_handler as *const () as usize as u32;
         core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((handler >> 2) & 0x03ff_ffff));
@@ -281,6 +287,8 @@ pub fn install_vblank_counter() {}
 /// faulted and was stepped over; the value it read or wrote is garbage.
 #[inline]
 pub fn fault_count() -> u32 {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
+    // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_count) }
 }
 
@@ -288,6 +296,8 @@ pub fn fault_count() -> u32 {
 /// to EPC + 4 so the command did not run twice.
 #[inline]
 pub fn gte_skip_count() -> u32 {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
+    // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_gte_skip_count) }
 }
 
@@ -370,24 +380,33 @@ const fn resume_after_fault(strict: bool, cause: u32, epc: u32, badvaddr: u32) -
 /// COP0 BadVAddr captured for the latest unexpected exception.
 #[inline]
 pub fn fault_badvaddr() -> u32 {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
+    // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_badvaddr) }
 }
 
 /// Raw COP0 Cause captured for the latest unexpected exception.
 #[inline]
 pub fn fault_cause() -> u32 {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
+    // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_cause) }
 }
 
 /// COP0 EPC captured for the latest unexpected exception.
 #[inline]
 pub fn fault_epc() -> u32 {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
+    // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_epc) }
 }
 
 /// Current monotonic VBlank count.
 #[inline]
 pub fn vblank_count() -> u32 {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. The
+    // asm handler and `install_vblank_counter` are the only writers, and an aligned word load
+    // cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_vblank_count) }
 }
 
@@ -417,6 +436,8 @@ pub fn vblank_count() -> u32 {
 #[cfg(target_arch = "mips")]
 #[inline]
 pub fn queue_gp1_at_vblank(word: u32) {
+    // SAFETY: a volatile aligned u32 store through a raw pointer, so no reference is formed. The
+    // VBlank handler is the only other accessor, and an aligned word store cannot tear.
     unsafe { core::ptr::write_volatile(&raw mut __psx_rt_pending_gp1, word) }
 }
 
@@ -430,6 +451,8 @@ pub fn queue_gp1_at_vblank(_word: u32) {}
 #[cfg(target_arch = "mips")]
 #[inline]
 pub fn gp1_queue_pending() -> bool {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. The
+    // VBlank handler is the only other accessor, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_pending_gp1) != 0 }
 }
 
@@ -449,6 +472,8 @@ pub fn gp1_queue_pending() -> bool {
 #[cfg(target_arch = "mips")]
 #[inline]
 pub fn take_pending_gp1() -> u32 {
+    // SAFETY: volatile aligned u32 accesses through a raw pointer, so no reference is formed. A
+    // handler run between the read and the clear is harmless (see above).
     unsafe {
         let word = core::ptr::read_volatile(&raw const __psx_rt_pending_gp1);
         if word != 0 {
@@ -485,6 +510,8 @@ pub fn gp1_queue_pending() -> bool {
 /// called [`install_vblank_counter`].
 #[cfg(target_arch = "mips")]
 pub fn wait_vblank() {
+    // SAFETY: a volatile read of the private INSTALLED flag through a raw pointer; only
+    // `install_vblank_counter` writes it, on this same single thread.
     unsafe {
         if !core::ptr::read_volatile(&raw const INSTALLED) {
             install_vblank_counter();
@@ -587,6 +614,8 @@ fn vector_word() -> u32 {
 pub fn cpu_interrupts_enabled() -> bool {
     let sr: u32;
     // The nop covers MFC0's load delay.
+    // SAFETY: reads COP0 SR into $8, declared as the output, and the nop covers MFC0's load delay.
+    // No memory or stack is touched, as the options state.
     unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr, options(nomem, nostack)) };
     sr & 1 != 0
 }
@@ -602,8 +631,13 @@ unsafe fn enable_cpu_interrupts() {
     // nop the asm block hands back the STALE $8, and whatever garbage it held
     // gets OR'd into SR (seen in the wild as BEV set -> exceptions vectoring
     // into ROM -> pc walking off the end of the BIOS).
+    // SAFETY: reads COP0 SR into $8, declared as the output, and the nop covers MFC0's load delay.
+    // No other register or memory is touched.
     unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr) };
     sr |= STATUS_IE | STATUS_IM2 | STATUS_CU2;
+    // SAFETY: writes SR back with IEc, IM2 and CU2 set and every other bit as read above. The only
+    // caller, `install_vblank_counter`, has already pointed the exception vector at psx-rt's
+    // handler, so the interrupts this enables land there.
     unsafe { core::arch::asm!("mtc0 $8, $12", in("$8") sr) };
 }
 

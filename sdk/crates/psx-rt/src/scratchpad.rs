@@ -344,12 +344,18 @@ extern "C" {
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 unsafe fn call_on_stack(frame: *mut u8, entry: unsafe extern "C" fn(*mut u8), sp: usize) {
+    // SAFETY: the caller (`ScratchpadStack::run`) passes a live frame, the entry that matches it,
+    // and an 8-byte-aligned stack top inside the scratchpad. The trampoline saves $ra and $s0 on
+    // the RAM stack, switches $sp, calls `entry(frame)`, and restores $sp, so the O32 contract
+    // holds across it.
     unsafe { __psx_rt_call_on_stack(frame, entry, sp) }
 }
 
 #[cfg(not(target_arch = "mips"))]
 #[inline(always)]
 unsafe fn call_on_stack(frame: *mut u8, entry: unsafe extern "C" fn(*mut u8), _sp: usize) {
+    // SAFETY: the caller passes a live frame and the entry that matches it, as on the target; the
+    // host has no scratchpad, so `entry` simply runs on the current stack.
     unsafe { entry(frame) }
 }
 
@@ -459,6 +465,8 @@ mod tests {
     fn run_returns_the_closure_result_and_moves_captures() {
         let mut touched = 0u32;
         let text = std::string::String::from("moved");
+        // SAFETY: on the host `run` only calls the closure, so none of its scratchpad, stack-budget
+        // or exception-handler obligations apply.
         let (len, words) = unsafe {
             Stack::run(|| {
                 touched += 1;

@@ -17,12 +17,23 @@ struct BumpState {
     end: usize,
 }
 
-// Single-threaded environment (interrupts masked during alloc, no
-// SMP on PS1) -- `Sync` is sound for the bump allocator.
+// SAFETY: `state` is reached only through `alloc` and `init`. The PS1 has one
+// CPU and no threads, and `alloc` does not mask interrupts, so the real
+// invariant is that no interrupt handler allocates: psx-rt's exception handler
+// is pure assembly and never does. A game-installed handler that allocated
+// could interleave with an in-progress `alloc` and break this.
 unsafe impl Sync for BumpAllocator {}
 
+// SAFETY: `alloc` returns null or a block aligned to `layout.align()` inside
+// the range handed to `init`; `next` only grows, so blocks never overlap, and
+// `dealloc` never reuses memory. Subject to the overflow caveat in `alloc`.
 unsafe impl GlobalAlloc for BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: single-threaded access per the `Sync` impl, so this is the
+        // only live reference to the state. NOT checked: on the 32-bit guest
+        // `aligned + size` wraps for a layout near `isize::MAX` (legal for a
+        // safe caller) and then passes the `end` test, returning a block that
+        // runs off the heap.
         unsafe {
             let state = &mut *self.state.get();
             let align = layout.align();
@@ -59,6 +70,8 @@ static ALLOCATOR: BumpAllocator = BumpAllocator {
 /// Called exactly once from [`crate::_start`] with a heap range that
 /// doesn't overlap anything in use.
 pub unsafe fn init(start: usize, size: usize) {
+    // SAFETY: the caller upholds this fn's `# Safety` (once, from `_start`,
+    // before any allocation), so no other reference to the state exists.
     unsafe {
         let state = &mut *ALLOCATOR.state.get();
         state.next = start;
