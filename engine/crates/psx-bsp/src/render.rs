@@ -1300,7 +1300,6 @@ pub struct Renderer {
     selection_reuse: bool,
     visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     visible_leaf_count: usize,
-    cached_visibility: Option<(u32, usize)>,
     cached_pxbsp_visibility: Option<(u32, usize)>,
     light_styles: [u16; DUMMY_LIGHT_STYLE + 1],
     /// Projection the brush-face frustum clip assumes (see
@@ -1465,7 +1464,6 @@ impl Renderer {
             selection_reuse: false,
             visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
-            cached_visibility: None,
             cached_pxbsp_visibility: None,
             view_projection: ViewProjection::DEFAULT,
             pxbsp_material_cache: [PxbspResolvedMaterial::default(); PXBSP_MATERIAL_CACHE_SLOTS],
@@ -2265,9 +2263,18 @@ impl Renderer {
     // Out of line on purpose: inlined into the scene render these per-frame
     // passes shared one register allocation with an 86 KB function and their
     // inner loops reloaded table pointers from the stack at every node.
+    //
+    // Edge policy for a visibility point with no PVS row of its own (the
+    // shared solid leaf 0, or a leaf cooked without a row): such a point is
+    // not a place anyone can stand, so its "view" carries no information. A
+    // camera only gets there transiently (a boom pressed into a wall, a
+    // teleport frame), right after being somewhere valid, so the renderer
+    // keeps the row of the last valid leaf of the same map and the world
+    // stays continuous. With no earlier row there is nothing justified to
+    // draw and the pass fails closed. A malformed tree or row fails closed
+    // and forgets the cached row.
     #[inline(never)]
     fn mark_visible_pxbsp_faces(&mut self, map: &PxbspResidentMap, point: Vec3I32) -> bool {
-        self.cached_visibility = None;
         let faces = map.faces();
         if faces.len() != self.pxbsp_face_count {
             self.cached_pxbsp_visibility = None;
@@ -2280,23 +2287,24 @@ impl Renderer {
             self.visible_leaf_count = 0;
             return false;
         };
-        if leaf_index == 0 {
+        if self.cached_pxbsp_visibility == Some((map.generation(), leaf_index)) {
+            return true;
+        }
+        let leaf = map.leaves().get(leaf_index).expect("validated leaf");
+        if leaf_index == 0 || leaf.visibility_offset < 0 {
+            if self
+                .cached_pxbsp_visibility
+                .is_some_and(|(generation, _)| generation == map.generation())
+            {
+                return true;
+            }
             self.cached_pxbsp_visibility = None;
             self.visible_pxbsp_faces.clear();
             self.visible_leaf_count = 0;
             return false;
         }
-        if self.cached_pxbsp_visibility == Some((map.generation(), leaf_index)) {
-            return true;
-        }
         self.pxbsp_face_state.fill(0);
         self.visible_pxbsp_faces.clear();
-        let leaf = map.leaves().get(leaf_index).expect("validated leaf");
-        if leaf.visibility_offset < 0 {
-            self.cached_pxbsp_visibility = None;
-            self.visible_leaf_count = 0;
-            return false;
-        }
 
         let world = map.brush_models().get(0).expect("validated world model");
         let visible_leaves = world.visible_leaves.max(0) as usize;
@@ -4005,6 +4013,47 @@ mod tests {
         assert!(!renderer.pxbsp_leaf_visible(1));
         assert!(renderer.pxbsp_leaf_visible(100));
         assert!(!renderer.pxbsp_leaf_visible(101));
+    }
+
+    #[test]
+    fn a_viewpoint_in_the_solid_leaf_keeps_the_last_valid_row() {
+        let bytes = write_file(&valid_lumps());
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(7, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        let open = Vec3I32 {
+            x: 4096,
+            y: 0,
+            z: 0,
+        };
+        let solid = Vec3I32 {
+            x: -4096,
+            y: 0,
+            z: 0,
+        };
+        assert_eq!(map.point_leaf_index(solid), Some(0));
+
+        // Nothing valid seen yet: a solid viewpoint justifies no drawing.
+        let mut fresh = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        assert!(!fresh.mark_visible_pxbsp_faces(&map, solid));
+        assert!(fresh.visible_pxbsp_faces.is_empty());
+        assert_eq!(fresh.cached_pxbsp_visibility, None);
+
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        assert!(renderer.mark_visible_pxbsp_faces(&map, open));
+        let chain = renderer.visible_pxbsp_faces.clone();
+        assert!(!chain.is_empty());
+        let cached = renderer.cached_pxbsp_visibility;
+        assert!(renderer.mark_visible_pxbsp_faces(&map, solid));
+        assert_eq!(renderer.visible_pxbsp_faces, chain);
+        assert_eq!(renderer.cached_pxbsp_visibility, cached);
+
+        // A reloaded map is a new generation and never inherits the row.
+        map.load(7, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        assert!(!renderer.mark_visible_pxbsp_faces(&map, solid));
+        assert!(renderer.visible_pxbsp_faces.is_empty());
+        assert_eq!(renderer.cached_pxbsp_visibility, None);
     }
 
     #[test]
