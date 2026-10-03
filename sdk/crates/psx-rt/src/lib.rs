@@ -55,7 +55,7 @@ pub mod heap;
 /// 392-byte array in `.data` (1,032 bytes with `hazard-trampolines-256`); nothing reads it at runtime except the CPU.
 #[no_mangle]
 #[used]
-pub static mut HAZARD_TRAMPOLINES: [u32; 2 + HAZARD_TRAMPOLINE_WORDS] = {
+static mut HAZARD_TRAMPOLINES: [u32; 2 + HAZARD_TRAMPOLINE_WORDS] = {
     let mut words = [0u32; 2 + HAZARD_TRAMPOLINE_WORDS];
     words[0] = 0x4841_5a54;
     words[1] = HAZARD_TRAMPOLINE_WORDS as u32;
