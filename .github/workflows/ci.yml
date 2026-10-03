@@ -15,6 +15,7 @@ jobs:
       - run: cargo fmt --manifest-path sdk/Cargo.toml --all -- --check
       - run: make check
       - run: make test
+      - run: rustup component add miri && make miri
       - run: make lint
       - name: Build a PS1 executable without editor or emulator sources
         run: make hello-tri
