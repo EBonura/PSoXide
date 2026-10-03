@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(arena.remaining(), 0);
         drop(frame);
         // SAFETY: the table only links `storage`, still alive here.
-        assert_eq!(unsafe { ot.iter_packets() }.count(), 3);
+        assert_eq!(unsafe { ot.packets() }.count(), 3);
     }
 
     #[test]

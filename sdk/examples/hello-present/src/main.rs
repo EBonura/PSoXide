@@ -138,10 +138,10 @@ fn main() {
         build_frame(frame, packets, TRIS as u32, false)
     });
     interrupts::queue_gp1_at_vblank(fb.begin_deferred_swap());
-    gpu::draw_sync();
+    gpu::wait_idle();
     (storage, dma) = in_flight.wait();
     wait_vblanks(4);
-    let held = interrupts::gp1_queue_pending() && !gpu::draw_done();
+    let held = interrupts::gp1_queue_pending() && !gpu::is_draw_done();
 
     // 2. Released: GP0(1Fh) through the port lets it land.
     gpu::signal_draw_done();
@@ -166,12 +166,12 @@ fn main() {
         interrupts::queue_gp1_at_vblank(fb.begin_deferred_swap());
         if !wait_flip(WAIT_LIMIT) {
             timeouts += 1;
-            gpu::draw_sync();
+            gpu::wait_idle();
             let word = interrupts::take_pending_gp1();
             if word != 0 {
                 psx_io::gpu::write_display_control(word);
             }
-        } else if !gpu::draw_done() {
+        } else if !gpu::is_draw_done() {
             // The flag cannot clear before the next arm, so a flip seen
             // without it happened before the frame's GP0(1Fh) ran.
             early += 1;
@@ -179,7 +179,7 @@ fn main() {
         (storage, dma) = in_flight.wait();
     }
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
-    gpu::draw_sync();
+    gpu::wait_idle();
 
     let checks = [
         (held, "flip without GP0(1Fh) was applied"),

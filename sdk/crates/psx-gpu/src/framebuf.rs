@@ -81,7 +81,7 @@ impl FrameBuffer {
     /// now and return the GP1 display-start word for the finished buffer,
     /// for the caller to apply exactly at a blank edge (e.g. via psx-rt's
     /// queued-GP1 VBlank hook). Drawing must be finished
-    /// ([`crate::draw_sync`]) before this call, because it rewrites the draw
+    /// ([`crate::wait_idle`]) before this call, because it rewrites the draw
     /// area/offset directly.
     pub fn begin_swap(&mut self) -> u32 {
         let display_start = self.begin_deferred_swap();
@@ -94,7 +94,7 @@ impl FrameBuffer {
     /// This is the non-blocking first half of a pipelined swap. Queue the
     /// returned GP1 word for a VBlank edge whose handler applies it only once
     /// the frame's closing GP0(1Fh) has run (psx-rt's
-    /// `interrupts::queue_gp1_at_vblank`; see [`crate::draw_done`]), wait
+    /// `interrupts::queue_gp1_at_vblank`; see [`crate::is_draw_done`]), wait
     /// until that queue entry is consumed, then call
     /// [`FrameBuffer::apply_draw_target`] before clearing or drawing into the
     /// newly selected buffer.

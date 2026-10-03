@@ -141,7 +141,7 @@ fn main() {
         };
         font.draw_text(8, y + 8, banner, bt);
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
     }

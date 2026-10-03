@@ -288,7 +288,7 @@ fn main() {
             ("FAIL", RED)
         };
         font.draw_text(8, 30, banner, tint);
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
     }

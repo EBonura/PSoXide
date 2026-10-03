@@ -188,20 +188,29 @@ impl<const N: usize> OrderingTable<N> {
         // hardware, and a wedged boot-time clear freezes the engine at
         // its first frame with no diagnostic. N stores per frame is a
         // measurable but small cost; callers that trust their DMA can
-        // opt back in via [`Self::clear_via_otc_dma`].
+        // opt back in via [`Self::clear_with_dma`].
         self.clear_software();
     }
 
     /// Opt-in OTC DMA clear (the pre-CL2 default). On hardware whose DMA
     /// controller wedges, this spins forever inside the DMA wait.
     #[cfg(target_arch = "mips")]
-    pub fn clear_via_otc_dma(&mut self) {
+    #[doc(alias = "ClearOTagR")]
+    pub fn clear_with_dma(&mut self) {
         let cleared = psx_io::dma::clear_ordering_table(&mut self.entries);
         if !cleared {
             // Wedged channel or an over-large table: the CPU path always
             // produces a valid chain, so never hand back a stale one.
             self.clear_software();
         }
+    }
+
+    /// Renamed to [`Self::clear_with_dma`].
+    #[cfg(target_arch = "mips")]
+    #[deprecated(note = "renamed to `clear_with_dma`")]
+    #[inline(always)]
+    pub fn clear_via_otc_dma(&mut self) {
+        self.clear_with_dma()
     }
 
     #[cfg(not(target_arch = "mips"))]
@@ -940,7 +949,7 @@ impl<const N: usize> OrderingTable<N> {
     }
 
     /// End this table's DMA walk with GP0(1Fh), so the GPU raises
-    /// [`crate::draw_done`] once everything in the table is drawn.
+    /// [`crate::is_draw_done`] once everything in the table is drawn.
     ///
     /// Links slot 0, the last one walked, to [`crate::DRAW_DONE_NODE`];
     /// packets inserted at slot 0 afterwards still draw before it. Call it
@@ -948,7 +957,7 @@ impl<const N: usize> OrderingTable<N> {
     /// slot 0. Pair the submission with [`crate::arm_draw_done`].
     ///
     /// Host builds leave the table as it is: the shared node lives outside
-    /// the table's address window, which [`iter_packets`](Self::iter_packets)
+    /// the table's address window, which [`packets`](Self::packets)
     /// relies on.
     ///
     /// # Panics
@@ -1033,7 +1042,7 @@ impl<const N: usize> OrderingTable<N> {
     ///
     /// # Safety
     ///
-    /// As [`crate::submit_linked_list_raw_async`]: the table and every
+    /// As [`crate::submit_linked_list_async_raw`]: the table and every
     /// packet it chains must stay live, unmoved and unmodified until that
     /// wait returns.
     #[deprecated(
@@ -1041,7 +1050,7 @@ impl<const N: usize> OrderingTable<N> {
     )]
     pub unsafe fn submit_async(&self) {
         // SAFETY: forwarded contract.
-        unsafe { crate::submit_linked_list_raw_async(self.submit_head()) };
+        unsafe { crate::submit_linked_list_async_raw(self.submit_head()) };
     }
 
     /// Walk the linked chain in DMA submission order, producing one
@@ -1059,7 +1068,7 @@ impl<const N: usize> OrderingTable<N> {
     /// requires. Primitives produced by [`crate::prim::*`] paired with
     /// a `PrimitiveArena` satisfy this; bespoke chains must guarantee
     /// the same.
-    pub unsafe fn iter_packets(&self) -> OtPacketIter {
+    pub unsafe fn packets(&self) -> Packets {
         // The submit head holds the address of the first chained
         // packet (its low 24 bits). PS1 hardware masks to 24 bits
         // because RAM is 2 MB and packet pointers can omit the high
@@ -1067,14 +1076,29 @@ impl<const N: usize> OrderingTable<N> {
         // because all OT-chained primitives live in the same arena
         // whose pointer fits in 24 bits relative to a stable base --
         // [`PrimitiveArena`] enforces that.
-        OtPacketIter {
+        Packets {
             next: self.entries[N - 1] & OT_ADDR_MASK,
             base_high: (self.submit_head() as usize) & !(OT_ADDR_MASK as usize),
             last_packet: OT_END,
             remaining_hops: N.saturating_add(OT_MAX_EXTRA_HOPS),
         }
     }
+
+    /// Renamed to [`Self::packets`].
+    ///
+    /// # Safety
+    /// See [`Self::packets`].
+    #[deprecated(note = "renamed to `packets`")]
+    #[inline(always)]
+    pub unsafe fn iter_packets(&self) -> Packets {
+        // SAFETY: same contract as the renamed function.
+        unsafe { self.packets() }
+    }
 }
+
+/// Renamed to [`Packets`].
+#[deprecated(note = "renamed to `Packets`")]
+pub type OtPacketIter = Packets;
 
 /// Walks an [`OrderingTable`]'s chain in DMA submission order.
 ///
@@ -1082,14 +1106,14 @@ impl<const N: usize> OrderingTable<N> {
 /// data words that follow its tag (so the full packet occupies
 /// `1 + words` u32s starting at the returned pointer). The terminal
 /// `0x00FFFFFF` marker stops iteration cleanly.
-pub struct OtPacketIter {
+pub struct Packets {
     next: u32,
     base_high: usize,
     last_packet: u32,
     remaining_hops: usize,
 }
 
-impl Iterator for OtPacketIter {
+impl Iterator for Packets {
     type Item = (*const u32, u8);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1109,7 +1133,7 @@ impl Iterator for OtPacketIter {
             self.remaining_hops -= 1;
             let ptr = (self.base_high | self.next as usize) as *const u32;
             // SAFETY: ptr was reached by walking the chain that
-            // `iter_packets`'s caller swore was live; tag word is
+            // `packets`'s caller swore was live; tag word is
             // always present in any chained slot.
             let tag = unsafe { ptr::read_volatile(ptr) };
             let words = ((tag >> 24) & 0xFF) as u8;
@@ -1170,7 +1194,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         assert_eq!(iter.next().unwrap().0, a.as_ptr());
         assert_eq!(iter.next().unwrap().0, b.as_ptr());
         assert_eq!(iter.next().unwrap().0, c.as_ptr());
@@ -1201,7 +1225,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         assert_eq!(iter.next().unwrap().0, b.as_ptr());
         assert_eq!(iter.next().unwrap().0, a.as_ptr());
         assert!(iter.next().is_none());
@@ -1231,7 +1255,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         // SAFETY: index 5 is inside `packets`.
         assert_eq!(iter.next().unwrap().0, unsafe { packets.as_ptr().add(5) });
         assert_eq!(iter.next().unwrap().0, packets.as_ptr());
@@ -1300,7 +1324,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         // SAFETY: index 4 is inside `packets`.
         assert_eq!(iter.next().unwrap().0, unsafe { packets.as_ptr().add(4) });
         assert_eq!(iter.next().unwrap().0, packets.as_ptr());
@@ -1377,7 +1401,7 @@ mod tests {
     /// insert it, and walk the chain. The iterator must report the
     /// same `(ptr, words)` pair we inserted.
     #[test]
-    fn iter_packets_walks_a_single_inserted_primitive() {
+    fn packets_walks_a_single_inserted_primitive() {
         let mut ot: OrderingTable<8> = OrderingTable::new();
         ot.clear();
         // Packet layout: [tag, w0, w1, w2] -- 3 data words after the tag.
@@ -1392,7 +1416,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         let entry = iter.next().expect("one entry");
         assert_eq!(entry.0 as usize, packet.as_ptr() as usize);
         assert_eq!(entry.1, 3);
@@ -1403,7 +1427,7 @@ mod tests {
     /// inserts (lower slot) come first because `clear()` chains
     /// high-to-low and the DMA head is `[N-1]`.
     #[test]
-    fn iter_packets_walks_multiple_slots_in_dma_order() {
+    fn packets_walks_multiple_slots_in_dma_order() {
         let mut ot: OrderingTable<8> = OrderingTable::new();
         ot.clear();
         let mut a: [u32; 2] = [0, 0xA];
@@ -1418,7 +1442,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         // DMA walker starts at [N-1] = [7] and chains down to [0].
         // b lives in slot 5, a in slot 2 -- both should appear, b first.
         let first = iter.next().expect("first entry").0 as usize;
@@ -1467,7 +1491,7 @@ mod tests {
         }
         let walked: [usize; 3] = {
             // SAFETY: every packet linked into the table is a local still alive here.
-            let mut iter = unsafe { ot.iter_packets() };
+            let mut iter = unsafe { ot.packets() };
             let order = [
                 iter.next().expect("near").0 as usize,
                 iter.next().expect("far").0 as usize,
@@ -1513,7 +1537,7 @@ mod tests {
     /// Multiple primitives in the same slot chain via the most-
     /// recently-inserted-first rule.
     #[test]
-    fn iter_packets_chains_primitives_within_one_slot() {
+    fn packets_chains_primitives_within_one_slot() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
         let mut first: [u32; 2] = [0, 0x1111];
@@ -1526,7 +1550,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         // `second` was inserted last and prepends to the chain head;
         // it walks first.
         let head = iter.next().expect("first").0 as usize;
@@ -1541,7 +1565,7 @@ mod tests {
     /// The host iterator should fail closed instead of spinning
     /// forever while previewing a malformed frame.
     #[test]
-    fn iter_packets_stops_on_duplicate_packet_in_same_slot() {
+    fn packets_stops_on_duplicate_packet_in_same_slot() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
         let mut packet: [u32; 2] = [0, 0xAA00_0000];
@@ -1553,7 +1577,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         let entry = iter.next().expect("first duplicate packet");
         assert_eq!(entry.0 as usize, packet.as_ptr() as usize);
         assert_eq!(entry.1, 1);
@@ -1565,7 +1589,7 @@ mod tests {
     /// catches the editor-preview failure mode where the cmd-log walk
     /// could peg the host thread.
     #[test]
-    fn iter_packets_stops_on_duplicate_packet_through_empty_slot() {
+    fn packets_stops_on_duplicate_packet_through_empty_slot() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
         let mut packet: [u32; 2] = [0, 0xBB00_0000];
@@ -1577,7 +1601,7 @@ mod tests {
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
-        let mut iter = unsafe { ot.iter_packets() };
+        let mut iter = unsafe { ot.packets() };
         let entry = iter.next().expect("first duplicate packet");
         assert_eq!(entry.0 as usize, packet.as_ptr() as usize);
         assert_eq!(entry.1, 1);
