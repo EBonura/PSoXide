@@ -32,6 +32,13 @@ use core::arch::asm;
 macro_rules! cofun {
     ($instr:expr) => {{
         #[cfg(target_arch = "mips")]
+        // SAFETY: every `$instr` passed in this module is a `0x4A..` COP2
+        // cofun encoding, which reads and writes GTE registers only. It
+        // writes no CPU register, needs no stack (`nostack`), and the asm
+        // conservatively omits `nomem` even though the op never touches RAM.
+        // The wrappers' `# Safety` input-register preconditions only decide
+        // whether the result is meaningful; stale inputs give garbage
+        // numbers, not undefined behaviour.
         unsafe {
             asm!(
                 ".word {instr}",
