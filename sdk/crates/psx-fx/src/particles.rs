@@ -212,6 +212,12 @@ impl<const N: usize> ParticlePool<N> {
     /// used -- callers typically track a running `idx` and advance
     /// it by this value.
     ///
+    /// # Safety
+    ///
+    /// `ot` keeps the addresses of the rects it is given: `rects` must stay
+    /// live and unmodified until every submission of `ot` has been waited
+    /// out.
+    ///
     /// `shake` is a per-frame vertex offset applied uniformly to
     /// every particle (convenience for callers that apply the same
     /// shake to ball / paddle / etc.).
@@ -223,7 +229,7 @@ impl<const N: usize> ParticlePool<N> {
         note = "links rects through the deprecated `OrderingTable::add`; use `render_into_frame`"
     )]
     #[allow(deprecated)]
-    pub fn render_into_ot<const OT_N: usize>(
+    pub unsafe fn render_into_ot<const OT_N: usize>(
         &self,
         ot: &mut OrderingTable<OT_N>,
         rects: &mut [RectFlat],
@@ -239,7 +245,8 @@ impl<const N: usize> ParticlePool<N> {
                 break;
             }
             rects[written] = p.rect(shake);
-            ot.add(z as usize, &mut rects[written], RectFlat::WORDS);
+            // SAFETY: forwarded contract.
+            unsafe { ot.add(z as usize, &mut rects[written], RectFlat::WORDS) };
             written += 1;
         }
         written
