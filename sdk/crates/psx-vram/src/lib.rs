@@ -1251,12 +1251,18 @@ pub fn dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
     // but a VRAM readback could have flipped it to GPUREAD→CPU.
     write_gp1(gp1::dma_direction(2));
     dma::enable_channel(Channel::Gpu);
-    dma::set_madr(Channel::Gpu, src as u32);
-    dma::set_bcr_block(Channel::Gpu, words_per_row, rect.h);
-    dma::set_chcr(
-        Channel::Gpu,
-        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
-    );
+    // SAFETY: none yet; this function's caller supplies `src` unchecked.
+    // The channel was drained by `copy_to_vram_header`.
+    unsafe {
+        dma::start(
+            Channel::Gpu,
+            dma::Transfer {
+                madr: src as u32,
+                bcr: dma::bcr_blocks(words_per_row, rect.h),
+                chcr: dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+            },
+        )
+    };
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
         dma::abort(Channel::Gpu);
         // The GP0(A0) header is already out and the payload did not

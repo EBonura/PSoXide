@@ -844,7 +844,9 @@ pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
 /// number of 32-bit words -- the DMA controller is word-addressed.
 fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
     let src = bytes.as_ptr() as u32;
-    if !src.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
+    // An empty slice would program a zero block count, which silicon reads
+    // as 65,536 blocks: megabytes past the slice. PIO moves nothing instead.
+    if bytes.is_empty() || !src.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
         return false;
     }
     let words = (bytes.len() / 4) as u32;
@@ -887,12 +889,20 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
 
     // Channel 4: main RAM -> SPU, block-sync, forward, start; block until done.
     dma::enable_channel(Channel::Spu);
-    dma::set_madr(Channel::Spu, src);
-    dma::set_bcr_block(Channel::Spu, block_size as u16, block_count as u16);
-    dma::set_chcr(
-        Channel::Spu,
-        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
-    );
+    // SAFETY: the transfer reads `block_size * block_count` words from
+    // `src`, which is exactly `bytes` (word-aligned, a whole number of
+    // words, at least one block), borrowed until this function returns. The
+    // wait below, or the abort on a wedge, ends the transfer before then.
+    unsafe {
+        dma::start(
+            Channel::Spu,
+            dma::Transfer {
+                madr: src,
+                bcr: dma::bcr_blocks(block_size as u16, block_count as u16),
+                chcr: dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+            },
+        )
+    };
     if !dma::wait_done(Channel::Spu, dma::DEFAULT_DMA_SPINS) {
         dma::abort(Channel::Spu);
     }
