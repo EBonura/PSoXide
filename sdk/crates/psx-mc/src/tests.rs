@@ -264,7 +264,7 @@ fn corrupt_stored_len_is_rejected_not_panicking() {
 
 fn blank_entry() -> Entry {
     Entry {
-        name: [0; crate::MAX_NAME + 1],
+        name: [0; crate::MAX_NAME_LEN + 1],
         name_len: 0,
         blocks: 0,
     }

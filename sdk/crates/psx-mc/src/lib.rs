@@ -19,7 +19,7 @@
 //!
 //! Like [`psx_pad`](../psx_pad), this avoids BIOS syscalls so the same code runs
 //! under an HLE BIOS side-load or a real boot. The card protocol is a fixed
-//! request/response the [`sio`] module drives byte by byte.
+//! request/response the [`hardware`] module drives byte by byte.
 //!
 //! ## Example
 //!
@@ -52,12 +52,15 @@ mod tests;
 pub mod compress;
 
 #[cfg(feature = "hw")]
+#[doc(alias = "SIO0")]
+pub mod hardware;
+#[cfg(feature = "hw")]
 pub mod sio;
 
 pub use ram::RamCard;
 
 #[cfg(feature = "hw")]
-pub use sio::{HardwareCard, Slot, TransportFault, TransportTrace};
+pub use hardware::{HardwareCard, Slot, TransportFault, TransportTrace};
 
 // --------------------------------------------------------------------------
 // Card geometry (fixed by the hardware).
@@ -76,7 +79,10 @@ pub const CARD_SIZE: usize = FRAME_COUNT * FRAME_SIZE;
 /// Usable save blocks (blocks 1..=15; block 0 holds the directory).
 pub const DATA_BLOCKS: usize = BLOCK_COUNT - 1;
 /// Maximum file-name length (region+product code + name), excluding the NUL.
-pub const MAX_NAME: usize = 20;
+pub const MAX_NAME_LEN: usize = 20;
+/// Renamed to [`MAX_NAME_LEN`].
+#[deprecated(note = "renamed to `MAX_NAME_LEN`")]
+pub const MAX_NAME: usize = MAX_NAME_LEN;
 
 /// A native PS1 memory-card save icon.
 ///
@@ -168,7 +174,7 @@ pub trait Block {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// File name bytes (ASCII), `name_len` valid.
-    pub name: [u8; MAX_NAME + 1],
+    pub name: [u8; MAX_NAME_LEN + 1],
     /// Valid length of `name`.
     pub name_len: u8,
     /// Number of 8 KiB blocks the file occupies.
