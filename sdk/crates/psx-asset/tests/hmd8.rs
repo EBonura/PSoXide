@@ -1,10 +1,10 @@
 //! HMD8 parser check.
 //!
 //! Builds a minimal blob by hand, reads it back, and confirms the loader
-//! rejects a damaged header instead of trusting it. That guard is the whole
-//! reason the reader is safe to point at streamed data: every per-field read
-//! after `load` is unchecked, so validation is the only thing standing between
-//! a short chunk and a wild dereference.
+//! rejects a damaged header instead of trusting it. The hot accessors read
+//! through offsets that validation proved, so a damaged chunk loads as the
+//! null model; their bounds check is against the blob itself, which the
+//! out-of-range tests below exercise.
 //!
 //! The 12-bit rotation-code decode has its own unit tests inside the module.
 //!
@@ -157,6 +157,83 @@ fn parses_a_minimal_blob() {
     }
 }
 
+/// The checked accessors guard memory with the blob's own length, so an
+/// index past the tables, the empty model, or a public count overwritten by
+/// safe code all read inert values instead of outside the blob.
+#[test]
+fn accessors_stay_inside_the_blob() {
+    let model = load(build_blob());
+    for far in [N_VERTS * 1000, usize::MAX / 8] {
+        let v = model.vert(far);
+        assert_eq!([v.x, v.y, v.z], [0, 0, 0]);
+        let w = model.vert_gte_words(far);
+        assert_eq!((w.xy, w.z), (0, 0));
+    }
+    for far in [N_TRIS * 1000, usize::MAX / 32] {
+        let tri = model.tri(far);
+        assert_eq!(tri.idx, [0; 3]);
+        assert_eq!(tri.body_mask, 0, "an out-of-range face must be skipped");
+        assert_eq!(model.tri_uv_words(far), [0; 3]);
+        assert_eq!(model.tri_normal(far), [0; 3]);
+    }
+
+    // The public counts are plain fields; writing them must not widen what
+    // the accessors read.
+    let mut lying = model;
+    lying.n_tris = 1 << 20;
+    lying.n_verts = 1 << 20;
+    lying.n_ranges = 1 << 20;
+    lying.n_bones = 1 << 20;
+    lying.n_frames = 1 << 20;
+    lying.n_clips = 1 << 20;
+    assert_eq!(lying.tri(1 << 19).body_mask, 0);
+    assert_eq!(lying.vert(1 << 19).x, 0);
+    let _ = lying.range(1 << 19);
+    let _ = lying.clip_len(1 << 19);
+    let _ = lying.clip_frame(1 << 19, 3);
+    let _ = lying
+        .frame(1 << 19)
+        .interpolate(lying.frame(0), 8)
+        .bone(1 << 19, false, 0);
+
+    let empty = Model::EMPTY;
+    assert_eq!(empty.vert(0).x, 0);
+    assert_eq!(empty.tri(0).body_mask, 0);
+    assert_eq!(empty.range(0).count, 0);
+    assert_eq!(empty.hitbox(0).bone, 0);
+    let pose = empty
+        .frame(0)
+        .interpolate(empty.frame(0), 0)
+        .bone(0, false, 0);
+    assert_eq!(pose.rotation.m[0][0], 4096, "empty model poses as identity");
+}
+
+/// In range, the unchecked forms read exactly what the checked ones do.
+#[test]
+fn unchecked_accessors_match_the_checked_ones() {
+    let model = load(build_blob());
+    for v in 0..model.n_verts {
+        // SAFETY: `v` is below the loaded vertex count.
+        let (a, b) = unsafe { (model.vert_unchecked(v), model.vert_gte_words_unchecked(v)) };
+        let (c, d) = (model.vert(v), model.vert_gte_words(v));
+        assert_eq!([a.x, a.y, a.z], [c.x, c.y, c.z]);
+        assert_eq!((b.xy, b.z), (d.xy, d.z));
+    }
+    for t in 0..model.n_tris {
+        // SAFETY: `t` is below the loaded triangle count.
+        let (a, uv, n) = unsafe {
+            (
+                model.tri_unchecked(t),
+                model.tri_uv_words_unchecked(t),
+                model.tri_normal_unchecked(t),
+            )
+        };
+        assert_eq!(a.idx, model.tri(t).idx);
+        assert_eq!(uv, model.tri_uv_words(t));
+        assert_eq!(n, model.tri_normal(t));
+    }
+}
+
 #[test]
 fn decodes_poses_and_interpolates_between_frames() {
     let model = load(build_blob());
@@ -235,6 +312,7 @@ fn real_chunks_hold_their_invariants() {
     };
 
     let mut checked = 0;
+    let mut with_tracks = 0;
     for entry in std::fs::read_dir(&dir).expect("fixture dir") {
         let path = entry.expect("dir entry").path();
         if path.extension().is_none_or(|e| e != "psxm") {
@@ -284,7 +362,19 @@ fn real_chunks_hold_their_invariants() {
                 assert!((index as usize) < model.n_verts, "{name} tri {t} index");
             }
         }
+        if model.has_tracks() {
+            let tracks = model.hma1().expect("validated tracks");
+            let mut scratch = vec![psx_asset::hma1::Aff::ZERO; tracks.model.n_bones()];
+            for clip in 0..tracks.model.n_clips() {
+                let end = tracks.model.clip_intervals(clip) * 256;
+                for pos in [0, end / 3, end, end + 999] {
+                    tracks.model.decode(clip, pos, &mut scratch);
+                }
+            }
+            with_tracks += 1;
+        }
         checked += 1;
     }
+    eprintln!("{checked} HMD8 chunks, {with_tracks} with HMA1 tracks");
     assert!(checked > 0, "no .psxm chunks in {dir}");
 }

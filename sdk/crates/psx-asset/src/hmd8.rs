@@ -34,25 +34,43 @@ use psx_gte::math::{Mat3I16, Vec3I16};
 
 // ponytail: unchecked reads, same rationale as map.rs -- no D-cache on the
 // R3000, so dropping the bounds branch lets LLVM coalesce these into MIPS
-// unaligned word loads (lwl/lwr). Offsets derive from the cooked model header
-// (magic-checked at load), so they are in range by construction.
+// unaligned word loads (lwl/lwr). Every caller proves its range first: from
+// the offsets `Model::load` validated against the blob (private fields only;
+// the public counts can be overwritten by safe code and are never trusted for
+// memory safety), or with an explicit `fits` check.
+
+/// True when `d[o..o + n]` is in bounds.
 #[inline(always)]
-fn rd_u32(d: &[u8], o: usize) -> u32 {
+fn fits(d: &[u8], o: usize, n: usize) -> bool {
+    o <= d.len() && n <= d.len() - o
+}
+
+/// # Safety
+/// `o + 4 <= d.len()`.
+#[inline(always)]
+unsafe fn rd_u32(d: &[u8], o: usize) -> u32 {
+    // SAFETY: the caller guarantees bytes `o..o + 4` are in `d`.
     unsafe {
         let p = d.as_ptr().add(o);
         u32::from_le_bytes([p.read(), p.add(1).read(), p.add(2).read(), p.add(3).read()])
     }
 }
+/// # Safety
+/// `o + 2 <= d.len()`.
 #[inline(always)]
-fn rd_u16(d: &[u8], o: usize) -> u16 {
+unsafe fn rd_u16(d: &[u8], o: usize) -> u16 {
+    // SAFETY: the caller guarantees bytes `o..o + 2` are in `d`.
     unsafe {
         let p = d.as_ptr().add(o);
         u16::from_le_bytes([p.read(), p.add(1).read()])
     }
 }
+/// # Safety
+/// `o + 2 <= d.len()`.
 #[inline(always)]
-fn rd_i16(d: &[u8], o: usize) -> i16 {
-    rd_u16(d, o) as i16
+unsafe fn rd_i16(d: &[u8], o: usize) -> i16 {
+    // SAFETY: same contract as this function's.
+    unsafe { rd_u16(d, o) as i16 }
 }
 
 #[inline(always)]
@@ -62,7 +80,10 @@ fn decode_q11(raw: u16) -> i16 {
     // twelve-bit value, then use SLTIU to add two only for the reserved +2047
     // encoding. Every caller masks the packed field to twelve bits first.
     #[cfg(target_arch = "mips")]
-    unsafe {
+    // SAFETY: register-only arithmetic: the asm reads and writes just its two
+    // declared operands (`.set noat` keeps $at out of it), touches no memory
+    // and no stack.
+    let decoded = unsafe {
         let decoded: u32;
         core::arch::asm!(
             ".set push",
@@ -78,20 +99,24 @@ fn decode_q11(raw: u16) -> i16 {
             scratch = lateout(reg) _,
             options(nomem, nostack, preserves_flags),
         );
-        return decoded as i16;
-    }
-
+        decoded as i16
+    };
     #[cfg(not(target_arch = "mips"))]
-    {
+    let decoded = {
         let signed = ((raw << 4) as i16) >> 4;
         signed
             .wrapping_shl(1)
             .wrapping_add(((raw == 0x07ff) as i16) << 1)
-    }
+    };
+    decoded
 }
 
+/// # Safety
+/// `o + 4 <= d.len()`: the word load also takes the byte after the pair.
 #[inline(always)]
-fn rd_q11_pair(d: &[u8], o: usize) -> (i16, i16) {
+unsafe fn rd_q11_pair(d: &[u8], o: usize) -> (i16, i16) {
+    // SAFETY: the caller guarantees bytes `o..o + 4` are in `d`; the load is
+    // unaligned, so `o` needs no alignment.
     unsafe {
         // Each pair occupies three bytes. One unaligned word load is cheaper
         // on MIPS-I than three independent byte loads and exposes both packed
@@ -119,6 +144,13 @@ fn unpack_normal_555(packed: u16) -> [i8; 3] {
 /// Construct with [`Model::load`] or [`Model::load_with_vertex_cap`]; a blob
 /// that fails validation yields an empty model rather than panicking, so a bad
 /// cook draws nothing instead of taking the guest down.
+///
+/// Every accessor is memory-safe on any model, including one whose public
+/// counts (`n_verts`, `n_tris` and the rest) were overwritten: reads are
+/// bounded by the blob and the private offsets `load` validated, never by the
+/// public counts. An index past a table reads an inert value (origin vertex,
+/// skipped triangle, identity pose). The `*_unchecked` forms skip that check
+/// for hot loops that already bound their index by the loaded count.
 #[derive(Clone, Copy)]
 pub struct Model {
     data: &'static [u8],
@@ -248,6 +280,10 @@ const NORMAL_NONE: u8 = 0;
 const NORMAL_I8X3: u8 = 1;
 const NORMAL_PACKED_555: u8 = 2;
 const MOUTH_XFORM_BYTES: usize = 24;
+const IDENTITY_TRANSFORM: BoneTransform = BoneTransform {
+    rotation: Mat3I16::IDENTITY,
+    translation: Vec3I16::ZERO,
+};
 // Generated from the same cooked model scan that sizes main.rs MODEL_SCRATCH.
 // A larger model would overflow projection scratch, so reject it here rather
 // than merely clamping the draw and leaving face indices out of bounds.
@@ -331,7 +367,7 @@ impl Model {
         n_bones: 0,
         n_ranges: 0,
         tri_off: 0,
-        tri_sz: 0,
+        tri_sz: TRI_SZ,
         normal_encoding: NORMAL_NONE,
         local_to_world_q12: 4096,
         mouth_xforms_off: 0,
@@ -357,13 +393,33 @@ impl Model {
         if data.len() < HMD7_HEADER_BYTES || data.get(0..4) != Some(b"HMD8") {
             return Self::EMPTY;
         }
-        let n_verts = rd_u32(data, 4) as usize;
-        let n_tris = rd_u32(data, 8) as usize;
-        let packed_texture_hitbox_counts = rd_u32(data, 12);
-        let n_frames = (rd_u32(data, 16) as usize).max(1);
-        let n_clips = (rd_u32(data, 20) as usize).max(1);
-        let model_data_len = rd_u32(data, 24) as usize;
-        let raw_local_to_world_q12 = rd_u16(data, 28);
+        // SAFETY: every read below ends inside the HMD7_HEADER_BYTES (36)
+        // bytes the length check above guarantees.
+        let (
+            n_verts,
+            n_tris,
+            packed_texture_hitbox_counts,
+            n_frames,
+            n_clips,
+            model_data_len,
+            raw_local_to_world_q12,
+            hmd_flags,
+            n_bones,
+            n_ranges,
+        ) = unsafe {
+            (
+                rd_u32(data, 4) as usize,
+                rd_u32(data, 8) as usize,
+                rd_u32(data, 12),
+                (rd_u32(data, 16) as usize).max(1),
+                (rd_u32(data, 20) as usize).max(1),
+                rd_u32(data, 24) as usize,
+                rd_u16(data, 28),
+                rd_u16(data, 30),
+                rd_u16(data, 32) as usize,
+                rd_u16(data, 34) as usize,
+            )
+        };
         if !valid_local_to_world_q12(raw_local_to_world_q12) {
             return Self::EMPTY;
         }
@@ -372,9 +428,6 @@ impl Model {
         } else {
             raw_local_to_world_q12
         };
-        let hmd_flags = rd_u16(data, 30);
-        let n_bones = rd_u16(data, 32) as usize;
-        let n_ranges = rd_u16(data, 34) as usize;
         let clips_off = HMD7_HEADER_BYTES;
         let requested_frame_times = hmd_flags & HMD_FLAG_FRAME_TIMES != 0;
         let frame_times_off = clips_off.saturating_add(n_clips.saturating_mul(4));
@@ -414,8 +467,9 @@ impl Model {
         let hitboxes_off = mouth_xforms_off.saturating_add(mouth_xforms_len);
         let hitboxes_len = n_hitboxes.saturating_mul(HMD7_HITBOX_BYTES);
         let hma_off = hitboxes_off.saturating_add(hitboxes_len);
-        let hma_len = if hmd_flags & HMD_FLAG_HMA1 != 0 && hma_off.saturating_add(4) <= data.len() {
-            4usize.saturating_add(rd_u32(data, hma_off) as usize)
+        let hma_len = if hmd_flags & HMD_FLAG_HMA1 != 0 && fits(data, hma_off, 4) {
+            // SAFETY: `fits` just checked bytes `hma_off..hma_off + 4`.
+            4usize.saturating_add(unsafe { rd_u32(data, hma_off) } as usize)
         } else {
             0
         };
@@ -448,16 +502,27 @@ impl Model {
         let mut range = 0usize;
         while valid && range < n_ranges {
             let o = ranges_off + range * HMD7_RANGE_BYTES;
-            let first = rd_u16(data, o) as usize;
-            let count = rd_u16(data, o + 2) as usize;
-            let bone = rd_u16(data, o + 4) as usize;
-            valid = count > 0 && first.saturating_add(count) <= n_verts && bone < n_bones;
+            // The range table ends before the poses, which `valid` placed
+            // inside the blob; `fits` re-checks it so the reads stand alone.
+            valid = fits(data, o, HMD7_RANGE_BYTES) && {
+                // SAFETY: `fits` checked the whole eight-byte record.
+                let (first, count, bone) = unsafe {
+                    (
+                        rd_u16(data, o) as usize,
+                        rd_u16(data, o + 2) as usize,
+                        rd_u16(data, o + 4) as usize,
+                    )
+                };
+                count > 0 && first.saturating_add(count) <= n_verts && bone < n_bones
+            };
             range += 1;
         }
         let mut hitbox = 0usize;
         while valid && hitbox < n_hitboxes {
             let o = hitboxes_off + hitbox * HMD7_HITBOX_BYTES;
-            valid = (rd_u16(data, o) as usize) < n_bones;
+            valid = fits(data, o, HMD7_HITBOX_BYTES)
+                // SAFETY: `fits` checked the whole hitbox record.
+                && (unsafe { rd_u16(data, o) } as usize) < n_bones;
             hitbox += 1;
         }
         if valid && hma_len != 0 {
@@ -541,23 +606,30 @@ impl Model {
         if self.hma_len == 0 {
             return None;
         }
-        let (map_off, blob_off, end) = hma1_section_layout(self.data, self.hma_off, self.hma_len);
         let data: &'static [u8] = self.data;
-        let jaw_bone = data[self.hma_off + 6];
+        let off = self.hma_off;
+        let (map_off, blob_off, end) = hma1_section_layout(data, off, self.hma_len)?;
+        // The section's own bone count, which load matched to the model's.
+        let n_used = u16::from_le_bytes([data[off + 4], data[off + 5]]) as usize;
+        let blob = data.get(blob_off..end)?;
+        let jaw_bone = data[off + 6];
+        let le_i16 = |o: usize| i16::from_le_bytes([data[o], data[o + 1]]);
         Some(Tracks {
-            model: crate::hma1::Model::new(&data[blob_off..end]),
-            map: &data[map_off..map_off + self.n_bones],
+            // SAFETY: `hma_off`/`hma_len` are private and only set by load
+            // after `hma1_section_valid` passed this blob to `Model::new`.
+            model: unsafe { crate::hma1::Model::new_unchecked(blob) },
+            map: data.get(map_off..map_off + n_used)?,
             jaw: if jaw_bone == 0xff {
                 None
             } else {
                 Some(Jaw {
                     bone: jaw_bone as usize,
-                    post: data[self.hma_off + 7] & 1 != 0,
+                    post: data[off + 7] & 1 != 0,
                     open: [
-                        rd_i16(data, self.hma_off + 8),
-                        rd_i16(data, self.hma_off + 10),
-                        rd_i16(data, self.hma_off + 12),
-                        rd_i16(data, self.hma_off + 14),
+                        le_i16(off + 8),
+                        le_i16(off + 10),
+                        le_i16(off + 12),
+                        le_i16(off + 14),
                     ],
                 })
             },
@@ -589,7 +661,7 @@ impl Model {
         let Some(tracks) = self.hma1() else {
             return Pose::Palette(self.frame(frame).interpolate(self.frame(frame2), frac16));
         };
-        if tracks.model.n_bones > scratch.len() {
+        if tracks.model.n_bones() > scratch.len() {
             return Pose::Palette(self.frame(0).interpolate(self.frame(0), 0));
         }
         let jaw = match tracks.jaw {
@@ -620,14 +692,27 @@ impl Model {
         self.local_to_world_q12
     }
 
+    /// `(first_frame, frame_count)` words of `clip`'s record, clamped to the
+    /// last clip, or `None` when the model has no readable clip table.
+    #[inline]
+    fn clip_rec(&self, clip: usize) -> Option<(u16, u16)> {
+        if self.clips_off == 0 {
+            return None;
+        }
+        let o = self.clips_off + clip.min(self.n_clips.saturating_sub(1)) * 4;
+        if !fits(self.data, o, 4) {
+            return None;
+        }
+        // SAFETY: `fits` checked the four-byte record.
+        Some(unsafe { (rd_u16(self.data, o), rd_u16(self.data, o + 2)) })
+    }
+
     #[inline]
     pub fn clip_len(&self, clip: usize) -> usize {
-        if self.clips_off == 0 {
+        let Some((_, count)) = self.clip_rec(clip) else {
             return self.n_frames.max(1);
-        }
-        let c = clip.min(self.n_clips.saturating_sub(1));
-        let o = self.clips_off + c * 4;
-        ((rd_u16(self.data, o + 2) & CLIP_FRAME_COUNT_MASK) as usize).max(1)
+        };
+        ((count & CLIP_FRAME_COUNT_MASK) as usize).max(1)
     }
 
     /// GoldSrc source-sequence duration at the 20 Hz game clock. HMD8 cooks
@@ -636,13 +721,10 @@ impl Model {
     /// falls back safely instead of allowing a malformed clip to divide by zero.
     #[inline]
     pub fn clip_hold_ticks(&self, clip: usize) -> u16 {
-        if self.clips_off == 0 {
+        let Some((packed_first, count)) = self.clip_rec(clip) else {
             return DEFAULT_CLIP_HOLD_TICKS;
-        }
-        let c = clip.min(self.n_clips.saturating_sub(1));
-        let o = self.clips_off + c * 4;
-        let packed_first = rd_u16(self.data, o);
-        let quanta = (rd_u16(self.data, o + 2) >> 8)
+        };
+        let quanta = (count >> 8)
             | if packed_first & CLIP_DURATION_EXT_BIT != 0 {
                 0x0100
             } else {
@@ -657,13 +739,11 @@ impl Model {
 
     #[inline]
     pub fn clip_frame(&self, clip: usize, local_frame: usize) -> usize {
-        if self.clips_off == 0 {
+        let Some((first, count)) = self.clip_rec(clip) else {
             return local_frame % self.n_frames.max(1);
-        }
-        let c = clip.min(self.n_clips.saturating_sub(1));
-        let o = self.clips_off + c * 4;
-        let first = (rd_u16(self.data, o) & CLIP_FIRST_FRAME_MASK) as usize;
-        let count = ((rd_u16(self.data, o + 2) & CLIP_FRAME_COUNT_MASK) as usize).max(1);
+        };
+        let first = (first & CLIP_FIRST_FRAME_MASK) as usize;
+        let count = ((count & CLIP_FRAME_COUNT_MASK) as usize).max(1);
         (first + (local_frame % count)).min(self.n_frames.saturating_sub(1))
     }
 
@@ -788,95 +868,191 @@ impl Model {
         }
     }
 
+    /// Bone range `index`, clamped to the last range. A model without ranges
+    /// (the empty model) returns an empty range.
     #[inline]
     pub fn range(&self, index: usize) -> BoneRange {
         let index = index.min(self.n_ranges.saturating_sub(1));
         let o = self.ranges_off + index * HMD7_RANGE_BYTES;
+        if !fits(self.data, o, HMD7_RANGE_BYTES) {
+            return BoneRange {
+                first: 0,
+                count: 0,
+                bone: 0,
+                body_mask: 0,
+                mouth: false,
+            };
+        }
+        // SAFETY: `fits` checked the eight-byte record.
+        let (first, count, bone) = unsafe {
+            (
+                rd_u16(self.data, o) as usize,
+                rd_u16(self.data, o + 2) as usize,
+                rd_u16(self.data, o + 4) as usize,
+            )
+        };
         BoneRange {
-            first: rd_u16(self.data, o) as usize,
-            count: rd_u16(self.data, o + 2) as usize,
-            bone: rd_u16(self.data, o + 4) as usize,
+            first,
+            count,
+            bone,
             body_mask: self.data[o + 6],
             mouth: self.data[o + 7] & HMD7_RANGE_MOUTH != 0,
         }
     }
 
+    /// Studio hitbox `index`, clamped to the last one. A model without
+    /// hitboxes returns a zero box on bone 0.
     #[inline]
     pub fn hitbox(&self, index: usize) -> StudioHitbox {
         let index = index.min(self.n_hitboxes.saturating_sub(1));
         let o = self.hitboxes_off + index * HMD7_HITBOX_BYTES;
-        StudioHitbox {
-            bone: rd_u16(self.data, o) as usize,
-            bbmin: Vec3I16::new(
-                rd_i16(self.data, o + 2),
-                rd_i16(self.data, o + 4),
-                rd_i16(self.data, o + 6),
-            ),
-            bbmax: Vec3I16::new(
-                rd_i16(self.data, o + 8),
-                rd_i16(self.data, o + 10),
-                rd_i16(self.data, o + 12),
-            ),
+        if self.n_hitboxes == 0 || !fits(self.data, o, HMD7_HITBOX_BYTES) {
+            return StudioHitbox {
+                bone: 0,
+                bbmin: Vec3I16::ZERO,
+                bbmax: Vec3I16::ZERO,
+            };
+        }
+        // SAFETY: `fits` checked the fourteen-byte record.
+        unsafe {
+            StudioHitbox {
+                bone: rd_u16(self.data, o) as usize,
+                bbmin: Vec3I16::new(
+                    rd_i16(self.data, o + 2),
+                    rd_i16(self.data, o + 4),
+                    rd_i16(self.data, o + 6),
+                ),
+                bbmax: Vec3I16::new(
+                    rd_i16(self.data, o + 8),
+                    rd_i16(self.data, o + 10),
+                    rd_i16(self.data, o + 12),
+                ),
+            }
         }
     }
 
+    /// True when vertex `index`'s record lies inside the blob: for every
+    /// `index < n_verts` of a loaded model. Memory safety rests on this check
+    /// alone, never on the public counts.
+    #[inline(always)]
+    fn vert_in_blob(&self, index: usize) -> bool {
+        if self.vertex_soa {
+            fits(self.data, self.vertices_off + index * 4, 4)
+                && fits(self.data, self.vertices_z_off + index * 2, 2)
+        } else {
+            fits(self.data, self.vertices_off + index * 6, 6)
+        }
+    }
+
+    /// Bone-local position of vertex `index`. An index past the vertex
+    /// stream reads as the origin instead of outside the blob; hot loops that
+    /// have already bounded the index can use [`Self::vert_unchecked`].
     #[inline]
     pub fn vert(&self, index: usize) -> Vec3I16 {
+        if !self.vert_in_blob(index) {
+            return Vec3I16::ZERO;
+        }
+        // SAFETY: `vert_in_blob` checked this vertex's record.
+        unsafe { self.vert_unchecked(index) }
+    }
+
+    /// [`Self::vert`] without the bounds check.
+    ///
+    /// # Safety
+    /// `index` must be below the `n_verts` that [`Model::load`] gave this
+    /// model. (The public count can be overwritten; the bound is the loaded
+    /// value.)
+    #[inline]
+    pub unsafe fn vert_unchecked(&self, index: usize) -> Vec3I16 {
         if self.vertex_soa {
             let xy = self.vertices_off + index * 4;
             let z = self.vertices_z_off + index * 2;
-            return Vec3I16::new(
-                rd_i16(self.data, xy),
-                rd_i16(self.data, xy + 2),
-                rd_i16(self.data, z),
-            );
+            // SAFETY: load placed both SoA streams, `n_verts` records long,
+            // inside the blob, and the caller keeps `index` below that.
+            return unsafe {
+                Vec3I16::new(
+                    rd_i16(self.data, xy),
+                    rd_i16(self.data, xy + 2),
+                    rd_i16(self.data, z),
+                )
+            };
         }
         #[allow(unused_variables)] // read only by the MIPS path below
         let o = self.vertices_off + index * 6;
         #[cfg(target_arch = "mips")]
         if self.aligned_vertices {
+            // New HMD8 cooks halfword-align this six-byte stream. Native
+            // LH loads replace six LBU operations plus their shifts/ORs in
+            // the per-RTPT model projection loop. The fallback below keeps
+            // an old cached HMD8 blob playable without requiring a recook.
+            // SAFETY: the six-byte record is in the blob (as below), and
+            // `aligned_vertices` means load saw `data + vertices_off` even;
+            // `index * 6` keeps it even, so the i16 loads are aligned.
             unsafe {
-                // New HMD8 cooks halfword-align this six-byte stream. Native
-                // LH loads replace six LBU operations plus their shifts/ORs in
-                // the per-RTPT model projection loop. The fallback below keeps
-                // an old cached HMD8 blob playable without requiring a recook.
                 let p = self.data.as_ptr().add(o).cast::<i16>();
                 return Vec3I16::new(p.read(), p.add(1).read(), p.add(2).read());
             }
         }
-        Vec3I16::new(
-            rd_i16(self.data, o),
-            rd_i16(self.data, o + 2),
-            rd_i16(self.data, o + 4),
-        )
+        // SAFETY: load placed the `n_verts * 6` byte stream inside the blob,
+        // and the caller keeps `index` below `n_verts`.
+        unsafe {
+            Vec3I16::new(
+                rd_i16(self.data, o),
+                rd_i16(self.data, o + 2),
+                rd_i16(self.data, o + 4),
+            )
+        }
     }
 
+    /// Vertex `index` packed as the GTE's VXY/VZ register words. An index
+    /// past the vertex stream reads as the origin; see
+    /// [`Self::vert_gte_words_unchecked`] for bounded hot loops.
     #[inline]
     pub fn vert_gte_words(&self, index: usize) -> GteVertexWords {
+        if !self.vert_in_blob(index) {
+            return GteVertexWords { xy: 0, z: 0 };
+        }
+        // SAFETY: `vert_in_blob` checked this vertex's record.
+        unsafe { self.vert_gte_words_unchecked(index) }
+    }
+
+    /// [`Self::vert_gte_words`] without the bounds check.
+    ///
+    /// # Safety
+    /// Same as [`Self::vert_unchecked`].
+    #[inline]
+    pub unsafe fn vert_gte_words_unchecked(&self, index: usize) -> GteVertexWords {
         if self.vertex_soa {
             let xy = self.vertices_off + index * 4;
             let z = self.vertices_z_off + index * 2;
             #[cfg(target_arch = "mips")]
+            // SAFETY: both records are in the blob (caller's bound on
+            // `index`). `data` is a byte slice, so a normal raw read can
+            // retain align=1 in LLVM even after the cast and become LWL/LWR.
+            // HMD_FLAG_VERTEX_SOA is validated against the actual base
+            // address at load, making these native aligned loads sound.
             unsafe {
                 return GteVertexWords {
-                    // `data` is a byte slice, so a normal raw read can retain
-                    // align=1 in LLVM even after the cast and become LWL/LWR.
-                    // HMD_FLAG_VERTEX_SOA is validated against the actual base
-                    // address at load, making these native aligned loads safe.
                     xy: core::ptr::read_volatile(self.data.as_ptr().add(xy).cast::<u32>()),
                     z: core::ptr::read_volatile(self.data.as_ptr().add(z).cast::<i16>()) as i32
                         as u32,
                 };
             }
             #[cfg(not(target_arch = "mips"))]
-            return GteVertexWords {
-                xy: rd_u32(self.data, xy),
-                z: rd_i16(self.data, z) as i32 as u32,
+            // SAFETY: both records are in the blob (caller's bound on `index`).
+            return unsafe {
+                GteVertexWords {
+                    xy: rd_u32(self.data, xy),
+                    z: rd_i16(self.data, z) as i32 as u32,
+                }
             };
         }
         #[allow(unused_variables)] // read only by the MIPS path below
         let o = self.vertices_off + index * 6;
         #[cfg(target_arch = "mips")]
+        // SAFETY: the six-byte record is in the blob (caller's bound on
+        // `index`); the XY word load is unaligned, and the Z load is aligned
+        // only when `aligned_vertices` says load saw an even base.
         unsafe {
             let p = self.data.as_ptr().add(o);
             let xy = p.cast::<u32>().read_unaligned();
@@ -885,14 +1061,15 @@ impl Model {
             } else {
                 rd_i16(self.data, o + 4)
             };
-            return GteVertexWords {
+            GteVertexWords {
                 xy,
                 z: z as i32 as u32,
-            };
+            }
         }
         #[cfg(not(target_arch = "mips"))]
         {
-            let v = self.vert(index);
+            // SAFETY: same contract as this function's.
+            let v = unsafe { self.vert_unchecked(index) };
             GteVertexWords {
                 xy: ((v.y as u16 as u32) << 16) | v.x as u16 as u32,
                 z: v.z as i32 as u32,
@@ -1064,59 +1241,112 @@ impl Model {
         }
     }
 
+    /// True when triangle `t`'s record lies inside the blob: for every
+    /// `t < n_tris` of a loaded model. Memory safety rests on this check
+    /// alone, never on the public counts.
+    #[inline(always)]
+    fn tri_in_blob(&self, t: usize) -> bool {
+        // `tri_sz` is TRI_SZ or TRI_SZ_FULL_NORMALS in every model (EMPTY
+        // included), so this covers every byte `tri_unchecked` reads.
+        fits(self.data, self.tri_off + t * self.tri_sz, self.tri_sz)
+    }
+
+    /// Triangle `t`, unpacked. An index past the triangle table reads as a
+    /// degenerate triangle with an empty body mask, which every renderer
+    /// skips; hot loops that have already bounded `t` can use
+    /// [`Self::tri_unchecked`].
     #[inline(always)]
     pub fn tri(&self, t: usize) -> Tri {
+        if !self.tri_in_blob(t) {
+            return Tri {
+                idx: [0; 3],
+                tex: 0,
+                uv: [(0, 0); 3],
+                normal: [0; 3],
+                body_mask: 0,
+            };
+        }
+        // SAFETY: `tri_in_blob` checked this triangle's record.
+        unsafe { self.tri_unchecked(t) }
+    }
+
+    /// [`Self::tri`] without the bounds check.
+    ///
+    /// # Safety
+    /// `t` must be below the `n_tris` that [`Model::load`] gave this model.
+    /// (The public count can be overwritten; the bound is the loaded value.)
+    #[inline(always)]
+    pub unsafe fn tri_unchecked(&self, t: usize) -> Tri {
         let o = self.tri_off + t * self.tri_sz;
         let d = self.data;
-        // Model::new validated the complete triangle table. Raw byte reads
-        // avoid Rust's unsafe-precondition guards, which current nightly still
-        // emits for every `get_unchecked`/slice index in this per-face hot loop.
-        let p = unsafe { d.as_ptr().add(o) };
-        Tri {
-            idx: [rd_u16(d, o), rd_u16(d, o + 2), rd_u16(d, o + 4)],
-            tex: rd_u16(d, o + 6) as usize,
-            uv: [
-                unsafe { (p.add(8).read(), p.add(9).read()) },
-                unsafe { (p.add(10).read(), p.add(11).read()) },
-                unsafe { (p.add(12).read(), p.add(13).read()) },
-            ],
-            normal: match self.normal_encoding {
-                NORMAL_I8X3 => unsafe {
-                    [
+        // Raw byte reads avoid Rust's unsafe-precondition guards, which
+        // current nightly still emits for every `get_unchecked`/slice index
+        // in this per-face hot loop.
+        // SAFETY: load placed the `n_tris * tri_sz` byte table inside the
+        // blob and the caller keeps `t` below `n_tris`, so the whole record
+        // is readable. Every offset below stays inside it: `tri_sz` is 20
+        // with i8 normals (last byte read: 17) and 16 otherwise (last: 15).
+        unsafe {
+            let p = d.as_ptr().add(o);
+            Tri {
+                idx: [rd_u16(d, o), rd_u16(d, o + 2), rd_u16(d, o + 4)],
+                tex: rd_u16(d, o + 6) as usize,
+                uv: [
+                    (p.add(8).read(), p.add(9).read()),
+                    (p.add(10).read(), p.add(11).read()),
+                    (p.add(12).read(), p.add(13).read()),
+                ],
+                normal: match self.normal_encoding {
+                    NORMAL_I8X3 => [
                         p.add(14).read() as i8,
                         p.add(15).read() as i8,
                         p.add(16).read() as i8,
-                    ]
+                    ],
+                    NORMAL_PACKED_555 => unpack_normal_555(rd_u16(d, o + 14)),
+                    _ => [0; 3],
                 },
-                NORMAL_PACKED_555 => unpack_normal_555(rd_u16(d, o + 14)),
-                _ => [0; 3],
-            },
-            body_mask: if self.has_body_masks {
-                unsafe {
+                body_mask: if self.has_body_masks {
                     p.add(if self.normal_encoding == NORMAL_I8X3 {
                         17
                     } else {
                         14
                     })
                     .read()
-                }
-            } else {
-                0xff
-            },
+                } else {
+                    0xff
+                },
+            }
         }
     }
 
     /// Packet-order UV words for a triangle whose other steady-render fields
-    /// are already in the viewmodel pose cache. The triangle table was fully
-    /// validated by `Model::new`, so these raw halfword reads are exact.
+    /// are already in the viewmodel pose cache. An index past the triangle
+    /// table reads as zero; see [`Self::tri_uv_words_unchecked`].
     #[inline(always)]
     pub fn tri_uv_words(&self, t: usize) -> [u16; 3] {
+        if !self.tri_in_blob(t) {
+            return [0; 3];
+        }
+        // SAFETY: `tri_in_blob` checked this triangle's record.
+        unsafe { self.tri_uv_words_unchecked(t) }
+    }
+
+    /// [`Self::tri_uv_words`] without the bounds check.
+    ///
+    /// # Safety
+    /// Same as [`Self::tri_unchecked`].
+    #[inline(always)]
+    pub unsafe fn tri_uv_words_unchecked(&self, t: usize) -> [u16; 3] {
         let o = self.tri_off + t * self.tri_sz + 8;
-        [
-            rd_u16(self.data, o),
-            rd_u16(self.data, o + 2),
-            rd_u16(self.data, o + 4),
-        ]
+        // SAFETY: bytes 8..14 of a record the caller's bound keeps in the
+        // blob.
+        unsafe {
+            [
+                rd_u16(self.data, o),
+                rd_u16(self.data, o + 2),
+                rd_u16(self.data, o + 4),
+            ]
+        }
     }
 
     #[inline]
@@ -1124,14 +1354,37 @@ impl Model {
         self.has_body_masks
     }
 
+    /// Triangle `t`'s face normal. An index past the triangle table reads as
+    /// zero; see [`Self::tri_normal_unchecked`].
     #[inline]
     pub fn tri_normal(&self, t: usize) -> [i8; 3] {
+        if !self.tri_in_blob(t) {
+            return [0; 3];
+        }
+        // SAFETY: `tri_in_blob` checked this triangle's record.
+        unsafe { self.tri_normal_unchecked(t) }
+    }
+
+    /// [`Self::tri_normal`] without the bounds check.
+    ///
+    /// # Safety
+    /// Same as [`Self::tri_unchecked`].
+    #[inline]
+    pub unsafe fn tri_normal_unchecked(&self, t: usize) -> [i8; 3] {
         let o = self.tri_off + t * self.tri_sz + 14;
-        let d = self.data;
-        match self.normal_encoding {
-            NORMAL_I8X3 => [d[o] as i8, d[o + 1] as i8, d[o + 2] as i8],
-            NORMAL_PACKED_555 => unpack_normal_555(rd_u16(d, o)),
-            _ => [0; 3],
+        let p = self.data.as_ptr();
+        // SAFETY: bytes 14..17 (i8 normals, 20-byte records) or 14..16
+        // (packed normals) of a record the caller's bound keeps in the blob.
+        unsafe {
+            match self.normal_encoding {
+                NORMAL_I8X3 => [
+                    p.add(o).read() as i8,
+                    p.add(o + 1).read() as i8,
+                    p.add(o + 2).read() as i8,
+                ],
+                NORMAL_PACKED_555 => unpack_normal_555(rd_u16(self.data, o)),
+                _ => [0; 3],
+            }
         }
     }
 
@@ -1295,16 +1548,19 @@ impl Pose<'_> {
     }
 }
 
+/// `(map_off, blob_off, end)` of the HMA1 section at `off`; `None` when its
+/// header does not fit `data`.
 #[inline(always)]
-fn hma1_section_layout(data: &[u8], off: usize, len: usize) -> (usize, usize, usize) {
-    let n_used = rd_u16(data, off + 4) as usize;
+fn hma1_section_layout(data: &[u8], off: usize, len: usize) -> Option<(usize, usize, usize)> {
+    let n_used = u16::from_le_bytes([*data.get(off + 4)?, *data.get(off + 5)?]) as usize;
     let map_off = off + HMA1_SECTION_HEADER;
-    ((map_off), (map_off + n_used + 1) & !1, off + len)
+    Some((map_off, (map_off + n_used + 1) & !1, off + len))
 }
 
-/// Structural check of an HMA1 section, run once at load: every range bone
-/// maps to a track bone, the jaw exists, and every clip the HMD8 table names
-/// has tracks. Key data itself is trusted like the palettes are.
+/// Check of an HMA1 section, run once at load: the tracks pass
+/// [`crate::hma1::Model::new`] (every read in bounds, parents first), every
+/// range bone maps to a track bone, the jaw exists, and every clip the HMD8
+/// table names has tracks.
 fn hma1_section_valid(
     data: &'static [u8],
     off: usize,
@@ -1312,39 +1568,33 @@ fn hma1_section_valid(
     n_bones: usize,
     n_clips: usize,
 ) -> bool {
-    if len < HMA1_SECTION_HEADER + 4 || rd_u16(data, off + 4) as usize != n_bones {
+    if len < HMA1_SECTION_HEADER + 4 {
         return false;
     }
-    let (map_off, blob_off, end) = hma1_section_layout(data, off, len);
-    if blob_off.saturating_add(8) > end {
+    let Some((map_off, blob_off, end)) = hma1_section_layout(data, off, len) else {
+        return false;
+    };
+    if map_off + n_bones > end || blob_off > end {
         return false;
     }
-    let hma_bones = rd_u16(data, blob_off) as usize;
-    let hma_clips = rd_u16(data, blob_off + 2) as usize;
-    if hma_bones == 0 || hma_clips < n_clips.max(1) {
+    let (Some(map), Some(blob), Some(&jaw)) = (
+        data.get(map_off..map_off + n_bones),
+        data.get(blob_off..end),
+        data.get(off + 6),
+    ) else {
+        return false;
+    };
+    if u16::from_le_bytes([data[off + 4], data[off + 5]]) as usize != n_bones {
         return false;
     }
-    if blob_off + 4 + hma_bones > end {
+    let Some(tracks) = crate::hma1::Model::new(blob) else {
         return false;
-    }
-    let mut b = 0usize;
-    while b < n_bones {
-        if data[map_off + b] as usize >= hma_bones {
-            return false;
-        }
-        b += 1;
-    }
-    // The decoder composes parents first without bounds checks.
-    let mut b = 0usize;
-    while b < hma_bones {
-        let parent = data[blob_off + 4 + b] as usize;
-        if parent != 0xff && parent >= b {
-            return false;
-        }
-        b += 1;
-    }
-    let jaw = data[off + 6];
-    jaw == 0xff || (jaw as usize) < hma_bones
+    };
+    let hma_bones = tracks.n_bones();
+    hma_bones != 0
+        && tracks.n_clips() >= n_clips.max(1)
+        && map.iter().all(|&bone| (bone as usize) < hma_bones)
+        && (jaw == 0xff || (jaw as usize) < hma_bones)
 }
 
 impl<'a> ModelFrame<'a> {
@@ -1356,56 +1606,57 @@ impl<'a> ModelFrame<'a> {
             frac16: frac16 as i32,
         }
     }
-
+    /// Bone `bone`'s palette entry, clamped to the last bone; identity when
+    /// the record is not inside the blob (the empty model).
     #[inline]
     fn bone(&self, bone: usize) -> BoneTransform {
         let bone = bone.min(self.n_bones.saturating_sub(1));
         let o = self.poses_off + (self.frame_idx * self.n_bones + bone) * HMD8_AFFINE_BYTES;
-        let p0 = rd_q11_pair(self.data, o);
-        let p1 = rd_q11_pair(self.data, o + 3);
-        let p2 = rd_q11_pair(self.data, o + 6);
-        let p3 = rd_q11_pair(self.data, o + 9);
-        let last = decode_q11(rd_u16(self.data, o + 12) & 0x0fff);
-        BoneTransform {
-            rotation: Mat3I16 {
-                m: [[p0.0, p0.1, p1.0], [p1.1, p2.0, p2.1], [p3.0, p3.1, last]],
-            },
-            translation: Vec3I16::new(
-                rd_i16(self.data, o + 14),
-                rd_i16(self.data, o + 16),
-                rd_i16(self.data, o + 18),
-            ),
+        if !fits(self.data, o, HMD8_AFFINE_BYTES) {
+            return IDENTITY_TRANSFORM;
+        }
+        // SAFETY: `fits` checked the 20-byte record; the last word load
+        // (pair at `o + 9`) ends at `o + 13` and the last halfword at `o + 20`.
+        unsafe {
+            let p0 = rd_q11_pair(self.data, o);
+            let p1 = rd_q11_pair(self.data, o + 3);
+            let p2 = rd_q11_pair(self.data, o + 6);
+            let p3 = rd_q11_pair(self.data, o + 9);
+            let last = decode_q11(rd_u16(self.data, o + 12) & 0x0fff);
+            BoneTransform {
+                rotation: Mat3I16 {
+                    m: [[p0.0, p0.1, p1.0], [p1.1, p2.0, p2.1], [p3.0, p3.1, last]],
+                },
+                translation: Vec3I16::new(
+                    rd_i16(self.data, o + 14),
+                    rd_i16(self.data, o + 16),
+                    rd_i16(self.data, o + 18),
+                ),
+            }
         }
     }
 
+    /// The frame's open-mouth transform; identity when it is not inside the
+    /// blob.
     #[inline]
     fn mouth_xform(&self) -> BoneTransform {
         let o = self.mouth_xforms_off + self.frame_idx * MOUTH_XFORM_BYTES;
-        BoneTransform {
-            rotation: Mat3I16 {
-                m: [
-                    [
-                        rd_i16(self.data, o),
-                        rd_i16(self.data, o + 2),
-                        rd_i16(self.data, o + 4),
+        if !fits(self.data, o, MOUTH_XFORM_BYTES) {
+            return IDENTITY_TRANSFORM;
+        }
+        let d = self.data;
+        // SAFETY: `fits` checked the 24-byte record.
+        unsafe {
+            BoneTransform {
+                rotation: Mat3I16 {
+                    m: [
+                        [rd_i16(d, o), rd_i16(d, o + 2), rd_i16(d, o + 4)],
+                        [rd_i16(d, o + 6), rd_i16(d, o + 8), rd_i16(d, o + 10)],
+                        [rd_i16(d, o + 12), rd_i16(d, o + 14), rd_i16(d, o + 16)],
                     ],
-                    [
-                        rd_i16(self.data, o + 6),
-                        rd_i16(self.data, o + 8),
-                        rd_i16(self.data, o + 10),
-                    ],
-                    [
-                        rd_i16(self.data, o + 12),
-                        rd_i16(self.data, o + 14),
-                        rd_i16(self.data, o + 16),
-                    ],
-                ],
-            },
-            translation: Vec3I16::new(
-                rd_i16(self.data, o + 18),
-                rd_i16(self.data, o + 20),
-                rd_i16(self.data, o + 22),
-            ),
+                },
+                translation: Vec3I16::new(rd_i16(d, o + 18), rd_i16(d, o + 20), rd_i16(d, o + 22)),
+            }
         }
     }
 
@@ -1521,8 +1772,10 @@ mod tests {
         let b = 0x0800u32;
         let packed = a | (b << 12) | (0xa5 << 24);
         let bytes = packed.to_le_bytes();
+        // SAFETY: `bytes` holds the four bytes the pair read loads.
+        let pair = unsafe { rd_q11_pair(&bytes, 0) };
         assert_eq!(
-            rd_q11_pair(&bytes, 0),
+            pair,
             (
                 reference_decode_q11(a as u16),
                 reference_decode_q11(b as u16)
