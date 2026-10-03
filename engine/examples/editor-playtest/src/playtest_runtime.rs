@@ -2026,7 +2026,7 @@ impl Playtest {
             let fired = self.logic.fire_index(
                 LOGIC,
                 usize::from(interactable.logic),
-                psx_game_runtime::logic::use_type::TOGGLE,
+                psx_game_runtime::logic::UseCode::Toggle,
                 now,
             );
             if fired {
