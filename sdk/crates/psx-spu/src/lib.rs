@@ -142,6 +142,7 @@ const SPUCNT_CD_AUDIO_ENABLE: u16 = 1 << 0;
 /// - Transfer mode: 16-bit PIO (the upload path we expose)
 ///
 /// Call once at boot before any voice operations.
+#[doc(alias = "SpuInit")]
 pub fn init() {
     // Silence everything immediately -- key_off on all 24 voices
     // before we touch any other state, so nothing glitches audibly

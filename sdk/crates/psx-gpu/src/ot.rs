@@ -167,6 +167,7 @@ impl<const N: usize> OrderingTable<N> {
     /// terminator (farthest from camera); each higher slot points
     /// to the slot below. Submission starts at `[N-1]` so the
     /// DMA walker visits `[N-1] → [N-2] → … → [0] → end`.
+    #[doc(alias = "ClearOTagR")]
     pub fn clear(&mut self) {
         // CPU clear by default: the OTC DMA is one of the channels the
         // CL2 silicon probes showed can wedge busy-forever on real
@@ -936,6 +937,7 @@ impl<const N: usize> OrderingTable<N> {
     /// Submit the whole table to GPU via DMA channel 2 linked-list
     /// mode and wait for completion. Forwards to
     /// [`crate::submit_linked_list`].
+    #[doc(alias = "DrawOTag")]
     pub fn submit(&self) {
         crate::submit_linked_list(self.submit_head());
     }
