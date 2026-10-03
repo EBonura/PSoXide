@@ -74,7 +74,9 @@ fn set_recording_active(active: bool) {
 }
 
 /// The slow half of [`super::write_command`]: record the word, or run the
-/// guard before the port write.
+/// guard before the port write. Out of line and cold, so each write site
+/// carries only the flag load and branch.
+#[cold]
 #[inline(never)]
 pub(super) fn write_command_slow(word: u32) {
     if is_recording() {
@@ -83,6 +85,18 @@ pub(super) fn write_command_slow(word: u32) {
     }
     run_direct_access_guard();
     super::write_command_unguarded(word);
+}
+
+/// The slow half of [`super::write_display_control`]: run the guard unless a
+/// recording is open (display control is never recorded), then write the
+/// port.
+#[cold]
+#[inline(never)]
+pub(super) fn write_display_control_slow(word: u32) {
+    if !is_recording() {
+        run_direct_access_guard();
+    }
+    super::write_display_control_unguarded(word);
 }
 
 /// A command stream recorded by [`begin_recording_raw`]: DMA linked-list
@@ -281,10 +295,17 @@ pub fn arm_direct_access_guard() {
 pub fn run_direct_access_guard() {
     // SAFETY: volatile accesses to this module's statics.
     let armed = unsafe { read_volatile(addr_of!(GUARD_ARMED)) };
-    if !armed {
-        return;
+    if armed {
+        run_armed_guard();
     }
-    // SAFETY: as above.
+}
+
+/// Disarm and run the guard: the rare half of [`run_direct_access_guard`],
+/// kept out of line so each GPU DMA start carries only the flag test.
+#[cold]
+#[inline(never)]
+fn run_armed_guard() {
+    // SAFETY: volatile accesses to this module's statics.
     unsafe { write_volatile(addr_of_mut!(GUARD_ARMED), false) };
     refresh_slow();
     // SAFETY: as above.
