@@ -83,6 +83,7 @@ extern "C" {
 /// are disabled internally for the duration of the isolated sequence.
 #[cfg(target_arch = "mips")]
 #[inline(always)]
+#[doc(alias = "FlushCache")]
 pub fn flush_i_cache() {
     // SAFETY: `__psx_rt_flush_i_cache` (the global_asm above) follows the O32 ABI: it clobbers only
     // the caller-saved $8-$11, returns through $ra, and restores the caller's SR and the normal
@@ -93,4 +94,5 @@ pub fn flush_i_cache() {
 
 /// Host no-op so shared code can call unconditionally.
 #[cfg(not(target_arch = "mips"))]
+#[doc(alias = "FlushCache")]
 pub fn flush_i_cache() {}

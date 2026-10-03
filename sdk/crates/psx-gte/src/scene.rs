@@ -178,6 +178,7 @@ pub struct AabbClipPlane {
 }
 
 /// Load the rotation matrix into the GTE's RT control registers (0..=4).
+#[doc(alias = "SetRotMatrix")]
 pub fn load_rotation(m: &Mat3I16) {
     ctc2!(0, pack_xy(m.m[0][0], m.m[0][1]));
     ctc2!(1, pack_xy(m.m[0][2], m.m[1][0]));
@@ -187,6 +188,7 @@ pub fn load_rotation(m: &Mat3I16) {
 }
 
 /// Load the light-direction matrix (LLM, control 8..=12).
+#[doc(alias = "SetLightMatrix")]
 pub fn load_light_matrix(m: &Mat3I16) {
     ctc2!(8, pack_xy(m.m[0][0], m.m[0][1]));
     ctc2!(9, pack_xy(m.m[0][2], m.m[1][0]));
@@ -212,6 +214,7 @@ pub fn load_aabb_clip4(planes: &[AabbClipPlane; 4]) {
 }
 
 /// Load the light-colour matrix (LCM, control 16..=20).
+#[doc(alias = "SetColorMatrix")]
 pub fn load_light_colour_matrix(m: &Mat3I16) {
     ctc2!(16, pack_xy(m.m[0][0], m.m[0][1]));
     ctc2!(17, pack_xy(m.m[0][2], m.m[1][0]));
@@ -221,6 +224,7 @@ pub fn load_light_colour_matrix(m: &Mat3I16) {
 }
 
 /// Load the translation vector (TR, control 5..=7).
+#[doc(alias = "SetTransMatrix")]
 pub fn load_translation(t: Vec3I32) {
     ctc2!(5, t.x as u32);
     ctc2!(6, t.y as u32);
@@ -228,6 +232,7 @@ pub fn load_translation(t: Vec3I32) {
 }
 
 /// Load the background-colour bias (BK, control 13..=15).
+#[doc(alias = "SetBackColor")]
 pub fn load_background_colour(c: Vec3I32) {
     ctc2!(13, c.x as u32);
     ctc2!(14, c.y as u32);
@@ -236,6 +241,7 @@ pub fn load_background_colour(c: Vec3I32) {
 
 /// Load the far-colour bias (FC, control 21..=23) used by depth-cue
 /// interpolation.
+#[doc(alias = "SetFarColor")]
 pub fn load_far_colour(c: Vec3I32) {
     ctc2!(21, c.x as u32);
     ctc2!(22, c.y as u32);
@@ -244,6 +250,7 @@ pub fn load_far_colour(c: Vec3I32) {
 
 /// Set OFX and OFY (control 24, 25) -- the screen-space offsets applied
 /// post-divide. Values are 15.16 fixed point; `160 << 16` = 160.0 px.
+#[doc(alias = "SetGeomOffset")]
 pub fn set_screen_offset(ofx_15_16: i32, ofy_15_16: i32) {
     ctc2!(24, ofx_15_16 as u32);
     ctc2!(25, ofy_15_16 as u32);
@@ -251,6 +258,7 @@ pub fn set_screen_offset(ofx_15_16: i32, ofy_15_16: i32) {
 
 /// Set the projection-plane distance H (control 26). Larger H = longer
 /// focal length = narrower FOV.
+#[doc(alias = "SetGeomScreen")]
 pub fn set_projection_plane(h: u16) {
     ctc2!(26, h as i32 as u32);
 }
@@ -275,6 +283,7 @@ pub fn set_avsz_weights(zsf3: i16, zsf4: i16) {
 ///
 /// Assumes the rotation matrix, translation, screen offset, and
 /// projection plane have already been set.
+#[doc(alias = "RotTransPers")]
 pub fn project_vertex(v: Vec3I16) -> Projected {
     mtc2!(0, v.xy_packed());
     mtc2!(1, v.z_packed());
@@ -295,6 +304,7 @@ pub fn project_vertex(v: Vec3I16) -> Projected {
 /// successive [`project_vertex`] calls because RTPT shares setup.
 ///
 /// The returned array is `[v0_result, v1_result, v2_result]`.
+#[doc(alias = "RotTransPers3")]
 pub fn project_triangle(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3] {
     // Load all three vertices first (data regs 0..=5), then fire RTPT.
     mtc2!(0, v0.xy_packed());
@@ -337,6 +347,7 @@ pub fn project_triangle(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3]
 /// perspective projection. Returns MAC1/2/3 in view-space units.
 ///
 /// Assumes the rotation matrix and translation have already been set.
+#[doc(alias = "RotTrans")]
 pub fn transform_vertex(v: Vec3I16) -> Vec3I32 {
     mtc2!(0, v.xy_packed());
     mtc2!(1, v.z_packed());
