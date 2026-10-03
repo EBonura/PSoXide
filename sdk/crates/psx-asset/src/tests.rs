@@ -672,12 +672,12 @@ fn world_round_trip_1x1_with_wall() {
         SURFACE_LIGHT_RECORD_COUNT as u16
     );
     assert_eq!(world.ambient_color(), [32, 32, 40]);
-    assert!(world.fog_enabled());
-    assert!(world.static_vertex_lighting());
+    assert!(world.is_fog_enabled());
+    assert!(world.has_static_vertex_lighting());
 
     let sector = world.sector(0, 0).unwrap();
     assert!(sector.has_floor());
-    assert!(sector.floor_walkable());
+    assert!(sector.is_floor_walkable());
     assert_eq!(sector.floor_material(), Some(0));
     assert_eq!(sector.ceiling_material(), None);
     assert_eq!(sector.wall_count(), 1);
@@ -687,7 +687,7 @@ fn world_round_trip_1x1_with_wall() {
 
     let wall = world.sector_wall(sector, 0).unwrap();
     assert_eq!(wall.direction(), psxed_format::world::direction::NORTH);
-    assert!(wall.solid());
+    assert!(wall.is_solid());
     assert_eq!(wall.material(), 1);
     assert_eq!(wall.heights(), [0, 0, 1024, 1024]);
     assert_eq!(wall.uvs().corners(), world::WALL_UVS);
@@ -744,11 +744,14 @@ fn floor_collision_decode_matches_full_sector_with_override() {
             world::SECTOR_SIZE,
         );
         let reduced = world.sector_floor_collision(0, 0, local_x, local_z, world::SECTOR_SIZE);
-        if full.floor_triangle_present(triangle) {
+        if full.has_floor_triangle(triangle) {
             let reduced = reduced.expect("present triangle");
             assert_eq!(reduced.split(), full.floor_split());
             assert_eq!(reduced.triangle(), triangle);
-            assert_eq!(reduced.walkable(), full.floor_triangle_walkable(triangle));
+            assert_eq!(
+                reduced.is_walkable(),
+                full.is_floor_triangle_walkable(triangle)
+            );
             assert_eq!(reduced.floor_heights(), full.floor_heights());
             assert_eq!(
                 reduced.triangle_heights(),
@@ -823,7 +826,7 @@ fn parses_legacy_v1_cooked_blob() {
     buf[28..30].copy_from_slice(&0x0200_i16.to_le_bytes());
 
     let m = Mesh::from_bytes(&buf).expect("parse");
-    assert_eq!(m.vert_count(), 2);
+    assert_eq!(m.vertex_count(), 2);
     assert_eq!(m.face_count(), 0);
     let v0 = m.vertex(0);
     assert_eq!(v0.x, 0x0100);
@@ -852,7 +855,7 @@ fn parses_v2_u16_indices() {
     buf[INDEX_OFFSET + 4..INDEX_OFFSET + 6].copy_from_slice(&259u16.to_le_bytes());
 
     let mesh = Mesh::from_bytes(&buf).expect("parse v2 mesh");
-    assert_eq!(mesh.vert_count(), VERTS as u16);
+    assert_eq!(mesh.vertex_count(), VERTS as u16);
     assert_eq!(mesh.face(0), (0, 255, 259));
 }
 

@@ -20,11 +20,11 @@
 //!
 //! Extraction note: the only coupling to its old home was a vertex-count guard
 //! reading a game-local budget constant. That is now
-//! [`DEFAULT_MAX_VERTS`] with [`Model::load_with_vertex_cap`] for callers that
-//! police their own arena.
+//! [`DEFAULT_MAX_VERTICES`] with [`Model::from_bytes_with_vertex_cap`] for
+//! callers that police their own arena.
 
 // ponytail: the lifted reader names its fields and accessors after the format
-// fields they read (`n_verts`, `first`, `count`), so per-item docs would only
+// fields they read (`first`, `count`, `bone`), so per-item docs would only
 // restate the name. The TYPES carry the meaning and are documented below.
 #![allow(missing_docs)]
 
@@ -35,7 +35,7 @@ use psx_gte::math::{Mat3I16, Vec3I16};
 // ponytail: unchecked reads, same rationale as map.rs -- no D-cache on the
 // R3000, so dropping the bounds branch lets LLVM coalesce these into MIPS
 // unaligned word loads (lwl/lwr). Every caller proves its range first: from
-// the offsets `Model::load` validated against the blob (private fields only;
+// the offsets `Model::from_bytes` validated against the blob (private fields only;
 // the public counts can be overwritten by safe code and are never trusted for
 // memory safety), or with an explicit `fits` check.
 
@@ -141,22 +141,28 @@ fn unpack_normal_555(packed: u16) -> [i8; 3] {
 /// A parsed HMD8 blob: mesh, bone ranges, clip table and every clip's composed
 /// bone palettes, all borrowed from one `&'static` slice with no copying.
 ///
-/// Construct with [`Model::load`] or [`Model::load_with_vertex_cap`]; a blob
-/// that fails validation yields an empty model rather than panicking, so a bad
-/// cook draws nothing instead of taking the guest down.
+/// Construct with [`Model::from_bytes`] or
+/// [`Model::from_bytes_with_vertex_cap`]; a blob that fails validation yields
+/// an empty model rather than panicking, so a bad cook draws nothing instead
+/// of taking the guest down.
 ///
 /// Every accessor is memory-safe on any model, including one whose public
-/// counts (`n_verts`, `n_tris` and the rest) were overwritten: reads are
-/// bounded by the blob and the private offsets `load` validated, never by the
+/// counts (the deprecated `n_verts`, `n_tris` and the rest) were overwritten:
+/// reads are bounded by the blob and the private offsets `from_bytes`
+/// validated, never by the
 /// public counts. An index past a table reads an inert value (origin vertex,
 /// skipped triangle, identity pose). The `*_unchecked` forms skip that check
 /// for hot loops that already bound their index by the loaded count.
 #[derive(Clone, Copy)]
 pub struct Model {
     data: &'static [u8],
+    #[deprecated(note = "use `vertex_count()`")]
     pub n_verts: usize,
+    #[deprecated(note = "use `triangle_count()`")]
     pub n_tris: usize,
+    #[deprecated(note = "use `frame_count()`")]
     pub n_frames: usize,
+    #[deprecated(note = "use `clip_count()`")]
     pub n_clips: usize,
     clips_off: usize,
     frame_times_off: usize,
@@ -164,7 +170,9 @@ pub struct Model {
     vertices_off: usize,
     vertices_z_off: usize,
     poses_off: usize,
+    #[deprecated(note = "use `bone_count()`")]
     pub n_bones: usize,
+    #[deprecated(note = "use `bone_range_count()`")]
     pub n_ranges: usize,
     tri_off: usize,
     tri_sz: usize,
@@ -172,6 +180,7 @@ pub struct Model {
     local_to_world_q12: u16,
     mouth_xforms_off: usize,
     hitboxes_off: usize,
+    #[deprecated(note = "use `hitbox_count()`")]
     pub n_hitboxes: usize,
     has_body_masks: bool,
     has_mouth: bool,
@@ -287,23 +296,31 @@ const IDENTITY_TRANSFORM: BoneTransform = BoneTransform {
 // Generated from the same cooked model scan that sizes main.rs MODEL_SCRATCH.
 // A larger model would overflow projection scratch, so reject it here rather
 // than merely clamping the draw and leaving face indices out of bounds.
-/// Vertex-count guard used by [`Model::load`].
+/// Vertex-count guard used by [`Model::from_bytes`].
 ///
 /// A consumer with its own model arena should call
-/// [`Model::load_with_vertex_cap`] and pass that arena's real capacity: the
-/// guard exists so a cook that outgrew the arena fails to load rather than
+/// [`Model::from_bytes_with_vertex_cap`] and pass that arena's real capacity:
+/// the guard exists so a cook that outgrew the arena fails to load rather than
 /// scribbling past it.
-pub const DEFAULT_MAX_VERTS: usize = 4096;
+pub const DEFAULT_MAX_VERTICES: usize = 4096;
+
+/// Renamed to [`DEFAULT_MAX_VERTICES`].
+#[deprecated(note = "renamed to `DEFAULT_MAX_VERTICES`")]
+pub const DEFAULT_MAX_VERTS: usize = DEFAULT_MAX_VERTICES;
 
 /// A decoded triangle. The blob keeps these packed; this is the unpacked view.
 #[derive(Clone, Copy)]
-pub struct Tri {
+pub struct Triangle {
     pub idx: [u16; 3],
     pub tex: usize,
     pub uv: [(u8, u8); 3],
     pub normal: [i8; 3],
     pub body_mask: u8,
 }
+
+/// Renamed to [`Triangle`].
+#[deprecated(note = "renamed to `Triangle`")]
+pub type Tri = Triangle;
 
 /// Cold UV payload for a projected model face. Vertex indices live in a
 /// separate packed-u32 stream so near/backface rejects touch only four
@@ -333,7 +350,7 @@ unsafe fn write_render_face(
     indices: *mut u32,
     payloads: *mut RenderFacePayload,
     t: usize,
-    tri: &Tri,
+    tri: &Triangle,
 ) {
     // SAFETY: contract is the enclosing fn's; see its doc comment.
     unsafe {
@@ -351,7 +368,8 @@ unsafe fn write_render_face(
 }
 
 impl Model {
-    /// Zero model for static cache slots (never drawn: n_tris = 0).
+    /// Zero model for static cache slots (never drawn: no triangles).
+    #[allow(deprecated)] // initialises the deprecated public count fields
     pub const EMPTY: Model = Model {
         data: &[],
         n_verts: 0,
@@ -382,14 +400,78 @@ impl Model {
         vertex_soa: false,
     };
 
-    /// Parse a HMD8 blob, guarding vertex count with [`DEFAULT_MAX_VERTS`].
+    /// Parse a HMD8 blob, guarding vertex count with [`DEFAULT_MAX_VERTICES`].
+    pub fn from_bytes(data: &'static [u8]) -> Model {
+        Self::from_bytes_with_vertex_cap(data, DEFAULT_MAX_VERTICES)
+    }
+
+    /// Renamed to [`Model::from_bytes`].
+    #[deprecated(note = "renamed to `from_bytes`")]
+    #[inline(always)]
     pub fn load(data: &'static [u8]) -> Model {
-        Self::load_with_vertex_cap(data, DEFAULT_MAX_VERTS)
+        Self::from_bytes(data)
+    }
+
+    /// Renamed to [`Model::from_bytes_with_vertex_cap`].
+    #[deprecated(note = "renamed to `from_bytes_with_vertex_cap`")]
+    #[inline(always)]
+    pub fn load_with_vertex_cap(data: &'static [u8], max_verts: usize) -> Model {
+        Self::from_bytes_with_vertex_cap(data, max_verts)
+    }
+
+    /// Number of vertices in the stream.
+    #[allow(deprecated)] // reads the deprecated field this accessor replaces
+    #[inline]
+    pub const fn vertex_count(&self) -> usize {
+        self.n_verts
+    }
+
+    /// Number of triangles in the face table.
+    #[allow(deprecated)] // reads the deprecated field this accessor replaces
+    #[inline]
+    pub const fn triangle_count(&self) -> usize {
+        self.n_tris
+    }
+
+    /// Number of baked palette frames across every clip.
+    #[allow(deprecated)] // reads the deprecated field this accessor replaces
+    #[inline]
+    pub const fn frame_count(&self) -> usize {
+        self.n_frames
+    }
+
+    /// Number of clips in the clip table.
+    #[allow(deprecated)] // reads the deprecated field this accessor replaces
+    #[inline]
+    pub const fn clip_count(&self) -> usize {
+        self.n_clips
+    }
+
+    /// Number of bones in each pose palette.
+    #[allow(deprecated)] // reads the deprecated field this accessor replaces
+    #[inline]
+    pub const fn bone_count(&self) -> usize {
+        self.n_bones
+    }
+
+    /// Number of bone ranges (see [`Model::bone_range`]).
+    #[allow(deprecated)] // reads the deprecated field this accessor replaces
+    #[inline]
+    pub const fn bone_range_count(&self) -> usize {
+        self.n_ranges
+    }
+
+    /// Number of studio hitboxes (zero when the cook emitted none).
+    #[allow(deprecated)] // reads the deprecated field this accessor replaces
+    #[inline]
+    pub const fn hitbox_count(&self) -> usize {
+        self.n_hitboxes
     }
 
     /// Parse a HMD8 blob, guarding vertex count with the caller's own arena
     /// capacity.
-    pub fn load_with_vertex_cap(data: &'static [u8], max_verts: usize) -> Model {
+    #[allow(deprecated)] // initialises the deprecated public count fields
+    pub fn from_bytes_with_vertex_cap(data: &'static [u8], max_verts: usize) -> Model {
         if data.len() < HMD7_HEADER_BYTES || data.get(0..4) != Some(b"HMD8") {
             return Self::EMPTY;
         }
@@ -601,8 +683,9 @@ impl Model {
 
     /// HMA1 local-space tracks, when the cook emitted them (validated at
     /// load). Most callers want [`Model::pose`], which picks the right path.
+    #[doc(alias = "hma1")]
     #[inline]
-    pub fn hma1(&self) -> Option<Tracks> {
+    pub fn tracks(&self) -> Option<Tracks> {
         if self.hma_len == 0 {
             return None;
         }
@@ -636,6 +719,13 @@ impl Model {
         })
     }
 
+    /// Renamed to [`Model::tracks`].
+    #[deprecated(note = "renamed to `tracks`")]
+    #[inline(always)]
+    pub fn hma1(&self) -> Option<Tracks> {
+        self.tracks()
+    }
+
     /// True when the model animates from HMA1 tracks. Its phase functions
     /// then return `(clip, clip, pos_q8)`: `pos_q8` is the source position in
     /// frames * 256, and [`Model::pose`] reads the triple the same way.
@@ -656,19 +746,19 @@ impl Model {
         frame2: usize,
         frac16: u32,
         mouth: u8,
-        scratch: &'a mut [crate::hma1::Aff],
+        scratch: &'a mut [crate::hma1::Affine],
     ) -> Pose<'a> {
-        let Some(tracks) = self.hma1() else {
+        let Some(tracks) = self.tracks() else {
             return Pose::Palette(self.frame(frame).interpolate(self.frame(frame2), frac16));
         };
-        if tracks.model.n_bones() > scratch.len() {
+        if tracks.model.bone_count() > scratch.len() {
             return Pose::Palette(self.frame(0).interpolate(self.frame(0), 0));
         }
         let jaw = match tracks.jaw {
             Some(j) => crate::hma1::Jaw::open(j.bone, j.post, j.open, mouth),
             None => crate::hma1::Jaw::NONE,
         };
-        let clip = frame.min(self.n_clips.saturating_sub(1));
+        let clip = frame.min(self.clip_count().saturating_sub(1));
         tracks.model.decode_with(clip, frac16, &jaw, scratch);
         Pose::Tracks {
             map: tracks.map,
@@ -679,8 +769,8 @@ impl Model {
     /// The sample holding `clip`'s final pose.
     #[inline]
     pub fn clip_end_pose(&self, clip: usize) -> (usize, usize, u32) {
-        let clip = clip.min(self.n_clips.saturating_sub(1));
-        if let Some(tracks) = self.hma1() {
+        let clip = clip.min(self.clip_count().saturating_sub(1));
+        if let Some(tracks) = self.tracks() {
             return (clip, clip, tracks.model.clip_intervals(clip) * 256);
         }
         let frame = self.clip_frame(clip, self.clip_len(clip) - 1);
@@ -699,7 +789,7 @@ impl Model {
         if self.clips_off == 0 {
             return None;
         }
-        let o = self.clips_off + clip.min(self.n_clips.saturating_sub(1)) * 4;
+        let o = self.clips_off + clip.min(self.clip_count().saturating_sub(1)) * 4;
         if !fits(self.data, o, 4) {
             return None;
         }
@@ -710,7 +800,7 @@ impl Model {
     #[inline]
     pub fn clip_len(&self, clip: usize) -> usize {
         let Some((_, count)) = self.clip_rec(clip) else {
-            return self.n_frames.max(1);
+            return self.frame_count().max(1);
         };
         ((count & CLIP_FRAME_COUNT_MASK) as usize).max(1)
     }
@@ -740,11 +830,11 @@ impl Model {
     #[inline]
     pub fn clip_frame(&self, clip: usize, local_frame: usize) -> usize {
         let Some((first, count)) = self.clip_rec(clip) else {
-            return local_frame % self.n_frames.max(1);
+            return local_frame % self.frame_count().max(1);
         };
         let first = (first & CLIP_FIRST_FRAME_MASK) as usize;
         let count = ((count & CLIP_FRAME_COUNT_MASK) as usize).max(1);
-        (first + (local_frame % count)).min(self.n_frames.saturating_sub(1))
+        (first + (local_frame % count)).min(self.frame_count().saturating_sub(1))
     }
 
     /// Select two retained palettes and their interpolation fraction using the
@@ -759,8 +849,8 @@ impl Model {
         elapsed: usize,
         looping: bool,
     ) -> (usize, usize, u32) {
-        let clip = clip.min(self.n_clips.saturating_sub(1));
-        if let Some(tracks) = self.hma1() {
+        let clip = clip.min(self.clip_count().saturating_sub(1));
+        if let Some(tracks) = self.tracks() {
             // GoldSrc spreads a cycle over numframes - 1 intervals, looping
             // or not; HMA1 positions are source frames * 256.
             let span = tracks.model.clip_intervals(clip) as usize * 256;
@@ -857,11 +947,11 @@ impl Model {
 
     #[inline]
     pub fn frame(&self, frame: usize) -> ModelFrame<'_> {
-        let f = if frame < self.n_frames { frame } else { 0 };
+        let f = if frame < self.frame_count() { frame } else { 0 };
         ModelFrame {
             data: self.data,
             poses_off: self.poses_off,
-            n_bones: self.n_bones,
+            n_bones: self.bone_count(),
             frame_idx: f,
             mouth_xforms_off: self.mouth_xforms_off,
             has_mouth: self.has_mouth,
@@ -871,8 +961,8 @@ impl Model {
     /// Bone range `index`, clamped to the last range. A model without ranges
     /// (the empty model) returns an empty range.
     #[inline]
-    pub fn range(&self, index: usize) -> BoneRange {
-        let index = index.min(self.n_ranges.saturating_sub(1));
+    pub fn bone_range(&self, index: usize) -> BoneRange {
+        let index = index.min(self.bone_range_count().saturating_sub(1));
         let o = self.ranges_off + index * HMD7_RANGE_BYTES;
         if !fits(self.data, o, HMD7_RANGE_BYTES) {
             return BoneRange {
@@ -900,13 +990,20 @@ impl Model {
         }
     }
 
+    /// Renamed to [`Model::bone_range`].
+    #[deprecated(note = "renamed to `bone_range`")]
+    #[inline(always)]
+    pub fn range(&self, index: usize) -> BoneRange {
+        self.bone_range(index)
+    }
+
     /// Studio hitbox `index`, clamped to the last one. A model without
     /// hitboxes returns a zero box on bone 0.
     #[inline]
     pub fn hitbox(&self, index: usize) -> StudioHitbox {
-        let index = index.min(self.n_hitboxes.saturating_sub(1));
+        let index = index.min(self.hitbox_count().saturating_sub(1));
         let o = self.hitboxes_off + index * HMD7_HITBOX_BYTES;
-        if self.n_hitboxes == 0 || !fits(self.data, o, HMD7_HITBOX_BYTES) {
+        if self.hitbox_count() == 0 || !fits(self.data, o, HMD7_HITBOX_BYTES) {
             return StudioHitbox {
                 bone: 0,
                 bbmin: Vec3I16::ZERO,
@@ -932,8 +1029,8 @@ impl Model {
     }
 
     /// True when vertex `index`'s record lies inside the blob: for every
-    /// `index < n_verts` of a loaded model. Memory safety rests on this check
-    /// alone, never on the public counts.
+    /// `index < vertex_count()` of a loaded model. Memory safety rests on this
+    /// check alone, never on the public counts.
     #[inline(always)]
     fn vert_in_blob(&self, index: usize) -> bool {
         if self.vertex_soa {
@@ -946,28 +1043,28 @@ impl Model {
 
     /// Bone-local position of vertex `index`. An index past the vertex
     /// stream reads as the origin instead of outside the blob; hot loops that
-    /// have already bounded the index can use [`Self::vert_unchecked`].
+    /// have already bounded the index can use [`Self::vertex_unchecked`].
     #[inline]
-    pub fn vert(&self, index: usize) -> Vec3I16 {
+    pub fn vertex(&self, index: usize) -> Vec3I16 {
         if !self.vert_in_blob(index) {
             return Vec3I16::ZERO;
         }
         // SAFETY: `vert_in_blob` checked this vertex's record.
-        unsafe { self.vert_unchecked(index) }
+        unsafe { self.vertex_unchecked(index) }
     }
 
-    /// [`Self::vert`] without the bounds check.
+    /// [`Self::vertex`] without the bounds check.
     ///
     /// # Safety
-    /// `index` must be below the `n_verts` that [`Model::load`] gave this
-    /// model. (The public count can be overwritten; the bound is the loaded
-    /// value.)
+    /// `index` must be below the [`Model::vertex_count`] that
+    /// [`Model::from_bytes`] gave this model. (The public count can be
+    /// overwritten; the bound is the loaded value.)
     #[inline]
-    pub unsafe fn vert_unchecked(&self, index: usize) -> Vec3I16 {
+    pub unsafe fn vertex_unchecked(&self, index: usize) -> Vec3I16 {
         if self.vertex_soa {
             let xy = self.vertices_off + index * 4;
             let z = self.vertices_z_off + index * 2;
-            // SAFETY: load placed both SoA streams, `n_verts` records long,
+            // SAFETY: load placed both SoA streams, `vertex_count()` records long,
             // inside the blob, and the caller keeps `index` below that.
             return unsafe {
                 Vec3I16::new(
@@ -993,8 +1090,8 @@ impl Model {
                 return Vec3I16::new(p.read(), p.add(1).read(), p.add(2).read());
             }
         }
-        // SAFETY: load placed the `n_verts * 6` byte stream inside the blob,
-        // and the caller keeps `index` below `n_verts`.
+        // SAFETY: load placed the `vertex_count() * 6` byte stream inside the
+        // blob, and the caller keeps `index` below `vertex_count()`.
         unsafe {
             Vec3I16::new(
                 rd_i16(self.data, o),
@@ -1006,22 +1103,22 @@ impl Model {
 
     /// Vertex `index` packed as the GTE's VXY/VZ register words. An index
     /// past the vertex stream reads as the origin; see
-    /// [`Self::vert_gte_words_unchecked`] for bounded hot loops.
+    /// [`Self::vertex_gte_words_unchecked`] for bounded hot loops.
     #[inline]
-    pub fn vert_gte_words(&self, index: usize) -> GteVertexWords {
+    pub fn vertex_gte_words(&self, index: usize) -> GteVertexWords {
         if !self.vert_in_blob(index) {
             return GteVertexWords { xy: 0, z: 0 };
         }
         // SAFETY: `vert_in_blob` checked this vertex's record.
-        unsafe { self.vert_gte_words_unchecked(index) }
+        unsafe { self.vertex_gte_words_unchecked(index) }
     }
 
-    /// [`Self::vert_gte_words`] without the bounds check.
+    /// [`Self::vertex_gte_words`] without the bounds check.
     ///
     /// # Safety
-    /// Same as [`Self::vert_unchecked`].
+    /// Same as [`Self::vertex_unchecked`].
     #[inline]
-    pub unsafe fn vert_gte_words_unchecked(&self, index: usize) -> GteVertexWords {
+    pub unsafe fn vertex_gte_words_unchecked(&self, index: usize) -> GteVertexWords {
         if self.vertex_soa {
             let xy = self.vertices_off + index * 4;
             let z = self.vertices_z_off + index * 2;
@@ -1069,7 +1166,7 @@ impl Model {
         #[cfg(not(target_arch = "mips"))]
         {
             // SAFETY: same contract as this function's.
-            let v = unsafe { self.vert_unchecked(index) };
+            let v = unsafe { self.vertex_unchecked(index) };
             GteVertexWords {
                 xy: ((v.y as u16 as u32) << 16) | v.x as u16 as u32,
                 z: v.z as i32 as u32,
@@ -1080,7 +1177,7 @@ impl Model {
     #[inline]
     /// Byte length of the header + clips + ranges + static vertices + palettes --
     /// everything the per-frame draw needs. The TriRec/texture tail after it is
-    /// only read by `fill_render_faces_raw`/`tri()` (load-time or viewmodels),
+    /// only read by `fill_render_faces_split_raw`/`triangle()` (load-time or viewmodels),
     /// so the enemy pool can drop it once the faces are baked.
     pub fn frame_section_len(&self) -> usize {
         self.tri_off
@@ -1109,19 +1206,19 @@ impl Model {
         // SAFETY: contract is the enclosing fn's; see its doc comment.
         unsafe {
             if !self.has_body_masks
-                || self.n_verts == 0
-                || self.n_verts > remap_len
+                || self.vertex_count() == 0
+                || self.vertex_count() > remap_len
                 || self.tri_off > data_len
             {
                 return None;
             }
 
-            let old_n = self.n_verts;
+            let old_n = self.vertex_count();
             let mut new_n = 0usize;
             ptr::write_bytes(remap, 0xff, old_n);
             let mut new_ranges = 0usize;
-            for ri in 0..self.n_ranges {
-                let range = self.range(ri);
+            for ri in 0..self.bone_range_count() {
+                let range = self.bone_range(ri);
                 if range.body_mask & visible_bodies == 0 {
                     continue;
                 }
@@ -1186,8 +1283,8 @@ impl Model {
                 }
             }
             let pose_len = self
-                .n_frames
-                .checked_mul(self.n_bones)?
+                .frame_count()
+                .checked_mul(self.bone_count())?
                 .checked_mul(HMD8_AFFINE_BYTES)?;
             if self.poses_off.checked_add(pose_len)? > self.tri_off
                 || dst.checked_add(pose_len)? > data_len
@@ -1197,7 +1294,7 @@ impl Model {
             ptr::copy(data.add(self.poses_off), data.add(dst), pose_len);
             dst += pose_len;
             if self.has_mouth {
-                let xform_len = self.n_frames.checked_mul(MOUTH_XFORM_BYTES)?;
+                let xform_len = self.frame_count().checked_mul(MOUTH_XFORM_BYTES)?;
                 if self.mouth_xforms_off.checked_add(xform_len)? > self.tri_off
                     || dst.checked_add(xform_len)? > data_len
                 {
@@ -1206,8 +1303,8 @@ impl Model {
                 ptr::copy(data.add(self.mouth_xforms_off), data.add(dst), xform_len);
                 dst += xform_len;
             }
-            if self.n_hitboxes != 0 {
-                let hitbox_len = self.n_hitboxes.checked_mul(HMD7_HITBOX_BYTES)?;
+            if self.hitbox_count() != 0 {
+                let hitbox_len = self.hitbox_count().checked_mul(HMD7_HITBOX_BYTES)?;
                 if self.hitboxes_off.checked_add(hitbox_len)? > self.tri_off
                     || dst.checked_add(hitbox_len)? > data_len
                 {
@@ -1242,23 +1339,23 @@ impl Model {
     }
 
     /// True when triangle `t`'s record lies inside the blob: for every
-    /// `t < n_tris` of a loaded model. Memory safety rests on this check
-    /// alone, never on the public counts.
+    /// `t < triangle_count()` of a loaded model. Memory safety rests on this
+    /// check alone, never on the public counts.
     #[inline(always)]
     fn tri_in_blob(&self, t: usize) -> bool {
         // `tri_sz` is TRI_SZ or TRI_SZ_FULL_NORMALS in every model (EMPTY
-        // included), so this covers every byte `tri_unchecked` reads.
+        // included), so this covers every byte `triangle_unchecked` reads.
         fits(self.data, self.tri_off + t * self.tri_sz, self.tri_sz)
     }
 
     /// Triangle `t`, unpacked. An index past the triangle table reads as a
     /// degenerate triangle with an empty body mask, which every renderer
     /// skips; hot loops that have already bounded `t` can use
-    /// [`Self::tri_unchecked`].
+    /// [`Self::triangle_unchecked`].
     #[inline(always)]
-    pub fn tri(&self, t: usize) -> Tri {
+    pub fn triangle(&self, t: usize) -> Triangle {
         if !self.tri_in_blob(t) {
-            return Tri {
+            return Triangle {
                 idx: [0; 3],
                 tex: 0,
                 uv: [(0, 0); 3],
@@ -1267,28 +1364,30 @@ impl Model {
             };
         }
         // SAFETY: `tri_in_blob` checked this triangle's record.
-        unsafe { self.tri_unchecked(t) }
+        unsafe { self.triangle_unchecked(t) }
     }
 
-    /// [`Self::tri`] without the bounds check.
+    /// [`Self::triangle`] without the bounds check.
     ///
     /// # Safety
-    /// `t` must be below the `n_tris` that [`Model::load`] gave this model.
+    /// `t` must be below the [`Model::triangle_count`] that
+    /// [`Model::from_bytes`] gave this model.
     /// (The public count can be overwritten; the bound is the loaded value.)
     #[inline(always)]
-    pub unsafe fn tri_unchecked(&self, t: usize) -> Tri {
+    pub unsafe fn triangle_unchecked(&self, t: usize) -> Triangle {
         let o = self.tri_off + t * self.tri_sz;
         let d = self.data;
         // Raw byte reads avoid Rust's unsafe-precondition guards, which
         // current nightly still emits for every `get_unchecked`/slice index
         // in this per-face hot loop.
-        // SAFETY: load placed the `n_tris * tri_sz` byte table inside the
-        // blob and the caller keeps `t` below `n_tris`, so the whole record
-        // is readable. Every offset below stays inside it: `tri_sz` is 20
-        // with i8 normals (last byte read: 17) and 16 otherwise (last: 15).
+        // SAFETY: load placed the `triangle_count() * tri_sz` byte table
+        // inside the blob and the caller keeps `t` below `triangle_count()`,
+        // so the whole record is readable. Every offset below stays inside
+        // it: `tri_sz` is 20 with i8 normals (last byte read: 17) and 16
+        // otherwise (last: 15).
         unsafe {
             let p = d.as_ptr().add(o);
-            Tri {
+            Triangle {
                 idx: [rd_u16(d, o), rd_u16(d, o + 2), rd_u16(d, o + 4)],
                 tex: rd_u16(d, o + 6) as usize,
                 uv: [
@@ -1321,22 +1420,22 @@ impl Model {
 
     /// Packet-order UV words for a triangle whose other steady-render fields
     /// are already in the viewmodel pose cache. An index past the triangle
-    /// table reads as zero; see [`Self::tri_uv_words_unchecked`].
+    /// table reads as zero; see [`Self::triangle_uv_words_unchecked`].
     #[inline(always)]
-    pub fn tri_uv_words(&self, t: usize) -> [u16; 3] {
+    pub fn triangle_uv_words(&self, t: usize) -> [u16; 3] {
         if !self.tri_in_blob(t) {
             return [0; 3];
         }
         // SAFETY: `tri_in_blob` checked this triangle's record.
-        unsafe { self.tri_uv_words_unchecked(t) }
+        unsafe { self.triangle_uv_words_unchecked(t) }
     }
 
-    /// [`Self::tri_uv_words`] without the bounds check.
+    /// [`Self::triangle_uv_words`] without the bounds check.
     ///
     /// # Safety
-    /// Same as [`Self::tri_unchecked`].
+    /// Same as [`Self::triangle_unchecked`].
     #[inline(always)]
-    pub unsafe fn tri_uv_words_unchecked(&self, t: usize) -> [u16; 3] {
+    pub unsafe fn triangle_uv_words_unchecked(&self, t: usize) -> [u16; 3] {
         let o = self.tri_off + t * self.tri_sz + 8;
         // SAFETY: bytes 8..14 of a record the caller's bound keeps in the
         // blob.
@@ -1355,22 +1454,22 @@ impl Model {
     }
 
     /// Triangle `t`'s face normal. An index past the triangle table reads as
-    /// zero; see [`Self::tri_normal_unchecked`].
+    /// zero; see [`Self::triangle_normal_unchecked`].
     #[inline]
-    pub fn tri_normal(&self, t: usize) -> [i8; 3] {
+    pub fn triangle_normal(&self, t: usize) -> [i8; 3] {
         if !self.tri_in_blob(t) {
             return [0; 3];
         }
         // SAFETY: `tri_in_blob` checked this triangle's record.
-        unsafe { self.tri_normal_unchecked(t) }
+        unsafe { self.triangle_normal_unchecked(t) }
     }
 
-    /// [`Self::tri_normal`] without the bounds check.
+    /// [`Self::triangle_normal`] without the bounds check.
     ///
     /// # Safety
-    /// Same as [`Self::tri_unchecked`].
+    /// Same as [`Self::triangle_unchecked`].
     #[inline]
-    pub unsafe fn tri_normal_unchecked(&self, t: usize) -> [i8; 3] {
+    pub unsafe fn triangle_normal_unchecked(&self, t: usize) -> [i8; 3] {
         let o = self.tri_off + t * self.tri_sz + 14;
         let p = self.data.as_ptr();
         // SAFETY: bytes 14..17 (i8 normals, 20-byte records) or 14..16
@@ -1392,8 +1491,8 @@ impl Model {
     pub fn render_face_count(&self, visible_bodies: u8) -> usize {
         let mut count = 0usize;
         let mut t = 0usize;
-        while t < self.n_tris {
-            if self.tri(t).body_mask & visible_bodies != 0 {
+        while t < self.triangle_count() {
+            if self.triangle(t).body_mask & visible_bodies != 0 {
                 count += 1;
             }
             t += 1;
@@ -1404,8 +1503,8 @@ impl Model {
     pub fn render_texture_mask(&self, visible_bodies: u8) -> u32 {
         let mut mask = 0u32;
         let mut t = 0usize;
-        while t < self.n_tris {
-            let tri = self.tri(t);
+        while t < self.triangle_count() {
+            let tri = self.triangle(t);
             if tri.body_mask & visible_bodies != 0 && tri.tex < 32 {
                 mask |= 1u32 << tri.tex;
             }
@@ -1419,8 +1518,8 @@ impl Model {
         let mut last_tex = usize::MAX;
         let mut last_mask = 0u8;
         let mut t = 0usize;
-        while t < self.n_tris {
-            let tri = self.tri(t);
+        while t < self.triangle_count() {
+            let tri = self.triangle(t);
             if tri.body_mask & visible_bodies == 0 {
                 t += 1;
                 continue;
@@ -1455,7 +1554,7 @@ impl Model {
     ) -> (usize, usize) {
         // SAFETY: contract is the enclosing fn's; see its doc comment.
         unsafe {
-            if self.n_tris == 0 || out_len == 0 {
+            if self.triangle_count() == 0 || out_len == 0 {
                 return (0, 0);
             }
             let mut source_t = 0usize;
@@ -1463,8 +1562,8 @@ impl Model {
             let mut run_count = 0usize;
             let mut run_tex = usize::MAX;
             let mut run_mask = 0u8;
-            while source_t < self.n_tris && out_t < out_len {
-                let a = self.tri(source_t);
+            while source_t < self.triangle_count() && out_t < out_len {
+                let a = self.triangle(source_t);
                 source_t += 1;
                 if a.body_mask & visible_bodies == 0 {
                     continue;
@@ -1497,9 +1596,99 @@ impl Model {
             (out_t, run_count)
         }
     }
+
+    /// Renamed to [`Model::vertex`].
+    #[deprecated(note = "renamed to `vertex`")]
+    #[inline(always)]
+    pub fn vert(&self, index: usize) -> Vec3I16 {
+        self.vertex(index)
+    }
+
+    /// Renamed to [`Model::vertex_unchecked`].
+    ///
+    /// # Safety
+    /// See [`Model::vertex_unchecked`].
+    #[deprecated(note = "renamed to `vertex_unchecked`")]
+    #[inline(always)]
+    pub unsafe fn vert_unchecked(&self, index: usize) -> Vec3I16 {
+        // SAFETY: same contract as the renamed function.
+        unsafe { self.vertex_unchecked(index) }
+    }
+
+    /// Renamed to [`Model::vertex_gte_words`].
+    #[deprecated(note = "renamed to `vertex_gte_words`")]
+    #[inline(always)]
+    pub fn vert_gte_words(&self, index: usize) -> GteVertexWords {
+        self.vertex_gte_words(index)
+    }
+
+    /// Renamed to [`Model::vertex_gte_words_unchecked`].
+    ///
+    /// # Safety
+    /// See [`Model::vertex_gte_words_unchecked`].
+    #[deprecated(note = "renamed to `vertex_gte_words_unchecked`")]
+    #[inline(always)]
+    pub unsafe fn vert_gte_words_unchecked(&self, index: usize) -> GteVertexWords {
+        // SAFETY: same contract as the renamed function.
+        unsafe { self.vertex_gte_words_unchecked(index) }
+    }
+
+    /// Renamed to [`Model::triangle`].
+    #[deprecated(note = "renamed to `triangle`")]
+    #[inline(always)]
+    pub fn tri(&self, t: usize) -> Triangle {
+        self.triangle(t)
+    }
+
+    /// Renamed to [`Model::triangle_unchecked`].
+    ///
+    /// # Safety
+    /// See [`Model::triangle_unchecked`].
+    #[deprecated(note = "renamed to `triangle_unchecked`")]
+    #[inline(always)]
+    pub unsafe fn tri_unchecked(&self, t: usize) -> Triangle {
+        // SAFETY: same contract as the renamed function.
+        unsafe { self.triangle_unchecked(t) }
+    }
+
+    /// Renamed to [`Model::triangle_uv_words`].
+    #[deprecated(note = "renamed to `triangle_uv_words`")]
+    #[inline(always)]
+    pub fn tri_uv_words(&self, t: usize) -> [u16; 3] {
+        self.triangle_uv_words(t)
+    }
+
+    /// Renamed to [`Model::triangle_uv_words_unchecked`].
+    ///
+    /// # Safety
+    /// See [`Model::triangle_uv_words_unchecked`].
+    #[deprecated(note = "renamed to `triangle_uv_words_unchecked`")]
+    #[inline(always)]
+    pub unsafe fn tri_uv_words_unchecked(&self, t: usize) -> [u16; 3] {
+        // SAFETY: same contract as the renamed function.
+        unsafe { self.triangle_uv_words_unchecked(t) }
+    }
+
+    /// Renamed to [`Model::triangle_normal`].
+    #[deprecated(note = "renamed to `triangle_normal`")]
+    #[inline(always)]
+    pub fn tri_normal(&self, t: usize) -> [i8; 3] {
+        self.triangle_normal(t)
+    }
+
+    /// Renamed to [`Model::triangle_normal_unchecked`].
+    ///
+    /// # Safety
+    /// See [`Model::triangle_normal_unchecked`].
+    #[deprecated(note = "renamed to `triangle_normal_unchecked`")]
+    #[inline(always)]
+    pub unsafe fn tri_normal_unchecked(&self, t: usize) -> [i8; 3] {
+        // SAFETY: same contract as the renamed function.
+        unsafe { self.triangle_normal_unchecked(t) }
+    }
 }
 
-/// A model's HMA1 section (see [`Model::hma1`]).
+/// A model's HMA1 section (see [`Model::tracks`]).
 #[derive(Clone, Copy)]
 pub struct Tracks {
     pub model: crate::hma1::Model,
@@ -1522,7 +1711,7 @@ pub enum Pose<'a> {
     Palette(InterpolatedModelFrame<'a>),
     Tracks {
         map: &'a [u8],
-        bones: &'a [crate::hma1::Aff],
+        bones: &'a [crate::hma1::Affine],
     },
 }
 
@@ -1590,9 +1779,9 @@ fn hma1_section_valid(
     let Some(tracks) = crate::hma1::Model::new(blob) else {
         return false;
     };
-    let hma_bones = tracks.n_bones();
+    let hma_bones = tracks.bone_count();
     hma_bones != 0
-        && tracks.n_clips() >= n_clips.max(1)
+        && tracks.clip_count() >= n_clips.max(1)
         && map.iter().all(|&bone| (bone as usize) < hma_bones)
         && (jaw == 0xff || (jaw as usize) < hma_bones)
 }

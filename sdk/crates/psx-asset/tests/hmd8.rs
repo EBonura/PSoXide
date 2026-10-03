@@ -115,43 +115,43 @@ fn build_blob() -> Vec<u8> {
 }
 
 fn load(bytes: Vec<u8>) -> Model {
-    Model::load(Box::leak(bytes.into_boxed_slice()))
+    Model::from_bytes(Box::leak(bytes.into_boxed_slice()))
 }
 
 #[test]
 fn parses_a_minimal_blob() {
     let model = load(build_blob());
 
-    assert_eq!(model.n_verts, N_VERTS);
-    assert_eq!(model.n_tris, N_TRIS);
-    assert_eq!(model.n_bones, N_BONES);
-    assert_eq!(model.n_ranges, N_RANGES);
-    assert_eq!(model.n_frames, N_FRAMES);
+    assert_eq!(model.vertex_count(), N_VERTS);
+    assert_eq!(model.triangle_count(), N_TRIS);
+    assert_eq!(model.bone_count(), N_BONES);
+    assert_eq!(model.bone_range_count(), N_RANGES);
+    assert_eq!(model.frame_count(), N_FRAMES);
     assert_eq!(model.local_to_world_q12(), 4096);
     assert_eq!(model.clip_len(0), N_FRAMES);
 
     // bone ranges partition the vertices; this is what lets a range pay one
     // matrix load, so a broken stride here silently skins to the wrong bone
     let mut covered = 0;
-    for i in 0..model.n_ranges {
-        let range = model.range(i);
+    for i in 0..model.bone_range_count() {
+        let range = model.bone_range(i);
         assert_eq!(range.bone, i);
         assert_eq!(range.first, covered);
         covered += range.count;
     }
     assert_eq!(covered, N_VERTS);
 
-    for v in 0..model.n_verts {
-        let vert = model.vert(v);
+    for v in 0..model.vertex_count() {
+        let vert = model.vertex(v);
         assert_eq!(
             [vert.x, vert.y, vert.z],
             [(v * 10) as i16, (v * 10 + 1) as i16, (v * 10 + 2) as i16]
         );
     }
 
-    for t in 0..model.n_tris {
+    for t in 0..model.triangle_count() {
         assert_eq!(
-            model.tri(t).idx,
+            model.triangle(t).idx,
             [(t * 2) as u16, (t * 2 + 1) as u16, (t * 2) as u16]
         );
     }
@@ -164,31 +164,34 @@ fn parses_a_minimal_blob() {
 fn accessors_stay_inside_the_blob() {
     let model = load(build_blob());
     for far in [N_VERTS * 1000, usize::MAX / 8] {
-        let v = model.vert(far);
+        let v = model.vertex(far);
         assert_eq!([v.x, v.y, v.z], [0, 0, 0]);
-        let w = model.vert_gte_words(far);
+        let w = model.vertex_gte_words(far);
         assert_eq!((w.xy, w.z), (0, 0));
     }
     for far in [N_TRIS * 1000, usize::MAX / 32] {
-        let tri = model.tri(far);
+        let tri = model.triangle(far);
         assert_eq!(tri.idx, [0; 3]);
         assert_eq!(tri.body_mask, 0, "an out-of-range face must be skipped");
-        assert_eq!(model.tri_uv_words(far), [0; 3]);
-        assert_eq!(model.tri_normal(far), [0; 3]);
+        assert_eq!(model.triangle_uv_words(far), [0; 3]);
+        assert_eq!(model.triangle_normal(far), [0; 3]);
     }
 
     // The public counts are plain fields; writing them must not widen what
     // the accessors read.
     let mut lying = model;
-    lying.n_tris = 1 << 20;
-    lying.n_verts = 1 << 20;
-    lying.n_ranges = 1 << 20;
-    lying.n_bones = 1 << 20;
-    lying.n_frames = 1 << 20;
-    lying.n_clips = 1 << 20;
-    assert_eq!(lying.tri(1 << 19).body_mask, 0);
-    assert_eq!(lying.vert(1 << 19).x, 0);
-    let _ = lying.range(1 << 19);
+    #[allow(deprecated)] // overwrites the deprecated public counts on purpose
+    {
+        lying.n_tris = 1 << 20;
+        lying.n_verts = 1 << 20;
+        lying.n_ranges = 1 << 20;
+        lying.n_bones = 1 << 20;
+        lying.n_frames = 1 << 20;
+        lying.n_clips = 1 << 20;
+    }
+    assert_eq!(lying.triangle(1 << 19).body_mask, 0);
+    assert_eq!(lying.vertex(1 << 19).x, 0);
+    let _ = lying.bone_range(1 << 19);
     let _ = lying.clip_len(1 << 19);
     let _ = lying.clip_frame(1 << 19, 3);
     let _ = lying
@@ -197,9 +200,9 @@ fn accessors_stay_inside_the_blob() {
         .bone(1 << 19, false, 0);
 
     let empty = Model::EMPTY;
-    assert_eq!(empty.vert(0).x, 0);
-    assert_eq!(empty.tri(0).body_mask, 0);
-    assert_eq!(empty.range(0).count, 0);
+    assert_eq!(empty.vertex(0).x, 0);
+    assert_eq!(empty.triangle(0).body_mask, 0);
+    assert_eq!(empty.bone_range(0).count, 0);
     assert_eq!(empty.hitbox(0).bone, 0);
     let pose = empty
         .frame(0)
@@ -212,25 +215,30 @@ fn accessors_stay_inside_the_blob() {
 #[test]
 fn unchecked_accessors_match_the_checked_ones() {
     let model = load(build_blob());
-    for v in 0..model.n_verts {
+    for v in 0..model.vertex_count() {
         // SAFETY: `v` is below the loaded vertex count.
-        let (a, b) = unsafe { (model.vert_unchecked(v), model.vert_gte_words_unchecked(v)) };
-        let (c, d) = (model.vert(v), model.vert_gte_words(v));
+        let (a, b) = unsafe {
+            (
+                model.vertex_unchecked(v),
+                model.vertex_gte_words_unchecked(v),
+            )
+        };
+        let (c, d) = (model.vertex(v), model.vertex_gte_words(v));
         assert_eq!([a.x, a.y, a.z], [c.x, c.y, c.z]);
         assert_eq!((b.xy, b.z), (d.xy, d.z));
     }
-    for t in 0..model.n_tris {
+    for t in 0..model.triangle_count() {
         // SAFETY: `t` is below the loaded triangle count.
         let (a, uv, n) = unsafe {
             (
-                model.tri_unchecked(t),
-                model.tri_uv_words_unchecked(t),
-                model.tri_normal_unchecked(t),
+                model.triangle_unchecked(t),
+                model.triangle_uv_words_unchecked(t),
+                model.triangle_normal_unchecked(t),
             )
         };
-        assert_eq!(a.idx, model.tri(t).idx);
-        assert_eq!(uv, model.tri_uv_words(t));
-        assert_eq!(n, model.tri_normal(t));
+        assert_eq!(a.idx, model.triangle(t).idx);
+        assert_eq!(uv, model.triangle_uv_words(t));
+        assert_eq!(n, model.triangle_normal(t));
     }
 }
 
@@ -240,7 +248,7 @@ fn decodes_poses_and_interpolates_between_frames() {
 
     let a = model.frame(0);
     let b = model.frame(1);
-    for bone in 0..model.n_bones {
+    for bone in 0..model.bone_count() {
         let pose = a.interpolate(a, 0).bone(bone, false, 0);
         assert_eq!(pose.rotation.m[0][0], 4096);
         assert_eq!(pose.rotation.m[1][1], 4096);
@@ -262,9 +270,13 @@ fn decodes_poses_and_interpolates_between_frames() {
 fn rejects_damage_instead_of_trusting_it() {
     let empty = |bytes: Vec<u8>| {
         let model = load(bytes);
-        assert_eq!(model.n_verts, 0, "damaged blob must load as the null model");
-        assert_eq!(model.n_tris, 0);
-        assert_eq!(model.n_bones, 0);
+        assert_eq!(
+            model.vertex_count(),
+            0,
+            "damaged blob must load as the null model"
+        );
+        assert_eq!(model.triangle_count(), 0);
+        assert_eq!(model.bone_count(), 0);
     };
 
     empty(b"HMD8".to_vec()); // shorter than the header
@@ -296,8 +308,12 @@ fn rejects_damage_instead_of_trusting_it() {
     empty(bad_scale);
 
     // more vertices than the caller's arena can hold
-    let model = Model::load_with_vertex_cap(Box::leak(build_blob().into_boxed_slice()), 2);
-    assert_eq!(model.n_verts, 0, "vertex cap must reject an oversized cook");
+    let model = Model::from_bytes_with_vertex_cap(Box::leak(build_blob().into_boxed_slice()), 2);
+    assert_eq!(
+        model.vertex_count(),
+        0,
+        "vertex cap must reject an oversized cook"
+    );
 }
 
 /// Run the same invariants over real cooked chunks, which are not committed:
@@ -332,40 +348,46 @@ fn real_chunks_hold_their_invariants() {
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let model = load(blob);
-        assert!(model.n_bones > 0, "{name} failed to load");
+        assert!(model.bone_count() > 0, "{name} failed to load");
 
         let mut covered = 0;
-        for i in 0..model.n_ranges {
-            let range = model.range(i);
-            assert!(range.bone < model.n_bones, "{name} range {i} bone");
+        for i in 0..model.bone_range_count() {
+            let range = model.bone_range(i);
+            assert!(range.bone < model.bone_count(), "{name} range {i} bone");
             assert!(
-                range.first + range.count <= model.n_verts,
+                range.first + range.count <= model.vertex_count(),
                 "{name} range {i}"
             );
             covered += range.count;
         }
-        assert!(covered <= model.n_verts, "{name} ranges overlap the stream");
+        assert!(
+            covered <= model.vertex_count(),
+            "{name} ranges overlap the stream"
+        );
 
-        for clip in 0..model.n_clips {
+        for clip in 0..model.clip_count() {
             let len = model.clip_len(clip);
             assert!(len > 0, "{name} clip {clip} empty");
             for local in 0..len {
                 assert!(
-                    model.clip_frame(clip, local) < model.n_frames,
+                    model.clip_frame(clip, local) < model.frame_count(),
                     "{name} clip {clip} frame {local} out of range"
                 );
             }
         }
 
-        for t in 0..model.n_tris {
-            for index in model.tri(t).idx {
-                assert!((index as usize) < model.n_verts, "{name} tri {t} index");
+        for t in 0..model.triangle_count() {
+            for index in model.triangle(t).idx {
+                assert!(
+                    (index as usize) < model.vertex_count(),
+                    "{name} tri {t} index"
+                );
             }
         }
         if model.has_tracks() {
-            let tracks = model.hma1().expect("validated tracks");
-            let mut scratch = vec![psx_asset::hma1::Aff::ZERO; tracks.model.n_bones()];
-            for clip in 0..tracks.model.n_clips() {
+            let tracks = model.tracks().expect("validated tracks");
+            let mut scratch = vec![psx_asset::hma1::Affine::ZERO; tracks.model.bone_count()];
+            for clip in 0..tracks.model.clip_count() {
                 let end = tracks.model.clip_intervals(clip) * 256;
                 for pos in [0, end / 3, end, end + 999] {
                     tracks.model.decode(clip, pos, &mut scratch);

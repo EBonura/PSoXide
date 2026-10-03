@@ -219,8 +219,15 @@ impl<'a> Mesh<'a> {
 
     /// Vertex count.
     #[inline]
-    pub fn vert_count(&self) -> u16 {
+    pub fn vertex_count(&self) -> u16 {
         self.vert_count
+    }
+
+    /// Renamed to [`Self::vertex_count`].
+    #[deprecated(note = "renamed to `vertex_count`")]
+    #[inline(always)]
+    pub fn vert_count(&self) -> u16 {
+        self.vertex_count()
     }
 
     /// Triangle count.
@@ -251,7 +258,7 @@ impl<'a> Mesh<'a> {
     /// Decode vertex `i` as a Q3.12 [`Vec3I16`]. Returns
     /// [`Vec3I16::ZERO`] if the index is out of range -- keeps
     /// the render path branch-free, callers who care can
-    /// check against [`Self::vert_count`] first.
+    /// check against [`Self::vertex_count`] first.
     #[inline]
     pub fn vertex(&self, i: u16) -> Vec3I16 {
         let idx = i as usize;
@@ -453,8 +460,15 @@ impl<'a> Model<'a> {
     /// Whether this model should render double-sided (no backface
     /// culling). Set by the cooker for hollow / open-faced models.
     #[inline]
-    pub fn double_sided(&self) -> bool {
+    pub fn is_double_sided(&self) -> bool {
         self.flags & psxed_format::model::flags::DOUBLE_SIDED != 0
+    }
+
+    /// Renamed to [`Self::is_double_sided`].
+    #[deprecated(note = "renamed to `is_double_sided`")]
+    #[inline(always)]
+    pub fn double_sided(&self) -> bool {
+        self.is_double_sided()
     }
 
     /// Number of joint records.
@@ -2358,8 +2372,15 @@ impl<'a> Texture<'a> {
 
     /// True when indexed palette entry 0 should remain transparent.
     #[inline]
-    pub fn index_zero_transparent(&self) -> bool {
+    pub fn is_index_zero_transparent(&self) -> bool {
         self.flags & psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT != 0
+    }
+
+    /// Renamed to [`Self::is_index_zero_transparent`].
+    #[deprecated(note = "renamed to `is_index_zero_transparent`")]
+    #[inline(always)]
+    pub fn index_zero_transparent(&self) -> bool {
+        self.is_index_zero_transparent()
     }
 
     /// Raw packed pixel halfwords, as bytes. Suitable for
@@ -2691,14 +2712,28 @@ impl<'a> World<'a> {
 
     /// Whether fog/depth cue is enabled for this world.
     #[inline]
-    pub fn fog_enabled(&self) -> bool {
+    pub fn is_fog_enabled(&self) -> bool {
         self.flags & psxed_format::world::world_flags::FOG_ENABLED != 0
+    }
+
+    /// Renamed to [`Self::is_fog_enabled`].
+    #[deprecated(note = "renamed to `is_fog_enabled`")]
+    #[inline(always)]
+    pub fn fog_enabled(&self) -> bool {
+        self.is_fog_enabled()
     }
 
     /// Whether face records carry baked static vertex lighting.
     #[inline]
-    pub fn static_vertex_lighting(&self) -> bool {
+    pub fn has_static_vertex_lighting(&self) -> bool {
         self.static_vertex_lighting
+    }
+
+    /// Renamed to [`Self::has_static_vertex_lighting`].
+    #[deprecated(note = "renamed to `has_static_vertex_lighting`")]
+    #[inline(always)]
+    pub fn static_vertex_lighting(&self) -> bool {
+        self.has_static_vertex_lighting()
     }
 
     /// Sector at a coordinate, returning `None` for empty cells or out of range.
@@ -2969,8 +3004,15 @@ impl WorldSectorFloorCollision {
 
     /// Whether the selected floor triangle is walkable.
     #[inline]
-    pub fn walkable(self) -> bool {
+    pub fn is_walkable(self) -> bool {
         self.walkable
+    }
+
+    /// Renamed to [`Self::is_walkable`].
+    #[deprecated(note = "renamed to `is_walkable`")]
+    #[inline(always)]
+    pub fn walkable(self) -> bool {
+        self.is_walkable()
     }
 
     /// Floor corner heights `[NW, NE, SE, SW]`.
@@ -3139,20 +3181,27 @@ impl WorldSector {
     #[inline]
     pub fn has_floor(&self) -> bool {
         self.flags & psxed_format::world::sector_flags::HAS_FLOOR != 0
-            && (self.floor_triangle_present(0) || self.floor_triangle_present(1))
+            && (self.has_floor_triangle(0) || self.has_floor_triangle(1))
     }
 
     /// True if this sector has a ceiling face.
     #[inline]
     pub fn has_ceiling(&self) -> bool {
         self.flags & psxed_format::world::sector_flags::HAS_CEILING != 0
-            && (self.ceiling_triangle_present(0) || self.ceiling_triangle_present(1))
+            && (self.has_ceiling_triangle(0) || self.has_ceiling_triangle(1))
     }
 
     /// True if the floor face is walkable.
     #[inline]
+    pub fn is_floor_walkable(&self) -> bool {
+        self.is_floor_triangle_walkable(0) || self.is_floor_triangle_walkable(1)
+    }
+
+    /// Renamed to [`Self::is_floor_walkable`].
+    #[deprecated(note = "renamed to `is_floor_walkable`")]
+    #[inline(always)]
     pub fn floor_walkable(&self) -> bool {
-        self.floor_triangle_walkable(0) || self.floor_triangle_walkable(1)
+        self.is_floor_walkable()
     }
 
     /// Floor diagonal split id.
@@ -3183,14 +3232,21 @@ impl WorldSector {
 
     /// `true` if a floor split triangle is present.
     #[inline]
-    pub fn floor_triangle_present(&self, index: usize) -> bool {
+    pub fn has_floor_triangle(&self, index: usize) -> bool {
         horizontal_triangle_present(self.floor_triangle_flags, index)
+    }
+
+    /// Renamed to [`Self::has_floor_triangle`].
+    #[deprecated(note = "renamed to `has_floor_triangle`")]
+    #[inline(always)]
+    pub fn floor_triangle_present(&self, index: usize) -> bool {
+        self.has_floor_triangle(index)
     }
 
     /// Floor split-triangle material slot.
     #[inline]
     pub fn floor_triangle_material(&self, index: usize) -> Option<u16> {
-        if self.floor_triangle_present(index) {
+        if self.has_floor_triangle(index) {
             material_or_none(self.floor_triangle_materials[index.min(1)])
         } else {
             None
@@ -3211,9 +3267,16 @@ impl WorldSector {
 
     /// `true` if a floor split triangle is walkable.
     #[inline]
-    pub fn floor_triangle_walkable(&self, index: usize) -> bool {
-        self.floor_triangle_present(index)
+    pub fn is_floor_triangle_walkable(&self, index: usize) -> bool {
+        self.has_floor_triangle(index)
             && horizontal_triangle_walkable(self.floor_triangle_flags, index)
+    }
+
+    /// Renamed to [`Self::is_floor_triangle_walkable`].
+    #[deprecated(note = "renamed to `is_floor_triangle_walkable`")]
+    #[inline(always)]
+    pub fn floor_triangle_walkable(&self, index: usize) -> bool {
+        self.is_floor_triangle_walkable(index)
     }
 
     /// Ceiling diagonal split id.
@@ -3244,14 +3307,21 @@ impl WorldSector {
 
     /// `true` if a ceiling split triangle is present.
     #[inline]
-    pub fn ceiling_triangle_present(&self, index: usize) -> bool {
+    pub fn has_ceiling_triangle(&self, index: usize) -> bool {
         horizontal_triangle_present(self.ceiling_triangle_flags, index)
+    }
+
+    /// Renamed to [`Self::has_ceiling_triangle`].
+    #[deprecated(note = "renamed to `has_ceiling_triangle`")]
+    #[inline(always)]
+    pub fn ceiling_triangle_present(&self, index: usize) -> bool {
+        self.has_ceiling_triangle(index)
     }
 
     /// Ceiling split-triangle material slot.
     #[inline]
     pub fn ceiling_triangle_material(&self, index: usize) -> Option<u16> {
-        if self.ceiling_triangle_present(index) {
+        if self.has_ceiling_triangle(index) {
             material_or_none(self.ceiling_triangle_materials[index.min(1)])
         } else {
             None
@@ -3272,9 +3342,16 @@ impl WorldSector {
 
     /// `true` if a ceiling split triangle is walkable.
     #[inline]
-    pub fn ceiling_triangle_walkable(&self, index: usize) -> bool {
-        self.ceiling_triangle_present(index)
+    pub fn is_ceiling_triangle_walkable(&self, index: usize) -> bool {
+        self.has_ceiling_triangle(index)
             && horizontal_triangle_walkable(self.ceiling_triangle_flags, index)
+    }
+
+    /// Renamed to [`Self::is_ceiling_triangle_walkable`].
+    #[deprecated(note = "renamed to `is_ceiling_triangle_walkable`")]
+    #[inline(always)]
+    pub fn ceiling_triangle_walkable(&self, index: usize) -> bool {
+        self.is_ceiling_triangle_walkable(index)
     }
 
     /// First global wall index for this sector.
@@ -3330,8 +3407,15 @@ impl WorldWall {
 
     /// Whether this wall blocks collision.
     #[inline]
-    pub fn solid(&self) -> bool {
+    pub fn is_solid(&self) -> bool {
         self.flags & psxed_format::world::wall_flags::SOLID != 0
+    }
+
+    /// Renamed to [`Self::is_solid`].
+    #[deprecated(note = "renamed to `is_solid`")]
+    #[inline(always)]
+    pub fn solid(&self) -> bool {
+        self.is_solid()
     }
 
     /// Material slot.
