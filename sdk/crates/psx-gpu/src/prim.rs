@@ -352,7 +352,7 @@ impl TriTextured {
         let (u1, v1) = uvs[1];
         let (u2, v2) = uvs[2];
         let clut = material.clut_word();
-        let tpage = material.tpage_word();
+        let tpage = material.texture_page_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),
@@ -378,7 +378,7 @@ impl TriTextured {
         let (u1, v1) = uvs[1];
         let (u2, v2) = uvs[2];
         let clut = material.clut_word();
-        let tpage = material.tpage_word();
+        let tpage = material.texture_page_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),
@@ -401,7 +401,7 @@ impl TriTextured {
         material: TextureMaterial,
     ) -> Self {
         let clut = material.clut_word();
-        let tpage = material.tpage_word();
+        let tpage = material.texture_page_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),
@@ -555,7 +555,7 @@ impl TriTexturedGouraud {
         let (u1, v1) = uvs[1];
         let (u2, v2) = uvs[2];
         let clut = material.clut_word();
-        let tpage = material.tpage_word();
+        let tpage = material.texture_page_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),
@@ -586,7 +586,7 @@ impl TriTexturedGouraud {
         let (u1, v1) = uvs[1];
         let (u2, v2) = uvs[2];
         let clut = material.clut_word();
-        let tpage = material.tpage_word();
+        let tpage = material.texture_page_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),
@@ -614,7 +614,7 @@ impl TriTexturedGouraud {
         let (r1, g1, b1) = colors[1];
         let (r2, g2, b2) = colors[2];
         let clut = material.clut_word();
-        let tpage = material.tpage_word();
+        let tpage = material.texture_page_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),
@@ -1210,7 +1210,7 @@ impl QuadTextured {
         let (u2, v2) = uvs[2];
         let (u3, v3) = uvs[3];
         let clut = material.clut_word();
-        let tpage = material.tpage_word();
+        let tpage = material.texture_page_word();
         Self {
             tag: 0,
             color_cmd: material.flat_textured_polygon_header(true),
@@ -1273,7 +1273,7 @@ impl QuadTexturedMaterial {
         let (u2, v2) = uvs[2];
         let (u3, v3) = uvs[3];
         let clut = material.clut_word();
-        let tpage = material.tpage_word();
+        let tpage = material.texture_page_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),

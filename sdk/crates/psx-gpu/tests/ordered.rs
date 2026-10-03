@@ -25,10 +25,10 @@ impl State {
 }
 #[derive(Clone)]
 struct Dma(Rc<RefCell<State>>);
-// SAFETY: the fake reads submitted nodes only in `submit` and in the `busy` or
+// SAFETY: the fake reads submitted nodes only in `submit` and in the `is_busy` or
 // `wait` call that retires them; `pending` is empty once `wait` returns.
 unsafe impl CommandStreamDma for Dma {
-    fn busy(&mut self) -> bool {
+    fn is_busy(&mut self) -> bool {
         let mut s = self.0.borrow_mut();
         s.polls += 1;
         if s.complete_on_poll {
@@ -67,7 +67,7 @@ unsafe impl CommandStreamDma for Dma {
         s.waits += 1;
         s.finish();
     }
-    fn draw_sync(&mut self) {
+    fn wait_idle(&mut self) {
         let mut s = self.0.borrow_mut();
         assert!(s.pending.is_empty());
         s.syncs += 1;
@@ -102,10 +102,10 @@ fn capacity_reuse_and_async_completion_preserve_order() {
                     list.submit();
                 }
                 if n % 211 == 0 {
-                    list.draw_sync();
+                    list.flush();
                 }
             }
-            list.draw_sync();
+            list.flush();
             assert_eq!(
                 s.borrow().output,
                 expected,
@@ -137,7 +137,7 @@ fn exact_capacity_boundaries_preserve_dma_nodes_and_fences() {
             list.push_packet([5; 13]);
             list.submit();
             list.push_packet([6; 15]);
-            list.draw_sync();
+            list.flush();
             let s = state.borrow();
             // Recorded from the original inlined reserve implementation. The
             // 31/32-word cases also exercise rollover's second spare-tag check.
@@ -166,14 +166,14 @@ fn mixed_uploads_and_immediate_fences_preserve_payload() {
     list.push_packet([0xe100040a]);
     list.push_upload(3, 4, 3, 1, &[1, 2, 3]);
     list.push_packet([0x680000ff, 7]);
-    list.draw_sync();
+    list.flush();
     assert_eq!(
         s.borrow().output,
         [0xe100040a, 0xa0000000, 0x00040003, 0x00010003, 0x00020001, 3, 0x680000ff, 7]
     );
     assert_eq!(s.borrow().syncs, 1);
     list.push_packet([0xe2000000]);
-    list.draw_sync();
+    list.flush();
     assert_eq!(s.borrow().output.last(), Some(&0xe2000000));
 }
 #[test]
@@ -222,7 +222,7 @@ fn captured_frame_preserves_all_264_packets_and_995_words() {
         }
         expected.extend_from_slice(packet);
     }
-    list.draw_sync();
+    list.flush();
     assert_eq!(fixture::packets().len(), 264);
     assert_eq!(expected.len(), 995);
     assert_eq!(state.borrow().output, expected);

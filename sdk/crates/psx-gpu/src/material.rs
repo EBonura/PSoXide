@@ -128,7 +128,8 @@ impl BlendMode {
     /// Hardware tpage bits do not encode "opaque"; the primitive
     /// opcode decides whether blending is active. This therefore
     /// returns one of the four blending variants.
-    pub const fn from_tpage_bits(bits: u8) -> Self {
+    #[doc(alias = "tpage")]
+    pub const fn from_texture_page_bits(bits: u8) -> Self {
         match bits & 0x3 {
             0 => Self::Average,
             1 => Self::Add,
@@ -137,17 +138,32 @@ impl BlendMode {
         }
     }
 
+    /// Renamed to [`from_texture_page_bits`](Self::from_texture_page_bits).
+    #[deprecated(note = "renamed to `from_texture_page_bits`")]
+    #[inline(always)]
+    pub const fn from_tpage_bits(bits: u8) -> Self {
+        Self::from_texture_page_bits(bits)
+    }
+
     /// Encode as GP0(E1) / tpage bits 5..6.
     ///
     /// `Opaque` uses the common average-blend encoding because the
     /// primitive semi-transparent bit will be clear.
-    pub const fn tpage_bits(self) -> u8 {
+    #[doc(alias = "tpage")]
+    pub const fn texture_page_bits(self) -> u8 {
         match self {
             Self::Opaque | Self::Average => 0,
             Self::Add => 1,
             Self::Subtract => 2,
             Self::AddQuarter => 3,
         }
+    }
+
+    /// Renamed to [`texture_page_bits`](Self::texture_page_bits).
+    #[deprecated(note = "renamed to `texture_page_bits`")]
+    #[inline(always)]
+    pub const fn tpage_bits(self) -> u8 {
+        self.texture_page_bits()
     }
 
     /// True when a primitive using this material should set its
@@ -199,7 +215,7 @@ impl TexturedPacketMaterial {
             tex_window_word: material.texture_window_word(),
             color_command_word: material.flat_textured_polygon_header(false),
             clut_high_word: (material.clut_word() as u32) << 16,
-            tpage_high_word: (material.tpage_word() as u32) << 16,
+            tpage_high_word: (material.texture_page_word() as u32) << 16,
         }
     }
 
@@ -240,7 +256,7 @@ impl TexturedGouraudPacketMaterial {
             tex_window_word: material.texture_window_word(),
             color0_command_word: material.textured_polygon_command(true, false),
             clut_high_word: (material.clut_word() as u32) << 16,
-            tpage_high_word: (material.tpage_word() as u32) << 16,
+            tpage_high_word: (material.texture_page_word() as u32) << 16,
         }
     }
 
@@ -345,10 +361,19 @@ impl TextureMaterial {
     ///
     /// The material owns the tpage blend and dither bits; all other
     /// tpage address/depth bits are preserved from the original word.
-    pub const fn tpage_word(self) -> u16 {
-        let blend_bits = (self.blend_mode.tpage_bits() as u16) << 5;
+    #[doc(alias = "tpage")]
+    #[doc(alias = "getTPage")]
+    pub const fn texture_page_word(self) -> u16 {
+        let blend_bits = (self.blend_mode.texture_page_bits() as u16) << 5;
         let dither_bit = (self.dither as u16) << 9;
         (self.tpage_word & !(0x0060 | 0x0200)) | blend_bits | dither_bit
+    }
+
+    /// Renamed to [`texture_page_word`](Self::texture_page_word).
+    #[deprecated(note = "renamed to `texture_page_word`")]
+    #[inline(always)]
+    pub const fn tpage_word(self) -> u16 {
+        self.texture_page_word()
     }
 
     /// GP0(E2) texture-window word for this material.
@@ -372,13 +397,27 @@ impl TextureMaterial {
     }
 
     /// True when the primitive command should set its raw-texture bit.
-    pub const fn raw_texture(self) -> bool {
+    pub const fn is_raw_texture(self) -> bool {
         self.raw_texture
     }
 
+    /// Renamed to [`is_raw_texture`](Self::is_raw_texture).
+    #[deprecated(note = "renamed to `is_raw_texture`")]
+    #[inline(always)]
+    pub const fn raw_texture(self) -> bool {
+        self.is_raw_texture()
+    }
+
     /// True when the material asks GP0(E1) / primitive tpage state for dithering.
-    pub const fn dither(self) -> bool {
+    pub const fn is_dithered(self) -> bool {
         self.dither
+    }
+
+    /// Renamed to [`is_dithered`](Self::is_dithered).
+    #[deprecated(note = "renamed to `is_dithered`")]
+    #[inline(always)]
+    pub const fn dither(self) -> bool {
+        self.is_dithered()
     }
 
     /// Textured polygon command bits without the low RGB payload.
@@ -418,11 +457,11 @@ impl TextureMaterial {
     /// material state before drawing keeps subsequent sprite draws in
     /// sync.
     pub const fn draw_mode_word(self) -> u32 {
-        let tpage = self.tpage_word();
+        let tpage = self.texture_page_word();
         gp0::draw_mode(
             (tpage & 0x0F) as u32,
             ((tpage >> 4) & 1) as u32,
-            self.blend_mode.tpage_bits() as u32,
+            self.blend_mode.texture_page_bits() as u32,
             ((tpage >> 7) & 0x3) as u32,
             self.dither,
             true,
@@ -443,11 +482,11 @@ mod tests {
 
     #[test]
     fn blend_mode_decodes_tpage_bits() {
-        assert_eq!(BlendMode::from_tpage_bits(0), BlendMode::Average);
-        assert_eq!(BlendMode::from_tpage_bits(1), BlendMode::Add);
-        assert_eq!(BlendMode::from_tpage_bits(2), BlendMode::Subtract);
-        assert_eq!(BlendMode::from_tpage_bits(3), BlendMode::AddQuarter);
-        assert_eq!(BlendMode::from_tpage_bits(4), BlendMode::Average);
+        assert_eq!(BlendMode::from_texture_page_bits(0), BlendMode::Average);
+        assert_eq!(BlendMode::from_texture_page_bits(1), BlendMode::Add);
+        assert_eq!(BlendMode::from_texture_page_bits(2), BlendMode::Subtract);
+        assert_eq!(BlendMode::from_texture_page_bits(3), BlendMode::AddQuarter);
+        assert_eq!(BlendMode::from_texture_page_bits(4), BlendMode::Average);
     }
 
     #[test]
@@ -465,8 +504,8 @@ mod tests {
                 .with_dither(true);
 
         assert_eq!(material.clut_word(), 0x1234);
-        assert_eq!((material.tpage_word() >> 5) & 0x3, 3);
-        assert_eq!((material.tpage_word() >> 9) & 0x1, 1);
+        assert_eq!((material.texture_page_word() >> 5) & 0x3, 3);
+        assert_eq!((material.texture_page_word() >> 9) & 0x1, 1);
         assert_eq!(material.texture_window_word(), 0xE204_2318);
         assert_eq!(material.texture_window.origin_texels(), [64, 64]);
         assert_eq!((material.textured_rect_header() >> 24) & 0xFF, 0x67);
