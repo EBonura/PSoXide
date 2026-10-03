@@ -23,12 +23,12 @@ const END: u32 = 0x00ff_ffff;
 ///
 /// * after [`Self::wait`] returns, nothing reads storage passed to an earlier
 ///   [`Self::submit`] (a timed-out transfer must be stopped, not abandoned);
-/// * [`Self::busy`] returns `true` while a submitted list may still be read,
+/// * [`Self::is_busy`] returns `true` while a submitted list may still be read,
 ///   because a `false` lets the stream start the next list at once;
 /// * [`Self::submit`] reads only the linked nodes it was given.
 pub unsafe trait CommandStreamDma {
     /// Whether the previous GPU DMA transfer is still reading its storage.
-    fn busy(&mut self) -> bool;
+    fn is_busy(&mut self) -> bool;
     /// Start a valid linked list after the channel becomes idle.
     ///
     /// # Safety
@@ -38,17 +38,43 @@ pub unsafe trait CommandStreamDma {
     /// Wait until the DMA engine no longer reads the submitted storage.
     fn wait(&mut self);
     /// Wait until previously submitted GPU drawing has finished.
-    fn draw_sync(&mut self);
+    #[doc(alias = "DrawSync")]
+    fn wait_idle(&mut self);
+
+    /// Renamed to [`is_busy`](Self::is_busy).
+    #[deprecated(note = "renamed to `is_busy`")]
+    #[inline(always)]
+    fn busy(&mut self) -> bool {
+        self.is_busy()
+    }
+
+    /// Renamed to [`wait_idle`](Self::wait_idle).
+    #[deprecated(note = "renamed to `wait_idle`")]
+    #[inline(always)]
+    fn draw_sync(&mut self) {
+        self.wait_idle()
+    }
 }
 
 /// SDK channel-2 transport for [`OrderedCommandStream`].
-pub struct GpuDma;
-// SAFETY: `busy` reads the channel-2 CHCR start bit, which stays set until the
+pub struct GpuChannel;
+
+/// Renamed to [`GpuChannel`].
+#[deprecated(note = "renamed to `GpuChannel`")]
+pub type GpuDma = GpuChannel;
+
+/// Renamed to [`GpuChannel`].
+// A type alias cannot name a unit struct's value, so the old value spelling
+// (`with_dma(words, GpuDma)`) keeps working through this constant.
+#[deprecated(note = "renamed to `GpuChannel`")]
+#[allow(non_upper_case_globals)]
+pub const GpuDma: GpuChannel = GpuChannel;
+// SAFETY: `is_busy` reads the channel-2 CHCR start bit, which stays set until the
 // walk ends. `wait` returns only after that bit clears or after it aborts the
 // channel (and resets the GPU) on timeout, so no walk outlives it.
-unsafe impl CommandStreamDma for GpuDma {
+unsafe impl CommandStreamDma for GpuChannel {
     #[inline]
-    fn busy(&mut self) -> bool {
+    fn is_busy(&mut self) -> bool {
         psx_io::dma::is_busy(psx_io::dma::Channel::Gpu)
     }
     #[inline]
@@ -61,7 +87,7 @@ unsafe impl CommandStreamDma for GpuDma {
         crate::submit_linked_list_wait();
     }
     #[inline]
-    fn draw_sync(&mut self) {
+    fn wait_idle(&mut self) {
         crate::wait_idle();
     }
 }
@@ -69,7 +95,7 @@ unsafe impl CommandStreamDma for GpuDma {
 /// Forward, incremental GPU command list over caller-owned static storage.
 ///
 /// Append complete packets with [`Self::push_packet`], then [`Self::submit`]
-/// to overlap CPU work with GPU drawing. Call [`Self::draw_sync`] before
+/// to overlap CPU work with GPU drawing. Call [`Self::flush`] before
 /// immediate GP0 drawing, VRAM uploads, or framebuffer presentation. Capacity
 /// exhaustion performs that same synchronization before reusing storage.
 /// Dropping the stream waits for in-flight DMA and discards unsent commands.
@@ -78,7 +104,7 @@ unsafe impl CommandStreamDma for GpuDma {
 /// before the frame's first packet (nodes can start walking as soon as they
 /// close) and end the frame with `push_packet([gp0::REQUEST_IRQ])` and
 /// [`Self::submit`]; see [`crate::is_draw_done`].
-pub struct OrderedCommandStream<D: CommandStreamDma = GpuDma> {
+pub struct OrderedCommandStream<D: CommandStreamDma = GpuChannel> {
     words: &'static mut [u32],
     len: usize,
     head: usize,
@@ -90,7 +116,7 @@ pub struct OrderedCommandStream<D: CommandStreamDma = GpuDma> {
 impl OrderedCommandStream {
     /// Use a static, word-aligned RAM buffer of at least 17 words.
     pub fn new(words: &'static mut [u32]) -> Self {
-        Self::with_dma(words, GpuDma)
+        Self::with_dma(words, GpuChannel)
     }
 }
 
@@ -130,7 +156,7 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         unsafe {
             core::ptr::write_volatile(self.words.as_mut_ptr().add(self.head), payload << 24 | link);
         }
-        if !self.dma.busy() {
+        if !self.dma.is_busy() {
             self.kick_pending();
         }
     }
@@ -144,7 +170,7 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         // never in the region now owned by DMA.
         // SAFETY: `sent..len` holds closed nodes whose tags link only inside
         // `words`, which is `'static`. The stream writes none of them again
-        // until `dma.wait()` returns (draw_sync and drop both wait first).
+        // until `dma.wait()` returns (flush and drop both wait first).
         unsafe {
             self.dma.submit(self.words.as_ptr().add(self.sent));
         }
@@ -179,7 +205,7 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
     #[cold]
     #[inline(never)]
     fn reuse_full_buffer(&mut self) {
-        self.draw_sync();
+        self.flush();
     }
 
     /// Append one complete GP0 packet in painter order.
@@ -208,7 +234,7 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
     /// Coordinates and dimensions use VRAM halfwords. The rectangle must
     /// match `pixels` and fit one node (at most 24 pixels). Odd pixel counts
     /// have a zero-padded final halfword. Large asset uploads should use the
-    /// VRAM upload helpers after [`Self::draw_sync`].
+    /// VRAM upload helpers after [`Self::flush`].
     pub fn push_upload(&mut self, x: u16, y: u16, width: u16, height: u16, pixels: &[u16]) {
         assert!(width > 0 && height > 0);
         assert_eq!(pixels.len(), usize::from(width) * usize::from(height));
@@ -240,7 +266,7 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
 
     /// Submit, wait for DMA and GPU, and reset the buffer for reuse.
     #[doc(alias = "DrawSync")]
-    pub fn draw_sync(&mut self) {
+    pub fn flush(&mut self) {
         self.submit();
         if self.submitted {
             self.dma.wait();
@@ -250,7 +276,14 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         self.head = 0;
         self.sent = 0;
         self.words[0] = END;
-        self.dma.draw_sync();
+        self.dma.wait_idle();
+    }
+
+    /// Renamed to [`flush`](Self::flush).
+    #[deprecated(note = "renamed to `flush`")]
+    #[inline(always)]
+    pub fn draw_sync(&mut self) {
+        self.flush()
     }
 }
 
