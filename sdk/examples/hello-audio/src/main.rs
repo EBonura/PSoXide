@@ -231,7 +231,7 @@ fn main() {
             (120, 120, 120),
         );
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
     }

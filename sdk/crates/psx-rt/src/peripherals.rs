@@ -2,7 +2,7 @@
 
 use crate::critical_section::{self, Mutex};
 use core::cell::Cell;
-use psx_io::periph::{Cdrom, GpuDma, MdecDma, OtcDma, Sio0, SpuDma};
+use psx_io::periph::{Cd, ControllerPort, GpuDma, MdecDma, OrderingTableClearDma, SpuDma};
 
 /// Every shared-state peripheral token, handed out once.
 ///
@@ -21,15 +21,15 @@ pub struct Peripherals {
     /// DMA channel 2 and the GP0 stream it feeds.
     pub gpu_dma: GpuDma,
     /// DMA channel 6, the ordering-table clear.
-    pub otc_dma: OtcDma,
+    pub ordering_table_clear_dma: OrderingTableClearDma,
     /// DMA channels 0 and 1 (MDEC in and out).
     pub mdec_dma: MdecDma,
     /// DMA channel 4 and the SPU transfer port.
     pub spu_dma: SpuDma,
     /// The CD-ROM controller and DMA channel 3.
-    pub cdrom: Cdrom,
-    /// SIO0, the pad and memory-card port.
-    pub sio0: Sio0,
+    pub cd: Cd,
+    /// The pad and memory-card port (SIO0).
+    pub controller_port: ControllerPort,
 }
 
 static TAKEN: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
@@ -62,11 +62,11 @@ impl Peripherals {
         unsafe {
             Self {
                 gpu_dma: GpuDma::steal(),
-                otc_dma: OtcDma::steal(),
+                ordering_table_clear_dma: OrderingTableClearDma::steal(),
                 mdec_dma: MdecDma::steal(),
                 spu_dma: SpuDma::steal(),
-                cdrom: Cdrom::steal(),
-                sio0: Sio0::steal(),
+                cd: Cd::steal(),
+                controller_port: ControllerPort::steal(),
             }
         }
     }

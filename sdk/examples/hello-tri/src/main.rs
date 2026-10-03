@@ -50,7 +50,7 @@ fn main() {
         let verts = [(160, 40 + wobble), (60, 200 - wobble), (260, 200 - wobble)];
         gpu::draw_tri_gouraud(verts, [(255, 64, 64), (64, 255, 64), (64, 64, 255)]);
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
 

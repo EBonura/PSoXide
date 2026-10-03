@@ -265,7 +265,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
         unsafe { self.ot.insert_tagged_packet_stream_unchecked(first, end) };
     }
 
-    /// End the walk with GP0(1Fh) so [`crate::draw_done`] rises once the
+    /// End the walk with GP0(1Fh) so [`crate::is_draw_done`] rises once the
     /// frame is drawn; see [`OrderingTable::end_with_draw_done`].
     ///
     /// # Panics
@@ -284,7 +284,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     /// part of this frame. Its own packets keep their order; anything added
     /// to this frame's slot 0 afterwards still draws before `next`.
     ///
-    /// Host builds link for real, but [`OrderingTable::iter_packets`] only
+    /// Host builds link for real, but [`OrderingTable::packets`] only
     /// follows links within one table's address window.
     ///
     /// # Panics
@@ -318,7 +318,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     pub fn submit_with<R>(self, _dma: &mut GpuDma, overlap: impl FnOnce() -> R) -> R {
         // SAFETY: as `submit`; `_wait` waits for the walk before this
         // returns, on every path out of `overlap`.
-        unsafe { crate::submit_linked_list_raw_async(self.ot.submit_head()) };
+        unsafe { crate::submit_linked_list_async_raw(self.ot.submit_head()) };
         let _wait = WaitOnDrop;
         overlap()
     }
@@ -376,7 +376,7 @@ impl<const N: usize, S> FrameStorage<N, S> {
         // SAFETY: the table and packets were linked by `build`, which only
         // admits packets in `self` or `'static` ones; the caller keeps
         // `self` untouched until the wait.
-        unsafe { crate::submit_linked_list_raw_async(self.ot.submit_head()) };
+        unsafe { crate::submit_linked_list_async_raw(self.ot.submit_head()) };
     }
 
     /// Build a frame with `build`, then kick it and return without waiting.
@@ -582,7 +582,7 @@ mod tests {
         // Slot 2 now heads b, which links a, which links slot 1's entry.
         let walked: [(usize, u8); 2] = {
             // SAFETY: the table links only `storage`, alive for the test.
-            let mut it = unsafe { ot.iter_packets() };
+            let mut it = unsafe { ot.packets() };
             let first = it.next().unwrap();
             let second = it.next().unwrap();
             assert!(it.next().is_none());
@@ -610,7 +610,7 @@ mod tests {
         frame.add(99, &mut rect);
         drop(frame);
         // SAFETY: the table links only `rect`, alive for the test.
-        let first = unsafe { ot.iter_packets() }.next().unwrap();
+        let first = unsafe { ot.packets() }.next().unwrap();
         assert_eq!(first.0 as usize & END as usize, addr(&rect) as usize);
     }
 
@@ -658,7 +658,7 @@ mod tests {
         });
         assert_eq!(count, 2);
         // SAFETY: the table links only the storage's own packets.
-        let walked = unsafe { storage.ot.iter_packets() }.count();
+        let walked = unsafe { storage.ot.packets() }.count();
         assert_eq!(walked, 2);
         assert_eq!(storage.packets_mut()[1].tag >> 24, RectFlat::WORDS as u32);
     }
@@ -678,7 +678,7 @@ mod tests {
         drop(frame);
         let walked: [usize; 2] = {
             // SAFETY: the table links only `first` and `second`, alive here.
-            let mut it = unsafe { ot.iter_packets() };
+            let mut it = unsafe { ot.packets() };
             let order = [it.next().unwrap().0 as usize, it.next().unwrap().0 as usize];
             assert!(it.next().is_none());
             order
@@ -721,8 +721,8 @@ mod tests {
         // SAFETY: the tables link only the arrays above, alive here.
         let heads = unsafe {
             (
-                checked.iter_packets().next().unwrap().0,
-                unchecked.iter_packets().next().unwrap().0,
+                checked.packets().next().unwrap().0,
+                unchecked.packets().next().unwrap().0,
             )
         };
         assert_eq!(heads, (b.as_ptr(), d.as_ptr()));
@@ -751,7 +751,7 @@ mod tests {
         drop(frame);
         // SAFETY: the table links only `a`, `b` and `stream`, alive here.
         let walked: [*const u32; 3] = unsafe {
-            let mut it = ot.iter_packets();
+            let mut it = ot.packets();
             let order = [
                 it.next().unwrap().0,
                 it.next().unwrap().0,

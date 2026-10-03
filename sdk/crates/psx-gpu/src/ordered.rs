@@ -54,7 +54,7 @@ unsafe impl CommandStreamDma for GpuDma {
     #[inline]
     unsafe fn submit(&mut self, head: *const u32) {
         // SAFETY: forwarded from this method's own contract.
-        unsafe { crate::submit_linked_list_raw_async(head) };
+        unsafe { crate::submit_linked_list_async_raw(head) };
     }
     #[inline]
     fn wait(&mut self) {
@@ -62,7 +62,7 @@ unsafe impl CommandStreamDma for GpuDma {
     }
     #[inline]
     fn draw_sync(&mut self) {
-        crate::draw_sync();
+        crate::wait_idle();
     }
 }
 
@@ -77,7 +77,7 @@ unsafe impl CommandStreamDma for GpuDma {
 /// To present through psx-rt's queued flip, call [`crate::arm_draw_done`]
 /// before the frame's first packet (nodes can start walking as soon as they
 /// close) and end the frame with `push_packet([gp0::REQUEST_IRQ])` and
-/// [`Self::submit`]; see [`crate::draw_done`].
+/// [`Self::submit`]; see [`crate::is_draw_done`].
 pub struct OrderedCommandStream<D: CommandStreamDma = GpuDma> {
     words: &'static mut [u32],
     len: usize,

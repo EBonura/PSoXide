@@ -566,7 +566,7 @@ fn draw_summary(font: &FontAtlas, small: &FontAtlas, st: &Stream, s: &Summary, l
         .n(s.kcyc[PHASE_WAIT], 1);
     small.draw_text(X0, 204, small_line.as_str(), WHITE);
     small.draw_text(X0, 214, "LATE: DECODER SLOW, NOT A FAIL", WHITE);
-    gpu::draw_sync();
+    gpu::wait_idle();
     psx_io::gpu::write_display_control(0x0500_0000);
 }
 
@@ -732,7 +732,7 @@ pub fn run_with(options: Options) -> Outcome {
         in_a_row = 0;
         let elapsed = interrupts::vblank_count().wrapping_sub(start);
         draw_overlay(&font, back_y, &st, shown + 1, elapsed, options.label);
-        gpu::draw_sync();
+        gpu::wait_idle();
         clock(Some(PHASE_WAIT));
         // Pace to 15 fps, then flip at the VBlank; the drive keeps draining.
         while (interrupts::vblank_count().wrapping_sub(next_flip) as i32) < 0 {
