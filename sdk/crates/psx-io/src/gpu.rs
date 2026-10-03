@@ -33,6 +33,12 @@ pub fn pause_recording() -> RecordingPause {
     RecordingPause(())
 }
 
+/// Run the direct-access guard if a queued frame armed it. Without the
+/// `present-queue` feature nothing can arm it, so it compiles to nothing.
+#[cfg(not(any(feature = "present-queue", test)))]
+#[inline(always)]
+pub fn run_direct_access_guard() {}
+
 /// Push a drawing or VRAM command word, or one of its parameters, to the
 /// GPU's command port (`GP0`). Pairs with the word builders in
 /// `psx_hw::gpu::gp0`: `write_command(gp0::draw_mode(...))`.
