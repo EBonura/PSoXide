@@ -20,6 +20,20 @@ pub fn write_gp0(word: u32) {
     unsafe { crate::write32(GP0, word) }
 }
 
+/// Write `word` to the GP0 port itself, bypassing any capture and the
+/// direct-access guard. Only for code that has already made the port safe,
+/// such as the present queue's stall recovery (which the guard itself runs).
+#[inline(always)]
+pub fn write_gp0_unguarded(word: u32) {
+    unsafe { crate::write32(GP0, word) }
+}
+
+/// [`write_gp0_unguarded`] for GP1.
+#[inline(always)]
+pub fn write_gp1_unguarded(word: u32) {
+    unsafe { crate::write32(GP1, word) }
+}
+
 #[inline(never)]
 fn write_gp0_slow(word: u32) {
     if is_capturing() {
