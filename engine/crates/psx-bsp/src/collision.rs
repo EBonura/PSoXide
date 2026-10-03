@@ -1,15 +1,16 @@
-//! Caller-owned PXBSP collision-hull traversal.
+//! Caller-owned PXBSP collision-hull traversal: point contents and segment
+//! traces through a hull of split planes, with bounded, allocation-free
+//! scratch and integer-only arithmetic.
 //!
-//! Derived from quake-psx `crates/quake-core` (commit 9e20a1b, same GPL-2
-//! authorship). This is PSoXide's canonical allocation-free implementation.
-//! PXBSP positions are Y-up Q20.12 and plane normals are Q3.12.
+//! PXBSP positions are Y-up Q20.12 and plane normals are Q3.12. The
+//! contents codes below are the cooked format's leaf values.
 
+use core::cmp::Ordering;
 use core::mem::MaybeUninit;
 
 use crate::{
     ClipNode, CompactPlane, CookedRecord, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32,
 };
-use psx_engine::div_q12_i32;
 use psx_gte::math::Mat3I16;
 use psx_math::int32::{div_u64_by_u32, mul_q12_i32, mul_q12_i32_wide};
 
@@ -20,6 +21,11 @@ pub const CONTENTS_SLIME: i16 = -4;
 pub const CONTENTS_LAVA: i16 = -5;
 pub const CONTENTS_SKY: i16 = -6;
 pub const Q12_ONE: i32 = 4096;
+/// How far a trace stops short of the plane it hits, on the start side,
+/// in Q20.12: 1/32 of a unit. Without it a contact rounded onto the plane
+/// (or a hair past it) would start the next trace inside solid; the margin
+/// is a few times the rounding of a Q0.12 fraction over typical moves and
+/// far below anything visible.
 pub const TRACE_PLANE_EPSILON_Q12: i32 = 128;
 pub const TRACE_STACK_CAPACITY: usize = 64;
 
@@ -155,43 +161,197 @@ impl From<TraceFlag> for bool {
     }
 }
 
+/// Result of one segment trace through a hull.
+///
+/// `fraction` (Q0.12, `0..=4096`) and `end` give how far along the segment
+/// the trace got: the whole way, or to just before the first point where it
+/// passes from open space into solid. `normal` and `plane_distance` describe
+/// that contact plane turned to face the segment start, and stay zero when
+/// there is no contact.
+///
+/// The flags say what the segment passed through: `start_solid` that its
+/// start point is in solid, `all_solid` that no part of it is in open space,
+/// `in_open` that it touched empty space and `in_water` that it touched a
+/// liquid (water, slime or lava).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct Trace {
+    pub fraction: i32,
+    pub end: Vec3I32,
+    pub plane_distance: i32,
+    pub normal: Vec3I16,
     pub all_solid: TraceFlag,
     pub start_solid: TraceFlag,
     pub in_open: TraceFlag,
     pub in_water: TraceFlag,
-    pub fraction: i32,
-    pub end: Vec3I32,
-    pub normal: Vec3I16,
-    pub plane_distance: i32,
 }
 
+impl Trace {
+    /// A trace that reached `end` without contact. Every flag but
+    /// `all_solid` starts clear; the first open leaf clears that one.
+    const fn reaching(end: Vec3I32) -> Self {
+        Self {
+            fraction: Q12_ONE,
+            end,
+            plane_distance: 0,
+            normal: Vec3I16 { x: 0, y: 0, z: 0 },
+            all_solid: TraceFlag::SET,
+            start_solid: TraceFlag::CLEAR,
+            in_open: TraceFlag::CLEAR,
+            in_water: TraceFlag::CLEAR,
+        }
+    }
+}
+
+/// A position along the traced segment, `num / den` in `[0, 1]`.
+///
+/// Every split point is the ratio of two plane distances of the segment's
+/// own end points, so it is kept as that exact ratio rather than rounded:
+/// pieces of the segment never drift off the planes that bound them.
 #[derive(Copy, Clone)]
-struct TraceContinuation {
-    far_child: i16,
-    plane_index: i16,
-    side: u8,
-    middle_fraction: i32,
-    end_fraction: i32,
-    middle: [i32; 3],
-    end: [i32; 3],
+struct SegmentParam {
+    num: u32,
+    den: u32,
+}
+
+impl SegmentParam {
+    const START: Self = Self { num: 0, den: 1 };
+    const END: Self = Self { num: 1, den: 1 };
+
+    /// Where a segment whose end points lie `ds` and `de` from a plane, on
+    /// opposite sides, meets it: `|ds| / (|ds| + |de|)`.
+    #[inline(always)]
+    fn crossing(ds: i32, de: i32) -> Self {
+        let near = ds.unsigned_abs();
+        let far = de.unsigned_abs();
+        match near.checked_add(far) {
+            Some(den) => Self { num: near, den },
+            // Only distances near the `i32` limits get here; halving both
+            // keeps the ratio within one part in 2^31.
+            None => Self {
+                num: near >> 1,
+                den: (near >> 1) + (far >> 1),
+            },
+        }
+    }
+
+    /// Exact ordering of two parameters: one 32x32 product per side.
+    #[inline(always)]
+    fn order(self, other: Self) -> Ordering {
+        if self.den == other.den {
+            return self.num.cmp(&other.num);
+        }
+        // psx-numeric-allow-next-line: R3000 MULTU gives the full 64-bit product of two u32 values; only compared, never divided
+        let left = u64::from(self.num) * u64::from(other.den);
+        // psx-numeric-allow-next-line: as above
+        let right = u64::from(other.num) * u64::from(self.den);
+        left.cmp(&right)
+    }
+}
+
+/// One end of a piece of the segment: a parameter, and whether the piece
+/// stops just short of it (`open`) or includes it.
+#[derive(Copy, Clone)]
+struct PieceEnd {
+    at: SegmentParam,
+    open: bool,
+}
+
+impl PieceEnd {
+    /// The tighter of two lower ends.
+    #[inline(always)]
+    fn later(self, other: Self) -> Self {
+        match self.at.order(other.at) {
+            Ordering::Greater => self,
+            Ordering::Less => other,
+            Ordering::Equal => Self {
+                at: self.at,
+                open: self.open || other.open,
+            },
+        }
+    }
+
+    /// The tighter of two upper ends.
+    #[inline(always)]
+    fn earlier(self, other: Self) -> Self {
+        match self.at.order(other.at) {
+            Ordering::Less => self,
+            Ordering::Greater => other,
+            Ordering::Equal => Self {
+                at: self.at,
+                open: self.open || other.open,
+            },
+        }
+    }
+
+    /// Whether no parameter lies between `self` (lower) and `upper`.
+    #[inline(always)]
+    fn empty_up_to(self, upper: Self) -> bool {
+        match self.at.order(upper.at) {
+            Ordering::Greater => true,
+            Ordering::Equal => self.open || upper.open,
+            Ordering::Less => false,
+        }
+    }
+}
+
+/// No entry plane: the piece starts at the segment start.
+const NO_ENTRY_PLANE: u16 = u16::MAX;
+
+/// A stretch of the segment still to be walked, from `node` down.
+#[derive(Copy, Clone)]
+struct PendingPiece {
+    lower: SegmentParam,
+    upper: SegmentParam,
+    /// Plane the piece starts on ([`NO_ENTRY_PLANE`] at the segment start).
+    entry_plane: u16,
+    node: i16,
+    /// Side of `entry_plane` the segment start is on: 0 front, 1 back.
+    entry_side: u8,
+    /// Bit 0: the lower end is excluded. Bit 1: the upper end is excluded.
+    open_ends: u8,
+}
+
+impl PendingPiece {
+    #[inline(always)]
+    fn lower_end(&self) -> PieceEnd {
+        PieceEnd {
+            at: self.lower,
+            open: self.open_ends & 1 != 0,
+        }
+    }
+
+    #[inline(always)]
+    fn upper_end(&self) -> PieceEnd {
+        PieceEnd {
+            at: self.upper,
+            open: self.open_ends & 2 != 0,
+        }
+    }
+
+    #[inline(always)]
+    fn set_ends(&mut self, lower: PieceEnd, upper: PieceEnd) {
+        self.lower = lower.at;
+        self.upper = upper.at;
+        self.open_ends = u8::from(lower.open) | (u8::from(upper.open) << 1);
+    }
 }
 
 /// Caller-owned workspace for one allocation-free BSP hull trace.
 ///
-/// The fixed stack stores at most [`TRACE_STACK_CAPACITY`] pending far-side
-/// traversals. A trace that needs one more entry returns `false`; the scratch
-/// remains reusable and the caller's output is not modified.
+/// The trace walks the segment front to back and defers the far piece of
+/// every plane it splits on; the scratch holds at most
+/// [`TRACE_STACK_CAPACITY`] deferred pieces. A trace that needs one more
+/// returns `false`; the scratch stays reusable and the caller's output is
+/// not modified.
 pub struct TraceScratch {
-    continuations: [MaybeUninit<TraceContinuation>; TRACE_STACK_CAPACITY],
+    pieces: [MaybeUninit<PendingPiece>; TRACE_STACK_CAPACITY],
 }
 
 impl TraceScratch {
     pub const fn new() -> Self {
         Self {
-            continuations: [MaybeUninit::uninit(); TRACE_STACK_CAPACITY],
+            pieces: [MaybeUninit::uninit(); TRACE_STACK_CAPACITY],
         }
     }
 }
@@ -202,24 +362,9 @@ impl Default for TraceScratch {
     }
 }
 
-impl Trace {
-    const fn unobstructed(end: Vec3I32) -> Self {
-        Self {
-            all_solid: TraceFlag::SET,
-            start_solid: TraceFlag::CLEAR,
-            in_open: TraceFlag::CLEAR,
-            in_water: TraceFlag::CLEAR,
-            fraction: Q12_ONE,
-            end,
-            normal: Vec3I16 { x: 0, y: 0, z: 0 },
-            plane_distance: 0,
-        }
-    }
-}
-
 /// Where a hull's split nodes live.
 ///
-/// Quake serves hull 0 (point traces) from the render BSP itself: the same
+/// Hull 0 (point traces) is served from the render BSP itself: the same
 /// balanced tree the renderer walks, with leaf records carrying contents.
 /// The cooked clipnode chains are a per-brush plane list, so a point
 /// location there costs O(brushes) and a long trace pays that at every
@@ -430,7 +575,7 @@ impl PlaneSource for &[CompactPlane] {
 
 /// Cooker-layout plane records (fourteen bytes, byte aligned): the distance
 /// and kind are gathered a byte at a time, and the normal only for the
-/// general kind, as Quake's walker does.
+/// general kind.
 #[cfg(not(target_arch = "mips"))]
 impl PlaneSource for RecordSlice<'_, Plane> {
     const CHECKED: bool = true;
@@ -525,7 +670,7 @@ impl<'a> CollisionHull<'a> {
     /// Construct a collision hull over validated, native-layout clip nodes.
     ///
     /// Resident maps validate the clip-node lump once during load, so the
-    /// trace hot path borrows Quake-style node records directly and follows
+    /// trace hot path borrows the native node records directly and follows
     /// plane and child indices without range checks.
     ///
     /// # Safety
@@ -546,7 +691,7 @@ impl<'a> CollisionHull<'a> {
         }
     }
 
-    /// A point hull served by the render BSP (Quake's hull 0): balanced
+    /// A point hull (hull 0) served by the render BSP: balanced
     /// tree, leaf contents from the leaf records.
     ///
     /// # Safety
@@ -570,8 +715,8 @@ impl<'a> CollisionHull<'a> {
         self.point_contents_from(self.head_node, &point)
     }
 
-    /// Sample an ordered feet-to-head point sequence and return Quake-style
-    /// liquid depth plus the strongest encountered hazard. Unknown contents,
+    /// Sample an ordered feet-to-head point sequence and return the liquid
+    /// depth (how many samples from the feet up are submerged) plus the strongest encountered hazard. Unknown contents,
     /// sky, empty, and solid do not count as liquid. Any malformed tree fails
     /// the whole query instead of returning a partial classification.
     pub fn sample_liquid_contents(&self, points: &[Vec3I32]) -> Option<LiquidContentsSample> {
@@ -639,36 +784,52 @@ impl<'a> CollisionHull<'a> {
     }
 }
 
-/// Descend from `node_index` to the leaf holding `point`.
+/// Descend from `node` to the leaf holding `point` and return its contents.
+///
+/// A point exactly on a plane goes to the front child. The walk visits at
+/// most as many nodes as the hull has, so a malformed cyclic hull fails
+/// instead of looping; checked plane sources also range-check every index.
 #[inline(never)]
 fn point_contents_walk<P: PlaneSource, N: NodeSource>(
     planes: P,
     nodes: N,
-    mut node_index: i16,
+    mut node: i16,
     point: &[i32; 3],
 ) -> Option<i16> {
-    let mut descent_budget = nodes.len();
-    while node_index >= 0 {
-        if descent_budget == 0 {
+    let node_count = nodes.len();
+    let mut visited = 0usize;
+    while node >= 0 {
+        let index = node as usize;
+        visited += 1;
+        if visited > node_count || (P::CHECKED && index >= node_count) {
             return None;
         }
-        descent_budget -= 1;
-        let index = node_index as usize;
-        if P::CHECKED && index >= nodes.len() {
+        // SAFETY: validated hulls keep every index in range; checked
+        // sources tested `index` above and test `plane` below.
+        let plane = unsafe { nodes.plane_unchecked(index) };
+        if P::CHECKED && plane >= planes.len() {
             return None;
         }
-        let plane_index = unsafe { nodes.plane_unchecked(index) };
-        if P::CHECKED && plane_index >= planes.len() {
-            return None;
-        }
-        let (distance, _) = unsafe { planes.distances_unchecked(plane_index, point, point) };
-        node_index = unsafe { nodes.child_unchecked(index, (distance < 0) as usize) };
+        let (distance, _) = unsafe { planes.distances_unchecked(plane, point, point) };
+        node = unsafe { nodes.child_unchecked(index, usize::from(distance < 0)) };
     }
-    nodes.contents(node_index)
+    nodes.contents(node)
 }
 
-/// The segment walker behind [`CollisionHull::trace_into`]; one copy per
-/// hull layout the binary uses.
+/// Trace `start..end` through the hull under `head_node`.
+///
+/// The segment is cut at every plane it crosses, at the exact parameter
+/// where its end points' plane distances change sign, and the pieces are
+/// visited front to back: at each split the piece on the segment start's
+/// side is walked first and the other is deferred in `scratch`. Leaves
+/// therefore arrive in segment order, and the first solid leaf reached
+/// straight from an open one is the contact. Its piece starts on the plane
+/// that was crossed, which is solved for the contact point with
+/// [`plane_contact`], so the margin off the plane is applied once, at the
+/// end, and never during descent.
+///
+/// Returns `false`, leaving `output` untouched, on malformed hull data or
+/// when more than [`TRACE_STACK_CAPACITY`] pieces are deferred at once.
 #[inline(never)]
 fn trace_segment<P: PlaneSource, N: NodeSource>(
     planes: P,
@@ -679,140 +840,133 @@ fn trace_segment<P: PlaneSource, N: NodeSource>(
     scratch: &mut TraceScratch,
     output: &mut Trace,
 ) -> bool {
-    let mut trace = Trace::unobstructed(*end);
-    let mut continuation_count = 0usize;
-    let mut node_index = head_node;
-    let mut start_fraction: i32 = 0;
-    let mut end_fraction: i32 = Q12_ONE;
-    let mut segment_start = array(*start);
-    let mut segment_end = array(*end);
-
+    let from = array(*start);
+    let to = array(*end);
+    let node_count = nodes.len();
+    let mut result = Trace::reaching(*end);
+    // `None` until the first leaf; then whether the last leaf was solid.
+    let mut last_solid: Option<bool> = None;
+    let mut deferred = 0usize;
+    let mut piece = PendingPiece {
+        lower: SegmentParam::START,
+        upper: SegmentParam::END,
+        entry_plane: NO_ENTRY_PLANE,
+        node: head_node,
+        entry_side: 0,
+        open_ends: 0,
+    };
     loop {
-        let mut descent_budget = nodes.len();
-        while node_index >= 0 {
-            if descent_budget == 0 {
+        let mut visited = 0usize;
+        while piece.node >= 0 {
+            let index = piece.node as usize;
+            visited += 1;
+            if visited > node_count || (P::CHECKED && index >= node_count) {
                 return false;
             }
-            descent_budget -= 1;
-            // Cooker-layout hulls range-check each index and fail closed;
-            // resident hulls were validated at load and trust them.
-            let index = node_index as usize;
-            if P::CHECKED && index >= nodes.len() {
+            // SAFETY: as in `point_contents_walk`.
+            let plane = unsafe { nodes.plane_unchecked(index) };
+            if P::CHECKED && plane >= planes.len() {
                 return false;
             }
-            let plane_index = unsafe { nodes.plane_unchecked(index) };
-            if P::CHECKED && plane_index >= planes.len() {
-                return false;
-            }
-            let (start_distance, end_distance) =
-                unsafe { planes.distances_unchecked(plane_index, &segment_start, &segment_end) };
-
-            // Both in front (sign bits clear) or both behind (sign bits set).
-            if start_distance | end_distance >= 0 {
-                node_index = unsafe { nodes.child_unchecked(index, 0) };
+            let (ds, de) = unsafe { planes.distances_unchecked(plane, &from, &to) };
+            let start_in_front = ds >= 0;
+            let near = usize::from(!start_in_front);
+            if start_in_front == (de >= 0) {
+                piece.node = unsafe { nodes.child_unchecked(index, near) };
                 continue;
             }
-            if start_distance & end_distance < 0 {
-                node_index = unsafe { nodes.child_unchecked(index, 1) };
-                continue;
-            }
-
-            let numerator = if start_distance < 0 {
-                start_distance.saturating_add(TRACE_PLANE_EPSILON_Q12)
-            } else {
-                start_distance.saturating_sub(TRACE_PLANE_EPSILON_Q12)
-            };
-            let fraction = div_q12_i32(numerator, start_distance.saturating_sub(end_distance))
-                .clamp(0, Q12_ONE);
-            let middle_fraction = start_fraction.saturating_add(mul_q12_i32(
-                end_fraction.saturating_sub(start_fraction),
-                fraction,
-            ));
-            let middle = interpolate(segment_start, segment_end, fraction);
-            let side = usize::from(start_distance < 0);
-            if continuation_count == TRACE_STACK_CAPACITY {
-                return false;
-            }
-            scratch.continuations[continuation_count].write(TraceContinuation {
-                far_child: unsafe { nodes.child_unchecked(index, side ^ 1) },
-                plane_index: plane_index as i16,
-                side: side as u8,
-                middle_fraction,
-                end_fraction,
-                middle,
-                end: segment_end,
+            // The segment crosses this plane at `cross`, and the crossing
+            // point itself is on the front side (on-plane points are front).
+            // So a start in front keeps the near side up to and including
+            // `cross`, and a start behind keeps it up to just short of it.
+            let cross = SegmentParam::crossing(ds, de);
+            let (lower, upper) = (piece.lower_end(), piece.upper_end());
+            let near_upper = upper.earlier(PieceEnd {
+                at: cross,
+                open: !start_in_front,
             });
-            continuation_count += 1;
-            node_index = unsafe { nodes.child_unchecked(index, side) };
-            end_fraction = middle_fraction;
-            segment_end = middle;
+            let far_lower = lower.later(PieceEnd {
+                at: cross,
+                open: start_in_front,
+            });
+            if far_lower.empty_up_to(upper) {
+                piece.node = unsafe { nodes.child_unchecked(index, near) };
+                continue;
+            }
+            if lower.empty_up_to(near_upper) {
+                piece.node = unsafe { nodes.child_unchecked(index, near ^ 1) };
+                continue;
+            }
+            if deferred == TRACE_STACK_CAPACITY {
+                return false;
+            }
+            let mut far = PendingPiece {
+                lower: cross,
+                upper: piece.upper,
+                entry_plane: plane as u16,
+                node: unsafe { nodes.child_unchecked(index, near ^ 1) },
+                entry_side: near as u8,
+                open_ends: 0,
+            };
+            far.set_ends(far_lower, upper);
+            scratch.pieces[deferred].write(far);
+            deferred += 1;
+            piece.set_ends(lower, near_upper);
+            piece.node = unsafe { nodes.child_unchecked(index, near) };
         }
 
-        let Some(contents) = nodes.contents(node_index) else {
+        let Some(contents) = nodes.contents(piece.node) else {
             return false;
         };
-        if contents != CONTENTS_SOLID {
-            trace.all_solid = TraceFlag::CLEAR;
-            if contents == CONTENTS_EMPTY {
-                trace.in_open = TraceFlag::SET;
-            } else {
-                trace.in_water = TraceFlag::SET;
+        let solid = contents == CONTENTS_SOLID;
+        if solid {
+            match last_solid {
+                None => result.start_solid = TraceFlag::SET,
+                Some(false) => {
+                    if piece.entry_plane == NO_ENTRY_PLANE {
+                        return false;
+                    }
+                    let Some(contact) = planes.get(usize::from(piece.entry_plane)) else {
+                        return false;
+                    };
+                    let (fraction, point) = plane_contact(*start, *end, contact, piece.entry_side);
+                    result.fraction = fraction;
+                    result.end = point;
+                    if piece.entry_side == 0 {
+                        result.normal = contact.normal;
+                        result.plane_distance = contact.distance;
+                    } else {
+                        result.normal = Vec3I16 {
+                            x: contact.normal.x.saturating_neg(),
+                            y: contact.normal.y.saturating_neg(),
+                            z: contact.normal.z.saturating_neg(),
+                        };
+                        result.plane_distance = contact.distance.saturating_neg();
+                    }
+                    *output = result;
+                    return true;
+                }
+                Some(true) => {}
             }
         } else {
-            trace.start_solid = TraceFlag::SET;
+            result.all_solid = TraceFlag::CLEAR;
+            if contents == CONTENTS_EMPTY {
+                result.in_open = TraceFlag::SET;
+            } else if liquid_precedence(contents) != 0 {
+                result.in_water = TraceFlag::SET;
+            }
         }
+        last_solid = Some(solid);
 
-        if continuation_count == 0 {
-            *output = trace;
-            return true;
+        if deferred == 0 {
+            break;
         }
-        continuation_count -= 1;
-        // This slot was written when it was pushed above, and stack order
-        // guarantees it is popped only after that write.
-        let continuation = unsafe { scratch.continuations[continuation_count].assume_init_read() };
-        let Some(far_contents) =
-            point_contents_walk(planes, nodes, continuation.far_child, &continuation.middle)
-        else {
-            return false;
-        };
-        if far_contents != CONTENTS_SOLID {
-            node_index = continuation.far_child;
-            start_fraction = continuation.middle_fraction;
-            end_fraction = continuation.end_fraction;
-            segment_start = continuation.middle;
-            segment_end = continuation.end;
-            continue;
-        }
-        if trace.all_solid.is_set() {
-            *output = trace;
-            return true;
-        }
-
-        let Some(plane) = planes.get(continuation.plane_index as usize) else {
-            return false;
-        };
-        if continuation.side == 0 {
-            trace.normal = plane.normal;
-            trace.plane_distance = plane.distance;
-        } else {
-            trace.normal = Vec3I16 {
-                x: plane.normal.x.saturating_neg(),
-                y: plane.normal.y.saturating_neg(),
-                z: plane.normal.z.saturating_neg(),
-            };
-            trace.plane_distance = plane.distance.saturating_neg();
-        }
-        // Re-solve the hit against the original segment and plane. The
-        // traversal's Q0.12 middle fraction is precise enough to choose
-        // children, but over a 32K-unit floor probe one fraction step is
-        // eight world units. Interpolating that coarse fraction made feet
-        // hover above the floor. The exact ratio keeps the endpoint on
-        // the epsilon-offset contact plane and is independent of how many
-        // other BSP nodes shortened the traversal segment first.
-        (trace.fraction, trace.end) = plane_contact(*start, *end, plane, continuation.side);
-        *output = trace;
-        return true;
+        deferred -= 1;
+        // SAFETY: every slot below `deferred` was written above in this call.
+        piece = unsafe { scratch.pieces[deferred].assume_init() };
     }
+    *output = result;
+    true
 }
 
 /// World-space query facade over one model-local clipnode hull.
@@ -884,18 +1038,6 @@ const fn liquid_precedence(contents: i16) -> u8 {
         CONTENTS_WATER => 1,
         _ => 0,
     }
-}
-
-fn interpolate(start: [i32; 3], end: [i32; 3], fraction: i32) -> [i32; 3] {
-    // Segment deltas are Q20.12 world spans against a Q0.12 fraction: bounded
-    // like the plane math above, so the wide multiply is exact here too.
-    let along =
-        |from: i32, to: i32| from.wrapping_add(mul_q12_i32_wide(to.wrapping_sub(from), fraction));
-    [
-        along(start[0], end[0]),
-        along(start[1], end[1]),
-        along(start[2], end[2]),
-    ]
 }
 
 /// Return the public Q0.12 fraction and a high-precision Q20.12 endpoint for
@@ -1670,7 +1812,7 @@ mod tests {
         assert_eq!(
             hull.sample_liquid_contents(&[at(Q12_ONE), at(-Q12_ONE / 2), at(-3 * Q12_ONE)]),
             Some(LiquidContentsSample::default()),
-            "Quake water level must begin at the feet"
+            "the water level must begin at the feet"
         );
         assert_eq!(
             hull.sample_liquid_contents(&[
@@ -1688,7 +1830,7 @@ mod tests {
     #[test]
     fn trace_storage_has_a_fixed_guest_size() {
         assert_eq!(core::mem::size_of::<Trace>(), 32);
-        assert_eq!(core::mem::size_of::<TraceScratch>(), 2_560);
+        assert_eq!(core::mem::size_of::<TraceScratch>(), 1_536);
     }
 
     #[test]
@@ -1783,6 +1925,102 @@ mod tests {
         assert!(result.in_open.is_set());
         assert_eq!(result.fraction, Q12_ONE);
         assert_eq!(result.end, end);
+    }
+
+    fn x_plane(distance_units: i32) -> [u8; Plane::SIZE] {
+        plane(
+            Vec3I16 {
+                x: Q12_ONE as i16,
+                y: 0,
+                z: 0,
+            },
+            distance_units * Q12_ONE,
+            0,
+        )
+    }
+
+    fn x(units_q12: i32) -> Vec3I32 {
+        Vec3I32 {
+            x: units_q12,
+            y: 0,
+            z: 0,
+        }
+    }
+
+    #[test]
+    fn a_plane_repeated_deeper_in_the_tree_adds_no_zero_width_solid() {
+        // Node 0 splits at x = 0 with open space behind it; node 1 splits on
+        // the same plane again with solid behind it. The segment's crossing
+        // point is in front of node 0, so node 1's back side is never
+        // reached and nothing is hit.
+        let planes = x_plane(0);
+        let mut nodes = Vec::new();
+        nodes.extend_from_slice(&node(0, 1, CONTENTS_EMPTY));
+        nodes.extend_from_slice(&node(0, CONTENTS_EMPTY, CONTENTS_SOLID));
+        let result = trace(
+            &hull(&planes, &nodes),
+            x(Q12_ONE),
+            x(-Q12_ONE),
+            &mut TraceScratch::new(),
+        );
+        assert_eq!(result.fraction, Q12_ONE);
+        assert_eq!(result.end, x(-Q12_ONE));
+        assert!(!result.all_solid.is_set());
+        assert!(!result.start_solid.is_set());
+    }
+
+    #[test]
+    fn a_solid_slab_thinner_than_the_margin_still_stops_the_trace() {
+        // Open for x >= 1/64 unit and for x < 0, solid in between.
+        let mut planes = Vec::new();
+        planes.extend_from_slice(&plane(
+            Vec3I16 {
+                x: Q12_ONE as i16,
+                y: 0,
+                z: 0,
+            },
+            Q12_ONE / 64,
+            0,
+        ));
+        planes.extend_from_slice(&x_plane(0));
+        let mut nodes = Vec::new();
+        nodes.extend_from_slice(&node(0, CONTENTS_EMPTY, 1));
+        nodes.extend_from_slice(&node(1, CONTENTS_SOLID, CONTENTS_EMPTY));
+        let result = trace(
+            &hull(&planes, &nodes),
+            x(Q12_ONE),
+            x(-Q12_ONE),
+            &mut TraceScratch::new(),
+        );
+        assert!(result.fraction < Q12_ONE);
+        assert_eq!(result.normal.x, Q12_ONE as i16);
+        assert_eq!(result.plane_distance, Q12_ONE / 64);
+        assert!(result.end.x >= Q12_ONE / 64);
+    }
+
+    #[test]
+    fn leaving_solid_then_entering_again_reports_the_second_entry() {
+        // Solid for x < 0 and for x >= 2, open in between; the trace starts
+        // in the left solid and runs right.
+        let mut planes = Vec::new();
+        planes.extend_from_slice(&x_plane(0));
+        planes.extend_from_slice(&x_plane(2));
+        let mut nodes = Vec::new();
+        nodes.extend_from_slice(&node(0, 1, CONTENTS_SOLID));
+        nodes.extend_from_slice(&node(1, CONTENTS_SOLID, CONTENTS_EMPTY));
+        let result = trace(
+            &hull(&planes, &nodes),
+            x(-Q12_ONE),
+            x(3 * Q12_ONE),
+            &mut TraceScratch::new(),
+        );
+        assert!(result.start_solid.is_set());
+        assert!(!result.all_solid.is_set());
+        assert!(result.in_open.is_set());
+        // Entering x = 2 from below: the normal faces the start (-x).
+        assert_eq!(result.normal.x, -(Q12_ONE as i16));
+        assert_eq!(result.plane_distance, -2 * Q12_ONE);
+        assert_eq!(result.end.x, 2 * Q12_ONE - TRACE_PLANE_EPSILON_Q12);
     }
 
     #[test]
