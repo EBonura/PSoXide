@@ -100,9 +100,7 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
 ///
 /// # Safety
 /// See [`read_u32`].
-///
-/// Deprecation is held until psx-io's dma.rs, which the DMA rework owns,
-/// moves to the new name.
+#[deprecated(note = "renamed to `read_u32`")]
 #[inline(always)]
 pub unsafe fn read32(addr: u32) -> u32 {
     // SAFETY: same contract as the renamed function.
@@ -135,9 +133,7 @@ pub unsafe fn read8(addr: u32) -> u8 {
 ///
 /// # Safety
 /// See [`write_u32`].
-///
-/// Deprecation is held until psx-io's dma.rs, which the DMA rework owns,
-/// moves to the new name.
+#[deprecated(note = "renamed to `write_u32`")]
 #[inline(always)]
 pub unsafe fn write32(addr: u32, value: u32) {
     // SAFETY: same contract as the renamed function.

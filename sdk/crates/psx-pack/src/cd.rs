@@ -561,7 +561,7 @@ impl SectorReader {
             psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
             self.enable_irqs();
             self.ack_all();
-            psx_io::dma::enable_channel(psx_io::dma::Channel::Cdrom);
+            psx_io::dma::enable_channel(psx_io::dma::Channel::Cd);
             if !self.prepared {
                 // A BIOS disc boot has already finished its file load. Do not
                 // send Pause before our first stream; on real BIOS boot paths
