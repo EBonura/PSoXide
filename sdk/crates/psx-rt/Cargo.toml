@@ -9,6 +9,7 @@ description  = "PS1 bare-metal runtime: _start, BIOS calls, panic, heap."
 [dependencies]
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
+critical-section = { version = "1.2", optional = true, features = ["restore-state-bool"] }
 
 [features]
 default = []
@@ -33,6 +34,10 @@ scratchpad-stack-check = []
 # For development and test builds; one `b` in the fault path, nothing on
 # the interrupt path.
 strict-faults = []
+# Register psx-rt's interrupt-masking critical section as the
+# `critical-section` crate's implementation (for dependencies that use that
+# crate). A program links at most one implementation, so this is opt-in.
+critical-section = ["dep:critical-section"]
 
 [lints]
 workspace = true
