@@ -198,6 +198,10 @@ pub unsafe fn clip_convex_plane<
     plane: &Plane,
     traversal: ClipTraversal,
 ) -> usize {
+    // SAFETY: `destination` is a live exclusive slice, so its pointer is
+    // valid for writes of `destination.len()` elements and cannot alias
+    // `source`. The capacity requirement when `CHECK_CAPACITY` is false is
+    // forwarded unchanged from this fn's `# Safety` section.
     unsafe {
         clip_convex_plane_raw::<_, _, CHECK_CAPACITY>(
             source,
@@ -231,6 +235,11 @@ pub unsafe fn clip_convex_plane_uninit<
     plane: &Plane,
     traversal: ClipTraversal,
 ) -> usize {
+    // SAFETY: `MaybeUninit<Vertex>` has the same layout as `Vertex`, so the
+    // cast pointer is aligned and valid for writes of `destination.len()`
+    // vertices; the raw kernel only writes (never reads) destination slots.
+    // The exclusive borrow rules out aliasing `source`, and the capacity
+    // requirement is forwarded from this fn's `# Safety` section.
     unsafe {
         clip_convex_plane_raw::<_, _, CHECK_CAPACITY>(
             source,
@@ -270,6 +279,10 @@ unsafe fn clip_convex_plane_raw<
             return false;
         }
         debug_assert!(*written < destination_len);
+        // SAFETY: `*written < destination_len`, checked above when
+        // `CHECK_CAPACITY` is set and otherwise guaranteed by the caller of
+        // the public entry points; `destination` is valid for writes of
+        // `destination_len` elements, so slot `*written` is in bounds.
         unsafe { destination.add(*written).write(vertex) };
         *written += 1;
         true
@@ -279,10 +292,13 @@ unsafe fn clip_convex_plane_raw<
     match traversal {
         ClipTraversal::PreviousToCurrent => {
             let mut previous_index = source.len() - 1;
+            // SAFETY: `source` is non-empty (early return above), so
+            // `len - 1` is a valid index.
             let mut previous = unsafe { *source.get_unchecked(previous_index) };
             let mut previous_distance = plane.distance(previous_index, &previous);
             let mut current_index = 0usize;
             while current_index < source.len() {
+                // SAFETY: the loop condition keeps `current_index < len`.
                 let current = unsafe { *source.get_unchecked(current_index) };
                 let current_distance = plane.distance(current_index, &current);
                 let current_inside = plane.inside(current_distance);
@@ -295,6 +311,9 @@ unsafe fn clip_convex_plane_raw<
                         &current,
                         current_distance,
                     );
+                    // SAFETY: `destination`/`destination_len` come straight from the
+                    // caller, who guarantees room for every emitted vertex when
+                    // `CHECK_CAPACITY` is false; with it set, `emit` bounds-checks.
                     if unsafe {
                         !emit::<Vertex, CHECK_CAPACITY>(
                             destination,
@@ -307,6 +326,8 @@ unsafe fn clip_convex_plane_raw<
                     }
                 }
                 if current_inside
+                    // SAFETY: same capacity contract as the crossing emit above:
+                    // the caller sized `destination`, or `emit` bounds-checks.
                     && unsafe {
                         !emit::<Vertex, CHECK_CAPACITY>(
                             destination,
@@ -332,12 +353,17 @@ unsafe fn clip_convex_plane_raw<
                 } else {
                     current_index + 1
                 };
+                // SAFETY: the loop condition keeps `current_index < len`.
                 let current = unsafe { *source.get_unchecked(current_index) };
+                // SAFETY: `next_index` is `current_index + 1` only when that is
+                // still `< len`, otherwise 0, which is valid for a non-empty slice.
                 let next = unsafe { *source.get_unchecked(next_index) };
                 let current_distance = plane.distance(current_index, &current);
                 let next_distance = plane.distance(next_index, &next);
                 let current_inside = plane.inside(current_distance);
                 if current_inside
+                    // SAFETY: same capacity contract as the crossing emit above:
+                    // the caller sized `destination`, or `emit` bounds-checks.
                     && unsafe {
                         !emit::<Vertex, CHECK_CAPACITY>(
                             destination,
@@ -358,6 +384,9 @@ unsafe fn clip_convex_plane_raw<
                         &next,
                         next_distance,
                     );
+                    // SAFETY: `destination`/`destination_len` come straight from the
+                    // caller, who guarantees room for every emitted vertex when
+                    // `CHECK_CAPACITY` is false; with it set, `emit` bounds-checks.
                     if unsafe {
                         !emit::<Vertex, CHECK_CAPACITY>(
                             destination,
@@ -418,6 +447,8 @@ mod tests {
         traversal: ClipTraversal,
     ) -> ([Vertex; 8], usize) {
         let mut output = [Vertex::default(); 8];
+        // SAFETY: every test source has 3 vertices, and one plane emits at
+        // most two per source vertex (6), which fits the 8 output slots.
         let count = unsafe {
             clip_convex_plane::<_, _, CHECK>(source, &mut output, &Plane(None), traversal)
         };
@@ -445,6 +476,7 @@ mod tests {
     fn cached_distance_domain_is_authoritative() {
         let source = [Vertex(100, 0), Vertex(100, 40), Vertex(100, 80)];
         let mut output = [Vertex::default(); 4];
+        // SAFETY: `CHECK_CAPACITY` is true, so `emit` bounds-checks every write.
         let count = unsafe {
             clip_convex_plane::<_, _, true>(
                 &source,
