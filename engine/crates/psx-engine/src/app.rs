@@ -80,7 +80,7 @@ pub(crate) fn boot_visual_checkpoint_hold(
     for _ in 0..frames.max(1) {
         fb.clear(color.0, color.1, color.2);
         draw_boot_text(fb, message);
-        gpu::draw_sync();
+        gpu::wait_idle();
         // Deliberately the deprecated fixed 242-HBlank delay, not
         // rt::wait_vblank(): a checkpoint can fire before platform::init,
         // and wait_vblank's lazy install would rewrite the exception

@@ -75,8 +75,8 @@ impl ChunkReader for psx_pack::cd::SectorReader {
         unsafe { Self::stop(self) }
     }
     #[inline]
-    unsafe fn ready(&mut self) -> Result<bool, psx_io::cdrom::SectorPollError> {
-        psx_io::cdrom::poll_data_sector()
+    unsafe fn ready(&mut self) -> Result<bool, psx_io::cd::SectorPollError> {
+        psx_io::cd::poll_data_sector()
     }
     #[inline]
     unsafe fn find_entry(

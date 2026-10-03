@@ -29,16 +29,16 @@ const GP1: u32 = 0x1F80_1814;
 /// panel that is trying to report on it.
 fn gp0_packet(words: &[u32]) {
     // Preserve best-effort diagnostics on timeout; no reset or unbounded wait.
-    let _ = psx_io::gpu::try_wait_cmd_ready(1_000_000);
+    let _ = psx_io::gpu::try_wait_command_ready(1_000_000);
     for &word in words {
-        psx_io::gpu::write_gp0(word);
+        psx_io::gpu::write_command(word);
     }
 }
 
 /// Configure drawing after a GP1(00h) reset: drawing area covering the
 /// whole displayed framebuffer, zero offset, display area at 0,0.
 pub fn setup(right: u32, bottom: u32) {
-    unsafe { psx_io::write32(GP1, 0x0300_0001) }; // display off while painting
+    unsafe { psx_io::write_u32(GP1, 0x0300_0001) }; // display off while painting
 
     // Program the display the way the launcher's gpu::init does, rather
     // than inheriting whatever GP1(00h) reset leaves behind. Without
@@ -47,10 +47,10 @@ pub fn setup(right: u32, bottom: u32) {
     // the TV. GP1(08h) 320x240 NTSC, GP1(06h) X 0x260..0x260+320*8,
     // GP1(07h) Y 0x10..0x10+240 -- the standard centred NTSC picture.
     unsafe {
-        psx_io::write32(GP1, 0x0800_0001); // display mode: 320x240, NTSC
-        psx_io::write32(GP1, 0x0600_0000 | 0x260 | ((0x260 + 320 * 8) << 12));
-        psx_io::write32(GP1, 0x0700_0000 | 0x10 | ((0x10 + 240) << 10));
-        psx_io::write32(GP1, 0x0500_0000); // display area starts at VRAM 0,0
+        psx_io::write_u32(GP1, 0x0800_0001); // display mode: 320x240, NTSC
+        psx_io::write_u32(GP1, 0x0600_0000 | 0x260 | ((0x260 + 320 * 8) << 12));
+        psx_io::write_u32(GP1, 0x0700_0000 | 0x10 | ((0x10 + 240) << 10));
+        psx_io::write_u32(GP1, 0x0500_0000); // display area starts at VRAM 0,0
     }
     gp0_packet(&[0xE100_0000]); // texpage/draw-mode defaults
     gp0_packet(&[0xE300_0000]);
@@ -60,7 +60,7 @@ pub fn setup(right: u32, bottom: u32) {
 
 /// Enable the configured display.
 pub fn show() {
-    unsafe { psx_io::write32(GP1, 0x0300_0000) }; // display on
+    unsafe { psx_io::write_u32(GP1, 0x0300_0000) }; // display on
 }
 
 /// Select one of the two vertically stacked 320x240 loading buffers.
@@ -75,7 +75,7 @@ pub fn set_draw_buffer(y: i16) {
 }
 
 fn display_buffer(y: i16) {
-    unsafe { psx_io::write32(GP1, 0x0500_0000 | ((y as u32 & 0x1ff) << 10)) };
+    unsafe { psx_io::write_u32(GP1, 0x0500_0000 | ((y as u32 & 0x1ff) << 10)) };
 }
 
 /// Show a completed loading buffer exactly at a fresh VBlank edge. I_STAT is
@@ -97,12 +97,12 @@ pub fn diagnostic_mode() {
 /// Whether the interrupt controller has latched a VBlank edge. Interrupts
 /// remain masked while the loader runs; the pending bit can still be polled.
 pub fn vblank_pending() -> bool {
-    psx_io::irq::stat() & (1 << psx_io::irq::source::VBLANK) != 0
+    psx_io::irq::pending() & (1 << psx_hw::irq::source::VBLANK) != 0
 }
 
 /// Acknowledge the pending VBlank edge.
 pub fn ack_vblank() {
-    psx_io::irq::ack(1 << psx_io::irq::source::VBLANK);
+    psx_io::irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
 }
 
 /// Wait until every submitted primitive has drained before presenting its
@@ -112,7 +112,7 @@ pub fn ack_vblank() {
 /// once the GPU can take the next command.
 pub fn draw_sync() {
     let _ = psx_io::gpu::try_wait_dma_ready(1_000_000);
-    let _ = psx_io::gpu::try_wait_cmd_ready(1_000_000);
+    let _ = psx_io::gpu::try_wait_command_ready(1_000_000);
 }
 
 /// Whether the diagnostic checklist has been revealed.
