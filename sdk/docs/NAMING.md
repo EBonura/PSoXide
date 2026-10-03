@@ -1,94 +1,166 @@
-# Naming convention
+# The PSoXide naming convention
 
-The SDK has three layers, and each takes its names from a different source.
-New items follow this file; existing items that don't are listed at the end
-so they can be renamed through deprecation rather than in one breaking pass.
+Every public name in the SDK follows one convention, built on the
+[Rust API Guidelines](https://rust-lang.github.io/api-guidelines/naming.html)
+and on what `core` and `std` already do. A PS1 programmer who knows Rust should
+be able to guess a name; one who knows PsyQ or psx-spx should be able to search
+for it.
 
-## Raw layer: psx-spx register names
+[NAMING-RENAMES.md](NAMING-RENAMES.md) lists every item that predates this
+convention, its new name and who applies the rename.
 
-Crates and modules that expose hardware registers one to one (`psx-io`,
-`psx-hw`, the register constants in the other crates) use the names in
-[psx-spx](https://psx-spx.consoledev.net/), converted to Rust case:
-`GPUSTAT` becomes `gpustat()`, `D2_MADR` becomes `madr(Channel::Gpu)`,
-`I_STAT` becomes `I_STAT` as a constant. Bit fields keep the psx-spx field
-name (`CHCR_START`, not `CHCR_GO`).
+## Names say what the call does
 
-Anything at this layer that makes hardware touch caller-chosen RAM is an
-`unsafe fn` with a `# Safety` section, whatever its name.
+A name describes the effect in plain words. It is never the name a historical
+SDK gave the call, and never a hardware mnemonic or register name.
 
-## Command and instruction wrappers: psx-spx mnemonics
-
-A function that issues exactly one GPU command, GTE instruction, CD-ROM
-command or SPU register write is named after the psx-spx mnemonic in
-snake_case: `rtps`, `nclip`, `avsz3`, `mvmva_rt_v0_tr_sf1` for GTE
-instructions; `get_stat`, `get_loc_p`, `try_set_loc_lba`, `try_read_n` for
-the CD-ROM commands `Getstat`, `GetlocP`, `Setloc`, `ReadN`; `key_on` and
-`key_off` for the SPU's `KON`/`KOFF`; `fill_rect` for GP0(02h). The doc
-comment cites the command number (`GP0(E6h)`, `GP1(05h)`).
-
-## Safe layer: Rust API guidelines
-
-Everything above the wrappers (`psx-gpu`'s frame and stream types,
-`psx-vram`, `psx-asset`, `psx-pad`, `psx-mc` and the rest) follows the
-[Rust API guidelines](https://rust-lang.github.io/api-guidelines/naming.html):
-snake_case functions that say what they do, `CamelCase` types with acronyms
-as words (`Clut`, `VramRect`), no `get_` prefix on getters, `as_`/`to_`/`into_`
-by cost, `try_` for the fallible form of an infallible-looking call,
-`_unchecked` for the variant that skips a check the safe one makes, `_raw`
-for the variant that takes a pointer instead of a reference. American
-spelling (`color`).
-
-## PsyQ names are aliases, never identifiers
-
-PsyQ (and PSn00bSDK, which copies it) is what most PS1 programmers know, so
-every item that does what a PsyQ call does carries its name as
-`#[doc(alias = "...")]`. Searching the rustdoc for `DrawSync` finds
-`psx_gpu::draw_sync`. No public identifier is spelled the PsyQ way, and a
-PsyQ name never decides a Rust name.
-
-Aliases in place:
-
-| PsyQ | SDK |
-| --- | --- |
-| `DrawSync` | `psx_gpu::draw_sync`, `OrderedCommandStream::draw_sync` |
-| `VSync` | `psx_rt::interrupts::wait_vblank`, `psx_rt::interrupts::vblank_count` (`VSync(-1)`) |
-| `ClearOTagR` | `psx_gpu::ot::OrderingTable::clear`, `psx_io::dma::clear_ordering_table` |
-| `DrawOTag` | `psx_gpu::ot::OrderingTable::submit` |
-| `ResetGraph` | `psx_gpu::init` |
-| `LoadImage` | `psx_vram::upload_words` |
-| `FlushCache` | `psx_rt::cache::flush_i_cache` |
-| `SpuInit` | `psx_spu::init` |
-| `PadRead` | `psx_pad::poll_port1` |
-| `SetRotMatrix` | `psx_gte::scene::load_rotation` |
-| `SetTransMatrix` | `psx_gte::scene::load_translation` |
-| `SetLightMatrix` | `psx_gte::scene::load_light_matrix` |
-| `SetColorMatrix` | `psx_gte::scene::load_light_colour_matrix` |
-| `SetBackColor` | `psx_gte::scene::load_background_colour` |
-| `SetFarColor` | `psx_gte::scene::load_far_colour` |
-| `SetGeomOffset` | `psx_gte::scene::set_screen_offset` |
-| `SetGeomScreen` | `psx_gte::scene::set_projection_plane` |
-| `RotTransPers` | `psx_gte::scene::project_vertex` |
-| `RotTransPers3` | `psx_gte::scene::project_triangle` |
-| `RotTrans` | `psx_gte::scene::transform_vertex` |
-
-## Renames this convention implies
-
-Not done in this pass. Each goes on the deprecation train: add the new name,
-mark the old one `#[deprecated(note = "renamed to ...")]` with a doc alias
-for the old spelling, and remove it once no game's main uses it.
-
-| Today | Proposed | Why |
+| Not this | This | Because |
 | --- | --- | --- |
-| `psx_gpu::draw_sync` | `psx_gpu::wait_idle` | PsyQ name; it waits for GPU-DMA and the GPU to go idle. |
-| `OrderedCommandStream::draw_sync` | `OrderedCommandStream::flush` | It submits, waits and resets the buffer, which is what `flush` means in Rust. |
-| `psx_gpu::vsync` | remove | Already deprecated: it does not sync to the display. |
-| `psx_gte::scene::load_background_colour` | `load_background_color` | Spelling: the rest of the SDK says `color`. |
-| `psx_gte::scene::load_far_colour` | `load_far_color` | Same. |
-| `psx_gte::scene::load_light_colour_matrix` | `load_light_color_matrix` | Same. |
-| `psx_gpu::submit_linked_list{,_async}` | `*_raw` (unsafe) plus a safe form | Takes a raw pointer; being reworked on `soundness/dma-gpu`. |
-| `psx_io::dma::{set_madr, set_bcr_*, set_chcr}` | `dma::raw::*` (unsafe), `dma::start` | Raw layer rule above; same branch. |
+| `draw_sync()` | `wait_idle()` | PsyQ's `DrawSync` says nothing about waiting |
+| `ops::rtps()` | `ops::project_single()` | `RTPS` is the GTE opcode mnemonic |
+| `gpu::gpustat()` | `gpu::status()` | `GPUSTAT` is the register name |
+| `cd::try_read_n()` | `cd::try_start_reading()` | `ReadN` is the drive command mnemonic |
+| `Voice::key_on()` | `Voice::start()` | `KON` is the SPU register |
 
-Names checked and left alone because they already follow the convention:
-the GTE instruction wrappers in `psx_gte::ops`, the CD-ROM command wrappers
-in `psx_io::cdrom` (`get_stat` is the snake_case of `Getstat`, not a getter),
-the SPU `key_on`/`key_off`, and every public type (no all-caps acronyms).
+The old spelling is not lost: it becomes a search alias (see the last section).
+
+## Casing (C-CASE)
+
+`UpperCamelCase` for types and traits, `snake_case` for functions, methods,
+modules, fields and macros, `SCREAMING_SNAKE_CASE` for constants and statics,
+as rustc's own lints enforce.
+
+## Acronyms are words
+
+An acronym in a `CamelCase` name is capitalised like a word: `Gpu`, `Dma`,
+`Cd`, `Spu`, `Mdec`, `Gte`, `Vram`, `Clut`, `Adsr` (std precedent:
+`Utf8Error`, `TcpStream`, `IpAddr`). In `snake_case` it is lower case: `cd`,
+`gpu_status`. `GPUStat`, `CDROMReader` and `SPUVoice` are all wrong; `Cd` is the
+drive's name, so the module is `cd`, not `cdrom`.
+
+## Conversions: `as_`, `to_`, `into_` (C-CONV)
+
+- `as_*`: free, borrowed view or reinterpretation (`Color555::as_u16`,
+  `str::as_bytes`).
+- `to_*`: costs some work, leaves `self` usable (`RawPoll::to_state`,
+  `f32::to_bits`).
+- `into_*`: consumes `self` (`Card::into_inner`, `Vec::into_boxed_slice`).
+
+## Getters have no `get_` (C-GETTER)
+
+A getter is named after what it returns: `cd::status()`, not `get_stat()`;
+`Model::vertex_count()`, not `get_vertex_count()`. The `get` prefix is reserved
+for lookups that may fail, the way `slice::get` and `SlotCache::get` work.
+
+## Constructors: `new`, `with_*`, `from_*` (C-CTOR)
+
+- `new` builds the common case (`Voice::new`, `Vec::new`).
+- `with_*` is a builder step or a constructor with one extra knob
+  (`TextureMaterial::with_tint`, `Vec::with_capacity`).
+- `from_*` converts from another representation (`Model::from_bytes`,
+  `Duration::from_secs`). A constructor that computes from a quantity in
+  another domain may say so with `for_*` (`Pitch::for_frequency`).
+
+A parser that reads a blob is `from_bytes`, not `load` or `parse_blob`.
+
+## Fallible variants: `try_*`
+
+When an operation has a form that can fail or time out, the fallible one is
+`try_*` and returns `Option` or `Result` (`cd::try_status`,
+`gpu::try_wait_command_ready`), the way `TryFrom` and `RefCell::try_borrow`
+work. The infallible name either panics, retries or waits without a bound,
+and says so in its docs.
+
+## `*_unchecked`: unsafe, skips a check the safe form makes
+
+`Model::vertex_unchecked` is `vertex` without the bounds check, and is
+`unsafe fn` with a `# Safety` section naming the check the caller now owns
+(`slice::get_unchecked`, `str::from_utf8_unchecked`).
+
+## `*_raw`: unsafe, low-level entry point
+
+A function that hands hardware a raw pointer or skips the safe layer's
+ownership rules is `unsafe fn` and ends in `_raw` (`submit_linked_list_raw`,
+`fill_render_faces_split_raw`; std's `Box::from_raw`). The safe form has the
+plain name.
+
+## Iterators: `iter`, `iter_mut`, `into_iter` (C-ITER)
+
+A collection's main iterator is `iter()`, `iter_mut()` or `into_iter()`. An
+iterator over a secondary view is named after what it yields (`packets()`,
+like `str::chars`), and its type is named the same in `CamelCase`
+(`Packets`, like `Chars`).
+
+## Predicates: `is_*`, `has_*`
+
+A method that returns `bool` and changes nothing starts with `is_`, `has_`,
+`are_` or `can_`: `is_busy`, `is_alive`, `has_floor_triangle`,
+`are_interrupts_enabled`. Event queries that read a transition keep their
+verb: `just_pressed`, `just_released`, `contains_ready`.
+
+## One module per device
+
+Each device has one module named after it, in lower case: `cd`, `gpu`, `gte`,
+`spu`, `mdec`, `dma`, `irq`, `timers`. Everything that talks to that device
+lives inside it, with submodules for sub-features (`cd::audio` for CD-DA
+playback). No module is named after a port or a protocol mnemonic (`sio`
+becomes `hardware` in psx-mc) or after a format abbreviation that shadows a
+`core` module (`psx_fmv::str` becomes `stream`).
+
+## Units in names where it matters
+
+When a number's unit or fixed-point format is not obvious from the type, the
+name carries it as a suffix:
+
+- fixed point: `_q12`, `_q8`, `_q16` (`phase_step_q12`, `lerp_q12_i32`)
+- sizes: `_bytes`, `_words`, `_halfwords`, `_texels` (`SECTOR_BYTES`,
+  `NODE_PAYLOAD_WORDS`)
+- time and rate: `_hz`, `_millis`, `_ticks`, `_vblanks`, `_spins`
+  (`sample_rate_hz`, `relative_millis`)
+- integer width when the call is about the width: `read_u32`, `write_u16`
+  (byteorder's `read_u32`)
+
+Counts end in `_count` (`vertex_count`, `clip_count`), never start with `n_`.
+Lengths of collections are `len()`, as in std.
+
+## Abbreviations
+
+Spell words out unless the short form is the one std or the whole field uses
+(`len`, `ptr`, `addr`, `rgb`, `uv`, `min`, `max`). Write `index`, not `idx`;
+`diagnostics`, not `diag`; `command`, not `cmd`. One concept
+has one spelling across the SDK: `vertex` and `triangle` everywhere (not
+`vert`/`tri` in one crate and `vertex` in the next), `color` (American, as in
+the rest of the SDK and in std).
+
+## Register-level names live only in psx-hw
+
+`psx-hw` is the hardware model shared by the SDK and the emulator: register
+addresses, bit fields and command bytes. Only there may a name be a register
+or field name (`I_STAT`, `CMD_GETSTAT`, `sio0::ctrl::TXEN`), because there the
+register is the thing being named. Each one carries its psx-spx name as a
+`#[doc(alias)]` where the spelling differs.
+
+Everywhere else, code uses psx-hw's constants directly and wraps them in calls
+named after what they do. No SDK crate outside psx-hw exports a register
+address or register bit constant.
+
+## PsyQ and psx-spx names are aliases
+
+Every item that does what a PsyQ call, a psx-spx command or a GTE/SPU mnemonic
+does carries that name as `#[doc(alias = "...")]`, so searching rustdoc for
+`DrawSync`, `RTPS`, `Getstat` or `KON` lands on it. A historical name is never
+an identifier.
+
+## Renaming without breaking games
+
+A rename never breaks a game that has not repinned:
+
+1. The new name is the real item, with the doc aliases.
+2. The old name stays as a thin `#[deprecated(note = "renamed to ...")]`
+   wrapper (`#[inline(always)]` function, type alias or constant), so a repin
+   compiles with warnings that point at the new name.
+3. Once no game's main uses the old name, it is removed.
+
+Public fields cannot be aliased; a field that breaks the convention gains an
+accessor method under the new name and the field itself is marked
+`#[deprecated]`.
