@@ -596,6 +596,14 @@ impl RawPoll {
     }
 }
 
+// SIO0 access contract. Every `unsafe` helper below, and every `unsafe` block that calls one,
+// touches only the SIO0 registers in `psx_io::sio` (0x1F80_1040..=0x1F80_104F), which are valid
+// MMIO on every PS1 and are accessed at their natural width. No pointer or memory ownership is
+// involved. The one obligation is exclusive use of SIO0 for the length of a call: the guest is
+// single-threaded, a poll runs to completion before it returns, and no interrupt handler touches
+// SIO0 (the controller IRQ stays masked in I_MASK), so nothing can interleave with a transaction. A
+// game that drove SIO0 from its own interrupt handler would break this.
+
 // --- SIO0 register layout, from the shared hardware-model crate ---
 // (`psx_hw::sio::sio0` is the single source of truth for these bits; the spin
 // budgets below are this driver's behavior, not layout, and stay local.)
@@ -649,11 +657,13 @@ pub fn poll_port2() -> PadState {
 /// the unfiltered handshake (or reproduce the legacy [`Pacing::NoAckWait`]
 /// failure); normal game code should use [`poll_port1`].
 pub fn poll_port1_raw(pacing: Pacing) -> RawPoll {
+    // SAFETY: `poll_once_raw` only drives SIO0, under the SIO0 access contract above.
     unsafe { poll_once_raw(false, pacing) }
 }
 
 /// Port-2 counterpart of [`poll_port1_raw`].
 pub fn poll_port2_raw(pacing: Pacing) -> RawPoll {
+    // SAFETY: `poll_once_raw` only drives SIO0, under the SIO0 access contract above.
     unsafe { poll_once_raw(true, pacing) }
 }
 
@@ -664,6 +674,7 @@ pub fn poll_port2_raw(pacing: Pacing) -> RawPoll {
 /// (SCPH-1200) might need -- setup time after `/CS`, and an inter-byte gap --
 /// without the machinery that corrupted the ack-wait path on silicon.
 pub fn poll_port1_diag(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+    // SAFETY: `poll_once_diag` only drives SIO0, under the SIO0 access contract above.
     unsafe { poll_once_diag(false, setup_spins, interbyte_spins) }
 }
 
@@ -696,6 +707,7 @@ fn poll_state(port2: bool) -> PadState {
     let mut last = PadState::NONE;
     let mut tries = 0;
     while tries < 4 {
+        // SAFETY: `poll_once` only drives SIO0, under the SIO0 access contract above.
         let s = unsafe { poll_once(port2) }.to_state();
         if !s.is_connected() {
             return s; // nothing attached -- not a glitch, don't retry
@@ -715,6 +727,8 @@ fn poll_state(port2: bool) -> PadState {
 #[inline]
 unsafe fn drain_rx() {
     let mut n = 0;
+    // SAFETY: STAT and DATA are SIO0 registers (SIO0 access contract). A DATA read pops one RX FIFO
+    // byte, and the loop is bounded to 16 pops.
     unsafe {
         while psx_io::read32(sio::STAT) & 0x2 != 0 && n < 16 {
             let _ = psx_io::read8(sio::DATA);
@@ -724,6 +738,8 @@ unsafe fn drain_rx() {
 }
 
 unsafe fn poll_once_raw(port2: bool, pacing: Pacing) -> RawPoll {
+    // SAFETY: every helper called here drives SIO0 only (SIO0 access contract); `ex` is handed
+    // references to locals.
     unsafe {
         // Raise JOYN so the device's state machine starts from idle, then drain
         // any stale RX byte. Only the ack-wait path arms the DSR IRQ.
@@ -803,6 +819,7 @@ unsafe fn ex(
     ack_seen: &mut u16,
     idx: &mut u8,
 ) -> u8 {
+    // SAFETY: `exchange_nowait` and `exchange_ack` drive SIO0 only (SIO0 access contract).
     unsafe {
         let i = *idx;
         *idx = idx.wrapping_add(1);
@@ -833,12 +850,16 @@ unsafe fn ex(
 /// itself (1024 STAT reads, four instructions each); its machine code is what
 /// the silicon sweep measured, so keep its shape.
 unsafe fn poll_once(port2: bool) -> RawPoll {
+    // SAFETY: `poll_once_timed` drives SIO0 only; the caller's exclusive use of SIO0 (SIO0 access
+    // contract) covers it.
     unsafe { poll_once_timed(port2, DEFAULT_SETUP_SPINS, 0) }
 }
 
 /// Diagnostic poll with caller-chosen setup and inter-byte delays, reached only
 /// through [`poll_port1_diag`].
 unsafe fn poll_once_diag(port2: bool, setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+    // SAFETY: `poll_once_timed` drives SIO0 only; the caller's exclusive use of SIO0 (SIO0 access
+    // contract) covers it.
     unsafe { poll_once_timed(port2, setup_spins, interbyte_spins) }
 }
 
@@ -847,6 +868,8 @@ unsafe fn poll_once_diag(port2: bool, setup_spins: u32, interbyte_spins: u32) ->
 /// so each caller above is specialised on its own timing.
 #[inline(always)]
 unsafe fn poll_once_timed(port2: bool, setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+    // SAFETY: select, delay_reads, drain_rx, exchange_delayed and deselect drive SIO0 only (SIO0
+    // access contract).
     unsafe {
         select(port2, false);
         // Setup time after asserting /CS, before the first clock -- the strict
@@ -921,6 +944,8 @@ unsafe fn poll_once_timed(port2: bool, setup_spins: u32, interbyte_spins: u32) -
 const CONFIG_COMMAND_GAP_SPINS: u32 = 8 * DEFAULT_SETUP_SPINS;
 
 fn enable_analog(port2: bool) -> bool {
+    // SAFETY: `transaction` and `delay_reads` drive SIO0 only (SIO0 access contract), and the
+    // configuration sequence runs to completion here.
     unsafe {
         // Enter config mode.
         transaction(port2, [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
@@ -937,6 +962,7 @@ fn enable_analog(port2: bool) -> bool {
     if state.mode == PadMode::Config {
         // The exit did not take: leave the pad in a playable mode rather
         // than parked in configuration, then re-read what it settled on.
+        // SAFETY: as above, SIO0 only (SIO0 access contract).
         unsafe {
             transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
             delay_reads(CONFIG_COMMAND_GAP_SPINS);
@@ -981,6 +1007,8 @@ const fn active_ctrl(port2: bool, ack_irq: bool) -> u16 {
 /// path wants it).
 #[inline]
 unsafe fn select(port2: bool, ack_irq: bool) {
+    // SAFETY: MODE, BAUD and CTRL are SIO0's 16-bit registers (SIO0 access contract); these writes
+    // configure the serial port and the select lines, nothing else.
     unsafe {
         psx_io::write16(sio::MODE, MODE_8N1);
         psx_io::write16(sio::BAUD, BAUD_PAD);
@@ -996,6 +1024,7 @@ unsafe fn select(port2: bool, ack_irq: bool) {
 /// path).
 #[inline]
 unsafe fn transaction(port2: bool, bytes: [u8; 8]) -> [u8; 8] {
+    // SAFETY: select, delay_reads, ex and deselect drive SIO0 only (SIO0 access contract).
     unsafe {
         select(port2, false);
         delay_reads(DEFAULT_SETUP_SPINS);
@@ -1025,6 +1054,8 @@ unsafe fn transaction(port2: bool, bytes: [u8; 8]) -> [u8; 8] {
 /// the next poll.
 #[inline]
 unsafe fn deselect() {
+    // SAFETY: CTRL is SIO0's 16-bit control register (SIO0 access contract); zero releases the
+    // select lines.
     unsafe { psx_io::write16(sio::CTRL, 0) };
 }
 
@@ -1040,6 +1071,8 @@ unsafe fn deselect() {
 /// - bit 9: latched DSR/ACK interrupt
 #[inline]
 unsafe fn exchange_nowait(tx: u8) -> u8 {
+    // SAFETY: STAT and DATA are SIO0 registers (SIO0 access contract); DATA is accessed as a byte,
+    // its natural width.
     unsafe {
         if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
             return 0xFF;
@@ -1056,6 +1089,7 @@ unsafe fn exchange_nowait(tx: u8) -> u8 {
 /// strict pad time to be ready for the next byte without any `/ACK`/CTRL games.
 #[inline]
 unsafe fn exchange_delayed(tx: u8, interbyte_spins: u32) -> u8 {
+    // SAFETY: both helpers drive SIO0 only (SIO0 access contract).
     unsafe {
         let rx = exchange_nowait(tx);
         delay_reads(interbyte_spins);
@@ -1067,6 +1101,8 @@ unsafe fn exchange_delayed(tx: u8, interbyte_spins: u32) -> u8 {
 #[inline]
 unsafe fn delay_reads(n: u32) {
     let mut k = n;
+    // SAFETY: STAT is SIO0's status register and reading it has no side effects (SIO0 access
+    // contract).
     unsafe {
         while k > 0 {
             let _ = psx_io::read32(sio::STAT);
@@ -1085,6 +1121,8 @@ unsafe fn delay_reads(n: u32) {
 /// to legacy timing rather than dropping the poll entirely.
 #[inline]
 unsafe fn exchange_ack(port2: bool, tx: u8) -> (u8, bool) {
+    // SAFETY: STAT, DATA and CTRL are SIO0 registers (SIO0 access contract). The CTRL write keeps
+    // the current port selected and only acknowledges the latched /ACK.
     unsafe {
         if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
             return (0xFF, false);
@@ -1115,6 +1153,7 @@ unsafe fn exchange_ack(port2: bool, tx: u8) -> (u8, bool) {
 #[inline]
 unsafe fn wait_stat(mask: u32, spins: u32) -> bool {
     let mut spins = spins;
+    // SAFETY: side-effect-free reads of SIO0 STAT (SIO0 access contract).
     unsafe {
         while psx_io::read32(sio::STAT) & mask == 0 {
             if spins == 0 {
@@ -1132,6 +1171,7 @@ unsafe fn wait_stat(mask: u32, spins: u32) -> bool {
 #[inline]
 unsafe fn wait_stat_low(mask: u32, spins: u32) -> bool {
     let mut spins = spins;
+    // SAFETY: side-effect-free reads of SIO0 STAT (SIO0 access contract).
     unsafe {
         while psx_io::read32(sio::STAT) & mask != 0 {
             if spins == 0 {
