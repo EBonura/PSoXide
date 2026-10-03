@@ -3,7 +3,7 @@
 //!
 //! Sits on top of `psx-io::gpu` + `psx-hw::gpu` constructors to expose
 //! a friendlier API: `init()` to set up display mode, a small
-//! primitives kit, and synchronisation (`draw_sync`, `vsync`, and the
+//! primitives kit, and synchronisation (`wait_idle`, and the
 //! GP0(1Fh) completion flag `draw_done` that psx-rt's queued flip tests).
 //!
 //! ## Primitives
@@ -541,7 +541,7 @@ pub fn draw_quad_flat(verts: [(i16, i16); 4], r: u8, g: u8, b: u8) {
 /// darkens and above 128 brightens (clamped).
 ///
 /// `clut_word` is a packed CLUT handle (see `Clut::uv_clut_word`);
-/// `tpage_word` is a packed tpage (see `TexturePage::uv_tpage_word`).
+/// `tpage_word` is a packed tpage (see `TexturePage::uv_word`).
 pub fn draw_quad_textured(
     verts: [(i16, i16); 4],
     uvs: [(u8, u8); 4],
@@ -572,7 +572,7 @@ pub fn draw_quad_textured_material(
     write_command(pack_vertex(verts[0].0, verts[0].1));
     write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
     write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
+    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.texture_page_word()));
     write_command(pack_vertex(verts[2].0, verts[2].1));
     write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
     write_command(pack_vertex(verts[3].0, verts[3].1));
@@ -595,7 +595,7 @@ pub fn draw_tri_textured_material(
     write_command(pack_vertex(verts[0].0, verts[0].1));
     write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
     write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
+    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.texture_page_word()));
     write_command(pack_vertex(verts[2].0, verts[2].1));
     write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
 }
@@ -648,7 +648,7 @@ pub fn draw_quad_textured_gouraud_material(
     write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
     write_command(pack_color(colors[1].0, colors[1].1, colors[1].2));
     write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
+    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.texture_page_word()));
     write_command(pack_color(colors[2].0, colors[2].1, colors[2].2));
     write_command(pack_vertex(verts[2].0, verts[2].1));
     write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
