@@ -25,24 +25,31 @@
 
 use core::ptr;
 
-pub const N_RATES: usize = 7;
-const CLIP_HEADER: usize = 4 + 2 * N_RATES * 2;
+pub const RATE_COUNT: usize = 7;
+/// Renamed to [`RATE_COUNT`].
+#[deprecated(note = "renamed to `RATE_COUNT`")]
+pub const N_RATES: usize = RATE_COUNT;
+const CLIP_HEADER: usize = 4 + 2 * RATE_COUNT * 2;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct Aff {
+pub struct Affine {
     pub r: [[i16; 3]; 3],
     pub _pad: i16,
     pub t: [i32; 3],
 }
 
-impl Aff {
-    pub const ZERO: Aff = Aff {
+impl Affine {
+    pub const ZERO: Affine = Affine {
         r: [[0; 3]; 3],
         _pad: 0,
         t: [0; 3],
     };
 }
+
+/// Renamed to [`Affine`].
+#[deprecated(note = "renamed to `Affine`")]
+pub type Aff = Affine;
 
 // The readers below take a raw pointer into a blob `Model::new` validated.
 // Each has the same contract: every byte it reads, `d + o` up to the width it
@@ -107,11 +114,11 @@ unsafe fn read12(d: *const u8, o: usize) -> [i32; 4] {
 /// `off`: the position maps to each rate with one multiply.
 #[inline(never)]
 unsafe fn seg(d: *const u8, off: usize, r: usize, pos_q8: u32) -> (usize, i32, usize) {
-    // SAFETY: `off` is a validated clip and `r < N_RATES`, so both reads are
+    // SAFETY: `off` is a validated clip and `r < RATE_COUNT`, so both reads are
     // inside its 32-byte header.
     unsafe {
         let s = u16_at(d, off + 4 + r * 2) as usize;
-        let factor = u16_at(d, off + 4 + N_RATES * 2 + r * 2);
+        let factor = u16_at(d, off + 4 + RATE_COUNT * 2 + r * 2);
         let sp = (pos_q8 * factor) >> 15;
         let i = (sp >> 8) as usize;
         if i >= s {
@@ -203,7 +210,7 @@ fn pack(a: i32, b: i32) -> u32 {
 /// parent * (r, t), rounded. On the PS1 the parent's rotation must already
 /// be in the GTE (see `decode`); elsewhere the same sums run in Rust.
 #[inline(always)]
-fn compose_loaded(p: &Aff, r: &[[i16; 3]; 3], t: [i32; 3], out: &mut Aff) {
+fn compose_loaded(p: &Affine, r: &[[i16; 3]; 3], t: [i32; 3], out: &mut Affine) {
     let rd = |v: i32| (v + 2048) >> 12;
     let cols = |xy: u32, z: u32| -> [i32; 3] {
         #[cfg(target_arch = "mips")]
@@ -441,16 +448,30 @@ impl Model {
         }
     }
 
-    /// Number of bones; `decode` needs this many `Aff` slots.
+    /// Number of bones; `decode` needs this many `Affine` slots.
     #[inline]
-    pub fn n_bones(&self) -> usize {
+    pub fn bone_count(&self) -> usize {
         self.n_bones
     }
 
     /// Number of clips in the blob (at least one).
     #[inline]
-    pub fn n_clips(&self) -> usize {
+    pub fn clip_count(&self) -> usize {
         self.n_clips
+    }
+
+    /// Renamed to [`Model::bone_count`].
+    #[deprecated(note = "renamed to `bone_count`")]
+    #[inline(always)]
+    pub fn n_bones(&self) -> usize {
+        self.bone_count()
+    }
+
+    /// Renamed to [`Model::clip_count`].
+    #[deprecated(note = "renamed to `clip_count`")]
+    #[inline(always)]
+    pub fn n_clips(&self) -> usize {
+        self.clip_count()
     }
 
     /// Byte offset of `clip`'s record, clamped to the last clip.
@@ -472,16 +493,16 @@ impl Model {
 
     /// Decode every bone of `clip` at `pos_q8` into model-space affines.
     /// Clips past the last decode the last; an `out` shorter than
-    /// [`Model::n_bones`] is left untouched.
+    /// [`Model::bone_count`] is left untouched.
     #[inline(always)]
-    pub fn decode(&self, clip: usize, pos_q8: u32, out: &mut [Aff]) {
+    pub fn decode(&self, clip: usize, pos_q8: u32, out: &mut [Affine]) {
         self.decode_with(clip, pos_q8, &Jaw::NONE, out)
     }
 
     /// [`Model::decode`] with a local controller rotation on one bone.
     /// `out` must hold at least `n_bones` entries.
     #[inline(never)]
-    pub fn decode_with(&self, clip: usize, pos_q8: u32, jaw: &Jaw, out: &mut [Aff]) {
+    pub fn decode_with(&self, clip: usize, pos_q8: u32, jaw: &Jaw, out: &mut [Affine]) {
         let off = self.clip_off(clip);
         // SAFETY: `Model::new` ran `tracks_fit`, which follows this same walk
         // for every clip and bounds each read below for any `pos_q8` (`seg`
@@ -612,7 +633,7 @@ impl Model {
                 // Parents precede children (checked when the HMD8 loads) and
                 // `out` holds `nb` bones (checked above).
                 if parent == 0xff {
-                    *out.get_unchecked_mut(b) = Aff { r, _pad: 0, t };
+                    *out.get_unchecked_mut(b) = Affine { r, _pad: 0, t };
                 } else {
                     let pa = *out.get_unchecked(parent);
                     if loaded != parent {
