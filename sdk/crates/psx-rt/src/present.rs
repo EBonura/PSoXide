@@ -177,6 +177,9 @@ fn release_stalled_slot() {
     psx_io::irq::set_mask(mask);
 }
 
+/// Port writes bypass the direct-access guard: this runs inside it
+/// ([`quiesce`]), and from the paired-arena fence, whose scratchpad stack
+/// `stack_guard` must bound without the guard's function pointer.
 #[cold]
 fn stop_walk_and_raise() {
     #[cfg(target_arch = "mips")]
@@ -184,10 +187,13 @@ fn stop_walk_and_raise() {
         use psx_io::dma::{self, Channel};
         if dma::is_busy(Channel::Gpu) && !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
             dma::abort(Channel::Gpu);
-            psx_io::gpu::write_gp1(0x0100_0000);
+            psx_io::gpu::write_gp1_unguarded(0x0100_0000);
         }
-        psx_io::gpu::wait_cmd_ready();
-        psx_io::gpu::write_gp0(psx_hw::gpu::gp0::REQUEST_IRQ);
+        // `wait_cmd_ready`, with its timeout reset written past the guard.
+        if !psx_io::gpu::try_wait_cmd_ready(psx_io::gpu::READY_SPINS) {
+            psx_io::gpu::write_gp1_unguarded(0x0100_0000);
+        }
+        psx_io::gpu::write_gp0_unguarded(psx_hw::gpu::gp0::REQUEST_IRQ);
     }
     unsafe {
         write_volatile(
