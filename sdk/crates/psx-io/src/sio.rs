@@ -1,16 +1,19 @@
-//! SIO0 (controller / memory-card) MMIO.
+//! SIO0 register addresses, moved to [`psx_hw::sio::sio0`].
 //!
-//! Keeping this thin for now: register reads/writes only. The full
-//! controller protocol (address byte, polling sequence, response
-//! decoding) lands in a higher-level `psx-pad` crate when we need it.
+//! The controller and memory-card protocols live in `psx-pad` and `psx-mc`.
 
-/// TX/RX FIFO port (byte).
-pub const DATA: u32 = 0x1F80_1040;
-/// Status register (32-bit).
-pub const STAT: u32 = 0x1F80_1044;
-/// Mode register (16-bit).
-pub const MODE: u32 = 0x1F80_1048;
-/// Control register (16-bit).
-pub const CTRL: u32 = 0x1F80_104A;
-/// Baud-rate divisor (16-bit).
-pub const BAUD: u32 = 0x1F80_104E;
+/// Moved to [`psx_hw::sio::sio0::DATA`].
+#[deprecated(note = "moved to `psx_hw::sio::sio0::DATA`")]
+pub const DATA: u32 = psx_hw::sio::sio0::DATA;
+/// Moved to [`psx_hw::sio::sio0::STAT`].
+#[deprecated(note = "moved to `psx_hw::sio::sio0::STAT`")]
+pub const STAT: u32 = psx_hw::sio::sio0::STAT;
+/// Moved to [`psx_hw::sio::sio0::MODE`].
+#[deprecated(note = "moved to `psx_hw::sio::sio0::MODE`")]
+pub const MODE: u32 = psx_hw::sio::sio0::MODE;
+/// Moved to [`psx_hw::sio::sio0::CTRL`].
+#[deprecated(note = "moved to `psx_hw::sio::sio0::CTRL`")]
+pub const CTRL: u32 = psx_hw::sio::sio0::CTRL;
+/// Moved to [`psx_hw::sio::sio0::BAUD`].
+#[deprecated(note = "moved to `psx_hw::sio::sio0::BAUD`")]
+pub const BAUD: u32 = psx_hw::sio::sio0::BAUD;

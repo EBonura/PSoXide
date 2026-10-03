@@ -10,7 +10,7 @@ extern crate psx_rt;
 
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
-use psx_io::cdrom;
+use psx_io::cd;
 use psx_pad::{button, poll_port1, ButtonState};
 use psx_spu::{self as spu, CdVolume, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
@@ -39,9 +39,9 @@ fn main() {
     spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
     spu::enable_cd_audio(true);
 
-    cdrom::set_mode(cdrom::MODE_DOUBLE_SPEED | cdrom::MODE_CDDA);
-    cdrom::demute();
-    cdrom::play_track(TRACK_GONCHAROV);
+    cd::set_mode(psx_hw::cd::MODE_DOUBLE_SPEED | psx_hw::cd::MODE_CDDA);
+    cd::unmute();
+    cd::play_track(TRACK_GONCHAROV);
 
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     let mut prev_pad = ButtonState::NONE;
@@ -50,24 +50,24 @@ fn main() {
     loop {
         let pad = poll_port1().buttons;
         if pressed(pad, prev_pad, button::START) {
-            cdrom::demute();
-            cdrom::play_track(TRACK_GONCHAROV);
+            cd::unmute();
+            cd::play_track(TRACK_GONCHAROV);
             playback = Playback::Playing;
         }
         if pressed(pad, prev_pad, button::CROSS) {
-            cdrom::pause();
+            cd::pause();
             playback = Playback::Paused;
         }
         if pressed(pad, prev_pad, button::SQUARE) {
-            cdrom::stop();
+            cd::stop();
             playback = Playback::Stopped;
         }
         if pressed(pad, prev_pad, button::TRIANGLE) {
-            cdrom::mute();
+            cd::mute();
             playback = Playback::Muted;
         }
         if pressed(pad, prev_pad, button::CIRCLE) {
-            cdrom::demute();
+            cd::unmute();
             playback = Playback::Playing;
         }
         prev_pad = pad;

@@ -1,46 +1,50 @@
 //! GPU MMIO: `GP0`, `GP1`, `GPUREAD`, `GPUSTAT`.
 //!
-//! Thin wrappers over [`crate::read32`] / [`crate::write32`] that use
+//! Thin wrappers over [`crate::read_u32`] / [`crate::write_u32`] that use
 //! the register addresses from `psx-hw`. Each helper commits exactly
 //! one MMIO access; higher-level SDK code composes them into commands.
 
 use psx_hw::gpu::{GpuStat, GP0, GP1, GPUREAD, GPUSTAT};
 
-/// Push a command or data word to `GP0`. Named `write_gp0` (not just
-/// `gp0`) so it doesn't collide with the `psx_hw::gpu::gp0` module
-/// that holds the command-word constructors -- that way callers can
-/// write `write_gp0(gp0::draw_mode(...))` and each half of the name
-/// is unambiguous.
+/// Push a drawing or VRAM command word, or one of its parameters, to the
+/// GPU's command port (`GP0`). Pairs with the word builders in
+/// `psx_hw::gpu::gp0`: `write_command(gp0::draw_mode(...))`.
+#[doc(alias = "GP0")]
 #[inline(always)]
-pub fn write_gp0(word: u32) {
+pub fn write_command(word: u32) {
     // SAFETY: GP0 (0x1F80_1810) is the GPU's aligned 32-bit command/data port on every PS1. Any
     // word is a legal write: the GPU parses it as a command or parameter, with no effect on
     // CPU-visible memory.
-    unsafe { crate::write32(GP0, word) }
+    unsafe { crate::write_u32(GP0, word) }
 }
 
-/// Push a command to `GP1`.
+/// Write a display-control command (reset, display mode, display area,
+/// DMA direction) to the GPU's control port (`GP1`).
+#[doc(alias = "GP1")]
 #[inline(always)]
-pub fn write_gp1(word: u32) {
+pub fn write_display_control(word: u32) {
     // SAFETY: GP1 (0x1F80_1814) is the GPU's aligned 32-bit control port on every PS1; any word is
     // a legal write and only changes GPU state.
-    unsafe { crate::write32(GP1, word) }
+    unsafe { crate::write_u32(GP1, word) }
 }
 
 /// Read the GPU status register.
+#[doc(alias = "GPUSTAT")]
 #[inline(always)]
-pub fn gpustat() -> GpuStat {
+pub fn status() -> GpuStat {
     // SAFETY: GPUSTAT (0x1F80_1814 on read) is the GPU's aligned 32-bit status register; reading it
     // has no side effects.
-    GpuStat::from_bits_retain(unsafe { crate::read32(GPUSTAT) })
+    GpuStat::from_bits_retain(unsafe { crate::read_u32(GPUSTAT) })
 }
 
-/// Read the VRAM-to-CPU / GP1(10h) return latch.
+/// Read the GPU's response latch: VRAM-to-CPU transfer data or a GP1(10h)
+/// info reply.
+#[doc(alias = "GPUREAD")]
 #[inline(always)]
-pub fn gpuread() -> u32 {
+pub fn read_data() -> u32 {
     // SAFETY: GPUREAD (0x1F80_1810 on read) is the GPU's aligned 32-bit response latch. A read may
     // advance a VRAM-to-CPU transfer, which is its purpose, and touches no CPU memory.
-    unsafe { crate::read32(GPUREAD) }
+    unsafe { crate::read_u32(GPUREAD) }
 }
 
 /// Spin until the GPU is ready to accept a new command word.
@@ -52,7 +56,7 @@ pub fn gpuread() -> u32 {
 /// transfer setup packet, the GPU is waiting for data, not a new
 /// normal command.
 #[inline]
-pub fn wait_cmd_ready() {
+pub fn wait_command_ready() {
     wait_ready(GpuStat::READY_CMD);
 }
 
@@ -72,9 +76,9 @@ pub const READY_SPINS: u32 = 500_000;
 /// and make the GPU accept work again.
 fn wait_ready(flag: GpuStat) {
     let mut spins = 0u32;
-    while !gpustat().contains(flag) {
+    while !status().contains(flag) {
         if spins >= READY_SPINS {
-            write_gp1(0x0100_0000);
+            write_display_control(0x0100_0000);
             return;
         }
         spins += 1;
@@ -90,7 +94,7 @@ pub fn wait_dma_ready() {
 /// Poll command readiness without resetting the GPU on timeout.
 /// Reads once, then retries at most `spin_limit` times.
 #[inline]
-pub fn try_wait_cmd_ready(spin_limit: u32) -> bool {
+pub fn try_wait_command_ready(spin_limit: u32) -> bool {
     try_wait_ready(GpuStat::READY_CMD, spin_limit)
 }
 /// Poll DMA receive readiness without resetting the GPU on timeout.
@@ -99,7 +103,57 @@ pub fn try_wait_dma_ready(spin_limit: u32) -> bool {
     try_wait_ready(GpuStat::READY_DMA_RECV, spin_limit)
 }
 fn try_wait_ready(flag: GpuStat, spin_limit: u32) -> bool {
-    poll_ready(spin_limit, || gpustat().contains(flag))
+    poll_ready(spin_limit, || status().contains(flag))
+}
+
+/// Renamed to [`write_command`].
+///
+/// Deprecation is held until psx-gpu and psx-vram, which the DMA rework
+/// owns, move to the new name.
+#[inline(always)]
+pub fn write_gp0(word: u32) {
+    write_command(word)
+}
+
+/// Renamed to [`write_display_control`].
+///
+/// Deprecation is held until psx-gpu and psx-vram, which the DMA rework
+/// owns, move to the new name.
+#[inline(always)]
+pub fn write_gp1(word: u32) {
+    write_display_control(word)
+}
+
+/// Renamed to [`status`].
+///
+/// Deprecation is held until psx-gpu and psx-vram, which the DMA rework
+/// owns, move to the new name.
+#[inline(always)]
+pub fn gpustat() -> GpuStat {
+    status()
+}
+
+/// Renamed to [`read_data`].
+#[deprecated(note = "renamed to `read_data`")]
+#[inline(always)]
+pub fn gpuread() -> u32 {
+    read_data()
+}
+
+/// Renamed to [`wait_command_ready`].
+///
+/// Deprecation is held until psx-gpu and psx-vram, which the DMA rework
+/// owns, move to the new name.
+#[inline(always)]
+pub fn wait_cmd_ready() {
+    wait_command_ready()
+}
+
+/// Renamed to [`try_wait_command_ready`].
+#[deprecated(note = "renamed to `try_wait_command_ready`")]
+#[inline(always)]
+pub fn try_wait_cmd_ready(spin_limit: u32) -> bool {
+    try_wait_command_ready(spin_limit)
 }
 
 fn poll_ready(spin_limit: u32, mut ready: impl FnMut() -> bool) -> bool {

@@ -19,9 +19,9 @@
 
 use crate::{Block, Error, Result, FRAME_COUNT, FRAME_SIZE};
 use psx_hw::sio::sio0;
-use psx_io::sio;
+use psx_hw::sio::sio0 as sio;
 
-// SIO0 access contract. Each `unsafe` block in this file is one volatile access to a `psx_io::sio`
+// SIO0 access contract. Each `unsafe` block in this file is one volatile access to a `psx_hw::sio::sio0`
 // register (0x1F80_1040..=0x1F80_104F), valid MMIO on every PS1, at its natural width. No pointer
 // or memory ownership is involved. The one obligation is exclusive use of SIO0 for a transaction:
 // the guest is single-threaded, every `HardwareCard` operation runs to completion before it
@@ -171,11 +171,11 @@ impl HardwareCard {
         // SAFETY: MODE, BAUD and CTRL writes configure SIO0 and select this card's port (SIO0
         // access contract).
         unsafe {
-            psx_io::write16(sio::MODE, MODE_8N1);
-            psx_io::write16(sio::BAUD, BAUD);
+            psx_io::write_u16(sio::MODE, MODE_8N1);
+            psx_io::write_u16(sio::BAUD, BAUD);
             // Clear the stale IRQ latch while /CS is high, then select the card.
-            psx_io::write16(sio::CTRL, CTRL_ACK);
-            psx_io::write16(sio::CTRL, self.active_ctrl());
+            psx_io::write_u16(sio::CTRL, CTRL_ACK);
+            psx_io::write_u16(sio::CTRL, self.active_ctrl());
         }
         self.spin(self.timing.setup_spins);
         self.drain_rx();
@@ -183,16 +183,16 @@ impl HardwareCard {
 
     fn deselect(&self) {
         // SAFETY: zero in SIO0 CTRL releases the select lines (SIO0 access contract).
-        unsafe { psx_io::write16(sio::CTRL, 0) };
+        unsafe { psx_io::write_u16(sio::CTRL, 0) };
     }
 
     fn drain_rx(&self) {
         let mut n = 0;
         // SAFETY: a side-effect-free read of SIO0 STAT (SIO0 access contract).
-        while unsafe { psx_io::read32(sio::STAT) } & STAT_RX_NOT_EMPTY != 0 && n < 16 {
+        while unsafe { psx_io::read_u32(sio::STAT) } & STAT_RX_NOT_EMPTY != 0 && n < 16 {
             // SAFETY: a byte read of SIO0 DATA pops one RX FIFO byte; the loop is bounded to 16
             // (SIO0 access contract).
-            let _ = unsafe { psx_io::read8(sio::DATA) };
+            let _ = unsafe { psx_io::read_u8(sio::DATA) };
             n += 1;
         }
     }
@@ -200,7 +200,7 @@ impl HardwareCard {
     fn spin(&self, mut n: u32) {
         while n > 0 {
             // SAFETY: a side-effect-free read of SIO0 STAT, used as a delay (SIO0 access contract).
-            let _ = unsafe { psx_io::read32(sio::STAT) };
+            let _ = unsafe { psx_io::read_u32(sio::STAT) };
             n -= 1;
             core::hint::spin_loop();
         }
@@ -208,7 +208,7 @@ impl HardwareCard {
 
     fn wait_high(&self, mask: u32, mut spins: u32) -> bool {
         // SAFETY: a side-effect-free read of SIO0 STAT (SIO0 access contract).
-        while unsafe { psx_io::read32(sio::STAT) } & mask == 0 {
+        while unsafe { psx_io::read_u32(sio::STAT) } & mask == 0 {
             if spins == 0 {
                 return false;
             }
@@ -220,7 +220,7 @@ impl HardwareCard {
 
     fn wait_low(&self, mask: u32, mut spins: u32) -> bool {
         // SAFETY: a side-effect-free read of SIO0 STAT (SIO0 access contract).
-        while unsafe { psx_io::read32(sio::STAT) } & mask != 0 {
+        while unsafe { psx_io::read_u32(sio::STAT) } & mask != 0 {
             if spins == 0 {
                 return false;
             }
@@ -249,13 +249,13 @@ impl HardwareCard {
             return 0xff;
         }
         // SAFETY: a byte write to SIO0 DATA clocks `tx` out (SIO0 access contract).
-        unsafe { psx_io::write8(sio::DATA, tx) };
+        unsafe { psx_io::write_u8(sio::DATA, tx) };
         if !self.wait_high(STAT_RX_NOT_EMPTY, self.timing.byte_spins) {
             self.record_fault(TransportFault::RxTimeout, exchange);
             return 0xff;
         }
         // SAFETY: a byte read of SIO0 DATA pops the received byte (SIO0 access contract).
-        let rx = unsafe { psx_io::read8(sio::DATA) };
+        let rx = unsafe { psx_io::read_u8(sio::DATA) };
         if (exchange as usize) < self.trace.response_prefix.len() {
             self.trace.response_prefix[exchange as usize] = rx;
         }
@@ -274,7 +274,7 @@ impl HardwareCard {
             }
             // SAFETY: a SIO0 CTRL write that keeps this port selected and acknowledges the latched
             // /ACK (SIO0 access contract).
-            unsafe { psx_io::write16(sio::CTRL, self.active_ctrl() | CTRL_ACK) };
+            unsafe { psx_io::write_u16(sio::CTRL, self.active_ctrl() | CTRL_ACK) };
         }
         rx
     }

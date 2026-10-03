@@ -149,7 +149,7 @@ fn main() {
     if !released {
         let word = interrupts::take_pending_gp1();
         if word != 0 {
-            psx_io::gpu::write_gp1(word);
+            psx_io::gpu::write_display_control(word);
         }
     }
 
@@ -169,7 +169,7 @@ fn main() {
             gpu::draw_sync();
             let word = interrupts::take_pending_gp1();
             if word != 0 {
-                psx_io::gpu::write_gp1(word);
+                psx_io::gpu::write_display_control(word);
             }
         } else if !gpu::draw_done() {
             // The flag cannot clear before the next arm, so a flip seen

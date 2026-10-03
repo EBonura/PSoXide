@@ -32,7 +32,7 @@ extern crate psx_rt;
 use psx_asset::Texture;
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_hw::gpu::{pack_color, pack_texcoord, pack_vertex, pack_xy};
-use psx_io::gpu::{wait_cmd_ready, write_gp0};
+use psx_io::gpu::{wait_command_ready, write_command};
 use psx_math::sincos;
 use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
 
@@ -151,9 +151,9 @@ fn drift(phase_q12: u16, amp_px: i16) -> i16 {
 /// 4-word packet. Tint `(0x80, 0x80, 0x80)` passes texels through
 /// unmodulated.
 fn draw_sprite(x: i16, y: i16, w: u16, h: u16, uv: (u8, u8), clut: u16) {
-    wait_cmd_ready();
-    write_gp0(0x6400_0000 | pack_color(0x80, 0x80, 0x80));
-    write_gp0(pack_vertex(x, y));
-    write_gp0(pack_texcoord(uv.0, uv.1, clut));
-    write_gp0(pack_xy(w, h));
+    wait_command_ready();
+    write_command(0x6400_0000 | pack_color(0x80, 0x80, 0x80));
+    write_command(pack_vertex(x, y));
+    write_command(pack_texcoord(uv.0, uv.1, clut));
+    write_command(pack_xy(w, h));
 }

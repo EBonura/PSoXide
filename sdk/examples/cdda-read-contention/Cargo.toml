@@ -17,4 +17,5 @@ lto = true
 
 [dependencies]
 psx-io = { path = "../../crates/psx-io" }
+psx-hw = { path = "../../../crates/psx-hw" }
 psx-rt = { path = "../../crates/psx-rt" }
