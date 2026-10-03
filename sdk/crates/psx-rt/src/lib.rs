@@ -38,6 +38,8 @@ pub mod cache;
 pub mod critical_section;
 pub mod interrupts;
 mod peripherals;
+#[cfg(feature = "present-queue")]
+pub mod present;
 pub mod scratchpad;
 #[cfg(target_arch = "mips")]
 pub mod tty;

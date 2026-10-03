@@ -34,6 +34,10 @@ scratchpad-stack-check = []
 # For development and test builds; one `b` in the fault path, nothing on
 # the interrupt path.
 strict-faults = []
+# `present`: the VBlank-kicked present queue, with psx-io's command
+# recording and direct-access guard. The handler's kick block costs one load
+# per VBlank and is assembled only with this feature.
+present-queue = ["psx-io/present-queue"]
 # Register psx-rt's interrupt-masking critical section as the
 # `critical-section` crate's implementation (for dependencies that use that
 # crate). A program links at most one implementation, so this is opt-in.

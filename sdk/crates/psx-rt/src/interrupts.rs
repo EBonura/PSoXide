@@ -31,6 +31,74 @@ __psx_rt_exception_handler:
     addiu $27, $27, 1
     sw    $27, %lo(__psx_rt_vblank_count)($26)
 
+    # Present queue (`crate::present`, `present-queue` feature only). One
+    # published chain waits in __psx_rt_present_head (0 = empty). Kick it on
+    # the first edge where the previous chain's closing GP0(1Fh) has run
+    # (GPUSTAT bit 24) and DMA channel 2 is idle: flip to the finished frame,
+    # acknowledge the flag with GP1(02h) (the new chain raises it again at its
+    # own end), point GP0 DMA at the CPU with GP1(04h)=2, enable channel 2 in
+    # DPCR and start the linked-list walk. Ported from quake-psx 3ca915c.
+    # With the slot empty this costs one load.
+    .if {present}
+    lui   $26, %hi(__psx_rt_present_head)
+    lw    $27, %lo(__psx_rt_present_head)($26)
+    nop
+    beqz  $27, 8f
+    nop
+    lui   $26, 0x1f80
+    lw    $27, 0x1814($26)
+    nop
+    srl   $27, $27, 24
+    andi  $27, $27, 1
+    beqz  $27, 7f
+    nop
+    lw    $27, 0x10a8($26)
+    nop
+    srl   $27, $27, 24
+    andi  $27, $27, 1
+    bnez  $27, 7f
+    nop
+    lui   $27, %hi(__psx_rt_present_display)
+    lw    $27, %lo(__psx_rt_present_display)($27)
+    nop
+    beqz  $27, 6f
+    nop
+    sw    $27, 0x1814($26)
+6:
+    lui   $27, 0x0200
+    sw    $27, 0x1814($26)
+    lui   $27, 0x0400
+    ori   $27, $27, 0x0002
+    sw    $27, 0x1814($26)
+    lw    $27, 0x10f0($26)
+    nop
+    ori   $27, $27, 0x0800
+    sw    $27, 0x10f0($26)
+    lui   $27, %hi(__psx_rt_present_head)
+    lw    $27, %lo(__psx_rt_present_head)($27)
+    nop
+    sw    $27, 0x10a0($26)
+    sw    $zero, 0x10a4($26)
+    lui   $27, 0x0100
+    ori   $27, $27, 0x0401
+    sw    $27, 0x10a8($26)
+    lui   $26, %hi(__psx_rt_present_head)
+    sw    $zero, %lo(__psx_rt_present_head)($26)
+    lui   $26, %hi(__psx_rt_present_kick_count)
+    lw    $27, %lo(__psx_rt_present_kick_count)($26)
+    nop
+    addiu $27, $27, 1
+    b     8f
+    sw    $27, %lo(__psx_rt_present_kick_count)($26)
+7:
+    lui   $26, %hi(__psx_rt_present_skip_count)
+    lw    $27, %lo(__psx_rt_present_skip_count)($26)
+    nop
+    addiu $27, $27, 1
+    sw    $27, %lo(__psx_rt_present_skip_count)($26)
+8:
+    .endif
+
     # Apply one queued GP1 word exactly at the blank edge (deferred display
     # flip). Zero means no request; a display-start word is never zero.
     # Only apply once GPUSTAT bit 24 is set: the frame's work ends with
@@ -175,7 +243,35 @@ __psx_rt_exception_handler:
     .set reorder
     "#,
     strict = const STRICT_FAULTS as u32,
+    present = const PRESENT_QUEUE as u32,
 );
+
+/// True when psx-rt was built with the `present-queue` feature: the VBlank
+/// handler kicks frames published through [`crate::present`].
+pub const PRESENT_QUEUE: bool = cfg!(feature = "present-queue");
+
+/// Present-queue slot: the chain head the VBlank handler kicks at the next
+/// ready edge, 0 when empty. Owned by [`crate::present`].
+#[cfg(feature = "present-queue")]
+#[no_mangle]
+pub(crate) static mut __psx_rt_present_head: u32 = 0;
+
+/// GP1(05h) word the handler writes just before kicking the slot's chain;
+/// 0 = no flip.
+#[cfg(feature = "present-queue")]
+#[no_mangle]
+pub(crate) static mut __psx_rt_present_display: u32 = 0;
+
+/// Chains the handler has kicked.
+#[cfg(feature = "present-queue")]
+#[no_mangle]
+pub(crate) static mut __psx_rt_present_kick_count: u32 = 0;
+
+/// Edges on which a published chain found the previous one undrawn or DMA
+/// channel 2 still busy.
+#[cfg(feature = "present-queue")]
+#[no_mangle]
+pub(crate) static mut __psx_rt_present_skip_count: u32 = 0;
 
 /// True when psx-rt was built with the `strict-faults` feature: the
 /// exception handler halts on every fault instead of stepping over the
