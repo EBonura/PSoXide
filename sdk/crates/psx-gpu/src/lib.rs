@@ -42,6 +42,9 @@
 pub mod framebuf;
 pub mod material;
 pub mod ordered;
+// ot.rs is being reworked on soundness/dma-gpu, which documents its unsafe
+// blocks; drop this allow when that lands.
+#[allow(clippy::undocumented_unsafe_blocks)]
 pub mod ot;
 pub mod prim;
 
@@ -768,6 +771,8 @@ pub fn submit_linked_list_wait() {
 #[inline(always)]
 fn dma_memory_barrier() {
     #[cfg(target_arch = "mips")]
+    // SAFETY: an empty asm block runs no instruction; it only orders the
+    // compiler's memory accesses around it.
     unsafe {
         core::arch::asm!("", options(nostack, preserves_flags));
     }

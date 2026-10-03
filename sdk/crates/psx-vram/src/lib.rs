@@ -1159,9 +1159,9 @@ pub fn upload_bytes_aligned(rect: VramRect, bytes: &[u8]) {
         && bytes.as_ptr().align_offset(4) == 0
         && bytes.len().is_multiple_of(4)
     {
-        // Every u32 bit pattern is valid; alignment, extent and lifetime are
-        // checked above and the input remains immutably borrowed.
         let words =
+            // SAFETY: every u32 bit pattern is valid; alignment, extent and
+            // lifetime are checked above and the input stays immutably borrowed.
             unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), bytes.len() / 4) };
         upload_words(rect, words);
     } else {
