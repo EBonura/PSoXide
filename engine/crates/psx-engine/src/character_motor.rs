@@ -1965,9 +1965,9 @@ pub fn commit_body_step_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
 
 /// Collision-check one exact non-player movement direction through a trace
 /// provider. Unlike [`commit_body_step_with_trace_provider`], this does not
-/// retry X-only and Z-only slides after a blocked diagonal. Quake's monster
-/// chase already enumerates those cardinal directions explicitly, so doing the
-/// slide cascade inside every candidate only repeats hull traces.
+/// retry X-only and Z-only slides after a blocked diagonal. The entity heading
+/// search already probes the cardinal headings as candidates of their own, so
+/// a slide cascade inside every candidate would only repeat hull traces.
 pub fn commit_body_direction_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
     provider: &mut P,
     start: RoomPoint,
