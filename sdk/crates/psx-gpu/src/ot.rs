@@ -970,6 +970,28 @@ impl<const N: usize> OrderingTable<N> {
         };
     }
 
+    /// Continue this table's walk into `head`, the first node of a chain
+    /// that ends the list itself: a command recording
+    /// (`psx_io::gpu::begin_recording_raw`) closed on [`crate::DRAW_DONE_NODE`],
+    /// say, for a frame published to `psx_rt::present`.
+    ///
+    /// # Safety
+    ///
+    /// `head` must point at a 4-byte-aligned node tag in RAM, and every node
+    /// reachable from it must meet [`crate::submit_linked_list_async_raw`]'s
+    /// contract (at most [`crate::MAX_NODE_WORDS`] payload words each, live
+    /// and unmodified) until every walk of this table has finished.
+    ///
+    /// # Panics
+    ///
+    /// If slot 0 is not empty: call it right after [`clear`](Self::clear),
+    /// before anything is inserted at slot 0.
+    #[inline]
+    pub unsafe fn end_with_chain(&mut self, head: *const u32) {
+        // SAFETY: forwarded contract.
+        unsafe { self.end_with_node(head) }
+    }
+
     /// Link slot 0 to `node`, a node whose own link ends the list.
     ///
     /// # Safety

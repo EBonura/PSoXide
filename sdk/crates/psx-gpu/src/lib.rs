@@ -830,7 +830,11 @@ pub unsafe fn submit_linked_list_async(head: *const u32) {
 pub fn submit_linked_list_wait() {
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(Channel::Gpu);
-        write_display_control(0x0100_0000);
+        // Past the direct-access guard (`present-queue` feature): the guard
+        // would wait on the walk that just wedged, and the paired-arena
+        // fence reaches this from a scratchpad stack that stack-guard bounds
+        // only through direct calls.
+        psx_io::gpu::write_display_control_unguarded(0x0100_0000);
     }
     // Prevent ordinary buffer-reuse stores from moving before the final
     // completion read (or explicit channel abort).

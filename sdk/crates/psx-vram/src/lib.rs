@@ -61,7 +61,7 @@
 
 use psx_hw::gpu::{gp0, gp1, pack_xy};
 use psx_io::dma::{self, Channel};
-use psx_io::gpu::{wait_command_ready, write_command, write_display_control};
+use psx_io::gpu::{pause_recording, wait_command_ready, write_command, write_display_control};
 use psx_io::periph::GpuDma;
 
 /// VRAM framebuffer width in pixels.
@@ -1121,6 +1121,8 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
     // During GP0(0xA0) image transfer the GPU is waiting for data,
     // not normal commands; DuckStation clears READY_CMD in this
     // state, so stream payload words without polling command-ready.
+    // An image upload cannot be recorded, so it always reaches the port.
+    let _pause = pause_recording();
     copy_to_vram_header(rect);
     let mut i = 0;
     while i + 1 < pixels.len() {
@@ -1160,6 +1162,7 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
     // consume one complete final word; its unused high halfword is ignored by
     // the GPU, so zero-pad it. See upload_16bpp: image payload writes must not
     // wait on the normal command-ready bit.
+    let _pause = pause_recording();
     copy_to_vram_header(rect);
     let mut i = 0;
     while i < bytes.len() {
@@ -1218,6 +1221,7 @@ pub fn upload_words(rect: VramRect, words: &[u32]) {
     );
     assert!(!words.is_empty(), "upload_words: empty upload");
 
+    let _pause = pause_recording();
     copy_to_vram_header(rect);
     for &word in words {
         write_command(word);
@@ -1276,6 +1280,7 @@ pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> boo
     }
     let src = words.as_ptr();
 
+    let _pause = pause_recording();
     copy_to_vram_header(rect);
     // GP1(04h) = 2: route DMA words CPU→GP0. `psx-gpu::init` sets this,
     // but a VRAM readback could have flipped it to GPUREAD→CPU.
