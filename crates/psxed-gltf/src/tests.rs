@@ -344,7 +344,7 @@ fn imports_minimal_glb_triangle() {
     let glb = minimal_triangle_glb();
     let psxm = convert_slice(&glb, &Config::default()).unwrap();
     let mesh = psx_asset::Mesh::from_bytes(&psxm).unwrap();
-    assert_eq!(mesh.vert_count(), 3);
+    assert_eq!(mesh.vertex_count(), 3);
     assert_eq!(mesh.face_count(), 1);
     assert!(mesh.has_face_colors());
     assert!(mesh.has_normals());

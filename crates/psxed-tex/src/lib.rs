@@ -503,7 +503,7 @@ pub fn requantize_psxt_to_4bpp(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     let width = texture.width();
     let height = texture.height();
     let pixel_count = usize::from(width) * usize::from(height);
-    let transparent_zero = texture.index_zero_transparent();
+    let transparent_zero = texture.is_index_zero_transparent();
     let mut rgba = Vec::with_capacity(pixel_count);
 
     match texture.depth() {
@@ -999,7 +999,7 @@ mod tests {
         assert_eq!(texture.depth(), Depth::Bit4);
         assert_eq!((texture.width(), texture.height()), (4, 2));
         assert_eq!(texture.clut_entries(), 16);
-        assert!(texture.index_zero_transparent());
+        assert!(texture.is_index_zero_transparent());
         assert!(output.len() < source.len());
     }
 
