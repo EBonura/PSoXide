@@ -170,7 +170,7 @@ const ENABLE_ATTEMPTS: u8 = 4;
 #[inline(always)]
 pub fn status() -> u32 {
     // SAFETY: MDEC status register read.
-    unsafe { psx_io::read32(MDEC1) }
+    unsafe { psx_io::read_u32(MDEC1) }
 }
 
 /// Wait until `status() & mask == want`. `false` on timeout.
@@ -194,7 +194,7 @@ pub fn reset() -> bool {
     dma::enable_channel(Channel::MdecIn);
     dma::enable_channel(Channel::MdecOut);
     // SAFETY: MDEC control register write.
-    unsafe { psx_io::write32(MDEC1, CONTROL_RESET) };
+    unsafe { psx_io::write_u32(MDEC1, CONTROL_RESET) };
     let settled = wait_status(STATUS_BUSY, 0, SETTLE_SPINS);
     let mut n = 0;
     while n < RESET_TAIL_READS {
@@ -202,7 +202,7 @@ pub fn reset() -> bool {
         n += 1;
     }
     // SAFETY: MDEC control register write.
-    unsafe { psx_io::write32(MDEC1, CONTROL_ENABLE_DMA) };
+    unsafe { psx_io::write_u32(MDEC1, CONTROL_ENABLE_DMA) };
     settled
 }
 
@@ -254,13 +254,13 @@ fn upload(command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
         return None;
     }
     // SAFETY: MDEC command write.
-    unsafe { psx_io::write32(MDEC0, command) };
+    unsafe { psx_io::write_u32(MDEC0, command) };
     let mut writes = 0u8;
     let mut asked = wait_status(STATUS_IN_REQUEST, STATUS_IN_REQUEST, SETTLE_SPINS);
     while !asked && writes + 1 < ENABLE_ATTEMPTS {
         // The enable can be lost to a reset that had not finished.
         // SAFETY: MDEC control register write, no reset bit.
-        unsafe { psx_io::write32(MDEC1, CONTROL_ENABLE_DMA) };
+        unsafe { psx_io::write_u32(MDEC1, CONTROL_ENABLE_DMA) };
         writes += 1;
         asked = wait_status(STATUS_IN_REQUEST, STATUS_IN_REQUEST, SETTLE_SPINS);
     }
@@ -278,14 +278,14 @@ fn upload(command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
             return None;
         }
         // SAFETY: MDEC command write.
-        unsafe { psx_io::write32(MDEC0, command) };
+        unsafe { psx_io::write_u32(MDEC0, command) };
     }
     for &word in words {
         if !wait_status(STATUS_IN_FULL, 0, SETTLE_SPINS) {
             return None;
         }
         // SAFETY: MDEC parameter write.
-        unsafe { psx_io::write32(MDEC0, word) };
+        unsafe { psx_io::write_u32(MDEC0, word) };
     }
     Some((enable_writes, true))
 }
@@ -334,7 +334,7 @@ pub fn load_tables_cpu() -> bool {
 #[inline(always)]
 pub fn write_command(word: u32) {
     // SAFETY: MDEC command/parameter write.
-    unsafe { psx_io::write32(MDEC0, word) }
+    unsafe { psx_io::write_u32(MDEC0, word) }
 }
 
 /// Read one word of decoded output from MDEC0 (the CPU path; DMA1 is the
@@ -342,7 +342,7 @@ pub fn write_command(word: u32) {
 #[inline(always)]
 pub fn read_data() -> u32 {
     // SAFETY: MDEC data read.
-    unsafe { psx_io::read32(MDEC0) }
+    unsafe { psx_io::read_u32(MDEC0) }
 }
 
 /// Start decoding `words` 32-bit words of run-length data (a multiple of 32,
@@ -367,7 +367,7 @@ pub unsafe fn decode_start(rle: &[u32], words: usize, mode: u32) {
     // SAFETY: MMIO write to MDEC0, then a DMA0 kick over the first `words`
     // words of `rle` (in bounds per the assert), which the caller keeps alive.
     unsafe {
-        psx_io::write32(MDEC0, mode | (words as u32 & 0xFFFF));
+        psx_io::write_u32(MDEC0, mode | (words as u32 & 0xFFFF));
         dma_in(rle.as_ptr(), words);
     }
 }

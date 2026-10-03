@@ -8,8 +8,8 @@ pub const BASE: u32 = 0x1F80_1800;
 
 /// Setmode bit: allow CD-DA playback via `Play`.
 pub const MODE_CDDA: u8 = 1 << 0;
-/// Setmode bit: auto-pause at the end of the track. With it set, the drive
-/// pauses and raises INT4 at the end of the current track instead of playing
+/// Setmode bit: auto-pause at the end of a CD-DA track. The drive stops on its
+/// own at the track boundary (reporting a clear PLAYING bit) instead of running
 /// on into the next track / lead-out, so software can detect end-of-track and
 /// loop without seeking the laser mid-playback.
 pub const MODE_AUTO_PAUSE: u8 = 1 << 1;
@@ -67,10 +67,13 @@ pub const CMD_GETLOCP: u8 = 0x11;
 #[doc(alias = "CdlSeekL")]
 pub const CMD_SEEKL: u8 = 0x15;
 
-/// Status byte: CD-DA playback is in progress. The drive reports at most one
-/// of the playing / seeking / reading bits at a time, and while it settles
-/// after a command it can report none of them for a second or two on real
-/// hardware.
+/// Status byte: CD-DA playback in progress.
+///
+/// The drive sets at most one of the three activity bits
+/// ([`STAT_PLAYING`], [`STAT_SEEKING`], [`STAT_READING`]) at a time;
+/// between activities (stopping, spinning up before a seek engages) it
+/// reports NONE of them for a second or two on real hardware, a window
+/// emulators currently skip past.
 pub const STAT_PLAYING: u8 = 0x80;
 /// Status byte: a seek is in progress. See [`STAT_PLAYING`].
 pub const STAT_SEEKING: u8 = 0x40;

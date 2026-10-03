@@ -6,7 +6,7 @@
 //! tint, raw-texture flag, dither flag, and semi-transparency mode.
 
 use psx_hw::gpu::{gp0, pack_color};
-use psx_io::gpu::{wait_cmd_ready, write_gp0};
+use psx_io::gpu::{wait_command_ready, write_command};
 
 /// PS1 semi-transparency mode.
 ///
@@ -117,8 +117,8 @@ impl TextureWindow {
 
     /// Apply this texture window to the GPU state.
     pub fn apply(self) {
-        wait_cmd_ready();
-        write_gp0(self.word());
+        wait_command_ready();
+        write_command(self.word());
     }
 }
 
@@ -431,9 +431,9 @@ impl TextureMaterial {
 
     /// Apply this material's tpage, blend, depth, dither, and texture-window state.
     pub fn apply_draw_mode(self) {
-        wait_cmd_ready();
-        write_gp0(self.draw_mode_word());
-        write_gp0(self.texture_window.word());
+        wait_command_ready();
+        write_command(self.draw_mode_word());
+        write_command(self.texture_window.word());
     }
 }
 

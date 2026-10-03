@@ -15,6 +15,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod cd;
 pub mod cdda;
 pub mod cdrom;
 pub mod disc_base;
@@ -34,7 +35,7 @@ pub mod timers;
 /// Targets unchecked memory-mapped I/O. The caller is responsible for
 /// the address mapping and any side effects.
 #[inline(always)]
-pub unsafe fn read32(addr: u32) -> u32 {
+pub unsafe fn read_u32(addr: u32) -> u32 {
     // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 32-bit volatile read
     // (this fn's `# Safety`).
     unsafe { core::ptr::read_volatile(addr as *const u32) }
@@ -43,9 +44,9 @@ pub unsafe fn read32(addr: u32) -> u32 {
 /// Read a 16-bit half-word from `addr`.
 ///
 /// # Safety
-/// See [`read32`].
+/// See [`read_u32`].
 #[inline(always)]
-pub unsafe fn read16(addr: u32) -> u16 {
+pub unsafe fn read_u16(addr: u32) -> u16 {
     // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 16-bit volatile read
     // (this fn's `# Safety`).
     unsafe { core::ptr::read_volatile(addr as *const u16) }
@@ -54,9 +55,9 @@ pub unsafe fn read16(addr: u32) -> u16 {
 /// Read an 8-bit byte from `addr`.
 ///
 /// # Safety
-/// See [`read32`].
+/// See [`read_u32`].
 #[inline(always)]
-pub unsafe fn read8(addr: u32) -> u8 {
+pub unsafe fn read_u8(addr: u32) -> u8 {
     // SAFETY: the caller guarantees `addr` is mapped and valid for an 8-bit volatile read (this
     // fn's `# Safety`).
     unsafe { core::ptr::read_volatile(addr as *const u8) }
@@ -65,9 +66,9 @@ pub unsafe fn read8(addr: u32) -> u8 {
 /// Write a 32-bit word to `addr`.
 ///
 /// # Safety
-/// See [`read32`].
+/// See [`read_u32`].
 #[inline(always)]
-pub unsafe fn write32(addr: u32, value: u32) {
+pub unsafe fn write_u32(addr: u32, value: u32) {
     // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 32-bit volatile write
     // (this fn's `# Safety`).
     unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
@@ -76,9 +77,9 @@ pub unsafe fn write32(addr: u32, value: u32) {
 /// Write a 16-bit half-word to `addr`.
 ///
 /// # Safety
-/// See [`read32`].
+/// See [`read_u32`].
 #[inline(always)]
-pub unsafe fn write16(addr: u32, value: u16) {
+pub unsafe fn write_u16(addr: u32, value: u16) {
     // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 16-bit volatile write
     // (this fn's `# Safety`).
     unsafe { core::ptr::write_volatile(addr as *mut u16, value) }
@@ -87,10 +88,80 @@ pub unsafe fn write16(addr: u32, value: u16) {
 /// Write an 8-bit byte to `addr`.
 ///
 /// # Safety
-/// See [`read32`].
+/// See [`read_u32`].
 #[inline(always)]
-pub unsafe fn write8(addr: u32, value: u8) {
+pub unsafe fn write_u8(addr: u32, value: u8) {
     // SAFETY: the caller guarantees `addr` is mapped and valid for an 8-bit volatile write (this
     // fn's `# Safety`).
     unsafe { core::ptr::write_volatile(addr as *mut u8, value) }
+}
+
+/// Renamed to [`read_u32`].
+///
+/// # Safety
+/// See [`read_u32`].
+///
+/// Deprecation is held until psx-io's dma.rs, which the DMA rework owns,
+/// moves to the new name.
+#[inline(always)]
+pub unsafe fn read32(addr: u32) -> u32 {
+    // SAFETY: same contract as the renamed function.
+    unsafe { read_u32(addr) }
+}
+
+/// Renamed to [`read_u16`].
+///
+/// # Safety
+/// See [`read_u16`].
+#[deprecated(note = "renamed to `read_u16`")]
+#[inline(always)]
+pub unsafe fn read16(addr: u32) -> u16 {
+    // SAFETY: same contract as the renamed function.
+    unsafe { read_u16(addr) }
+}
+
+/// Renamed to [`read_u8`].
+///
+/// # Safety
+/// See [`read_u8`].
+#[deprecated(note = "renamed to `read_u8`")]
+#[inline(always)]
+pub unsafe fn read8(addr: u32) -> u8 {
+    // SAFETY: same contract as the renamed function.
+    unsafe { read_u8(addr) }
+}
+
+/// Renamed to [`write_u32`].
+///
+/// # Safety
+/// See [`write_u32`].
+///
+/// Deprecation is held until psx-io's dma.rs, which the DMA rework owns,
+/// moves to the new name.
+#[inline(always)]
+pub unsafe fn write32(addr: u32, value: u32) {
+    // SAFETY: same contract as the renamed function.
+    unsafe { write_u32(addr, value) }
+}
+
+/// Renamed to [`write_u16`].
+///
+/// # Safety
+/// See [`write_u16`].
+#[deprecated(note = "renamed to `write_u16`")]
+#[inline(always)]
+pub unsafe fn write16(addr: u32, value: u16) {
+    // SAFETY: same contract as the renamed function.
+    unsafe { write_u16(addr, value) }
+}
+
+/// Renamed to [`write_u8`].
+///
+/// # Safety
+/// See [`write_u8`].
+#[deprecated(note = "renamed to `write_u8`")]
+#[inline(always)]
+pub unsafe fn write8(addr: u32, value: u8) {
+    // SAFETY: same contract as the renamed function.
+    unsafe { write_u8(addr, value) }
 }

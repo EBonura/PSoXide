@@ -567,7 +567,7 @@ fn draw_summary(font: &FontAtlas, small: &FontAtlas, st: &Stream, s: &Summary, l
     small.draw_text(X0, 204, small_line.as_str(), WHITE);
     small.draw_text(X0, 214, "LATE: DECODER SLOW, NOT A FAIL", WHITE);
     gpu::draw_sync();
-    psx_io::gpu::write_gp1(0x0500_0000);
+    psx_io::gpu::write_display_control(0x0500_0000);
 }
 
 /// The test could not start: a red screen, and the reason on the TTY.
@@ -575,7 +575,7 @@ fn fail(what: &'static str) -> Outcome {
     tty::print("FMV FAIL ");
     tty::println(what);
     gpu::fill_rect(0, 0, WIDTH, HEIGHT, 160, 0, 0);
-    psx_io::gpu::write_gp1(0x0500_0000);
+    psx_io::gpu::write_display_control(0x0500_0000);
     Outcome {
         setup_error: Some(what),
         stop: Stop::Setup,
@@ -637,7 +637,7 @@ pub fn run_with(options: Options) -> Outcome {
     if !xa_ok {
         return fail("cd xa mode");
     }
-    psx_io::cdrom::set_audio_mixer(0x80, 0, 0x80, 0);
+    psx_io::cd::set_audio_mixer(0x80, 0, 0x80, 0);
     if !setup() {
         return fail("mdec tables");
     }
@@ -739,7 +739,7 @@ pub fn run_with(options: Options) -> Outcome {
             st.pump();
         }
         wait_vblank_pumping(&mut st);
-        psx_io::gpu::write_gp1(0x0500_0000 | ((back_y as u32) << 10));
+        psx_io::gpu::write_display_control(0x0500_0000 | ((back_y as u32) << 10));
         next_flip = interrupts::vblank_count().wrapping_add(VBLANKS_PER_FRAME - 1);
         back_y = if back_y == 0 { 256 } else { 0 };
         shown += 1;

@@ -195,7 +195,7 @@ impl SectorReader {
         // SAFETY: CD_STATUS (0x1F80_1800) is the controller's index/status
         // byte register; writing the index only selects a register bank, and
         // the caller owns the CD controller exclusively per `prepare`'s contract.
-        unsafe { psx_io::write8(CD_STATUS, i & 0x03) };
+        unsafe { psx_io::write_u8(CD_STATUS, i & 0x03) };
     }
 
     unsafe fn irq_flag(&mut self) -> u8 {
@@ -204,7 +204,7 @@ impl SectorReader {
         // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
-            let f = psx_io::read8(CD_IRQ) & 0x1F;
+            let f = psx_io::read_u8(CD_IRQ) & 0x1F;
             self.wr_index(0);
             f
         }
@@ -217,8 +217,8 @@ impl SectorReader {
         // exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
-            psx_io::write8(CD_IRQ, irq & 0x1F);
-            psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+            psx_io::write_u8(CD_IRQ, irq & 0x1F);
+            psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
             self.wr_index(0);
         }
     }
@@ -230,8 +230,8 @@ impl SectorReader {
         // exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
-            psx_io::write8(CD_IRQ, 0x5F);
-            psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+            psx_io::write_u8(CD_IRQ, 0x5F);
+            psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
             self.wr_index(0);
         }
     }
@@ -242,7 +242,7 @@ impl SectorReader {
         // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
-            psx_io::write8(CD_PARAM, 0x1F);
+            psx_io::write_u8(CD_PARAM, 0x1F);
             self.wr_index(0);
         }
     }
@@ -253,7 +253,7 @@ impl SectorReader {
         // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(0);
-            let e = psx_io::read8(CD_IRQ) & 0x1F;
+            let e = psx_io::read_u8(CD_IRQ) & 0x1F;
             self.wr_index(0);
             e
         }
@@ -265,7 +265,7 @@ impl SectorReader {
         // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
-            psx_io::write8(CD_PARAM, mask & 0x1F);
+            psx_io::write_u8(CD_PARAM, mask & 0x1F);
             self.wr_index(0);
         }
     }
@@ -280,8 +280,8 @@ impl SectorReader {
         unsafe {
             self.wr_index(0);
             let mut guard = 0;
-            while psx_io::read8(CD_STATUS) & STATUS_RESPONSE_FIFO_NOT_EMPTY != 0 && guard < 256 {
-                let _ = psx_io::read8(CD_RESPONSE);
+            while psx_io::read_u8(CD_STATUS) & STATUS_RESPONSE_FIFO_NOT_EMPTY != 0 && guard < 256 {
+                let _ = psx_io::read_u8(CD_RESPONSE);
                 guard += 1;
             }
         }
@@ -293,7 +293,7 @@ impl SectorReader {
         // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(0);
-            psx_io::read8(CD_STATUS) & STATUS_DATA_FIFO_NOT_EMPTY != 0
+            psx_io::read_u8(CD_STATUS) & STATUS_DATA_FIFO_NOT_EMPTY != 0
         }
     }
 
@@ -302,7 +302,7 @@ impl SectorReader {
         while i < PARAM_POLL {
             // SAFETY: side-effect-free read of the CD-ROM status register; the
             // caller owns the controller per `prepare`'s contract.
-            if unsafe { psx_io::read8(CD_STATUS) } & STATUS_PARAMETER_FIFO_NOT_FULL != 0 {
+            if unsafe { psx_io::read_u8(CD_STATUS) } & STATUS_PARAMETER_FIFO_NOT_FULL != 0 {
                 return true;
             }
             i += 1;
@@ -328,7 +328,7 @@ impl SectorReader {
         unsafe {
             // Arm the data transfer (BFRD).
             self.wr_index(0);
-            psx_io::write8(CD_IRQ, 0x80);
+            psx_io::write_u8(CD_IRQ, 0x80);
             self.wr_index(0);
         }
         // The FIFO fills shortly after BFRD; the bound covers a slow
@@ -341,13 +341,13 @@ impl SectorReader {
         for word_index in 0..SECTOR_WORDS {
             // SAFETY: CD_DATA is the data-FIFO pop register; the reads only
             // drain controller data, under the caller's controller ownership.
-            let b0 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            let b0 = unsafe { psx_io::read_u8(CD_DATA) } as u32;
             // SAFETY: as above.
-            let b1 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            let b1 = unsafe { psx_io::read_u8(CD_DATA) } as u32;
             // SAFETY: as above.
-            let b2 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            let b2 = unsafe { psx_io::read_u8(CD_DATA) } as u32;
             // SAFETY: as above.
-            let b3 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            let b3 = unsafe { psx_io::read_u8(CD_DATA) } as u32;
             // SAFETY: every caller passes a pointer to a live, exclusively
             // borrowed `[u32; SECTOR_WORDS]` (`self.discard` or the
             // `read_sector`/`try_read_sector` buffer), so it is word-aligned
@@ -434,19 +434,19 @@ impl SectorReader {
             self.drain_responses();
             // Reset the parameter FIFO (0x40) before queueing parameters.
             self.wr_index(1);
-            psx_io::write8(CD_IRQ, 0x40);
+            psx_io::write_u8(CD_IRQ, 0x40);
             self.wr_index(0);
             for &p in params {
                 if !self.wait_param_room() {
                     self.wr_index(0);
-                    self.diag = [DIAG_PARAM_STUCK, psx_io::read8(CD_STATUS), command, 0];
+                    self.diag = [DIAG_PARAM_STUCK, psx_io::read_u8(CD_STATUS), command, 0];
                     self.set_irq_enable(saved);
                     self.wr_index(0);
                     return false;
                 }
-                psx_io::write8(CD_PARAM, p);
+                psx_io::write_u8(CD_PARAM, p);
             }
-            psx_io::write8(CD_RESPONSE, command);
+            psx_io::write_u8(CD_RESPONSE, command);
             let ok = match self.wait_irq(expected, limit) {
                 Wait::Matched => {
                     self.drain_responses();
@@ -457,8 +457,8 @@ impl SectorReader {
                     // Capture the INT5 response pair (status, error code)
                     // before the drain throws it away.
                     self.wr_index(0);
-                    let r0 = psx_io::read8(CD_RESPONSE);
-                    let r1 = psx_io::read8(CD_RESPONSE);
+                    let r0 = psx_io::read_u8(CD_RESPONSE);
+                    let r1 = psx_io::read_u8(CD_RESPONSE);
                     self.diag = [DIAG_CD_ERROR, r0, command, r1];
                     self.drain_responses();
                     self.ack_all();
@@ -466,7 +466,7 @@ impl SectorReader {
                 }
                 Wait::Timeout => {
                     self.wr_index(0);
-                    let status = psx_io::read8(CD_STATUS);
+                    let status = psx_io::read_u8(CD_STATUS);
                     let flag = self.irq_flag();
                     self.diag = [DIAG_TIMEOUT, status, command, flag];
                     false
@@ -557,8 +557,8 @@ impl SectorReader {
         unsafe {
             // Keep CD-ROM at the controller level and poll its IRQ flags
             // manually, so DataReady cannot enter an unhandled CPU IRQ storm.
-            psx_io::irq::set_mask(1 << psx_io::irq::source::VBLANK);
-            psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+            psx_io::irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+            psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
             self.enable_irqs();
             self.ack_all();
             psx_io::dma::enable_channel(psx_io::dma::Channel::Cdrom);
@@ -589,7 +589,7 @@ impl SectorReader {
             // above, and an emulator FIFO never holds any, which is why
             // this cannot reproduce headless.
             self.wr_index(0);
-            psx_io::write8(CD_IRQ, 0x00);
+            psx_io::write_u8(CD_IRQ, 0x00);
             self.send_command(CMD_SETMODE, &[mode], IRQ_ACK, ACK_POLL)
         }
     }
@@ -680,8 +680,8 @@ impl SectorReader {
                 Wait::Matched => {}
                 Wait::CdError => {
                     self.wr_index(0);
-                    let r0 = psx_io::read8(CD_RESPONSE);
-                    let r1 = psx_io::read8(CD_RESPONSE);
+                    let r0 = psx_io::read_u8(CD_RESPONSE);
+                    let r1 = psx_io::read_u8(CD_RESPONSE);
                     self.diag = [DIAG_CD_ERROR, r0, DIAG_SITE_READ, r1];
                     self.drain_responses();
                     self.ack_all();
@@ -689,7 +689,7 @@ impl SectorReader {
                 }
                 Wait::Timeout => {
                     self.wr_index(0);
-                    let status = psx_io::read8(CD_STATUS);
+                    let status = psx_io::read_u8(CD_STATUS);
                     let flag = self.irq_flag();
                     self.diag = [DIAG_TIMEOUT, status, DIAG_SITE_READ, flag];
                     self.drain_responses();
@@ -728,8 +728,8 @@ impl SectorReader {
             let flag = self.irq_flag();
             if flag == IRQ_ERROR {
                 self.wr_index(0);
-                let r0 = psx_io::read8(CD_RESPONSE);
-                let r1 = psx_io::read8(CD_RESPONSE);
+                let r0 = psx_io::read_u8(CD_RESPONSE);
+                let r1 = psx_io::read_u8(CD_RESPONSE);
                 self.diag = [DIAG_CD_ERROR, r0, DIAG_SITE_READ, r1];
                 self.drain_responses();
                 self.ack_all();

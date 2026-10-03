@@ -14,6 +14,7 @@ description  = "Guest-side WORLD.PAK (PSOXWPAK) parsing, in-place HLZC/LZ4 chunk
 
 [target.'cfg(target_arch = "mips")'.dependencies]
 psx-io = { workspace = true }
+psx-hw = { workspace = true }
 
 [dev-dependencies]
 # Host tests round-trip against the REAL producers: psx-iso is the pack
