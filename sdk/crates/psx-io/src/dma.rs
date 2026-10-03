@@ -173,7 +173,7 @@ pub unsafe fn start(ch: Channel, transfer: Transfer) {
 /// default memory clobber. Do not add `nomem` or `readonly`: both would drop
 /// the guarantee.
 #[inline(always)]
-fn compiler_barrier() {
+pub fn compiler_barrier() {
     #[cfg(target_arch = "mips")]
     // SAFETY: an empty asm block; it only constrains compiler ordering.
     unsafe {
