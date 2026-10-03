@@ -139,6 +139,23 @@ impl<const N: usize> OrderingTable<N> {
         self.clear();
         OtFrame { ot: self }
     }
+
+    /// Continue a frame in this table without clearing it, for a frame
+    /// built in several phases (a scene pass, then an overlay pass).
+    ///
+    /// # Safety
+    ///
+    /// Every packet the table links already, through an earlier
+    /// [`OtFrame`], [`OtFrame::add_raw`] or [`OrderingTable::insert`], must
+    /// stay live and unmodified, except for tags later adds write, until the
+    /// returned frame's walk has finished (or for good, if it is never
+    /// submitted). Packets an earlier frame added with [`OtFrame::add`] were
+    /// borrowed only for that frame, so the caller now owns their lifetime.
+    /// The table must not be walking.
+    #[inline]
+    pub unsafe fn resume_frame(&mut self) -> OtFrame<'_, N> {
+        OtFrame { ot: self }
+    }
 }
 
 impl<'f, const N: usize> OtFrame<'f, N> {
@@ -177,6 +194,75 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     pub unsafe fn add_raw(&mut self, z: usize, packet: *mut u32, words: u8) {
         // SAFETY: forwarded contract.
         unsafe { self.ot.insert(z, packet, words) };
+    }
+
+    /// [`add_raw`](Self::add_raw) without the depth clamp or the node-length
+    /// check; see [`OrderingTable::insert_unchecked`].
+    ///
+    /// # Safety
+    ///
+    /// The contract of [`add_raw`](Self::add_raw), and also: `z` is less
+    /// than `N`, and `words` is at most [`crate::MAX_NODE_WORDS`].
+    #[inline(always)]
+    pub unsafe fn add_raw_unchecked(&mut self, z: usize, packet: *mut u32, words: u8) {
+        // SAFETY: forwarded contract.
+        unsafe { self.ot.insert_unchecked(z, packet, words) };
+    }
+
+    /// [`add_raw_unchecked`](Self::add_raw_unchecked) with the word count
+    /// already in tag form, in bits 24..31 of `tag_high`; see
+    /// [`OrderingTable::insert_unchecked_tag_high`].
+    ///
+    /// # Safety
+    ///
+    /// The contract of [`add_raw_unchecked`](Self::add_raw_unchecked), with
+    /// `tag_high >> 24` as the word count, and also: the low 24 bits of
+    /// `tag_high` are zero.
+    #[inline(always)]
+    pub unsafe fn add_raw_tag_high_unchecked(&mut self, z: usize, packet: *mut u32, tag_high: u32) {
+        // SAFETY: forwarded contract.
+        unsafe { self.ot.insert_unchecked_tag_high(z, packet, tag_high) };
+    }
+
+    /// Add packed two-word commands, last to first, so packets that share a
+    /// slot keep their array order; see
+    /// [`OrderingTable::insert_packed_commands_reverse_unchecked`] for the
+    /// layout.
+    ///
+    /// # Safety
+    ///
+    /// `commands` points at `command_count * 2` readable words in that
+    /// layout; every slot is less than `N` and every word count at most
+    /// [`crate::MAX_NODE_WORDS`]; and every packet meets the contract of
+    /// [`add_raw`](Self::add_raw).
+    #[inline(always)]
+    pub unsafe fn add_packed_commands_reverse_unchecked(
+        &mut self,
+        commands: *const usize,
+        command_count: usize,
+    ) {
+        // SAFETY: forwarded contract.
+        unsafe {
+            self.ot
+                .insert_packed_commands_reverse_unchecked(commands, command_count)
+        };
+    }
+
+    /// Add a contiguous stream of packets whose tags carry their own slot;
+    /// see [`OrderingTable::insert_tagged_packet_stream_unchecked`] for the
+    /// tag layout.
+    ///
+    /// # Safety
+    ///
+    /// `first..end` is a writable, contiguous sequence of complete packets
+    /// in that layout; every word count describes the next packet exactly
+    /// and is at most [`crate::MAX_NODE_WORDS`]; every non-sentinel slot is
+    /// less than `N`; and the whole range meets the contract of
+    /// [`add_raw`](Self::add_raw).
+    #[inline(always)]
+    pub unsafe fn add_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
+        // SAFETY: forwarded contract.
+        unsafe { self.ot.insert_tagged_packet_stream_unchecked(first, end) };
     }
 
     /// End the walk with GP0(1Fh) so [`crate::draw_done`] rises once the
@@ -575,5 +661,105 @@ mod tests {
         let walked = unsafe { storage.ot.iter_packets() }.count();
         assert_eq!(walked, 2);
         assert_eq!(storage.packets_mut()[1].tag >> 24, RectFlat::WORDS as u32);
+    }
+
+    #[test]
+    fn resume_frame_keeps_the_links_already_made() {
+        let mut first = RectFlat::new(0, 0, 4, 4, 1, 1, 1);
+        let mut second = RectFlat::new(0, 0, 4, 4, 2, 2, 2);
+        let mut ot = OrderingTable::<4>::new();
+        let mut frame = ot.frame();
+        frame.add(1, &mut first);
+        drop(frame);
+        // SAFETY: `first` and `second` outlive every use of the table, and
+        // nothing walks it.
+        let mut frame = unsafe { ot.resume_frame() };
+        frame.add(2, &mut second);
+        drop(frame);
+        let walked: [usize; 2] = {
+            // SAFETY: the table links only `first` and `second`, alive here.
+            let mut it = unsafe { ot.iter_packets() };
+            let order = [it.next().unwrap().0 as usize, it.next().unwrap().0 as usize];
+            assert!(it.next().is_none());
+            order
+        };
+        assert_eq!(
+            walked.map(|a| a as u32 & END),
+            [addr(&second), addr(&first)]
+        );
+    }
+
+    #[test]
+    fn unchecked_adds_link_like_add_raw() {
+        let mut checked = OrderingTable::<4>::new();
+        let mut unchecked = OrderingTable::<4>::new();
+        let mut a = [0u32; 3];
+        let mut b = [0u32; 3];
+        let mut c = [0u32; 3];
+        let mut d = [0u32; 3];
+        {
+            let mut frame = checked.frame();
+            // SAFETY: the arrays outlive every use of the tables in this
+            // test and hold a tag plus two words.
+            unsafe {
+                frame.add_raw(2, a.as_mut_ptr(), 2);
+                frame.add_raw(2, b.as_mut_ptr(), 2);
+            }
+        }
+        {
+            let mut frame = unchecked.frame();
+            // SAFETY: as above; slot 2 is below 4 and two words fit a node.
+            unsafe {
+                frame.add_raw_unchecked(2, c.as_mut_ptr(), 2);
+                frame.add_raw_tag_high_unchecked(2, d.as_mut_ptr(), 2 << 24);
+            }
+        }
+        assert_eq!(a[0] >> 24, c[0] >> 24);
+        assert_eq!(b[0] >> 24, d[0] >> 24);
+        assert_eq!(b[0] & END, a.as_ptr() as usize as u32 & END);
+        assert_eq!(d[0] & END, c.as_ptr() as usize as u32 & END);
+        // SAFETY: the tables link only the arrays above, alive here.
+        let heads = unsafe {
+            (
+                checked.iter_packets().next().unwrap().0,
+                unchecked.iter_packets().next().unwrap().0,
+            )
+        };
+        assert_eq!(heads, (b.as_ptr(), d.as_ptr()));
+    }
+
+    #[test]
+    fn packed_and_tagged_adds_forward_to_the_table() {
+        let mut a = [0u32; 2];
+        let mut b = [0u32; 2];
+        let commands: [usize; 4] = [
+            a.as_mut_ptr() as usize,
+            3 | (1 << 24),
+            b.as_mut_ptr() as usize,
+            3 | (1 << 24),
+        ];
+        let mut stream = [(1u32 << 24) | 1, 0xAAAA_AAAA];
+        let mut ot = OrderingTable::<4>::new();
+        let mut frame = ot.frame();
+        // SAFETY: the commands, packets and stream outlive every use of the
+        // table; slots 3 and 1 fit it and every node is one word long.
+        unsafe {
+            frame.add_packed_commands_reverse_unchecked(commands.as_ptr(), 2);
+            let first = stream.as_mut_ptr();
+            frame.add_tagged_packet_stream_unchecked(first, first.add(stream.len()));
+        }
+        drop(frame);
+        // SAFETY: the table links only `a`, `b` and `stream`, alive here.
+        let walked: [*const u32; 3] = unsafe {
+            let mut it = ot.iter_packets();
+            let order = [
+                it.next().unwrap().0,
+                it.next().unwrap().0,
+                it.next().unwrap().0,
+            ];
+            assert!(it.next().is_none());
+            order
+        };
+        assert_eq!(walked, [a.as_ptr(), b.as_ptr(), stream.as_ptr()]);
     }
 }
