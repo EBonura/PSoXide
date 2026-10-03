@@ -25,9 +25,9 @@ const AUTHORED_LOOP_CAPACITY: usize = 32;
 /// simulation that is every 100 ms; walking speed then moves a loop's level
 /// by a few percent per step.
 const AUTHORED_LOOP_PERIOD: u8 = 2;
-/// GoldSrc's mixer skips a looped channel while both sides are below 8/255
-/// of full scale. An authored loop without a voice is keyed only from this
-/// gain (thousandths) up.
+/// Half-Life drops a looping sound while it is quieter than about 3% of full
+/// scale (8/255) on both sides. An authored loop without a voice is keyed
+/// only from this gain (thousandths) up.
 const AUDIBLE_GAIN_MILLI: u16 = 32;
 
 /// Caller-owned bank/voice state; no allocation and no additional SPU owner.
@@ -322,9 +322,10 @@ fn silent_distance(packed_attenuation: u8) -> Option<i32> {
     Some((source + (1 << shift) - 1) >> shift)
 }
 
-/// GoldSrc channel gain in tenths of a percent. Its mixer uses
-/// `gain = volume * (1 - distance * attenuation / 1000)`. The cooker stores
-/// the SDK attenuation choice plus the BSP coordinate shift in one byte.
+/// GoldSrc channel gain in tenths of a percent. Half-Life's distance falloff
+/// is linear: `gain = volume * (1 - distance * attenuation / 1000)`. The
+/// cooker stores the authored attenuation class plus the BSP coordinate shift
+/// in one byte.
 #[inline]
 fn authored_gain_milli(volume_percent: u8, packed_attenuation: u8, distance: i32) -> u16 {
     let mode = packed_attenuation & 7;
