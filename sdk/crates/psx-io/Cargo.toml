@@ -11,3 +11,11 @@ psx-hw = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# Command recording and the direct-access guard that `psx_rt::present`
+# needs (`gpu::begin_recording_raw`, `gpu::arm_direct_access_guard`). Costs
+# one load and branch per command or display-control write and per GPU DMA
+# start; without it those compile to the plain stores.
+present-queue = []

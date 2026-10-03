@@ -277,6 +277,34 @@ impl<'f, const N: usize> OtFrame<'f, N> {
         self.ot.end_with_draw_done();
     }
 
+    /// The node the frame's walk starts at, for a chain that continues into
+    /// this frame (a recorded preamble handed to `psx_rt::present`). Only an
+    /// address: kicking a walk from it is up to an unsafe call that takes on
+    /// the frame's lifetime itself.
+    #[inline]
+    pub fn submit_head(&self) -> *const u32 {
+        self.ot.submit_head()
+    }
+
+    /// Continue this frame's walk into `head`, a chain that ends the list
+    /// itself; see [`OrderingTable::end_with_chain`].
+    ///
+    /// # Safety
+    ///
+    /// Every node reachable from `head` must stay live and unmodified for
+    /// `'f`, and for any walk of this frame that outlives it, under
+    /// [`crate::submit_linked_list_async_raw`]'s node rules.
+    ///
+    /// # Panics
+    ///
+    /// If anything was already added at slot 0, or the frame already ends
+    /// in a link.
+    #[inline]
+    pub unsafe fn end_with_chain(&mut self, head: *const u32) {
+        // SAFETY: forwarded contract.
+        unsafe { self.ot.end_with_chain(head) };
+    }
+
     /// Continue this frame's walk into `next` once its own slot 0 is done,
     /// so both tables go out in one kick.
     ///
