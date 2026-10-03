@@ -282,3 +282,23 @@ fn set_directory_size(image: &mut [u8], index: usize, size: usize) {
         .iter()
         .fold(0u8, |checksum, byte| checksum ^ byte);
 }
+
+#[test]
+fn entry_name_reads_ascii_names_back() {
+    let mut e = blank_entry();
+    e.name[..4].copy_from_slice(b"SAVE");
+    e.name_len = 4;
+    assert_eq!(e.name(), "SAVE");
+}
+
+#[test]
+fn entry_name_falls_back_for_corrupt_bytes_and_lengths() {
+    // A corrupt card can hand back bytes that are not UTF-8.
+    let mut e = blank_entry();
+    e.name[..3].copy_from_slice(&[b'A', 0xff, 0xfe]);
+    e.name_len = 3;
+    assert_eq!(e.name(), "?");
+    // A length past the buffer must not index out of it either.
+    e.name_len = u8::MAX;
+    assert_eq!(e.name(), "?");
+}
