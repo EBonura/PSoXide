@@ -219,6 +219,10 @@ impl<const N: usize> ParticlePool<N> {
     /// The particle's original colour is scaled by `ttl /
     /// spawn_ttl` so bursts fade out gracefully; size tapers from
     /// 3 px (first half of life) to 2 px (second half).
+    #[deprecated(
+        note = "links rects through the deprecated `OrderingTable::add`; use `render_into_frame`"
+    )]
+    #[allow(deprecated)]
     pub fn render_into_ot<const OT_N: usize>(
         &self,
         ot: &mut OrderingTable<OT_N>,
