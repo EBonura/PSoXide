@@ -33,17 +33,24 @@ pub struct CollisionProxy {
     pub half: [i32; 3],
 }
 
-/// Decode the cooked GoldSrc CPushable speed without exposing collision
-/// metadata stored in the old upper byte of the low word.
+/// Cart speed limit in units per tick, from the cooked low byte. The cooker
+/// derives it from the entity's friction (`400 - friction` units per second
+/// at the game's tick rate); the byte above carries collision metadata.
 #[inline(always)]
 pub const fn max_speed(packed_speed_half_x: i32) -> i32 {
-    packed_speed_half_x as u32 as u8 as i32
+    packed_speed_half_x & 0xff
 }
 
-/// Reconstruct the canonical world-collision hull selected by
-/// `SV_HullForBsp`. GoldSrc renders and links the full brush-model AABB, but
-/// movement through BSP geometry uses a point/duck/standing/large hull anchored
-/// at the model's padded mins. Keeping this proxy transient costs no PS1 RAM.
+/// Half extents (X, Y up, Z) of the player-class hulls a cart can collide
+/// as, by the two-bit hull code in its cooked metadata: crouching, standing
+/// and large. Code zero names no hull.
+const COLLISION_HULL_HALF: [[i32; 3]; 4] = [[0, 0, 0], [16, 18, 16], [16, 36, 16], [32, 32, 32]];
+
+/// The box a cart collides with the world as. A cart without collision
+/// metadata sweeps its visual box. Otherwise it uses the player-class hull
+/// its size implies, anchored at the cart's minimum corner, which on every
+/// axis the cooker flagged is padded out by one more unit. An unknown hull
+/// code yields an empty box at the origin.
 #[inline(always)]
 pub const fn collision_proxy(
     local_center: [i32; 3],
@@ -52,36 +59,28 @@ pub const fn collision_proxy(
 ) -> CollisionProxy {
     let meta = packed_speed_half_x as u16;
     if meta & COLLISION_META_VALID == 0 {
-        // Backwards compatibility for previously cooked rooms.
         return CollisionProxy {
             center: local_center,
             half: visual_half,
         };
     }
-    let hull = (meta >> COLLISION_HULL_SHIFT) & 3;
-    if hull == 0 {
+    let code = ((meta >> COLLISION_HULL_SHIFT) & 3) as usize;
+    if code == 0 {
         return CollisionProxy {
-            center: [0, 0, 0],
-            half: [0, 0, 0],
+            center: [0; 3],
+            half: [0; 3],
         };
     }
-    let half = if hull == 1 {
-        [16, 18, 16] // Gold hull 3 after HL Z -> PSX Y remap
-    } else if hull == 2 {
-        [16, 36, 16] // Gold hull 1
-    } else {
-        [32, 32, 32] // Gold hull 2
-    };
-    let correction = (meta >> COLLISION_MIN_CORR_SHIFT) & 7;
-    let mins = [
-        local_center[0] - visual_half[0] - (correction & 1) as i32,
-        local_center[1] - visual_half[1] - ((correction >> 1) & 1) as i32,
-        local_center[2] - visual_half[2] - ((correction >> 2) & 1) as i32,
-    ];
-    CollisionProxy {
-        center: [mins[0] + half[0], mins[1] + half[1], mins[2] + half[2]],
-        half,
+    let half = COLLISION_HULL_HALF[code];
+    let corrected = (meta >> COLLISION_MIN_CORR_SHIFT) & 7;
+    let mut center = local_center;
+    let mut axis = 0;
+    while axis < 3 {
+        let pad = if corrected & (1 << axis) != 0 { 1 } else { 0 };
+        center[axis] = local_center[axis] - visual_half[axis] - pad + half[axis];
+        axis += 1;
     }
+    CollisionProxy { center, half }
 }
 
 /// Classify one point trace used by a translated pushable face. Generic
@@ -153,27 +152,25 @@ fn isqrt(n: i32) -> i32 {
     psx_math::int32::isqrt_i32(n)
 }
 
-/// Euclidean-clamp a planar velocity to the cooked GoldSrc maximum.
+/// Limit a planar velocity to `max_speed`. Inside the limit it is returned
+/// as is; outside, both components are scaled by `max_speed / length`
+/// with the length rounded up and the products rounded toward zero, so the
+/// result never exceeds the limit after rounding.
 #[inline]
 pub fn clamp_velocity(vx: i32, vz: i32, max_speed: i32) -> (i8, i8) {
+    // A packed velocity component is an i8, so no limit exceeds 127.
     let max_speed = max_speed.clamp(0, i8::MAX as i32);
-    if max_speed == 0 {
-        return (0, 0);
+    let length_squared = vx * vx + vz * vz;
+    if length_squared <= max_speed * max_speed {
+        return (vx as i8, vz as i8);
     }
-    let len2 = vx.saturating_mul(vx).saturating_add(vz.saturating_mul(vz));
-    if len2 <= max_speed * max_speed {
-        return (vx.clamp(-127, 127) as i8, vz.clamp(-127, 127) as i8);
-    }
-    // Floor sqrt can normalize an oblique vector just outside the circle to
-    // another vector still outside it (10,3 -> 9,2 at max 9). Divide by the
-    // integer ceiling so the packed velocity can never exceed MaxSpeed.
-    let mut len = isqrt(len2).max(1);
-    if len * len < len2 {
-        len += 1;
+    let mut length = isqrt(length_squared);
+    if length * length < length_squared {
+        length += 1;
     }
     (
-        (vx * max_speed / len).clamp(-127, 127) as i8,
-        (vz * max_speed / len).clamp(-127, 127) as i8,
+        (vx * max_speed / length) as i8,
+        (vz * max_speed / length) as i8,
     )
 }
 
@@ -241,12 +238,14 @@ pub const fn fall_step(state: State, gravity: i8) -> State {
     }
 }
 
-/// Classify GoldSrc's two independent `func_pushable` paths. `Touch` pushes
-/// only through real side contact and explicitly refuses while IN_USE is held.
-/// `Use` is continuous and may pull its aimed 64-unit use target after the
-/// player's first backward step has opened a gap. Neither path accepts an
-/// airborne player, a player standing on the cart, or neutral movement.
-#[inline]
+/// How the player's movement acts on a cart this tick.
+///
+/// Nothing moves a cart unless the player is on the ground, not standing on
+/// that cart, and giving movement input. Holding use turns pushing off: only
+/// the cart the player is aiming at responds, and it is pulled. Otherwise a
+/// cart the player touches is pushed while the input heads toward it
+/// (`toward > 0`).
+#[inline(always)]
 pub const fn contact_mode(
     grounded: bool,
     standing_on_cart: bool,
@@ -257,39 +256,31 @@ pub const fn contact_mode(
     toward: i32,
 ) -> u8 {
     if !grounded || standing_on_cart || !has_wish {
-        CONTACT_NONE
-    } else if use_held {
-        if use_target {
+        return CONTACT_NONE;
+    }
+    if use_held {
+        return if use_target {
             CONTACT_PULL
         } else {
             CONTACT_NONE
-        }
-    } else if touching && toward > 0 {
+        };
+    }
+    if touching && toward > 0 {
         CONTACT_PUSH
     } else {
         CONTACT_NONE
     }
 }
 
-/// CPushable::Use applies a non-player-touch factor of 0.25. Preserve at
-/// least one fixed-point unit for a non-zero stick component so low analog
-/// input still converges instead of quantizing the pull away entirely.
-#[inline]
+/// A pulled cart follows a quarter of the player's input, rounded toward
+/// zero but never to zero: any input moves it at least one unit.
+#[inline(always)]
 pub const fn pull_component(wish: i32) -> i32 {
-    if wish > 0 {
-        if wish < 4 {
-            1
-        } else {
-            wish / 4
-        }
-    } else if wish < 0 {
-        if wish > -4 {
-            -1
-        } else {
-            wish / 4
-        }
+    let quarter = wish / 4;
+    if quarter == 0 {
+        wish.signum()
     } else {
-        0
+        quarter
     }
 }
 
