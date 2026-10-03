@@ -91,7 +91,7 @@ unsafe impl CommandStreamDma for GpuChannel {
     }
     #[inline]
     fn wait_idle(&mut self) {
-        crate::wait_idle();
+        crate::wait_idle_impl();
     }
 }
 

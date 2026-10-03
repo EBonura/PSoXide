@@ -1,206 +1,67 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! High-level PS1 GPU interface.
+//! The PS1 GPU: a driver that owns it, the packets it draws, and safe
+//! frame building over its linked-list DMA.
 //!
-//! Sits on top of `psx-io::gpu` + `psx-hw::gpu` constructors to expose
-//! a friendlier API: `init()` to set up display mode, a small
-//! primitives kit, and synchronisation (`wait_idle`, and the
-//! GP0(1Fh) completion flag `draw_done` that psx-rt's queued flip tests).
+//! # Layers
 //!
-//! ## Primitives
+//! - [`Gpu`] owns GP0, GP1 and DMA channel 2 through the
+//!   [`GpuDma`](psx_io::periph::GpuDma) token. Every port write is a method,
+//!   so the borrow checker keeps immediate drawing out of a running walk.
+//! - [`prim`] holds the packets: `repr(C)` structs whose words are the GP0
+//!   wire format. [`Gpu::draw`] sends one now; an [`ot::OrderingTable`]
+//!   frame links many for one DMA walk.
+//! - [`frame`] builds frames with lifetimes instead of `unsafe`: a packet
+//!   added to an [`frame::OtFrame`] stays borrowed until the walk that reads
+//!   it has finished.
+//! - [`ordered`] streams packets in painter order over static storage.
+//! - [`display`] describes what the GPU shows; [`material`] describes how
+//!   textured packets sample and blend.
+//! - The raw layer, [`submit_linked_list_async_raw`] and the `*_unchecked`
+//!   adds on [`frame::OtFrame`], is `unsafe`: it hands the DMA controller
+//!   addresses the type system cannot follow.
 //!
-//! | Function                    | GP0 op | Words | Notes                          |
-//! |-----------------------------|--------|-------|--------------------------------|
-//! | [`fill_rect`]               | 0x02   | 3     | Ignores draw area, X %= 16.    |
-//! | [`draw_tri_flat`]           | 0x20   | 4     | Single colour.                 |
-//! | [`draw_tri_gouraud`]        | 0x30   | 6     | Per-vertex colour.             |
-//! | [`draw_quad_flat`]          | 0x28   | 5     | Single colour.                 |
-//! | [`draw_line_mono`]          | 0x40   | 3     | Rasterised line, any slope.    |
-//! | [`draw_line_gouraud`]       | 0x50   | 4     | Gouraud line.                  |
-//! | [`draw_quad_textured`]      | 0x2C   | 9     | Flat tint, free UV per vertex. |
-//! | [`draw_quad_textured_gouraud`] | 0x3C | 12   | Per-vertex colour × texel.     |
-//! | [`draw_sprite_material`]    | 0x64   | 4     | Material-aware textured sprite. |
-//!
-//! Textured rectangles (GP0 0x64..=0x7F) are the fastest path for
-//! axis-aligned 1:1 sprites. [`draw_sprite_material`] covers the
-//! common variable-size sprite path; `psx-font` layers atlas helpers
-//! on top. The [`material`] module groups packed CLUT/tpage words
-//! with tint and blend state.
-//!
-//! ## Why split like this
-//!
-//! Keeping the low-level constructors in `psx-hw` means the same
-//! encoding is shared with the emulator's GPU decoder -- both sides
-//! can't drift out of sync on command layout. `psx-gpu` adds the
-//! thin ergonomic layer: `wait_command_ready()` + `write_command()`
-//! sequencing, typed depth enums, vertex/UV packing.
+//! Register addresses and command-word encoders live in `psx-hw`, shared
+//! with the emulator's GPU, so the two cannot disagree on a layout.
 
 #![no_std]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
+mod compat;
+pub mod display;
 pub mod frame;
 pub mod framebuf;
+mod gpu;
 pub mod material;
 pub mod ordered;
 pub mod ot;
 pub mod prim;
 
-use crate::material::{BlendMode, TextureMaterial};
-use psx_hw::gpu::{gp0, gp1, pack_color, pack_texcoord, pack_vertex, pack_xy, DmaDirection};
+#[allow(deprecated, reason = "the forwarders kept for one stage")]
+pub use compat::{
+    arm_draw_done, draw_line_gouraud, draw_line_mono, draw_line_mono_blended, draw_quad_flat,
+    draw_quad_textured, draw_quad_textured_gouraud, draw_quad_textured_gouraud_material,
+    draw_quad_textured_material, draw_rect_flat, draw_sprite_material, draw_sync, draw_tri_flat,
+    draw_tri_flat_blended, draw_tri_gouraud, draw_tri_gouraud_blended, draw_tri_textured_material,
+    fill_rect, init, set_display_offset, set_draw_area, set_draw_offset, set_mask_mode,
+    set_screen_h_offset, set_screen_v_offset, set_texture_page, signal_draw_done, submit_static,
+    wait_idle,
+};
+pub use gpu::{Gpu, MaskMode};
+
+use psx_hw::gpu::{gp0, gp1, DmaDirection};
 use psx_io::dma::{self, Channel};
-use psx_io::gpu::{wait_command_ready, write_command, write_display_control};
-use psx_io::periph::GpuDma;
+use psx_io::gpu::{wait_command_ready, write_display_control};
 use psx_io::timers;
 
-/// Video standard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VideoMode {
-    /// 60 Hz NTSC.
-    Ntsc,
-    /// 50 Hz PAL.
-    Pal,
-}
+/// Moved to [`display::VideoMode`].
+#[deprecated(note = "moved to `psx_gpu::display::VideoMode`")]
+pub type VideoMode = display::VideoMode;
 
-/// Display resolution. Arbitrary combinations aren't valid on hardware;
-/// stick to the preset constants below.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Resolution {
-    /// Width in pixels.
-    pub width: u16,
-    /// Height in pixels (240 or 480).
-    pub height: u16,
-}
+/// Moved to [`display::Resolution`].
+#[deprecated(note = "moved to `psx_gpu::display::Resolution`")]
+pub type Resolution = display::Resolution;
 
-impl Resolution {
-    /// 320×240 -- the default for most PS1 games.
-    pub const R320X240: Self = Self {
-        width: 320,
-        height: 240,
-    };
-    /// 256×240.
-    pub const R256X240: Self = Self {
-        width: 256,
-        height: 240,
-    };
-    /// 512×240.
-    pub const R512X240: Self = Self {
-        width: 512,
-        height: 240,
-    };
-    /// 640×240.
-    pub const R640X240: Self = Self {
-        width: 640,
-        height: 240,
-    };
-    /// 320×256 -- PAL's natural vertical resolution.
-    pub const R320X256: Self = Self {
-        width: 320,
-        height: 256,
-    };
-    /// 640×480, interlaced.
-    pub const R640X480: Self = Self {
-        width: 640,
-        height: 480,
-    };
-
-    /// True for the 480-line modes, which the GPU only shows interlaced.
-    const fn is_interlaced(self) -> bool {
-        self.height >= 480
-    }
-
-    /// Scanlines per field: the height, or half of it when interlaced.
-    /// GP1(07h) counts scanlines of one field, so a 480-line picture spans
-    /// 240 of them (psx-spx, GP1(07h)).
-    const fn field_lines(self) -> u32 {
-        if self.is_interlaced() {
-            self.height as u32 / 2
-        } else {
-            self.height as u32
-        }
-    }
-}
-
-/// The GP1(08h) display-mode word for `mode` and `res`.
-///
-/// psx-spx, GP1(08h): bit 2 selects 480 lines only "when Bit5=1", so a
-/// 480-line resolution sets the interlace bit as well.
-const fn display_mode_command(mode: VideoMode, res: Resolution) -> u32 {
-    let hres_field = match res.width {
-        256 => 0,
-        320 => 1,
-        512 => 2,
-        640 => 3,
-        _ => 1,
-    };
-    let interlaced = res.is_interlaced();
-    gp1::display_mode(
-        hres_field,
-        interlaced as u32,
-        matches!(mode, VideoMode::Pal),
-        false,
-        interlaced,
-    )
-}
-
-/// GPU clocks per displayed pixel at the standard PSX dot clock that
-/// [`init`] programs. The horizontal display window therefore spans
-/// `width * H_CLOCKS_PER_PIXEL` GPU clocks.
-const H_CLOCKS_PER_PIXEL: u32 = 8;
-
-/// Default left edge (GP1 06h X1) of the horizontal display window, in GPU
-/// clocks from start-of-line -- the standard centred NTSC picture.
-const H_DISPLAY_WINDOW_START: u32 = 0x260;
-/// Default top edge (GP1 07h Y1) of the NTSC vertical display window.
-const NTSC_V_DISPLAY_WINDOW_START: u32 = 0x10;
-/// Default top edge (GP1 07h Y1) of the PAL vertical display window.
-const PAL_V_DISPLAY_WINDOW_START: u32 = 0x23;
-
-const fn v_display_window_start(mode: VideoMode) -> u32 {
-    match mode {
-        VideoMode::Ntsc => NTSC_V_DISPLAY_WINDOW_START,
-        VideoMode::Pal => PAL_V_DISPLAY_WINDOW_START,
-    }
-}
-
-/// Initialise the GPU: reset, set display mode, set display ranges,
-/// configure DMA direction, enable display output.
-#[doc(alias = "ResetGraph")]
-pub fn init(mode: VideoMode, res: Resolution) {
-    write_display_control(gp1::RESET);
-    write_display_control(display_mode_command(mode, res));
-
-    // Horizontal & vertical display windows. Values below match the
-    // standard PSX output (NTSC 260h..C60h, PAL similar) -- tweaking
-    // them shifts the picture on the TV but not the VRAM layout.
-    let h_start = H_DISPLAY_WINDOW_START;
-    let h_end = h_start + (res.width as u32) * H_CLOCKS_PER_PIXEL;
-    write_display_control(gp1::h_display_range(h_start, h_end));
-
-    let v_start = v_display_window_start(mode);
-    let v_end = v_start + res.field_lines();
-    write_display_control(gp1::v_display_range(v_start, v_end));
-
-    write_display_control(gp1::dma_direction(DmaDirection::CpuToGp0 as u32));
-    write_display_control(gp1::display_enable(true));
-}
-
-/// Re-issue the display windows shifted by `dx` pixels / `dy` scanlines
-/// from the standard picture [`init`] programs. Moves the picture on the
-/// TV without touching the VRAM layout or the display mode, which is
-/// exactly what a "screen position" option needs (CRTs differ by several
-/// pixels in where they center). Pass the same `mode`/`res` given to
-/// [`init`]; the shift is clamped so the window never starts before the
-/// blanking edge.
-pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
-    let h_start = (H_DISPLAY_WINDOW_START as i32 + dx as i32 * H_CLOCKS_PER_PIXEL as i32).max(0);
-    let h_end = h_start as u32 + (res.width as u32) * H_CLOCKS_PER_PIXEL;
-    write_display_control(gp1::h_display_range(h_start as u32, h_end));
-
-    let v_start = (v_display_window_start(mode) as i32 + dy as i32).max(0);
-    let v_end = v_start as u32 + res.field_lines();
-    write_display_control(gp1::v_display_range(v_start as u32, v_end));
-}
-
-/// Block until the GPU has finished drawing everything sent to it.
+/// [`Gpu::wait_idle`]'s waits, shared with the deprecated free function.
 ///
 /// Waits for DMA channel 2 to finish its walk, then for GPUSTAT bit 28
 /// (ready for a DMA block), then for bit 26 (ready for a command word).
@@ -211,40 +72,18 @@ pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
 /// large-triangle lists) and bit 26's at the list's closing GP0(1Fh)
 /// (625,348 and 314,075). PSn00bSDK's `DrawSync` waits the same way.
 ///
-/// Every wait is bounded, with the recovery of
-/// [`submit_linked_list_wait`] and `psx_io::gpu::wait_command_ready`, so a
-/// wedged GPU costs a reset instead of a hang.
-///
-/// For presenting through psx-rt's queued flip, which must not block, use
-/// [`arm_draw_done`] and a closing GP0(1Fh) instead; see [`is_draw_done`].
+/// Every wait is bounded, with the recovery of [`submit_linked_list_wait`]
+/// and `psx_io::gpu::wait_command_ready`, so a wedged GPU costs a reset
+/// instead of a hang.
 #[inline]
-#[doc(alias = "DrawSync")]
-pub fn wait_idle() {
+pub(crate) fn wait_idle_impl() {
     submit_linked_list_wait();
     psx_io::gpu::wait_dma_ready();
     wait_command_ready();
 }
 
-/// Renamed to [`wait_idle`].
-#[deprecated(note = "renamed to `wait_idle`")]
-#[inline(always)]
-pub fn draw_sync() {
-    wait_idle()
-}
-
-/// Clear GPUSTAT bit 24 (the GPU's IRQ1 flag) with GP1(02h).
-///
-/// Call it right before kicking a frame's work whose last command is
-/// GP0(1Fh) (see [`is_draw_done`]), and only once the previous frame's queued
-/// flip has been applied: acknowledging earlier hides the previous frame's
-/// completion from psx-rt's VBlank handler.
-#[inline]
-pub fn arm_draw_done() {
-    write_display_control(gp1::ACK_IRQ);
-}
-
 /// True once the GPU has executed the GP0(1Fh) that closes the work kicked
-/// after the last [`arm_draw_done`], so everything before it is drawn.
+/// after the last [`Gpu::arm_draw_done`], so everything before it is drawn.
 ///
 /// This is the completion test psx-rt's queued display flip
 /// (`psx_rt::interrupts::queue_display_control_at_vblank`) applies at each VBlank edge.
@@ -253,11 +92,18 @@ pub fn arm_draw_done() {
 /// GP1(02h). The v1.24 present-queue probe flipped on this flag with 120 of
 /// 120 frames complete on a console. End a DMA chain with it through
 /// [`ot::OrderingTable::end_with_draw_done`] or [`DRAW_DONE_NODE`], an
-/// ordered stream with `push_packet([gp0::REQUEST_IRQ])`, and port drawing
-/// with [`signal_draw_done`].
+/// ordered stream with `push_packet([gp0::REQUEST_IRQ])`, and immediate
+/// drawing with [`Gpu::signal_draw_done`].
+///
+/// Arm the flag right before kicking a frame whose last command is GP0(1Fh),
+/// and only once the previous frame's queued flip has been applied:
+/// acknowledging earlier hides the previous frame's completion from psx-rt's
+/// VBlank handler.
 ///
 /// GP0(1Fh) also raises interrupt source 1 (GPU) in `I_STAT`; keep it masked
 /// in `I_MASK`, since psx-rt's handler does not acknowledge it.
+///
+/// It only reads GPUSTAT, so it needs no [`Gpu`].
 #[inline]
 pub fn is_draw_done() -> bool {
     psx_io::gpu::status().contains(psx_hw::gpu::GpuStat::IRQ1)
@@ -268,15 +114,6 @@ pub fn is_draw_done() -> bool {
 #[inline(always)]
 pub fn draw_done() -> bool {
     is_draw_done()
-}
-
-/// Send GP0(1Fh) through the command port, closing work drawn with the
-/// immediate `draw_*` functions (see [`is_draw_done`]). Like them it waits for
-/// the GPU to accept a command first.
-#[inline]
-pub fn signal_draw_done() {
-    wait_command_ready();
-    write_command(gp0::REQUEST_IRQ);
 }
 
 /// A linked-list DMA node holding only GP0(1Fh), for the end of a chain.
@@ -355,388 +192,7 @@ pub fn vsync() {
     while timers::counter(timers::Timer::Timer1) < 242 {}
 }
 
-/// Set the drawing-area rectangle. Pixels outside this rect are
-/// clipped by the rasteriser.
-pub fn set_draw_area(x0: u16, y0: u16, x1: u16, y1: u16) {
-    wait_command_ready();
-    write_command(gp0::draw_area_top_left(x0 as u32, y0 as u32));
-    write_command(gp0::draw_area_bottom_right(x1 as u32, y1 as u32));
-}
-
-/// Set the drawing offset -- added to every vertex by the GPU.
-/// Use this to position a coordinate system at the top-left of your
-/// back-buffer.
-pub fn set_draw_offset(x: i16, y: i16) {
-    wait_command_ready();
-    write_command(gp0::draw_offset(x as i32, y as i32));
-}
-
-/// Set the GPU mask-bit (stencil-style) mode via GP0(E6h). `set_on_draw` forces
-/// bit 15 of every pixel written; `check_before_draw` skips pixels whose mask
-/// bit is already set. Together (both true) they give front-to-back occlusion
-/// without a Z-buffer: draw nearest first with the mask set, and farther pixels
-/// that would overdraw are rejected. Applies until changed, so reset to
-/// `(false, false)` before the translucent/blended passes that must not mask.
-pub fn set_mask_mode(set_on_draw: bool, check_before_draw: bool) {
-    wait_command_ready();
-    write_command(gp0::mask_bit(set_on_draw, check_before_draw));
-}
-
-/// Shift the displayed picture horizontally on the TV by `offset_px` pixels
-/// (positive = right) via the authentic GP1(06h) horizontal display range --
-/// the same mechanism period games used to recentre the image inside a CRT's
-/// overscan. Unlike [`set_draw_offset`], this never clips rendered content: it
-/// only slides where the active window lands in the video signal, so the whole
-/// picture is preserved. `res` must match the value handed to [`init`] so the
-/// window keeps its width.
-///
-/// Note: this project's emulator mirrors the offset in its presentation buffer
-/// so the front-end preview is visible; other emulators may crop to the active
-/// display region and hide the shift.
-pub fn set_screen_h_offset(offset_px: i16, res: Resolution) {
-    let start = (H_DISPLAY_WINDOW_START as i32 + offset_px as i32 * H_CLOCKS_PER_PIXEL as i32)
-        .max(0) as u32;
-    let end = start + res.width as u32 * H_CLOCKS_PER_PIXEL;
-    write_display_control(gp1::h_display_range(start, end));
-}
-
-/// Shift the displayed picture vertically on the TV by `offset_px` scanlines
-/// (positive = down) via the authentic GP1(07h) vertical display range. This
-/// is the vertical counterpart to [`set_screen_h_offset`]: it slides the video
-/// window inside overscan without changing VRAM layout or the GPU draw offset.
-/// `mode` and `res` must match the values handed to [`init`].
-pub fn set_screen_v_offset(offset_px: i16, mode: VideoMode, res: Resolution) {
-    let start = (v_display_window_start(mode) as i32 + offset_px as i32).max(0) as u32;
-    let end = start + res.field_lines();
-    write_display_control(gp1::v_display_range(start, end));
-}
-
-/// Fill a VRAM rectangle with a solid color. Ignores draw area / offset.
-/// Useful for clearing a back buffer.
-pub fn fill_rect(x: u16, y: u16, w: u16, h: u16, r: u8, g: u8, b: u8) {
-    wait_command_ready();
-    write_command(gp0::fill_rect(r, g, b));
-    write_command(pack_xy(x, y));
-    write_command(pack_xy(w, h));
-}
-
-/// Draw a flat-shaded (single-color) triangle.
-pub fn draw_tri_flat(verts: [(i16, i16); 3], r: u8, g: u8, b: u8) {
-    wait_command_ready();
-    write_command(gp0::polygon_opcode(false, false, false, false, false) | pack_color(r, g, b));
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-}
-
-/// Draw a semi-transparent flat-shaded triangle.
-pub fn draw_tri_flat_blended(verts: [(i16, i16); 3], r: u8, g: u8, b: u8, blend_mode: BlendMode) {
-    if !blend_mode.is_translucent() {
-        draw_tri_flat(verts, r, g, b);
-        return;
-    }
-    TextureMaterial::blended(0, 0, (r, g, b), blend_mode).apply_draw_mode();
-    wait_command_ready();
-    write_command(gp0::polygon_opcode(false, false, false, true, false) | pack_color(r, g, b));
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-}
-
-/// Draw a Gouraud-shaded triangle. `colors[i]` is the color at `verts[i]`;
-/// the GPU interpolates across the triangle.
-pub fn draw_tri_gouraud(verts: [(i16, i16); 3], colors: [(u8, u8, u8); 3]) {
-    wait_command_ready();
-    let op = gp0::polygon_opcode(true, false, false, false, false);
-    let (r0, g0, b0) = colors[0];
-    write_command(op | pack_color(r0, g0, b0));
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    let (r1, g1, b1) = colors[1];
-    write_command(pack_color(r1, g1, b1));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    let (r2, g2, b2) = colors[2];
-    write_command(pack_color(r2, g2, b2));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-}
-
-/// Draw a semi-transparent Gouraud-shaded triangle. The GPU interpolates the
-/// vertex colours first, then applies the selected native blend equation.
-pub fn draw_tri_gouraud_blended(
-    verts: [(i16, i16); 3],
-    colors: [(u8, u8, u8); 3],
-    blend_mode: BlendMode,
-) {
-    if !blend_mode.is_translucent() {
-        draw_tri_gouraud(verts, colors);
-        return;
-    }
-    TextureMaterial::blended(0, 0, colors[0], blend_mode).apply_draw_mode();
-    wait_command_ready();
-    let op = gp0::polygon_opcode(true, false, false, true, false);
-    let (r0, g0, b0) = colors[0];
-    write_command(op | pack_color(r0, g0, b0));
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    let (r1, g1, b1) = colors[1];
-    write_command(pack_color(r1, g1, b1));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    let (r2, g2, b2) = colors[2];
-    write_command(pack_color(r2, g2, b2));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-}
-
-/// Draw a single monochrome line from `(x0, y0)` to `(x1, y1)`
-/// via GP0 0x40 (single mono line, 3 words). The GPU's line
-/// rasteriser handles diagonal paths correctly -- unlike building
-/// a line out of `fill_rect` calls, which the PSX fill-rect
-/// primitive (GP0 0x02) rounds to 16-pixel X boundaries and
-/// produces blocky staircase output.
-///
-/// Packet: `[cmd+color, v0, v1]`.
-pub fn draw_line_mono(x0: i16, y0: i16, x1: i16, y1: i16, r: u8, g: u8, b: u8) {
-    wait_command_ready();
-    // 0x40 = single mono line, opaque. Color in the low 24 bits
-    // of the first word (same as other monochrome primitives).
-    write_command(0x4000_0000 | pack_color(r, g, b));
-    write_command(pack_vertex(x0, y0));
-    write_command(pack_vertex(x1, y1));
-}
-
-/// Draw a line using the native PS1 semi-transparency equation.
-pub fn draw_line_mono_blended(
-    from: (i16, i16),
-    to: (i16, i16),
-    color: (u8, u8, u8),
-    blend_mode: BlendMode,
-) {
-    if !blend_mode.is_translucent() {
-        draw_line_mono(from.0, from.1, to.0, to.1, color.0, color.1, color.2);
-        return;
-    }
-    TextureMaterial::blended(0, 0, color, blend_mode).apply_draw_mode();
-    wait_command_ready();
-    write_command(0x4200_0000 | pack_color(color.0, color.1, color.2));
-    write_command(pack_vertex(from.0, from.1));
-    write_command(pack_vertex(to.0, to.1));
-}
-
-/// Draw a Gouraud-shaded line from `(x0, y0, c0)` to `(x1, y1, c1)`.
-/// The GPU interpolates RGB across the segment. Packet (GP0 0x50,
-/// 4 words): `[cmd+c0, v0, c1, v1]`.
-pub fn draw_line_gouraud(x0: i16, y0: i16, c0: (u8, u8, u8), x1: i16, y1: i16, c1: (u8, u8, u8)) {
-    wait_command_ready();
-    write_command(0x5000_0000 | pack_color(c0.0, c0.1, c0.2));
-    write_command(pack_vertex(x0, y0));
-    write_command(pack_color(c1.0, c1.1, c1.2));
-    write_command(pack_vertex(x1, y1));
-}
-
-/// Fill an axis-aligned rectangle with a flat color, as a polygon draw.
-///
-/// Unlike [`fill_rect`] (the GP0 02h VRAM fill), this goes through the
-/// rasterizer, so it respects the draw area and draw offset and works with
-/// double-buffered coordinates; it is the right call for UI panels and HUD
-/// backgrounds.
-pub fn draw_rect_flat(x: i16, y: i16, w: u16, h: u16, r: u8, g: u8, b: u8) {
-    let (x1, y1) = (x + w as i16, y + h as i16);
-    draw_quad_flat([(x, y), (x1, y), (x, y1), (x1, y1)], r, g, b);
-}
-
-/// Draw a flat-shaded quad (two triangles sharing the v1-v2 edge).
-pub fn draw_quad_flat(verts: [(i16, i16); 4], r: u8, g: u8, b: u8) {
-    wait_command_ready();
-    write_command(gp0::polygon_opcode(false, true, false, false, false) | pack_color(r, g, b));
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-    write_command(pack_vertex(verts[3].0, verts[3].1));
-}
-
-/// Draw a textured quad (GP0 0x2C, 9 words) with a single tint.
-///
-/// Vertex order is the PSX fan convention:
-/// - `verts[0]`, `uvs[0]` -- top-left
-/// - `verts[1]`, `uvs[1]` -- top-right
-/// - `verts[2]`, `uvs[2]` -- bottom-left
-/// - `verts[3]`, `uvs[3]` -- bottom-right
-///
-/// The GPU raster treats `(v0, v1, v2)` as one triangle and
-/// `(v1, v2, v3)` as the other. Non-rectangular quads shear /
-/// rotate / skew by tweaking vertex positions; UV interpolation
-/// across the destination is perspective-incorrect (this is a
-/// known PSX quirk -- fine for text, jitters at grazing angles).
-///
-/// `tint = (128, 128, 128)` leaves texels unmodulated. PSX tint
-/// math is `output = texel * tint / 128`, so any value below 128
-/// darkens and above 128 brightens (clamped).
-///
-/// `clut_word` is a packed CLUT handle (see `Clut::uv_word`);
-/// `tpage_word` is a packed tpage (see `TexturePage::uv_word`).
-pub fn draw_quad_textured(
-    verts: [(i16, i16); 4],
-    uvs: [(u8, u8); 4],
-    clut_word: u16,
-    tpage_word: u16,
-    tint: (u8, u8, u8),
-) {
-    draw_quad_textured_material(
-        verts,
-        uvs,
-        TextureMaterial::opaque(clut_word, tpage_word, tint),
-    );
-}
-
-/// Draw a textured quad using a [`TextureMaterial`].
-///
-/// This is the material-aware version of [`draw_quad_textured`].
-/// The material supplies the CLUT, tpage, tint, raw-texture bit,
-/// semi-transparent command bit, tpage blend mode, and dither bit.
-pub fn draw_quad_textured_material(
-    verts: [(i16, i16); 4],
-    uvs: [(u8, u8); 4],
-    material: TextureMaterial,
-) {
-    wait_command_ready();
-    write_command(material.texture_window_word());
-    write_command(material.flat_textured_polygon_header(true));
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(
-        uvs[1].0,
-        uvs[1].1,
-        material.texture_page_word(),
-    ));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-    write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
-    write_command(pack_vertex(verts[3].0, verts[3].1));
-    write_command(pack_texcoord(uvs[3].0, uvs[3].1, 0));
-}
-
-/// Draw a textured triangle using a [`TextureMaterial`].
-///
-/// This immediate-mode counterpart to [`prim::TriTextured`] is useful for
-/// compact screen-space masks and UI effects that do not enter an ordering
-/// table. Vertex and UV indices correspond directly.
-pub fn draw_tri_textured_material(
-    verts: [(i16, i16); 3],
-    uvs: [(u8, u8); 3],
-    material: TextureMaterial,
-) {
-    wait_command_ready();
-    write_command(material.texture_window_word());
-    write_command(material.flat_textured_polygon_header(false));
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(
-        uvs[1].0,
-        uvs[1].1,
-        material.texture_page_word(),
-    ));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-    write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
-}
-
-/// Draw a gouraud-shaded textured quad (GP0 0x3C, 12 words).
-///
-/// Each vertex carries its own RGB; the GPU interpolates across
-/// the primitive and modulates the sampled texel by the
-/// interpolated colour. Use this for gradient-filled text or
-/// any "per-corner tint" effect.
-///
-/// Vertex order matches [`draw_quad_textured`]: TL, TR, BL, BR.
-/// The four `colors` align with the four vertices.
-///
-/// Per-vertex colour is a plain RGB tint, same `output = texel *
-/// color / 128` scaling as the flat version -- (128, 128, 128) is
-/// "unmodulated".
-pub fn draw_quad_textured_gouraud(
-    verts: [(i16, i16); 4],
-    uvs: [(u8, u8); 4],
-    colors: [(u8, u8, u8); 4],
-    clut_word: u16,
-    tpage_word: u16,
-) {
-    draw_quad_textured_gouraud_material(
-        verts,
-        uvs,
-        colors,
-        TextureMaterial::new(clut_word, tpage_word),
-    );
-}
-
-/// Draw a Gouraud-shaded textured quad using a [`TextureMaterial`].
-///
-/// The material supplies texture state and blend flags; `colors`
-/// still supplies the per-vertex RGB tint payload.
-pub fn draw_quad_textured_gouraud_material(
-    verts: [(i16, i16); 4],
-    uvs: [(u8, u8); 4],
-    colors: [(u8, u8, u8); 4],
-    material: TextureMaterial,
-) {
-    wait_command_ready();
-    write_command(material.texture_window_word());
-    write_command(
-        material.textured_polygon_command(true, true)
-            | pack_color(colors[0].0, colors[0].1, colors[0].2),
-    );
-    write_command(pack_vertex(verts[0].0, verts[0].1));
-    write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
-    write_command(pack_color(colors[1].0, colors[1].1, colors[1].2));
-    write_command(pack_vertex(verts[1].0, verts[1].1));
-    write_command(pack_texcoord(
-        uvs[1].0,
-        uvs[1].1,
-        material.texture_page_word(),
-    ));
-    write_command(pack_color(colors[2].0, colors[2].1, colors[2].2));
-    write_command(pack_vertex(verts[2].0, verts[2].1));
-    write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
-    write_command(pack_color(colors[3].0, colors[3].1, colors[3].2));
-    write_command(pack_vertex(verts[3].0, verts[3].1));
-    write_command(pack_texcoord(uvs[3].0, uvs[3].1, 0));
-}
-
-/// Draw a variable-size textured sprite using a [`TextureMaterial`].
-///
-/// Textured rectangles do not embed a per-primitive tpage word, so
-/// this helper applies the material draw mode before emitting the
-/// four-word GP0 0x64 packet.
-pub fn draw_sprite_material(
-    x: i16,
-    y: i16,
-    w: u16,
-    h: u16,
-    uv: (u8, u8),
-    material: TextureMaterial,
-) {
-    material.apply_draw_mode();
-    wait_command_ready();
-    write_command(material.textured_rect_header());
-    write_command(pack_vertex(x, y));
-    write_command(pack_texcoord(uv.0, uv.1, material.clut_word()));
-    write_command(pack_xy(w, h));
-}
-
-/// Set the texture page + CLUT + color depth used by subsequent
-/// textured primitives. Textured-rect commands (0x64..=0x7F) read
-/// the texpage from the last GP0(E1h); textured polygons embed
-/// the texpage in one of their UV words. Setting it via E1h is
-/// a good default for sprites.
-pub fn set_texture_page(tpage_x: u16, tpage_y: u16, depth: TextureDepth) {
-    wait_command_ready();
-    write_command(gp0::draw_mode(
-        (tpage_x / 64) as u32,
-        (tpage_y / 256) as u32,
-        0,
-        depth as u32,
-        false,
-        true,
-    ));
-}
-
-/// Texture color depth passed to [`set_texture_page`].
+/// Texture color depth passed to [`Gpu::set_texture_page`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum TextureDepth {
@@ -965,48 +421,5 @@ impl<const W: usize> StaticChain for StaticPacket<W> {
     #[inline]
     fn head(&self) -> *const u32 {
         self.as_ptr()
-    }
-}
-
-/// Kick a `'static`, immutable chain, such as [`DRAW_DONE_NODE`], without
-/// waiting for it.
-///
-/// The chain outlives any walk, so there is nothing to wait for before
-/// reusing memory; a later kick waits for this walk on its own.
-#[inline]
-pub fn submit_static(_dma: &mut GpuDma, chain: &'static impl StaticChain) {
-    // SAFETY: `StaticChain` guarantees a well-formed single-node list that
-    // stays live and unmodified for 'static.
-    unsafe { submit_linked_list_async_raw(chain.head()) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const INTERLACE: u32 = 1 << 5;
-    const LINES_480: u32 = 1 << 2;
-
-    #[test]
-    fn a_240_line_mode_is_progressive() {
-        let word = display_mode_command(VideoMode::Ntsc, Resolution::R320X240);
-        assert_eq!(word & (INTERLACE | LINES_480), 0);
-        assert_eq!(word & 3, 1, "320-pixel horizontal mode");
-        assert_eq!(Resolution::R320X240.field_lines(), 240);
-    }
-
-    #[test]
-    fn a_480_line_mode_sets_the_interlace_bit_it_needs() {
-        let word = display_mode_command(VideoMode::Ntsc, Resolution::R640X480);
-        assert_eq!(word & (INTERLACE | LINES_480), INTERLACE | LINES_480);
-        assert_eq!(word & 3, 3, "640-pixel horizontal mode");
-    }
-
-    #[test]
-    fn a_480_line_mode_spans_one_field_of_scanlines() {
-        // psx-spx GP1(07h): NTSC Y1/Y2 = 88h -/+ 240/2 in either line mode.
-        let start = v_display_window_start(VideoMode::Ntsc);
-        assert_eq!(start, 0x88 - 120);
-        assert_eq!(start + Resolution::R640X480.field_lines(), 0x88 + 120);
     }
 }

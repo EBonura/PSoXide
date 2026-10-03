@@ -33,6 +33,10 @@
 #![warn(missing_docs)]
 
 use psx_font::FontAtlas;
+#[expect(
+    deprecated,
+    reason = "psx-osk draws without a `psx_gpu::Gpu` until its own API takes one"
+)]
 use psx_gpu::draw_rect_flat;
 
 /// What pressing the highlighted key does. Toggles (Shift/Sym) return `None`.
@@ -247,6 +251,10 @@ impl Keyboard {
 
     /// Draw the panel, keys, and `hint` line with the caller's palette.
     /// Immediate GP0 quads + psx-font text; call after the scene draw.
+    #[expect(
+        deprecated,
+        reason = "psx-osk draws without a `psx_gpu::Gpu` until its own API takes one"
+    )]
     pub fn draw(&self, font: &FontAtlas, p: &Palette, hint: &str) {
         draw_rect_flat(
             0,
