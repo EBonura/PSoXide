@@ -44,30 +44,40 @@ impl Aff {
     };
 }
 
+// The readers below take a raw pointer into a blob `Model::new` validated.
+// Each has the same contract: every byte it reads, `d + o` up to the width it
+// names, lies inside that blob.
+
 #[inline(always)]
 unsafe fn u8_at(d: *const u8, o: usize) -> u32 {
+    // SAFETY: the caller guarantees the bytes read are inside the blob.
     unsafe { *d.add(o) as u32 }
 }
 #[inline(always)]
 unsafe fn i8_at(d: *const u8, o: usize) -> i32 {
+    // SAFETY: the caller guarantees the bytes read are inside the blob.
     unsafe { *d.add(o) as i8 as i32 }
 }
 #[inline(always)]
 unsafe fn u16_at(d: *const u8, o: usize) -> u32 {
     // track data is byte-packed: odd offsets are legal
+    // SAFETY: the caller guarantees the bytes read are inside the blob.
     unsafe { *d.add(o) as u32 | (*d.add(o + 1) as u32) << 8 }
 }
 #[inline(always)]
 unsafe fn i16_at(d: *const u8, o: usize) -> i32 {
+    // SAFETY: the caller guarantees the bytes read are inside the blob.
     unsafe { (*d.add(o) as u32 | (*d.add(o + 1) as u32) << 8) as i16 as i32 }
 }
 #[inline(always)]
 unsafe fn u32_unaligned(d: *const u8, o: usize) -> u32 {
+    // SAFETY: the caller guarantees the bytes read are inside the blob.
     unsafe { ptr::read_unaligned(d.add(o).cast::<u32>()) }
 }
 
 #[inline(always)]
 unsafe fn read8(d: *const u8, o: usize) -> [i32; 4] {
+    // SAFETY: the caller guarantees the bytes read are inside the blob.
     unsafe {
         [
             i8_at(d, o) << 5,
@@ -79,6 +89,7 @@ unsafe fn read8(d: *const u8, o: usize) -> [i32; 4] {
 }
 #[inline(always)]
 unsafe fn read12(d: *const u8, o: usize) -> [i32; 4] {
+    // SAFETY: the caller guarantees the bytes read are inside the blob.
     unsafe {
         let packed = u16_at(d, o) | (u16_at(d, o + 2) << 16);
         let w2 = u16_at(d, o + 4);
@@ -96,6 +107,8 @@ unsafe fn read12(d: *const u8, o: usize) -> [i32; 4] {
 /// `off`: the position maps to each rate with one multiply.
 #[inline(never)]
 unsafe fn seg(d: *const u8, off: usize, r: usize, pos_q8: u32) -> (usize, i32, usize) {
+    // SAFETY: `off` is a validated clip and `r < N_RATES`, so both reads are
+    // inside its 32-byte header.
     unsafe {
         let s = u16_at(d, off + 4 + r * 2) as usize;
         let factor = u16_at(d, off + 4 + N_RATES * 2 + r * 2);
@@ -156,6 +169,9 @@ fn quat_to_mat(q: [i32; 4]) -> [[i16; 3]; 3] {
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 fn mvmva_raw(xy: u32, z: u32) -> [i32; 3] {
+    // SAFETY: GTE-only asm: it writes VXY0/VZ0, runs MVMVA on the rotation
+    // already loaded, and reads MAC1..3 into $8..$10, all declared operands.
+    // No memory or stack access.
     unsafe {
         let m1: u32;
         let m2: u32;
@@ -278,45 +294,185 @@ pub fn quat_mul(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     ]
 }
 
+/// A validated HMA1 blob.
+///
+/// The decoder reads keys without bounds checks, so the only way to build
+/// one is [`Model::new`], which walks every clip and bone once and proves
+/// that no playback position can read outside the blob. The fields are
+/// private so safe code cannot widen what was proven.
 #[derive(Clone, Copy)]
 pub struct Model {
     d: *const u8,
-    pub n_bones: usize,
-    pub bind_off: usize,
-    pub clips_off: usize,
+    n_bones: usize,
+    n_clips: usize,
+    bind_off: usize,
+    clips_off: usize,
+}
+
+/// Fixed layout of a blob: `(n_bones, n_clips, bind_off, clips_off)`, when
+/// the header, parents, bind translations and clip offset table fit `d`.
+fn layout(d: &[u8]) -> Option<(usize, usize, usize, usize)> {
+    let n_bones = u16::from_le_bytes([*d.first()?, *d.get(1)?]) as usize;
+    let n_clips = u16::from_le_bytes([*d.get(2)?, *d.get(3)?]) as usize;
+    let bind_off = (4 + n_bones + 1) & !1;
+    let clips_off = (bind_off + n_bones * 6 + 3) & !3;
+    (clips_off + n_clips * 4 <= d.len()).then_some((n_bones, n_clips, bind_off, clips_off))
+}
+
+/// One past the last byte a keyed track can read: keys `i` and `i + 1` of
+/// `key_bytes` each from `keys`, `read` bytes per key load, where `i` is at
+/// most `max(segments, 1) - 1` (see `seg`).
+fn track_end(keys: usize, segments: usize, key_bytes: usize, read: usize) -> usize {
+    keys.saturating_add(segments.max(1).saturating_mul(key_bytes))
+        .saturating_add(read)
+}
+
+/// Walk every clip exactly as `decode_with` does and check each read against
+/// `d`, for every playback position at once.
+fn tracks_fit(d: &[u8], n_bones: usize, n_clips: usize, clips_off: usize) -> bool {
+    let len = d.len();
+    let u16_at = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]) as usize;
+    for clip in 0..n_clips {
+        let o = clips_off + clip * 4;
+        let off = u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]) as usize;
+        let modes = off.saturating_add(CLIP_HEADER);
+        if modes.saturating_add(n_bones) > len {
+            return false;
+        }
+        let segments = |rate: usize| u16_at(off + 4 + rate * 2);
+        let mut p = (modes + n_bones + 1) & !1;
+        for b in 0..n_bones {
+            let mode = d[modes + b] as usize;
+            let (rc, pc, hi) = (mode & 7, (mode >> 3) & 7, mode & 0x40 != 0);
+            // Rotation.
+            let end = if rc == 7 {
+                p = p.saturating_add(if hi { 6 } else { 4 });
+                p
+            } else if !hi {
+                if p.saturating_add(6) > len {
+                    return false;
+                }
+                let kb = d[p + 4] as usize;
+                // 8-bit keys pack 4, 6 or 8 bits per component (2..=4 bytes);
+                // wider would overflow the decoder's 32-bit field shifts.
+                if kb > 4 {
+                    return false;
+                }
+                let ks = p + 6;
+                p = ks.saturating_add((segments(rc) + 1).saturating_mul(kb));
+                track_end(ks, segments(rc), kb, 4)
+            } else {
+                let keys = p;
+                p = p.saturating_add((segments(rc) + 1).saturating_mul(6));
+                track_end(keys, segments(rc), 6, 6)
+            };
+            if end > len {
+                return false;
+            }
+            // Translation (pc == 7 reads the bind table `layout` checked).
+            let end = if pc == 7 {
+                0
+            } else if pc == 6 {
+                p = p.saturating_add(6);
+                p
+            } else {
+                if p.saturating_add(7) > len {
+                    return false;
+                }
+                let kb = d[p + 6] as usize;
+                let ks = p + 8;
+                p = ks.saturating_add((segments(pc) + 1).saturating_mul(kb));
+                if kb == 6 {
+                    track_end(ks, segments(pc), 6, 6)
+                } else {
+                    track_end(ks, segments(pc), kb, 4)
+                }
+            };
+            if end > len {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 impl Model {
-    /// `d` must stay alive while the model is used and carry 4 readable
-    /// bytes past the last key (the cooker pads the section).
-    pub fn new(d: &'static [u8]) -> Model {
-        let n_bones = u16::from_le_bytes([d[0], d[1]]) as usize;
-        let bind_off = (4 + n_bones + 1) & !1;
-        let clips_off = (bind_off + n_bones * 6 + 3) & !3;
+    /// Validate and wrap an HMA1 blob. `None` when any clip, at any playback
+    /// position, would read outside `d`, when a bone's parent does not come
+    /// before it (the decoder composes parents first), or when there are no
+    /// clips.
+    pub fn new(d: &'static [u8]) -> Option<Model> {
+        let (n_bones, n_clips, bind_off, clips_off) = layout(d)?;
+        if n_clips == 0 {
+            return None;
+        }
+        for b in 0..n_bones {
+            let parent = d[4 + b] as usize;
+            if parent != 0xff && parent >= b {
+                return None;
+            }
+        }
+        if !tracks_fit(d, n_bones, n_clips, clips_off) {
+            return None;
+        }
+        Some(Model {
+            d: d.as_ptr(),
+            n_bones,
+            n_clips,
+            bind_off,
+            clips_off,
+        })
+    }
+
+    /// [`Model::new`] without the walk, for a blob that already passed it.
+    ///
+    /// # Safety
+    /// `Model::new(d)` must return `Some`.
+    #[inline]
+    pub(crate) unsafe fn new_unchecked(d: &'static [u8]) -> Model {
+        // `new` returned Some for these bytes, so `layout` does too.
+        let (n_bones, n_clips, bind_off, clips_off) = layout(d).unwrap_or((0, 1, 0, 0));
         Model {
             d: d.as_ptr(),
             n_bones,
+            n_clips,
             bind_off,
             clips_off,
         }
     }
 
-    /// Number of clips in the blob.
+    /// Number of bones; `decode` needs this many `Aff` slots.
+    #[inline]
+    pub fn n_bones(&self) -> usize {
+        self.n_bones
+    }
+
+    /// Number of clips in the blob (at least one).
+    #[inline]
     pub fn n_clips(&self) -> usize {
-        unsafe { u16_at(self.d, 2) as usize }
+        self.n_clips
+    }
+
+    /// Byte offset of `clip`'s record, clamped to the last clip.
+    #[inline(always)]
+    fn clip_off(&self, clip: usize) -> usize {
+        let clip = clip.min(self.n_clips - 1);
+        // SAFETY: `layout` checked the clip offset table, and `clip` is below
+        // `n_clips`; the load is unaligned.
+        unsafe { ptr::read_unaligned(self.d.add(self.clips_off + clip * 4).cast::<u32>()) as usize }
     }
 
     /// Source frame intervals of `clip` (numframes - 1, at least 1): the
-    /// clip's position runs 0..=`clip_intervals * 256`.
+    /// clip's position runs 0..=`clip_intervals * 256`. Clips past the last
+    /// read the last.
     pub fn clip_intervals(&self, clip: usize) -> u32 {
-        unsafe {
-            let off =
-                ptr::read_unaligned(self.d.add(self.clips_off + clip * 4).cast::<u32>()) as usize;
-            u16_at(self.d, off).max(1)
-        }
+        // SAFETY: `tracks_fit` checked every clip's header is in the blob.
+        unsafe { u16_at(self.d, self.clip_off(clip)).max(1) }
     }
 
     /// Decode every bone of `clip` at `pos_q8` into model-space affines.
+    /// Clips past the last decode the last; an `out` shorter than
+    /// [`Model::n_bones`] is left untouched.
     #[inline(always)]
     pub fn decode(&self, clip: usize, pos_q8: u32, out: &mut [Aff]) {
         self.decode_with(clip, pos_q8, &Jaw::NONE, out)
@@ -326,9 +482,14 @@ impl Model {
     /// `out` must hold at least `n_bones` entries.
     #[inline(never)]
     pub fn decode_with(&self, clip: usize, pos_q8: u32, jaw: &Jaw, out: &mut [Aff]) {
+        let off = self.clip_off(clip);
+        // SAFETY: `Model::new` ran `tracks_fit`, which follows this same walk
+        // for every clip and bounds each read below for any `pos_q8` (`seg`
+        // clamps the key index to the segment count it checked). Parents
+        // precede children (checked by `new`) and `out` holds `nb` bones
+        // (checked below), so the unchecked `out` accesses are in bounds.
         unsafe {
             let d = self.d;
-            let off = ptr::read_unaligned(d.add(self.clips_off + clip * 4).cast::<u32>()) as usize;
             let nb = self.n_bones;
             if out.len() < nb {
                 return;
