@@ -64,6 +64,10 @@ classic-affine-lattice = []
 # per-joint compose recording cost real cycles and must not ride along
 # in shipping or performance-measurement builds.
 vert-debug = []
+# Hand frames of scenes that ask for RenderSubmission::PresentQueue to
+# psx-rt's VBlank-kicked present queue. Without it those scenes present the
+# QueuedDoubleBuffered way, and no SDK code pays for the queue.
+present-queue = ["psx-rt/present-queue"]
 
 [lints]
 workspace = true

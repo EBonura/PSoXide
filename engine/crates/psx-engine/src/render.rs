@@ -455,6 +455,24 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         self.add_packet_slot(range.slot_depth::<DEPTH>(depth), prim);
     }
 
+    /// Continue the walk past slot 0 into `head` instead of ending it there:
+    /// for a present-queue frame, [`Ctx::present_queue_hook`](crate::Ctx::present_queue_hook).
+    /// Call it right after [`begin`](Self::begin), before anything is
+    /// inserted at slot 0.
+    ///
+    /// # Safety
+    /// `head` must be a linked-list node that ends the list itself, live and
+    /// unmodified while the table is walked.
+    pub unsafe fn end_with_chain(&mut self, head: *const u32) {
+        // SAFETY: forwarded contract.
+        unsafe { self.frame.end_with_chain(head) }
+    }
+
+    /// The first node the table's walk reads.
+    pub fn submit_head(&self) -> *const u32 {
+        self.frame.submit_head()
+    }
+
     /// Submit this frame's ordering table and wait for the walk.
     pub fn submit(self, dma: &mut GpuDma) {
         self.frame.submit(dma);
@@ -1316,9 +1334,15 @@ fn packet_cursor(
 /// in-flight frame's ordering table) has consumed its packets. A direct call,
 /// not a function pointer, so `tools/stack_guard.py` can bound the
 /// scratchpad-stack model paths that reach it through a packet push.
+///
+/// Under the present queue the in-flight frame may not have started walking
+/// yet (it waits in psx-rt's slot for an edge), so wait for its kick first;
+/// with nothing queued that is one load.
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 fn wait_for_in_flight_list() {
+    #[cfg(feature = "present-queue")]
+    psx_rt::present::wait_slot_empty();
     psx_gpu::submit_linked_list_wait();
 }
 

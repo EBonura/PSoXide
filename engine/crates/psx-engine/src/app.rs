@@ -44,6 +44,7 @@ use psx_level::{
 use psx_pad::{enable_analog_port1, poll_port1};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
+use crate::present_queue::{PresentQueue, ENABLED as PRESENT_QUEUE_ENABLED};
 use crate::scene::{Ctx, RenderSubmission, Scene};
 use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
@@ -579,6 +580,8 @@ impl App {
         // fixed updates that were already due get to run in the gap that used
         // to be a spin. See `finish_deferred_flip`.
         let mut deferred_flip: Option<u16> = None;
+        // Frames handed to psx-rt's present queue (RenderSubmission::PresentQueue).
+        let mut present_queue = PresentQueue::new();
 
         loop {
             // Resolve a queued flip as soon as the handler has taken the word,
@@ -704,7 +707,32 @@ impl App {
                     missed_visual_intervals,
                     fixed_update_clamped: _,
                 } => {
-                    let submission = scene.render_submission();
+                    let mut submission = scene.render_submission();
+                    if !PRESENT_QUEUE_ENABLED && submission == RenderSubmission::PresentQueue {
+                        submission = RenderSubmission::QueuedDoubleBuffered;
+                    }
+                    if submission == RenderSubmission::PresentQueue {
+                        if !present_queue.active {
+                            // The queue starts on an idle GPU: present what
+                            // the other paths left in flight first. A queued
+                            // flip is resolved before any visual frame runs.
+                            debug_assert!(deferred_flip.is_none());
+                            Self::present_pending(
+                                scene,
+                                &mut clock,
+                                &mut ctx,
+                                &mut pending_present,
+                            );
+                            present_queue.start();
+                        }
+                        // The frame before the last published one used this
+                        // frame's ordering table, packets and nodes.
+                        telemetry::stage_begin(telemetry::stage::OT_WAIT);
+                        present_queue.wait_arena_free();
+                        telemetry::stage_end(telemetry::stage::OT_WAIT);
+                    } else if present_queue.active {
+                        present_queue.stop(&mut clock, &mut ctx);
+                    }
                     // A queued scene keeps one completed visual in flight.
                     // A single-buffered one drains only the linked-list DMA
                     // before reusing its packet RAM; the GPU may continue
@@ -719,7 +747,10 @@ impl App {
                             gpu::submit_linked_list_wait();
                             telemetry::stage_end(telemetry::stage::OT_WAIT);
                         })
-                    } else if submission == RenderSubmission::QueuedDoubleBuffered {
+                    } else if matches!(
+                        submission,
+                        RenderSubmission::QueuedDoubleBuffered | RenderSubmission::PresentQueue
+                    ) {
                         pending_present.take()
                     } else {
                         // Immediate scenes retain the original overload path:
@@ -758,7 +789,11 @@ impl App {
                             "33 SCENE RENDER BEGIN",
                         );
                     }
+                    if submission == RenderSubmission::PresentQueue {
+                        ctx.set_present_queue_hook(Some(present_queue.hook()));
+                    }
                     scene.render(&mut ctx);
+                    ctx.set_present_queue_hook(None);
                     if !traced_render {
                         boot_visual_checkpoint_hold(
                             &mut ctx.fb,
@@ -769,7 +804,14 @@ impl App {
                     }
                     telemetry::stage_end(telemetry::stage::RENDER);
 
-                    if submission.is_queued() {
+                    let published = submission == RenderSubmission::PresentQueue
+                        && present_queue.publish(config, scene, &mut ctx);
+                    if submission == RenderSubmission::PresentQueue && !published {
+                        // Present this frame the double-buffered way.
+                        present_queue.stop(&mut clock, &mut ctx);
+                    }
+
+                    if submission.is_queued() && !published {
                         if let Some(previous_misses) = queued_previous {
                             telemetry::stage_begin(telemetry::stage::OT_WAIT);
                             gpu::draw_sync();
@@ -824,7 +866,14 @@ impl App {
                     // turn, when the following frame's CPU packets hide its
                     // remaining raster time.
                     scheduler.complete_visual_frame();
-                    pending_present = Some(missed_visual_intervals);
+                    if published {
+                        // Counted at publish: the queue shows the frame on the
+                        // first edge after the one before it has drawn.
+                        emit_visual_frame_counters(missed_visual_intervals);
+                        ctx.visual_frame = ctx.visual_frame.advance();
+                    } else {
+                        pending_present = Some(missed_visual_intervals);
+                    }
                 }
             }
         }
