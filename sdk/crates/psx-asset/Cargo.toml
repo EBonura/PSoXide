@@ -10,5 +10,5 @@ description = "Runtime parsers for PSoXide cooked-asset blobs. Consumes the bina
 psxed-format = { path = "../../../crates/psxed-format" }
 psx-gte      = { path = "../psx-gte" }
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

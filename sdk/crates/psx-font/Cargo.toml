@@ -13,5 +13,5 @@ psx-gpu  = { path = "../psx-gpu" }
 psx-math = { path = "../psx-math" }
 psx-vram = { path = "../psx-vram" }
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

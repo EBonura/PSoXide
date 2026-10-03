@@ -9,5 +9,5 @@ description  = "Volatile MMIO primitives for PSoXide target code."
 [dependencies]
 psx-hw = { workspace = true }
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

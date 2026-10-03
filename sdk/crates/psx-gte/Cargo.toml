@@ -9,5 +9,5 @@ description  = "PS1 GTE (COP2) wrappers. MIPS build emits inline-asm coprocessor
 [dependencies]
 psx-gte-core = { workspace = true }
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

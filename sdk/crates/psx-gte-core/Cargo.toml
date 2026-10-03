@@ -21,5 +21,5 @@ serde = { version = "1.0", default-features = false, features = ["derive"], opti
 default = []
 serde = ["dep:serde"]
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

@@ -11,5 +11,5 @@ psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
 psx-math = { path = "../psx-math" }
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true
