@@ -23,7 +23,7 @@
 
 use crate::{
     Block, Card, Entry, Error, Result, SaveIcon, CONTAINER_LEN, CONTAINER_MAGIC, DATA_BLOCKS,
-    FLAG_COMPRESSED, FRAMES_PER_BLOCK, FRAME_SIZE, MAX_NAME,
+    FLAG_COMPRESSED, FRAMES_PER_BLOCK, FRAME_SIZE, MAX_NAME_LEN,
 };
 
 // Directory entry field offsets.
@@ -424,7 +424,7 @@ impl<B: Block> Card<B> {
             if n >= out.len() {
                 break;
             }
-            let mut name = [0u8; MAX_NAME + 1];
+            let mut name = [0u8; MAX_NAME_LEN + 1];
             let name_len = copy_entry_name(&e, &mut name);
             let blocks = self.chain(i)?.len as u8;
             out[n] = Entry {
@@ -587,7 +587,7 @@ impl<B: Block> Card<B> {
                 // Sony's directory field is allocated file size, not payload
                 // length: one 0x2000-byte unit for every linked card block.
                 write_u32(&mut e[E_SIZE..], (need * BLOCK_CAP) as u32);
-                let n = name.len().min(MAX_NAME);
+                let n = name.len().min(MAX_NAME_LEN);
                 e[E_NAME..E_NAME + n].copy_from_slice(&name[..n]);
             }
             self.write_dir(alloc[k] as usize, &mut e)?;
@@ -699,7 +699,7 @@ impl<B: Block> Card<B> {
 // --------------------------------------------------------------------------
 
 fn validate_name(name: &[u8]) -> Result<()> {
-    if name.is_empty() || name.len() > MAX_NAME {
+    if name.is_empty() || name.len() > MAX_NAME_LEN {
         return Err(Error::BadName);
     }
     if name.iter().any(|&b| !(0x20..=0x7E).contains(&b)) {
@@ -716,14 +716,14 @@ fn validate_title(title: &str) -> Result<()> {
 }
 
 fn entry_name_eq(entry: &[u8; FRAME_SIZE], name: &[u8]) -> bool {
-    let mut buf = [0u8; MAX_NAME + 1];
+    let mut buf = [0u8; MAX_NAME_LEN + 1];
     let len = copy_entry_name(entry, &mut buf) as usize;
     &buf[..len] == name
 }
 
-fn copy_entry_name(entry: &[u8; FRAME_SIZE], out: &mut [u8; MAX_NAME + 1]) -> u8 {
+fn copy_entry_name(entry: &[u8; FRAME_SIZE], out: &mut [u8; MAX_NAME_LEN + 1]) -> u8 {
     let mut len = 0;
-    while len < MAX_NAME {
+    while len < MAX_NAME_LEN {
         let b = entry[E_NAME + len];
         if b == 0 {
             break;
