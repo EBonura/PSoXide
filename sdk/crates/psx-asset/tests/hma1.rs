@@ -5,7 +5,7 @@
 //! model. These tests build a small blob by hand, decode it, and confirm that
 //! truncation and damaged tables are rejected rather than trusted.
 
-use psx_asset::hma1::{Aff, Model};
+use psx_asset::hma1::{Affine, Model};
 
 const N_BONES: usize = 2;
 /// Segments of the keyed rate-0 track: keys at five source frames.
@@ -100,11 +100,11 @@ fn new(bytes: Vec<u8>) -> Option<Model> {
 #[test]
 fn decodes_a_minimal_blob_at_any_position() {
     let model = new(build_blob().0).expect("well-formed blob");
-    assert_eq!(model.n_bones(), N_BONES);
-    assert_eq!(model.n_clips(), 1);
+    assert_eq!(model.bone_count(), N_BONES);
+    assert_eq!(model.clip_count(), 1);
     assert_eq!(model.clip_intervals(0), SEGMENTS as u32);
 
-    let mut out = [Aff::ZERO; N_BONES];
+    let mut out = [Affine::ZERO; N_BONES];
     // Past the end and past the last clip both clamp instead of reading on.
     for (clip, pos) in [(0, 0), (0, 300), (0, 4 * 256), (0, 100_000), (9, 50)] {
         model.decode(clip, pos, &mut out);
@@ -114,7 +114,7 @@ fn decodes_a_minimal_blob_at_any_position() {
     }
 
     // A scratch buffer too small for the bones is left alone.
-    let mut short = [Aff::ZERO; 1];
+    let mut short = [Affine::ZERO; 1];
     model.decode(0, 0, &mut short);
     assert_eq!(short[0].t, [0; 3]);
 }

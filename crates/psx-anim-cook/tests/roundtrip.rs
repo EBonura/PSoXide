@@ -60,7 +60,7 @@ fn runtime_decoder_matches_reference() {
     let runtime = psx_asset::hma1::Model::new(leaked).expect("cooked HMA1 validates");
     let reference = hma_dec::ModelView::new(&e.bytes);
     for pos_q8 in (0..30 * 256).step_by(37) {
-        let mut a = [psx_asset::hma1::Aff::ZERO; 3];
+        let mut a = [psx_asset::hma1::Affine::ZERO; 3];
         runtime.decode(0, pos_q8, &mut a);
         let mut b = [hma_dec::Affine::default(); 3];
         reference.decode(&reference.clip(0), pos_q8, true, &mut b);
@@ -128,7 +128,7 @@ fn jaw_controller_matches_reference_both_ways() {
         for amount in [0u8, 17, 40, 64] {
             let jaw = psx_asset::hma1::Jaw::open(1, post, jaw_q(30.0), amount);
             for pos_q8 in (0..30 * 256).step_by(211) {
-                let mut a = [psx_asset::hma1::Aff::ZERO; 3];
+                let mut a = [psx_asset::hma1::Affine::ZERO; 3];
                 runtime.decode_with(0, pos_q8, &jaw, &mut a);
                 let mut b = [hma_dec::Affine::default(); 3];
                 let rj = (jaw.bone != usize::MAX).then_some((jaw.bone, jaw.post, jaw.q));
@@ -242,9 +242,9 @@ fn hmd8_tracks_drive_phase_and_pose() {
         open: jaw_q(30.0),
     };
     // 15 quanta = 30 ticks at the 20 Hz game clock
-    let md = psx_asset::hmd8::Model::load(hmd8_with_tracks(&e.bytes, Some(jaw), 15));
+    let md = psx_asset::hmd8::Model::from_bytes(hmd8_with_tracks(&e.bytes, Some(jaw), 15));
     assert!(
-        md.has_tracks() && md.n_ranges == 3,
+        md.has_tracks() && md.bone_range_count() == 3,
         "tracks section rejected"
     );
     assert_eq!(md.clip_hold_ticks(0), 30);
@@ -260,7 +260,7 @@ fn hmd8_tracks_drive_phase_and_pose() {
         (12 * 256, 64),
         (29 * 256 + 3, 21),
     ] {
-        let mut scratch = [psx_asset::hma1::Aff::ZERO; 8];
+        let mut scratch = [psx_asset::hma1::Affine::ZERO; 8];
         let pose = md.pose(0, 0, pos, mouth, &mut scratch);
         let j = psx_asset::hma1::Jaw::open(1, false, jaw.open, mouth);
         let rj = (j.bone != usize::MAX).then_some((j.bone, j.post, j.q));
@@ -278,7 +278,7 @@ fn hmd8_tracks_drive_phase_and_pose() {
         }
     }
     // too little scratch: the bind palette, never a partial decode
-    let mut small = [psx_asset::hma1::Aff::ZERO; 2];
+    let mut small = [psx_asset::hma1::Affine::ZERO; 2];
     assert!(matches!(
         md.pose(0, 0, 0, 0, &mut small),
         psx_asset::hmd8::Pose::Palette(_)
@@ -295,6 +295,10 @@ fn hmd8_rejects_a_jaw_outside_the_tracks() {
         post: false,
         open: jaw_q(30.0),
     };
-    let md = psx_asset::hmd8::Model::load(hmd8_with_tracks(&e.bytes, Some(jaw), 15));
-    assert_eq!(md.n_ranges, 0, "a bad section must fail the whole model");
+    let md = psx_asset::hmd8::Model::from_bytes(hmd8_with_tracks(&e.bytes, Some(jaw), 15));
+    assert_eq!(
+        md.bone_range_count(),
+        0,
+        "a bad section must fail the whole model"
+    );
 }
