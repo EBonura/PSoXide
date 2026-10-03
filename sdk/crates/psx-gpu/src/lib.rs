@@ -737,17 +737,21 @@ pub fn submit_linked_list_async(head: *const u32) {
     // VRAM readback and forget to reset it.
     write_gp1(gp1::dma_direction(2));
     dma::enable_channel(Channel::Gpu);
-    dma::set_madr(Channel::Gpu, head as u32);
-    // BCR is ignored in linked-list mode but must be written to
-    // some value on real hardware; zero is conventional.
-    dma::set_bcr_manual(Channel::Gpu, 0);
-    // Publish ordinary RAM payload/tag stores before the volatile DMA start.
-    // Volatile MMIO alone is not a compiler barrier for unrelated memory.
-    dma_memory_barrier();
-    dma::set_chcr(
-        Channel::Gpu,
-        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
-    );
+    // SAFETY: none yet; this function's caller supplies `head` unchecked.
+    // The channel is idle (waited out or aborted above). `dma::start`
+    // publishes the payload and tag stores before the CHCR store.
+    unsafe {
+        dma::start(
+            Channel::Gpu,
+            dma::Transfer {
+                madr: head as u32,
+                // BCR is ignored in linked-list mode but must be written to
+                // some value on real hardware; zero is conventional.
+                bcr: dma::bcr_words(0),
+                chcr: dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
+            },
+        )
+    };
 }
 
 /// Block until the GPU-DMA linked-list walk kicked by

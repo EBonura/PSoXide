@@ -212,13 +212,18 @@ pub fn reset() -> bool {
 /// `words` must stay alive and unmodified until DMA0 completes.
 unsafe fn dma_in(words: *const u32, count: usize) {
     dma::abort(Channel::MdecIn);
-    dma::set_madr(Channel::MdecIn, words as u32);
-    dma::set_bcr_block(
-        Channel::MdecIn,
-        DMA_BLOCK_WORDS as u16,
-        (count / DMA_BLOCK_WORDS) as u16,
-    );
-    dma::set_chcr(Channel::MdecIn, CHCR_IN);
+    // SAFETY: the channel was just aborted, so it is idle; the caller keeps
+    // `count` words at `words` alive and unmodified until DMA0 completes.
+    unsafe {
+        dma::start(
+            Channel::MdecIn,
+            dma::Transfer {
+                madr: words as u32,
+                bcr: dma::bcr_blocks(DMA_BLOCK_WORDS as u16, (count / DMA_BLOCK_WORDS) as u16),
+                chcr: CHCR_IN,
+            },
+        )
+    };
 }
 
 /// How [`load_tables`] got the tables in.
@@ -398,14 +403,31 @@ pub fn decode<R>(rle: &[u32], mode: u32, columns: impl FnOnce() -> R) -> (R, boo
 /// over DMA1 and wait for them. For 15bpp one 16-pixel-wide column of
 /// height `h` is `8 * h` words. `false` if DMA1 wedged.
 pub fn read_column(dst: &mut [u32]) -> bool {
+    let blocks = dst.len() / DMA_BLOCK_WORDS;
+    // Silicon reads a zero block count as 65,536 blocks, so a slice shorter
+    // than one block would be overrun by megabytes; one too long for BCR
+    // would be cut short. Refuse both rather than write past `dst`.
+    let Ok(blocks) = u16::try_from(blocks) else {
+        return false;
+    };
+    if blocks == 0 {
+        return false;
+    }
     dma::abort(Channel::MdecOut);
-    dma::set_madr(Channel::MdecOut, dst.as_mut_ptr() as u32);
-    dma::set_bcr_block(
-        Channel::MdecOut,
-        DMA_BLOCK_WORDS as u16,
-        (dst.len() / DMA_BLOCK_WORDS) as u16,
-    );
-    dma::set_chcr(Channel::MdecOut, CHCR_OUT);
+    // SAFETY: the channel was just aborted, so it is idle. The transfer
+    // writes `blocks * DMA_BLOCK_WORDS` words, no more than `dst.len()`,
+    // into `dst`, borrowed exclusively until this function returns; the
+    // wait below, or the abort on a wedge, ends it before then.
+    unsafe {
+        dma::start(
+            Channel::MdecOut,
+            dma::Transfer {
+                madr: dst.as_mut_ptr() as u32,
+                bcr: dma::bcr_blocks(DMA_BLOCK_WORDS as u16, blocks),
+                chcr: CHCR_OUT,
+            },
+        )
+    };
     if dma::wait_done(Channel::MdecOut, DMA_SPINS) {
         true
     } else {
