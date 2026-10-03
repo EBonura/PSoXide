@@ -238,6 +238,7 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
     }
 
     /// Submit, wait for DMA and GPU, and reset the buffer for reuse.
+    #[doc(alias = "DrawSync")]
     pub fn draw_sync(&mut self) {
         self.submit();
         if self.submitted {

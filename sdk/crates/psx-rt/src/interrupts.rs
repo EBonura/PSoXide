@@ -403,6 +403,7 @@ pub fn fault_epc() -> u32 {
 
 /// Current monotonic VBlank count.
 #[inline]
+#[doc(alias = "VSync")]
 pub fn vblank_count() -> u32 {
     // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. The
     // asm handler and `install_vblank_counter` are the only writers, and an aligned word load
@@ -509,6 +510,7 @@ pub fn gp1_queue_pending() -> bool {
 /// Installs the VBlank counter on first use if the game has not already
 /// called [`install_vblank_counter`].
 #[cfg(target_arch = "mips")]
+#[doc(alias = "VSync")]
 pub fn wait_vblank() {
     // SAFETY: a volatile read of the private INSTALLED flag through a raw pointer; only
     // `install_vblank_counter` writes it, on this same single thread.
@@ -524,6 +526,7 @@ pub fn wait_vblank() {
 /// Block until the next VBlank IRQ. Host no-op: the counter never
 /// advances off-target, so waiting would hang.
 #[cfg(not(target_arch = "mips"))]
+#[doc(alias = "VSync")]
 pub fn wait_vblank() {}
 
 /// True when the general exception vector jumps to psx-rt's handler, the
