@@ -222,7 +222,7 @@ impl<const START: usize, const END: usize> ScratchpadStack<START, END> {
     pub unsafe fn run<R, F: FnOnce() -> R>(f: F) -> R {
         // Force the layout checks for every instantiation.
         let region = Self::REGION;
-        if on_scratchpad_stack() {
+        if is_on_scratchpad_stack() {
             return f();
         }
         let mut frame = Frame::<F, R> {
@@ -268,7 +268,7 @@ struct Frame<F, R> {
 
 /// True while `$sp` points into the scratchpad. Always false on the host.
 #[inline(always)]
-pub fn on_scratchpad_stack() -> bool {
+pub fn is_on_scratchpad_stack() -> bool {
     #[cfg(target_arch = "mips")]
     {
         crate::stack_pointer().wrapping_sub(BASE) <= SIZE
@@ -277,6 +277,13 @@ pub fn on_scratchpad_stack() -> bool {
     {
         false
     }
+}
+
+/// Renamed to [`is_on_scratchpad_stack`].
+#[deprecated(note = "renamed to `is_on_scratchpad_stack`")]
+#[inline(always)]
+pub fn on_scratchpad_stack() -> bool {
+    is_on_scratchpad_stack()
 }
 
 // void __psx_rt_call_on_stack(void *frame, void (*entry)(void *), void *sp)
@@ -365,7 +372,7 @@ unsafe fn call_on_stack(frame: *mut u8, entry: unsafe extern "C" fn(*mut u8), _s
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 pub(crate) fn leave_for_panic(arg: *const u8, report: extern "C" fn(*const u8) -> !) {
-    if !on_scratchpad_stack() {
+    if !is_on_scratchpad_stack() {
         return;
     }
     // SAFETY: a plain read; the value is either zero or a RAM stack
@@ -388,8 +395,8 @@ mod check {
 
     #[cfg(target_arch = "mips")]
     pub(super) fn before(region: Region) {
-        if crate::interrupts::cpu_interrupts_enabled()
-            && !crate::interrupts::stack_safe_handler_installed()
+        if crate::interrupts::are_interrupts_enabled()
+            && !crate::interrupts::is_stack_safe_handler_installed()
         {
             panic!(
                 "scratchpad stack: interrupts are on and the exception vector is neither psx-rt's \
@@ -474,6 +481,6 @@ mod tests {
             })
         };
         assert_eq!((touched, len, words), (1, 5, [7; 9]));
-        assert!(!on_scratchpad_stack());
+        assert!(!is_on_scratchpad_stack());
     }
 }

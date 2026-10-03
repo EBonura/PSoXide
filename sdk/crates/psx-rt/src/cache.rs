@@ -84,7 +84,7 @@ extern "C" {
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 #[doc(alias = "FlushCache")]
-pub fn flush_i_cache() {
+pub fn flush_instruction_cache() {
     // SAFETY: `__psx_rt_flush_i_cache` (the global_asm above) follows the O32 ABI: it clobbers only
     // the caller-saved $8-$11, returns through $ra, and restores the caller's SR and the normal
     // cache-control value. Its stores go to isolated cache tags, never to memory, so it is sound
@@ -95,4 +95,11 @@ pub fn flush_i_cache() {
 /// Host no-op so shared code can call unconditionally.
 #[cfg(not(target_arch = "mips"))]
 #[doc(alias = "FlushCache")]
-pub fn flush_i_cache() {}
+pub fn flush_instruction_cache() {}
+
+/// Renamed to [`flush_instruction_cache`].
+#[deprecated(note = "renamed to `flush_instruction_cache`")]
+#[inline(always)]
+pub fn flush_i_cache() {
+    flush_instruction_cache()
+}

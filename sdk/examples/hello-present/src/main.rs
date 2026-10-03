@@ -61,7 +61,7 @@ static mut FRAME: FrameStorage<8, [TriGouraud; TRIS]> = FrameStorage::new([EMPTY
 /// Returns whether it was applied.
 fn wait_flip(limit: u32) -> bool {
     let start = interrupts::vblank_count();
-    while interrupts::gp1_queue_pending() {
+    while interrupts::is_display_control_queued() {
         if interrupts::vblank_count().wrapping_sub(start) > limit {
             return false;
         }
@@ -137,17 +137,17 @@ fn main() {
     let (in_flight, ()) = storage.draw_async(dma, |frame, packets| {
         build_frame(frame, packets, TRIS as u32, false)
     });
-    interrupts::queue_gp1_at_vblank(fb.begin_deferred_swap());
+    interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
     gpu::wait_idle();
     (storage, dma) = in_flight.wait();
     wait_vblanks(4);
-    let held = interrupts::gp1_queue_pending() && !gpu::is_draw_done();
+    let held = interrupts::is_display_control_queued() && !gpu::is_draw_done();
 
     // 2. Released: GP0(1Fh) through the port lets it land.
     gpu::signal_draw_done();
     let released = wait_flip(4);
     if !released {
-        let word = interrupts::take_pending_gp1();
+        let word = interrupts::take_queued_display_control();
         if word != 0 {
             psx_io::gpu::write_display_control(word);
         }
@@ -163,11 +163,11 @@ fn main() {
         gpu::arm_draw_done();
         let (in_flight, ()) =
             storage.draw_async(dma, |frame, packets| build_frame(frame, packets, f, true));
-        interrupts::queue_gp1_at_vblank(fb.begin_deferred_swap());
+        interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
         if !wait_flip(WAIT_LIMIT) {
             timeouts += 1;
             gpu::wait_idle();
-            let word = interrupts::take_pending_gp1();
+            let word = interrupts::take_queued_display_control();
             if word != 0 {
                 psx_io::gpu::write_display_control(word);
             }
@@ -229,7 +229,7 @@ fn main() {
         }
         gpu::arm_draw_done();
         gpu::signal_draw_done();
-        interrupts::queue_gp1_at_vblank(fb.begin_deferred_swap());
+        interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
         wait_flip(WAIT_LIMIT);
     }
 }

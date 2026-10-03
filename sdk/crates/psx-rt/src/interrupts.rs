@@ -231,7 +231,7 @@ static mut __psx_rt_fault_badvaddr: u32 = 0;
 
 /// One queued GP1 word the VBlank handler writes to the GPU at the first
 /// blank edge on which GPUSTAT bit 24 is set, then clears. Zero = empty.
-/// Written by [`queue_gp1_at_vblank`].
+/// Written by [`queue_display_control_at_vblank`].
 #[no_mangle]
 static mut __psx_rt_pending_gp1: u32 = 0;
 
@@ -267,7 +267,7 @@ pub fn install_vblank_counter() {
         let handler = __psx_rt_exception_handler as *const () as usize as u32;
         core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((handler >> 2) & 0x03ff_ffff));
         core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
-        crate::cache::flush_i_cache();
+        crate::cache::flush_instruction_cache();
 
         core::ptr::write_volatile(&raw mut __psx_rt_vblank_count, 0);
         irq::acknowledge(1 << psx_hw::irq::source::VBLANK);
@@ -334,9 +334,9 @@ pub const fn interrupt_resume_pc(epc: u32, word_at_epc: u32) -> u32 {
     }
 }
 
-/// COP0 Cause.BD: the exception was taken in the delay slot of the branch
-/// at EPC.
-pub const CAUSE_BD: u32 = 1 << 31;
+/// Moved to [`psx_hw::cop0::CAUSE_BD`].
+#[deprecated(note = "renamed to `psx_hw::cop0::CAUSE_BD`")]
+pub const CAUSE_BD: u32 = psx_hw::cop0::CAUSE_BD;
 
 /// Where psx-rt's exception handler resumes after a fault (any exception
 /// but an interrupt), or `None` where it halts. `badvaddr` is COP0
@@ -344,7 +344,7 @@ pub const CAUSE_BD: u32 = 1 << 31;
 ///
 /// BREAK (the shipping form of `panic=immediate-abort`), an instruction bus
 /// error and a misaligned instruction fetch (AdEL with BadVAddr == EPC)
-/// halt. So does any fault with [`CAUSE_BD`] set: the faulting instruction
+/// halt. So does any fault with [`psx_hw::cop0::CAUSE_BD`] set: the faulting instruction
 /// sat in the delay slot of the branch at EPC, which has already run, so
 /// `epc + 4` would run the faulting instruction again as if the branch had
 /// fallen through, and resuming where the branch goes would take decoding
@@ -352,8 +352,8 @@ pub const CAUSE_BD: u32 = 1 << 31;
 /// Every other fault is stepped over (`epc + 4`) and counted, unless
 /// [`STRICT_FAULTS`] is set, in which case every fault halts. The
 /// handler's assembly makes exactly this decision; before halting it
-/// records Cause, EPC and BadVAddr ([`fault_cause`], [`fault_epc`],
-/// [`fault_badvaddr`]).
+/// records Cause, EPC and BadVAddr ([`fault_cause`], [`fault_pc`],
+/// [`fault_bad_address`]).
 pub const fn fault_resume_pc(cause: u32, epc: u32, badvaddr: u32) -> Option<u32> {
     resume_after_fault(STRICT_FAULTS, cause, epc, badvaddr)
 }
@@ -370,7 +370,7 @@ const fn resume_after_fault(strict: bool, cause: u32, epc: u32, badvaddr: u32) -
         4 if badvaddr == epc => return None,
         _ => {}
     }
-    if cause & CAUSE_BD != 0 {
+    if cause & psx_hw::cop0::CAUSE_BD != 0 {
         None
     } else {
         Some(epc.wrapping_add(4))
@@ -379,10 +379,18 @@ const fn resume_after_fault(strict: bool, cause: u32, epc: u32, badvaddr: u32) -
 
 /// COP0 BadVAddr captured for the latest unexpected exception.
 #[inline]
-pub fn fault_badvaddr() -> u32 {
+#[doc(alias = "BadVAddr")]
+pub fn fault_bad_address() -> u32 {
     // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
     // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_badvaddr) }
+}
+
+/// Renamed to [`fault_bad_address`].
+#[deprecated(note = "renamed to `fault_bad_address`")]
+#[inline(always)]
+pub fn fault_badvaddr() -> u32 {
+    fault_bad_address()
 }
 
 /// Raw COP0 Cause captured for the latest unexpected exception.
@@ -395,10 +403,18 @@ pub fn fault_cause() -> u32 {
 
 /// COP0 EPC captured for the latest unexpected exception.
 #[inline]
-pub fn fault_epc() -> u32 {
+#[doc(alias = "EPC")]
+pub fn fault_pc() -> u32 {
     // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
     // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_epc) }
+}
+
+/// Renamed to [`fault_pc`].
+#[deprecated(note = "renamed to `fault_pc`")]
+#[inline(always)]
+pub fn fault_epc() -> u32 {
+    fault_pc()
 }
 
 /// Current monotonic VBlank count.
@@ -436,7 +452,8 @@ pub fn vblank_count() -> u32 {
 /// acknowledge it.
 #[cfg(target_arch = "mips")]
 #[inline]
-pub fn queue_gp1_at_vblank(word: u32) {
+#[doc(alias = "GP1")]
+pub fn queue_display_control_at_vblank(word: u32) {
     // SAFETY: a volatile aligned u32 store through a raw pointer, so no reference is formed. The
     // VBlank handler is the only other accessor, and an aligned word store cannot tear.
     unsafe { core::ptr::write_volatile(&raw mut __psx_rt_pending_gp1, word) }
@@ -445,13 +462,22 @@ pub fn queue_gp1_at_vblank(word: u32) {
 /// Host no-op: no IRQ exists to consume the queue off-target.
 #[cfg(not(target_arch = "mips"))]
 #[inline]
-pub fn queue_gp1_at_vblank(_word: u32) {}
+#[doc(alias = "GP1")]
+pub fn queue_display_control_at_vblank(_word: u32) {}
 
-/// True while a word queued by [`queue_gp1_at_vblank`] has not yet been
-/// applied by the VBlank handler.
+/// Renamed to [`queue_display_control_at_vblank`].
+#[deprecated(note = "renamed to `queue_display_control_at_vblank`")]
+#[inline(always)]
+pub fn queue_gp1_at_vblank(word: u32) {
+    queue_display_control_at_vblank(word)
+}
+
+/// True while a word queued by [`queue_display_control_at_vblank`] has not
+/// yet been applied by the VBlank handler.
 #[cfg(target_arch = "mips")]
 #[inline]
-pub fn gp1_queue_pending() -> bool {
+#[doc(alias = "GP1")]
+pub fn is_display_control_queued() -> bool {
     // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. The
     // VBlank handler is the only other accessor, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_pending_gp1) != 0 }
@@ -461,9 +487,9 @@ pub fn gp1_queue_pending() -> bool {
 /// the caller can write it to GP1 itself. Returns 0 when nothing was queued.
 ///
 /// The handler only applies its word at a blank edge on which GPUSTAT
-/// bit 24 is set (see [`queue_gp1_at_vblank`]), so a long enough frame, or
+/// bit 24 is set (see [`queue_display_control_at_vblank`]), so a long enough frame, or
 /// one that never sends GP0(1Fh), leaves it queued indefinitely. A caller that has given up waiting must take the word
-/// rather than leave it: the next [`queue_gp1_at_vblank`] overwrites the
+/// rather than leave it: the next [`queue_display_control_at_vblank`] overwrites the
 /// slot, and a display start that never reaches the GPU desynchronises the
 /// display side from the draw side for the rest of the session.
 ///
@@ -472,7 +498,8 @@ pub fn gp1_queue_pending() -> bool {
 /// value again; GP1(05h) is idempotent.
 #[cfg(target_arch = "mips")]
 #[inline]
-pub fn take_pending_gp1() -> u32 {
+#[doc(alias = "GP1")]
+pub fn take_queued_display_control() -> u32 {
     // SAFETY: volatile aligned u32 accesses through a raw pointer, so no reference is formed. A
     // handler run between the read and the clear is harmless (see above).
     unsafe {
@@ -487,15 +514,31 @@ pub fn take_pending_gp1() -> u32 {
 /// Host: nothing is ever queued, so nothing can be taken.
 #[cfg(not(target_arch = "mips"))]
 #[inline]
-pub fn take_pending_gp1() -> u32 {
+#[doc(alias = "GP1")]
+pub fn take_queued_display_control() -> u32 {
     0
+}
+
+/// Renamed to [`take_queued_display_control`].
+#[deprecated(note = "renamed to `take_queued_display_control`")]
+#[inline(always)]
+pub fn take_pending_gp1() -> u32 {
+    take_queued_display_control()
 }
 
 /// Host no-op: nothing is ever pending off-target.
 #[cfg(not(target_arch = "mips"))]
 #[inline]
-pub fn gp1_queue_pending() -> bool {
+#[doc(alias = "GP1")]
+pub fn is_display_control_queued() -> bool {
     false
+}
+
+/// Renamed to [`is_display_control_queued`].
+#[deprecated(note = "renamed to `is_display_control_queued`")]
+#[inline(always)]
+pub fn gp1_queue_pending() -> bool {
+    is_display_control_queued()
 }
 
 /// Block until the next VBlank IRQ.
@@ -532,9 +575,17 @@ pub fn wait_vblank() {}
 /// True when the general exception vector jumps to psx-rt's handler, the
 /// one that never touches `$sp` (so interrupts are safe on any stack).
 #[cfg(target_arch = "mips")]
-pub fn handler_installed() -> bool {
+pub fn is_handler_installed() -> bool {
     let handler = __psx_rt_exception_handler as *const () as usize as u32;
     vector_word() == jump_word(handler)
+}
+
+/// Renamed to [`is_handler_installed`].
+#[cfg(target_arch = "mips")]
+#[deprecated(note = "renamed to `is_handler_installed`")]
+#[inline(always)]
+pub fn handler_installed() -> bool {
+    is_handler_installed()
 }
 
 /// The vector word of a game's exception handler declared with
@@ -592,10 +643,18 @@ pub unsafe fn declare_stack_safe_handler(_handler: unsafe extern "C" fn()) {}
 /// True when the general exception vector jumps to psx-rt's handler or to
 /// the one declared with [`declare_stack_safe_handler`].
 #[cfg(target_arch = "mips")]
-pub fn stack_safe_handler_installed() -> bool {
+pub fn is_stack_safe_handler_installed() -> bool {
     // SAFETY: a plain read of a word only this module writes.
     let declared = unsafe { core::ptr::read_volatile(&raw const STACK_SAFE_HANDLER) };
-    handler_installed() || (declared != 0 && vector_word() == declared)
+    is_handler_installed() || (declared != 0 && vector_word() == declared)
+}
+
+/// Renamed to [`is_stack_safe_handler_installed`].
+#[cfg(target_arch = "mips")]
+#[deprecated(note = "renamed to `is_stack_safe_handler_installed`")]
+#[inline(always)]
+pub fn stack_safe_handler_installed() -> bool {
+    is_stack_safe_handler_installed()
 }
 
 /// The `j handler` word psx-rt writes into the vector.
@@ -614,13 +673,21 @@ fn vector_word() -> u32 {
 
 /// True when COP0 SR has interrupts enabled (IEc).
 #[cfg(target_arch = "mips")]
-pub fn cpu_interrupts_enabled() -> bool {
+pub fn are_interrupts_enabled() -> bool {
     let sr: u32;
     // The nop covers MFC0's load delay.
     // SAFETY: reads COP0 SR into $8, declared as the output, and the nop covers MFC0's load delay.
     // No memory or stack is touched, as the options state.
     unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr, options(nomem, nostack)) };
     sr & 1 != 0
+}
+
+/// Renamed to [`are_interrupts_enabled`].
+#[cfg(target_arch = "mips")]
+#[deprecated(note = "renamed to `are_interrupts_enabled`")]
+#[inline(always)]
+pub fn cpu_interrupts_enabled() -> bool {
+    are_interrupts_enabled()
 }
 
 #[cfg(target_arch = "mips")]
@@ -761,7 +828,7 @@ mod tests {
         // branch would fall through), so the handler halts instead.
         for cause in [ADEL, ADES, DBE, RI, CPU, OV] {
             assert_eq!(
-                resume_after_fault(false, cause | CAUSE_BD, EPC, BAD_DATA),
+                resume_after_fault(false, cause | psx_hw::cop0::CAUSE_BD, EPC, BAD_DATA),
                 None,
                 "{cause:#x}"
             );
@@ -770,7 +837,7 @@ mod tests {
 
     #[test]
     fn fatal_faults_halt_in_or_out_of_a_delay_slot() {
-        for bd in [0, CAUSE_BD] {
+        for bd in [0, psx_hw::cop0::CAUSE_BD] {
             assert_eq!(resume_after_fault(false, BREAK | bd, EPC, 0), None);
             assert_eq!(resume_after_fault(false, IBE | bd, EPC, 0), None);
             assert_eq!(resume_after_fault(false, ADEL | bd, EPC, EPC), None);
@@ -784,14 +851,17 @@ mod tests {
         // fault there (Coprocessor Unusable with SR.CU2 clear, say) halts.
         let bne = 0x1509_FFFC;
         assert_eq!(interrupt_resume_pc(EPC, bne), EPC);
-        assert_eq!(resume_after_fault(false, CPU | CAUSE_BD, EPC, 0), None);
+        assert_eq!(
+            resume_after_fault(false, CPU | psx_hw::cop0::CAUSE_BD, EPC, 0),
+            None
+        );
         // Outside a delay slot the same fault steps over the RTPS.
         assert_eq!(resume_after_fault(false, CPU, EPC, 0), Some(EPC + 4));
     }
 
     #[test]
     fn strict_faults_halt_on_every_fault() {
-        for bd in [0, CAUSE_BD] {
+        for bd in [0, psx_hw::cop0::CAUSE_BD] {
             for cause in [ADEL, ADES, IBE, DBE, BREAK, RI, CPU, OV] {
                 assert_eq!(
                     resume_after_fault(true, cause | bd, EPC, BAD_DATA),
