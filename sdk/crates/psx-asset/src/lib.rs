@@ -1034,6 +1034,14 @@ impl<'a> Animation<'a> {
         }
     }
 
+    /// Decode the joint record `joint_index` of the frame starting at
+    /// logical byte offset `frame_offset`.
+    ///
+    /// # Safety
+    /// `frame_offset` must be `frame * joint_count * pose_record_size` for a
+    /// frame `< frame_count`, and `joint_index < joint_count`. `from_bytes`
+    /// sized `poses` (or validated every dictionary index) so that such a
+    /// record lies wholly inside `poses`.
     #[inline]
     unsafe fn pose_at_frame_offset_unchecked(
         &self,
@@ -1042,35 +1050,60 @@ impl<'a> Animation<'a> {
     ) -> JointPose {
         let base = self.record_offset(frame_offset + joint_index as usize * self.pose_record_size);
         if self.poses.as_ptr() as usize & 1 != 0 {
+            // SAFETY: per this fn's `# Safety` section the whole record at
+            // `base` is inside `poses`; the byte decoder needs no alignment.
             return unsafe { self.pose_at_byte_offset_unaligned(base) };
         }
         if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V4 {
+            // SAFETY: the record is `POSE_RECORD_SIZE_V4` (16) bytes and lies
+            // inside `poses` per this fn's `# Safety` section, so `base + 16`
+            // is in bounds; `pose_v4_unchecked` checks alignment itself.
             return unsafe { self.pose_v4_unchecked(base) };
         }
         if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V3 {
+            // SAFETY: the record is `POSE_RECORD_SIZE_V3` (20) bytes and lies
+            // inside `poses` per this fn's `# Safety` section, so `base + 20`
+            // is in bounds; `pose_v3_unchecked` checks alignment itself.
             return unsafe { self.pose_v3_unchecked(base) };
         }
+        // Only v1 (30-byte) and v2 (24-byte) records reach here. Both are
+        // non-dictionary, so `base` is a multiple of an even record size,
+        // and `poses` is 2-byte aligned (checked above): every i16 below is
+        // aligned. The record covers bytes `base..base + 24` at least.
+        // SAFETY: the 18-byte matrix at `base` is inside the in-bounds record
+        // (this fn's `# Safety` section) and 2-byte aligned as argued above.
         let matrix = unsafe { read_pose_matrix_aligned_unchecked(self.poses, base) };
         let off = 18;
         let translation = if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE {
+            // v2 records are 24 bytes, so `base + 18..base + 24` is inside
+            // the in-bounds record, and each offset is even on a 2-byte-aligned
+            // pool.
             Vec3I32::new(
                 decode_packed_translation(
+                    // SAFETY: bytes `base + 18..base + 20` of the 24-byte record, even offset.
                     unsafe { read_i16_aligned_unchecked(self.poses, base + off) },
                     self.translation_shift,
                 ),
                 decode_packed_translation(
+                    // SAFETY: bytes `base + 20..base + 22` of the 24-byte record, even offset.
                     unsafe { read_i16_aligned_unchecked(self.poses, base + off + 2) },
                     self.translation_shift,
                 ),
                 decode_packed_translation(
+                    // SAFETY: bytes `base + 22..base + 24` of the 24-byte record, even offset.
                     unsafe { read_i16_aligned_unchecked(self.poses, base + off + 4) },
                     self.translation_shift,
                 ),
             )
         } else {
+            // v1 records are 30 bytes: three byte-wise i32 reads at
+            // `base + 18..base + 30`, all inside the in-bounds record.
             Vec3I32::new(
+                // SAFETY: bytes `base + 18..base + 22` of the v1 record.
                 unsafe { read_i32_unchecked(self.poses, base + off) },
+                // SAFETY: bytes `base + 22..base + 26` of the v1 record.
                 unsafe { read_i32_unchecked(self.poses, base + off + 4) },
+                // SAFETY: bytes `base + 26..base + 30` of the v1 record.
                 unsafe { read_i32_unchecked(self.poses, base + off + 8) },
             )
         };
@@ -1091,15 +1124,23 @@ impl<'a> Animation<'a> {
     /// # Safety
     /// `base + 20` must be in bounds.
     unsafe fn pose_v3_unchecked(&self, base: usize) -> JointPose {
+        // SAFETY: `base + 20 <= poses.len()` (this fn's `# Safety` section),
+        // so `base` is within the allocation.
         let record = unsafe { self.poses.as_ptr().add(base) };
         let (matrix, packed_translation) = if record as usize & 3 == 0 {
+            // SAFETY: `base + 20` is in bounds and the record pointer was just
+            // checked to be word aligned.
             unsafe { read_pose_v3_word_aligned_unchecked(self.poses, base) }
         } else {
+            // SAFETY: needs `base + 14` in bounds; `base + 20` is.
             let matrix = unsafe { read_pose_matrix_q11_unchecked(self.poses, base) };
             let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
             let translation = Vec3I16::new(
+                // SAFETY: bytes `base + 14..base + 16`, inside `base + 20`.
                 unsafe { read_i16_unchecked(self.poses, base + off) },
+                // SAFETY: bytes `base + 16..base + 18`, inside `base + 20`.
                 unsafe { read_i16_unchecked(self.poses, base + off + 2) },
+                // SAFETY: bytes `base + 18..base + 20`, inside `base + 20`.
                 unsafe { read_i16_unchecked(self.poses, base + off + 4) },
             );
             (matrix, translation)
@@ -1121,15 +1162,23 @@ impl<'a> Animation<'a> {
     /// # Safety
     /// `base + 16` must be in bounds.
     unsafe fn pose_v4_unchecked(&self, base: usize) -> JointPose {
+        // SAFETY: `base + 16 <= poses.len()` (this fn's `# Safety` section),
+        // so `base` is within the allocation.
         let record = unsafe { self.poses.as_ptr().add(base) };
         let (matrix, packed_translation) = if record as usize & 3 == 0 {
+            // SAFETY: `base + 16` is in bounds and the record pointer was just
+            // checked to be word aligned.
             unsafe { read_pose_v4_word_aligned_unchecked(self.poses, base) }
         } else {
+            // SAFETY: needs `base + 10` in bounds; `base + 16` is.
             let matrix = unsafe { read_pose_matrix_q11_cross_unchecked(self.poses, base) };
             let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4;
             let translation = Vec3I16::new(
+                // SAFETY: bytes `base + 10..base + 12`, inside `base + 16`.
                 unsafe { read_i16_unchecked(self.poses, base + off) },
+                // SAFETY: bytes `base + 12..base + 14`, inside `base + 16`.
                 unsafe { read_i16_unchecked(self.poses, base + off + 2) },
+                // SAFETY: bytes `base + 14..base + 16`, inside `base + 16`.
                 unsafe { read_i16_unchecked(self.poses, base + off + 4) },
             );
             (matrix, translation)
@@ -1144,35 +1193,52 @@ impl<'a> Animation<'a> {
         }
     }
 
+    /// Byte-wise decode of the record at `base`, for pools with no
+    /// alignment guarantee.
+    ///
+    /// # Safety
+    /// The whole `pose_record_size`-byte record at `base` must lie inside
+    /// `poses`.
     #[inline(never)]
     unsafe fn pose_at_byte_offset_unaligned(&self, base: usize) -> JointPose {
         if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V4 {
+            // SAFETY: the 16-byte record is in bounds per this fn's `# Safety`.
             return unsafe { self.pose_v4_unchecked(base) };
         }
         if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V3 {
+            // SAFETY: the 20-byte record is in bounds per this fn's `# Safety`.
             return unsafe { self.pose_v3_unchecked(base) };
         }
+        // Only v1 (30-byte) and v2 (24-byte) records reach here.
+        // SAFETY: the 18-byte matrix lies inside the in-bounds record;
+        // `read_pose_matrix_unchecked` reads byte-wise, no alignment needed.
         let matrix = unsafe { read_pose_matrix_unchecked(self.poses, base) };
         let off = 18;
         let translation = if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE {
             Vec3I32::new(
                 decode_packed_translation(
+                    // SAFETY: bytes `base + 18..base + 20` of the 24-byte record.
                     unsafe { read_i16_unchecked(self.poses, base + off) },
                     self.translation_shift,
                 ),
                 decode_packed_translation(
+                    // SAFETY: bytes `base + 20..base + 22` of the 24-byte record.
                     unsafe { read_i16_unchecked(self.poses, base + off + 2) },
                     self.translation_shift,
                 ),
                 decode_packed_translation(
+                    // SAFETY: bytes `base + 22..base + 24` of the 24-byte record.
                     unsafe { read_i16_unchecked(self.poses, base + off + 4) },
                     self.translation_shift,
                 ),
             )
         } else {
             Vec3I32::new(
+                // SAFETY: bytes `base + 18..base + 22` of the 30-byte v1 record.
                 unsafe { read_i32_unchecked(self.poses, base + off) },
+                // SAFETY: bytes `base + 22..base + 26` of the 30-byte v1 record.
                 unsafe { read_i32_unchecked(self.poses, base + off + 4) },
+                // SAFETY: bytes `base + 26..base + 30` of the 30-byte v1 record.
                 unsafe { read_i32_unchecked(self.poses, base + off + 8) },
             )
         };
@@ -1200,8 +1266,11 @@ impl<'a> Animation<'a> {
         let bytes = self.poses.get(base..base + self.pose_record_size)?;
         if v4 {
             let (matrix, translation) = if bytes.as_ptr() as usize & 3 == 0 {
+                // SAFETY: `bytes` is a checked `get` of exactly the 16-byte v4
+                // record and its pointer was just checked to be word aligned.
                 unsafe { read_pose_v4_word_aligned_unchecked(bytes, 0) }
             } else {
+                // SAFETY: the 16-byte checked slice covers the 10 bytes needed.
                 let matrix = unsafe { read_pose_matrix_q11_cross_unchecked(bytes, 0) };
                 let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V4;
                 let translation = Vec3I16::new(
@@ -1222,8 +1291,10 @@ impl<'a> Animation<'a> {
             // storage is word-aligned; retain the byte decoder for arbitrary
             // slices accepted by the public parser.
             let (matrix, translation) = if bytes.as_ptr() as usize & 3 == 0 {
+                // SAFETY: as stated above, plus the word alignment just checked.
                 unsafe { read_pose_v3_word_aligned_unchecked(bytes, 0) }
             } else {
+                // SAFETY: the 20-byte checked slice covers the 14 bytes needed.
                 let matrix = unsafe { read_pose_matrix_q11_unchecked(bytes, 0) };
                 let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
                 let translation = Vec3I16::new(
@@ -1365,6 +1436,8 @@ impl AnimationPoseSample<'_> {
             self.animation
                 .pose_at_frame_offset_unchecked(self.base_frame_offset, joint_index)
         };
+        // SAFETY: as for `a`: `next_frame < frame_count` by construction in
+        // `looped_pose_sample_q12`, and the joint index was checked above.
         let b = unsafe {
             self.animation
                 .pose_at_frame_offset_unchecked(self.next_frame_offset, joint_index)
@@ -1647,23 +1720,31 @@ fn decode_q11_element(raw: u16) -> i16 {
 #[inline(always)]
 fn decode_q11_element_wide(raw: u16) -> i32 {
     #[cfg(target_arch = "mips")]
-    unsafe {
+    {
         let decoded: u32;
-        core::arch::asm!(
-            ".set push",
-            ".set noat",
-            "xori {scratch}, {decoded}, 0x07ff",
-            "sltiu {scratch}, {scratch}, 1",
-            "sll {decoded}, {decoded}, 20",
-            "sra {decoded}, {decoded}, 19",
-            "sll {scratch}, {scratch}, 1",
-            "addu {decoded}, {decoded}, {scratch}",
-            ".set pop",
-            decoded = inlateout(reg) raw as u32 => decoded,
-            scratch = lateout(reg) _,
-            options(nomem, nostack, preserves_flags),
-        );
-        return decoded as i32;
+        // SAFETY: pure register arithmetic: no memory access (`nomem`), no
+        // stack use (`nostack`), no branches, and `$at` is never named, so
+        // `.set noat` only silences the assembler. `scratch` is a lateout,
+        // but the only input lives in `decoded`'s own inlateout register,
+        // which an output can never share, so the first write to `scratch`
+        // cannot clobber the input.
+        unsafe {
+            core::arch::asm!(
+                ".set push",
+                ".set noat",
+                "xori {scratch}, {decoded}, 0x07ff",
+                "sltiu {scratch}, {scratch}, 1",
+                "sll {decoded}, {decoded}, 20",
+                "sra {decoded}, {decoded}, 19",
+                "sll {scratch}, {scratch}, 1",
+                "addu {decoded}, {decoded}, {scratch}",
+                ".set pop",
+                decoded = inlateout(reg) raw as u32 => decoded,
+                scratch = lateout(reg) _,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        decoded as i32
     }
 
     #[cfg(not(target_arch = "mips"))]
@@ -1689,6 +1770,9 @@ unsafe fn read_pose_matrix_q11_unchecked(bytes: &[u8], offset: usize) -> [[i16; 
     let mut pair = 0;
     while pair < 4 {
         let o = offset + pair * 3;
+        // SAFETY: `pair < 4`, so the highest byte read is `offset + 11`,
+        // inside the `offset + 14` the caller guarantees; `u8` reads need no
+        // alignment.
         let packed = unsafe {
             (bytes.as_ptr().add(o).read() as u32)
                 | ((bytes.as_ptr().add(o + 1).read() as u32) << 8)
@@ -1698,6 +1782,8 @@ unsafe fn read_pose_matrix_q11_unchecked(bytes: &[u8], offset: usize) -> [[i16; 
         flat[pair * 2 + 1] = decode_q11_element(((packed >> 12) & 0x0FFF) as u16);
         pair += 1;
     }
+    // SAFETY: bytes `offset + 12` and `offset + 13` are inside the
+    // `offset + 14` the caller guarantees.
     let last = unsafe {
         (bytes.as_ptr().add(offset + 12).read() as u16)
             | ((bytes.as_ptr().add(offset + 13).read() as u16) << 8)
@@ -1784,6 +1870,8 @@ unsafe fn read_pose_matrix_q11_cross_unchecked(bytes: &[u8], offset: usize) -> [
     let mut pair = 0usize;
     while pair < 3 {
         let o = offset + pair * 3;
+        // SAFETY: `pair < 3`, so the highest byte read is `offset + 8`,
+        // inside the `offset + 10` the caller guarantees.
         let packed = unsafe {
             (bytes.as_ptr().add(o).read() as u32)
                 | ((bytes.as_ptr().add(o + 1).read() as u32) << 8)
@@ -1795,6 +1883,7 @@ unsafe fn read_pose_matrix_q11_cross_unchecked(bytes: &[u8], offset: usize) -> [
     }
     let first = [flat[0], flat[1], flat[2]];
     let second = [flat[3], flat[4], flat[5]];
+    // SAFETY: `offset + 9` is inside the `offset + 10` the caller guarantees.
     let correction = unsafe { bytes.as_ptr().add(offset + 9).read() };
     let third = v4_third_basis_q12(first, second, correction);
     [
@@ -1813,6 +1902,8 @@ unsafe fn read_pose_v4_word_aligned_unchecked(
     bytes: &[u8],
     offset: usize,
 ) -> ([[i16; 3]; 3], Vec3I16) {
+    // SAFETY: the caller guarantees `offset + 16` is in bounds and the record
+    // is word aligned, which is exactly the pointer form's contract.
     unsafe { read_pose_v4_word_aligned_ptr(bytes.as_ptr().add(offset)) }
 }
 
@@ -1824,6 +1915,7 @@ unsafe fn read_pose_v4_word_aligned_unchecked(
 /// `record` must be word aligned with 16 readable bytes.
 #[inline(always)]
 unsafe fn read_pose_v4_word_aligned_ptr(record: *const u8) -> ([[i16; 3]; 3], Vec3I16) {
+    // SAFETY: same contract as this fn: word aligned, 16 readable bytes.
     let (rows, translation) = unsafe { read_pose_v4_rows_word_aligned(record) };
     (
         [
@@ -1857,9 +1949,15 @@ fn narrow_q12_row(row: [i32; 3]) -> [i16; 3] {
 unsafe fn read_pose_v4_rows_word_aligned(record: *const u8) -> ([[i32; 3]; 3], Vec3I16) {
     debug_assert_eq!(record as usize & 3, 0);
     let words = record.cast::<u32>();
+    // The caller guarantees `record` is word aligned with 16 readable
+    // bytes, so words 0..=3 are aligned and in bounds.
+    // SAFETY: word 0, bytes 0..4.
     let w0 = u32::from_le(unsafe { words.add(0).read() });
+    // SAFETY: word 1, bytes 4..8.
     let w1 = u32::from_le(unsafe { words.add(1).read() });
+    // SAFETY: word 2, bytes 8..12.
     let w2 = u32::from_le(unsafe { words.add(2).read() });
+    // SAFETY: word 3, bytes 12..16.
     let w3 = u32::from_le(unsafe { words.add(3).read() });
 
     let p0 = w0 & 0x00ff_ffff;
@@ -1902,7 +2000,10 @@ unsafe fn lerp_v4_pair_word_aligned(
     translation_shift: u8,
     alpha_q12: u16,
 ) -> JointPose {
+    // SAFETY: the caller guarantees `a_record` is word aligned with 16
+    // readable bytes.
     let (a_rows, a_packed) = unsafe { read_pose_v4_rows_word_aligned(a_record) };
+    // SAFETY: likewise for `b_record`.
     let (b_rows, b_packed) = unsafe { read_pose_v4_rows_word_aligned(b_record) };
 
     let mut matrix = [[0i16; 3]; 3];
@@ -1970,13 +2071,22 @@ unsafe fn read_pose_v3_word_aligned_unchecked(
     bytes: &[u8],
     offset: usize,
 ) -> ([[i16; 3]; 3], Vec3I16) {
+    // SAFETY: the caller guarantees `offset + 20 <= bytes.len()`, so
+    // `offset` is within the allocation.
     let record = unsafe { bytes.as_ptr().add(offset) };
     debug_assert_eq!(record as usize & 3, 0);
     let words = record.cast::<u32>();
+    // The caller guarantees the record is u32 aligned with 20 readable
+    // bytes, so words 0..=4 are aligned and in bounds.
+    // SAFETY: word 0, bytes 0..4 of the record.
     let w0 = u32::from_le(unsafe { words.add(0).read() });
+    // SAFETY: word 1, bytes 4..8 of the record.
     let w1 = u32::from_le(unsafe { words.add(1).read() });
+    // SAFETY: word 2, bytes 8..12 of the record.
     let w2 = u32::from_le(unsafe { words.add(2).read() });
+    // SAFETY: word 3, bytes 12..16 of the record.
     let w3 = u32::from_le(unsafe { words.add(3).read() });
+    // SAFETY: word 4, bytes 16..20 of the record.
     let w4 = u32::from_le(unsafe { words.add(4).read() });
 
     let p0 = w0 & 0x00ff_ffff;
@@ -2020,43 +2130,70 @@ fn read_pose_matrix(bytes: &[u8]) -> [[i16; 3]; 3] {
     ]
 }
 
+/// Byte-wise read of an 18-byte row-major `i16` pose matrix.
+///
+/// # Safety
+/// `offset + 18` must be `<= bytes.len()`.
 #[inline]
 unsafe fn read_pose_matrix_unchecked(bytes: &[u8], offset: usize) -> [[i16; 3]; 3] {
     [
         [
+            // SAFETY: bytes `offset..offset + 2`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset) },
+            // SAFETY: bytes `offset + 2..offset + 4`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset + 2) },
+            // SAFETY: bytes `offset + 4..offset + 6`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset + 4) },
         ],
         [
+            // SAFETY: bytes `offset + 6..offset + 8`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset + 6) },
+            // SAFETY: bytes `offset + 8..offset + 10`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset + 8) },
+            // SAFETY: bytes `offset + 10..offset + 12`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset + 10) },
         ],
         [
+            // SAFETY: bytes `offset + 12..offset + 14`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset + 12) },
+            // SAFETY: bytes `offset + 14..offset + 16`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset + 14) },
+            // SAFETY: bytes `offset + 16..offset + 18`, inside the caller's `offset + 18`.
             unsafe { read_i16_unchecked(bytes, offset + 16) },
         ],
     ]
 }
 
+/// Halfword-load read of an 18-byte row-major `i16` pose matrix.
+///
+/// # Safety
+/// `offset + 18` must be `<= bytes.len()` and `bytes.as_ptr().add(offset)`
+/// must be 2-byte aligned.
 #[inline]
 unsafe fn read_pose_matrix_aligned_unchecked(bytes: &[u8], offset: usize) -> [[i16; 3]; 3] {
     [
         [
+            // SAFETY: bytes `offset..offset + 2`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset) },
+            // SAFETY: bytes `offset + 2..offset + 4`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset + 2) },
+            // SAFETY: bytes `offset + 4..offset + 6`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset + 4) },
         ],
         [
+            // SAFETY: bytes `offset + 6..offset + 8`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset + 6) },
+            // SAFETY: bytes `offset + 8..offset + 10`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset + 8) },
+            // SAFETY: bytes `offset + 10..offset + 12`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset + 10) },
         ],
         [
+            // SAFETY: bytes `offset + 12..offset + 14`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset + 12) },
+            // SAFETY: bytes `offset + 14..offset + 16`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset + 14) },
+            // SAFETY: bytes `offset + 16..offset + 18`, in bounds and 2-byte aligned.
             unsafe { read_i16_aligned_unchecked(bytes, offset + 16) },
         ],
     ]
@@ -3363,16 +3500,32 @@ fn read_i16(bytes: &[u8], offset: usize) -> i16 {
     i16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
 
+/// Little-endian `i16` at `offset`, without a bounds check.
+///
+/// # Safety
+/// `offset + 2` must be `<= bytes.len()`.
 #[inline]
 unsafe fn read_i16_unchecked(bytes: &[u8], offset: usize) -> i16 {
-    i16::from_le_bytes([unsafe { *bytes.get_unchecked(offset) }, unsafe {
-        *bytes.get_unchecked(offset + 1)
-    }])
+    // SAFETY: `offset` and `offset + 1` are both `< offset + 2 <= len`, as
+    // the caller guarantees.
+    let lo = unsafe { *bytes.get_unchecked(offset) };
+    // SAFETY: as above.
+    let hi = unsafe { *bytes.get_unchecked(offset + 1) };
+    i16::from_le_bytes([lo, hi])
 }
 
+/// Little-endian `i16` at `offset` via one halfword load.
+///
+/// # Safety
+/// `offset + 2` must be `<= bytes.len()` and `bytes.as_ptr().add(offset)`
+/// must be 2-byte aligned.
 #[inline]
 unsafe fn read_i16_aligned_unchecked(bytes: &[u8], offset: usize) -> i16 {
+    // SAFETY: `offset < offset + 2 <= len` per the caller, so the pointer
+    // stays inside the slice.
     debug_assert_eq!((unsafe { bytes.as_ptr().add(offset) } as usize) & 1, 0);
+    // SAFETY: the caller guarantees two readable bytes at `offset` and 2-byte
+    // alignment, which is everything an `i16` read needs.
     i16::from_le(unsafe { bytes.as_ptr().add(offset).cast::<i16>().read() })
 }
 
@@ -3386,12 +3539,20 @@ fn read_i32(bytes: &[u8], offset: usize) -> i32 {
     ])
 }
 
+/// Little-endian `i32` at `offset`, read byte-wise without a bounds check.
+///
+/// # Safety
+/// `offset + 4` must be `<= bytes.len()`.
 #[inline]
 unsafe fn read_i32_unchecked(bytes: &[u8], offset: usize) -> i32 {
     i32::from_le_bytes([
+        // SAFETY: each index below is `< offset + 4 <= len` per the caller.
         unsafe { *bytes.get_unchecked(offset) },
+        // SAFETY: as above.
         unsafe { *bytes.get_unchecked(offset + 1) },
+        // SAFETY: as above.
         unsafe { *bytes.get_unchecked(offset + 2) },
+        // SAFETY: as above.
         unsafe { *bytes.get_unchecked(offset + 3) },
     ])
 }
