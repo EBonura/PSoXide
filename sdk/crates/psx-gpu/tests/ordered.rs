@@ -227,3 +227,15 @@ fn captured_frame_preserves_all_264_packets_and_995_words() {
     assert_eq!(expected.len(), 995);
     assert_eq!(state.borrow().output, expected);
 }
+#[test]
+fn release_waits_for_the_walk_and_returns_the_buffer_and_transport() {
+    let (mut list, s) = stream(32, false);
+    list.push_packet([0x2000_0000, 1, 2, 3]);
+    list.submit();
+    let (words, _dma) = list.release();
+    assert_eq!(words.len(), 32);
+    let s = s.borrow();
+    assert!(s.pending.is_empty(), "release left a walk running");
+    assert_eq!(s.output, [0x2000_0000, 1, 2, 3]);
+    assert_eq!(s.syncs, 1);
+}
