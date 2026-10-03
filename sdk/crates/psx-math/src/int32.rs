@@ -172,7 +172,9 @@ const RSQRT_KNOTS: [u32; 193] = {
     let mut i = 0;
     while i < 193 {
         // 2^30 * 16 / sqrt(k) = sqrt(2^68 / k), floor root by bisection.
+        // psx-numeric-allow-next-line: const-eval knot table, never runs on the guest
         let target = (1u128 << 68) / (i as u128 + 64);
+        // psx-numeric-allow-next-line: const-eval knot table, never runs on the guest
         let (mut lo, mut hi) = (0u128, 1u128 << 35);
         while lo < hi {
             let mid = (lo + hi).div_ceil(2);
@@ -195,6 +197,7 @@ const RSQRT_KNOTS: [u32; 193] = {
 
 /// One `multu`: the full 64-bit product of two words.
 #[inline(always)]
+// psx-numeric-allow-next-line: MULTU returns the full HI:LO product
 const fn mul32(a: u32, b: u32) -> u64 {
     // psx-numeric-allow-next-line: MULTU high/low product, no helper
     (a as u64) * (b as u64)
@@ -251,9 +254,12 @@ pub const fn isqrt_u64(value: u64) -> u32 {
     let mut square = mul32(root, root);
     while square > value {
         root -= 1;
+        // psx-numeric-allow-next-line: correction steps on the u64 square, add/sub only
         square -= 2 * root as u64 + 1;
     }
+    // psx-numeric-allow-next-line: correction steps on the u64 square, add/sub only
     while root != u32::MAX && square + 2 * (root as u64) < value {
+        // psx-numeric-allow-next-line: correction steps on the u64 square, add/sub only
         square += 2 * root as u64 + 1;
         root += 1;
     }
