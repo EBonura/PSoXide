@@ -883,11 +883,25 @@ impl<const N: usize> OrderingTable<N> {
         };
     }
 
+    /// Continue this table's walk into `head`, the first node of a chain
+    /// that ends the list itself: a recorded HUD
+    /// (`psx_io::gpu::begin_capture`) closed on [`crate::DRAW_DONE_NODE`],
+    /// say, for a frame published to `psx_rt::present`.
+    ///
+    /// # Safety
+    /// The chain must stay live and unmodified while the table is
+    /// submitted.
+    ///
+    /// # Panics
+    /// If slot 0 is not empty.
+    pub unsafe fn end_with_chain(&mut self, head: *const u32) {
+        unsafe { self.end_with_node(head) }
+    }
+
     /// Link slot 0 to `node`, a node whose own link ends the list.
     ///
     /// # Safety
     /// `node` must stay live and unmodified while the table is submitted.
-    #[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
     unsafe fn end_with_node(&mut self, node: *const u32) {
         assert!(
             self.entries[0] == OT_END,
