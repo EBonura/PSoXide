@@ -5,6 +5,9 @@
 //! DMA completes. The backing slice is static so moving or forgetting the
 //! stream cannot invalidate an in-flight DMA address. No allocation is used.
 
+use core::marker::PhantomData;
+use core::ptr::NonNull;
+
 /// Conservative merged primitive payload limit, excluding the DMA tag.
 pub const NODE_PAYLOAD_WORDS: usize = 15;
 const _: () = assert!(NODE_PAYLOAD_WORDS <= crate::MAX_NODE_WORDS);
@@ -105,13 +108,26 @@ unsafe impl CommandStreamDma for GpuChannel {
 /// close) and end the frame with `push_packet([gp0::REQUEST_IRQ])` and
 /// [`Self::submit`]; see [`crate::is_draw_done`].
 pub struct OrderedCommandStream<D: CommandStreamDma = GpuChannel> {
-    words: &'static mut [u32],
+    // One base pointer for the whole `'static` buffer rather than the
+    // `&mut [u32]` itself: every access goes through it, so writing the open
+    // node never reborrows the nodes a walk is still reading.
+    words: NonNull<u32>,
+    capacity: usize,
+    _words: PhantomData<&'static mut [u32]>,
     len: usize,
     head: usize,
     sent: usize,
     submitted: bool,
     dma: D,
 }
+
+// SAFETY: the stream owns its `'static` buffer exclusively, as the
+// `&'static mut [u32]` it was built from did, so moving it to another
+// context is as safe as moving that reference and the transport.
+unsafe impl<D: CommandStreamDma + Send> Send for OrderedCommandStream<D> {}
+// SAFETY: `&self` methods read no buffer word, so shared references are as
+// safe as for the `&'static mut [u32]` it replaces.
+unsafe impl<D: CommandStreamDma + Sync> Sync for OrderedCommandStream<D> {}
 
 impl OrderedCommandStream {
     /// Use a static, word-aligned RAM buffer of at least 17 words.
@@ -129,7 +145,9 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         );
         words[0] = END;
         Self {
-            words,
+            capacity: words.len(),
+            words: NonNull::from(words).cast(),
+            _words: PhantomData,
             len: 1,
             head: 0,
             sent: 0,
@@ -138,23 +156,39 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         }
     }
 
+    /// Word `index` of the buffer.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the buffer, as slice indexing would.
+    #[inline(always)]
+    fn word_mut(&mut self, index: usize) -> &mut u32 {
+        assert!(index < self.capacity);
+        // SAFETY: `index` is inside the buffer this stream owns for `'static`;
+        // the borrow covers this one word, which no walk is reading (callers
+        // only touch the open node and words past it).
+        unsafe { &mut *self.words.as_ptr().add(index) }
+    }
+
     #[inline]
     fn open_node(&mut self) {
         self.head = self.len;
-        self.words[self.head] = END;
+        *self.word_mut(self.head) = END;
         self.len += 1;
     }
 
     #[inline]
     fn close_node(&mut self, next: Option<usize>) {
         let payload = (self.len - self.head - 1) as u32;
-        let link = next.map_or(END, |i| self.words.as_ptr().wrapping_add(i) as u32 & END);
+        let link = next.map_or(END, |i| {
+            self.words.as_ptr().wrapping_add(i).expose_provenance() as u32 & END
+        });
         // Finish the tag before checking the channel; the shared submit helper
         // supplies the compiler release barrier before DMA starts.
         // SAFETY: `head` indexes a tag word written by `open_node`, so it is
         // below `len` and inside `words`.
         unsafe {
-            core::ptr::write_volatile(self.words.as_mut_ptr().add(self.head), payload << 24 | link);
+            core::ptr::write_volatile(self.words.as_ptr().add(self.head), payload << 24 | link);
         }
         if !self.dma.is_busy() {
             self.kick_pending();
@@ -165,7 +199,8 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         if self.sent > self.head {
             return;
         }
-        self.words[self.head] = self.words[self.head] & 0xff00_0000 | END;
+        let tag = self.word_mut(self.head);
+        *tag = *tag & 0xff00_0000 | END;
         // Only closed nodes are visible. Future appends start beyond len,
         // never in the region now owned by DMA.
         // SAFETY: `sent..len` holds closed nodes whose tags link only inside
@@ -186,11 +221,11 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         );
         // Reserve the next tag too, even if this packet fits the current node.
         // Otherwise an exactly full arena makes submit's open_node overflow.
-        if self.len + count + 1 > self.words.len() {
+        if self.len + count + 1 > self.capacity {
             self.reuse_full_buffer();
         }
         if self.len - self.head - 1 + count > NODE_PAYLOAD_WORDS {
-            if self.len + count + 2 > self.words.len() {
+            if self.len + count + 2 > self.capacity {
                 self.reuse_full_buffer();
             } else {
                 self.close_node(Some(self.len));
@@ -219,10 +254,10 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
             // reserve(N) checked the whole packet plus a spare tag, including
             // any capacity-driven reset. This index is therefore in bounds;
             // repeating a slice check per GP0 word bloats hot draw loops.
-            // SAFETY: as above, `len < self.words.len()` for every word of the
+            // SAFETY: as above, `len < self.capacity` for every word of the
             // packet.
             unsafe {
-                *self.words.get_unchecked_mut(len) = word;
+                self.words.as_ptr().add(len).write(word);
             }
             len += 1;
         }
@@ -240,12 +275,12 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         assert_eq!(pixels.len(), usize::from(width) * usize::from(height));
         let count = 3 + pixels.len().div_ceil(2);
         self.reserve(count);
-        self.words[self.len] = 0xa000_0000;
-        self.words[self.len + 1] = (u32::from(y) << 16) | u32::from(x);
-        self.words[self.len + 2] = (u32::from(height) << 16) | u32::from(width);
+        *self.word_mut(self.len) = 0xa000_0000;
+        *self.word_mut(self.len + 1) = (u32::from(y) << 16) | u32::from(x);
+        *self.word_mut(self.len + 2) = (u32::from(height) << 16) | u32::from(width);
         self.len += 3;
         for pair in pixels.chunks(2) {
-            self.words[self.len] =
+            *self.word_mut(self.len) =
                 u32::from(pair[0]) | (u32::from(*pair.get(1).unwrap_or(&0)) << 16);
             self.len += 1;
         }
@@ -275,7 +310,7 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         self.len = 1;
         self.head = 0;
         self.sent = 0;
-        self.words[0] = END;
+        *self.word_mut(0) = END;
         self.dma.wait_idle();
     }
 
