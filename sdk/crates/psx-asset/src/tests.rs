@@ -382,7 +382,12 @@ fn animation_v3_word_decoder_matches_byte_decoder_for_every_q11_code_and_lane() 
                 translation_offset += 2;
             }
 
+            // SAFETY: `record.0` is a full 20-byte v3 record, covering the
+            // 14 bytes the byte decoder reads.
             let expected_matrix = unsafe { read_pose_matrix_q11_unchecked(&record.0, 0) };
+            // SAFETY: all 20 bytes are in bounds, and `WordAlignedRecord` is
+            // `repr(C, align(4))` with the array as its only field, so offset 0
+            // is word aligned.
             let (matrix, translation) =
                 unsafe { read_pose_v3_word_aligned_unchecked(&record.0, 0) };
             assert_eq!(matrix, expected_matrix, "lane={lane} code=0x{code:03x}");
