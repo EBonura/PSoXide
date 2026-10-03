@@ -64,6 +64,7 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-memprobe` | Checks psx-rt's `memcpy`/`memset`/`memcmp` against reference loops for every size and alignment; prints `MEMPROBE PASS` or `FAIL`. |
 | `hello-pack` | `psx_pack::cd` smoke test: streams raw and compressed WORLD.PAK chunks off the disc and checks them. |
 | `hello-i64probe` | Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides. |
+| `hello-icache` | Rewrites a function in cached RAM and checks that `psx_rt::cache::flush_instruction_cache` makes the CPU run the new code; prints `ICACHE PASS`, `INCONCLUSIVE` (nothing was stale) or `FAIL`. |
 | `cdda-read-contention` | CD-ROM conformance probe: issues a data read while CD-DA is playing and records which IRQ the drive raises. |
 
 ## See also

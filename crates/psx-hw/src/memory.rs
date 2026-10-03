@@ -111,10 +111,50 @@ pub mod bios {
 /// Cache control register at `0xFFFE_0130`.
 ///
 /// The only KSEG2 address actually used by PS1 software. Controls the
-/// I-cache enable, scratchpad enable, and a handful of debug bits.
+/// I-cache enable, scratchpad enable, and a handful of debug bits. Bit
+/// names and the "usually" settings follow psx-spx, "Memory Control",
+/// FFFE0130h.
 pub mod cache_control {
     /// Virtual address. Does not follow the KUSEG/KSEG0/KSEG1 mirror rule.
     pub const ADDR: u32 = 0xFFFE_0130;
+
+    /// Bit 2: tag test mode. While COP0 SR.IsC is set, word stores to
+    /// `0x000..0x1000` write instruction-cache tags, which is how a line
+    /// is invalidated.
+    pub const TAG_TEST: u32 = 1 << 2;
+    /// Bit 3: scratchpad mode.
+    pub const SCRATCHPAD: u32 = 1 << 3;
+    /// Bit 7: data cache (the scratchpad) enable.
+    pub const DATA_CACHE: u32 = 1 << 7;
+    /// Bits 8-9 = 1: instruction-cache refills fetch 4 words.
+    pub const I_REFILL_4_WORDS: u32 = 1 << 8;
+    /// Bit 11: instruction cache enable.
+    pub const I_CACHE: u32 = 1 << 11;
+    /// Bit 13: read priority.
+    pub const READ_PRIORITY: u32 = 1 << 13;
+    /// Bit 14: no wait state.
+    pub const NO_WAIT_STATE: u32 = 1 << 14;
+    /// Bit 15: bus grant. DMA never completes without it.
+    pub const BUS_GRANT: u32 = 1 << 15;
+    /// Bit 16: load scheduling.
+    pub const LOAD_SCHEDULING: u32 = 1 << 16;
+
+    /// The setting used while invalidating the instruction cache: cache
+    /// on, tag test mode on, scratchpad off.
+    pub const FLUSH: u32 = TAG_TEST | I_CACHE;
+
+    /// The normal running setting: every bit psx-spx lists as usually
+    /// set. It has not been read back from a console yet; a
+    /// hardware-tests case that reads the register after boot would
+    /// confirm it.
+    pub const RUNNING: u32 = SCRATCHPAD
+        | DATA_CACHE
+        | I_REFILL_4_WORDS
+        | I_CACHE
+        | READ_PRIORITY
+        | NO_WAIT_STATE
+        | BUS_GRANT
+        | LOAD_SCHEDULING;
 }
 
 #[cfg(test)]
@@ -135,5 +175,11 @@ mod tests {
     #[test]
     fn ram_mirrors_fill_expected_window() {
         assert_eq!(ram::SIZE as u32 * 4, ram::MIRROR_END);
+    }
+
+    #[test]
+    fn cache_control_settings_add_up() {
+        assert_eq!(cache_control::FLUSH, 0x0000_0804);
+        assert_eq!(cache_control::RUNNING, 0x0001_E988);
     }
 }
