@@ -22,7 +22,9 @@ impl State {
 }
 #[derive(Clone)]
 struct Dma(Rc<RefCell<State>>);
-impl CommandStreamDma for Dma {
+// SAFETY: the fake reads submitted nodes only in `submit` and in the `busy` or
+// `wait` call that retires them; `pending` is empty once `wait` returns.
+unsafe impl CommandStreamDma for Dma {
     fn busy(&mut self) -> bool {
         let mut s = self.0.borrow_mut();
         s.polls += 1;
