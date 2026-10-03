@@ -6,12 +6,16 @@
 //! OT's depth sort determines the draw order. Running this
 //! exercises the full commercial-game rendering pipe:
 //!
-//! 1. Clear the OT (sets up inter-slot chain).
-//! 2. Build primitive packets in a static RAM arena.
-//! 3. Prepend into the OT at the primitive's Z slot.
+//! 1. Start a frame: clear the OT (sets up the inter-slot chain).
+//! 2. Write the primitive packets into storage the frame borrows.
+//! 3. Prepend each into the OT at its Z slot.
 //! 4. Fill a background rect.
-//! 5. Submit the OT to GP0 via DMA linked-list.
+//! 5. Submit the OT to GP0 via DMA linked-list and wait for the walk.
 //! 6. VSync.
+//!
+//! The frame borrows the table and every packet until the walk is over,
+//! so the borrow checker, not an `unsafe` block, proves the DMA never
+//! reads a packet that is gone or changing.
 //!
 //! Each triangle drifts on a sine wave -- smooth back-and-forth,
 //! no modulo snap-back. `psx-math::sincos` supplies the Q1.12
@@ -27,39 +31,7 @@ use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::TriGouraud;
 use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_math::sincos;
-
-/// Primitives live in `.bss` so the DMA walker hits stable
-/// addresses. Mutable static is fine on single-threaded bare metal.
-static mut OT: OrderingTable<16> = OrderingTable::new();
-static mut TRIS: [TriGouraud; 3] = [
-    TriGouraud {
-        tag: 0,
-        color0_cmd: 0,
-        v0: 0,
-        color1: 0,
-        v1: 0,
-        color2: 0,
-        v2: 0,
-    },
-    TriGouraud {
-        tag: 0,
-        color0_cmd: 0,
-        v0: 0,
-        color1: 0,
-        v1: 0,
-        color2: 0,
-        v2: 0,
-    },
-    TriGouraud {
-        tag: 0,
-        color0_cmd: 0,
-        v0: 0,
-        color1: 0,
-        v1: 0,
-        color2: 0,
-        v2: 0,
-    },
-];
+use psx_rt::Peripherals;
 
 /// Pixel displacement for a sine-driven drift. `phase_q12` is a
 /// Q0.12 angle (one full revolution = 4096); amplitude is the
@@ -77,6 +49,15 @@ fn main() {
     let mut fb = FrameBuffer::new(320, 240);
     gpu::set_draw_area(0, 0, 319, 239);
     gpu::set_draw_offset(0, 0);
+
+    let Some(mut peripherals) = Peripherals::take() else {
+        return;
+    };
+    // The table and the packets live on `main`'s stack, which outlives
+    // every frame; each frame borrows them until its walk is done.
+    let mut ot = OrderingTable::<16>::new();
+    let mut tris: [TriGouraud; 3] =
+        core::array::from_fn(|_| TriGouraud::new([(0, 0); 3], [(0, 0, 0); 3]));
 
     let mut frame: u32 = 0;
     loop {
@@ -120,21 +101,17 @@ fn main() {
             [(80, 160, 220), (220, 120, 80), (160, 220, 80)],
         );
 
-        // Safety: the OT + TRIS statics are the only mutation site
-        // and we touch them sequentially on one thread.
-        unsafe {
-            TRIS[0] = red;
-            TRIS[1] = green;
-            TRIS[2] = blue;
+        let mut ot_frame = ot.frame();
+        let [back, middle, front] = &mut tris;
+        *back = red;
+        *middle = green;
+        *front = blue;
+        ot_frame.add(10, back);
+        ot_frame.add(8, middle);
+        ot_frame.add(6, front);
 
-            OT.clear();
-            OT.add(10, &mut TRIS[0], TriGouraud::WORDS);
-            OT.add(8, &mut TRIS[1], TriGouraud::WORDS);
-            OT.add(6, &mut TRIS[2], TriGouraud::WORDS);
-
-            fb.clear(0, 0, 48);
-            OT.submit();
-        }
+        fb.clear(0, 0, 48);
+        ot_frame.submit(&mut peripherals.gpu_dma);
 
         psx_rt::interrupts::wait_vblank();
         fb.swap();

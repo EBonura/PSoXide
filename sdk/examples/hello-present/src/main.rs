@@ -18,6 +18,10 @@
 //!    kicked asynchronously, flip through the queue with no timeout, and
 //!    every flip is seen with its frame's GP0(1Fh) executed.
 //!
+//! The asynchronous kicks go through `FrameStorage::draw_async`: the table
+//! and packets are `'static` and owned by the returned `InFlight` until
+//! its `wait`, so no frame is rebuilt under a walk.
+//!
 //! The verdict goes to the TTY (`PRESENT PASS ...` or `PRESENT FAIL ...`)
 //! and on screen.
 
@@ -28,12 +32,13 @@ extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
 use psx_font::{fonts::BASIC, FontAtlas};
+use psx_gpu::frame::{FrameStorage, OtFrame};
 use psx_gpu::framebuf::FrameBuffer;
-use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::TriGouraud;
 use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_rt::interrupts;
 use psx_rt::tty;
+use psx_rt::Peripherals;
 use psx_vram::{Clut, TexDepth, Tpage};
 
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -50,8 +55,7 @@ const WAIT_LIMIT: u32 = 8;
 const TRIS: usize = 12;
 
 const EMPTY: TriGouraud = TriGouraud::new([(0, 0); 3], [(0, 0, 0); 3]);
-static mut OT: OrderingTable<8> = OrderingTable::new();
-static mut PACKETS: [TriGouraud; TRIS] = [EMPTY; TRIS];
+static mut FRAME: FrameStorage<8, [TriGouraud; TRIS]> = FrameStorage::new([EMPTY; TRIS]);
 
 /// Wait until the queued flip is applied or `limit` VBlanks pass.
 /// Returns whether it was applied.
@@ -72,12 +76,16 @@ fn wait_vblanks(n: u32) {
     }
 }
 
-/// Build frame `f` into the ordering table: `f % (TRIS + 1)` half-screen
-/// Gouraud triangles, closed with GP0(1Fh) when `close` is set.
-fn build_frame(ot: &mut OrderingTable<8>, packets: &mut [TriGouraud; TRIS], f: u32, close: bool) {
-    ot.clear();
+/// Build frame `f`: `f % (TRIS + 1)` half-screen Gouraud triangles,
+/// closed with GP0(1Fh) when `close` is set.
+fn build_frame<'f>(
+    frame: &mut OtFrame<'f, 8>,
+    packets: &'f mut [TriGouraud; TRIS],
+    f: u32,
+    close: bool,
+) {
     if close {
-        ot.end_with_draw_done();
+        frame.end_with_draw_done();
     }
     let count = (f as usize) % (TRIS + 1);
     for (t, packet) in packets.iter_mut().take(count).enumerate() {
@@ -88,7 +96,7 @@ fn build_frame(ot: &mut OrderingTable<8>, packets: &mut [TriGouraud; TRIS], f: u
             [(319, 239), (0, 239), (319, 0)]
         };
         *packet = TriGouraud::new(verts, [(shade, 0, 40), (0, shade, 40), (40, 0, shade)]);
-        ot.add(1 + t % 6, packet, TriGouraud::WORDS);
+        frame.add(1 + t % 6, packet);
     }
 }
 
@@ -115,18 +123,23 @@ fn main() {
     gpu::init(VideoMode::Ntsc, Resolution::R320X240);
     let mut fb = FrameBuffer::new(320, 240);
     fb.apply_draw_target();
-    // SAFETY: single-threaded; nothing else touches these statics, and the
-    // DMA reading them is waited out before they are rebuilt.
-    let (ot, packets) = unsafe { (&mut *addr_of_mut!(OT), &mut *addr_of_mut!(PACKETS)) };
+    let Some(peripherals) = Peripherals::take() else {
+        return;
+    };
+    let mut dma = peripherals.gpu_dma;
+    // SAFETY: the only reference ever made to FRAME.
+    let mut storage = unsafe { &mut *addr_of_mut!(FRAME) };
 
     // 1. Held: no GP0(1Fh), so the flip must stay queued even once the GPU
     // is idle.
     fb.clear(8, 8, 24);
-    build_frame(ot, packets, TRIS as u32, false);
     gpu::arm_draw_done();
-    ot.submit_async();
+    let (in_flight, ()) = storage.draw_async(dma, |frame, packets| {
+        build_frame(frame, packets, TRIS as u32, false)
+    });
     interrupts::queue_gp1_at_vblank(fb.begin_deferred_swap());
     gpu::draw_sync();
+    (storage, dma) = in_flight.wait();
     wait_vblanks(4);
     let held = interrupts::gp1_queue_pending() && !gpu::draw_done();
 
@@ -147,9 +160,9 @@ fn main() {
     for f in 0..FRAMES {
         fb.apply_draw_target();
         fb.clear(8, 8, 24);
-        build_frame(ot, packets, f, true);
         gpu::arm_draw_done();
-        ot.submit_async();
+        let (in_flight, ()) =
+            storage.draw_async(dma, |frame, packets| build_frame(frame, packets, f, true));
         interrupts::queue_gp1_at_vblank(fb.begin_deferred_swap());
         if !wait_flip(WAIT_LIMIT) {
             timeouts += 1;
@@ -163,6 +176,7 @@ fn main() {
             // without it happened before the frame's GP0(1Fh) ran.
             early += 1;
         }
+        (storage, dma) = in_flight.wait();
     }
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
     gpu::draw_sync();
