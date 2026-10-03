@@ -184,7 +184,7 @@ pub const STRICT_FAULTS: bool = cfg!(feature = "strict-faults");
 
 /// Monotonic VBlank IRQ count.
 #[no_mangle]
-pub static mut __psx_rt_vblank_count: u32 = 0;
+static mut __psx_rt_vblank_count: u32 = 0;
 
 /// Count of exceptions that were NOT interrupts: bus errors, address
 /// errors, reserved instructions.
@@ -208,32 +208,32 @@ pub static mut __psx_rt_vblank_count: u32 = 0;
 /// slot, hung another). Build development and test discs with the
 /// `strict-faults` feature to halt on the first fault instead.
 #[no_mangle]
-pub static mut __psx_rt_fault_count: u32 = 0;
+static mut __psx_rt_fault_count: u32 = 0;
 
 /// Interrupts the handler returned from at EPC + 4 because the word at EPC
 /// was a GTE command (see [`interrupt_resume_pc`]).
 #[no_mangle]
-pub static mut __psx_rt_gte_skip_count: u32 = 0;
+static mut __psx_rt_gte_skip_count: u32 = 0;
 
 /// Raw COP0 Cause captured for the latest unexpected exception.
 #[no_mangle]
-pub static mut __psx_rt_fault_cause: u32 = 0;
+static mut __psx_rt_fault_cause: u32 = 0;
 
 /// COP0 EPC captured for the latest unexpected exception.
 #[no_mangle]
-pub static mut __psx_rt_fault_epc: u32 = 0;
+static mut __psx_rt_fault_epc: u32 = 0;
 
 /// COP0 BadVAddr captured for the latest unexpected exception. Only
 /// meaningful for an address error; other faults leave a stale value in the
 /// register.
 #[no_mangle]
-pub static mut __psx_rt_fault_badvaddr: u32 = 0;
+static mut __psx_rt_fault_badvaddr: u32 = 0;
 
 /// One queued GP1 word the VBlank handler writes to the GPU at the first
 /// blank edge on which GPUSTAT bit 24 is set, then clears. Zero = empty.
 /// Written by [`queue_gp1_at_vblank`].
 #[no_mangle]
-pub static mut __psx_rt_pending_gp1: u32 = 0;
+static mut __psx_rt_pending_gp1: u32 = 0;
 
 /// Set once [`install_vblank_counter`] has run, so [`wait_vblank`] can
 /// install lazily without resetting a counter the game is already using.
