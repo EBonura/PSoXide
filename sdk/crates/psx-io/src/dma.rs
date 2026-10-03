@@ -209,6 +209,9 @@ pub mod raw {
 }
 
 /// Write `MADR` (memory address that DMA will source from or drain to).
+#[deprecated(
+    note = "a safe MADR store lets safe code aim DMA anywhere in RAM; use the unsafe `dma::start`, or `dma::raw::set_madr` for probes"
+)]
 #[inline(always)]
 pub fn set_madr(ch: Channel, addr: u32) {
     // SAFETY: none; see `raw::set_madr`.
@@ -223,6 +226,9 @@ pub fn madr(ch: Channel) -> u32 {
 
 /// Write `BCR` in manual / linked-list mode: just a 16-bit word count.
 /// For block-slice mode use [`set_bcr_block`].
+#[deprecated(
+    note = "use the unsafe `dma::start` with `dma::bcr_words`, or `dma::raw::set_bcr` for probes"
+)]
 #[inline(always)]
 pub fn set_bcr_manual(ch: Channel, words: u16) {
     // SAFETY: none; see `raw::set_bcr`.
@@ -231,6 +237,9 @@ pub fn set_bcr_manual(ch: Channel, words: u16) {
 
 /// Write `BCR` in block-slice mode:
 /// `BS × BA = blocks of block_size words`.
+#[deprecated(
+    note = "use the unsafe `dma::start` with `dma::bcr_blocks`, or `dma::raw::set_bcr` for probes"
+)]
 #[inline(always)]
 pub fn set_bcr_block(ch: Channel, block_size: u16, block_count: u16) {
     // SAFETY: none; see `raw::set_bcr`.
@@ -238,6 +247,9 @@ pub fn set_bcr_block(ch: Channel, block_size: u16, block_count: u16) {
 }
 
 /// Write `CHCR` (control). Starts the transfer if `CHCR_START` is set.
+#[deprecated(
+    note = "a safe CHCR store starts DMA from safe code; use the unsafe `dma::start`, `dma::abort` to stop a channel, or `dma::raw::set_chcr` for probes"
+)]
 #[inline(always)]
 pub fn set_chcr(ch: Channel, value: u32) {
     // SAFETY: none; see `raw::set_chcr`.

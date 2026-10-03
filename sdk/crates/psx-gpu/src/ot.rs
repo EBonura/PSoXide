@@ -852,6 +852,9 @@ impl<const N: usize> OrderingTable<N> {
     /// let mut packet = [0u32; 2 + psx_gpu::MAX_NODE_WORDS];
     /// ot.add(0, &mut packet, 17);
     /// ```
+    #[deprecated(
+        note = "keeps the packet's address past the borrow and trusts `words`; use `OrderingTable::frame` and `OtFrame::add`"
+    )]
     pub fn add<T>(&mut self, z: usize, prim: &mut T, words: u8) {
         const {
             assert!(
@@ -897,7 +900,7 @@ impl<const N: usize> OrderingTable<N> {
     }
 
     /// Pointer to the slot where DMA starts (`[N-1]`). Passed to
-    /// [`submit_via_dma`] as the linked-list entry point.
+    /// [`crate::submit_linked_list_raw`] as the linked-list entry point.
     #[inline]
     pub fn submit_head(&self) -> *const u32 {
         &self.entries[N - 1] as *const u32
@@ -936,9 +939,12 @@ impl<const N: usize> OrderingTable<N> {
     /// Submit the whole table to GPU via DMA channel 2 linked-list
     /// mode and wait for completion. Forwards to
     /// [`crate::submit_linked_list`].
-    #[doc(alias = "DrawOTag")]
+    #[deprecated(
+        note = "nothing proves the linked packets are alive; use `OrderingTable::frame` and `OtFrame::submit`"
+    )]
     pub fn submit(&self) {
-        crate::submit_linked_list(self.submit_head());
+        // SAFETY: none; the caller carries the raw contract unchecked.
+        unsafe { crate::submit_linked_list_raw(self.submit_head()) };
     }
 
     /// Kick the table's DMA walk without waiting for it to finish.
@@ -946,8 +952,12 @@ impl<const N: usize> OrderingTable<N> {
     /// [`crate::submit_linked_list_wait`]. The table (and every
     /// primitive it chains) must stay live and unmodified until that
     /// wait returns.
+    #[deprecated(
+        note = "returns mid-walk with the table still mutable; use `OtFrame::submit_with`, `FrameStorage::draw_async` or `FramePair`"
+    )]
     pub fn submit_async(&self) {
-        crate::submit_linked_list_async(self.submit_head());
+        // SAFETY: none; the caller carries the raw contract unchecked.
+        unsafe { crate::submit_linked_list_raw_async(self.submit_head()) };
     }
 
     /// Walk the linked chain in DMA submission order, producing one
