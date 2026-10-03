@@ -917,20 +917,25 @@ impl<const N: usize> OrderingTable<N> {
     /// ```compile_fail
     /// let mut ot: psx_gpu::ot::OrderingTable<4> = psx_gpu::ot::OrderingTable::new();
     /// let mut packet = [0u32; 2 + psx_gpu::MAX_NODE_WORDS];
-    /// ot.add(0, &mut packet, 17);
+    /// unsafe { ot.add(0, &mut packet, 17) };
     /// ```
+    ///
+    /// # Safety
+    ///
+    /// The table keeps `prim`'s address after this borrow ends: `prim` must
+    /// stay live, unmoved and unmodified until every submission of this
+    /// table has been waited out, and `words` must not exceed its payload.
     #[deprecated(
         note = "keeps the packet's address past the borrow and trusts `words`; use `OrderingTable::frame` and `OtFrame::add`"
     )]
-    pub fn add<T>(&mut self, z: usize, prim: &mut T, words: u8) {
+    pub unsafe fn add<T>(&mut self, z: usize, prim: &mut T, words: u8) {
         const {
             assert!(
                 core::mem::size_of::<T>() <= 4 * (crate::MAX_NODE_WORDS + 1),
                 "primitive larger than one GPU DMA node"
             )
         };
-        // SAFETY: none; the caller carries `insert`'s contract unchecked,
-        // which is the hole the deprecation names.
+        // SAFETY: forwarded contract.
         unsafe { self.insert(z, prim as *mut T as *mut u32, words) };
     }
 
@@ -1008,26 +1013,34 @@ impl<const N: usize> OrderingTable<N> {
     }
 
     /// Submit the whole table to GPU via DMA channel 2 linked-list
-    /// mode and wait for completion. Forwards to
-    /// [`crate::submit_linked_list`].
+    /// mode and wait for completion.
+    ///
+    /// # Safety
+    ///
+    /// As [`crate::submit_linked_list_raw`] for the chain this table heads:
+    /// every packet linked into it must be live and unmodified, and the
+    /// table must not have moved since it was cleared.
     #[deprecated(
         note = "nothing proves the linked packets are alive; use `OrderingTable::frame` and `OtFrame::submit`"
     )]
-    pub fn submit(&self) {
-        // SAFETY: none; the caller carries the raw contract unchecked.
+    pub unsafe fn submit(&self) {
+        // SAFETY: forwarded contract.
         unsafe { crate::submit_linked_list_raw(self.submit_head()) };
     }
 
-    /// Kick the table's DMA walk without waiting for it to finish.
-    /// Forwards to [`crate::submit_linked_list_async`]; pair it with
-    /// [`crate::submit_linked_list_wait`]. The table (and every
-    /// primitive it chains) must stay live and unmodified until that
+    /// Kick the table's DMA walk without waiting for it to finish; pair
+    /// it with [`crate::submit_linked_list_wait`].
+    ///
+    /// # Safety
+    ///
+    /// As [`crate::submit_linked_list_raw_async`]: the table and every
+    /// packet it chains must stay live, unmoved and unmodified until that
     /// wait returns.
     #[deprecated(
         note = "returns mid-walk with the table still mutable; use `OtFrame::submit_with`, `FrameStorage::draw_async` or `FramePair`"
     )]
-    pub fn submit_async(&self) {
-        // SAFETY: none; the caller carries the raw contract unchecked.
+    pub unsafe fn submit_async(&self) {
+        // SAFETY: forwarded contract.
         unsafe { crate::submit_linked_list_raw_async(self.submit_head()) };
     }
 
