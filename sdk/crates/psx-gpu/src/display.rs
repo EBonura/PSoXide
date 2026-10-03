@@ -71,6 +71,19 @@ impl Resolution {
         }
     }
 
+    /// GPU clocks per pixel in this width's dot clock: the GPU clock
+    /// divided by 10, 8, 5 or 4 for 256, 320, 512 or 640 pixels (psx-spx,
+    /// GPU Timings). Every width therefore spans the same 2,560 clocks of
+    /// GP1(06h) range, as psx-spx's table of standard X1/X2 values shows.
+    pub(crate) const fn clocks_per_pixel(self) -> i32 {
+        match self.width {
+            256 => 10,
+            320 => 8,
+            512 => 5,
+            _ => 4,
+        }
+    }
+
     /// The GP1(08h) horizontal-resolution field.
     const fn horizontal_field(self) -> u32 {
         match self.width {
@@ -81,11 +94,6 @@ impl Resolution {
         }
     }
 }
-
-/// GPU clocks per displayed pixel at the standard PSX dot clock that
-/// [`crate::Gpu::new`] programs. The horizontal display window therefore
-/// spans `width * H_CLOCKS_PER_PIXEL` GPU clocks.
-const H_CLOCKS_PER_PIXEL: i32 = 8;
 
 /// Default left edge (GP1 06h X1) of the horizontal display window, in GPU
 /// clocks from start-of-line: the standard centred NTSC picture.
@@ -149,9 +157,10 @@ impl DisplayConfig {
 
     /// GP1(06h): the horizontal display window.
     pub(crate) const fn horizontal_range_command(self) -> u32 {
-        let start = H_DISPLAY_WINDOW_START + self.offset.0 as i32 * H_CLOCKS_PER_PIXEL;
+        let clocks_per_pixel = self.resolution.clocks_per_pixel();
+        let start = H_DISPLAY_WINDOW_START + self.offset.0 as i32 * clocks_per_pixel;
         let start = if start < 0 { 0 } else { start as u32 };
-        let end = start + self.resolution.width as u32 * H_CLOCKS_PER_PIXEL as u32;
+        let end = start + (self.resolution.width as i32 * clocks_per_pixel) as u32;
         gp1::h_display_range(start, end)
     }
 
@@ -381,5 +390,30 @@ mod tests {
     #[should_panic(expected = "two buffers must fit")]
     fn a_480_line_double_buffer_does_not_fit_vram() {
         let _ = DoubleBuffer::new(Resolution::R640X480);
+    }
+
+    #[test]
+    fn every_width_spans_the_same_2560_clocks() {
+        // psx-spx GP1(06h): the standard NTSC and PAL X2 - X1 is 2560 for
+        // 256, 320, 512 and 640 pixels; each width's dot clock divides the
+        // GPU clock by 10, 8, 5 or 4 (psx-spx, GPU Timings).
+        for resolution in [
+            Resolution::R256X240,
+            Resolution::R320X240,
+            Resolution::R512X240,
+            Resolution::R640X240,
+            Resolution::R640X480,
+        ] {
+            let word = DisplayConfig::new(VideoMode::Ntsc, resolution).horizontal_range_command();
+            let (x1, x2) = (word & 0xFFF, (word >> 12) & 0xFFF);
+            assert_eq!((x1, x2 - x1), (0x260, 2560), "{resolution:?}");
+        }
+    }
+
+    #[test]
+    fn an_offset_moves_by_whole_pixels_of_the_current_width() {
+        let display = DisplayConfig::new(VideoMode::Ntsc, Resolution::R512X240);
+        let word = display.with_offset((3, 0)).horizontal_range_command();
+        assert_eq!(word & 0xFFF, 0x260 + 3 * 5);
     }
 }
