@@ -19,7 +19,7 @@
 //!   [`FramePair`] runs the usual two-buffer ping-pong on top.
 //!
 //! Every type here is a thin wrapper over the same stores and kicks as
-//! [`OrderingTable::insert`] and [`crate::submit_linked_list_raw`].
+//! [`OtFrame::add_raw`] and [`crate::submit_linked_list_raw`].
 //!
 //! # Usage
 //!
@@ -146,7 +146,7 @@ impl<const N: usize> OrderingTable<N> {
     /// # Safety
     ///
     /// Every packet the table links already, through an earlier
-    /// [`OtFrame`], [`OtFrame::add_raw`] or [`OrderingTable::insert`], must
+    /// [`OtFrame`] or a raw add, must
     /// stay live and unmodified, except for tags later adds write, until the
     /// returned frame's walk has finished (or for good, if it is never
     /// submitted). Packets an earlier frame added with [`OtFrame::add`] were
@@ -172,10 +172,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
         // words after it, at most one node), borrowed exclusively for 'f.
         // The frame can only be walked by `submit`/`submit_with`, which wait
         // before 'f can end, or by `FrameStorage` with 'f = 'static.
-        unsafe {
-            self.ot
-                .insert(z, (packet as *mut P).cast::<u32>(), P::WORDS)
-        };
+        unsafe { self.ot.link(z, (packet as *mut P).cast::<u32>(), P::WORDS) };
     }
 
     /// Prepend a raw packet to depth slot `z` (clamped to `N - 1`).
@@ -193,11 +190,11 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     #[inline(always)]
     pub unsafe fn add_raw(&mut self, z: usize, packet: *mut u32, words: u8) {
         // SAFETY: forwarded contract.
-        unsafe { self.ot.insert(z, packet, words) };
+        unsafe { self.ot.link(z, packet, words) };
     }
 
     /// [`add_raw`](Self::add_raw) without the depth clamp or the node-length
-    /// check; see [`OrderingTable::insert_unchecked`].
+    /// check.
     ///
     /// # Safety
     ///
@@ -206,12 +203,11 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     #[inline(always)]
     pub unsafe fn add_raw_unchecked(&mut self, z: usize, packet: *mut u32, words: u8) {
         // SAFETY: forwarded contract.
-        unsafe { self.ot.insert_unchecked(z, packet, words) };
+        unsafe { self.ot.link_unchecked(z, packet, words) };
     }
 
     /// [`add_raw_unchecked`](Self::add_raw_unchecked) with the word count
-    /// already in tag form, in bits 24..31 of `tag_high`; see
-    /// [`OrderingTable::insert_unchecked_tag_high`].
+    /// already in tag form, in bits 24..31 of `tag_high`.
     ///
     /// # Safety
     ///
@@ -221,13 +217,16 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     #[inline(always)]
     pub unsafe fn add_raw_tag_high_unchecked(&mut self, z: usize, packet: *mut u32, tag_high: u32) {
         // SAFETY: forwarded contract.
-        unsafe { self.ot.insert_unchecked_tag_high(z, packet, tag_high) };
+        unsafe { self.ot.link_tag_high_unchecked(z, packet, tag_high) };
     }
 
-    /// Add packed two-word commands, last to first, so packets that share a
-    /// slot keep their array order; see
-    /// [`OrderingTable::insert_packed_commands_reverse_unchecked`] for the
-    /// layout.
+    /// Add packed two-word commands, first to last, the way repeated classic
+    /// `addPrim` calls do: packets that share a slot come out in reverse.
+    ///
+    /// Each command is two machine words: the packet's address (`ptr as
+    /// usize`, which exposes it), then a word with the slot in bits 0..=15
+    /// and the packet's payload word count in bits 24..=31. On the console
+    /// this is one hand-scheduled loop; host builds run a scalar twin.
     ///
     /// # Safety
     ///
@@ -235,6 +234,25 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     /// layout; every slot is less than `N` and every word count at most
     /// [`crate::MAX_NODE_WORDS`]; and every packet meets the contract of
     /// [`add_raw`](Self::add_raw).
+    #[inline(always)]
+    pub unsafe fn add_packed_commands_unchecked(
+        &mut self,
+        commands: *const usize,
+        command_count: usize,
+    ) {
+        // SAFETY: forwarded contract.
+        unsafe {
+            self.ot
+                .link_packed_commands_unchecked(commands, command_count)
+        };
+    }
+
+    /// [`add_packed_commands_unchecked`](Self::add_packed_commands_unchecked)
+    /// last to first, so packets that share a slot keep their array order.
+    ///
+    /// # Safety
+    ///
+    /// As [`add_packed_commands_unchecked`](Self::add_packed_commands_unchecked).
     #[inline(always)]
     pub unsafe fn add_packed_commands_reverse_unchecked(
         &mut self,
@@ -244,25 +262,52 @@ impl<'f, const N: usize> OtFrame<'f, N> {
         // SAFETY: forwarded contract.
         unsafe {
             self.ot
-                .insert_packed_commands_reverse_unchecked(commands, command_count)
+                .link_packed_commands_reverse_unchecked(commands, command_count)
         };
     }
 
-    /// Add a contiguous stream of packets whose tags carry their own slot;
-    /// see [`OrderingTable::insert_tagged_packet_stream_unchecked`] for the
-    /// tag layout.
+    /// Add a contiguous stream of packets whose tags carry their own slot.
+    ///
+    /// Before this call each tag holds the packet's payload word count in
+    /// bits 24..=31 and its slot in bits 0..=15. Packets are prepended from
+    /// `first` to `end`, as repeated `addPrim` calls would; slot `0xFFFF`
+    /// skips a packet, so separately ordered HUD packets can share the
+    /// arena. Renderers stage depth keys in the tags as they build packets
+    /// and leave the link pass to this one loop.
     ///
     /// # Safety
     ///
     /// `first..end` is a writable, contiguous sequence of complete packets
     /// in that layout; every word count describes the next packet exactly
-    /// and is at most [`crate::MAX_NODE_WORDS`]; every non-sentinel slot is
-    /// less than `N`; and the whole range meets the contract of
+    /// and is at most [`crate::MAX_NODE_WORDS`]; every slot other than
+    /// `0xFFFF` is less than `N`; and the whole range meets the contract of
     /// [`add_raw`](Self::add_raw).
     #[inline(always)]
     pub unsafe fn add_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
         // SAFETY: forwarded contract.
-        unsafe { self.ot.insert_tagged_packet_stream_unchecked(first, end) };
+        unsafe { self.ot.link_tagged_packet_stream_unchecked(first, end) };
+    }
+
+    /// [`add_tagged_packet_stream_unchecked`](Self::add_tagged_packet_stream_unchecked)
+    /// with every staged slot other than `0xFFFF` shifted right by
+    /// `SLOT_SHIFT`, so a smaller table can back a fine depth range
+    /// (`SLOT_SHIFT = 3` maps depths 0..2047 onto 256 slots).
+    ///
+    /// # Safety
+    ///
+    /// As [`add_tagged_packet_stream_unchecked`](Self::add_tagged_packet_stream_unchecked),
+    /// with every shifted slot less than `N`, and `SLOT_SHIFT` less than 16.
+    #[inline(always)]
+    pub unsafe fn add_tagged_packet_stream_shifted_unchecked<const SLOT_SHIFT: u32>(
+        &mut self,
+        first: *mut u32,
+        end: *mut u32,
+    ) {
+        // SAFETY: forwarded contract.
+        unsafe {
+            self.ot
+                .link_tagged_packet_stream_shifted_unchecked::<SLOT_SHIFT>(first, end)
+        };
     }
 
     /// End the walk with GP0(1Fh) so [`crate::is_draw_done`] rises once the

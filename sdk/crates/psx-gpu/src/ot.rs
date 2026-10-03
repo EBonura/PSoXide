@@ -172,23 +172,23 @@ impl<const N: usize> OrderingTable<N> {
     /// # Panics
     /// If `words` exceeds [`crate::MAX_NODE_WORDS`]: silicon loses words
     /// from a longer node.
-    pub unsafe fn insert(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
+    pub(crate) unsafe fn link(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
         assert!(
             words as usize <= crate::MAX_NODE_WORDS,
             "GPU DMA node longer than MAX_NODE_WORDS"
         );
         let z = z.min(N - 1);
         // SAFETY: `z` was clamped below `N`; the packet contract is forwarded.
-        unsafe { self.insert_unchecked(z, packet_ptr, words) };
+        unsafe { self.link_unchecked(z, packet_ptr, words) };
     }
 
     /// Prepend a primitive packet into an already-clamped depth slot.
     ///
     /// # Safety
-    /// Same packet lifetime/alignment requirements as [`insert`](Self::insert).
+    /// Same packet lifetime/alignment requirements as [`link`](Self::link).
     /// In addition, `z` must be less than `N`.
     #[inline(always)]
-    pub unsafe fn insert_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
+    pub(crate) unsafe fn link_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
         debug_assert!(z < N);
         debug_assert!(words as usize <= crate::MAX_NODE_WORDS);
         let old_head = self.entries[z] & OT_ADDR_MASK;
@@ -203,10 +203,10 @@ impl<const N: usize> OrderingTable<N> {
     /// high byte of `tag_high` into an already-clamped depth slot.
     ///
     /// # Safety
-    /// Same requirements as [`insert_unchecked`](Self::insert_unchecked).
+    /// Same requirements as [`link_unchecked`](Self::link_unchecked).
     /// The low 24 bits of `tag_high` must be zero.
     #[inline(always)]
-    pub unsafe fn insert_unchecked_tag_high(
+    pub(crate) unsafe fn link_tag_high_unchecked(
         &mut self,
         z: usize,
         packet_ptr: *mut u32,
@@ -216,7 +216,7 @@ impl<const N: usize> OrderingTable<N> {
         debug_assert_eq!(tag_high & OT_ADDR_MASK, 0);
         debug_assert!((tag_high >> 24) as usize <= crate::MAX_NODE_WORDS);
         let old_head = self.entries[z] & OT_ADDR_MASK;
-        // SAFETY: as `insert_unchecked`: the caller guarantees a writable tag word.
+        // SAFETY: as `link_unchecked`: the caller guarantees a writable tag word.
         unsafe { ptr::write_volatile(packet_ptr, tag_high | old_head) };
         let pkt_addr = packet_ptr.expose_provenance() as u32 & OT_ADDR_MASK;
         self.entries[z] = pkt_addr;
@@ -230,17 +230,17 @@ impl<const N: usize> OrderingTable<N> {
     /// OT's prepend semantics deliberately reverse commands which share a
     /// slot. This matches repeated classic `addPrim` calls exactly.
     ///
-    /// Use [`Self::insert_packed_commands_reverse_unchecked`] when same-slot
+    /// Use [`Self::link_packed_commands_reverse_unchecked`] when same-slot
     /// submission order must instead be preserved.
     ///
     /// # Safety
     /// `commands` must point to `command_count * 2` readable machine words in
     /// the documented layout. Every packet pointer must meet the lifetime,
-    /// alignment, and writability requirements of [`Self::insert_unchecked`],
+    /// alignment, and writability requirements of [`Self::link_unchecked`],
     /// every encoded slot must be less than `N`, and every word count at most
     /// [`crate::MAX_NODE_WORDS`].
     #[inline]
-    pub unsafe fn insert_packed_commands_unchecked(
+    pub(crate) unsafe fn link_packed_commands_unchecked(
         &mut self,
         commands: *const usize,
         command_count: usize,
@@ -310,10 +310,8 @@ impl<const N: usize> OrderingTable<N> {
                 let slot = (slot_words & u16::MAX as u32) as usize;
                 debug_assert!(slot < N);
                 // SAFETY: the caller guarantees the packet and the slot meet
-                // `insert_unchecked_tag_high`'s contract.
-                unsafe {
-                    self.insert_unchecked_tag_high(slot, packet_ptr, slot_words & 0xFF00_0000)
-                };
+                // `link_tag_high_unchecked`'s contract.
+                unsafe { self.link_tag_high_unchecked(slot, packet_ptr, slot_words & 0xFF00_0000) };
             }
         }
     }
@@ -334,11 +332,11 @@ impl<const N: usize> OrderingTable<N> {
     /// # Safety
     /// `commands` must point to `command_count * 2` readable machine words in the
     /// documented layout. Every encoded packet pointer must meet the lifetime,
-    /// alignment, and writability requirements of [`Self::insert_unchecked`],
+    /// alignment, and writability requirements of [`Self::link_unchecked`],
     /// every encoded slot must be less than `N`, and every word count at most
     /// [`crate::MAX_NODE_WORDS`].
     #[inline]
-    pub unsafe fn insert_packed_commands_reverse_unchecked(
+    pub(crate) unsafe fn link_packed_commands_reverse_unchecked(
         &mut self,
         commands: *const usize,
         command_count: usize,
@@ -413,10 +411,8 @@ impl<const N: usize> OrderingTable<N> {
                 let slot = (slot_words & u16::MAX as u32) as usize;
                 debug_assert!(slot < N);
                 // SAFETY: the caller guarantees the packet and the slot meet
-                // `insert_unchecked_tag_high`'s contract.
-                unsafe {
-                    self.insert_unchecked_tag_high(slot, packet_ptr, slot_words & 0xFF00_0000)
-                };
+                // `link_tag_high_unchecked`'s contract.
+                unsafe { self.link_tag_high_unchecked(slot, packet_ptr, slot_words & 0xFF00_0000) };
             }
         }
     }
@@ -440,7 +436,11 @@ impl<const N: usize> OrderingTable<N> {
     /// exactly and be at most [`crate::MAX_NODE_WORDS`], and every
     /// non-sentinel slot must be less than `N`.
     #[inline]
-    pub unsafe fn insert_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
+    pub(crate) unsafe fn link_tagged_packet_stream_unchecked(
+        &mut self,
+        first: *mut u32,
+        end: *mut u32,
+    ) {
         if first >= end {
             return;
         }
@@ -451,7 +451,7 @@ impl<const N: usize> OrderingTable<N> {
             let entries = self.entries.as_mut_ptr();
             // Sixteen instructions per packet, two RAM loads. Every OT slot
             // already holds a 24-bit address with a zero top byte (`clear`,
-            // `insert_unchecked*` and this loop all store masked packet
+            // `link_unchecked*` and this loop all store masked packet
             // addresses), so the old head needs no mask before the packet's
             // word count is OR-ed in.
             // SAFETY: the loop walks `first..end` by each packet's own word count, which the
@@ -520,9 +520,7 @@ impl<const N: usize> OrderingTable<N> {
                 if slot != u16::MAX as usize {
                     debug_assert!(slot < N);
                     // SAFETY: the caller guarantees a writable packet and an in-range slot.
-                    unsafe {
-                        self.insert_unchecked_tag_high(slot, packet, staged_tag & 0xFF00_0000)
-                    };
+                    unsafe { self.link_tag_high_unchecked(slot, packet, staged_tag & 0xFF00_0000) };
                 }
                 packet = next;
             }
@@ -542,10 +540,10 @@ impl<const N: usize> OrderingTable<N> {
     /// # Safety
     ///
     /// The packet lifetime and layout requirements match
-    /// [`Self::insert_tagged_packet_stream_unchecked`]. Every shifted slot must
+    /// [`Self::link_tagged_packet_stream_unchecked`]. Every shifted slot must
     /// be less than `N`, and `SLOT_SHIFT` must be less than 16.
     #[inline]
-    pub unsafe fn insert_tagged_packet_stream_shifted_unchecked<const SLOT_SHIFT: u32>(
+    pub(crate) unsafe fn link_tagged_packet_stream_shifted_unchecked<const SLOT_SHIFT: u32>(
         &mut self,
         first: *mut u32,
         end: *mut u32,
@@ -559,7 +557,7 @@ impl<const N: usize> OrderingTable<N> {
         #[cfg(target_arch = "mips")]
         {
             let entries = self.entries.as_mut_ptr();
-            // The `insert_tagged_packet_stream_unchecked` loop with the slot
+            // The `link_tagged_packet_stream_unchecked` loop with the slot
             // shift after the sentinel test.
             // SAFETY: the loop walks the caller's exact packet sequence and writes only tags
             // and slot entries, which `SLOT_SHIFT` keeps below `N` per the contract.
@@ -623,11 +621,7 @@ impl<const N: usize> OrderingTable<N> {
                     // SAFETY: the caller guarantees a writable packet and an in-range shifted
                     // slot.
                     unsafe {
-                        self.insert_unchecked_tag_high(
-                            shifted_slot,
-                            packet,
-                            staged_tag & 0xFF00_0000,
-                        )
+                        self.link_tag_high_unchecked(shifted_slot, packet, staged_tag & 0xFF00_0000)
                     };
                 }
                 packet = next;
@@ -664,7 +658,118 @@ impl<const N: usize> OrderingTable<N> {
             )
         };
         // SAFETY: forwarded contract.
-        unsafe { self.insert(z, prim as *mut T as *mut u32, words) };
+        unsafe { self.link(z, prim as *mut T as *mut u32, words) };
+    }
+
+    /// Prepend a raw packet to slot `z` (clamped to `N - 1`).
+    ///
+    /// # Safety
+    ///
+    /// As [`OtFrame::add_raw`](crate::frame::OtFrame::add_raw).
+    #[deprecated(note = "use `OtFrame::add_raw`, through `frame()` or `resume_frame()`")]
+    #[inline(always)]
+    pub unsafe fn insert(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
+        // SAFETY: forwarded contract.
+        unsafe { self.link(z, packet_ptr, words) }
+    }
+
+    /// Prepend a raw packet to slot `z` without the clamp or length check.
+    ///
+    /// # Safety
+    ///
+    /// As [`OtFrame::add_raw_unchecked`](crate::frame::OtFrame::add_raw_unchecked).
+    #[deprecated(note = "use `OtFrame::add_raw_unchecked`, through `frame()` or `resume_frame()`")]
+    #[inline(always)]
+    pub unsafe fn insert_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
+        // SAFETY: forwarded contract.
+        unsafe { self.link_unchecked(z, packet_ptr, words) }
+    }
+
+    /// Prepend a raw packet whose word count is already in tag position.
+    ///
+    /// # Safety
+    ///
+    /// As [`OtFrame::add_raw_tag_high_unchecked`](crate::frame::OtFrame::add_raw_tag_high_unchecked).
+    #[deprecated(
+        note = "use `OtFrame::add_raw_tag_high_unchecked`, through `frame()` or `resume_frame()`"
+    )]
+    #[inline(always)]
+    pub unsafe fn insert_unchecked_tag_high(
+        &mut self,
+        z: usize,
+        packet_ptr: *mut u32,
+        tag_high: u32,
+    ) {
+        // SAFETY: forwarded contract.
+        unsafe { self.link_tag_high_unchecked(z, packet_ptr, tag_high) }
+    }
+
+    /// Add packed two-word commands, first to last.
+    ///
+    /// # Safety
+    ///
+    /// As [`OtFrame::add_packed_commands_unchecked`](crate::frame::OtFrame::add_packed_commands_unchecked).
+    #[deprecated(
+        note = "use `OtFrame::add_packed_commands_unchecked`, through `frame()` or `resume_frame()`"
+    )]
+    #[inline(always)]
+    pub unsafe fn insert_packed_commands_unchecked(
+        &mut self,
+        commands: *const usize,
+        command_count: usize,
+    ) {
+        // SAFETY: forwarded contract.
+        unsafe { self.link_packed_commands_unchecked(commands, command_count) }
+    }
+
+    /// Add packed two-word commands, last to first.
+    ///
+    /// # Safety
+    ///
+    /// As [`OtFrame::add_packed_commands_reverse_unchecked`](crate::frame::OtFrame::add_packed_commands_reverse_unchecked).
+    #[deprecated(
+        note = "use `OtFrame::add_packed_commands_reverse_unchecked`, through `frame()` or `resume_frame()`"
+    )]
+    #[inline(always)]
+    pub unsafe fn insert_packed_commands_reverse_unchecked(
+        &mut self,
+        commands: *const usize,
+        command_count: usize,
+    ) {
+        // SAFETY: forwarded contract.
+        unsafe { self.link_packed_commands_reverse_unchecked(commands, command_count) }
+    }
+
+    /// Add a contiguous stream of packets whose tags carry their slot.
+    ///
+    /// # Safety
+    ///
+    /// As [`OtFrame::add_tagged_packet_stream_unchecked`](crate::frame::OtFrame::add_tagged_packet_stream_unchecked).
+    #[deprecated(
+        note = "use `OtFrame::add_tagged_packet_stream_unchecked`, through `frame()` or `resume_frame()`"
+    )]
+    #[inline(always)]
+    pub unsafe fn insert_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
+        // SAFETY: forwarded contract.
+        unsafe { self.link_tagged_packet_stream_unchecked(first, end) }
+    }
+
+    /// Add a tagged packet stream with every slot shifted right.
+    ///
+    /// # Safety
+    ///
+    /// As [`OtFrame::add_tagged_packet_stream_shifted_unchecked`](crate::frame::OtFrame::add_tagged_packet_stream_shifted_unchecked).
+    #[deprecated(
+        note = "use `OtFrame::add_tagged_packet_stream_shifted_unchecked`, through `frame()` or `resume_frame()`"
+    )]
+    #[inline(always)]
+    pub unsafe fn insert_tagged_packet_stream_shifted_unchecked<const SLOT_SHIFT: u32>(
+        &mut self,
+        first: *mut u32,
+        end: *mut u32,
+    ) {
+        // SAFETY: forwarded contract.
+        unsafe { self.link_tagged_packet_stream_shifted_unchecked::<SLOT_SHIFT>(first, end) }
     }
 
     /// End this table's DMA walk with GP0(1Fh), so the GPU raises
@@ -920,7 +1025,7 @@ mod tests {
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
-            ot.insert_packed_commands_reverse_unchecked(
+            ot.link_packed_commands_reverse_unchecked(
                 commands.as_ptr().cast::<usize>(),
                 commands.len(),
             );
@@ -954,7 +1059,7 @@ mod tests {
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
-            ot.insert_packed_commands_unchecked(commands.as_ptr().cast::<usize>(), commands.len());
+            ot.link_packed_commands_unchecked(commands.as_ptr().cast::<usize>(), commands.len());
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
@@ -982,7 +1087,7 @@ mod tests {
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
-            ot.insert_tagged_packet_stream_unchecked(first, first.add(packets.len()));
+            ot.link_tagged_packet_stream_unchecked(first, first.add(packets.len()));
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
@@ -1012,7 +1117,7 @@ mod tests {
         unsafe {
             {
                 let first = packets.as_mut_ptr();
-                ot.insert_tagged_packet_stream_shifted_unchecked::<3>(
+                ot.link_tagged_packet_stream_shifted_unchecked::<3>(
                     first,
                     first.add(packets.len()),
                 );
@@ -1043,7 +1148,7 @@ mod tests {
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
-            ot.insert(2, packet.as_mut_ptr(), 3);
+            ot.link(2, packet.as_mut_ptr(), 3);
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
@@ -1068,8 +1173,8 @@ mod tests {
         unsafe {
             // a is in a deeper (further from camera) slot than b, so b
             // should appear first when walking from the head.
-            ot.insert(2, a.as_mut_ptr(), 1);
-            ot.insert(5, b.as_mut_ptr(), 1);
+            ot.link(2, a.as_mut_ptr(), 1);
+            ot.link(5, b.as_mut_ptr(), 1);
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
@@ -1090,7 +1195,7 @@ mod tests {
         let mut packet = [0u32; 1 + crate::MAX_NODE_WORDS];
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
-        unsafe { ot.insert(1, packet.as_mut_ptr(), crate::MAX_NODE_WORDS as u8) };
+        unsafe { ot.link(1, packet.as_mut_ptr(), crate::MAX_NODE_WORDS as u8) };
         assert_eq!(packet[0] >> 24, crate::MAX_NODE_WORDS as u32);
     }
 
@@ -1101,7 +1206,7 @@ mod tests {
         ot.clear();
         let mut packet = [0u32; 2 + crate::MAX_NODE_WORDS];
         // SAFETY: the call panics on the word count before it touches the packet.
-        unsafe { ot.insert(1, packet.as_mut_ptr(), crate::MAX_NODE_WORDS as u8 + 1) };
+        unsafe { ot.link(1, packet.as_mut_ptr(), crate::MAX_NODE_WORDS as u8 + 1) };
     }
 
     /// The draw-done node is the last thing walked, after every slot and
@@ -1117,8 +1222,8 @@ mod tests {
         // their slots and word counts fit the table.
         unsafe {
             ot.end_with_node(node.as_ptr());
-            ot.insert(0, far.as_mut_ptr(), 1);
-            ot.insert(3, near.as_mut_ptr(), 1);
+            ot.link(0, far.as_mut_ptr(), 1);
+            ot.link(3, near.as_mut_ptr(), 1);
         }
         let walked: [usize; 3] = {
             // SAFETY: every packet linked into the table is a local still alive here.
@@ -1150,7 +1255,7 @@ mod tests {
         let mut packet: [u32; 2] = [0, 0xF];
         // SAFETY: the packet and the node are locals that outlive the table's use.
         unsafe {
-            ot.insert(0, packet.as_mut_ptr(), 1);
+            ot.link(0, packet.as_mut_ptr(), 1);
             ot.end_with_node(node.as_ptr());
         }
     }
@@ -1176,8 +1281,8 @@ mod tests {
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
-            ot.insert(1, first.as_mut_ptr(), 1);
-            ot.insert(1, second.as_mut_ptr(), 1);
+            ot.link(1, first.as_mut_ptr(), 1);
+            ot.link(1, second.as_mut_ptr(), 1);
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
@@ -1203,8 +1308,8 @@ mod tests {
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
-            ot.insert(1, packet.as_mut_ptr(), 1);
-            ot.insert(1, packet.as_mut_ptr(), 1);
+            ot.link(1, packet.as_mut_ptr(), 1);
+            ot.link(1, packet.as_mut_ptr(), 1);
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
@@ -1227,8 +1332,8 @@ mod tests {
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
-            ot.insert(1, packet.as_mut_ptr(), 1);
-            ot.insert(2, packet.as_mut_ptr(), 1);
+            ot.link(1, packet.as_mut_ptr(), 1);
+            ot.link(2, packet.as_mut_ptr(), 1);
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
