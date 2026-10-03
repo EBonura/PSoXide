@@ -2,7 +2,7 @@
 //!
 //! `no_std` guest code cannot reach for `format!`, so HUD overlays
 //! that want to print a counter next to a label need a tiny
-//! stack-buffer formatter. [`u16_hex`] renders a `u16` as `0xABCD`
+//! stack-buffer formatter. [`format_u16`] renders a `u16` as `0xABCD`
 //! into a [`HexU16`] whose [`as_str`](HexU16::as_str) feeds straight
 //! into [`FontAtlas::draw_text`](crate::FontAtlas::draw_text).
 
@@ -19,7 +19,7 @@ impl HexU16 {
 }
 
 /// Format a `u16` as a fixed-width `0xABCD` hex label.
-pub fn u16_hex(v: u16) -> HexU16 {
+pub fn format_u16(v: u16) -> HexU16 {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = [0u8; 6];
     out[0] = b'0';
@@ -31,14 +31,21 @@ pub fn u16_hex(v: u16) -> HexU16 {
     HexU16(out)
 }
 
+/// Renamed to [`format_u16`].
+#[deprecated(note = "renamed to `format_u16`")]
+#[inline(always)]
+pub fn u16_hex(v: u16) -> HexU16 {
+    format_u16(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn formats_fixed_width_uppercase() {
-        assert_eq!(u16_hex(0).as_str(), "0x0000");
-        assert_eq!(u16_hex(0x1F40).as_str(), "0x1F40");
-        assert_eq!(u16_hex(u16::MAX).as_str(), "0xFFFF");
+        assert_eq!(format_u16(0).as_str(), "0x0000");
+        assert_eq!(format_u16(0x1F40).as_str(), "0x1F40");
+        assert_eq!(format_u16(u16::MAX).as_str(), "0xFFFF");
     }
 }

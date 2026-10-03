@@ -100,7 +100,9 @@ use psx_vram::{
 pub mod fonts;
 pub mod hex;
 
-pub use hex::{u16_hex, HexU16};
+#[allow(deprecated)] // keeps the old root path working until games repin
+pub use hex::u16_hex;
+pub use hex::{format_u16, HexU16};
 
 // ======================================================================
 // BitmapFont -- the static descriptor
@@ -337,13 +339,21 @@ pub enum TextBlend {
 impl TextBlend {
     /// The two-bit draw-mode semi-transparency ("ABR") field selecting
     /// this equation.
-    pub const fn abr(self) -> u8 {
+    #[doc(alias = "ABR")]
+    pub const fn semi_transparency_bits(self) -> u8 {
         match self {
             Self::Average => 0,
             Self::Add => 1,
             Self::Subtract => 2,
             Self::AddQuarter => 3,
         }
+    }
+
+    /// Renamed to [`TextBlend::semi_transparency_bits`].
+    #[deprecated(note = "renamed to `semi_transparency_bits`")]
+    #[inline(always)]
+    pub const fn abr(self) -> u8 {
+        self.semi_transparency_bits()
     }
 }
 
@@ -366,7 +376,7 @@ const fn blended_draw_mode_word(tpage: TexturePage, blend: TextBlend) -> u32 {
     gp0::draw_mode(
         (tpage.x() / 64) as u32,
         if tpage.y() == 256 { 1 } else { 0 },
-        blend.abr() as u32,
+        blend.semi_transparency_bits() as u32,
         tpage.depth() as u32,
         false,
         true,
@@ -1589,11 +1599,19 @@ impl FontAtlas {
         self.font
     }
 
-    /// TexturePage the atlas is installed at -- useful if the caller wants
-    /// to restore it after drawing with a different tpage. Always
+    /// Texture page the atlas is installed at -- useful if the caller
+    /// wants to restore it after drawing with a different tpage. Always
     /// 4bpp, always inside a valid VRAM page-aligned slot.
-    pub fn tpage(&self) -> TexturePage {
+    #[doc(alias = "tpage")]
+    pub fn texture_page(&self) -> TexturePage {
         self.tpage
+    }
+
+    /// Renamed to [`FontAtlas::texture_page`].
+    #[deprecated(note = "renamed to `texture_page`")]
+    #[inline(always)]
+    pub fn tpage(&self) -> TexturePage {
+        self.texture_page()
     }
 }
 
@@ -1663,10 +1681,10 @@ mod tests {
     /// against the hardware's documented ABR encoding.
     #[test]
     fn text_blend_maps_to_the_hardware_abr_field() {
-        assert_eq!(TextBlend::Average.abr(), 0);
-        assert_eq!(TextBlend::Add.abr(), 1);
-        assert_eq!(TextBlend::Subtract.abr(), 2);
-        assert_eq!(TextBlend::AddQuarter.abr(), 3);
+        assert_eq!(TextBlend::Average.semi_transparency_bits(), 0);
+        assert_eq!(TextBlend::Add.semi_transparency_bits(), 1);
+        assert_eq!(TextBlend::Subtract.semi_transparency_bits(), 2);
+        assert_eq!(TextBlend::AddQuarter.semi_transparency_bits(), 3);
     }
 
     /// The blended draw mode must differ from the opaque one in the ABR
@@ -1690,7 +1708,7 @@ mod tests {
                 let word = blended_draw_mode_word(tpage, blend);
                 assert_eq!(
                     (word >> 5) & 3,
-                    u32::from(blend.abr()),
+                    u32::from(blend.semi_transparency_bits()),
                     "{blend:?} ABR field"
                 );
                 assert_eq!(
@@ -1705,7 +1723,7 @@ mod tests {
             for blend in [TextBlend::Average, TextBlend::Add, TextBlend::Subtract] {
                 assert_eq!(
                     blended_draw_mode_word(tpage, blend) & 0x1FF,
-                    u32::from(tpage.uv_word(blend.abr())),
+                    u32::from(tpage.uv_word(blend.semi_transparency_bits())),
                     "{blend:?} page/blend/depth encoding"
                 );
             }
