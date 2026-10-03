@@ -191,9 +191,9 @@ const LERP_A: Arg = Arg::Imm(0x0000_1234);
 /// group is only interesting next to the register A/B records anyway.
 const EXTENDED: [Probe; 39] = [
     probe(0x1E, 128, warm_nops, NONE, NONE).uncached(),
-    // The write queue is four stores deep: Sony's notes and nugget's
-    // measurements both say a store followed by three independent
-    // instructions costs nothing. Against 0x76, 64 back-to-back stores.
+    // Each store is followed by three independent instructions, which a
+    // four-deep write queue should absorb for free. This probe measures
+    // that claim against 0x76's 64 back-to-back stores.
     probe(0x1F, 64, warm_stores_spaced, Arg::RamWord, NONE),
     // Warm GTE command latency: back-to-back commands, each stalling until
     // the one before it has finished.

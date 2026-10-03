@@ -41,7 +41,7 @@ pub const DEFAULT_PACKET_WORDS: usize = 0x30000 / core::mem::size_of::<u32>();
 /// maps without permanently reserving two complete face tables on PS1.
 const PXBSP_NODE_POSTORDER: u32 = 1 << 31;
 /// Traversal stack entry layout: node index in the low bits, the residual
-/// clip-plane mask (Quake's clipflags) above it. Node indices are `i16`, so
+/// clip-plane mask above it. Node indices are `i16`, so
 /// sixteen bits is ample.
 const PXBSP_NODE_STACK_INDEX: u32 = 0xffff;
 const PXBSP_NODE_STACK_MASK_SHIFT: u32 = 16;
@@ -916,7 +916,7 @@ impl FrustumPlanes {
         }
     }
 
-    /// Quake's `R_RecursiveWorldNode` clipflags, applied to one node box.
+    /// Hierarchical frustum test of one node box against the live clip planes.
     ///
     /// `mask` names the planes a caller still has to care about; the rest were
     /// already proven satisfied by an ancestor box. Returns `None` when the box
@@ -1141,10 +1141,9 @@ impl FrustumPlanes {
         {
             return (count, false);
         }
-        // Classify once before clipping. Quake-PSX performs the equivalent
-        // screen outcode AND before emitting a brush triangle: if every point
-        // is outside the same boundary, no edge can cross the view. Keeping
-        // this test in exact plane space preserves the polygon clip contract
+        // Classify once before clipping: if every point is outside the same
+        // plane, no edge can cross the view and the polygon is rejected
+        // whole. Keeping this test in exact plane space preserves the polygon clip contract
         // while avoiding five complete copy/interpolation passes for the many
         // PVS faces that sit wholly beyond one side of the camera frustum.
         let mut all_inside = true;
@@ -1271,8 +1270,7 @@ pub struct Renderer {
     /// Two-bit PXBSP face state: 0 hidden, 1 PVS fallback, 2 node-owned PVS.
     pxbsp_face_state: Vec<u8>,
     pxbsp_face_count: usize,
-    /// Sorted, unique PVS face chain for PXBSP worlds. Quake-PSX builds the
-    /// same kind of surface chain during BSP traversal; retaining it across
+    /// Sorted, unique PVS face chain for PXBSP worlds. Retaining it across
     /// frames avoids scanning the complete face table while the view leaf is
     /// unchanged. `pxbsp_face_state` remains the packed deduplication table.
     visible_pxbsp_faces: Vec<u16>,
@@ -1282,7 +1280,7 @@ pub struct Renderer {
     frame_pxbsp_faces: Vec<u16>,
     /// Two-bit per-face frame selection: 0 hidden, 1/2 node-owned back/front,
     /// 3 leaf/staticized fallback. The node states retain the camera-side
-    /// result Quake computes once for every coplanar node surface.
+    /// result computed once per node for all of its coplanar surfaces.
     frame_pxbsp_face_state: Vec<u8>,
     /// Per-face residual clip-plane mask for this frame: the planes the
     /// marking node could not prove. Zero means the face is wholly inside the
@@ -1656,9 +1654,9 @@ impl Renderer {
             self.view_projection,
         );
 
-        // Quake-PSX R_DrawBrushModel also scans the brush model's bounded
-        // surface slice and performs its plane-side test per face. World-node
-        // plane reuse does not apply to this transformed mover path.
+        // A brush model draws its own contiguous face range with a plane-side
+        // test per face. World-node plane reuse does not apply to this
+        // transformed mover path.
         let frame = self.draw_pxbsp_faces(
             map,
             local_camera,
@@ -2383,7 +2381,7 @@ impl Renderer {
         true
     }
 
-    /// Rebuild the Quake-style PVS stamp for render nodes. This runs only
+    /// Rebuild the per-node PVS stamp for render nodes. This runs only
     /// when the camera enters a different leaf; per-frame traversal can then
     /// skip every branch that cannot lead to a PVS-visible leaf.
     // Out of line on purpose: inlined into the scene render these per-frame
@@ -2466,8 +2464,8 @@ impl Renderer {
     /// Prove, once per loaded map, that every face reachable under a node lies
     /// inside that node's stored bounds.
     ///
-    /// Quake's `qbsp` maintains this invariant and `R_RecursiveWorldNode`'s
-    /// clipflags rely on it, but a PXBSP cook is free to store looser bounds.
+    /// Inheriting a node's clip proof down the tree depends on this
+    /// invariant, and a PXBSP cook is free to store looser bounds.
     /// Without the proof, inheriting "wholly inside the frustum" down the tree
     /// could drop a face that pokes out of its node box, so the render path
     /// falls back to the exact per-face clip whenever this returns false.
@@ -2630,9 +2628,9 @@ impl Renderer {
             return false;
         }
 
-        // Quake's R_RecursiveWorldNode carries clip state down the tree: once a
-        // node's box is wholly inside every plane, no descendant box or face
-        // can leave the frustum. Inheriting that proof (valid only while the
+        // Clip state is carried down the tree: once a node's box is wholly
+        // inside every plane, no descendant box or face can leave the
+        // frustum. Inheriting that proof (valid only while the
         // cook's node bounds are proven to enclose their faces) lets the draw
         // loop skip the exact per-face clip entirely.
         let inherit_clip = self.pxbsp_node_bounds_enclose_faces;

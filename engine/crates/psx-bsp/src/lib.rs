@@ -5,11 +5,10 @@
 //!
 //! Shared by the guest runtime, the editor cook and quake-psx so the wire
 //! format has one Rust definition (docs/quake-bsp-migration-plan.md, P0).
-//! Derived from quake-psx `crates/quake-formats` (GPL-2, same authorship;
-//! synced to its commit 83a6349); the PXBSP extensions (material lump,
-//! PSoXide entity records, streaming index) will grow here.
-// ponytail: verbatim-copy provenance; field docs land as PXBSP diverges,
-// then this allow goes away.
+//! Record sizes and lump order are the cooked format's; the readers and
+//! validators are this crate's own. The PXBSP extensions (material lump,
+//! PSoXide entity records, streaming index) grow here.
+// ponytail: field docs land as PXBSP diverges, then this allow goes away.
 #![allow(missing_docs)]
 
 extern crate alloc;
