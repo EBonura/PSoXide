@@ -75,8 +75,9 @@ pub fn write_command_unguarded(word: u32) {
 #[inline(always)]
 pub fn write_display_control(word: u32) {
     #[cfg(any(feature = "present-queue", test))]
-    if handoff::is_slow() && !handoff::is_recording() {
-        handoff::run_direct_access_guard();
+    if handoff::is_slow() {
+        handoff::write_display_control_slow(word);
+        return;
     }
     // SAFETY: GP1 (0x1F80_1814) is the GPU's aligned 32-bit control port on every PS1; any word is
     // a legal write and only changes GPU state.
