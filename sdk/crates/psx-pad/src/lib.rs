@@ -33,7 +33,15 @@
 //! right X/Y, then left X/Y. Fresh DualShocks boot digital, so games
 //! that require sticks should either call [`enable_analog_port1`] or
 //! show an "enable analog mode" prompt when [`PadState::is_analog`]
-//! is false.
+//! is false. Programs that require a DualShock call
+//! [`require_analog_port1`] at boot: it locks the pad in analog mode, so
+//! the Analog button cannot switch it back, and says whether an
+//! analog-capable pad is there at all.
+//!
+//! Every poll is a complete, ACK-paced packet whose length follows the ID it
+//! reports, so a 0x41 digital frame and a 0x73 analog frame decode the same
+//! buttons. A packet that fails part way reports [`PadMode::Unknown`]; read
+//! through a [`PadReader`] to get the last clean state instead.
 //!
 //! Our [`ButtonState`] stores active-high so `buttons.is_held` feels
 //! natural in game code.
@@ -747,6 +755,97 @@ pub fn enable_analog_port2() -> bool {
     enable_analog(true)
 }
 
+/// What a port held after [`require_analog_port1`] asked it for analog mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AnalogRequirement {
+    /// A DualShock answered in analog mode, now locked there: the Analog
+    /// button no longer switches it back to digital.
+    Analog,
+    /// A controller answered but did not settle in analog mode: an original
+    /// digital pad, or a DualShock that refused or ignored the request.
+    DigitalOnly,
+    /// No controller gave a clean reply.
+    Absent,
+}
+
+impl AnalogRequirement {
+    /// Classify the mode a pad reported after the analog request.
+    pub const fn from_mode(mode: PadMode) -> Self {
+        match mode {
+            PadMode::Analog => Self::Analog,
+            PadMode::Digital | PadMode::Config => Self::DigitalOnly,
+            PadMode::Disconnected | PadMode::Unknown => Self::Absent,
+        }
+    }
+}
+
+/// Put the port-1 controller in analog mode, lock it there, and report what
+/// it settled on. For programs that need sticks and must not let the Analog
+/// button flip the pad back to digital mid-session. Call it at boot (a
+/// chain-loaded program starts from whatever the previous one left) and
+/// again while the answer is not [`AnalogRequirement::Analog`], so a pad
+/// plugged in later is picked up.
+pub fn require_analog_port1() -> AnalogRequirement {
+    AnalogRequirement::from_mode(request_analog(false, REQUIRE_ANALOG_GAP_SPINS).mode)
+}
+
+/// Port-2 counterpart of [`require_analog_port1`].
+pub fn require_analog_port2() -> AnalogRequirement {
+    AnalogRequirement::from_mode(request_analog(true, REQUIRE_ANALOG_GAP_SPINS).mode)
+}
+
+/// A port reader that never hands a garbled packet to the game.
+///
+/// A poll that fails validation reports [`PadMode::Unknown`] with every
+/// button released. Taken at face value, a held button would read as released
+/// for that one frame and then as a fresh press on the next, so a held Select
+/// or Cross fires twice. The reader returns the last clean state instead.
+/// A clean report of an empty port is accepted as it is: unplugging a pad
+/// does release its buttons.
+#[derive(Copy, Clone, Debug)]
+pub struct PadReader {
+    port2: bool,
+    last: PadState,
+}
+
+impl PadReader {
+    /// A reader for port 1 that has seen nothing yet.
+    pub const fn port1() -> Self {
+        Self {
+            port2: false,
+            last: PadState::NONE,
+        }
+    }
+
+    /// A reader for port 2 that has seen nothing yet.
+    pub const fn port2() -> Self {
+        Self {
+            port2: true,
+            last: PadState::NONE,
+        }
+    }
+
+    /// Poll the port once and return the latest clean state.
+    pub fn poll(&mut self) -> PadState {
+        self.accept(poll_state(self.port2))
+    }
+
+    /// Fold one poll result into the reader and return the latest clean
+    /// state. [`PadReader::poll`] calls this; it is public so a caller that
+    /// polls some other way gets the same rule.
+    pub fn accept(&mut self, state: PadState) -> PadState {
+        if state.mode != PadMode::Unknown {
+            self.last = state;
+        }
+        self.last
+    }
+
+    /// The latest clean state without polling.
+    pub const fn last(&self) -> PadState {
+        self.last
+    }
+}
+
 /// Poll a port, retrying a garbled response.
 ///
 /// On real hardware a poll occasionally desyncs -- a stale byte lingering in
@@ -1104,33 +1203,59 @@ unsafe fn poll_once_timed(port2: bool, setup_spins: u32, interbyte_spins: u32) -
 /// re-measured on silicon.
 const CONFIG_COMMAND_GAP_SPINS: u32 = 8 * DEFAULT_SETUP_SPINS;
 
+/// Spins between the configuration commands of [`require_analog_port1`]:
+/// about one video frame, the spacing Sony's libpad uses, so the request
+/// that a program must win (the SCPH-110 is the pad that needed spacing at
+/// all) uses the reference pacing rather than the shorter, unmeasured one
+/// above. A spin costs about 6.7 CPU cycles on silicon (the 2026-07-26
+/// setup-delay sweep: 192 spins polled in 8587 cycles, 1536 in 17615), so
+/// this is about 660k cycles, a little over one 60 Hz frame. Only boot-time
+/// and redetect callers pay it; [`enable_analog_port1`] keeps its short gap
+/// because games call it from their frame loops.
+const REQUIRE_ANALOG_GAP_SPINS: u32 = 96 * DEFAULT_SETUP_SPINS;
+
+/// Exit-config retries when a pad is still answering ID 0xF3 after the
+/// analog request. Each costs one gap; a pad left in configuration mode
+/// still reports buttons, but never analog, and ignores the Analog lock.
+const CONFIG_EXIT_RETRIES: u32 = 3;
+
 fn enable_analog(port2: bool) -> bool {
+    request_analog(port2, CONFIG_COMMAND_GAP_SPINS).is_analog()
+}
+
+/// Send the analog-and-lock request, spacing the commands by `gap` spins,
+/// and return the state the pad settled on. A pad still parked in
+/// configuration mode (ID 0xF3, the SCPH-110 failure) is sent the exit
+/// command again, a bounded number of times, before its state is reported.
+fn request_analog(port2: bool, gap: u32) -> PadState {
     // SAFETY: `transaction` and `delay_reads` drive SIO0 only (SIO0 access contract), and the
     // configuration sequence runs to completion here.
     unsafe {
         // Enter config mode.
         transaction(port2, [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        delay_reads(CONFIG_COMMAND_GAP_SPINS);
+        delay_reads(gap);
         // Request analog mode and lock it so the pad cannot toggle
         // back underneath analog-only game controls.
         transaction(port2, [0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00]);
-        delay_reads(CONFIG_COMMAND_GAP_SPINS);
+        delay_reads(gap);
         // Exit config mode, restoring the requested analog mode.
         transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        delay_reads(CONFIG_COMMAND_GAP_SPINS);
+        delay_reads(gap);
     }
     let mut state = poll_state(port2);
-    if state.mode == PadMode::Config {
+    let mut retries = 0;
+    while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
         // than parked in configuration, then re-read what it settled on.
         // SAFETY: as above, SIO0 only (SIO0 access contract).
         unsafe {
             transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-            delay_reads(CONFIG_COMMAND_GAP_SPINS);
+            delay_reads(gap);
         }
         state = poll_state(port2);
+        retries += 1;
     }
-    state.is_analog()
+    state
 }
 
 #[inline]
@@ -1542,5 +1667,111 @@ mod tests {
         assert!(input.just_pressed(1));
         assert!(!input.just_released(0));
         assert!(!input.is_held(99));
+    }
+
+    fn state(mode: PadMode, buttons: u16) -> PadState {
+        PadState {
+            buttons: ButtonState::from_bits(buttons),
+            mode,
+            sticks: AnalogSticks::CENTERED,
+            id_low: match mode {
+                PadMode::Digital => 0x41,
+                PadMode::Analog => 0x73,
+                PadMode::Config => 0xF3,
+                _ => 0xFF,
+            },
+        }
+    }
+
+    #[test]
+    fn analog_requirement_classifies_every_mode() {
+        use AnalogRequirement as R;
+        assert_eq!(R::from_mode(PadMode::Analog), R::Analog);
+        assert_eq!(R::from_mode(PadMode::Digital), R::DigitalOnly);
+        assert_eq!(R::from_mode(PadMode::Config), R::DigitalOnly);
+        assert_eq!(R::from_mode(PadMode::Disconnected), R::Absent);
+        assert_eq!(R::from_mode(PadMode::Unknown), R::Absent);
+    }
+
+    #[test]
+    fn analog_and_digital_frames_decode_the_same_buttons() {
+        let digital = RawPoll {
+            id_low: 0x41,
+            id_high: 0x5A,
+            buttons_low: 0xFE,  // SELECT (active-low)
+            buttons_high: 0xBF, // CROSS
+            sticks: AnalogSticks::CENTERED,
+            mode: PadMode::Digital,
+            ack_seen: 0x0f,
+            exchanges: 5,
+        };
+        let sticks = AnalogSticks {
+            right_x: 0x80,
+            right_y: 0x80,
+            left_x: 0x00,
+            left_y: 0xFF,
+        };
+        let analog = RawPoll {
+            id_low: 0x73,
+            sticks,
+            mode: PadMode::Analog,
+            ack_seen: 0xff,
+            exchanges: 9,
+            ..digital
+        };
+        let (d, a) = (digital.to_state(), analog.to_state());
+        assert_eq!(d.buttons, a.buttons);
+        assert_eq!(a.buttons.bits(), button::SELECT | button::CROSS);
+        assert!(a.is_analog() && !d.is_analog());
+        assert_eq!(a.sticks, sticks);
+        assert_eq!(d.sticks, AnalogSticks::CENTERED);
+    }
+
+    #[test]
+    fn a_packet_slipped_by_one_byte_reads_as_select_and_both_directions() {
+        // Why every packet must be complete and paced: an analog packet that
+        // slips one byte delivers the ID's 0x5A as the first button byte.
+        // That decodes as Select, R3, Left and Right held together, the
+        // phantom-Select pattern seen on a console in analog mode.
+        let slipped = decode_buttons(0x5A, 0xFF);
+        assert_eq!(
+            slipped.bits(),
+            button::SELECT | button::R3 | button::LEFT | button::RIGHT
+        );
+    }
+
+    #[test]
+    fn reader_keeps_the_last_clean_state_across_a_garbled_poll() {
+        let mut reader = PadReader::port1();
+        let mut tracker = PadTracker::new();
+        let held = state(PadMode::Analog, button::SELECT);
+        tracker.update(reader.accept(held).buttons.bits());
+        assert!(tracker.just_pressed(button::SELECT));
+        // The failed packet must neither release nor re-press Select.
+        let garbled = PadState {
+            mode: PadMode::Unknown,
+            ..PadState::NONE
+        };
+        let seen = reader.accept(garbled);
+        assert_eq!(seen, held);
+        tracker.update(seen.buttons.bits());
+        assert!(!tracker.just_released(button::SELECT));
+        tracker.update(reader.accept(held).buttons.bits());
+        assert!(!tracker.just_pressed(button::SELECT), "no second press");
+    }
+
+    #[test]
+    fn reader_accepts_every_clean_mode_including_an_empty_port() {
+        let mut reader = PadReader::port1();
+        assert_eq!(reader.last(), PadState::NONE);
+        for clean in [
+            state(PadMode::Digital, button::CROSS),
+            state(PadMode::Analog, button::START),
+            state(PadMode::Config, 0),
+            PadState::NONE,
+        ] {
+            assert_eq!(reader.accept(clean), clean);
+        }
+        assert_eq!(reader.last(), PadState::NONE, "unplugging releases");
     }
 }
