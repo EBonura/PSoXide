@@ -61,7 +61,7 @@
 
 use psx_hw::gpu::{gp0, gp1, pack_xy};
 use psx_io::dma::{self, Channel};
-use psx_io::gpu::{wait_cmd_ready, write_gp0, write_gp1};
+use psx_io::gpu::{wait_command_ready, write_command, write_display_control};
 use psx_io::periph::GpuDma;
 
 /// VRAM framebuffer width in pixels.
@@ -613,8 +613,8 @@ impl Tpage {
     /// "current" tpage for sprite / rect primitives that don't
     /// embed a tpage of their own.
     pub fn apply_as_draw_mode(self) {
-        wait_cmd_ready();
-        write_gp0(gp0::draw_mode(
+        wait_command_ready();
+        write_command(gp0::draw_mode(
             (self.x / 64) as u32,
             if self.y == 256 { 1 } else { 0 },
             0,
@@ -625,8 +625,8 @@ impl Tpage {
         // Plain tpage application means "sample the page directly".
         // Material-aware helpers re-apply their own texture window after
         // setting draw mode.
-        wait_cmd_ready();
-        write_gp0(gp0::tex_window(0, 0, 0, 0));
+        wait_command_ready();
+        write_command(gp0::tex_window(0, 0, 0, 0));
     }
 }
 
@@ -1101,7 +1101,7 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
     while i + 1 < pixels.len() {
         let lo = pixels[i] as u32;
         let hi = pixels[i + 1] as u32;
-        write_gp0(lo | (hi << 16));
+        write_command(lo | (hi << 16));
         i += 2;
     }
 }
@@ -1138,7 +1138,7 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
     copy_to_vram_header(rect);
     let mut i = 0;
     while i < bytes.len() {
-        write_gp0(packed_upload_word(bytes, i));
+        write_command(packed_upload_word(bytes, i));
         i += 4;
     }
 }
@@ -1195,7 +1195,7 @@ pub fn upload_words(rect: VramRect, words: &[u32]) {
 
     copy_to_vram_header(rect);
     for &word in words {
-        write_gp0(word);
+        write_command(word);
     }
 }
 
@@ -1210,13 +1210,13 @@ fn copy_to_vram_header(rect: VramRect) {
     // channel for the block-DMA path) mid-walk corrupts the command
     // stream, so drain the channel first. Bounded: a wedged walk must
     // not take the upload (or the boot that needs it) down with it.
-    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(Channel::Gpu);
     }
-    wait_cmd_ready();
-    write_gp0(gp0::COPY_CPU_TO_VRAM);
-    write_gp0(pack_xy(rect.x, rect.y));
-    write_gp0(pack_xy(rect.w, rect.h));
+    wait_command_ready();
+    write_command(gp0::COPY_CPU_TO_VRAM);
+    write_command(pack_xy(rect.x, rect.y));
+    write_command(pack_xy(rect.w, rect.h));
 }
 
 /// Upload `words` to `rect` over block-mode DMA (channel 2) instead of
@@ -1254,7 +1254,7 @@ pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> boo
     copy_to_vram_header(rect);
     // GP1(04h) = 2: route DMA words CPU→GP0. `psx-gpu::init` sets this,
     // but a VRAM readback could have flipped it to GPUREAD→CPU.
-    write_gp1(gp1::dma_direction(2));
+    write_display_control(gp1::dma_direction(2));
     dma::enable_channel(Channel::Gpu);
     // SAFETY: the channel was drained by `copy_to_vram_header`. The transfer
     // reads `words_per_row * rect.h` words from `src`, which the check above
@@ -1264,15 +1264,17 @@ pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> boo
         dma::start(
             Channel::Gpu,
             dma::Transfer {
-                madr: src as u32,
-                bcr: dma::bcr_blocks(words_per_row, rect.h),
-                chcr: dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+                address: src as u32,
+                size: dma::size_blocks(words_per_row, rect.h),
+                control: psx_hw::dma::CHCR_TO_DEVICE
+                    | psx_hw::dma::CHCR_SYNC_BLOCK
+                    | psx_hw::dma::CHCR_START,
             },
         )
     };
     // On a wedge the GP0(A0) header is already out and the payload did not
     // land, so VRAM holds a partial upload either way; report it.
-    dma::wait_or_abort(Channel::Gpu, dma::DEFAULT_DMA_SPINS)
+    dma::wait_or_abort(Channel::Gpu, dma::DEFAULT_SPINS)
 }
 
 /// Upload typed [`Color555`] pixels -- sugar over [`upload_16bpp`]

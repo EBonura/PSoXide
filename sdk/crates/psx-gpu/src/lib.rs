@@ -31,7 +31,7 @@
 //! Keeping the low-level constructors in `psx-hw` means the same
 //! encoding is shared with the emulator's GPU decoder -- both sides
 //! can't drift out of sync on command layout. `psx-gpu` adds the
-//! thin ergonomic layer: `wait_cmd_ready()` + `write_gp0()`
+//! thin ergonomic layer: `wait_command_ready()` + `write_command()`
 //! sequencing, typed depth enums, vertex/UV packing.
 
 #![no_std]
@@ -50,7 +50,7 @@ use crate::material::{BlendMode, TextureMaterial};
 use psx_hw::gpu::pack_texcoord;
 use psx_hw::gpu::{gp0, gp1, pack_color, pack_vertex, pack_xy};
 use psx_io::dma::{self, Channel};
-use psx_io::gpu::{wait_cmd_ready, write_gp0, write_gp1};
+use psx_io::gpu::{wait_command_ready, write_command, write_display_control};
 use psx_io::periph::GpuDma;
 use psx_io::timers;
 
@@ -125,7 +125,7 @@ const fn v_display_window_start(mode: VideoMode) -> u32 {
 /// configure DMA direction, enable display output.
 #[doc(alias = "ResetGraph")]
 pub fn init(mode: VideoMode, res: Resolution) {
-    write_gp1(gp1::RESET);
+    write_display_control(gp1::RESET);
 
     let hres_field = match res.width {
         256 => 0,
@@ -137,21 +137,21 @@ pub fn init(mode: VideoMode, res: Resolution) {
     let vres_field = if res.height >= 480 { 1 } else { 0 };
     let pal = matches!(mode, VideoMode::Pal);
 
-    write_gp1(gp1::display_mode(hres_field, vres_field, pal, false, false));
+    write_display_control(gp1::display_mode(hres_field, vres_field, pal, false, false));
 
     // Horizontal & vertical display windows. Values below match the
     // standard PSX output (NTSC 260h..C60h, PAL similar) -- tweaking
     // them shifts the picture on the TV but not the VRAM layout.
     let h_start = H_DISPLAY_WINDOW_START;
     let h_end = h_start + (res.width as u32) * H_CLOCKS_PER_PIXEL;
-    write_gp1(gp1::h_display_range(h_start, h_end));
+    write_display_control(gp1::h_display_range(h_start, h_end));
 
     let v_start = v_display_window_start(mode);
     let v_end = v_start + res.height as u32;
-    write_gp1(gp1::v_display_range(v_start, v_end));
+    write_display_control(gp1::v_display_range(v_start, v_end));
 
-    write_gp1(gp1::dma_direction(2)); // CPU → GP0
-    write_gp1(gp1::display_enable(true));
+    write_display_control(gp1::dma_direction(2)); // CPU → GP0
+    write_display_control(gp1::display_enable(true));
 }
 
 /// Re-issue the display windows shifted by `dx` pixels / `dy` scanlines
@@ -164,11 +164,11 @@ pub fn init(mode: VideoMode, res: Resolution) {
 pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
     let h_start = (H_DISPLAY_WINDOW_START as i32 + dx as i32 * H_CLOCKS_PER_PIXEL as i32).max(0);
     let h_end = h_start as u32 + (res.width as u32) * H_CLOCKS_PER_PIXEL;
-    write_gp1(gp1::h_display_range(h_start as u32, h_end));
+    write_display_control(gp1::h_display_range(h_start as u32, h_end));
 
     let v_start = (v_display_window_start(mode) as i32 + dy as i32).max(0);
     let v_end = v_start as u32 + res.height as u32;
-    write_gp1(gp1::v_display_range(v_start as u32, v_end));
+    write_display_control(gp1::v_display_range(v_start as u32, v_end));
 }
 
 /// Block until the GPU has finished drawing everything sent to it.
@@ -183,7 +183,7 @@ pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
 /// (625,348 and 314,075). PSn00bSDK's `DrawSync` waits the same way.
 ///
 /// Every wait is bounded, with the recovery of
-/// [`submit_linked_list_wait`] and `psx_io::gpu::wait_cmd_ready`, so a
+/// [`submit_linked_list_wait`] and `psx_io::gpu::wait_command_ready`, so a
 /// wedged GPU costs a reset instead of a hang.
 ///
 /// For presenting through psx-rt's queued flip, which must not block, use
@@ -193,7 +193,7 @@ pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
 pub fn draw_sync() {
     submit_linked_list_wait();
     psx_io::gpu::wait_dma_ready();
-    wait_cmd_ready();
+    wait_command_ready();
 }
 
 /// Clear GPUSTAT bit 24 (the GPU's IRQ1 flag) with GP1(02h).
@@ -204,7 +204,7 @@ pub fn draw_sync() {
 /// completion from psx-rt's VBlank handler.
 #[inline]
 pub fn arm_draw_done() {
-    write_gp1(gp1::ACK_IRQ);
+    write_display_control(gp1::ACK_IRQ);
 }
 
 /// True once the GPU has executed the GP0(1Fh) that closes the work kicked
@@ -224,7 +224,7 @@ pub fn arm_draw_done() {
 /// in `I_MASK`, since psx-rt's handler does not acknowledge it.
 #[inline]
 pub fn draw_done() -> bool {
-    psx_io::gpu::gpustat().contains(psx_hw::gpu::GpuStat::IRQ1)
+    psx_io::gpu::status().contains(psx_hw::gpu::GpuStat::IRQ1)
 }
 
 /// Send GP0(1Fh) through the command port, closing work drawn with the
@@ -232,8 +232,8 @@ pub fn draw_done() -> bool {
 /// the GPU to accept a command first.
 #[inline]
 pub fn signal_draw_done() {
-    wait_cmd_ready();
-    write_gp0(gp0::REQUEST_IRQ);
+    wait_command_ready();
+    write_command(gp0::REQUEST_IRQ);
 }
 
 /// A linked-list DMA node holding only GP0(1Fh), for the end of a chain.
@@ -307,17 +307,17 @@ pub fn vsync() {
 /// Set the drawing-area rectangle. Pixels outside this rect are
 /// clipped by the rasteriser.
 pub fn set_draw_area(x0: u16, y0: u16, x1: u16, y1: u16) {
-    wait_cmd_ready();
-    write_gp0(gp0::draw_area_top_left(x0 as u32, y0 as u32));
-    write_gp0(gp0::draw_area_bottom_right(x1 as u32, y1 as u32));
+    wait_command_ready();
+    write_command(gp0::draw_area_top_left(x0 as u32, y0 as u32));
+    write_command(gp0::draw_area_bottom_right(x1 as u32, y1 as u32));
 }
 
 /// Set the drawing offset -- added to every vertex by the GPU.
 /// Use this to position a coordinate system at the top-left of your
 /// back-buffer.
 pub fn set_draw_offset(x: i16, y: i16) {
-    wait_cmd_ready();
-    write_gp0(gp0::draw_offset(x as i32, y as i32));
+    wait_command_ready();
+    write_command(gp0::draw_offset(x as i32, y as i32));
 }
 
 /// Set the GPU mask-bit (stencil-style) mode via GP0(E6h). `set_on_draw` forces
@@ -327,8 +327,8 @@ pub fn set_draw_offset(x: i16, y: i16) {
 /// that would overdraw are rejected. Applies until changed, so reset to
 /// `(false, false)` before the translucent/blended passes that must not mask.
 pub fn set_mask_mode(set_on_draw: bool, check_before_draw: bool) {
-    wait_cmd_ready();
-    write_gp0(gp0::mask_bit(set_on_draw, check_before_draw));
+    wait_command_ready();
+    write_command(gp0::mask_bit(set_on_draw, check_before_draw));
 }
 
 /// Shift the displayed picture horizontally on the TV by `offset_px` pixels
@@ -346,7 +346,7 @@ pub fn set_screen_h_offset(offset_px: i16, res: Resolution) {
     let start = (H_DISPLAY_WINDOW_START as i32 + offset_px as i32 * H_CLOCKS_PER_PIXEL as i32)
         .max(0) as u32;
     let end = start + res.width as u32 * H_CLOCKS_PER_PIXEL;
-    write_gp1(gp1::h_display_range(start, end));
+    write_display_control(gp1::h_display_range(start, end));
 }
 
 /// Shift the displayed picture vertically on the TV by `offset_px` scanlines
@@ -357,25 +357,25 @@ pub fn set_screen_h_offset(offset_px: i16, res: Resolution) {
 pub fn set_screen_v_offset(offset_px: i16, mode: VideoMode, res: Resolution) {
     let start = (v_display_window_start(mode) as i32 + offset_px as i32).max(0) as u32;
     let end = start + res.height as u32;
-    write_gp1(gp1::v_display_range(start, end));
+    write_display_control(gp1::v_display_range(start, end));
 }
 
 /// Fill a VRAM rectangle with a solid color. Ignores draw area / offset.
 /// Useful for clearing a back buffer.
 pub fn fill_rect(x: u16, y: u16, w: u16, h: u16, r: u8, g: u8, b: u8) {
-    wait_cmd_ready();
-    write_gp0(gp0::fill_rect(r, g, b));
-    write_gp0(pack_xy(x, y));
-    write_gp0(pack_xy(w, h));
+    wait_command_ready();
+    write_command(gp0::fill_rect(r, g, b));
+    write_command(pack_xy(x, y));
+    write_command(pack_xy(w, h));
 }
 
 /// Draw a flat-shaded (single-color) triangle.
 pub fn draw_tri_flat(verts: [(i16, i16); 3], r: u8, g: u8, b: u8) {
-    wait_cmd_ready();
-    write_gp0(gp0::polygon_opcode(false, false, false, false, false) | pack_color(r, g, b));
-    write_gp0(pack_vertex(verts[0].0, verts[0].1));
-    write_gp0(pack_vertex(verts[1].0, verts[1].1));
-    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+    wait_command_ready();
+    write_command(gp0::polygon_opcode(false, false, false, false, false) | pack_color(r, g, b));
+    write_command(pack_vertex(verts[0].0, verts[0].1));
+    write_command(pack_vertex(verts[1].0, verts[1].1));
+    write_command(pack_vertex(verts[2].0, verts[2].1));
 }
 
 /// Draw a semi-transparent flat-shaded triangle.
@@ -385,27 +385,27 @@ pub fn draw_tri_flat_blended(verts: [(i16, i16); 3], r: u8, g: u8, b: u8, blend_
         return;
     }
     TextureMaterial::blended(0, 0, (r, g, b), blend_mode).apply_draw_mode();
-    wait_cmd_ready();
-    write_gp0(gp0::polygon_opcode(false, false, false, true, false) | pack_color(r, g, b));
-    write_gp0(pack_vertex(verts[0].0, verts[0].1));
-    write_gp0(pack_vertex(verts[1].0, verts[1].1));
-    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+    wait_command_ready();
+    write_command(gp0::polygon_opcode(false, false, false, true, false) | pack_color(r, g, b));
+    write_command(pack_vertex(verts[0].0, verts[0].1));
+    write_command(pack_vertex(verts[1].0, verts[1].1));
+    write_command(pack_vertex(verts[2].0, verts[2].1));
 }
 
 /// Draw a Gouraud-shaded triangle. `colors[i]` is the color at `verts[i]`;
 /// the GPU interpolates across the triangle.
 pub fn draw_tri_gouraud(verts: [(i16, i16); 3], colors: [(u8, u8, u8); 3]) {
-    wait_cmd_ready();
+    wait_command_ready();
     let op = gp0::polygon_opcode(true, false, false, false, false);
     let (r0, g0, b0) = colors[0];
-    write_gp0(op | pack_color(r0, g0, b0));
-    write_gp0(pack_vertex(verts[0].0, verts[0].1));
+    write_command(op | pack_color(r0, g0, b0));
+    write_command(pack_vertex(verts[0].0, verts[0].1));
     let (r1, g1, b1) = colors[1];
-    write_gp0(pack_color(r1, g1, b1));
-    write_gp0(pack_vertex(verts[1].0, verts[1].1));
+    write_command(pack_color(r1, g1, b1));
+    write_command(pack_vertex(verts[1].0, verts[1].1));
     let (r2, g2, b2) = colors[2];
-    write_gp0(pack_color(r2, g2, b2));
-    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+    write_command(pack_color(r2, g2, b2));
+    write_command(pack_vertex(verts[2].0, verts[2].1));
 }
 
 /// Draw a semi-transparent Gouraud-shaded triangle. The GPU interpolates the
@@ -420,17 +420,17 @@ pub fn draw_tri_gouraud_blended(
         return;
     }
     TextureMaterial::blended(0, 0, colors[0], blend_mode).apply_draw_mode();
-    wait_cmd_ready();
+    wait_command_ready();
     let op = gp0::polygon_opcode(true, false, false, true, false);
     let (r0, g0, b0) = colors[0];
-    write_gp0(op | pack_color(r0, g0, b0));
-    write_gp0(pack_vertex(verts[0].0, verts[0].1));
+    write_command(op | pack_color(r0, g0, b0));
+    write_command(pack_vertex(verts[0].0, verts[0].1));
     let (r1, g1, b1) = colors[1];
-    write_gp0(pack_color(r1, g1, b1));
-    write_gp0(pack_vertex(verts[1].0, verts[1].1));
+    write_command(pack_color(r1, g1, b1));
+    write_command(pack_vertex(verts[1].0, verts[1].1));
     let (r2, g2, b2) = colors[2];
-    write_gp0(pack_color(r2, g2, b2));
-    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+    write_command(pack_color(r2, g2, b2));
+    write_command(pack_vertex(verts[2].0, verts[2].1));
 }
 
 /// Draw a single monochrome line from `(x0, y0)` to `(x1, y1)`
@@ -442,12 +442,12 @@ pub fn draw_tri_gouraud_blended(
 ///
 /// Packet: `[cmd+color, v0, v1]`.
 pub fn draw_line_mono(x0: i16, y0: i16, x1: i16, y1: i16, r: u8, g: u8, b: u8) {
-    wait_cmd_ready();
+    wait_command_ready();
     // 0x40 = single mono line, opaque. Color in the low 24 bits
     // of the first word (same as other monochrome primitives).
-    write_gp0(0x4000_0000 | pack_color(r, g, b));
-    write_gp0(pack_vertex(x0, y0));
-    write_gp0(pack_vertex(x1, y1));
+    write_command(0x4000_0000 | pack_color(r, g, b));
+    write_command(pack_vertex(x0, y0));
+    write_command(pack_vertex(x1, y1));
 }
 
 /// Draw a line using the native PS1 semi-transparency equation.
@@ -462,21 +462,21 @@ pub fn draw_line_mono_blended(
         return;
     }
     TextureMaterial::blended(0, 0, color, blend_mode).apply_draw_mode();
-    wait_cmd_ready();
-    write_gp0(0x4200_0000 | pack_color(color.0, color.1, color.2));
-    write_gp0(pack_vertex(from.0, from.1));
-    write_gp0(pack_vertex(to.0, to.1));
+    wait_command_ready();
+    write_command(0x4200_0000 | pack_color(color.0, color.1, color.2));
+    write_command(pack_vertex(from.0, from.1));
+    write_command(pack_vertex(to.0, to.1));
 }
 
 /// Draw a Gouraud-shaded line from `(x0, y0, c0)` to `(x1, y1, c1)`.
 /// The GPU interpolates RGB across the segment. Packet (GP0 0x50,
 /// 4 words): `[cmd+c0, v0, c1, v1]`.
 pub fn draw_line_gouraud(x0: i16, y0: i16, c0: (u8, u8, u8), x1: i16, y1: i16, c1: (u8, u8, u8)) {
-    wait_cmd_ready();
-    write_gp0(0x5000_0000 | pack_color(c0.0, c0.1, c0.2));
-    write_gp0(pack_vertex(x0, y0));
-    write_gp0(pack_color(c1.0, c1.1, c1.2));
-    write_gp0(pack_vertex(x1, y1));
+    wait_command_ready();
+    write_command(0x5000_0000 | pack_color(c0.0, c0.1, c0.2));
+    write_command(pack_vertex(x0, y0));
+    write_command(pack_color(c1.0, c1.1, c1.2));
+    write_command(pack_vertex(x1, y1));
 }
 
 /// Fill an axis-aligned rectangle with a flat color, as a polygon draw.
@@ -492,12 +492,12 @@ pub fn draw_rect_flat(x: i16, y: i16, w: u16, h: u16, r: u8, g: u8, b: u8) {
 
 /// Draw a flat-shaded quad (two triangles sharing the v1-v2 edge).
 pub fn draw_quad_flat(verts: [(i16, i16); 4], r: u8, g: u8, b: u8) {
-    wait_cmd_ready();
-    write_gp0(gp0::polygon_opcode(false, true, false, false, false) | pack_color(r, g, b));
-    write_gp0(pack_vertex(verts[0].0, verts[0].1));
-    write_gp0(pack_vertex(verts[1].0, verts[1].1));
-    write_gp0(pack_vertex(verts[2].0, verts[2].1));
-    write_gp0(pack_vertex(verts[3].0, verts[3].1));
+    wait_command_ready();
+    write_command(gp0::polygon_opcode(false, true, false, false, false) | pack_color(r, g, b));
+    write_command(pack_vertex(verts[0].0, verts[0].1));
+    write_command(pack_vertex(verts[1].0, verts[1].1));
+    write_command(pack_vertex(verts[2].0, verts[2].1));
+    write_command(pack_vertex(verts[3].0, verts[3].1));
 }
 
 /// Draw a textured quad (GP0 0x2C, 9 words) with a single tint.
@@ -544,17 +544,17 @@ pub fn draw_quad_textured_material(
     uvs: [(u8, u8); 4],
     material: TextureMaterial,
 ) {
-    wait_cmd_ready();
-    write_gp0(material.texture_window_word());
-    write_gp0(material.flat_textured_polygon_header(true));
-    write_gp0(pack_vertex(verts[0].0, verts[0].1));
-    write_gp0(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
-    write_gp0(pack_vertex(verts[1].0, verts[1].1));
-    write_gp0(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
-    write_gp0(pack_vertex(verts[2].0, verts[2].1));
-    write_gp0(pack_texcoord(uvs[2].0, uvs[2].1, 0));
-    write_gp0(pack_vertex(verts[3].0, verts[3].1));
-    write_gp0(pack_texcoord(uvs[3].0, uvs[3].1, 0));
+    wait_command_ready();
+    write_command(material.texture_window_word());
+    write_command(material.flat_textured_polygon_header(true));
+    write_command(pack_vertex(verts[0].0, verts[0].1));
+    write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
+    write_command(pack_vertex(verts[1].0, verts[1].1));
+    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
+    write_command(pack_vertex(verts[2].0, verts[2].1));
+    write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
+    write_command(pack_vertex(verts[3].0, verts[3].1));
+    write_command(pack_texcoord(uvs[3].0, uvs[3].1, 0));
 }
 
 /// Draw a textured triangle using a [`TextureMaterial`].
@@ -567,15 +567,15 @@ pub fn draw_tri_textured_material(
     uvs: [(u8, u8); 3],
     material: TextureMaterial,
 ) {
-    wait_cmd_ready();
-    write_gp0(material.texture_window_word());
-    write_gp0(material.flat_textured_polygon_header(false));
-    write_gp0(pack_vertex(verts[0].0, verts[0].1));
-    write_gp0(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
-    write_gp0(pack_vertex(verts[1].0, verts[1].1));
-    write_gp0(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
-    write_gp0(pack_vertex(verts[2].0, verts[2].1));
-    write_gp0(pack_texcoord(uvs[2].0, uvs[2].1, 0));
+    wait_command_ready();
+    write_command(material.texture_window_word());
+    write_command(material.flat_textured_polygon_header(false));
+    write_command(pack_vertex(verts[0].0, verts[0].1));
+    write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
+    write_command(pack_vertex(verts[1].0, verts[1].1));
+    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
+    write_command(pack_vertex(verts[2].0, verts[2].1));
+    write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
 }
 
 /// Draw a gouraud-shaded textured quad (GP0 0x3C, 12 words).
@@ -616,23 +616,23 @@ pub fn draw_quad_textured_gouraud_material(
     colors: [(u8, u8, u8); 4],
     material: TextureMaterial,
 ) {
-    wait_cmd_ready();
-    write_gp0(material.texture_window_word());
-    write_gp0(
+    wait_command_ready();
+    write_command(material.texture_window_word());
+    write_command(
         material.textured_polygon_command(true, true)
             | pack_color(colors[0].0, colors[0].1, colors[0].2),
     );
-    write_gp0(pack_vertex(verts[0].0, verts[0].1));
-    write_gp0(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
-    write_gp0(pack_color(colors[1].0, colors[1].1, colors[1].2));
-    write_gp0(pack_vertex(verts[1].0, verts[1].1));
-    write_gp0(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
-    write_gp0(pack_color(colors[2].0, colors[2].1, colors[2].2));
-    write_gp0(pack_vertex(verts[2].0, verts[2].1));
-    write_gp0(pack_texcoord(uvs[2].0, uvs[2].1, 0));
-    write_gp0(pack_color(colors[3].0, colors[3].1, colors[3].2));
-    write_gp0(pack_vertex(verts[3].0, verts[3].1));
-    write_gp0(pack_texcoord(uvs[3].0, uvs[3].1, 0));
+    write_command(pack_vertex(verts[0].0, verts[0].1));
+    write_command(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
+    write_command(pack_color(colors[1].0, colors[1].1, colors[1].2));
+    write_command(pack_vertex(verts[1].0, verts[1].1));
+    write_command(pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()));
+    write_command(pack_color(colors[2].0, colors[2].1, colors[2].2));
+    write_command(pack_vertex(verts[2].0, verts[2].1));
+    write_command(pack_texcoord(uvs[2].0, uvs[2].1, 0));
+    write_command(pack_color(colors[3].0, colors[3].1, colors[3].2));
+    write_command(pack_vertex(verts[3].0, verts[3].1));
+    write_command(pack_texcoord(uvs[3].0, uvs[3].1, 0));
 }
 
 /// Draw a variable-size textured sprite using a [`TextureMaterial`].
@@ -649,11 +649,11 @@ pub fn draw_sprite_material(
     material: TextureMaterial,
 ) {
     material.apply_draw_mode();
-    wait_cmd_ready();
-    write_gp0(material.textured_rect_header());
-    write_gp0(pack_vertex(x, y));
-    write_gp0(pack_texcoord(uv.0, uv.1, material.clut_word()));
-    write_gp0(pack_xy(w, h));
+    wait_command_ready();
+    write_command(material.textured_rect_header());
+    write_command(pack_vertex(x, y));
+    write_command(pack_texcoord(uv.0, uv.1, material.clut_word()));
+    write_command(pack_xy(w, h));
 }
 
 /// Set the texture page + CLUT + color depth used by subsequent
@@ -662,8 +662,8 @@ pub fn draw_sprite_material(
 /// the texpage in one of their UV words. Setting it via E1h is
 /// a good default for sprites.
 pub fn set_texture_page(tpage_x: u16, tpage_y: u16, depth: TextureDepth) {
-    wait_cmd_ready();
-    write_gp0(gp0::draw_mode(
+    wait_command_ready();
+    write_command(gp0::draw_mode(
         (tpage_x / 64) as u32,
         (tpage_y / 256) as u32,
         0,
@@ -730,18 +730,18 @@ pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
     // Bounded: a wedged channel (see `dma::abort`) would otherwise hang
     // the frame loop forever. Aborting costs at most the tail of a walk
     // that was never going to finish.
-    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(Channel::Gpu);
         // The walker stopped mid-packet, so the GPU is still waiting for
         // the rest of a command. Discard it or every later ready-wait
         // blocks on a GPU that can never become ready.
-        write_gp1(0x0100_0000);
+        write_display_control(0x0100_0000);
     }
 
     // Make sure the GPU's DMA direction is CPU→GP0 before we kick off the
     // walker. `gpu::init` sets this, but games occasionally re-route DMA for
     // VRAM readback and forget to reset it.
-    write_gp1(gp1::dma_direction(2));
+    write_display_control(gp1::dma_direction(2));
     dma::enable_channel(Channel::Gpu);
     // SAFETY: the channel is idle (waited out or aborted above); the caller
     // keeps the chain live and unmodified until the walk is waited out.
@@ -751,11 +751,13 @@ pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
         dma::start(
             Channel::Gpu,
             dma::Transfer {
-                madr: head as u32,
+                address: head as u32,
                 // BCR is ignored in linked-list mode but must be written to
                 // some value on real hardware; zero is conventional.
-                bcr: dma::bcr_words(0),
-                chcr: dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
+                size: dma::size_words(0),
+                control: psx_hw::dma::CHCR_TO_DEVICE
+                    | psx_hw::dma::CHCR_SYNC_LINKED
+                    | psx_hw::dma::CHCR_START,
             },
         )
     };
@@ -781,9 +783,9 @@ pub unsafe fn submit_linked_list_async(head: *const u32) {
 /// cost from CPU build cost.
 #[inline]
 pub fn submit_linked_list_wait() {
-    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
         dma::abort(Channel::Gpu);
-        write_gp1(0x0100_0000);
+        write_display_control(0x0100_0000);
     }
     // Prevent ordinary buffer-reuse stores from moving before the final
     // completion read (or explicit channel abort).
