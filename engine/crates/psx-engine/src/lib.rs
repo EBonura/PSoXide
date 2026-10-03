@@ -206,7 +206,7 @@ pub use scratch::{BoundedSink, FixedScratch, SliceSink};
 // arguments (instance rotation, joint transforms) without pulling in
 // `psx-gte` directly.
 pub use psx_gte::math::{Mat3I16, Vec3I16};
-pub use scene::{Ctx, RenderSubmission, Scene, SceneStateRef};
+pub use scene::{Ctx, QueuedFrame, RenderSubmission, Scene, SceneStateRef};
 pub use third_person_camera::{
     ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget,

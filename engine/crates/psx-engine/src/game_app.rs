@@ -57,7 +57,7 @@ use psx_level::{
 };
 use psx_pad::{button, PadState};
 
-use crate::scene::{Ctx, RenderSubmission, Scene, SceneStateRef};
+use crate::scene::{Ctx, QueuedFrame, RenderSubmission, Scene, SceneStateRef};
 use crate::transitions::render_transition_overlay;
 use crate::ui;
 
@@ -3105,6 +3105,14 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
     fn submit_render(&mut self, ctx: &mut Ctx) {
         if !self.loading_pending() && self.current_tag().has_gameplay() {
             self.gameplay.submit_render(ctx);
+        }
+    }
+
+    fn take_queued_frame(&mut self, ctx: &mut Ctx) -> Option<QueuedFrame> {
+        if !self.loading_pending() && self.current_tag().has_gameplay() {
+            self.gameplay.take_queued_frame(ctx)
+        } else {
+            None
         }
     }
 

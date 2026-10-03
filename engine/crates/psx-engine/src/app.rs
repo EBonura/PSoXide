@@ -44,7 +44,7 @@ use psx_level::{
 use psx_pad::{enable_analog_port1, poll_port1};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
-use crate::scene::{Ctx, RenderSubmission, Scene};
+use crate::scene::{Ctx, QueuedFrame, RenderSubmission, Scene};
 use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
 use crate::time::EngineClock;
@@ -573,6 +573,8 @@ impl App {
         // fixed updates that were already due get to run in the gap that used
         // to be a spin. See `finish_deferred_flip`.
         let mut deferred_flip: Option<u16> = None;
+        // Frames handed to psx-rt's present queue (RenderSubmission::PresentQueue).
+        let mut present_queue = PresentQueue::new();
 
         loop {
             // Resolve a queued flip as soon as the handler has taken the word,
@@ -699,6 +701,28 @@ impl App {
                     fixed_update_clamped: _,
                 } => {
                     let submission = scene.render_submission();
+                    if submission == RenderSubmission::PresentQueue {
+                        if !present_queue.active {
+                            // The queue starts on an idle GPU: present what
+                            // the other paths left in flight first. A queued
+                            // flip is resolved before any visual frame runs.
+                            debug_assert!(deferred_flip.is_none());
+                            Self::present_pending(
+                                scene,
+                                &mut clock,
+                                &mut ctx,
+                                &mut pending_present,
+                            );
+                            present_queue.start();
+                        }
+                        // The frame before the last published one used this
+                        // frame's ordering table, packets and nodes.
+                        telemetry::stage_begin(telemetry::stage::OT_WAIT);
+                        psx_rt::present::wait_arena_free();
+                        telemetry::stage_end(telemetry::stage::OT_WAIT);
+                    } else if present_queue.active {
+                        present_queue.stop(&mut clock, &mut ctx);
+                    }
                     // A queued scene keeps one completed visual in flight.
                     // A single-buffered one drains only the linked-list DMA
                     // before reusing its packet RAM; the GPU may continue
@@ -713,7 +737,10 @@ impl App {
                             gpu::submit_linked_list_wait();
                             telemetry::stage_end(telemetry::stage::OT_WAIT);
                         })
-                    } else if submission == RenderSubmission::QueuedDoubleBuffered {
+                    } else if matches!(
+                        submission,
+                        RenderSubmission::QueuedDoubleBuffered | RenderSubmission::PresentQueue
+                    ) {
                         pending_present.take()
                     } else {
                         // Immediate scenes retain the original overload path:
@@ -752,7 +779,11 @@ impl App {
                             "33 SCENE RENDER BEGIN",
                         );
                     }
+                    if submission == RenderSubmission::PresentQueue {
+                        ctx.set_present_queue_hook(Some(present_queue.hook()));
+                    }
                     scene.render(&mut ctx);
+                    ctx.set_present_queue_hook(None);
                     if !traced_render {
                         boot_visual_checkpoint_hold(
                             &mut ctx.fb,
@@ -763,7 +794,14 @@ impl App {
                     }
                     telemetry::stage_end(telemetry::stage::RENDER);
 
-                    if submission.is_queued() {
+                    let published = submission == RenderSubmission::PresentQueue
+                        && present_queue.publish(config, scene, &mut ctx);
+                    if submission == RenderSubmission::PresentQueue && !published {
+                        // Present this frame the double-buffered way.
+                        present_queue.stop(&mut clock, &mut ctx);
+                    }
+
+                    if submission.is_queued() && !published {
                         if let Some(previous_misses) = queued_previous {
                             telemetry::stage_begin(telemetry::stage::OT_WAIT);
                             gpu::draw_sync();
@@ -818,7 +856,14 @@ impl App {
                     // turn, when the following frame's CPU packets hide its
                     // remaining raster time.
                     scheduler.complete_visual_frame();
-                    pending_present = Some(missed_visual_intervals);
+                    if published {
+                        // Counted at publish: the queue shows the frame on the
+                        // first edge after the one before it has drawn.
+                        emit_visual_frame_counters(missed_visual_intervals);
+                        ctx.visual_frame = ctx.visual_frame.advance();
+                    } else {
+                        pending_present = Some(missed_visual_intervals);
+                    }
                 }
             }
         }
@@ -889,6 +934,144 @@ impl App {
 
         emit_visual_frame_counters(missed_visual_intervals);
         ctx.visual_frame = ctx.visual_frame.advance();
+    }
+}
+
+/// Words in one recorded preamble: the draw area and offset, the clear and a
+/// node header, with room to spare.
+const PRESENT_PREAMBLE_WORDS: usize = 16;
+
+/// Runner-owned nodes for the frames in the present queue, one per frame of
+/// the pair (the frame before the last published one is never walked while
+/// its successor builds, see `psx_rt::present::wait_arena_free`).
+///
+/// `PRESENT_HOOKS[i]` is a header-only node a scene's ordering table ends on;
+/// the runner links it to the recorded overlay, or straight to GP0(1Fh).
+/// `PRESENT_PREAMBLES[i]` holds the recorded draw target and clear that
+/// precede the table.
+static mut PRESENT_HOOKS: [u32; 2] = [0x00FF_FFFF; 2];
+static mut PRESENT_PREAMBLES: [[u32; PRESENT_PREAMBLE_WORDS]; 2] = [[0; PRESENT_PREAMBLE_WORDS]; 2];
+
+/// The runner's side of [`RenderSubmission::PresentQueue`].
+struct PresentQueue {
+    active: bool,
+    /// GP1(05h) word that shows the last published frame, published with the
+    /// next one; 0 before the first.
+    display: u32,
+    /// Which [`PRESENT_HOOKS`] / [`PRESENT_PREAMBLES`] entry the frame being
+    /// built uses.
+    frame: usize,
+}
+
+impl PresentQueue {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            display: 0,
+            frame: 0,
+        }
+    }
+
+    /// Enter the queue. The GPU must be idle with nothing queued.
+    fn start(&mut self) {
+        psx_rt::present::start();
+        *self = Self {
+            active: true,
+            display: 0,
+            frame: 0,
+        };
+    }
+
+    fn hook(&self) -> *const u32 {
+        unsafe { core::ptr::addr_of!(PRESENT_HOOKS[self.frame]) }
+    }
+
+    /// Point this frame's hook node at `next`.
+    fn link_hook(&self, next: *const u32) {
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(PRESENT_HOOKS[self.frame]),
+                next as u32 & 0x00FF_FFFF,
+            );
+        }
+    }
+
+    /// Record the overlay and preamble around the frame `scene` just built
+    /// and publish it. `false` when the scene declined or its overlay did not
+    /// fit: nothing was published, and the caller presents the frame through
+    /// [`Scene::submit_render`] after [`stop`](Self::stop).
+    fn publish<S: Scene>(&mut self, config: Config, scene: &mut S, ctx: &mut Ctx) -> bool {
+        let draw_done = gpu::DRAW_DONE_NODE.as_ptr();
+        let Some(QueuedFrame {
+            head,
+            overlay,
+            overlay_words,
+        }) = scene.take_queued_frame(ctx)
+        else {
+            self.link_hook(draw_done);
+            return false;
+        };
+
+        telemetry::stage_begin(telemetry::stage::RENDER);
+        unsafe { psx_io::gpu::begin_capture(overlay, overlay_words) };
+        scene.render_overlay(ctx);
+        let recorded = psx_io::gpu::end_capture();
+        telemetry::stage_end(telemetry::stage::RENDER);
+        match recorded {
+            Ok(Some(recording)) => {
+                unsafe { recording.link_to(draw_done) };
+                self.link_hook(recording.head());
+            }
+            Ok(None) => self.link_hook(draw_done),
+            Err(_) => {
+                self.link_hook(draw_done);
+                return false;
+            }
+        }
+
+        telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+        let preamble = unsafe { core::ptr::addr_of_mut!(PRESENT_PREAMBLES[self.frame]) };
+        unsafe { psx_io::gpu::begin_capture(preamble.cast(), PRESENT_PREAMBLE_WORDS) };
+        ctx.fb.apply_draw_target();
+        ctx.fb.clear(
+            config.clear_color.0,
+            config.clear_color.1,
+            config.clear_color.2,
+        );
+        let Ok(Some(preamble)) = psx_io::gpu::end_capture() else {
+            unreachable!("the preamble always fits");
+        };
+        unsafe { preamble.link_to(head) };
+        telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
+
+        telemetry::stage_begin(telemetry::stage::OT_WAIT);
+        psx_rt::present::wait_slot_empty();
+        telemetry::stage_end(telemetry::stage::OT_WAIT);
+        telemetry::stage_begin(telemetry::stage::PRESENT);
+        unsafe { psx_rt::present::publish(preamble.head(), self.display) };
+        self.display = ctx.fb.begin_deferred_swap();
+        self.frame ^= 1;
+        telemetry::stage_end(telemetry::stage::PRESENT);
+        true
+    }
+
+    /// Leave the queue: wait for the published frames to draw, put the last
+    /// one on screen, and point the GPU at the buffer the next frame draws
+    /// into, which is where the other presentation paths expect to start.
+    fn stop(&mut self, clock: &mut EngineClock, ctx: &mut Ctx) {
+        telemetry::stage_begin(telemetry::stage::PRESENT);
+        // Quiesces only if anything was published since the last direct access.
+        psx_io::gpu::run_direct_access_guard();
+        if self.display != 0 {
+            clock.queue_display_flip(self.display);
+            if !clock.wait_display_flip() {
+                telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
+            }
+        }
+        ctx.fb.apply_draw_target();
+        telemetry::stage_end(telemetry::stage::PRESENT);
+        self.active = false;
+        self.display = 0;
     }
 }
 
