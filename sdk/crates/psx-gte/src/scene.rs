@@ -81,6 +81,8 @@ const CLASSIC_NORMALIZE_TABLE: [i16; 192] = [
 #[inline(always)]
 fn gte_input_commit_gap() {
     #[cfg(target_arch = "mips")]
+    // SAFETY: two `.word 0` NOPs (`sll $0, $0, 0`); they write no register
+    // or memory and exist only to space GTE input writes from the next op.
     unsafe {
         asm!(
             ".word 0",
@@ -447,6 +449,10 @@ pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> RtptInFlight {
         let v1_z = v1.z_packed();
         let v2_xy = v2.xy_packed();
         let v2_z = v2.z_packed();
+        // SAFETY: the six words are MTC2 $8..$13 into data regs 0..5 (V0..V2),
+        // two NOPs, then RTPT. Each MTC2 only reads its declared `in` register,
+        // RTPT only touches GTE registers, and no CPU register is written, so
+        // `nomem`/`nostack` with no outputs is accurate.
         unsafe {
             asm!(
                 // MTC2 $8..$13 into V0/V1/V2 input registers.
@@ -500,6 +506,11 @@ impl RtptInFlight {
             let sz1: u32;
             let sz2: u32;
             let sz3: u32;
+            // SAFETY: six MFC2s copy SXY0..SXY2 (data 12..14) and SZ1..SZ3 (17..19)
+            // into $8..$13, all declared as outputs; each read's load-delay slot is
+            // covered by the next MFC2 and the final NOP. No memory or stack is
+            // touched. Reading before RTPT finishes yields stale values, not UB (see
+            // the doc comment above).
             unsafe {
                 asm!(
                     // Read SXY0/SXY1/SXY2/SZ1/SZ2/SZ3; each MFC2's
@@ -551,6 +562,9 @@ impl RtptInFlight {
 fn project_vertex_mips(v: Vec3I16) -> Projected {
     let mut sxy = v.xy_packed();
     let mut sz = v.z_packed();
+    // SAFETY: MTC2 $8/$9 into V0, two NOPs, RTPS, then MFC2 SXY2 (data 14)
+    // into $8 and SZ3 (data 19) into $9 plus a load-delay NOP. Only $8 and $9
+    // are written and both are `inlateout`; no memory or stack is touched.
     unsafe {
         asm!(
             // MTC2 $8,VXY0 and $9,VZ0.
@@ -596,6 +610,10 @@ fn project_triangle_mips(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3
     let sz1: u32;
     let sz2: u32;
     let sz3: u32;
+    // SAFETY: MTC2 $8..$13 into V0..V2, two NOPs, RTPT, then MFC2s of SXY0..2
+    // and SZ1..3 back into $8..$13 with a final load-delay NOP. Exactly those
+    // six registers are written, each declared `inlateout`; no memory or
+    // stack is touched.
     unsafe {
         asm!(
             // MTC2 $8..$13 into V0/V1/V2 input registers.
@@ -660,6 +678,10 @@ fn transform_vertex_mips(v: Vec3I16) -> Vec3I32 {
     let mac1: u32;
     let mac2: u32;
     let mac3: u32;
+    // SAFETY: MTC2 $8/$9 into V0, two NOPs, MVMVA (RT, V0, TR), then MFC2
+    // MAC1..MAC3 (data 25..27) into $8..$10 with a final load-delay NOP. Only
+    // $8..$10 are written and all are declared outputs; no memory or stack is
+    // touched.
     unsafe {
         asm!(
             // MTC2 $8,VXY0 and $9,VZ0.
@@ -732,6 +754,11 @@ pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
         let trx: u32;
         let try_: u32;
         let trz: u32;
+        // SAFETY: same MTC2/MVMVA/MFC2 shape as `transform_vertex_mips` minus the
+        // input gap, then a MAC1 re-read into $11 and CFC2 TRX/TRY/TRZ (control
+        // 5..7) into $12..$14. Every written register ($8..$14) is a declared
+        // output and no memory or stack is touched. The deliberately unpadded
+        // schedule can return stale MAC values; that is a data hazard, not UB.
         unsafe {
             asm!(
                 // Live schedule, byte-identical to transform_vertex_mips:
@@ -804,6 +831,10 @@ pub fn average_cached_z3(depths: [u16; 3]) -> u16 {
     #[cfg(target_arch = "mips")]
     {
         let mut otz = depths[0] as u32;
+        // SAFETY: MTC2 $8..$10 into SZ1..SZ3 (data 17..19), two NOPs, AVSZ3,
+        // then MFC2 OTZ (data 7) into $8 plus a load-delay NOP. Only $8 is written
+        // (`inlateout`); $9/$10 are read-only inputs; no memory or stack is
+        // touched.
         unsafe {
             asm!(
                 // Load SZ1..SZ3, then leave the hardware-safe two-slot MTC2
@@ -846,6 +877,9 @@ pub fn classic_otz3_from_sum(sum: u32) -> u16 {
     #[cfg(target_arch = "mips")]
     {
         let mut otz = sum;
+        // SAFETY: pure ALU shift-add on $8..$10. $8 is `inlateout` and the
+        // $9/$10 scratch registers are declared `lateout(_)`; no memory or stack
+        // is touched and `addu`/`sll`/`srl` never trap.
         unsafe {
             asm!(
                 "sll $9, $8, 2",
@@ -878,6 +912,10 @@ pub fn average_cached_z4(depths: [u16; 4]) -> u16 {
     #[cfg(target_arch = "mips")]
     {
         let mut otz = depths[0] as u32;
+        // SAFETY: MTC2 $8..$11 into SZ0..SZ3 (data 16..19), two NOPs, AVSZ4,
+        // then MFC2 OTZ (data 7) into $8 plus a load-delay NOP. Only $8 is written
+        // (`inlateout`); $9..$11 are read-only inputs; no memory or stack is
+        // touched.
         unsafe {
             asm!(
                 // Load SZ0..SZ3, then leave the hardware-safe two-slot MTC2
@@ -958,6 +996,12 @@ fn aabb_outer_support(mins: [i16; 3], maxs: [i16; 3], signbits: u8) -> Vec3I16 {
 #[inline(always)]
 fn aabb_dot_mvmva<const OP: u32, const READ_MAC: u32>(v: Vec3I16) -> i32 {
     let mut dot = v.xy_packed();
+    // SAFETY: MTC2 $8/$9 into V0, two NOPs, then `OP` and `READ_MAC`. The
+    // only instantiations (`aabb_clip_dot`) pass MVMVA encodings (`0x4a00_6012`
+    // RT, `0x4a02_6012` LLM; cv=none, sf=0) and MFC2 of MAC1..MAC3 into $8,
+    // so only $8 is written (`inlateout`) and no memory or stack is touched.
+    // This private fn trusts its const arguments; any new caller must keep
+    // `READ_MAC` writing $8 only.
     unsafe {
         asm!(
             ".word 0x48880000",
@@ -1097,6 +1141,9 @@ pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
         let sxy0 = pack_xy(vertices[0].0, vertices[0].1);
         let sxy1 = pack_xy(vertices[1].0, vertices[1].1);
         let mut area = pack_xy(vertices[2].0, vertices[2].1);
+        // SAFETY: MTC2 $8..$10 into SXY0..SXY2 (data 12..14), two NOPs, NCLIP,
+        // eight NOPs, then MFC2 MAC0 (data 24) into $10 plus a load-delay NOP.
+        // Only $10 is written (`inlateout`); no memory or stack is touched.
         unsafe {
             asm!(
                 // MTC2 $8/$9/$10,SXY0/SXY1/SXY2.
@@ -1153,6 +1200,9 @@ pub fn screen_area_and_unpack_model_face_scheduled(
         let mut uv1 = corner_words[1];
         let mut uv2 = corner_words[2];
         let palette_bank: u32;
+        // SAFETY: MTC2 $8..$10 into SXY0..SXY2, NCLIP, register-only `srl`/`andi`
+        // on $11..$14, then MFC2 MAC0 into $10. The written registers ($10..$14)
+        // are all declared `inlateout`/`lateout`; no memory or stack is touched.
         unsafe {
             asm!(
                 // MTC2 SXY0..SXY2 and the hardware-confirmed input gap.
@@ -1224,6 +1274,10 @@ pub fn screen_area_and_average_cached_z3_scheduled(
         let sxy1 = pack_xy(vertices[1].0, vertices[1].1);
         let mut area = pack_xy(vertices[2].0, vertices[2].1);
         let mut otz = depths[0] as u32;
+        // SAFETY: MTC2 $8..$10 into SXY0..SXY2, NCLIP, MTC2 $11..$13 into
+        // SZ1..SZ3, then MFC2 MAC0 into $10, AVSZ3, and MFC2 OTZ into $11 with a
+        // final load-delay NOP. Only $10 and $11 are written (`inlateout`);
+        // $12/$13 are read-only; no memory or stack is touched.
         unsafe {
             asm!(
                 // Load SXY0..SXY2 and leave the measured input-commit gap.
@@ -1286,6 +1340,10 @@ pub fn screen_area_and_classic_otz3_scheduled(
         let mut otz = depths[0] as u32;
         let depth1 = depths[1] as u32;
         let depth2 = depths[2] as u32;
+        // SAFETY: MTC2 $8..$10 into SXY0..SXY2, NCLIP, ALU shift-add on
+        // $11..$13, MFC2 MAC0 into $10 and a final `srl` into $11. Every written
+        // register ($10..$13) is declared `inlateout` (scratch outputs discarded);
+        // no memory or stack is touched and the ALU ops never trap.
         unsafe {
             asm!(
                 // Load SXY0..SXY2 and leave the measured input-commit gap.
