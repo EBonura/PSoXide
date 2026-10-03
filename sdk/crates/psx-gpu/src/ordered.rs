@@ -14,7 +14,19 @@ const END: u32 = 0x00ff_ffff;
 ///
 /// The default implementation uses the SDK's GPU channel ownership and bounded
 /// waits. Alternate implementations can test the transport without MMIO.
-pub trait CommandStreamDma {
+///
+/// # Safety
+///
+/// [`OrderedCommandStream`] is a safe API that rewrites node storage as soon
+/// as this transport says the hardware is done with it, so an implementation
+/// must tell the truth:
+///
+/// * after [`Self::wait`] returns, nothing reads storage passed to an earlier
+///   [`Self::submit`] (a timed-out transfer must be stopped, not abandoned);
+/// * [`Self::busy`] returns `true` while a submitted list may still be read,
+///   because a `false` lets the stream start the next list at once;
+/// * [`Self::submit`] reads only the linked nodes it was given.
+pub unsafe trait CommandStreamDma {
     /// Whether the previous GPU DMA transfer is still reading its storage.
     fn busy(&mut self) -> bool;
     /// Start a valid linked list after the channel becomes idle.
@@ -31,7 +43,10 @@ pub trait CommandStreamDma {
 
 /// SDK channel-2 transport for [`OrderedCommandStream`].
 pub struct GpuDma;
-impl CommandStreamDma for GpuDma {
+// SAFETY: `busy` reads the channel-2 CHCR start bit, which stays set until the
+// walk ends. `wait` returns only after that bit clears or after it aborts the
+// channel (and resets the GPU) on timeout, so no walk outlives it.
+unsafe impl CommandStreamDma for GpuDma {
     #[inline]
     fn busy(&mut self) -> bool {
         psx_io::dma::is_busy(psx_io::dma::Channel::Gpu)
@@ -109,6 +124,8 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         let link = next.map_or(END, |i| self.words.as_ptr().wrapping_add(i) as u32 & END);
         // Finish the tag before checking the channel; the shared submit helper
         // supplies the compiler release barrier before DMA starts.
+        // SAFETY: `head` indexes a tag word written by `open_node`, so it is
+        // below `len` and inside `words`.
         unsafe {
             core::ptr::write_volatile(self.words.as_mut_ptr().add(self.head), payload << 24 | link);
         }
@@ -124,6 +141,9 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         self.words[self.head] = self.words[self.head] & 0xff00_0000 | END;
         // Only closed nodes are visible. Future appends start beyond len,
         // never in the region now owned by DMA.
+        // SAFETY: `sent..len` holds closed nodes whose tags link only inside
+        // `words`, which is `'static`. The stream writes none of them again
+        // until `dma.wait()` returns (draw_sync and drop both wait first).
         unsafe {
             self.dma.submit(self.words.as_ptr().add(self.sent));
         }
@@ -172,6 +192,8 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
             // reserve(N) checked the whole packet plus a spare tag, including
             // any capacity-driven reset. This index is therefore in bounds;
             // repeating a slice check per GP0 word bloats hot draw loops.
+            // SAFETY: as above, `len < self.words.len()` for every word of the
+            // packet.
             unsafe {
                 *self.words.get_unchecked_mut(len) = word;
             }
