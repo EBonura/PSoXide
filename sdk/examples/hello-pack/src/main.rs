@@ -31,9 +31,9 @@ use psx_pack::cd::{
 };
 use psx_pack::fnv1a32;
 use psx_rt::tty;
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const GREEN: (u8, u8, u8) = (80, 220, 100);

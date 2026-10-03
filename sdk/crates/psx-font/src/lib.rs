@@ -93,7 +93,7 @@ use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 use psx_io::gpu::{wait_command_ready, write_command};
 use psx_math::sincos;
 use psx_vram::{
-    upload_16bpp, upload_clut, Clut, Color555, TexDepth, Tpage, VramHandle, VramRect,
+    upload_16bpp, upload_clut, Clut, Color555, TextureDepth, TexturePage, VramHandle, VramRect,
     VramRegionSource,
 };
 
@@ -265,7 +265,7 @@ impl BitmapFont {
 #[derive(Copy, Clone, Debug)]
 pub struct FontAtlas {
     font: &'static BitmapFont,
-    tpage: Tpage,
+    tpage: TexturePage,
     /// Pre-encoded CLUT word. Storing the two-byte packet value instead of
     /// the four-byte coordinate handle pays for `uv_origin` without growing
     /// `FontAtlas` in PS1 RAM, and removes repeated encoding from draw calls.
@@ -362,7 +362,7 @@ const SEMI_TRANSPARENT_FLAT_RECT_CMD: u32 = 0x6200_0000;
 /// The GP0(E1h) word that installs `tpage` with `blend`'s equation in
 /// the ABR field. Split out from the draw call so the bit layout is
 /// checkable on the host, where no GPU exists to observe.
-const fn blended_draw_mode_word(tpage: Tpage, blend: TextBlend) -> u32 {
+const fn blended_draw_mode_word(tpage: TexturePage, blend: TextBlend) -> u32 {
     gp0::draw_mode(
         (tpage.x() / 64) as u32,
         if tpage.y() == 256 { 1 } else { 0 },
@@ -728,7 +728,7 @@ pub fn upload_fonts<R: VramRegionSource>(
         return None;
     }
 
-    let (base, pages) = alloc.alloc_page_run(metrics.pages, TexDepth::Bit4, 0)?;
+    let (base, pages) = alloc.alloc_page_run(metrics.pages, TextureDepth::Bit4, 0)?;
     // CLUT allocation can't fail at boot (the band is empty); if it ever does
     // the page run is left reserved, which is harmless at boot.
     let (clut, clut_handle) = alloc.alloc_clut(2)?;
@@ -739,12 +739,12 @@ pub fn upload_fonts<R: VramRegionSource>(
         let (glyphs_per_row, _, _, _) = font_atlas_dims(font);
         out[slot] = Some(FontAtlas {
             font,
-            tpage: Tpage::new(
+            tpage: TexturePage::new(
                 base.x() + placement.page * FONT_PAGE_HALFWORDS as u16,
                 base.y(),
-                TexDepth::Bit4,
+                TextureDepth::Bit4,
             ),
-            clut_word: clut.uv_clut_word(),
+            clut_word: clut.uv_word(),
             glyphs_per_row,
             uv_origin: ((placement.x_halfwords * 4) as u8, placement.y as u8),
         });
@@ -793,7 +793,7 @@ impl FontAtlas {
     /// 2-entry CLUT (transparent, white) at `clut`.
     ///
     /// The caller picks the tpage / clut locations -- typically
-    /// `Tpage::new(768, 0, TexDepth::Bit4)` for the standard
+    /// `TexturePage::new(768, 0, TextureDepth::Bit4)` for the standard
     /// off-display region, and a `Clut::new(768, 480)` for the
     /// CLUT row. Both must live inside VRAM and not overlap the
     /// active framebuffer.
@@ -801,9 +801,9 @@ impl FontAtlas {
     /// Atlas layout picks `glyphs_per_row` so the texture's pixel
     /// width stays within `MAX_ATLAS_W_TEXELS`. For 8-wide fonts
     /// that's 32 glyphs per row; 16-wide fonts get 16 per row.
-    pub fn upload(font: &'static BitmapFont, tpage: Tpage, clut: Clut) -> Self {
+    pub fn upload(font: &'static BitmapFont, tpage: TexturePage, clut: Clut) -> Self {
         assert!(
-            matches!(tpage.depth(), TexDepth::Bit4),
+            matches!(tpage.depth(), TextureDepth::Bit4),
             "FontAtlas::upload requires a 4bpp tpage",
         );
 
@@ -882,7 +882,7 @@ impl FontAtlas {
         Self {
             font,
             tpage,
-            clut_word: clut.uv_clut_word(),
+            clut_word: clut.uv_word(),
             glyphs_per_row,
             uv_origin: (0, 0),
         }
@@ -987,11 +987,8 @@ impl FontAtlas {
         tint: (u8, u8, u8),
         mut emit: impl FnMut(&[u32]) -> bool,
     ) -> bool {
-        let material = psx_gpu::material::TextureMaterial::opaque(
-            self.clut_word,
-            self.tpage.uv_tpage_word(0),
-            tint,
-        );
+        let material =
+            psx_gpu::material::TextureMaterial::opaque(self.clut_word, self.tpage.uv_word(0), tint);
         if !emit(&[material.draw_mode_word(), material.texture_window_word()]) {
             return false;
         }
@@ -1269,7 +1266,7 @@ impl FontAtlas {
         let sw = scale_q8_i16(gw, scale_x_q8);
         let sh = scale_q8_i16(gh, scale_y_q8);
         let clut = self.clut_word;
-        let tpage = self.tpage.uv_tpage_word(0);
+        let tpage = self.tpage.uv_word(0);
         let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
             | pack_color(tint.0, tint.1, tint.2);
         let gap_q8 = i32::from(letter_spacing) << 8;
@@ -1339,7 +1336,7 @@ impl FontAtlas {
         let s = sincos::sin_q12(angle_q12);
         let c = sincos::cos_q12(angle_q12);
         let clut = self.clut_word;
-        let tpage = self.tpage.uv_tpage_word(0);
+        let tpage = self.tpage.uv_word(0);
         let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
             | pack_color(tint.0, tint.1, tint.2);
 
@@ -1406,7 +1403,7 @@ impl FontAtlas {
         let (m00, m01) = (m[0][0] as i32, m[0][1] as i32);
         let (m10, m11) = (m[1][0] as i32, m[1][1] as i32);
         let clut = self.clut_word;
-        let tpage = self.tpage.uv_tpage_word(0);
+        let tpage = self.tpage.uv_word(0);
         let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
             | pack_color(tint.0, tint.1, tint.2);
 
@@ -1504,7 +1501,7 @@ impl FontAtlas {
         let sw = gw * scale_x as i16;
         let sh = gh * scale_y as i16;
         let clut = self.clut_word;
-        let tpage = self.tpage.uv_tpage_word(0);
+        let tpage = self.tpage.uv_word(0);
         let color0_cmd =
             gp0::polygon_opcode(true, true, true, false, false) | pack_color(top.0, top.1, top.2);
         let mut cursor_x = x;
@@ -1558,7 +1555,7 @@ impl FontAtlas {
         let sw = scale_q8_i16(gw, scale_x_q8);
         let sh = scale_q8_i16(gh, scale_y_q8);
         let clut = self.clut_word;
-        let tpage = self.tpage.uv_tpage_word(0);
+        let tpage = self.tpage.uv_word(0);
         let color0_cmd = gp0::polygon_opcode(true, true, true, false, false)
             | pack_color(colors[0].0, colors[0].1, colors[0].2);
         let gap_q8 = i32::from(letter_spacing) << 8;
@@ -1592,10 +1589,10 @@ impl FontAtlas {
         self.font
     }
 
-    /// Tpage the atlas is installed at -- useful if the caller wants
+    /// TexturePage the atlas is installed at -- useful if the caller wants
     /// to restore it after drawing with a different tpage. Always
     /// 4bpp, always inside a valid VRAM page-aligned slot.
-    pub fn tpage(&self) -> Tpage {
+    pub fn tpage(&self) -> TexturePage {
         self.tpage
     }
 }
@@ -1659,7 +1656,7 @@ mod tests {
         blended_draw_mode_word, TextBlend, SEMI_TRANSPARENT_FLAT_RECT_CMD,
         SEMI_TRANSPARENT_RECT_CMD,
     };
-    use psx_vram::{TexDepth, Tpage};
+    use psx_vram::{TextureDepth, TexturePage};
 
     /// The blend equation is selected by the draw mode, not the
     /// primitive, so these two bits are the whole mechanism. Pin them
@@ -1679,9 +1676,9 @@ mod tests {
     #[test]
     fn blended_draw_mode_only_moves_the_abr_bits() {
         for tpage in [
-            Tpage::new(0, 0, TexDepth::Bit4),
-            Tpage::new(640, 256, TexDepth::Bit4),
-            Tpage::new(896, 0, TexDepth::Bit8),
+            TexturePage::new(0, 0, TextureDepth::Bit4),
+            TexturePage::new(640, 256, TextureDepth::Bit4),
+            TexturePage::new(896, 0, TextureDepth::Bit8),
         ] {
             let opaque = blended_draw_mode_word(tpage, TextBlend::Average);
             for blend in [
@@ -1708,7 +1705,7 @@ mod tests {
             for blend in [TextBlend::Average, TextBlend::Add, TextBlend::Subtract] {
                 assert_eq!(
                     blended_draw_mode_word(tpage, blend) & 0x1FF,
-                    u32::from(tpage.uv_tpage_word(blend.abr())),
+                    u32::from(tpage.uv_word(blend.abr())),
                     "{blend:?} page/blend/depth encoding"
                 );
             }
@@ -2074,8 +2071,8 @@ mod tests {
             let (glyphs_per_row, _, _, _) = font_atlas_dims(font);
             let atlas = FontAtlas {
                 font,
-                tpage: Tpage::new(placement.page * 64, 0, TexDepth::Bit4),
-                clut_word: clut.uv_clut_word(),
+                tpage: TexturePage::new(placement.page * 64, 0, TextureDepth::Bit4),
+                clut_word: clut.uv_word(),
                 glyphs_per_row,
                 uv_origin: ((placement.x_halfwords * 4) as u8, placement.y as u8),
             };
@@ -2117,9 +2114,9 @@ mod tests {
             fn alloc_page_run(
                 &mut self,
                 _count: u16,
-                _depth: TexDepth,
+                _depth: TextureDepth,
                 _page_y: u16,
-            ) -> Option<(Tpage, VramHandle)> {
+            ) -> Option<(TexturePage, VramHandle)> {
                 panic!("preflight failure must not reserve pages")
             }
 
@@ -2130,8 +2127,8 @@ mod tests {
 
         let stale = FontAtlas {
             font: &TEST_FONT,
-            tpage: Tpage::new(0, 0, TexDepth::Bit4),
-            clut_word: Clut::new(0, 480).uv_clut_word(),
+            tpage: TexturePage::new(0, 0, TextureDepth::Bit4),
+            clut_word: Clut::new(0, 480).uv_word(),
             glyphs_per_row: 2,
             uv_origin: (0, 0),
         };
@@ -2166,8 +2163,8 @@ mod deferred_packet_tests {
     fn atlas() -> FontAtlas {
         FontAtlas {
             font: &fonts::SPLEEN_5X8,
-            tpage: Tpage::new(640, 0, TexDepth::Bit4),
-            clut_word: Clut::new(960, 500).uv_clut_word(),
+            tpage: TexturePage::new(640, 0, TextureDepth::Bit4),
+            clut_word: Clut::new(960, 500).uv_word(),
             glyphs_per_row: 32,
             uv_origin: (0, 16),
         }

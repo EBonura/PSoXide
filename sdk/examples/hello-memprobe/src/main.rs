@@ -17,9 +17,9 @@ use core::hint::black_box;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_rt::tty;
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 const GREEN: (u8, u8, u8) = (80, 220, 100);
 const RED: (u8, u8, u8) = (230, 80, 80);

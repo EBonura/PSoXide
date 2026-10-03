@@ -45,7 +45,7 @@ use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_rt::{interrupts, tty};
 use psx_spu::{self as spu, CdVolume, Volume};
-use psx_vram::{Clut, TexDepth, Tpage, VramRect};
+use psx_vram::{Clut, TextureDepth, TexturePage, VramRect};
 
 const MOVIE: &str = "MOVIE.STR";
 /// Double speed, XA-ADPCM to the SPU, file/channel filter.
@@ -73,9 +73,9 @@ const SEED: u32 = 0x9E37_79B9;
 /// First word of every STR video sector: 0x0160, 0x8001.
 const STR_MAGIC: u32 = 0x8001_0160;
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
-const SMALL_TPAGE: Tpage = Tpage::new(384, 0, TexDepth::Bit4);
+const SMALL_TPAGE: TexturePage = TexturePage::new(384, 0, TextureDepth::Bit4);
 const SMALL_CLUT: Clut = Clut::new(336, 256);
 /// Left margin: keeps text inside a CRT's overscan-safe area.
 const X0: i16 = 16;

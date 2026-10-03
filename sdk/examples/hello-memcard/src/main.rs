@@ -23,13 +23,13 @@ use psx_mc::{
 #[cfg(target_arch = "mips")]
 use psx_pad::{button, poll_port1, ButtonState};
 #[cfg(target_arch = "mips")]
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 mod recovery;
 pub use recovery::{exact_legacy_size_target, repair_exact_legacy_size};
 
 #[cfg(target_arch = "mips")]
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 #[cfg(target_arch = "mips")]
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
