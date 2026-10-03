@@ -1128,7 +1128,7 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
     while i + 1 < pixels.len() {
         let lo = pixels[i] as u32;
         let hi = pixels[i + 1] as u32;
-        write_command(lo | (hi << 16));
+        psx_io::gpu::write_command_unguarded(lo | (hi << 16));
         i += 2;
     }
 }
@@ -1166,7 +1166,7 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
     copy_to_vram_header(rect);
     let mut i = 0;
     while i < bytes.len() {
-        write_command(packed_upload_word(bytes, i));
+        psx_io::gpu::write_command_unguarded(packed_upload_word(bytes, i));
         i += 4;
     }
 }
@@ -1224,13 +1224,13 @@ pub fn upload_words(rect: VramRect, words: &[u32]) {
     let _pause = pause_recording();
     copy_to_vram_header(rect);
     for &word in words {
-        write_command(word);
+        psx_io::gpu::write_command_unguarded(word);
     }
 }
 
-/// Emit the GP0(0xA0) "copy CPU→VRAM" command header: destination
-/// top-left and halfword extent. Pixel payload words follow, pushed
-/// either by the FIFO or by block DMA.
+/// Emit the GP0(0xA0) "copy CPU→VRAM" header (destination, halfword extent). Its writes run
+/// any armed present-queue guard and callers hold a recording pause, so the FIFO payload that
+/// follows skips the flag test (`write_command_unguarded`); block DMA follows otherwise.
 #[inline]
 fn copy_to_vram_header(rect: VramRect) {
     // An asynchronously kicked ordering-table walk may still be feeding
