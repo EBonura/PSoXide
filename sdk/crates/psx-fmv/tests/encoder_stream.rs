@@ -5,8 +5,8 @@
 //! Set `PSX_FMV_TEST_STR=/path/movie.str` to run it; without the variable
 //! the test passes trivially, so `cargo test` needs no media on disk.
 
-use psx_fmv::bs;
-use psx_fmv::str::FrameAssembler;
+use psx_fmv::bitstream;
+use psx_fmv::stream::FrameAssembler;
 
 #[test]
 fn decodes_every_frame_of_a_psxavenc_stream() {
@@ -22,10 +22,10 @@ fn decodes_every_frame_of_a_psxavenc_stream() {
         let Some(frame) = asm.add(sector, &mut buf) else {
             continue;
         };
-        let header = bs::Header::parse(&buf).unwrap();
+        let header = bitstream::Header::parse(&buf).unwrap();
         let mbs = (frame.width as u32).div_ceil(16) * (frame.height as u32).div_ceil(16);
         let mut pumps = 0;
-        let words = bs::decode_frame(
+        let words = bitstream::decode_frame(
             &buf[..frame.size as usize],
             &mut out,
             mbs,
@@ -44,10 +44,10 @@ fn decodes_every_frame_of_a_psxavenc_stream() {
         let mut blocks = 0;
         let mut at_block_start = true;
         for &hw in &out[..words * 2] {
-            if at_block_start && hw != bs::END_OF_BLOCK {
+            if at_block_start && hw != bitstream::END_OF_BLOCK {
                 blocks += 1;
                 at_block_start = false;
-            } else if hw == bs::END_OF_BLOCK {
+            } else if hw == bitstream::END_OF_BLOCK {
                 at_block_start = true;
             }
         }

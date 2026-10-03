@@ -32,17 +32,8 @@
 //! re-writing the enable if it did not, and falls back to CPU writes when
 //! DMA0 still will not take the table.
 
+use psx_hw::mdec::{self as hw, MDEC0, MDEC1};
 use psx_io::dma::{self, Channel};
-
-const MDEC0: u32 = 0x1F80_1820;
-const MDEC1: u32 = 0x1F80_1824;
-
-/// Decode command, 15bpp output (bits 28..27 = 3).
-pub const DECODE_15BPP: u32 = 0x3800_0000;
-/// Decode command, 24bpp output (bits 28..27 = 2).
-pub const DECODE_24BPP: u32 = 0x3000_0000;
-/// Set bit 15 on every 15bpp pixel (mask/semi-transparency bit).
-pub const DECODE_STP: u32 = 0x0200_0000;
 
 /// DMA block size the MDEC channels use, in words.
 pub const DMA_BLOCK_WORDS: usize = 32;
@@ -136,25 +127,44 @@ const fn build_scale() -> [u32; 32] {
     words
 }
 
-/// MDEC1 status: data-out FIFO empty.
-pub const STATUS_OUT_EMPTY: u32 = 1 << 31;
-/// MDEC1 status: data-in FIFO full.
-pub const STATUS_IN_FULL: u32 = 1 << 30;
-/// MDEC1 status: a command is receiving or processing parameters.
-pub const STATUS_BUSY: u32 = 1 << 29;
-/// MDEC1 status: data-in request (DMA0 enabled and the MDEC wants data).
-pub const STATUS_IN_REQUEST: u32 = 1 << 28;
-/// MDEC1 status: data-out request.
-pub const STATUS_OUT_REQUEST: u32 = 1 << 27;
+// Register constants moved to psx-hw; these forward until games repin.
 
-/// MDEC1 control: abort everything and reset. Tables survive it.
-pub const CONTROL_RESET: u32 = 0x8000_0000;
-/// MDEC1 control: enable the DMA0 and DMA1 requests.
-pub const CONTROL_ENABLE_DMA: u32 = 0x6000_0000;
-/// Command 2 for luma and chroma: 32 parameter words follow.
-pub const COMMAND_SET_QUANT: u32 = 0x4000_0001;
-/// Command 3: 32 parameter words follow.
-pub const COMMAND_SET_SCALE: u32 = 0x6000_0000;
+/// Moved to [`psx_hw::mdec::DECODE_15BPP`].
+#[deprecated(note = "moved to `psx_hw::mdec::DECODE_15BPP`")]
+pub const DECODE_15BPP: u32 = psx_hw::mdec::DECODE_15BPP;
+/// Moved to [`psx_hw::mdec::DECODE_24BPP`].
+#[deprecated(note = "moved to `psx_hw::mdec::DECODE_24BPP`")]
+pub const DECODE_24BPP: u32 = psx_hw::mdec::DECODE_24BPP;
+/// Moved to [`psx_hw::mdec::DECODE_STP`].
+#[deprecated(note = "moved to `psx_hw::mdec::DECODE_STP`")]
+pub const DECODE_STP: u32 = psx_hw::mdec::DECODE_STP;
+/// Moved to [`psx_hw::mdec::STATUS_OUT_EMPTY`].
+#[deprecated(note = "moved to `psx_hw::mdec::STATUS_OUT_EMPTY`")]
+pub const STATUS_OUT_EMPTY: u32 = psx_hw::mdec::STATUS_OUT_EMPTY;
+/// Moved to [`psx_hw::mdec::STATUS_IN_FULL`].
+#[deprecated(note = "moved to `psx_hw::mdec::STATUS_IN_FULL`")]
+pub const STATUS_IN_FULL: u32 = psx_hw::mdec::STATUS_IN_FULL;
+/// Moved to [`psx_hw::mdec::STATUS_BUSY`].
+#[deprecated(note = "moved to `psx_hw::mdec::STATUS_BUSY`")]
+pub const STATUS_BUSY: u32 = psx_hw::mdec::STATUS_BUSY;
+/// Moved to [`psx_hw::mdec::STATUS_IN_REQUEST`].
+#[deprecated(note = "moved to `psx_hw::mdec::STATUS_IN_REQUEST`")]
+pub const STATUS_IN_REQUEST: u32 = psx_hw::mdec::STATUS_IN_REQUEST;
+/// Moved to [`psx_hw::mdec::STATUS_OUT_REQUEST`].
+#[deprecated(note = "moved to `psx_hw::mdec::STATUS_OUT_REQUEST`")]
+pub const STATUS_OUT_REQUEST: u32 = psx_hw::mdec::STATUS_OUT_REQUEST;
+/// Moved to [`psx_hw::mdec::CONTROL_RESET`].
+#[deprecated(note = "moved to `psx_hw::mdec::CONTROL_RESET`")]
+pub const CONTROL_RESET: u32 = psx_hw::mdec::CONTROL_RESET;
+/// Moved to [`psx_hw::mdec::CONTROL_ENABLE_DMA`].
+#[deprecated(note = "moved to `psx_hw::mdec::CONTROL_ENABLE_DMA`")]
+pub const CONTROL_ENABLE_DMA: u32 = psx_hw::mdec::CONTROL_ENABLE_DMA;
+/// Moved to [`psx_hw::mdec::COMMAND_SET_QUANT`].
+#[deprecated(note = "moved to `psx_hw::mdec::COMMAND_SET_QUANT`")]
+pub const COMMAND_SET_QUANT: u32 = psx_hw::mdec::COMMAND_SET_QUANT;
+/// Moved to [`psx_hw::mdec::COMMAND_SET_SCALE`].
+#[deprecated(note = "moved to `psx_hw::mdec::COMMAND_SET_SCALE`")]
+pub const COMMAND_SET_SCALE: u32 = psx_hw::mdec::COMMAND_SET_SCALE;
 
 /// Spin budget for one status wait (reset settle, request, FIFO room).
 /// The console settles a reset in tens of cycles; this is a few ms.
@@ -195,15 +205,15 @@ pub fn reset() -> bool {
     dma::enable_channel(Channel::MdecIn);
     dma::enable_channel(Channel::MdecOut);
     // SAFETY: MDEC control register write.
-    unsafe { psx_io::write_u32(MDEC1, CONTROL_RESET) };
-    let settled = wait_status(STATUS_BUSY, 0, SETTLE_SPINS);
+    unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_RESET) };
+    let settled = wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS);
     let mut n = 0;
     while n < RESET_TAIL_READS {
         let _ = status();
         n += 1;
     }
     // SAFETY: MDEC control register write.
-    unsafe { psx_io::write_u32(MDEC1, CONTROL_ENABLE_DMA) };
+    unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_ENABLE_DMA) };
     settled
 }
 
@@ -241,8 +251,15 @@ pub struct Tables {
 
 impl Tables {
     /// The MDEC asked for data on both commands, so DMA0 feeds it.
-    pub fn dma_ready(&self) -> bool {
+    pub fn is_dma_ready(&self) -> bool {
         self.enable_writes != 0 && self.cpu_uploads == 0
+    }
+
+    /// Renamed to [`Tables::is_dma_ready`].
+    #[deprecated(note = "renamed to `is_dma_ready`")]
+    #[inline(always)]
+    pub fn dma_ready(&self) -> bool {
+        self.is_dma_ready()
     }
 }
 
@@ -251,19 +268,19 @@ impl Tables {
 /// request rose, 0 if never; went over the CPU), or `None` if the MDEC
 /// would not take the words at all.
 fn upload(command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
-    if !wait_status(STATUS_BUSY, 0, SETTLE_SPINS) {
+    if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
         return None;
     }
     // SAFETY: MDEC command write.
     unsafe { psx_io::write_u32(MDEC0, command) };
     let mut writes = 0u8;
-    let mut asked = wait_status(STATUS_IN_REQUEST, STATUS_IN_REQUEST, SETTLE_SPINS);
+    let mut asked = wait_status(hw::STATUS_IN_REQUEST, hw::STATUS_IN_REQUEST, SETTLE_SPINS);
     while !asked && writes + 1 < ENABLE_ATTEMPTS {
         // The enable can be lost to a reset that had not finished.
         // SAFETY: MDEC control register write, no reset bit.
-        unsafe { psx_io::write_u32(MDEC1, CONTROL_ENABLE_DMA) };
+        unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_ENABLE_DMA) };
         writes += 1;
-        asked = wait_status(STATUS_IN_REQUEST, STATUS_IN_REQUEST, SETTLE_SPINS);
+        asked = wait_status(hw::STATUS_IN_REQUEST, hw::STATUS_IN_REQUEST, SETTLE_SPINS);
     }
     let enable_writes = if asked { writes + 1 } else { 0 };
     if asked {
@@ -275,14 +292,14 @@ fn upload(command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
         // Part of the table went in: start the command over.
         dma::abort(Channel::MdecIn);
         reset();
-        if !wait_status(STATUS_BUSY, 0, SETTLE_SPINS) {
+        if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
             return None;
         }
         // SAFETY: MDEC command write.
         unsafe { psx_io::write_u32(MDEC0, command) };
     }
     for &word in words {
-        if !wait_status(STATUS_IN_FULL, 0, SETTLE_SPINS) {
+        if !wait_status(hw::STATUS_IN_FULL, 0, SETTLE_SPINS) {
             return None;
         }
         // SAFETY: MDEC parameter write.
@@ -294,9 +311,9 @@ fn upload(command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
 /// Upload the standard quantization tables and the IDCT basis. `None` if
 /// the MDEC would take them neither over DMA0 nor over the CPU.
 pub fn load_tables() -> Option<Tables> {
-    let (quant_writes, quant_cpu) = upload(COMMAND_SET_QUANT, &QUANT_WORDS)?;
-    let (scale_writes, scale_cpu) = upload(COMMAND_SET_SCALE, &SCALE_WORDS)?;
-    if !wait_status(STATUS_BUSY, 0, SETTLE_SPINS) {
+    let (quant_writes, quant_cpu) = upload(hw::COMMAND_SET_QUANT, &QUANT_WORDS)?;
+    let (scale_writes, scale_cpu) = upload(hw::COMMAND_SET_SCALE, &SCALE_WORDS)?;
+    if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
         return None;
     }
     Some(Tables {
@@ -314,21 +331,21 @@ pub fn load_tables() -> Option<Tables> {
 /// the MDEC. `false` if the input FIFO never made room.
 pub fn load_tables_cpu() -> bool {
     for (command, words) in [
-        (COMMAND_SET_QUANT, &QUANT_WORDS),
-        (COMMAND_SET_SCALE, &SCALE_WORDS),
+        (hw::COMMAND_SET_QUANT, &QUANT_WORDS),
+        (hw::COMMAND_SET_SCALE, &SCALE_WORDS),
     ] {
-        if !wait_status(STATUS_BUSY, 0, SETTLE_SPINS) {
+        if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
             return false;
         }
         write_command(command);
         for &word in words {
-            if !wait_status(STATUS_IN_FULL, 0, SETTLE_SPINS) {
+            if !wait_status(hw::STATUS_IN_FULL, 0, SETTLE_SPINS) {
                 return false;
             }
             write_command(word);
         }
     }
-    wait_status(STATUS_BUSY, 0, SETTLE_SPINS)
+    wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS)
 }
 
 /// Write one word to MDEC0: a command, or a parameter the CPU feeds itself.
@@ -347,8 +364,9 @@ pub fn read_data() -> u32 {
 }
 
 /// Start decoding `words` 32-bit words of run-length data (a multiple of 32,
-/// as [`crate::bs::decode_frame`] returns). `mode` is [`DECODE_15BPP`] or
-/// [`DECODE_24BPP`], optionally with [`DECODE_STP`].
+/// as [`crate::bitstream::decode_frame`] returns). `mode` is
+/// [`psx_hw::mdec::DECODE_15BPP`] or [`psx_hw::mdec::DECODE_24BPP`],
+/// optionally with [`psx_hw::mdec::DECODE_STP`].
 ///
 /// [`decode`] is the safe form: it holds the borrow of `rle` until DMA0 is
 /// done with it.
@@ -373,7 +391,7 @@ pub unsafe fn decode_start(rle: &[u32], words: usize, mode: u32) {
     }
 }
 
-/// Decode all of `rle` (a multiple of 32 words, as [`crate::bs::decode_frame`]
+/// Decode all of `rle` (a multiple of 32 words, as [`crate::bitstream::decode_frame`]
 /// returns) with DMA0 feeding the MDEC, the safe form of [`decode_start`].
 ///
 /// `columns` runs while DMA0 feeds the MDEC and pulls the output, normally
