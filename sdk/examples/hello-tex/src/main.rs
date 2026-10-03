@@ -34,7 +34,7 @@ use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_hw::gpu::{pack_color, pack_texcoord, pack_vertex, pack_xy};
 use psx_io::gpu::{wait_command_ready, write_command};
 use psx_math::sincos;
-use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
+use psx_vram::{upload_bytes, Clut, TextureDepth, TexturePage, VramRect};
 
 /// Wall (brick) -- cooked by `make assets` from
 /// `vendor/brick-wall.jpg`.
@@ -47,7 +47,7 @@ static FLOOR_BLOB: &[u8] = include_bytes!("../../../../assets/textures/floor.psx
 /// 256-wide tpage with room to spare. The `apply_as_draw_mode`
 /// call at startup sets this as the current tpage; every textured
 /// sprite we draw samples from it.
-const SHARED_TPAGE: Tpage = Tpage::new(640, 0, TexDepth::Bit4);
+const SHARED_TPAGE: TexturePage = TexturePage::new(640, 0, TextureDepth::Bit4);
 
 /// CLUT for the brick texture. X aligned to 16; Y=480 sits below
 /// both framebuffer halves (0..240 and 240..480).
@@ -103,8 +103,8 @@ fn main() {
 
     // --- Pre-encode the per-texture UV words ---
     SHARED_TPAGE.apply_as_draw_mode();
-    let brick_clut_word = BRICK_CLUT.uv_clut_word();
-    let floor_clut_word = FLOOR_CLUT.uv_clut_word();
+    let brick_clut_word = BRICK_CLUT.uv_word();
+    let floor_clut_word = FLOOR_CLUT.uv_word();
 
     // Sine-oscillating centres -- same Q0.12 phase pattern as
     // hello-ot's triangles. Modulo arithmetic would create a

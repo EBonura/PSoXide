@@ -30,16 +30,16 @@ extern crate psx_rt;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_pad::{button, poll_port1, ButtonState, PadMode, PadState};
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
 /// Font atlas VRAM slot.
 ///
 /// With double-buffering, buffer A is at (0..320, 0..240) and B
-/// at (0..320, 240..480). Tpage X must be a multiple of 64 → 320
+/// at (0..320, 240..480). TexturePage X must be a multiple of 64 → 320
 /// is the lowest slot that clears both buffers. At 4bpp, a BASIC
 /// 128-glyph atlas uses 64 halfwords × 32 halfword rows →
 /// (320..384) × (0..32), inside tpage (320, 0, Bit4).
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 /// 2-entry CLUT (transparent + white) at (320, 256). X is a
 /// multiple of 16 ✓, past the right edge of buffer B at X=320 ✓.
 const FONT_CLUT: Clut = Clut::new(320, 256);

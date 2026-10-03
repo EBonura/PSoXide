@@ -541,7 +541,7 @@ pub fn draw_quad_flat(verts: [(i16, i16); 4], r: u8, g: u8, b: u8) {
 /// darkens and above 128 brightens (clamped).
 ///
 /// `clut_word` is a packed CLUT handle (see `Clut::uv_clut_word`);
-/// `tpage_word` is a packed tpage (see `Tpage::uv_tpage_word`).
+/// `tpage_word` is a packed tpage (see `TexturePage::uv_tpage_word`).
 pub fn draw_quad_textured(
     verts: [(i16, i16); 4],
     uvs: [(u8, u8); 4],

@@ -16,7 +16,7 @@
 //! - [`VramRect`] -- an `(x, y, w, h)` in VRAM pixels with const
 //!   validation of the bounds. Can't construct one that would
 //!   overflow VRAM.
-//! - [`Tpage`] -- a texture-page handle. Const constructor
+//! - [`TexturePage`] -- a texture-page handle. Const constructor
 //!   enforces the PSX alignment rules (`x % 64 == 0`, `y ∈ {0, 256}`),
 //!   knows its bit-depth, and emits the GP0(E1h) draw-mode word
 //!   or the 16-bit tpage field embedded in textured-rect UV words.
@@ -31,7 +31,7 @@
 //!
 //! - Compile-time tpage-overlap detection. A later pass can wrap
 //!   allocations in a const-generic `Layout<...>` that enforces
-//!   non-overlap across a fixed set of Tpage/Clut declarations;
+//!   non-overlap across a fixed set of TexturePage/Clut declarations;
 //!   kept out for now because the rules around the 16-pixel CLUT
 //!   stride + tpage-row sharing get messy to express in bare
 //!   Rust const generics, and a build-time allocator tool is a
@@ -46,7 +46,7 @@
 //!
 //! ## Why these types over PsyQ's shorts
 //!
-//! Every field has rules PsyQ leaves to the programmer. Tpage X
+//! Every field has rules PsyQ leaves to the programmer. TexturePage X
 //! must be a multiple of 64; Y must be 0 or 256. CLUT X must be
 //! a multiple of 16. Upload sizes are clamped on hardware but
 //! wrap (wrap, not truncate) on the real DMA controller if you
@@ -154,13 +154,29 @@ impl Color555 {
     ///
     /// Set it on every entry of an additive or translucent palette, leaving
     /// the fully transparent index (usually 0) at [`Self::TRANSPARENT`].
-    pub const fn with_stp(self) -> Self {
+    #[doc(alias = "STP")]
+    pub const fn with_semi_transparency(self) -> Self {
         Self(self.0 | 0x8000)
     }
 
+    /// Renamed to [`Self::with_semi_transparency`].
+    #[deprecated(note = "renamed to `with_semi_transparency`")]
+    #[inline(always)]
+    pub const fn with_stp(self) -> Self {
+        self.with_semi_transparency()
+    }
+
     /// Whether bit 15 is set (the mask bit, or STP in a CLUT entry).
-    pub const fn has_stp(self) -> bool {
+    #[doc(alias = "STP")]
+    pub const fn is_semi_transparent(self) -> bool {
         self.0 & 0x8000 != 0
+    }
+
+    /// Renamed to [`Self::is_semi_transparent`].
+    #[deprecated(note = "renamed to `is_semi_transparent`")]
+    #[inline(always)]
+    pub const fn has_stp(self) -> bool {
+        self.is_semi_transparent()
     }
 }
 
@@ -438,10 +454,17 @@ impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
     /// Whether a logical atlas page contains no live window or full-page
     /// reservation. Used by the physical allocator to return lazy backing at
     /// scene boundaries.
-    pub fn page_is_empty(&self, page_index: usize) -> bool {
+    pub fn is_page_empty(&self, page_index: usize) -> bool {
         self.rows
             .get(page_index)
             .is_some_and(|rows| rows.iter().all(|row| *row == 0))
+    }
+
+    /// Renamed to [`Self::is_page_empty`].
+    #[deprecated(note = "renamed to `is_page_empty`")]
+    #[inline(always)]
+    pub fn page_is_empty(&self, page_index: usize) -> bool {
+        self.is_page_empty(page_index)
     }
 }
 
@@ -495,14 +518,14 @@ fn texture_region_mark(
 }
 
 // ======================================================================
-// Tpage + Clut
+// TexturePage + Clut
 // ======================================================================
 
 /// Texture color depth -- the last field of GP0(E1h) and bits 7..8
 /// of a primitive's tpage word.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub enum TexDepth {
+pub enum TextureDepth {
     /// 4-bit CLUT-indexed. 4 texels per 16-bit halfword.
     Bit4 = 0,
     /// 8-bit CLUT-indexed. 2 texels per halfword.
@@ -511,7 +534,7 @@ pub enum TexDepth {
     Bit15 = 2,
 }
 
-impl TexDepth {
+impl TextureDepth {
     const fn as_u16(self) -> u16 {
         self as u16
     }
@@ -520,9 +543,9 @@ impl TexDepth {
     /// 2 for 8bpp, 1 for 15bpp.
     pub const fn texels_per_halfword(self) -> u16 {
         match self {
-            TexDepth::Bit4 => 4,
-            TexDepth::Bit8 => 2,
-            TexDepth::Bit15 => 1,
+            TextureDepth::Bit4 => 4,
+            TextureDepth::Bit8 => 2,
+            TextureDepth::Bit15 => 1,
         }
     }
 }
@@ -539,24 +562,24 @@ impl TexDepth {
 ///   texels pack into fewer halfwords and hence a narrower span.)
 ///
 /// The const constructor catches misaligned X/Y at compile time.
-/// A const check across multiple Tpage consts (to enforce non-
+/// A const check across multiple TexturePage consts (to enforce non-
 /// overlap) needs const generics that are noisy to express here;
 /// runtime collision tooling lives in a follow-up.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Tpage {
+pub struct TexturePage {
     x: u16,
     y: u16,
-    depth: TexDepth,
+    depth: TextureDepth,
 }
 
-impl Tpage {
-    /// Build a Tpage. Compile-time assertion that `x` is a
+impl TexturePage {
+    /// Build a TexturePage. Compile-time assertion that `x` is a
     /// multiple of 64 and `y` is 0 or 256.
     #[allow(clippy::manual_is_multiple_of)]
-    pub const fn new(x: u16, y: u16, depth: TexDepth) -> Self {
-        assert!(x % 64 == 0, "Tpage: x must be a multiple of 64");
-        assert!(x < VRAM_WIDTH, "Tpage: x past VRAM");
-        assert!(y == 0 || y == 256, "Tpage: y must be 0 or 256");
+    pub const fn new(x: u16, y: u16, depth: TextureDepth) -> Self {
+        assert!(x % 64 == 0, "TexturePage: x must be a multiple of 64");
+        assert!(x < VRAM_WIDTH, "TexturePage: x past VRAM");
+        assert!(y == 0 || y == 256, "TexturePage: y must be 0 or 256");
         Self { x, y, depth }
     }
 
@@ -569,7 +592,7 @@ impl Tpage {
         self.y
     }
     /// Color depth.
-    pub const fn depth(self) -> TexDepth {
+    pub const fn depth(self) -> TextureDepth {
         self.depth
     }
 
@@ -577,9 +600,9 @@ impl Tpage {
     /// Useful for sanity-checking that uploaded texture data fits.
     pub const fn covering_rect(self) -> VramRect {
         let w = match self.depth {
-            TexDepth::Bit4 => 64,
-            TexDepth::Bit8 => 128,
-            TexDepth::Bit15 => 256,
+            TextureDepth::Bit4 => 64,
+            TextureDepth::Bit8 => 128,
+            TextureDepth::Bit15 => 256,
         };
         // covering_rect is for upload sizing; height is always the
         // 256-row page height. The assert in VramRect::new guards
@@ -601,7 +624,8 @@ impl Tpage {
     ///
     /// `semi_trans` picks the GPU blend mode when a texel's mask
     /// bit is set. 0 is "0.5·bg + 0.5·fg" -- the most common.
-    pub const fn uv_tpage_word(self, semi_trans: u8) -> u16 {
+    #[doc(alias = "getTPage")]
+    pub const fn uv_word(self, semi_trans: u8) -> u16 {
         assert!(semi_trans < 4, "semi_trans must be 0..4");
         let tpx = (self.x / 64) & 0xF;
         let tpy = if self.y == 256 { 1 } else { 0 };
@@ -665,7 +689,8 @@ impl Clut {
     ///   bits 0..5   : CLUT X / 16
     ///   bits 6..14  : CLUT Y
     /// ```
-    pub const fn uv_clut_word(self) -> u16 {
+    #[doc(alias = "getClut")]
+    pub const fn uv_word(self) -> u16 {
         let cx = (self.x / 16) & 0x3F;
         let cy = self.y & 0x1FF;
         cx | (cy << 6)
@@ -691,7 +716,7 @@ const CLUT_SLOTS_PER_ROW: u16 = VRAM_WIDTH / 16;
 
 /// A freeable handle to a VRAM reservation handed out by [`VramAllocator`].
 ///
-/// Returned alongside the hardware [`Tpage`] / [`Clut`] so a caller can both
+/// Returned alongside the hardware [`TexturePage`] / [`Clut`] so a caller can both
 /// use the reservation immediately and release it later via
 /// [`VramAllocator::free`]. `Copy` so it can sit in fixed slot tables.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -719,13 +744,13 @@ pub enum VramHandle {
 /// [`VramAllocator`] type (e.g. `psx-font`). [`VramAllocator`] implements it.
 pub trait VramRegionSource {
     /// Reserve `count` contiguous texture pages at page row `page_y`
-    /// (0 or 256), returning the base [`Tpage`] and a free handle.
+    /// (0 or 256), returning the base [`TexturePage`] and a free handle.
     fn alloc_page_run(
         &mut self,
         count: u16,
-        depth: TexDepth,
+        depth: TextureDepth,
         page_y: u16,
-    ) -> Option<(Tpage, VramHandle)>;
+    ) -> Option<(TexturePage, VramHandle)>;
 
     /// Reserve a CLUT of `entries` palette slots (16 for 4bpp, 256 for 8bpp).
     fn alloc_clut(&mut self, entries: u16) -> Option<(Clut, VramHandle)>;
@@ -816,7 +841,7 @@ pub struct VramAllocator<const ROOM_PAGES: usize, const CLUT_ROWS: usize> {
     /// Physical backing selected lazily for each logical room-atlas page.
     /// Unused capacity therefore consumes no VRAM, and a page is returned when
     /// its final window (or full-page image) is released at a scene boundary.
-    room_pages: [Option<Tpage>; ROOM_PAGES],
+    room_pages: [Option<TexturePage>; ROOM_PAGES],
     room_page_handles: [VramHandle; ROOM_PAGES],
     room_base_x: u16,
     room_base_y: u16,
@@ -886,7 +911,7 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         self.room_base_y = base_y;
     }
 
-    fn ensure_room_page(&mut self, page_index: usize) -> Option<Tpage> {
+    fn ensure_room_page(&mut self, page_index: usize) -> Option<TexturePage> {
         if let Some(tpage) = self.room_pages.get(page_index).copied().flatten() {
             return Some(tpage);
         }
@@ -908,7 +933,7 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
             self.find_page_run(1, self.room_base_y)?
         };
         self.set_rect(x, self.room_base_y, ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
-        let tpage = Tpage::new(x, self.room_base_y, TexDepth::Bit4);
+        let tpage = TexturePage::new(x, self.room_base_y, TextureDepth::Bit4);
         self.room_pages[page_index] = Some(tpage);
         self.room_page_handles[page_index] = VramHandle::Rect(VramRect::new(
             x,
@@ -920,7 +945,7 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
     }
 
     fn release_room_page_if_empty(&mut self, page_index: usize) {
-        if page_index >= ROOM_PAGES || !self.room.page_is_empty(page_index) {
+        if page_index >= ROOM_PAGES || !self.room.is_page_empty(page_index) {
             return;
         }
         let handle = core::mem::replace(&mut self.room_page_handles[page_index], VramHandle::Empty);
@@ -954,7 +979,7 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         &mut self,
         width_texels: u16,
         height_texels: u16,
-    ) -> Option<(Tpage, TextureWindowPlacement, VramHandle)> {
+    ) -> Option<(TexturePage, TextureWindowPlacement, VramHandle)> {
         let placement = self.room.allocate(width_texels, height_texels)?;
         let page_index = placement.page_index() as usize;
         let Some(tpage) = self.ensure_room_page(page_index) else {
@@ -967,7 +992,7 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
     /// Reserve a whole room-material page (large UI / background textures use a
     /// full page without a GP0(E2) window). The room band must be reserved
     /// first via [`reserve_room_band`](Self::reserve_room_band).
-    pub fn alloc_room_page(&mut self) -> Option<(Tpage, VramHandle)> {
+    pub fn alloc_room_page(&mut self) -> Option<(TexturePage, VramHandle)> {
         let page_index = self.room.reserve_empty_page()?;
         let Some(tpage) = self.ensure_room_page(page_index) else {
             self.room.release_page(page_index);
@@ -985,16 +1010,16 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
     pub fn alloc_model_slot(
         &mut self,
         halfwords_per_row: u16,
-        depth: TexDepth,
-    ) -> Option<(Tpage, VramHandle)> {
-        if !matches!(depth, TexDepth::Bit4 | TexDepth::Bit8) {
+        depth: TextureDepth,
+    ) -> Option<(TexturePage, VramHandle)> {
+        if !matches!(depth, TextureDepth::Bit4 | TextureDepth::Bit8) {
             return None;
         }
         let pages = halfwords_per_row.div_ceil(ALLOC_COL_W).max(1);
         let x = self.find_page_run(pages, 256)?;
         self.set_rect(x, 256, pages * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
         Some((
-            Tpage::new(x, 256, depth),
+            TexturePage::new(x, 256, depth),
             VramHandle::Rect(VramRect::new(
                 x,
                 256,
@@ -1030,13 +1055,13 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramRegionSource
     fn alloc_page_run(
         &mut self,
         count: u16,
-        depth: TexDepth,
+        depth: TextureDepth,
         page_y: u16,
-    ) -> Option<(Tpage, VramHandle)> {
+    ) -> Option<(TexturePage, VramHandle)> {
         let x = self.find_page_run(count, page_y)?;
         self.set_rect(x, page_y, count * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
         Some((
-            Tpage::new(x, page_y, depth),
+            TexturePage::new(x, page_y, depth),
             VramHandle::Rect(VramRect::new(
                 x,
                 page_y,
@@ -1300,6 +1325,32 @@ pub fn upload_clut(clut: Clut, entries: &[Color555]) {
 // Tests
 // ======================================================================
 
+/// Renamed to [`TexturePage`].
+#[deprecated(note = "renamed to `TexturePage`")]
+pub type Tpage = TexturePage;
+
+/// Renamed to [`TextureDepth`].
+#[deprecated(note = "renamed to `TextureDepth`")]
+pub type TexDepth = TextureDepth;
+
+impl TexturePage {
+    /// Renamed to [`TexturePage::uv_word`].
+    #[deprecated(note = "renamed to `uv_word`")]
+    #[inline(always)]
+    pub const fn uv_tpage_word(self, semi_trans: u8) -> u16 {
+        self.uv_word(semi_trans)
+    }
+}
+
+impl Clut {
+    /// Renamed to [`Clut::uv_word`].
+    #[deprecated(note = "renamed to `uv_word`")]
+    #[inline(always)]
+    pub const fn uv_clut_word(self) -> u16 {
+        self.uv_word()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1361,13 +1412,16 @@ mod tests {
     #[test]
     fn stp_is_the_mask_bit_named_for_its_palette_meaning() {
         let opaque = Color555::rgb8(255, 255, 255);
-        assert!(!opaque.has_stp());
-        assert_eq!(opaque.with_stp().as_u16(), opaque.with_mask_bit().as_u16());
-        assert!(opaque.with_stp().has_stp());
+        assert!(!opaque.is_semi_transparent());
+        assert_eq!(
+            opaque.with_semi_transparency().as_u16(),
+            opaque.with_mask_bit().as_u16()
+        );
+        assert!(opaque.with_semi_transparency().is_semi_transparent());
         // The fully transparent slot must stay 0x0000: setting STP there would
         // make the GPU blend the texel instead of skipping it.
         assert_eq!(Color555::TRANSPARENT.as_u16(), 0);
-        assert!(!Color555::TRANSPARENT.has_stp());
+        assert!(!Color555::TRANSPARENT.is_semi_transparent());
     }
 
     #[test]
@@ -1476,9 +1530,9 @@ mod tests {
 
     #[test]
     fn tpage_encodes_uv_word_correctly() {
-        let tp = Tpage::new(640, 0, TexDepth::Bit15);
+        let tp = TexturePage::new(640, 0, TextureDepth::Bit15);
         // x=640 → tpx=10, y=0 → tpy=0, depth=15bpp → 2.
-        let word = tp.uv_tpage_word(0);
+        let word = tp.uv_word(0);
         assert_eq!(word & 0xF, 10, "tpx");
         assert_eq!((word >> 4) & 1, 0, "tpy");
         assert_eq!((word >> 5) & 3, 0, "semi_trans");
@@ -1488,20 +1542,20 @@ mod tests {
     #[test]
     #[should_panic = "x must be a multiple of 64"]
     fn tpage_rejects_misaligned_x() {
-        let _ = Tpage::new(32, 0, TexDepth::Bit8);
+        let _ = TexturePage::new(32, 0, TextureDepth::Bit8);
     }
 
     #[test]
     #[should_panic = "y must be 0 or 256"]
     fn tpage_rejects_bad_y() {
-        let _ = Tpage::new(0, 128, TexDepth::Bit4);
+        let _ = TexturePage::new(0, 128, TextureDepth::Bit4);
     }
 
     #[test]
     fn clut_encodes_uv_word_correctly() {
         let cl = Clut::new(640, 240);
         // x=640 → cx=40, y=240 → cy=240.
-        let word = cl.uv_clut_word();
+        let word = cl.uv_word();
         assert_eq!(word & 0x3F, 40, "cx");
         assert_eq!((word >> 6) & 0x1FF, 240, "cy");
     }
@@ -1514,9 +1568,9 @@ mod tests {
 
     #[test]
     fn tex_depth_texels_per_halfword() {
-        assert_eq!(TexDepth::Bit4.texels_per_halfword(), 4);
-        assert_eq!(TexDepth::Bit8.texels_per_halfword(), 2);
-        assert_eq!(TexDepth::Bit15.texels_per_halfword(), 1);
+        assert_eq!(TextureDepth::Bit4.texels_per_halfword(), 4);
+        assert_eq!(TextureDepth::Bit8.texels_per_halfword(), 2);
+        assert_eq!(TextureDepth::Bit15.texels_per_halfword(), 1);
     }
 
     #[test]
@@ -1524,7 +1578,7 @@ mod tests {
         let mut a = VramAllocator::<6, 16>::new(480);
         a.reserve_rect(VramRect::new(0, 0, 320, 480));
         let (tp, _h) = a
-            .alloc_page_run(3, TexDepth::Bit4, 0)
+            .alloc_page_run(3, TextureDepth::Bit4, 0)
             .expect("3 contiguous pages");
         assert_eq!(tp.x() % 64, 0, "page X is 64-aligned");
         assert!(tp.x() >= 320, "page must not overlap the framebuffer");
@@ -1534,11 +1588,11 @@ mod tests {
     #[test]
     fn vram_alloc_free_round_trips_a_page() {
         let mut a = VramAllocator::<6, 16>::new(480);
-        let (tp1, h1) = a.alloc_page_run(1, TexDepth::Bit4, 0).unwrap();
-        let (tp2, _h2) = a.alloc_page_run(1, TexDepth::Bit4, 0).unwrap();
+        let (tp1, h1) = a.alloc_page_run(1, TextureDepth::Bit4, 0).unwrap();
+        let (tp2, _h2) = a.alloc_page_run(1, TextureDepth::Bit4, 0).unwrap();
         assert_ne!(tp1.x(), tp2.x());
         a.free(h1);
-        let (tp3, _h3) = a.alloc_page_run(1, TexDepth::Bit4, 0).unwrap();
+        let (tp3, _h3) = a.alloc_page_run(1, TextureDepth::Bit4, 0).unwrap();
         assert_eq!(tp3.x(), tp1.x(), "freed page is reused");
     }
 
@@ -1558,12 +1612,12 @@ mod tests {
         a.reserve_room_band(640, 0);
         let (_, _, window) = a.alloc_window(64, 64).expect("room window");
         assert!(
-            a.alloc_page_run(6, TexDepth::Bit4, 0).is_none(),
+            a.alloc_page_run(6, TextureDepth::Bit4, 0).is_none(),
             "live preferred room page interrupts the six-page top run"
         );
         a.free(window);
         assert!(
-            a.alloc_page_run(6, TexDepth::Bit4, 0).is_some(),
+            a.alloc_page_run(6, TextureDepth::Bit4, 0).is_some(),
             "last-window release must return the physical room page"
         );
     }
@@ -1571,13 +1625,13 @@ mod tests {
     #[test]
     fn model_slots_preserve_indexed_texture_depth() {
         let mut a = VramAllocator::<2, 16>::new(480);
-        let (bit4, _h4) = a.alloc_model_slot(32, TexDepth::Bit4).unwrap();
-        let (bit8, _h8) = a.alloc_model_slot(64, TexDepth::Bit8).unwrap();
+        let (bit4, _h4) = a.alloc_model_slot(32, TextureDepth::Bit4).unwrap();
+        let (bit8, _h8) = a.alloc_model_slot(64, TextureDepth::Bit8).unwrap();
 
-        assert_eq!(bit4.depth(), TexDepth::Bit4);
-        assert_eq!(bit8.depth(), TexDepth::Bit8);
+        assert_eq!(bit4.depth(), TextureDepth::Bit4);
+        assert_eq!(bit8.depth(), TextureDepth::Bit8);
         assert_ne!(bit4.x(), bit8.x());
-        assert!(a.alloc_model_slot(64, TexDepth::Bit15).is_none());
+        assert!(a.alloc_model_slot(64, TextureDepth::Bit15).is_none());
     }
 
     #[test]
