@@ -18,6 +18,7 @@
 //! Values beyond what you pass in on spawn are 0-initialised;
 //! `ttl == 0` marks a slot as empty. No allocation, ever.
 
+use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::RectFlat;
 
@@ -72,6 +73,19 @@ impl Particle {
     /// Is this particle currently alive and worth rendering?
     pub const fn alive(&self) -> bool {
         self.ttl != 0
+    }
+
+    /// The rect this particle draws as: colour faded by `ttl / spawn_ttl`,
+    /// 3 px for the first half of its life and 2 px after.
+    #[inline]
+    fn rect(&self, shake: (i16, i16)) -> RectFlat {
+        let denom = self.spawn_ttl.max(1) as u16;
+        let scale = self.ttl as u16;
+        let r = ((self.r as u16 * scale) / denom) as u8;
+        let g = ((self.g as u16 * scale) / denom) as u8;
+        let b = ((self.b as u16 * scale) / denom) as u8;
+        let size = if (self.ttl as u16) * 2 > denom { 3 } else { 2 };
+        RectFlat::new(self.x + shake.0, self.y + shake.1, size, size, r, g, b)
     }
 }
 
@@ -163,6 +177,33 @@ impl<const N: usize> ParticlePool<N> {
         }
     }
 
+    /// Render every live particle as a `RectFlat` from `rects` into
+    /// `frame` at slot `z`, stopping when the arena runs out. Returns the
+    /// number of rects written.
+    ///
+    /// Colour fades with `ttl / spawn_ttl` and size tapers from 3 px to
+    /// 2 px.
+    pub fn render_into_frame<'f, const OT_N: usize>(
+        &self,
+        frame: &mut OtFrame<'f, OT_N>,
+        rects: &mut PrimitiveArena<'f, RectFlat>,
+        z: u8,
+        shake: (i16, i16),
+    ) -> usize {
+        let mut written = 0;
+        for p in self.particles.iter() {
+            if p.ttl == 0 {
+                continue;
+            }
+            let Some(rect) = rects.push(p.rect(shake)) else {
+                break;
+            };
+            frame.add(z as usize, rect);
+            written += 1;
+        }
+        written
+    }
+
     /// Render every live particle as a `RectFlat` into the caller's
     /// buffer, inserting each into OT slot `z`.
     ///
@@ -193,13 +234,7 @@ impl<const N: usize> ParticlePool<N> {
             if written >= rects.len() {
                 break;
             }
-            let denom = p.spawn_ttl.max(1) as u16;
-            let scale = p.ttl as u16;
-            let r = ((p.r as u16 * scale) / denom) as u8;
-            let g = ((p.g as u16 * scale) / denom) as u8;
-            let b = ((p.b as u16 * scale) / denom) as u8;
-            let size = if (p.ttl as u16) * 2 > denom { 3 } else { 2 };
-            rects[written] = RectFlat::new(p.x + shake.0, p.y + shake.1, size, size, r, g, b);
+            rects[written] = p.rect(shake);
             ot.add(z as usize, &mut rects[written], RectFlat::WORDS);
             written += 1;
         }
@@ -228,6 +263,23 @@ impl<const N: usize> Default for ParticlePool<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_into_frame_stops_when_the_arena_is_full() {
+        let mut pool: ParticlePool<8> = ParticlePool::new();
+        let mut rng = LcgRng::new(7);
+        pool.spawn_burst(&mut rng, (50, 50), (200, 100, 50), 5, 16, 20);
+        let mut storage: [RectFlat; 3] =
+            core::array::from_fn(|_| RectFlat::new(0, 0, 0, 0, 0, 0, 0));
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        let mut frame = ot.frame();
+        let mut arena = PrimitiveArena::new(&mut storage);
+        assert_eq!(pool.render_into_frame(&mut frame, &mut arena, 2, (0, 0)), 3);
+        assert_eq!(arena.remaining(), 0);
+        drop(frame);
+        // SAFETY: the table only links `storage`, still alive here.
+        assert_eq!(unsafe { ot.iter_packets() }.count(), 3);
+    }
 
     #[test]
     fn empty_pool_is_empty() {
