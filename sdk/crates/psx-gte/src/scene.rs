@@ -44,115 +44,92 @@ pub struct Projected {
     pub sz: u16,
 }
 
-/// Result of the classic PS1 integer-vector normalisation path.
+/// A direction scaled to Q12 unit length by
+/// [`normalize_classic_q12_scheduled`], with the squared lengths it came
+/// from.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 #[repr(C)]
 pub struct ClassicNormalizedVector {
-    /// Q12 unit vector produced by the GTE reciprocal-table path.
+    /// The input direction at length 4096 (Q12 1.0); zero when the
+    /// squared length is zero or wrapped negative.
     pub vector: Vec3I16,
-    /// Squared integer length of the input X/Y pair.
+    /// `x * x + y * y` of the whole-unit components, wrapping.
     pub xy_squared: i32,
-    /// Squared integer length of all three input components.
+    /// `x * x + y * y + z * z` of the whole-unit components, wrapping.
     pub squared: i32,
 }
 
-// Reciprocal square-root factors for the normalised squared range 64..=255.
-// This is the original PS1 fixed-point table: retaining its exact entries
-// makes animation, AI and projectile direction results portable across games.
-const CLASSIC_NORMALIZE_TABLE: [i16; 192] = [
-    0x1000, 0x0fe0, 0x0fc1, 0x0fa3, 0x0f85, 0x0f68, 0x0f4c, 0x0f30, 0x0f15, 0x0efb, 0x0ee1, 0x0ec7,
-    0x0eae, 0x0e96, 0x0e7e, 0x0e66, 0x0e4f, 0x0e38, 0x0e22, 0x0e0c, 0x0df7, 0x0de2, 0x0dcd, 0x0db9,
-    0x0da5, 0x0d91, 0x0d7e, 0x0d6b, 0x0d58, 0x0d45, 0x0d33, 0x0d21, 0x0d10, 0x0cff, 0x0cee, 0x0cdd,
-    0x0ccc, 0x0cbc, 0x0cac, 0x0c9c, 0x0c8d, 0x0c7d, 0x0c6e, 0x0c5f, 0x0c51, 0x0c42, 0x0c34, 0x0c26,
-    0x0c18, 0x0c0a, 0x0bfd, 0x0bef, 0x0be2, 0x0bd5, 0x0bc8, 0x0bbb, 0x0baf, 0x0ba2, 0x0b96, 0x0b8a,
-    0x0b7e, 0x0b72, 0x0b67, 0x0b5b, 0x0b50, 0x0b45, 0x0b39, 0x0b2e, 0x0b24, 0x0b19, 0x0b0e, 0x0b04,
-    0x0af9, 0x0aef, 0x0ae5, 0x0adb, 0x0ad1, 0x0ac7, 0x0abd, 0x0ab4, 0x0aaa, 0x0aa1, 0x0a97, 0x0a8e,
-    0x0a85, 0x0a7c, 0x0a73, 0x0a6a, 0x0a61, 0x0a59, 0x0a50, 0x0a47, 0x0a3f, 0x0a37, 0x0a2e, 0x0a26,
-    0x0a1e, 0x0a16, 0x0a0e, 0x0a06, 0x09fe, 0x09f6, 0x09ef, 0x09e7, 0x09e0, 0x09d8, 0x09d1, 0x09c9,
-    0x09c2, 0x09bb, 0x09b4, 0x09ad, 0x09a5, 0x099e, 0x0998, 0x0991, 0x098a, 0x0983, 0x097c, 0x0976,
-    0x096f, 0x0969, 0x0962, 0x095c, 0x0955, 0x094f, 0x0949, 0x0943, 0x093c, 0x0936, 0x0930, 0x092a,
-    0x0924, 0x091e, 0x0918, 0x0912, 0x090d, 0x0907, 0x0901, 0x08fb, 0x08f6, 0x08f0, 0x08eb, 0x08e5,
-    0x08e0, 0x08da, 0x08d5, 0x08cf, 0x08ca, 0x08c5, 0x08bf, 0x08ba, 0x08b5, 0x08b0, 0x08ab, 0x08a6,
-    0x08a1, 0x089c, 0x0897, 0x0892, 0x088d, 0x0888, 0x0883, 0x087e, 0x087a, 0x0875, 0x0870, 0x086b,
-    0x0867, 0x0862, 0x085e, 0x0859, 0x0855, 0x0850, 0x084c, 0x0847, 0x0843, 0x083e, 0x083a, 0x0836,
-    0x0831, 0x082d, 0x0829, 0x0824, 0x0820, 0x081c, 0x0818, 0x0814, 0x0810, 0x080c, 0x0808, 0x0804,
-];
-
-#[inline(always)]
-fn gte_input_commit_gap() {
-    #[cfg(target_arch = "mips")]
-    // SAFETY: two `.word 0` NOPs (`sll $0, $0, 0`); they write no register
-    // or memory and exist only to space GTE input writes from the next op.
-    unsafe {
-        asm!(
-            ".word 0",
-            ".word 0",
-            options(nostack, nomem, preserves_flags),
-        );
+/// floor(sqrt(n)) by bisection, for building tables at compile time.
+const fn isqrt_u32(n: u32) -> u32 {
+    let (mut lo, mut hi) = (0u32, 1u32 << 16);
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if mid * mid <= n {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
     }
+    lo
 }
 
-/// Normalise a Q12 `i32` vector through the classic GTE reciprocal-square-root
-/// schedule.
-///
-/// Inputs are truncated to signed integer components before squaring, matching
-/// the historical PS1 helper used by Quake-era engines. The output is a Q12
-/// unit vector plus the integer X/Y and XYZ squared lengths. This clobbers the
-/// GTE IR, MAC and leading-count data registers, but no matrix or projection
-/// control state.
-#[inline]
-pub fn normalize_classic_q12_scheduled(input: Vec3I32) -> ClassicNormalizedVector {
-    let x = (input.x >> 12) as i16;
-    let y = (input.y >> 12) as i16;
-    let z = (input.z >> 12) as i16;
+/// Q12 reciprocal square roots of the sums 64..=255, scaled so the sum 64
+/// maps to 1.0: entry `m - 64` is floor(4096 * sqrt(64 / m)). That equals
+/// floor(32768 / sqrt(m)) = floor(sqrt(2^30 / m)), and since flooring the
+/// argument first doesn't change an integer square root's floor, it is
+/// computed exactly in integers.
+const RSQRT_Q12_FROM_64: [i16; 192] = {
+    let mut table = [0i16; 192];
+    let mut i = 0;
+    while i < 192 {
+        table[i] = isqrt_u32((1u32 << 30) / (64 + i as u32)) as i16;
+        i += 1;
+    }
+    table
+};
 
-    write_data!(9, x as i32 as u32);
-    write_data!(10, y as i32 as u32);
-    write_data!(11, z as i32 as u32);
-    gte_input_commit_gap();
-    // SAFETY: IR1 through IR3 were loaded above and given the silicon-safe
-    // input-commit distance before SQR consumes them.
-    unsafe { ops::square_unshifted() };
-    let x_squared = read_data!(25) as i32;
-    let y_squared = read_data!(26) as i32;
-    let z_squared = read_data!(27) as i32;
-    let xy_squared = x_squared.wrapping_add(y_squared);
-    let squared = xy_squared.wrapping_add(z_squared);
+/// Scale a Q12 direction to length 4096 with a 192-entry reciprocal square
+/// root table, the classic fixed-point way.
+///
+/// Each component is floored to whole units (`>> 12`) and kept as 16 bits.
+/// With `s` the sum of their squares (wrapping `i32`):
+///
+/// 1. `L` = leading zero bits of `s`, rounded down to even.
+/// 2. `s` shifted by `L - 24` lands in 64..=255; the table gives
+///    `r` = floor(4096 * sqrt(64 / that)).
+/// 3. Each component becomes `(c * r) >> ((31 - L) / 2)`.
+///
+/// Because `L` is even, the table entry equals 4096 * 2^(15 - L/2) / sqrt(s),
+/// and the shift in step 3 removes that power of two exactly, leaving
+/// 4096 * c / sqrt(s) up to the table's truncation. A zero or wrapped (negative)
+/// `s` gives a zero vector. Pure integer work: no GTE state is used.
+pub fn normalize_classic_q12_scheduled(input: Vec3I32) -> ClassicNormalizedVector {
+    let c = [
+        (input.x >> 12) as i16,
+        (input.y >> 12) as i16,
+        (input.z >> 12) as i16,
+    ];
+    let square = |v: i16| i32::from(v) * i32::from(v);
+    let xy_squared = square(c[0]).wrapping_add(square(c[1]));
+    let squared = xy_squared.wrapping_add(square(c[2]));
     if squared <= 0 {
         return ClassicNormalizedVector {
-            vector: Vec3I16::ZERO,
+            vector: Vec3I16::new(0, 0, 0),
             xy_squared,
             squared,
         };
     }
-
-    write_data!(30, squared as u32);
-    gte_input_commit_gap();
-    let leading = (read_data!(31) & !1) as i32;
-    let normalised_squared = if leading >= 24 {
-        squared.wrapping_shl((leading - 24) as u32)
+    let even_zeros = (squared as u32).leading_zeros() & !1;
+    let in_range = if even_zeros >= 24 {
+        squared << (even_zeros - 24)
     } else {
-        squared >> (24 - leading)
+        squared >> (24 - even_zeros)
     };
-    let table_index = (normalised_squared - 64) as usize;
-    let reciprocal = CLASSIC_NORMALIZE_TABLE[table_index];
-    let output_shift = (31 - leading) >> 1;
-
-    // Load IR0 first so the three vector writes and the explicit input gap
-    // give every operand ample time to commit before GPF reads them.
-    write_data!(8, reciprocal as i32 as u32);
-    write_data!(9, x as i32 as u32);
-    write_data!(10, y as i32 as u32);
-    write_data!(11, z as i32 as u32);
-    gte_input_commit_gap();
-    // SAFETY: IR0 through IR3 contain the reciprocal/vector product inputs.
-    unsafe { ops::scale_vector_unshifted() };
-    let nx = (read_data!(25) as i32 >> output_shift) as i16;
-    let ny = (read_data!(26) as i32 >> output_shift) as i16;
-    let nz = (read_data!(27) as i32 >> output_shift) as i16;
-
+    let r = i32::from(RSQRT_Q12_FROM_64[(in_range - 64) as usize]);
+    let shift = (31 - even_zeros) / 2;
+    let scale = |v: i16| ((i32::from(v) * r) >> shift) as i16;
     ClassicNormalizedVector {
-        vector: Vec3I16::new(nx, ny, nz),
+        vector: Vec3I16::new(scale(c[0]), scale(c[1]), scale(c[2])),
         xy_squared,
         squared,
     }
@@ -1788,5 +1765,66 @@ mod host_smoke {
         }
         assert_eq!(core::mem::size_of::<AabbClipPlane>(), 12);
         assert_eq!(core::mem::align_of::<AabbClipPlane>(), 4);
+    }
+
+    /// FNV-1a 64 of `normalize_classic_q12_scheduled` over 40,000 inputs
+    /// spread across every magnitude, including ones whose squares wrap.
+    /// Recorded from the implementation that came before the generated
+    /// table; the rewrite has to land on the same digest.
+    #[test]
+    fn classic_normalize_matches_previous_results_digest() {
+        let mut seed = 0x1234_5678u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let mut hash = 0xCBF2_9CE4_8422_2325u64;
+        let mut eat = |value: i32| {
+            for byte in value.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        };
+        for i in 0..40_000u32 {
+            // Shift each component right by 0..=31 bits so small, medium,
+            // large and wrapping magnitudes all show up.
+            let mut component = || (next() as i32) >> (next() % 32);
+            let input = Vec3I32::new(component(), component(), component());
+            let input = if i % 7 == 0 {
+                Vec3I32::new(input.x, 0, 0)
+            } else {
+                input
+            };
+            host::reset();
+            let out = normalize_classic_q12_scheduled(input);
+            eat(i32::from(out.vector.x));
+            eat(i32::from(out.vector.y));
+            eat(i32::from(out.vector.z));
+            eat(out.xy_squared);
+            eat(out.squared);
+        }
+        assert_eq!(hash, 0x803B_4A0D_7EA1_0CB5);
+    }
+
+    /// The table the previous implementation used, captured by running it.
+    const PREVIOUS_TABLE: [i16; 192] = [
+        4096, 4064, 4033, 4003, 3973, 3944, 3916, 3888, 3861, 3835, 3809, 3783, 3758, 3734, 3710,
+        3686, 3663, 3640, 3618, 3596, 3575, 3554, 3533, 3513, 3493, 3473, 3454, 3435, 3416, 3397,
+        3379, 3361, 3344, 3327, 3310, 3293, 3276, 3260, 3244, 3228, 3213, 3197, 3182, 3167, 3153,
+        3138, 3124, 3110, 3096, 3082, 3069, 3055, 3042, 3029, 3016, 3003, 2991, 2978, 2966, 2954,
+        2942, 2930, 2919, 2907, 2896, 2885, 2873, 2862, 2852, 2841, 2830, 2820, 2809, 2799, 2789,
+        2779, 2769, 2759, 2749, 2740, 2730, 2721, 2711, 2702, 2693, 2684, 2675, 2666, 2657, 2649,
+        2640, 2631, 2623, 2615, 2606, 2598, 2590, 2582, 2574, 2566, 2558, 2550, 2543, 2535, 2528,
+        2520, 2513, 2505, 2498, 2491, 2484, 2477, 2469, 2462, 2456, 2449, 2442, 2435, 2428, 2422,
+        2415, 2409, 2402, 2396, 2389, 2383, 2377, 2371, 2364, 2358, 2352, 2346, 2340, 2334, 2328,
+        2322, 2317, 2311, 2305, 2299, 2294, 2288, 2283, 2277, 2272, 2266, 2261, 2255, 2250, 2245,
+        2239, 2234, 2229, 2224, 2219, 2214, 2209, 2204, 2199, 2194, 2189, 2184, 2179, 2174, 2170,
+        2165, 2160, 2155, 2151, 2146, 2142, 2137, 2133, 2128, 2124, 2119, 2115, 2110, 2106, 2102,
+        2097, 2093, 2089, 2084, 2080, 2076, 2072, 2068, 2064, 2060, 2056, 2052,
+    ];
+
+    #[test]
+    fn generated_rsqrt_table_matches_the_previous_table() {
+        assert_eq!(RSQRT_Q12_FROM_64, PREVIOUS_TABLE);
     }
 }
