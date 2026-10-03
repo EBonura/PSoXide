@@ -194,9 +194,18 @@ pub mod raw {
     ///
     /// The value arms the next transfer on `ch`: the caller takes on
     /// [`super::start`]'s contract for whatever transfer later starts with it.
+    ///
+    /// With the `present-queue` feature, a store to the GPU channel first
+    /// runs an armed direct-access guard (`gpu::arm_direct_access_guard`),
+    /// so it never re-arms the channel under a queued walk. Every GPU DMA
+    /// start, [`super::start`] included, goes through here.
     #[doc(alias = "MADR")]
     #[inline(always)]
     pub unsafe fn set_address(ch: Channel, addr: u32) {
+        #[cfg(feature = "present-queue")]
+        if matches!(ch, Channel::Gpu) {
+            crate::gpu::run_direct_access_guard();
+        }
         // SAFETY: a store to this channel's address register; see the contract above.
         unsafe { crate::write_u32(ch.register_base() + reg::MADR, addr) }
     }
