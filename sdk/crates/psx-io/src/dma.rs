@@ -140,6 +140,7 @@ pub fn enable_channel(ch: Channel) {
 /// Convenience wrapper: sets up MADR/BCR/CHCR and blocks until done.
 /// Returns false if the channel wedged, or if `buf` is longer than the
 /// 16-bit BCR word count can express.
+#[doc(alias = "ClearOTagR")]
 pub fn clear_ordering_table(buf: &mut [u32]) -> bool {
     let Ok(words) = u16::try_from(buf.len()) else {
         // Truncating to 16 bits would clear only the tail of the table

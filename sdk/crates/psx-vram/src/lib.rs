@@ -1176,6 +1176,7 @@ pub fn upload_bytes_aligned(rect: VramRect, bytes: &[u8]) {
 /// textures commonly live in a `u32` staging arena already, so accepting the
 /// packed words directly avoids reconstructing every word from four byte
 /// loads while retaining the silicon-safe FIFO transfer path.
+#[doc(alias = "LoadImage")]
 pub fn upload_words(rect: VramRect, words: &[u32]) {
     let expected_words = rect.pixel_count() as usize / 2;
     assert!(
