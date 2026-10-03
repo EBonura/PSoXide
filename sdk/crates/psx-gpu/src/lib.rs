@@ -711,7 +711,7 @@ pub const MAX_NODE_WORDS: usize = 16;
 /// rasterises this one. A walk already running on the channel is waited
 /// out first (or aborted if it wedged).
 ///
-/// This is the unchecked layer under [`ot::OtFrame`], [`ot::FrameStorage`]
+/// This is the unchecked layer under [`frame::OtFrame`], [`frame::FrameStorage`]
 /// and [`submit_static`], which prove the contract below with lifetimes.
 ///
 /// # Safety
@@ -772,6 +772,9 @@ pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
 // Kept safe for existing callers until they move to the frame API; this
 // is exactly the hole the lint names.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[deprecated(
+    note = "takes an unchecked pointer; use `OrderingTable::frame`, `submit_static`, or the unsafe `submit_linked_list_raw_async`"
+)]
 pub fn submit_linked_list_async(head: *const u32) {
     // SAFETY: none; the caller carries the raw contract unchecked.
     unsafe { submit_linked_list_raw_async(head) }
@@ -834,6 +837,9 @@ pub unsafe fn submit_linked_list_raw(head: *const u32) {
 // Kept safe for existing callers until they move to the frame API; this
 // is exactly the hole the lint names.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[deprecated(
+    note = "takes an unchecked pointer; use `OrderingTable::frame`, `submit_static`, or the unsafe `submit_linked_list_raw`"
+)]
 pub fn submit_linked_list(head: *const u32) {
     // SAFETY: none; the caller carries the raw contract unchecked.
     unsafe { submit_linked_list_raw(head) }

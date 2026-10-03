@@ -53,7 +53,8 @@ unsafe impl CommandStreamDma for GpuDma {
     }
     #[inline]
     unsafe fn submit(&mut self, head: *const u32) {
-        crate::submit_linked_list_async(head);
+        // SAFETY: forwarded from this method's own contract.
+        unsafe { crate::submit_linked_list_raw_async(head) };
     }
     #[inline]
     fn wait(&mut self) {
