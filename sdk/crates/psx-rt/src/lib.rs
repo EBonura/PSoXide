@@ -111,10 +111,13 @@ pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
     tty::println("psx-rt: start");
 
     // Zero BSS.
-    let bss_start = &raw mut __bss_start as *mut u8;
-    let bss_end = &raw const __bss_end as *const u8;
+    let bss_start = &raw mut __bss_start;
+    let bss_end = &raw const __bss_end;
     let bss_len = bss_end as usize - bss_start as usize;
     if bss_len > 0 {
+        // SAFETY: [__bss_start, __bss_end) is this image's .bss as psoxide.ld lays it out: writable
+        // RAM the program owns. No Rust code has run yet, so nothing reads or references it, and
+        // zero is each .bss static's initial value.
         unsafe { core::ptr::write_bytes(bss_start, 0, bss_len) };
     }
     #[cfg(feature = "boot-trace")]
@@ -126,13 +129,21 @@ pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
 
     #[cfg(feature = "alloc")]
     {
-        let heap_start = &raw const __heap_start as *const u8 as usize;
-        let heap_end = &raw const __heap_end as *const u8 as usize;
+        let heap_start = &raw const __heap_start as usize;
+        let heap_end = &raw const __heap_end as usize;
+        // SAFETY: runs once, before `main` and any allocation. [__heap_start, __heap_end) is the
+        // range psoxide.ld leaves between .bss and the stack reserve, used by nothing else. ASSUMES
+        // __heap_start <= __heap_end, which the linker script does not assert: the RAM region ends
+        // 0x100 bytes above __heap_end, so a .bss ending in that window makes this subtraction
+        // wrap.
         unsafe { heap::init(heap_start, heap_end - heap_start) };
     }
 
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: main");
+    // SAFETY: the game crate defines `#[no_mangle] fn main()` and the link resolves this
+    // declaration to it. The signature is not checked across that boundary; a `main` with a
+    // different signature would be undefined behaviour.
     unsafe { main() };
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: main returned");
@@ -173,7 +184,7 @@ fn stack_pointer() -> usize {
 pub fn assert_stack_headroom() {
     /// Bytes of slack required between `$sp` and the top of `.bss`.
     const GUARD: usize = 0x800;
-    let data_top = &raw const __bss_end as *const u8 as usize;
+    let data_top = &raw const __bss_end as usize;
     let sp = stack_pointer();
     if sp <= data_top.saturating_add(GUARD) {
         tty::print("\nSTACK/DATA COLLISION: $sp=0x");
@@ -208,7 +219,7 @@ pub fn halt() -> ! {
 /// depends on both `psx-rt` and `std`.
 #[cfg(target_arch = "mips")]
 #[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     let info = (info as *const core::panic::PanicInfo<'_>).cast::<u8>();
     scratchpad::leave_for_panic(info, report_panic);
     report_panic(info)
