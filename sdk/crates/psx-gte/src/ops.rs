@@ -53,237 +53,334 @@ macro_rules! cofun {
     }};
 }
 
-/// RTPS -- perspective transform of V0. `sf=1, lm=0`.
+/// Emit the deprecated forwarder that keeps an op's old mnemonic name
+/// compiling after its rename. `$note` is the full deprecation note, spelled
+/// out at each use because `#[deprecated]` only takes a string literal.
+macro_rules! renamed_op {
+    ($old:ident => $new:ident, $note:literal) => {
+        #[doc = concat!("Renamed to [`", stringify!($new), "`].")]
+        ///
+        /// # Safety
+        #[doc = concat!("See [`", stringify!($new), "`].")]
+        #[deprecated(note = $note)]
+        #[inline(always)]
+        pub unsafe fn $old() {
+            // SAFETY: same contract as the renamed function.
+            unsafe { $new() }
+        }
+    };
+}
+
+/// Perspective-project V0 (`RTPS`, `sf=1, lm=0`).
 ///
 /// # Safety
 /// Assumes V0, RT, TR, OFX/OFY, H, DQA/DQB are loaded.
+#[doc(alias = "RTPS")]
+#[doc(alias = "RotTransPers")]
 #[inline(always)]
-pub unsafe fn rtps() {
+pub unsafe fn project_single() {
     cofun!(0x4A08_0001)
 }
 
-/// RTPT -- RTPS applied to V0, V1, V2 in sequence. `sf=1, lm=0`.
+/// Perspective-project V0, V1 and V2 in sequence (`RTPT`, `sf=1, lm=0`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "RTPT")]
+#[doc(alias = "RotTransPers3")]
 #[inline(always)]
-pub unsafe fn rtpt() {
+pub unsafe fn project_triple() {
     cofun!(0x4A08_0030)
 }
 
-/// NCLIP -- Z component of `(SXY1-SXY0) × (SXY2-SXY0)` into MAC0.
+/// Winding of the three SXY entries (`NCLIP`): the Z component of
+/// `(SXY1-SXY0) × (SXY2-SXY0)` into MAC0.
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "NCLIP")]
+#[doc(alias = "NormalClip")]
 #[inline(always)]
-pub unsafe fn nclip() {
+pub unsafe fn screen_winding() {
     cofun!(0x4A00_0006)
 }
 
-/// OP -- outer product of IR with the rotation matrix diagonal. `sf=1`.
+/// Outer product of IR with the rotation matrix diagonal (`OP`, `sf=1`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "OP")]
+#[doc(alias = "OuterProduct12")]
 #[inline(always)]
-pub unsafe fn op_sf1() {
+pub unsafe fn outer_product() {
     cofun!(0x4A08_000C)
 }
 
-/// AVSZ3 -- average SZ1..SZ3 weighted by ZSF3, store in OTZ + MAC0.
+/// Average SZ1..SZ3 weighted by ZSF3 into OTZ and MAC0 (`AVSZ3`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "AVSZ3")]
+#[doc(alias = "AverageZ3")]
 #[inline(always)]
-pub unsafe fn avsz3() {
+pub unsafe fn average_z3() {
     cofun!(0x4A00_002D)
 }
 
-/// AVSZ4 -- average SZ0..SZ3 weighted by ZSF4.
+/// Average SZ0..SZ3 weighted by ZSF4 into OTZ and MAC0 (`AVSZ4`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "AVSZ4")]
+#[doc(alias = "AverageZ4")]
 #[inline(always)]
-pub unsafe fn avsz4() {
+pub unsafe fn average_z4() {
     cofun!(0x4A00_002E)
 }
 
-/// SQR -- squares the current IR vector into MAC1/2/3, `sf=1`.
+/// Square the current IR vector into MAC1/2/3 (`SQR`, `sf=1`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "SQR")]
+#[doc(alias = "Square12")]
 #[inline(always)]
-pub unsafe fn sqr() {
+pub unsafe fn square() {
     cofun!(0x4A08_0028)
 }
 
-/// SQR -- squares the current IR vector into MAC1/2/3 without the
-/// fractional right shift (`sf=0`).
+/// Square the current IR vector into MAC1/2/3 without the fractional
+/// right shift (`SQR`, `sf=0`).
 ///
 /// This form is useful for integer vector lengths: the MAC registers retain
 /// the exact component squares while the CPU prepares a reciprocal scale.
 ///
 /// # Safety
 /// IR1, IR2 and IR3 must contain the vector to square.
+#[doc(alias = "SQR")]
+#[doc(alias = "Square0")]
 #[inline(always)]
-pub unsafe fn sqr_sf0() {
+pub unsafe fn square_unshifted() {
     cofun!(0x4A00_0028)
 }
 
-/// NCDS -- normal-colour depth-cue single vertex. `sf=1, lm=0`.
+/// Light, color and depth-cue one vertex normal (`NCDS`, `sf=1, lm=0`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "NCDS")]
+#[doc(alias = "NormalColorDpq")]
 #[inline(always)]
-pub unsafe fn ncds() {
+pub unsafe fn light_color_depth_single() {
     cofun!(0x4A08_0013)
 }
 
-/// NCCS -- normal-colour single vertex (no depth cue).
+/// Light and color one vertex normal, no depth cue (`NCCS`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "NCCS")]
+#[doc(alias = "NormalColorCol")]
 #[inline(always)]
-pub unsafe fn nccs() {
+pub unsafe fn light_color_single() {
     cofun!(0x4A08_001B)
 }
 
-/// NCS -- normal-colour single vertex (lighting + RGBC modulate).
+/// Light one vertex normal, without the RGBC modulate (`NCS`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "NCS")]
+#[doc(alias = "NormalColor")]
 #[inline(always)]
-pub unsafe fn ncs() {
+pub unsafe fn light_single() {
     cofun!(0x4A08_001E)
 }
 
-/// NCDT -- NCDS for V0, V1, V2.
+/// [`light_color_depth_single`] for V0, V1 and V2 (`NCDT`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "NCDT")]
+#[doc(alias = "NormalColorDpq3")]
 #[inline(always)]
-pub unsafe fn ncdt() {
+pub unsafe fn light_color_depth_triple() {
     cofun!(0x4A08_0016)
 }
 
-/// NCT -- NCS for V0, V1, V2.
+/// [`light_single`] for V0, V1 and V2 (`NCT`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "NCT")]
+#[doc(alias = "NormalColor3")]
 #[inline(always)]
-pub unsafe fn nct() {
+pub unsafe fn light_triple() {
     cofun!(0x4A08_0020)
 }
 
-/// NCCT -- NCCS for V0, V1, V2.
+/// [`light_color_single`] for V0, V1 and V2 (`NCCT`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "NCCT")]
+#[doc(alias = "NormalColorCol3")]
 #[inline(always)]
-pub unsafe fn ncct() {
+pub unsafe fn light_color_triple() {
     cofun!(0x4A08_003F)
 }
 
-/// DPCS -- depth-cue single (RGBC ↔ FC by IR0).
+/// Depth-cue RGBC toward the far color by IR0 (`DPCS`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "DPCS")]
+#[doc(alias = "DpqColor")]
 #[inline(always)]
-pub unsafe fn dpcs() {
+pub unsafe fn depth_cue_single() {
     cofun!(0x4A08_0010)
 }
 
-/// DPCT -- DPCS run three times against the RGB FIFO.
+/// [`depth_cue_single`] run three times against the RGB FIFO (`DPCT`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "DPCT")]
+#[doc(alias = "DpqColor3")]
 #[inline(always)]
-pub unsafe fn dpct() {
+pub unsafe fn depth_cue_triple() {
     cofun!(0x4A08_002A)
 }
 
-/// INTPL -- interpolate IR toward FC by IR0; FIFO push.
+/// Interpolate IR toward the far color by IR0, then push the color FIFO
+/// (`INTPL`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "INTPL")]
 #[inline(always)]
-pub unsafe fn intpl() {
+pub unsafe fn interpolate_far_color() {
     cofun!(0x4A08_0011)
 }
 
-/// DCPL -- depth-cue colour light: `RGBC*IR ↔ FC` by IR0.
+/// Depth-cue a lit color: `RGBC*IR` toward FC by IR0 (`DCPL`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "DCPL")]
+#[doc(alias = "DpqColorLight")]
 #[inline(always)]
-pub unsafe fn dcpl() {
+pub unsafe fn depth_cue_light() {
     cofun!(0x4A08_0029)
 }
 
-/// CC -- colour-colour blend.
+/// Light IR through the light color matrix and modulate by RGBC (`CC`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "CC")]
+#[doc(alias = "ColorCol")]
 #[inline(always)]
-pub unsafe fn cc() {
+pub unsafe fn color_color() {
     cofun!(0x4A08_001C)
 }
 
-/// CDP -- colour depth queue.
+/// [`color_color`] followed by a depth cue toward the far color (`CDP`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "CDP")]
+#[doc(alias = "ColorDpq")]
 #[inline(always)]
-pub unsafe fn cdp() {
+pub unsafe fn color_depth_cue() {
     cofun!(0x4A08_0014)
 }
 
-/// GPF -- `MAC = IR * IR0`, FIFO-push, `sf=1`.
+/// Scale the IR vector by IR0 into MAC, then push the color FIFO
+/// (`GPF`, `sf=1`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "GPF")]
 #[inline(always)]
-pub unsafe fn gpf() {
+pub unsafe fn scale_vector() {
     cofun!(0x4A08_003D)
 }
 
-/// GPF -- `MAC = IR * IR0`, FIFO-push, without the fractional right shift
-/// (`sf=0`).
+/// Scale the IR vector by IR0 into MAC, then push the color FIFO, without
+/// the fractional right shift (`GPF`, `sf=0`).
 ///
 /// # Safety
 /// IR0 through IR3 must contain the scalar and vector inputs.
+#[doc(alias = "GPF")]
 #[inline(always)]
-pub unsafe fn gpf_sf0() {
+pub unsafe fn scale_vector_unshifted() {
     cofun!(0x4A00_003D)
 }
 
-/// GPL -- `MAC = MAC + IR * IR0`, FIFO-push, `sf=1`.
+/// Add the IR vector scaled by IR0 to MAC, then push the color FIFO
+/// (`GPL`, `sf=1`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "GPL")]
 #[inline(always)]
-pub unsafe fn gpl() {
+pub unsafe fn scale_vector_accumulate() {
     cofun!(0x4A08_003E)
 }
 
-/// MVMVA(`mx=RT, vx=V0, cv=TR, sf=1, lm=0`) -- view-space transform
-/// without the perspective divide.
+/// Rotate V0 by RT and add TR, without the perspective divide
+/// (`MVMVA` with `mx=RT, vx=V0, cv=TR, sf=1, lm=0`).
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "MVMVA")]
+#[doc(alias = "RotTrans")]
 #[inline(always)]
-pub unsafe fn mvmva_rt_v0_tr_sf1() {
+pub unsafe fn rotate_translate_v0() {
     cofun!(0x4A08_0012)
 }
 
-/// MVMVA(`mx=RT, vx=V0, cv=FC, sf=1, lm=0`) -- the "far color" translation
-/// variant. PSX-SPX documents this `cv=FC` combination as hardware-bugged
+/// Rotate V0 by RT with the far color as the translation
+/// (`MVMVA` with `mx=RT, vx=V0, cv=FC, sf=1, lm=0`).
+///
+/// PSX-SPX documents this `cv=FC` combination as hardware-bugged
 /// (the first matrix-row product is discarded mid-accumulate), which makes
 /// it a sharp emulator-vs-silicon conformance check rather than a useful
 /// transform.
 ///
 /// # Safety
-/// See [`rtps`].
+/// See [`project_single`].
+#[doc(alias = "MVMVA")]
 #[inline(always)]
-pub unsafe fn mvmva_rt_v0_fc_sf1() {
+pub unsafe fn rotate_v0_far_color() {
     cofun!(0x4A08_4012)
 }
+
+// Deprecated forwarders for the mnemonic names these ops had before the
+// naming convention (sdk/docs/NAMING.md).
+renamed_op!(rtps => project_single, "renamed to `project_single`");
+renamed_op!(rtpt => project_triple, "renamed to `project_triple`");
+renamed_op!(nclip => screen_winding, "renamed to `screen_winding`");
+renamed_op!(op_sf1 => outer_product, "renamed to `outer_product`");
+renamed_op!(avsz3 => average_z3, "renamed to `average_z3`");
+renamed_op!(avsz4 => average_z4, "renamed to `average_z4`");
+renamed_op!(sqr => square, "renamed to `square`");
+renamed_op!(sqr_sf0 => square_unshifted, "renamed to `square_unshifted`");
+renamed_op!(ncds => light_color_depth_single, "renamed to `light_color_depth_single`");
+renamed_op!(nccs => light_color_single, "renamed to `light_color_single`");
+renamed_op!(ncs => light_single, "renamed to `light_single`");
+renamed_op!(ncdt => light_color_depth_triple, "renamed to `light_color_depth_triple`");
+renamed_op!(nct => light_triple, "renamed to `light_triple`");
+renamed_op!(ncct => light_color_triple, "renamed to `light_color_triple`");
+renamed_op!(dpcs => depth_cue_single, "renamed to `depth_cue_single`");
+renamed_op!(dpct => depth_cue_triple, "renamed to `depth_cue_triple`");
+renamed_op!(intpl => interpolate_far_color, "renamed to `interpolate_far_color`");
+renamed_op!(dcpl => depth_cue_light, "renamed to `depth_cue_light`");
+renamed_op!(cc => color_color, "renamed to `color_color`");
+renamed_op!(cdp => color_depth_cue, "renamed to `color_depth_cue`");
+renamed_op!(gpf => scale_vector, "renamed to `scale_vector`");
+renamed_op!(gpf_sf0 => scale_vector_unshifted, "renamed to `scale_vector_unshifted`");
+renamed_op!(gpl => scale_vector_accumulate, "renamed to `scale_vector_accumulate`");
+renamed_op!(mvmva_rt_v0_tr_sf1 => rotate_translate_v0, "renamed to `rotate_translate_v0`");
+renamed_op!(mvmva_rt_v0_fc_sf1 => rotate_v0_far_color, "renamed to `rotate_v0_far_color`");

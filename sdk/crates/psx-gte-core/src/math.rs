@@ -11,7 +11,7 @@
 //! Types here are **POD** (`Copy`, `no_std`, no heap). The GTE register
 //! wire format is always a packed `u32`, so the types mainly exist for
 //! static correctness -- the actual register I/O happens through the
-//! [`mtc2!`][crate::mtc2!] / [`ctc2!`][crate::ctc2!] macros.
+//! `write_data!` / `write_control!` macros in `psx-gte`.
 
 /// 3-component vector of `i16` in 1.3.12 fixed point.
 /// Matches the GTE's V0/V1/V2 input slots and the IR accumulators.

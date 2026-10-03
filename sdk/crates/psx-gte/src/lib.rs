@@ -8,15 +8,16 @@
 //!
 //! This crate exposes two layers:
 //!
-//! - **Low-level register macros**: [`mtc2!`], [`mfc2!`], [`ctc2!`],
-//!   [`cfc2!`]. Each takes a literal register index (0..31) so the
-//!   assembler emits the correct immediate field. Use these when you
-//!   need direct access for performance-sensitive paths.
+//! - **Low-level register macros**: [`write_data!`], [`read_data!`],
+//!   [`write_control!`], [`read_control!`]. Each takes a literal
+//!   register index (0..31) so the assembler emits the correct
+//!   immediate field. Use these when you need direct access for
+//!   performance-sensitive paths.
 //!
 //! - **High-level operation wrappers**: zero-argument inline functions
 //!   for the common GTE commands with their typical options baked in
-//!   (e.g. [`ops::rtps`] uses `sf=1, lm=0`). On MIPS each compiles to
-//!   a single 4-byte `.word`. On host they dispatch to a per-thread
+//!   (e.g. [`ops::project_single`] uses `sf=1, lm=0`). On MIPS each
+//!   compiles to a single 4-byte `.word`. On host they dispatch to a per-thread
 //!   software GTE living in [`host`].
 //!
 //! All function-op wrappers are `unsafe fn` -- they assume the caller
@@ -35,15 +36,15 @@
 //! # Example
 //!
 //! ```ignore
-//! use psx_gte::{ctc2, mtc2, mfc2, ops::rtps};
+//! use psx_gte::{ops::project_single, read_data, write_control, write_data};
 //!
 //! unsafe {
-//!     ctc2!(0, 0x0000_1000); // RT[0][0]=0x1000, RT[0][1]=0
+//!     write_control!(0, 0x0000_1000); // RT[0][0]=0x1000, RT[0][1]=0
 //!     // … fill in the rest of the rotation matrix and TR …
-//!     mtc2!(0, (10 & 0xFFFF) | (20 << 16));
-//!     mtc2!(1, 30);
-//!     rtps();
-//!     let sxy2: u32 = mfc2!(14);
+//!     write_data!(0, (10 & 0xFFFF) | (20 << 16));
+//!     write_data!(1, 30);
+//!     project_single();
+//!     let sxy2: u32 = read_data!(14);
 //! }
 //! ```
 

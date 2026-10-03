@@ -2,7 +2,7 @@
 //!
 //! Lives next to the type definitions because the inherent `impl`s
 //! belong in the same crate as the type. Higher-level GTE register
-//! access (`mtc2!` / `ctc2!` macros) lives in `psx-gte`, which
+//! access (`write_data!` / `write_control!` macros) lives in `psx-gte`, which
 //! re-exports this module so callers can keep importing it from there.
 //!
 //! The PS1 has no hardware sin/cos -- rotations use the shared
