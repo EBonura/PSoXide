@@ -172,7 +172,7 @@ pub fn texture_stats_from_bytes(bytes: &[u8]) -> Result<TextureStats, TextureImp
         height: texture.height(),
         depth,
         clut_entries: texture.clut_entries(),
-        index_zero_transparent: texture.index_zero_transparent(),
+        index_zero_transparent: texture.is_index_zero_transparent(),
     })
 }
 
@@ -694,7 +694,7 @@ mod tests {
         let stats = texture_stats_from_bytes(&bytes).expect("rewritten texture parses");
         assert!(stats.index_zero_transparent);
         let texture = psx_asset::Texture::from_bytes(&bytes).expect("texture parses");
-        assert!(texture.index_zero_transparent());
+        assert!(texture.is_index_zero_transparent());
         assert_eq!(&texture.clut_bytes()[0..2], &[0, 0]);
 
         let pixel_start = AssetHeader::SIZE + TextureHeader::SIZE;

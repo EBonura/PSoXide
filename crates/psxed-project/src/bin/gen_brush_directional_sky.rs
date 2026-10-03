@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(texture.depth(), Depth::Bit4);
         assert_eq!(texture.clut_entries(), 96);
         assert_eq!(texture.clut_bytes().len(), 96 * 2);
-        assert!(!texture.index_zero_transparent());
+        assert!(!texture.is_index_zero_transparent());
         for face in 1..FACE_COUNT {
             assert_eq!(
                 &texture.clut_bytes()[..FACE_PALETTE_COLORS * 2],
