@@ -5,7 +5,6 @@
 //! with a real allocator (`linked_list_allocator`, `talc`, …) when the
 //! engine needs deallocation.
 
-
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 
