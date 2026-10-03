@@ -660,16 +660,16 @@ impl TriTexturedGouraud {
     /// carries `ot_slot` for a later tagged-stream OT linking pass.
     ///
     /// This is the windowed counterpart to
-    /// [`ClassicTriTexturedGouraud::with_staged_slot_prepacked_unchecked`].
+    /// [`ClassicTriTexturedGouraud::with_staged_slot_prepacked_colors`].
     /// It is intended for classic affine renderers whose tiled materials can
     /// interleave in the ordering table, so every polygon restores its own
     /// GP0(E2) state instead of relying on a global draw-mode side effect.
     ///
-    /// # Safety
-    /// Every color must have its high byte clear. `clut_high_word` and
-    /// `tpage_high_word` must contain only their intended high halfwords, and
-    /// `texture_window_word` must be a valid GP0(E2) command.
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+    /// Every color word must have its high byte clear, and `clut_high_word`
+    /// and `tpage_high_word` must hold only their high halfwords; debug builds
+    /// assert both. A word that breaks this changes what the GPU draws, not
+    /// memory, so the constructor is safe.
+    pub const fn with_staged_slot_prepacked_colors(
         verts: [(i16, i16); 3],
         uv_words: [u16; 3],
         colors: [u32; 3],
@@ -678,6 +678,8 @@ impl TriTexturedGouraud {
         texture_window_word: u32,
         ot_slot: u16,
     ) -> Self {
+        debug_assert!((colors[0] | colors[1] | colors[2]) >> 24 == 0);
+        debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             tex_window: texture_window_word,
@@ -691,6 +693,34 @@ impl TriTexturedGouraud {
             v2: pack_vertex(verts[2].0, verts[2].1),
             uv2: uv_words[2] as u32,
         }
+    }
+
+    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
+    ///
+    /// # Safety
+    ///
+    /// Nothing beyond that function's preconditions; it stays `unsafe` so
+    /// existing `unsafe` blocks keep compiling without a warning.
+    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
+    #[inline(always)]
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [u32; 3],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        texture_window_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_colors(
+            verts,
+            uv_words,
+            colors,
+            clut_high_word,
+            tpage_high_word,
+            texture_window_word,
+            ot_slot,
+        )
     }
 
     /// Zeroed packet for static prebuilt-pool initialisation. Real
@@ -828,10 +858,11 @@ impl ClassicTriTexturedGouraud {
 
     /// Build a staged packet without masking the supplied packet RGB words.
     ///
-    /// # Safety
-    /// Every color must have its high byte clear. `clut_high_word` and
-    /// `tpage_high_word` must contain only their intended high halfwords.
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+    /// Every color word must have its high byte clear, and `clut_high_word`
+    /// and `tpage_high_word` must hold only their high halfwords; debug builds
+    /// assert both. A word that breaks this changes what the GPU draws, not
+    /// memory, so the constructor is safe.
+    pub const fn with_staged_slot_prepacked_colors(
         verts: [(i16, i16); 3],
         uv_words: [u16; 3],
         colors: [u32; 3],
@@ -839,6 +870,8 @@ impl ClassicTriTexturedGouraud {
         tpage_high_word: u32,
         ot_slot: u16,
     ) -> Self {
+        debug_assert!((colors[0] | colors[1] | colors[2]) >> 24 == 0);
+        debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             color0_cmd: 0x3400_0000 | colors[0],
@@ -851,6 +884,32 @@ impl ClassicTriTexturedGouraud {
             v2: pack_vertex(verts[2].0, verts[2].1),
             uv2: uv_words[2] as u32,
         }
+    }
+
+    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
+    ///
+    /// # Safety
+    ///
+    /// Nothing beyond that function's preconditions; it stays `unsafe` so
+    /// existing `unsafe` blocks keep compiling without a warning.
+    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
+    #[inline(always)]
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [u32; 3],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_colors(
+            verts,
+            uv_words,
+            colors,
+            clut_high_word,
+            tpage_high_word,
+            ot_slot,
+        )
     }
 }
 
@@ -940,10 +999,11 @@ impl ClassicQuadTexturedGouraud {
 
     /// Build a staged packet without masking the supplied packet RGB words.
     ///
-    /// # Safety
-    /// Every color must have its high byte clear. `clut_high_word` and
-    /// `tpage_high_word` must contain only their intended high halfwords.
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+    /// Every color word must have its high byte clear, and `clut_high_word`
+    /// and `tpage_high_word` must hold only their high halfwords; debug builds
+    /// assert both. A word that breaks this changes what the GPU draws, not
+    /// memory, so the constructor is safe.
+    pub const fn with_staged_slot_prepacked_colors(
         verts: [(i16, i16); 4],
         uv_words: [u16; 4],
         colors: [u32; 4],
@@ -951,6 +1011,8 @@ impl ClassicQuadTexturedGouraud {
         tpage_high_word: u32,
         ot_slot: u16,
     ) -> Self {
+        debug_assert!((colors[0] | colors[1] | colors[2] | colors[3]) >> 24 == 0);
+        debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             color0_cmd: 0x3c00_0000 | colors[0],
@@ -966,6 +1028,32 @@ impl ClassicQuadTexturedGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
+    }
+
+    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
+    ///
+    /// # Safety
+    ///
+    /// Nothing beyond that function's preconditions; it stays `unsafe` so
+    /// existing `unsafe` blocks keep compiling without a warning.
+    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
+    #[inline(always)]
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [u32; 4],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_colors(
+            verts,
+            uv_words,
+            colors,
+            clut_high_word,
+            tpage_high_word,
+            ot_slot,
+        )
     }
 }
 
@@ -1058,11 +1146,11 @@ impl QuadTexturedGouraud {
     /// Build a self-contained texture-window packet whose tag temporarily
     /// carries `ot_slot` for a later tagged-stream OT linking pass.
     ///
-    /// # Safety
-    /// Every color must have its high byte clear. `clut_high_word` and
-    /// `tpage_high_word` must contain only their intended high halfwords, and
-    /// `texture_window_word` must be a valid GP0(E2) command.
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+    /// Every color word must have its high byte clear, and `clut_high_word`
+    /// and `tpage_high_word` must hold only their high halfwords; debug builds
+    /// assert both. A word that breaks this changes what the GPU draws, not
+    /// memory, so the constructor is safe.
+    pub const fn with_staged_slot_prepacked_colors(
         verts: [(i16, i16); 4],
         uv_words: [u16; 4],
         colors: [u32; 4],
@@ -1071,6 +1159,8 @@ impl QuadTexturedGouraud {
         texture_window_word: u32,
         ot_slot: u16,
     ) -> Self {
+        debug_assert!((colors[0] | colors[1] | colors[2] | colors[3]) >> 24 == 0);
+        debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             tex_window: texture_window_word,
@@ -1087,6 +1177,34 @@ impl QuadTexturedGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
+    }
+
+    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
+    ///
+    /// # Safety
+    ///
+    /// Nothing beyond that function's preconditions; it stays `unsafe` so
+    /// existing `unsafe` blocks keep compiling without a warning.
+    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
+    #[inline(always)]
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [u32; 4],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        texture_window_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_colors(
+            verts,
+            uv_words,
+            colors,
+            clut_high_word,
+            tpage_high_word,
+            texture_window_word,
+            ot_slot,
+        )
     }
 
     /// Zeroed packet for static prebuilt-pool initialisation. Real
@@ -1550,18 +1668,14 @@ mod tests {
             0x0105_0000,
             77,
         );
-        // SAFETY: every color has a clear high byte and the clut / tpage words hold only their high
-        // halfwords, as the unchecked constructor requires.
-        let unchecked_tri = unsafe {
-            ClassicTriTexturedGouraud::with_staged_slot_prepacked_unchecked(
-                tri_verts,
-                tri_uvs,
-                tri_colors,
-                0x1234_0000,
-                0x0105_0000,
-                77,
-            )
-        };
+        let unchecked_tri = ClassicTriTexturedGouraud::with_staged_slot_prepacked_colors(
+            tri_verts,
+            tri_uvs,
+            tri_colors,
+            0x1234_0000,
+            0x0105_0000,
+            77,
+        );
         // SAFETY: ClassicTriTexturedGouraud is `repr(C, align(4))` with only u32 fields, so the
         // slice covers exactly the initialised local, which outlives it.
         let checked_tri_words = unsafe {
@@ -1591,18 +1705,14 @@ mod tests {
             0x0105_0000,
             88,
         );
-        // SAFETY: every color has a clear high byte and the clut / tpage words hold only their high
-        // halfwords, as the unchecked constructor requires.
-        let unchecked_quad = unsafe {
-            ClassicQuadTexturedGouraud::with_staged_slot_prepacked_unchecked(
-                quad_verts,
-                quad_uvs,
-                quad_colors,
-                0x1234_0000,
-                0x0105_0000,
-                88,
-            )
-        };
+        let unchecked_quad = ClassicQuadTexturedGouraud::with_staged_slot_prepacked_colors(
+            quad_verts,
+            quad_uvs,
+            quad_colors,
+            0x1234_0000,
+            0x0105_0000,
+            88,
+        );
         // SAFETY: ClassicQuadTexturedGouraud is `repr(C, align(4))` with only u32 fields, so the
         // slice covers exactly the initialised local, which outlives it.
         let checked_quad_words = unsafe {
