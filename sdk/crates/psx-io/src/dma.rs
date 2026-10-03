@@ -141,20 +141,21 @@ pub unsafe fn start(ch: Channel, transfer: Transfer) {
         raw::set_madr(ch, transfer.madr);
         raw::set_bcr(ch, transfer.bcr);
     }
-    publish_barrier();
+    compiler_barrier();
     // SAFETY: as above.
     unsafe { raw::set_chcr(ch, transfer.chcr) };
 }
 
-/// Compiler-only barrier: ordinary RAM stores before it are emitted before
-/// any MMIO store after it.
+/// Compiler-only barrier: ordinary RAM accesses are not moved across it in
+/// either direction, so stores before it land before an MMIO store after it
+/// and accesses after it follow an MMIO read before it.
 ///
 /// The pinned MIPS-I backend lowers even a single-thread compiler fence to
 /// `SYNC`, which the R3000 lacks, so the target uses an empty `asm!` with its
 /// default memory clobber. Do not add `nomem` or `readonly`: both would drop
 /// the guarantee.
 #[inline(always)]
-fn publish_barrier() {
+fn compiler_barrier() {
     #[cfg(target_arch = "mips")]
     // SAFETY: an empty asm block; it only constrains compiler ordering.
     unsafe {
@@ -303,13 +304,9 @@ pub fn clear_ordering_table(buf: &mut [u32]) -> bool {
             },
         )
     };
-    let done = wait_done(Channel::Otc, DEFAULT_DMA_SPINS);
-    if !done {
-        // Leave the controller usable for the next caller rather than
-        // handing back a channel that will swallow its kick.
-        abort(Channel::Otc);
-    }
-    done
+    // A wedge is aborted, which leaves the controller usable for the next
+    // caller rather than handing back a channel that will swallow its kick.
+    wait_or_abort(Channel::Otc, DEFAULT_DMA_SPINS)
 }
 
 /// Spin budget for one DMA completion wait. Comfortably longer than the
@@ -337,6 +334,20 @@ pub fn wait_done(ch: Channel, spins: u32) -> bool {
         waited += 1;
     }
     true
+}
+
+/// End a transfer started with [`start`]: [`wait_done`], [`abort`] the
+/// channel if it wedged, then a compiler barrier so the caller's next RAM
+/// access to the buffer is not moved before the completion read (the
+/// barrier emits no instruction). After it returns the channel no longer
+/// touches the buffer either way; `false` means the data did not all land.
+pub fn wait_or_abort(ch: Channel, spins: u32) -> bool {
+    let done = wait_done(ch, spins);
+    if !done {
+        abort(ch);
+    }
+    compiler_barrier();
+    done
 }
 
 #[cfg(test)]
