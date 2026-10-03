@@ -1259,7 +1259,7 @@ fn compile_model(
     let (topology_surfaces, render_surfaces) = compile_model_surfaces(brushes);
     let (mut bsp, portals, leak_diagnostic) =
         compile_model_topology(&topology_surfaces, brushes, occupant_points, true);
-    // qbsp parity: every drawable face is capped to SURFACE_EXTENT_UNITS,
+    // Every drawable face is capped to SURFACE_EXTENT_UNITS,
     // lights or not. Build exact leaves from the unsplit CSG surfaces, then
     // keep the PS1-sized render surfaces as single-owner records referenced
     // by leaf marks; partition fragments are visibility construction data,
