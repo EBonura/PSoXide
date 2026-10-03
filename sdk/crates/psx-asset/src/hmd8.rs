@@ -202,6 +202,107 @@ pub struct GteVertexWords {
     pub z: u32,
 }
 
+impl GteVertexWords {
+    /// The vertex as a bone-local position.
+    #[inline(always)]
+    pub const fn position(self) -> Vec3I16 {
+        Vec3I16::new(self.xy as i16, (self.xy >> 16) as i16, self.z as i16)
+    }
+
+    #[inline(always)]
+    const fn from_soa(xy: u32, z: i16) -> Self {
+        GteVertexWords {
+            xy,
+            z: z as i32 as u32,
+        }
+    }
+}
+
+/// A model's vertex stream as GTE register words, bounds-checked once.
+///
+/// [`Model::vertex_words`] builds it from the struct-of-arrays stream current
+/// cooks emit: a word-aligned run of packed XY words and a run of Z halfwords,
+/// one entry per vertex. Both are ordinary slices of the same length, so a
+/// loop over [`Self::triples`] or [`Self::iter`] reads every vertex with
+/// native aligned loads and no per-index check, and a range taken with
+/// [`Self::slice`] is checked once rather than once per vertex.
+#[derive(Clone, Copy)]
+pub struct VertexWords<'a> {
+    xy: &'a [u32],
+    z: &'a [i16],
+}
+
+impl<'a> VertexWords<'a> {
+    /// No vertices.
+    pub const EMPTY: VertexWords<'static> = VertexWords { xy: &[], z: &[] };
+
+    /// Number of vertices in the view.
+    #[inline(always)]
+    pub const fn len(&self) -> usize {
+        self.xy.len()
+    }
+
+    /// True when the view holds no vertices.
+    #[inline(always)]
+    pub const fn is_empty(&self) -> bool {
+        self.xy.is_empty()
+    }
+
+    /// Vertex `index`, or `None` past the end of the view.
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<GteVertexWords> {
+        Some(GteVertexWords::from_soa(
+            *self.xy.get(index)?,
+            *self.z.get(index)?,
+        ))
+    }
+
+    /// The vertices `range` covers, or `None` when it runs past the view.
+    #[inline]
+    pub fn slice(&self, range: core::ops::Range<usize>) -> Option<VertexWords<'a>> {
+        Some(VertexWords {
+            xy: self.xy.get(range.clone())?,
+            z: self.z.get(range)?,
+        })
+    }
+
+    /// Every vertex in order.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = GteVertexWords> + 'a {
+        self.xy
+            .iter()
+            .zip(self.z)
+            .map(|(&xy, &z)| GteVertexWords::from_soa(xy, z))
+    }
+
+    /// The vertices in consecutive groups of three, one RTPT batch each,
+    /// and the view of the zero to two vertices left over.
+    #[inline]
+    pub fn triples(
+        &self,
+    ) -> (
+        impl Iterator<Item = [GteVertexWords; 3]> + 'a,
+        VertexWords<'a>,
+    ) {
+        let (xy, xy_rest) = self.xy.as_chunks::<3>();
+        let (z, z_rest) = self.z.as_chunks::<3>();
+        let groups = xy.iter().zip(z).map(|(xy, z)| {
+            [
+                GteVertexWords::from_soa(xy[0], z[0]),
+                GteVertexWords::from_soa(xy[1], z[1]),
+                GteVertexWords::from_soa(xy[2], z[2]),
+            ]
+        });
+        (
+            groups,
+            VertexWords {
+                xy: xy_rest,
+                z: z_rest,
+            },
+        )
+    }
+}
+
 /// One frame's bone palette, read lazily: a bone's affine is unpacked from the
 /// blob when asked for, not eagerly into a scratch array.
 #[derive(Clone, Copy)]
@@ -1111,6 +1212,59 @@ impl Model {
         }
         // SAFETY: `vert_in_blob` checked this vertex's record.
         unsafe { self.vertex_gte_words_unchecked(index) }
+    }
+
+    /// The whole vertex stream as a bounds-checked-once view; see
+    /// [`VertexWords`]. Hot loops that walk a bone range read it through
+    /// [`VertexWords::slice`] and [`VertexWords::triples`] instead of
+    /// calling [`Self::vertex_gte_words`] per index.
+    ///
+    /// Only the struct-of-arrays stream (`HMD_FLAG_VERTEX_SOA`, which every
+    /// current cook sets) has this shape. An older interleaved cook, and the
+    /// empty or a rejected model, return an empty view; read those through
+    /// the per-index accessors.
+    #[inline]
+    pub fn vertex_words(&self) -> VertexWords<'static> {
+        if !self.vertex_soa {
+            return VertexWords::EMPTY;
+        }
+        // The loaded count, from private offsets (the public count can be
+        // overwritten): `from_bytes` put the Z run right after `count` XY words.
+        let count = self.vertices_z_off.saturating_sub(self.vertices_off) / 4;
+        let base = self.data.as_ptr() as usize;
+        let in_blob = fits(self.data, self.vertices_off, count * 4)
+            && fits(self.data, self.vertices_z_off, count * 2);
+        let aligned = base
+            .wrapping_add(self.vertices_off)
+            .is_multiple_of(core::mem::align_of::<u32>())
+            && base
+                .wrapping_add(self.vertices_z_off)
+                .is_multiple_of(core::mem::align_of::<i16>());
+        // `from_bytes` proved both facts for every model with `vertex_soa`
+        // set; a change to its validation that stops proving them trips here.
+        debug_assert!(in_blob, "HMD8 SoA vertex stream outside the blob");
+        debug_assert!(aligned, "HMD8 SoA vertex stream misaligned");
+        if !(in_blob && aligned) {
+            return VertexWords::EMPTY;
+        }
+        let start = self.data.as_ptr();
+        // SAFETY: `in_blob` checked that `count` u32s at `vertices_off` and
+        // `count` i16s at `vertices_z_off` lie inside `data`, a `&'static`
+        // shared slice nothing can write through, and `aligned` checked both
+        // starts against the element alignment. Every bit pattern is a valid
+        // u32 and i16. Neither check can fail for a model `from_bytes`
+        // accepted with `vertex_soa`: it rejects a SoA blob whose
+        // `data + vertices_off` is not 4-aligned (the `& 3 == 0` term of
+        // `valid`), places `vertices_z_off` at `vertices_off + n_verts * 4`
+        // (so it is 4-aligned too), and requires `poses_off <= tri_off <=
+        // data.len()` with `poses_off = vertices_off + n_verts * 6`, which
+        // covers both runs.
+        unsafe {
+            VertexWords {
+                xy: core::slice::from_raw_parts(start.add(self.vertices_off).cast::<u32>(), count),
+                z: core::slice::from_raw_parts(start.add(self.vertices_z_off).cast::<i16>(), count),
+            }
+        }
     }
 
     /// [`Self::vertex_gte_words`] without the bounds check.

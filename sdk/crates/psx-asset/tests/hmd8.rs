@@ -329,6 +329,7 @@ fn real_chunks_hold_their_invariants() {
 
     let mut checked = 0;
     let mut with_tracks = 0;
+    let mut soa_chunks = 0;
     for entry in std::fs::read_dir(&dir).expect("fixture dir") {
         let path = entry.expect("dir entry").path();
         if path.extension().is_none_or(|e| e != "psxm") {
@@ -347,7 +348,8 @@ fn real_chunks_hold_their_invariants() {
             continue;
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let model = load(blob);
+        let soa = u16::from_le_bytes([blob[30], blob[31]]) & FLAG_VERTEX_SOA != 0;
+        let model = Model::from_bytes(leak_at(&blob, 0));
         assert!(model.bone_count() > 0, "{name} failed to load");
 
         let mut covered = 0;
@@ -364,6 +366,16 @@ fn real_chunks_hold_their_invariants() {
             covered <= model.vertex_count(),
             "{name} ranges overlap the stream"
         );
+
+        let words = model.vertex_words();
+        if soa {
+            soa_chunks += 1;
+            assert_eq!(words.len(), model.vertex_count(), "{name} vertex words");
+            for (v, w) in words.iter().enumerate() {
+                let c = model.vertex_gte_words(v);
+                assert_eq!((w.xy, w.z), (c.xy, c.z), "{name} vertex {v}");
+            }
+        }
 
         for clip in 0..model.clip_count() {
             let len = model.clip_len(clip);
@@ -397,6 +409,132 @@ fn real_chunks_hold_their_invariants() {
         }
         checked += 1;
     }
-    eprintln!("{checked} HMD8 chunks, {with_tracks} with HMA1 tracks");
+    eprintln!("{checked} HMD8 chunks, {with_tracks} with HMA1 tracks, {soa_chunks} SoA");
     assert!(checked > 0, "no .psxm chunks in {dir}");
+}
+
+/// `HMD_FLAG_VERTEX_SOA`: the stream every current cook emits.
+const FLAG_VERTEX_SOA: u16 = 1 << 7;
+
+/// The same model as [`build_blob`] with its vertices in struct-of-arrays
+/// form: every packed XY word, then every Z halfword. The header and clip
+/// table end on a word boundary, so no padding precedes the ranges.
+fn build_soa_blob() -> Vec<u8> {
+    let mut out = build_blob();
+    out[30..32].copy_from_slice(&FLAG_VERTEX_SOA.to_le_bytes());
+    let vertices_off = HEADER + N_CLIPS * 4 + N_RANGES * 8;
+    assert_eq!(vertices_off % 4, 0);
+    let mut stream = Vec::new();
+    for v in 0..N_VERTS {
+        let (x, y) = ((v * 10) as u16, (v * 10 + 1) as u16);
+        put_u32(&mut stream, u32::from(x) | (u32::from(y) << 16));
+    }
+    for v in 0..N_VERTS {
+        put_u16(&mut stream, (v * 10 + 2) as u16);
+    }
+    out[vertices_off..vertices_off + N_VERTS * 6].copy_from_slice(&stream);
+    out
+}
+
+/// Leak `blob` at an address `misalign` bytes past a four-byte boundary.
+fn leak_at(blob: &[u8], misalign: usize) -> &'static [u8] {
+    let buf: &'static mut [u8] = Box::leak(vec![0u8; blob.len() + 8].into_boxed_slice());
+    let start = buf.as_ptr().align_offset(4) + misalign;
+    buf[start..start + blob.len()].copy_from_slice(blob);
+    &buf[start..start + blob.len()]
+}
+
+#[test]
+fn soa_vertex_words_cover_exactly_the_loaded_stream() {
+    let model = Model::from_bytes(leak_at(&build_soa_blob(), 0));
+    assert_eq!(model.vertex_count(), N_VERTS);
+    let words = model.vertex_words();
+    assert_eq!(words.len(), model.vertex_count());
+    for v in 0..N_VERTS {
+        let (a, b) = (words.get(v).expect("in range"), model.vertex_gte_words(v));
+        assert_eq!((a.xy, a.z), (b.xy, b.z));
+        let (p, q) = (a.position(), model.vertex(v));
+        assert_eq!([p.x, p.y, p.z], [q.x, q.y, q.z]);
+        assert_eq!(
+            [p.x, p.y, p.z],
+            [(v * 10) as i16, (v * 10 + 1) as i16, (v * 10 + 2) as i16]
+        );
+    }
+    assert!(words.get(N_VERTS).is_none());
+
+    // Groups of three then the remainder visit every vertex once, in order.
+    let (groups, rest) = words.triples();
+    let mut seen: Vec<u32> = groups.flatten().map(|w| w.xy).collect();
+    assert_eq!(seen.len(), N_VERTS / 3 * 3);
+    assert_eq!(rest.len(), N_VERTS % 3);
+    seen.extend(rest.iter().map(|w| w.xy));
+    let all: Vec<u32> = words.iter().map(|w| w.xy).collect();
+    assert_eq!(seen, all);
+
+    // Every bone range slices cleanly; a range past the stream does not.
+    for i in 0..model.bone_range_count() {
+        let range = model.bone_range(i);
+        let part = words
+            .slice(range.first..range.first + range.count)
+            .expect("range in stream");
+        assert_eq!(part.len(), range.count);
+        assert_eq!(
+            part.get(0).map(|w| w.xy),
+            words.get(range.first).map(|w| w.xy)
+        );
+    }
+    assert!(words.slice(0..N_VERTS + 1).is_none());
+    assert!(words.slice(N_VERTS..N_VERTS).is_some_and(|w| w.is_empty()));
+}
+
+/// The view's length comes from the offsets `from_bytes` validated, not from
+/// the public count safe code can overwrite.
+#[test]
+fn soa_vertex_words_ignore_an_overwritten_count() {
+    let mut lying = Model::from_bytes(leak_at(&build_soa_blob(), 0));
+    #[allow(deprecated)] // overwrites the deprecated public count on purpose
+    {
+        lying.n_verts = 1 << 20;
+    }
+    assert_eq!(lying.vertex_words().len(), N_VERTS);
+}
+
+#[test]
+fn malformed_soa_blobs_load_with_no_vertex_words() {
+    let full = build_soa_blob();
+    let short = &full[..full.len() - 1];
+    let mut bad_range = full.clone();
+    let ranges_off = HEADER + N_CLIPS * 4;
+    bad_range[ranges_off..ranges_off + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+    for blob in [short, &bad_range[..]] {
+        let model = Model::from_bytes(leak_at(blob, 0));
+        assert_eq!(
+            model.vertex_count(),
+            0,
+            "damaged blob must load as the null model"
+        );
+        assert!(model.vertex_words().is_empty());
+    }
+    assert!(Model::EMPTY.vertex_words().is_empty());
+}
+
+/// A SoA blob whose vertex stream does not start on a word boundary is
+/// rejected at load, so the view never casts a misaligned address.
+#[test]
+fn unaligned_soa_blob_is_rejected_not_read() {
+    let blob = build_soa_blob();
+    for misalign in 1..4 {
+        let model = Model::from_bytes(leak_at(&blob, misalign));
+        assert_eq!(model.vertex_count(), 0, "misaligned by {misalign}");
+        assert!(model.vertex_words().is_empty(), "misaligned by {misalign}");
+    }
+}
+
+/// An interleaved (pre-SoA) cook still loads; it has no word view and reads
+/// through the per-index accessors.
+#[test]
+fn interleaved_blob_has_no_vertex_words() {
+    let model = load(build_blob());
+    assert_eq!(model.vertex_count(), N_VERTS);
+    assert!(model.vertex_words().is_empty());
 }
