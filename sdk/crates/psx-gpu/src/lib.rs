@@ -99,6 +99,49 @@ impl Resolution {
         width: 320,
         height: 256,
     };
+    /// 640×480, interlaced.
+    pub const R640X480: Self = Self {
+        width: 640,
+        height: 480,
+    };
+
+    /// True for the 480-line modes, which the GPU only shows interlaced.
+    const fn is_interlaced(self) -> bool {
+        self.height >= 480
+    }
+
+    /// Scanlines per field: the height, or half of it when interlaced.
+    /// GP1(07h) counts scanlines of one field, so a 480-line picture spans
+    /// 240 of them (psx-spx, GP1(07h)).
+    const fn field_lines(self) -> u32 {
+        if self.is_interlaced() {
+            self.height as u32 / 2
+        } else {
+            self.height as u32
+        }
+    }
+}
+
+/// The GP1(08h) display-mode word for `mode` and `res`.
+///
+/// psx-spx, GP1(08h): bit 2 selects 480 lines only "when Bit5=1", so a
+/// 480-line resolution sets the interlace bit as well.
+const fn display_mode_command(mode: VideoMode, res: Resolution) -> u32 {
+    let hres_field = match res.width {
+        256 => 0,
+        320 => 1,
+        512 => 2,
+        640 => 3,
+        _ => 1,
+    };
+    let interlaced = res.is_interlaced();
+    gp1::display_mode(
+        hres_field,
+        interlaced as u32,
+        matches!(mode, VideoMode::Pal),
+        false,
+        interlaced,
+    )
 }
 
 /// GPU clocks per displayed pixel at the standard PSX dot clock that
@@ -126,18 +169,7 @@ const fn v_display_window_start(mode: VideoMode) -> u32 {
 #[doc(alias = "ResetGraph")]
 pub fn init(mode: VideoMode, res: Resolution) {
     write_display_control(gp1::RESET);
-
-    let hres_field = match res.width {
-        256 => 0,
-        320 => 1,
-        512 => 2,
-        640 => 3,
-        _ => 1,
-    };
-    let vres_field = if res.height >= 480 { 1 } else { 0 };
-    let pal = matches!(mode, VideoMode::Pal);
-
-    write_display_control(gp1::display_mode(hres_field, vres_field, pal, false, false));
+    write_display_control(display_mode_command(mode, res));
 
     // Horizontal & vertical display windows. Values below match the
     // standard PSX output (NTSC 260h..C60h, PAL similar) -- tweaking
@@ -147,7 +179,7 @@ pub fn init(mode: VideoMode, res: Resolution) {
     write_display_control(gp1::h_display_range(h_start, h_end));
 
     let v_start = v_display_window_start(mode);
-    let v_end = v_start + res.height as u32;
+    let v_end = v_start + res.field_lines();
     write_display_control(gp1::v_display_range(v_start, v_end));
 
     write_display_control(gp1::dma_direction(2)); // CPU → GP0
@@ -167,7 +199,7 @@ pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
     write_display_control(gp1::h_display_range(h_start as u32, h_end));
 
     let v_start = (v_display_window_start(mode) as i32 + dy as i32).max(0);
-    let v_end = v_start as u32 + res.height as u32;
+    let v_end = v_start as u32 + res.field_lines();
     write_display_control(gp1::v_display_range(v_start as u32, v_end));
 }
 
@@ -378,7 +410,7 @@ pub fn set_screen_h_offset(offset_px: i16, res: Resolution) {
 /// `mode` and `res` must match the values handed to [`init`].
 pub fn set_screen_v_offset(offset_px: i16, mode: VideoMode, res: Resolution) {
     let start = (v_display_window_start(mode) as i32 + offset_px as i32).max(0) as u32;
-    let end = start + res.height as u32;
+    let end = start + res.field_lines();
     write_display_control(gp1::v_display_range(start, end));
 }
 
@@ -965,4 +997,35 @@ pub fn submit_static(_dma: &mut GpuDma, chain: &'static impl StaticChain) {
     // SAFETY: `StaticChain` guarantees a well-formed single-node list that
     // stays live and unmodified for 'static.
     unsafe { submit_linked_list_async_raw(chain.head()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INTERLACE: u32 = 1 << 5;
+    const LINES_480: u32 = 1 << 2;
+
+    #[test]
+    fn a_240_line_mode_is_progressive() {
+        let word = display_mode_command(VideoMode::Ntsc, Resolution::R320X240);
+        assert_eq!(word & (INTERLACE | LINES_480), 0);
+        assert_eq!(word & 3, 1, "320-pixel horizontal mode");
+        assert_eq!(Resolution::R320X240.field_lines(), 240);
+    }
+
+    #[test]
+    fn a_480_line_mode_sets_the_interlace_bit_it_needs() {
+        let word = display_mode_command(VideoMode::Ntsc, Resolution::R640X480);
+        assert_eq!(word & (INTERLACE | LINES_480), INTERLACE | LINES_480);
+        assert_eq!(word & 3, 3, "640-pixel horizontal mode");
+    }
+
+    #[test]
+    fn a_480_line_mode_spans_one_field_of_scanlines() {
+        // psx-spx GP1(07h): NTSC Y1/Y2 = 88h -/+ 240/2 in either line mode.
+        let start = v_display_window_start(VideoMode::Ntsc);
+        assert_eq!(start, 0x88 - 120);
+        assert_eq!(start + Resolution::R640X480.field_lines(), 0x88 + 120);
+    }
 }
