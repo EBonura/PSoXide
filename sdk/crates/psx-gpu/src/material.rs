@@ -177,7 +177,7 @@ impl BlendMode {
 ///
 /// `clut_word` is the packed CLUT handle used by indexed textures.
 /// `tpage_word` is the packed tpage word normally produced by
-/// `TexturePage::uv_tpage_word(0)`. The material rewrites the tpage blend
+/// `TexturePage::uv_word(0)`. The material rewrites the tpage blend
 /// bits from [`BlendMode`] so one base tpage can be reused across
 /// opaque and translucent variants.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
