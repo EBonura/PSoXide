@@ -344,14 +344,54 @@ pub fn read_data() -> u32 {
 /// as [`crate::bs::decode_frame`] returns). `mode` is [`DECODE_15BPP`] or
 /// [`DECODE_24BPP`], optionally with [`DECODE_STP`].
 ///
+/// [`decode`] is the safe form: it holds the borrow of `rle` until DMA0 is
+/// done with it.
+///
+/// # Panics
+/// If `words` is larger than `rle.len()`: DMA0 would read past the slice.
+///
 /// # Safety
-/// `rle` must stay alive and unmodified until [`decode_finish`] returns.
+/// DMA0 keeps reading `rle` after this returns. The caller must keep `rle`
+/// alive and unmodified until [`decode_finish`] returns, and must call it
+/// before the storage is reused or freed.
 pub unsafe fn decode_start(rle: &[u32], words: usize, mode: u32) {
-    // SAFETY: MDEC command write, then a DMA0 kick the caller keeps alive.
+    assert!(
+        words <= rle.len(),
+        "MDEC decode of {words} words from a shorter buffer"
+    );
+    // SAFETY: MMIO write to MDEC0, then a DMA0 kick over the first `words`
+    // words of `rle` (in bounds per the assert), which the caller keeps alive.
     unsafe {
         psx_io::write32(MDEC0, mode | (words as u32 & 0xFFFF));
         dma_in(rle.as_ptr(), words);
     }
+}
+
+/// Decode all of `rle` (a multiple of 32 words, as [`crate::bs::decode_frame`]
+/// returns) with DMA0 feeding the MDEC, the safe form of [`decode_start`].
+///
+/// `columns` runs while DMA0 feeds the MDEC and pulls the output, normally
+/// with [`read_column`] once per column. Returns its result and
+/// [`decode_finish`]'s: `false` there means DMA0 was still busy and has been
+/// aborted.
+pub fn decode<R>(rle: &[u32], mode: u32, columns: impl FnOnce() -> R) -> (R, bool) {
+    // Finishes the decode on every exit, an unwinding `columns` included.
+    struct Finish(bool);
+    impl Drop for Finish {
+        fn drop(&mut self) {
+            if !self.0 {
+                decode_finish();
+            }
+        }
+    }
+    // SAFETY: `rle` stays borrowed until this function returns, and every
+    // return path runs decode_finish first (directly, or via `Finish` when
+    // unwinding), which returns only once DMA0 is done or aborted.
+    unsafe { decode_start(rle, rle.len(), mode) };
+    let mut finish = Finish(false);
+    let out = columns();
+    finish.0 = true;
+    (out, decode_finish())
 }
 
 /// Pull the next `dst.len()` words (a multiple of 32) of decoded pixels
