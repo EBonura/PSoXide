@@ -25,6 +25,7 @@
 #[doc(alias = "BS")]
 pub mod bitstream;
 pub mod bs;
+pub mod idct;
 pub mod iso;
 #[cfg(target_arch = "mips")]
 pub mod mdec;
