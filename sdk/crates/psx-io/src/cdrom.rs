@@ -423,6 +423,8 @@ pub fn stop_and_settle(spin_limit: u32, max_polls: u32) -> bool {
         // emulator answers instantly and would burn the poll budget in
         // microseconds. Volatile MMIO reads cannot be optimized out.
         for _ in 0..20_000u32 {
+            // SAFETY: 0x1F80_1800 is the CD-ROM controller's index/status register, byte-wide MMIO
+            // on every PS1. Reading it has no side effects, so this is a pure delay.
             unsafe { core::ptr::read_volatile(0x1F80_1800 as *const u8) };
         }
         let quiet = match try_get_stat(spin_limit) {

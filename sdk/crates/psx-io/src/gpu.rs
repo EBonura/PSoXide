@@ -13,24 +13,33 @@ use psx_hw::gpu::{GpuStat, GP0, GP1, GPUREAD, GPUSTAT};
 /// is unambiguous.
 #[inline(always)]
 pub fn write_gp0(word: u32) {
+    // SAFETY: GP0 (0x1F80_1810) is the GPU's aligned 32-bit command/data port on every PS1. Any
+    // word is a legal write: the GPU parses it as a command or parameter, with no effect on
+    // CPU-visible memory.
     unsafe { crate::write32(GP0, word) }
 }
 
 /// Push a command to `GP1`.
 #[inline(always)]
 pub fn write_gp1(word: u32) {
+    // SAFETY: GP1 (0x1F80_1814) is the GPU's aligned 32-bit control port on every PS1; any word is
+    // a legal write and only changes GPU state.
     unsafe { crate::write32(GP1, word) }
 }
 
 /// Read the GPU status register.
 #[inline(always)]
 pub fn gpustat() -> GpuStat {
+    // SAFETY: GPUSTAT (0x1F80_1814 on read) is the GPU's aligned 32-bit status register; reading it
+    // has no side effects.
     GpuStat::from_bits_retain(unsafe { crate::read32(GPUSTAT) })
 }
 
 /// Read the VRAM-to-CPU / GP1(10h) return latch.
 #[inline(always)]
 pub fn gpuread() -> u32 {
+    // SAFETY: GPUREAD (0x1F80_1810 on read) is the GPU's aligned 32-bit response latch. A read may
+    // advance a VRAM-to-CPU transfer, which is its purpose, and touches no CPU memory.
     unsafe { crate::read32(GPUREAD) }
 }
 

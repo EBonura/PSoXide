@@ -36,12 +36,16 @@ pub mod source {
 /// Read `I_STAT`.
 #[inline(always)]
 pub fn stat() -> u32 {
+    // SAFETY: I_STAT (0x1F80_1070) is the interrupt controller's aligned 32-bit pending register on
+    // every PS1; reading it has no side effects.
     unsafe { crate::read32(I_STAT) }
 }
 
 /// Read `I_MASK`.
 #[inline(always)]
 pub fn mask() -> u32 {
+    // SAFETY: I_MASK (0x1F80_1074) is the interrupt controller's aligned 32-bit mask register on
+    // every PS1; reading it has no side effects.
     unsafe { crate::read32(I_MASK) }
 }
 
@@ -50,11 +54,15 @@ pub fn mask() -> u32 {
 /// preserved, any bit that was 0 is cleared.
 #[inline(always)]
 pub fn ack(bits: u32) {
+    // SAFETY: an aligned 32-bit write to I_STAT (0x1F80_1070). The hardware ANDs the value in, so
+    // it can only clear pending bits.
     unsafe { crate::write32(I_STAT, !bits) }
 }
 
 /// Set the mask register (who can interrupt the CPU).
 #[inline(always)]
 pub fn set_mask(bits: u32) {
+    // SAFETY: an aligned 32-bit write to I_MASK (0x1F80_1074). It only selects which sources raise
+    // the CPU interrupt line and touches no memory.
     unsafe { crate::write32(I_MASK, bits) }
 }
