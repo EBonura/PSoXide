@@ -16,7 +16,7 @@
 //!    sectors arrive as 2048-byte data. A polled pump drains every ready
 //!    sector (checksum, ordinal gap check) into a three-slot frame ring
 //!    and runs between every unit of work, including every wait.
-//! 2. `psx_fmv::bs::decode_frame` runs the bitstream decode on the CPU.
+//! 2. `psx_fmv::bitstream::decode_frame` runs the bitstream decode on the CPU.
 //! 3. The MDEC decodes at 15bpp (DMA0 in); each 16-pixel column comes back
 //!    over DMA1 and goes to the back buffer.
 //! 4. The overlay is drawn over the frame, then the display flips at a
@@ -36,7 +36,7 @@
 #![no_std]
 
 use core::ptr::addr_of_mut;
-use psx_fmv::{bs, iso, mdec, str::FrameAssembler};
+use psx_fmv::{bitstream, iso, mdec, stream::FrameAssembler};
 use psx_font::{
     fonts::{basic::BASIC, basic_8x16::BASIC_8X16_BITMAP},
     BitOrder, BitmapFont, FontAtlas,
@@ -360,14 +360,7 @@ fn target(y: u16) {
 }
 
 /// Live counters, drawn over the bottom of the video frame.
-fn draw_overlay(
-    font: &FontAtlas,
-    y: u16,
-    st: &Stream,
-    shown: u32,
-    vblanks: u32,
-    label: &str,
-) {
+fn draw_overlay(font: &FontAtlas, y: u16, st: &Stream, shown: u32, vblanks: u32, label: &str) {
     gpu::fill_rect(0, y + 172, WIDTH, 68, 0, 0, 0);
     target(y);
     let l1 = Text::new().s("FR ").n(shown, 4).s("  LATE ").n(st.late, 4);
@@ -627,12 +620,12 @@ pub fn run_with(options: Options) -> Outcome {
     let Some((lba, _size)) = find_movie() else {
         return fail("MOVIE.STR not found");
     };
-    // SAFETY: the reader is prepared and idle. Demute first: a muted drive
+    // SAFETY: the reader is prepared and idle. Unmute first: a muted drive
     // plays no XA, and the program that ran before may have left it muted
     // (the hardware-test CD battery does).
     let xa_ok = unsafe {
         let r = &mut *addr_of_mut!(READER);
-        r.demute() && r.prepare_mode(CD_MODE) && r.set_filter(XA_FILE, XA_CHANNEL)
+        r.unmute() && r.prepare_mode(CD_MODE) && r.set_filter(XA_FILE, XA_CHANNEL)
     };
     if !xa_ok {
         return fail("cd xa mode");
@@ -696,7 +689,7 @@ pub fn run_with(options: Options) -> Outcome {
         st.decoding = Some(slot);
         let frame = &slot_bytes(slot)[..(bytes as usize).min(SLOT_WORDS * 4)];
         let decoded =
-            bs::decode_frame(frame, rle16, COLUMNS as u32 * ROWS, ROWS, &mut || st.pump());
+            bitstream::decode_frame(frame, rle16, COLUMNS as u32 * ROWS, ROWS, &mut || st.pump());
         st.decoding = None; // the bitstream is fully consumed
         let words = match decoded {
             Ok(w) => w,
@@ -707,7 +700,7 @@ pub fn run_with(options: Options) -> Outcome {
         };
         clock(Some(PHASE_MDEC));
         // SAFETY: RLE stays untouched until decode_finish below.
-        unsafe { mdec::decode_start(rle, words, mdec::DECODE_15BPP) };
+        unsafe { mdec::decode_start(rle, words, psx_hw::mdec::DECODE_15BPP) };
         // SAFETY: COLUMN is only used here.
         let column = unsafe { &mut *addr_of_mut!(COLUMN) };
         let mut ok = true;
@@ -890,7 +883,8 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
     let rle16 =
         unsafe { core::slice::from_raw_parts_mut(rle.as_mut_ptr() as *mut u16, RLE_WORDS * 2) };
     let bytes = &slot_bytes(0)[..(frame.size as usize).min(SLOT_WORDS * 4)];
-    let Ok(words) = bs::decode_frame(bytes, rle16, COLUMNS as u32 * ROWS, ROWS, &mut || {}) else {
+    let Ok(words) = bitstream::decode_frame(bytes, rle16, COLUMNS as u32 * ROWS, ROWS, &mut || {})
+    else {
         return out;
     };
     out.read = true;
@@ -899,18 +893,18 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
 
     // CPU: feed while the input FIFO has room, drain whatever comes out.
     if mdec::reset() && mdec::load_tables_cpu() {
-        mdec::write_command(mdec::DECODE_15BPP | (words as u32 & 0xFFFF));
+        mdec::write_command(psx_hw::mdec::DECODE_15BPP | (words as u32 & 0xFFFF));
         let mut fed = 0usize;
         let mut idle = 0u32;
         while (fed < words || out.cpu_words < out.expected) && idle < CPU_STALL_SPINS {
             let status = mdec::status();
             let mut progress = false;
-            if fed < words && status & mdec::STATUS_IN_FULL == 0 {
+            if fed < words && status & psx_hw::mdec::STATUS_IN_FULL == 0 {
                 mdec::write_command(rle[fed]);
                 fed += 1;
                 progress = true;
             }
-            if status & mdec::STATUS_OUT_EMPTY == 0 {
+            if status & psx_hw::mdec::STATUS_OUT_EMPTY == 0 {
                 out.cpu_sum = out.cpu_sum.wrapping_add(mdec::read_data());
                 out.cpu_words += 1;
                 progress = true;
@@ -923,7 +917,7 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
     // DMA, the player's way.
     if dma_setup() {
         // SAFETY: RLE stays untouched until decode_finish.
-        unsafe { mdec::decode_start(rle, words, mdec::DECODE_15BPP) };
+        unsafe { mdec::decode_start(rle, words, psx_hw::mdec::DECODE_15BPP) };
         let column = unsafe { &mut *addr_of_mut!(COLUMN) };
         let mut ok = true;
         for _ in 0..COLUMNS {
