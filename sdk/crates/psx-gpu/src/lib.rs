@@ -36,8 +36,6 @@
 
 #![no_std]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
-#![deny(unsafe_op_in_unsafe_fn)]
-#![warn(missing_docs)]
 
 pub mod frame;
 pub mod framebuf;
@@ -47,8 +45,7 @@ pub mod ot;
 pub mod prim;
 
 use crate::material::{BlendMode, TextureMaterial};
-use psx_hw::gpu::pack_texcoord;
-use psx_hw::gpu::{gp0, gp1, pack_color, pack_vertex, pack_xy};
+use psx_hw::gpu::{gp0, gp1, pack_color, pack_texcoord, pack_vertex, pack_xy, DmaDirection};
 use psx_io::dma::{self, Channel};
 use psx_io::gpu::{wait_command_ready, write_command, write_display_control};
 use psx_io::periph::GpuDma;
@@ -182,7 +179,7 @@ pub fn init(mode: VideoMode, res: Resolution) {
     let v_end = v_start + res.field_lines();
     write_display_control(gp1::v_display_range(v_start, v_end));
 
-    write_display_control(gp1::dma_direction(2)); // CPU → GP0
+    write_display_control(gp1::dma_direction(DmaDirection::CpuToGp0 as u32));
     write_display_control(gp1::display_enable(true));
 }
 
@@ -801,13 +798,13 @@ pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
         // The walker stopped mid-packet, so the GPU is still waiting for
         // the rest of a command. Discard it or every later ready-wait
         // blocks on a GPU that can never become ready.
-        write_display_control(0x0100_0000);
+        write_display_control(gp1::RESET_CMD_BUFFER);
     }
 
     // Make sure the GPU's DMA direction is CPU→GP0 before we kick off the
     // walker. `gpu::init` sets this, but games occasionally re-route DMA for
     // VRAM readback and forget to reset it.
-    write_display_control(gp1::dma_direction(2));
+    write_display_control(gp1::dma_direction(DmaDirection::CpuToGp0 as u32));
     dma::enable_channel(Channel::Gpu);
     // SAFETY: the channel is idle (waited out or aborted above); the caller
     // keeps the chain live and unmodified until the walk is waited out.
@@ -866,27 +863,11 @@ pub fn submit_linked_list_wait() {
         // would wait on the walk that just wedged, and the paired-arena
         // fence reaches this from a scratchpad stack that stack-guard bounds
         // only through direct calls.
-        psx_io::gpu::write_display_control_unguarded(0x0100_0000);
+        psx_io::gpu::write_display_control_unguarded(gp1::RESET_CMD_BUFFER);
     }
-    // Prevent ordinary buffer-reuse stores from moving before the final
-    // completion read (or explicit channel abort).
-    dma_memory_barrier();
-}
-
-// The pinned MIPS-I backend incorrectly lowers even a single-thread compiler
-// fence to SYNC, which R3000 lacks. Empty asm with its default memory clobber
-// is a compiler-only barrier and emits no instruction. Do not add nomem or
-// readonly: both would remove the DMA publication/completion guarantee.
-#[inline(always)]
-fn dma_memory_barrier() {
-    #[cfg(target_arch = "mips")]
-    // SAFETY: an empty asm block runs no instruction; it only orders the
-    // compiler's memory accesses around it.
-    unsafe {
-        core::arch::asm!("", options(nostack, preserves_flags));
-    }
-    #[cfg(not(target_arch = "mips"))]
-    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    // Keep the caller's buffer-reuse stores after the completion read (or
+    // the abort).
+    dma::compiler_barrier();
 }
 
 /// Submit a linked-list chain starting at `head` to GPU GP0 via
