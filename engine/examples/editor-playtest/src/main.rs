@@ -629,6 +629,15 @@ struct Playtest {
     queued_head: *const u32,
     queued_overlay: *mut u32,
     queued_overlay_words: usize,
+    /// The present queue is held off: last frame's packets ahead of the
+    /// world pass would not fit beside a queued frame, so the paired-arena
+    /// fence would wait for its kick early in the frame. Zero (the
+    /// `init_zeroed` state) offers the queue.
+    present_queue_held_off: bool,
+    /// Frames in the current stay: in the queue, or held off and fitting.
+    present_queue_frames: u16,
+    /// Doublings of the re-entry wait after short stays in the queue.
+    present_queue_backoff: u8,
     /// Sim ticks since the last POI presentation step.
     poi_presentation_subtick: u8,
     /// Unique reward currently replacing the just-closed POI message panel.

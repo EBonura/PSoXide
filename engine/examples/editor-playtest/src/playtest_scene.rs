@@ -323,7 +323,86 @@ impl Playtest {
 /// (HUD, panels, damage numbers, fades).
 const PRESENT_OVERLAY_WORDS: usize = 1024;
 
+/// Whether a frame's successor, built while this frame waits in the present
+/// queue, would reach its paired-arena fence late: in or after the world
+/// pass, not in the character passes ahead of it.
+///
+/// `used_slots` is what this frame took from the arena of `capacity` slots;
+/// `queued` says whether it reserved its overlay words (a double-buffered
+/// frame did not, so they are added as a queued frame would take them).
+/// `world_words` is the world pass's packet words. The successor draws the
+/// world first when it fits in the slots this frame leaves free, with the
+/// same eighth to spare as `BspRuntime::fits_before_fence`; otherwise it
+/// draws everything else first, and the fence lands late only if that fits.
+fn queued_successor_fences_late(
+    capacity: usize,
+    used_slots: usize,
+    queued: bool,
+    world_words: usize,
+) -> bool {
+    let overlay_slots = PRESENT_OVERLAY_WORDS / PRIMITIVE_PACKET_SLOT_WORDS;
+    let used = if queued {
+        used_slots
+    } else {
+        used_slots + overlay_slots
+    };
+    let free = capacity.saturating_sub(used);
+    if world_words + world_words / 8 <= free * PRIMITIVE_PACKET_SLOT_WORDS {
+        return true;
+    }
+    let world_slots = world_words.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
+    used.saturating_sub(world_slots + overlay_slots) <= free
+}
+
+/// Frames in a row whose packets must fit beside a queued frame before the
+/// present queue is offered again. Leaving the queue drains it (most of a
+/// frame), so a scene at the edge must not flip between the two paths.
+const PRESENT_QUEUE_REENTRY_FRAMES: u16 = 30;
+/// A stay in the queue shorter than this counts as a false start and
+/// doubles the next re-entry wait, up to [`PRESENT_QUEUE_MAX_BACKOFF`]
+/// doublings.
+const PRESENT_QUEUE_SHORT_STAY_FRAMES: u16 = 60;
+const PRESENT_QUEUE_MAX_BACKOFF: u8 = 4;
+
 impl Playtest {
+    /// Decide whether the next frame goes through the present queue.
+    ///
+    /// A queued frame cannot start drawing until its VBlank kick, so the
+    /// next frame's paired-arena fence waits longer than it would in the
+    /// double-buffered path. That only pays when the fence lands late
+    /// (`fits`, see [`queued_successor_fences_late`]). With the player and
+    /// one enemy it does; with two melee enemies the fence lands in the
+    /// character passes, where the queue alone was 1.6% slower, so those
+    /// frames go double-buffered. The queue is left at once, and re-entered
+    /// after [`PRESENT_QUEUE_REENTRY_FRAMES`] fitting frames, twice as many
+    /// after each stay shorter than [`PRESENT_QUEUE_SHORT_STAY_FRAMES`].
+    fn choose_present_queue(&mut self, fits: bool) {
+        if !self.present_queue_held_off {
+            if fits {
+                self.present_queue_frames = self.present_queue_frames.saturating_add(1);
+            } else {
+                self.present_queue_backoff =
+                    if self.present_queue_frames < PRESENT_QUEUE_SHORT_STAY_FRAMES {
+                        (self.present_queue_backoff + 1).min(PRESENT_QUEUE_MAX_BACKOFF)
+                    } else {
+                        0
+                    };
+                self.present_queue_held_off = true;
+                self.present_queue_frames = 0;
+            }
+        } else if !fits {
+            self.present_queue_frames = 0;
+        } else {
+            self.present_queue_frames = self.present_queue_frames.saturating_add(1);
+            if self.present_queue_frames
+                >= PRESENT_QUEUE_REENTRY_FRAMES << self.present_queue_backoff
+            {
+                self.present_queue_held_off = false;
+                self.present_queue_frames = 0;
+            }
+        }
+    }
+
     /// Hand the state the last render prepared to `render_overlay`, which
     /// draws it once that frame is presented.
     fn commit_overlay_state(&mut self) {
@@ -336,7 +415,7 @@ impl Playtest {
 
 impl Scene for Playtest {
     fn render_submission(&self) -> RenderSubmission {
-        if cfg!(feature = "present-queue") {
+        if cfg!(feature = "present-queue") && !self.present_queue_held_off {
             RenderSubmission::PresentQueue
         } else {
             RenderSubmission::QueuedDoubleBuffered
@@ -2244,6 +2323,16 @@ impl Scene for Playtest {
                 }
             }
         }
+        let world_words = self
+            .bsp
+            .as_ref()
+            .map_or(0, |bsp| bsp.last_world_packet_words());
+        self.choose_present_queue(queued_successor_fences_late(
+            primitive_packets.capacity(),
+            primitive_packets.used_slots(),
+            present_hook.is_some(),
+            world_words,
+        ));
         // The next frame builds beside this one while its list is walked.
         primitive_packets.finish_paired_frame();
         // Submission is deliberately split from packet preparation. The app

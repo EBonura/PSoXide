@@ -1515,6 +1515,11 @@ impl BspRuntime {
         )
     }
 
+    /// Packet words the last world pass wrote.
+    pub(super) fn last_world_packet_words(&self) -> usize {
+        self.last_world_packet_words
+    }
+
     /// True when last frame's world, with an eighth to spare, would fit in
     /// the slots the in-flight frame leaves free, so drawing it now needs no
     /// fence.
