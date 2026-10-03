@@ -80,16 +80,16 @@
 #[macro_export]
 macro_rules! mfc2 {
     ($reg:literal) => {{
+        // Out-of-range indices would spill into other encoding fields.
+        const { assert!(($reg as u32) < 32, "GTE register index must be 0..=31") };
         let value: u32;
         #[cfg(target_arch = "mips")]
         // SAFETY: MFC2 copies one GTE data register into $t0. The asm
         // declares $t0 as its only output, touches no memory or stack
         // (`nomem`, `nostack`), and its trailing NOP covers the load-delay
         // slot so the compiler's read of $t0 sees the committed value.
-        // This relies on `$reg` being 0..=31 so the shifted index stays in
-        // the rd field (bits 15..11); nothing checks it, and any other value
-        // rewrites rt or the opcode itself. Every in-tree caller passes a
-        // literal in 0..=31.
+        // The const assert above keeps `$reg` in 0..=31, so the shifted
+        // index stays in the rd field (bits 15..11).
         unsafe {
             core::arch::asm!(
                 ".word {instr}",
@@ -111,16 +111,16 @@ macro_rules! mfc2 {
 #[macro_export]
 macro_rules! mtc2 {
     ($reg:literal, $value:expr) => {{
+        // Out-of-range indices would spill into other encoding fields.
+        const { assert!(($reg as u32) < 32, "GTE register index must be 0..=31") };
         let _value: u32 = $value;
         #[cfg(target_arch = "mips")]
         // SAFETY: MTC2 copies $t0 into one GTE data register. The asm only
         // reads $t0 (declared as its input), writes no CPU register, and
         // touches no memory or stack (`nomem`, `nostack`); GTE state is not
         // Rust-visible memory.
-        // This relies on `$reg` being 0..=31 so the shifted index stays in
-        // the rd field (bits 15..11); nothing checks it, and any other value
-        // rewrites rt or the opcode itself. Every in-tree caller passes a
-        // literal in 0..=31.
+        // The const assert above keeps `$reg` in 0..=31, so the shifted
+        // index stays in the rd field (bits 15..11).
         unsafe {
             core::arch::asm!(
                 ".word {instr}",
@@ -143,16 +143,16 @@ macro_rules! mtc2 {
 #[macro_export]
 macro_rules! cfc2 {
     ($reg:literal) => {{
+        // Out-of-range indices would spill into other encoding fields.
+        const { assert!(($reg as u32) < 32, "GTE register index must be 0..=31") };
         let value: u32;
         #[cfg(target_arch = "mips")]
         // SAFETY: CFC2 copies one GTE control register into $t0. The asm
         // declares $t0 as its only output, touches no memory or stack
         // (`nomem`, `nostack`), and its trailing NOP covers the load-delay
         // slot so the compiler's read of $t0 sees the committed value.
-        // This relies on `$reg` being 0..=31 so the shifted index stays in
-        // the rd field (bits 15..11); nothing checks it, and any other value
-        // rewrites rt or the opcode itself. Every in-tree caller passes a
-        // literal in 0..=31.
+        // The const assert above keeps `$reg` in 0..=31, so the shifted
+        // index stays in the rd field (bits 15..11).
         unsafe {
             core::arch::asm!(
                 ".word {instr}",
@@ -174,16 +174,16 @@ macro_rules! cfc2 {
 #[macro_export]
 macro_rules! ctc2 {
     ($reg:literal, $value:expr) => {{
+        // Out-of-range indices would spill into other encoding fields.
+        const { assert!(($reg as u32) < 32, "GTE register index must be 0..=31") };
         let _value: u32 = $value;
         #[cfg(target_arch = "mips")]
         // SAFETY: CTC2 copies $t0 into one GTE control register. The asm
         // only reads $t0 (declared as its input), writes no CPU register,
         // and touches no memory or stack (`nomem`, `nostack`); GTE state is
         // not Rust-visible memory.
-        // This relies on `$reg` being 0..=31 so the shifted index stays in
-        // the rd field (bits 15..11); nothing checks it, and any other value
-        // rewrites rt or the opcode itself. Every in-tree caller passes a
-        // literal in 0..=31.
+        // The const assert above keeps `$reg` in 0..=31, so the shifted
+        // index stays in the rd field (bits 15..11).
         unsafe {
             core::arch::asm!(
                 ".word {instr}",
