@@ -8,5 +8,5 @@ description  = "Fixed-timestep game clock: per-game tick rate and catch-up polic
 
 [dependencies]
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true
