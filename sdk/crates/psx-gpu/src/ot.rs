@@ -888,8 +888,7 @@ impl<const N: usize> OrderingTable<N> {
     ///
     /// # Safety
     /// `node` must stay live and unmodified while the table is submitted.
-    #[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
-    unsafe fn end_with_node(&mut self, node: *const u32) {
+    pub(crate) unsafe fn end_with_node(&mut self, node: *const u32) {
         assert!(
             self.entries[0] == OT_END,
             "end_with_draw_done needs an empty slot 0: call it right after clear"

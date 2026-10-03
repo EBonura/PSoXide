@@ -39,6 +39,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod frame;
 pub mod framebuf;
 pub mod material;
 pub mod ordered;
