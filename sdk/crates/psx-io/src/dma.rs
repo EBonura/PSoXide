@@ -77,10 +77,141 @@ pub const CHCR_TRIGGER: u32 = 1 << 28;
 
 // --- Register access helpers ----------------------------------------------
 
+/// `BCR` for manual or linked-list sync: a 16-bit word count (linked-list
+/// mode ignores it, but silicon wants it written).
+#[inline(always)]
+pub const fn bcr_words(words: u16) -> u32 {
+    words as u32
+}
+
+/// `BCR` for block sync: `block_count` blocks of `block_size` words.
+///
+/// A zero field means 0x1_0000 on silicon, so a zero count is a 65,536-block
+/// transfer, not an empty one.
+#[inline(always)]
+pub const fn bcr_blocks(block_size: u16, block_count: u16) -> u32 {
+    (block_size as u32) | ((block_count as u32) << 16)
+}
+
+/// The three per-channel register values that describe one transfer.
+///
+/// [`start`] stores them in the order silicon expects: `MADR`, `BCR`, then
+/// `CHCR` (which starts the transfer when it carries [`CHCR_START`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Transfer {
+    /// RAM address the channel reads from or writes to (`MADR`).
+    pub madr: u32,
+    /// Word or block count (`BCR`); see [`bcr_words`] and [`bcr_blocks`].
+    pub bcr: u32,
+    /// Control word (`CHCR`): direction, step, sync mode, start.
+    pub chcr: u32,
+}
+
+/// Program channel `ch` with `transfer` and start it.
+///
+/// The same three stores every SDK driver makes: `MADR`, `BCR`, a
+/// compiler-only barrier that publishes ordinary RAM stores made before the
+/// call (it emits no instruction), then `CHCR`. The caller still enables the
+/// channel in `DPCR` ([`enable_channel`]) and waits for completion
+/// ([`wait_done`]).
+///
+/// # Safety
+///
+/// From the `CHCR` store until the channel goes idle ([`wait_done`] returns
+/// `true`, or [`abort`] stops it), the DMA controller reads or writes RAM
+/// with no regard for Rust's borrow rules. The caller must guarantee that
+/// for that whole window:
+///
+/// - every word the transfer can **write** (a device-to-RAM channel, such
+///   as MDEC-out, CD-ROM, GPU readback or OTC) lies in memory the caller
+///   owns exclusively, with no live Rust reference to it;
+/// - every word the transfer can **read** (a RAM-to-device channel, or each
+///   node of a linked list and the nodes its tags link to) is live,
+///   initialised and not written by anyone else;
+/// - the extent is the one `bcr` and the sync mode describe, remembering
+///   that a zero block count means 65,536 blocks;
+/// - the channel is idle when this is called (silicon ignores a `CHCR`
+///   write to a busy channel, so the old transfer would keep running).
+#[doc(alias = "DMA kick")]
+#[inline(always)]
+pub unsafe fn start(ch: Channel, transfer: Transfer) {
+    // SAFETY: the caller upholds this function's contract for the transfer
+    // these three stores arm and start.
+    unsafe {
+        raw::set_madr(ch, transfer.madr);
+        raw::set_bcr(ch, transfer.bcr);
+    }
+    publish_barrier();
+    // SAFETY: as above.
+    unsafe { raw::set_chcr(ch, transfer.chcr) };
+}
+
+/// Compiler-only barrier: ordinary RAM stores before it are emitted before
+/// any MMIO store after it.
+///
+/// The pinned MIPS-I backend lowers even a single-thread compiler fence to
+/// `SYNC`, which the R3000 lacks, so the target uses an empty `asm!` with its
+/// default memory clobber. Do not add `nomem` or `readonly`: both would drop
+/// the guarantee.
+#[inline(always)]
+fn publish_barrier() {
+    #[cfg(target_arch = "mips")]
+    // SAFETY: an empty asm block; it only constrains compiler ordering.
+    unsafe {
+        core::arch::asm!("", options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "mips"))]
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Single-register writes for silicon probes and drivers that need a store
+/// order other than [`start`]'s.
+pub mod raw {
+    use super::{Channel, BCR_OFF, CHCR_OFF, MADR_OFF};
+
+    /// Write `MADR`.
+    ///
+    /// # Safety
+    ///
+    /// The value arms the next transfer on `ch`: the caller takes on
+    /// [`super::start`]'s contract for whatever transfer later starts with it.
+    #[inline(always)]
+    pub unsafe fn set_madr(ch: Channel, addr: u32) {
+        // SAFETY: a store to this channel's MADR; see the contract above.
+        unsafe { crate::write32(ch.base() + MADR_OFF, addr) }
+    }
+
+    /// Write `BCR`.
+    ///
+    /// # Safety
+    ///
+    /// As [`set_madr`]: the count sets the extent of the next transfer.
+    #[inline(always)]
+    pub unsafe fn set_bcr(ch: Channel, value: u32) {
+        // SAFETY: a store to this channel's BCR; see the contract above.
+        unsafe { crate::write32(ch.base() + BCR_OFF, value) }
+    }
+
+    /// Write `CHCR`. With [`super::CHCR_START`] set this starts a transfer
+    /// from whatever `MADR` and `BCR` hold.
+    ///
+    /// # Safety
+    ///
+    /// A value with `CHCR_START` set must satisfy [`super::start`]'s contract
+    /// for the transfer it starts. A value without it (such as 0, an abort)
+    /// starts nothing.
+    #[inline(always)]
+    pub unsafe fn set_chcr(ch: Channel, value: u32) {
+        // SAFETY: a store to this channel's CHCR; see the contract above.
+        unsafe { crate::write32(ch.base() + CHCR_OFF, value) }
+    }
+}
+
 /// Write `MADR` (memory address that DMA will source from or drain to).
 #[inline(always)]
 pub fn set_madr(ch: Channel, addr: u32) {
-    unsafe { crate::write32(ch.base() + MADR_OFF, addr) }
+    // SAFETY: none; see `raw::set_madr`.
+    unsafe { raw::set_madr(ch, addr) }
 }
 
 /// Read `MADR`.
@@ -93,25 +224,23 @@ pub fn madr(ch: Channel) -> u32 {
 /// For block-slice mode use [`set_bcr_block`].
 #[inline(always)]
 pub fn set_bcr_manual(ch: Channel, words: u16) {
-    unsafe { crate::write32(ch.base() + BCR_OFF, words as u32) }
+    // SAFETY: none; see `raw::set_bcr`.
+    unsafe { raw::set_bcr(ch, bcr_words(words)) }
 }
 
 /// Write `BCR` in block-slice mode:
 /// `BS × BA = blocks of block_size words`.
 #[inline(always)]
 pub fn set_bcr_block(ch: Channel, block_size: u16, block_count: u16) {
-    unsafe {
-        crate::write32(
-            ch.base() + BCR_OFF,
-            (block_size as u32) | ((block_count as u32) << 16),
-        )
-    }
+    // SAFETY: none; see `raw::set_bcr`.
+    unsafe { raw::set_bcr(ch, bcr_blocks(block_size, block_count)) }
 }
 
 /// Write `CHCR` (control). Starts the transfer if `CHCR_START` is set.
 #[inline(always)]
 pub fn set_chcr(ch: Channel, value: u32) {
-    unsafe { crate::write32(ch.base() + CHCR_OFF, value) }
+    // SAFETY: none; see `raw::set_chcr`.
+    unsafe { raw::set_chcr(ch, value) }
 }
 
 /// Read `CHCR`.
@@ -159,13 +288,21 @@ pub fn clear_ordering_table(buf: &mut [u32]) -> bool {
     // the CD reader, the ordering-table clear, and the boot uploads.
     abort(Channel::Otc);
     enable_channel(Channel::Otc);
-    set_madr(Channel::Otc, last_addr);
-    set_bcr_manual(Channel::Otc, words);
     // OTC clear: direction backward (step -4), manual sync, trigger bit.
-    set_chcr(
-        Channel::Otc,
-        CHCR_STEP_BACKWARD | CHCR_SYNC_MANUAL | CHCR_START | CHCR_TRIGGER,
-    );
+    // SAFETY: the channel was just aborted, so it is idle. The transfer
+    // writes `words` words stepping back from `last_addr`, which is exactly
+    // `buf`, borrowed exclusively until this function returns; the wait
+    // below (or the abort on a wedge) ends the transfer before then.
+    unsafe {
+        start(
+            Channel::Otc,
+            Transfer {
+                madr: last_addr,
+                bcr: bcr_words(words),
+                chcr: CHCR_STEP_BACKWARD | CHCR_SYNC_MANUAL | CHCR_START | CHCR_TRIGGER,
+            },
+        )
+    };
     let done = wait_done(Channel::Otc, DEFAULT_DMA_SPINS);
     if !done {
         // Leave the controller usable for the next caller rather than
@@ -184,7 +321,8 @@ pub const DEFAULT_DMA_SPINS: u32 = 500_000;
 /// treats dropping the START bit as an abort request; the channel is
 /// safe to re-arm afterwards.
 pub fn abort(ch: Channel) {
-    set_chcr(ch, 0);
+    // SAFETY: a CHCR of 0 has no START bit, so it starts nothing.
+    unsafe { raw::set_chcr(ch, 0) };
 }
 
 /// Bounded completion wait. `false` means the channel was still busy
@@ -199,4 +337,24 @@ pub fn wait_done(ch: Channel, spins: u32) -> bool {
         waited += 1;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_bcr_packs_size_low_and_count_high() {
+        assert_eq!(bcr_blocks(16, 3), 0x0003_0010);
+        assert_eq!(bcr_blocks(0xFFFF, 0xFFFF), 0xFFFF_FFFF);
+        assert_eq!(bcr_words(0x1234), 0x1234);
+    }
+
+    #[test]
+    fn channel_blocks_sit_at_sixteen_byte_strides() {
+        assert_eq!(Channel::MdecIn.base(), 0x1F80_1080);
+        assert_eq!(Channel::Gpu.base(), 0x1F80_10A0);
+        assert_eq!(Channel::Otc.base(), 0x1F80_10E0);
+        assert_eq!(Channel::Otc.dpcr_enable_bit(), 27);
+    }
 }
