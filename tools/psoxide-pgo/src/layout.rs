@@ -120,13 +120,20 @@ fn ordering_symbol(section: &str, symbols: &[String]) -> Option<String> {
     symbols.first().filter(|symbol| plain(symbol)).cloned()
 }
 
-/// The input sections of `.text` in an ld.lld `-Map`, in address order.
+/// The code input sections (`.text*`) of an ld.lld `-Map`, in address order,
+/// from every output section, not only `.text`: a game that links hot code
+/// into a region of its own (WipEout's `.race`, an overlay slot) must not
+/// fall out of the layout's view and call graph.
+///
+/// Two output sections can share addresses (an overlay's tenants at one
+/// VMA). Only the first input section to claim a range is kept, so a word
+/// still names one function; the map lists the resident tenant first.
 ///
 /// ELF32 map columns: VMA, LMA, size, alignment, then the output section at
 /// column 33, an input section eight columns in and its symbols sixteen in.
 pub fn read_map(text: &str) -> Vec<Section> {
     let mut found: Vec<(Section, Vec<String>)> = Vec::new();
-    let (mut in_text, mut current) = (false, false);
+    let mut current = false;
     for line in text.lines() {
         if line.len() < 34 || line.as_bytes()[8] != b' ' {
             continue;
@@ -140,9 +147,7 @@ pub fn read_map(text: &str) -> Vec<Section> {
         let depth = rest.len() - body.len();
         let body = body.trim_end();
         if depth == 0 {
-            in_text = body == ".text";
             current = false;
-        } else if !in_text {
         } else if depth == 8 {
             current = false;
             if let Some(name) = input_section(body).filter(|_| size > 0) {
@@ -168,7 +173,16 @@ pub fn read_map(text: &str) -> Vec<Section> {
             section
         })
         .collect();
+    // Stable: at one address the map's first (resident) tenant stays first.
     sections.sort_by_key(|section| section.start);
+    let mut end = 0u32;
+    sections.retain(|section| {
+        let keep = section.start >= end;
+        if keep {
+            end = section.start.wrapping_add(section.size);
+        }
+        keep
+    });
     sections
 }
 
@@ -1180,6 +1194,38 @@ mod tests {
         text += &map_line(at, 0x20, 0, ".data");
         text += &map_line(at, 0x20, 8, &format!("{OBJ}:(.data.HAZARD_TRAMPOLINES)"));
         text
+    }
+
+    #[test]
+    fn code_outside_text_is_read_and_overlay_tenants_do_not_overlap() {
+        // `.race` before `.text`, as WipEout links its race loop, with a
+        // second tenant (`.race_split`) at the same addresses.
+        let mut text = String::from("     VMA      LMA     Size Align Out     In      Symbol\n");
+        text += &map_line(0x8001_0000, 0x40, 0, ".race");
+        text += &map_line(0x8001_0000, 0x40, 8, &format!("{OBJ}:(.text.{TICK_A})"));
+        text += &map_line(0x8001_0000, 0x40, 16, "game::tick");
+        text += &map_line(0x8001_0000, 0x30, 0, ".race_split");
+        text += &map_line(0x8001_0000, 0x30, 8, &format!("{OBJ}:(.text.{TICK_B})"));
+        text += &map_line(0x8001_0000, 0x30, 16, "game::tick");
+        text += &map_line(0x8001_0040, 0x10, 0, ".text");
+        text += &map_line(0x8001_0040, 0x10, 8, &format!("{OBJ}:(.text._start)"));
+        text += &map_line(0x8001_0040, 0x10, 16, "_start");
+        text += &map_line(0x8001_0050, 0x20, 0, ".data");
+        text += &map_line(
+            0x8001_0050,
+            0x20,
+            8,
+            &format!("{OBJ}:(.data.HAZARD_TRAMPOLINES)"),
+        );
+        let sections = read_map(&text);
+        let names: Vec<(u32, Option<&str>)> = sections
+            .iter()
+            .map(|s| (s.start, s.symbol.as_deref()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![(0x8001_0000, Some(TICK_A)), (0x8001_0040, Some("_start"))]
+        );
     }
 
     // One function in two checkouts: only the crate disambiguator differs.
