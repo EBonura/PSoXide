@@ -192,10 +192,16 @@ impl SectorReader {
 
     #[inline]
     unsafe fn wr_index(&mut self, i: u8) {
+        // SAFETY: CD_STATUS (0x1F80_1800) is the controller's index/status
+        // byte register; writing the index only selects a register bank, and
+        // the caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe { psx_io::write8(CD_STATUS, i & 0x03) };
     }
 
     unsafe fn irq_flag(&mut self) -> u8 {
+        // SAFETY: index-1 read of the IRQ flag register. CD_* are the CD-ROM
+        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
+        // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
             let f = psx_io::read8(CD_IRQ) & 0x1F;
@@ -205,6 +211,10 @@ impl SectorReader {
     }
 
     unsafe fn ack(&mut self, irq: u8) {
+        // SAFETY: index-1 write of the IRQ flag register plus the I_STAT CD-ROM
+        // ack. CD_* are the CD-ROM controller's byte registers at
+        // 0x1F80_1800..=0x1F80_1803 and the caller owns the CD controller
+        // exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
             psx_io::write8(CD_IRQ, irq & 0x1F);
@@ -214,6 +224,10 @@ impl SectorReader {
     }
 
     unsafe fn ack_all(&mut self) {
+        // SAFETY: index-1 write acking every controller IRQ plus the I_STAT CD-
+        // ROM ack. CD_* are the CD-ROM controller's byte registers at
+        // 0x1F80_1800..=0x1F80_1803 and the caller owns the CD controller
+        // exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
             psx_io::write8(CD_IRQ, 0x5F);
@@ -223,6 +237,9 @@ impl SectorReader {
     }
 
     unsafe fn enable_irqs(&mut self) {
+        // SAFETY: index-1 write of the IRQ enable register. CD_* are the CD-ROM
+        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
+        // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
             psx_io::write8(CD_PARAM, 0x1F);
@@ -231,6 +248,9 @@ impl SectorReader {
     }
 
     unsafe fn irq_enable(&mut self) -> u8 {
+        // SAFETY: index-0 read of the IRQ enable register. CD_* are the CD-ROM
+        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
+        // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(0);
             let e = psx_io::read8(CD_IRQ) & 0x1F;
@@ -240,6 +260,9 @@ impl SectorReader {
     }
 
     unsafe fn set_irq_enable(&mut self, mask: u8) {
+        // SAFETY: index-1 write of the IRQ enable register. CD_* are the CD-ROM
+        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
+        // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(1);
             psx_io::write8(CD_PARAM, mask & 0x1F);
@@ -251,6 +274,9 @@ impl SectorReader {
         // The response FIFO is 16 bytes deep, so a real drain reads at most 16.
         // Bound the loop: on heavy streaming the CD/emulator can wedge the FIFO
         // "not-empty", and an unbounded drain spins forever (hung loader).
+        // SAFETY: index-0 status and response-FIFO reads of the CD-ROM
+        // controller registers; popping responses only discards controller
+        // output, and the caller owns the controller per `prepare`'s contract.
         unsafe {
             self.wr_index(0);
             let mut guard = 0;
@@ -262,6 +288,9 @@ impl SectorReader {
     }
 
     unsafe fn data_fifo_ready(&mut self) -> bool {
+        // SAFETY: index-0 status read, no side effects. CD_* are the CD-ROM
+        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
+        // caller owns the CD controller exclusively per `prepare`'s contract.
         unsafe {
             self.wr_index(0);
             psx_io::read8(CD_STATUS) & STATUS_DATA_FIFO_NOT_EMPTY != 0
@@ -271,6 +300,8 @@ impl SectorReader {
     unsafe fn wait_param_room(&mut self) -> bool {
         let mut i = 0;
         while i < PARAM_POLL {
+            // SAFETY: side-effect-free read of the CD-ROM status register; the
+            // caller owns the controller per `prepare`'s contract.
             if unsafe { psx_io::read8(CD_STATUS) } & STATUS_PARAMETER_FIFO_NOT_FULL != 0 {
                 return true;
             }
@@ -292,6 +323,8 @@ impl SectorReader {
     /// per sector than a working DMA, which no SectorReader user
     /// notices, and it cannot wedge the DMA controller.
     unsafe fn dma_read_sector(&mut self, buffer: *mut u32) {
+        // SAFETY: index-0 Request-register write arming BFRD on the CD-ROM
+        // controller; the caller owns the controller per `prepare`'s contract.
         unsafe {
             // Arm the data transfer (BFRD).
             self.wr_index(0);
@@ -301,14 +334,24 @@ impl SectorReader {
         // The FIFO fills shortly after BFRD; the bound covers a slow
         // drive without letting a dead one hang the caller.
         let mut i = 0;
+        // SAFETY: status poll under the same controller ownership.
         while !unsafe { self.data_fifo_ready() } && i < DATA_POLL {
             i += 1;
         }
         for word_index in 0..SECTOR_WORDS {
+            // SAFETY: CD_DATA is the data-FIFO pop register; the reads only
+            // drain controller data, under the caller's controller ownership.
             let b0 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            // SAFETY: as above.
             let b1 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            // SAFETY: as above.
             let b2 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            // SAFETY: as above.
             let b3 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            // SAFETY: every caller passes a pointer to a live, exclusively
+            // borrowed `[u32; SECTOR_WORDS]` (`self.discard` or the
+            // `read_sector`/`try_read_sector` buffer), so it is word-aligned
+            // and `word_index < SECTOR_WORDS` keeps the write in bounds.
             unsafe {
                 buffer
                     .add(word_index)
@@ -321,6 +364,9 @@ impl SectorReader {
     /// sector DMA-drained (into the reader's bounce buffer) before the ack,
     /// or the data FIFO stays occupied and later reads misalign.
     unsafe fn ack_unexpected(&mut self, flag: u8) {
+        // SAFETY: controller register helpers under the caller's exclusive
+        // ownership; `discard` points at this reader's own
+        // `[u32; SECTOR_WORDS]`, which is exactly what `dma_read_sector` fills.
         unsafe {
             match flag {
                 IRQ_DATA_READY => {
@@ -344,12 +390,14 @@ impl SectorReader {
     unsafe fn wait_irq(&mut self, expected: u8, limit: u32) -> Wait {
         let mut i = 0;
         while i < limit {
+            // SAFETY: flag read under the caller's controller ownership.
             let flag = unsafe { self.irq_flag() };
             if flag == expected {
                 return Wait::Matched;
             }
             // Some drives raise the data FIFO before (or without) latching the
             // DataReady flag; treat visible data as a match.
+            // SAFETY: status read under the caller's controller ownership.
             if expected == IRQ_DATA_READY && unsafe { self.data_fifo_ready() } {
                 return Wait::Matched;
             }
@@ -357,6 +405,7 @@ impl SectorReader {
                 return Wait::CdError;
             }
             if flag != 0 {
+                // SAFETY: same controller ownership as the polls above.
                 unsafe { self.ack_unexpected(flag) };
             }
             i += 1;
@@ -374,6 +423,9 @@ impl SectorReader {
         expected: u8,
         limit: u32,
     ) -> bool {
+        // SAFETY: CD-ROM register accesses and helpers only; the caller owns
+        // the controller exclusively per `prepare`'s contract. No Rust memory
+        // is touched beyond `self.diag` through `&mut self`.
         unsafe {
             let saved = self.irq_enable();
             self.set_irq_enable(0);
@@ -444,6 +496,7 @@ impl SectorReader {
     /// concurrent CD/DMA-ch3 users, no CD-ROM IRQ handler installed). The
     /// caller accepts the global `I_MASK` rewrite.
     pub unsafe fn prepare(&mut self) -> bool {
+        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
         unsafe { self.prepare_with_mode(CD_MODE_DOUBLE_SPEED_2048) }
     }
 
@@ -459,6 +512,7 @@ impl SectorReader {
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn prepare_single_speed(&mut self) -> bool {
+        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
         unsafe { self.prepare_with_mode(0x00) }
     }
 
@@ -470,6 +524,7 @@ impl SectorReader {
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn prepare_mode(&mut self, mode: u8) -> bool {
+        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
         unsafe { self.prepare_with_mode(mode) }
     }
 
@@ -479,6 +534,7 @@ impl SectorReader {
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn set_filter(&mut self, file: u8, channel: u8) -> bool {
+        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
         unsafe { self.send_command(CMD_SETFILTER, &[file, channel], IRQ_ACK, ACK_POLL) }
     }
 
@@ -489,11 +545,15 @@ impl SectorReader {
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn demute(&mut self) -> bool {
+        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
         unsafe { self.send_command(CMD_DEMUTE, &[], IRQ_ACK, ACK_POLL) }
     }
 
     unsafe fn prepare_with_mode(&mut self, mode: u8) -> bool {
         self.mode = mode;
+        // SAFETY: interrupt-controller, DPCR and CD-ROM register accesses
+        // only; the public callers forward `prepare`'s contract (exclusive
+        // single-threaded controller use, caller accepts the I_MASK rewrite).
         unsafe {
             // Keep CD-ROM at the controller level and poll its IRQ flags
             // manually, so DataReady cannot enter an unhandled CPU IRQ storm.
@@ -544,6 +604,8 @@ impl SectorReader {
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn start_read(&mut self, lba: u32) -> bool {
+        // SAFETY: CD-ROM command helpers only; the caller upholds
+        // `prepare`'s `# Safety` contract.
         unsafe {
             let (m, s, f) = lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba));
             if !self.send_command(CMD_SETLOC, &[m, s, f], IRQ_ACK, ACK_POLL) {
@@ -570,6 +632,8 @@ impl SectorReader {
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn start_read_seek_first(&mut self, lba: u32, seek_poll: u32) -> bool {
+        // SAFETY: CD-ROM command helpers only; the caller upholds
+        // `prepare`'s `# Safety` contract.
         unsafe {
             let (m, s, f) = lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba));
             if !self.send_command(CMD_SETLOC, &[m, s, f], IRQ_ACK, ACK_POLL) {
@@ -608,6 +672,9 @@ impl SectorReader {
     /// Same contract as [`prepare`](Self::prepare); a read must be running
     /// (successful [`start_read`](Self::start_read)).
     pub unsafe fn read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> bool {
+        // SAFETY: CD-ROM register helpers under the caller's `prepare`
+        // contract; `buffer` is an exclusive `[u32; SECTOR_WORDS]`, exactly
+        // the span `dma_read_sector` writes.
         unsafe {
             match self.wait_irq(IRQ_DATA_READY, DATA_POLL) {
                 Wait::Matched => {}
@@ -654,6 +721,9 @@ impl SectorReader {
     /// Same contract as [`read_sector`](Self::read_sector).
     #[allow(clippy::result_unit_err)]
     pub unsafe fn try_read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> Result<bool, ()> {
+        // SAFETY: CD-ROM register helpers under the caller's `prepare`
+        // contract; `buffer` is an exclusive `[u32; SECTOR_WORDS]`, exactly
+        // the span `dma_read_sector` writes.
         unsafe {
             let flag = self.irq_flag();
             if flag == IRQ_ERROR {
@@ -684,6 +754,8 @@ impl SectorReader {
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn stop(&mut self) {
+        // SAFETY: CD-ROM command helpers only; the caller upholds
+        // `prepare`'s `# Safety` contract.
         unsafe {
             if self.send_command(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL) {
                 let _ = self.wait_irq(IRQ_COMPLETE, CLEANUP_POLL);
