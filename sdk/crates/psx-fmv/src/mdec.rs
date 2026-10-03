@@ -92,40 +92,9 @@ const fn build_quant() -> [u32; 32] {
     words
 }
 
-// Scaled cosines: SF0 = cos(0) * sqrt(2), SFk = cos(k*pi/16) * 2, Q14.
-const SF0: i16 = 0x5A82;
-const SF1: i16 = 0x7D8A;
-const SF2: i16 = 0x7641;
-const SF3: i16 = 0x6A6D;
-const SF4: i16 = 0x5A82;
-const SF5: i16 = 0x471C;
-const SF6: i16 = 0x30FB;
-const SF7: i16 = 0x18F8;
-
-/// The 8x8 IDCT basis command 3 uploads.
-const SCALE: [i16; 64] = [
-    SF0, SF0, SF0, SF0, SF0, SF0, SF0, SF0, //
-    SF1, SF3, SF5, SF7, -SF7, -SF5, -SF3, -SF1, //
-    SF2, SF6, -SF6, -SF2, -SF2, -SF6, SF6, SF2, //
-    SF3, -SF7, -SF1, -SF5, SF5, SF1, SF7, -SF3, //
-    SF4, -SF4, -SF4, SF4, SF4, -SF4, -SF4, SF4, //
-    SF5, -SF1, SF7, SF3, -SF3, -SF7, SF1, -SF5, //
-    SF6, -SF2, SF2, -SF6, -SF6, SF2, -SF2, SF6, //
-    SF7, -SF5, SF3, -SF1, SF1, -SF3, SF5, -SF7,
-];
-
-/// The IDCT basis as the 32 words command 3 takes.
-pub static SCALE_WORDS: [u32; 32] = build_scale();
-
-const fn build_scale() -> [u32; 32] {
-    let mut words = [0u32; 32];
-    let mut w = 0;
-    while w < 32 {
-        words[w] = (SCALE[2 * w] as u16 as u32) | ((SCALE[2 * w + 1] as u16 as u32) << 16);
-        w += 1;
-    }
-    words
-}
+/// The IDCT matrix for MDEC command 3, generated from the DCT basis in
+/// [`crate::idct`].
+pub static SCALE_WORDS: [u32; 32] = crate::idct::MATRIX_WORDS;
 
 // Register constants moved to psx-hw; these forward until games repin.
 
