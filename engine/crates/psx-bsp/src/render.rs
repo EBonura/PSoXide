@@ -13,10 +13,9 @@ use psx_engine::{
         clip_convex_plane, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
         ClipTraversal,
     },
-    compose_classic_alias_transform, materialize_classic_affine_baked_light_vertices,
-    materialize_classic_affine_word_vertices, submit_classic_affine_mixed_batch,
-    ClassicAffineMixedBatchSurface, ClassicAffineProfile, ClassicAffineSubmit, ClassicAffineVertex,
-    ClassicAffineWordSourceVertex,
+    compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
+    submit_surface_batch, AffineSurface, AffineVertex, SurfaceProfile, SurfaceSourceVertex,
+    SurfaceSubmit,
 };
 use psx_gte::math::{Mat3I16, Vec3I16 as GteVec3I16, Vec3I32 as GteVec3I32};
 use psx_gte::scene;
@@ -166,7 +165,7 @@ fn box_fits(ancestors: &[(Vec3I16, Vec3I16)], mins: Vec3I16, maxs: Vec3I16) -> b
             || maxs.z > amaxs.z
     })
 }
-const SUBDIVISION_SCRATCH_VERTICES: usize = 12;
+const SUBDIVISION_SCRATCH_VERTICES: usize = psx_engine::AFFINE_SPLIT_SCRATCH_VERTICES;
 
 /// PXBSP scratchpad layout: the five clip-plane records, the batch vertex
 /// workspace, then the mixed-batch writer's stack.
@@ -180,9 +179,9 @@ const SUBDIVISION_SCRATCH_VERTICES: usize = 12;
 ///
 /// The writer's frame (spilled loop state it reloads per packet) is the next
 /// most re-read, so `flush_pxbsp_batch` runs it on the bytes above the batch.
-/// The batch gives up fourteen more slots for that: nineteen is the most that
-/// leaves the writer's linked call tree room (296 bytes, which
-/// `tools/stack_guard.py` proves). A face wider than the batch cannot be
+/// The batch gives up fourteen more slots for that, and the writer's split
+/// scratch takes six more; `tools/stack_guard.py` proves the writer's linked
+/// call tree fits what is left. A face wider than the batch cannot be
 /// drawn, so the cooker splits every face down to [`PXBSP_MAX_FACE_VERTICES`]
 /// and the face pass skips (never breaks on) anything wider. Cortex's cook is
 /// all quads (measured 2026-09-23), so a flush still groups four of them.
@@ -199,10 +198,10 @@ const PXBSP_AFFINE_BATCH_VERTEX_CAPACITY: usize =
 #[cfg(target_arch = "mips")]
 const _: () = assert!(
     PXBSP_CLIP_PLANE_BYTES
-        + PXBSP_AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>()
+        + PXBSP_AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<AffineVertex>()
         <= psx_engine::scratchpad::SIZE
 );
-// A `ClassicAffineVertex` is four-aligned and the plane block is a multiple
+// A `AffineVertex` is four-aligned and the plane block is a multiple
 // of both its own eight-byte alignment and four.
 const _: () = assert!(PXBSP_CLIP_PLANE_BYTES.is_multiple_of(8));
 /// The PXBSP face pass's scratchpad bytes, live only inside
@@ -211,7 +210,7 @@ const PXBSP_CLIP_PLANES: Region = Region::new(0, PXBSP_CLIP_PLANE_BYTES);
 const PXBSP_BATCH: Region = Region::new(
     PXBSP_CLIP_PLANE_BYTES,
     PXBSP_CLIP_PLANE_BYTES
-        + PXBSP_AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>(),
+        + PXBSP_AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<AffineVertex>(),
 );
 /// The mixed-batch writer's stack: every scratchpad byte above the batch.
 /// The clip planes and the batch are live across each flush.
@@ -225,11 +224,12 @@ type PxbspSelectionStack = ScratchpadStack<0, { psx_engine::scratchpad::SIZE }>;
 // Regions live around the selection call: none but its own stack.
 const _: () = assert_disjoint(&[PxbspSelectionStack::REGION]);
 const DUMMY_LIGHT_STYLE: usize = 64;
-// Two-level subdivision emits at most 19 packets for one source triangle;
-// 13 words covers the larger textured-Gouraud quad packet.
-const WORST_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 13;
+// Splitting bounds the packets one source triangle can produce; 13 words
+// covers the larger textured-Gouraud quad packet with its tag.
+const WORST_PACKET_WORDS_PER_TRIANGLE: usize = psx_engine::AFFINE_PACKETS_PER_TRIANGLE * 13;
 // A scoped windowed polygon adds its GP0(E2) selector and full-window reset.
-const WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 15;
+const WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE: usize =
+    psx_engine::AFFINE_PACKETS_PER_TRIANGLE * 15;
 const PXBSP_MATERIAL_TICKS_PER_SECOND: u16 = 60;
 const TEXTURED_GOURAUD_COMMAND: u32 = 0x3400_0000;
 const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
@@ -237,7 +237,7 @@ const SEMI_TRANSPARENT_COMMAND_BIT: u32 = 0x0200_0000;
 /// from the near plane than a first-person view does. Keep one profile
 /// authority for every world, special-surface and model submission so their
 /// shared edges cross subdivision bands together.
-const PXBSP_RENDER_PROFILE: ClassicAffineProfile = ClassicAffineProfile::PXBSP_THIRD_PERSON;
+const PXBSP_RENDER_PROFILE: SurfaceProfile = SurfaceProfile::PXBSP_THIRD_PERSON;
 
 /// Q20.12 world camera and Q0.12 turn angles.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1101,9 +1101,9 @@ impl FrustumPlanes {
     /// `count + 5` records; `scratch` the same.
     pub fn clip_polygon(
         &self,
-        vertices: &mut [ClassicAffineVertex],
+        vertices: &mut [AffineVertex],
         count: usize,
-        scratch: &mut [ClassicAffineVertex],
+        scratch: &mut [AffineVertex],
     ) -> usize {
         let (count, in_scratch) = self.clip_polygon_buffers(vertices, count, scratch);
         if in_scratch {
@@ -1117,18 +1117,18 @@ impl FrustumPlanes {
     /// of copying the polygon back after every one of the five planes.
     fn clip_polygon_buffers(
         &self,
-        vertices: &mut [ClassicAffineVertex],
+        vertices: &mut [AffineVertex],
         count: usize,
-        scratch: &mut [ClassicAffineVertex],
+        scratch: &mut [AffineVertex],
     ) -> (usize, bool) {
         self.clip_polygon_buffers_inner(vertices, count, scratch, false)
     }
 
     fn clip_polygon_buffers_inner(
         &self,
-        vertices: &mut [ClassicAffineVertex],
+        vertices: &mut [AffineVertex],
         count: usize,
-        scratch: &mut [ClassicAffineVertex],
+        scratch: &mut [AffineVertex],
         outside_rejected: bool,
     ) -> (usize, bool) {
         let mut count = count;
@@ -1195,11 +1195,11 @@ impl FrustumPlanes {
 
 struct PxbspClipPlane<'a>(&'a ([i32; 3], i32));
 
-impl AttributedClipPlane<ClassicAffineVertex> for PxbspClipPlane<'_> {
+impl AttributedClipPlane<AffineVertex> for PxbspClipPlane<'_> {
     type Distance = i32;
 
     #[inline(always)]
-    fn distance(&self, _: usize, vertex: &ClassicAffineVertex) -> Self::Distance {
+    fn distance(&self, _: usize, vertex: &AffineVertex) -> Self::Distance {
         FrustumPlanes::distance(self.0, vertex.position)
     }
 
@@ -1212,12 +1212,12 @@ impl AttributedClipPlane<ClassicAffineVertex> for PxbspClipPlane<'_> {
     fn intersection(
         &self,
         _: usize,
-        first: &ClassicAffineVertex,
+        first: &AffineVertex,
         first_distance: Self::Distance,
         _: usize,
-        second: &ClassicAffineVertex,
+        second: &AffineVertex,
         second_distance: Self::Distance,
-    ) -> ClassicAffineVertex {
+    ) -> AffineVertex {
         let fraction = crossing_fraction_q16_i32(first_distance, second_distance);
         lerp_vertex(first, second, fraction)
     }
@@ -1226,8 +1226,8 @@ impl AttributedClipPlane<ClassicAffineVertex> for PxbspClipPlane<'_> {
 #[inline(never)]
 fn clip_polygon_plane(
     plane: &([i32; 3], i32),
-    source: &[ClassicAffineVertex],
-    destination: &mut [ClassicAffineVertex],
+    source: &[AffineVertex],
+    destination: &mut [AffineVertex],
 ) -> usize {
     unsafe {
         clip_convex_plane::<_, _, false>(
@@ -1239,11 +1239,7 @@ fn clip_polygon_plane(
     }
 }
 
-fn lerp_vertex(
-    a: &ClassicAffineVertex,
-    b: &ClassicAffineVertex,
-    fraction_q16: u32,
-) -> ClassicAffineVertex {
+fn lerp_vertex(a: &AffineVertex, b: &AffineVertex, fraction_q16: u32) -> AffineVertex {
     let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32_exact(x, y, fraction_q16) };
     let lerp_u8 = |x: u8, y: u8| -> u8 { lerp_i(x as i32, y as i32).clamp(0, 255) as u8 };
     let ca = a.color;
@@ -1252,7 +1248,7 @@ fn lerp_vertex(
         | ((lerp_u8((ca >> 8) as u8, (cb >> 8) as u8) as u32) << 8)
         | ((lerp_u8((ca >> 16) as u8, (cb >> 16) as u8) as u32) << 16)
         | (ca & 0xff00_0000);
-    ClassicAffineVertex {
+    AffineVertex {
         position: [
             lerp_i(a.position[0] as i32, b.position[0] as i32).clamp(-32768, 32767) as i16,
             lerp_i(a.position[1] as i32, b.position[1] as i32).clamp(-32768, 32767) as i16,
@@ -1629,7 +1625,7 @@ impl Renderer {
         let first_face = model.first_face as usize;
         let face_end = first_face.checked_add(model.face_count as usize)?;
         let local_camera = transform.point_to_local(camera.origin);
-        let (rotation, translation) = compose_classic_alias_transform(
+        let (rotation, translation) = compose_model_view_transform(
             view.rotation,
             view.translation,
             transform.rotation,
@@ -1693,21 +1689,20 @@ impl Renderer {
         #[cfg(target_arch = "mips")]
         let batch_vertices = unsafe {
             core::slice::from_raw_parts_mut(
-                psx_engine::scratchpad::ptr_at::<ClassicAffineVertex>(PXBSP_CLIP_PLANE_BYTES),
+                psx_engine::scratchpad::ptr_at::<AffineVertex>(PXBSP_CLIP_PLANE_BYTES),
                 PXBSP_AFFINE_BATCH_VERTEX_CAPACITY,
             )
         };
         #[cfg(not(target_arch = "mips"))]
         let mut batch_vertex_storage =
-            [ClassicAffineVertex::default(); PXBSP_AFFINE_BATCH_VERTEX_CAPACITY];
+            [AffineVertex::default(); PXBSP_AFFINE_BATCH_VERTEX_CAPACITY];
         #[cfg(not(target_arch = "mips"))]
         let batch_vertices = &mut batch_vertex_storage[..];
-        let mut batch_surfaces =
-            [ClassicAffineMixedBatchSurface::default(); PXBSP_BATCH_MAX_SURFACES];
+        let mut batch_surfaces = [AffineSurface::default(); PXBSP_BATCH_MAX_SURFACES];
         // One face at a time is materialized here, frustum-clipped, then
         // copied into the batch (a clip adds at most one vertex per plane).
-        let mut face_vertices = [ClassicAffineVertex::default(); PXBSP_BATCH_MAX_VERTICES + 8];
-        let mut clip_scratch = [ClassicAffineVertex::default(); PXBSP_BATCH_MAX_VERTICES + 8];
+        let mut face_vertices = [AffineVertex::default(); PXBSP_BATCH_MAX_VERTICES + 8];
+        let mut clip_scratch = [AffineVertex::default(); PXBSP_BATCH_MAX_VERTICES + 8];
         let mut batch_vertex_count = 0usize;
         let mut batch_surface_count = 0usize;
         let mut batch_worst_words = 0usize;
@@ -1716,10 +1711,7 @@ impl Renderer {
         // The vertex lump base, resolved once. `materialize_pxbsp_face` used
         // to re-derive it per drawn face, which is a lump-table lookup plus a
         // checked byte offset and a slice bounds compare.
-        let source_base = map
-            .vertex_data()
-            .as_ptr()
-            .cast::<ClassicAffineWordSourceVertex>();
+        let source_base = map.vertex_data().as_ptr().cast::<SurfaceSourceVertex>();
         let baked_overflow = self.pxbsp_baked_overflow(map);
         // Own the clip planes for the duration of the loop. Reaching them
         // through the caller's reference made every plane test reload a
@@ -1914,7 +1906,7 @@ impl Renderer {
                 stats.packet_overflow_avoided = true;
                 break;
             }
-            batch_surfaces[batch_surface_count] = ClassicAffineMixedBatchSurface {
+            batch_surfaces[batch_surface_count] = AffineSurface {
                 first_vertex: batch_vertex_count as u16,
                 vertex_count: vertex_count as u16,
                 tpage: state.texture_page,
@@ -1980,7 +1972,7 @@ impl Renderer {
         let data = map.vertex_data();
         let key = (data.as_ptr() as usize, data.len());
         if (self.pxbsp_baked_overflow.0, self.pxbsp_baked_overflow.1) != key {
-            const STRIDE: usize = core::mem::size_of::<ClassicAffineWordSourceVertex>();
+            const STRIDE: usize = core::mem::size_of::<SurfaceSourceVertex>();
             let overflow = data
                 .chunks_exact(STRIDE)
                 .any(|vertex| vertex[STRIDE - 1] != 0);
@@ -1998,12 +1990,12 @@ impl Renderer {
     /// slice bounds compare on every drawn face.
     unsafe fn materialize_pxbsp_face(
         &self,
-        source_base: *const ClassicAffineWordSourceVertex,
+        source_base: *const SurfaceSourceVertex,
         face: FaceRef,
         uv_offset: [u8; 2],
         color_scale_q7: u8,
         baked_overflow: bool,
-        output: &mut [ClassicAffineVertex],
+        output: &mut [AffineVertex],
     ) {
         let first = face.first_vertex();
         let flags = face.flags();
@@ -2016,7 +2008,7 @@ impl Renderer {
         debug_assert_eq!(source_ptr as usize & 3, 0);
         if baked_light && !baked_uv {
             unsafe {
-                materialize_classic_affine_baked_light_vertices(
+                materialize_baked_surface_vertices(
                     source_ptr,
                     output.len(),
                     output.as_mut_ptr(),
@@ -2025,7 +2017,7 @@ impl Renderer {
             }
         } else {
             unsafe {
-                materialize_classic_affine_word_vertices(
+                materialize_surface_vertices(
                     source_ptr,
                     output.len(),
                     output.as_mut_ptr(),
@@ -2139,7 +2131,7 @@ impl Renderer {
     #[cfg(target_arch = "mips")]
     #[inline(always)]
     unsafe fn pxbsp_face_clip_gte(
-        source_base: *const ClassicAffineWordSourceVertex,
+        source_base: *const SurfaceSourceVertex,
         face: FaceRef,
         planes: &[([i32; 3], i32); 5],
         side_error: i32,
@@ -2254,7 +2246,7 @@ impl Renderer {
     /// [`Self::materialize_pxbsp_face`].
     #[cfg(not(target_arch = "mips"))]
     unsafe fn pxbsp_face_clip(
-        source_base: *const ClassicAffineWordSourceVertex,
+        source_base: *const SurfaceSourceVertex,
         face: FaceRef,
         planes: &[([i32; 3], i32); 5],
         side_error: i32,
@@ -2266,7 +2258,7 @@ impl Renderer {
         if count == 0 {
             return None;
         }
-        // `ClassicAffineWordSourceVertex` is `repr(C)`, four-aligned and
+        // `SurfaceSourceVertex` is `repr(C)`, four-aligned and
         // twelve-byte strided, with `position` first. Reading x and y as the
         // one word they already share costs two shifts and saves a load, and
         // a load is six cycles of RAM stall against one cycle for a shift.
@@ -2481,7 +2473,7 @@ impl Renderer {
         let marks = map.mark_surfaces();
         let faces = map.faces();
         let vertices = map.vertex_data();
-        let stride = core::mem::size_of::<ClassicAffineWordSourceVertex>();
+        let stride = core::mem::size_of::<SurfaceSourceVertex>();
         let Some(root) = map.brush_models().get(0).map(|world| world.head_nodes[0]) else {
             return false;
         };
@@ -3088,14 +3080,14 @@ fn packet_capacity(next: *mut u32, end: *mut u32, needed_words: usize) -> bool {
 }
 
 unsafe fn flush_pxbsp_batch(
-    vertices: &mut [ClassicAffineVertex],
+    vertices: &mut [AffineVertex],
     vertex_count: usize,
-    surfaces: &[ClassicAffineMixedBatchSurface],
+    surfaces: &[AffineSurface],
     surface_count: usize,
     output: *mut u32,
-) -> ClassicAffineSubmit {
+) -> SurfaceSubmit {
     if vertex_count == 0 || surface_count == 0 {
-        return ClassicAffineSubmit {
+        return SurfaceSubmit {
             next_packet: output,
             packets: 0,
             hardware_triangles: 0,
@@ -3106,7 +3098,7 @@ unsafe fn flush_pxbsp_batch(
     // exception handler, and tools/stack_guard.py proves its call tree fits.
     unsafe {
         PxbspWriterStack::run(|| {
-            submit_classic_affine_mixed_batch(
+            submit_surface_batch(
                 vertices.as_mut_ptr(),
                 vertex_count,
                 surfaces.as_ptr(),
@@ -4325,12 +4317,9 @@ mod frustum_tests {
 
     #[test]
     fn pxbsp_renderer_uses_the_third_person_affine_profile() {
-        assert_eq!(
-            PXBSP_RENDER_PROFILE,
-            ClassicAffineProfile::PXBSP_THIRD_PERSON
-        );
-        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_once_at, 340);
-        assert_eq!(PXBSP_RENDER_PROFILE.subdivide_twice_at, 170);
+        assert_eq!(PXBSP_RENDER_PROFILE, SurfaceProfile::PXBSP_THIRD_PERSON);
+        assert_eq!(PXBSP_RENDER_PROFILE.split_once_below, 340);
+        assert_eq!(PXBSP_RENDER_PROFILE.split_twice_below, 170);
         assert_eq!(PXBSP_RENDER_PROFILE.ot_depth, 2048);
     }
 
@@ -4366,8 +4355,8 @@ mod frustum_tests {
         )
     }
 
-    fn vertex(p: [i16; 3]) -> ClassicAffineVertex {
-        ClassicAffineVertex {
+    fn vertex(p: [i16; 3]) -> AffineVertex {
+        AffineVertex {
             position: p,
             uv: [0, 0],
             color: 0x808080,

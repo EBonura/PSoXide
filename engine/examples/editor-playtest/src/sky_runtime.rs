@@ -8,7 +8,7 @@ use psx_bsp::sky::{
     submit_view_ray_cube_sky, submit_view_ray_layered_sky, VIEW_RAY_CUBE_SKY_PACKET_WORDS,
     VIEW_RAY_SKY_PACKET_WORDS,
 };
-use psx_engine::classic_affine::ClassicAffineSubmit;
+use psx_engine::SurfaceSubmit;
 
 /// Draw the room's cooked sky panorama through the arena-owned
 /// [`psx_game_runtime::sky::SkyCyclorama`] cache.
@@ -145,7 +145,7 @@ pub(super) fn draw_scene_sky(
                     && cache.clut_word == slot.clut_word
                 {
                     core::ptr::copy_nonoverlapping(cache.stream.as_ptr(), output, cache.words);
-                    ClassicAffineSubmit {
+                    SurfaceSubmit {
                         next_packet: output.add(cache.words),
                         packets: cache.packets,
                         hardware_triangles: 0,

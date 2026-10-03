@@ -37,7 +37,7 @@ fn audit(path: &str, map: &PxbspResidentMap) {
     let leaves = map.leaves();
     let marks = map.mark_surfaces();
     let vertex_data = map.vertex_data();
-    let stride = 12usize; // ClassicAffineWordSourceVertex
+    let stride = 12usize; // psx_engine::SurfaceSourceVertex
 
     let face_bounds = |index: usize| -> Option<([i16; 3], [i16; 3])> {
         let face = faces.get(index)?;

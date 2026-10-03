@@ -21,8 +21,7 @@
 //! the same way), and needs no guest divide: everything fits `u32` for GTE
 //! screen coordinates and SZ depths.
 //!
-//! Used by `classic_affine` (feature `classic-affine-lattice`) and the
-//! GoldSrc ports' world emitters. Validated against PSoXide-emulator's
+//! Used by the GoldSrc ports' world emitters. Validated against PSoXide-emulator's
 //! texture-warp probe (`gpu/warp_probe.rs`, `examples/warp_probe_check.rs`).
 
 /// A projected vertex as the policy sees it: GTE screen position and SZ.

@@ -8,7 +8,7 @@
 
 use psx_math::int32::isqrt_i32;
 
-use psx_engine::ClassicAffineSubmit;
+use psx_engine::SurfaceSubmit;
 use psx_gpu::material::TextureWindow;
 use psx_gpu::prim::{ClassicTriTextured, QuadTextured};
 use psx_gte::math::Mat3I16;
@@ -706,7 +706,7 @@ pub unsafe fn submit_view_ray_layered_sky(
     projection: i16,
     material_tick: u32,
     output: *mut u32,
-) -> ClassicAffineSubmit {
+) -> SurfaceSubmit {
     unsafe {
         submit_view_ray_layered_sky_to_slot(
             texture_page,
@@ -747,7 +747,7 @@ pub unsafe fn submit_view_ray_layered_sky_to_slot(
     material_tick: u32,
     ot_slot: u16,
     output: *mut u32,
-) -> ClassicAffineSubmit {
+) -> SurfaceSubmit {
     let width = layer_size[0].clamp(8, 128);
     let height = layer_size[1].clamp(8, 128);
     debug_assert!(width.is_power_of_two());
@@ -846,7 +846,7 @@ pub unsafe fn submit_layered_sky_samples_to_slot(
     background_scroll: [u8; 2],
     ot_slot: u16,
     output: *mut u32,
-) -> ClassicAffineSubmit {
+) -> SurfaceSubmit {
     let width = layer_size[0].clamp(8, 128);
     let height = layer_size[1].clamp(8, 128);
     let screen_width = screen_size[0].max(1);
@@ -909,7 +909,7 @@ pub unsafe fn submit_layered_sky_samples_to_slot(
     emit_layer(atlas_origin, foreground_window, foreground_scroll);
     emit_layer(background_origin, background_window, background_scroll);
 
-    ClassicAffineSubmit {
+    SurfaceSubmit {
         next_packet: next,
         packets: (SKY_CELLS * 2 + SKY_WINDOW_PACKET_COUNT) as u32,
         hardware_triangles: (SKY_CELLS * 4) as u32,
@@ -937,7 +937,7 @@ pub unsafe fn submit_view_ray_cube_sky(
     screen_center: [i16; 2],
     projection: i16,
     output: *mut u32,
-) -> ClassicAffineSubmit {
+) -> SurfaceSubmit {
     unsafe {
         submit_view_ray_cube_sky_to_slot(
             texture_page,
@@ -969,7 +969,7 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
     projection: i16,
     ot_slot: u16,
     output: *mut u32,
-) -> ClassicAffineSubmit {
+) -> SurfaceSubmit {
     let screen_width = screen_size[0].max(1);
     let screen_height = screen_size[1].max(1);
     let mut next = output;
@@ -1210,7 +1210,7 @@ pub unsafe fn submit_view_ray_cube_sky_to_slot(
         next = next.add(SKY_WINDOW_PACKET_WORDS);
     }
 
-    ClassicAffineSubmit {
+    SurfaceSubmit {
         next_packet: next,
         packets: packets + CUBE_SKY_WINDOW_PACKET_COUNT as u32,
         hardware_triangles,
