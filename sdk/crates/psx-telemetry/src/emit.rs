@@ -35,6 +35,9 @@ const LOG_ADDR: *mut u32 = 0xBF80_2F0C as *mut u32;
 pub fn cycles() -> u32 {
     #[cfg(all(target_arch = "mips", feature = "emit"))]
     {
+        // SAFETY: 0xBF80_2F08 is the word-aligned cycle-counter port in the
+        // uncached Expansion 2 window, decoded by the emulator; the read has
+        // no side effects and touches no Rust-owned memory.
         unsafe { core::ptr::read_volatile(0xBF80_2F08 as *const u32) }
     }
     #[cfg(not(all(target_arch = "mips", feature = "emit")))]
@@ -97,8 +100,12 @@ pub fn console(message: &str) {
     {
         const PORT: *mut u32 = 0xBF80_2F0C as *mut u32;
         for &byte in message.as_bytes() {
+            // SAFETY: PORT is the word-aligned debug-log port in the uncached
+            // Expansion 2 window, not Rust-owned memory; each write only
+            // appends one byte to the emulator's log stream.
             unsafe { core::ptr::write_volatile(PORT, byte as u32) };
         }
+        // SAFETY: same debug-log port as the loop above.
         unsafe { core::ptr::write_volatile(PORT, b'\n' as u32) };
     }
     #[cfg(not(target_arch = "mips"))]
@@ -123,6 +130,8 @@ fn encode_event(kind: u8, id: u16) -> u32 {
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 #[inline(always)]
 fn emit_value(value: u32) {
+    // SAFETY: VALUE_ADDR is the word-aligned value-latch port in the uncached
+    // Expansion 2 window, not Rust-owned memory; the write only latches a word.
     unsafe {
         core::ptr::write_volatile(VALUE_ADDR, value);
     }
@@ -135,6 +144,8 @@ fn emit_value(_value: u32) {}
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 #[inline(always)]
 fn debug_byte(byte: u8) {
+    // SAFETY: LOG_ADDR is the word-aligned debug-log port in the uncached
+    // Expansion 2 window, not Rust-owned memory; the write appends one byte.
     unsafe {
         core::ptr::write_volatile(LOG_ADDR, byte as u32);
     }
@@ -147,6 +158,8 @@ fn debug_byte(_byte: u8) {}
 #[cfg(all(target_arch = "mips", feature = "emit"))]
 #[inline(always)]
 fn emit_event(kind: u8, id: u16) {
+    // SAFETY: EVENT_ADDR is the word-aligned event port in the uncached
+    // Expansion 2 window, not Rust-owned memory; the write records one event.
     unsafe {
         core::ptr::write_volatile(EVENT_ADDR, encode_event(kind, id));
     }
