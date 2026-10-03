@@ -18,6 +18,12 @@
 //!    kicked asynchronously, flip through the queue with no timeout, and
 //!    every flip is seen with its frame's GP0(1Fh) executed.
 //!
+//! 4. Queued (`psx_rt::present`): `FRAMES` more frames are published as
+//!    whole chains -- a recorded preamble (draw target and clear), the
+//!    ordering table, a recorded HUD band, GP0(1Fh) -- and the VBlank
+//!    handler flips and kicks each one. Every frame must be kicked exactly
+//!    once, with no stall recovery and no recording overflow.
+//!
 //! The verdict goes to the TTY (`PRESENT PASS ...` or `PRESENT FAIL ...`)
 //! and on screen.
 
@@ -33,6 +39,7 @@ use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::TriGouraud;
 use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_rt::interrupts;
+use psx_rt::present;
 use psx_rt::tty;
 use psx_vram::{Clut, TexDepth, Tpage};
 
@@ -52,6 +59,12 @@ const TRIS: usize = 12;
 const EMPTY: TriGouraud = TriGouraud::new([(0, 0); 3], [(0, 0, 0); 3]);
 static mut OT: OrderingTable<8> = OrderingTable::new();
 static mut PACKETS: [TriGouraud; TRIS] = [EMPTY; TRIS];
+// Stage 4 builds frame N while N-1 may still walk, so everything a chain
+// links is double-buffered.
+static mut QUEUED_OT: [OrderingTable<8>; 2] = [OrderingTable::new(), OrderingTable::new()];
+static mut QUEUED_PACKETS: [[TriGouraud; TRIS]; 2] = [[EMPTY; TRIS], [EMPTY; TRIS]];
+static mut PREAMBLE: [[u32; 64]; 2] = [[0; 64]; 2];
+static mut HUD: [[u32; 1024]; 2] = [[0; 1024]; 2];
 
 /// Wait until the queued flip is applied or `limit` VBlanks pass.
 /// Returns whether it was applied.
@@ -167,12 +180,72 @@ fn main() {
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
     gpu::draw_sync();
 
+    // 4. Whole frames through the present queue.
+    let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
+    gpu::draw_sync();
+    let before = present::stats();
+    present::start();
+    let mut overflows = 0u32;
+    let mut shown = 0u32;
+    let queue_start = interrupts::vblank_count();
+    for f in 0..FRAMES {
+        let side = (f & 1) as usize;
+        // The chain two frames back used this side's buffers.
+        present::wait_arena_free();
+        // SAFETY: wait_arena_free above guarantees no walk reads this side.
+        let (ot, packets, preamble, hud) = unsafe {
+            (
+                &mut (*addr_of_mut!(QUEUED_OT))[side],
+                &mut (*addr_of_mut!(QUEUED_PACKETS))[side],
+                &mut (*addr_of_mut!(PREAMBLE))[side],
+                &mut (*addr_of_mut!(HUD))[side],
+            )
+        };
+        build_frame(ot, packets, f, false);
+        unsafe { psx_io::gpu::begin_capture(hud.as_mut_ptr(), hud.len()) };
+        gpu::fill_rect(0, fb.buffer_y(fb.drawing) + 200, 320, 40, 20, 24, 60);
+        font.draw_text(8, 212, "QUEUED HUD", WHITE);
+        let hud_chain = psx_io::gpu::end_capture();
+        match hud_chain {
+            Ok(Some(chain)) => unsafe {
+                chain.link_to(gpu::DRAW_DONE_NODE.as_ptr());
+                ot.end_with_chain(chain.head());
+            },
+            _ => {
+                overflows += 1;
+                ot.end_with_draw_done();
+            }
+        }
+        unsafe { psx_io::gpu::begin_capture(preamble.as_mut_ptr(), preamble.len()) };
+        fb.apply_draw_target();
+        fb.clear(8, 24, 8);
+        let Ok(Some(head)) = psx_io::gpu::end_capture() else {
+            overflows += 1;
+            continue;
+        };
+        unsafe { head.link_to(ot.submit_head()) };
+        // Show the frame before this one when this one starts drawing.
+        let display = shown;
+        shown = fb.begin_deferred_swap();
+        present::wait_slot_empty();
+        unsafe { present::publish(head.head(), display) };
+    }
+    present::quiesce();
+    psx_io::gpu::write_gp1(shown);
+    let queue_vblanks = interrupts::vblank_count().wrapping_sub(queue_start);
+    let after = present::stats();
+    let kicks = after.kicks.wrapping_sub(before.kicks);
+    let recoveries = after.recoveries.wrapping_sub(before.recoveries);
+
     let checks = [
         (held, "flip without GP0(1Fh) was applied"),
         (released, "GP0(1Fh) did not release the flip"),
         (timeouts == 0, "queued flips timed out"),
         (early == 0, "flip before the frame's GP0(1Fh)"),
         (vblanks >= FRAMES, "fewer VBlanks than frames"),
+        (kicks == FRAMES, "queued frames not each kicked once"),
+        (recoveries == 0, "present queue stalled"),
+        (overflows == 0, "recording overflowed"),
         (interrupts::fault_count() == 0, "exceptions other than IRQs"),
     ];
     let failures = checks.iter().filter(|check| !check.0).count() as u32;
@@ -186,6 +259,8 @@ fn main() {
         line("vblanks", vblanks),
         line("timeouts", timeouts),
         line("early", early),
+        line("kicks", kicks),
+        line("queue vblanks", queue_vblanks),
     ];
     let (banner, tint) = if failures == 0 {
         ("PRESENT PASS", GREEN)
@@ -199,7 +274,6 @@ fn main() {
     }
     tty::println("");
 
-    let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     loop {
         fb.apply_draw_target();
         fb.clear(10, 12, 20);

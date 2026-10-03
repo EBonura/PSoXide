@@ -36,6 +36,7 @@ mod mem;
 pub mod bios;
 pub mod cache;
 pub mod interrupts;
+pub mod present;
 pub mod scratchpad;
 #[cfg(target_arch = "mips")]
 pub mod tty;
