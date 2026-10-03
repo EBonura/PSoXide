@@ -161,7 +161,7 @@ impl BlendMode {
 ///
 /// `clut_word` is the packed CLUT handle used by indexed textures.
 /// `tpage_word` is the packed tpage word normally produced by
-/// `Tpage::uv_tpage_word(0)`. The material rewrites the tpage blend
+/// `TexturePage::uv_tpage_word(0)`. The material rewrites the tpage blend
 /// bits from [`BlendMode`] so one base tpage can be reused across
 /// opaque and translucent variants.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -188,7 +188,7 @@ pub struct TexturedPacketMaterial {
     pub color_command_word: u32,
     /// CLUT word shifted into the high half of vertex-0 UV.
     pub clut_high_word: u32,
-    /// Tpage word shifted into the high half of vertex-1 UV.
+    /// TexturePage word shifted into the high half of vertex-1 UV.
     pub tpage_high_word: u32,
 }
 
@@ -229,7 +229,7 @@ pub struct TexturedGouraudPacketMaterial {
     pub color0_command_word: u32,
     /// CLUT word shifted into the high half of vertex-0 UV.
     pub clut_high_word: u32,
-    /// Tpage word shifted into the high half of vertex-1 UV.
+    /// TexturePage word shifted into the high half of vertex-1 UV.
     pub tpage_high_word: u32,
 }
 

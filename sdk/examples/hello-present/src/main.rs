@@ -39,9 +39,9 @@ use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_rt::interrupts;
 use psx_rt::tty;
 use psx_rt::Peripherals;
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 const WHITE: (u8, u8, u8) = (220, 220, 230);
 const GREEN: (u8, u8, u8) = (80, 220, 100);

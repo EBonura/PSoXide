@@ -13,9 +13,9 @@ use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_io::cd;
 use psx_pad::{button, poll_port1, ButtonState};
 use psx_spu::{self as spu, CdVolume, Volume};
-use psx_vram::{Clut, TexDepth, Tpage};
+use psx_vram::{Clut, TextureDepth, TexturePage};
 
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 const TRACK_GONCHAROV: u8 = 2;
 

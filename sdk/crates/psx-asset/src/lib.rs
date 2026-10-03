@@ -2242,7 +2242,7 @@ fn scale_i32_q12(value: i32, scale_q12: i32) -> i32 {
 /// RGB555 halfwords.
 ///
 /// Construct by `Texture::from_bytes(&blob)`; upload to VRAM via
-/// [`Texture::upload`], which returns the matching `Tpage` + `Clut`
+/// [`Texture::upload`], which returns the matching `TexturePage` + `Clut`
 /// handles ready to feed into primitive constructors.
 #[derive(Copy, Clone, Debug)]
 pub struct Texture<'a> {
