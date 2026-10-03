@@ -5,7 +5,7 @@
 //! the on-wire GP0 word order so a reader can cross-reference
 //! PSX-SPX without redundant decoding.
 //!
-//! Builders (`new` constructors) zero the tag; [`crate::ot::OrderingTable::add`]
+//! Builders (`new` constructors) zero the tag; [`crate::frame::OtFrame::add`]
 //! fills it in during insertion with `(words_after_tag << 24) | next`.
 
 use crate::material::{
@@ -1351,6 +1351,58 @@ impl Sprite {
         }
     }
 }
+
+/// A GPU packet that can be linked into an ordering table as one DMA node.
+///
+/// [`crate::frame::OtFrame::add`] uses it to insert a packet without a
+/// separate word count.
+///
+/// # Safety
+///
+/// The implementing type must be `#[repr(C)]` with 4-byte alignment and a
+/// `u32` tag word as its first field, followed by at least `WORDS` more
+/// initialised `u32`s that form the packet's GP0 payload. `WORDS` must not
+/// exceed [`crate::MAX_NODE_WORDS`]. The type must have no interior
+/// mutability, so the payload cannot change while it is borrowed.
+pub unsafe trait GpuPacket {
+    /// Payload words after the tag.
+    const WORDS: u8;
+}
+
+macro_rules! impl_gpu_packet {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            // SAFETY: an SDK packet: `#[repr(C, align(4))]`, tag first, then
+            // `WORDS` payload words of plain `u32` data (checked below).
+            unsafe impl GpuPacket for $ty {
+                const WORDS: u8 = <$ty>::WORDS;
+            }
+            const _: () = {
+                assert!(core::mem::size_of::<$ty>() >= 4 * (1 + <$ty>::WORDS as usize));
+                assert!(core::mem::align_of::<$ty>() >= 4);
+            };
+        )+
+    };
+}
+
+impl_gpu_packet!(
+    TriFlat,
+    TriGouraud,
+    QuadFlat,
+    RectFlat,
+    QuadGouraud,
+    QuadGouraudBlended,
+    LineMono,
+    TriTextured,
+    ClassicTriTextured,
+    TriTexturedGouraud,
+    ClassicTriTexturedGouraud,
+    ClassicQuadTexturedGouraud,
+    QuadTexturedGouraud,
+    QuadTextured,
+    QuadTexturedMaterial,
+    Sprite,
+);
 
 // Every packet here fits one linked-list node (see `crate::MAX_NODE_WORDS`).
 const _: () = {
