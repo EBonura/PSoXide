@@ -36,6 +36,7 @@ dependencies = [
  "psx-fmv",
  "psx-font",
  "psx-gpu",
+ "psx-hw",
  "psx-io",
  "psx-pack",
  "psx-rt",
@@ -88,6 +89,7 @@ dependencies = [
 name = "psx-fmv"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psx-io",
 ]
 
@@ -161,6 +163,7 @@ dependencies = [
 name = "psx-pack"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psx-io",
 ]
 

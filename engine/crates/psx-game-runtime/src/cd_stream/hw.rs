@@ -378,13 +378,13 @@ pub(super) unsafe fn dma_read_sector(buffer: *mut u32, polls: &mut u32) {
     // the channel yet (an open item from the SDK soundness audit).
     unsafe {
         psx_io::dma::start(
-            psx_io::dma::Channel::Cdrom,
+            psx_io::dma::Channel::Cd,
             psx_io::dma::Transfer {
-                madr: buffer as u32,
-                bcr: psx_io::dma::bcr_words(SECTOR_WORDS as u16),
+                address: buffer as u32,
+                size: psx_io::dma::size_words(SECTOR_WORDS as u16),
                 // Matches the BIOS-style burst control word that the emulator
                 // models at Redux's quarter-rate CD DMA completion cadence.
-                chcr: 0x1140_0100,
+                control: 0x1140_0100,
             },
         )
     };
