@@ -43,6 +43,7 @@ unused_must_use = "deny"
 
 [workspace.lints.clippy]
 dbg_macro = "deny"
+undocumented_unsafe_blocks = "warn"
 todo = "deny"
 too_many_arguments = "allow"
 
