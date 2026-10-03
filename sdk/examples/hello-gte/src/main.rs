@@ -102,7 +102,7 @@ fn main() {
         }
 
         if frame == 0 {
-            let flag = scene::read_flag();
+            let flag = scene::error_flags();
             if flag != 0 {
                 tty::println("hello-gte: GTE flag non-zero at first frame");
             }
