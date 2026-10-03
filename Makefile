@@ -18,3 +18,7 @@ lint:
 	cargo run --locked -q -p xtask -- check-mfc0 sdk
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+	# Again for the guest: the cfg(target_arch = "mips") MMIO, DMA and asm paths
+	# only exist there. Libraries only; the tests need std.
+	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --target $(TARGET) \
+		-Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --all-features -- -D warnings
