@@ -24,9 +24,10 @@
 //!    offset and clear as leading packets: the handler writes only GP1.
 //! 3. Before [`publish`], call [`wait_slot_empty`]. Before rebuilding memory
 //!    the frame before the last published one used, call [`wait_arena_free`].
-//! 4. Do not touch GP0, GP1 or DMA channel 2 through the ports while
-//!    [`slot_full`]: the handler owns the GPU until it has kicked. Image
-//!    uploads in particular need [`quiesce`] first.
+//! 4. Direct GP0 or GP1 writes and GPU DMA setup are safe at any time:
+//!    [`publish`] arms psx-io's direct-access guard, so the first such access
+//!    after it runs [`quiesce`]. Code that only records (psx-io's GP0
+//!    capture) keeps the overlap.
 //!
 //! Keep interrupt source 1 (GPU) masked in `I_MASK`: GP0(1Fh) raises it and
 //! the handler does not acknowledge it. The handler returns past a GTE
@@ -57,6 +58,8 @@ pub struct PresentStats {
 /// Raise the draw-done flag once, so the first published frame's edge finds
 /// it set. Nothing may be queued and channel 2 must be idle.
 pub fn start() {
+    // Any direct GPU access while a published frame may walk waits it out.
+    psx_io::gpu::set_direct_access_guard(quiesce);
     #[cfg(target_arch = "mips")]
     {
         psx_io::gpu::wait_cmd_ready();
@@ -105,6 +108,7 @@ pub unsafe fn publish(head: *const u32, display: u32) {
         );
         write_volatile(addr_of_mut!(__psx_rt_present_head), head as u32);
     }
+    psx_io::gpu::arm_direct_access_guard();
     #[cfg(not(target_arch = "mips"))]
     let _ = (head, display);
 }

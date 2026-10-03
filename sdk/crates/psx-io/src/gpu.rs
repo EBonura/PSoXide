@@ -13,10 +13,20 @@ use psx_hw::gpu::{GpuStat, GP0, GP1, GPUREAD, GPUSTAT};
 /// is unambiguous.
 #[inline(always)]
 pub fn write_gp0(word: u32) {
+    if slow_path() {
+        write_gp0_slow(word);
+        return;
+    }
+    unsafe { crate::write32(GP0, word) }
+}
+
+#[inline(never)]
+fn write_gp0_slow(word: u32) {
     if is_capturing() {
         capture_word(word);
         return;
     }
+    run_direct_access_guard();
     unsafe { crate::write32(GP0, word) }
 }
 
@@ -103,12 +113,14 @@ pub unsafe fn begin_capture(buffer: *mut u32, words: usize) {
         capture.end = buffer.add(words);
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CAPTURE.active), true);
     }
+    refresh_slow_path();
 }
 
 /// Stop recording. `Ok(None)` when nothing was written.
 pub fn end_capture() -> Result<Option<Gp0Recording>, CaptureOverflow> {
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(CAPTURE.active), false);
+        refresh_slow_path();
         let capture = &mut *core::ptr::addr_of_mut!(CAPTURE);
         if capture.overflowed {
             return Err(CaptureOverflow);
@@ -160,7 +172,60 @@ fn capture_word(word: u32) {
 /// Push a command to `GP1`.
 #[inline(always)]
 pub fn write_gp1(word: u32) {
+    if slow_path() && !is_capturing() {
+        run_direct_access_guard();
+    }
     unsafe { crate::write32(GP1, word) }
+}
+
+/// Set by a capture or an armed guard: the rare state `write_gp0` checks for
+/// with one load before taking its plain port write.
+static mut SLOW: bool = false;
+static mut GUARD_ARMED: bool = false;
+static mut GUARD: Option<fn()> = None;
+
+#[inline(always)]
+fn slow_path() -> bool {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(SLOW)) }
+}
+
+fn refresh_slow_path() {
+    unsafe {
+        let slow = core::ptr::read_volatile(core::ptr::addr_of!(CAPTURE.active))
+            || core::ptr::read_volatile(core::ptr::addr_of!(GUARD_ARMED));
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(SLOW), slow);
+    }
+}
+
+/// Register the function that makes direct GPU access safe while a queued
+/// frame may be walking (`psx_rt::present` registers its quiesce). It runs
+/// once, on the first direct GP0 or GP1 write or GPU DMA setup after
+/// [`arm_direct_access_guard`], and is then disarmed.
+pub fn set_direct_access_guard(guard: fn()) {
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(GUARD), Some(guard)) };
+}
+
+/// Arm the guard: the GPU may be busy with work the CPU handed off, so the
+/// next direct access must wait for it.
+pub fn arm_direct_access_guard() {
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(GUARD_ARMED), true) };
+    refresh_slow_path();
+}
+
+/// Run and disarm the guard if it is armed. Direct-access paths outside this
+/// module (GPU DMA setup) call it first.
+#[inline]
+pub fn run_direct_access_guard() {
+    unsafe {
+        if !core::ptr::read_volatile(core::ptr::addr_of!(GUARD_ARMED)) {
+            return;
+        }
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(GUARD_ARMED), false);
+        refresh_slow_path();
+        if let Some(guard) = core::ptr::read_volatile(core::ptr::addr_of!(GUARD)) {
+            guard();
+        }
+    }
 }
 
 /// Read the GPU status register.
