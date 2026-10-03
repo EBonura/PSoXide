@@ -640,6 +640,7 @@ pub const DEFAULT_SETUP_SPINS: u32 = 1_024;
 ///
 /// The returned [`PadState`] always contains active-high buttons; in
 /// analog mode it also contains the four DualShock stick bytes.
+#[doc(alias = "PadRead")]
 pub fn poll_port1() -> PadState {
     poll_state(false)
 }
