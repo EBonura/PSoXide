@@ -14,6 +14,9 @@ struct State {
 impl State {
     fn finish(&mut self) {
         for (ptr, original) in self.pending.drain(..) {
+            // SAFETY: `submit` recorded `ptr` from a node of the stream's static backing slice,
+            // which its contract keeps valid until this completion, and `original.len()` words were
+            // readable then.
             let now = unsafe { std::slice::from_raw_parts(ptr, original.len()) };
             assert_eq!(now, original, "in-flight node mutated before completion");
             self.output.extend_from_slice(&original[1..]);
@@ -37,10 +40,14 @@ unsafe impl CommandStreamDma for Dma {
         let mut s = self.0.borrow_mut();
         assert!(s.pending.is_empty(), "submitted over busy DMA");
         loop {
+            // SAFETY: by `submit`'s contract `p` (the head, then each followed link) points at a
+            // valid node's tag word.
             let tag = unsafe { *p };
             let n = (tag >> 24) as usize;
             assert!((1..=15).contains(&n));
             s.nodes.push(n);
+            // SAFETY: the tag reports `n` payload words, so under `submit`'s contract the node
+            // spans `n + 1` valid words.
             s.pending
                 .push((p, unsafe { std::slice::from_raw_parts(p, n + 1) }.to_vec()));
             let link = tag & 0xffffff;
@@ -49,6 +56,9 @@ unsafe impl CommandStreamDma for Dma {
             }
             let delta = link.wrapping_sub(p as u32 & 0xffffff) & 0xffffff;
             assert!(delta > 0 && delta % 4 == 0);
+            // SAFETY: links stay inside the stream's one backing slice and point forward (delta > 0
+            // is asserted), and that slice is far smaller than 16 MiB, so the 24-bit delta is the
+            // true word distance to the next node and stays in bounds.
             p = unsafe { p.add(delta as usize / 4) };
         }
     }

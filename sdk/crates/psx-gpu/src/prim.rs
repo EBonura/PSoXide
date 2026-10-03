@@ -1395,6 +1395,8 @@ mod tests {
             ],
             BlendMode::AddQuarter,
         );
+        // SAFETY: QuadGouraudBlended is `repr(C, align(4))` with only u32 fields, so `quad` is
+        // aligned and its size_of / 4 words are initialised u32s that outlive the slice.
         let words = unsafe {
             core::slice::from_raw_parts(
                 (&quad as *const QuadGouraudBlended).cast::<u32>(),
@@ -1431,6 +1433,8 @@ mod tests {
         assert_eq!(core::mem::size_of::<QuadTexturedGouraud>(), 14 * 4);
         assert_eq!(QuadTexturedGouraud::WORDS, 13);
 
+        // SAFETY: QuadTexturedGouraud is `repr(C, align(4))` with only u32 fields, and its size was
+        // just asserted to be 14 words, so the slice covers exactly `quad`.
         let words = unsafe {
             core::slice::from_raw_parts((&quad as *const QuadTexturedGouraud).cast::<u32>(), 14)
         };
@@ -1494,6 +1498,8 @@ mod tests {
             0x0105_0000,
             77,
         );
+        // SAFETY: every color has a clear high byte and the clut / tpage words hold only their high
+        // halfwords, as the unchecked constructor requires.
         let unchecked_tri = unsafe {
             ClassicTriTexturedGouraud::with_staged_slot_prepacked_unchecked(
                 tri_verts,
@@ -1504,12 +1510,16 @@ mod tests {
                 77,
             )
         };
+        // SAFETY: ClassicTriTexturedGouraud is `repr(C, align(4))` with only u32 fields, so the
+        // slice covers exactly the initialised local, which outlives it.
         let checked_tri_words = unsafe {
             core::slice::from_raw_parts(
                 (&raw const checked_tri).cast::<u32>(),
                 core::mem::size_of::<ClassicTriTexturedGouraud>() / core::mem::size_of::<u32>(),
             )
         };
+        // SAFETY: ClassicTriTexturedGouraud is `repr(C, align(4))` with only u32 fields, so the
+        // slice covers exactly the initialised local, which outlives it.
         let unchecked_tri_words = unsafe {
             core::slice::from_raw_parts(
                 (&raw const unchecked_tri).cast::<u32>(),
@@ -1529,6 +1539,8 @@ mod tests {
             0x0105_0000,
             88,
         );
+        // SAFETY: every color has a clear high byte and the clut / tpage words hold only their high
+        // halfwords, as the unchecked constructor requires.
         let unchecked_quad = unsafe {
             ClassicQuadTexturedGouraud::with_staged_slot_prepacked_unchecked(
                 quad_verts,
@@ -1539,12 +1551,16 @@ mod tests {
                 88,
             )
         };
+        // SAFETY: ClassicQuadTexturedGouraud is `repr(C, align(4))` with only u32 fields, so the
+        // slice covers exactly the initialised local, which outlives it.
         let checked_quad_words = unsafe {
             core::slice::from_raw_parts(
                 (&raw const checked_quad).cast::<u32>(),
                 core::mem::size_of::<ClassicQuadTexturedGouraud>() / core::mem::size_of::<u32>(),
             )
         };
+        // SAFETY: ClassicQuadTexturedGouraud is `repr(C, align(4))` with only u32 fields, so the
+        // slice covers exactly the initialised local, which outlives it.
         let unchecked_quad_words = unsafe {
             core::slice::from_raw_parts(
                 (&raw const unchecked_quad).cast::<u32>(),
