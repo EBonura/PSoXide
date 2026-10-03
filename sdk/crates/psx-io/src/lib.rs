@@ -18,9 +18,6 @@
 pub mod cdda;
 pub mod cdrom;
 pub mod disc_base;
-// dma.rs is being reworked on soundness/dma-gpu, which documents its unsafe
-// blocks; drop this allow when that lands.
-#[allow(clippy::undocumented_unsafe_blocks)]
 pub mod dma;
 pub mod gpu;
 pub mod gte;

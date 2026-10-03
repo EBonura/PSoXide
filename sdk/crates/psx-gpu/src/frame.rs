@@ -133,6 +133,7 @@ impl<const N: usize> OrderingTable<N> {
     ///
     /// The table stays borrowed until the frame is submitted and its walk
     /// has finished, so it can neither be cleared nor moved under the DMA.
+    #[doc(alias = "ClearOTagR")]
     #[inline]
     pub fn frame(&mut self) -> OtFrame<'_, N> {
         self.clear();
@@ -213,6 +214,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     }
 
     /// Kick the walk and wait for it.
+    #[doc(alias = "DrawOTag")]
     #[inline]
     pub fn submit(self, _dma: &mut GpuDma) {
         // SAFETY: every node is the table (borrowed for 'f), a packet
