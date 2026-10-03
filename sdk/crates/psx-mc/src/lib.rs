@@ -160,6 +160,11 @@ pub trait Block {
 // --------------------------------------------------------------------------
 
 /// One file as reported by [`Card::list`].
+///
+/// The fields stay public because games build `[Entry; N]` listing buffers
+/// with a struct literal (voxide's save menu, the hello-memcard example).
+/// Nothing relies on them for memory safety: [`Entry::name`] checks both the
+/// length and the UTF-8.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// File name bytes (ASCII), `name_len` valid.
@@ -171,10 +176,16 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// The file name as a `&str` (names are ASCII by construction).
+    /// The file name as a `&str`.
+    ///
+    /// Names this crate writes are ASCII, but a listing reads whatever bytes
+    /// the card holds, so a corrupt or foreign card can carry anything. Such
+    /// a name, or a `name_len` past the buffer, reads as `"?"`.
     pub fn name(&self) -> &str {
-        // SAFETY: names only ever contain the ASCII bytes validated on write.
-        unsafe { core::str::from_utf8_unchecked(&self.name[..self.name_len as usize]) }
+        self.name
+            .get(..self.name_len as usize)
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .unwrap_or("?")
     }
 }
 
