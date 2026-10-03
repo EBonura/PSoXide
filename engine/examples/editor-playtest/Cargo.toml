@@ -87,6 +87,9 @@ hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
 # and draw packets, so probe builds request it explicitly via
 # EDITOR_PLAYTEST_FEATURES="... vert-debug-overlay".
 vert-debug-overlay = ["psx-engine/vert-debug"]
+# Hand every gameplay frame to psx-rt's VBlank-kicked present queue
+# (RenderSubmission::PresentQueue) instead of kicking it from the runner.
+present-queue = ["psx-engine/present-queue"]
 world-order-global = []
 world-order-slot = []
 world-order-linked = []

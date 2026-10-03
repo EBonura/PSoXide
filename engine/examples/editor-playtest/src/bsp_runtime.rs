@@ -1515,6 +1515,17 @@ impl BspRuntime {
         )
     }
 
+    /// True when last frame's world, with an eighth to spare, would fit in
+    /// the slots the in-flight frame leaves free, so drawing it now needs no
+    /// fence.
+    pub(super) fn fits_before_fence(&self, primitive_packets: &PrimitivePacketArena<'_>) -> bool {
+        let predicted_words = self
+            .last_world_packet_words
+            .saturating_add(self.last_world_packet_words / 8);
+        !primitive_packets.fence_pending()
+            || primitive_packets.remaining_words_before_fence() >= predicted_words
+    }
+
     pub(super) fn draw<const DEPTH: usize>(
         &mut self,
         camera: WorldCamera,
@@ -1560,12 +1571,7 @@ impl BspRuntime {
         // characters near the camera grow the in-flight frame enough to force
         // that on every frame, doubling the room stage. The retry below stays
         // as the safety net for a world that outgrows the prediction.
-        let predicted_words = self
-            .last_world_packet_words
-            .saturating_add(self.last_world_packet_words / 8);
-        if primitive_packets.fence_pending()
-            && primitive_packets.remaining_words_before_fence() < predicted_words
-        {
+        if !self.fits_before_fence(primitive_packets) {
             primitive_packets.fence();
         }
         let mut redraws = 0u32;

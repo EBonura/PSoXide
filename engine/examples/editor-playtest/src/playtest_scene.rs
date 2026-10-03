@@ -268,9 +268,79 @@ mod target_ui_tests {
     }
 }
 
+impl Playtest {
+    /// The cooked BSP world, then the sky that shares its farthest OT slot.
+    fn draw_world_and_sky(
+        &mut self,
+        camera: WorldCamera,
+        room_record: Option<&LevelRoomRecord>,
+        sim_tick: SimTick,
+        primitive_packets: &mut PrimitivePacketArena<'_>,
+        ot: &mut OtFrame<'_, OT_DEPTH>,
+    ) {
+        let material_tick = self.gameplay_tick(sim_tick).as_u32();
+        let mut visible_sky_aperture = false;
+        if let Some(bsp) = self.bsp.as_mut() {
+            telemetry::stage_begin(telemetry::stage::ROOM);
+            sort_probe_class(SORT_CLASS_WORLD);
+            let cinematic_visibility = (self.opening.active() && !self.opening.gameplay_camera())
+                .then(|| {
+                    let player = self.motor.position();
+                    RoomPoint::new(player.x, player.y + 32, player.z)
+                });
+            visible_sky_aperture = bsp.draw(
+                camera,
+                cinematic_visibility,
+                material_tick,
+                &self.destructibles,
+                primitive_packets,
+                ot,
+            );
+            telemetry::stage_end(telemetry::stage::ROOM);
+        }
+
+        // Sky shares the farthest OT slot with the maximum-depth PXBSP packet.
+        // OT insertion prepends, so inserting the sky after PXBSP makes DMA
+        // execute the sky first and keeps even a slot-2047 wall in front.
+        if let Some(room_record) = room_record {
+            telemetry::stage_begin(telemetry::stage::SKY);
+            sort_probe_class(SORT_CLASS_SKY);
+            draw_scene_sky(
+                room_record.sky,
+                camera,
+                material_tick,
+                visible_sky_aperture,
+                primitive_packets,
+                ot,
+            );
+            telemetry::stage_end(telemetry::stage::SKY);
+            sort_probe_class(SORT_CLASS_WORLD);
+        }
+    }
+}
+
+/// Arena words a present-queue frame reserves for its recorded overlay
+/// (HUD, panels, damage numbers, fades).
+const PRESENT_OVERLAY_WORDS: usize = 1024;
+
+impl Playtest {
+    /// Hand the state the last render prepared to `render_overlay`, which
+    /// draws it once that frame is presented.
+    fn commit_overlay_state(&mut self) {
+        self.overlay_camera = self.prepared_overlay_camera;
+        self.overlay_sim_tick = self.prepared_overlay_sim_tick;
+        self.overlay_poi_panel_frame = self.prepared_poi_panel_frame;
+        self.overlay_poi_page_type_frame = self.prepared_poi_page_type_frame;
+    }
+}
+
 impl Scene for Playtest {
     fn render_submission(&self) -> RenderSubmission {
-        RenderSubmission::QueuedDoubleBuffered
+        if cfg!(feature = "present-queue") {
+            RenderSubmission::PresentQueue
+        } else {
+            RenderSubmission::QueuedDoubleBuffered
+        }
     }
 
     fn take_gameplay_sfx_events(&mut self) -> u32 {
@@ -1025,50 +1095,41 @@ impl Scene for Playtest {
                 PrimitivePacketArena::new_paired(&mut render_scratch.primitive_packets, frames),
             )
         };
+        self.queued_head = core::ptr::null();
+        let present_hook = ctx.present_queue_hook();
+        if let Some(hook) = present_hook {
+            // The walk continues past slot 0 into the overlay the runner
+            // records for this frame.
+            unsafe { ot.end_with_chain(hook) };
+        }
 
         let room_record = ROOMS.get(self.room_index.to_usize());
-        // The cooked BSP replaces only static grid surfaces. It writes its
-        // tagged packets into the same arena/OT used below, after which the
-        // ordinary actor, equipment, effect, and overlay passes continue.
-        let bsp_material_tick = self.gameplay_tick(ctx.sim_tick).as_u32();
-        let mut visible_sky_aperture = false;
+        // Which world objects the cooked BSP lets the passes below draw.
         let mut world_object_visibility = WorldObjectVisibility::ALL;
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
-            sort_probe_class(SORT_CLASS_WORLD);
             world_object_visibility = bsp.visible_world_objects(camera, &self.destructibles);
-            let cinematic_visibility = (self.opening.active() && !self.opening.gameplay_camera())
-                .then(|| {
-                    let player = self.motor.position();
-                    RoomPoint::new(player.x, player.y + 32, player.z)
-                });
-            visible_sky_aperture = bsp.draw(
-                camera,
-                cinematic_visibility,
-                bsp_material_tick,
-                &self.destructibles,
-                &mut primitive_packets,
-                &mut ot,
-            );
             telemetry::stage_end(telemetry::stage::ROOM);
         }
-
-        // Sky shares the farthest OT slot with the maximum-depth PXBSP packet.
-        // OT insertion prepends, so inserting the sky after PXBSP makes DMA
-        // execute the sky first and keeps even a slot-2047 wall in front.
-        if let Some(room_record) = room_record {
-            telemetry::stage_begin(telemetry::stage::SKY);
-            sort_probe_class(SORT_CLASS_SKY);
-            draw_scene_sky(
-                room_record.sky,
+        // The cooked BSP world is the frame's largest block of packets and
+        // needs it contiguous. When it fits beside the frame the GPU may still
+        // be reading, it goes first and nothing waits. When it does not, it
+        // goes last, so the paired-arena fence (the wait for that frame's
+        // walk) comes late in the frame, when the walk has usually finished,
+        // instead of costing most of a draw up front. Characters and props
+        // emit their packets too quickly to push the fence back themselves.
+        let world_first = self
+            .bsp
+            .as_ref()
+            .is_none_or(|bsp| bsp.fits_before_fence(&primitive_packets));
+        if world_first {
+            self.draw_world_and_sky(
                 camera,
-                bsp_material_tick,
-                visible_sky_aperture,
+                room_record,
+                ctx.sim_tick,
                 &mut primitive_packets,
                 &mut ot,
             );
-            telemetry::stage_end(telemetry::stage::SKY);
-            sort_probe_class(SORT_CLASS_WORLD);
         }
 
         let mut world = begin_world_render_pass(&mut ot, &mut render_scratch.world_commands);
@@ -2148,6 +2209,16 @@ impl Scene for Playtest {
             &mut ot,
             &mut primitive_packets,
         );
+
+        if !world_first {
+            self.draw_world_and_sky(
+                camera,
+                room_record,
+                ctx.sim_tick,
+                &mut primitive_packets,
+                &mut ot,
+            );
+        }
         telemetry::counter(
             telemetry::counter::TRI_PRIMITIVES,
             primitive_packets.len() as u32,
@@ -2157,6 +2228,22 @@ impl Scene for Playtest {
             primitive_packets.remaining() as u32,
         );
         telemetry::counter(telemetry::counter::WORLD_COMMANDS, world_command_len as u32);
+        if present_hook.is_some() {
+            // Words for the runner to record the overlay into. The whole
+            // reservation is committed: the recording links its nodes by
+            // address, and a descending frame would slide a shorter prefix.
+            let words = PRESENT_OVERLAY_WORDS.min(primitive_packets.remaining_words())
+                / PRIMITIVE_PACKET_SLOT_WORDS
+                * PRIMITIVE_PACKET_SLOT_WORDS;
+            if let Some(mut reservation) = primitive_packets.reserve_packet_words(words) {
+                let overlay = reservation.words_mut().as_mut_ptr();
+                if reservation.commit(words, 1).is_some() {
+                    self.queued_head = ot.submit_head();
+                    self.queued_overlay = overlay;
+                    self.queued_overlay_words = words;
+                }
+            }
+        }
         // The next frame builds beside this one while its list is walked.
         primitive_packets.finish_paired_frame();
         // Submission is deliberately split from packet preparation. The app
@@ -2165,11 +2252,21 @@ impl Scene for Playtest {
         let _ = ot;
     }
 
+    fn take_queued_frame(&mut self, _ctx: &mut Ctx) -> Option<QueuedFrame> {
+        let head = core::mem::replace(&mut self.queued_head, core::ptr::null());
+        if head.is_null() {
+            return None;
+        }
+        self.commit_overlay_state();
+        Some(QueuedFrame {
+            head,
+            overlay: self.queued_overlay,
+            overlay_words: self.queued_overlay_words,
+        })
+    }
+
     fn submit_render(&mut self, _ctx: &mut Ctx) {
-        self.overlay_camera = self.prepared_overlay_camera;
-        self.overlay_sim_tick = self.prepared_overlay_sim_tick;
-        self.overlay_poi_panel_frame = self.prepared_poi_panel_frame;
-        self.overlay_poi_page_type_frame = self.prepared_poi_page_type_frame;
+        self.commit_overlay_state();
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         // SAFETY: `render` built OT[built] this frame from PACKET_FRAMES' paired
         // scratch and static packets. Neither is touched again until the
