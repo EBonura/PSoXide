@@ -210,7 +210,7 @@ pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 ///
 /// PXBSP installs ZSF3=0x155 and ZSF4=0x100, so a flat triangle/quad lands at
 /// `SZ / 4`, and its view transform carries a uniform 3.0 scale
-/// (`psx_bsp::render::XBSP_VIEW_SCALE_Q12`), so `SZ` is three times the true
+/// (`psx_bsp::render::PXBSP_VIEW_SCALE_Q12`), so `SZ` is three times the true
 /// view depth: the world keys at `3 z / 4` and fills the 2,048-slot table by
 /// `z = 2731`. Mapping `0..=2731` onto the 2,046-slot world band reproduces
 /// the triangle formula to within a slot for equal-depth vertices. Models,
@@ -831,7 +831,7 @@ mod pxbsp_depth_order_tests {
     use super::*;
 
     /// The classic path projects through a view scaled by
-    /// `XBSP_VIEW_SCALE_Q12`, so its `SZ` for a vertex at true view depth
+    /// `PXBSP_VIEW_SCALE_Q12`, so its `SZ` for a vertex at true view depth
     /// `z` is `z * scale`; the runtime range must reproduce the OTZ that
     /// follows from that, not from `z` itself.
     #[cfg(feature = "ot-2048")]
@@ -839,7 +839,7 @@ mod pxbsp_depth_order_tests {
     fn dynamic_world_range_matches_classic_affine_triangle_otz() {
         assert_eq!(OT_DEPTH, 2048);
         assert_eq!(PXBSP_CLASSIC_DEPTH_RANGE.far(), 2731);
-        let scale = psx_bsp::render::XBSP_VIEW_SCALE_Q12;
+        let scale = psx_bsp::render::PXBSP_VIEW_SCALE_Q12;
         for depth in [0, 4, 32, 127, 256, 512, 1024, 2048, 2730, 2731] {
             let dynamic_slot = WORLD_BAND
                 .slot::<OT_DEPTH>(PXBSP_CLASSIC_DEPTH_RANGE, depth)

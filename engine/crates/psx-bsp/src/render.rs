@@ -324,15 +324,36 @@ pub fn configure_projection() {
     scene::set_average_z_weights(0x155, 0x100);
 }
 
-/// Uniform scale the XBSP view remaps bake into the rotation (3.0 in Q12).
+/// Uniform scale baked into the PXBSP view rotation: 3.0 in Q12.
 ///
-/// Projection divides it back out, so screen positions are unchanged, but
-/// every GTE `SZ` the classic affine path reads is this many times the true
-/// view depth, and so is every OTZ it stages (`SZ / 4` with the installed
-/// `ZSF3 = 0x155`, `ZSF4 = 0x100`). Anything else that sorts into the same
-/// ordering table must key its depth through the same law; see
-/// [`pxbsp_classic_far_depth`].
-pub const XBSP_VIEW_SCALE_Q12: i32 = 0x3000;
+/// What it does. Screen position is `H * x / z`, so a uniform factor on the
+/// view cancels and every pixel lands where it would at scale 1. What it
+/// changes is the integer resolution of the GTE's view-space results: the
+/// IR registers and `SZ` hold `S` times the true view coordinate, so depth,
+/// the perspective divide and the OT key the classic path stages from it
+/// (`SZ / 4` under the `ZSF3 = 0x155`, `ZSF4 = 0x100` weights installed by
+/// [`configure_projection`]) are all resolved in `1/S` world units.
+///
+/// The bounds on S, for H = 160 and a 2048-slot table:
+/// - the rotation entries become `S * 4096` in a signed 16-bit matrix, so
+///   `S <= 7`;
+/// - the GTE divide saturates once `SZ <= H / 2` (psx-spx, RTPS/RTPT
+///   divide overflow), which is a true depth of `80 / S` units: 80 at
+///   S = 1, 40 at 2, 26.7 at 3, 20 at 4;
+/// - the last table slot is reached at a true depth of `4 * 2048 / S`:
+///   8192 at S = 1, 4096 at 2, 2731 at 3, 2048 at 4;
+/// - `SZ` and the IR registers stay in range for every depth the table can
+///   key, since `S * 2731 <= 4 * 2048` is far under their 16-bit limits.
+///
+/// So S trades the zone in front of the camera where projection saturates
+/// against how far the world can be keyed before the classic path rejects
+/// it. Three is the balance the PXBSP depth bands, the runtime depth ranges
+/// and every cooked world were tuned at: two would double the saturating
+/// zone to 40 units, and four would pull the far reject in from 2731 to
+/// 2048 units on a Cortex level that is about 3950 units long. Anything else
+/// that sorts into the same ordering table must key its depth through the
+/// same law; see [`pxbsp_classic_far_depth`].
+pub const PXBSP_VIEW_SCALE_Q12: i32 = 0x3000;
 
 /// True view depth at which a flat PXBSP surface reaches OT slot `ot_depth`,
 /// the first slot the classic path rejects: `ot_depth * 4 / scale`.
@@ -342,10 +363,10 @@ pub const XBSP_VIEW_SCALE_Q12: i32 = 0x3000;
 /// uses it as the far end of the depth range every non-world draw maps
 /// through. Surfaces beyond it are not drawn by the world renderer at all.
 pub const fn pxbsp_classic_far_depth(ot_depth: u16) -> i32 {
-    (ot_depth as i32 * 4 * 4096 + XBSP_VIEW_SCALE_Q12 / 2) / XBSP_VIEW_SCALE_Q12
+    (ot_depth as i32 * 4 * 4096 + PXBSP_VIEW_SCALE_Q12 / 2) / PXBSP_VIEW_SCALE_Q12
 }
 
-const XBSP_VIEW_SCALE: i16 = XBSP_VIEW_SCALE_Q12 as i16;
+const PXBSP_VIEW_SCALE: i16 = PXBSP_VIEW_SCALE_Q12 as i16;
 
 /// Build and load the Y-up camera transform used by PSoXide brush worlds.
 ///
@@ -364,9 +385,9 @@ pub fn load_pxbsp_view(camera: Camera) -> ViewTransform {
 /// `+Z` forward, `-Y` up frame, carrying the view scale.
 const PXBSP_COORDINATES: Mat3I16 = Mat3I16 {
     m: [
-        [0, 0, XBSP_VIEW_SCALE],
-        [0, -XBSP_VIEW_SCALE, 0],
-        [XBSP_VIEW_SCALE, 0, 0],
+        [0, 0, PXBSP_VIEW_SCALE],
+        [0, -PXBSP_VIEW_SCALE, 0],
+        [PXBSP_VIEW_SCALE, 0, 0],
     ],
 };
 
@@ -433,7 +454,6 @@ fn load_view_rotation_with_coordinates(
     }
 }
 
-/// Cached PVS and projection scratch for the XBSP render path.
 /// Projection parameters the brush-face frustum clip is built from: the GTE
 /// H register and the screen half-extents the caller projects into, plus a
 /// pixel margin kept outside the visible edge and the near distance in world
