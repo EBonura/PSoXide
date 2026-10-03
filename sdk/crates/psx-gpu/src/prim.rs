@@ -13,11 +13,15 @@ use crate::material::{
 };
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 
+/// Command-word bit 25: draw with the current semi-transparency equation.
+const SEMI_TRANSPARENT: u32 = 1 << 25;
+
 const fn pack_packet_texcoord(u: u8, v: u8, extra: u16) -> u32 {
     (u as u32) | ((v as u32) << 8) | ((extra as u32) << 16)
 }
 
 /// Flat-shaded triangle. 5 words (tag + 4 data).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct TriFlat {
     /// DMA / OT linkage word. Written by the OT at insert time.
@@ -46,9 +50,17 @@ impl TriFlat {
             v2: pack_vertex(verts[2].0, verts[2].1),
         }
     }
+
+    /// The same triangle drawn with the semi-transparency equation set by the
+    /// last GP0(E1h) ([`crate::Gpu::set_draw_mode`]).
+    pub const fn translucent(mut self) -> Self {
+        self.color_cmd |= SEMI_TRANSPARENT;
+        self
+    }
 }
 
 /// Gouraud-shaded triangle. 7 words (tag + 6 data).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct TriGouraud {
     /// OT linkage.
@@ -87,9 +99,17 @@ impl TriGouraud {
             v2: pack_vertex(verts[2].0, verts[2].1),
         }
     }
+
+    /// The same triangle drawn with the semi-transparency equation set by the
+    /// last GP0(E1h) ([`crate::Gpu::set_draw_mode`]).
+    pub const fn translucent(mut self) -> Self {
+        self.color0_cmd |= SEMI_TRANSPARENT;
+        self
+    }
 }
 
 /// Flat-shaded quad. 6 words (tag + 5 data).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct QuadFlat {
     /// OT linkage.
@@ -121,11 +141,36 @@ impl QuadFlat {
             v3: pack_vertex(verts[3].0, verts[3].1),
         }
     }
+
+    /// The same quad drawn with the semi-transparency equation set by the
+    /// last GP0(E1h) ([`crate::Gpu::set_draw_mode`]).
+    pub const fn translucent(mut self) -> Self {
+        self.color_cmd |= SEMI_TRANSPARENT;
+        self
+    }
+
+    /// An axis-aligned rectangle: `size` pixels from `origin`, in `color`.
+    ///
+    /// Unlike [`FillRect`] it goes through the rasteriser, so it clips to
+    /// the draw area and follows the draw offset: the right shape for UI
+    /// panels and HUD backgrounds.
+    pub const fn rect(origin: (i16, i16), size: (u16, u16), color: (u8, u8, u8)) -> Self {
+        let (x0, y0) = origin;
+        let x1 = x0.wrapping_add(size.0 as i16);
+        let y1 = y0.wrapping_add(size.1 as i16);
+        Self::new(
+            [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
+            color.0,
+            color.1,
+            color.2,
+        )
+    }
 }
 
 /// Untextured variable-size rectangle. 4 words (tag + 3 data).
 /// Ignores draw-area clip on some GPU revisions; prefer `QuadFlat`
 /// when you need clipping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct RectFlat {
     /// OT linkage.
@@ -153,12 +198,47 @@ impl RectFlat {
     }
 }
 
+/// VRAM fill (GP0 02h). 4 words (tag + 3 data).
+///
+/// Writes VRAM directly: it ignores the draw area, the draw offset and the
+/// mask bits, and the GPU rounds the X range to 16-pixel steps (psx-spx,
+/// GP0(02h)). Use it to clear a buffer; use [`QuadFlat::rect`] for a
+/// panel that should clip and follow the draw offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C, align(4))]
+pub struct FillRect {
+    /// OT linkage.
+    pub tag: u32,
+    /// `0x02000000 | color`.
+    pub color_command: u32,
+    /// Top-left corner in VRAM.
+    pub origin: u32,
+    /// Width and height.
+    pub size: u32,
+}
+
+impl FillRect {
+    /// Data-word count.
+    pub const WORDS: u8 = 3;
+
+    /// Fill `size` pixels of VRAM at `origin` with `color`.
+    pub const fn new(origin: (u16, u16), size: (u16, u16), color: (u8, u8, u8)) -> Self {
+        Self {
+            tag: 0,
+            color_command: gp0::fill_rect(color.0, color.1, color.2),
+            origin: pack_xy(origin.0, origin.1),
+            size: pack_xy(size.0, size.1),
+        }
+    }
+}
+
 /// Gouraud-shaded quad. 9 words (tag + 8 data).
 ///
 /// Same vertex order as [`QuadFlat`] (V0=TL, V1=TR, V2=BL, V3=BR
 /// by convention, though the GPU actually draws (V0,V1,V2) then
 /// (V1,V2,V3)). Each vertex carries its own RGB; the GPU
 /// gouraud-interpolates across the primitive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct QuadGouraud {
     /// OT linkage.
@@ -204,6 +284,13 @@ impl QuadGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
         }
     }
+
+    /// The same quad drawn with the semi-transparency equation set by the
+    /// last GP0(E1h) ([`crate::Gpu::set_draw_mode`]).
+    pub const fn translucent(mut self) -> Self {
+        self.color0_cmd |= SEMI_TRANSPARENT;
+        self
+    }
 }
 
 /// Semi-transparent Gouraud quad with its GP0(E1) blend state embedded in
@@ -213,6 +300,7 @@ impl QuadGouraud {
 /// read them from the current draw mode. Keeping the state word and polygon in
 /// one OT packet makes the result independent of whichever textured surface
 /// happened to draw immediately before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct QuadGouraudBlended {
     /// OT linkage.
@@ -270,6 +358,7 @@ impl QuadGouraudBlended {
 /// Monochrome single line. 4 words (tag + 3 data). GP0 0x40 -- the
 /// real diagonal-capable line rasteriser (unlike `RectFlat`, which
 /// the GPU snaps to 16-pixel X boundaries in its GP0 0x02 fill).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct LineMono {
     /// OT linkage.
@@ -295,6 +384,59 @@ impl LineMono {
             v1: pack_vertex(x1, y1),
         }
     }
+
+    /// The same line drawn with the semi-transparency equation set by the
+    /// last GP0(E1h) ([`crate::Gpu::set_draw_mode`]).
+    pub const fn translucent(mut self) -> Self {
+        self.color_cmd |= SEMI_TRANSPARENT;
+        self
+    }
+}
+
+/// Gouraud-shaded single line (GP0 50h). 5 words (tag + 4 data).
+///
+/// The GPU interpolates the colour from one endpoint to the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C, align(4))]
+pub struct LineGouraud {
+    /// OT linkage.
+    pub tag: u32,
+    /// `0x50000000 | start color`.
+    pub color0_command: u32,
+    /// Start point.
+    pub v0: u32,
+    /// End color.
+    pub color1: u32,
+    /// End point.
+    pub v1: u32,
+}
+
+impl LineGouraud {
+    /// Data-word count.
+    pub const WORDS: u8 = 4;
+
+    /// A line from `from` to `to`, shaded from `from_color` to `to_color`.
+    pub const fn new(
+        from: (i16, i16),
+        from_color: (u8, u8, u8),
+        to: (i16, i16),
+        to_color: (u8, u8, u8),
+    ) -> Self {
+        Self {
+            tag: 0,
+            color0_command: 0x5000_0000 | pack_color(from_color.0, from_color.1, from_color.2),
+            v0: pack_vertex(from.0, from.1),
+            color1: pack_color(to_color.0, to_color.1, to_color.2),
+            v1: pack_vertex(to.0, to.1),
+        }
+    }
+
+    /// The same line drawn with the semi-transparency equation set by the
+    /// last GP0(E1h) ([`crate::Gpu::set_draw_mode`]).
+    pub const fn translucent(mut self) -> Self {
+        self.color0_command |= SEMI_TRANSPARENT;
+        self
+    }
 }
 
 /// Textured triangle with a single flat tint. 9 words (tag + 8 data).
@@ -304,6 +446,7 @@ impl LineMono {
 /// vertex 1's UV high word (PSX-SPX convention for GP0 0x24). Emitting
 /// E2 per triangle keeps windowed world materials from leaking state to
 /// model triangles when the ordering table interleaves both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct TriTextured {
     /// OT linkage.
@@ -439,8 +582,8 @@ impl TriTextured {
 /// texture-window command. Renderers that keep one texture-window state for
 /// the whole pass can use this compact GP0(24h) packet. 8 words (tag + 7
 /// data).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
-#[derive(Copy, Clone)]
 pub struct ClassicTriTextured {
     /// Staged OT tag or final DMA linkage.
     pub tag: u32,
@@ -497,6 +640,7 @@ impl ClassicTriTextured {
 /// state across ordering-table interleaving. CLUT rides in v0's
 /// UV high word, tpage in v1's UV high word (PSX-SPX convention
 /// for GP0 0x34).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct TriTexturedGouraud {
     /// OT linkage.
@@ -782,8 +926,8 @@ impl TriTexturedGouraud {
 /// Classic textured Gouraud triangle without an inline GP0(E2) texture-window
 /// command. This is the compact GP0(34h) packet used by renderers that keep a
 /// single texture-window state for the whole pass. 10 words (tag + 9 data).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
-#[derive(Copy, Clone)]
 pub struct ClassicTriTexturedGouraud {
     /// Staged OT tag or final DMA linkage.
     pub tag: u32,
@@ -916,8 +1060,8 @@ impl ClassicTriTexturedGouraud {
 /// Classic textured Gouraud quad without inline texture-window state. This
 /// is the compact GP0(3Ch) packet paired with
 /// [`ClassicTriTexturedGouraud`]. 13 words (tag + 12 data).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
-#[derive(Copy, Clone)]
 pub struct ClassicQuadTexturedGouraud {
     /// Staged OT tag or final DMA linkage.
     pub tag: u32,
@@ -1071,6 +1215,7 @@ impl ClassicQuadTexturedGouraud {
 /// pixel-identical output (proved by
 /// `textured_gouraud_quad_matches_two_triangle_split_bitexact` in the
 /// emulator GPU tests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct QuadTexturedGouraud {
     /// OT linkage.
@@ -1110,6 +1255,29 @@ impl QuadTexturedGouraud {
     /// Opcode bit promoting the Gouraud-textured-triangle header
     /// (`0x34`) to the Gouraud-textured-quad header (`0x3C`).
     const QUAD_OPCODE_BIT: u32 = 0x0800_0000;
+
+    /// Build a textured Gouraud quad from per-vertex UVs and a
+    /// [`TextureMaterial`]. Vertex order is TL, TR, BL, BR; each colour
+    /// tints its vertex (`(128, 128, 128)` leaves texels unmodulated).
+    pub const fn with_material(
+        verts: [(i16, i16); 4],
+        uvs: [(u8, u8); 4],
+        colors: [(u8, u8, u8); 4],
+        material: TextureMaterial,
+    ) -> Self {
+        let mut uv_words = [0u16; 4];
+        let mut i = 0;
+        while i < 4 {
+            uv_words[i] = uvs[i].0 as u16 | (uvs[i].1 as u16) << 8;
+            i += 1;
+        }
+        Self::with_packet_material_packed_uv_words(
+            verts,
+            uv_words,
+            colors,
+            material.textured_gouraud_packet_material(),
+        )
+    }
 
     /// Build a textured Gouraud quad from UV words and a packet material
     /// precomputed for a hot material, mirroring
@@ -1278,6 +1446,7 @@ impl QuadTexturedGouraud {
 ///
 /// Same CLUT + tpage embedding as [`TriTextured`], extended by
 /// one vertex. Vertex order: TL, TR, BL, BR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct QuadTextured {
     /// OT linkage.
@@ -1350,6 +1519,7 @@ impl QuadTextured {
 /// quads: GP0(E2) texture-window state immediately followed by the
 /// GP0(2Ch) textured-quad command. Use it when OT interleaving must
 /// not leak window state across different textured draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct QuadTexturedMaterial {
     /// OT linkage.
@@ -1409,6 +1579,7 @@ impl QuadTexturedMaterial {
 }
 
 /// Textured sprite (variable size). 5 words (tag + 4 data).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C, align(4))]
 pub struct Sprite {
     /// OT linkage.
@@ -1508,9 +1679,11 @@ impl_gpu_packet!(
     TriGouraud,
     QuadFlat,
     RectFlat,
+    FillRect,
     QuadGouraud,
     QuadGouraudBlended,
     LineMono,
+    LineGouraud,
     TriTextured,
     ClassicTriTextured,
     TriTexturedGouraud,
@@ -1529,9 +1702,11 @@ const _: () = {
         TriGouraud::WORDS,
         QuadFlat::WORDS,
         RectFlat::WORDS,
+        FillRect::WORDS,
         QuadGouraud::WORDS,
         QuadGouraudBlended::WORDS,
         LineMono::WORDS,
+        LineGouraud::WORDS,
         TriTextured::WORDS,
         ClassicTriTextured::WORDS,
         TriTexturedGouraud::WORDS,
