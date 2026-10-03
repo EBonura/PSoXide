@@ -153,11 +153,34 @@ fn wait_ready(flag: GpuStat) {
     let mut spins = 0u32;
     while !status().contains(flag) {
         if spins >= READY_SPINS {
-            write_display_control(0x0100_0000);
+            count_command_reset();
+            write_display_control(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
             return;
         }
         spins += 1;
     }
+}
+
+/// GP1(01h) resets [`wait_command_ready`] and [`wait_dma_ready`] have issued
+/// after a ready bit stayed low for [`READY_SPINS`] polls.
+static mut COMMAND_RESETS: u32 = 0;
+
+#[cold]
+fn count_command_reset() {
+    // SAFETY: volatile aligned accesses to this private static; only this
+    // function writes it and the program is single threaded (no handler
+    // touches it).
+    unsafe {
+        let count = core::ptr::addr_of_mut!(COMMAND_RESETS);
+        count.write_volatile(count.read_volatile().wrapping_add(1));
+    }
+}
+
+/// How many times a ready-wait has timed out and reset the GPU's command
+/// buffer since boot: a count of GPU hangs the SDK recovered from.
+pub fn command_reset_count() -> u32 {
+    // SAFETY: a volatile aligned read of a private static.
+    unsafe { core::ptr::addr_of!(COMMAND_RESETS).read_volatile() }
 }
 
 /// Spin until the GPU can start a DMA block transfer.
