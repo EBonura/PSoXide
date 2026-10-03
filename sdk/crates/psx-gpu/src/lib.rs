@@ -814,7 +814,7 @@ pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
         dma::start(
             Channel::Gpu,
             dma::Transfer {
-                address: head as u32,
+                address: head.expose_provenance() as u32,
                 // BCR is ignored in linked-list mode but must be written to
                 // some value on real hardware; zero is conventional.
                 size: dma::size_words(0),

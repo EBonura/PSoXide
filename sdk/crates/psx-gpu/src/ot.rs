@@ -23,6 +23,7 @@
 //! ending in `0x00FFFFFF`. Submitting such an OT sends nothing to
 //! GP0. As primitives are added, their packets chain in.
 
+use core::marker::PhantomData;
 use core::ptr;
 
 const OT_ADDR_MASK: u32 = 0x00FF_FFFF;
@@ -43,8 +44,9 @@ impl<const N: usize> OrderingTable<N> {
     /// Call [`clear`](Self::clear) before submitting -- that wires
     /// up the inter-slot chain so DMA walks across all `N` slots.
     pub const fn new() -> Self {
+        const { assert!(N > 0, "an ordering table needs at least one slot") };
         Self {
-            entries: [0x00FF_FFFF; N],
+            entries: [OT_END; N],
         }
     }
 
@@ -86,11 +88,12 @@ impl<const N: usize> OrderingTable<N> {
 
     #[cfg(not(target_arch = "mips"))]
     fn clear_software(&mut self) {
-        // Slot 0 is the sentinel; chain walks stop here.
-        self.entries[0] = 0x00FF_FFFF;
+        // Slot 0 is the sentinel; chain walks stop here. Each other slot links
+        // the one below it, by the low 24 bits of its address.
+        let base = self.entries.as_mut_ptr().expose_provenance() as u32;
+        self.entries[0] = OT_END;
         for i in 1..N {
-            let prev = &self.entries[i - 1] as *const u32 as u32 & 0x00FF_FFFF;
-            self.entries[i] = prev;
+            self.entries[i] = base.wrapping_add(4 * (i as u32 - 1)) & OT_ADDR_MASK;
         }
     }
 
@@ -110,7 +113,7 @@ impl<const N: usize> OrderingTable<N> {
         // SAFETY: `bulk_words` is at most `N - 1`, so this stays inside `entries` or one past
         // it.
         let bulk_end = unsafe { cursor.add(bulk_words) };
-        let mut previous = entries as u32 & OT_ADDR_MASK;
+        let mut previous = entries.expose_provenance() as u32 & OT_ADDR_MASK;
         if bulk_words != 0 {
             // SAFETY: the loop stores `bulk_words` words from `entries + 1`, all inside the
             // table, and touches no other memory or the stack.
@@ -192,7 +195,7 @@ impl<const N: usize> OrderingTable<N> {
         let tag = ((words as u32) << 24) | old_head;
         // SAFETY: the caller guarantees `packet_ptr` is a live, writable, aligned tag word.
         unsafe { ptr::write_volatile(packet_ptr, tag) };
-        let pkt_addr = packet_ptr as u32 & OT_ADDR_MASK;
+        let pkt_addr = packet_ptr.expose_provenance() as u32 & OT_ADDR_MASK;
         self.entries[z] = pkt_addr;
     }
 
@@ -215,7 +218,7 @@ impl<const N: usize> OrderingTable<N> {
         let old_head = self.entries[z] & OT_ADDR_MASK;
         // SAFETY: as `insert_unchecked`: the caller guarantees a writable tag word.
         unsafe { ptr::write_volatile(packet_ptr, tag_high | old_head) };
-        let pkt_addr = packet_ptr as u32 & OT_ADDR_MASK;
+        let pkt_addr = packet_ptr.expose_provenance() as u32 & OT_ADDR_MASK;
         self.entries[z] = pkt_addr;
     }
 
@@ -300,7 +303,8 @@ impl<const N: usize> OrderingTable<N> {
                 // SAFETY: `index < command_count`, inside the caller's command array.
                 let command = unsafe { commands.add(index * 2) };
                 // SAFETY: the first word of each command is its packet pointer.
-                let packet_ptr = unsafe { ptr::read(command) } as *mut u32;
+                let packet_ptr =
+                    ptr::with_exposed_provenance_mut::<u32>(unsafe { ptr::read(command) });
                 // SAFETY: the second word of each command is its slot and word count.
                 let slot_words = unsafe { ptr::read(command.add(1)) } as u32;
                 let slot = (slot_words & u16::MAX as u32) as usize;
@@ -402,7 +406,8 @@ impl<const N: usize> OrderingTable<N> {
                 // SAFETY: `index < command_count`, inside the caller's command array.
                 let command = unsafe { commands.add(index * 2) };
                 // SAFETY: the first word of each command is its packet pointer.
-                let packet_ptr = unsafe { ptr::read(command) } as *mut u32;
+                let packet_ptr =
+                    ptr::with_exposed_provenance_mut::<u32>(unsafe { ptr::read(command) });
                 // SAFETY: the second word of each command is its slot and word count.
                 let slot_words = unsafe { ptr::read(command.add(1)) } as u32;
                 let slot = (slot_words & u16::MAX as u32) as usize;
@@ -715,14 +720,15 @@ impl<const N: usize> OrderingTable<N> {
             self.entries[0] == OT_END,
             "end_with_draw_done needs an empty slot 0: call it right after clear"
         );
-        self.entries[0] = node as u32 & OT_ADDR_MASK;
+        self.entries[0] = node.expose_provenance() as u32 & OT_ADDR_MASK;
     }
 
     /// Pointer to the slot where DMA starts (`[N-1]`). Passed to
     /// [`crate::submit_linked_list_raw`] as the linked-list entry point.
     #[inline]
     pub fn submit_head(&self) -> *const u32 {
-        &self.entries[N - 1] as *const u32
+        // From the whole array, so the pointer may reach every entry.
+        self.entries.as_ptr().wrapping_add(N - 1)
     }
 
     /// Submit the whole table to GPU via DMA channel 2 linked-list
@@ -762,29 +768,29 @@ impl<const N: usize> OrderingTable<N> {
     ///
     /// Used by the editor's host-side preview to convert an OT into a
     /// `psx-gpu-render` command log without DMAing through real
-    /// hardware. The hardware DMA walker follows the same pointers in
-    /// the same order, so the iterator output is bit-equivalent to
-    /// what the GPU would consume.
+    /// hardware. The hardware DMA walker follows the same links in
+    /// the same order, so the iterator yields what the GPU would consume.
+    ///
+    /// A link holds only the low 24 bits of an address, as on the console.
+    /// A link into this table is read through the table; any other link is
+    /// read as an exposed address with the table's upper address bits,
+    /// which every packet in console RAM shares.
     ///
     /// # Safety
     /// Every chained packet must be live for the lifetime of the
-    /// returned iterator -- exactly the same invariant `submit()`
-    /// requires. Primitives produced by [`crate::prim::*`] paired with
-    /// a `PrimitiveArena` satisfy this; bespoke chains must guarantee
-    /// the same.
-    pub unsafe fn packets(&self) -> Packets {
-        // The submit head holds the address of the first chained
-        // packet (its low 24 bits). PS1 hardware masks to 24 bits
-        // because RAM is 2 MB and packet pointers can omit the high
-        // byte. On host the same masking still recovers the address
-        // because all OT-chained primitives live in the same arena
-        // whose pointer fits in 24 bits relative to a stable base --
-        // [`PrimitiveArena`] enforces that.
+    /// returned iterator, exactly the invariant a submission requires, and
+    /// its address must have been exposed, as every insert does.
+    pub unsafe fn packets(&self) -> Packets<'_> {
+        let table = self.entries.as_ptr();
         Packets {
+            table,
+            table_low: table.addr() as u32 & OT_ADDR_MASK,
+            table_bytes: N * 4,
             next: self.entries[N - 1] & OT_ADDR_MASK,
-            base_high: (self.submit_head() as usize) & !(OT_ADDR_MASK as usize),
+            base_high: table.addr() & !(OT_ADDR_MASK as usize),
             last_packet: OT_END,
             remaining_hops: N.saturating_add(OT_MAX_EXTRA_HOPS),
+            _table: PhantomData,
         }
     }
 
@@ -794,7 +800,7 @@ impl<const N: usize> OrderingTable<N> {
     /// See [`Self::packets`].
     #[deprecated(note = "renamed to `packets`")]
     #[inline(always)]
-    pub unsafe fn iter_packets(&self) -> Packets {
+    pub unsafe fn iter_packets(&self) -> Packets<'_> {
         // SAFETY: same contract as the renamed function.
         unsafe { self.packets() }
     }
@@ -802,7 +808,7 @@ impl<const N: usize> OrderingTable<N> {
 
 /// Renamed to [`Packets`].
 #[deprecated(note = "renamed to `Packets`")]
-pub type OtPacketIter = Packets;
+pub type OtPacketIter<'a> = Packets<'a>;
 
 /// Walks an [`OrderingTable`]'s chain in DMA submission order.
 ///
@@ -810,14 +816,35 @@ pub type OtPacketIter = Packets;
 /// data words that follow its tag (so the full packet occupies
 /// `1 + words` u32s starting at the returned pointer). The terminal
 /// `0x00FFFFFF` marker stops iteration cleanly.
-pub struct Packets {
+#[derive(Debug)]
+pub struct Packets<'a> {
+    /// The table's first entry, with the table's provenance.
+    table: *const u32,
+    /// Low 24 bits of `table`'s address, as links name it.
+    table_low: u32,
+    /// Size of the table in bytes.
+    table_bytes: usize,
     next: u32,
     base_high: usize,
     last_packet: u32,
     remaining_hops: usize,
+    _table: PhantomData<&'a [u32]>,
 }
 
-impl Iterator for Packets {
+impl Packets<'_> {
+    /// The word `link` names: a table entry through the table, anything
+    /// else through its exposed address.
+    fn resolve(&self, link: u32) -> *const u32 {
+        let offset = link.wrapping_sub(self.table_low) as usize;
+        if offset < self.table_bytes {
+            self.table.wrapping_byte_add(offset)
+        } else {
+            ptr::with_exposed_provenance(self.base_high | link as usize)
+        }
+    }
+}
+
+impl Iterator for Packets<'_> {
     type Item = (*const u32, u8);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -835,7 +862,8 @@ impl Iterator for Packets {
                 return None;
             }
             self.remaining_hops -= 1;
-            let ptr = (self.base_high | self.next as usize) as *const u32;
+            let link = self.next;
+            let ptr = self.resolve(link);
             // SAFETY: ptr was reached by walking the chain that
             // `packets`'s caller swore was live; tag word is
             // always present in any chained slot.
@@ -843,7 +871,7 @@ impl Iterator for Packets {
             let words = ((tag >> 24) & 0xFF) as u8;
             self.next = tag & OT_ADDR_MASK;
             if words > 0 {
-                self.last_packet = ptr as u32 & OT_ADDR_MASK;
+                self.last_packet = link;
                 return Some((ptr, words));
             }
         }
@@ -862,7 +890,8 @@ mod tests {
 
     #[repr(C)]
     struct PackedCommand {
-        packet: *mut u32,
+        /// The packet's exposed address.
+        packet: usize,
         slot_words: usize,
     }
 
@@ -875,15 +904,15 @@ mod tests {
         let mut c = [0u32; 2];
         let commands = [
             PackedCommand {
-                packet: a.as_mut_ptr(),
+                packet: a.as_mut_ptr().expose_provenance(),
                 slot_words: 4 | (1 << 24),
             },
             PackedCommand {
-                packet: b.as_mut_ptr(),
+                packet: b.as_mut_ptr().expose_provenance(),
                 slot_words: 4 | (1 << 24),
             },
             PackedCommand {
-                packet: c.as_mut_ptr(),
+                packet: c.as_mut_ptr().expose_provenance(),
                 slot_words: 2 | (1 << 24),
             },
         ];
@@ -913,11 +942,11 @@ mod tests {
         let mut b = [0u32; 2];
         let commands = [
             PackedCommand {
-                packet: a.as_mut_ptr(),
+                packet: a.as_mut_ptr().expose_provenance(),
                 slot_words: 4 | (1 << 24),
             },
             PackedCommand {
-                packet: b.as_mut_ptr(),
+                packet: b.as_mut_ptr().expose_provenance(),
                 slot_words: 4 | (1 << 24),
             },
         ];
@@ -949,13 +978,11 @@ mod tests {
             0xDDDD_DDDD,
         ];
 
+        let first = packets.as_mut_ptr();
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
         unsafe {
-            ot.insert_tagged_packet_stream_unchecked(
-                packets.as_mut_ptr(),
-                packets.as_mut_ptr().add(packets.len()),
-            );
+            ot.insert_tagged_packet_stream_unchecked(first, first.add(packets.len()));
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
@@ -983,10 +1010,13 @@ mod tests {
         // SAFETY: `packets` is one contiguous run of complete packets whose slots fit the
         // table.
         unsafe {
-            ot.insert_tagged_packet_stream_shifted_unchecked::<3>(
-                packets.as_mut_ptr(),
-                packets.as_mut_ptr().add(packets.len()),
-            );
+            {
+                let first = packets.as_mut_ptr();
+                ot.insert_tagged_packet_stream_shifted_unchecked::<3>(
+                    first,
+                    first.add(packets.len()),
+                );
+            }
         }
 
         // SAFETY: every packet linked into the table is a local still alive here.
