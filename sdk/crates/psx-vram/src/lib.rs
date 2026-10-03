@@ -1263,13 +1263,9 @@ pub fn dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
             },
         )
     };
-    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
-        dma::abort(Channel::Gpu);
-        // The GP0(A0) header is already out and the payload did not
-        // land, so VRAM holds a partial upload either way; report it.
-        return false;
-    }
-    true
+    // On a wedge the GP0(A0) header is already out and the payload did not
+    // land, so VRAM holds a partial upload either way; report it.
+    dma::wait_or_abort(Channel::Gpu, dma::DEFAULT_DMA_SPINS)
 }
 
 /// Upload typed [`Color555`] pixels -- sugar over [`upload_16bpp`]

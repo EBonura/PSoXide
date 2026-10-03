@@ -428,22 +428,12 @@ pub fn read_column(dst: &mut [u32]) -> bool {
             },
         )
     };
-    if dma::wait_done(Channel::MdecOut, DMA_SPINS) {
-        true
-    } else {
-        dma::abort(Channel::MdecOut);
-        false
-    }
+    dma::wait_or_abort(Channel::MdecOut, DMA_SPINS)
 }
 
 /// Confirm DMA0 finished feeding the frame. `false` (after aborting the
 /// channel) if it is still busy, e.g. the frame held more data than was
 /// read back.
 pub fn decode_finish() -> bool {
-    if dma::wait_done(Channel::MdecIn, DMA_SPINS) {
-        true
-    } else {
-        dma::abort(Channel::MdecIn);
-        false
-    }
+    dma::wait_or_abort(Channel::MdecIn, DMA_SPINS)
 }

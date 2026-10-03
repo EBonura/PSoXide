@@ -903,9 +903,7 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
             },
         )
     };
-    if !dma::wait_done(Channel::Spu, dma::DEFAULT_DMA_SPINS) {
-        dma::abort(Channel::Spu);
-    }
+    dma::wait_or_abort(Channel::Spu, dma::DEFAULT_DMA_SPINS);
     // The channel is done handing bytes over; the SPU is still writing
     // them into sound RAM.
     wait_transfer_idle();
