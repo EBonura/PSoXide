@@ -17,9 +17,24 @@ pub const SIO1_BASE: u32 = 0x1F80_1050;
 
 /// `SIO0` register bit layouts and standard mode/baud values, shared by every
 /// SIO0 device driver (pads in `psx-pad`, memory cards in `psx-mc`) and usable
-/// by the emulator's SIO model. Register *addresses* live with the MMIO
-/// accessors in `psx-io`; this module owns only the layout facts.
+/// by the emulator's SIO model.
 pub mod sio0 {
+    /// TX/RX FIFO port (byte).
+    #[doc(alias = "JOY_DATA")]
+    pub const DATA: u32 = 0x1F80_1040;
+    /// Status register (32-bit).
+    #[doc(alias = "JOY_STAT")]
+    pub const STAT: u32 = 0x1F80_1044;
+    /// Mode register (16-bit).
+    #[doc(alias = "JOY_MODE")]
+    pub const MODE: u32 = 0x1F80_1048;
+    /// Control register (16-bit).
+    #[doc(alias = "JOY_CTRL")]
+    pub const CTRL: u32 = 0x1F80_104A;
+    /// Baud-rate divisor (16-bit).
+    #[doc(alias = "JOY_BAUD")]
+    pub const BAUD: u32 = 0x1F80_104E;
+
     /// `JOY_CTRL` (u16) bits.
     pub mod ctrl {
         /// TX enable.
