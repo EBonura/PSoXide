@@ -131,12 +131,13 @@ pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
     {
         let heap_start = &raw const __heap_start as usize;
         let heap_end = &raw const __heap_end as usize;
-        // SAFETY: runs once, before `main` and any allocation. [__heap_start, __heap_end) is the
-        // range psoxide.ld leaves between .bss and the stack reserve, used by nothing else. ASSUMES
-        // __heap_start <= __heap_end, which the linker script does not assert: the RAM region ends
-        // 0x100 bytes above __heap_end, so a .bss ending in that window makes this subtraction
-        // wrap.
-        unsafe { heap::init(heap_start, heap_end - heap_start) };
+        // The RAM region ends 0x100 bytes above __heap_end, so a .bss that ends in that window
+        // puts __heap_start past __heap_end: that leaves no heap, not a wrapped 4 GiB one.
+        let heap_size = heap_end.saturating_sub(heap_start);
+        // SAFETY: runs once, before `main` and any allocation. [heap_start, heap_start +
+        // heap_size) is the range psoxide.ld leaves between .bss and the stack reserve (empty if
+        // they meet), used by nothing else.
+        unsafe { heap::init(heap_start, heap_size) };
     }
 
     #[cfg(feature = "boot-trace")]
