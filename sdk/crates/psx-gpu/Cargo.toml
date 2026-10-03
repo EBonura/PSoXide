@@ -7,6 +7,7 @@ repository.workspace = true
 description  = "High-level PS1 GPU API: init, primitives, framebuffers."
 
 [dependencies]
+bitflags = { version = "2.6", default-features = false }
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
 
