@@ -43,7 +43,7 @@ EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 # emulator (it once broke CollisionHull::trace_into and point_leaf_index).
 # The old cure was -disable-mips-df-backward-search, which fills those slots
 # with nops instead. The guest no longer passes it: every filler search stays
-# ON and tools/hazard_patch.py reroutes each hazardous branch through psx-rt's
+# ON and the SDK's hazard-patch reroutes each hazardous branch through psx-rt's
 # HAZARD_TRAMPOLINES after the link, then rescans (below). The SDK owns the
 # flag set (tools/sdk-examples.mk PSX_DELAY_SLOT_FLAGS, hydrated from the
 # locked SDK), so it is read from there rather than copied. The SDK writes it
@@ -96,12 +96,20 @@ patch_and_prove() {
     # consumer runs inside the R3000 load delay. Rather than disabling the
     # filler (tens of kilobytes of nops), reroute those branches through the
     # guest's HAZARD_TRAMPOLINES array post-link and prove the image clean
-    # (tools/hazard_patch.py). The MIPS binutils are required for that proof.
-    command -v mipsel-none-elf-objdump >/dev/null 2>&1 || {
-        echo "[guest-build] mipsel-none-elf-objdump missing; cannot patch load-delay hazards" >&2
-        exit 1
-    }
-    python3 "$ROOT/tools/hazard_patch.py" "$1" >"$3/hazard-patch.txt" 2>&1 || {
+    # (the SDK's hazard-patch). PSOXIDE_HAZARD_DIR names a directory that
+    # already holds hazard-patch and stack-guard; otherwise they build here,
+    # from tools/psoxide-hazard in the locked SDK.
+    if [ -n "${PSOXIDE_HAZARD_DIR:-}" ]; then
+        hazard_dir="$PSOXIDE_HAZARD_DIR"
+    else
+        hazard_dir="${CARGO_TARGET_DIR:-$ROOT/target}/release"
+        (cd "$ROOT" && cargo build -q --release --locked -p psoxide-hazard \
+            --target-dir "${CARGO_TARGET_DIR:-$ROOT/target}") || {
+            echo "[guest-build] could not build the SDK's post-link checks (tools/psoxide-hazard)" >&2
+            exit 1
+        }
+    fi
+    "$hazard_dir/hazard-patch" "$1" >"$3/hazard-patch.txt" 2>&1 || {
         cat "$3/hazard-patch.txt" >&2
         echo "[guest-build] load-delay hazards remain in $EXE_RELATIVE; refusing to stage it" >&2
         exit 1
@@ -109,7 +117,7 @@ patch_and_prove() {
     # Every psx_rt::scratchpad::ScratchpadStack call tree must fit its
     # region. An inlining change can deepen one with no source change, so
     # this is proved on the patched image after every link, never assumed.
-    python3 "$ROOT/tools/stack_guard.py" "$1" "$2" >"$3/stack-guard.txt" 2>&1 || {
+    "$hazard_dir/stack-guard" "$1" "$2" >"$3/stack-guard.txt" 2>&1 || {
         cat "$3/stack-guard.txt" >&2
         echo "[guest-build] a scratchpad stack call tree is unproven in $EXE_RELATIVE; refusing to stage it" >&2
         exit 1
@@ -150,7 +158,7 @@ GUEST_CARGO_HOME="${PSOXIDE_GUEST_CARGO_HOME:-$STAGE_ROOT/cargo-home}"
 
 mkdir -p "$STAGE_ROOT"
 
-# tools/stack_guard.py (below) needs the link map to prove the guest's
+# stack-guard (below) needs the link map to prove the guest's
 # scratchpad stacks, so a build that did not ask for one still writes one.
 GUEST_MAP="${PSOXIDE_GUEST_LINK_MAP:-$STAGE_ROOT/editor-playtest.map}"
 if [ -z "${PSOXIDE_GUEST_LINK_MAP:-}" ]; then
