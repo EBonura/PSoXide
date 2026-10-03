@@ -884,7 +884,12 @@ fn with_gpu_list_dma(body: impl FnOnce() -> u16) -> u16 {
     let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
     gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
-    dma::set_bcr_manual(dma::Channel::Gpu, 0);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_words(0));
+    }
     let elapsed = body();
     gpu_io::write_gp1(0x0400_0000 | old_direction);
     elapsed
@@ -896,10 +901,20 @@ const LIST_KICK: u32 = dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_S
 fn timed_empty_list(nodes: usize) -> u16 {
     let head = build_empty_list(nodes);
     with_gpu_list_dma(|| {
-        dma::set_madr(dma::Channel::Gpu, head);
+        // SAFETY: silicon probe: the transfer touches only memory this probe
+        // owns, which stays live and untouched until the probe waits the
+        // channel idle or aborts it.
+        unsafe {
+            dma::raw::set_madr(dma::Channel::Gpu, head);
+        }
         psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0);
         psx_io::timers::set_counter(psx_io::timers::Timer::Timer2, 0);
-        dma::set_chcr(dma::Channel::Gpu, LIST_KICK);
+        // SAFETY: silicon probe: the transfer touches only memory this probe
+        // owns, which stays live and untouched until the probe waits the
+        // channel idle or aborts it.
+        unsafe {
+            dma::raw::set_chcr(dma::Channel::Gpu, LIST_KICK);
+        }
         let mut polls = 0u32;
         while dma::is_busy(dma::Channel::Gpu) && polls < 1_000_000 {
             polls += 1;

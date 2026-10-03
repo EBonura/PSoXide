@@ -344,8 +344,13 @@ fn submit_and_time(head: u32) -> u16 {
     gpu_io::write_gp1(0x0200_0000); // acknowledge any stale GPU interrupt
     gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
-    dma::set_madr(dma::Channel::Gpu, head);
-    dma::set_bcr_manual(dma::Channel::Gpu, 0);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_madr(dma::Channel::Gpu, head);
+        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_words(0));
+    }
     // GP1 writes take a few cycles to reach GPUSTAT, and an acknowledge that
     // is still in flight when the list's interrupt request arrives cancels
     // it. Let both settle before the clock starts.
@@ -355,10 +360,15 @@ fn submit_and_time(head: u32) -> u16 {
 
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
-    dma::set_chcr(
-        dma::Channel::Gpu,
-        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
-    );
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_chcr(
+            dma::Channel::Gpu,
+            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
+        );
+    }
     let mut polls = 0u32;
     while gpu_io::gpustat().bits() & (1 << 24) == 0 && polls < 1_000_000 {
         polls += 1;

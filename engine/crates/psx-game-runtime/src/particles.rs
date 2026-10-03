@@ -5,8 +5,8 @@
 //! the screen extents arrive as plain values.
 
 use psx_engine::{
-    DepthRange, LoadedWorldCameraGte, OtFrame, PrimitivePacketArena, PrimitiveSink,
-    ProjectedVertex, SimTick, WorldCamera, WorldVertex,
+    DepthRange, LoadedWorldCameraGte, OtFrame, PrimitivePacketArena, ProjectedVertex, SimTick,
+    WorldCamera, WorldVertex,
 };
 use psx_gpu::{
     draw_tri_flat_blended,
@@ -37,14 +37,14 @@ const WATER_SPLASH_LIFETIME: u32 = 16;
 
 /// Draw a retained dash ground pulse. World projection/depth keeps walls authoritative.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_dash_sample<const OT_DEPTH: usize>(
+pub fn draw_dash_sample<'a, const OT_DEPTH: usize>(
     sample: crate::combat_feedback::DashSample,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let project = |p: [i32; 3]| {
         let vertex = WorldVertex::new(p[0], p[1], p[2]);
@@ -96,7 +96,7 @@ pub fn draw_dash_sample<const OT_DEPTH: usize>(
 /// A short translucent blade ribbon, driven by the same three editor-authored
 /// damage windows as combat. Uses no retained history or heap allocation.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_melee_window_trail<const OT_DEPTH: usize>(
+pub fn draw_melee_window_trail<'a, const OT_DEPTH: usize>(
     record: &psx_level::CombatCapsuleRecord,
     action: psx_level::CharacterAnimationAction,
     pose: crate::actor_pose::ActorPoseSnapshot,
@@ -104,8 +104,8 @@ pub fn draw_melee_window_trail<const OT_DEPTH: usize>(
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let Some(phases) = crate::combat::melee_trail_phases(record, action, pose.phase_q12()) else {
         return 0;
@@ -151,13 +151,12 @@ pub fn draw_melee_window_trail<const OT_DEPTH: usize>(
             colors,
             BlendMode::AddQuarter,
         );
-        let Some(packet) = packets.push(quad) else {
+        let Some(packet) = packets.push_packet(quad) else {
             break;
         };
-        ot.add_slot(
+        ot.add_packet_slot(
             depth_range.slot::<OT_DEPTH>(points.iter().map(|p| p.sz).sum::<i32>() / 4),
             packet,
-            psx_gpu::prim::QuadGouraudBlended::WORDS,
         );
         submitted += 1;
     }
@@ -166,15 +165,15 @@ pub fn draw_melee_window_trail<const OT_DEPTH: usize>(
 
 /// Draw one authored particle emitter's steady-state population as
 /// camera-facing textured quads. Returns the submitted quad count.
-pub fn draw_particle_emitter<const OT_DEPTH: usize>(
+pub fn draw_particle_emitter<'a, const OT_DEPTH: usize>(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
     elapsed_tick: SimTick,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     if emitter.flags & particle_emitter_flags::ENABLED == 0
         || emitter.max_particles == 0
@@ -226,7 +225,7 @@ pub fn draw_particle_emitter<const OT_DEPTH: usize>(
 /// Draw a tiny fixed-budget splash around a moving actor's feet. This is a
 /// purely visual three-sprite effect: it owns no emitter state, performs no
 /// collision queries, and derives its phase from the gameplay tick.
-pub fn draw_water_wade_splash<const OT_DEPTH: usize>(
+pub fn draw_water_wade_splash<'a, const OT_DEPTH: usize>(
     x: i32,
     surface_y: i32,
     z: i32,
@@ -235,8 +234,8 @@ pub fn draw_water_wade_splash<const OT_DEPTH: usize>(
     depth_range: DepthRange,
     particle_material: TextureMaterial,
     elapsed_tick: SimTick,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let mut submitted = 0usize;
     let mut index = 0u32;
@@ -290,14 +289,14 @@ pub fn draw_water_wade_splash<const OT_DEPTH: usize>(
 /// additive glow, a short tapered ghost trail, and a two-frame muzzle flash.
 /// The effect uses the shared particle page and remains fully fixed-budget.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
+pub fn draw_projectile_bolt<'a, const OT_DEPTH: usize>(
     projectile: ProjectileSnapshot,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     if projectile.radius == 0 {
         return 0;
@@ -405,14 +404,14 @@ pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
 
 /// Draw a compact angular charge at an animated projectile muzzle.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_projectile_charge<const OT_DEPTH: usize>(
+pub fn draw_projectile_charge<'a, const OT_DEPTH: usize>(
     charge: AuthoredProjectileCharge,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let position = WorldVertex::new(charge.position[0], charge.position[1], charge.position[2]);
     let center = if let Some(projector) = projector {
@@ -451,14 +450,14 @@ pub fn draw_projectile_charge<const OT_DEPTH: usize>(
 
 /// Draw one expanding angular impact flare from the fixed presentation pool.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_projectile_impact<const OT_DEPTH: usize>(
+pub fn draw_projectile_impact<'a, const OT_DEPTH: usize>(
     impact: ProjectileImpactEffect,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let position = WorldVertex::new(impact.position[0], impact.position[1], impact.position[2]);
     let center = if let Some(projector) = projector {
@@ -600,14 +599,14 @@ fn scale_rgb(rgb: [u8; 3], numerator: u16, denominator: u16) -> [u8; 3] {
     ]
 }
 
-fn draw_projectile_segment<const OT_DEPTH: usize>(
+fn draw_projectile_segment<'a, const OT_DEPTH: usize>(
     tail: ProjectedVertex,
     head: ProjectedVertex,
     half: i16,
     material: TextureMaterial,
     slot: psx_engine::DepthSlot,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let dx = i32::from(head.sx) - i32::from(tail.sx);
     let dy = i32::from(head.sy) - i32::from(tail.sy);
@@ -642,13 +641,13 @@ fn draw_projectile_segment<const OT_DEPTH: usize>(
     )
 }
 
-fn draw_particle_diamond<const OT_DEPTH: usize>(
+fn draw_particle_diamond<'a, const OT_DEPTH: usize>(
     center: ProjectedVertex,
     half: i16,
     material: TextureMaterial,
     slot: psx_engine::DepthSlot,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     draw_particle_oriented_quad(
         [
@@ -664,12 +663,12 @@ fn draw_particle_diamond<const OT_DEPTH: usize>(
     )
 }
 
-fn draw_particle_oriented_quad<const OT_DEPTH: usize>(
+fn draw_particle_oriented_quad<'a, const OT_DEPTH: usize>(
     screen: [(i16, i16); 4],
     material: TextureMaterial,
     slot: psx_engine::DepthSlot,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let quad = QuadTexturedMaterial::with_material(
         screen,
@@ -681,14 +680,14 @@ fn draw_particle_oriented_quad<const OT_DEPTH: usize>(
         ],
         material,
     );
-    let Some(packet) = primitive_packets.push(quad) else {
+    let Some(packet) = primitive_packets.push_packet(quad) else {
         return 0;
     };
     ot.add_packet_slot(slot, packet);
     1
 }
 
-fn draw_particle_sample<const OT_DEPTH: usize>(
+fn draw_particle_sample<'a, const OT_DEPTH: usize>(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
@@ -697,8 +696,8 @@ fn draw_particle_sample<const OT_DEPTH: usize>(
     seed: u32,
     age: i32,
     lifetime: i32,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let spawn_radius = emitter.spawn_radius as i32;
     let origin_x = emitter
@@ -768,13 +767,13 @@ fn draw_particle_sample<const OT_DEPTH: usize>(
     )
 }
 
-fn draw_particle_quad<const OT_DEPTH: usize>(
+fn draw_particle_quad<'a, const OT_DEPTH: usize>(
     center: ProjectedVertex,
     half: i16,
     material: TextureMaterial,
     slot: psx_engine::DepthSlot,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     let left = clamp_i16(i32::from(center.sx).saturating_sub(i32::from(half)));
     let right = clamp_i16(i32::from(center.sx).saturating_add(i32::from(half)));
@@ -793,7 +792,7 @@ fn draw_particle_quad<const OT_DEPTH: usize>(
         ],
         material,
     );
-    let Some(packet) = primitive_packets.push(quad) else {
+    let Some(packet) = primitive_packets.push_packet(quad) else {
         return 0;
     };
     ot.add_packet_slot(slot, packet);

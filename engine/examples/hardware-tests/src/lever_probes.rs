@@ -1077,9 +1077,14 @@ fn build_list() -> u32 {
 }
 
 fn kick_list(head: u32) {
-    dma::set_madr(dma::Channel::Gpu, head);
-    dma::set_bcr_manual(dma::Channel::Gpu, 0);
-    dma::set_chcr(dma::Channel::Gpu, LIST_KICK);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_madr(dma::Channel::Gpu, head);
+        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_words(0));
+        dma::raw::set_chcr(dma::Channel::Gpu, LIST_KICK);
+    }
 }
 
 const SPUCNT: u32 = 0x1F80_1DAA;
@@ -1167,12 +1172,17 @@ impl Activity {
                 spu_mode(self.spucnt | 0x0020)
             };
             if ready {
-                dma::set_madr(dma::Channel::Spu, self.head);
-                dma::set_bcr_block(dma::Channel::Spu, 16, SPU_BLOCKS);
-                dma::set_chcr(
-                    dma::Channel::Spu,
-                    dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
-                );
+                // SAFETY: silicon probe: the transfer touches only memory this probe
+                // owns, which stays live and untouched until the probe waits the
+                // channel idle or aborts it.
+                unsafe {
+                    dma::raw::set_madr(dma::Channel::Spu, self.head);
+                    dma::raw::set_bcr(dma::Channel::Spu, dma::bcr_blocks(16, SPU_BLOCKS));
+                    dma::raw::set_chcr(
+                        dma::Channel::Spu,
+                        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+                    );
+                }
                 self.spu_kicks += 1;
             } else {
                 self.spu_enabled = false;

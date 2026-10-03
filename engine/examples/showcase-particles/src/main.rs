@@ -13,7 +13,7 @@
 
 extern crate psx_rt;
 
-use psx_engine::{button, App, Config, Ctx, OtFrame, PrimitiveArena, Scene};
+use psx_engine::{button, App, Config, Ctx, OtFrame, Scene};
 use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool};
 use psx_gpu::ot::OrderingTable;
@@ -100,10 +100,11 @@ impl Scene for ShowcaseParticles {
         self.particles.update(1);
     }
 
-    fn render(&mut self, _ctx: &mut Ctx) {
+    fn render(&mut self, ctx: &mut Ctx) {
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
-        let mut rects = unsafe { PrimitiveArena::new(&mut RECTS) };
-        let mut backgrounds = unsafe { PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
+        let mut rects = unsafe { psx_gpu::frame::PrimitiveArena::new(&mut RECTS) };
+        let mut backgrounds =
+            unsafe { psx_gpu::frame::PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
 
         let Some(bg) = backgrounds.push(QuadGouraud::new(
             [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
@@ -126,7 +127,7 @@ impl Scene for ShowcaseParticles {
             ot.add_packet(MARKER_SLOT, marker);
         }
 
-        ot.submit();
+        ot.submit(ctx.gpu_dma());
 
         if let Some(font) = self.font.as_ref() {
             font.draw_text(4, 4, "SHOWCASE-PARTICLES", (220, 230, 250));
@@ -138,10 +139,10 @@ impl Scene for ShowcaseParticles {
     }
 }
 
-fn render_particles<const N: usize, const OT_N: usize>(
+fn render_particles<'a, const N: usize, const OT_N: usize>(
     particles: &ParticlePool<N>,
-    rects: &mut PrimitiveArena<'_, RectFlat>,
-    ot: &mut OtFrame<'_, OT_N>,
+    rects: &mut psx_gpu::frame::PrimitiveArena<'a, RectFlat>,
+    ot: &mut OtFrame<'a, OT_N>,
     slot: usize,
 ) -> usize {
     let mut written = 0;

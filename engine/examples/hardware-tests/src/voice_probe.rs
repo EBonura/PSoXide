@@ -551,9 +551,12 @@ fn upload_adpcm_settled(dest: SpuAddr, bytes: &[u8]) -> UploadTiming {
         timing.max_mode_polls = timing.max_mode_polls.max(wait_mode(stopped | 0x0020));
 
         dma::enable_channel(dma::Channel::Spu);
-        dma::set_madr(dma::Channel::Spu, bytes.as_ptr() as u32);
-        dma::set_bcr_block(dma::Channel::Spu, block_size as u16, block_count as u16);
-        dma::set_chcr(
+        dma::raw::set_madr(dma::Channel::Spu, bytes.as_ptr() as u32);
+        dma::raw::set_bcr(
+            dma::Channel::Spu,
+            dma::bcr_blocks(block_size as u16, block_count as u16),
+        );
+        dma::raw::set_chcr(
             dma::Channel::Spu,
             dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
         );

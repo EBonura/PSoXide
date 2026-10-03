@@ -54,9 +54,7 @@
 extern crate psx_rt;
 
 use psx_asset::Texture;
-use psx_engine::{
-    App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, PrimitiveArena, Scene, SimTick,
-};
+use psx_engine::{App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, Scene, SimTick};
 use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, TriTexturedGouraud};
@@ -412,7 +410,7 @@ impl Scene for Corridor {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        self.build_frame_ot();
+        self.build_frame_ot(ctx.gpu_dma());
         let font = self.font.as_ref().expect("font uploaded in init");
         self.draw_hud(font, ctx.sim_tick);
     }
@@ -435,10 +433,11 @@ fn update_ring_z(tick: SimTick) {
 // ----------------------------------------------------------------------
 
 impl Corridor {
-    fn build_frame_ot(&mut self) {
+    fn build_frame_ot(&mut self, dma: &mut psx_engine::GpuDma) {
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
-        let mut tris = unsafe { PrimitiveArena::new(&mut TRIS) };
-        let mut backgrounds = unsafe { PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
+        let mut tris = unsafe { psx_gpu::frame::PrimitiveArena::new(&mut TRIS) };
+        let mut backgrounds =
+            unsafe { psx_gpu::frame::PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
 
         // --- Background -- solid fog-colour quad behind everything. ---
         let Some(bg) = backgrounds.push(QuadGouraud::new(
@@ -530,7 +529,7 @@ impl Corridor {
             }
         }
 
-        ot.submit();
+        ot.submit(dma);
     }
 
     fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {

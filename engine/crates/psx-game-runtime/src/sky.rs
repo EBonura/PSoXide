@@ -117,8 +117,8 @@ impl SkyCyclorama {
     /// Streamed sky assets carry empty baked bytes and are uploaded on gameplay
     /// entry, so residency resolves through the caller's slot resolvers; baked
     /// builds upload lazily.
-    pub fn draw_panorama<const OT_DEPTH: usize>(
-        &mut self,
+    pub fn draw_panorama<'a, const OT_DEPTH: usize>(
+        &'a mut self,
         sky: LevelSkyRecord,
         camera: WorldCamera,
         assets: &'static [LevelAssetRecord],
@@ -129,7 +129,7 @@ impl SkyCyclorama {
         mut ensure_sky_panorama_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
         sky_panorama_tpage_word: impl Fn(usize) -> u16,
         sky_panorama_clut_word: impl Fn(usize) -> u16,
-        ot: &mut OtFrame<'_, OT_DEPTH>,
+        ot: &mut OtFrame<'a, OT_DEPTH>,
     ) {
         // The ordinary world band stops one slot earlier. Renderers that also
         // use this farthest slot preserve the background contract through the
@@ -180,10 +180,8 @@ impl SkyCyclorama {
             self.key = key;
             self.valid = true;
         }
-        let mut i = 0usize;
-        while i < self.count {
-            ot.add_packet_slot(sky_ot_slot, &mut self.packets[i]);
-            i += 1;
+        for packet in &mut self.packets[..self.count] {
+            ot.add_packet_slot(sky_ot_slot, packet);
         }
     }
 }

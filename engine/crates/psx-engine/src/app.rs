@@ -517,6 +517,12 @@ impl App {
             initial_pad,
             fb,
         );
+        // The runner owns channel 2 for the whole run; scenes borrow it
+        // through `Ctx::gpu_dma`. A game that took the tokens itself keeps
+        // them, and its scenes then submit with its own token.
+        if let Some(peripherals) = psx_rt::Peripherals::take() {
+            ctx.set_gpu_dma(peripherals.gpu_dma);
+        }
         boot_visual_checkpoint(&mut ctx.fb, (200, 96, 0), "02 CTX READY");
 
         // The wrapper is the Scene the scheduled loop drives: its

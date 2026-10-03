@@ -184,8 +184,13 @@ fn arm(kind: Kind) -> Armed {
     gpu_io::write_gp1(0x0200_0000);
     gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
-    dma::set_madr(dma::Channel::Gpu, head);
-    dma::set_bcr_manual(dma::Channel::Gpu, 0);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_madr(dma::Channel::Gpu, head);
+        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_words(0));
+    }
     settle();
     Armed {
         shape,
@@ -265,7 +270,12 @@ fn kick_and_stamp(armed: &Armed) -> Stamps {
     };
     let guard = IrqGuard::mask();
     let mut clock = Clock::start();
-    dma::set_chcr(dma::Channel::Gpu, KICK);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_chcr(dma::Channel::Gpu, KICK);
+    }
     loop {
         let t = clock.now();
         let busy = dma::is_busy(dma::Channel::Gpu);
@@ -438,7 +448,12 @@ fn throughput(kind: LoopKind) -> Throughput {
     let armed = arm(Kind::Expensive);
     let guard = IrqGuard::mask();
     timers::set_mode(timers::Timer::Timer2, 0);
-    dma::set_chcr(dma::Channel::Gpu, KICK);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_chcr(dma::Channel::Gpu, KICK);
+    }
     let (iterations, cycles) = run_loop(kind, 0, WALK_CAP);
     // Let the drawing finish before anything else touches the GPU.
     let mut clock = Clock::start();

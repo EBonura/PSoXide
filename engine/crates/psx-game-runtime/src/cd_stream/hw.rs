@@ -372,11 +372,22 @@ pub(super) fn stream_world_pack(cd: &mut CdController, result: &mut BenchResult)
 #[cfg(target_arch = "mips")]
 pub(super) unsafe fn dma_read_sector(buffer: *mut u32, polls: &mut u32) {
     cd_arm_data_transfer();
-    psx_io::dma::set_madr(psx_io::dma::Channel::Cdrom, buffer as u32);
-    psx_io::dma::set_bcr_manual(psx_io::dma::Channel::Cdrom, SECTOR_WORDS as u16);
-    // Matches the BIOS-style burst control word that the emulator
-    // models at Redux's quarter-rate CD DMA completion cadence.
-    psx_io::dma::set_chcr(psx_io::dma::Channel::Cdrom, 0x1140_0100);
+    // SAFETY: the caller guarantees `buffer` is writable for one whole
+    // sector. Channel 3 is idle because the previous sector spun until it
+    // was, unless that spin hit DMA_POLL_LIMIT; that path does not abort
+    // the channel yet (an open item from the SDK soundness audit).
+    unsafe {
+        psx_io::dma::start(
+            psx_io::dma::Channel::Cdrom,
+            psx_io::dma::Transfer {
+                madr: buffer as u32,
+                bcr: psx_io::dma::bcr_words(SECTOR_WORDS as u16),
+                // Matches the BIOS-style burst control word that the emulator
+                // models at Redux's quarter-rate CD DMA completion cadence.
+                chcr: 0x1140_0100,
+            },
+        )
+    };
     let mut i = 0;
     while psx_io::dma::is_busy(psx_io::dma::Channel::Cdrom) && i < DMA_POLL_LIMIT {
         *polls = (*polls).saturating_add(1);

@@ -31,6 +31,7 @@ extern crate psx_rt;
 use psx_engine::{button, sfx, App, Config, Ctx, MicrogameAction, MicrogameShell, Scene};
 use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
+use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
 use psx_settings::Profile;
@@ -463,19 +464,21 @@ impl Scene for Breakout {
         }
     }
 
-    fn render(&mut self, _ctx: &mut Ctx) {
-        self.build_frame_ot();
-        unsafe { OT.submit() };
+    fn render(&mut self, ctx: &mut Ctx) {
+        self.build_frame_ot().submit(ctx.gpu_dma());
         self.draw_hud();
     }
 }
 
 impl Breakout {
-    fn build_frame_ot(&mut self) {
-        let ot = unsafe { &mut OT };
-        let rects = unsafe { &mut RECTS };
+    fn build_frame_ot(&mut self) -> OtFrame<'static, 8> {
+        let mut frame = unsafe { &mut OT }.frame();
+        // The last six rects stay for the trail, paddle and ball, so
+        // particles can never starve them.
+        let (main_rects, tail_rects) = unsafe { &mut RECTS }.split_at_mut(96 - 6);
+        let mut rects = PrimitiveArena::new(main_rects);
+        let mut tail = PrimitiveArena::new(tail_rects);
         let bg = unsafe { &mut BG_QUAD };
-        ot.clear();
 
         let (shake_dx, shake_dy) = self.shake.tick();
 
@@ -484,24 +487,28 @@ impl Breakout {
             [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
             [(22, 30, 64), (22, 30, 64), (4, 6, 18), (4, 6, 18)],
         );
-        ot.add(7, bg, QuadGouraud::WORDS);
+        frame.add(7, bg);
 
         // Slot 6 -- side borders.
-        rects[0] = RectFlat::new(shake_dx, 0, BORDER_W, SCREEN_H as u16, 140, 140, 180);
-        rects[1] = RectFlat::new(
-            SCREEN_W - BORDER_W as i16 + shake_dx,
-            0,
-            BORDER_W,
-            SCREEN_H as u16,
-            140,
-            140,
-            180,
-        );
-        ot.add(6, &mut rects[0], RectFlat::WORDS);
-        ot.add(6, &mut rects[1], RectFlat::WORDS);
+        let borders = [
+            RectFlat::new(shake_dx, 0, BORDER_W, SCREEN_H as u16, 140, 140, 180),
+            RectFlat::new(
+                SCREEN_W - BORDER_W as i16 + shake_dx,
+                0,
+                BORDER_W,
+                SCREEN_H as u16,
+                140,
+                140,
+                180,
+            ),
+        ];
+        for border in borders {
+            if let Some(rect) = rects.push(border) {
+                frame.add(6, rect);
+            }
+        }
 
         // Slot 4 -- bricks.
-        let mut idx = 2;
         for row in 0..ROWS {
             let (r, gc, b) = ROW_COLORS[row];
             for col in 0..COLS {
@@ -511,22 +518,15 @@ impl Breakout {
                 }
                 let bx = WALL_LEFT + (col as i16) * (BRICK_W as i16 + BRICK_GAP) + shake_dx;
                 let by = WALL_TOP + (row as i16) * (BRICK_H as i16 + BRICK_GAP) + shake_dy;
-                rects[idx] = RectFlat::new(bx, by, BRICK_W, BRICK_H, r, gc, b);
-                ot.add(4, &mut rects[idx], RectFlat::WORDS);
-                idx += 1;
+                if let Some(rect) = rects.push(RectFlat::new(bx, by, BRICK_W, BRICK_H, r, gc, b)) {
+                    frame.add(4, rect);
+                }
             }
         }
 
-        // Slot 3 -- particles. Reserve 6 trailing slots for
-        // paddle + ball + trail so particles don't starve them.
-        let particle_budget = rects.len().saturating_sub(idx + 6);
-        let wrote = self.particles.render_into_ot(
-            ot,
-            &mut rects[idx..idx + particle_budget],
-            3,
-            (shake_dx, shake_dy),
-        );
-        idx += wrote;
+        // Slot 3 -- particles, in whatever is left before the tail.
+        self.particles
+            .render_into_frame(&mut frame, &mut rects, 3, (shake_dx, shake_dy));
 
         // Slot 2 -- ball trail (only during Playing).
         if self.phase == Phase::Playing {
@@ -541,9 +541,10 @@ impl Breakout {
                 let gc = (brightness.min(200)) as u8;
                 let b = (brightness.min(120)) as u8;
                 let size = (3 + i) as u16;
-                rects[idx] = RectFlat::new(tx + shake_dx, ty + shake_dy, size, size, r, gc, b);
-                ot.add(2, &mut rects[idx], RectFlat::WORDS);
-                idx += 1;
+                let trail = RectFlat::new(tx + shake_dx, ty + shake_dy, size, size, r, gc, b);
+                if let Some(rect) = tail.push(trail) {
+                    frame.add(2, rect);
+                }
             }
         }
 
@@ -553,7 +554,7 @@ impl Breakout {
         } else {
             (220, 220, 240)
         };
-        rects[idx] = RectFlat::new(
+        let paddle = RectFlat::new(
             self.paddle_x + shake_dx,
             PADDLE_Y + shake_dy,
             PADDLE_W,
@@ -562,11 +563,12 @@ impl Breakout {
             pg,
             pb,
         );
-        ot.add(1, &mut rects[idx], RectFlat::WORDS);
-        idx += 1;
+        if let Some(rect) = tail.push(paddle) {
+            frame.add(1, rect);
+        }
 
         // Slot 0 (front) -- ball.
-        rects[idx] = RectFlat::new(
+        let ball = RectFlat::new(
             self.ball_x + shake_dx,
             self.ball_y + shake_dy,
             BALL_SIZE,
@@ -575,7 +577,10 @@ impl Breakout {
             230,
             120,
         );
-        ot.add(0, &mut rects[idx], RectFlat::WORDS);
+        if let Some(rect) = tail.push(ball) {
+            frame.add(0, rect);
+        }
+        frame
     }
 
     fn draw_hud(&self) {

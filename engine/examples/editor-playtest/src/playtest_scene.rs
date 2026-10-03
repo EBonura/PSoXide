@@ -2171,13 +2171,16 @@ impl Scene for Playtest {
         self.overlay_poi_panel_frame = self.prepared_poi_panel_frame;
         self.overlay_poi_page_type_frame = self.prepared_poi_page_type_frame;
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
-        let ot_in_flight = unsafe {
+        // SAFETY: `render` built OT[built] this frame from PACKET_FRAMES' paired
+        // scratch and static packets. Neither is touched again until the
+        // runner has waited this walk out: it drains channel 2 before
+        // `render_overlay` and the flip, and the next frame builds into the
+        // other table and the other end of the scratch.
+        unsafe {
             let built = (*core::ptr::addr_of!(PACKET_FRAMES)).built_frame();
-            OtFrame::resume(&mut *core::ptr::addr_of_mut!(OT[built]))
+            psx_gpu::submit_linked_list_raw_async((*core::ptr::addr_of!(OT[built])).submit_head());
         }
-        .submit_async();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
-        ot_in_flight.detach();
     }
 
     fn render_overlay(&mut self, _ctx: &mut Ctx) {

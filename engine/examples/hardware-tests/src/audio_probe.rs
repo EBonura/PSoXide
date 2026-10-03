@@ -209,9 +209,14 @@ impl AudioProbe {
         cd_select(0);
         unsafe { psx_io::write8(CD_REQUEST_IRQ, 0x80) };
         dma::enable_channel(dma::Channel::Cdrom);
-        dma::set_madr(dma::Channel::Cdrom, self.sector_buffer.as_mut_ptr() as u32);
-        dma::set_bcr_manual(dma::Channel::Cdrom, SECTOR_WORDS as u16);
-        dma::set_chcr(dma::Channel::Cdrom, 0x1140_0100);
+        // SAFETY: silicon probe: the transfer touches only memory this probe
+        // owns, which stays live and untouched until the probe waits the
+        // channel idle or aborts it.
+        unsafe {
+            dma::raw::set_madr(dma::Channel::Cdrom, self.sector_buffer.as_mut_ptr() as u32);
+            dma::raw::set_bcr(dma::Channel::Cdrom, dma::bcr_words(SECTOR_WORDS as u16));
+            dma::raw::set_chcr(dma::Channel::Cdrom, 0x1140_0100);
+        }
         let mut guard = 0u32;
         while dma::is_busy(dma::Channel::Cdrom) && guard < 1_000_000 {
             guard += 1;

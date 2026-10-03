@@ -284,7 +284,7 @@ impl Scene for Showcase3D {
         }
         self.sparks.update(1);
 
-        self.build_frame_ot(ctx.sim_tick);
+        self.build_frame_ot(ctx.sim_tick, ctx.gpu_dma());
         let font = self.font.as_ref().expect("font uploaded in init");
         self.draw_hud(font, ctx.sim_tick);
     }
@@ -315,12 +315,13 @@ impl Showcase3D {
         }
     }
 
-    fn build_frame_ot(&mut self, tick: SimTick) {
+    fn build_frame_ot(&mut self, tick: SimTick, dma: &mut psx_engine::GpuDma) {
         let frame = tick.as_u32();
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
-        let mut rects = unsafe { PrimitiveArena::new(&mut SCENE_RECTS) };
+        let mut rects = unsafe { psx_gpu::frame::PrimitiveArena::new(&mut SCENE_RECTS) };
         let mut gouraud = unsafe { PrimitiveArena::new(&mut GOURAUD_TRIS) };
-        let mut backgrounds = unsafe { PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
+        let mut backgrounds =
+            unsafe { psx_gpu::frame::PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
 
         let (shake_dx, shake_dy) = self.shake.tick();
 
@@ -433,7 +434,7 @@ impl Showcase3D {
             (shake_dx, shake_dy),
         );
 
-        ot.submit();
+        ot.submit(dma);
     }
 
     fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {
@@ -518,10 +519,10 @@ fn transform_axis(m: &Mat3I16, row: usize, v: Vec3World) -> i32 {
     (sum >> 12) as i32
 }
 
-fn render_particles<const N: usize, const OT_N: usize>(
+fn render_particles<'a, const N: usize, const OT_N: usize>(
     particles: &ParticlePool<N>,
-    rects: &mut PrimitiveArena<'_, RectFlat>,
-    ot: &mut OtFrame<'_, OT_N>,
+    rects: &mut psx_gpu::frame::PrimitiveArena<'a, RectFlat>,
+    ot: &mut OtFrame<'a, OT_N>,
     slot: usize,
     shake: (i16, i16),
 ) -> usize {

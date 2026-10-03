@@ -377,19 +377,20 @@ impl Scene for Lighting {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        self.build_frame_ot(ctx.sim_tick);
+        self.build_frame_ot(ctx.sim_tick, ctx.gpu_dma());
         let font = self.font.as_ref().expect("font uploaded in init");
         self.draw_hud(font, ctx.sim_tick);
     }
 }
 
 impl Lighting {
-    fn build_frame_ot(&mut self, tick: SimTick) {
+    fn build_frame_ot(&mut self, tick: SimTick, dma: &mut psx_engine::GpuDma) {
         let frame = tick.as_u32();
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut gouraud = unsafe { PrimitiveArena::new(&mut GOURAUD_TRIS) };
-        let mut markers = unsafe { PrimitiveArena::new(&mut LIGHT_MARKERS) };
-        let mut backgrounds = unsafe { PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
+        let mut markers = unsafe { psx_gpu::frame::PrimitiveArena::new(&mut LIGHT_MARKERS) };
+        let mut backgrounds =
+            unsafe { psx_gpu::frame::PrimitiveArena::new(core::slice::from_mut(&mut BG_QUAD)) };
 
         let cube = Mesh::from_bytes(CUBE_BLOB).expect("cube blob");
 
@@ -499,7 +500,7 @@ impl Lighting {
             ot.add_packet(LIGHT_MARKER_SLOT, marker);
         }
 
-        ot.submit();
+        ot.submit(dma);
     }
 
     fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {

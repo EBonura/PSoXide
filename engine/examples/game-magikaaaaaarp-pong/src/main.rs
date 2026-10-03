@@ -13,6 +13,7 @@ use psx_engine::{
     MicrogameShell, Scene, SimTick,
 };
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
+use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::material::TextureMaterial;
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, QuadTexturedMaterial, RectFlat};
@@ -107,8 +108,6 @@ const SPECTRUM_BAR_PITCH: i16 = 18;
 const SPECTRUM_MAX_H: u16 = 76;
 const SPECTRUM_OT_SLOT: usize = 15;
 const CENTER_DASH_RECTS: usize = 14;
-const CENTER_RECTS_START: usize = 2;
-const PADDLE_RECT_START: usize = CENTER_RECTS_START + CENTER_DASH_RECTS;
 
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
@@ -520,84 +519,104 @@ impl Scene for MagikaaaaaarpPong {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        self.build_frame_ot(ctx.sim_tick.as_u32());
-        unsafe { OT.submit() };
+        let frame = self.build_frame_ot(ctx.sim_tick.as_u32());
+        frame.submit(ctx.gpu_dma());
         self.draw_hud(ctx.sim_tick.as_u32());
     }
 }
 
 impl MagikaaaaaarpPong {
-    fn build_frame_ot(&self, sim_tick: u32) {
-        let ot = unsafe { &mut OT };
-        let rects = unsafe { &mut RECTS };
-        ot.clear();
+    fn build_frame_ot(&self, sim_tick: u32) -> OtFrame<'static, 16> {
+        let mut frame = unsafe { &mut OT }.frame();
+        let mut rects = PrimitiveArena::new(unsafe { &mut RECTS });
+        let mut add = |frame: &mut OtFrame<'static, 16>, z: usize, rect: RectFlat| {
+            if let Some(rect) = rects.push(rect) {
+                frame.add(z, rect);
+            }
+        };
 
-        self.add_spectrum_to_ot(ot, sim_tick);
+        self.add_spectrum_to_ot(&mut frame, sim_tick);
 
-        rects[0] = RectFlat::new(
-            0,
-            PLAYFIELD_TOP - 1,
-            SCREEN_W as u16,
-            BORDER_H,
-            INK.0,
-            INK.1,
-            INK.2,
+        add(
+            &mut frame,
+            1,
+            RectFlat::new(
+                0,
+                PLAYFIELD_TOP - 1,
+                SCREEN_W as u16,
+                BORDER_H,
+                INK.0,
+                INK.1,
+                INK.2,
+            ),
         );
-        rects[1] = RectFlat::new(
-            0,
-            PLAYFIELD_BOT,
-            SCREEN_W as u16,
-            BORDER_H,
-            INK.0,
-            INK.1,
-            INK.2,
+        add(
+            &mut frame,
+            1,
+            RectFlat::new(
+                0,
+                PLAYFIELD_BOT,
+                SCREEN_W as u16,
+                BORDER_H,
+                INK.0,
+                INK.1,
+                INK.2,
+            ),
         );
-        ot.add(1, &mut rects[0], RectFlat::WORDS);
-        ot.add(1, &mut rects[1], RectFlat::WORDS);
 
         let mut y = PLAYFIELD_TOP + 7;
-        let mut idx = CENTER_RECTS_START;
-        while y + 8 <= PLAYFIELD_BOT - 4 && idx < CENTER_RECTS_START + CENTER_DASH_RECTS {
-            rects[idx] = RectFlat::new(
-                (SCREEN_W - 4) / 2,
-                y,
-                4,
-                8,
-                MUTED_INK.0,
-                MUTED_INK.1,
-                MUTED_INK.2,
+        let mut dashes = 0;
+        while y + 8 <= PLAYFIELD_BOT - 4 && dashes < CENTER_DASH_RECTS {
+            add(
+                &mut frame,
+                2,
+                RectFlat::new(
+                    (SCREEN_W - 4) / 2,
+                    y,
+                    4,
+                    8,
+                    MUTED_INK.0,
+                    MUTED_INK.1,
+                    MUTED_INK.2,
+                ),
             );
-            ot.add(2, &mut rects[idx], RectFlat::WORDS);
             y += 16;
-            idx += 1;
+            dashes += 1;
         }
 
-        rects[PADDLE_RECT_START] = RectFlat::new(
-            PADDLE_MARGIN,
-            self.p1_y,
-            PADDLE_W,
-            PADDLE_H,
-            INK.0,
-            INK.1,
-            INK.2,
+        add(
+            &mut frame,
+            5,
+            RectFlat::new(
+                PADDLE_MARGIN,
+                self.p1_y,
+                PADDLE_W,
+                PADDLE_H,
+                INK.0,
+                INK.1,
+                INK.2,
+            ),
         );
-        rects[PADDLE_RECT_START + 1] = RectFlat::new(
-            SCREEN_W - PADDLE_MARGIN - PADDLE_W as i16,
-            self.p2_y,
-            PADDLE_W,
-            PADDLE_H,
-            INK.0,
-            INK.1,
-            INK.2,
+        add(
+            &mut frame,
+            5,
+            RectFlat::new(
+                SCREEN_W - PADDLE_MARGIN - PADDLE_W as i16,
+                self.p2_y,
+                PADDLE_W,
+                PADDLE_H,
+                INK.0,
+                INK.1,
+                INK.2,
+            ),
         );
-        ot.add(5, &mut rects[PADDLE_RECT_START], RectFlat::WORDS);
-        ot.add(5, &mut rects[PADDLE_RECT_START + 1], RectFlat::WORDS);
 
-        self.add_cube_to_ot(ot, cube_scale_q12(sim_tick));
-        self.add_score_flyby_to_ot(ot);
+        self.add_cube_to_ot(&mut frame, cube_scale_q12(sim_tick));
+        self.add_score_flyby_to_ot(&mut frame);
+        frame
     }
 
-    fn add_spectrum_to_ot(&self, ot: &mut OrderingTable<16>, tick: u32) {
+    fn add_spectrum_to_ot(&self, frame: &mut OtFrame<'static, 16>, tick: u32) {
         let elapsed = if self.cdda_started {
             Some(tick.saturating_sub(self.cdda_started_tick))
         } else {
@@ -611,8 +630,7 @@ impl MagikaaaaaarpPong {
             .unwrap_or(0);
         let quads = unsafe { &mut SPECTRUM_QUADS };
 
-        let mut band = 0;
-        while band < SPECTRUM_BANDS {
+        for (band, quad) in quads.iter_mut().enumerate() {
             let amp = elapsed
                 .map(|_| SPECTRUM_DATA[offset + band] as u16)
                 .unwrap_or(0);
@@ -621,7 +639,7 @@ impl MagikaaaaaarpPong {
             let y = SPECTRUM_BASE_Y - h as i16;
             let top = spectrum_top_color(amp);
             let bottom = spectrum_bottom_color(top);
-            quads[band] = QuadGouraud::new(
+            *quad = QuadGouraud::new(
                 [
                     (x, y),
                     (x + SPECTRUM_BAR_W as i16, y),
@@ -630,15 +648,14 @@ impl MagikaaaaaarpPong {
                 ],
                 [top, top, bottom, bottom],
             );
-            ot.add(SPECTRUM_OT_SLOT, &mut quads[band], QuadGouraud::WORDS);
-            band += 1;
+            frame.add(SPECTRUM_OT_SLOT, quad);
         }
     }
 
-    fn add_cube_to_ot(&self, ot: &mut OrderingTable<16>, scale_q12: i32) {
+    fn add_cube_to_ot(&self, frame: &mut OtFrame<'static, 16>, scale_q12: i32) {
         let cx = self.ball_x + BALL_SIZE as i16 / 2;
         let cy = self.ball_y + BALL_SIZE as i16 / 2;
-        let quads = unsafe { &mut CUBE_QUADS };
+        let mut quads = PrimitiveArena::new(unsafe { &mut CUBE_QUADS });
         let mut projected = [ScreenVertex::ZERO; 8];
 
         let mut i = 0;
@@ -653,16 +670,15 @@ impl MagikaaaaaarpPong {
             i += 1;
         }
 
-        let mut quad_idx = 0;
         i = 0;
-        while i < CUBE_FACES.len() && quad_idx < quads.len() {
+        while i < CUBE_FACES.len() && quads.remaining() > 0 {
             let face = CUBE_FACES[i];
             let normal = rotate_vec(face.normal, self.spin_x, self.spin_y, self.spin_z);
             if normal.z < -96 {
                 let [a, b, c, d] = face.indices;
                 let avg_z = (projected[a].z + projected[b].z + projected[c].z + projected[d].z) / 4;
                 let tint = cube_face_tint(normal.z);
-                quads[quad_idx] = QuadTexturedMaterial::with_material(
+                let quad = QuadTexturedMaterial::with_material(
                     [
                         (projected[a].x, projected[a].y),
                         (projected[b].x, projected[b].y),
@@ -676,15 +692,15 @@ impl MagikaaaaaarpPong {
                         tint,
                     ),
                 );
-                let slot = cube_depth_slot(avg_z);
-                ot.add(slot, &mut quads[quad_idx], QuadTexturedMaterial::WORDS);
-                quad_idx += 1;
+                if let Some(quad) = quads.push(quad) {
+                    frame.add(cube_depth_slot(avg_z), quad);
+                }
             }
             i += 1;
         }
     }
 
-    fn add_score_flyby_to_ot(&self, ot: &mut OrderingTable<16>) {
+    fn add_score_flyby_to_ot(&self, frame: &mut OtFrame<'static, 16>) {
         if self.score_flyby_tick >= SCORE_FLYBY_DURATION_TICKS || self.score_flyby_dir == 0 {
             return;
         }
@@ -715,7 +731,7 @@ impl MagikaaaaaarpPong {
                 (128, 128, 128),
             ),
         );
-        ot.add(SCORE_FLYBY_OT_SLOT, quad, QuadTexturedMaterial::WORDS);
+        frame.add(SCORE_FLYBY_OT_SLOT, quad);
     }
 
     fn draw_hud(&self, sim_tick: u32) {

@@ -357,9 +357,14 @@ fn dma_in(words: *const u32, count: usize) {
 fn dma_in_raw(words: *const u32, count: usize) {
     // SAFETY: single-threaded bookkeeping.
     unsafe { (*addr_of_mut!(KICK_MADR))[0] = words as u32 };
-    dma::set_madr(Channel::MdecIn, words as u32);
-    dma::set_bcr_block(Channel::MdecIn, 32, (count / 32) as u16);
-    dma::set_chcr(Channel::MdecIn, CHCR_IN);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_madr(Channel::MdecIn, words as u32);
+        dma::raw::set_bcr(Channel::MdecIn, dma::bcr_blocks(32, (count / 32) as u16));
+        dma::raw::set_chcr(Channel::MdecIn, CHCR_IN);
+    }
 }
 
 fn dma_done(ch: Channel) -> bool {
@@ -506,8 +511,13 @@ fn variant_e(run: &mut Run) -> bool {
         let dpcr = psx_io::read32(dma::DPCR);
         psx_io::write32(dma::DPCR, (dpcr & !0xFF) | 0xBB);
     }
-    dma::set_chcr(Channel::MdecIn, 0x0000_0201);
-    dma::set_chcr(Channel::MdecOut, 0x0000_0200);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_chcr(Channel::MdecIn, 0x0000_0201);
+        dma::raw::set_chcr(Channel::MdecOut, 0x0000_0200);
+    }
     ctl(RESET);
     ctl(ENABLE);
     // DecDCTinSync before each command and after each DMA. The library
@@ -601,9 +611,17 @@ fn probe(run: &mut Run) -> bool {
     dma::abort(Channel::MdecOut);
     // SAFETY: single-threaded bookkeeping.
     unsafe { (*addr_of_mut!(KICK_MADR))[1] = out.as_mut_ptr() as u32 };
-    dma::set_madr(Channel::MdecOut, out.as_mut_ptr() as u32);
-    dma::set_bcr_block(Channel::MdecOut, 32, (PROBE_OUT_WORDS / 32) as u16);
-    dma::set_chcr(Channel::MdecOut, CHCR_OUT);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_madr(Channel::MdecOut, out.as_mut_ptr() as u32);
+        dma::raw::set_bcr(
+            Channel::MdecOut,
+            dma::bcr_blocks(32, (PROBE_OUT_WORDS / 32) as u16),
+        );
+        dma::raw::set_chcr(Channel::MdecOut, CHCR_OUT);
+    }
     let out_done = dma_done(Channel::MdecOut) && !(FAULT && FAULT_PROBE.load());
     let in_done = dma_done(Channel::MdecIn);
     snap(run, SNAP_PROBE);

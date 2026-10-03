@@ -178,11 +178,13 @@ pub use movement::{
     horizontal_view_coordinates, yaw_to_point, CameraRelativeMove, InputAxis, InputAxisProfile,
     InputVector,
 };
+/// The GPU DMA ownership token [`OtFrame::submit`] takes; scenes borrow
+/// the app runner's through [`Ctx::gpu_dma`].
+pub use psx_io::periph::GpuDma;
 pub use render::{
-    CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, OtSubmitInFlight,
-    PacketFramePair, PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch,
-    PrimitivePacketStream, PrimitivePacketWordReservation, PrimitiveSink, RoomSurfaceSink,
-    PRIMITIVE_PACKET_SLOT_WORDS,
+    CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, PacketFramePair,
+    PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch, PrimitivePacketStream,
+    PrimitivePacketWordReservation, PrimitiveSink, RoomSurfaceSink, PRIMITIVE_PACKET_SLOT_WORDS,
 };
 pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_basis,

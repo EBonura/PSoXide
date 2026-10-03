@@ -5,15 +5,15 @@
 use super::*;
 
 /// Draw one authored particle emitter through the crate policy.
-pub(super) fn draw_particle_emitter(
+pub(super) fn draw_particle_emitter<'a>(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
     elapsed_tick: SimTick,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     psx_game_runtime::particles::draw_particle_emitter(
         emitter,
@@ -27,7 +27,7 @@ pub(super) fn draw_particle_emitter(
     )
 }
 
-pub(super) fn draw_water_wade_splash(
+pub(super) fn draw_water_wade_splash<'a>(
     x: i32,
     surface_y: i32,
     z: i32,
@@ -36,8 +36,8 @@ pub(super) fn draw_water_wade_splash(
     depth_range: DepthRange,
     particle_material: TextureMaterial,
     elapsed_tick: SimTick,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     psx_game_runtime::particles::draw_water_wade_splash(
         x,
@@ -54,14 +54,14 @@ pub(super) fn draw_water_wade_splash(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_projectile_bolt(
+pub(super) fn draw_projectile_bolt<'a>(
     projectile: psx_game_runtime::projectiles::ProjectileSnapshot,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     psx_game_runtime::particles::draw_projectile_bolt(
         projectile,
@@ -75,14 +75,14 @@ pub(super) fn draw_projectile_bolt(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_projectile_charge(
+pub(super) fn draw_projectile_charge<'a>(
     charge: psx_game_runtime::combat::AuthoredProjectileCharge,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     psx_game_runtime::particles::draw_projectile_charge(
         charge,
@@ -96,14 +96,14 @@ pub(super) fn draw_projectile_charge(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_projectile_impact(
+pub(super) fn draw_projectile_impact<'a>(
     impact: psx_game_runtime::projectiles::ProjectileImpactEffect,
     camera: WorldCamera,
     projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    ot: &mut OtFrame<'_, OT_DEPTH>,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'a, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'a>,
 ) -> usize {
     psx_game_runtime::particles::draw_projectile_impact(
         impact,

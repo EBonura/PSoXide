@@ -520,9 +520,17 @@ fn raw_read(
                 }
                 extra = spins;
             }
-            psx_io::dma::set_madr(psx_io::dma::Channel::Cdrom, buffer as u32);
-            psx_io::dma::set_bcr_manual(psx_io::dma::Channel::Cdrom, SECTOR_WORDS as u16);
-            psx_io::dma::set_chcr(psx_io::dma::Channel::Cdrom, 0x1140_0100);
+            // SAFETY: silicon probe: the transfer touches only memory this probe
+            // owns, which stays live and untouched until the probe waits the
+            // channel idle or aborts it.
+            unsafe {
+                psx_io::dma::raw::set_madr(psx_io::dma::Channel::Cdrom, buffer as u32);
+                psx_io::dma::raw::set_bcr(
+                    psx_io::dma::Channel::Cdrom,
+                    psx_io::dma::bcr_words(SECTOR_WORDS as u16),
+                );
+                psx_io::dma::raw::set_chcr(psx_io::dma::Channel::Cdrom, 0x1140_0100);
+            }
             if probe_chcr {
                 chcr_kick = unsafe { psx_io::read32(psx_io::dma::Channel::Cdrom.base() + 0x8) };
             }

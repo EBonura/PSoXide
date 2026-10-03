@@ -14,6 +14,7 @@
 
 use psx_font::FontAtlas;
 use psx_gpu::framebuf::FrameBuffer;
+use psx_io::periph::GpuDma;
 use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
 use psx_pad::{button, poll_port2, ActionInput, ActionMap, PadState};
 
@@ -89,6 +90,7 @@ pub struct Ctx {
     /// receive the clear immediately before [`Scene::submit_render`].
     pub fb: FrameBuffer,
     runtime_requests: RuntimeRequests,
+    gpu_dma: Option<GpuDma>,
 }
 
 impl Ctx {
@@ -110,7 +112,26 @@ impl Ctx {
             pad2_prev: PadState::NONE,
             fb,
             runtime_requests: RuntimeRequests::default(),
+            gpu_dma: None,
         }
+    }
+
+    /// Hand the context the GPU DMA token; the app runner does this once.
+    pub(crate) fn set_gpu_dma(&mut self, dma: GpuDma) {
+        self.gpu_dma = Some(dma);
+    }
+
+    /// The GPU DMA token, for [`OtFrame::submit`](crate::OtFrame::submit)
+    /// and the other calls that walk or write through channel 2.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu_dma(&mut self) -> &mut GpuDma {
+        self.gpu_dma
+            .as_mut()
+            .expect("the app runner holds the GPU DMA token")
     }
 
     /// Fixed simulation delta as Q12 seconds.
@@ -452,10 +473,9 @@ pub trait Scene {
     /// build CPU-side packets here; the runner clears the next back buffer and
     /// calls [`submit_render`](Scene::submit_render) afterwards.
     ///
-    /// A scene that kicks its ordering table asynchronously (via
-    /// [`OtFrame::submit_async`](crate::OtFrame::submit_async) +
-    /// [`OtSubmitInFlight::detach`](crate::OtSubmitInFlight::detach))
-    /// must not issue any immediate GP0 draw after the kick; put that
+    /// A scene that kicks its ordering table asynchronously (with
+    /// [`psx_gpu::submit_linked_list_raw_async`], leaving the wait to the
+    /// runner) must not issue any immediate GP0 draw after the kick; put that
     /// work in [`render_overlay`](Scene::render_overlay) instead, which
     /// the engine calls once the GPU has drained the table.
     ///

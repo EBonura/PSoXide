@@ -27,6 +27,7 @@ extern crate psx_rt;
 use psx_engine::{button, sfx, App, Config, Ctx, MicrogameAction, MicrogameShell, Scene, SimTick};
 use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
+use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
 use psx_settings::Profile;
@@ -587,19 +588,22 @@ impl Scene for Invaders {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        self.build_frame_ot(ctx.sim_tick);
-        unsafe { OT.submit() };
+        let frame = self.build_frame_ot(ctx.sim_tick);
+        frame.submit(ctx.gpu_dma());
         self.draw_hud();
     }
 }
 
 impl Invaders {
-    fn build_frame_ot(&mut self, tick: SimTick) {
-        let frame = tick.as_u32();
-        let ot = unsafe { &mut OT };
-        let rects = unsafe { &mut RECTS };
+    fn build_frame_ot(&mut self, tick: SimTick) -> OtFrame<'static, 8> {
+        let frame_count = tick.as_u32();
+        let mut frame = unsafe { &mut OT }.frame();
+        // The last six rects stay for the bombs, bullet and ship, so
+        // particles can never starve them.
+        let (main_rects, tail_rects) = unsafe { &mut RECTS }.split_at_mut(128 - 6);
+        let mut rects = PrimitiveArena::new(main_rects);
+        let mut tail = PrimitiveArena::new(tail_rects);
         let bg = unsafe { &mut BG_QUAD };
-        ot.clear();
 
         let (shake_dx, shake_dy) = self.shake.tick();
 
@@ -608,10 +612,9 @@ impl Invaders {
             [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
             [(20, 10, 50), (20, 10, 50), (2, 2, 10), (2, 2, 10)],
         );
-        ot.add(7, bg, QuadGouraud::WORDS);
+        frame.add(7, bg);
 
         // Slot 5 -- aliens.
-        let mut idx = 0;
         for row in 0..ROWS {
             let (r, gc, b) = ROW_COLORS[row];
             for col in 0..COLS {
@@ -619,30 +622,23 @@ impl Invaders {
                     continue;
                 }
                 let (ax, ay, _, _) = self.alien_bbox(row, col);
-                rects[idx] =
-                    RectFlat::new(ax + shake_dx, ay + shake_dy, ALIEN_W, ALIEN_H, r, gc, b);
-                ot.add(5, &mut rects[idx], RectFlat::WORDS);
-                idx += 1;
+                let alien = RectFlat::new(ax + shake_dx, ay + shake_dy, ALIEN_W, ALIEN_H, r, gc, b);
+                if let Some(rect) = rects.push(alien) {
+                    frame.add(5, rect);
+                }
             }
         }
 
-        // Slot 3 -- particles. Reserve 6 trailing slots for
-        // bullets + ship.
-        let particle_budget = rects.len().saturating_sub(idx + 6);
-        let wrote = self.particles.render_into_ot(
-            ot,
-            &mut rects[idx..idx + particle_budget],
-            3,
-            (shake_dx, shake_dy),
-        );
-        idx += wrote;
+        // Slot 3 -- particles, in whatever is left before the tail.
+        self.particles
+            .render_into_frame(&mut frame, &mut rects, 3, (shake_dx, shake_dy));
 
         // Slot 2 -- enemy bombs.
         for bomb in &self.enemy_bombs {
             if !bomb.alive {
                 continue;
             }
-            rects[idx] = RectFlat::new(
+            let shot = RectFlat::new(
                 bomb.x + shake_dx,
                 bomb.y + shake_dy,
                 BULLET_W,
@@ -651,13 +647,14 @@ impl Invaders {
                 160,
                 80,
             );
-            ot.add(2, &mut rects[idx], RectFlat::WORDS);
-            idx += 1;
+            if let Some(rect) = tail.push(shot) {
+                frame.add(2, rect);
+            }
         }
 
         // Slot 1 -- player bullet.
         if self.player_bullet.alive {
-            rects[idx] = RectFlat::new(
+            let shot = RectFlat::new(
                 self.player_bullet.x + shake_dx,
                 self.player_bullet.y + shake_dy,
                 BULLET_W,
@@ -666,18 +663,19 @@ impl Invaders {
                 255,
                 180,
             );
-            ot.add(1, &mut rects[idx], RectFlat::WORDS);
-            idx += 1;
+            if let Some(rect) = tail.push(shot) {
+                frame.add(1, rect);
+            }
         }
 
         // Slot 0 (front) -- the ship. Flash uses the engine's
         // frame counter for the bit-2 strobe.
-        let (sr, sg, sb) = if self.ship_flash_frames > 0 && (frame & 2 != 0) {
+        let (sr, sg, sb) = if self.ship_flash_frames > 0 && (frame_count & 2 != 0) {
             (255, 200, 80)
         } else {
             (120, 220, 255)
         };
-        rects[idx] = RectFlat::new(
+        let ship = RectFlat::new(
             self.ship_x + shake_dx,
             SHIP_Y + shake_dy,
             SHIP_W,
@@ -686,7 +684,10 @@ impl Invaders {
             sg,
             sb,
         );
-        ot.add(0, &mut rects[idx], RectFlat::WORDS);
+        if let Some(rect) = tail.push(ship) {
+            frame.add(0, rect);
+        }
+        frame
     }
 
     fn draw_hud(&self) {

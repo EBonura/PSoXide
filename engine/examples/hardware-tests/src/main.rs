@@ -6137,7 +6137,12 @@ fn test_irq_gpu_ack_path() -> TestResult {
 fn otc_kick_bounded(ptr: *mut u32, words: u16, chcr: u32, delay: bool) -> (bool, bool) {
     // Clear a possibly-wedged START from the previous variant; on
     // silicon clearing bit 24 requests an abort.
-    dma::set_chcr(dma::Channel::Otc, 0);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_chcr(dma::Channel::Otc, 0);
+    }
     for _ in 0..1_000u32 {
         unsafe { core::ptr::read_volatile(psx_io::dma::DPCR as *const u32) };
     }
@@ -6148,9 +6153,14 @@ fn otc_kick_bounded(ptr: *mut u32, words: u16, chcr: u32, delay: bool) -> (bool,
         }
     }
     let last = unsafe { ptr.add(words as usize - 1) };
-    dma::set_madr(dma::Channel::Otc, last as u32);
-    dma::set_bcr_manual(dma::Channel::Otc, words);
-    dma::set_chcr(dma::Channel::Otc, chcr);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_madr(dma::Channel::Otc, last as u32);
+        dma::raw::set_bcr(dma::Channel::Otc, dma::bcr_words(words));
+        dma::raw::set_chcr(dma::Channel::Otc, chcr);
+    }
     let mut spins = 0u32;
     while dma::is_busy(dma::Channel::Otc) && spins < 200_000 {
         spins += 1;
@@ -8193,9 +8203,9 @@ fn test_spu_upload_addr_after_mode() -> TestResult {
         psx_io::write16(TRANSFER_ADDR, (dest / 8) as u16);
 
         dma::enable_channel(dma::Channel::Spu);
-        dma::set_madr(dma::Channel::Spu, src.as_ptr() as u32);
-        dma::set_bcr_block(dma::Channel::Spu, 4, 4);
-        dma::set_chcr(
+        dma::raw::set_madr(dma::Channel::Spu, src.as_ptr() as u32);
+        dma::raw::set_bcr(dma::Channel::Spu, dma::bcr_blocks(4, 4));
+        dma::raw::set_chcr(
             dma::Channel::Spu,
             dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
         );
@@ -8249,10 +8259,10 @@ fn test_spu_upload_small_blocks() -> TestResult {
             armed += 1;
         }
         dma::enable_channel(dma::Channel::Spu);
-        dma::set_madr(dma::Channel::Spu, src.as_ptr() as u32);
+        dma::raw::set_madr(dma::Channel::Spu, src.as_ptr() as u32);
         // Four blocks of four words, rather than one block of sixteen.
-        dma::set_bcr_block(dma::Channel::Spu, 4, 4);
-        dma::set_chcr(
+        dma::raw::set_bcr(dma::Channel::Spu, dma::bcr_blocks(4, 4));
+        dma::raw::set_chcr(
             dma::Channel::Spu,
             dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
         );
@@ -8653,20 +8663,28 @@ fn test_gpu_textured_gouraud_tri() -> TestResult {
         "gpu tex gouraud tri",
     )
 }
+/// The GPU DMA token for a probe that submits a frame from inside a test.
+fn probe_gpu_dma() -> psx_io::periph::GpuDma {
+    // SAFETY: the app runner holds the real token but starts no walk while a
+    // test runs, and every submit waits for the previous walk before it
+    // kicks, so this token never overlaps another one's transfer.
+    unsafe { psx_io::periph::GpuDma::steal() }
+}
+
 // The player's submit PATH: build an ordering table, DMA it to the GPU
 // (linked-list mode), then read back -- exercises the OT + DMA stage.
 fn test_gpu_ot_dma_draw() -> TestResult {
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
-    let mut ot = gpu::ot::OrderingTable::<4>::new();
-    ot.clear();
     let mut t0 = prim::TriFlat::new([(4, 4), (90, 8), (4, 90)], 0xff, 0x20, 0x20);
     let mut t1 = prim::TriFlat::new([(90, 90), (90, 8), (8, 90)], 0x20, 0xff, 0x20);
     let mut t2 = prim::TriFlat::new([(40, 24), (72, 64), (20, 72)], 0x20, 0x20, 0xff);
-    ot.add(2, &mut t0, prim::TriFlat::WORDS);
-    ot.add(2, &mut t1, prim::TriFlat::WORDS);
-    ot.add(0, &mut t2, prim::TriFlat::WORDS);
-    ot.submit();
+    let mut ot = gpu::ot::OrderingTable::<4>::new();
+    let mut frame = ot.frame();
+    frame.add(2, &mut t0);
+    frame.add(2, &mut t1);
+    frame.add(0, &mut t2);
+    frame.submit(&mut probe_gpu_dma());
     gpu_io::wait_cmd_ready();
     expect_eq(0xaffb_7c55, gpu_hash_scratch(), "gpu ot dma draw")
 }
@@ -8735,8 +8753,6 @@ fn test_gpu_texgouraud_ot_dma() -> TestResult {
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     let tpage = gpu_upload_tex15();
     gpu_draw_env_scratch();
-    let mut ot = gpu::ot::OrderingTable::<4>::new();
-    ot.clear();
     let mut tri = prim::TriTexturedGouraud::new(
         [(6, 6), (90, 14), (40, 90)],
         [(0, 0), (15, 0), (8, 15)],
@@ -8744,8 +8760,10 @@ fn test_gpu_texgouraud_ot_dma() -> TestResult {
         0,
         tpage,
     );
-    ot.add(0, &mut tri, prim::TriTexturedGouraud::WORDS);
-    ot.submit();
+    let mut ot = gpu::ot::OrderingTable::<4>::new();
+    let mut frame = ot.frame();
+    frame.add(0, &mut tri);
+    frame.submit(&mut probe_gpu_dma());
     gpu_io::wait_cmd_ready();
     expect_eq(0x6392_570b, gpu_hash_scratch(), "gpu texgouraud ot dma")
 }
@@ -8791,8 +8809,6 @@ fn test_gpu_8bpp_clut_tri() -> TestResult {
 fn test_gpu_big_ot() -> TestResult {
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
-    let mut ot = gpu::ot::OrderingTable::<8>::new();
-    ot.clear();
     let mut tris = [
         prim::TriFlat::new([(2, 2), (30, 6), (4, 40)], 0xff, 0x20, 0x20),
         prim::TriFlat::new([(34, 2), (62, 6), (36, 40)], 0x20, 0xff, 0x20),
@@ -8803,10 +8819,12 @@ fn test_gpu_big_ot() -> TestResult {
         prim::TriFlat::new([(20, 20), (76, 30), (40, 80)], 0xa0, 0xa0, 0xa0),
         prim::TriFlat::new([(48, 8), (60, 60), (10, 70)], 0x60, 0xc0, 0x40),
     ];
+    let mut ot = gpu::ot::OrderingTable::<8>::new();
+    let mut frame = ot.frame();
     for (i, t) in tris.iter_mut().enumerate() {
-        ot.add(i % 7, t, prim::TriFlat::WORDS);
+        frame.add(i % 7, t);
     }
-    ot.submit();
+    frame.submit(&mut probe_gpu_dma());
     gpu_io::wait_cmd_ready();
     expect_eq(0x91a7_f548, gpu_hash_scratch(), "gpu big ot")
 }
@@ -9062,10 +9080,13 @@ fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) -> u32 {
         // SCPH-9902 capture showed that the low-six mode mirror settles after
         // 24-27 polls, while bits 9/7 remain clear until the DMA side is armed.
         dma::enable_channel(dma::Channel::Spu);
-        dma::set_madr(dma::Channel::Spu, out.as_ptr() as u32);
-        dma::set_bcr_block(dma::Channel::Spu, block_size as u16, block_count as u16);
+        dma::raw::set_madr(dma::Channel::Spu, out.as_ptr() as u32);
+        dma::raw::set_bcr(
+            dma::Channel::Spu,
+            dma::bcr_blocks(block_size as u16, block_count as u16),
+        );
         // from-device (no CHCR_TO_DEVICE), block-sync, start.
-        dma::set_chcr(dma::Channel::Spu, dma::CHCR_SYNC_BLOCK | dma::CHCR_START);
+        dma::raw::set_chcr(dma::Channel::Spu, dma::CHCR_SYNC_BLOCK | dma::CHCR_START);
         // Bounded wait: never spin forever on silicon -- if SPU->RAM DMA
         // stalls the test fails gracefully (zeroed read-back) instead of
         // hanging the whole suite at a black screen.
@@ -9498,10 +9519,10 @@ fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usi
             ptr::write_volatile(ptr.add(index), 0);
         }
         dma::enable_channel(dma::Channel::Otc);
-        dma::set_madr(dma::Channel::Otc, ptr.add(15) as u32);
-        dma::set_bcr_manual(dma::Channel::Otc, 16);
+        dma::raw::set_madr(dma::Channel::Otc, ptr.add(15) as u32);
+        dma::raw::set_bcr(dma::Channel::Otc, dma::bcr_words(16));
         push_precision(values, next, dma::chcr(dma::Channel::Otc));
-        dma::set_chcr(
+        dma::raw::set_chcr(
             dma::Channel::Otc,
             dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
         );
@@ -10798,11 +10819,11 @@ fn timed_otc_dma_cycles(words: u16) -> u16 {
             ptr::write_volatile(ptr.add(i), 0);
         }
         dma::enable_channel(dma::Channel::Otc);
-        dma::set_madr(dma::Channel::Otc, ptr.add(words as usize - 1) as u32);
-        dma::set_bcr_manual(dma::Channel::Otc, words);
+        dma::raw::set_madr(dma::Channel::Otc, ptr.add(words as usize - 1) as u32);
+        dma::raw::set_bcr(dma::Channel::Otc, dma::bcr_words(words));
         timers::set_mode(timers::Timer::Timer2, 0);
         timers::set_counter(timers::Timer::Timer2, 0);
-        dma::set_chcr(
+        dma::raw::set_chcr(
             dma::Channel::Otc,
             dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
         );
@@ -10843,12 +10864,12 @@ fn timed_spu_dma_write_512_halfwords() -> u16 {
         psx_io::write16(SPUCNT, stopped | 0x0020); // DMA Write
 
         dma::enable_channel(dma::Channel::Spu);
-        dma::set_madr(dma::Channel::Spu, source as u32);
-        dma::set_bcr_block(dma::Channel::Spu, 16, 16);
+        dma::raw::set_madr(dma::Channel::Spu, source as u32);
+        dma::raw::set_bcr(dma::Channel::Spu, dma::bcr_blocks(16, 16));
 
         timers::set_mode(timers::Timer::Timer2, 0);
         timers::set_counter(timers::Timer::Timer2, 0);
-        dma::set_chcr(
+        dma::raw::set_chcr(
             dma::Channel::Spu,
             dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
         );
@@ -10883,15 +10904,25 @@ fn timed_gpu_dma_block(block_size: u16, block_count: u16) -> u16 {
     let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
     gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
     dma::enable_channel(dma::Channel::Gpu);
-    dma::set_madr(dma::Channel::Gpu, SOURCE.as_ptr() as u32);
-    dma::set_bcr_block(dma::Channel::Gpu, block_size, block_count);
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_madr(dma::Channel::Gpu, SOURCE.as_ptr() as u32);
+        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_blocks(block_size, block_count));
+    }
 
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
-    dma::set_chcr(
-        dma::Channel::Gpu,
-        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
-    );
+    // SAFETY: silicon probe: the transfer touches only memory this probe
+    // owns, which stays live and untouched until the probe waits the
+    // channel idle or aborts it.
+    unsafe {
+        dma::raw::set_chcr(
+            dma::Channel::Gpu,
+            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+        );
+    }
 
     let mut polls = 0u32;
     while dma::is_busy(dma::Channel::Gpu) && polls < 1_000_000 {
@@ -10926,12 +10957,12 @@ fn timed_gpu_dma_linked_2x128() -> u16 {
         let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
         gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
         dma::enable_channel(dma::Channel::Gpu);
-        dma::set_madr(dma::Channel::Gpu, list as u32);
-        dma::set_bcr_manual(dma::Channel::Gpu, 0);
+        dma::raw::set_madr(dma::Channel::Gpu, list as u32);
+        dma::raw::set_bcr(dma::Channel::Gpu, dma::bcr_words(0));
 
         timers::set_mode(timers::Timer::Timer2, 0);
         timers::set_counter(timers::Timer::Timer2, 0);
-        dma::set_chcr(
+        dma::raw::set_chcr(
             dma::Channel::Gpu,
             dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
         );
@@ -11033,9 +11064,9 @@ fn timed_otc_dma_wait() -> u16 {
             ptr::write_volatile(ptr.add(i), 0);
         }
         dma::enable_channel(dma::Channel::Otc);
-        dma::set_madr(dma::Channel::Otc, ptr.add(15) as u32);
-        dma::set_bcr_manual(dma::Channel::Otc, 16);
-        dma::set_chcr(
+        dma::raw::set_madr(dma::Channel::Otc, ptr.add(15) as u32);
+        dma::raw::set_bcr(dma::Channel::Otc, dma::bcr_words(16));
+        dma::raw::set_chcr(
             dma::Channel::Otc,
             dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
         );

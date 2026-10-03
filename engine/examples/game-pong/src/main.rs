@@ -37,6 +37,7 @@ use psx_engine::{
     button, sfx, ActionBinding, ActionMap, App, Config, Ctx, MicrogameAction, MicrogameShell, Scene,
 };
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
+use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::RectFlat;
 use psx_settings::Profile;
@@ -389,9 +390,8 @@ impl Scene for Pong {
         }
     }
 
-    fn render(&mut self, _ctx: &mut Ctx) {
-        self.build_frame_ot();
-        self.submit_frame_ot();
+    fn render(&mut self, ctx: &mut Ctx) {
+        self.build_frame_ot().submit(ctx.gpu_dma());
         self.draw_scoreboard();
     }
 }
@@ -399,24 +399,32 @@ impl Scene for Pong {
 impl Pong {
     /// Populate RECTS with the current frame's primitives and drop
     /// them into the OT at the right depth slots.
-    fn build_frame_ot(&self) {
-        let ot = unsafe { &mut OT };
-        let rects = unsafe { &mut RECTS };
-        ot.clear();
+    fn build_frame_ot(&self) -> OtFrame<'static, 8> {
+        let mut frame = unsafe { &mut OT }.frame();
+        let mut rects = PrimitiveArena::new(unsafe { &mut RECTS });
+        let mut add = |z: usize, rect: RectFlat| {
+            if let Some(rect) = rects.push(rect) {
+                frame.add(z, rect);
+            }
+        };
 
         // Slot 0 (back) -- top + bottom border strips.
-        rects[0] = RectFlat::new(
+        add(
             0,
-            PLAYFIELD_TOP - 1,
-            SCREEN_W as u16,
-            BORDER_H,
-            140,
-            140,
-            180,
+            RectFlat::new(
+                0,
+                PLAYFIELD_TOP - 1,
+                SCREEN_W as u16,
+                BORDER_H,
+                140,
+                140,
+                180,
+            ),
         );
-        rects[1] = RectFlat::new(0, PLAYFIELD_BOT, SCREEN_W as u16, BORDER_H, 140, 140, 180);
-        ot.add(0, &mut rects[0], RectFlat::WORDS);
-        ot.add(0, &mut rects[1], RectFlat::WORDS);
+        add(
+            0,
+            RectFlat::new(0, PLAYFIELD_BOT, SCREEN_W as u16, BORDER_H, 140, 140, 180),
+        );
 
         // Slot 2 -- centre dashes.
         let dash_h: u16 = 10;
@@ -425,41 +433,43 @@ impl Pong {
         let mut y = PLAYFIELD_TOP + 6;
         let mut idx = 2;
         while y + dash_h as i16 <= PLAYFIELD_BOT - 4 && idx < 14 {
-            rects[idx] = RectFlat::new(dash_x, y, 4, dash_h, 110, 110, 150);
-            ot.add(2, &mut rects[idx], RectFlat::WORDS);
+            add(2, RectFlat::new(dash_x, y, 4, dash_h, 110, 110, 150));
             y += dash_h as i16 + dash_gap;
             idx += 1;
         }
 
         // Slot 5 -- paddles.
-        rects[14] = RectFlat::new(PADDLE_MARGIN, self.p1_y, PADDLE_W, PADDLE_H, 240, 240, 240);
-        rects[15] = RectFlat::new(
-            SCREEN_W - PADDLE_MARGIN - PADDLE_W as i16,
-            self.p2_y,
-            PADDLE_W,
-            PADDLE_H,
-            240,
-            240,
-            240,
+        add(
+            5,
+            RectFlat::new(PADDLE_MARGIN, self.p1_y, PADDLE_W, PADDLE_H, 240, 240, 240),
         );
-        ot.add(5, &mut rects[14], RectFlat::WORDS);
-        ot.add(5, &mut rects[15], RectFlat::WORDS);
+        add(
+            5,
+            RectFlat::new(
+                SCREEN_W - PADDLE_MARGIN - PADDLE_W as i16,
+                self.p2_y,
+                PADDLE_W,
+                PADDLE_H,
+                240,
+                240,
+                240,
+            ),
+        );
 
         // Slot 7 (front) -- ball, warm tint to read against white paddles.
-        rects[16] = RectFlat::new(
-            self.ball_x,
-            self.ball_y,
-            BALL_SIZE,
-            BALL_SIZE,
-            255,
-            220,
-            120,
+        add(
+            7,
+            RectFlat::new(
+                self.ball_x,
+                self.ball_y,
+                BALL_SIZE,
+                BALL_SIZE,
+                255,
+                220,
+                120,
+            ),
         );
-        ot.add(7, &mut rects[16], RectFlat::WORDS);
-    }
-
-    fn submit_frame_ot(&self) {
-        unsafe { OT.submit() };
+        frame
     }
 
     /// Scoreboard + game-over banner. Immediate-mode on top of OT.

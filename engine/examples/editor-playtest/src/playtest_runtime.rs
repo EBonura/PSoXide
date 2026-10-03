@@ -1406,12 +1406,12 @@ impl Playtest {
         }
     }
 
-    pub(super) fn draw_particle_emitters(
+    pub(super) fn draw_particle_emitters<'a>(
         &self,
         camera: WorldCamera,
         elapsed_tick: SimTick,
-        ot: &mut OtFrame<'_, OT_DEPTH>,
-        primitive_packets: &mut PrimitivePacketArena<'_>,
+        ot: &mut OtFrame<'a, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'a>,
     ) -> usize {
         let Some(particle_material) = self.particle_material else {
             return 0;
@@ -1489,11 +1489,11 @@ impl Playtest {
 
     /// Draw live combat bolts after world submission so their additive quads
     /// participate in the same depth table as authored particle effects.
-    pub(super) fn draw_combat_projectiles(
+    pub(super) fn draw_combat_projectiles<'a>(
         &self,
         camera: WorldCamera,
-        ot: &mut OtFrame<'_, OT_DEPTH>,
-        primitive_packets: &mut PrimitivePacketArena<'_>,
+        ot: &mut OtFrame<'a, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'a>,
     ) -> usize {
         let Some(particle_material) = self.particle_material else {
             return 0;
@@ -1656,12 +1656,12 @@ impl Playtest {
     /// Draw the player's lightweight water-foot splash when actually moving
     /// through non-lethal water. The effect is capped at three sprite packets
     /// and derives its phase from time, so it adds no persistent particle state.
-    pub(super) fn draw_player_water_wade_splash(
+    pub(super) fn draw_player_water_wade_splash<'a>(
         &self,
         camera: WorldCamera,
         elapsed_tick: SimTick,
-        ot: &mut OtFrame<'_, OT_DEPTH>,
-        primitive_packets: &mut PrimitivePacketArena<'_>,
+        ot: &mut OtFrame<'a, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'a>,
     ) -> usize {
         if !self.player_moved_last_tick || self.hazard_death_ticks_remaining > 0 {
             return 0;

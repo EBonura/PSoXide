@@ -278,7 +278,7 @@ impl Scene for ModelShowcase {
                 &mut triangles,
             );
             world.flush();
-            ot.submit();
+            ot.submit(ctx.gpu_dma());
         }
 
         if let Some(font) = self.font.as_ref() {
