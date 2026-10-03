@@ -486,7 +486,7 @@ pub fn run_standalone() -> ! {
         fb.clear(9, 11, 18);
         app.draw(&font);
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
     }

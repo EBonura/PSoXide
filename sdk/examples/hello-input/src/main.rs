@@ -94,7 +94,7 @@ fn main() {
         draw_button_labels(&font, pad);
         draw_pad_status(&font, state);
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
     }

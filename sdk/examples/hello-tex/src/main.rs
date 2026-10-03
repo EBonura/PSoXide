@@ -131,7 +131,7 @@ fn main() {
         let fy = 140 + drift(floor_phase_y, 20);
         draw_sprite(fx, fy, TEX_W, TEX_H, (FLOOR_U, 0), floor_clut_word);
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
         frame = frame.wrapping_add(1);

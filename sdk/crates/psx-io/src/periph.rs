@@ -2,9 +2,9 @@
 //!
 //! One token exists per device whose state two drivers could otherwise
 //! fight over: the GPU's DMA channel (an in-flight linked-list walk and a
-//! GP0 write interleave), the OTC, MDEC and SPU channels, the CD-ROM
-//! controller (three drivers program it) and SIO0 (pads and memory cards
-//! share it). An API that drives one of them takes the token by `&mut`, so
+//! GP0 write interleave), the ordering-table clear, MDEC and SPU channels, the CD-ROM
+//! controller (three drivers program it) and the controller port (pads and memory
+//! cards share it). An API that drives one of them takes the token by `&mut`, so
 //! the borrow checker sees the conflict. The tokens are empty, so passing
 //! them costs nothing at run time.
 //!
@@ -45,7 +45,8 @@ token!(
 );
 token!(
     /// DMA channel 6, the ordering-table clear.
-    OtcDma
+    #[doc(alias = "OTC")]
+    OrderingTableClearDma
 );
 token!(
     /// DMA channels 0 and 1, into and out of the MDEC.
@@ -57,12 +58,24 @@ token!(
 );
 token!(
     /// The CD-ROM controller and DMA channel 3.
-    Cdrom
+    #[doc(alias = "CDROM")]
+    Cd
 );
 token!(
-    /// SIO0, the controller and memory-card port.
-    Sio0
+    /// The controller and memory-card port.
+    #[doc(alias = "SIO0")]
+    ControllerPort
 );
+
+/// Renamed to [`OrderingTableClearDma`].
+#[deprecated(note = "renamed to `OrderingTableClearDma`")]
+pub type OtcDma = OrderingTableClearDma;
+/// Renamed to [`Cd`].
+#[deprecated(note = "renamed to `Cd`")]
+pub type Cdrom = Cd;
+/// Renamed to [`ControllerPort`].
+#[deprecated(note = "renamed to `ControllerPort`")]
+pub type Sio0 = ControllerPort;
 
 #[cfg(test)]
 mod tests {
@@ -71,10 +84,10 @@ mod tests {
     #[test]
     fn tokens_are_zero_sized() {
         assert_eq!(core::mem::size_of::<GpuDma>(), 0);
-        assert_eq!(core::mem::size_of::<OtcDma>(), 0);
+        assert_eq!(core::mem::size_of::<OrderingTableClearDma>(), 0);
         assert_eq!(core::mem::size_of::<MdecDma>(), 0);
         assert_eq!(core::mem::size_of::<SpuDma>(), 0);
-        assert_eq!(core::mem::size_of::<Cdrom>(), 0);
-        assert_eq!(core::mem::size_of::<Sio0>(), 0);
+        assert_eq!(core::mem::size_of::<Cd>(), 0);
+        assert_eq!(core::mem::size_of::<ControllerPort>(), 0);
     }
 }

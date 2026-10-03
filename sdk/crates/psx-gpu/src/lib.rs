@@ -187,19 +187,26 @@ pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
 /// wedged GPU costs a reset instead of a hang.
 ///
 /// For presenting through psx-rt's queued flip, which must not block, use
-/// [`arm_draw_done`] and a closing GP0(1Fh) instead; see [`draw_done`].
+/// [`arm_draw_done`] and a closing GP0(1Fh) instead; see [`is_draw_done`].
 #[inline]
 #[doc(alias = "DrawSync")]
-pub fn draw_sync() {
+pub fn wait_idle() {
     submit_linked_list_wait();
     psx_io::gpu::wait_dma_ready();
     wait_command_ready();
 }
 
+/// Renamed to [`wait_idle`].
+#[deprecated(note = "renamed to `wait_idle`")]
+#[inline(always)]
+pub fn draw_sync() {
+    wait_idle()
+}
+
 /// Clear GPUSTAT bit 24 (the GPU's IRQ1 flag) with GP1(02h).
 ///
 /// Call it right before kicking a frame's work whose last command is
-/// GP0(1Fh) (see [`draw_done`]), and only once the previous frame's queued
+/// GP0(1Fh) (see [`is_draw_done`]), and only once the previous frame's queued
 /// flip has been applied: acknowledging earlier hides the previous frame's
 /// completion from psx-rt's VBlank handler.
 #[inline]
@@ -223,12 +230,19 @@ pub fn arm_draw_done() {
 /// GP0(1Fh) also raises interrupt source 1 (GPU) in `I_STAT`; keep it masked
 /// in `I_MASK`, since psx-rt's handler does not acknowledge it.
 #[inline]
-pub fn draw_done() -> bool {
+pub fn is_draw_done() -> bool {
     psx_io::gpu::status().contains(psx_hw::gpu::GpuStat::IRQ1)
 }
 
+/// Renamed to [`is_draw_done`].
+#[deprecated(note = "renamed to `is_draw_done`")]
+#[inline(always)]
+pub fn draw_done() -> bool {
+    is_draw_done()
+}
+
 /// Send GP0(1Fh) through the command port, closing work drawn with the
-/// immediate `draw_*` functions (see [`draw_done`]). Like them it waits for
+/// immediate `draw_*` functions (see [`is_draw_done`]). Like them it waits for
 /// the GPU to accept a command first.
 #[inline]
 pub fn signal_draw_done() {
@@ -238,7 +252,7 @@ pub fn signal_draw_done() {
 
 /// A linked-list DMA node holding only GP0(1Fh), for the end of a chain.
 ///
-/// Link it as the chain's last node and the GPU raises [`draw_done`] when
+/// Link it as the chain's last node and the GPU raises [`is_draw_done`] when
 /// it gets there. It is immutable and shared: every chain can end on
 /// [`DRAW_DONE_NODE`].
 #[repr(C, align(4))]
@@ -261,10 +275,18 @@ pub static DRAW_DONE_NODE: DrawDoneNode = DrawDoneNode([(1 << 24) | 0x00FF_FFFF,
 /// call restarts the count from zero. That is why the helpers below cannot
 /// observe the real display position: they reconfigure before reading.
 #[inline]
-pub fn configure_vsync_timer() {
+pub fn configure_scanline_timer() {
     // Mode: bit0=sync enable, bits1-2=01 (reset at VBlank), bit8=1
     // (clock source = HBlank).
     timers::set_mode(timers::Timer::Timer1, 0x0103);
+}
+
+/// Renamed to [`configure_scanline_timer`]: it programs Timer 1 to count
+/// HBlanks and has nothing to do with vertical sync.
+#[deprecated(note = "renamed to `configure_scanline_timer`")]
+#[inline(always)]
+pub fn configure_vsync_timer() {
+    configure_scanline_timer()
 }
 
 /// Timer-1 scanline counter used by the VBlank wait helpers.
@@ -275,7 +297,7 @@ pub fn configure_vsync_timer() {
 )]
 #[inline]
 pub fn scanline_counter() -> u16 {
-    configure_vsync_timer();
+    configure_scanline_timer();
     timers::counter(timers::Timer::Timer1)
 }
 
@@ -300,7 +322,7 @@ pub fn in_vblank() -> bool {
 #[deprecated(note = "busy-waits a fixed 242 HBlanks from the call site instead of \
             syncing to the display; use psx_rt::interrupts::wait_vblank()")]
 pub fn vsync() {
-    configure_vsync_timer();
+    configure_scanline_timer();
     while timers::counter(timers::Timer::Timer1) < 242 {}
 }
 
@@ -720,7 +742,7 @@ pub const MAX_NODE_WORDS: usize = 16;
 /// unmodified until [`submit_linked_list_wait`] returns (or a later kick,
 /// which waits for this walk first).
 #[doc(alias = "DrawOTag")]
-pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
+pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
     // A completed DMA walk does not imply that the GPU has finished
     // rasterising the commands it consumed. Do not call `draw_sync()` here:
     // channel 2's request handshake can queue the next list behind that work,
@@ -763,17 +785,28 @@ pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
     };
 }
 
-/// Old name of [`submit_linked_list_raw_async`].
+/// Renamed to [`submit_linked_list_async_raw`].
+///
+/// # Safety
+/// See [`submit_linked_list_async_raw`].
+#[deprecated(note = "renamed to `submit_linked_list_async_raw`")]
+#[inline(always)]
+pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
+    // SAFETY: same contract as the renamed function.
+    unsafe { submit_linked_list_async_raw(head) }
+}
+
+/// Old name of [`submit_linked_list_async_raw`].
 ///
 /// # Safety
 ///
-/// As [`submit_linked_list_raw_async`].
+/// As [`submit_linked_list_async_raw`].
 #[deprecated(
-    note = "takes an unchecked pointer; use `OrderingTable::frame`, `submit_static`, or the unsafe `submit_linked_list_raw_async`"
+    note = "takes an unchecked pointer; use `OrderingTable::frame`, `submit_static`, or the unsafe `submit_linked_list_async_raw`"
 )]
 pub unsafe fn submit_linked_list_async(head: *const u32) {
     // SAFETY: forwarded contract.
-    unsafe { submit_linked_list_raw_async(head) }
+    unsafe { submit_linked_list_async_raw(head) }
 }
 
 /// Block until the GPU-DMA linked-list walk kicked by
@@ -812,16 +845,16 @@ fn dma_memory_barrier() {
 /// DMA channel 2 in linked-list mode. Blocks until the walker hits
 /// the `0x00FFFFFF` terminator (or aborts a wedged walk).
 ///
-/// This is [`submit_linked_list_raw_async`] immediately followed by
+/// This is [`submit_linked_list_async_raw`] immediately followed by
 /// [`submit_linked_list_wait`].
 ///
 /// # Safety
 ///
-/// As [`submit_linked_list_raw_async`], for the duration of this call.
+/// As [`submit_linked_list_async_raw`], for the duration of this call.
 #[doc(alias = "DrawOTag")]
 pub unsafe fn submit_linked_list_raw(head: *const u32) {
     // SAFETY: forwarded contract; the wait below ends the walk before return.
-    unsafe { submit_linked_list_raw_async(head) };
+    unsafe { submit_linked_list_async_raw(head) };
     submit_linked_list_wait();
 }
 
@@ -915,5 +948,5 @@ impl<const W: usize> StaticChain for StaticPacket<W> {
 pub fn submit_static(_dma: &mut GpuDma, chain: &'static impl StaticChain) {
     // SAFETY: `StaticChain` guarantees a well-formed single-node list that
     // stays live and unmodified for 'static.
-    unsafe { submit_linked_list_raw_async(chain.head()) }
+    unsafe { submit_linked_list_async_raw(chain.head()) }
 }

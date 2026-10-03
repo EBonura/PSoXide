@@ -108,7 +108,7 @@ fn main() {
             }
         }
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
         frame = frame.wrapping_add(1);

@@ -201,7 +201,7 @@ fn main() {
             font.draw_text(8, y, what, RED);
             y += 12;
         }
-        gpu::draw_sync();
+        gpu::wait_idle();
         interrupts::wait_vblank();
         fb.swap();
     }

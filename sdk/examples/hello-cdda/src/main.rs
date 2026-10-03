@@ -98,7 +98,7 @@ fn main() {
         font.draw_text(56, 122, status, tint);
         font.draw_text(4, 220, "mixed-mode disc audio stream", (110, 110, 110));
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
     }

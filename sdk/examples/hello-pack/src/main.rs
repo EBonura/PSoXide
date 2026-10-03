@@ -247,7 +247,7 @@ fn main() {
             font.draw_text(72, 210, rep.failed, (255, 235, 235));
         }
 
-        gpu::draw_sync();
+        gpu::wait_idle();
         psx_rt::interrupts::wait_vblank();
         fb.swap();
     }
