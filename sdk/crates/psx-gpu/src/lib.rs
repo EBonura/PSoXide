@@ -43,9 +43,6 @@ pub mod frame;
 pub mod framebuf;
 pub mod material;
 pub mod ordered;
-// ot.rs is being reworked on soundness/dma-gpu, which documents its unsafe
-// blocks; drop this allow when that lands.
-#[allow(clippy::undocumented_unsafe_blocks)]
 pub mod ot;
 pub mod prim;
 

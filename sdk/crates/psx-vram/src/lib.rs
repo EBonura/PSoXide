@@ -1233,6 +1233,7 @@ fn copy_to_vram_header(rect: VramRect) {
 /// Opt-in: on real hardware the DMA controller can latch a channel
 /// busy-forever (CL2 probe, 2026-07-31). The completion wait is bounded,
 /// so a wedge costs a `false` and a partial upload rather than a hang.
+#[doc(alias = "LoadImage")]
 pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> bool {
     if !rect.w.is_multiple_of(2) || rect.w == 0 || rect.h == 0 {
         return false;

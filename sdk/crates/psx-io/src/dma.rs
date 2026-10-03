@@ -132,7 +132,6 @@ pub struct Transfer {
 ///   that a zero block count means 65,536 blocks;
 /// - the channel is idle when this is called (silicon ignores a `CHCR`
 ///   write to a busy channel, so the old transfer would keep running).
-#[doc(alias = "DMA kick")]
 #[inline(always)]
 pub unsafe fn start(ch: Channel, transfer: Transfer) {
     // SAFETY: the caller upholds this function's contract for the transfer
@@ -221,6 +220,7 @@ pub fn set_madr(ch: Channel, addr: u32) {
 /// Read `MADR`.
 #[inline(always)]
 pub fn madr(ch: Channel) -> u32 {
+    // SAFETY: a side-effect-free read of this channel's MADR register.
     unsafe { crate::read32(ch.base() + MADR_OFF) }
 }
 
@@ -259,6 +259,7 @@ pub fn set_chcr(ch: Channel, value: u32) {
 /// Read `CHCR`.
 #[inline(always)]
 pub fn chcr(ch: Channel) -> u32 {
+    // SAFETY: a side-effect-free read of this channel's CHCR register.
     unsafe { crate::read32(ch.base() + CHCR_OFF) }
 }
 
@@ -270,7 +271,10 @@ pub fn is_busy(ch: Channel) -> bool {
 
 /// Enable a channel in `DPCR` without disturbing the others.
 pub fn enable_channel(ch: Channel) {
+    // SAFETY: a side-effect-free read of DPCR.
     let dpcr = unsafe { crate::read32(DPCR) };
+    // SAFETY: sets one channel's enable bit and keeps the rest; enabling a
+    // channel starts no transfer.
     unsafe { crate::write32(DPCR, dpcr | (1 << ch.dpcr_enable_bit())) }
 }
 
