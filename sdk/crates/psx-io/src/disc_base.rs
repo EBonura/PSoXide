@@ -44,6 +44,8 @@ pub unsafe fn install(magic: u32, lba_offset: u32, cdda_track_base: u32) {
     if magic != HANDOFF_MAGIC {
         return;
     }
+    // SAFETY: per this fn's `# Safety`, it runs once at boot before anything can read the bases, so
+    // these plain stores race nothing and no reference to either static is live.
     unsafe {
         LBA_OFFSET = lba_offset;
         CDDA_TRACK_BASE = cdda_track_base as u8;
