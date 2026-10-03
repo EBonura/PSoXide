@@ -49,7 +49,7 @@
 
 use crate::math::{Mat3I16, Vec3I16, Vec3I32};
 use crate::scene;
-use crate::{mfc2, mtc2, ops};
+use crate::{ops, read_data, write_data};
 
 /// A single directional light in some reference frame (caller's
 /// choice of world / object / eye space).
@@ -121,8 +121,8 @@ impl LightRig {
     /// - BK ← ambient
     ///
     /// Call once per object (or once per frame if lights are
-    /// in a universal frame). Any subsequent [`NCCS`][ops::nccs]
-    /// / [`NCS`][ops::ncs] / [`NCDS`][ops::ncds] reads these.
+    /// in a universal frame). Any subsequent [`NCCS`][ops::light_color_single]
+    /// / [`NCS`][ops::light_single] / [`NCDS`][ops::light_color_depth_single] reads these.
     pub fn load(&self) {
         let [l0, l1, l2] = self.lights;
 
@@ -147,10 +147,10 @@ impl LightRig {
                 [l0.colour.2, l1.colour.2, l2.colour.2], // B row
             ],
         };
-        scene::load_light_colour_matrix(&lcm);
+        scene::load_light_color_matrix(&lcm);
 
         // BK: ambient term.
-        scene::load_background_colour(Vec3I32::new(self.ambient.0, self.ambient.1, self.ambient.2));
+        scene::load_background_color(Vec3I32::new(self.ambient.0, self.ambient.1, self.ambient.2));
     }
 
     /// Return a new rig with every light's direction rotated into
@@ -317,9 +317,9 @@ pub struct FoggedTri {
 /// - Projection plane + screen offset
 ///   ([`scene::set_projection_plane`], [`scene::set_screen_offset`])
 /// - Light rig ([`LightRig::load`], `for_object` applied)
-/// - Far colour ([`scene::load_far_colour`])
+/// - Far colour ([`scene::load_far_color`])
 /// - Depth-cue coefficients ([`scene::set_depth_cue`])
-/// - AVSZ weights ([`scene::set_avsz_weights`])
+/// - AVSZ weights ([`scene::set_average_z_weights`])
 pub fn project_triangle_fogged(
     verts: [Vec3I16; 3],
     normals: [Vec3I16; 3],
@@ -328,7 +328,7 @@ pub fn project_triangle_fogged(
     // Material goes into RGBC once -- NCDS reads RGBC on every call
     // and it doesn't change per-vertex.
     let rgbc = (material.0 as u32) | ((material.1 as u32) << 8) | ((material.2 as u32) << 16);
-    mtc2!(6, rgbc);
+    write_data!(6, rgbc);
 
     // Per-vertex RTPS → NCDS, interleaved so each vertex's NCDS
     // uses the IR0 just written by its RTPS. Collect results
@@ -338,37 +338,37 @@ pub fn project_triangle_fogged(
     let mut screen = [(0i16, 0i16); 3];
     for i in 0..3 {
         // --- RTPS: project verts[i] ---
-        mtc2!(0, verts[i].xy_packed());
-        mtc2!(1, verts[i].z_packed());
+        write_data!(0, verts[i].xy_packed());
+        write_data!(1, verts[i].z_packed());
         // SAFETY: V0 loaded; scene setup is caller-supplied.
-        unsafe { ops::rtps() };
-        let sxy = mfc2!(14); // SXY2 (latest) -- SXY has no result-read latency
-        let sz = mfc2!(19) as u16; // SZ3 (latest)
+        unsafe { ops::project_single() };
+        let sxy = read_data!(14); // SXY2 (latest) -- SXY has no result-read latency
+        let sz = read_data!(19) as u16; // SZ3 (latest)
         screen[i] = (sxy as i16, (sxy >> 16) as i16);
 
         // --- NCDS: lit + fogged colour for normals[i], using the
         // IR0 just written by the RTPS above. ---
-        mtc2!(0, normals[i].xy_packed());
-        mtc2!(1, normals[i].z_packed());
+        write_data!(0, normals[i].xy_packed());
+        write_data!(1, normals[i].z_packed());
         // SAFETY: V0 holds the normal; RGBC is loaded; scene
         // matrices / DQA / DQB / FC / IR0 come from the caller.
-        unsafe { ops::ncds() };
-        let rgb = mfc2!(22); // RGB2 (latest)
+        unsafe { ops::light_color_depth_single() };
+        let rgb = read_data!(22); // RGB2 (latest)
 
         verts_out[i] = unpack_projected(sxy, sz, rgb);
     }
 
     // --- Back-face cull in software from the projected SXY. GTE NCLIP's
     // MAC0 read-back is STALE on real hardware (the result-read hazard, see
-    // scene::screen_area_mac0), which mis-culls and drops faces on silicon
+    // scene::screen_area), which mis-culls and drops faces on silicon
     // while looking fine on emulators. The i32 cross product is exact and
     // hazard-free; SXY itself has no read latency, so `screen` is correct. ---
-    let front_facing = crate::scene::screen_area_mac0(screen) > 0;
+    let front_facing = crate::scene::screen_area(screen) > 0;
 
     // --- AVSZ3: OT key from SZ1/2/3, weighted by ZSF3. ---
     // SAFETY: three RTPS calls populated the SZ FIFO.
-    unsafe { ops::avsz3() };
-    let otz = mfc2!(7) as u16;
+    unsafe { ops::average_z3() };
+    let otz = read_data!(7) as u16;
 
     FoggedTri {
         verts: verts_out,
@@ -413,30 +413,34 @@ pub fn project_lit_triangle(
     normals: [Vec3I16; 3],
     materials: [(u8, u8, u8); 3],
 ) -> [ProjectedLit; 3] {
-    mtc2!(0, verts[0].xy_packed());
-    mtc2!(1, verts[0].z_packed());
-    mtc2!(2, verts[1].xy_packed());
-    mtc2!(3, verts[1].z_packed());
-    mtc2!(4, verts[2].xy_packed());
-    mtc2!(5, verts[2].z_packed());
+    write_data!(0, verts[0].xy_packed());
+    write_data!(1, verts[0].z_packed());
+    write_data!(2, verts[1].xy_packed());
+    write_data!(3, verts[1].z_packed());
+    write_data!(4, verts[2].xy_packed());
+    write_data!(5, verts[2].z_packed());
     // SAFETY: V0, V1, and V2 are loaded; scene setup is caller-supplied.
-    unsafe { ops::rtpt() };
+    unsafe { ops::project_triple() };
 
-    let sxy = [mfc2!(12), mfc2!(13), mfc2!(14)];
-    let sz = [mfc2!(17) as u16, mfc2!(18) as u16, mfc2!(19) as u16];
+    let sxy = [read_data!(12), read_data!(13), read_data!(14)];
+    let sz = [
+        read_data!(17) as u16,
+        read_data!(18) as u16,
+        read_data!(19) as u16,
+    ];
 
     if materials[0] == materials[1] && materials[1] == materials[2] {
-        mtc2!(0, normals[0].xy_packed());
-        mtc2!(1, normals[0].z_packed());
-        mtc2!(2, normals[1].xy_packed());
-        mtc2!(3, normals[1].z_packed());
-        mtc2!(4, normals[2].xy_packed());
-        mtc2!(5, normals[2].z_packed());
-        mtc2!(6, rgbc_word(materials[0]));
+        write_data!(0, normals[0].xy_packed());
+        write_data!(1, normals[0].z_packed());
+        write_data!(2, normals[1].xy_packed());
+        write_data!(3, normals[1].z_packed());
+        write_data!(4, normals[2].xy_packed());
+        write_data!(5, normals[2].z_packed());
+        write_data!(6, rgbc_word(materials[0]));
         // SAFETY: V0, V1, V2 hold normals and RGBC is common to all
         // three vertices. NCCT is equivalent to NCCS for V0/V1/V2.
-        unsafe { ops::ncct() };
-        let rgb = [mfc2!(20), mfc2!(21), mfc2!(22)];
+        unsafe { ops::light_color_triple() };
+        let rgb = [read_data!(20), read_data!(21), read_data!(22)];
         return [
             unpack_projected(sxy[0], sz[0], rgb[0]),
             unpack_projected(sxy[1], sz[1], rgb[1]),
@@ -447,13 +451,13 @@ pub fn project_lit_triangle(
     let mut out = [ProjectedLit::default(); 3];
     let mut i = 0;
     while i < 3 {
-        mtc2!(0, normals[i].xy_packed());
-        mtc2!(1, normals[i].z_packed());
-        mtc2!(6, rgbc_word(materials[i]));
+        write_data!(0, normals[i].xy_packed());
+        write_data!(1, normals[i].z_packed());
+        write_data!(6, rgbc_word(materials[i]));
         // SAFETY: V0 holds the normal, RGBC holds the material;
         // LLM/LCM/BK were loaded by the caller's light rig.
-        unsafe { ops::nccs() };
-        out[i] = unpack_projected(sxy[i], sz[i], mfc2!(22));
+        unsafe { ops::light_color_single() };
+        out[i] = unpack_projected(sxy[i], sz[i], read_data!(22));
         i += 1;
     }
 
@@ -479,26 +483,26 @@ pub fn project_lit_triangle(
 ///   applied so lights are in the same frame as the normal)
 pub fn project_lit(vert: Vec3I16, normal: Vec3I16, material: (u8, u8, u8)) -> ProjectedLit {
     // --- Position: RTPS ---
-    mtc2!(0, vert.xy_packed());
-    mtc2!(1, vert.z_packed());
+    write_data!(0, vert.xy_packed());
+    write_data!(1, vert.z_packed());
     // SAFETY: V0 loaded; scene setup is caller's responsibility.
-    unsafe { ops::rtps() };
-    let sxy = mfc2!(14); // SXY2 (packed xy)
-    let sz = mfc2!(19) as u16; // SZ3
+    unsafe { ops::project_single() };
+    let sxy = read_data!(14); // SXY2 (packed xy)
+    let sz = read_data!(19) as u16; // SZ3
 
     // --- Lighting: NCCS ---
-    mtc2!(0, normal.xy_packed());
-    mtc2!(1, normal.z_packed());
+    write_data!(0, normal.xy_packed());
+    write_data!(1, normal.z_packed());
     // RGBC layout (data reg 6): 0x00CC_BBGG_RR -- low 8 bits R,
     // next 8 G, next 8 B, top 8 "CODE" (GPU command byte, used by
     // some prim ops; 0 for our purposes).
-    mtc2!(6, rgbc_word(material));
+    write_data!(6, rgbc_word(material));
     // SAFETY: V0 holds the normal, RGBC holds the material;
     // LLM/LCM/BK were loaded via `LightRig::load`.
-    unsafe { ops::nccs() };
+    unsafe { ops::light_color_single() };
     // Read lit colour from RGB2 (data reg 22). Same 0x00BB_GGRR
     // layout as RGBC.
-    let lit = mfc2!(22);
+    let lit = read_data!(22);
 
     ProjectedLit {
         sx: sxy as i16,

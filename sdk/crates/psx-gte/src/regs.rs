@@ -4,7 +4,7 @@
 //! index is encoded as a 5-bit immediate field in the instruction --
 //! you can't pass it as a runtime value without either stamping 32
 //! separate functions or generating code at build time. Macros keep
-//! the call site readable (`mtc2!(0, value)`) while letting the
+//! the call site readable (`write_data!(0, value)`) while letting the
 //! assembler emit the exact encoding.
 //!
 //! Every macro emits a hand-built `.word` rather than the mnemonic
@@ -62,7 +62,7 @@
 //! | 29 / 30         | ZSF3 / ZSF4 AVSZ weights                  |
 //! | 31              | FLAG (error/saturation bits)              |
 
-/// Move-from-COP2 data register. Expands to a single MFC2 instruction
+/// Read a GTE data register (`MFC2`). Expands to a single MFC2 instruction
 /// with the register index baked into the `.word` encoding, followed
 /// by a NOP that fills the one-cycle load-delay slot.
 ///
@@ -73,12 +73,13 @@
 /// block, and that move runs in the delay slot → sees the
 /// pre-MFC2 value of $8, not the coprocessor data. The emulator
 /// models this correctly (see `cpu::committing_load`), so without
-/// the NOP every `mfc2!` call silently returns stale data.
+/// the NOP every `read_data!` call silently returns stale data.
 ///
 /// Encoded as two `.word`s: the MFC2 then a 32-bit zero (the MIPS
 /// canonical NOP = `SLL $0, $0, 0`).
+#[doc(alias = "MFC2")]
 #[macro_export]
-macro_rules! mfc2 {
+macro_rules! read_data {
     ($reg:literal) => {{
         // Out-of-range indices would spill into other encoding fields.
         const { assert!(($reg as u32) < 32, "GTE register index must be 0..=31") };
@@ -107,9 +108,10 @@ macro_rules! mfc2 {
     }};
 }
 
-/// Move-to-COP2 data register. Expands to a single MTC2 instruction.
+/// Write a GTE data register (`MTC2`). Expands to a single MTC2 instruction.
+#[doc(alias = "MTC2")]
 #[macro_export]
-macro_rules! mtc2 {
+macro_rules! write_data {
     ($reg:literal, $value:expr) => {{
         // Out-of-range indices would spill into other encoding fields.
         const { assert!(($reg as u32) < 32, "GTE register index must be 0..=31") };
@@ -136,12 +138,13 @@ macro_rules! mtc2 {
     }};
 }
 
-/// Control-from-COP2 register (reads GTE *control* bank). Same
-/// load-delay concern as [`mfc2!`] -- emits a NOP after the CFC2 to
-/// give the result a cycle to commit to $8 before Rust's
-/// compiler-inserted move-from-$8 runs.
+/// Read a GTE control register (`CFC2`). Same load-delay concern as
+/// [`read_data!`] -- emits a NOP after the CFC2 to give the result a
+/// cycle to commit to $8 before Rust's compiler-inserted move-from-$8
+/// runs.
+#[doc(alias = "CFC2")]
 #[macro_export]
-macro_rules! cfc2 {
+macro_rules! read_control {
     ($reg:literal) => {{
         // Out-of-range indices would spill into other encoding fields.
         const { assert!(($reg as u32) < 32, "GTE register index must be 0..=31") };
@@ -170,9 +173,10 @@ macro_rules! cfc2 {
     }};
 }
 
-/// Control-to-COP2 register (writes GTE *control* bank).
+/// Write a GTE control register (`CTC2`).
+#[doc(alias = "CTC2")]
 #[macro_export]
-macro_rules! ctc2 {
+macro_rules! write_control {
     ($reg:literal, $value:expr) => {{
         // Out-of-range indices would spill into other encoding fields.
         const { assert!(($reg as u32) < 32, "GTE register index must be 0..=31") };
@@ -197,6 +201,34 @@ macro_rules! ctc2 {
             $crate::host::write_control($reg, _value);
         }
     }};
+}
+
+/// Renamed to [`read_data!`].
+#[deprecated(note = "renamed to `read_data!`")]
+#[macro_export]
+macro_rules! mfc2 {
+    ($($t:tt)*) => { $crate::read_data!($($t)*) };
+}
+
+/// Renamed to [`write_data!`].
+#[deprecated(note = "renamed to `write_data!`")]
+#[macro_export]
+macro_rules! mtc2 {
+    ($($t:tt)*) => { $crate::write_data!($($t)*) };
+}
+
+/// Renamed to [`read_control!`].
+#[deprecated(note = "renamed to `read_control!`")]
+#[macro_export]
+macro_rules! cfc2 {
+    ($($t:tt)*) => { $crate::read_control!($($t)*) };
+}
+
+/// Renamed to [`write_control!`].
+#[deprecated(note = "renamed to `write_control!`")]
+#[macro_export]
+macro_rules! ctc2 {
+    ($($t:tt)*) => { $crate::write_control!($($t)*) };
 }
 
 /// Helper: pack two i16 values into one u32 for MTC2/CTC2 of XY-pair

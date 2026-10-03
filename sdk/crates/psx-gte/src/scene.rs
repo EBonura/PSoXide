@@ -25,7 +25,7 @@
 use crate::math::{Mat3I16, Vec3I16, Vec3I32};
 use crate::ops;
 use crate::regs::pack_xy;
-use crate::{cfc2, ctc2, mfc2, mtc2};
+use crate::{read_control, read_data, write_control, write_data};
 #[cfg(target_arch = "mips")]
 use core::arch::asm;
 
@@ -106,16 +106,16 @@ pub fn normalize_classic_q12_scheduled(input: Vec3I32) -> ClassicNormalizedVecto
     let y = (input.y >> 12) as i16;
     let z = (input.z >> 12) as i16;
 
-    mtc2!(9, x as i32 as u32);
-    mtc2!(10, y as i32 as u32);
-    mtc2!(11, z as i32 as u32);
+    write_data!(9, x as i32 as u32);
+    write_data!(10, y as i32 as u32);
+    write_data!(11, z as i32 as u32);
     gte_input_commit_gap();
     // SAFETY: IR1 through IR3 were loaded above and given the silicon-safe
     // input-commit distance before SQR consumes them.
-    unsafe { ops::sqr_sf0() };
-    let x_squared = mfc2!(25) as i32;
-    let y_squared = mfc2!(26) as i32;
-    let z_squared = mfc2!(27) as i32;
+    unsafe { ops::square_unshifted() };
+    let x_squared = read_data!(25) as i32;
+    let y_squared = read_data!(26) as i32;
+    let z_squared = read_data!(27) as i32;
     let xy_squared = x_squared.wrapping_add(y_squared);
     let squared = xy_squared.wrapping_add(z_squared);
     if squared <= 0 {
@@ -126,9 +126,9 @@ pub fn normalize_classic_q12_scheduled(input: Vec3I32) -> ClassicNormalizedVecto
         };
     }
 
-    mtc2!(30, squared as u32);
+    write_data!(30, squared as u32);
     gte_input_commit_gap();
-    let leading = (mfc2!(31) & !1) as i32;
+    let leading = (read_data!(31) & !1) as i32;
     let normalised_squared = if leading >= 24 {
         squared.wrapping_shl((leading - 24) as u32)
     } else {
@@ -140,16 +140,16 @@ pub fn normalize_classic_q12_scheduled(input: Vec3I32) -> ClassicNormalizedVecto
 
     // Load IR0 first so the three vector writes and the explicit input gap
     // give every operand ample time to commit before GPF reads them.
-    mtc2!(8, reciprocal as i32 as u32);
-    mtc2!(9, x as i32 as u32);
-    mtc2!(10, y as i32 as u32);
-    mtc2!(11, z as i32 as u32);
+    write_data!(8, reciprocal as i32 as u32);
+    write_data!(9, x as i32 as u32);
+    write_data!(10, y as i32 as u32);
+    write_data!(11, z as i32 as u32);
     gte_input_commit_gap();
     // SAFETY: IR0 through IR3 contain the reciprocal/vector product inputs.
-    unsafe { ops::gpf_sf0() };
-    let nx = (mfc2!(25) as i32 >> output_shift) as i16;
-    let ny = (mfc2!(26) as i32 >> output_shift) as i16;
-    let nz = (mfc2!(27) as i32 >> output_shift) as i16;
+    unsafe { ops::scale_vector_unshifted() };
+    let nx = (read_data!(25) as i32 >> output_shift) as i16;
+    let ny = (read_data!(26) as i32 >> output_shift) as i16;
+    let nz = (read_data!(27) as i32 >> output_shift) as i16;
 
     ClassicNormalizedVector {
         vector: Vec3I16::new(nx, ny, nz),
@@ -180,25 +180,25 @@ pub struct AabbClipPlane {
 /// Load the rotation matrix into the GTE's RT control registers (0..=4).
 #[doc(alias = "SetRotMatrix")]
 pub fn load_rotation(m: &Mat3I16) {
-    ctc2!(0, pack_xy(m.m[0][0], m.m[0][1]));
-    ctc2!(1, pack_xy(m.m[0][2], m.m[1][0]));
-    ctc2!(2, pack_xy(m.m[1][1], m.m[1][2]));
-    ctc2!(3, pack_xy(m.m[2][0], m.m[2][1]));
-    ctc2!(4, m.m[2][2] as i32 as u32);
+    write_control!(0, pack_xy(m.m[0][0], m.m[0][1]));
+    write_control!(1, pack_xy(m.m[0][2], m.m[1][0]));
+    write_control!(2, pack_xy(m.m[1][1], m.m[1][2]));
+    write_control!(3, pack_xy(m.m[2][0], m.m[2][1]));
+    write_control!(4, m.m[2][2] as i32 as u32);
 }
 
 /// Load the light-direction matrix (LLM, control 8..=12).
 #[doc(alias = "SetLightMatrix")]
 pub fn load_light_matrix(m: &Mat3I16) {
-    ctc2!(8, pack_xy(m.m[0][0], m.m[0][1]));
-    ctc2!(9, pack_xy(m.m[0][2], m.m[1][0]));
-    ctc2!(10, pack_xy(m.m[1][1], m.m[1][2]));
-    ctc2!(11, pack_xy(m.m[2][0], m.m[2][1]));
-    ctc2!(12, m.m[2][2] as i32 as u32);
+    write_control!(8, pack_xy(m.m[0][0], m.m[0][1]));
+    write_control!(9, pack_xy(m.m[0][2], m.m[1][0]));
+    write_control!(10, pack_xy(m.m[1][1], m.m[1][2]));
+    write_control!(11, pack_xy(m.m[2][0], m.m[2][1]));
+    write_control!(12, m.m[2][2] as i32 as u32);
 }
 
 /// Load four clip-plane normals for [`classify_aabb_clip4`] and
-/// [`aabb_outside_clip4`].
+/// [`is_aabb_outside_clip4`].
 ///
 /// Planes zero through two occupy the rotation-matrix rows. Plane three uses
 /// the first light-matrix row. This intentionally replaces both matrices;
@@ -213,68 +213,71 @@ pub fn load_aabb_clip4(planes: &[AabbClipPlane; 4]) {
     });
 }
 
-/// Load the light-colour matrix (LCM, control 16..=20).
+/// Load the light-color matrix (LCM, control 16..=20).
 #[doc(alias = "SetColorMatrix")]
-pub fn load_light_colour_matrix(m: &Mat3I16) {
-    ctc2!(16, pack_xy(m.m[0][0], m.m[0][1]));
-    ctc2!(17, pack_xy(m.m[0][2], m.m[1][0]));
-    ctc2!(18, pack_xy(m.m[1][1], m.m[1][2]));
-    ctc2!(19, pack_xy(m.m[2][0], m.m[2][1]));
-    ctc2!(20, m.m[2][2] as i32 as u32);
+pub fn load_light_color_matrix(m: &Mat3I16) {
+    write_control!(16, pack_xy(m.m[0][0], m.m[0][1]));
+    write_control!(17, pack_xy(m.m[0][2], m.m[1][0]));
+    write_control!(18, pack_xy(m.m[1][1], m.m[1][2]));
+    write_control!(19, pack_xy(m.m[2][0], m.m[2][1]));
+    write_control!(20, m.m[2][2] as i32 as u32);
 }
 
 /// Load the translation vector (TR, control 5..=7).
 #[doc(alias = "SetTransMatrix")]
 pub fn load_translation(t: Vec3I32) {
-    ctc2!(5, t.x as u32);
-    ctc2!(6, t.y as u32);
-    ctc2!(7, t.z as u32);
+    write_control!(5, t.x as u32);
+    write_control!(6, t.y as u32);
+    write_control!(7, t.z as u32);
 }
 
-/// Load the background-colour bias (BK, control 13..=15).
+/// Load the background-color bias (BK, control 13..=15).
 #[doc(alias = "SetBackColor")]
-pub fn load_background_colour(c: Vec3I32) {
-    ctc2!(13, c.x as u32);
-    ctc2!(14, c.y as u32);
-    ctc2!(15, c.z as u32);
+pub fn load_background_color(c: Vec3I32) {
+    write_control!(13, c.x as u32);
+    write_control!(14, c.y as u32);
+    write_control!(15, c.z as u32);
 }
 
-/// Load the far-colour bias (FC, control 21..=23) used by depth-cue
+/// Load the far-color bias (FC, control 21..=23) used by depth-cue
 /// interpolation.
 #[doc(alias = "SetFarColor")]
-pub fn load_far_colour(c: Vec3I32) {
-    ctc2!(21, c.x as u32);
-    ctc2!(22, c.y as u32);
-    ctc2!(23, c.z as u32);
+pub fn load_far_color(c: Vec3I32) {
+    write_control!(21, c.x as u32);
+    write_control!(22, c.y as u32);
+    write_control!(23, c.z as u32);
 }
 
 /// Set OFX and OFY (control 24, 25) -- the screen-space offsets applied
 /// post-divide. Values are 15.16 fixed point; `160 << 16` = 160.0 px.
 #[doc(alias = "SetGeomOffset")]
 pub fn set_screen_offset(ofx_15_16: i32, ofy_15_16: i32) {
-    ctc2!(24, ofx_15_16 as u32);
-    ctc2!(25, ofy_15_16 as u32);
+    write_control!(24, ofx_15_16 as u32);
+    write_control!(25, ofy_15_16 as u32);
 }
 
 /// Set the projection-plane distance H (control 26). Larger H = longer
 /// focal length = narrower FOV.
 #[doc(alias = "SetGeomScreen")]
 pub fn set_projection_plane(h: u16) {
-    ctc2!(26, h as i32 as u32);
+    write_control!(26, h as i32 as u32);
 }
 
 /// Set the depth-cue coefficients DQA / DQB (control 27, 28).
 /// Depth-cue outputs IR0 = DQA/H + DQB, scaled to 0..0x1000.
 pub fn set_depth_cue(dqa: i16, dqb: i32) {
-    ctc2!(27, dqa as i32 as u32);
-    ctc2!(28, dqb as u32);
+    write_control!(27, dqa as i32 as u32);
+    write_control!(28, dqb as u32);
 }
 
 /// Set the AVSZ3/AVSZ4 averaging weights (control 29, 30). Typical
 /// values: `ZSF3 = 0x555` (= 1/3 in 0.12), `ZSF4 = 0x400` (= 1/4).
-pub fn set_avsz_weights(zsf3: i16, zsf4: i16) {
-    ctc2!(29, zsf3 as i32 as u32);
-    ctc2!(30, zsf4 as i32 as u32);
+#[doc(alias = "AVSZ")]
+#[doc(alias = "ZSF3")]
+#[doc(alias = "ZSF4")]
+pub fn set_average_z_weights(zsf3: i16, zsf4: i16) {
+    write_control!(29, zsf3 as i32 as u32);
+    write_control!(30, zsf4 as i32 as u32);
 }
 
 /// Load `v` into the V0 input slot (data registers 0 and 1) and run
@@ -285,13 +288,13 @@ pub fn set_avsz_weights(zsf3: i16, zsf4: i16) {
 /// projection plane have already been set.
 #[doc(alias = "RotTransPers")]
 pub fn project_vertex(v: Vec3I16) -> Projected {
-    mtc2!(0, v.xy_packed());
-    mtc2!(1, v.z_packed());
+    write_data!(0, v.xy_packed());
+    write_data!(1, v.z_packed());
     // SAFETY: V0 has just been loaded; RT / TR / H / OFX / OFY are
     // assumed to be set by the caller's scene setup.
-    unsafe { ops::rtps() };
-    let sxy = mfc2!(14);
-    let sz = mfc2!(19) as u16;
+    unsafe { ops::project_single() };
+    let sxy = read_data!(14);
+    let sz = read_data!(19) as u16;
     Projected {
         sx: sxy as i16,
         sy: (sxy >> 16) as i16,
@@ -307,23 +310,23 @@ pub fn project_vertex(v: Vec3I16) -> Projected {
 #[doc(alias = "RotTransPers3")]
 pub fn project_triangle(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3] {
     // Load all three vertices first (data regs 0..=5), then fire RTPT.
-    mtc2!(0, v0.xy_packed());
-    mtc2!(1, v0.z_packed());
-    mtc2!(2, v1.xy_packed());
-    mtc2!(3, v1.z_packed());
-    mtc2!(4, v2.xy_packed());
-    mtc2!(5, v2.z_packed());
+    write_data!(0, v0.xy_packed());
+    write_data!(1, v0.z_packed());
+    write_data!(2, v1.xy_packed());
+    write_data!(3, v1.z_packed());
+    write_data!(4, v2.xy_packed());
+    write_data!(5, v2.z_packed());
     // SAFETY: all three vertices are loaded; scene-setup registers
     // are the caller's responsibility.
-    unsafe { ops::rtpt() };
+    unsafe { ops::project_triple() };
     // After RTPT, SXY FIFO holds (v0, v1, v2) in slots 0/1/2, and
     // SZ FIFO holds them in SZ1/SZ2/SZ3.
-    let sxy0 = mfc2!(12);
-    let sxy1 = mfc2!(13);
-    let sxy2 = mfc2!(14);
-    let sz1 = mfc2!(17) as u16;
-    let sz2 = mfc2!(18) as u16;
-    let sz3 = mfc2!(19) as u16;
+    let sxy0 = read_data!(12);
+    let sxy1 = read_data!(13);
+    let sxy2 = read_data!(14);
+    let sz1 = read_data!(17) as u16;
+    let sz2 = read_data!(18) as u16;
+    let sz3 = read_data!(19) as u16;
     [
         Projected {
             sx: sxy0 as i16,
@@ -349,11 +352,15 @@ pub fn project_triangle(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3]
 /// Assumes the rotation matrix and translation have already been set.
 #[doc(alias = "RotTrans")]
 pub fn transform_vertex(v: Vec3I16) -> Vec3I32 {
-    mtc2!(0, v.xy_packed());
-    mtc2!(1, v.z_packed());
+    write_data!(0, v.xy_packed());
+    write_data!(1, v.z_packed());
     // SAFETY: V0 has just been loaded; RT/TR are set by scene setup.
-    unsafe { ops::mvmva_rt_v0_tr_sf1() };
-    Vec3I32::new(mfc2!(25) as i32, mfc2!(26) as i32, mfc2!(27) as i32)
+    unsafe { ops::rotate_translate_v0() };
+    Vec3I32::new(
+        read_data!(25) as i32,
+        read_data!(26) as i32,
+        read_data!(27) as i32,
+    )
 }
 
 /// Transform one vertex with a lower-overhead MIPS register schedule.
@@ -433,7 +440,7 @@ pub fn project_triangle_scheduled(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Pro
     }
 }
 
-/// In-flight RTPT kicked by [`rtpt_kick`]; [`read`](Self::read)
+/// In-flight RTPT kicked by [`start_project_triple`]; [`read`](Self::read)
 /// collects the three projected results.
 ///
 /// Between kick and read the caller must not issue any other GTE op
@@ -442,7 +449,8 @@ pub fn project_triangle_scheduled(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Pro
 /// build the projection happens eagerly at kick and `read` just
 /// returns it.
 #[must_use = "call read() to collect the projected triple"]
-pub struct RtptInFlight(#[cfg(not(target_arch = "mips"))] [Projected; 3]);
+#[doc(alias = "RTPT")]
+pub struct ProjectTripleInFlight(#[cfg(not(target_arch = "mips"))] [Projected; 3]);
 
 /// Load V0..V2 and issue RTPT without reading results, so the caller
 /// can overlap the GTE op with scalar work for the previous triple.
@@ -451,7 +459,8 @@ pub struct RtptInFlight(#[cfg(not(target_arch = "mips"))] [Projected; 3]);
 /// written 6 instructions before RTPT issues and RTPT consumes V2
 /// last, so the HWB-010/011 commit-slip hazard profile is unchanged.
 #[inline(always)]
-pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> RtptInFlight {
+#[doc(alias = "RTPT")]
+pub fn start_project_triple(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> ProjectTripleInFlight {
     #[cfg(target_arch = "mips")]
     {
         let v0_xy = v0.xy_packed();
@@ -490,15 +499,15 @@ pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> RtptInFlight {
                 options(nostack, nomem, preserves_flags),
             );
         }
-        RtptInFlight()
+        ProjectTripleInFlight()
     }
     #[cfg(not(target_arch = "mips"))]
     {
-        RtptInFlight(project_triangle(v0, v1, v2))
+        ProjectTripleInFlight(project_triangle(v0, v1, v2))
     }
 }
 
-impl RtptInFlight {
+impl ProjectTripleInFlight {
     /// Collect the projected triple.
     ///
     /// MFC2 does not provide a general GTE-busy interlock: the console result
@@ -637,7 +646,7 @@ fn project_triangle_mips(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3
             // Conservative HWB-010/011 input-commit gap. The original
             // console failure proved MVMVA/RTPS; hardware-tests v1.20 records
             // 0xC0-C3 measure RTPT directly before we remove these slots.
-            // Keep this in sync with rtpt_kick.
+            // Keep this in sync with start_project_triple.
             ".word 0",
             ".word 0",
             // RTPT.
@@ -816,7 +825,11 @@ pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
         TransformProbe {
             out,
             x_settled: out.x,
-            tr: [cfc2!(5) as i32, cfc2!(6) as i32, cfc2!(7) as i32],
+            tr: [
+                read_control!(5) as i32,
+                read_control!(6) as i32,
+                read_control!(7) as i32,
+            ],
         }
     }
 }
@@ -827,8 +840,8 @@ pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
 pub fn average_z_triangle() -> u16 {
     // SAFETY: no input registers to prepare -- AVSZ3 reads SZ1..SZ3
     // which were populated by the most recent RTPT / project_triangle.
-    unsafe { ops::avsz3() };
-    mfc2!(7) as u16
+    unsafe { ops::average_z3() };
+    read_data!(7) as u16
 }
 
 /// Reload three cached projected depths into the GTE SZ FIFO and compute OTZ.
@@ -869,12 +882,12 @@ pub fn average_cached_z3(depths: [u16; 3]) -> u16 {
     }
     #[cfg(not(target_arch = "mips"))]
     {
-        mtc2!(17, depths[0] as u32);
-        mtc2!(18, depths[1] as u32);
-        mtc2!(19, depths[2] as u32);
+        write_data!(17, depths[0] as u32);
+        write_data!(18, depths[1] as u32);
+        write_data!(19, depths[2] as u32);
         // SAFETY: SZ1, SZ2 and SZ3 were loaded immediately above.
-        unsafe { ops::avsz3() };
-        mfc2!(7) as u16
+        unsafe { ops::average_z3() };
+        read_data!(7) as u16
     }
 }
 
@@ -884,7 +897,8 @@ pub fn average_cached_z3(depths: [u16; 3]) -> u16 {
 /// `5 * 17 * 4 + 1`, avoiding two shifts and additions emitted for the flat
 /// constant multiply on MIPS I.
 #[inline(always)]
-pub fn classic_otz3_from_sum(sum: u32) -> u16 {
+#[doc(alias = "OTZ")]
+pub fn classic_ordering_depth3_from_sum(sum: u32) -> u16 {
     #[cfg(target_arch = "mips")]
     {
         let mut otz = sum;
@@ -952,13 +966,13 @@ pub fn average_cached_z4(depths: [u16; 4]) -> u16 {
     }
     #[cfg(not(target_arch = "mips"))]
     {
-        mtc2!(16, depths[0] as u32);
-        mtc2!(17, depths[1] as u32);
-        mtc2!(18, depths[2] as u32);
-        mtc2!(19, depths[3] as u32);
+        write_data!(16, depths[0] as u32);
+        write_data!(17, depths[1] as u32);
+        write_data!(18, depths[2] as u32);
+        write_data!(19, depths[3] as u32);
         // SAFETY: SZ0 through SZ3 were loaded immediately above.
-        unsafe { ops::avsz4() };
-        mfc2!(7) as u16
+        unsafe { ops::average_z4() };
+        read_data!(7) as u16
     }
 }
 
@@ -970,7 +984,9 @@ pub fn average_cached_z4(depths: [u16; 4]) -> u16 {
 /// unsigned 16-bit depths, multiply by signed `ZSF3`, shift right by 12, then
 /// saturate to OTZ's unsigned 16-bit range.
 #[inline]
-pub fn average_z3_otz(depths: [u16; 3], zsf3: i16) -> u16 {
+#[doc(alias = "OTZ")]
+#[doc(alias = "AverageZ3")]
+pub fn average_z3_ordering_depth(depths: [u16; 3], zsf3: i16) -> u16 {
     // ZSF3 is i16 and each depth is u16, so the product reaches ~2^41: the
     // hardware AVSZ3 accumulates in the GTE's own wide register and this is
     // the software mirror of it. An i32 accumulator would wrap and hand the
@@ -983,12 +999,14 @@ pub fn average_z3_otz(depths: [u16; 3], zsf3: i16) -> u16 {
 
 /// Compute AVSZ4's saturated OTZ result from four cached projected depths.
 ///
-/// This is the four-vertex counterpart to [`average_z3_otz`] and matches the
+/// This is the four-vertex counterpart to [`average_z3_ordering_depth`] and matches the
 /// GTE's `AVSZ4` operation with the supplied `ZSF4` value. MIPS render loops
 /// should normally prefer [`average_cached_z4`].
 #[inline]
-pub fn average_z4_otz(depths: [u16; 4], zsf4: i16) -> u16 {
-    // psx-numeric-allow-next-line: AVSZ4 wide accumulator, same reasoning as average_z3_otz
+#[doc(alias = "OTZ")]
+#[doc(alias = "AverageZ4")]
+pub fn average_z4_ordering_depth(depths: [u16; 4], zsf4: i16) -> u16 {
+    // psx-numeric-allow-next-line: AVSZ4 wide accumulator, same reasoning as average_z3_ordering_depth
     let sum = depths[0] as i64 + depths[1] as i64 + depths[2] as i64 + depths[3] as i64;
     // psx-numeric-allow-next-line: AVSZ4 wide accumulator
     ((sum * zsf4 as i64) >> 12).clamp(0, u16::MAX as i64) as u16
@@ -1096,7 +1114,7 @@ pub fn classify_aabb_clip4(
 /// selection loop, and as an out-of-line call it spent a third of its cycles
 /// on the call itself (two arrays by value plus the plane pointer).
 #[inline(always)]
-pub fn aabb_outside_clip4(
+pub fn is_aabb_outside_clip4(
     mins: [i16; 3],
     maxs: [i16; 3],
     planes: &[AabbClipPlane; 4],
@@ -1130,7 +1148,9 @@ pub fn aabb_outside_clip4(
 /// latency. Confirmed against real hardware (cortex GTE disc 2026-06-09:
 /// NCLIP MAC0 back-to-back read is stale, +8 nops reads correct).
 #[inline]
-pub fn screen_area_mac0(vertices: [(i16, i16); 3]) -> i32 {
+#[doc(alias = "NCLIP")]
+#[doc(alias = "MAC0")]
+pub fn screen_area(vertices: [(i16, i16); 3]) -> i32 {
     let (sx0, sy0) = (vertices[0].0 as i32, vertices[0].1 as i32);
     let (sx1, sy1) = (vertices[1].0 as i32, vertices[1].1 as i32);
     let (sx2, sy2) = (vertices[2].0 as i32, vertices[2].1 as i32);
@@ -1143,10 +1163,12 @@ pub fn screen_area_mac0(vertices: [(i16, i16); 3]) -> i32 {
 /// Run a hardware-safe `NCLIP` for an already-projected triangle.
 ///
 /// The two input NOPs and eight-instruction result distance are both required
-/// by the console measurements documented on [`screen_area_mac0`]. This is
+/// by the console measurements documented on [`screen_area`]. This is
 /// useful in tight indexed-model loops where the GTE would otherwise be idle.
 #[inline(always)]
-pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
+#[doc(alias = "NCLIP")]
+#[doc(alias = "MAC0")]
+pub fn screen_area_scheduled(vertices: [(i16, i16); 3]) -> i32 {
     #[cfg(target_arch = "mips")]
     {
         let sxy0 = pack_xy(vertices[0].0, vertices[0].1);
@@ -1187,7 +1209,7 @@ pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
     }
     #[cfg(not(target_arch = "mips"))]
     {
-        screen_area_mac0(vertices)
+        screen_area(vertices)
     }
 }
 
@@ -1255,7 +1277,7 @@ pub fn screen_area_and_unpack_model_face_scheduled(
     #[cfg(not(target_arch = "mips"))]
     {
         (
-            screen_area_mac0(vertices),
+            screen_area(vertices),
             [
                 (corner_words[0] >> 16) as u16,
                 (corner_words[1] >> 16) as u16,
@@ -1272,7 +1294,7 @@ pub fn screen_area_and_unpack_model_face_scheduled(
 /// The cached screen coordinates and depths are loaded together. The three
 /// SZ writes occupy part of the silicon-required NCLIP result gap, so callers
 /// that need both winding and an OT key avoid paying two independent GTE
-/// schedules. The returned area is identical to [`screen_area_mac0`], and the
+/// schedules. The returned area is identical to [`screen_area`], and the
 /// depth is identical to [`average_cached_z3`] with the installed ZSF3.
 #[inline(always)]
 pub fn screen_area_and_average_cached_z3_scheduled(
@@ -1327,7 +1349,7 @@ pub fn screen_area_and_average_cached_z3_scheduled(
     }
     #[cfg(not(target_arch = "mips"))]
     {
-        (screen_area_mac0(vertices), average_cached_z3(depths))
+        (screen_area(vertices), average_cached_z3(depths))
     }
 }
 
@@ -1339,7 +1361,8 @@ pub fn screen_area_and_average_cached_z3_scheduled(
 /// NCLIP's required MAC0 result gap, so it replaces the later AVSZ3 command
 /// without extending the hazard schedule.
 #[inline(always)]
-pub fn screen_area_and_classic_otz3_scheduled(
+#[doc(alias = "OTZ")]
+pub fn screen_area_and_classic_ordering_depth3_scheduled(
     vertices: [(i16, i16); 3],
     depths: [u16; 3],
 ) -> (i32, u16) {
@@ -1393,7 +1416,7 @@ pub fn screen_area_and_classic_otz3_scheduled(
     #[cfg(not(target_arch = "mips"))]
     {
         let sum = depths[0] as u32 + depths[1] as u32 + depths[2] as u32;
-        (screen_area_mac0(vertices), ((sum * 0x155) >> 12) as u16)
+        (screen_area(vertices), ((sum * 0x155) >> 12) as u16)
     }
 }
 
@@ -1401,16 +1424,127 @@ pub fn screen_area_and_classic_otz3_scheduled(
 ///
 /// Useful when a renderer cached/projected vertices first and later wants
 /// the signed screen-space area test for arbitrary indexed faces. Uses the
-/// software [`screen_area_mac0`] (see its note on the NCLIP MAC0 hazard).
-pub fn screen_triangle_back_facing(vertices: [(i16, i16); 3]) -> bool {
-    screen_area_mac0(vertices) <= 0
+/// software [`screen_area`] (see its note on the NCLIP MAC0 hazard).
+pub fn is_screen_triangle_back_facing(vertices: [(i16, i16); 3]) -> bool {
+    screen_area(vertices) <= 0
 }
 
 /// Read the GTE FLAG register. Non-zero indicates at least one error
 /// bit fired during the last op (overflow, saturation, divide
 /// overflow). Useful for debug prints on a frame that looks wrong.
+#[doc(alias = "FLAG")]
+pub fn error_flags() -> u32 {
+    read_control!(31)
+}
+
+/// Renamed to [`load_light_color_matrix`].
+#[deprecated(note = "renamed to `load_light_color_matrix`")]
+#[inline(always)]
+pub fn load_light_colour_matrix(m: &Mat3I16) {
+    load_light_color_matrix(m)
+}
+
+/// Renamed to [`load_background_color`].
+#[deprecated(note = "renamed to `load_background_color`")]
+#[inline(always)]
+pub fn load_background_colour(c: Vec3I32) {
+    load_background_color(c)
+}
+
+/// Renamed to [`load_far_color`].
+#[deprecated(note = "renamed to `load_far_color`")]
+#[inline(always)]
+pub fn load_far_colour(c: Vec3I32) {
+    load_far_color(c)
+}
+
+/// Renamed to [`set_average_z_weights`].
+#[deprecated(note = "renamed to `set_average_z_weights`")]
+#[inline(always)]
+pub fn set_avsz_weights(zsf3: i16, zsf4: i16) {
+    set_average_z_weights(zsf3, zsf4)
+}
+
+/// Renamed to [`ProjectTripleInFlight`].
+#[deprecated(note = "renamed to `ProjectTripleInFlight`")]
+pub type RtptInFlight = ProjectTripleInFlight;
+
+/// Renamed to [`start_project_triple`].
+#[deprecated(note = "renamed to `start_project_triple`")]
+#[inline(always)]
+pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> ProjectTripleInFlight {
+    start_project_triple(v0, v1, v2)
+}
+
+/// Renamed to [`classic_ordering_depth3_from_sum`].
+#[deprecated(note = "renamed to `classic_ordering_depth3_from_sum`")]
+#[inline(always)]
+pub fn classic_otz3_from_sum(sum: u32) -> u16 {
+    classic_ordering_depth3_from_sum(sum)
+}
+
+/// Renamed to [`average_z3_ordering_depth`].
+#[deprecated(note = "renamed to `average_z3_ordering_depth`")]
+#[inline(always)]
+pub fn average_z3_otz(depths: [u16; 3], zsf3: i16) -> u16 {
+    average_z3_ordering_depth(depths, zsf3)
+}
+
+/// Renamed to [`average_z4_ordering_depth`].
+#[deprecated(note = "renamed to `average_z4_ordering_depth`")]
+#[inline(always)]
+pub fn average_z4_otz(depths: [u16; 4], zsf4: i16) -> u16 {
+    average_z4_ordering_depth(depths, zsf4)
+}
+
+/// Renamed to [`is_aabb_outside_clip4`].
+#[deprecated(note = "renamed to `is_aabb_outside_clip4`")]
+#[inline(always)]
+pub fn aabb_outside_clip4(
+    mins: [i16; 3],
+    maxs: [i16; 3],
+    planes: &[AabbClipPlane; 4],
+    clip_flags: u8,
+) -> bool {
+    is_aabb_outside_clip4(mins, maxs, planes, clip_flags)
+}
+
+/// Renamed to [`screen_area`].
+#[deprecated(note = "renamed to `screen_area`")]
+#[inline(always)]
+pub fn screen_area_mac0(vertices: [(i16, i16); 3]) -> i32 {
+    screen_area(vertices)
+}
+
+/// Renamed to [`screen_area_scheduled`].
+#[deprecated(note = "renamed to `screen_area_scheduled`")]
+#[inline(always)]
+pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
+    screen_area_scheduled(vertices)
+}
+
+/// Renamed to [`screen_area_and_classic_ordering_depth3_scheduled`].
+#[deprecated(note = "renamed to `screen_area_and_classic_ordering_depth3_scheduled`")]
+#[inline(always)]
+pub fn screen_area_and_classic_otz3_scheduled(
+    vertices: [(i16, i16); 3],
+    depths: [u16; 3],
+) -> (i32, u16) {
+    screen_area_and_classic_ordering_depth3_scheduled(vertices, depths)
+}
+
+/// Renamed to [`is_screen_triangle_back_facing`].
+#[deprecated(note = "renamed to `is_screen_triangle_back_facing`")]
+#[inline(always)]
+pub fn screen_triangle_back_facing(vertices: [(i16, i16); 3]) -> bool {
+    is_screen_triangle_back_facing(vertices)
+}
+
+/// Renamed to [`error_flags`].
+#[deprecated(note = "renamed to `error_flags`")]
+#[inline(always)]
 pub fn read_flag() -> u32 {
-    cfc2!(31)
+    error_flags()
 }
 
 #[cfg(all(test, not(target_arch = "mips")))]
@@ -1527,10 +1661,7 @@ mod host_smoke {
     #[test]
     fn scheduled_nclip_matches_software_area_on_host() {
         let vertices = [(-320, 112), (47, -91), (511, 230)];
-        assert_eq!(
-            screen_area_mac0_scheduled(vertices),
-            screen_area_mac0(vertices)
-        );
+        assert_eq!(screen_area_scheduled(vertices), screen_area(vertices));
     }
 
     #[test]
@@ -1540,7 +1671,7 @@ mod host_smoke {
         assert_eq!(
             screen_area_and_unpack_model_face_scheduled(vertices, corners),
             (
-                screen_area_mac0(vertices),
+                screen_area(vertices),
                 [0xabcd, 0x0123, 0xfedc],
                 ((0xc123 >> 14) & 3) as u8,
             ),
@@ -1549,24 +1680,24 @@ mod host_smoke {
 
     #[test]
     fn cached_average_z_matches_avsz_saturation_rules() {
-        assert_eq!(average_z3_otz([100, 200, 300], 1_365), 199);
-        assert_eq!(average_z4_otz([100, 200, 300, 400], 1_024), 250);
-        assert_eq!(average_z3_otz([u16::MAX; 3], i16::MAX), u16::MAX);
-        assert_eq!(average_z4_otz([u16::MAX; 4], -1), 0);
+        assert_eq!(average_z3_ordering_depth([100, 200, 300], 1_365), 199);
+        assert_eq!(average_z4_ordering_depth([100, 200, 300, 400], 1_024), 250);
+        assert_eq!(average_z3_ordering_depth([u16::MAX; 3], i16::MAX), u16::MAX);
+        assert_eq!(average_z4_ordering_depth([u16::MAX; 4], -1), 0);
 
-        set_avsz_weights(1_365, 1_024);
+        set_average_z_weights(1_365, 1_024);
         assert_eq!(average_cached_z3([100, 200, 300]), 199);
         assert_eq!(average_cached_z4([100, 200, 300, 400]), 250);
-        assert_eq!(classic_otz3_from_sum(100 + 200 + 300), 49);
+        assert_eq!(classic_ordering_depth3_from_sum(100 + 200 + 300), 49);
 
         let vertices = [(-320, 112), (47, -91), (511, 230)];
         assert_eq!(
             screen_area_and_average_cached_z3_scheduled(vertices, [100, 200, 300]),
-            (screen_area_mac0(vertices), 199),
+            (screen_area(vertices), 199),
         );
         assert_eq!(
-            screen_area_and_classic_otz3_scheduled(vertices, [100, 200, 300]),
-            (screen_area_mac0(vertices), 49),
+            screen_area_and_classic_ordering_depth3_scheduled(vertices, [100, 200, 300]),
+            (screen_area(vertices), 49),
         );
     }
 
@@ -1650,7 +1781,10 @@ mod host_smoke {
         ] {
             let expected = scalar(mins, maxs, flags);
             assert_eq!(classify_aabb_clip4(mins, maxs, &planes, flags), expected);
-            assert_eq!(aabb_outside_clip4(mins, maxs, &planes, flags), expected < 0,);
+            assert_eq!(
+                is_aabb_outside_clip4(mins, maxs, &planes, flags),
+                expected < 0,
+            );
         }
         assert_eq!(core::mem::size_of::<AabbClipPlane>(), 12);
         assert_eq!(core::mem::align_of::<AabbClipPlane>(), 4);
