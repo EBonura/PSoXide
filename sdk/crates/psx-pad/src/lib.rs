@@ -214,7 +214,7 @@ impl AnalogSticks {
 /// This is for two-axis input. A single-axis control is a different question
 /// and a scalar threshold is right for it: NitroXide steers on the left stick's
 /// X alone, and folding Y into the test there would let noise on an axis it
-/// does not read enable steering. See [`Deadzone::outside_axis`].
+/// does not read enable steering. See [`Deadzone::is_outside_axis`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Deadzone {
     inner_squared: i32,
@@ -295,9 +295,16 @@ impl Deadzone {
     /// Strictly outside, matching the boundary behaviour of the games this
     /// replaces.
     #[inline]
-    pub const fn outside(self, x: i16, y: i16) -> bool {
+    pub const fn is_outside(self, x: i16, y: i16) -> bool {
         let (x, y) = (x as i32, y as i32);
         x * x + y * y > self.inner_squared
+    }
+
+    /// Renamed to [`is_outside`](Self::is_outside).
+    #[deprecated(note = "renamed to `is_outside`")]
+    #[inline(always)]
+    pub const fn outside(self, x: i16, y: i16) -> bool {
+        self.is_outside(x, y)
     }
 
     /// The reading unchanged if it is real input, or `None` inside the dead
@@ -305,7 +312,7 @@ impl Deadzone {
     /// jumps from zero to the boundary the moment it is crossed.
     #[inline]
     pub const fn gate(self, x: i16, y: i16) -> Option<(i16, i16)> {
-        if self.outside(x, y) {
+        if self.is_outside(x, y) {
             Some((x, y))
         } else {
             None
@@ -338,15 +345,22 @@ impl Deadzone {
 
     /// The one-axis form, for a control that reads a single axis.
     #[inline]
-    pub const fn outside_axis(self, v: i16) -> bool {
+    pub const fn is_outside_axis(self, v: i16) -> bool {
         let v = v as i32;
         v * v > self.inner_squared
+    }
+
+    /// Renamed to [`is_outside_axis`](Self::is_outside_axis).
+    #[deprecated(note = "renamed to `is_outside_axis`")]
+    #[inline(always)]
+    pub const fn outside_axis(self, v: i16) -> bool {
+        self.is_outside_axis(v)
     }
 
     /// The one-axis form of [`Deadzone::scaled`].
     #[inline]
     pub const fn scaled_axis(self, v: i16) -> Option<i16> {
-        if !self.outside_axis(v) {
+        if !self.is_outside_axis(v) {
             return None;
         }
         let span = if self.outer > self.inner {
@@ -491,23 +505,44 @@ pub struct ActionInput<'a, const ACTIONS: usize> {
 impl<const ACTIONS: usize> ActionInput<'_, ACTIONS> {
     /// Whether an action is held now.
     #[inline]
-    pub fn held(self, action: usize) -> bool {
+    pub fn is_held(self, action: usize) -> bool {
         let mask = self.map.binding(action).mask();
         mask != 0 && self.current.buttons.is_held(mask)
     }
 
     /// Whether an action transitioned from released to pressed this tick.
     #[inline]
-    pub fn pressed(self, action: usize) -> bool {
+    pub fn just_pressed(self, action: usize) -> bool {
         let mask = self.map.binding(action).mask();
         mask != 0 && self.current.buttons.is_held(mask) && !self.previous.buttons.is_held(mask)
     }
 
     /// Whether an action transitioned from pressed to released this tick.
     #[inline]
-    pub fn released(self, action: usize) -> bool {
+    pub fn just_released(self, action: usize) -> bool {
         let mask = self.map.binding(action).mask();
         mask != 0 && !self.current.buttons.is_held(mask) && self.previous.buttons.is_held(mask)
+    }
+
+    /// Renamed to [`is_held`](Self::is_held).
+    #[deprecated(note = "renamed to `is_held`")]
+    #[inline(always)]
+    pub fn held(self, action: usize) -> bool {
+        self.is_held(action)
+    }
+
+    /// Renamed to [`just_pressed`](Self::just_pressed).
+    #[deprecated(note = "renamed to `just_pressed`")]
+    #[inline(always)]
+    pub fn pressed(self, action: usize) -> bool {
+        self.just_pressed(action)
+    }
+
+    /// Renamed to [`just_released`](Self::just_released).
+    #[deprecated(note = "renamed to `just_released`")]
+    #[inline(always)]
+    pub fn released(self, action: usize) -> bool {
+        self.just_released(action)
     }
 }
 
@@ -574,7 +609,7 @@ impl RawPoll {
     /// was. The select byte (bit 0) and all bytes up to (but not including) the
     /// final, never-acknowledged byte must each show an `/ACK`.
     #[inline]
-    pub fn ack_complete(self) -> bool {
+    pub fn is_fully_acknowledged(self) -> bool {
         if self.exchanges < 2 {
             return false;
         }
@@ -583,6 +618,13 @@ impl RawPoll {
         let acked_needed = self.exchanges - 1;
         let mask = (1u16 << acked_needed) - 1;
         self.ack_seen & mask == mask
+    }
+
+    /// Renamed to [`is_fully_acknowledged`](Self::is_fully_acknowledged).
+    #[deprecated(note = "renamed to `is_fully_acknowledged`")]
+    #[inline(always)]
+    pub fn ack_complete(self) -> bool {
+        self.is_fully_acknowledged()
     }
 
     /// Convert to the cleaned [`PadState`] used by game code.
@@ -674,9 +716,16 @@ pub fn poll_port2_raw(pacing: Pacing) -> RawPoll {
 /// `/ACK` wait, no DSR IRQ). This isolates the two timings a strict original pad
 /// (SCPH-1200) might need -- setup time after `/CS`, and an inter-byte gap --
 /// without the machinery that corrupted the ack-wait path on silicon.
-pub fn poll_port1_diag(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+pub fn poll_port1_diagnostics(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
     // SAFETY: `poll_once_diag` only drives SIO0, under the SIO0 access contract above.
     unsafe { poll_once_diag(false, setup_spins, interbyte_spins) }
+}
+
+/// Renamed to [`poll_port1_diagnostics`].
+#[deprecated(note = "renamed to `poll_port1_diagnostics`")]
+#[inline(always)]
+pub fn poll_port1_diag(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+    poll_port1_diagnostics(setup_spins, interbyte_spins)
 }
 
 /// Ask the port-1 controller to enter DualShock analog mode. Returns
@@ -845,7 +894,7 @@ unsafe fn ex(
 ///
 /// Its own function so the fixed timing is a compile-time fact rather than
 /// something constant propagation happens to recover: a build that also calls
-/// [`poll_port1_diag`] (the hardware-test suite) still gets this specialised
+/// [`poll_port1_diagnostics`] (the hardware-test suite) still gets this specialised
 /// copy for its normal polling, and profiles stop charging every game's pad
 /// cost to a function named `diag`. Nearly all of that cost is the setup loop
 /// itself (1024 STAT reads, four instructions each); its machine code is what
@@ -857,7 +906,7 @@ unsafe fn poll_once(port2: bool) -> RawPoll {
 }
 
 /// Diagnostic poll with caller-chosen setup and inter-byte delays, reached only
-/// through [`poll_port1_diag`].
+/// through [`poll_port1_diagnostics`].
 unsafe fn poll_once_diag(port2: bool, setup_spins: u32, interbyte_spins: u32) -> RawPoll {
     // SAFETY: `poll_once_timed` drives SIO0 only; the caller's exclusive use of SIO0 (SIO0 access
     // contract) covers it.
@@ -1210,18 +1259,21 @@ mod tests {
         // moment one axis does clear it the input snaps to a cardinal. Radially
         // (20, 20) is 28.3 counts out and is real input.
         let dz = Deadzone::new(24);
-        assert!(dz.outside(20, 20), "diagonal push must count as input");
-        assert!(!dz.outside(20, 0), "same magnitude per axis is still drift");
-        assert!(!dz.outside(0, 0));
-        assert!(dz.outside(25, 0));
+        assert!(dz.is_outside(20, 20), "diagonal push must count as input");
+        assert!(
+            !dz.is_outside(20, 0),
+            "same magnitude per axis is still drift"
+        );
+        assert!(!dz.is_outside(0, 0));
+        assert!(dz.is_outside(25, 0));
     }
 
     #[test]
     fn the_one_axis_form_ignores_the_other_axis() {
         // NitroXide's steering: Y is not read, so it must not gate X.
         let dz = Deadzone::new(24);
-        assert!(dz.outside_axis(30));
-        assert!(!dz.outside_axis(20));
+        assert!(dz.is_outside_axis(30));
+        assert!(!dz.is_outside_axis(20));
         // Rescaled onto full span like the two-axis form, not merely offset:
         // (30 - 24) of the 103 counts left maps to 7 of 127.
         assert_eq!(dz.scaled_axis(30), Some(7), "starts from zero, not 30");
@@ -1341,15 +1393,15 @@ mod tests {
             ack_seen: 0b0_1111, // exchanges 0..=3 acked
             exchanges: 5,
         };
-        assert!(raw.ack_complete());
+        assert!(raw.is_fully_acknowledged());
 
         // Drop one ACK in the middle -> incomplete handshake.
         raw.ack_seen = 0b0_1011;
-        assert!(!raw.ack_complete());
+        assert!(!raw.is_fully_acknowledged());
 
         // A no-ack poll (legacy / slow original under NoAckWait) is incomplete.
         raw.ack_seen = 0;
-        assert!(!raw.ack_complete());
+        assert!(!raw.is_fully_acknowledged());
     }
 
     #[test]
@@ -1374,10 +1426,10 @@ mod tests {
             ..previous
         };
         let input = map.input(current, previous);
-        assert!(input.held(0));
-        assert!(!input.pressed(0), "the logical action stayed held");
-        assert!(input.pressed(1));
-        assert!(!input.released(0));
-        assert!(!input.held(99));
+        assert!(input.is_held(0));
+        assert!(!input.just_pressed(0), "the logical action stayed held");
+        assert!(input.just_pressed(1));
+        assert!(!input.just_released(0));
+        assert!(!input.is_held(99));
     }
 }
