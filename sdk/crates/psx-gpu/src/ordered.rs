@@ -278,7 +278,7 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
         assert_eq!(pixels.len(), usize::from(width) * usize::from(height));
         let count = 3 + pixels.len().div_ceil(2);
         self.reserve(count);
-        *self.word_mut(self.len) = 0xa000_0000;
+        *self.word_mut(self.len) = psx_hw::gpu::gp0::COPY_CPU_TO_VRAM;
         *self.word_mut(self.len + 1) = (u32::from(y) << 16) | u32::from(x);
         *self.word_mut(self.len + 2) = (u32::from(height) << 16) | u32::from(width);
         self.len += 3;
@@ -343,6 +343,18 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
     #[inline(always)]
     pub fn draw_sync(&mut self) {
         self.flush();
+    }
+}
+
+/// Shows the buffer's fill state, not its words.
+impl<D: CommandStreamDma> core::fmt::Debug for OrderedCommandStream<D> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OrderedCommandStream")
+            .field("capacity", &self.capacity)
+            .field("len", &self.len)
+            .field("sent", &self.sent)
+            .field("submitted", &self.submitted)
+            .finish_non_exhaustive()
     }
 }
 
