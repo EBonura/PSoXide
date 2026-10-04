@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn mono_chord_round_trips_above_45_db() {
         let m = chord(18_900, 2.0, 1.0);
-        let sectors = encode(MONO_18K, &[m.clone()], 0);
+        let sectors = encode(MONO_18K, std::slice::from_ref(&m), 0);
         let out = decode(MONO_18K, &sectors);
         assert_eq!(out.len(), 1);
         assert!(snr_db(&rounded(&m), &out[0]) > 45.0);
@@ -679,7 +679,7 @@ mod tests {
         let tone: Vec<f64> = (0..44_100)
             .map(|i| 8000.0 * (2.0 * PI * 440.0 * i as f64 / 44_100.0).sin())
             .collect();
-        let stereo = prepare_pcm(STEREO_37K, 44_100, &[tone.clone()], None);
+        let stereo = prepare_pcm(STEREO_37K, 44_100, std::slice::from_ref(&tone), None);
         assert_eq!(stereo.len(), 2);
         assert_eq!(stereo[0], stereo[1]);
         assert_eq!(stereo[0].len(), 37_800);
