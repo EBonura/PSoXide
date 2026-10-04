@@ -45,6 +45,16 @@ fn fits(d: &[u8], o: usize, n: usize) -> bool {
     o <= d.len() && n <= d.len() - o
 }
 
+/// `len` bytes at `src` copied to `dst` inside `d` (the ranges may overlap),
+/// or `None` when either range leaves `d`.
+fn move_within(d: &mut [u8], src: usize, dst: usize, len: usize) -> Option<()> {
+    if !fits(d, src, len) || !fits(d, dst, len) {
+        return None;
+    }
+    d.copy_within(src..src + len, dst);
+    Some(())
+}
+
 /// # Safety
 /// `o + 4 <= d.len()`.
 #[inline(always)]
@@ -571,10 +581,25 @@ impl Model {
 
     /// Parse a HMD8 blob, guarding vertex count with the caller's own arena
     /// capacity.
-    #[allow(deprecated)] // initialises the deprecated public count fields
     pub fn from_bytes_with_vertex_cap(data: &'static [u8], max_verts: usize) -> Model {
+        let (model, keeps_blob) = Self::layout(data, max_verts);
+        if keeps_blob {
+            Model { data, ..model }
+        } else {
+            model
+        }
+    }
+
+    /// Parse the header and tables of `data` into a model whose own blob is
+    /// empty, plus whether [`Model::from_bytes_with_vertex_cap`] attaches
+    /// `data` to it (every model but [`Model::EMPTY`] does). Borrows `data`
+    /// only for the call, so [`Model::compact_visible_bodies`] can lay out a
+    /// buffer it holds by `&mut`. The detached model never leaves this
+    /// module: its offsets describe a blob it does not hold.
+    #[allow(deprecated)] // initialises the deprecated public count fields
+    fn layout(data: &[u8], max_verts: usize) -> (Model, bool) {
         if data.len() < HMD7_HEADER_BYTES || data.get(0..4) != Some(b"HMD8") {
-            return Self::EMPTY;
+            return (Self::EMPTY, false);
         }
         // SAFETY: every read below ends inside the HMD7_HEADER_BYTES (36)
         // bytes the length check above guarantees.
@@ -604,7 +629,7 @@ impl Model {
             )
         };
         if !valid_local_to_world_q12(raw_local_to_world_q12) {
-            return Self::EMPTY;
+            return (Self::EMPTY, false);
         }
         let local_to_world_q12 = if raw_local_to_world_q12 == 0 {
             LOCAL_TO_WORLD_IDENTITY_Q12
@@ -714,72 +739,78 @@ impl Model {
         if !valid {
             // ponytail: null model = draws nothing. If a legit model trips this,
             // fix the cook / raise the cap rather than removing the guard.
-            return Model {
-                data,
-                n_verts: 0,
-                n_tris: 0,
-                n_frames: 1,
-                n_clips: 1,
-                clips_off: 0,
-                frame_times_off: 0,
-                ranges_off: 0,
-                vertices_off: 0,
-                vertices_z_off: 0,
-                poses_off: 0,
-                n_bones: 0,
-                n_ranges: 0,
-                tri_off: 0,
-                tri_sz,
-                normal_encoding: NORMAL_NONE,
-                local_to_world_q12: LOCAL_TO_WORLD_IDENTITY_Q12,
-                mouth_xforms_off: 0,
-                hitboxes_off: 0,
-                n_hitboxes: 0,
-                has_body_masks: false,
-                has_mouth: false,
-                has_frame_times: false,
-                hma_off: 0,
-                hma_len: 0,
-                aligned_vertices: false,
-                vertex_soa: false,
-            };
+            return (
+                Model {
+                    data: &[],
+                    n_verts: 0,
+                    n_tris: 0,
+                    n_frames: 1,
+                    n_clips: 1,
+                    clips_off: 0,
+                    frame_times_off: 0,
+                    ranges_off: 0,
+                    vertices_off: 0,
+                    vertices_z_off: 0,
+                    poses_off: 0,
+                    n_bones: 0,
+                    n_ranges: 0,
+                    tri_off: 0,
+                    tri_sz,
+                    normal_encoding: NORMAL_NONE,
+                    local_to_world_q12: LOCAL_TO_WORLD_IDENTITY_Q12,
+                    mouth_xforms_off: 0,
+                    hitboxes_off: 0,
+                    n_hitboxes: 0,
+                    has_body_masks: false,
+                    has_mouth: false,
+                    has_frame_times: false,
+                    hma_off: 0,
+                    hma_len: 0,
+                    aligned_vertices: false,
+                    vertex_soa: false,
+                },
+                true,
+            );
         }
 
-        Model {
-            data,
-            n_verts,
-            n_tris,
-            n_frames,
-            n_clips,
-            clips_off,
-            frame_times_off,
-            ranges_off,
-            vertices_off,
-            vertices_z_off,
-            poses_off,
-            n_bones,
-            n_ranges,
-            tri_off,
-            tri_sz,
-            normal_encoding: if full_normals {
-                NORMAL_I8X3
-            } else if requested_packed_normals {
-                NORMAL_PACKED_555
-            } else {
-                NORMAL_NONE
+        (
+            Model {
+                data: &[],
+                n_verts,
+                n_tris,
+                n_frames,
+                n_clips,
+                clips_off,
+                frame_times_off,
+                ranges_off,
+                vertices_off,
+                vertices_z_off,
+                poses_off,
+                n_bones,
+                n_ranges,
+                tri_off,
+                tri_sz,
+                normal_encoding: if full_normals {
+                    NORMAL_I8X3
+                } else if requested_packed_normals {
+                    NORMAL_PACKED_555
+                } else {
+                    NORMAL_NONE
+                },
+                local_to_world_q12,
+                mouth_xforms_off,
+                hitboxes_off,
+                n_hitboxes,
+                has_body_masks: requested_body_masks,
+                has_mouth: requested_mouth,
+                has_frame_times: requested_frame_times,
+                hma_off,
+                hma_len,
+                aligned_vertices: (data.as_ptr() as usize + vertices_off) & 1 == 0,
+                vertex_soa: requested_vertex_soa,
             },
-            local_to_world_q12,
-            mouth_xforms_off,
-            hitboxes_off,
-            n_hitboxes,
-            has_body_masks: requested_body_masks,
-            has_mouth: requested_mouth,
-            has_frame_times: requested_frame_times,
-            hma_off,
-            hma_len,
-            aligned_vertices: (data.as_ptr() as usize + vertices_off) & 1 == 0,
-            vertex_soa: requested_vertex_soa,
-        }
+            true,
+        )
     }
 
     /// HMA1 local-space tracks, when the cook emitted them (validated at
@@ -1337,18 +1368,168 @@ impl Model {
         self.tri_off
     }
 
-    /// Compact a human HMD8 stream to the body values used by the current map.
-    /// Whole bone/body ranges and their static vertices are filtered; the
-    /// shared pose palette and mouth transforms move down unchanged. The
-    /// triangle tail is deliberately discarded by the caller after face bake.
+    /// Compact the HMD8 blob in `blob`, in place, to the bodies in
+    /// `visible_bodies`: whole bone/body ranges and their static vertices are
+    /// dropped, and the shared pose palette, mouth transforms, hitboxes and
+    /// HMA1 tracks move down unchanged. The triangle tail is not kept, so bake
+    /// faces before compacting. Parse the result again with
+    /// [`Model::from_bytes`] over `blob[..len]`.
     ///
-    /// Returns the compact frame-section length, or `None` for malformed input.
+    /// `remap` receives, for every old vertex index, its new index or
+    /// `u16::MAX` when it was dropped; it needs one entry per vertex.
+    ///
+    /// Returns the compact frame-section length, or `None` when `blob` is not
+    /// a valid HMD8 model with body masks, `remap` is too short, or no
+    /// visible body remains. `blob` may be partly rewritten on `None` after
+    /// the range pass has started.
+    ///
+    /// The buffer is borrowed exclusively, so no [`Model`] can read it while
+    /// it changes: a model parsed from these bytes earlier must not be used
+    /// again.
+    pub fn compact_visible_bodies(
+        blob: &mut [u8],
+        visible_bodies: u8,
+        remap: &mut [u16],
+    ) -> Option<usize> {
+        let (layout, _) = Self::layout(blob, DEFAULT_MAX_VERTICES);
+        let old_n = layout.vertex_count();
+        if !layout.has_body_masks
+            || old_n == 0
+            || old_n > remap.len()
+            || layout.tri_off > blob.len()
+        {
+            return None;
+        }
+        let remap = &mut remap[..old_n];
+        remap.fill(u16::MAX);
+        let mut new_n = 0usize;
+        let mut new_ranges = 0usize;
+        for range in 0..layout.bone_range_count() {
+            let o = layout.ranges_off + range * HMD7_RANGE_BYTES;
+            let record = blob.get(o..o + HMD7_RANGE_BYTES)?;
+            let first = u16::from_le_bytes([record[0], record[1]]) as usize;
+            let count = u16::from_le_bytes([record[2], record[3]]) as usize;
+            if record[6] & visible_bodies == 0 {
+                continue;
+            }
+            // Ranges only move down, so this record is read before anything
+            // overwrites it and later records are still in place.
+            let dst = layout.ranges_off + new_ranges * HMD7_RANGE_BYTES;
+            blob.copy_within(o..o + HMD7_RANGE_BYTES, dst);
+            blob[dst..dst + 2].copy_from_slice(&(new_n as u16).to_le_bytes());
+            for slot in remap.get_mut(first..first + count)? {
+                *slot = new_n as u16;
+                new_n += 1;
+            }
+            new_ranges += 1;
+        }
+        if new_n == 0 || new_ranges == 0 {
+            return None;
+        }
+        let dst = layout.compact_vertices(blob, remap, new_ranges, new_n)?;
+        layout.compact_tail(blob, dst, new_ranges, new_n)
+    }
+
+    /// Move the kept vertices of `self`'s layout down behind the kept
+    /// ranges; returns the end of the vertex data.
+    fn compact_vertices(
+        &self,
+        blob: &mut [u8],
+        remap: &[u16],
+        new_ranges: usize,
+        new_n: usize,
+    ) -> Option<usize> {
+        let kept = || remap.iter().enumerate().filter(|(_, &new)| new != u16::MAX);
+        let new_vertices_off = self.ranges_off + new_ranges * HMD7_RANGE_BYTES;
+        if !self.vertex_soa {
+            let mut dst = new_vertices_off;
+            for (old, _) in kept() {
+                move_within(blob, self.vertices_off + old * 6, dst, 6)?;
+                dst += 6;
+            }
+            return Some(dst);
+        }
+        // Move the hot XY stream before the old Z stream can be overwritten,
+        // then compact Z straight after the kept XY: six bytes per vertex,
+        // as before.
+        let new_vertices_z_off = new_vertices_off + new_n * 4;
+        for (new, (old, _)) in kept().enumerate() {
+            move_within(
+                blob,
+                self.vertices_off + old * 4,
+                new_vertices_off + new * 4,
+                4,
+            )?;
+        }
+        for (new, (old, _)) in kept().enumerate() {
+            move_within(
+                blob,
+                self.vertices_z_off + old * 2,
+                new_vertices_z_off + new * 2,
+                2,
+            )?;
+        }
+        Some(new_vertices_z_off + new_n * 2)
+    }
+
+    /// Move the pose palette, mouth transforms, hitboxes and HMA1 tracks of
+    /// `self`'s layout down to `dst`, then rewrite the header's vertex count,
+    /// model data length and range count. Returns the new frame-section end.
+    fn compact_tail(
+        &self,
+        blob: &mut [u8],
+        mut dst: usize,
+        new_ranges: usize,
+        new_n: usize,
+    ) -> Option<usize> {
+        let pose_len = self
+            .frame_count()
+            .checked_mul(self.bone_count())?
+            .checked_mul(HMD8_AFFINE_BYTES)?;
+        let mouth_len = if self.has_mouth {
+            self.frame_count().checked_mul(MOUTH_XFORM_BYTES)?
+        } else {
+            0
+        };
+        let hitbox_len = self.hitbox_count().checked_mul(HMD7_HITBOX_BYTES)?;
+        for (src, len) in [
+            (self.poses_off, pose_len),
+            (self.mouth_xforms_off, mouth_len),
+            (self.hitboxes_off, hitbox_len),
+            // HMA1 tracks are per bone, not per vertex: they move intact.
+            (self.hma_off, self.hma_len),
+        ] {
+            if len == 0 {
+                continue;
+            }
+            if src.checked_add(len)? > self.tri_off || dst.checked_add(len)? > blob.len() {
+                return None;
+            }
+            move_within(blob, src, dst, len)?;
+            dst += len;
+        }
+        let model_data_len = u32::try_from(dst.checked_sub(self.ranges_off)?).ok()?;
+        let new_n = u32::try_from(new_n).ok()?;
+        blob[4..8].copy_from_slice(&new_n.to_le_bytes());
+        blob[24..28].copy_from_slice(&model_data_len.to_le_bytes());
+        blob[34..36].copy_from_slice(&(new_ranges as u16).to_le_bytes());
+        Some(dst)
+    }
+
+    /// The in-place compaction behind a raw pointer, from before
+    /// [`Model::compact_visible_bodies`] took the buffer by `&mut`.
+    ///
+    /// It reparses the layout from `data`; `self` is not read.
     ///
     /// # Safety
     ///
-    /// `data` must be writable for `data_len` bytes and contain this model's
-    /// source bytes. `remap` must be writable for `remap_len` `u16` entries;
-    /// neither allocation may overlap the other.
+    /// `data` must be valid for reads and writes of `data_len` bytes, and
+    /// `remap` for `remap_len` `u16` writes; the two must not overlap. No
+    /// reference into either may be used while this runs, and no [`Model`]
+    /// over the bytes (`self` included) may be used afterwards: the bytes
+    /// change under it. Reparse from the compacted bytes instead.
+    #[deprecated(note = "use `Model::compact_visible_bodies`, which takes the buffer by `&mut`")]
+    #[inline(always)]
     pub unsafe fn compact_visible_body_frames_raw(
         &self,
         data: *mut u8,
@@ -1357,139 +1538,16 @@ impl Model {
         remap: *mut u16,
         remap_len: usize,
     ) -> Option<usize> {
-        // SAFETY: contract is the enclosing fn's; see its doc comment.
-        unsafe {
-            if !self.has_body_masks
-                || self.vertex_count() == 0
-                || self.vertex_count() > remap_len
-                || self.tri_off > data_len
-            {
-                return None;
-            }
-
-            let old_n = self.vertex_count();
-            let mut new_n = 0usize;
-            ptr::write_bytes(remap, 0xff, old_n);
-            let mut new_ranges = 0usize;
-            for ri in 0..self.bone_range_count() {
-                let range = self.bone_range(ri);
-                if range.body_mask & visible_bodies == 0 {
-                    continue;
-                }
-                let dst_range = self.ranges_off + new_ranges * HMD7_RANGE_BYTES;
-                ptr::copy(
-                    data.add(self.ranges_off + ri * HMD7_RANGE_BYTES),
-                    data.add(dst_range),
-                    HMD7_RANGE_BYTES,
-                );
-                ptr::copy_nonoverlapping(
-                    (new_n as u16).to_le_bytes().as_ptr(),
-                    data.add(dst_range),
-                    2,
-                );
-                for old in range.first..range.first + range.count {
-                    ptr::write(remap.add(old), new_n as u16);
-                    new_n += 1;
-                }
-                new_ranges += 1;
-            }
-            if new_n == 0 || new_ranges == 0 {
-                return None;
-            }
-
-            let new_vertices_off = self.ranges_off + new_ranges * HMD7_RANGE_BYTES;
-            let mut dst;
-            if self.vertex_soa {
-                // Copy the hot XY stream before the old Z stream can be
-                // overwritten, then compact Z immediately after the retained XY.
-                // The total remains exactly six bytes per vertex.
-                let new_vertices_z_off = new_vertices_off + new_n * 4;
-                let mut new = 0usize;
-                for old in 0..old_n {
-                    if ptr::read(remap.add(old)) != u16::MAX {
-                        ptr::copy(
-                            data.add(self.vertices_off + old * 4),
-                            data.add(new_vertices_off + new * 4),
-                            4,
-                        );
-                        new += 1;
-                    }
-                }
-                new = 0;
-                for old in 0..old_n {
-                    if ptr::read(remap.add(old)) != u16::MAX {
-                        ptr::copy(
-                            data.add(self.vertices_z_off + old * 2),
-                            data.add(new_vertices_z_off + new * 2),
-                            2,
-                        );
-                        new += 1;
-                    }
-                }
-                dst = new_vertices_z_off + new_n * 2;
-            } else {
-                dst = new_vertices_off;
-                for old in 0..old_n {
-                    if ptr::read(remap.add(old)) != u16::MAX {
-                        ptr::copy(data.add(self.vertices_off + old * 6), data.add(dst), 6);
-                        dst += 6;
-                    }
-                }
-            }
-            let pose_len = self
-                .frame_count()
-                .checked_mul(self.bone_count())?
-                .checked_mul(HMD8_AFFINE_BYTES)?;
-            if self.poses_off.checked_add(pose_len)? > self.tri_off
-                || dst.checked_add(pose_len)? > data_len
-            {
-                return None;
-            }
-            ptr::copy(data.add(self.poses_off), data.add(dst), pose_len);
-            dst += pose_len;
-            if self.has_mouth {
-                let xform_len = self.frame_count().checked_mul(MOUTH_XFORM_BYTES)?;
-                if self.mouth_xforms_off.checked_add(xform_len)? > self.tri_off
-                    || dst.checked_add(xform_len)? > data_len
-                {
-                    return None;
-                }
-                ptr::copy(data.add(self.mouth_xforms_off), data.add(dst), xform_len);
-                dst += xform_len;
-            }
-            if self.hitbox_count() != 0 {
-                let hitbox_len = self.hitbox_count().checked_mul(HMD7_HITBOX_BYTES)?;
-                if self.hitboxes_off.checked_add(hitbox_len)? > self.tri_off
-                    || dst.checked_add(hitbox_len)? > data_len
-                {
-                    return None;
-                }
-                ptr::copy(data.add(self.hitboxes_off), data.add(dst), hitbox_len);
-                dst += hitbox_len;
-            }
-            if self.hma_len != 0 {
-                // HMA1 tracks are per bone, not per vertex: move them intact.
-                if self.hma_off.checked_add(self.hma_len)? > self.tri_off
-                    || dst.checked_add(self.hma_len)? > data_len
-                {
-                    return None;
-                }
-                ptr::copy(data.add(self.hma_off), data.add(dst), self.hma_len);
-                dst += self.hma_len;
-            }
-            let model_data_len = dst.checked_sub(self.ranges_off)?;
-            if model_data_len > u32::MAX as usize || new_n > u32::MAX as usize {
-                return None;
-            }
-            ptr::copy_nonoverlapping((new_n as u32).to_le_bytes().as_ptr(), data.add(4), 4);
-            ptr::copy_nonoverlapping(
-                (model_data_len as u32).to_le_bytes().as_ptr(),
-                data.add(24),
-                4,
-            );
-            ptr::copy_nonoverlapping((new_ranges as u16).to_le_bytes().as_ptr(), data.add(34), 2);
-            Some(dst)
-        }
+        // SAFETY: the caller hands over both regions exclusively for this
+        // call, at the stated lengths and without overlap (this fn's
+        // `# Safety`).
+        let (blob, remap) = unsafe {
+            (
+                core::slice::from_raw_parts_mut(data, data_len),
+                core::slice::from_raw_parts_mut(remap, remap_len),
+            )
+        };
+        Self::compact_visible_bodies(blob, visible_bodies, remap)
     }
 
     /// True when triangle `t`'s record lies inside the blob: for every
@@ -1904,13 +1962,7 @@ fn hma1_section_layout(data: &[u8], off: usize, len: usize) -> Option<(usize, us
 /// [`crate::hma1::Model::new`] (every read in bounds, parents first), every
 /// range bone maps to a track bone, the jaw exists, and every clip the HMD8
 /// table names has tracks.
-fn hma1_section_valid(
-    data: &'static [u8],
-    off: usize,
-    len: usize,
-    n_bones: usize,
-    n_clips: usize,
-) -> bool {
+fn hma1_section_valid(data: &[u8], off: usize, len: usize, n_bones: usize, n_clips: usize) -> bool {
     if len < HMA1_SECTION_HEADER + 4 {
         return false;
     }
@@ -1930,12 +1982,11 @@ fn hma1_section_valid(
     if u16::from_le_bytes([data[off + 4], data[off + 5]]) as usize != n_bones {
         return false;
     }
-    let Some(tracks) = crate::hma1::Model::new(blob) else {
+    let Some((hma_bones, hma_clips, _, _)) = crate::hma1::validated_layout(blob) else {
         return false;
     };
-    let hma_bones = tracks.bone_count();
     hma_bones != 0
-        && tracks.clip_count() >= n_clips.max(1)
+        && hma_clips >= n_clips.max(1)
         && map.iter().all(|&bone| (bone as usize) < hma_bones)
         && (jaw == 0xff || (jaw as usize) < hma_bones)
 }
@@ -2087,7 +2138,62 @@ fn compose_affine(parent: BoneTransform, child: BoneTransform) -> BoneTransform 
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_q11, rd_q11_pair, valid_local_to_world_q12};
+    use super::*;
+
+    /// Word-aligned fixture storage: the SoA vertex stream must sit on a
+    /// 4-byte boundary, which a `Vec<u8>` does not promise.
+    #[repr(C, align(4))]
+    struct Blob([u8; 1024]);
+
+    /// A body-masked HMD8 model: `ranges` is `(vertex count, body mask)` per
+    /// range, every byte of vertices, poses and mouth transforms distinct.
+    /// Returns the storage and the blob length.
+    fn body_masked(ranges: &[(u16, u8)], soa: bool, hitboxes: usize) -> (Blob, usize) {
+        const FRAMES: usize = 2;
+        const BONES: usize = 3;
+        let n_verts: usize = ranges.iter().map(|&(count, _)| count as usize).sum();
+        let ranges_off = 40;
+        let vertices_off = ranges_off + ranges.len() * HMD7_RANGE_BYTES;
+        let poses_off = vertices_off + n_verts * 6;
+        let mouth_off = poses_off + FRAMES * BONES * HMD8_AFFINE_BYTES;
+        let hitboxes_off = mouth_off + FRAMES * MOUTH_XFORM_BYTES;
+        let end = hitboxes_off + hitboxes * HMD7_HITBOX_BYTES;
+        let mut blob = Blob([0; 1024]);
+        let b = &mut blob.0;
+        for (i, byte) in b[vertices_off..hitboxes_off].iter_mut().enumerate() {
+            *byte = (i * 7 + 3) as u8;
+        }
+        let mut flags = HMD_FLAG_BODY_MASKS | HMD_FLAG_MOUTH;
+        if soa {
+            flags |= HMD_FLAG_VERTEX_SOA;
+        }
+        if hitboxes != 0 {
+            flags |= HMD_FLAG_HITBOXES;
+        }
+        b[0..4].copy_from_slice(b"HMD8");
+        b[4..8].copy_from_slice(&(n_verts as u32).to_le_bytes());
+        b[12..16].copy_from_slice(&((hitboxes as u32) << 16).to_le_bytes());
+        b[16..20].copy_from_slice(&(FRAMES as u32).to_le_bytes());
+        b[20..24].copy_from_slice(&1u32.to_le_bytes());
+        b[24..28].copy_from_slice(&((end - ranges_off) as u32).to_le_bytes());
+        b[30..32].copy_from_slice(&flags.to_le_bytes());
+        b[32..34].copy_from_slice(&(BONES as u16).to_le_bytes());
+        b[34..36].copy_from_slice(&(ranges.len() as u16).to_le_bytes());
+        let mut first = 0u16;
+        for (i, &(count, mask)) in ranges.iter().enumerate() {
+            let o = ranges_off + i * HMD7_RANGE_BYTES;
+            b[o..o + 2].copy_from_slice(&first.to_le_bytes());
+            b[o + 2..o + 4].copy_from_slice(&count.to_le_bytes());
+            b[o + 4..o + 6].copy_from_slice(&((i % BONES) as u16).to_le_bytes());
+            b[o + 6] = mask;
+            first += count;
+        }
+        for h in 0..hitboxes {
+            let o = hitboxes_off + h * HMD7_HITBOX_BYTES;
+            b[o..o + 2].copy_from_slice(&((h % BONES) as u16).to_le_bytes());
+        }
+        (blob, end)
+    }
 
     fn reference_decode_q11(raw: u16) -> i16 {
         let code = if raw & 0x0800 != 0 {
@@ -2134,5 +2240,59 @@ mod tests {
         for invalid in [1, 255, 257, 511, 513, 1000, 4095, 4097, u16::MAX] {
             assert!(!valid_local_to_world_q12(invalid));
         }
+    }
+
+    /// Compaction keeps exactly the visible bodies' ranges and vertices, the
+    /// whole pose palette, mouth transforms and hitboxes, and the result
+    /// parses as a model with the kept counts.
+    #[test]
+    fn compaction_keeps_the_visible_bodies() {
+        let ranges: &[(u16, u8)] = &[(3, 1), (2, 2), (4, 1), (1, 3)];
+        for soa in [false, true] {
+            let (source, len) = body_masked(ranges, soa, 2);
+            let leaked: &'static Blob = std::boxed::Box::leak(std::boxed::Box::new(Blob(source.0)));
+            let before = Model::from_bytes(&leaked.0[..len]);
+            let mut blob = Blob(source.0);
+            let mut remap = [0u16; 16];
+            let kept = Model::compact_visible_bodies(&mut blob.0[..len], 2, &mut remap)
+                .expect("body 2 is visible");
+            // Ranges 1 (vertices 3..5) and 3 (vertex 9) carry body 2.
+            let mut expected = [u16::MAX; 10];
+            expected[3] = 0;
+            expected[4] = 1;
+            expected[9] = 2;
+            assert_eq!(&remap[..10], &expected);
+            let compact: &'static Blob = std::boxed::Box::leak(std::boxed::Box::new(Blob(blob.0)));
+            let after = Model::from_bytes(&compact.0[..kept]);
+            assert_eq!(after.vertex_count(), 3);
+            assert_eq!(after.bone_range_count(), 2);
+            assert_eq!(after.hitbox_count(), 2);
+            assert!(after.has_body_masks());
+            for (old, &new) in expected.iter().enumerate() {
+                if new != u16::MAX {
+                    assert_eq!(after.vertex(new as usize), before.vertex(old), "soa {soa}");
+                }
+            }
+            assert_eq!(after.bone_range(1).first, 2);
+            assert_eq!(after.bone_range(1).body_mask, 3);
+            let pose_bytes =
+                2 * 3 * HMD8_AFFINE_BYTES + 2 * MOUTH_XFORM_BYTES + 2 * HMD7_HITBOX_BYTES;
+            assert_eq!(
+                &compact.0[kept - pose_bytes..kept],
+                &source.0[len - pose_bytes..len],
+                "palette, mouth and hitboxes move intact"
+            );
+        }
+        // Nothing visible, or no remap room: refused.
+        let (source, len) = body_masked(ranges, false, 0);
+        let mut blob = Blob(source.0);
+        assert_eq!(
+            Model::compact_visible_bodies(&mut blob.0[..len], 4, &mut [0; 16]),
+            None
+        );
+        assert_eq!(
+            Model::compact_visible_bodies(&mut blob.0[..len], 2, &mut [0; 9]),
+            None
+        );
     }
 }
