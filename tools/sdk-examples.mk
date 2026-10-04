@@ -31,7 +31,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -52,6 +52,17 @@ pgo-choose:
 	@test -n '$(GATE)' || (echo "Set GATE"; exit 1)
 	$(PGO) choose --crate "sdk/examples/$(EXAMPLE)" --profile "$(PGO_PROFILE)" --gate '$(GATE)' $(PGO_VARIANTS) \
 		-- $(EXAMPLE_CARGO)
+# hello-xa plays four generated songs from SONGS.XA: synthesise the WAVs, encode
+# them as one interleaved XA file, build the example and put both on a disc.
+XA_DIR := $(BUILD)/hello-xa-songs
+hello-xa-disc:
+	cargo run -q --release --locked -p psx-audio-cook --example xa_demo_songs -- "$(XA_DIR)"
+	cargo run -q --release --locked -p psx-audio-cook -- xa-encode "$(XA_DIR)/SONGS.XA" \
+		"$(XA_DIR)/song0_pad.wav" "$(XA_DIR)/song1_high.wav" "$(XA_DIR)/song2_blips.wav" "$(XA_DIR)/song3_whistle.wav" \
+		--manifest "$(XA_DIR)/songs.json"
+	$(MAKE) example EXAMPLE=hello-xa
+	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-xa.exe" \
+		--out "$(BUILD)/$(TARGET)/release/hello-xa.bin" --volume PSOXIDESDK --xa-file "$(XA_DIR)/SONGS.XA"
 hello-tri:
 	$(MAKE) example EXAMPLE=hello-tri
 hello-tri-disc:
