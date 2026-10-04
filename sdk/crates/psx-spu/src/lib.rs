@@ -185,8 +185,8 @@ pub fn init() {
     write_reg16(NOISE_HI, 0);
 
     // Main volume to max -- per-voice volume still controls the mix.
-    write_reg16(MAIN_VOL_LEFT, Volume::MAX.0 as u16);
-    write_reg16(MAIN_VOL_RIGHT, Volume::MAX.0 as u16);
+    write_reg16(MAIN_VOL_LEFT, Volume::MAX.register_bits());
+    write_reg16(MAIN_VOL_RIGHT, Volume::MAX.register_bits());
     write_reg16(CD_VOL_LEFT, CdVolume::SILENCE.0 as u16);
     write_reg16(CD_VOL_RIGHT, CdVolume::SILENCE.0 as u16);
 
@@ -297,8 +297,10 @@ const SPU_DRAIN_SETTLE_READS: u32 = 256;
 
 /// A 16-bit signed SPU voice/main volume.
 ///
-/// Static voice/main volume uses `-0x4000..=0x3FFF` as its practical
-/// linear range. Positive magnitudes are the normal "louder" direction.
+/// Static voice/main volume uses `-0x4000..=0x3FFF` as its linear range.
+/// Positive magnitudes are the normal "louder" direction and a negative one
+/// inverts the phase. A value outside the range is limited to it when it is
+/// written to the register, so it never reaches the sweep-mode bit.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Volume(pub i16);
@@ -315,8 +317,29 @@ impl Volume {
     /// actually using floats (since we're `no_std`, no FPU). `num`
     /// and `den` are integer -- `Volume::linear(3, 4)` is 0.75.
     pub const fn linear(num: u16, den: u16) -> Self {
+        if num >= den {
+            return Self::MAX; // 1.0 and above saturate (a zero `den` too)
+        }
         let v = ((Self::MAX.0 as u32) * (num as u32)) / (den as u32);
         Self(v as i16)
+    }
+
+    /// The 16-bit value the SPU volume registers take.
+    ///
+    /// Bit 15 selects sweep mode and bits 0 to 14 hold a signed 15-bit level
+    /// (psx-spx, "SPU Voice Volume"), so a fixed volume clears bit 15 and a
+    /// negative level is its 15-bit two's complement. The level is limited to
+    /// `-0x4000..=0x3FFF` first; a wider `i16` would otherwise set bit 15
+    /// or wrap in the 15-bit field.
+    const fn register_bits(self) -> u16 {
+        let level = if self.0 < -0x4000 {
+            -0x4000
+        } else if self.0 > 0x3FFF {
+            0x3FFF
+        } else {
+            self.0
+        };
+        (level as u16) & 0x7FFF
     }
 }
 
@@ -630,8 +653,8 @@ impl Voice {
     /// modulated by [`set_main_volume`], but each voice can have
     /// its own level.
     pub fn set_volume(self, left: Volume, right: Volume) {
-        write_reg16(self.reg_base() + VOICE_VOL_LEFT, left.0 as u16);
-        write_reg16(self.reg_base() + VOICE_VOL_RIGHT, right.0 as u16);
+        write_reg16(self.reg_base() + VOICE_VOL_LEFT, left.register_bits());
+        write_reg16(self.reg_base() + VOICE_VOL_RIGHT, right.register_bits());
     }
 
     /// Set the voice's sample-rate pitch (Q5.12). [`Pitch::UNITY`]
@@ -801,8 +824,8 @@ pub fn irq_pending() -> bool {
 
 /// Set the main L/R output volume that every voice mixes through.
 pub fn set_main_volume(left: Volume, right: Volume) {
-    write_reg16(MAIN_VOL_LEFT, left.0 as u16);
-    write_reg16(MAIN_VOL_RIGHT, right.0 as u16);
+    write_reg16(MAIN_VOL_LEFT, left.register_bits());
+    write_reg16(MAIN_VOL_RIGHT, right.register_bits());
 }
 
 /// Set the SPU CD input volume.
@@ -1040,6 +1063,33 @@ mod tests {
         // 0.5 → 0x1FFF (rounded down from 0x3FFF / 2).
         let half = Volume::linear(1, 2);
         assert_eq!(half.0, 0x1FFF);
+    }
+
+    /// psx-spx, SPU volume registers: bit 15 selects sweep mode, bits 0-14
+    /// hold a signed 15-bit level (-0x4000..=0x3FFF in use). A fixed volume
+    /// therefore never sets bit 15, and a negative one is two's complement
+    /// in 15 bits.
+    #[test]
+    fn volume_register_value_follows_the_psx_spx_layout() {
+        for raw in i16::MIN..=i16::MAX {
+            let bits = Volume(raw).register_bits();
+            assert_eq!(bits & 0x8000, 0, "{raw}: sweep bit set");
+            // Sign-extend the 15-bit field the way the SPU reads it.
+            let level = ((bits << 1) as i16) >> 1;
+            assert_eq!(level, raw.clamp(-0x4000, 0x3FFF), "{raw}");
+        }
+        assert_eq!(Volume(0x3FFF).register_bits(), 0x3FFF);
+        assert_eq!(Volume(-0x2000).register_bits(), 0x6000);
+        assert_eq!(Volume(-0x4000).register_bits(), 0x4000);
+    }
+
+    #[test]
+    fn volume_linear_saturates_instead_of_wrapping() {
+        // 2.0 used to compute 0x7FFE, which the register reads as -2.
+        assert_eq!(Volume::linear(2, 1), Volume::MAX);
+        assert_eq!(Volume::linear(5, 4), Volume::MAX);
+        assert_eq!(Volume::linear(1, 0), Volume::MAX);
+        assert_eq!(Volume::linear(3, 4).0, 0x2FFF);
     }
 
     #[test]

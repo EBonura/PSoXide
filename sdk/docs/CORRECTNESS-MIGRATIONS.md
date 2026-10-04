@@ -53,3 +53,25 @@ repin for a game that already handles `Error::Corrupt`.
 the first transport error. A game that mapped `Compression` to "save is
 damaged" and anything else to "card problem" gets the right message without
 a change.
+
+## psx-spu: `Volume` encodes the 15-bit level the SPU reads (spu-01)
+
+`Volume` is written to the SPU as `value as u16`. Bit 15 of a volume
+register is the sweep-mode select (psx-spx, "SPU Voice Volume"), so every
+negative `Volume` switched the voice or the main output into sweep mode
+instead of inverting the phase, and `Volume::linear(2, 1)` computed `0x7FFE`,
+which the register reads as -2. The register write now limits the level to
+`-0x4000..=0x3FFF` and stores it as a 15-bit two's complement, so bit 15 is
+always clear and a negative `Volume` really inverts the phase.
+`Volume::linear` saturates at `Volume::MAX` once `num >= den` (a zero `den`
+included, which used to divide by zero).
+
+The field stays public, so `Volume(x)` still compiles; only the encoding at
+the register changed. A game that passed a negative `Volume` and got a
+sweep now gets an inverted voice, and one that passed more than `0x3FFF` now
+gets `0x3FFF`. Callers of the constructor or `Volume::linear` need no edit:
+wipeout-psx `game/src/gameplay.rs` (3), nitroxide `game/src/audio.rs` (4),
+voxide `game/src/sfx.rs` (5), hl-psx and cs-psx `game/src/settings.rs`
+(1 each, `0x3FFF * s / VOL_MAX`), oot-psx (3), quake-psx `game/src/audio.rs`
+(3 `linear`, all with `num <= den`), hk-psx (audio tests mock their own
+`Volume`).
