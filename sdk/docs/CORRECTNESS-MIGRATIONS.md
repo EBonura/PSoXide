@@ -290,3 +290,19 @@ and their packed faces must keep that budget at 1024 or below. Callers of
 the default: PSoXide-editor `engine/crates/psx-goldsrc/src/viewmodel.rs` (1,
 `Model::load`) and the `psx-anim-cook` round-trip tests; none builds a model
 over 1024 vertices that is known to this review.
+
+## psx-asset: a clip that outruns the frame table stays inside it (asset-06)
+
+`Model::looped_clip_phase` and `one_shot_clip_phase` read the per-frame time
+table at `first + local`, with `local` up to the clip's frame count (255) and
+`first` clamped only to the last frame. Load never checked a clip record
+against `frame_count`, so a clip claiming more frames than the cook emitted
+read the bytes of whatever followed the table and, near the end of a blob,
+panicked (index out of bounds at `hmd8.rs:1032` in a host test).
+
+The time lookup now clamps its index to the last frame, as `clip_frame`
+already does, so the read stays in the table the loader placed inside the
+blob. A well-formed clip (`first + count <= frame_count`) is unchanged, so no
+model that animated correctly moves; load acceptance is unchanged too.
+No API change. hl-psx and cs-psx call these through the clip-time helpers;
+the only effect is on a malformed cook.
