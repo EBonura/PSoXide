@@ -242,3 +242,19 @@ frame hashes of scenes that draw `signed` output (particle bursts) change.
 Callers: cs-psx and hl-psx, through `ParticlePool::spawn_burst` (their
 view shake and impact streams use `next()`, which is unchanged); voxide
 `game/src/mob.rs` uses `next_mixed`, also unchanged. Refresh pins on repin.
+
+## psx-osk: `PANEL_TOP` and `PANEL_HEIGHT` describe the painted panel (osk-01)
+
+`PANEL_TOP` was documented as the top edge of the keyboard panel and
+`PANEL_HEIGHT` as its height, but `draw` painted the panel 14 pixels above
+`PANEL_TOP` (from line 122, 118 tall) and put the key rows at `PANEL_TOP`
+(136), so every caller subtracted the hint line itself (`Y0 - 14`).
+
+`PANEL_TOP` is now the painted top (122) and `PANEL_HEIGHT` the painted height
+(118); the keyboard draws the same pixels as before. A game keeps its content
+above `PANEL_TOP` with no adjustment. The deprecated `Y0` keeps its old value
+(136, the top of the key rows) so a repin does not move anything;
+`PANEL_H` now reports 118, not 104.
+
+Caller: psxcel `game/src/main.rs:68`, `KBD_GRID_Y1` uses `psx_osk::Y0 - 14`.
+Change it to `psx_osk::PANEL_TOP` and the grid ends at the same line.
