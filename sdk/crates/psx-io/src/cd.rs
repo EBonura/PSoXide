@@ -6,6 +6,7 @@
 //! and status bits live in [`psx_hw::cd`].
 
 pub mod audio;
+pub mod xa;
 
 use crate::{irq, read_u8, write_u8};
 
