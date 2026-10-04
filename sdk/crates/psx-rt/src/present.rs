@@ -23,7 +23,7 @@
 //! 2. Every published chain must end on GP0(1Fh) (`psx_gpu::DRAW_DONE_NODE`,
 //!    `OrderingTable::end_with_draw_done`), and must carry its own draw
 //!    area, offset and clear as leading packets: the handler writes only
-//!    GP1. `psx_io::gpu::begin_recording_raw` records those from the usual
+//!    GP1. `psx_io::gpu::start_recording_raw` records those from the usual
 //!    immediate calls.
 //! 3. Before [`publish_raw`], call [`wait_slot_empty`]. Before rebuilding
 //!    memory that the frame before the last published one used, call
