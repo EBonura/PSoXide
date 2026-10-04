@@ -162,7 +162,7 @@ pub(crate) fn draw_acquired_module(
 /// silicon framerate is the only true measurement; this makes it
 /// readable from a console photo. 30 fps steady shows "30 W2".
 #[cfg(feature = "fps-overlay")]
-pub(crate) fn draw_fps_overlay(font: &FontAtlas, fps: u8, worst_gap_vblanks: u8) {
+pub(crate) fn draw_fps_overlay(gpu: &mut Gpu, font: &FontAtlas, fps: u8, worst_gap_vblanks: u8) {
     let mut buf = [0u8; 8];
     let mut len = 0usize;
     push_u8_decimal(&mut buf, &mut len, fps);

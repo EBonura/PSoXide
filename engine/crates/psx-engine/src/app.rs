@@ -96,13 +96,15 @@ fn boot_visual_checkpoint_raw(
         fb.clear(gpu, color);
         draw_boot_text(gpu, fb, message);
         gpu.wait_idle();
-        // Deliberately the deprecated fixed 242-HBlank delay, not
-        // rt::wait_vblank(): a checkpoint can fire before platform::init,
-        // and wait_vblank's lazy install would rewrite the exception
-        // vector and clobber I_MASK mid-boot. A fixed hold is all this
-        // diagnostic needs, and it is what was verified on silicon.
-        #[allow(deprecated)]
-        psx_gpu::vsync();
+        // Deliberately a fixed 242-HBlank delay, not rt::wait_vblank(): a
+        // checkpoint can fire before platform::init, and wait_vblank's lazy
+        // install would rewrite the exception vector and clobber I_MASK
+        // mid-boot. A fixed hold is all this diagnostic needs, and it is
+        // what was verified on silicon (the old psx_gpu::vsync).
+        // Timer 1 mode: bit 0 sync enable, bits 1-2 reset at VBlank, bit 8
+        // HBlank clock. Writing the mode restarts the count from zero.
+        psx_io::timers::set_mode(psx_io::timers::Timer::Timer1, 0x0103);
+        while psx_io::timers::counter(psx_io::timers::Timer::Timer1) < 242 {}
         fb.swap(gpu);
     }
 }

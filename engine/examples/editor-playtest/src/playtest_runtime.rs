@@ -1358,9 +1358,10 @@ impl Playtest {
     }
 
     #[cfg(feature = "collision-debug-overlay")]
-    pub(super) fn draw_collision_debug_overlay(&self, camera: WorldCamera) {
+    pub(super) fn draw_collision_debug_overlay(&self, gpu: &mut Gpu, camera: WorldCamera) {
         if let Some(character) = self.character.as_ref() {
             draw_collision_cylinder_debug(
+                gpu,
                 self.motor.position(),
                 character.radius,
                 character.height,
@@ -1378,6 +1379,7 @@ impl Playtest {
                     continue;
                 };
                 draw_collision_cylinder_debug(
+                    gpu,
                     RoomPoint::new(inst.x, inst.y, inst.z),
                     i32::from(model.collision_radius),
                     i32::from(model.world_height),
@@ -1396,6 +1398,7 @@ impl Playtest {
                     continue;
                 };
                 draw_collision_cylinder_debug(
+                    gpu,
                     RoomPoint::new(inst.x, inst.y, inst.z),
                     i32::from(model.collision_radius),
                     i32::from(model.world_height),

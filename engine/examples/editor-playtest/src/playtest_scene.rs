@@ -2401,7 +2401,7 @@ impl Scene for Playtest {
 
         #[cfg(feature = "collision-debug-overlay")]
         if self.show_collision_debug {
-            self.draw_collision_debug_overlay(camera);
+            self.draw_collision_debug_overlay(gpu, camera);
         }
 
         if let Some(target) = self.lock_target_indicator_position() {
@@ -2515,7 +2515,7 @@ impl Scene for Playtest {
 
         #[cfg(feature = "fps-overlay")]
         if let Some(font) = self.ui_fonts[0].as_ref() {
-            draw_fps_overlay(font, self.fps_display, self.fps_display_worst);
+            draw_fps_overlay(gpu, font, self.fps_display, self.fps_display_worst);
         }
 
         let cross_prompt = UI_NODES
