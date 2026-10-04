@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! MDEC driver: table upload, decode command, DMA0 in, DMA1 out.
 //!
+//! [`Mdec`] owns the two DMA channels that feed and drain the decoder; every
+//! step that starts one is a method on it.
+//!
 //! Decode protocol, as commercial players drive it:
 //!
-//! 1. [`reset`] once, then [`load_tables`] (quantization + IDCT tables).
-//!    Neither assumes the MDEC reacts at once: see "Reset latency" below.
-//! 2. Per frame, [`decode_start`] writes the decode command (output depth +
+//! 1. [`Mdec::reset`] once, then [`Mdec::load_tables`] (quantization + IDCT
+//!    tables). Neither assumes the MDEC reacts at once: see "Reset latency"
+//!    below.
+//! 2. Per frame, [`Mdec::decode_start`] writes the decode command (output depth +
 //!    run-length word count) to MDEC0 and kicks DMA0 with the whole
 //!    run-length buffer. It does not wait: the MDEC throttles DMA0 as its
 //!    output FIFO fills.
-//! 3. [`read_column`] pulls one 16-pixel-wide column of decoded
+//! 3. [`Mdec::read_column`] pulls one 16-pixel-wide column of decoded
 //!    macroblocks over DMA1 (macroblocks come out in the order the
 //!    bitstream stores them: top to bottom, then left to right), which the
 //!    caller uploads to VRAM.
-//! 4. [`decode_finish`] confirms DMA0 drained.
+//! 4. [`Mdec::decode_finish`] confirms DMA0 drained.
 //!
 //! Every wait is bounded (`psx_io::dma::wait_done`), and every kick aborts
 //! the channel first, per the SDK rule for silicon DMA wedges.
@@ -26,14 +30,15 @@
 //! SuperStation One FPGA and PSoXide already read the documented reset state.
 //! Writing the DMA-request enable right behind the reset, as this driver used
 //! to, left the table upload waiting on DMA0 forever on that console while
-//! both of the others played the movie. So [`reset`] waits for the reset to
-//! settle before enabling requests, and [`load_tables`] checks that the MDEC
+//! both of the others played the movie. So [`Mdec::reset`] waits for the reset to
+//! settle before enabling requests, and [`Mdec::load_tables`] checks that the MDEC
 //! actually raised its data-in request (status bit 28) after each command,
 //! re-writing the enable if it did not, and falls back to CPU writes when
 //! DMA0 still will not take the table.
 
 use psx_hw::mdec::{self as hw, MDEC0, MDEC1};
 use psx_io::dma::{self, Channel};
+use psx_io::periph::MdecDma;
 
 use crate::rle::{self, RleLengthError};
 
@@ -167,27 +172,6 @@ fn wait_status(mask: u32, want: u32, spins: u32) -> bool {
     true
 }
 
-/// Reset the MDEC, wait for the reset to finish, then enable its DMA
-/// requests on both channels. `false` if the MDEC stayed busy after the
-/// reset (the enable is still written).
-pub fn reset() -> bool {
-    dma::abort(Channel::MdecIn);
-    dma::abort(Channel::MdecOut);
-    dma::enable_channel(Channel::MdecIn);
-    dma::enable_channel(Channel::MdecOut);
-    // SAFETY: MDEC control register write.
-    unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_RESET) };
-    let settled = wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS);
-    let mut n = 0;
-    while n < RESET_TAIL_READS {
-        let _ = status();
-        n += 1;
-    }
-    // SAFETY: MDEC control register write.
-    unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_ENABLE_DMA) };
-    settled
-}
-
 /// Send `blocks` 32-word blocks from `words` to the MDEC over DMA0 without
 /// waiting.
 ///
@@ -213,7 +197,7 @@ unsafe fn dma_in(words: *const u32, blocks: u16) {
     };
 }
 
-/// How [`load_tables`] got the tables in.
+/// How [`Mdec::load_tables`] got the tables in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tables {
     /// Enable writes, summed over both commands, before the MDEC raised its
@@ -239,209 +223,385 @@ impl Tables {
     }
 }
 
-/// Write `command`, then feed its 32 parameter words: over DMA0 when the
-/// MDEC asks for data, else over the CPU. Returns (enable writes before the
-/// request rose, 0 if never; went over the CPU), or `None` if the MDEC
-/// would not take the words at all.
-fn upload(command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
-    if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
-        return None;
+/// The MDEC's driver: it owns the two DMA channels that feed and drain it, so
+/// every decode step that starts one is a method here and the borrow checker
+/// sees a second decoder.
+///
+/// A decode frame is: [`reset`](Self::reset) and
+/// [`load_tables`](Self::load_tables) once, then per frame
+/// [`decode`](Self::decode) with a closure that pulls the output columns.
+///
+/// The status register stays a free function ([`status`]): reading it
+/// cannot disturb a transfer, so it needs no owner.
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct Mdec(MdecDma);
+
+impl Mdec {
+    /// Take the MDEC's DMA channels. Touches no register: call
+    /// [`reset`](Self::reset) next.
+    pub const fn new(dma: MdecDma) -> Self {
+        Self(dma)
     }
-    // SAFETY: MDEC command write.
-    unsafe { psx_io::write_u32(MDEC0, command) };
-    let mut writes = 0u8;
-    let mut asked = wait_status(hw::STATUS_IN_REQUEST, hw::STATUS_IN_REQUEST, SETTLE_SPINS);
-    while !asked && writes + 1 < ENABLE_ATTEMPTS {
-        // The enable can be lost to a reset that had not finished.
-        // SAFETY: MDEC control register write, no reset bit.
-        unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_ENABLE_DMA) };
-        writes += 1;
-        asked = wait_status(hw::STATUS_IN_REQUEST, hw::STATUS_IN_REQUEST, SETTLE_SPINS);
+
+    /// Give the DMA token back.
+    #[inline(always)]
+    pub fn release(self) -> MdecDma {
+        self.0
     }
-    let enable_writes = if asked { writes + 1 } else { 0 };
-    if asked {
-        // SAFETY: `words` is a static table; the transfer is waited out.
-        unsafe { dma_in(words.as_ptr(), 1) };
-        if dma::wait_done(Channel::MdecIn, DMA_SPINS) {
-            return Some((enable_writes, false));
-        }
-        // Part of the table went in: start the command over.
+
+    /// Reset the MDEC, wait for the reset to finish, then enable its DMA
+    /// requests on both channels. `false` if the MDEC stayed busy after the
+    /// reset (the enable is still written).
+    pub fn reset(&mut self) -> bool {
         dma::abort(Channel::MdecIn);
-        reset();
+        dma::abort(Channel::MdecOut);
+        dma::enable_channel(Channel::MdecIn);
+        dma::enable_channel(Channel::MdecOut);
+        // SAFETY: MDEC control register write.
+        unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_RESET) };
+        let settled = wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS);
+        let mut n = 0;
+        while n < RESET_TAIL_READS {
+            let _ = status();
+            n += 1;
+        }
+        // SAFETY: MDEC control register write.
+        unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_ENABLE_DMA) };
+        settled
+    }
+
+    /// Write `command`, then feed its 32 parameter words: over DMA0 when the
+    /// MDEC asks for data, else over the CPU. Returns (enable writes before the
+    /// request rose, 0 if never; went over the CPU), or `None` if the MDEC
+    /// would not take the words at all.
+    fn upload(&mut self, command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
         if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
             return None;
         }
         // SAFETY: MDEC command write.
         unsafe { psx_io::write_u32(MDEC0, command) };
-    }
-    for &word in words {
-        if !wait_status(hw::STATUS_IN_FULL, 0, SETTLE_SPINS) {
-            return None;
+        let mut writes = 0u8;
+        let mut asked = wait_status(hw::STATUS_IN_REQUEST, hw::STATUS_IN_REQUEST, SETTLE_SPINS);
+        while !asked && writes + 1 < ENABLE_ATTEMPTS {
+            // The enable can be lost to a reset that had not finished.
+            // SAFETY: MDEC control register write, no reset bit.
+            unsafe { psx_io::write_u32(MDEC1, hw::CONTROL_ENABLE_DMA) };
+            writes += 1;
+            asked = wait_status(hw::STATUS_IN_REQUEST, hw::STATUS_IN_REQUEST, SETTLE_SPINS);
         }
-        // SAFETY: MDEC parameter write.
-        unsafe { psx_io::write_u32(MDEC0, word) };
-    }
-    Some((enable_writes, true))
-}
-
-/// Upload the standard quantization tables and the IDCT basis. `None` if
-/// the MDEC would take them neither over DMA0 nor over the CPU.
-pub fn load_tables() -> Option<Tables> {
-    let (quant_writes, quant_cpu) = upload(hw::COMMAND_SET_QUANT, &QUANT_WORDS)?;
-    let (scale_writes, scale_cpu) = upload(hw::COMMAND_SET_SCALE, &SCALE_WORDS)?;
-    if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
-        return None;
-    }
-    Some(Tables {
-        enable_writes: if quant_writes == 0 || scale_writes == 0 {
-            0
-        } else {
-            quant_writes + scale_writes
-        },
-        cpu_uploads: quant_cpu as u8 + scale_cpu as u8,
-    })
-}
-
-/// Upload both tables over CPU writes to MDEC0 only, after [`reset`]. No
-/// DMA involved: the control path for a console whose DMA0 will not feed
-/// the MDEC. `false` if the input FIFO never made room.
-pub fn load_tables_cpu() -> bool {
-    for (command, words) in [
-        (hw::COMMAND_SET_QUANT, &QUANT_WORDS),
-        (hw::COMMAND_SET_SCALE, &SCALE_WORDS),
-    ] {
-        if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
-            return false;
+        let enable_writes = if asked { writes + 1 } else { 0 };
+        if asked {
+            // SAFETY: `words` is a borrowed table; the transfer is waited out.
+            unsafe { dma_in(words.as_ptr(), 1) };
+            if dma::wait_done(Channel::MdecIn, DMA_SPINS) {
+                return Some((enable_writes, false));
+            }
+            // Part of the table went in: start the command over.
+            dma::abort(Channel::MdecIn);
+            self.reset();
+            if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
+                return None;
+            }
+            // SAFETY: MDEC command write.
+            unsafe { psx_io::write_u32(MDEC0, command) };
         }
-        write_command(command);
         for &word in words {
             if !wait_status(hw::STATUS_IN_FULL, 0, SETTLE_SPINS) {
+                return None;
+            }
+            // SAFETY: MDEC parameter write.
+            unsafe { psx_io::write_u32(MDEC0, word) };
+        }
+        Some((enable_writes, true))
+    }
+
+    /// Upload the standard quantization tables and the IDCT basis. `None` if
+    /// the MDEC would take them neither over DMA0 nor over the CPU.
+    pub fn load_tables(&mut self) -> Option<Tables> {
+        let (quant_writes, quant_cpu) = self.upload(hw::COMMAND_SET_QUANT, &QUANT_WORDS)?;
+        let (scale_writes, scale_cpu) = self.upload(hw::COMMAND_SET_SCALE, &SCALE_WORDS)?;
+        if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
+            return None;
+        }
+        Some(Tables {
+            enable_writes: if quant_writes == 0 || scale_writes == 0 {
+                0
+            } else {
+                quant_writes + scale_writes
+            },
+            cpu_uploads: quant_cpu as u8 + scale_cpu as u8,
+        })
+    }
+
+    /// Upload both tables over CPU writes to MDEC0 only, after
+    /// [`reset`](Self::reset). No DMA involved: the control path for a console
+    /// whose DMA0 will not feed the MDEC. `false` if the input FIFO never made
+    /// room.
+    pub fn load_tables_cpu(&mut self) -> bool {
+        for (command, words) in [
+            (hw::COMMAND_SET_QUANT, &QUANT_WORDS),
+            (hw::COMMAND_SET_SCALE, &SCALE_WORDS),
+        ] {
+            if !wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS) {
                 return false;
             }
-            write_command(word);
+            self.write_command(command);
+            for &word in words {
+                if !wait_status(hw::STATUS_IN_FULL, 0, SETTLE_SPINS) {
+                    return false;
+                }
+                self.write_command(word);
+            }
         }
+        wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS)
     }
-    wait_status(hw::STATUS_BUSY, 0, SETTLE_SPINS)
+
+    /// Write one word to MDEC0: a command, or a parameter the CPU feeds itself.
+    #[inline(always)]
+    pub fn write_command(&mut self, word: u32) {
+        // SAFETY: MDEC command/parameter write.
+        unsafe { psx_io::write_u32(MDEC0, word) }
+    }
+
+    /// Read one word of decoded output from MDEC0 (the CPU path; DMA1 is the
+    /// usual one). Garbage when the output FIFO is empty.
+    #[inline(always)]
+    pub fn read_data(&mut self) -> u32 {
+        // SAFETY: MDEC data read.
+        unsafe { psx_io::read_u32(MDEC0) }
+    }
+
+    /// Start decoding `words` 32-bit words of run-length data (a multiple of 32,
+    /// as [`crate::bitstream::decode_frame`] returns). `mode` is
+    /// [`psx_hw::mdec::DECODE_15BPP`] or [`psx_hw::mdec::DECODE_24BPP`],
+    /// optionally with [`psx_hw::mdec::DECODE_STP`].
+    ///
+    /// [`decode`](Self::decode) is the safe form: it holds the borrow of `rle`
+    /// until DMA0 is done with it.
+    ///
+    /// # Errors
+    /// [`RleLengthError`] when `words` is 0, not a multiple of 32, longer than
+    /// the decode command can announce ([`crate::rle::MAX_WORDS`]) or longer
+    /// than `rle`. Nothing is written to the MDEC then and no DMA starts.
+    ///
+    /// # Safety
+    /// On `Ok`, DMA0 keeps reading `rle` after this returns. The caller must
+    /// keep `rle` alive and unmodified until [`decode_finish`](Self::decode_finish)
+    /// returns, and must call it before the storage is reused or freed.
+    pub unsafe fn decode_start(
+        &mut self,
+        rle: &[u32],
+        words: usize,
+        mode: u32,
+    ) -> Result<(), RleLengthError> {
+        if words > rle.len() {
+            return Err(RleLengthError::PastBuffer);
+        }
+        let blocks = rle::dma_block_count(words)?;
+        // SAFETY: MMIO write to MDEC0, then a DMA0 kick of `blocks` (not 0)
+        // 32-word blocks, exactly the first `words` words of `rle` (checked
+        // above), which the caller keeps alive until `decode_finish`.
+        unsafe {
+            psx_io::write_u32(MDEC0, mode | words as u32);
+            dma_in(rle.as_ptr(), blocks);
+        }
+        Ok(())
+    }
+
+    /// Decode all of `rle` (a multiple of 32 words, as
+    /// [`crate::bitstream::decode_frame`] returns) with DMA0 feeding the MDEC,
+    /// the safe form of [`decode_start`](Self::decode_start).
+    ///
+    /// `columns` runs while DMA0 feeds the MDEC and pulls the output, normally
+    /// with [`read_column`](Self::read_column) once per column; it gets the
+    /// driver back for that. Returns its result and
+    /// [`decode_finish`](Self::decode_finish)'s: `false` there means DMA0 was
+    /// still busy and has been aborted.
+    ///
+    /// # Errors
+    /// [`RleLengthError`] when `rle` is empty, not a whole number of 32-word
+    /// blocks or longer than [`crate::rle::MAX_WORDS`]; `columns` does not run.
+    pub fn decode<R>(
+        &mut self,
+        rle: &[u32],
+        mode: u32,
+        columns: impl FnOnce(&mut Self) -> R,
+    ) -> Result<(R, bool), RleLengthError> {
+        // Finishes the decode on every exit, an unwinding `columns` included.
+        struct Finish<'a> {
+            mdec: &'a mut Mdec,
+            done: bool,
+        }
+        impl Drop for Finish<'_> {
+            fn drop(&mut self) {
+                if !self.done {
+                    self.mdec.decode_finish();
+                }
+            }
+        }
+        // SAFETY: `rle` stays borrowed until this function returns. On `Err`
+        // no DMA started; on `Ok` every return path runs decode_finish first
+        // (directly, or via `Finish` when unwinding), which returns only once
+        // DMA0 is done or aborted.
+        unsafe { self.decode_start(rle, rle.len(), mode)? };
+        let mut finish = Finish {
+            mdec: self,
+            done: false,
+        };
+        let out = columns(finish.mdec);
+        finish.done = true;
+        Ok((out, finish.mdec.decode_finish()))
+    }
+
+    /// Pull the next `dst.len()` words (a multiple of 32) of decoded pixels
+    /// over DMA1 and wait for them. For 15bpp one 16-pixel-wide column of
+    /// height `h` is `8 * h` words. `false` if DMA1 wedged.
+    pub fn read_column(&mut self, dst: &mut [u32]) -> bool {
+        let blocks = dst.len() / DMA_BLOCK_WORDS;
+        // Silicon reads a zero block count as 65,536 blocks, so a slice shorter
+        // than one block would be overrun by megabytes; one too long for BCR
+        // would be cut short. Refuse both rather than write past `dst`.
+        let Ok(blocks) = u16::try_from(blocks) else {
+            return false;
+        };
+        if blocks == 0 {
+            return false;
+        }
+        dma::abort(Channel::MdecOut);
+        // SAFETY: the channel was just aborted, so it is idle. The transfer
+        // writes `blocks * DMA_BLOCK_WORDS` words, no more than `dst.len()`,
+        // into `dst`, borrowed exclusively until this function returns; the
+        // wait below, or the abort on a wedge, ends it before then.
+        unsafe {
+            dma::start(
+                Channel::MdecOut,
+                dma::Transfer {
+                    address: dst.as_mut_ptr() as u32,
+                    size: dma::size_blocks(DMA_BLOCK_WORDS as u16, blocks),
+                    control: CHCR_OUT,
+                },
+            )
+        };
+        dma::wait_or_abort(Channel::MdecOut, DMA_SPINS)
+    }
+
+    /// Confirm DMA0 finished feeding the frame. `false` (after aborting the
+    /// channel) if it is still busy, e.g. the frame held more data than was
+    /// read back.
+    pub fn decode_finish(&mut self) -> bool {
+        dma::wait_or_abort(Channel::MdecIn, DMA_SPINS)
+    }
 }
 
-/// Write one word to MDEC0: a command, or a parameter the CPU feeds itself.
+/// A driver for a deprecated forwarder that never took the token.
+fn steal_mdec() -> Mdec {
+    // SAFETY: a token is a logic guard, not a memory-safety one (see
+    // `psx_io::periph`), and the old free functions never took one.
+    Mdec::new(unsafe { MdecDma::steal() })
+}
+
+/// Reset the MDEC and enable its DMA requests.
+#[deprecated(note = "use `Mdec::reset` with the `MdecDma` token")]
+pub fn reset() -> bool {
+    steal_mdec().reset()
+}
+
+/// Upload the standard quantization tables and the IDCT basis.
+#[deprecated(note = "use `Mdec::load_tables` with the `MdecDma` token")]
+pub fn load_tables() -> Option<Tables> {
+    steal_mdec().load_tables()
+}
+
+/// Upload both tables over CPU writes to MDEC0 only.
+#[deprecated(note = "use `Mdec::load_tables_cpu` with the `MdecDma` token")]
+pub fn load_tables_cpu() -> bool {
+    steal_mdec().load_tables_cpu()
+}
+
+/// Write one word to MDEC0.
+#[deprecated(note = "use `Mdec::write_command` with the `MdecDma` token")]
 #[inline(always)]
 pub fn write_command(word: u32) {
-    // SAFETY: MDEC command/parameter write.
-    unsafe { psx_io::write_u32(MDEC0, word) }
+    steal_mdec().write_command(word);
 }
 
-/// Read one word of decoded output from MDEC0 (the CPU path; DMA1 is the
-/// usual one). Garbage when the output FIFO is empty.
+/// Read one word of decoded output from MDEC0.
+#[deprecated(note = "use `Mdec::read_data` with the `MdecDma` token")]
 #[inline(always)]
 pub fn read_data() -> u32 {
-    // SAFETY: MDEC data read.
-    unsafe { psx_io::read_u32(MDEC0) }
+    steal_mdec().read_data()
 }
 
-/// Start decoding `words` 32-bit words of run-length data (a multiple of 32,
-/// as [`crate::bitstream::decode_frame`] returns). `mode` is
-/// [`psx_hw::mdec::DECODE_15BPP`] or [`psx_hw::mdec::DECODE_24BPP`],
-/// optionally with [`psx_hw::mdec::DECODE_STP`].
-///
-/// [`decode`] is the safe form: it holds the borrow of `rle` until DMA0 is
-/// done with it.
+/// Start decoding `words` words of run-length data.
 ///
 /// # Errors
-/// [`RleLengthError`] when `words` is 0, not a multiple of 32, longer than
-/// the decode command can announce ([`crate::rle::MAX_WORDS`]) or longer
-/// than `rle`. Nothing is written to the MDEC then and no DMA starts.
+/// See [`Mdec::decode_start`].
 ///
 /// # Safety
-/// On `Ok`, DMA0 keeps reading `rle` after this returns. The caller must
-/// keep `rle` alive and unmodified until [`decode_finish`] returns, and must
-/// call it before the storage is reused or freed.
+/// See [`Mdec::decode_start`].
+#[deprecated(note = "use `Mdec::decode_start` with the `MdecDma` token")]
 pub unsafe fn decode_start(rle: &[u32], words: usize, mode: u32) -> Result<(), RleLengthError> {
-    if words > rle.len() {
-        return Err(RleLengthError::PastBuffer);
-    }
-    let blocks = rle::dma_block_count(words)?;
-    // SAFETY: MMIO write to MDEC0, then a DMA0 kick of `blocks` (not 0)
-    // 32-word blocks, exactly the first `words` words of `rle` (checked
-    // above), which the caller keeps alive until `decode_finish`.
-    unsafe {
-        psx_io::write_u32(MDEC0, mode | words as u32);
-        dma_in(rle.as_ptr(), blocks);
-    }
-    Ok(())
+    // SAFETY: forwarded contract.
+    unsafe { steal_mdec().decode_start(rle, words, mode) }
 }
 
-/// Decode all of `rle` (a multiple of 32 words, as [`crate::bitstream::decode_frame`]
-/// returns) with DMA0 feeding the MDEC, the safe form of [`decode_start`].
-///
-/// `columns` runs while DMA0 feeds the MDEC and pulls the output, normally
-/// with [`read_column`] once per column. Returns its result and
-/// [`decode_finish`]'s: `false` there means DMA0 was still busy and has been
-/// aborted.
+/// Decode all of `rle` with DMA0 feeding the MDEC.
 ///
 /// # Errors
-/// [`RleLengthError`] when `rle` is empty, not a whole number of 32-word
-/// blocks or longer than [`crate::rle::MAX_WORDS`]; `columns` does not run.
+/// See [`Mdec::decode`].
+#[deprecated(note = "use `Mdec::decode` with the `MdecDma` token")]
 pub fn decode<R>(
     rle: &[u32],
     mode: u32,
     columns: impl FnOnce() -> R,
 ) -> Result<(R, bool), RleLengthError> {
-    // Finishes the decode on every exit, an unwinding `columns` included.
-    struct Finish(bool);
-    impl Drop for Finish {
-        fn drop(&mut self) {
-            if !self.0 {
-                decode_finish();
-            }
-        }
-    }
-    // SAFETY: `rle` stays borrowed until this function returns. On `Err`
-    // no DMA started; on `Ok` every return path runs decode_finish first
-    // (directly, or via `Finish` when unwinding), which returns only once
-    // DMA0 is done or aborted.
-    unsafe { decode_start(rle, rle.len(), mode)? };
-    let mut finish = Finish(false);
-    let out = columns();
-    finish.0 = true;
-    Ok((out, decode_finish()))
+    steal_mdec().decode(rle, mode, |_| columns())
 }
 
-/// Pull the next `dst.len()` words (a multiple of 32) of decoded pixels
-/// over DMA1 and wait for them. For 15bpp one 16-pixel-wide column of
-/// height `h` is `8 * h` words. `false` if DMA1 wedged.
+/// Pull the next `dst.len()` words of decoded pixels over DMA1.
+#[deprecated(note = "use `Mdec::read_column` with the `MdecDma` token")]
 pub fn read_column(dst: &mut [u32]) -> bool {
-    let blocks = dst.len() / DMA_BLOCK_WORDS;
-    // Silicon reads a zero block count as 65,536 blocks, so a slice shorter
-    // than one block would be overrun by megabytes; one too long for BCR
-    // would be cut short. Refuse both rather than write past `dst`.
-    let Ok(blocks) = u16::try_from(blocks) else {
-        return false;
-    };
-    if blocks == 0 {
-        return false;
-    }
-    dma::abort(Channel::MdecOut);
-    // SAFETY: the channel was just aborted, so it is idle. The transfer
-    // writes `blocks * DMA_BLOCK_WORDS` words, no more than `dst.len()`,
-    // into `dst`, borrowed exclusively until this function returns; the
-    // wait below, or the abort on a wedge, ends it before then.
-    unsafe {
-        dma::start(
-            Channel::MdecOut,
-            dma::Transfer {
-                address: dst.as_mut_ptr() as u32,
-                size: dma::size_blocks(DMA_BLOCK_WORDS as u16, blocks),
-                control: CHCR_OUT,
-            },
-        )
-    };
-    dma::wait_or_abort(Channel::MdecOut, DMA_SPINS)
+    steal_mdec().read_column(dst)
 }
 
-/// Confirm DMA0 finished feeding the frame. `false` (after aborting the
-/// channel) if it is still busy, e.g. the frame held more data than was
-/// read back.
+/// Confirm DMA0 finished feeding the frame.
+#[deprecated(note = "use `Mdec::decode_finish` with the `MdecDma` token")]
 pub fn decode_finish() -> bool {
-    dma::wait_or_abort(Channel::MdecIn, DMA_SPINS)
+    steal_mdec().decode_finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_driver_is_its_token_and_gives_it_back() {
+        assert_eq!(core::mem::size_of::<Mdec>(), 0);
+        // SAFETY: a test-local token on the host; `new` touches no register.
+        let mdec = Mdec::new(unsafe { MdecDma::steal() });
+        let _token: MdecDma = mdec.release();
+    }
+
+    #[test]
+    fn a_decode_that_cannot_be_described_never_runs_its_columns() {
+        // SAFETY: a test-local token on the host; both calls are refused
+        // before any register is touched.
+        let mut mdec = Mdec::new(unsafe { MdecDma::steal() });
+        let mut ran = false;
+        // Empty, and one word short of a block: refused before any write.
+        for rle in [&[][..], &[0u32; 31][..]] {
+            let result = mdec.decode(rle, hw::DECODE_15BPP, |_| ran = true);
+            assert!(result.is_err());
+        }
+        assert!(!ran);
+    }
+
+    #[test]
+    fn a_column_slice_the_channel_cannot_describe_is_refused_before_it_starts() {
+        // SAFETY: a test-local token on the host; both are refused first.
+        let mut mdec = Mdec::new(unsafe { MdecDma::steal() });
+        assert!(!mdec.read_column(&mut []));
+        assert!(!mdec.read_column(&mut [0u32; 31]));
+    }
 }
