@@ -322,13 +322,6 @@ impl Deadzone {
         x * x + y * y > self.inner_squared
     }
 
-    /// Renamed to [`is_outside`](Self::is_outside).
-    #[deprecated(note = "renamed to `is_outside`")]
-    #[inline(always)]
-    pub const fn outside(self, x: i16, y: i16) -> bool {
-        self.is_outside(x, y)
-    }
-
     /// The reading unchanged if it is real input, or `None` inside the dead
     /// region. The plain radial form: direction is preserved, but magnitude
     /// jumps from zero to the boundary the moment it is crossed.
@@ -719,14 +712,6 @@ pub fn poll_diagnostics_on<T: Transport>(
 #[deprecated(note = "use `poll_diagnostics_on` with the `ControllerPort` token")]
 pub fn poll_port1_diagnostics(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
     poll_diagnostics_on(&mut steal_port(), Port::One, setup_spins, interbyte_spins)
-}
-
-/// Renamed to [`poll_diagnostics_on`].
-#[deprecated(note = "use `poll_diagnostics_on` with the `ControllerPort` token")]
-#[allow(deprecated)]
-#[inline(always)]
-pub fn poll_port1_diag(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
-    poll_port1_diagnostics(setup_spins, interbyte_spins)
 }
 
 /// Ask the controller in `socket` to enter DualShock analog mode. Returns

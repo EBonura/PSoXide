@@ -44,10 +44,6 @@ impl Affine {
     };
 }
 
-/// Renamed to [`Affine`].
-#[deprecated(note = "renamed to `Affine`")]
-pub type Aff = Affine;
-
 // The readers below take a raw pointer into a blob `Model::new` validated.
 // Each has the same contract: every byte it reads, `d + o` up to the width it
 // names, lies inside that blob.

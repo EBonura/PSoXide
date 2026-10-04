@@ -13,7 +13,7 @@ use crate::gpu;
 use crate::material::{BlendMode, TextureMaterial};
 use crate::prim::{
     FillRect, LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite, TriFlat,
-    TriGouraud, TriTextured,
+    TriGouraud,
 };
 use psx_io::timers;
 
@@ -23,13 +23,6 @@ use psx_io::timers;
 #[doc(alias = "ResetGraph")]
 pub fn init(mode: VideoMode, res: Resolution) {
     gpu::reset(DisplayConfig::new(mode, res));
-}
-
-/// Move the picture by `dx` pixels and `dy` scanlines from the standard
-/// position, keeping `mode` and `res`.
-#[deprecated(note = "use `Gpu::set_display` with `DisplayConfig::with_offset`")]
-pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
-    gpu::write_display_window(DisplayConfig::new(mode, res).with_offset((dx, dy)));
 }
 
 /// Block until the GPU has finished drawing everything sent to it.
@@ -146,16 +139,6 @@ pub fn draw_quad_textured_material(
     gpu::draw(&QuadTexturedMaterial::with_material(verts, uvs, material));
 }
 
-/// Draw a textured triangle using a [`TextureMaterial`].
-#[deprecated(note = "use `gpu.draw(&TriTextured::with_material(..))`")]
-pub fn draw_tri_textured_material(
-    verts: [(i16, i16); 3],
-    uvs: [(u8, u8); 3],
-    material: TextureMaterial,
-) {
-    gpu::draw(&TriTextured::with_material(verts, uvs, material));
-}
-
 /// Draw a Gouraud-shaded textured quad using a [`TextureMaterial`].
 #[deprecated(note = "use `gpu.draw(&QuadTexturedGouraud::with_material(..))`")]
 pub fn draw_quad_textured_gouraud_material(
@@ -195,13 +178,6 @@ fn configure_scanline_timer() {
     );
 }
 
-/// Programs Timer 1 to count HBlanks. It has nothing to do with vertical sync.
-#[deprecated(note = "Timer 1 belongs to `psx_io::timers`; set its mode there")]
-#[inline(always)]
-pub fn configure_vsync_timer() {
-    configure_scanline_timer()
-}
-
 /// Wait 242 HBlank periods (~15.4ms) from the moment of the call.
 ///
 /// Despite the name, this does NOT sync to the display: reconfiguring
@@ -217,7 +193,32 @@ pub fn vsync() {
     while timers::counter(timers::Timer::Timer1) < 242 {}
 }
 
-/// Old name of [`crate::chain::submit_async_raw`].
+/// Kick a linked-list chain without waiting for the walk.
+///
+/// # Safety
+///
+/// As [`crate::chain::submit_async_raw`].
+#[deprecated(note = "use `chain::submit_async_raw`, which takes the `GpuDma` token")]
+#[doc(alias = "DrawOTag")]
+#[inline(always)]
+pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
+    // SAFETY: forwarded contract.
+    unsafe { crate::chain::start_walk(head) }
+}
+
+/// Renamed to [`submit_linked_list_async_raw`].
+///
+/// # Safety
+///
+/// As [`crate::chain::submit_async_raw`].
+#[deprecated(note = "use `chain::submit_async_raw`, which takes the `GpuDma` token")]
+#[inline(always)]
+pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
+    // SAFETY: forwarded contract.
+    unsafe { crate::chain::start_walk(head) }
+}
+
+/// Old name of [`submit_linked_list_async_raw`].
 ///
 /// # Safety
 ///
@@ -231,16 +232,15 @@ pub unsafe fn submit_linked_list_async(head: *const u32) {
     unsafe { crate::chain::start_walk(head) }
 }
 
-/// Old name of [`crate::chain::submit_raw`].
+/// Kick a linked-list chain and wait for the walk.
 ///
 /// # Safety
 ///
 /// As [`crate::chain::submit_raw`].
-#[deprecated(
-    note = "use `OrderingTable::frame`, `Gpu::submit_static`, or the unsafe `chain::submit_raw`"
-)]
+#[deprecated(note = "use `chain::submit_raw`, which takes the `GpuDma` token")]
+#[doc(alias = "DrawOTag")]
 #[inline(always)]
-pub unsafe fn submit_linked_list(head: *const u32) {
+pub unsafe fn submit_linked_list_raw(head: *const u32) {
     // SAFETY: forwarded contract; the wait ends the walk before return.
     unsafe { crate::chain::start_walk(head) };
     crate::chain::wait_walk();
@@ -253,12 +253,6 @@ pub fn submit_linked_list_wait() {
     crate::chain::wait_walk();
 }
 
-/// Renamed to [`crate::is_draw_done`].
-#[deprecated(note = "renamed to `is_draw_done`")]
-#[inline(always)]
-pub fn draw_done() -> bool {
-    crate::is_draw_done()
-}
 /// Each forwarder now sends a packet's payload; these tests check that
 /// payload against the word sequence the free function wrote before it
 /// forwarded, taken from its old body.
@@ -282,7 +276,6 @@ mod tests {
 
     const VERTS3: [(i16, i16); 3] = [(1, -2), (300, 4), (-5, 239)];
     const VERTS4: [(i16, i16); 4] = [(1, 2), (100, 3), (4, 90), (101, 91)];
-    const UVS3: [(u8, u8); 3] = [(0, 1), (63, 2), (4, 255)];
     const UVS4: [(u8, u8); 4] = [(0, 1), (63, 2), (4, 255), (200, 100)];
     const COLORS4: [(u8, u8, u8); 4] = [(1, 2, 3), (40, 50, 60), (70, 80, 90), (255, 0, 128)];
 
@@ -389,18 +382,6 @@ mod tests {
             payload(&QuadTexturedMaterial::with_material(VERTS4, UVS4, m)),
             quad
         );
-
-        let tri = [
-            m.texture_window_word(),
-            m.flat_textured_polygon_header(false),
-            pack_vertex(1, -2),
-            pack_texcoord(0, 1, m.clut_word()),
-            pack_vertex(300, 4),
-            pack_texcoord(63, 2, m.texture_page_word()),
-            pack_vertex(-5, 239),
-            pack_texcoord(4, 255, 0),
-        ];
-        assert_eq!(payload(&TriTextured::with_material(VERTS3, UVS3, m)), tri);
 
         let c = COLORS4;
         let gouraud = [

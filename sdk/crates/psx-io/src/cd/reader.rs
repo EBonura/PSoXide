@@ -192,13 +192,6 @@ impl SectorReader {
         u32::from_be_bytes(self.diag)
     }
 
-    /// Renamed to [`SectorReader::diagnostics`].
-    #[deprecated(note = "renamed to `diagnostics`")]
-    #[inline(always)]
-    pub fn diag(&self) -> u32 {
-        self.diagnostics()
-    }
-
     /// Pop one sector's 2048 bytes from the data FIFO into `buffer`.
     ///
     /// Arms the data request, waits (bounded) until the FIFO reports data,
