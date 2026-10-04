@@ -597,19 +597,60 @@ impl ParityCode {
 fn encode_mode2_sector(sector: &mut [u8]) {
     debug_assert_eq!(sector.len(), RAW_SECTOR_SIZE);
     if sector[SUBMODE_AT] & SUBMODE_FORM2 != 0 {
-        let crc = edc(&sector[SUBHEADER_AT..FORM2_EDC_AT]);
-        sector[FORM2_EDC_AT..FORM2_EDC_AT + 4].copy_from_slice(&crc.to_le_bytes());
-        return;
+        protect_mode2_form2(sector);
+    } else {
+        protect_mode2_form1(sector);
     }
+}
+
+/// Mode 1 EDC position: after the 2048 data bytes at 0x10.
+const MODE1_EDC_AT: usize = 0x810;
+
+/// ECMA-130 EDC (the sector CRC) of `bytes`, starting from zero.
+pub fn sector_edc(bytes: &[u8]) -> u32 {
+    edc(bytes)
+}
+
+/// Compute both parity codes over the 2340 bytes from the header (0x0C)
+/// to the end of a raw sector, with the header as it stands.
+pub fn write_sector_parity(sector: &mut [u8]) {
+    debug_assert_eq!(sector.len(), RAW_SECTOR_SIZE);
+    let area = &mut sector[HEADER_AT..];
+    P_CODE.encode(area);
+    Q_CODE.encode(area);
+}
+
+/// Protect a raw Mode 1 sector whose sync, header and 2048 data bytes are
+/// in place: EDC over 0x000..0x810 at 0x810, eight zero bytes, then P and
+/// Q parity computed with the real header.
+pub fn protect_mode1(sector: &mut [u8]) {
+    debug_assert_eq!(sector.len(), RAW_SECTOR_SIZE);
+    let crc = edc(&sector[..MODE1_EDC_AT]);
+    sector[MODE1_EDC_AT..MODE1_EDC_AT + 4].copy_from_slice(&crc.to_le_bytes());
+    sector[MODE1_EDC_AT + 4..MODE1_EDC_AT + 12].fill(0);
+    write_sector_parity(sector);
+}
+
+/// Protect a raw Mode 2 Form 1 sector whose subheaders and 2048 data bytes
+/// are in place: EDC over 0x010..0x818 at 0x818, then P and Q parity
+/// computed with the header counted as zero (and left as it was).
+pub fn protect_mode2_form1(sector: &mut [u8]) {
+    debug_assert_eq!(sector.len(), RAW_SECTOR_SIZE);
     let crc = edc(&sector[SUBHEADER_AT..FORM1_EDC_AT]);
     sector[FORM1_EDC_AT..FORM1_EDC_AT + 4].copy_from_slice(&crc.to_le_bytes());
     let mut header = [0u8; 4];
     header.copy_from_slice(&sector[HEADER_AT..HEADER_AT + 4]);
     sector[HEADER_AT..HEADER_AT + 4].fill(0);
-    let area = &mut sector[HEADER_AT..];
-    P_CODE.encode(area);
-    Q_CODE.encode(area);
+    write_sector_parity(sector);
     sector[HEADER_AT..HEADER_AT + 4].copy_from_slice(&header);
+}
+
+/// Protect a raw Mode 2 Form 2 sector whose subheaders and 2324 data bytes
+/// are in place: EDC over 0x010..0x92C at 0x92C, no parity.
+pub fn protect_mode2_form2(sector: &mut [u8]) {
+    debug_assert_eq!(sector.len(), RAW_SECTOR_SIZE);
+    let crc = edc(&sector[SUBHEADER_AT..FORM2_EDC_AT]);
+    sector[FORM2_EDC_AT..FORM2_EDC_AT + 4].copy_from_slice(&crc.to_le_bytes());
 }
 
 fn bin_to_bcd(value: u8) -> u8 {
@@ -732,6 +773,78 @@ fn encode_path_table_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both parity equations of every P and Q vector, for both planes:
+    /// zero sum and zero alpha-weighted sum (ECMA-130 Annex A).
+    fn parity_holds(area: &[u8]) -> bool {
+        [&P_CODE, &Q_CODE].iter().all(|code| {
+            (0..2).all(|plane| {
+                (0..code.vectors).all(|v| {
+                    let mut symbols: Vec<u8> = (0..code.len)
+                        .map(|i| {
+                            let word = (v * code.vector_step + i * code.symbol_step) % code.wrap;
+                            area[2 * word + plane]
+                        })
+                        .collect();
+                    symbols.push(area[2 * (code.parity_at + v) + plane]);
+                    symbols.push(area[2 * (code.parity_at + code.vectors + v) + plane]);
+                    let sum = symbols.iter().fold(0, |a, &b| a ^ b);
+                    let weighted = symbols.iter().fold(0, |a, &b| gf_times_alpha(a) ^ b);
+                    sum == 0 && weighted == 0
+                })
+            })
+        })
+    }
+
+    fn test_sector(mode: u8) -> Vec<u8> {
+        let mut sector = vec![0u8; RAW_SECTOR_SIZE];
+        sector[1..11].fill(0xFF);
+        sector[0x0C..0x10].copy_from_slice(&[0x01, 0x23, 0x45, mode]);
+        for (i, byte) in sector[0x10..0x930].iter_mut().enumerate() {
+            *byte = (i * 7 + 3) as u8;
+        }
+        sector
+    }
+
+    #[test]
+    fn mode1_protection_covers_the_real_header() {
+        let mut sector = test_sector(1);
+        protect_mode1(&mut sector);
+        assert_eq!(
+            sector[0x810..0x814],
+            sector_edc(&sector[..0x810]).to_le_bytes()
+        );
+        assert!(sector[0x814..0x81C].iter().all(|&b| b == 0));
+        assert!(parity_holds(&sector[0x0C..]));
+    }
+
+    #[test]
+    fn mode2_form1_parity_counts_the_header_as_zero() {
+        let mut sector = test_sector(2);
+        sector[0x16] = 0;
+        protect_mode2_form1(&mut sector);
+        assert_eq!(sector[0x0C..0x10], [0x01, 0x23, 0x45, 2]);
+        assert_eq!(
+            sector[0x818..0x81C],
+            sector_edc(&sector[0x10..0x818]).to_le_bytes()
+        );
+        let mut zeroed = sector.clone();
+        zeroed[0x0C..0x10].fill(0);
+        assert!(parity_holds(&zeroed[0x0C..]));
+        assert!(!parity_holds(&sector[0x0C..]));
+    }
+
+    #[test]
+    fn mode2_form2_gets_an_edc_only() {
+        let mut sector = test_sector(2);
+        let before = sector.clone();
+        protect_mode2_form2(&mut sector);
+        assert_eq!(
+            sector[0x92C..0x930],
+            sector_edc(&sector[0x10..0x92C]).to_le_bytes()
+        );
+        assert_eq!(sector[..0x92C], before[..0x92C]);
+    }
 
     #[test]
     fn xa_file_keeps_subheaders_and_form_edc() {
