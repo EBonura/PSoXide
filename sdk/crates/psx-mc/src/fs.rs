@@ -718,17 +718,29 @@ impl<B: Block> Card<B> {
         #[cfg(feature = "compress")]
         {
             let mut remaining = stored_len;
+            // A transport error ends the input the way a short stream does, so
+            // keep it: a card pulled mid-load is not a codec fault.
+            let mut transport_error = None;
             let produced = crate::compress::decompress_from(
                 || {
                     if remaining == 0 {
                         return None;
                     }
                     remaining -= 1;
-                    cur.next_byte(&mut self.dev).ok()
+                    match cur.next_byte(&mut self.dev) {
+                        Ok(byte) => Some(byte),
+                        Err(e) => {
+                            transport_error = Some(e);
+                            None
+                        }
+                    }
                 },
                 &mut buf[..raw_len],
-            )
-            .ok_or(Error::Compression)?;
+            );
+            if let Some(e) = transport_error {
+                return Err(e);
+            }
+            let produced = produced.ok_or(Error::Compression)?;
             if produced != raw_len {
                 return Err(Error::Compression);
             }
