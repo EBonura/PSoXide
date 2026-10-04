@@ -12,10 +12,9 @@
 //! Scope: this root module is PURE logic (parsing + decompression), building
 //! and testing on the host. The CD-ROM command/DMA state machine that feeds
 //! sectors in lives in [`cd`] ([`cd::SectorReader`] + [`cd::load_chunk`]),
-//! `cfg(target_arch = "mips")`-gated, ported from hl-psx's silicon-proven
-//! `cdstream.rs` (second generation of the engine's
-//! `editor-playtest/src/cd_stream/hw.rs`). Note [`cd::SectorReader::prepare`]
-//! masks `I_MASK` to VBlank-only; read its docs before adopting.
+//! `cfg(target_arch = "mips")`-gated; the reader is `psx_io::cd::reader`, on
+//! the `Cd` token. Note [`cd::SectorReader::prepare`] sets `I_MASK` to
+//! VBlank-only until `stop` puts it back; read its docs before adopting.
 //!
 //! Pack layout (all little-endian, from `psx-iso`):
 //!

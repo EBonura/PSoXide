@@ -1,17 +1,19 @@
 //! CD-ROM drive: commands, responses, sector polling, CD-DA playback in
-//! [`audio`], XA-ADPCM music in [`xa`].
+//! [`audio`], XA-ADPCM music in [`xa`] and polled data-sector reads in
+//! [`reader`].
 //!
 //! One driver owns the controller: the [`Cd`] token. Every command and
 //! register step is a method taking `&mut Cd`, so the borrow checker sees a
 //! second driver that tries to program the controller while one is mid-command.
-//! [`xa::Player`] holds the token while it exists and gives it back with
-//! `release`.
+//! [`xa::Player`] and [`reader::SectorReader`] hold the token while they exist
+//! and give it back with `release`.
 //!
 //! The controller exposes four byte registers selected by the low two
 //! bits of the index register at [`BASE`]. Register addresses, command bytes
 //! and status bits live in [`psx_hw::cd`].
 
 pub mod audio;
+pub mod reader;
 pub mod xa;
 
 use crate::periph::Cd;
@@ -32,9 +34,17 @@ const STATUS_RESPONSE_NOT_EMPTY: u8 = 1 << 5;
 const IRQ_ACK: u8 = 3;
 const IRQ_DATA_READY: u8 = 1;
 const IRQ_COMPLETE: u8 = 2;
+const IRQ_DATA_END: u8 = 4;
 const IRQ_ERROR: u8 = 5;
 const IRQ_ACK_ALL: u8 = 0x1F;
 const IRQ_PARAM_FIFO_RESET: u8 = 0x40;
+const STATUS_DATA_FIFO_NOT_EMPTY: u8 = 1 << 6;
+/// Request register, index 0: arm the data FIFO (BFRD) so the next sector's
+/// bytes can be popped; writing 0 drops it again.
+const REQUEST_DATA: u8 = 0x80;
+/// Response bytes a sector probe discards at most. The FIFO holds 16, but a
+/// controller wedged "not empty" must not be able to spin the drain forever.
+const SECTOR_POLL_DRAIN_LIMIT: u32 = 256;
 
 /// Fixed-size command response.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -415,6 +425,90 @@ impl Cd {
     }
 }
 
+/// Register-level steps, for a driver that sequences commands itself, such as
+/// the polled [`reader::SectorReader`].
+///
+/// Each is one controller access or a short fixed run of them, and each
+/// leaves register index 0 selected, so the byte steps that follow need not
+/// select it again.
+impl Cd {
+    /// Acknowledge every controller IRQ (writing `0x5F`, which also resets
+    /// the parameter FIFO) and the CD-ROM bit of `I_STAT`.
+    pub fn acknowledge_all_and_reset_parameters(&mut self) {
+        ack_all_and_reset_parameters();
+    }
+
+    /// The controller's IRQ enable bits.
+    pub fn irq_enable_mask(&mut self) -> u8 {
+        irq_enable()
+    }
+
+    /// Set the controller's IRQ enable bits (five are defined).
+    pub fn set_irq_enable_mask(&mut self, mask: u8) {
+        set_irq_enable(mask);
+    }
+
+    /// Pop and discard up to `limit` response bytes. The FIFO is 16 bytes
+    /// deep; the bound is for a controller wedged "not empty".
+    pub fn drain_response_limited(&mut self, limit: u32) {
+        drain_response_limited(limit);
+    }
+
+    /// Whether the data FIFO holds sector bytes to pop.
+    pub fn is_data_fifo_ready(&mut self) -> bool {
+        data_fifo_ready()
+    }
+
+    /// Wait for the parameter FIFO to have room, for at most `spins` more
+    /// status reads. `false` on timeout.
+    pub fn wait_parameter_room(&mut self, spins: u32) -> bool {
+        wait_param_room_bounded(spins)
+    }
+
+    /// Empty the parameter FIFO.
+    pub fn reset_parameter_fifo(&mut self) {
+        clear_parameter_fifo();
+    }
+
+    /// Push one parameter byte. Wait for room first.
+    pub fn send_parameter_byte(&mut self, byte: u8) {
+        write_byte(REG_PARAMETER, byte);
+    }
+
+    /// Write the command byte, which starts the command.
+    pub fn send_command_byte(&mut self, byte: u8) {
+        write_byte(REG_COMMAND_RESPONSE, byte);
+    }
+
+    /// Pop one response byte.
+    pub fn read_response_byte(&mut self) -> u8 {
+        read_byte(REG_COMMAND_RESPONSE)
+    }
+
+    /// The status register: FIFO flags and the busy bit.
+    pub fn status_register(&mut self) -> u8 {
+        read_status()
+    }
+
+    /// Arm the data FIFO so the drive's buffered sector can be popped with
+    /// [`read_data_byte`](Self::read_data_byte) once
+    /// [`is_data_fifo_ready`](Self::is_data_fifo_ready) says it filled.
+    #[doc(alias = "BFRD")]
+    pub fn request_data(&mut self) {
+        write_byte(REG_REQUEST_IRQ, REQUEST_DATA);
+    }
+
+    /// Drop the data request, which resets the data FIFO.
+    pub fn clear_data_request(&mut self) {
+        write_byte(REG_REQUEST_IRQ, 0);
+    }
+
+    /// Pop one byte of sector data.
+    pub fn read_data_byte(&mut self) -> u8 {
+        read_byte(REG_PARAMETER)
+    }
+}
+
 /// The controller steps one polled command takes, so the order and the
 /// timeouts can be tested against a fake.
 trait CommandIo {
@@ -510,28 +604,19 @@ impl SectorPollIo for SectorPollMmio {
     }
     #[inline]
     fn drain(&mut self) {
-        select_index(0);
-        let mut drained = 0;
-        while read_status() & STATUS_RESPONSE_NOT_EMPTY != 0 && drained < 256 {
-            let _ = read_byte(REG_COMMAND_RESPONSE);
-            drained += 1;
-        }
+        drain_response_limited(SECTOR_POLL_DRAIN_LIMIT);
     }
     #[inline]
     fn acknowledge(&mut self, flag: u8, reset: bool) {
         if reset {
-            select_index(1);
-            write_byte(REG_REQUEST_IRQ, IRQ_ACK_ALL | IRQ_PARAM_FIFO_RESET);
-            irq::acknowledge(1 << psx_hw::irq::source::CDROM);
-            select_index(0);
+            ack_all_and_reset_parameters();
         } else {
             ack_irq(flag);
         }
     }
     #[inline]
     fn data_ready(&mut self) -> bool {
-        select_index(0);
-        read_status() & (1 << 6) != 0
+        data_fifo_ready()
     }
 }
 #[inline]
@@ -543,7 +628,7 @@ fn poll_sector(io: &mut impl SectorPollIo) -> Result<bool, SectorPollError> {
             io.acknowledge(IRQ_ACK_ALL, true);
             Err(SectorPollError)
         }
-        flag @ (IRQ_COMPLETE | IRQ_ACK | 4) => {
+        flag @ (IRQ_COMPLETE | IRQ_ACK | IRQ_DATA_END) => {
             io.drain();
             io.acknowledge(flag, false);
             Ok(false)
@@ -552,7 +637,10 @@ fn poll_sector(io: &mut impl SectorPollIo) -> Result<bool, SectorPollError> {
     }
 }
 
-const fn lba_to_bcd_msf(lba: u32) -> [u8; 3] {
+/// Data-track LBA to the absolute BCD `[minute, second, frame]` Setloc takes.
+/// LBA 0 is 00:02:00: the 150-sector lead-in puts it two seconds in. Minutes
+/// clamp at 99.
+pub const fn lba_to_bcd_msf(lba: u32) -> [u8; 3] {
     let absolute = lba.saturating_add(150);
     let raw_minute = absolute / (60 * 75);
     let minute = if raw_minute > 99 {
@@ -750,6 +838,30 @@ fn wait_param_room_bounded(mut spins: u32) -> bool {
         core::hint::spin_loop();
     }
     true
+}
+
+/// Pop and discard up to `limit` response bytes.
+fn drain_response_limited(limit: u32) {
+    select_index(0);
+    let mut drained = 0;
+    while read_status() & STATUS_RESPONSE_NOT_EMPTY != 0 && drained < limit {
+        let _ = read_byte(REG_COMMAND_RESPONSE);
+        drained += 1;
+    }
+}
+
+/// Acknowledge every controller IRQ and reset the parameter FIFO, then the
+/// CD-ROM bit of I_STAT.
+fn ack_all_and_reset_parameters() {
+    select_index(1);
+    write_byte(REG_REQUEST_IRQ, IRQ_ACK_ALL | IRQ_PARAM_FIFO_RESET);
+    irq::acknowledge(1 << psx_hw::irq::source::CDROM);
+    select_index(0);
+}
+
+fn data_fifo_ready() -> bool {
+    select_index(0);
+    read_status() & STATUS_DATA_FIFO_NOT_EMPTY != 0
 }
 
 fn clear_parameter_fifo() {

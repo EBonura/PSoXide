@@ -1,52 +1,46 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! CD-ROM sector-read state machine: stream pack chunks straight off the disc.
+//! The pack-table scan and chunk streaming, on top of the polled sector
+//! reader.
 //!
-//! This is the hardware half the crate doc used to defer to the caller. It is
-//! a faithful port of hl-psx's `cdstream.rs` `hw` module (itself a cleaned-up
-//! second generation of the engine's `editor-playtest/src/cd_stream/hw.rs`),
-//! which streams 96 maps through this exact command sequence on real silicon.
-//! The command order, poll limits, and IRQ ack ordering are deliberately
-//! identical; the comments that record silicon findings travel with the code.
-//! What changed is packaging only: the module-level `static mut` state
-//! (`CD_READ_PREPARED`, the bounce sector buffer) now lives inside
-//! [`SectorReader`], and the pack-table scan reuses the crate's pure parsing
-//! helpers ([`crate::parse_header`], [`crate::parse_entry_at`],
-//! [`crate::entry_location`]) instead of ad-hoc pointer reads.
+//! The CD controller has one driver, `psx_io::cd`: the `Cd` token, its
+//! register steps, and [`SectorReader`], the polled reader that sequences
+//! SetMode, Setloc, ReadN and Pause the way the pack loader has run on
+//! silicon. This module holds what the pack format adds: finding a chunk's
+//! table entry and copying its sectors into a caller's buffer.
 //!
-//! Everything that touches MMIO is `cfg(target_arch = "mips")`; on the host
-//! only the pure pieces (constants, BCD MSF math) compile, so `cargo test`
-//! keeps covering them.
+//! Everything that touches the drive is `cfg(target_arch = "mips")`; on the
+//! host only the constants and the [`SectorReader`] re-export compile, so
+//! `cargo test` keeps covering the pure pieces.
 //!
-//! # What `prepare()` does to the machine (read this before calling)
+//! # What loading does to the machine
 //!
-//! [`SectorReader::prepare`] takes ownership of the CD controller and, more
-//! intrusively, of the interrupt controller:
-//!
-//! * **`I_MASK` is rewritten to VBlank-only** (`irq::set_mask(1 << VBLANK)`).
-//!   Every other IRQ source (CD-ROM, DMA, SPU, timers, pads...) stops reaching
-//!   the CPU until the caller restores its own mask. The reader runs the CD
-//!   controller purely by polling its flag register, so a CD-ROM CPU IRQ with
-//!   no handler installed would otherwise be an unhandled-IRQ storm.
-//! * The latched CD-ROM `I_STAT` bit is acked and all five controller-level
-//!   IRQ enables are switched on (`0x1F`), then every pending controller IRQ
-//!   is acked (`0x5F`: flags + parameter-FIFO reset bit).
-//! * DMA channel 3 (CD-ROM) is enabled in `DPCR`.
-//! * On the first `prepare()` of this reader, pending IRQs latched by earlier
-//!   activity (e.g. the BIOS disc boot's file load) are drained. Do NOT send
-//!   Pause before the first stream instead: on real BIOS boot paths some
-//!   emulators have no active read command to pause and never acknowledge it.
-//! * `Setmode(0x80)`: double speed, 2048-byte user data sectors.
+//! [`load_chunk`] and [`find_entry`] bracket each read with
+//! [`SectorReader::prepare`] and [`SectorReader::stop`]. Between the two,
+//! `I_MASK` is VBlank-only (the reader polls the controller's own IRQ flags,
+//! so a CD-ROM CPU interrupt with no handler cannot storm). `stop` puts the
+//! previous mask back, so a caller's timer or controller interrupts survive a
+//! chunk load. The reader needs the `Cd` token: `SectorReader::with_cd`.
 //!
 //! No caching happens at this layer. hl-psx's 512-entry table cache (skip
 //! re-scanning the header on every chunk load) is a game-side optimization:
 //! keep it in the game, keyed to its own pack, where the entry count and the
 //! RAM budget are known.
 
-#[allow(unused_imports)]
-use crate::{entry_location, parse_entry_at, parse_header, PackEntry, ENTRY_BYTES, SECTOR_BYTES};
+use crate::SECTOR_BYTES;
+#[cfg(target_arch = "mips")]
+use crate::{entry_location, parse_entry_at, parse_header, PackEntry, ENTRY_BYTES};
 
-/// One CD sector's user data as DMA words (`SECTOR_BYTES / 4`).
+/// Moved to `psx_io::cd::reader`. Kept at this path for one stage so
+/// `psx_pack::cd::SectorReader` still resolves; a re-export cannot carry a
+/// deprecation.
+pub use psx_io::cd::reader::{
+    SectorReader, DIAG_CD_ERROR, DIAG_PARAM_STUCK, DIAG_SITE_READ, DIAG_TIMEOUT,
+};
+
+/// One CD sector's user data in 32-bit words (`SECTOR_BYTES / 4`).
 pub const SECTOR_WORDS: usize = SECTOR_BYTES / 4;
+
+const _: () = assert!(SECTOR_WORDS == psx_io::cd::reader::SECTOR_WORDS);
 
 /// Where `mkisopsx` / the editor's embedded Play place `WORLD.PAK`: the pack's
 /// first sector, as an absolute data-track LBA. Mirrors
@@ -54,762 +48,6 @@ pub const SECTOR_WORDS: usize = SECTOR_BYTES / 4;
 /// area so runtime LBAs never depend on the boot EXE size); a host test in
 /// this crate asserts the two constants stay equal.
 pub const WORLD_PACK_DEFAULT_LBA: u32 = 1024;
-
-// --- CD-ROM controller registers (behind the index register's low 2 bits) ---
-#[cfg(target_arch = "mips")]
-const CD_BASE: u32 = 0x1F80_1800;
-#[cfg(target_arch = "mips")]
-const CD_STATUS: u32 = CD_BASE;
-#[cfg(target_arch = "mips")]
-const CD_RESPONSE: u32 = CD_BASE + 1;
-#[cfg(target_arch = "mips")]
-const CD_PARAM: u32 = CD_BASE + 2;
-/// Same port, read side: index-0 reads pop the data FIFO one byte at a time.
-#[cfg(target_arch = "mips")]
-const CD_DATA: u32 = CD_BASE + 2;
-#[cfg(target_arch = "mips")]
-const CD_IRQ: u32 = CD_BASE + 3;
-
-#[cfg(target_arch = "mips")]
-const STATUS_RESPONSE_FIFO_NOT_EMPTY: u8 = 1 << 5;
-#[cfg(target_arch = "mips")]
-const STATUS_PARAMETER_FIFO_NOT_FULL: u8 = 1 << 4;
-#[cfg(target_arch = "mips")]
-const STATUS_DATA_FIFO_NOT_EMPTY: u8 = 1 << 6;
-
-#[cfg(target_arch = "mips")]
-const IRQ_DATA_READY: u8 = 1;
-#[cfg(target_arch = "mips")]
-const IRQ_COMPLETE: u8 = 2;
-#[cfg(target_arch = "mips")]
-const IRQ_ACK: u8 = 3;
-#[cfg(target_arch = "mips")]
-const IRQ_DATA_END: u8 = 4;
-#[cfg(target_arch = "mips")]
-const IRQ_ERROR: u8 = 5;
-
-#[cfg(target_arch = "mips")]
-const CMD_SETLOC: u8 = 0x02;
-#[cfg(target_arch = "mips")]
-const CMD_READN: u8 = 0x06;
-#[cfg(target_arch = "mips")]
-const CMD_PAUSE: u8 = 0x09;
-#[cfg(target_arch = "mips")]
-const CMD_SETMODE: u8 = 0x0E;
-#[cfg(target_arch = "mips")]
-const CMD_SETFILTER: u8 = 0x0D;
-#[cfg(target_arch = "mips")]
-const CMD_DEMUTE: u8 = 0x0C;
-#[cfg(target_arch = "mips")]
-const CMD_SEEKL: u8 = 0x15;
-#[cfg(target_arch = "mips")]
-const CD_MODE_DOUBLE_SPEED_2048: u8 = 0x80;
-
-// Poll limits, straight from hl-psx (tuned on silicon; DATA_POLL covers a
-// worst-case seek at double speed).
-#[cfg(target_arch = "mips")]
-const ACK_POLL: u32 = 16_384;
-#[cfg(target_arch = "mips")]
-const PARAM_POLL: u32 = 16_384;
-#[cfg(target_arch = "mips")]
-const DATA_POLL: u32 = 4_000_000;
-#[cfg(target_arch = "mips")]
-const CLEANUP_POLL: u32 = 16_384;
-
-#[cfg(target_arch = "mips")]
-enum Wait {
-    Matched,
-    CdError,
-    Timeout,
-}
-
-/// [`SectorReader::diagnostics`] cause byte: the drive raised INT5; the snapshot carries the
-/// error response's status and error-code bytes.
-#[cfg(target_arch = "mips")]
-pub const DIAG_CD_ERROR: u8 = 0x05;
-/// [`SectorReader::diagnostics`] cause byte: the wait spun out; the snapshot carries the raw
-/// `CD_STATUS` register and the last IRQ flag seen.
-#[cfg(target_arch = "mips")]
-pub const DIAG_TIMEOUT: u8 = 0xFF;
-/// [`SectorReader::diagnostics`] cause byte: the parameter FIFO never freed up.
-#[cfg(target_arch = "mips")]
-pub const DIAG_PARAM_STUCK: u8 = 0xFE;
-/// [`SectorReader::diagnostics`] command byte standing in for a `read_sector` wait (ReadN is
-/// streaming; no command byte is in flight).
-#[cfg(target_arch = "mips")]
-pub const DIAG_SITE_READ: u8 = 0xD0;
-
-/// Blocking, polled CD-ROM sector reader.
-///
-/// Owns the state hl-psx kept in module-level `static mut`s: the
-/// "first prepare has drained boot-time IRQs" flag and a one-sector bounce
-/// buffer that unexpected `DataReady` IRQs are DMA-drained into (the data
-/// FIFO must be emptied before the ack or the controller wedges). Create one
-/// reader and reuse it for the program's lifetime; a fresh reader merely
-/// repeats the harmless first-time drain.
-///
-/// Typical use is not these raw methods but [`load_chunk`] /
-/// [`load_chunk_decompressed`] on top. The raw sequence is:
-/// `prepare()` then `start_read(lba)` then N x `read_sector(&mut buf)` then
-/// `stop()`.
-#[cfg(target_arch = "mips")]
-pub struct SectorReader {
-    prepared: bool,
-    /// Mode byte the last prepare() set; re-sent inside every BIOS-bracket
-    /// read start, because that is what the BIOS does.
-    mode: u8,
-    discard: [u32; SECTOR_WORDS],
-    /// Last failure snapshot: `[cause, status, command, flag-or-error]`.
-    /// Written on every failure path so a caller with only a screen to
-    /// print on (the demo-disc loader) can say what the drive did.
-    diag: [u8; 4],
-}
-
-#[cfg(target_arch = "mips")]
-impl SectorReader {
-    /// A reader that has not yet drained boot-time IRQs. `const` so it can
-    /// sit in a `static`.
-    pub const fn new() -> Self {
-        SectorReader {
-            prepared: false,
-            mode: CD_MODE_DOUBLE_SPEED_2048,
-            discard: [0; SECTOR_WORDS],
-            diag: [0; 4],
-        }
-    }
-
-    /// The last failure snapshot packed big-endian:
-    /// `cause<<24 | status<<16 | command<<8 | flag_or_error`. Zero when
-    /// nothing has failed yet. Causes are the `DIAG_*` constants; for
-    /// [`DIAG_CD_ERROR`] the status/flag bytes are the INT5 response pair,
-    /// otherwise status is the raw `CD_STATUS` register at failure and the
-    /// low byte is the last IRQ flag seen.
-    pub fn diagnostics(&self) -> u32 {
-        u32::from_be_bytes(self.diag)
-    }
-
-    /// Renamed to [`SectorReader::diagnostics`].
-    #[deprecated(note = "renamed to `diagnostics`")]
-    #[inline(always)]
-    pub fn diag(&self) -> u32 {
-        self.diagnostics()
-    }
-
-    // --- register helpers (exact hl-psx port) ---
-
-    #[inline]
-    unsafe fn wr_index(&mut self, i: u8) {
-        // SAFETY: CD_STATUS (0x1F80_1800) is the controller's index/status
-        // byte register; writing the index only selects a register bank, and
-        // the caller owns the CD controller exclusively per `prepare`'s contract.
-        unsafe { psx_io::write_u8(CD_STATUS, i & 0x03) };
-    }
-
-    unsafe fn irq_flag(&mut self) -> u8 {
-        // SAFETY: index-1 read of the IRQ flag register. CD_* are the CD-ROM
-        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
-        // caller owns the CD controller exclusively per `prepare`'s contract.
-        unsafe {
-            self.wr_index(1);
-            let f = psx_io::read_u8(CD_IRQ) & 0x1F;
-            self.wr_index(0);
-            f
-        }
-    }
-
-    unsafe fn ack(&mut self, irq: u8) {
-        // SAFETY: index-1 write of the IRQ flag register plus the I_STAT CD-ROM
-        // ack. CD_* are the CD-ROM controller's byte registers at
-        // 0x1F80_1800..=0x1F80_1803 and the caller owns the CD controller
-        // exclusively per `prepare`'s contract.
-        unsafe {
-            self.wr_index(1);
-            psx_io::write_u8(CD_IRQ, irq & 0x1F);
-            psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
-            self.wr_index(0);
-        }
-    }
-
-    unsafe fn ack_all(&mut self) {
-        // SAFETY: index-1 write acking every controller IRQ plus the I_STAT CD-
-        // ROM ack. CD_* are the CD-ROM controller's byte registers at
-        // 0x1F80_1800..=0x1F80_1803 and the caller owns the CD controller
-        // exclusively per `prepare`'s contract.
-        unsafe {
-            self.wr_index(1);
-            psx_io::write_u8(CD_IRQ, 0x5F);
-            psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
-            self.wr_index(0);
-        }
-    }
-
-    unsafe fn enable_irqs(&mut self) {
-        // SAFETY: index-1 write of the IRQ enable register. CD_* are the CD-ROM
-        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
-        // caller owns the CD controller exclusively per `prepare`'s contract.
-        unsafe {
-            self.wr_index(1);
-            psx_io::write_u8(CD_PARAM, 0x1F);
-            self.wr_index(0);
-        }
-    }
-
-    unsafe fn irq_enable(&mut self) -> u8 {
-        // SAFETY: index-0 read of the IRQ enable register. CD_* are the CD-ROM
-        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
-        // caller owns the CD controller exclusively per `prepare`'s contract.
-        unsafe {
-            self.wr_index(0);
-            let e = psx_io::read_u8(CD_IRQ) & 0x1F;
-            self.wr_index(0);
-            e
-        }
-    }
-
-    unsafe fn set_irq_enable(&mut self, mask: u8) {
-        // SAFETY: index-1 write of the IRQ enable register. CD_* are the CD-ROM
-        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
-        // caller owns the CD controller exclusively per `prepare`'s contract.
-        unsafe {
-            self.wr_index(1);
-            psx_io::write_u8(CD_PARAM, mask & 0x1F);
-            self.wr_index(0);
-        }
-    }
-
-    unsafe fn drain_responses(&mut self) {
-        // The response FIFO is 16 bytes deep, so a real drain reads at most 16.
-        // Bound the loop: on heavy streaming the CD/emulator can wedge the FIFO
-        // "not-empty", and an unbounded drain spins forever (hung loader).
-        // SAFETY: index-0 status and response-FIFO reads of the CD-ROM
-        // controller registers; popping responses only discards controller
-        // output, and the caller owns the controller per `prepare`'s contract.
-        unsafe {
-            self.wr_index(0);
-            let mut guard = 0;
-            while psx_io::read_u8(CD_STATUS) & STATUS_RESPONSE_FIFO_NOT_EMPTY != 0 && guard < 256 {
-                let _ = psx_io::read_u8(CD_RESPONSE);
-                guard += 1;
-            }
-        }
-    }
-
-    unsafe fn data_fifo_ready(&mut self) -> bool {
-        // SAFETY: index-0 status read, no side effects. CD_* are the CD-ROM
-        // controller's byte registers at 0x1F80_1800..=0x1F80_1803 and the
-        // caller owns the CD controller exclusively per `prepare`'s contract.
-        unsafe {
-            self.wr_index(0);
-            psx_io::read_u8(CD_STATUS) & STATUS_DATA_FIFO_NOT_EMPTY != 0
-        }
-    }
-
-    unsafe fn wait_param_room(&mut self) -> bool {
-        let mut i = 0;
-        while i < PARAM_POLL {
-            // SAFETY: side-effect-free read of the CD-ROM status register; the
-            // caller owns the controller per `prepare`'s contract.
-            if unsafe { psx_io::read_u8(CD_STATUS) } & STATUS_PARAMETER_FIFO_NOT_FULL != 0 {
-                return true;
-            }
-            i += 1;
-        }
-        false
-    }
-
-    /// Move one sector from the drive's buffer into RAM.
-    ///
-    /// This used to be a chopping-burst DMA on channel 3 (the hl-psx
-    /// recipe). The CL1/CL2 silicon probes convicted that path on real
-    /// hardware: the transfer is a state-dependent lottery, and the
-    /// channel can latch its start bit and stay busy forever while
-    /// moving nothing, which read as all-zero sectors everywhere the
-    /// reader is used. PIO is the recipe the same probes proved
-    /// byte-perfect on silicon: arm BFRD, wait until the data FIFO
-    /// actually reports data, then pop all 2048 bytes. ~1.3 ms slower
-    /// per sector than a working DMA, which no SectorReader user
-    /// notices, and it cannot wedge the DMA controller.
-    unsafe fn dma_read_sector(&mut self, buffer: *mut u32) {
-        // SAFETY: index-0 Request-register write arming BFRD on the CD-ROM
-        // controller; the caller owns the controller per `prepare`'s contract.
-        unsafe {
-            // Arm the data transfer (BFRD).
-            self.wr_index(0);
-            psx_io::write_u8(CD_IRQ, 0x80);
-            self.wr_index(0);
-        }
-        // The FIFO fills shortly after BFRD; the bound covers a slow
-        // drive without letting a dead one hang the caller.
-        let mut i = 0;
-        // SAFETY: status poll under the same controller ownership.
-        while !unsafe { self.data_fifo_ready() } && i < DATA_POLL {
-            i += 1;
-        }
-        for word_index in 0..SECTOR_WORDS {
-            // SAFETY: CD_DATA is the data-FIFO pop register; the reads only
-            // drain controller data, under the caller's controller ownership.
-            let b0 = unsafe { psx_io::read_u8(CD_DATA) } as u32;
-            // SAFETY: as above.
-            let b1 = unsafe { psx_io::read_u8(CD_DATA) } as u32;
-            // SAFETY: as above.
-            let b2 = unsafe { psx_io::read_u8(CD_DATA) } as u32;
-            // SAFETY: as above.
-            let b3 = unsafe { psx_io::read_u8(CD_DATA) } as u32;
-            // SAFETY: every caller passes a pointer to a live, exclusively
-            // borrowed `[u32; SECTOR_WORDS]` (`self.discard` or the
-            // `read_sector`/`try_read_sector` buffer), so it is word-aligned
-            // and `word_index < SECTOR_WORDS` keeps the write in bounds.
-            unsafe {
-                buffer
-                    .add(word_index)
-                    .write_volatile((b3 << 24) | (b2 << 16) | (b1 << 8) | b0)
-            };
-        }
-    }
-
-    /// Clear an IRQ we were not waiting for. A stale `DataReady` must have its
-    /// sector DMA-drained (into the reader's bounce buffer) before the ack,
-    /// or the data FIFO stays occupied and later reads misalign.
-    unsafe fn ack_unexpected(&mut self, flag: u8) {
-        // SAFETY: controller register helpers under the caller's exclusive
-        // ownership; `discard` points at this reader's own
-        // `[u32; SECTOR_WORDS]`, which is exactly what `dma_read_sector` fills.
-        unsafe {
-            match flag {
-                IRQ_DATA_READY => {
-                    let discard = self.discard.as_mut_ptr();
-                    self.dma_read_sector(discard);
-                    self.drain_responses();
-                    self.ack(IRQ_DATA_READY);
-                }
-                IRQ_COMPLETE | IRQ_ACK | IRQ_DATA_END => {
-                    self.drain_responses();
-                    self.ack(flag);
-                }
-                _ => {
-                    self.drain_responses();
-                    self.ack_all();
-                }
-            }
-        }
-    }
-
-    unsafe fn wait_irq(&mut self, expected: u8, limit: u32) -> Wait {
-        let mut i = 0;
-        while i < limit {
-            // SAFETY: flag read under the caller's controller ownership.
-            let flag = unsafe { self.irq_flag() };
-            if flag == expected {
-                return Wait::Matched;
-            }
-            // Some drives raise the data FIFO before (or without) latching the
-            // DataReady flag; treat visible data as a match.
-            // SAFETY: status read under the caller's controller ownership.
-            if expected == IRQ_DATA_READY && unsafe { self.data_fifo_ready() } {
-                return Wait::Matched;
-            }
-            if flag == IRQ_ERROR {
-                return Wait::CdError;
-            }
-            if flag != 0 {
-                // SAFETY: same controller ownership as the polls above.
-                unsafe { self.ack_unexpected(flag) };
-            }
-            i += 1;
-        }
-        Wait::Timeout
-    }
-
-    /// Dispatch one command with controller IRQs masked and every FIFO in a
-    /// known state, then wait for `expected` and ack it. The mask/ack ordering
-    /// is load-bearing on silicon; do not reorder.
-    unsafe fn send_command(
-        &mut self,
-        command: u8,
-        params: &[u8],
-        expected: u8,
-        limit: u32,
-    ) -> bool {
-        // SAFETY: CD-ROM register accesses and helpers only; the caller owns
-        // the controller exclusively per `prepare`'s contract. No Rust memory
-        // is touched beyond `self.diag` through `&mut self`.
-        unsafe {
-            let saved = self.irq_enable();
-            self.set_irq_enable(0);
-            self.ack_all();
-            self.wr_index(0);
-            self.drain_responses();
-            // Reset the parameter FIFO (0x40) before queueing parameters.
-            self.wr_index(1);
-            psx_io::write_u8(CD_IRQ, 0x40);
-            self.wr_index(0);
-            for &p in params {
-                if !self.wait_param_room() {
-                    self.wr_index(0);
-                    self.diag = [DIAG_PARAM_STUCK, psx_io::read_u8(CD_STATUS), command, 0];
-                    self.set_irq_enable(saved);
-                    self.wr_index(0);
-                    return false;
-                }
-                psx_io::write_u8(CD_PARAM, p);
-            }
-            psx_io::write_u8(CD_RESPONSE, command);
-            let ok = match self.wait_irq(expected, limit) {
-                Wait::Matched => {
-                    self.drain_responses();
-                    self.ack(expected);
-                    true
-                }
-                Wait::CdError => {
-                    // Capture the INT5 response pair (status, error code)
-                    // before the drain throws it away.
-                    self.wr_index(0);
-                    let r0 = psx_io::read_u8(CD_RESPONSE);
-                    let r1 = psx_io::read_u8(CD_RESPONSE);
-                    self.diag = [DIAG_CD_ERROR, r0, command, r1];
-                    self.drain_responses();
-                    self.ack_all();
-                    false
-                }
-                Wait::Timeout => {
-                    self.wr_index(0);
-                    let status = psx_io::read_u8(CD_STATUS);
-                    let flag = self.irq_flag();
-                    self.diag = [DIAG_TIMEOUT, status, command, flag];
-                    false
-                }
-            };
-            self.set_irq_enable(saved);
-            self.wr_index(0);
-            ok
-        }
-    }
-
-    // --- public state machine, mirroring hl-psx hw::{prepare,start_read,read_sector,stop} ---
-
-    /// Take over the CD controller for polled data reads and set
-    /// double-speed / 2048-byte-sector mode.
-    ///
-    /// **Loud warning:** this rewrites `I_MASK` to VBlank-only and leaves it
-    /// that way; see the module docs for the full list of side effects. Call
-    /// it (directly or via [`load_chunk`]) only from code that owns interrupt
-    /// policy, i.e. a polling main loop, not from an IRQ handler.
-    ///
-    /// Returns `false` when the Setmode handshake times out (no drive, tray
-    /// open, dead controller); the reader is safe to retry.
-    ///
-    /// # Safety
-    /// MMIO access; single-threaded use only (one live `SectorReader`, no
-    /// concurrent CD/DMA-ch3 users, no CD-ROM IRQ handler installed). The
-    /// caller accepts the global `I_MASK` rewrite.
-    pub unsafe fn prepare(&mut self) -> bool {
-        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
-        unsafe { self.prepare_with_mode(CD_MODE_DOUBLE_SPEED_2048) }
-    }
-
-    /// [`prepare`](Self::prepare) at single speed: half the throughput,
-    /// twice the per-sector margin. The demo-disc chain loader measured
-    /// silent payload corruption over hundreds of back-to-back
-    /// double-speed sectors on the project console (2026-08-01, the
-    /// loader's RAM checksum against the disc build); the header sector
-    /// alone always read clean, so the failure scales with sustained
-    /// rate, and a loader that takes three extra seconds beats one that
-    /// jumps into a corrupt payload.
-    ///
-    /// # Safety
-    /// Same contract as [`prepare`](Self::prepare).
-    pub unsafe fn prepare_single_speed(&mut self) -> bool {
-        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
-        unsafe { self.prepare_with_mode(0x00) }
-    }
-
-    /// [`prepare`](Self::prepare) with an explicit Setmode byte, for
-    /// streams that need more than plain data: e.g. `0x80 | 0x40 | 0x08`
-    /// (double speed, XA-ADPCM on, file/channel filter) plays interleaved
-    /// XA audio through the SPU while video sectors still arrive as data.
-    ///
-    /// # Safety
-    /// Same contract as [`prepare`](Self::prepare).
-    pub unsafe fn prepare_mode(&mut self, mode: u8) -> bool {
-        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
-        unsafe { self.prepare_with_mode(mode) }
-    }
-
-    /// Setfilter: the XA file and channel whose audio sectors the drive
-    /// plays when the mode has the filter bit set.
-    ///
-    /// # Safety
-    /// Same contract as [`prepare`](Self::prepare).
-    pub unsafe fn set_filter(&mut self, file: u8, channel: u8) -> bool {
-        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
-        unsafe { self.send_command(CMD_SETFILTER, &[file, channel], IRQ_ACK, ACK_POLL) }
-    }
-
-    /// Unmute the drive: let CD-DA and XA-ADPCM reach the SPU. The drive
-    /// stays muted across programs, so a stream that plays XA audio must not
-    /// assume the last tenant left it unmuted.
-    ///
-    /// # Safety
-    /// Same contract as [`prepare`](Self::prepare).
-    #[doc(alias = "Demute")]
-    pub unsafe fn unmute(&mut self) -> bool {
-        // SAFETY: the caller upholds `prepare`'s `# Safety` contract.
-        unsafe { self.send_command(CMD_DEMUTE, &[], IRQ_ACK, ACK_POLL) }
-    }
-
-    /// Renamed to [`SectorReader::unmute`].
-    ///
-    /// # Safety
-    /// See [`SectorReader::unmute`].
-    #[deprecated(note = "renamed to `unmute`")]
-    #[inline(always)]
-    pub unsafe fn demute(&mut self) -> bool {
-        // SAFETY: same contract as the renamed function.
-        unsafe { self.unmute() }
-    }
-
-    unsafe fn prepare_with_mode(&mut self, mode: u8) -> bool {
-        self.mode = mode;
-        // SAFETY: interrupt-controller, DPCR and CD-ROM register accesses
-        // only; the public callers forward `prepare`'s contract (exclusive
-        // single-threaded controller use, caller accepts the I_MASK rewrite).
-        unsafe {
-            // Keep CD-ROM at the controller level and poll its IRQ flags
-            // manually, so DataReady cannot enter an unhandled CPU IRQ storm.
-            psx_io::irq::set_mask(1 << psx_hw::irq::source::VBLANK);
-            psx_io::irq::acknowledge(1 << psx_hw::irq::source::CDROM);
-            self.enable_irqs();
-            self.ack_all();
-            psx_io::dma::enable_channel(psx_io::dma::Channel::Cd);
-            if !self.prepared {
-                // A BIOS disc boot has already finished its file load. Do not
-                // send Pause before our first stream; on real BIOS boot paths
-                // some emulators have no active read command to pause and
-                // never acknowledge it. Drain any already-latched data/ack
-                // instead.
-                let mut i = 0;
-                while i < 16 {
-                    let f = self.irq_flag();
-                    if f == 0 {
-                        break;
-                    }
-                    self.ack_unexpected(f);
-                    i += 1;
-                }
-                self.ack_all();
-                self.prepared = true;
-            }
-            // Purge whatever the previous tenant left in the data FIFO by
-            // dropping BFRD (Request register, index 0: 0 = reset the data
-            // FIFO). The demo-disc chain loader's header read came back
-            // with shifted bytes on silicon (magic mismatch, identical
-            // every attempt) after the menu's earlier disc reads; leftover
-            // FIFO bytes are the only state that survives the IRQ drain
-            // above, and an emulator FIFO never holds any, which is why
-            // this cannot reproduce headless.
-            self.wr_index(0);
-            psx_io::write_u8(CD_IRQ, 0x00);
-            self.send_command(CMD_SETMODE, &[mode], IRQ_ACK, ACK_POLL)
-        }
-    }
-
-    /// Seek to `lba` (Setloc with BCD MSF) and start a ReadN stream.
-    /// [`prepare`](Self::prepare) must have succeeded first.
-    ///
-    /// `lba` is relative to the start of this program's own disc image; on a
-    /// multi-program disc [`psx_io::disc_base`] shifts it to where that image
-    /// actually landed.
-    ///
-    /// # Safety
-    /// Same contract as [`prepare`](Self::prepare).
-    pub unsafe fn start_read(&mut self, lba: u32) -> bool {
-        // SAFETY: CD-ROM command helpers only; the caller upholds
-        // `prepare`'s `# Safety` contract.
-        unsafe {
-            let (m, s, f) = lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba));
-            if !self.send_command(CMD_SETLOC, &[m, s, f], IRQ_ACK, ACK_POLL) {
-                return false;
-            }
-            if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_POLL) {
-                return false;
-            }
-            self.enable_irqs();
-            true
-        }
-    }
-
-    /// [`start_read`](Self::start_read) the way the real BIOS starts one:
-    /// SetLoc, then an EXPLICIT SeekL waited to completion, then ReadN.
-    ///
-    /// Traced from a real SCPH-1001 boot (2026-08-01, emulator CD command
-    /// log): the BIOS brackets every read -- even a single sector -- as
-    /// SetLoc/SeekL/SetMode/ReadN/Pause. The implicit seek a bare
-    /// SetLoc+ReadN performs starts data flowing while the mech is still
-    /// settling; the same console that corrupts our sustained implicit-seek
-    /// streams loads 1.4 MB EXEs through the BIOS bracket without fault.
-    ///
-    /// # Safety
-    /// Same contract as [`prepare`](Self::prepare).
-    pub unsafe fn start_read_seek_first(&mut self, lba: u32, seek_poll: u32) -> bool {
-        // SAFETY: CD-ROM command helpers only; the caller upholds
-        // `prepare`'s `# Safety` contract.
-        unsafe {
-            let (m, s, f) = lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba));
-            if !self.send_command(CMD_SETLOC, &[m, s, f], IRQ_ACK, ACK_POLL) {
-                return false;
-            }
-            // SeekL acks (INT3) then completes (INT2) once the head has
-            // settled on the target; only then is ReadN issued, so the
-            // drive never streams during mech settle.
-            if !self.send_command(CMD_SEEKL, &[], IRQ_ACK, ACK_POLL) {
-                return false;
-            }
-            match self.wait_irq(IRQ_COMPLETE, seek_poll) {
-                Wait::Matched => {}
-                Wait::CdError | Wait::Timeout => return false,
-            }
-            self.ack(IRQ_COMPLETE);
-            // The BIOS re-sends SetMode inside every bracket, between the
-            // seek completion and ReadN; every one of its ReadN commands in
-            // the trace is prefixed SetLoc,SeekL,SetMode. Match it exactly.
-            if !self.send_command(CMD_SETMODE, &[self.mode], IRQ_ACK, ACK_POLL) {
-                return false;
-            }
-            if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_POLL) {
-                return false;
-            }
-            self.enable_irqs();
-            true
-        }
-    }
-
-    /// Block until the next sector of the running ReadN stream is ready, then
-    /// DMA its 2048 bytes into `buffer`. `false` on drive error or timeout
-    /// (the stream is acked/cleaned up; follow with [`stop`](Self::stop)).
-    ///
-    /// # Safety
-    /// Same contract as [`prepare`](Self::prepare); a read must be running
-    /// (successful [`start_read`](Self::start_read)).
-    pub unsafe fn read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> bool {
-        // SAFETY: CD-ROM register helpers under the caller's `prepare`
-        // contract; `buffer` is an exclusive `[u32; SECTOR_WORDS]`, exactly
-        // the span `dma_read_sector` writes.
-        unsafe {
-            match self.wait_irq(IRQ_DATA_READY, DATA_POLL) {
-                Wait::Matched => {}
-                Wait::CdError => {
-                    self.wr_index(0);
-                    let r0 = psx_io::read_u8(CD_RESPONSE);
-                    let r1 = psx_io::read_u8(CD_RESPONSE);
-                    self.diag = [DIAG_CD_ERROR, r0, DIAG_SITE_READ, r1];
-                    self.drain_responses();
-                    self.ack_all();
-                    return false;
-                }
-                Wait::Timeout => {
-                    self.wr_index(0);
-                    let status = psx_io::read_u8(CD_STATUS);
-                    let flag = self.irq_flag();
-                    self.diag = [DIAG_TIMEOUT, status, DIAG_SITE_READ, flag];
-                    self.drain_responses();
-                    self.ack_all();
-                    return false;
-                }
-            }
-            self.dma_read_sector(buffer.as_mut_ptr());
-            self.drain_responses();
-            self.ack(IRQ_DATA_READY);
-            true
-        }
-    }
-
-    /// Non-blocking [`read_sector`](Self::read_sector): check the controller
-    /// once and, if the next sector of the running ReadN stream is ready,
-    /// pop its 2048 bytes into `buffer` and ack it.
-    ///
-    /// `Ok(true)` means `buffer` holds a new sector, `Ok(false)` that none
-    /// has arrived yet. `Err(())` is a drive error; the stream is acked and
-    /// the caller should [`stop`](Self::stop) (the diag snapshot is set as
-    /// for `read_sector`).
-    ///
-    /// Streaming consumers (FMV) call this between units of other work so
-    /// the drive never runs ahead of the CPU by more than the controller can
-    /// hold. At double speed a sector lands every ~6.7 ms.
-    ///
-    /// # Safety
-    /// Same contract as [`read_sector`](Self::read_sector).
-    #[allow(clippy::result_unit_err)]
-    pub unsafe fn try_read_sector(&mut self, buffer: &mut [u32; SECTOR_WORDS]) -> Result<bool, ()> {
-        // SAFETY: CD-ROM register helpers under the caller's `prepare`
-        // contract; `buffer` is an exclusive `[u32; SECTOR_WORDS]`, exactly
-        // the span `dma_read_sector` writes.
-        unsafe {
-            let flag = self.irq_flag();
-            if flag == IRQ_ERROR {
-                self.wr_index(0);
-                let r0 = psx_io::read_u8(CD_RESPONSE);
-                let r1 = psx_io::read_u8(CD_RESPONSE);
-                self.diag = [DIAG_CD_ERROR, r0, DIAG_SITE_READ, r1];
-                self.drain_responses();
-                self.ack_all();
-                return Err(());
-            }
-            if flag != IRQ_DATA_READY && !self.data_fifo_ready() {
-                if flag != 0 {
-                    self.ack_unexpected(flag);
-                }
-                return Ok(false);
-            }
-            self.dma_read_sector(buffer.as_mut_ptr());
-            self.drain_responses();
-            self.ack(IRQ_DATA_READY);
-            Ok(true)
-        }
-    }
-
-    /// Pause the ReadN stream (keeps the drive spun up) and ack everything.
-    /// Safe to call after failures; it tolerates a drive with no active read.
-    ///
-    /// # Safety
-    /// Same contract as [`prepare`](Self::prepare).
-    pub unsafe fn stop(&mut self) {
-        // SAFETY: CD-ROM command helpers only; the caller upholds
-        // `prepare`'s `# Safety` contract.
-        unsafe {
-            if self.send_command(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL) {
-                let _ = self.wait_irq(IRQ_COMPLETE, CLEANUP_POLL);
-                self.drain_responses();
-                self.ack(IRQ_COMPLETE);
-            }
-            self.ack_all();
-        }
-    }
-}
-
-#[cfg(target_arch = "mips")]
-impl Default for SectorReader {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Binary `0..=99` to BCD, as CD-ROM commands expect.
-#[cfg(any(target_arch = "mips", test))]
-const fn bin_to_bcd(v: u8) -> u8 {
-    ((v / 10) << 4) | (v % 10)
-}
-
-/// Data-track LBA to the absolute BCD `(minute, second, frame)` triple Setloc
-/// takes. LBA 0 is 00:02:00 (the 150-sector / 2-second lead-in offset).
-#[cfg(any(target_arch = "mips", test))]
-fn lba_to_bcd_msf(lba: u32) -> (u8, u8, u8) {
-    let abs = lba.saturating_add(150);
-    (
-        bin_to_bcd((abs / (60 * 75)) as u8),
-        bin_to_bcd(((abs / 75) % 60) as u8),
-        bin_to_bcd((abs % 75) as u8),
-    )
-}
 
 /// The sector currently in `scratch`, as bytes (little-endian DMA words are
 /// exactly the on-disc byte order).
@@ -834,20 +72,16 @@ fn load_header_sector(
     if *loaded == sector {
         return true;
     }
-    // SAFETY: single-threaded polled MMIO; see SectorReader::prepare's contract,
-    // which load_chunk/find_entry re-state to their callers.
-    unsafe {
-        if !rd.prepare() || !rd.start_read(pack_lba + sector) {
-            rd.stop();
-            return false;
-        }
-        let ok = rd.read_sector(scratch);
+    if !rd.prepare() || !rd.start_read(pack_lba + sector) {
         rd.stop();
-        if ok {
-            *loaded = sector;
-        }
-        ok
+        return false;
     }
+    let ok = rd.read_sector(scratch);
+    rd.stop();
+    if ok {
+        *loaded = sector;
+    }
+    ok
 }
 
 /// Read table entry `index` while scanning, stitching an entry that straddles
@@ -892,8 +126,8 @@ fn read_entry(
 /// (including `byte_size` and the FNV `checksum` the writer stored).
 ///
 /// Reads the header/table sectors through `scratch`, one at a time. `None`
-/// on read failure, bad magic/version, or id not present. Inherits
-/// [`SectorReader::prepare`]'s side effects (VBlank-only `I_MASK`).
+/// on read failure, bad magic/version, or id not present. `I_MASK` is
+/// VBlank-only while it reads and restored when it returns.
 #[cfg(target_arch = "mips")]
 pub fn find_entry(
     rd: &mut SectorReader,
@@ -936,9 +170,9 @@ pub fn find_entry(
 /// Reads only as many sectors as `byte_size` needs: the table's padded
 /// `sector_count` could be garbage and looping on it would hang the loader.
 ///
-/// Inherits [`SectorReader::prepare`]'s side effects: after this call
-/// `I_MASK` is VBlank-only. No caching; scan cost is linear in the table, so
-/// games loading many chunks should keep their own id table (see module doc).
+/// `I_MASK` is VBlank-only while the reads run and back to what it was when
+/// this returns. No caching; scan cost is linear in the table, so games
+/// loading many chunks should keep their own id table (see module doc).
 #[cfg(target_arch = "mips")]
 pub fn load_chunk(
     rd: &mut SectorReader,
@@ -952,34 +186,35 @@ pub fn load_chunk(
     if byte_size > dst.len() * 4 {
         return None;
     }
-    // SAFETY: same single-threaded polled-MMIO contract as find_entry above;
-    // the byte copies stay inside dst (byte_size checked) and scratch.
-    unsafe {
-        if !rd.prepare() || !rd.start_read(pack_lba + entry.sector_offset) {
+    if !rd.prepare() || !rd.start_read(pack_lba + entry.sector_offset) {
+        rd.stop();
+        return None;
+    }
+    let dst_ptr = dst.as_mut_ptr() as *mut u8;
+    let needed = byte_size.div_ceil(SECTOR_BYTES);
+    let mut s = 0usize;
+    while s < needed {
+        if !rd.read_sector(scratch) {
             rd.stop();
             return None;
         }
-        let dst_ptr = dst.as_mut_ptr() as *mut u8;
-        let needed = byte_size.div_ceil(SECTOR_BYTES);
-        let mut s = 0usize;
-        while s < needed {
-            if !rd.read_sector(scratch) {
-                rd.stop();
-                return None;
-            }
-            let off = s * SECTOR_BYTES;
-            let copy = byte_size.saturating_sub(off).min(SECTOR_BYTES);
-            if copy > 0 {
+        let off = s * SECTOR_BYTES;
+        let copy = byte_size.saturating_sub(off).min(SECTOR_BYTES);
+        if copy > 0 {
+            // SAFETY: `off + copy <= byte_size <= dst.len() * 4` (checked
+            // above), so the write stays inside `dst`; `scratch` is a whole
+            // sector and `copy <= SECTOR_BYTES`; the two are distinct borrows.
+            unsafe {
                 core::ptr::copy_nonoverlapping(
                     scratch.as_ptr() as *const u8,
                     dst_ptr.add(off),
                     copy,
                 );
             }
-            s += 1;
         }
-        rd.stop();
+        s += 1;
     }
+    rd.stop();
     Some(byte_size)
 }
 
@@ -1010,15 +245,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn msf_matches_the_disc_math() {
-        // LBA 0 = absolute 00:02:00 (150-sector lead-in).
-        assert_eq!(lba_to_bcd_msf(0), (0x00, 0x02, 0x00));
-        // The default pack LBA: 1024 + 150 = 1174 = 15 * 75 + 49.
-        assert_eq!(lba_to_bcd_msf(WORLD_PACK_DEFAULT_LBA), (0x00, 0x15, 0x49));
-        // One full minute of sectors: 4500 - 150 = LBA 4350 -> 01:00:00.
-        assert_eq!(lba_to_bcd_msf(4350), (0x01, 0x00, 0x00));
-        // BCD digits, not binary: 59 seconds encodes as 0x59.
-        assert_eq!(lba_to_bcd_msf(4350 - 75), (0x00, 0x59, 0x00));
+    fn the_default_pack_lba_seeks_where_the_disc_math_says() {
+        // The default pack LBA: 1024 + 150 lead-in sectors = 1174 = 15 * 75 + 49,
+        // so Setloc gets 00:15:49. (The BCD arithmetic itself is psx-io's, and
+        // tested there.)
+        assert_eq!(
+            psx_io::cd::lba_to_bcd_msf(WORLD_PACK_DEFAULT_LBA),
+            [0x00, 0x15, 0x49]
+        );
     }
 
     #[test]
