@@ -144,6 +144,11 @@
       "shows": "CD-DA audio tracks."
     },
     {
+      "name": "hello-xa",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-xa",
+      "shows": "XA-ADPCM music: four generated songs interleaved in one file, played through `psx_io::cd::xa` with a pad-driven switch (`make hello-xa-disc`)."
+    },
+    {
       "name": "hello-spstack",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-spstack",
       "shows": "A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `stack-guard` (`tools/psoxide-hazard`) proves it fits."
@@ -157,6 +162,11 @@
       "name": "hello-present",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-present",
       "shows": "psx-rt's queued display flip, held until the frame's closing GP0(1Fh) sets GPUSTAT bit 24 (`arm_draw_done`, `end_with_draw_done`, `signal_draw_done`)."
+    },
+    {
+      "name": "hello-present-queue",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-present-queue",
+      "shows": "psx-rt's VBlank-kicked present queue (`present-queue` feature): whole frames published as one chain each, preamble and HUD recorded with `psx_io::gpu::start_recording_raw`, kicked and flipped by the VBlank handler."
     },
     {
       "name": "hello-fmv",
@@ -182,6 +192,11 @@
       "name": "hello-i64probe",
       "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-i64probe",
       "shows": "Runs software 64-bit multiply/divide/modulo on the target and checks the results; covers psx-rt's `__divdi3`/`__moddi3` overrides."
+    },
+    {
+      "name": "hello-icache",
+      "url": "https://github.com/EBonura/PSoXide/tree/main/sdk/examples/hello-icache",
+      "shows": "Rewrites a function in cached RAM and checks that `psx_rt::cache::flush_instruction_cache` makes the CPU run the new code; prints `ICACHE PASS`, `INCONCLUSIVE` (nothing was stale) or `FAIL`."
     },
     {
       "name": "cdda-read-contention",
