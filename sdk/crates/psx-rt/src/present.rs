@@ -55,6 +55,7 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use crate::interrupts::{
     __psx_rt_present_head, __psx_rt_present_kick_count, __psx_rt_present_skip_count,
 };
+use crate::wait;
 
 /// Edges a published frame may wait before the CPU treats the chain ahead of
 /// it as stalled (its walk wedged, or it lost its GP0(1Fh)).
@@ -144,48 +145,71 @@ pub unsafe fn publish_raw(head: *const u32, display: u32) {
 /// Block until the handler has kicked the published frame. Spins only when
 /// the CPU is a whole frame ahead of presentation. Not inlined, so a profile
 /// can tell the spin from work.
+///
+/// Bounded: with no psx-rt handler running (the counter never installed, or
+/// interrupts masked) nothing kicks the frame and the VBlank stall test never
+/// fires, so the wait gives up after a few million reads and asserts in a
+/// debug build.
 #[inline(never)]
 pub fn wait_slot_empty() {
     let start = crate::interrupts::vblank_count();
-    while is_slot_full() {
-        if crate::interrupts::vblank_count().wrapping_sub(start) >= STALL_VBLANKS {
-            release_stalled_slot();
-        }
-    }
+    let done = wait::wait_while(
+        is_slot_full,
+        || is_stalled(start),
+        release_stalled_slot,
+        wait::SPIN_LIMIT,
+    );
+    debug_assert!(
+        done,
+        "present: the slot never emptied; is the VBlank handler installed?"
+    );
 }
 
 /// Wait until memory used by the frame before the most recently published
 /// one is no longer walked. Once the published frame has been kicked (slot
 /// empty), the handler saw the older frame's GP0(1Fh), so its walk had
 /// ended; while it is still queued, the only walk that can be running is the
-/// older frame's.
+/// older frame's. Bounded like [`wait_slot_empty`].
 #[inline(never)]
 pub fn wait_arena_free() {
     let start = crate::interrupts::vblank_count();
-    while is_slot_full() && is_channel_busy() {
-        if crate::interrupts::vblank_count().wrapping_sub(start) >= STALL_VBLANKS {
-            release_stalled_slot();
-        }
-    }
+    let done = wait::wait_while(
+        || is_slot_full() && is_channel_busy(),
+        || is_stalled(start),
+        release_stalled_slot,
+        wait::SPIN_LIMIT,
+    );
+    debug_assert!(
+        done,
+        "present: the arena never freed; is the VBlank handler installed?"
+    );
     // Keep the rebuild's stores after the completion read.
     compiler_barrier();
 }
 
 /// Wait until the GPU is completely idle: nothing queued, no walk running and
 /// the last chain's drawing done. The direct-access guard runs this before
-/// the first direct GPU access after a publish.
+/// the first direct GPU access after a publish. Bounded like
+/// [`wait_slot_empty`]; a walk it gives up on is stopped by hand.
 #[doc(alias = "DrawSync")]
 #[inline(never)]
 pub fn wait_idle() {
     wait_slot_empty();
     let start = crate::interrupts::vblank_count();
+    let mut spins = 0u32;
     while is_channel_busy() || !is_draw_done() {
-        if crate::interrupts::vblank_count().wrapping_sub(start) >= STALL_VBLANKS {
+        spins += 1;
+        if is_stalled(start) || spins >= wait::SPIN_LIMIT {
             stop_walk_and_raise();
             break;
         }
     }
     compiler_barrier();
+}
+
+/// True once [`STALL_VBLANKS`] edges have passed since `start`.
+fn is_stalled(start: u32) -> bool {
+    crate::interrupts::vblank_count().wrapping_sub(start) >= STALL_VBLANKS
 }
 
 /// The published frame has waited [`STALL_VBLANKS`] edges for the chain
