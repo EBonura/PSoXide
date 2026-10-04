@@ -158,6 +158,10 @@ pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: bss ok");
 
+    // Before any game code can replace the exception vector: `wait_vblank` installs lazily only
+    // over the word found here.
+    interrupts::record_boot_vector();
+
     // After the zeroing, not before: the bases live in statics.
     // SAFETY: once, at boot, before anything can observe them.
     unsafe { psx_io::disc_base::install(a0, a1, a2) };
