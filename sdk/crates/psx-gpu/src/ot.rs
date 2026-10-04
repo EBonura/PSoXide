@@ -998,6 +998,15 @@ impl Iterator for Packets<'_> {
     }
 }
 
+/// Shows the slot count, not the `N` link words.
+impl<const N: usize> core::fmt::Debug for OrderingTable<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OrderingTable")
+            .field("slots", &N)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<const N: usize> Default for OrderingTable<N> {
     fn default() -> Self {
         Self::new()
