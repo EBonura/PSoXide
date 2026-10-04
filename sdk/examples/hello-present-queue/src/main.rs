@@ -25,7 +25,7 @@ use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{FillRect, TriGouraud};
 use psx_gpu::Gpu;
-use psx_io::gpu::{begin_recording_raw, end_recording};
+use psx_io::gpu::start_recording_raw;
 use psx_rt::{interrupts, present, tty};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
@@ -134,14 +134,14 @@ fn main() {
 
         // SAFETY: `hud` is static, and is not written again until
         // `wait_arena_free` says its walk has ended.
-        unsafe { begin_recording_raw(hud.as_mut_ptr(), hud.len()) };
+        let recording = unsafe { start_recording_raw(hud.as_mut_ptr(), hud.len()) };
         gpu.draw(&FillRect::new(
             (0, fb.draw_origin().1 + 200),
             (320, 40),
             (20, 24, 60),
         ));
         font.draw_text(8, 212, "QUEUED HUD", WHITE);
-        match end_recording() {
+        match recording.end() {
             // SAFETY: the recording and the static GP0(1Fh) node live as long
             // as `hud`; the table's slot 0 is still empty.
             Ok(Some(recording)) => unsafe {
@@ -155,10 +155,10 @@ fn main() {
         }
 
         // SAFETY: as for `hud`.
-        unsafe { begin_recording_raw(preamble.as_mut_ptr(), preamble.len()) };
+        let recording = unsafe { start_recording_raw(preamble.as_mut_ptr(), preamble.len()) };
         fb.apply_draw_target(&mut gpu);
         fb.clear(&mut gpu, (8, 24, 8));
-        let Ok(Some(preamble)) = end_recording() else {
+        let Ok(Some(preamble)) = recording.end() else {
             overflows += 1;
             continue;
         };

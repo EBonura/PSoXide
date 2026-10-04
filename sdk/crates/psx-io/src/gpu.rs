@@ -9,10 +9,11 @@ use psx_hw::gpu::{GpuStat, GP0, GP1, GPUREAD, GPUSTAT};
 #[cfg(any(feature = "present-queue", test))]
 mod handoff;
 #[cfg(any(feature = "present-queue", test))]
+#[allow(deprecated)] // re-exports the deprecated forwarders with the rest
 pub use handoff::{
     arm_direct_access_guard, begin_recording_raw, end_recording, is_recording,
-    run_direct_access_guard, set_direct_access_guard, CommandRecording, RecordingOverflow,
-    RECORDING_NODE_WORDS,
+    run_direct_access_guard, set_direct_access_guard, start_recording_raw, ActiveRecording,
+    CommandRecording, RecordingOverflow, RECORDING_NODE_WORDS,
 };
 #[cfg(any(feature = "present-queue", test))]
 pub use handoff::{pause_recording, RecordingPause};
