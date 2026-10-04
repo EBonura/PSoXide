@@ -28,3 +28,19 @@ its own two-copy journal already covers the torn-write case, and it now
 also survives a refused overwrite), hl-psx `game/src/save.rs` (1), psxcel
 `game/src/main.rs` (1 `write_compressed`), PSoXide-editor
 `engine/examples/editor-playtest` (via `psx_settings`).
+
+## psx-mc: directory checksums are verified on every read (mc-03)
+
+`write_dir` has always kept each directory entry's XOR checksum, but only
+the optional `validate_filesystem` read it back. `find`, `chain`, `list`,
+`free_blocks`, `read`, `write` and `delete` trusted any entry with a
+plausible state byte, so one flipped link byte could make `delete` free
+another save's blocks or `write` allocate over them.
+
+Every directory read now compares the stored checksum and returns
+`Error::Corrupt` on a mismatch. There is no switch to turn it off. Cards
+written by the BIOS, by other tools that follow the format and by this crate
+carry valid checksums; a card whose entries do not is damaged, and a game
+that meets `Corrupt` from `list` or `read` should offer the same recovery it
+offers for a failed `validate_filesystem`. No code change is needed on
+repin for a game that already handles `Error::Corrupt`.
