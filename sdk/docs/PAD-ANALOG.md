@@ -1,5 +1,14 @@
 # Requiring analog mode
 
+The entry points take the controller port: `poll_on(&mut port, Port::One)`,
+`require_analog_on(&mut port, Port::One)`, `enable_analog_on`,
+`poll_raw_on`, `poll_diagnostics_on` and `PadReader::poll_on(&mut port)`. The
+`ControllerPort` token comes from `psx_rt::Peripherals`, and a memory card
+borrows the same port. This page keeps the names it was written with
+(`poll_port1`, `require_analog_port1`); those are the deprecated forwarders
+of the `_on` functions, with the same behaviour and the same ACK pacing
+([MIGRATION-ownership.md](MIGRATION-ownership.md)).
+
 A program that needs the sticks, or a disc that wants every program to hold
 the pad in one known mode, should ask for analog mode once at boot, lock it,
 and read the pad through a reader that never hands over a garbled packet. This
@@ -24,9 +33,9 @@ released.
 ## At boot
 
 ```rust
-use psx_pad::{require_analog_port1, AnalogRequirement};
+use psx_pad::{require_analog_on, AnalogRequirement, Port};
 
-match require_analog_port1() {
+match require_analog_on(&mut port, Port::One) {
     AnalogRequirement::Analog => {}      // locked: the Analog button is dead
     AnalogRequirement::DigitalOnly => {} // an original pad, or one that refused
     AnalogRequirement::Absent => {}      // nothing answered yet
@@ -56,7 +65,7 @@ use psx_pad::PadReader;
 
 let mut pad = PadReader::port1();
 loop {
-    let state = pad.poll();
+    let state = pad.poll_on(&mut port);
     // state.buttons, state.sticks, state.mode
 }
 ```

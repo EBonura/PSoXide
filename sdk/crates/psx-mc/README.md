@@ -25,7 +25,9 @@ Three layers, each usable on its own:
 ```rust
 use psx_mc::{Card, HardwareCard, Slot};
 
-let mut card = Card::new(HardwareCard::new(Slot::One));
+// `port` is the `ControllerPort` token from `psx_rt::Peripherals`, or a
+// `&mut` of it when the program keeps polling pads between saves.
+let mut card = Card::new(HardwareCard::on_port(port, Slot::One));
 if !card.is_formatted()? {
     card.format()?;
 }
