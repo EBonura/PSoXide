@@ -567,3 +567,50 @@ fn the_default_vertex_guard_matches_what_the_render_faces_can_address() {
         );
     }
 }
+
+/// The minimal blob with a per-frame time table and one clip record whose
+/// frame range is `first` and `count` (the 8-bit count field).
+fn build_timed_blob(first: u16, count: u8) -> Vec<u8> {
+    let mut blob = build_blob();
+    // header flags at byte 30: HMD_FLAG_FRAME_TIMES is bit 5
+    let flags = u16::from_le_bytes([blob[30], blob[31]]) | (1 << 5);
+    blob[30..32].copy_from_slice(&flags.to_le_bytes());
+    // the clip record follows the header; its count is the low byte of the second halfword
+    blob[HEADER..HEADER + 2].copy_from_slice(&first.to_le_bytes());
+    blob[HEADER + 2] = count;
+    // one time byte per frame sits between the clip table and the ranges
+    let times_at = HEADER + N_CLIPS * 4;
+    for (i, time) in [0u8, 255].into_iter().enumerate() {
+        blob.insert(times_at + i, time);
+    }
+    blob
+}
+
+#[test]
+fn a_clip_longer_than_the_frame_table_cannot_read_past_the_time_table() {
+    // The clip claims 255 frames starting at frame 1 of 2, so the lookup
+    // `frame_times[first + local]` ran up to 254 bytes past the 2-entry table
+    // and, in this small blob, off the end of it.
+    let model = load(build_timed_blob(1, 255));
+    assert_eq!(model.frame_count(), N_FRAMES);
+    for elapsed in 0..=100 {
+        for (a, b, frac) in [
+            model.looped_clip_phase(0, 100, elapsed),
+            model.one_shot_clip_phase(0, 100, elapsed),
+        ] {
+            assert!(a < N_FRAMES && b < N_FRAMES, "{a} {b}");
+            assert!(frac < 16);
+        }
+    }
+}
+
+#[test]
+fn a_well_formed_timed_clip_still_interpolates() {
+    let model = load(build_timed_blob(0, 2));
+    // Frame times 0 and 255 over a 100-unit clip: halfway is about frame 0
+    // blending toward frame 1, and the end of a one-shot is frame 1.
+    let (a, b, _) = model.one_shot_clip_phase(0, 100, 50);
+    assert_eq!((a, b), (0, 1));
+    let (a, _, _) = model.one_shot_clip_phase(0, 100, 100);
+    assert_eq!(a, 1);
+}
