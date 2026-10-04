@@ -121,7 +121,7 @@ fn debug_bytes(bytes: &[u8]) {
     }
 }
 
-#[cfg(all(target_arch = "mips", feature = "emit"))]
+#[cfg(any(all(target_arch = "mips", feature = "emit"), test))]
 #[inline(always)]
 fn encode_event(kind: u8, id: u16) -> u32 {
     ((kind as u32) << 24) | id as u32
@@ -168,3 +168,47 @@ fn emit_event(kind: u8, id: u16) {
 #[cfg(not(all(target_arch = "mips", feature = "emit")))]
 #[inline(always)]
 fn emit_event(_kind: u8, _id: u16) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The emulator decodes `kind = word >> 24` and `id = word & 0xFFFF`
+    /// (`emulator-core/src/telemetry.rs`: KIND_SHIFT 24, ID_MASK 0xFFFF) and
+    /// names kinds 1 to 6 FrameBegin, StageBegin, StageEnd, Counter,
+    /// TaskBegin, TaskEnd.
+    #[test]
+    fn event_words_decode_the_way_the_emulator_does() {
+        let kinds = [
+            (EVENT_KIND_FRAME_BEGIN, 1u8),
+            (EVENT_KIND_STAGE_BEGIN, 2),
+            (EVENT_KIND_STAGE_END, 3),
+            (EVENT_KIND_COUNTER, 4),
+            (EVENT_KIND_TASK_BEGIN, 5),
+            (EVENT_KIND_TASK_END, 6),
+        ];
+        for (kind, number) in kinds {
+            assert_eq!(kind, number);
+            for id in [0u16, 1, 51, 266, 0xFFFF] {
+                let word = encode_event(kind, id);
+                assert_eq!((word >> 24) & 0xFF, number as u32);
+                assert_eq!(word & 0xFFFF, id as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn emitters_are_silent_no_ops_off_target() {
+        // Host builds and builds without `emit` touch no port and read no
+        // cycle counter.
+        assert_eq!(cycles(), 0);
+        frame_begin(7);
+        stage_begin(crate::stage::UPDATE);
+        stage_end(crate::stage::UPDATE);
+        counter(crate::counter::TRI_PRIMITIVES, 9);
+        task_begin(crate::task::FIXED_UPDATE);
+        task_end(crate::task::FIXED_UPDATE);
+        debug_log("x");
+        console("x");
+    }
+}
