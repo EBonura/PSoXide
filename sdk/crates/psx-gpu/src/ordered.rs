@@ -12,11 +12,11 @@ use psx_io::periph::GpuDma;
 
 /// Most payload words the stream packs into one node, after its tag.
 ///
-/// One word under [`crate::MAX_NODE_WORDS`], the node length the
+/// One word under [`crate::chain::MAX_NODE_WORDS`], the node length the
 /// hardware-tests v1.24 drawing case points to. The spare word is a margin,
 /// not a second measured limit.
 pub const NODE_PAYLOAD_WORDS: usize = 15;
-const _: () = assert!(NODE_PAYLOAD_WORDS <= crate::MAX_NODE_WORDS);
+const _: () = assert!(NODE_PAYLOAD_WORDS <= crate::chain::MAX_NODE_WORDS);
 const END: u32 = 0x00ff_ffff;
 
 /// DMA operations required by an ordered stream.
@@ -77,11 +77,11 @@ unsafe impl CommandStreamDma for GpuDma {
     #[inline]
     unsafe fn submit(&mut self, head: *const u32) {
         // SAFETY: forwarded from this method's own contract.
-        unsafe { crate::submit_linked_list_async_raw(head) };
+        unsafe { crate::chain::start_walk(head) };
     }
     #[inline]
     fn wait(&mut self) {
-        crate::submit_linked_list_wait();
+        crate::chain::wait_walk();
     }
     #[inline]
     fn wait_idle(&mut self) {

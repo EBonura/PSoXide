@@ -26,6 +26,7 @@
 #![no_std]
 #![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
+pub mod chain;
 mod compat;
 pub mod display;
 pub mod frame;
@@ -38,20 +39,23 @@ pub mod prim;
 
 #[allow(deprecated, reason = "the forwarders kept for one stage")]
 pub use compat::{
-    arm_draw_done, draw_line_gouraud, draw_line_mono, draw_line_mono_blended, draw_quad_flat,
-    draw_quad_textured, draw_quad_textured_gouraud, draw_quad_textured_gouraud_material,
-    draw_quad_textured_material, draw_rect_flat, draw_sprite_material, draw_sync, draw_tri_flat,
-    draw_tri_flat_blended, draw_tri_gouraud, draw_tri_gouraud_blended, draw_tri_textured_material,
-    fill_rect, init, set_display_offset, set_draw_area, set_draw_offset, set_mask_mode,
-    set_screen_h_offset, set_screen_v_offset, set_texture_page, signal_draw_done, submit_static,
-    wait_idle,
+    arm_draw_done, configure_scanline_timer, configure_vsync_timer, draw_done, draw_line_gouraud,
+    draw_line_mono, draw_line_mono_blended, draw_quad_flat, draw_quad_textured,
+    draw_quad_textured_gouraud, draw_quad_textured_gouraud_material, draw_quad_textured_material,
+    draw_rect_flat, draw_sprite_material, draw_sync, draw_tri_flat, draw_tri_flat_blended,
+    draw_tri_gouraud, draw_tri_gouraud_blended, draw_tri_textured_material, fill_rect, in_vblank,
+    init, scanline_counter, set_display_offset, set_draw_area, set_draw_offset, set_mask_mode,
+    set_screen_h_offset, set_screen_v_offset, set_texture_page, signal_draw_done,
+    submit_linked_list, submit_linked_list_async, submit_linked_list_async_raw,
+    submit_linked_list_raw, submit_linked_list_raw_async, submit_linked_list_wait, submit_static,
+    vsync, wait_idle, TextureDepth,
 };
+// The chain items' old root paths, kept for one stage: they are the same
+// items, so they cannot carry a deprecation of their own.
+pub use chain::{DrawDoneNode, StaticChain, StaticPacket, DRAW_DONE_NODE, MAX_NODE_WORDS};
 pub use gpu::{Gpu, MaskMode};
 
-use psx_hw::gpu::{gp0, gp1, DmaDirection};
-use psx_io::dma::{self, Channel};
-use psx_io::gpu::{wait_command_ready, write_display_control};
-use psx_io::timers;
+use psx_io::gpu::wait_command_ready;
 
 /// Moved to [`display::VideoMode`].
 #[deprecated(note = "moved to `psx_gpu::display::VideoMode`")]
@@ -72,7 +76,7 @@ pub type Resolution = display::Resolution;
 /// large-triangle lists) and bit 26's at the list's closing GP0(1Fh)
 /// (625,348 and 314,075). PSn00bSDK's `DrawSync` waits the same way.
 ///
-/// Every wait is bounded, with the recovery of [`submit_linked_list_wait`]
+/// Every wait is bounded, with the recovery of [`chain::wait`]
 /// and `psx_io::gpu::wait_command_ready`, so a wedged GPU costs a reset
 /// instead of a hang.
 #[inline]
@@ -81,7 +85,7 @@ pub(crate) fn wait_idle_impl() {
     // the armed guard waits until it has been kicked and drawn. Without the
     // `present-queue` feature this is nothing.
     psx_io::gpu::run_direct_access_guard();
-    submit_linked_list_wait();
+    chain::wait_walk();
     psx_io::gpu::wait_dma_ready();
     wait_command_ready();
 }
@@ -95,7 +99,7 @@ pub(crate) fn wait_idle_impl() {
 /// command stream, after the drawing before it; the flag stays set until
 /// GP1(02h). The v1.24 present-queue probe flipped on this flag with 120 of
 /// 120 frames complete on a console. End a DMA chain with it through
-/// [`ot::OrderingTable::end_with_draw_done`] or [`DRAW_DONE_NODE`], an
+/// [`ot::OrderingTable::end_with_draw_done`] or [`chain::DRAW_DONE_NODE`], an
 /// ordered stream with `push_packet([gp0::REQUEST_IRQ])`, and immediate
 /// drawing with [`Gpu::signal_draw_done`].
 ///
@@ -113,241 +117,6 @@ pub fn is_draw_done() -> bool {
     psx_io::gpu::status().contains(psx_hw::gpu::GpuStat::IRQ1)
 }
 
-/// Renamed to [`is_draw_done`].
-#[deprecated(note = "renamed to `is_draw_done`")]
-#[inline(always)]
-pub fn draw_done() -> bool {
-    is_draw_done()
-}
-
-/// A linked-list DMA node holding only GP0(1Fh), for the end of a chain.
-///
-/// Link it as the chain's last node and the GPU raises [`is_draw_done`] when
-/// it gets there. It is immutable and shared: every chain can end on
-/// [`DRAW_DONE_NODE`].
-#[repr(C, align(4))]
-pub struct DrawDoneNode([u32; 2]);
-
-impl DrawDoneNode {
-    /// The node's tag word, the address a chain links to.
-    #[inline]
-    pub fn as_ptr(&self) -> *const u32 {
-        self.0.as_ptr()
-    }
-}
-
-/// The shared GP0(1Fh) node: one payload word, then the end of the list.
-pub static DRAW_DONE_NODE: DrawDoneNode = DrawDoneNode([(1 << 24) | 0x00FF_FFFF, gp0::REQUEST_IRQ]);
-
-/// Configure Timer 1 as an HBlank-counting scanline counter.
-///
-/// WARNING: writing a timer's mode register resets its counter, so every
-/// call restarts the count from zero. That is why the helpers below cannot
-/// observe the real display position: they reconfigure before reading.
-#[inline]
-pub fn configure_scanline_timer() {
-    // Mode: bit0=sync enable, bits1-2=01 (reset at VBlank), bit8=1
-    // (clock source = HBlank).
-    timers::set_mode(timers::Timer::Timer1, 0x0103);
-}
-
-/// Renamed to [`configure_scanline_timer`]: it programs Timer 1 to count
-/// HBlanks and has nothing to do with vertical sync.
-#[deprecated(note = "renamed to `configure_scanline_timer`")]
-#[inline(always)]
-pub fn configure_vsync_timer() {
-    configure_scanline_timer()
-}
-
-/// Timer-1 scanline counter used by the VBlank wait helpers.
-#[deprecated(
-    note = "reconfigures Timer 1 before reading, which resets the counter, \
-            so this returns ~0 rather than the display scanline; use \
-            psx_rt::interrupts for display timing"
-)]
-#[inline]
-pub fn scanline_counter() -> u16 {
-    configure_scanline_timer();
-    timers::counter(timers::Timer::Timer1)
-}
-
-/// Whether Timer 1 currently reports the VBlank scanline region.
-#[deprecated(note = "built on scanline_counter(), whose reconfigure-before-read \
-            resets the counter, so this is almost always false; use \
-            psx_rt::interrupts for display timing")]
-#[allow(deprecated)]
-#[inline]
-pub fn in_vblank() -> bool {
-    scanline_counter() >= 242
-}
-
-/// Wait 242 HBlank periods (~15.4ms) from the moment of the call.
-///
-/// Despite the name, this does NOT sync to the display: reconfiguring
-/// Timer 1 resets its counter, so the wait starts from zero at the call
-/// site. Frame time becomes `work + 15.4ms` instead of snapping to the
-/// next VBlank -- nearly right for light frames, badly slow for heavy
-/// ones. It cannot be repaired here: syncing needs the VBlank IRQ, which
-/// the runtime owns.
-#[deprecated(note = "busy-waits a fixed 242 HBlanks from the call site instead of \
-            syncing to the display; use psx_rt::interrupts::wait_vblank()")]
-pub fn vsync() {
-    configure_scanline_timer();
-    while timers::counter(timers::Timer::Timer1) < 242 {}
-}
-
-/// Texture color depth for the deprecated `set_texture_page`.
-#[deprecated(
-    note = "only `set_texture_page` used it; `TextureMaterial` and psx-vram's `TextureDepth` describe texture pages"
-)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum TextureDepth {
-    /// 4-bit CLUT-indexed.
-    Bit4 = 0,
-    /// 8-bit CLUT-indexed.
-    Bit8 = 1,
-    /// 15-bit direct color.
-    Bit15 = 2,
-}
-
-/// Most payload words one linked-list DMA node may carry (the words after
-/// its tag), the depth of the GPU's command FIFO.
-///
-/// Silicon very likely loses words from longer nodes while it draws.
-/// Hardware-tests v1.24 drew the same 16 half-screen Gouraud triangles as
-/// 16 nodes and as 4 nodes of 24 words: the packed list's closing GP0(1Fh)
-/// arrived at 314,075 clocks against 625,348, about 8 triangles' worth at
-/// the 39,084 clocks each costs, and its last-node drain matched the
-/// unpacked list's one-triangle gap, so roughly half its drawing never
-/// happened. Every SDK node builder stays at or under this limit:
-/// [`ordered::OrderedCommandStream`] caps nodes at
-/// [`ordered::NODE_PAYLOAD_WORDS`], [`ot::OrderingTable::insert`] refuses
-/// longer packets, and every [`prim`] packet is shorter.
-pub const MAX_NODE_WORDS: usize = 16;
-
-/// Kick a linked-list chain to GPU GP0 via DMA channel 2 in
-/// linked-list mode **without** waiting for the walk to finish.
-///
-/// Returns as soon as the DMA transfer is started, so the CPU can do
-/// other work (build the next frame, run a sim tick) while the GPU
-/// rasterises this one. A walk already running on the channel is waited
-/// out first (or aborted if it wedged).
-///
-/// This is the unchecked layer under [`frame::OtFrame`], [`frame::FrameStorage`]
-/// and [`submit_static`], which prove the contract below with lifetimes.
-///
-/// # Safety
-///
-/// `head` must point at a 4-byte-aligned node tag in RAM. Each tag holds
-/// the next node's address in bits 23..=0 (`0x00FF_FFFF` ends the list) and
-/// its payload word count, at most [`MAX_NODE_WORDS`], in bits 31..=24.
-/// Every node reachable from `head`, and its payload, must stay live and
-/// unmodified until [`submit_linked_list_wait`] returns (or a later kick,
-/// which waits for this walk first).
-#[doc(alias = "DrawOTag")]
-pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
-    // A completed DMA walk does not imply that the GPU has finished
-    // rasterising the commands it consumed. Do not call `wait_idle()` here:
-    // channel 2's request handshake can queue the next list behind that work,
-    // which is how PsyQ/PSn00bSDK keep the GPU fed. Only the DMA channel and
-    // the list's backing storage must be free before starting another walk.
-    //
-    // Bounded: a wedged channel (see `dma::abort`) would otherwise hang
-    // the frame loop forever. Aborting costs at most the tail of a walk
-    // that was never going to finish.
-    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
-        abort_wedged_walk();
-    }
-
-    // Make sure the GPU's DMA direction is CPU→GP0 before we kick off the
-    // walker. `gpu::init` sets this, but games occasionally re-route DMA for
-    // VRAM readback and forget to reset it.
-    write_display_control(gp1::dma_direction(DmaDirection::CpuToGp0 as u32));
-    dma::enable_channel(Channel::Gpu);
-    // SAFETY: the channel is idle (waited out or aborted above); the caller
-    // keeps the chain live and unmodified until the walk is waited out.
-    // `dma::start` publishes the payload and tag stores before the CHCR
-    // store.
-    unsafe {
-        dma::start(
-            Channel::Gpu,
-            dma::Transfer {
-                address: head.expose_provenance() as u32,
-                // BCR is ignored in linked-list mode but must be written to
-                // some value on real hardware; zero is conventional.
-                size: dma::size_words(0),
-                control: psx_hw::dma::CHCR_TO_DEVICE
-                    | psx_hw::dma::CHCR_SYNC_LINKED
-                    | psx_hw::dma::CHCR_START,
-            },
-        )
-    };
-}
-
-/// Renamed to [`submit_linked_list_async_raw`].
-///
-/// # Safety
-/// See [`submit_linked_list_async_raw`].
-#[deprecated(note = "renamed to `submit_linked_list_async_raw`")]
-#[inline(always)]
-pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
-    // SAFETY: same contract as the renamed function.
-    unsafe { submit_linked_list_async_raw(head) }
-}
-
-/// Old name of [`submit_linked_list_async_raw`].
-///
-/// # Safety
-///
-/// As [`submit_linked_list_async_raw`].
-#[deprecated(
-    note = "takes an unchecked pointer; use `OrderingTable::frame`, `submit_static`, or the unsafe `submit_linked_list_async_raw`"
-)]
-pub unsafe fn submit_linked_list_async(head: *const u32) {
-    // SAFETY: forwarded contract.
-    unsafe { submit_linked_list_async_raw(head) }
-}
-
-/// Block until the GPU-DMA linked-list walk kicked by
-/// [`submit_linked_list_async`] has drained the whole chain. This is
-/// the CPU-blocked-on-GPU portion of an ordering-table submission;
-/// profiling code times it separately from the kick to split GPU-draw
-/// cost from CPU build cost.
-#[inline]
-pub fn submit_linked_list_wait() {
-    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
-        abort_wedged_walk();
-    }
-    // Keep the caller's buffer-reuse stores after the completion read (or
-    // the abort).
-    dma::compiler_barrier();
-}
-
-/// Stop a channel-2 walk that outlived its spin budget.
-///
-/// The walker stopped mid-packet, so the GPU still waits for the rest of a
-/// command: GP1(01h) discards it, or every later ready-wait blocks on a GPU
-/// that can never become ready. The reset goes past the present-queue
-/// direct-access guard, which would wait on the walk that just wedged; the
-/// paired-arena fence reaches this from a scratchpad stack that stack-guard
-/// bounds only through direct calls, hence `inline(always)`.
-#[inline(always)]
-fn abort_wedged_walk() {
-    dma::abort(Channel::Gpu);
-    psx_io::gpu::write_display_control_unguarded(gp1::RESET_CMD_BUFFER);
-    // SAFETY: volatile aligned accesses to a private static that only this
-    // function writes; the program is single threaded and no handler
-    // touches it.
-    unsafe {
-        let count = core::ptr::addr_of_mut!(DMA_ABORTS);
-        count.write_volatile(count.read_volatile().wrapping_add(1));
-    }
-}
-
-/// Walks [`abort_wedged_walk`] has stopped since boot.
-static mut DMA_ABORTS: u32 = 0;
-
 /// How often the SDK recovered a hung GPU since boot, for a debug overlay
 /// or a test log. Every GPU wait is bounded and recovers by resetting the
 /// GPU; these counts make the recoveries visible.
@@ -362,106 +131,7 @@ pub struct RecoveryStats {
 /// The recovery counts since boot. Reads only, so it needs no [`Gpu`].
 pub fn recovery_stats() -> RecoveryStats {
     RecoveryStats {
-        // SAFETY: a volatile aligned read of a private static.
-        dma_aborts: unsafe { core::ptr::addr_of!(DMA_ABORTS).read_volatile() },
+        dma_aborts: chain::dma_abort_count(),
         command_resets: psx_io::gpu::command_reset_count(),
-    }
-}
-
-/// Submit a linked-list chain starting at `head` to GPU GP0 via
-/// DMA channel 2 in linked-list mode. Blocks until the walker hits
-/// the `0x00FFFFFF` terminator (or aborts a wedged walk).
-///
-/// This is [`submit_linked_list_async_raw`] immediately followed by
-/// [`submit_linked_list_wait`].
-///
-/// # Safety
-///
-/// As [`submit_linked_list_async_raw`], for the duration of this call.
-#[doc(alias = "DrawOTag")]
-pub unsafe fn submit_linked_list_raw(head: *const u32) {
-    // SAFETY: forwarded contract; the wait below ends the walk before return.
-    unsafe { submit_linked_list_async_raw(head) };
-    submit_linked_list_wait();
-}
-
-/// Old name of [`submit_linked_list_raw`].
-///
-/// # Safety
-///
-/// As [`submit_linked_list_raw`].
-#[deprecated(
-    note = "takes an unchecked pointer; use `OrderingTable::frame`, `submit_static`, or the unsafe `submit_linked_list_raw`"
-)]
-pub unsafe fn submit_linked_list(head: *const u32) {
-    // SAFETY: forwarded contract.
-    unsafe { submit_linked_list_raw(head) }
-}
-
-/// One immutable linked-list node: `W` GP0 words, then the end of the list.
-///
-/// Built in a `static`, it is a chain that stays valid for the whole run, so
-/// [`submit_static`] can kick it from safe code without waiting.
-///
-/// ```
-/// use psx_gpu::StaticPacket;
-/// // GP0(E1h) draw mode, then GP0(1Fh).
-/// static MODE_THEN_IRQ: StaticPacket<2> = StaticPacket::new([0xE100_0000, 0x1F00_0000]);
-/// assert_eq!(MODE_THEN_IRQ.words(), &[0xE100_0000, 0x1F00_0000]);
-/// ```
-#[repr(C, align(4))]
-pub struct StaticPacket<const W: usize> {
-    tag: u32,
-    words: [u32; W],
-}
-
-impl<const W: usize> StaticPacket<W> {
-    /// A node carrying `words` that ends the list.
-    pub const fn new(words: [u32; W]) -> Self {
-        const { assert!(W <= MAX_NODE_WORDS, "packet longer than one GPU DMA node") };
-        Self {
-            tag: ((W as u32) << 24) | 0x00FF_FFFF,
-            words,
-        }
-    }
-
-    /// The payload words.
-    pub const fn words(&self) -> &[u32; W] {
-        &self.words
-    }
-
-    /// The node's tag word, the address a chain links to.
-    #[inline]
-    pub fn as_ptr(&self) -> *const u32 {
-        &self.tag
-    }
-}
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// A complete, immutable linked list: [`StaticPacket`] or [`DrawDoneNode`].
-///
-/// Sealed: implementors guarantee that a shared reference to them is a
-/// whole chain whose nodes never change while the reference lives.
-pub trait StaticChain: sealed::Sealed {
-    /// Address of the first node's tag.
-    fn head(&self) -> *const u32;
-}
-
-impl sealed::Sealed for DrawDoneNode {}
-impl StaticChain for DrawDoneNode {
-    #[inline]
-    fn head(&self) -> *const u32 {
-        self.as_ptr()
-    }
-}
-
-impl<const W: usize> sealed::Sealed for StaticPacket<W> {}
-impl<const W: usize> StaticChain for StaticPacket<W> {
-    #[inline]
-    fn head(&self) -> *const u32 {
-        self.as_ptr()
     }
 }

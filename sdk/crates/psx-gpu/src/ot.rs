@@ -16,7 +16,7 @@
 //! ```text
 //!   bits 0..=23: address of next packet (24-bit, masked into RAM)
 //!   bits 24..=31: word count of this packet's data, at most
-//!                 `crate::MAX_NODE_WORDS` (16) on silicon
+//!                 `crate::chain::MAX_NODE_WORDS` (16) on silicon
 //! ```
 //!
 //! An "empty OT" has every entry pointing at its predecessor,
@@ -178,7 +178,7 @@ impl<const N: usize> OrderingTable<N> {
     /// Prepend a primitive packet into the depth-`z` slot. `packet_ptr`
     /// must point at the packet's tag word (first `u32`); `words` is
     /// the count of data words that follow the tag, at most
-    /// [`crate::MAX_NODE_WORDS`].
+    /// [`crate::chain::MAX_NODE_WORDS`].
     ///
     /// # Safety
     /// Caller guarantees that `[packet_ptr .. packet_ptr + 1 + words]`
@@ -187,11 +187,11 @@ impl<const N: usize> OrderingTable<N> {
     /// [`crate::prim`] satisfy this.
     ///
     /// # Panics
-    /// If `words` exceeds [`crate::MAX_NODE_WORDS`]: silicon loses words
+    /// If `words` exceeds [`crate::chain::MAX_NODE_WORDS`]: silicon loses words
     /// from a longer node.
     pub(crate) unsafe fn link(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
         assert!(
-            words as usize <= crate::MAX_NODE_WORDS,
+            words as usize <= crate::chain::MAX_NODE_WORDS,
             "GPU DMA node longer than MAX_NODE_WORDS"
         );
         let z = z.min(N - 1);
@@ -206,7 +206,7 @@ impl<const N: usize> OrderingTable<N> {
     /// In addition, `z` must be less than `N`.
     #[inline(always)]
     pub(crate) unsafe fn link_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
-        debug_assert!(words as usize <= crate::MAX_NODE_WORDS);
+        debug_assert!(words as usize <= crate::chain::MAX_NODE_WORDS);
         // SAFETY: forwarded contract; a word count below 256 fills the top byte only.
         unsafe { self.link_tag_high_unchecked(z, packet_ptr, (words as u32) << 24) };
     }
@@ -226,7 +226,7 @@ impl<const N: usize> OrderingTable<N> {
     ) {
         debug_assert!(z < N);
         debug_assert_eq!(tag_high & OT_ADDR_MASK, 0);
-        debug_assert!((tag_high >> 24) as usize <= crate::MAX_NODE_WORDS);
+        debug_assert!((tag_high >> 24) as usize <= crate::chain::MAX_NODE_WORDS);
         debug_assert!(is_dma_reachable(packet_ptr), "GPU DMA reads main RAM only");
         // SAFETY: the caller guarantees `z < N`.
         let entry = unsafe { self.entries.get_unchecked_mut(z) };
@@ -252,7 +252,7 @@ impl<const N: usize> OrderingTable<N> {
     /// the documented layout. Every packet pointer must meet the lifetime,
     /// alignment, and writability requirements of [`Self::link_unchecked`],
     /// every encoded slot must be less than `N`, and every word count at most
-    /// [`crate::MAX_NODE_WORDS`].
+    /// [`crate::chain::MAX_NODE_WORDS`].
     #[inline]
     pub(crate) unsafe fn link_packed_commands_unchecked(
         &mut self,
@@ -348,7 +348,7 @@ impl<const N: usize> OrderingTable<N> {
     /// documented layout. Every encoded packet pointer must meet the lifetime,
     /// alignment, and writability requirements of [`Self::link_unchecked`],
     /// every encoded slot must be less than `N`, and every word count at most
-    /// [`crate::MAX_NODE_WORDS`].
+    /// [`crate::chain::MAX_NODE_WORDS`].
     #[inline]
     pub(crate) unsafe fn link_packed_commands_reverse_unchecked(
         &mut self,
@@ -447,7 +447,7 @@ impl<const N: usize> OrderingTable<N> {
     /// # Safety
     /// `first..end` must be a writable, contiguous sequence of complete GPU
     /// packets. Every packet's word count must describe the next packet
-    /// exactly and be at most [`crate::MAX_NODE_WORDS`], and every
+    /// exactly and be at most [`crate::chain::MAX_NODE_WORDS`], and every
     /// non-sentinel slot must be less than `N`.
     #[inline]
     pub(crate) unsafe fn link_tagged_packet_stream_unchecked(
@@ -667,7 +667,7 @@ impl<const N: usize> OrderingTable<N> {
     pub unsafe fn add<T>(&mut self, z: usize, prim: &mut T, words: u8) {
         const {
             assert!(
-                core::mem::size_of::<T>() <= 4 * (crate::MAX_NODE_WORDS + 1),
+                core::mem::size_of::<T>() <= 4 * (crate::chain::MAX_NODE_WORDS + 1),
                 "primitive larger than one GPU DMA node"
             )
         };
@@ -789,7 +789,7 @@ impl<const N: usize> OrderingTable<N> {
     /// End this table's DMA walk with GP0(1Fh), so the GPU raises
     /// [`crate::is_draw_done`] once everything in the table is drawn.
     ///
-    /// Links slot 0, the last one walked, to [`crate::DRAW_DONE_NODE`];
+    /// Links slot 0, the last one walked, to [`crate::chain::DRAW_DONE_NODE`];
     /// packets inserted at slot 0 afterwards still draw before it. Call it
     /// after every [`clear`](Self::clear) and before anything is inserted at
     /// slot 0. Pair the submission with [`crate::arm_draw_done`].
@@ -804,20 +804,20 @@ impl<const N: usize> OrderingTable<N> {
         #[cfg(target_arch = "mips")]
         // SAFETY: the shared node is immutable static RAM for the whole run.
         unsafe {
-            self.end_with_node(crate::DRAW_DONE_NODE.as_ptr())
+            self.end_with_node(crate::chain::DRAW_DONE_NODE.as_ptr())
         };
     }
 
     /// Continue this table's walk into `head`, the first node of a chain
     /// that ends the list itself: a command recording
-    /// (`psx_io::gpu::begin_recording_raw`) closed on [`crate::DRAW_DONE_NODE`],
+    /// (`psx_io::gpu::begin_recording_raw`) closed on [`crate::chain::DRAW_DONE_NODE`],
     /// say, for a frame published to `psx_rt::present`.
     ///
     /// # Safety
     ///
     /// `head` must point at a 4-byte-aligned node tag in RAM, and every node
-    /// reachable from it must meet [`crate::submit_linked_list_async_raw`]'s
-    /// contract (at most [`crate::MAX_NODE_WORDS`] payload words each, live
+    /// reachable from it must meet [`crate::chain::submit_async_raw`]'s
+    /// contract (at most [`crate::chain::MAX_NODE_WORDS`] payload words each, live
     /// and unmodified) until every walk of this table has finished.
     ///
     /// # Panics
@@ -843,7 +843,7 @@ impl<const N: usize> OrderingTable<N> {
     }
 
     /// Pointer to the slot where DMA starts (`[N-1]`). Passed to
-    /// [`crate::submit_linked_list_raw`] as the linked-list entry point.
+    /// [`crate::chain::submit_raw`] as the linked-list entry point.
     #[inline]
     pub fn submit_head(&self) -> *const u32 {
         // From the whole array, so the pointer may reach every entry.
@@ -855,7 +855,7 @@ impl<const N: usize> OrderingTable<N> {
     ///
     /// # Safety
     ///
-    /// As [`crate::submit_linked_list_raw`] for the chain this table heads:
+    /// As [`crate::chain::submit_raw`] for the chain this table heads:
     /// every packet linked into it must be live and unmodified, and the
     /// table must not have moved since it was cleared.
     #[deprecated(
@@ -863,15 +863,16 @@ impl<const N: usize> OrderingTable<N> {
     )]
     pub unsafe fn submit(&self) {
         // SAFETY: forwarded contract.
-        unsafe { crate::submit_linked_list_raw(self.submit_head()) };
+        unsafe { crate::chain::start_walk(self.submit_head()) };
+        crate::chain::wait_walk();
     }
 
     /// Kick the table's DMA walk without waiting for it to finish; pair
-    /// it with [`crate::submit_linked_list_wait`].
+    /// it with [`crate::chain::wait`].
     ///
     /// # Safety
     ///
-    /// As [`crate::submit_linked_list_async_raw`]: the table and every
+    /// As [`crate::chain::submit_async_raw`]: the table and every
     /// packet it chains must stay live, unmoved and unmodified until that
     /// wait returns.
     #[deprecated(
@@ -879,7 +880,7 @@ impl<const N: usize> OrderingTable<N> {
     )]
     pub unsafe fn submit_async(&self) {
         // SAFETY: forwarded contract.
-        unsafe { crate::submit_linked_list_async_raw(self.submit_head()) };
+        unsafe { crate::chain::start_walk(self.submit_head()) };
     }
 
     /// Walk the linked chain in DMA submission order, producing one
@@ -1206,11 +1207,11 @@ mod tests {
     fn insert_takes_a_full_fifo_of_words() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
-        let mut packet = [0u32; 1 + crate::MAX_NODE_WORDS];
+        let mut packet = [0u32; 1 + crate::chain::MAX_NODE_WORDS];
         // SAFETY: the packets are locals that outlive every use of the table in this test, and
         // their slots and word counts fit the table.
-        unsafe { ot.link(1, packet.as_mut_ptr(), crate::MAX_NODE_WORDS as u8) };
-        assert_eq!(packet[0] >> 24, crate::MAX_NODE_WORDS as u32);
+        unsafe { ot.link(1, packet.as_mut_ptr(), crate::chain::MAX_NODE_WORDS as u8) };
+        assert_eq!(packet[0] >> 24, crate::chain::MAX_NODE_WORDS as u32);
     }
 
     #[test]
@@ -1218,9 +1219,15 @@ mod tests {
     fn insert_refuses_a_node_longer_than_the_fifo() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
-        let mut packet = [0u32; 2 + crate::MAX_NODE_WORDS];
+        let mut packet = [0u32; 2 + crate::chain::MAX_NODE_WORDS];
         // SAFETY: the call panics on the word count before it touches the packet.
-        unsafe { ot.link(1, packet.as_mut_ptr(), crate::MAX_NODE_WORDS as u8 + 1) };
+        unsafe {
+            ot.link(
+                1,
+                packet.as_mut_ptr(),
+                crate::chain::MAX_NODE_WORDS as u8 + 1,
+            )
+        };
     }
 
     /// The draw-done node is the last thing walked, after every slot and
@@ -1277,7 +1284,7 @@ mod tests {
     #[test]
     fn the_shared_draw_done_node_is_one_gp0_1f_word_then_the_end() {
         // SAFETY: the node is two words of immutable static data.
-        let node = unsafe { core::slice::from_raw_parts(crate::DRAW_DONE_NODE.as_ptr(), 2) };
+        let node = unsafe { core::slice::from_raw_parts(crate::chain::DRAW_DONE_NODE.as_ptr(), 2) };
         assert_eq!(node[0] >> 24, 1);
         assert_eq!(node[0] & OT_ADDR_MASK, OT_END);
         assert_eq!(node[1], psx_hw::gpu::gp0::REQUEST_IRQ);
