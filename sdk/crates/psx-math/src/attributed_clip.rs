@@ -730,6 +730,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn q16_crossing_and_lerp_match_the_wide_oracles() {
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || {
