@@ -306,3 +306,17 @@ blob. A well-formed clip (`first + count <= frame_count`) is unchanged, so no
 model that animated correctly moves; load acceptance is unchanged too.
 No API change. hl-psx and cs-psx call these through the clip-time helpers;
 the only effect is on a malformed cook.
+
+## psx-asset: a damaged HMA1 rotation key cannot overflow the renormalise (asset-13)
+
+`hma1::quat_to_mat` renormalised a decoded quaternion with `3 * e * e` in
+`i32`, where `e` is how far the squared length is from one. An 8-bit key can
+hold components from -4096 to 12224; four of the large ones put `e` near
+-141,000 and the product past `i32`: a panic in a debug build and a garbage
+matrix in release. The loader checks that a track's bytes lie inside the
+blob, not what values they hold.
+
+`e` is now limited to one unit either way, which the series is only valid
+for anyway. Every key whose length error is inside that limit (every
+well-formed cook) decodes bit for bit as before; a key outside it decodes to
+a bounded wrong rotation instead of overflowing. No API change.

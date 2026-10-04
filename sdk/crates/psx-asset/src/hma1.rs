@@ -143,7 +143,10 @@ fn lerp4(a: [i32; 4], b: [i32; 4], f: i32) -> [i32; 4] {
 fn quat_to_mat(q: [i32; 4]) -> [[i16; 3]; 3] {
     let [mut x, mut y, mut z, mut w] = q;
     let n = (x * x + y * y + z * z + w * w + 2048) >> 12;
-    let e = 4096 - n;
+    // The renormalising series is only meaningful while the length error is at most one unit;
+    // clamping keeps a damaged key (components up to 12224) from overflowing `3 * e * e`,
+    // and leaves every in-range key as it was.
+    let e = (4096 - n).clamp(-4096, 4096);
     let r = 4096 + (e >> 1) + ((3 * e * e) >> 15);
     x = (x * r + 2048) >> 12;
     y = (y * r + 2048) >> 12;
@@ -648,6 +651,83 @@ impl Model {
                         loaded = parent;
                     }
                     compose_loaded(&pa, &r, t, out.get_unchecked_mut(b));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::f64::consts::FRAC_1_SQRT_2;
+
+    /// Q12 rotation matrix of a unit quaternion given as floats (the
+    /// standard formula, in f64, normalised first).
+    fn reference(q: [f64; 4]) -> [[f64; 3]; 3] {
+        let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+        let [x, y, z, w] = [q[0] / n, q[1] / n, q[2] / n, q[3] / n];
+        [
+            [
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y - w * z),
+                2.0 * (x * z + w * y),
+            ],
+            [
+                2.0 * (x * y + w * z),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z - w * x),
+            ],
+            [
+                2.0 * (x * z - w * y),
+                2.0 * (y * z + w * x),
+                1.0 - 2.0 * (x * x + y * y),
+            ],
+        ]
+    }
+
+    #[test]
+    fn quat_to_mat_matches_the_float_formula_for_near_unit_input() {
+        // Rotations about each axis and a diagonal one, with the quaternion
+        // scaled up to 5% off unit length, which the renormalise step absorbs.
+        let axes: [[f64; 4]; 5] = [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.5, 0.5, 0.5, 0.5],
+            [0.0, 0.0, FRAC_1_SQRT_2, FRAC_1_SQRT_2],
+            [0.3, -0.5, 0.2, 0.78],
+            [-0.6, 0.1, 0.0, 0.79],
+        ];
+        for axis in axes {
+            for scale in [0.95, 1.0, 1.05] {
+                let q = axis.map(|c| (c * 4096.0 * scale) as i32);
+                let got = quat_to_mat(q);
+                let want = reference(axis);
+                for r in 0..3 {
+                    for c in 0..3 {
+                        let expected = (want[r][c] * 4096.0).round() as i32;
+                        let diff = (got[r][c] as i32 - expected).abs();
+                        assert!(diff <= 24, "{axis:?} x{scale} [{r}][{c}] off by {diff}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quat_to_mat_survives_the_largest_components_a_key_can_hold() {
+        // An 8-bit key is an i8 base plus an 8-bit offset, shifted left by 5:
+        // components from -4096 to 12224. Their squared length is far from
+        // 4096, and `3 * e * e` in i32 overflowed (a panic in debug, garbage
+        // in release) once the length error passed about 26,000.
+        let extremes = [-4096, 0, 4096, 12224];
+        for x in extremes {
+            for y in extremes {
+                for z in extremes {
+                    for w in extremes {
+                        let m = quat_to_mat([x, y, z, w]);
+                        // Garbage rotation is allowed; unbounded work is not.
+                        let _ = m;
+                    }
                 }
             }
         }
