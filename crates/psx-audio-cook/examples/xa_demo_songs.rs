@@ -9,11 +9,8 @@ const RATE: u32 = 37_800;
 const DEFAULT_SECONDS: f64 = 4.0;
 
 /// Fade in and out over 50 ms so a loop restart does not click.
-fn fade(t: f64) -> f64 {
-    (t / 0.05)
-        .min(1.0)
-        .min((SECONDS - t) / 0.05)
-        .clamp(0.0, 1.0)
+fn fade(t: f64, seconds: f64) -> f64 {
+    (t / 0.05).min((seconds - t) / 0.05).clamp(0.0, 1.0)
 }
 
 fn tone(freq: f64, t: f64) -> f64 {
@@ -53,9 +50,11 @@ fn sample(index: usize, t: f64, seconds: f64) -> (f64, f64) {
 }
 
 fn main() {
-    let dir = std::env::args()
-        .nth(1)
-        .expect("usage: xa_demo_songs OUT_DIR");
+    let mut args = std::env::args().skip(1);
+    let dir = args.next().expect("usage: xa_demo_songs OUT_DIR [SECONDS]");
+    let seconds = args
+        .next()
+        .map_or(DEFAULT_SECONDS, |s| s.parse().expect("SECONDS is a number"));
     std::fs::create_dir_all(&dir).expect("create output directory");
     for (index, name) in ["song0_pad", "song1_high", "song2_blips", "song3_whistle"]
         .iter()
