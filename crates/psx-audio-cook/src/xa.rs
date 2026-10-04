@@ -376,7 +376,7 @@ pub struct RawSector {
 
 /// Split a file of raw 2336-byte sectors.
 pub fn parse_file(bytes: &[u8]) -> Result<Vec<RawSector>, String> {
-    if bytes.is_empty() || bytes.len() % RAW_SECTOR_BYTES != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(RAW_SECTOR_BYTES) {
         return Err(format!(
             "size is not a multiple of {RAW_SECTOR_BYTES} bytes"
         ));
