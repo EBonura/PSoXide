@@ -353,6 +353,10 @@ fn pack_q11_codes(codes: [u16; 9]) -> [u8; 14] {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+)]
 fn animation_v3_word_decoder_matches_byte_decoder_for_every_q11_code_and_lane() {
     #[repr(C, align(4))]
     struct WordAlignedRecord([u8; psxed_format::animation::POSE_RECORD_SIZE_V3]);
@@ -1082,6 +1086,10 @@ fn wide_q11_decode_equals_narrow_for_every_code() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+)]
 fn cross_rounding_matches_the_saturating_form_across_its_whole_domain() {
     // `cross_round_q12` only ever sees `a*b - c*d` over decoded Q11 elements,
     // so sweep every value that expression can produce.
@@ -1098,6 +1106,10 @@ fn cross_rounding_matches_the_saturating_form_across_its_whole_domain() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+)]
 fn third_basis_reconstruction_matches_the_array_form() {
     let interesting: [i16; 9] = [-4096, -4095, -2048, -1, 0, 1, 2048, 4094, 4096];
     let mut rng = Rng(0x5eed_1234);
@@ -1154,6 +1166,10 @@ fn third_basis_reconstruction_matches_the_array_form() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+)]
 fn wide_element_lerp_matches_the_i16_lerp() {
     let alphas = [0u16, 1, 2, 2047, 2048, 2049, 4093, 4094, 4095];
     let mut a = -4096i32;
@@ -1174,6 +1190,10 @@ fn wide_element_lerp_matches_the_i16_lerp() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+)]
 fn packed_translation_lerp_matches_the_saturating_form() {
     let endpoints: [i16; 11] = [
         i16::MIN,
