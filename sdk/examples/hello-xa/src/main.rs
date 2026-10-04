@@ -31,7 +31,11 @@ const FONT_CLUT: Clut = Clut::new(320, 256);
 /// its manifest: file number 1, single speed, four channels.
 const SONGS_FILE: &str = "SONGS.XA";
 const FILE_NUMBER: u8 = 1;
-const SPEED: DriveSpeed = DriveSpeed::Single;
+const SPEED: DriveSpeed = if cfg!(feature = "double-speed") {
+    DriveSpeed::Double
+} else {
+    DriveSpeed::Single
+};
 const SONG_NAMES: [&str; 4] = ["A MAJOR PAD", "G MAJOR HIGH", "BLIPS", "WHISTLE"];
 
 static mut READER: SectorReader = SectorReader::new();
@@ -47,9 +51,7 @@ fn read_one(lba: u32) -> Option<&'static [u8]> {
         }
         let ok = reader.read_sector(&mut *addr_of_mut!(SECTOR));
         reader.stop();
-        ok.then(|| {
-            core::slice::from_raw_parts(addr_of_mut!(SECTOR) as *const u8, SECTOR_WORDS * 4)
-        })
+        ok.then(|| core::slice::from_raw_parts(addr_of_mut!(SECTOR) as *const u8, SECTOR_WORDS * 4))
     }
 }
 
@@ -162,7 +164,12 @@ fn main() {
         font.draw_text(4, 124, "STATE", (160, 160, 160));
         font.draw_text(48, 124, state, tint);
         font.draw_text(4, 138, "TIME", (160, 160, 160));
-        font.draw_text(48, 138, number(&mut digits, player.elapsed_millis()), (240, 240, 240));
+        font.draw_text(
+            48,
+            138,
+            number(&mut digits, player.elapsed_millis()),
+            (240, 240, 240),
+        );
         font.draw_text(4, 152, "LOOPS", (160, 160, 160));
         font.draw_text(48, 152, number(&mut digits, loops), (240, 240, 240));
         font.draw_text(4, 166, "VOLUME", (160, 160, 160));
