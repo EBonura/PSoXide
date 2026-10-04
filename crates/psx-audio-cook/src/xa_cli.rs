@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 /// Usage text of the XA subcommands.
-pub const USAGE: &str = "  psx-audio-cook xa-encode OUT.XA SONG.wav... [--rate 37800|18900] [--mono] [--speed 1|2] [--file N] [--peak F] [--manifest OUT.json]\n  psx-audio-cook xa-decode IN.XA CHANNEL OUT.wav\n  psx-audio-cook xa-score SRC.wav IN.XA CHANNEL";
+pub const USAGE: &str = "  psx-audio-cook xa-encode OUT.XA SONG.wav... [--rate 37800|18900] [--mono] [--speed 1|2] [--file N] [--peak F] [--manifest OUT.json]\n  psx-audio-cook xa-decode IN.XA CHANNEL OUT.wav\n  psx-audio-cook xa-score SRC.wav IN.XA CHANNEL\n  psx-audio-cook xa-peaks CAPTURE.wav";
 
 fn fail(message: impl std::fmt::Display) -> ExitCode {
     eprintln!("{message}");
@@ -205,5 +205,48 @@ pub fn score(source: &str, input: &str, channel: &str) -> ExitCode {
         })
         .collect();
     println!("{{\"snr_db\":[{}]}}", snr.join(","));
+    ExitCode::SUCCESS
+}
+
+/// `xa-peaks CAPTURE.wav`: for every half second of the left channel, the
+/// start time, RMS level and strongest frequency, as tab-separated lines.
+/// The gate that plays `hello-xa` headless reads an emulator audio capture
+/// with it.
+pub fn peaks(input: &str) -> ExitCode {
+    const FRAME: usize = 16_384;
+    let bytes = match std::fs::read(input) {
+        Ok(b) => b,
+        Err(e) => return fail(format!("{input}: {e}")),
+    };
+    let (rate, channels) = match wav::read_channels(&bytes) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("{input}: {e}")),
+    };
+    let left = &channels[0];
+    let hop = (rate / 2) as usize;
+    let mut at = 0;
+    while at + FRAME <= left.len() {
+        let window = &left[at..at + FRAME];
+        let rms = (window.iter().map(|v| v * v).sum::<f64>() / FRAME as f64).sqrt();
+        let mut re: Vec<f64> = window
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let hann = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / FRAME as f64).cos();
+                v * hann
+            })
+            .collect();
+        let mut im = vec![0.0; FRAME];
+        metrics::fft(&mut re, &mut im);
+        let bin = (1..FRAME / 2)
+            .max_by(|&a, &b| {
+                let (pa, pb) = (re[a].hypot(im[a]), re[b].hypot(im[b]));
+                pa.total_cmp(&pb)
+            })
+            .unwrap_or(0);
+        let hz = bin as f64 * rate as f64 / FRAME as f64;
+        println!("{:.1}\t{:.0}\t{:.0}", at as f64 / rate as f64, rms, hz);
+        at += hop;
+    }
     ExitCode::SUCCESS
 }

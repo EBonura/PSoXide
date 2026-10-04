@@ -12,7 +12,7 @@ The pieces, all in this repository:
 | --- | --- |
 | Encoder, reference decoder, interleaver | `psx-audio-cook xa-encode`, `xa-decode`, `xa-score` (`crates/psx-audio-cook/src/xa.rs`) |
 | Disc builder | `mkisopsx --xa-file` (`crates/psx-iso`) |
-| Player | `psx_io::cd::xa` (`XaPlayer`) |
+| Player | `psx_io::cd::xa` (`Player`) |
 | Example | `sdk/examples/hello-xa`, built by `make hello-xa-disc` |
 
 ## Converting CD-DA tracks
@@ -52,6 +52,11 @@ psx-audio-cook xa-decode MUSIC.XA 0 check.wav    # listen to the reference decod
 `xa-score` compares the reference decoder's output with the source resampled
 to the file's rate. A tonal test chord at 37.8 kHz stereo scores above 45 dB;
 dense modern mixes land lower, as any 4-bit codec does.
+
+To hear it without a console, `make hello-xa-disc` builds a disc with four
+generated songs, and `make hello-xa-gate FRONTEND=<headless emulator>` plays
+it, presses CROSS three times and checks the emulator's audio capture and
+drive command log (`tools/xa_gate.sh`).
 
 ## Choosing a format
 
@@ -94,7 +99,7 @@ bytes are 2304 of every 2352 (the rest is sync, header, subheader and EDC).
 ## Playing
 
 ```rust
-use psx_io::cd::xa::{DriveSpeed, XaEvent, XaFile, XaPlayer};
+use psx_io::cd::xa::{DriveSpeed, Event, File, Player};
 
 // Once: the SPU must take the drive's audio.
 psx_spu::enable_cd_audio(true);
@@ -102,19 +107,19 @@ psx_spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
 
 // Find MUSIC.XA by name (psx_fmv::iso has a root directory lookup) and
 // describe it with the numbers from the manifest.
-let music = XaFile::from_directory_entry(lba, size_bytes, 1, DriveSpeed::Single);
-let mut player = XaPlayer::new(peripherals.cd);
+let music = File::from_directory_entry(lba, size_bytes, 1, DriveSpeed::Single);
+let mut player = Player::new(peripherals.cd);
 
+player.set_volume(0x80, 0x80);          // drive mixer, 0x80 is unity
 player.play(music.song(2), true)?;      // channel 2, looping
 loop {
-    if player.poll() == XaEvent::Looped { /* optional */ }
+    if player.poll() == Event::Looped { /* optional */ }
     // ...
-    player.set_volume(0x80, 0x80);      // 0x80 is unity
-    player.stop();                       // pause; play() starts again from the top
 }
+player.stop();                           // pause; play() starts again from the top
 ```
 
-`XaPlayer` owns the CD token, so nothing else drives the controller while it
+`Player` owns the CD token, so nothing else drives the controller while it
 exists; `release()` stops the music and returns the token.
 
 `play` sends Demute, Setmode, Setfilter, Setloc and ReadS (a few
@@ -166,3 +171,7 @@ channel `0xFF`, which the drive ignores while the filter is on (it neither
 decodes them nor raises a data interrupt). The last sector of the file has the
 end-of-file and end-of-record bits. The first block of every channel uses
 filter 0, so a restart or a seek into the song decodes from cold.
+
+There is no loop marker in the data: the format has only end-of-file, and the
+player loops by watching the head position. The encoder writes 4-bit samples
+without emphasis; 8-bit ADPCM is not supported.

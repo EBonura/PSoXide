@@ -21,7 +21,7 @@
 //!
 //! # Polling
 //!
-//! The player is poll-driven like [`super::audio`]: call [`XaPlayer::poll`]
+//! The player is poll-driven like [`super::audio`]: call [`Player::poll`]
 //! about once per frame. It asks the drive where the head is, and when the
 //! head reaches the end of the song file it either restarts the file
 //! (looping) or pauses the drive. A restart is a seek, so a loop has an
@@ -71,14 +71,14 @@ impl DriveSpeed {
 
 /// An interleaved XA file on the disc.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct XaFile {
+pub struct File {
     lba: u32,
     sector_count: u32,
     number: u8,
     speed: DriveSpeed,
 }
 
-impl XaFile {
+impl File {
     /// A file at `lba` (relative to this program's disc image, see
     /// [`crate::disc_base`]) of `sector_count` sectors, including the end
     /// guard `mkisopsx` keeps. `number` and `speed` come from the encoder's
@@ -104,8 +104,8 @@ impl XaFile {
     }
 
     /// Channel `channel` of this file as a song.
-    pub const fn song(self, channel: u8) -> XaSong {
-        XaSong {
+    pub const fn song(self, channel: u8) -> Song {
+        Song {
             file: self,
             channel,
         }
@@ -117,16 +117,16 @@ impl XaFile {
     }
 }
 
-/// One channel of an [`XaFile`].
+/// One channel of an [`File`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct XaSong {
-    file: XaFile,
+pub struct Song {
+    file: File,
     channel: u8,
 }
 
 /// The step of starting a song that the drive refused.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum XaError {
+pub enum Error {
     /// Demute did not answer.
     Unmute,
     /// Setmode did not answer.
@@ -139,9 +139,9 @@ pub enum XaError {
     Read,
 }
 
-/// What [`XaPlayer::poll`] saw.
+/// What [`Player::poll`] saw.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum XaEvent {
+pub enum Event {
     /// No song is playing.
     Idle,
     /// A song is playing (or its start is still seeking).
@@ -209,7 +209,7 @@ enum State {
 
 struct Engine {
     state: State,
-    song: Option<XaSong>,
+    song: Option<Song>,
     looping: bool,
     /// A pause was refused; try again at the next poll.
     pause_pending: bool,
@@ -229,22 +229,17 @@ impl Engine {
         }
     }
 
-    fn start(
-        &mut self,
-        drive: &mut impl Drive,
-        song: XaSong,
-        looping: bool,
-    ) -> Result<(), XaError> {
+    fn start(&mut self, drive: &mut impl Drive, song: Song, looping: bool) -> Result<(), Error> {
         let file = song.file;
         let result = (|| {
             if !drive.unmute() {
-                return Err(XaError::Unmute);
+                return Err(Error::Unmute);
             }
             if !drive.set_mode(file.speed.mode()) {
-                return Err(XaError::SetMode);
+                return Err(Error::SetMode);
             }
             if !drive.set_filter(file.number, song.channel) {
-                return Err(XaError::SetFilter);
+                return Err(Error::SetFilter);
             }
             self.begin_read(drive, song)
         })();
@@ -259,13 +254,13 @@ impl Engine {
     }
 
     /// Seek to the top of the file and start streaming.
-    fn begin_read(&mut self, drive: &mut impl Drive, song: XaSong) -> Result<(), XaError> {
+    fn begin_read(&mut self, drive: &mut impl Drive, song: Song) -> Result<(), Error> {
         let start = shift_lba(song.file.lba);
         if !drive.set_target(start) {
-            return Err(XaError::Seek);
+            return Err(Error::Seek);
         }
         if !drive.start_streaming() {
-            return Err(XaError::Read);
+            return Err(Error::Read);
         }
         self.start_lba = start;
         self.head_lba = start;
@@ -284,12 +279,12 @@ impl Engine {
         self.song = None;
     }
 
-    fn poll(&mut self, drive: &mut impl Drive) -> XaEvent {
+    fn poll(&mut self, drive: &mut impl Drive) -> Event {
         let Some(song) = self.song else {
             if self.pause_pending {
                 self.pause_pending = !drive.pause();
             }
-            return XaEvent::Idle;
+            return Event::Idle;
         };
         let end = self.start_lba + song.file.span_sector_count();
         if let Some(head) = drive.head_lba() {
@@ -303,7 +298,7 @@ impl Engine {
                 return self.reach_end(drive, song);
             }
         }
-        XaEvent::Playing
+        Event::Playing
     }
 
     fn is_streaming(&self) -> bool {
@@ -318,25 +313,26 @@ impl Engine {
         sectors * 1000 / song.file.speed.sectors_per_second()
     }
 
-    fn reach_end(&mut self, drive: &mut impl Drive, song: XaSong) -> XaEvent {
+    fn reach_end(&mut self, drive: &mut impl Drive, song: Song) -> Event {
         if self.looping && self.begin_read(drive, song).is_ok() {
-            return XaEvent::Looped;
+            return Event::Looped;
         }
         self.stop(drive);
-        XaEvent::Finished
+        Event::Finished
     }
 }
 
 /// Plays XA-ADPCM songs. Owns the CD token: nothing else drives the
 /// controller while a player exists.
-pub struct XaPlayer {
+pub struct Player {
     _cd: Cd,
     engine: Engine,
 }
 
-impl XaPlayer {
+impl Player {
     /// A player with nothing playing. The SPU's CD input must be on and have
-    /// a volume (`psx_spu::enable_cd_audio`, `psx_spu::set_cd_volume`).
+    /// a volume (`psx_spu::enable_cd_audio`, `psx_spu::set_cd_volume`), and
+    /// the drive's own mixer must pass audio ([`set_volume`](Self::set_volume)).
     pub const fn new(cd: Cd) -> Self {
         Self {
             _cd: cd,
@@ -353,7 +349,7 @@ impl XaPlayer {
     /// Start `song` from the top (or restart it). With `looping` it
     /// restarts by itself when [`poll`](Self::poll) sees it end. Blocks for
     /// the five drive commands, a few milliseconds on a warm drive.
-    pub fn play(&mut self, song: XaSong, looping: bool) -> Result<(), XaError> {
+    pub fn play(&mut self, song: Song, looping: bool) -> Result<(), Error> {
         self.engine.start(&mut Mmio, song, looping)
     }
 
@@ -364,7 +360,7 @@ impl XaPlayer {
 
     /// Call about once per frame: notices the end of the song and loops or
     /// stops. Costs one drive command.
-    pub fn poll(&mut self) -> XaEvent {
+    pub fn poll(&mut self) -> Event {
         self.engine.poll(&mut Mmio)
     }
 
@@ -380,7 +376,7 @@ impl XaPlayer {
     }
 
     /// The song being played.
-    pub fn song(&self) -> Option<XaSong> {
+    pub fn song(&self) -> Option<Song> {
         self.engine.song
     }
 
@@ -463,8 +459,8 @@ mod tests {
     }
 
     /// 100 sectors of songs plus the guard, at LBA 1000.
-    fn song(speed: DriveSpeed) -> XaSong {
-        XaFile::new(1000, 100 + END_GUARD_SECTORS, 3, speed).song(2)
+    fn song(speed: DriveSpeed) -> Song {
+        File::new(1000, 100 + END_GUARD_SECTORS, 3, speed).song(2)
     }
 
     #[test]
@@ -488,11 +484,11 @@ mod tests {
     #[test]
     fn each_refused_step_is_reported_and_leaves_the_player_idle() {
         for (at, error) in [
-            ("unmute", XaError::Unmute),
-            ("mode", XaError::SetMode),
-            ("filter", XaError::SetFilter),
-            ("target", XaError::Seek),
-            ("read", XaError::Read),
+            ("unmute", Error::Unmute),
+            ("mode", Error::SetMode),
+            ("filter", Error::SetFilter),
+            ("target", Error::Seek),
+            ("read", Error::Read),
         ] {
             let mut drive = Fake {
                 fail_at: Some(at),
@@ -501,7 +497,7 @@ mod tests {
             let mut engine = Engine::new();
             let result = engine.start(&mut drive, song(DriveSpeed::Single), false);
             assert_eq!(result, Err(error));
-            assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+            assert_eq!(engine.poll(&mut drive), Event::Idle);
         }
     }
 
@@ -515,13 +511,13 @@ mod tests {
         drive.log.clear();
         // Past the end (where the previous run stopped), then inside the file.
         drive.heads = vec![Some(1105), None, Some(1003), Some(1050)];
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert!(!engine.is_streaming());
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert!(engine.is_streaming());
         assert_eq!(engine.elapsed_millis(), 3 * 1000 / 150);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert_eq!(engine.elapsed_millis(), 50 * 1000 / 150);
         assert!(
             drive.log.is_empty(),
@@ -539,13 +535,13 @@ mod tests {
             .unwrap();
         drive.log.clear();
         drive.heads = vec![Some(1010), Some(1100), Some(1103), Some(1020)];
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Looped);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Looped);
         assert_eq!(drive.log, ["target 1000", "read"]);
         // The drive still reports the guard region until the seek lands.
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert_eq!(drive.log.len(), 2);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert!(engine.is_streaming());
     }
 
@@ -558,10 +554,10 @@ mod tests {
             .unwrap();
         drive.log.clear();
         drive.heads = vec![Some(1099), Some(1101)];
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Finished);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Finished);
         assert_eq!(drive.log, ["pause"]);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
     }
 
     #[test]
@@ -575,7 +571,7 @@ mod tests {
             .unwrap();
         engine.stop(&mut drive);
         assert_eq!(drive.log.last().unwrap(), "pause");
-        assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
     }
 
     #[test]
@@ -590,11 +586,11 @@ mod tests {
             .unwrap();
         drive.log.clear();
         engine.stop(&mut drive);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
         assert_eq!(drive.log, ["pause", "pause", "pause"]);
         // Accepted: no further commands.
-        assert_eq!(engine.poll(&mut drive), XaEvent::Idle);
+        assert_eq!(engine.poll(&mut drive), Event::Idle);
         assert_eq!(drive.log.len(), 3);
     }
 
@@ -613,7 +609,7 @@ mod tests {
             .start(&mut drive, song(DriveSpeed::Single), false)
             .unwrap();
         drive.log.clear();
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
         assert!(drive.log.is_empty());
     }
 
@@ -626,17 +622,17 @@ mod tests {
             .unwrap();
         drive.heads = vec![Some(1010), Some(1100)];
         drive.fail_at = Some("target");
-        assert_eq!(engine.poll(&mut drive), XaEvent::Playing);
-        assert_eq!(engine.poll(&mut drive), XaEvent::Finished);
+        assert_eq!(engine.poll(&mut drive), Event::Playing);
+        assert_eq!(engine.poll(&mut drive), Event::Finished);
         assert_eq!(drive.log.last().unwrap(), "pause");
     }
 
     #[test]
     fn the_file_span_excludes_the_guard() {
-        let file = XaFile::from_directory_entry(7, 2048 * 116, 1, DriveSpeed::Single);
+        let file = File::from_directory_entry(7, 2048 * 116, 1, DriveSpeed::Single);
         assert_eq!(file.span_sector_count(), 100);
         assert_eq!(
-            XaFile::new(0, 4, 0, DriveSpeed::Double).span_sector_count(),
+            File::new(0, 4, 0, DriveSpeed::Double).span_sector_count(),
             0
         );
     }

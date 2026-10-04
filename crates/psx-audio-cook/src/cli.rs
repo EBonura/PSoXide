@@ -17,6 +17,7 @@
 //!                [--speed 1|2] [--file N] [--peak F] [--manifest OUT.json]
 //! psx-audio-cook xa-decode IN.XA CHANNEL OUT.wav
 //! psx-audio-cook xa-score SRC.wav IN.XA CHANNEL
+//! psx-audio-cook xa-peaks CAPTURE.wav
 //! ```
 //!
 //! `raw` writes bare ADPCM blocks (flags set); `psau` wraps them in the PSAU
@@ -51,6 +52,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("xa-encode") if args.len() >= 3 => xa_cli::encode(&args[1], &args[2..]),
         Some("xa-decode") if args.len() == 4 => xa_cli::decode(&args[1], &args[2], &args[3]),
         Some("xa-score") if args.len() == 4 => xa_cli::score(&args[1], &args[2], &args[3]),
+        Some("xa-peaks") if args.len() == 2 => xa_cli::peaks(&args[1]),
         _ => usage(),
     }
 }
