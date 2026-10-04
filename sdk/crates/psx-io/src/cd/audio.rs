@@ -28,7 +28,7 @@ use crate::cd::{self, PlayPosition};
 /// the drive is still cold from boot can wedge it (observed on silicon).
 pub const COLD_DRIVE_DELAY_TICKS: u32 = 45;
 /// Per-command response spin budget. Generous; the drive answers far sooner.
-pub const DEFAULT_COMMAND_SPINS: u32 = 131_072;
+pub const DEFAULT_COMMAND_SPINS: u32 = crate::cd::DEFAULT_COMMAND_SPINS;
 const RETRY_AFTER_OK_TICKS: u32 = 2;
 const RETRY_AFTER_NAK_TICKS: u32 = 4;
 

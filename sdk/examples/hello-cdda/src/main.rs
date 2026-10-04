@@ -46,9 +46,9 @@ fn main() {
     spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
     spu::enable_cd_audio(true);
 
-    cd::set_mode(psx_hw::cd::MODE_DOUBLE_SPEED | psx_hw::cd::MODE_CDDA);
-    cd::unmute();
-    cd::play_track(TRACK_GONCHAROV);
+    let _ = cd::set_mode(psx_hw::cd::MODE_DOUBLE_SPEED | psx_hw::cd::MODE_CDDA);
+    let _ = cd::unmute();
+    let _ = cd::play_track(TRACK_GONCHAROV);
 
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     let mut prev_pad = ButtonState::NONE;
@@ -57,24 +57,24 @@ fn main() {
     loop {
         let pad = poll_port1().buttons;
         if pressed(pad, prev_pad, button::START) {
-            cd::unmute();
-            cd::play_track(TRACK_GONCHAROV);
+            let _ = cd::unmute();
+            let _ = cd::play_track(TRACK_GONCHAROV);
             playback = Playback::Playing;
         }
         if pressed(pad, prev_pad, button::CROSS) {
-            cd::pause();
+            let _ = cd::pause();
             playback = Playback::Paused;
         }
         if pressed(pad, prev_pad, button::SQUARE) {
-            cd::stop();
+            let _ = cd::stop();
             playback = Playback::Stopped;
         }
         if pressed(pad, prev_pad, button::TRIANGLE) {
-            cd::mute();
+            let _ = cd::mute();
             playback = Playback::Muted;
         }
         if pressed(pad, prev_pad, button::CIRCLE) {
-            cd::unmute();
+            let _ = cd::unmute();
             playback = Playback::Playing;
         }
         prev_pad = pad;
