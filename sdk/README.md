@@ -55,6 +55,7 @@ Build and run them via the top-level `Makefile` (see the
 | `hello-gte` | GTE-accelerated transforms. |
 | `hello-audio` | SPU voice playback. |
 | `hello-cdda` | CD-DA audio tracks. |
+| `hello-xa` | XA-ADPCM music: four generated songs interleaved in one file, played through `psx_io::cd::xa` with a pad-driven switch (`make hello-xa-disc`). |
 | `hello-spstack` | A call tree run on a scratchpad stack under VBlank IRQs, checked against the RAM stack; `stack-guard` (`tools/psoxide-hazard`) proves it fits. |
 | `hello-gteirq` | RTPS run under VBlank IRQs, checking that psx-rt's handler never runs a GTE command twice. The emulator models this since its commit c7e3ea8; a console run remains the reference. |
 | `hello-present` | psx-rt's queued display flip, held until the frame's closing GP0(1Fh) sets GPUSTAT bit 24 (`arm_draw_done`, `end_with_draw_done`, `signal_draw_done`). |
