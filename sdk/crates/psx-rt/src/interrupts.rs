@@ -775,7 +775,10 @@ pub fn gp1_queue_pending() -> bool {
 /// handler there keeps it: this function never overwrites it. Such a game
 /// calls [`install_vblank_counter`] first and then wraps psx-rt's handler,
 /// or its handler chains to psx-rt's, which is what advances the count this
-/// waits on.
+/// waits on. The wait is bounded: after about four million reads
+/// without the count moving it returns (and asserts in a debug build) instead
+/// of hanging, as it would inside a critical section or without the handler.
+/// [`try_wait_vblank`] takes the bound.
 #[cfg(target_arch = "mips")]
 #[doc(alias = "VSync")]
 pub fn wait_vblank() {
@@ -791,8 +794,24 @@ pub fn wait_vblank() {
             }
         }
     }
-    let v = vblank_count();
-    while vblank_count() == v {}
+    if !try_wait_vblank(crate::wait::SPIN_LIMIT) {
+        debug_assert!(
+            false,
+            "wait_vblank: the VBlank count never advanced; psx-rt's handler is not running"
+        );
+    }
+}
+
+/// [`wait_vblank`] with its own bound: `true` once the count has advanced,
+/// `false` after `spins` reads of it without a change. A `false` means no
+/// VBlank interrupt reached psx-rt's handler: interrupts are masked (inside a
+/// [`critical_section`](crate::critical_section)), the counter was never
+/// installed, or a game's handler does not chain to psx-rt's. Does not
+/// install the counter; [`wait_vblank`] does that first.
+#[cfg(target_arch = "mips")]
+pub fn try_wait_vblank(spins: u32) -> bool {
+    let start = vblank_count();
+    crate::wait::wait_while(|| vblank_count() == start, || false, || {}, spins)
 }
 
 /// Block until the next VBlank IRQ. Host no-op: the counter never

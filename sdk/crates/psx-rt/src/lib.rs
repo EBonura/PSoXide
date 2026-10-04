@@ -43,6 +43,11 @@ pub mod present;
 pub mod scratchpad;
 #[cfg(target_arch = "mips")]
 pub mod tty;
+#[allow(
+    dead_code,
+    reason = "used by the MIPS waits and the present queue, which a host build lacks"
+)]
+mod wait;
 
 #[cfg(feature = "alloc")]
 pub mod heap;

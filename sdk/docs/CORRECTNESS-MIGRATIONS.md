@@ -121,3 +121,25 @@ game that polls `I_STAT` for a source it also enabled in `I_MASK` never
 worked and now loses the flag to the acknowledge, which the stray count
 shows. The fast path (a VBlank) is byte for byte the same code; the new
 block is reached only when no VBlank is pending.
+
+## psx-rt: VBlank and present-queue waits give up instead of hanging (rt-08)
+
+`wait_vblank()` and `present::{wait_slot_empty, wait_arena_free, wait_idle}`
+looped without a bound that survives a missing handler: they counted VBlanks
+that only psx-rt's handler produces. Inside a `critical_section::with`
+(interrupts masked) or before `install_vblank_counter()` they never
+returned; a headless guest that calls `wait_vblank()` in a critical section
+stops there on main.
+
+They now stop after about four million reads of their condition. The signature
+is unchanged. `wait_vblank()` returns and asserts in a debug build; the
+present waits assert in a debug build and, in `wait_idle`, stop a walk that
+never finished by hand, as the VBlank stall path already did. New
+`interrupts::try_wait_vblank(spins) -> bool` is the bounded form that
+reports it. A wait that completes is unchanged: the added cost is one
+counter increment per spin pass.
+
+A call site that really did wait inside a critical section was hung before
+and now falls through; none of the games below does (the waits all run in the
+main loop with interrupts on): nitroxide, voxide, hk-psx, hl-psx, cs-psx,
+quake-psx, oot-psx.
