@@ -71,6 +71,18 @@ When an operation has a form that can fail or time out, the fallible one is
 work. The infallible name either panics, retries or waits without a bound,
 and says so in its docs.
 
+## `*_on`: the form that takes the device owner
+
+A function that used to reach a device with no argument and now takes the
+owner of that device (the token, or the driver that holds it) keeps its name
+with `_on` appended: `poll_on(&mut port, socket)`, `tick_on(&mut cd, now)`,
+`upload_on(&mut spu, sample)`. The old spelling is the deprecated forwarder
+that steals the token for the call. A constructor does the same with
+`on_port` (`HardwareCard::on_port(port, slot)`), and a type that can hold a
+token instead of borrowing one takes `with_cd` (`SectorReader::with_cd(cd)`).
+A method that already took `self` simply gains the owner as its receiver
+(`cd.play_track(2)`), so it needs no suffix.
+
 ## `*_unchecked`: unsafe, skips a check the safe form makes
 
 `Model::vertex_unchecked` is `vertex` without the bounds check, and is

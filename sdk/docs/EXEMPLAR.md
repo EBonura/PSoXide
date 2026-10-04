@@ -50,10 +50,19 @@ pub struct Gpu(GpuDma); // the psx-io token, zero-sized
   examples built byte-identical or frame-identical against the free
   functions it replaced.
 
-Ownership is complete inside psx-gpu only. psx-vram, psx-font, psx-osk and
-psx-fx still write GP0 without the token, and psx-io's port writes are safe
-free functions anyone can call. Work package WP2 moves them onto `&mut Gpu`
-(or the token), after which the borrow checker sees every GPU writer.
+Ownership is complete inside psx-gpu only for the GPU: psx-vram, psx-font,
+psx-osk and psx-fx still write GP0 without the token, and psx-io's port writes
+are safe free functions anyone can call; moving them onto `&mut Gpu` (or the
+token) is still to do.
+
+The other devices follow the same shape, with the token itself or a small
+driver as the owner (see [MIGRATION-ownership.md](MIGRATION-ownership.md)):
+`Cd` is the CD-ROM driver (`SectorReader` and `xa::Player` hold it while they
+exist), `ControllerPort` is the one SIO0 transport that `psx-pad` polls and
+`psx-mc::HardwareCard` clock bytes through, `psx_spu::Spu` owns `SpuDma`,
+`psx_fmv::mdec::Mdec` owns `MdecDma`, and `OrderingTableClearDma` runs the
+ordering-table clear. Where a call needs the device only to read a status
+register it stays a free function.
 
 ## DMA: prove the buffer outlives the transfer
 
