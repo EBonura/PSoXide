@@ -6,6 +6,7 @@
 //! global interrupt register. The addresses and bit layouts live in
 //! [`psx_hw::dma`].
 
+use crate::periph::OrderingTableClearDma;
 use psx_hw::dma as reg;
 
 /// Channel index 0..=6 in the order the DMA controller presents them.
@@ -381,16 +382,31 @@ pub fn enable_channel(ch: Channel) {
     });
 }
 
-/// Ordering-table clear: writes `buf` as a reverse-linked chain the
-/// GPU-DMA walker consumes. The hardware starts from the last word and
-/// steps backward, writing a terminator at the first transfer and then
-/// predecessor pointers.
-///
-/// Convenience wrapper: programs the channel and blocks until done.
-/// Returns false if the channel wedged, or if `buf` is longer than the
-/// 16-bit word count can express.
-#[doc(alias = "ClearOTagR")]
+impl OrderingTableClearDma {
+    /// Ordering-table clear: writes `buf` as a reverse-linked chain the
+    /// GPU-DMA walker consumes. The hardware starts from the last word and
+    /// steps backward, writing a terminator at the first transfer and then
+    /// predecessor pointers.
+    ///
+    /// Convenience wrapper: programs the channel and blocks until done.
+    /// Returns false if the channel wedged, or if `buf` is longer than the
+    /// 16-bit word count can express.
+    #[doc(alias = "ClearOTagR")]
+    pub fn clear_table(&mut self, buf: &mut [u32]) -> bool {
+        clear_table(buf)
+    }
+}
+
+/// [`OrderingTableClearDma::clear_table`] on a token the caller does not hold.
+#[deprecated(note = "use `OrderingTableClearDma::clear_table` with the token")]
+#[inline(always)]
 pub fn clear_ordering_table(buf: &mut [u32]) -> bool {
+    // SAFETY: a token is a logic guard, not a memory-safety one (see
+    // `crate::periph`), and the old function never took one.
+    unsafe { OrderingTableClearDma::steal() }.clear_table(buf)
+}
+
+fn clear_table(buf: &mut [u32]) -> bool {
     let Ok(words) = u16::try_from(buf.len()) else {
         // Truncating to 16 bits would clear only the tail of the table
         // and leave the head pointing into words the DMA never touched.
@@ -456,7 +472,7 @@ pub const DEFAULT_DMA_SPINS: u32 = DEFAULT_SPINS;
 /// psx-spx documents only that START clears when a transfer completes, not
 /// that clearing it stops one in progress. Code whose memory safety needs a
 /// transfer to have stopped must not rely on this call for it; see
-/// [`clear_ordering_table`] for a bound that does not.
+/// [`OrderingTableClearDma::clear_table`] for a bound that does not.
 pub fn abort(ch: Channel) {
     // SAFETY: a control word of 0 has no START bit, so it starts nothing.
     unsafe { raw::set_control(ch, 0) };
@@ -487,7 +503,7 @@ pub fn wait_done(ch: Channel, spins: u32) -> bool {
 /// still reads busy after both budgets is wedged and moving no data, as the
 /// CD channel's console wedges were (START latched, MADR frozen). Burst-mode
 /// channels without chopping need no assumption; see
-/// [`clear_ordering_table`].
+/// [`OrderingTableClearDma::clear_table`].
 pub fn wait_or_abort(ch: Channel, spins: u32) -> bool {
     let done = wait_done(ch, spins);
     if !done {
@@ -531,6 +547,7 @@ pub const CHCR_TRIGGER: u32 = reg::CHCR_TRIGGER;
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
 
     #[test]
@@ -546,5 +563,18 @@ mod tests {
         assert_eq!(Channel::Gpu.register_base(), 0x1F80_10A0);
         assert_eq!(Channel::OrderingTableClear.register_base(), 0x1F80_10E0);
         assert_eq!(Channel::OrderingTableClear.enable_bit(), 27);
+    }
+
+    #[test]
+    fn the_clear_refuses_a_table_it_cannot_describe_before_touching_the_channel() {
+        // SAFETY: a test-local token on the host; both calls return before any
+        // register is touched.
+        let mut dma = unsafe { OrderingTableClearDma::steal() };
+        // An empty table has nothing to clear.
+        assert!(dma.clear_table(&mut []));
+        // 65,536 words does not fit the 16-bit count: refused whole, not
+        // truncated to its tail.
+        let mut long = std::vec![0u32; 65_536];
+        assert!(!dma.clear_table(&mut long));
     }
 }
