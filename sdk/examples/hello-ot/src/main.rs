@@ -26,10 +26,10 @@
 
 extern crate psx_rt;
 
-use psx_gpu::framebuf::FrameBuffer;
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::TriGouraud;
-use psx_gpu::{self as gpu, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_math::sincos;
 use psx_rt::Peripherals;
 
@@ -45,14 +45,17 @@ fn drift(phase_q12: u16, amplitude_px: i16) -> i16 {
 
 #[no_mangle]
 fn main() {
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
-
-    let Some(mut peripherals) = Peripherals::take() else {
+    let Some(peripherals) = Peripherals::take() else {
         return;
     };
+    let mut gpu = Gpu::new(
+        peripherals.gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
+
     // The table and the packets live on `main`'s stack, which outlives
     // every frame; each frame borrows them until its walk is done.
     let mut ot = OrderingTable::<16>::new();
@@ -78,7 +81,7 @@ fn main() {
         // Slot 0 = front, slot 15 = back (ordering-table walker
         // visits slot N-1 first, slot 0 last → later = on top).
         // Vertex coordinates are in draw-offset-relative space,
-        // which `FrameBuffer::swap` keeps pointing at the current
+        // which `DoubleBuffer::swap` keeps pointing at the current
         // back buffer for us.
         let red = TriGouraud::new(
             [(120 + red_dx, 60), (40 + red_dx, 160), (200 + red_dx, 160)],
@@ -110,11 +113,11 @@ fn main() {
         ot_frame.add(8, middle);
         ot_frame.add(6, front);
 
-        fb.clear(0, 0, 48);
-        ot_frame.submit(&mut peripherals.gpu_dma);
+        fb.clear(&mut gpu, (0, 0, 48));
+        ot_frame.submit(gpu.dma_mut());
 
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
         frame = frame.wrapping_add(1);
     }
 }

@@ -32,10 +32,10 @@ extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
 use psx_font::{fonts::BASIC, FontAtlas};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::frame::{FrameStorage, OtFrame};
-use psx_gpu::framebuf::FrameBuffer;
 use psx_gpu::prim::TriGouraud;
-use psx_gpu::{self as gpu, Resolution, VideoMode};
+use psx_gpu::{is_draw_done, Gpu};
 use psx_rt::interrupts;
 use psx_rt::tty;
 use psx_rt::Peripherals;
@@ -120,31 +120,34 @@ fn as_str(text: &[u8]) -> &str {
 #[no_mangle]
 fn main() {
     interrupts::install_vblank_counter();
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    fb.apply_draw_target();
     let Some(peripherals) = Peripherals::take() else {
         return;
     };
-    let mut dma = peripherals.gpu_dma;
+    // The token moves into each in-flight frame and comes back from its
+    // wait; between frames `Gpu::from_dma_mut` lends the driver.
+    let display = DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240);
+    let mut dma = Gpu::new(peripherals.gpu_dma, display).release();
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    fb.apply_draw_target(Gpu::from_dma_mut(&mut dma));
     // SAFETY: the only reference ever made to FRAME.
     let mut storage = unsafe { &mut *addr_of_mut!(FRAME) };
 
     // 1. Held: no GP0(1Fh), so the flip must stay queued even once the GPU
     // is idle.
-    fb.clear(8, 8, 24);
-    gpu::arm_draw_done();
+    let gpu = Gpu::from_dma_mut(&mut dma);
+    fb.clear(gpu, (8, 8, 24));
+    gpu.arm_draw_done();
     let (in_flight, ()) = storage.draw_async(dma, |frame, packets| {
         build_frame(frame, packets, TRIS as u32, false)
     });
     interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
-    gpu::wait_idle();
     (storage, dma) = in_flight.wait();
+    Gpu::from_dma_mut(&mut dma).wait_idle();
     wait_vblanks(4);
-    let held = interrupts::is_display_control_queued() && !gpu::is_draw_done();
+    let held = interrupts::is_display_control_queued() && !is_draw_done();
 
     // 2. Released: GP0(1Fh) through the port lets it land.
-    gpu::signal_draw_done();
+    Gpu::from_dma_mut(&mut dma).signal_draw_done();
     let released = wait_flip(4);
     if !released {
         let word = interrupts::take_queued_display_control();
@@ -158,28 +161,33 @@ fn main() {
     let mut early = 0u32;
     let start = interrupts::vblank_count();
     for f in 0..FRAMES {
-        fb.apply_draw_target();
-        fb.clear(8, 8, 24);
-        gpu::arm_draw_done();
+        let gpu = Gpu::from_dma_mut(&mut dma);
+        fb.apply_draw_target(gpu);
+        fb.clear(gpu, (8, 8, 24));
+        gpu.arm_draw_done();
         let (in_flight, ()) =
             storage.draw_async(dma, |frame, packets| build_frame(frame, packets, f, true));
         interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
-        if !wait_flip(WAIT_LIMIT) {
+        let flipped = wait_flip(WAIT_LIMIT);
+        // A flip needs the frame drawn, so its walk is over and this wait
+        // returns at once; after a timeout it ends the walk first.
+        (storage, dma) = in_flight.wait();
+        if !flipped {
             timeouts += 1;
-            gpu::wait_idle();
+            Gpu::from_dma_mut(&mut dma).wait_idle();
             let word = interrupts::take_queued_display_control();
             if word != 0 {
                 psx_io::gpu::write_display_control(word);
             }
-        } else if !gpu::is_draw_done() {
+        } else if !is_draw_done() {
             // The flag cannot clear before the next arm, so a flip seen
             // without it happened before the frame's GP0(1Fh) ran.
             early += 1;
         }
-        (storage, dma) = in_flight.wait();
     }
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
-    gpu::wait_idle();
+    let gpu = Gpu::from_dma_mut(&mut dma);
+    gpu.wait_idle();
 
     let checks = [
         (held, "flip without GP0(1Fh) was applied"),
@@ -215,8 +223,8 @@ fn main() {
 
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     loop {
-        fb.apply_draw_target();
-        fb.clear(10, 12, 20);
+        fb.apply_draw_target(gpu);
+        fb.clear(gpu, (10, 12, 20));
         font.draw_text(8, 6, "QUEUED FLIP WAITS FOR GP0(1FH)", WHITE);
         font.draw_text(8, 30, banner, tint);
         for (row, (text, len)) in lines.iter().enumerate() {
@@ -227,8 +235,8 @@ fn main() {
             font.draw_text(8, y, what, RED);
             y += 12;
         }
-        gpu::arm_draw_done();
-        gpu::signal_draw_done();
+        gpu.arm_draw_done();
+        gpu.signal_draw_done();
         interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
         wait_flip(WAIT_LIMIT);
     }

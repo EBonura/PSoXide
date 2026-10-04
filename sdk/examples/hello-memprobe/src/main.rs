@@ -15,7 +15,8 @@ extern crate psx_rt;
 
 use core::hint::black_box;
 use psx_font::{fonts::BASIC, FontAtlas};
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_rt::tty;
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
@@ -251,10 +252,15 @@ fn run_all() -> (u32, u32) {
 
 #[no_mangle]
 fn main() {
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
 
     let (cases, failures) = run_all();
@@ -280,7 +286,7 @@ fn main() {
     }
 
     loop {
-        fb.clear(10, 12, 20);
+        fb.clear(&mut gpu, (10, 12, 20));
         font.draw_text(8, 6, "MEM PROBE (memcpy/memset/memcmp)", (220, 220, 230));
         let (banner, tint) = if failures == 0 {
             ("ALL PASS", GREEN)
@@ -288,8 +294,8 @@ fn main() {
             ("FAIL", RED)
         };
         font.draw_text(8, 30, banner, tint);
-        gpu::wait_idle();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
     }
 }
