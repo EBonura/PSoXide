@@ -81,7 +81,7 @@ impl<const WORDS: usize> RleBuffer<WORDS> {
         unsafe { core::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast::<u16>(), WORDS * 2) }
     }
 
-    /// The buffer as words, for [`crate::mdec`]'s decode.
+    /// The buffer as words, for the MDEC decode (`mdec::decode`, guest only).
     pub const fn as_words(&self) -> &[u32] {
         &self.0
     }
