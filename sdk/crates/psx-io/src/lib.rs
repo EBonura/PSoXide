@@ -18,6 +18,7 @@
 pub mod cd;
 pub mod cdda;
 pub mod cdrom;
+pub mod controller_port;
 pub mod disc_base;
 pub mod dma;
 pub mod gpu;
