@@ -427,3 +427,43 @@ fn deleting_through_a_cross_linked_entry_does_not_free_the_other_save() {
     let n = c.read(NAME2, &mut buf).unwrap();
     assert_eq!(&buf[..n], b"save B");
 }
+
+/// A card that stops answering reads of one frame, as when it is pulled while
+/// a save streams in.
+struct FailRead {
+    inner: RamCard,
+    frame: u16,
+}
+
+impl Block for FailRead {
+    fn read_frame(&mut self, frame: u16, out: &mut [u8; FRAME_SIZE]) -> crate::Result<()> {
+        if frame == self.frame {
+            return Err(Error::NoCard);
+        }
+        self.inner.read_frame(frame, out)
+    }
+    fn write_frame(&mut self, frame: u16, data: &[u8; FRAME_SIZE]) -> crate::Result<()> {
+        self.inner.write_frame(frame, data)
+    }
+}
+
+#[cfg(feature = "compress")]
+#[test]
+fn a_card_pulled_during_a_compressed_read_reports_the_transport_error() {
+    let mut data = [0u8; 512];
+    for (i, b) in data[..256].iter_mut().enumerate() {
+        *b = (i * 131 + 7) as u8; // incompressible half, then zeros
+    }
+    let mut c = fresh();
+    let mut scratch = [0u8; 1024];
+    c.write_compressed(NAME, "T", &data, &mut scratch).unwrap();
+    // Block 1 is frames 64..128: title, icon, then the payload from frame 66.
+    // The stored bytes run past frame 66 into 67.
+    let image = *c.into_inner().image();
+    let mut c = Card::new(FailRead {
+        inner: RamCard::from_image(&image).unwrap(),
+        frame: 67,
+    });
+    let mut buf = [0u8; 512];
+    assert_eq!(c.read(NAME, &mut buf), Err(Error::NoCard));
+}
