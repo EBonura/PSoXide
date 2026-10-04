@@ -22,7 +22,7 @@ __psx_rt_exception_handler:
     nop
     and   $27, $27, $26
     andi  $27, $27, 0x0001
-    beqz  $27, 1f
+    beqz  $27, 9f
     nop
 
     lui   $26, %hi(__psx_rt_vblank_count)
@@ -240,6 +240,39 @@ __psx_rt_exception_handler:
 3:
     b     3b
     nop
+
+    # No VBlank pending. An interrupt (ExcCode 0) with an enabled source
+    # pending here is one nothing in this handler owns, and returning without
+    # acknowledging it re-enters at once, forever. Record it, acknowledge it
+    # (writing a 0 to an I_STAT bit clears it, a 1 leaves it) and count it,
+    # then go on to the common return. Not done when VBlank is pending too:
+    # a game's own handler chains here for VBlank, and a source it services
+    # itself must stay in I_STAT until it does. `stray_interrupt_sources`
+    # below is the same decision in Rust, unit-tested on host.
+9:
+    mfc0  $27, $13
+    nop
+    andi  $27, $27, 0x007c
+    bnez  $27, 1b
+    nop
+    lui   $26, 0x1f80
+    lw    $27, 0x1070($26)
+    lw    $26, 0x1074($26)
+    nop
+    and   $27, $27, $26
+    beqz  $27, 1b
+    nop
+    lui   $26, %hi(__psx_rt_stray_irq_last)
+    sw    $27, %lo(__psx_rt_stray_irq_last)($26)
+    nor   $27, $27, $zero
+    lui   $26, 0x1f80
+    sw    $27, 0x1070($26)
+    lui   $26, %hi(__psx_rt_stray_irq_count)
+    lw    $27, %lo(__psx_rt_stray_irq_count)($26)
+    nop
+    addiu $27, $27, 1
+    b     1b
+    sw    $27, %lo(__psx_rt_stray_irq_count)($26)
     .set reorder
     "#,
     strict = const STRICT_FAULTS as u32,
@@ -331,6 +364,53 @@ static mut __psx_rt_fault_badvaddr: u32 = 0;
 #[no_mangle]
 static mut __psx_rt_pending_gp1: u32 = 0;
 
+/// Interrupts other than VBlank the handler acknowledged because nothing
+/// owned them (see [`stray_interrupt_sources`]).
+#[no_mangle]
+static mut __psx_rt_stray_irq_count: u32 = 0;
+
+/// The `I_STAT & I_MASK` sources of the latest stray interrupt.
+#[no_mangle]
+static mut __psx_rt_stray_irq_last: u32 = 0;
+
+/// Stray interrupts acknowledged so far. psx-rt's handler owns VBlank only;
+/// any other source enabled in `I_MASK` that fires while no VBlank is
+/// pending, and that no handler in front of this one claimed, is
+/// acknowledged and counted here instead of re-entering forever. Non-zero
+/// means something enabled a source nothing services.
+#[inline]
+pub fn stray_interrupt_count() -> u32 {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
+    // the asm exception handler writes it, and an aligned word load cannot tear.
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_stray_irq_count) }
+}
+
+/// The `I_STAT & I_MASK` bits of the latest stray interrupt
+/// ([`stray_interrupt_count`]); zero before the first.
+#[inline]
+pub fn last_stray_interrupt_sources() -> u32 {
+    // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
+    // the asm exception handler writes it, and an aligned word load cannot tear.
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_stray_irq_last) }
+}
+
+/// The sources psx-rt's handler acknowledges as strays for one entry, given
+/// `I_STAT`, `I_MASK` and COP0 Cause; zero when it leaves them alone.
+///
+/// It acts only on an interrupt (Cause.ExcCode 0) with no VBlank pending: a
+/// pending VBlank means a game's own handler may have chained here with a
+/// source of its own still waiting for it, which must stay in `I_STAT`. The
+/// handler's assembly makes exactly this decision.
+pub const fn stray_interrupt_sources(status: u32, mask: u32, cause: u32) -> u32 {
+    let pending = status & mask;
+    let is_interrupt = (cause >> 2) & 0x1F == 0;
+    if is_interrupt && pending & (1 << psx_hw::irq::source::VBLANK) == 0 {
+        pending
+    } else {
+        0
+    }
+}
+
 /// Set once [`install_vblank_counter`] has run, so [`wait_vblank`] can
 /// install lazily without resetting a counter the game is already using.
 #[cfg(target_arch = "mips")]
@@ -384,6 +464,12 @@ extern "C" {
 /// enable bits used by the R3000A. The operation is idempotent for
 /// the current runtime: reinstalling simply resets the software
 /// counter and refreshes the vector.
+///
+/// The handler owns VBlank only. Another source enabled in `I_MASK` that
+/// fires while no VBlank is pending is acknowledged and counted
+/// ([`stray_interrupt_count`]) rather than re-entering forever, so a source a
+/// game needs must be serviced by the game's own handler ahead of this one
+/// (which then chains here), not left to this handler.
 #[cfg(target_arch = "mips")]
 pub fn install_vblank_counter() {
     const EXCEPTION_VECTOR: *mut u32 = 0x8000_0080 as *mut u32;
@@ -580,8 +666,9 @@ pub fn vblank_count() -> u32 {
 /// handler tested bit 24 it tested GPUSTAT bit 28, which on silicon rises
 /// about one large primitive before the drawing ends (hardware-tests v1.24
 /// cases 219-226), so a flip could expose a frame one primitive short.
-/// Keep interrupt source 1 (GPU) masked in `I_MASK`: this handler does not
-/// acknowledge it.
+/// Keep interrupt source 1 (GPU) masked in `I_MASK`: this handler owns VBlank
+/// only, so a GPU interrupt it finds is acknowledged as a stray and counted
+/// ([`stray_interrupt_count`]), which costs a handler entry per frame.
 #[cfg(target_arch = "mips")]
 #[inline]
 #[doc(alias = "GP1")]
@@ -1030,6 +1117,55 @@ mod tests {
         assert!(may_install_lazily(Some(GAME_JUMP), GAME_JUMP, RT_JUMP));
         // No recorded boot word: the entry predates the rule, keep installing.
         assert!(may_install_lazily(None, GAME_JUMP, RT_JUMP));
+    }
+
+    // I_STAT / I_MASK bits (psx-spx): VBlank 0, GPU 1, CDROM 2, DMA 3.
+    const VBLANK_BIT: u32 = 1 << 0;
+    const GPU_BIT: u32 = 1 << 1;
+    const CDROM_BIT: u32 = 1 << 2;
+    const INTERRUPT: u32 = 0;
+
+    #[test]
+    fn an_enabled_source_nothing_owns_is_acknowledged() {
+        // CD enabled and firing with no VBlank: the case that re-entered forever.
+        assert_eq!(
+            stray_interrupt_sources(CDROM_BIT, VBLANK_BIT | CDROM_BIT, INTERRUPT),
+            CDROM_BIT
+        );
+        // Only enabled sources count.
+        assert_eq!(
+            stray_interrupt_sources(CDROM_BIT | GPU_BIT, VBLANK_BIT | GPU_BIT, INTERRUPT),
+            GPU_BIT
+        );
+        assert_eq!(stray_interrupt_sources(CDROM_BIT, VBLANK_BIT, INTERRUPT), 0);
+    }
+
+    #[test]
+    fn a_chained_vblank_leaves_other_sources_for_their_owner() {
+        // A game's handler services CD itself and chains here for VBlank; a CD
+        // flag that latched in between must stay in I_STAT for it.
+        let mask = VBLANK_BIT | CDROM_BIT;
+        assert_eq!(
+            stray_interrupt_sources(VBLANK_BIT | CDROM_BIT, mask, INTERRUPT),
+            0
+        );
+    }
+
+    #[test]
+    fn only_interrupts_are_acknowledged() {
+        for cause in [ADEL, ADES, IBE, DBE, BREAK, RI, CPU, OV] {
+            assert_eq!(
+                stray_interrupt_sources(CDROM_BIT, CDROM_BIT, cause),
+                0,
+                "{cause:#x}"
+            );
+        }
+        // Cause bits above ExcCode (BD, pending lines) do not hide an interrupt.
+        let busy = psx_hw::cop0::CAUSE_BD | 0x0400;
+        assert_eq!(
+            stray_interrupt_sources(CDROM_BIT, CDROM_BIT, busy),
+            CDROM_BIT
+        );
     }
 
     #[test]

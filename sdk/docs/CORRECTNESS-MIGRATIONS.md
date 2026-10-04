@@ -100,3 +100,24 @@ call `install_vblank_counter()` and then wrap: wipeout-psx, voxide, hk-psx,
 hl-psx, cs-psx, quake-psx, oot-psx. Games that call `wait_vblank()` with no
 install of their own: nitroxide `game/src/draw.rs` (1, after the engine's
 install).
+
+## psx-rt: the exception handler acknowledges stray interrupts (rt-05)
+
+psx-rt's handler owns VBlank and acknowledged only that. Any other source
+enabled in `I_MASK` returned without an acknowledge, so the same interrupt
+re-entered at once and the console hung. `psx_io::irq::set_mask` is safe, so
+`irq::set_mask(1 << VBLANK | 1 << TMR2)` after `install_vblank_counter()` was
+enough (a headless run of exactly that stops at the first line and never
+reaches its VBlank wait).
+
+The handler now acknowledges an interrupt that has an enabled source
+pending and no VBlank pending, records the source bits and counts it
+(`interrupts::stray_interrupt_count()`, `last_stray_interrupt_sources()`).
+It deliberately does nothing while a VBlank is pending: a game's own handler
+chains to psx-rt's for VBlank, and a source that handler services itself
+(hk-psx and cs-psx's CD interrupt) must stay in `I_STAT` until it does. A
+game that relied on a handler of its own for such a source is unaffected; a
+game that polls `I_STAT` for a source it also enabled in `I_MASK` never
+worked and now loses the flag to the acknowledge, which the stray count
+shows. The fast path (a VBlank) is byte for byte the same code; the new
+block is reached only when no VBlank is pending.
