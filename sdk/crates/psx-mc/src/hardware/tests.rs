@@ -102,7 +102,9 @@ impl CardBus {
             (CMD_READ, 7) => 0x5D,
             (CMD_READ, 8) => self.msb,
             (CMD_READ, 9) => self.lsb,
-            (CMD_READ, 10..=137) => self.frame(u16::from_be_bytes([self.msb, self.lsb]))[index - 10],
+            (CMD_READ, 10..=137) => {
+                self.frame(u16::from_be_bytes([self.msb, self.lsb]))[index - 10]
+            }
             (CMD_READ, 138) => {
                 let sum = checksum(self.frame(u16::from_be_bytes([self.msb, self.lsb])));
                 if self.behaviour == Behaviour::BadReadChecksum {
@@ -259,7 +261,10 @@ fn the_card_uses_the_pad_transport_not_a_private_one() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "the post-write settle is hundreds of thousands of interpreted reads")]
+#[cfg_attr(
+    miri,
+    ignore = "the post-write settle is hundreds of thousands of interpreted reads"
+)]
 fn a_written_frame_lands_on_the_card_and_reads_back() {
     let mut bus = CardBus::new(Behaviour::Normal);
     let data = core::array::from_fn(|i| (i as u8).wrapping_mul(3) ^ 0xA5);
@@ -288,7 +293,10 @@ fn an_empty_slot_reports_no_card_and_resets_the_port() {
     assert_eq!(trace.fault, TransportFault::AckTimeout);
     assert_eq!(trace.fault_exchange, 0);
     // A failed transaction ends with a release and a UART reset.
-    assert_eq!(&bus.control[bus.control.len() - 2..], [0, sio0::ctrl::RESET]);
+    assert_eq!(
+        &bus.control[bus.control.len() - 2..],
+        [0, sio0::ctrl::RESET]
+    );
 }
 
 #[test]
@@ -305,7 +313,10 @@ fn the_card_waits_longer_for_ack_than_a_pad_and_otherwise_matches_it() {
     let card = Timing::default().link();
     let pad = psx_io::controller_port::Timing::PAD;
     assert_eq!(card, psx_io::controller_port::Timing::CARD);
-    assert_eq!((card.setup_spins, card.byte_spins), (pad.setup_spins, pad.byte_spins));
+    assert_eq!(
+        (card.setup_spins, card.byte_spins),
+        (pad.setup_spins, pad.byte_spins)
+    );
     assert!(card.ack_spins > pad.ack_spins);
 }
 
@@ -332,8 +343,5 @@ fn a_frame_past_the_end_is_refused_before_the_port_is_touched() {
         card.read_frame(FRAME_COUNT as u16, &mut out),
         Err(Error::OutOfRange)
     );
-    assert_eq!(
-        card.write_frame(u16::MAX, &out),
-        Err(Error::OutOfRange)
-    );
+    assert_eq!(card.write_frame(u16::MAX, &out), Err(Error::OutOfRange));
 }
