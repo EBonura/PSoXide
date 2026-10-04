@@ -65,6 +65,9 @@ Examples that use CD audio or WORLD.PAK need their own pack inputs; the generic
   (hello-fmv's movie) and the website's `site` tasks. The repository runs no
   Python.
 
+- `tools/check-register-literals.sh` (`make lint`): fails when a hardware-window
+  address literal appears anywhere outside `crates/psx-hw`.
+
 The root host workspace and `sdk/` device workspace intentionally remain
 separate. Existing `sdk/crates/*` and `sdk/psoxide.ld` paths are retained.
 The dependency-free `psxed-format` package now lives in `crates/psxed-format`;
