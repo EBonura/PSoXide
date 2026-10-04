@@ -35,8 +35,10 @@
 use psx_hw::mdec::{self as hw, MDEC0, MDEC1};
 use psx_io::dma::{self, Channel};
 
+use crate::rle::{self, RleLengthError};
+
 /// DMA block size the MDEC channels use, in words.
-pub const DMA_BLOCK_WORDS: usize = 32;
+pub const DMA_BLOCK_WORDS: usize = crate::rle::BLOCK_WORDS;
 
 /// Spin budget for one table upload or column transfer.
 pub const DMA_SPINS: u32 = 400_000;
@@ -186,20 +188,25 @@ pub fn reset() -> bool {
     settled
 }
 
-/// Send `words` (a multiple of 32) to the MDEC over DMA0 without waiting.
+/// Send `blocks` 32-word blocks from `words` to the MDEC over DMA0 without
+/// waiting.
 ///
 /// # Safety
-/// `words` must stay alive and unmodified until DMA0 completes.
-unsafe fn dma_in(words: *const u32, count: usize) {
+/// `blocks` must not be 0 (the controller reads 0 as 65,536 blocks), and
+/// `blocks * 32` words at `words` must stay alive and unmodified until DMA0
+/// completes.
+unsafe fn dma_in(words: *const u32, blocks: u16) {
+    debug_assert!(blocks != 0, "a zero block count is 65,536 blocks");
     dma::abort(Channel::MdecIn);
     // SAFETY: the channel was just aborted, so it is idle; the caller keeps
-    // `count` words at `words` alive and unmodified until DMA0 completes.
+    // the `blocks * 32` words at `words` alive and unmodified until DMA0
+    // completes, and `blocks` is not 0.
     unsafe {
         dma::start(
             Channel::MdecIn,
             dma::Transfer {
                 address: words as u32,
-                size: dma::size_blocks(DMA_BLOCK_WORDS as u16, (count / DMA_BLOCK_WORDS) as u16),
+                size: dma::size_blocks(DMA_BLOCK_WORDS as u16, blocks),
                 control: CHCR_IN,
             },
         )
@@ -254,7 +261,7 @@ fn upload(command: u32, words: &[u32; 32]) -> Option<(u8, bool)> {
     let enable_writes = if asked { writes + 1 } else { 0 };
     if asked {
         // SAFETY: `words` is a static table; the transfer is waited out.
-        unsafe { dma_in(words.as_ptr(), 32) };
+        unsafe { dma_in(words.as_ptr(), 1) };
         if dma::wait_done(Channel::MdecIn, DMA_SPINS) {
             return Some((enable_writes, false));
         }
@@ -340,24 +347,28 @@ pub fn read_data() -> u32 {
 /// [`decode`] is the safe form: it holds the borrow of `rle` until DMA0 is
 /// done with it.
 ///
-/// # Panics
-/// If `words` is larger than `rle.len()`: DMA0 would read past the slice.
+/// # Errors
+/// [`RleLengthError`] when `words` is 0, not a multiple of 32, longer than
+/// the decode command can announce ([`crate::rle::MAX_WORDS`]) or longer
+/// than `rle`. Nothing is written to the MDEC then and no DMA starts.
 ///
 /// # Safety
-/// DMA0 keeps reading `rle` after this returns. The caller must keep `rle`
-/// alive and unmodified until [`decode_finish`] returns, and must call it
-/// before the storage is reused or freed.
-pub unsafe fn decode_start(rle: &[u32], words: usize, mode: u32) {
-    assert!(
-        words <= rle.len(),
-        "MDEC decode of {words} words from a shorter buffer"
-    );
-    // SAFETY: MMIO write to MDEC0, then a DMA0 kick over the first `words`
-    // words of `rle` (in bounds per the assert), which the caller keeps alive.
-    unsafe {
-        psx_io::write_u32(MDEC0, mode | (words as u32 & 0xFFFF));
-        dma_in(rle.as_ptr(), words);
+/// On `Ok`, DMA0 keeps reading `rle` after this returns. The caller must
+/// keep `rle` alive and unmodified until [`decode_finish`] returns, and must
+/// call it before the storage is reused or freed.
+pub unsafe fn decode_start(rle: &[u32], words: usize, mode: u32) -> Result<(), RleLengthError> {
+    if words > rle.len() {
+        return Err(RleLengthError::PastBuffer);
     }
+    let blocks = rle::dma_block_count(words)?;
+    // SAFETY: MMIO write to MDEC0, then a DMA0 kick of `blocks` (not 0)
+    // 32-word blocks, exactly the first `words` words of `rle` (checked
+    // above), which the caller keeps alive until `decode_finish`.
+    unsafe {
+        psx_io::write_u32(MDEC0, mode | words as u32);
+        dma_in(rle.as_ptr(), blocks);
+    }
+    Ok(())
 }
 
 /// Decode all of `rle` (a multiple of 32 words, as [`crate::bitstream::decode_frame`]
@@ -367,7 +378,15 @@ pub unsafe fn decode_start(rle: &[u32], words: usize, mode: u32) {
 /// with [`read_column`] once per column. Returns its result and
 /// [`decode_finish`]'s: `false` there means DMA0 was still busy and has been
 /// aborted.
-pub fn decode<R>(rle: &[u32], mode: u32, columns: impl FnOnce() -> R) -> (R, bool) {
+///
+/// # Errors
+/// [`RleLengthError`] when `rle` is empty, not a whole number of 32-word
+/// blocks or longer than [`crate::rle::MAX_WORDS`]; `columns` does not run.
+pub fn decode<R>(
+    rle: &[u32],
+    mode: u32,
+    columns: impl FnOnce() -> R,
+) -> Result<(R, bool), RleLengthError> {
     // Finishes the decode on every exit, an unwinding `columns` included.
     struct Finish(bool);
     impl Drop for Finish {
@@ -377,14 +396,15 @@ pub fn decode<R>(rle: &[u32], mode: u32, columns: impl FnOnce() -> R) -> (R, boo
             }
         }
     }
-    // SAFETY: `rle` stays borrowed until this function returns, and every
-    // return path runs decode_finish first (directly, or via `Finish` when
-    // unwinding), which returns only once DMA0 is done or aborted.
-    unsafe { decode_start(rle, rle.len(), mode) };
+    // SAFETY: `rle` stays borrowed until this function returns. On `Err`
+    // no DMA started; on `Ok` every return path runs decode_finish first
+    // (directly, or via `Finish` when unwinding), which returns only once
+    // DMA0 is done or aborted.
+    unsafe { decode_start(rle, rle.len(), mode)? };
     let mut finish = Finish(false);
     let out = columns();
     finish.0 = true;
-    (out, decode_finish())
+    Ok((out, decode_finish()))
 }
 
 /// Pull the next `dst.len()` words (a multiple of 32) of decoded pixels

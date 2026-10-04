@@ -29,6 +29,7 @@ pub mod idct;
 pub mod iso;
 #[cfg(target_arch = "mips")]
 pub mod mdec;
+pub mod rle;
 pub mod str;
 #[doc(alias = "STR")]
 pub mod stream;
