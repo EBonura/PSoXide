@@ -175,18 +175,98 @@ pub trait AttributedClipPlane<Vertex> {
     ) -> Vertex;
 }
 
-/// Clip one convex attributed polygon against one half-space.
+/// `destination` filled before the clip finished. The vertices written so far
+/// are not a usable polygon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClipOverflow;
+
+impl core::fmt::Display for ClipOverflow {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("clip output does not fit the destination")
+    }
+}
+
+/// Clip one attributed polygon against one half-space into `destination`,
+/// returning how many vertices it wrote.
 ///
-/// A convex polygon gains at most one vertex per plane, so
-/// `destination.len() >= source.len() + 1` is sufficient. `CHECK_CAPACITY`
-/// preserves the donor's measured policy: HL-PSX retains its release guards,
-/// while Quake and PXBSP use fixed scratch whose capacity is proven by
-/// convexity.
+/// Every write is bounds-checked. A convex `source` clipped by a plane whose
+/// `inside` answer is the same each time a vertex is evaluated gains at most
+/// one vertex, so `source.len() + 1` slots always suffice for it; any input
+/// fits `2 * source.len()`, the most one vertex and one crossing per source
+/// vertex can emit.
+///
+/// # Errors
+///
+/// [`ClipOverflow`] when `destination` is too small.
+#[inline(always)]
+pub fn clip_to_plane<Vertex: Copy, Plane: AttributedClipPlane<Vertex>>(
+    source: &[Vertex],
+    destination: &mut [Vertex],
+    plane: &Plane,
+    traversal: ClipTraversal,
+) -> Result<usize, ClipOverflow> {
+    // SAFETY: `destination` is a live exclusive slice, so its pointer is
+    // valid for writes of `destination.len()` elements and cannot alias
+    // `source`; with `CHECK_CAPACITY` the kernel bounds every write by that
+    // length.
+    unsafe {
+        clip_convex_plane_raw::<_, _, true>(
+            source,
+            destination.as_mut_ptr(),
+            destination.len(),
+            plane,
+            traversal,
+        )
+    }
+    .map_err(|_| ClipOverflow)
+}
+
+/// [`clip_to_plane`] without the bounds check on each write, for fixed
+/// scratch whose size is proven.
 ///
 /// # Safety
 ///
-/// When `CHECK_CAPACITY` is false, `destination` must have room for every
-/// emitted vertex. `source` and `destination` must not overlap.
+/// `destination.len()` must be at least `2 * source.len()`; or at least
+/// `source.len() + 1` when `source` is convex and `plane.inside` gives the
+/// same answer every time a vertex's distance is evaluated (the
+/// `CurrentToNext` traversal evaluates each distance twice).
+#[inline(always)]
+pub unsafe fn clip_to_plane_unchecked<Vertex: Copy, Plane: AttributedClipPlane<Vertex>>(
+    source: &[Vertex],
+    destination: &mut [Vertex],
+    plane: &Plane,
+    traversal: ClipTraversal,
+) -> usize {
+    // SAFETY: `destination` is a live exclusive slice, valid for writes of
+    // its length and not aliasing `source`; this fn's `# Safety` bounds the
+    // emitted count by that length. Without `CHECK_CAPACITY` the kernel never
+    // returns `Err`.
+    match unsafe {
+        clip_convex_plane_raw::<_, _, false>(
+            source,
+            destination.as_mut_ptr(),
+            destination.len(),
+            plane,
+            traversal,
+        )
+    } {
+        Ok(written) | Err(written) => written,
+    }
+}
+
+/// Clip one convex attributed polygon against one half-space.
+///
+/// With `CHECK_CAPACITY` true this is [`clip_to_plane`] returning the count
+/// written before an overflow; with it false, [`clip_to_plane_unchecked`].
+///
+/// # Safety
+///
+/// When `CHECK_CAPACITY` is false, [`clip_to_plane_unchecked`]'s contract.
+/// `source.len() + 1` slots are enough only for a convex source and a plane
+/// whose `inside` answer is stable per vertex; `2 * source.len()` always is.
+#[deprecated(
+    note = "use the safe `clip_to_plane` (checked) or `clip_to_plane_unchecked` (proven capacity)"
+)]
 #[inline(always)]
 pub unsafe fn clip_convex_plane<
     Vertex: Copy,
@@ -202,7 +282,7 @@ pub unsafe fn clip_convex_plane<
     // valid for writes of `destination.len()` elements and cannot alias
     // `source`. The capacity requirement when `CHECK_CAPACITY` is false is
     // forwarded unchanged from this fn's `# Safety` section.
-    unsafe {
+    match unsafe {
         clip_convex_plane_raw::<_, _, CHECK_CAPACITY>(
             source,
             destination.as_mut_ptr(),
@@ -210,20 +290,78 @@ pub unsafe fn clip_convex_plane<
             plane,
             traversal,
         )
+    } {
+        Ok(written) | Err(written) => written,
     }
 }
 
-/// Clip into uninitialised fixed scratch without clearing it first.
+/// [`clip_to_plane`] into uninitialised scratch, so console renderers can
+/// keep stack or scratchpad scratch as `MaybeUninit` and pay only for the
+/// vertices clipping emits. On `Ok(n)` the first `n` entries are initialised.
 ///
-/// This is the same kernel as [`clip_convex_plane`]. It exists so console
-/// renderers can retain stack/DMEM scratch as `MaybeUninit` and pay only for
-/// vertices that clipping actually emits.
+/// # Errors
+///
+/// [`ClipOverflow`] when `destination` is too small.
+#[inline(always)]
+pub fn clip_to_plane_uninit<Vertex: Copy, Plane: AttributedClipPlane<Vertex>>(
+    source: &[Vertex],
+    destination: &mut [MaybeUninit<Vertex>],
+    plane: &Plane,
+    traversal: ClipTraversal,
+) -> Result<usize, ClipOverflow> {
+    // SAFETY: `MaybeUninit<Vertex>` has `Vertex`'s layout, so the cast
+    // pointer is aligned and valid for writes of `destination.len()`
+    // vertices; the kernel only writes destination slots, bounds-checked
+    // with `CHECK_CAPACITY`, and the exclusive borrow rules out aliasing.
+    unsafe {
+        clip_convex_plane_raw::<_, _, true>(
+            source,
+            destination.as_mut_ptr().cast::<Vertex>(),
+            destination.len(),
+            plane,
+            traversal,
+        )
+    }
+    .map_err(|_| ClipOverflow)
+}
+
+/// [`clip_to_plane_uninit`] without the bounds check on each write. The
+/// first returned-count entries of `destination` are initialised.
 ///
 /// # Safety
 ///
-/// When `CHECK_CAPACITY` is false, `destination` must have room for every
-/// emitted vertex. `source` and `destination` must not overlap. The first
+/// [`clip_to_plane_unchecked`]'s capacity contract.
+#[inline(always)]
+pub unsafe fn clip_to_plane_uninit_unchecked<Vertex: Copy, Plane: AttributedClipPlane<Vertex>>(
+    source: &[Vertex],
+    destination: &mut [MaybeUninit<Vertex>],
+    plane: &Plane,
+    traversal: ClipTraversal,
+) -> usize {
+    // SAFETY: as in `clip_to_plane_uninit`, with the capacity bound from this
+    // fn's `# Safety`. Without `CHECK_CAPACITY` the kernel never returns `Err`.
+    match unsafe {
+        clip_convex_plane_raw::<_, _, false>(
+            source,
+            destination.as_mut_ptr().cast::<Vertex>(),
+            destination.len(),
+            plane,
+            traversal,
+        )
+    } {
+        Ok(written) | Err(written) => written,
+    }
+}
+
+/// [`clip_convex_plane`] into uninitialised scratch. The first
 /// returned-count entries of `destination` are initialised on return.
+///
+/// # Safety
+///
+/// [`clip_convex_plane`]'s contract.
+#[deprecated(
+    note = "use the safe `clip_to_plane_uninit` (checked) or `clip_to_plane_uninit_unchecked` (proven capacity)"
+)]
 #[inline(always)]
 pub unsafe fn clip_convex_plane_uninit<
     Vertex: Copy,
@@ -240,7 +378,7 @@ pub unsafe fn clip_convex_plane_uninit<
     // vertices; the raw kernel only writes (never reads) destination slots.
     // The exclusive borrow rules out aliasing `source`, and the capacity
     // requirement is forwarded from this fn's `# Safety` section.
-    unsafe {
+    match unsafe {
         clip_convex_plane_raw::<_, _, CHECK_CAPACITY>(
             source,
             destination.as_mut_ptr().cast::<Vertex>(),
@@ -248,9 +386,14 @@ pub unsafe fn clip_convex_plane_uninit<
             plane,
             traversal,
         )
+    } {
+        Ok(written) | Err(written) => written,
     }
 }
 
+/// The Sutherland-Hodgman kernel. `Err(written)` when `CHECK_CAPACITY` found
+/// `destination` full; without it every write is the caller's to bound and
+/// the result is always `Ok`.
 #[inline(always)]
 unsafe fn clip_convex_plane_raw<
     Vertex: Copy,
@@ -262,11 +405,13 @@ unsafe fn clip_convex_plane_raw<
     destination_len: usize,
     plane: &Plane,
     traversal: ClipTraversal,
-) -> usize {
+) -> Result<usize, usize> {
     if source.is_empty() {
-        return 0;
+        return Ok(0);
     }
-    debug_assert!(destination_len >= source.len().saturating_add(1));
+    if !CHECK_CAPACITY {
+        debug_assert!(destination_len >= source.len().saturating_add(1));
+    }
 
     #[inline(always)]
     unsafe fn emit<Vertex: Copy, const CHECK_CAPACITY: bool>(
@@ -322,7 +467,7 @@ unsafe fn clip_convex_plane_raw<
                             crossing,
                         )
                     } {
-                        return written;
+                        return Err(written);
                     }
                 }
                 if current_inside
@@ -337,7 +482,7 @@ unsafe fn clip_convex_plane_raw<
                         )
                     }
                 {
-                    return written;
+                    return Err(written);
                 }
                 previous_index = current_index;
                 previous = current;
@@ -373,7 +518,7 @@ unsafe fn clip_convex_plane_raw<
                         )
                     }
                 {
-                    return written;
+                    return Err(written);
                 }
                 if current_inside != plane.inside(next_distance) {
                     let crossing = plane.intersection(
@@ -395,14 +540,14 @@ unsafe fn clip_convex_plane_raw<
                             crossing,
                         )
                     } {
-                        return written;
+                        return Err(written);
                     }
                 }
                 current_index += 1;
             }
         }
     }
-    written
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -447,10 +592,13 @@ mod tests {
         traversal: ClipTraversal,
     ) -> ([Vertex; 8], usize) {
         let mut output = [Vertex::default(); 8];
-        // SAFETY: every test source has 3 vertices, and one plane emits at
-        // most two per source vertex (6), which fits the 8 output slots.
-        let count = unsafe {
-            clip_convex_plane::<_, _, CHECK>(source, &mut output, &Plane(None), traversal)
+        assert!(2 * source.len() <= output.len());
+        let count = if CHECK {
+            clip_to_plane(source, &mut output, &Plane(None), traversal).expect("fits")
+        } else {
+            // SAFETY: one plane emits at most two vertices per source vertex,
+            // and the assert above leaves room for that.
+            unsafe { clip_to_plane_unchecked(source, &mut output, &Plane(None), traversal) }
         };
         (output, count)
     }
@@ -476,17 +624,61 @@ mod tests {
     fn cached_distance_domain_is_authoritative() {
         let source = [Vertex(100, 0), Vertex(100, 40), Vertex(100, 80)];
         let mut output = [Vertex::default(); 4];
-        // SAFETY: `CHECK_CAPACITY` is true, so `emit` bounds-checks every write.
+        let count = clip_to_plane(
+            &source,
+            &mut output,
+            &Plane(Some(&[-2, 2, 2])),
+            ClipTraversal::CurrentToNext,
+        );
+        assert_eq!(count, Ok(4));
+        assert_eq!(output, [Vertex(0, 20), source[1], source[2], Vertex(0, 40)]);
+    }
+
+    /// math-01: a non-convex source crossing the plane at every edge emits
+    /// two vertices per source vertex, more than the `len + 1` the old docs
+    /// called sufficient. The safe form reports it; `2 * len` always fits.
+    #[test]
+    fn non_convex_input_overflows_len_plus_one_but_fits_twice_len() {
+        let zigzag = [Vertex(1, 0), Vertex(-1, 10), Vertex(1, 20), Vertex(-1, 30)];
+        for traversal in [
+            ClipTraversal::PreviousToCurrent,
+            ClipTraversal::CurrentToNext,
+        ] {
+            let mut tight = [Vertex::default(); 5];
+            assert_eq!(
+                clip_to_plane(&zigzag, &mut tight, &Plane(None), traversal),
+                Err(ClipOverflow)
+            );
+            let mut roomy = [Vertex::default(); 8];
+            assert_eq!(
+                clip_to_plane(&zigzag, &mut roomy, &Plane(None), traversal),
+                Ok(6)
+            );
+            let mut uninit = [MaybeUninit::<Vertex>::uninit(); 5];
+            assert_eq!(
+                clip_to_plane_uninit(&zigzag, &mut uninit, &Plane(None), traversal),
+                Err(ClipOverflow)
+            );
+        }
+    }
+
+    /// The deprecated forwarders keep their old results: the checked form
+    /// returns the count written before the overflow.
+    #[allow(deprecated)]
+    #[test]
+    fn deprecated_forwarders_keep_partial_counts() {
+        let zigzag = [Vertex(1, 0), Vertex(-1, 10), Vertex(1, 20), Vertex(-1, 30)];
+        let mut tight = [Vertex::default(); 5];
+        // SAFETY: `CHECK_CAPACITY` is true, so every write is bounds-checked.
         let count = unsafe {
             clip_convex_plane::<_, _, true>(
-                &source,
-                &mut output,
-                &Plane(Some(&[-2, 2, 2])),
-                ClipTraversal::CurrentToNext,
+                &zigzag,
+                &mut tight,
+                &Plane(None),
+                ClipTraversal::PreviousToCurrent,
             )
         };
-        assert_eq!(count, 4);
-        assert_eq!(output, [Vertex(0, 20), source[1], source[2], Vertex(0, 40)]);
+        assert_eq!(count, 5);
     }
 
     #[test]
