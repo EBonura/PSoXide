@@ -10,9 +10,8 @@ description  = "FMV playback building blocks: STR sector demux, BS v2 bitstream 
 [dependencies]
 # The bitstream, STR and ISO parsers are pure logic and build for guest and
 # host alike (host `cargo test` covers them). The MDEC driver touches MMIO
-# and only exists on the MIPS guest.
-
-[target.'cfg(target_arch = "mips")'.dependencies]
+# only when one of its methods runs, so it builds on the host as well and its
+# ownership tests run there.
 psx-hw = { workspace = true }
 psx-io = { workspace = true }
 
