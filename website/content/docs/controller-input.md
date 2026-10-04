@@ -21,10 +21,10 @@ Open `build/examples/mipsel-sony-psx/release/hello-input.cue` in the desktop emu
 
 ## Poll once each frame
 
-`poll_port1()` returns the controller's connection mode, buttons and stick values. Read it once at the beginning of your update and share that snapshot with the rest of your game:
+`poll_on(&mut port, Port::One)` returns the controller's connection mode, buttons and stick values. `port` is the controller-port token from `Peripherals`, shared with the memory card driver. Read it once at the beginning of your update and share that snapshot with the rest of your game:
 
 ```rust
-let state = poll_port1();
+let state = poll_on(&mut port, Port::One);
 let pad = state.buttons;
 if pad.is_held(button::UP) {
     r = r.saturating_add(4);
