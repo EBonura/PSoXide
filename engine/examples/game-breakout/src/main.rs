@@ -34,6 +34,7 @@ use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
+use psx_gpu::Gpu;
 use psx_settings::Profile;
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TextureDepth, TexturePage};
@@ -466,7 +467,7 @@ impl Scene for Breakout {
 
     fn render(&mut self, ctx: &mut Ctx) {
         self.build_frame_ot().submit(ctx.gpu_dma());
-        self.draw_hud();
+        self.draw_hud(ctx.gpu());
     }
 }
 
@@ -583,7 +584,7 @@ impl Breakout {
         frame
     }
 
-    fn draw_hud(&self) {
+    fn draw_hud(&self, gpu: &mut Gpu) {
         let Some(font) = self.font.as_ref() else {
             return;
         };
@@ -607,7 +608,7 @@ impl Breakout {
             Phase::Lost => {}
             Phase::Playing => {}
         }
-        self.shell.draw(font, "BREAKOUT");
+        self.shell.draw(gpu, font, "BREAKOUT");
     }
 }
 

@@ -17,6 +17,7 @@ use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::material::TextureMaterial;
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, QuadTexturedMaterial, RectFlat};
+use psx_gpu::Gpu;
 use psx_io::cdrom;
 use psx_math::int32::clamp_i16;
 use psx_settings::Profile;
@@ -521,7 +522,8 @@ impl Scene for MagikaaaaaarpPong {
     fn render(&mut self, ctx: &mut Ctx) {
         let frame = self.build_frame_ot(ctx.sim_tick.as_u32());
         frame.submit(ctx.gpu_dma());
-        self.draw_hud(ctx.sim_tick.as_u32());
+        let sim_tick = ctx.sim_tick.as_u32();
+        self.draw_hud(ctx.gpu(), sim_tick);
     }
 }
 
@@ -730,7 +732,7 @@ impl MagikaaaaaarpPong {
         frame.add(SCORE_FLYBY_OT_SLOT, quad);
     }
 
-    fn draw_hud(&self, sim_tick: u32) {
+    fn draw_hud(&self, gpu: &mut Gpu, sim_tick: u32) {
         let Some(font) = self.font.as_ref() else {
             return;
         };
@@ -746,7 +748,7 @@ impl MagikaaaaaarpPong {
         if self.two_player && self.shell.is_playing() {
             font.draw_text((SCREEN_W - 8 * 7) / 2, SCORE_Y, "2P MODE", MUTED_INK);
         }
-        self.shell.draw(font, "MAGIKARP PONG");
+        self.shell.draw(gpu, font, "MAGIKARP PONG");
     }
 }
 

@@ -1343,7 +1343,12 @@ fn packet_cursor(
 fn wait_for_in_flight_list() {
     #[cfg(feature = "present-queue")]
     psx_rt::present::wait_slot_empty();
-    psx_gpu::submit_linked_list_wait();
+    // SAFETY: the wait reads channel 2's status until the walk the frame's
+    // owner kicked has finished, and starts nothing. The fence runs from a
+    // packet push deep in a scene's render, where the runner's token (held
+    // by `Ctx`) is not at hand but is idle: nothing else drives channel 2
+    // until this returns.
+    psx_gpu::chain::wait(unsafe { &mut psx_io::periph::GpuDma::steal() });
 }
 
 /// Host builds have no DMA; the tests count fences instead.

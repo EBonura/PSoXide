@@ -30,6 +30,7 @@ use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
+use psx_gpu::Gpu;
 use psx_settings::Profile;
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TextureDepth, TexturePage};
@@ -590,7 +591,7 @@ impl Scene for Invaders {
     fn render(&mut self, ctx: &mut Ctx) {
         let frame = self.build_frame_ot(ctx.sim_tick);
         frame.submit(ctx.gpu_dma());
-        self.draw_hud();
+        self.draw_hud(ctx.gpu());
     }
 }
 
@@ -690,7 +691,7 @@ impl Invaders {
         frame
     }
 
-    fn draw_hud(&self) {
+    fn draw_hud(&self, gpu: &mut Gpu) {
         let Some(font) = self.font.as_ref() else {
             return;
         };
@@ -716,7 +717,7 @@ impl Invaders {
             Phase::Lost => {}
             Phase::Playing => {}
         }
-        self.shell.draw(font, "INVADERS");
+        self.shell.draw(gpu, font, "INVADERS");
     }
 }
 

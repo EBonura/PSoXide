@@ -964,18 +964,18 @@ impl Scene for Playtest {
 
     /// Apply front-end settings chosen before Play. Screen-position options
     /// shift the whole rendered scene through the display window.
-    fn apply_options(&mut self, options: &[psx_level::LevelOptionDef], values: &[i32]) {
+    fn apply_options(
+        &mut self,
+        options: &[psx_level::LevelOptionDef],
+        values: &[i32],
+        ctx: &mut Ctx,
+    ) {
+        let mut screen_offset = self.screen_offset;
         for (option, value) in options.iter().zip(values) {
             if option.id == SCREEN_OFFSET_X_OPTION_ID {
-                let offset_px = (*value).clamp(-128, 127) as i16;
-                psx_gpu::set_screen_h_offset(offset_px, psx_gpu::Resolution::R320X240);
+                screen_offset.0 = (*value).clamp(-128, 127) as i16;
             } else if option.id == SCREEN_OFFSET_Y_OPTION_ID {
-                let offset_px = (*value).clamp(-128, 127) as i16;
-                psx_gpu::set_screen_v_offset(
-                    offset_px,
-                    psx_gpu::VideoMode::Ntsc,
-                    psx_gpu::Resolution::R320X240,
-                );
+                screen_offset.1 = (*value).clamp(-128, 127) as i16;
             } else if option.id == SFX_VOLUME_OPTION_ID {
                 let percent = (*value).clamp(0, SFX_VOLUME_MAX) as u16;
                 let volume = psx_spu::Volume::linear(percent, SFX_VOLUME_MAX as u16);
@@ -987,11 +987,20 @@ impl Scene for Playtest {
                 self.brightness_level = (*value).clamp(1, i32::from(BRIGHTNESS_LEVELS)) as u8;
             }
         }
+        if screen_offset != self.screen_offset {
+            self.screen_offset = screen_offset;
+            ctx.gpu().set_display(
+                DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240)
+                    .with_offset(screen_offset),
+            );
+        }
     }
 
     fn render_post_process(&mut self, ctx: &mut Ctx) {
-        draw_brightness_overlay(self.brightness_level);
-        draw_opening_fade(&ctx.fb, self.opening.fade());
+        let fade = self.opening.fade();
+        let (gpu, fb) = ctx.gpu_and_buffers();
+        draw_brightness_overlay(gpu, self.brightness_level);
+        draw_opening_fade(gpu, fb, fade);
     }
 
     fn init(&mut self, _ctx: &mut Ctx) {
@@ -2354,7 +2363,7 @@ impl Scene for Playtest {
         })
     }
 
-    fn submit_render(&mut self, _ctx: &mut Ctx) {
+    fn submit_render(&mut self, ctx: &mut Ctx) {
         self.commit_overlay_state();
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         // SAFETY: `render` built OT[built] this frame from PACKET_FRAMES' paired
@@ -2364,23 +2373,27 @@ impl Scene for Playtest {
         // other table and the other end of the scratch.
         unsafe {
             let built = (*core::ptr::addr_of!(PACKET_FRAMES)).built_frame();
-            psx_gpu::submit_linked_list_async_raw((*core::ptr::addr_of!(OT[built])).submit_head());
+            psx_gpu::chain::submit_async_raw(
+                ctx.gpu_dma(),
+                (*core::ptr::addr_of!(OT[built])).submit_head(),
+            );
         }
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
     }
 
-    fn render_overlay(&mut self, _ctx: &mut Ctx) {
+    fn render_overlay(&mut self, ctx: &mut Ctx) {
+        let gpu = ctx.gpu();
         let camera = self.overlay_camera;
         let overlay_tick = self.overlay_sim_tick;
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            draw_room_atmosphere_overlay(room_record, overlay_tick);
+            draw_room_atmosphere_overlay(gpu, room_record, overlay_tick);
         }
 
         if self.opening.active() {
             if !self.opening.gameplay_camera() {
                 if let Some(font) = self.ui_fonts[0].as_ref() {
-                    draw_opening_skip(font, self.opening.skip_progress());
+                    draw_opening_skip(gpu, font, self.opening.skip_progress());
                 }
             }
             return;
@@ -2392,7 +2405,13 @@ impl Scene for Playtest {
         }
 
         if let Some(target) = self.lock_target_indicator_position() {
-            draw_lock_target_indicator(target, camera, overlay_tick, self.player_stance.active());
+            draw_lock_target_indicator(
+                gpu,
+                target,
+                camera,
+                overlay_tick,
+                self.player_stance.active(),
+            );
         }
 
         // Damage numbers sit above the world and below the panels: they
@@ -2436,6 +2455,7 @@ impl Scene for Playtest {
                             }
                         };
                         draw_enemy_vitality_hud(
+                            gpu,
                             font,
                             projected.sx.saturating_add(40).clamp(4, SCREEN_W - 80),
                             projected.sy.clamp(4, SCREEN_H - 20),
@@ -2481,6 +2501,7 @@ impl Scene for Playtest {
                     None
                 };
                 draw_player_vitality_hud(
+                    gpu,
                     font,
                     active,
                     share(active),
@@ -2529,6 +2550,7 @@ impl Scene for Playtest {
                     .map(|interactable| crate::loc::prompt_verb(interactable.prompt))
                     .unwrap_or("READ");
                 psx_engine::ui::draw_dismissing_message_panel(
+                    gpu,
                     font,
                     variant,
                     !self.acquired_module.is_none(),
@@ -2543,6 +2565,7 @@ impl Scene for Playtest {
                 .and_then(|index| BOOST_MODULES.get(index))
             {
                 draw_acquired_module(
+                    gpu,
                     font,
                     self.acquired_module.index().map_or(module.name, |index| {
                         crate::loc::module_name(index, module.name)
@@ -2573,6 +2596,7 @@ impl Scene for Playtest {
                                     .unwrap_or("READ"),
                             );
                             draw_expanding_poi_message(
+                                gpu,
                                 font,
                                 action,
                                 page_text,
@@ -2584,6 +2608,7 @@ impl Scene for Playtest {
                             );
                         }
                         psx_game_runtime::poi::MessageSource::World => draw_message_page(
+                            gpu,
                             font,
                             page_text,
                             variant,
@@ -2596,6 +2621,7 @@ impl Scene for Playtest {
                 }
             } else if let Some(message) = self.message_overlay {
                 draw_interactable_message(
+                    gpu,
                     font,
                     message.title,
                     message.body,
@@ -2605,6 +2631,7 @@ impl Scene for Playtest {
             } else if let Some(index) = self.active_interactable {
                 if let Some(interactable) = INTERACTABLES.get(index) {
                     draw_interaction_prompt_animated(
+                        gpu,
                         font,
                         crate::loc::prompt_verb(interactable.prompt),
                         overlay_tick.as_u32() as u16,

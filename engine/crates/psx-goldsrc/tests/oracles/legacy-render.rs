@@ -7,7 +7,7 @@
 //! ratio/interpolation helpers keep every intermediate in 32 bits.
 
 use psx_engine::attributed_clip::{
-    clip_convex_plane, lerp_q12_i32_wide as mix, ratio_q12_i32 as t_q12, AttributedClipPlane,
+    clip_to_plane, lerp_q12_i32_wide as mix, ratio_q12_i32 as t_q12, AttributedClipPlane,
     ClipTraversal,
 };
 use psx_engine::projection::{
@@ -353,9 +353,7 @@ pub fn projected_midpoint_cv(mut a: CVert, mut b: CVert) -> CVert {
 /// Clip a triangle against `z >= NEAR_Z` in view space. Writes up to 4 verts.
 pub fn near_clip(cv: &[CVert; 3], out: &mut [CVert; 4]) -> usize {
     // Keep GoldSrc's canonical endpoint interpolation and fan order.
-    unsafe {
-        clip_convex_plane::<_, _, true>(cv, out, &NearPlane, ClipTraversal::PreviousToCurrent)
-    }
+    clip_to_plane(cv, out, &NearPlane, ClipTraversal::PreviousToCurrent).unwrap_or(out.len())
 }
 
 struct NearPlane;
@@ -511,9 +509,7 @@ fn clip_edge(
         bound,
         keep_ge,
     };
-    unsafe {
-        clip_convex_plane::<_, _, true>(&inp[..n], out, &plane, ClipTraversal::PreviousToCurrent)
-    }
+    clip_to_plane(&inp[..n], out, &plane, ClipTraversal::PreviousToCurrent).unwrap_or(out.len())
 }
 
 struct ScreenPlane {
@@ -640,15 +636,13 @@ impl AttributedClipPlane<SVert> for GoldSrcViewClipPlane {
 }
 
 fn clip_view_plane(inp: &[SVert], n: usize, out: &mut [SVert; 8], plane: ViewPlane) -> usize {
-    let m = unsafe {
-        clip_convex_plane::<_, _, true>(
-            &inp[..n],
-            out,
-            &GoldSrcViewClipPlane(plane),
-            ClipTraversal::PreviousToCurrent,
-        )
-    };
-    m
+    clip_to_plane(
+        &inp[..n],
+        out,
+        &GoldSrcViewClipPlane(plane),
+        ClipTraversal::PreviousToCurrent,
+    )
+    .unwrap_or(out.len())
 }
 
 #[inline(always)]

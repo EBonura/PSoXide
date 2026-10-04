@@ -117,8 +117,13 @@ pub(super) fn draw_projectile_impact<'a>(
 }
 
 /// Draw the room's screen-space atmosphere motes over the frame.
-pub(super) fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_tick: SimTick) {
+pub(super) fn draw_room_atmosphere_overlay(
+    gpu: &mut Gpu,
+    room: &LevelRoomRecord,
+    elapsed_tick: SimTick,
+) {
     psx_game_runtime::particles::draw_room_atmosphere_overlay(
+        gpu,
         room,
         elapsed_tick,
         SCREEN_W,

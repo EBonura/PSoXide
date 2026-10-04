@@ -102,11 +102,14 @@ use psx_game_runtime::{
     save::{SaveBlock, SavedPlayerPosition},
 };
 use psx_gpu::{
-    draw_line_mono, draw_tri_flat_blended,
+    display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode},
     material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
-    prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
-    VideoMode,
+    prim::{
+        LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite, TriFlat,
+        TriTextured, TriTexturedGouraud,
+    },
+    Gpu,
 };
 use psx_level::portal_visibility::{
     debug_portal_clip, PortalClipDebug, PortalClipDebugDecision, PortalClipDebugPlane,
@@ -705,6 +708,9 @@ struct Playtest {
     analog_deadzone: i16,
     /// User-facing 1..=6 presentation brightness level.
     brightness_level: u8,
+    /// Display-window picture offset (pixels right, scanlines down) selected by
+    /// the front-end Settings scene; zero is the standard centred picture.
+    screen_offset: (i16, i16),
     /// Host-visible render breadcrumbs emitted for a few frames after
     /// crossing into another room.
     post_cross_debug_frames: u8,

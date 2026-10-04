@@ -9,13 +9,12 @@ use psx_engine::ui::{
     draw_message_panel,
 };
 pub(crate) use psx_engine::ui::{MessagePageMeta, MessagePanelVariant};
-use psx_gpu::draw_quad_flat;
 
 /// Apply the six-step demo-disc brightness control as a native PS1 blend over
 /// the composed frame. This costs two flat triangles and no VRAM. Level one
 /// matches the old level three, level four is the authored image, and the top
 /// two levels lift the image above neutral.
-pub(crate) fn draw_brightness_overlay(level: u8) {
+pub(crate) fn draw_brightness_overlay(gpu: &mut Gpu, level: u8) {
     let (amount, blend_mode) = match level.clamp(1, BRIGHTNESS_LEVELS) {
         1 => (24, BlendMode::Subtract),
         2 => (14, BlendMode::Subtract),
@@ -27,34 +26,45 @@ pub(crate) fn draw_brightness_overlay(level: u8) {
     if amount == 0 {
         return;
     }
-    draw_tri_flat_blended(
-        [(0, 0), (SCREEN_W, 0), (0, SCREEN_H)],
-        amount,
-        amount,
-        amount,
-        blend_mode,
+    // Level four (the only opaque blend) has amount 0 and returned above, so
+    // both triangles are translucent.
+    let material = TextureMaterial::blended(0, 0, (amount, amount, amount), blend_mode);
+    gpu.set_draw_mode(material);
+    gpu.draw(
+        &TriFlat::new(
+            [(0, 0), (SCREEN_W, 0), (0, SCREEN_H)],
+            amount,
+            amount,
+            amount,
+        )
+        .translucent(),
     );
-    draw_tri_flat_blended(
-        [(SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
-        amount,
-        amount,
-        amount,
-        blend_mode,
+    gpu.set_draw_mode(material);
+    gpu.draw(
+        &TriFlat::new(
+            [(SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
+            amount,
+            amount,
+            amount,
+        )
+        .translucent(),
     );
 }
 
 /// Animated proximity prompt. `prompt` is the action verb; the shared engine
 /// chrome adds the matching Cross icon.
 pub(crate) fn draw_interaction_prompt_animated(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     prompt: &str,
     frame: u16,
     cross_prompt: Option<UiTextureSlot>,
 ) {
-    draw_interaction_prompt_panel(font, prompt, frame, cross_prompt);
+    draw_interaction_prompt_panel(gpu, font, prompt, frame, cross_prompt);
 }
 
 pub(crate) fn draw_interactable_message(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     _title: &str,
     body: &str,
@@ -62,6 +72,7 @@ pub(crate) fn draw_interactable_message(
     cross_prompt: Option<UiTextureSlot>,
 ) {
     draw_message_page(
+        gpu,
         font,
         body,
         MessagePanelVariant::PointOfInterest,
@@ -74,6 +85,7 @@ pub(crate) fn draw_interactable_message(
 
 /// Shared POI/world-message bridge used by the playtest state machine.
 pub(crate) fn draw_message_page(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     page_text: &str,
     variant: MessagePanelVariant,
@@ -83,6 +95,7 @@ pub(crate) fn draw_message_page(
     cross_prompt: Option<UiTextureSlot>,
 ) {
     draw_message_panel(
+        gpu,
         font,
         page_text,
         variant,
@@ -97,6 +110,7 @@ pub(crate) fn draw_message_page(
 /// POI-only presentation bridge that visibly morphs the active interaction
 /// prompt into the first message page.
 pub(crate) fn draw_expanding_poi_message(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     action: &str,
     page_text: &str,
@@ -107,6 +121,7 @@ pub(crate) fn draw_expanding_poi_message(
     cross_prompt: Option<UiTextureSlot>,
 ) {
     draw_expanding_message_panel(
+        gpu,
         font,
         action,
         page_text,
@@ -120,6 +135,7 @@ pub(crate) fn draw_expanding_poi_message(
 }
 
 pub(crate) fn draw_acquired_module(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     item_name: &str,
     frame: u16,
@@ -128,6 +144,7 @@ pub(crate) fn draw_acquired_module(
     cross_prompt: Option<UiTextureSlot>,
 ) {
     draw_item_acquired_panel(
+        gpu,
         font,
         item_name,
         frame,
@@ -159,7 +176,7 @@ pub(crate) fn draw_fps_overlay(font: &FontAtlas, fps: u8, worst_gap_vblanks: u8)
     };
     let width = font.text_width(text) as i16;
     let x = SCREEN_W - 8 - width;
-    draw_rect(x - 3, 6, width + 6, 12, (10, 12, 16));
+    draw_rect(gpu, x - 3, 6, width + 6, 12, (10, 12, 16));
     font.draw_text(x, 8, text, (170, 255, 190));
 }
 
@@ -474,11 +491,11 @@ impl DbgLine {
 }
 
 #[inline(never)]
-fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
+fn draw_rect(gpu: &mut Gpu, x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
     if width <= 0 || height <= 0 {
         return;
     }
-    draw_quad_flat(
+    gpu.draw(&QuadFlat::new(
         [
             (x, y),
             (x + width, y),
@@ -488,7 +505,7 @@ fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
         color.0,
         color.1,
         color.2,
-    );
+    ));
 }
 
 /// A rectangle with its top-left and bottom-right corners chamfered.
@@ -504,27 +521,27 @@ fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
 /// bottom edge. At the authored cut of two pixels the outer two are slivers,
 /// so the whole shell costs two extra polygons.
 #[inline(never)]
-fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8)) {
+fn draw_chamfered(gpu: &mut Gpu, x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8)) {
     if w <= 0 || h <= 0 {
         return;
     }
     // A cut wider than half the box would cross the slopes over each other.
     let cut = cut.min(w / 2).min(h / 2).max(0);
     if cut == 0 {
-        draw_rect(x, y, w, h, color);
+        draw_rect(gpu, x, y, w, h, color);
         return;
     }
     let (r, g, b) = color;
     // Left sliver: top edge rises from (x, y + cut) to (x + cut, y).
-    draw_quad_flat(
+    gpu.draw(&QuadFlat::new(
         [(x, y + cut), (x + cut, y), (x, y + h), (x + cut, y + h)],
         r,
         g,
         b,
-    );
-    draw_rect(x + cut, y, w - cut * 2, h, color);
+    ));
+    draw_rect(gpu, x + cut, y, w - cut * 2, h, color);
     // Right sliver: bottom edge falls from (x + w - cut, y + h) to (x + w, y + h - cut).
-    draw_quad_flat(
+    gpu.draw(&QuadFlat::new(
         [
             (x + w - cut, y),
             (x + w, y),
@@ -534,7 +551,7 @@ fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8))
         r,
         g,
         b,
-    );
+    ));
 }
 
 /// Draw the complete player vitality cluster. Owning the two bars and cooldown
@@ -542,6 +559,7 @@ fn draw_chamfered(x: i16, y: i16, w: i16, h: i16, cut: i16, color: (u8, u8, u8))
 /// authored shell, and lets the active channel stay deliberately longer.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_player_vitality_hud(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     active: VitalityChannelId,
     active_fill_q12: u16,
@@ -563,6 +581,7 @@ pub(crate) fn draw_player_vitality_hud(
     if swap_motion_progress_q12 < 2048 {
         // The old active bar is still on the near side of the orbit.
         draw_vitality_bar(
+            gpu,
             font,
             incoming.bounds,
             incoming.cut,
@@ -571,6 +590,7 @@ pub(crate) fn draw_player_vitality_hud(
             active_label,
         );
         draw_vitality_bar(
+            gpu,
             font,
             outgoing.bounds,
             outgoing.cut,
@@ -581,6 +601,7 @@ pub(crate) fn draw_player_vitality_hud(
     } else {
         // After the crossing, the newly active bar comes to the near side.
         draw_vitality_bar(
+            gpu,
             font,
             outgoing.bounds,
             outgoing.cut,
@@ -589,6 +610,7 @@ pub(crate) fn draw_player_vitality_hud(
             inactive_label,
         );
         draw_vitality_bar(
+            gpu,
             font,
             incoming.bounds,
             incoming.cut,
@@ -598,6 +620,7 @@ pub(crate) fn draw_player_vitality_hud(
         );
     }
     draw_swap_cooldown_diamond(
+        gpu,
         20,
         18,
         swap_cooldown_progress_q12,
@@ -611,6 +634,7 @@ pub(crate) fn draw_player_vitality_hud(
 /// cooldown diamond. Enemy swap timing is intentionally internal; the moving
 /// bars and model-colour sweep communicate the stance change itself.
 pub(crate) fn draw_enemy_vitality_hud(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     left_x: i16,
     top_y: i16,
@@ -626,6 +650,7 @@ pub(crate) fn draw_enemy_vitality_hud(
 
     if swap_motion_progress_q12 < 2048 {
         draw_vitality_bar(
+            gpu,
             font,
             incoming.bounds,
             incoming.cut,
@@ -634,6 +659,7 @@ pub(crate) fn draw_enemy_vitality_hud(
             "",
         );
         draw_vitality_bar(
+            gpu,
             font,
             outgoing.bounds,
             outgoing.cut,
@@ -643,6 +669,7 @@ pub(crate) fn draw_enemy_vitality_hud(
         );
     } else {
         draw_vitality_bar(
+            gpu,
             font,
             outgoing.bounds,
             outgoing.cut,
@@ -651,6 +678,7 @@ pub(crate) fn draw_enemy_vitality_hud(
             "",
         );
         draw_vitality_bar(
+            gpu,
             font,
             incoming.bounds,
             incoming.cut,
@@ -792,6 +820,7 @@ fn lerp_i16(from: i16, to: i16, t_q12: u16) -> i16 {
 
 #[inline(never)]
 fn draw_vitality_bar(
+    gpu: &mut Gpu,
     font: &FontAtlas,
     (x, y, w, h): (i16, i16, i16, i16),
     cut: i16,
@@ -799,8 +828,9 @@ fn draw_vitality_bar(
     rgb: (u8, u8, u8),
     label: &str,
 ) {
-    draw_chamfered(x, y, w, h, cut, (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2));
+    draw_chamfered(gpu, x, y, w, h, cut, (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2));
     draw_chamfered(
+        gpu,
         x + 1,
         y + 1,
         w - 2,
@@ -821,6 +851,7 @@ fn draw_vitality_bar(
     let fill_y = y + (h - fill_h) / 2;
     let filled = ((i32::from(fill_w) * i32::from(fill_q12.min(4096))) >> 12) as i16;
     draw_rect(
+        gpu,
         fill_x,
         fill_y,
         fill_w,
@@ -828,12 +859,19 @@ fn draw_vitality_bar(
         (rgb.0 / 12, rgb.1 / 12, rgb.2 / 12),
     );
     if filled > 0 {
-        draw_rect(fill_x, fill_y, filled, fill_h, rgb);
+        draw_rect(gpu, fill_x, fill_y, filled, fill_h, rgb);
         let mut step = 1;
         while step < 8 {
             let tx = fill_x + (fill_w * step) / 8;
             if tx < fill_x + filled {
-                draw_rect(tx, fill_y, 1, fill_h, (rgb.0 / 3, rgb.1 / 3, rgb.2 / 3));
+                draw_rect(
+                    gpu,
+                    tx,
+                    fill_y,
+                    1,
+                    fill_h,
+                    (rgb.0 / 3, rgb.1 / 3, rgb.2 / 3),
+                );
             }
             step += 1;
         }
@@ -851,6 +889,7 @@ fn draw_vitality_bar(
 
 #[inline(never)]
 fn draw_swap_cooldown_diamond(
+    gpu: &mut Gpu,
     cx: i16,
     cy: i16,
     progress_q12: u16,
@@ -866,23 +905,29 @@ fn draw_swap_cooldown_diamond(
         } else {
             (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2)
         };
-        draw_diamond_outline(cx, cy, radius, echo_rgb);
+        draw_diamond_outline(gpu, cx, cy, radius, echo_rgb);
     }
 
     // One dark outer quad gives the cell a hard silhouette. During lockout a
     // brighter neutral grey advances clockwise over a darker grey remainder;
     // stance colour appears only when the swap is available again.
-    draw_diamond(cx, cy, 12, (18, 20, 23));
+    draw_diamond(gpu, cx, cy, 12, (18, 20, 23));
     if progress_q12 >= 4096 {
-        draw_diamond(cx, cy, 10, rgb);
+        draw_diamond(gpu, cx, cy, 10, rgb);
     } else {
-        draw_diamond(cx, cy, 10, (54, 54, 54));
-        draw_clockwise_diamond_fill(cx, cy, (112, 112, 112), progress_q12);
+        draw_diamond(gpu, cx, cy, 10, (54, 54, 54));
+        draw_clockwise_diamond_fill(gpu, cx, cy, (112, 112, 112), progress_q12);
     }
 }
 
 #[inline(never)]
-fn draw_clockwise_diamond_fill(cx: i16, cy: i16, rgb: (u8, u8, u8), progress_q12: u16) {
+fn draw_clockwise_diamond_fill(
+    gpu: &mut Gpu,
+    cx: i16,
+    cy: i16,
+    rgb: (u8, u8, u8),
+    progress_q12: u16,
+) {
     // Four evenly spaced samples per edge keep the same smooth sixteen-step
     // clockwise read as the old dial while following the diamond silhouette.
     const SCREEN_RING: [(i16, i16); 17] = [
@@ -912,13 +957,12 @@ fn draw_clockwise_diamond_fill(cx: i16, cy: i16, rgb: (u8, u8, u8), progress_q12
     while wedge < complete {
         let a = SCREEN_RING[wedge];
         let b = SCREEN_RING[wedge + 1];
-        draw_tri_flat_blended(
+        gpu.draw(&TriFlat::new(
             [(cx, cy), (cx + a.0, cy + a.1), (cx + b.0, cy + b.1)],
             rgb.0,
             rgb.1,
             rgb.2,
-            BlendMode::Opaque,
-        );
+        ));
         wedge += 1;
     }
     if complete < 16 && partial_q12 > 0 {
@@ -928,19 +972,18 @@ fn draw_clockwise_diamond_fill(cx: i16, cy: i16, rgb: (u8, u8, u8), progress_q12
             a.0 + (((i32::from(b.0) - i32::from(a.0)) * partial_q12) >> 12) as i16,
             a.1 + (((i32::from(b.1) - i32::from(a.1)) * partial_q12) >> 12) as i16,
         );
-        draw_tri_flat_blended(
+        gpu.draw(&TriFlat::new(
             [(cx, cy), (cx + a.0, cy + a.1), (cx + end.0, cy + end.1)],
             rgb.0,
             rgb.1,
             rgb.2,
-            BlendMode::Opaque,
-        );
+        ));
     }
 }
 
 #[inline(always)]
-fn draw_diamond(cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
-    draw_quad_flat(
+fn draw_diamond(gpu: &mut Gpu, cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
+    gpu.draw(&QuadFlat::new(
         [
             (cx, cy - radius),
             (cx + radius, cy),
@@ -950,19 +993,27 @@ fn draw_diamond(cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
         rgb.0,
         rgb.1,
         rgb.2,
-    );
+    ));
 }
 
 #[inline(always)]
-fn draw_diamond_outline(cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
+fn draw_diamond_outline(gpu: &mut Gpu, cx: i16, cy: i16, radius: i16, rgb: (u8, u8, u8)) {
     let top = (cx, cy - radius);
     let right = (cx + radius, cy);
     let bottom = (cx, cy + radius);
     let left = (cx - radius, cy);
-    draw_line_mono(top.0, top.1, right.0, right.1, rgb.0, rgb.1, rgb.2);
-    draw_line_mono(right.0, right.1, bottom.0, bottom.1, rgb.0, rgb.1, rgb.2);
-    draw_line_mono(bottom.0, bottom.1, left.0, left.1, rgb.0, rgb.1, rgb.2);
-    draw_line_mono(left.0, left.1, top.0, top.1, rgb.0, rgb.1, rgb.2);
+    gpu.draw(&LineMono::new(
+        top.0, top.1, right.0, right.1, rgb.0, rgb.1, rgb.2,
+    ));
+    gpu.draw(&LineMono::new(
+        right.0, right.1, bottom.0, bottom.1, rgb.0, rgb.1, rgb.2,
+    ));
+    gpu.draw(&LineMono::new(
+        bottom.0, bottom.1, left.0, left.1, rgb.0, rgb.1, rgb.2,
+    ));
+    gpu.draw(&LineMono::new(
+        left.0, left.1, top.0, top.1, rgb.0, rgb.1, rgb.2,
+    ));
 }
 
 #[inline(always)]
@@ -1051,51 +1102,65 @@ mod vitality_hud_tests {
     }
 }
 
-pub(crate) fn draw_opening_skip(font: &FontAtlas, progress: u8) {
+pub(crate) fn draw_opening_skip(gpu: &mut Gpu, font: &FontAtlas, progress: u8) {
     font.draw_text(192, 216, "HOLD X TO SKIP", (180, 195, 190));
-    draw_rect(192, 229, 112, 2, (38, 51, 48));
-    draw_rect(192, 229, i16::from(progress) * 112 / 30, 2, (156, 219, 207));
+    draw_rect(gpu, 192, 229, 112, 2, (38, 51, 48));
+    draw_rect(
+        gpu,
+        192,
+        229,
+        i16::from(progress) * 112 / 30,
+        2,
+        (156, 219, 207),
+    );
 }
 
 /// Dim the composed framebuffer rather than clipping dark colours with subtraction.
 /// Exact 1:1 texture coordinates make the read/write pass safe within each pixel;
 /// clear the texture cache before sampling this frame's newly drawn image.
-pub(crate) fn draw_opening_fade(fb: &psx_gpu::framebuf::FrameBuffer, amount: u8) {
-    use psx_gpu::material::TextureMaterial;
-    use psx_gpu::{draw_quad_textured_material, draw_sprite_material};
+pub(crate) fn draw_opening_fade(gpu: &mut Gpu, fb: &DoubleBuffer, amount: u8) {
     use psx_io::gpu::{wait_command_ready, write_command};
     if amount == 0 {
         return;
     }
     if amount == 255 {
-        draw_quad_flat(
+        gpu.draw(&QuadFlat::new(
             [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
             0,
             0,
             0,
-        );
+        ));
         return;
     }
     let tint = ((255 - u16::from(amount)) * 128 / 255) as u8;
     wait_command_ready();
     write_command(0x0100_0000); // Clear GPU texture cache after world rendering.
-    let base_y = fb.buffer_y(fb.drawing);
+    let base_y = fb.draw_origin().1;
+    let (fb_width, fb_height) = fb.size();
     let mut y = 0u16;
-    while y < fb.height {
+    while y < fb_height {
         let source_y = base_y + y;
         let v = (source_y & 255) as u8;
-        let h = (fb.height - y).min(128).min(255 - u16::from(v));
+        let h = (fb_height - y).min(128).min(255 - u16::from(v));
         let row_height = h.max(1);
         let mut x = 0u16;
-        while x < fb.width {
-            let w = (fb.width - x).min(128);
+        while x < fb_width {
+            let w = (fb_width - x).min(128);
             let tpage = (x / 64) | ((source_y / 256) << 4) | (2 << 7);
             let material = TextureMaterial::opaque(0, tpage, (tint, tint, tint)).with_dither(true);
-            material.apply_draw_mode();
+            gpu.set_draw_mode(material);
             if h == 0 {
-                draw_sprite_material(x as i16, y as i16, w, 1, (0, v), material);
+                gpu.set_draw_mode(material);
+                gpu.draw(&Sprite::with_material(
+                    x as i16,
+                    y as i16,
+                    w,
+                    1,
+                    (0, v),
+                    material,
+                ));
             } else {
-                draw_quad_textured_material(
+                gpu.draw(&QuadTexturedMaterial::with_material(
                     [
                         (x as i16, y as i16),
                         ((x + w) as i16, y as i16),
@@ -1109,7 +1174,7 @@ pub(crate) fn draw_opening_fade(fb: &psx_gpu::framebuf::FrameBuffer, amount: u8)
                         (w as u8, v + h as u8),
                     ],
                     material,
-                );
+                ));
             }
             x += w;
         }

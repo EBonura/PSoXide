@@ -9,9 +9,9 @@ use psx_engine::{
     WorldCamera, WorldVertex,
 };
 use psx_gpu::{
-    draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial},
-    prim::QuadTexturedMaterial,
+    prim::{QuadTexturedMaterial, TriFlat},
+    Gpu,
 };
 use psx_level::{particle_emitter_flags, room_flags, LevelRoomRecord, ParticleEmitterRecord};
 use psx_math::int32::clamp_i16;
@@ -870,6 +870,7 @@ const fn particle_blend_mode(mode: u8) -> BlendMode {
 /// Draw the room's screen-space atmosphere particles (drifting motes)
 /// as immediate-mode flat triangles over the presented frame.
 pub fn draw_room_atmosphere_overlay(
+    gpu: &mut Gpu,
     room: &LevelRoomRecord,
     elapsed_tick: SimTick,
     screen_w: i16,
@@ -905,6 +906,7 @@ pub fn draw_room_atmosphere_overlay(
         let y = wrap_atmosphere_axis(base_y + (elapsed.wrapping_mul(fall_q4) >> 4), wrap_h);
         let size = 1 + ((layer as i16) >> 1);
         draw_atmosphere_particle(
+            gpu,
             x,
             y,
             size,
@@ -914,14 +916,22 @@ pub fn draw_room_atmosphere_overlay(
     }
 }
 
-fn draw_atmosphere_particle(x: i16, y: i16, size: i16, tint: (u8, u8, u8)) {
+fn draw_atmosphere_particle(gpu: &mut Gpu, x: i16, y: i16, size: i16, tint: (u8, u8, u8)) {
     let lean = size + 1;
-    draw_tri_flat_blended(
-        [(x, y), (x + lean, y + 1), (x, y + size + 1)],
-        tint.0,
-        tint.1,
-        tint.2,
+    gpu.set_draw_mode(TextureMaterial::blended(
+        0,
+        0,
+        (tint.0, tint.1, tint.2),
         BlendMode::Average,
+    ));
+    gpu.draw(
+        &TriFlat::new(
+            [(x, y), (x + lean, y + 1), (x, y + size + 1)],
+            tint.0,
+            tint.1,
+            tint.2,
+        )
+        .translucent(),
     );
 }
 

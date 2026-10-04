@@ -5,7 +5,7 @@
 //! in a loop, passing a [`Ctx`] that carries the live-per-frame
 //! things the scene needs: the current pad state (with edge-detection
 //! helpers), the simulation and visual-frame counters, the display cadence,
-//! and a [`FrameBuffer`] ready to draw into.
+//! and the [`DoubleBuffer`] and [`Gpu`] it draws with.
 //!
 //! The split into `update` + `render` is cosmetic -- both get the
 //! same `Ctx`. Keeping them separate reads better and makes it easy
@@ -13,7 +13,8 @@
 //! update, replay without re-rendering, etc).
 
 use psx_font::FontAtlas;
-use psx_gpu::framebuf::FrameBuffer;
+use psx_gpu::display::DoubleBuffer;
+use psx_gpu::Gpu;
 use psx_io::periph::GpuDma;
 use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
 use psx_pad::{button, poll_port2, ActionInput, ActionMap, PadState};
@@ -124,7 +125,7 @@ pub struct Ctx {
     /// Frame buffer the scene draws into. Immediate scenes receive it cleared
     /// before [`Scene::render`]; queued scenes prepare CPU packets first and
     /// receive the clear immediately before [`Scene::submit_render`].
-    pub fb: FrameBuffer,
+    pub fb: DoubleBuffer,
     runtime_requests: RuntimeRequests,
     gpu_dma: Option<GpuDma>,
     present_queue_hook: Option<*const u32>,
@@ -137,7 +138,7 @@ impl Ctx {
         video_hz: VideoHz,
         pad: PadState,
         pad_prev: PadState,
-        fb: FrameBuffer,
+        fb: DoubleBuffer,
     ) -> Self {
         Self {
             sim_tick,
@@ -170,6 +171,33 @@ impl Ctx {
         self.gpu_dma
             .as_mut()
             .expect("the app runner holds the GPU DMA token")
+    }
+
+    /// The GPU driver, for immediate drawing and the other calls that write
+    /// GP0 or GP1. It borrows the context, so nothing can draw while a
+    /// linked-list walk the same borrow started is still being waited on.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu(&mut self) -> &mut Gpu {
+        Gpu::from_dma_mut(self.gpu_dma())
+    }
+
+    /// The GPU driver and the double buffer together, for calls such as
+    /// `ctx.fb.clear(gpu, ..)` that need both at once.
+    ///
+    /// # Panics
+    ///
+    /// Outside the app runner, which takes the token at boot.
+    #[inline]
+    pub fn gpu_and_buffers(&mut self) -> (&mut Gpu, &mut DoubleBuffer) {
+        let dma = self
+            .gpu_dma
+            .as_mut()
+            .expect("the app runner holds the GPU DMA token");
+        (Gpu::from_dma_mut(dma), &mut self.fb)
     }
 
     /// During a [`RenderSubmission::PresentQueue`] render, the node the
@@ -694,13 +722,14 @@ pub trait Scene {
     /// table and the parallel live-value slice (`values[i]` is the current value
     /// of `options[i]`, already clamped to that option's range). A scene reads
     /// whatever settings it cares about by matching `option.id` and caches or
-    /// applies them.
+    /// applies them. `ctx` is there for options that program the hardware, the
+    /// display window's picture offset for one, through `ctx.gpu()`.
     ///
     /// Values are not delivered per frame: front-end menus publish only when an
     /// option changes, and live in-game adjustment is a separate, later concern.
     /// Default is a no-op.
     #[allow(unused_variables)]
-    fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32]) {}
+    fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32], ctx: &mut Ctx) {}
 
     /// Acquire the VRAM/asset resources a flow state needs, through the
     /// project's VRAM allocator. The flow driver calls this once, immediately

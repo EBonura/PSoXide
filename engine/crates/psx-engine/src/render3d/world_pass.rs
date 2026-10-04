@@ -306,7 +306,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let uv0 = (clamp_u8(verts[0].u), clamp_u8(verts[0].v));
         let uv1 = (clamp_u8(verts[1].u), clamp_u8(verts[1].v));
         let uv2 = (clamp_u8(verts[2].u), clamp_u8(verts[2].v));
-        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
+        let Some(tri) = triangles.push(TriTextured::with_material(
             [
                 (verts[0].projected.sx, verts[0].projected.sy),
                 (verts[1].projected.sx, verts[1].projected.sy),

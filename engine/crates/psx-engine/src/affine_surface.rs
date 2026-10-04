@@ -40,14 +40,18 @@
 //! dropped before it is written. Compact surfaces emit plain GP0(34h/3Ch)
 //! textured Gouraud packets; windowed surfaces wrap each polygon in its own
 //! GP0(E2) texture-window selector and a full-window reset, and mark the tag
-//! with [`TAG_SCOPED_TEXTURE_WINDOW`]. Tags carry the packet's data-word
+//! with `WINDOWED_POLYGON_TAG`. Tags carry the packet's data-word
 //! count in bits 24..31 and its ordering-table slot in bits 0..15, ready for
 //! the tagged-stream linker.
 
 use psx_gpu::material::TextureWindow;
-use psx_gpu::ot::TAG_SCOPED_TEXTURE_WINDOW;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene;
+
+/// Staged-tag bit marking a polygon wrapped in its own texture-window
+/// selector. It is this module's marker alone: tagged-stream insertion keeps
+/// only the word count and the slot from a staged tag and ignores it.
+const WINDOWED_POLYGON_TAG: u32 = 1 << 16;
 
 /// Extra vertex slots the caller reserves after a batch for midpoints.
 pub const AFFINE_SPLIT_SCRATCH_VERTICES: usize = 6;
@@ -438,7 +442,7 @@ impl PacketSink {
             }
         };
         if windowed {
-            put(((polygon_words + 2) << 24) | TAG_SCOPED_TEXTURE_WINDOW | u32::from(otz));
+            put(((polygon_words + 2) << 24) | WINDOWED_POLYGON_TAG | u32::from(otz));
             put(surface.texture_window_word);
         } else {
             put((polygon_words << 24) | u32::from(otz));
@@ -822,7 +826,7 @@ mod tests {
         while offset < used {
             let tag = words[offset];
             let data = tag >> 24;
-            let windowed = tag & TAG_SCOPED_TEXTURE_WINDOW != 0;
+            let windowed = tag & WINDOWED_POLYGON_TAG != 0;
             let polygon = offset + 1 + usize::from(windowed);
             let corners = if data == QUAD_WORDS || data == QUAD_WORDS + 2 {
                 4
@@ -987,7 +991,7 @@ mod tests {
         };
         assert_eq!(result.packets, 1);
         assert_eq!(words[0] >> 24, TRI_WORDS + 2);
-        assert_ne!(words[0] & TAG_SCOPED_TEXTURE_WINDOW, 0);
+        assert_ne!(words[0] & WINDOWED_POLYGON_TAG, 0);
         assert_eq!(words[1], 0xe200_0000);
         assert_eq!(words[2] >> 24, 0x36);
         assert_eq!(words[4], 5 | (7 << 8) | (0x1234 << 16));

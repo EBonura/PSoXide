@@ -40,6 +40,7 @@ use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_gpu::frame::{OtFrame, PrimitiveArena};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::RectFlat;
+use psx_gpu::Gpu;
 use psx_settings::Profile;
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TextureDepth, TexturePage};
@@ -392,7 +393,7 @@ impl Scene for Pong {
 
     fn render(&mut self, ctx: &mut Ctx) {
         self.build_frame_ot().submit(ctx.gpu_dma());
-        self.draw_scoreboard();
+        self.draw_scoreboard(ctx.gpu());
     }
 }
 
@@ -473,7 +474,7 @@ impl Pong {
     }
 
     /// Scoreboard + game-over banner. Immediate-mode on top of OT.
-    fn draw_scoreboard(&self) {
+    fn draw_scoreboard(&self, gpu: &mut Gpu) {
         let Some(font) = self.font.as_ref() else {
             return;
         };
@@ -486,7 +487,7 @@ impl Pong {
         if self.two_player && self.shell.is_playing() {
             font.draw_text((SCREEN_W - 8 * 7) / 2, 6, "2P MODE", (140, 220, 170));
         }
-        self.shell.draw(font, "PONG");
+        self.shell.draw(gpu, font, "PONG");
     }
 }
 

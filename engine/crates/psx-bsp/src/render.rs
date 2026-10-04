@@ -10,8 +10,8 @@ use alloc::vec::Vec;
 use psx_engine::scratchpad::{assert_disjoint, Region, ScratchpadStack};
 use psx_engine::{
     attributed_clip::{
-        clip_convex_plane, crossing_fraction_q16_i32, lerp_q16_i32_exact, AttributedClipPlane,
-        ClipTraversal,
+        clip_to_plane_unchecked, crossing_fraction_q16_i32, lerp_q16_i32_exact,
+        AttributedClipPlane, ClipTraversal,
     },
     compose_model_view_transform, materialize_baked_surface_vertices, materialize_surface_vertices,
     submit_surface_batch, AffineSurface, AffineVertex, SurfaceProfile, SurfaceSourceVertex,
@@ -1229,8 +1229,13 @@ fn clip_polygon_plane(
     source: &[AffineVertex],
     destination: &mut [AffineVertex],
 ) -> usize {
+    // SAFETY: `clip_polygon` documents room for `count + 5` records in each
+    // buffer, and the source here is a convex polygon of at most `count`
+    // vertices clipped by one plane whose `inside` answer depends only on the
+    // vertex distance, so it gains at most one vertex: `source.len() + 1`
+    // slots suffice.
     unsafe {
-        clip_convex_plane::<_, _, false>(
+        clip_to_plane_unchecked(
             source,
             destination,
             &PxbspClipPlane(plane),

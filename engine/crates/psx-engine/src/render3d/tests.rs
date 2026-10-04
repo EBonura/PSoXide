@@ -238,7 +238,7 @@ fn model_face_packed_uv_words_match_packet_texcoords() {
     let uvs = [(3, 5), (17, 7), (11, 29)];
     let face = TexturedModelRenderFace::new([0, 1, 2], uvs);
 
-    let tuple_packet = TriTextured::with_material_packet_texcoords(verts, uvs, material);
+    let tuple_packet = TriTextured::with_material(verts, uvs, material);
     let packed_packet =
         TriTextured::with_material_packed_uv_words(verts, face.uv_words(), material);
 
@@ -449,8 +449,7 @@ fn gouraud_packed_uv_words_match_packet_texcoords() {
     ];
     let colors = [(7, 13, 19), (23, 29, 31), (37, 41, 43)];
 
-    let tuple_packet =
-        TriTexturedGouraud::with_material_packet_texcoords(verts, uvs, colors, material);
+    let tuple_packet = TriTexturedGouraud::with_material(verts, uvs, colors, material);
     let packed_packet =
         TriTexturedGouraud::with_material_packed_uv_words(verts, uv_words, colors, material);
     let prepacked_packet = TriTexturedGouraud::with_packet_material_packed_uv_words(

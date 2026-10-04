@@ -726,11 +726,8 @@ mod tests {
                         } else {
                             material
                         };
-                        let old = TriTextured::with_material_packet_texcoords(
-                            verts,
-                            face.uvs(),
-                            mat.with_clut_bank(bank),
-                        );
+                        let old =
+                            TriTextured::with_material(verts, face.uvs(), mat.with_clut_bank(bank));
                         let (packet, fading) = packets.for_face(index, progress, bank);
                         assert_eq!(fading, fades);
                         let new = TriTextured::with_packet_material_packed_uv_words(

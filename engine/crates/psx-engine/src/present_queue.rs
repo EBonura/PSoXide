@@ -124,9 +124,9 @@ impl PresentQueue {
         // SAFETY: `take_queued_frame`'s contract keeps `overlay` live and
         // unmodified until the frame after next starts rendering, which is
         // after this frame's walk (`wait_arena_free`).
-        unsafe { psx_io::gpu::begin_recording_raw(overlay, overlay_words) };
+        let recording = unsafe { psx_io::gpu::start_recording_raw(overlay, overlay_words) };
         scene.render_overlay(ctx);
-        let recorded = psx_io::gpu::end_recording();
+        let recorded = recording.end();
         telemetry::stage_end(telemetry::stage::RENDER);
         match recorded {
             Ok(Some(recording)) => {
@@ -146,14 +146,14 @@ impl PresentQueue {
         let preamble = unsafe { core::ptr::addr_of_mut!(PRESENT_PREAMBLES[self.frame]) };
         // SAFETY: this frame's preamble is not walked again until the frame
         // after next (`wait_arena_free`), and nothing else references it.
-        unsafe { psx_io::gpu::begin_recording_raw(preamble.cast(), PRESENT_PREAMBLE_WORDS) };
-        ctx.fb.apply_draw_target();
-        ctx.fb.clear(
-            config.clear_color.0,
-            config.clear_color.1,
-            config.clear_color.2,
-        );
-        let Ok(Some(preamble)) = psx_io::gpu::end_recording() else {
+        let recording =
+            unsafe { psx_io::gpu::start_recording_raw(preamble.cast(), PRESENT_PREAMBLE_WORDS) };
+        {
+            let (gpu, fb) = ctx.gpu_and_buffers();
+            fb.apply_draw_target(gpu);
+            fb.clear(gpu, config.clear_color);
+        }
+        let Ok(Some(preamble)) = recording.end() else {
             unreachable!("the preamble always fits");
         };
         // SAFETY: the preamble has not been published yet.
@@ -183,12 +183,15 @@ impl PresentQueue {
         // Waits only if anything was published since the last direct access.
         psx_io::gpu::run_direct_access_guard();
         if self.display != 0 {
-            clock.queue_display_flip(self.display);
+            clock.queue_display_flip(ctx.gpu(), self.display);
             if !clock.wait_display_flip() {
                 telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
             }
         }
-        ctx.fb.apply_draw_target();
+        {
+            let (gpu, fb) = ctx.gpu_and_buffers();
+            fb.apply_draw_target(gpu);
+        }
         telemetry::stage_end(telemetry::stage::PRESENT);
         self.active = false;
         self.display = 0;
