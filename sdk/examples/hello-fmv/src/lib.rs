@@ -36,7 +36,7 @@
 #![no_std]
 
 use core::ptr::addr_of_mut;
-use psx_fmv::{bitstream, iso, mdec, rle::RleBuffer, stream::FrameAssembler};
+use psx_fmv::{bitstream, iso, mdec::Mdec, rle::RleBuffer, stream::FrameAssembler};
 use psx_font::{
     fonts::{basic::BASIC, basic_8x16::BASIC_8X16_BITMAP},
     BitOrder, BitmapFont, FontAtlas,
@@ -44,10 +44,10 @@ use psx_font::{
 use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
 use psx_gpu::prim::FillRect;
 use psx_gpu::Gpu;
-use psx_io::periph::GpuDma;
+use psx_io::periph::{Cd, MdecDma};
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
-use psx_rt::{interrupts, tty};
-use psx_spu::{self as spu, CdVolume, Volume};
+use psx_rt::{interrupts, tty, Peripherals};
+use psx_spu::{self as spu, CdVolume, Spu, Volume};
 use psx_vram::{Clut, TextureDepth, TexturePage, VramRect};
 
 const MOVIE: &str = "MOVIE.STR";
@@ -123,7 +123,12 @@ const GREEN: (u8, u8, u8) = (60, 220, 90);
 const RED: (u8, u8, u8) = (240, 60, 60);
 const YELLOW: (u8, u8, u8) = (230, 210, 60);
 
-static mut READER: SectorReader = SectorReader::new();
+// The devices this test drives, owned for the length of a run: the drive's
+// sector reader (which holds the CD token) and the MDEC driver (which holds
+// its DMA token). Built by `install_devices` at each entry point, in separate
+// statics so a reference to one never aliases a reference to the other.
+static mut READER: Option<SectorReader> = None;
+static mut MDEC: Option<Mdec> = None;
 static mut SECTOR: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 static mut SLOT: [[u32; SLOT_WORDS]; SLOTS] = [[0; SLOT_WORDS]; SLOTS];
 static mut RLE: RleBuffer<RLE_WORDS> = RleBuffer::new();
@@ -183,6 +188,28 @@ struct Stream {
     cut: u32,
 }
 
+/// Own the drive and the MDEC for a run, replacing the previous run's.
+fn install_devices(cd: Cd, mdec: MdecDma) {
+    // SAFETY: single-threaded; nothing holds a reference from the previous run.
+    unsafe {
+        *addr_of_mut!(READER) = Some(SectorReader::with_cd(cd));
+        *addr_of_mut!(MDEC) = Some(Mdec::new(mdec));
+    }
+}
+
+/// The sector reader `install_devices` built.
+fn reader() -> &'static mut SectorReader {
+    // SAFETY: single-threaded, and no caller keeps the reference across a call
+    // that takes another.
+    unsafe { (*addr_of_mut!(READER)).as_mut().expect("reader installed") }
+}
+
+/// The MDEC driver `install_devices` built.
+fn mdec() -> &'static mut Mdec {
+    // SAFETY: as `reader`.
+    unsafe { (*addr_of_mut!(MDEC)).as_mut().expect("mdec installed") }
+}
+
 fn slot_bytes(i: usize) -> &'static mut [u8] {
     // SAFETY: slots are disjoint statics; callers keep the pump's filling
     // slot and the decoder's slot distinct (see `Stream`).
@@ -197,9 +224,9 @@ impl Stream {
     fn pump(&mut self) {
         clock(None);
         while !self.done {
-            // SAFETY: single-threaded; READER/SECTOR are only used here.
-            let got =
-                unsafe { (*addr_of_mut!(READER)).try_read_sector(&mut *addr_of_mut!(SECTOR)) };
+            // SAFETY: single-threaded; SECTOR is only used here and by the
+            // synchronous directory reads, never while a pump is running.
+            let got = unsafe { reader().try_read_sector(&mut *addr_of_mut!(SECTOR)) };
             match got {
                 Ok(true) => {}
                 Ok(false) => return,
@@ -271,7 +298,7 @@ impl Stream {
 fn read_one(lba: u32) -> Option<&'static [u8]> {
     // SAFETY: single-threaded use of the reader and its sector buffer.
     unsafe {
-        let r = &mut *addr_of_mut!(READER);
+        let r = reader();
         if !r.start_read(lba) {
             return None;
         }
@@ -465,7 +492,7 @@ pub enum Stop {
 pub struct Options {
     /// MDEC setup (reset, tables, DMA requests), run at the start and again
     /// after a decode error; `false` when DMA0 decodes cannot run.
-    pub setup: fn() -> bool,
+    pub setup: fn(&mut Mdec) -> bool,
     /// Stop after this many video sectors; 0 plays the whole file. The pass
     /// criteria then apply to the cut: every sector up to it intact.
     pub max_sectors: u32,
@@ -604,8 +631,8 @@ fn wait_vblank_pumping(st: &mut Stream) {
 
 /// The SDK's MDEC setup: reset, then the tables. `false` unless DMA0 can
 /// feed the decoder afterwards, which every frame needs.
-pub fn mdec_setup() -> bool {
-    mdec::reset() && mdec::load_tables().is_some_and(|t| t.enable_writes != 0)
+pub fn mdec_setup(mdec: &mut Mdec) -> bool {
+    mdec.reset() && mdec.load_tables().is_some_and(|t| t.enable_writes != 0)
 }
 
 /// Run the whole test: stream, check, and leave the summary (or, when the
@@ -620,42 +647,44 @@ pub fn run() -> Outcome {
 /// plays a short cut behind each of its diagnostic sequences that worked.
 pub fn run_with(options: Options) -> Outcome {
     let setup = options.setup;
-    // SAFETY: the test takes over the GPU, as its doc says; nothing else
-    // drives it until the test returns.
-    let dma = unsafe { GpuDma::steal() };
+    // SAFETY: the test takes over the GPU, SPU, CD drive and MDEC, as its doc
+    // says; it runs from a menu that may already have used them, so it takes the
+    // set afresh. Nothing else drives them until the test returns.
+    let peripherals = unsafe { Peripherals::steal() };
+    install_devices(peripherals.cd, peripherals.mdec_dma);
     let gpu = &mut Gpu::new(
-        dma,
+        peripherals.gpu_dma,
         DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
     );
     gpu.draw(&FillRect::new((0, 0), (WIDTH, 512), (0, 0, 0)));
     let font = FontAtlas::upload(&WIDE, FONT_TPAGE, FONT_CLUT);
     let small = FontAtlas::upload(&BASIC, SMALL_TPAGE, SMALL_CLUT);
 
-    spu::init();
+    let _spu = Spu::new(peripherals.spu_dma);
     spu::set_main_volume(Volume::MAX, Volume::MAX);
     spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
     spu::enable_cd_audio(true);
 
-    // SAFETY: nothing else drives the CD while the test runs; prepare also
-    // takes the drive over from whatever used it before.
-    if !unsafe { (*addr_of_mut!(READER)).prepare() } {
+    // The reader owns the CD token for the run; prepare also takes the drive
+    // over from whatever used it before.
+    if !reader().prepare() {
         return fail(gpu, "cd prepare");
     }
     let Some((lba, _size)) = find_movie() else {
         return fail(gpu, "MOVIE.STR not found");
     };
-    // SAFETY: the reader is prepared and idle. Unmute first: a muted drive
-    // plays no XA, and the program that ran before may have left it muted
-    // (the hardware-test CD battery does).
-    let xa_ok = unsafe {
-        let r = &mut *addr_of_mut!(READER);
+    // The reader is prepared and idle. Unmute first: a muted drive plays no XA,
+    // and the program that ran before may have left it muted (the hardware-test
+    // CD battery does).
+    let xa_ok = {
+        let r = reader();
         r.unmute() && r.prepare_mode(CD_MODE) && r.set_filter(XA_FILE, XA_CHANNEL)
     };
     if !xa_ok {
         return fail(gpu, "cd xa mode");
     }
-    psx_io::cd::set_audio_mixer(0x80, 0, 0x80, 0);
-    if !setup() {
+    reader().cd_mut().set_audio_mixer(0x80, 0, 0x80, 0);
+    if !setup(mdec()) {
         return fail(gpu, "mdec tables");
     }
 
@@ -678,8 +707,8 @@ pub fn run_with(options: Options) -> Outcome {
         last_sector_vblank: interrupts::vblank_count(),
         cut: options.max_sectors,
     };
-    // SAFETY: the reader was prepared above.
-    if !unsafe { (*addr_of_mut!(READER)).start_read(lba) } {
+    // The reader was prepared above.
+    if !reader().start_read(lba) {
         return fail(gpu, "cd start");
     }
 
@@ -730,16 +759,20 @@ pub fn run_with(options: Options) -> Outcome {
         let column = unsafe { &mut *addr_of_mut!(COLUMN) };
         // DMA0 feeds the MDEC while the closure pulls each column over DMA1;
         // `decode` holds the run-length borrow until DMA0 is done with it.
-        let decoded = mdec::decode(&rle.as_words()[..words], psx_hw::mdec::DECODE_15BPP, || {
-            for c in 0..COLUMNS {
-                if !mdec::read_column(column) {
-                    return false;
+        let decoded = mdec().decode(
+            &rle.as_words()[..words],
+            psx_hw::mdec::DECODE_15BPP,
+            |mdec| {
+                for c in 0..COLUMNS {
+                    if !mdec.read_column(column) {
+                        return false;
+                    }
+                    psx_vram::upload_words(VramRect::new(c * 16, back_y, 16, HEIGHT), column);
+                    st.pump();
                 }
-                psx_vram::upload_words(VramRect::new(c * 16, back_y, 16, HEIGHT), column);
-                st.pump();
-            }
-            true
-        });
+                true
+            },
+        );
         if !matches!(decoded, Ok((true, true))) {
             errors += 1;
             in_a_row += 1;
@@ -747,7 +780,7 @@ pub fn run_with(options: Options) -> Outcome {
                 wedged = true;
                 break;
             }
-            let _ = setup();
+            let _ = setup(mdec());
             continue;
         }
         in_a_row = 0;
@@ -765,8 +798,8 @@ pub fn run_with(options: Options) -> Outcome {
         back_y = if back_y == 0 { 256 } else { 0 };
         shown += 1;
     }
-    // SAFETY: stop the stream we started (also ends the XA audio).
-    unsafe { (*addr_of_mut!(READER)).stop() };
+    // Stop the stream we started (also ends the XA audio).
+    reader().stop();
     let vblanks = interrupts::vblank_count().wrapping_sub(start);
     let stop = if wedged {
         Stop::Wedged
@@ -870,26 +903,26 @@ const CPU_STALL_SPINS: u32 = 100_000;
 
 /// Run [`FrameControl`]. Takes the CD drive and the MDEC; `dma_setup` is the
 /// MDEC setup for the DMA half.
-pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
+pub fn frame_control(dma_setup: fn(&mut Mdec) -> bool) -> FrameControl {
     let mut out = FrameControl::default();
-    // SAFETY: single-threaded use of the reader, its sector buffer and the
-    // frame buffers, as in `run`.
-    let reader = unsafe { &mut *addr_of_mut!(READER) };
-    if !unsafe { reader.prepare() } {
+    // SAFETY: takes the CD drive and the MDEC afresh, as `run_with` does.
+    let peripherals = unsafe { Peripherals::steal() };
+    install_devices(peripherals.cd, peripherals.mdec_dma);
+    if !reader().prepare() {
         return out;
     }
     let Some((lba, _)) = find_movie() else {
         return out;
     };
     // Plain data reads: the XA audio sectors come back too and are skipped.
-    if !unsafe { reader.start_read(lba) } {
+    if !reader().start_read(lba) {
         return out;
     }
     let mut asm = FrameAssembler::new();
     let mut frame = None;
     for _ in 0..48 {
-        // SAFETY: as above.
-        if !unsafe { reader.read_sector(&mut *addr_of_mut!(SECTOR)) } {
+        // SAFETY: SECTOR is only used by this loop and `find_movie` before it.
+        if !reader().read_sector(unsafe { &mut *addr_of_mut!(SECTOR) }) {
             break;
         }
         let words = unsafe { &*addr_of_mut!(SECTOR) };
@@ -903,7 +936,7 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
             break;
         }
     }
-    unsafe { reader.stop() };
+    reader().stop();
     let Some(frame) = frame else {
         return out;
     };
@@ -926,20 +959,20 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
     out.expected = COLUMNS as u32 * ROWS * 128;
 
     // CPU: feed while the input FIFO has room, drain whatever comes out.
-    if mdec::reset() && mdec::load_tables_cpu() {
-        mdec::write_command(psx_hw::mdec::DECODE_15BPP | (words as u32 & 0xFFFF));
+    if mdec().reset() && mdec().load_tables_cpu() {
+        mdec().write_command(psx_hw::mdec::DECODE_15BPP | (words as u32 & 0xFFFF));
         let mut fed = 0usize;
         let mut idle = 0u32;
         while (fed < words || out.cpu_words < out.expected) && idle < CPU_STALL_SPINS {
-            let status = mdec::status();
+            let status = psx_fmv::mdec::status();
             let mut progress = false;
             if fed < words && status & psx_hw::mdec::STATUS_IN_FULL == 0 {
-                mdec::write_command(rle[fed]);
+                mdec().write_command(rle[fed]);
                 fed += 1;
                 progress = true;
             }
             if status & psx_hw::mdec::STATUS_OUT_EMPTY == 0 {
-                out.cpu_sum = out.cpu_sum.wrapping_add(mdec::read_data());
+                out.cpu_sum = out.cpu_sum.wrapping_add(mdec().read_data());
                 out.cpu_words += 1;
                 progress = true;
             }
@@ -949,12 +982,12 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
     }
 
     // DMA, the player's way.
-    if dma_setup() {
+    if dma_setup(mdec()) {
         // SAFETY: COLUMN is only used here.
         let column = unsafe { &mut *addr_of_mut!(COLUMN) };
-        let decoded = mdec::decode(rle, psx_hw::mdec::DECODE_15BPP, || {
+        let decoded = mdec().decode(rle, psx_hw::mdec::DECODE_15BPP, |mdec| {
             for _ in 0..COLUMNS {
-                if !mdec::read_column(column) {
+                if !mdec.read_column(column) {
                     return false;
                 }
                 for &w in column.iter() {
@@ -977,6 +1010,6 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
     print_num("dma_sum", out.dma_sum);
     tty::println("");
     // Leave the MDEC as the player expects to find it.
-    let _ = mdec::reset();
+    let _ = mdec().reset();
     out
 }

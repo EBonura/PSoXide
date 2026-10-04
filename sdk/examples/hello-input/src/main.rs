@@ -17,7 +17,7 @@
 //!   triangle in the centre whose orientation rotates with the
 //!   face-button pressed.
 //! - The program asks for analog mode at boot and locks it
-//!   (`require_analog_port1`, see `sdk/docs/PAD-ANALOG.md`), so the
+//!   (`require_analog_on`, see `sdk/docs/PAD-ANALOG.md`), so the
 //!   DualShock Analog button (F9 on the frontend keyboard, or gamepad
 //!   Mode/Guide when the OS exposes it) no longer switches it back.
 //!   A pad plugged in later is asked again. In analog mode the
@@ -33,7 +33,7 @@ use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::prim::TriFlat;
 use psx_gpu::Gpu;
-use psx_pad::{button, require_analog_port1, ButtonState, PadMode, PadReader, PadState};
+use psx_pad::{button, require_analog_on, ButtonState, PadMode, PadReader, PadState, Port};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 /// Font atlas VRAM slot.
@@ -73,18 +73,19 @@ fn main() {
     // A program started by a launcher inherits whatever mode the last one
     // left, so it asks for analog and the lock itself. The reader keeps the
     // last clean state through a poll the driver had to reject.
-    let _ = require_analog_port1();
+    let mut port = peripherals.controller_port;
+    let _ = require_analog_on(&mut port, Port::One);
     let mut reader = PadReader::port1();
     let mut was_connected = true;
 
     loop {
-        let state = reader.poll();
+        let state = reader.poll_on(&mut port);
         // A pad plugged in later starts in digital mode, and one parked in
         // configuration mode (ID 0xF3) never reaches analog by itself: ask
         // again for both, not every frame for a digital-only pad (the
         // request blocks for a few frames).
         if (state.is_connected() && !was_connected) || state.mode == PadMode::Config {
-            let _ = require_analog_port1();
+            let _ = require_analog_on(&mut port, Port::One);
         }
         was_connected = state.is_connected();
         let pad = state.buttons;
