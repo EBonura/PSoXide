@@ -11,15 +11,15 @@ check:
 test:
 	cargo test --locked --workspace
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
-# Miri over psx-gpu's host tests, under both borrow models: its frame,
+# Miri over psx-gpu's and psx-fx's host tests, under both borrow models: the frame,
 # ordering-table and stream code hands raw addresses to the DMA model.
 # Provenance is permissive because a DMA link is a 24-bit integer on the
 # console; leaks are ignored because the stream tests leak their 'static
 # buffers on purpose. Needs `rustup component add miri`.
 MIRI_FLAGS := -Zmiri-permissive-provenance -Zmiri-ignore-leaks
 miri:
-	MIRIFLAGS="$(MIRI_FLAGS)" cargo miri test --locked --manifest-path sdk/Cargo.toml -p psx-gpu
-	MIRIFLAGS="$(MIRI_FLAGS) -Zmiri-tree-borrows" cargo miri test --locked --manifest-path sdk/Cargo.toml -p psx-gpu
+	MIRIFLAGS="$(MIRI_FLAGS)" cargo miri test --locked --manifest-path sdk/Cargo.toml -p psx-gpu -p psx-fx
+	MIRIFLAGS="$(MIRI_FLAGS) -Zmiri-tree-borrows" cargo miri test --locked --manifest-path sdk/Cargo.toml -p psx-gpu -p psx-fx
 fmt:
 	cargo fmt --all
 	cargo fmt --manifest-path sdk/Cargo.toml --all
