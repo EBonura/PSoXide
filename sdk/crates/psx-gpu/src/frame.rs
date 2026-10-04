@@ -559,6 +559,12 @@ impl<const N: usize, S> FramePair<N, S> {
         self.next ^= 1;
     }
 
+    /// Wait for the last walk, then hand back both storages and the token.
+    pub fn release(self) -> ([&'static mut FrameStorage<N, S>; 2], GpuDma) {
+        crate::submit_linked_list_wait();
+        (self.storage, self.dma)
+    }
+
     /// [`build`](Self::build), then [`kick`](Self::kick).
     pub fn present<R>(
         &mut self,
