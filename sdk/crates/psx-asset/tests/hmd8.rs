@@ -57,12 +57,17 @@ fn identity_affine(translation: [i16; 3]) -> Vec<u8> {
 }
 
 fn build_blob() -> Vec<u8> {
+    build_blob_with_vertices(N_VERTS)
+}
+
+/// The same model with `vertex_count` vertices (even), split between the two bones.
+fn build_blob_with_vertices(vertex_count: usize) -> Vec<u8> {
     let ranges_off = HEADER + N_CLIPS * 4;
-    let model_data_len = N_RANGES * 8 + N_VERTS * 6 + N_FRAMES * N_BONES * 20;
+    let model_data_len = N_RANGES * 8 + vertex_count * 6 + N_FRAMES * N_BONES * 20;
 
     let mut out = Vec::new();
     out.extend_from_slice(b"HMD8");
-    put_u32(&mut out, N_VERTS as u32);
+    put_u32(&mut out, vertex_count as u32);
     put_u32(&mut out, N_TRIS as u32);
     put_u32(&mut out, 1); // low half textures, high half hitboxes
     put_u32(&mut out, N_FRAMES as u32);
@@ -81,14 +86,14 @@ fn build_blob() -> Vec<u8> {
 
     // two ranges, one per bone, splitting the vertices evenly
     for bone in 0..N_RANGES {
-        put_u16(&mut out, (bone * 2) as u16); // first
-        put_u16(&mut out, 2); // count
+        put_u16(&mut out, (bone * vertex_count / 2) as u16); // first
+        put_u16(&mut out, (vertex_count / 2) as u16); // count
         put_u16(&mut out, bone as u16); // bone
         put_u16(&mut out, 0); // body mask + range flags
     }
 
     // bone-local vertices, distinct so a mis-strided read shows up
-    for v in 0..N_VERTS {
+    for v in 0..vertex_count {
         for axis in 0..3 {
             put_u16(&mut out, (v * 10 + axis) as u16);
         }
@@ -537,4 +542,28 @@ fn interleaved_blob_has_no_vertex_words() {
     let model = load(build_blob());
     assert_eq!(model.vertex_count(), N_VERTS);
     assert!(model.vertex_words().is_empty());
+}
+
+/// The packed render-face stream stores three 10-bit vertex indices
+/// (`RENDER_FACE_INDEX_MASK`), so the default vertex guard must not admit a
+/// model with more vertices than that can address: its faces would be packed
+/// with the high bits masked off and point at the wrong vertices.
+#[test]
+fn the_default_vertex_guard_matches_what_the_render_faces_can_address() {
+    use psx_asset::hmd8::{DEFAULT_MAX_VERTICES, RENDER_FACE_INDEX_MASK};
+    let addressable = RENDER_FACE_INDEX_MASK as usize + 1;
+    assert_eq!(addressable, 1024);
+    assert_eq!(DEFAULT_MAX_VERTICES, addressable);
+
+    assert_eq!(
+        load(build_blob_with_vertices(addressable)).vertex_count(),
+        addressable
+    );
+    for too_many in [addressable + 2, 2048, 4096] {
+        assert_eq!(
+            load(build_blob_with_vertices(too_many)).vertex_count(),
+            0,
+            "{too_many} vertices"
+        );
+    }
 }

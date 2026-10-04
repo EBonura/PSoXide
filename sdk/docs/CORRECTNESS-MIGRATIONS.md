@@ -270,3 +270,23 @@ promise that a bad asset is a `ParseError`. A 64-bit host cannot show it.
 The offsets now go through `take_table` (`checked_add`), so an oversized
 `pixel_bytes` or `clut_bytes` returns `ParseError::TableOverflow`. No API
 change; a game that parsed only valid textures sees nothing.
+
+## psx-asset: the default HMD8 vertex guard matches the packed face indices (asset-03)
+
+`RENDER_FACE_INDEX_MASK` (ten bits) was documented as safe because "model
+loading rejects meshes above 1024 vertices", but `DEFAULT_MAX_VERTICES` was
+4096 and `Model::from_bytes` used it. A 1025 to 4096 vertex model loaded
+and `fill_render_faces_split_raw` packed its faces with the index masked to
+ten bits, so they pointed at the wrong vertices.
+
+`DEFAULT_MAX_VERTICES` is now `RENDER_FACE_INDEX_MASK + 1` (1024) and
+`Model::from_bytes` / `load` reject larger models (they load as the empty
+model, as any invalid blob does). `fill_render_faces_split_raw`
+`debug_assert`s the same bound for a model loaded with a larger explicit cap.
+
+hl-psx and cs-psx load through `Model::load_with_vertex_cap(data,
+room_budget::MAX_MODEL_VERTS)` (`game/src/model.rs`), so they are unchanged,
+and their packed faces must keep that budget at 1024 or below. Callers of
+the default: PSoXide-editor `engine/crates/psx-goldsrc/src/viewmodel.rs` (1,
+`Model::load`) and the `psx-anim-cook` round-trip tests; none builds a model
+over 1024 vertices that is known to this review.
