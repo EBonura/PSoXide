@@ -88,7 +88,10 @@ pub enum ExchangeError {
         reply: u8,
     },
     /// The device pulsed `/ACK` but held it asserted.
-    AckStuck,
+    AckStuck {
+        /// The byte received before the wait.
+        reply: u8,
+    },
 }
 
 /// The six accesses the transport makes to the port, and the transaction
@@ -249,7 +252,7 @@ pub trait Transport {
                 return Err(ExchangeError::AckTimeout { reply });
             }
             if !self.wait_status_clear(sio0::stat::DSR_LEVEL, timing.ack_spins) {
-                return Err(ExchangeError::AckStuck);
+                return Err(ExchangeError::AckStuck { reply });
             }
         }
         Ok(reply)
@@ -455,7 +458,7 @@ mod tests {
         bus.received.push(0x41);
         assert_eq!(
             bus.exchange(0x01, false, TIMING),
-            Err(ExchangeError::AckStuck)
+            Err(ExchangeError::AckStuck { reply: 0x41 })
         );
     }
 

@@ -19,14 +19,18 @@
 //!
 //! Like [`psx_pad`](../psx_pad), this avoids BIOS syscalls so the same code runs
 //! under an HLE BIOS side-load or a real boot. The card protocol is a fixed
-//! request/response the [`hardware`] module drives byte by byte.
+//! request/response the [`hardware`] module drives byte by byte, over the same
+//! shared SIO0 transport the pad driver polls controllers with, so the port has
+//! one owner (the `ControllerPort` token) however many drivers use it.
 //!
 //! ## Example
 //!
-//! ```ignore
+//! ```text
 //! use psx_mc::{Card, HardwareCard, Slot};
 //!
-//! let mut card = Card::new(HardwareCard::new(Slot::One));
+//! // `port` is the `ControllerPort` token (or a `&mut` of it, to keep polling
+//! // pads between saves).
+//! let mut card = Card::new(HardwareCard::on_port(&mut port, Slot::One));
 //! if !card.is_formatted()? {
 //!     card.format()?;
 //! }
@@ -61,6 +65,9 @@ pub use ram::RamCard;
 
 #[cfg(feature = "hw")]
 pub use hardware::{HardwareCard, Slot, TransportFault, TransportTrace};
+/// The token a [`HardwareCard`] drives the port through.
+#[cfg(feature = "hw")]
+pub use psx_io::periph::ControllerPort;
 
 // --------------------------------------------------------------------------
 // Card geometry (fixed by the hardware).
