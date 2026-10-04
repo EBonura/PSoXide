@@ -37,7 +37,7 @@ pub use boot::{load_boot_exe_from_disc, BootError, BootExe};
 pub use exe::{Exe, ExeError, EXE_HEADER_BYTES};
 pub use iso9660::{
     default_system_cnf, protect_mode1, protect_mode2_form1, protect_mode2_form2, sector_edc,
-    write_sector_parity, IsoBuilder, IsoFile, XA_SECTOR_SIZE,
+    sector_edc_continue, write_sector_parity, IsoBuilder, IsoFile, XA_SECTOR_SIZE,
 };
 
 /// One raw CD-ROM sector -- always 2352 bytes on a PS1 disc regardless
