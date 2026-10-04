@@ -6,7 +6,7 @@
 //! global interrupt register. The addresses and bit layouts live in
 //! [`psx_hw::dma`].
 
-use crate::periph::OrderingTableClearDma;
+use crate::periph::{OrderingTableClearDma, SpuDma};
 use psx_hw::dma as reg;
 
 /// Channel index 0..=6 in the order the DMA controller presents them.
@@ -455,6 +455,46 @@ fn clear_table(buf: &mut [u32]) -> bool {
     wait_or_abort(Channel::OrderingTableClear, DEFAULT_SPINS)
 }
 
+impl SpuDma {
+    /// Copy `words` to the SPU over DMA channel 4, in blocks of `block_words`
+    /// words, and wait for the channel to finish.
+    ///
+    /// Enables the channel without disturbing the others, starts a block-sync
+    /// transfer, and ends it with [`wait_or_abort`], so the SPU has taken
+    /// every word or the channel has been aborted by the time this returns.
+    /// The caller has already put the SPU in its DMA-write transfer mode.
+    ///
+    /// Returns `false` without starting anything when `words` is empty (a zero
+    /// block count means 65,536 blocks on silicon), when `block_words` is 0 or
+    /// does not divide the length, or when the block count does not fit the
+    /// 16-bit field; and `false` when the channel wedged and was aborted.
+    pub fn write_blocks(&mut self, words: &[u32], block_words: u16) -> bool {
+        let block = usize::from(block_words);
+        if words.is_empty() || block == 0 || !words.len().is_multiple_of(block) {
+            return false;
+        }
+        let Ok(block_count) = u16::try_from(words.len() / block) else {
+            return false;
+        };
+        enable_channel(Channel::Spu);
+        // SAFETY: the transfer reads `block_words * block_count` words from
+        // `words`, which is exactly the slice (a whole number of non-empty
+        // blocks, checked above), borrowed until this function returns. The
+        // wait below, or its abort on a wedge, ends the transfer before then.
+        unsafe {
+            start(
+                Channel::Spu,
+                Transfer {
+                    address: words.as_ptr() as u32,
+                    size: size_blocks(block_words, block_count),
+                    control: reg::CHCR_TO_DEVICE | reg::CHCR_SYNC_BLOCK | reg::CHCR_START,
+                },
+            )
+        };
+        wait_or_abort(Channel::Spu, DEFAULT_SPINS)
+    }
+}
+
 /// Spin budget for one DMA completion wait. Comfortably longer than the
 /// largest legitimate transfer (a full-screen VRAM upload) and short
 /// enough that a wedged channel returns control inside a frame.
@@ -563,6 +603,22 @@ mod tests {
         assert_eq!(Channel::Gpu.register_base(), 0x1F80_10A0);
         assert_eq!(Channel::OrderingTableClear.register_base(), 0x1F80_10E0);
         assert_eq!(Channel::OrderingTableClear.enable_bit(), 27);
+    }
+
+    #[test]
+    fn an_spu_write_refuses_a_shape_it_cannot_describe_before_touching_the_channel() {
+        // SAFETY: a test-local token on the host; every call below returns
+        // before any register is touched.
+        let mut dma = unsafe { SpuDma::steal() };
+        let words = std::vec![0u32; 12];
+        // Nothing to send: a zero block count would be 65,536 blocks.
+        assert!(!dma.write_blocks(&[], 4));
+        // No block size, or one that leaves a partial block.
+        assert!(!dma.write_blocks(&words, 0));
+        assert!(!dma.write_blocks(&words, 5));
+        // More blocks than the 16-bit count holds.
+        let long = std::vec![0u32; 65_536];
+        assert!(!dma.write_blocks(&long, 1));
     }
 
     #[test]

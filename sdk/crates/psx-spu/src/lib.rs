@@ -57,7 +57,7 @@
 #![warn(missing_docs)]
 
 use psx_hw::spu::{BASE as SPU_BASE, SPUCNT, SPUSTAT};
-use psx_io::dma::{self, Channel};
+use psx_io::periph::SpuDma;
 
 pub mod tones;
 
@@ -129,21 +129,93 @@ const CD_VOL_RIGHT: u32 = 0x1F80_1DB2;
 const SPUCNT_CD_AUDIO_ENABLE: u16 = 1 << 0;
 
 // ======================================================================
+// The driver
+// ======================================================================
+
+/// The SPU's memory-moving driver: it owns the SPU's DMA channel, so the one
+/// operation that copies RAM into sound RAM, the ADPCM upload, is a method
+/// here and the borrow checker sees a second uploader.
+///
+/// The voice, volume and reverb registers are free functions in this crate:
+/// writing one cannot touch RAM, so they need no owner yet.
+///
+/// ```text
+/// let mut spu = psx_spu::Spu::new(peripherals.spu_dma);
+/// spu.upload_adpcm(SpuAddr::new(0x1010), &TONE_SAMPLE);
+/// ```
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct Spu(SpuDma);
+
+impl Spu {
+    /// Take over the SPU: reset it to a sane playable state and write the
+    /// silence block every one-shot's repeat address points at.
+    ///
+    /// Sets:
+    /// - SPUCNT: enable, unmute, default reverb off, CD audio off
+    /// - Main volume: max
+    /// - Every voice: silenced (volume 0, ADSR release fire, key-off)
+    /// - Reverb input and wet-output depth, pitch-mod, and noise: all disabled
+    /// - Transfer mode: "normal" (the upload path we expose)
+    ///
+    /// Call once at boot before any voice operations.
+    #[doc(alias = "SpuInit")]
+    pub fn new(mut dma: SpuDma) -> Self {
+        init_with(&mut dma);
+        Self(dma)
+    }
+
+    /// Upload ADPCM sample bytes to SPU RAM.
+    ///
+    /// Goes over DMA channel 4 when `bytes` is word-aligned and a whole number
+    /// of words, which is fast and the only reliable path past the 32-halfword
+    /// transfer FIFO, and otherwise falls back to the manual-transfer (PIO)
+    /// path, one halfword per write.
+    ///
+    /// `bytes` must be a multiple of 2 (one halfword per two bytes).
+    /// `dest` must be 8-byte-aligned (the SPU voice-start register's
+    /// resolution) and above the silence block.
+    ///
+    /// # Panics
+    /// If `bytes` is odd in length, or `dest` overlaps the silence block at
+    /// 0x1000.
+    #[doc(alias = "SpuWrite")]
+    pub fn upload_adpcm(&mut self, dest: SpuAddr, bytes: &[u8]) {
+        upload_adpcm_with(&mut self.0, dest, bytes);
+    }
+
+    /// Give the DMA token back.
+    #[inline(always)]
+    pub fn release(self) -> SpuDma {
+        self.0
+    }
+}
+
+/// A token for a deprecated forwarder that never took one.
+fn steal_dma() -> SpuDma {
+    // SAFETY: a token is a logic guard, not a memory-safety one (see
+    // `psx_io::periph`), and the old free functions never took one.
+    unsafe { SpuDma::steal() }
+}
+
+/// Reset the SPU to a sane playable state.
+#[deprecated(note = "use `Spu::new` with the `SpuDma` token")]
+pub fn init() {
+    init_with(&mut steal_dma());
+}
+
+/// Upload ADPCM sample bytes to SPU RAM.
+#[deprecated(note = "use `Spu::upload_adpcm` with the `SpuDma` token")]
+pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
+    upload_adpcm_with(&mut steal_dma(), dest, bytes);
+}
+
+// ======================================================================
 // Initialisation
 // ======================================================================
 
-/// Reset the SPU to a sane playable state.
-///
-/// Sets:
-/// - SPUCNT: enable, unmute, default reverb off, CD audio off
-/// - Main volume: max
-/// - Every voice: silenced (volume 0, ADSR release fire, key-off)
-/// - Reverb input and wet-output depth, pitch-mod, and noise: all disabled
-/// - Transfer mode: 16-bit PIO (the upload path we expose)
-///
-/// Call once at boot before any voice operations.
-#[doc(alias = "SpuInit")]
-pub fn init() {
+// The register sequence behind `Spu::new`.
+fn init_with(dma: &mut SpuDma) {
     // Silence everything immediately -- key-off on all 24 voices
     // before we touch any other state, so nothing glitches audibly
     // on cold boot.
@@ -203,7 +275,7 @@ pub fn init() {
     write_reg16(TRANSFER_CTRL, 0x0004); // normal mode
 
     // The one upload allowed onto the silence block: it writes the block.
-    upload_adpcm_unguarded(SILENCE_BLOCK, &SILENCE_BLOCK_BYTES);
+    upload_adpcm_unguarded(dma, SILENCE_BLOCK, &SILENCE_BLOCK_BYTES);
 }
 
 /// One ADPCM block of silence that loops on itself, for every one-shot's
@@ -863,23 +935,15 @@ pub fn enable_cd_audio(enabled: bool) {
 // ADPCM upload (PIO path)
 // ======================================================================
 
-/// Upload ADPCM sample bytes to SPU RAM via the manual-transfer
-/// (PIO) path. Slow -- one halfword per write -- but simple and
-/// doesn't need DMA setup. Games that upload many megabytes of
-/// samples at boot use DMA; for per-frame SFX uploads of a few
-/// KB, this is fine.
-///
-/// `bytes` must be a multiple of 2 (one halfword per two bytes).
-/// `dest` must be 8-byte-aligned (the SPU voice-start register's
-/// resolution).
-///
-/// Process (PSX-SPX § "SPU Data Transfer"):
+// The upload behind `Spu::upload_adpcm`, guarded against the silence block.
+//
+// The PIO path follows PSX-SPX "SPU Data Transfer"; the process (PSX-SPX § "SPU Data Transfer"):
 /// 1. Write transfer-control = 0 (reset).
 /// 2. Write target address register.
 /// 3. Write transfer-control = 4 (manual).
 /// 4. Push halfword data through 0x1F80_1DA8.
 /// 5. Wait for the transfer to drain (SPUSTAT bit 7 = transfer busy).
-pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
+fn upload_adpcm_with(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) {
     assert!(
         bytes.len().is_multiple_of(2),
         "upload_adpcm: byte slice must be a multiple of 2",
@@ -894,16 +958,16 @@ pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
         dest.byte_offset() >= SILENCE_BLOCK.byte_offset() + SILENCE_BLOCK_BYTES.len() as u32,
         "upload_adpcm: destination overlaps the SPU silence block at 0x1000",
     );
-    upload_adpcm_unguarded(dest, bytes);
+    upload_adpcm_unguarded(dma, dest, bytes);
 }
 
-/// [`upload_adpcm`] without the silence-block guard, for [`init`] writing
-/// that block. `bytes` is a whole number of halfwords.
-fn upload_adpcm_unguarded(dest: SpuAddr, bytes: &[u8]) {
+// The upload without the silence-block guard, for `Spu::new` writing
+// that block. `bytes` is a whole number of halfwords.
+fn upload_adpcm_unguarded(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) {
     // Prefer DMA (channel 4): fast, and the only reliable path for uploads
     // larger than the 32-halfword transfer FIFO. Falls back to PIO when the
     // source is not word-aligned / a whole number of 32-bit words.
-    if !upload_adpcm_dma(dest, bytes) {
+    if !upload_adpcm_dma(dma, dest, bytes) {
         upload_adpcm_pio(dest, bytes);
     }
 }
@@ -911,7 +975,7 @@ fn upload_adpcm_unguarded(dest: SpuAddr, bytes: &[u8]) {
 /// DMA upload (channel 4, RAM -> SPU RAM), block-sync. Returns `false` (so the
 /// caller falls back to PIO) when `bytes` is not 4-byte aligned or not a whole
 /// number of 32-bit words -- the DMA controller is word-addressed.
-fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
+fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
     let src = bytes.as_ptr() as u32;
     // An empty slice would program a zero block count, which silicon reads
     // as 65,536 blocks: megabytes past the slice. PIO moves nothing instead.
@@ -957,24 +1021,11 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
     wait_spu_status(spucnt | 0x0020);
 
     // Channel 4: main RAM -> SPU, block-sync, forward, start; block until done.
-    dma::enable_channel(Channel::Spu);
-    // SAFETY: the transfer reads `block_size * block_count` words from
-    // `src`, which is exactly `bytes` (word-aligned, a whole number of
-    // words, at least one block), borrowed until this function returns. The
-    // wait below, or the abort on a wedge, ends the transfer before then.
-    unsafe {
-        dma::start(
-            Channel::Spu,
-            dma::Transfer {
-                address: src,
-                size: dma::size_blocks(block_size as u16, block_count as u16),
-                control: psx_hw::dma::CHCR_TO_DEVICE
-                    | psx_hw::dma::CHCR_SYNC_BLOCK
-                    | psx_hw::dma::CHCR_START,
-            },
-        )
-    };
-    dma::wait_or_abort(Channel::Spu, dma::DEFAULT_SPINS);
+    // SAFETY: `bytes` is word-aligned and a whole number of words (checked
+    // above), so it is exactly `words` initialised `u32`s.
+    let source =
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), words as usize) };
+    let _ = dma.write_blocks(source, block_size as u16);
     // The channel is done handing bytes over; the SPU is still writing
     // them into sound RAM.
     wait_transfer_idle();
@@ -1032,6 +1083,15 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_driver_is_its_token_and_gives_it_back() {
+        assert_eq!(core::mem::size_of::<Spu>(), 0);
+        // SAFETY: a test-local token on the host. `Spu::new` would reset the
+        // registers, so the driver is built around the token directly.
+        let spu = Spu(unsafe { SpuDma::steal() });
+        let _token: SpuDma = spu.release();
+    }
 
     #[test]
     fn the_silence_block_ends_and_repeats_onto_itself() {
