@@ -407,9 +407,9 @@ pub const fn pack_texcoord(u: u8, v: u8, extra: u16) -> u32 {
 /// `GP0` primitive command words.
 ///
 /// Each constant is the command word's top byte with a zero color, the
-/// form every primitive header takes: OR in [`pack_color`](super::pack_color) (the first
+/// form every primitive header takes: OR in [`pack_color`] (the first
 /// vertex's color for shaded primitives) and, for a translucent or
-/// raw-textured primitive, [`SEMI_TRANSPARENT`] and [`RAW_TEXTURE`]. The
+/// raw-textured primitive, [`packet::SEMI_TRANSPARENT`] and [`packet::RAW_TEXTURE`]. The
 /// bit layout is psx-spx "GPU Render Polygon Commands" (bits 28..24 select
 /// shading, vertex count, texturing, translucency and raw texture), "Render
 /// Line Commands" and "Render Rectangle Commands".
