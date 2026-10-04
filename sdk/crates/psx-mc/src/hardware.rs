@@ -125,7 +125,20 @@ impl Timing {
 ///
 /// `P` is how the card holds the port: the [`ControllerPort`] token (the
 /// default) or a `&mut ControllerPort` borrowed from the program for the
-/// length of the card's use.
+/// length of the card's use. While a card holds the port, a pad poll cannot
+/// borrow it:
+///
+/// ```compile_fail,E0499
+/// use psx_mc::{HardwareCard, Slot};
+/// use psx_io::periph::ControllerPort;
+///
+/// // SAFETY: the doctest never touches the port; it only has to compile.
+/// let mut port = unsafe { ControllerPort::steal() };
+/// let mut card = HardwareCard::on_port(&mut port, Slot::One);
+/// let other_driver = &mut port; // the card still holds the borrow
+/// let _ = card.last_trace();
+/// let _ = other_driver;
+/// ```
 pub struct HardwareCard<P = ControllerPort> {
     port: P,
     slot: Slot,
