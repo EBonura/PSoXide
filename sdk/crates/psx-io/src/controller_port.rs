@@ -117,12 +117,19 @@ pub trait Transport {
     /// transfers (the SCPH-1200 stopped answering, a clone's bytes corrupted),
     /// so the transport watches the live `/ACK` level in `STAT` instead.
     fn select(&mut self, port: Port) {
+        self.select_with(port, false);
+    }
+
+    /// [`select`](Self::select) with the `/ACK` interrupt armed when
+    /// `arm_ack_irq` is set, so `STAT` latches each pulse. Only a diagnostic
+    /// pacing wants that.
+    fn select_with(&mut self, port: Port, arm_ack_irq: bool) {
         self.set_mode(sio0::MODE_8N1);
         self.set_baud(sio0::BAUD_250KHZ);
         // Clear any stale IRQ latch from the previous transaction, then
         // assert the select line.
         self.set_control(sio0::ctrl::ACK);
-        self.set_control(sio0::selected_ctrl(port.is_two(), false));
+        self.set_control(sio0::selected_ctrl(port.is_two(), arm_ack_irq));
     }
 
     /// Release `/CS`, which resets the attached device's state machine.
@@ -461,6 +468,6 @@ mod tests {
             },
             Timing::PAD
         );
-        assert!(Timing::CARD.ack_spins > Timing::PAD.ack_spins);
+        const { assert!(Timing::CARD.ack_spins > Timing::PAD.ack_spins) };
     }
 }
