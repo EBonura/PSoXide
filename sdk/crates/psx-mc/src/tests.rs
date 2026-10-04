@@ -387,3 +387,43 @@ fn overwrite_survives_the_card_being_pulled_at_any_frame() {
     }
     assert!(completed, "the write never completed inside 400 frames");
 }
+
+/// A card with two one-block saves, A in directory entry 0 and B in entry 1,
+/// whose entry 0 link byte was flipped on its way to the card so that A claims
+/// B's block as a continuation. The checksum byte no longer matches.
+fn cross_linked_card() -> Card<RamCard> {
+    let mut c = fresh();
+    c.write(NAME, "A", b"save A").unwrap();
+    c.write(NAME2, "B", b"save B").unwrap();
+    let mut image = *c.into_inner().image();
+    // Entry 0 is frame 1; its link field is bytes 8..10, `FFFF` for "none".
+    assert_eq!(&image[FRAME_SIZE + 8..FRAME_SIZE + 10], &[0xFF, 0xFF]);
+    image[FRAME_SIZE + 8] = 1;
+    image[FRAME_SIZE + 9] = 0;
+    Card::new(RamCard::from_image(&image).unwrap())
+}
+
+#[test]
+fn a_directory_entry_with_a_bad_checksum_is_refused() {
+    let mut c = cross_linked_card();
+    let mut list = [blank_entry(); 15];
+    assert_eq!(c.list(&mut list), Err(Error::Corrupt));
+    assert_eq!(c.free_blocks(), Err(Error::Corrupt));
+    let mut buf = [0u8; 16];
+    assert_eq!(c.read(NAME, &mut buf), Err(Error::Corrupt));
+    assert_eq!(c.write(NAME2, "B", b"new B"), Err(Error::Corrupt));
+}
+
+#[test]
+fn deleting_through_a_cross_linked_entry_does_not_free_the_other_save() {
+    let mut c = cross_linked_card();
+    assert_eq!(c.delete(NAME), Err(Error::Corrupt));
+    // B's entry is intact and still reads once the damaged entry is out of the way.
+    let mut image = *c.into_inner().image();
+    image[FRAME_SIZE + 8] = 0xFF;
+    image[FRAME_SIZE + 9] = 0xFF;
+    let mut c = Card::new(RamCard::from_image(&image).unwrap());
+    let mut buf = [0u8; 16];
+    let n = c.read(NAME2, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"save B");
+}

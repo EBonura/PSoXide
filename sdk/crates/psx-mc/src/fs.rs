@@ -212,9 +212,15 @@ impl<'a> DataWriter<'a> {
 // --------------------------------------------------------------------------
 
 impl<B: Block> Card<B> {
+    /// Read directory entry `index`, refusing one whose XOR checksum does not
+    /// match. Every operation walks these entries, so a flipped link or state
+    /// byte must stop it before it frees or reuses another save's blocks.
     fn read_dir(&mut self, index: usize) -> Result<[u8; FRAME_SIZE]> {
         let mut f = [0u8; FRAME_SIZE];
         self.dev.read_frame(1 + index as u16, &mut f)?;
+        if checksum(&f) != f[E_CHK] {
+            return Err(Error::Corrupt);
+        }
         Ok(f)
     }
 
@@ -246,9 +252,6 @@ impl<B: Block> Card<B> {
         let mut links = [LINK_NONE; DATA_BLOCKS];
         for i in 0..DATA_BLOCKS {
             let entry = self.read_dir(i)?;
-            if checksum(&entry) != entry[E_CHK] {
-                return Err(Error::Corrupt);
-            }
             let state = entry[E_STATE];
             if !is_free(state) && !matches!(state, ST_FIRST | ST_MIDDLE | ST_LAST) {
                 return Err(Error::Corrupt);
