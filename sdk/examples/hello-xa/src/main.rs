@@ -18,7 +18,7 @@ use psx_fmv::iso;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_io::cd::xa::{DriveSpeed, XaEvent, XaFile, XaPlayer};
+use psx_io::cd::xa::{DriveSpeed, Event, File, Player};
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_pad::{button, poll_port1, ButtonState};
 use psx_spu::{self as spu, CdVolume, Volume};
@@ -57,14 +57,14 @@ fn read_one(lba: u32) -> Option<&'static [u8]> {
 
 /// The song file's position on the disc, looked up by name so the program
 /// does not bake in an LBA.
-fn find_songs() -> Option<XaFile> {
+fn find_songs() -> Option<File> {
     // SAFETY: nothing else drives the controller yet.
     if !unsafe { (*addr_of_mut!(READER)).prepare() } {
         return None;
     }
     let (root, _) = iso::root_directory(read_one(iso::PVD_LBA)?)?;
     let (lba, size) = iso::find_in_directory(read_one(root)?, SONGS_FILE)?;
-    Some(XaFile::from_directory_entry(lba, size, FILE_NUMBER, SPEED))
+    Some(File::from_directory_entry(lba, size, FILE_NUMBER, SPEED))
 }
 
 /// Decimal digits of `value` into `buf`, as text.
@@ -101,7 +101,7 @@ fn main() {
     spu::enable_cd_audio(true);
 
     let file = find_songs();
-    let mut player = XaPlayer::new(peripherals.cd);
+    let mut player = Player::new(peripherals.cd);
     let mut song = 0u8;
     let mut volume = 0x80u8;
     let mut loops = 0u32;
@@ -139,7 +139,7 @@ fn main() {
             }
         }
         previous = pad;
-        if player.poll() == XaEvent::Looped {
+        if player.poll() == Event::Looped {
             loops += 1;
         }
 

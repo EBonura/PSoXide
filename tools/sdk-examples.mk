@@ -31,7 +31,7 @@ PGO_ARGS ?=
 PGO_VARIANTS ?= --variant off --variant default --variant hot=500 --variant hot=500+profi
 GATE ?=
 
-.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc
+.PHONY: example disc hello-tri hello-tri-disc run-tri examples pgo-collect pgo-choose hello-xa-disc hello-xa-gate
 examples:
 	@set -e; for example in hello-tri hello-input hello-ot hello-gte hello-tex hello-memcard hello-spstack hello-gteirq hello-present hello-present-queue; do $(MAKE) -f tools/sdk-examples.mk disc EXAMPLE=$$example; done
 
@@ -63,6 +63,11 @@ hello-xa-disc:
 	$(MAKE) example EXAMPLE=hello-xa
 	cargo run --locked --release -p mkisopsx -- --exe "$(BUILD)/$(TARGET)/release/hello-xa.exe" \
 		--out "$(BUILD)/$(TARGET)/release/hello-xa.bin" --volume PSOXIDESDK --xa-file "$(XA_DIR)/SONGS.XA"
+# Plays hello-xa headless and checks the audio capture: make hello-xa-gate FRONTEND=/path/to/frontend
+hello-xa-gate: hello-xa-disc
+	@test -n "$(FRONTEND)" || (echo "Set FRONTEND to the PSoXide-emulator executable"; exit 1)
+	cargo build -q --release --locked -p psx-audio-cook
+	sh tools/xa_gate.sh "$(FRONTEND)" "$(BUILD)/$(TARGET)/release/hello-xa.cue" target/release/psx-audio-cook
 hello-tri:
 	$(MAKE) example EXAMPLE=hello-tri
 hello-tri-disc:
