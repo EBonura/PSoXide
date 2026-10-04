@@ -88,6 +88,12 @@ struct Chain {
     len: usize,
 }
 
+/// The directory entries of the files a write replaces, one bit per entry.
+struct Replaced {
+    first_entries: u16,
+    all_entries: u16,
+}
+
 // --------------------------------------------------------------------------
 // Sequential reader over a file's payload region (skips title+icon frames).
 // --------------------------------------------------------------------------
@@ -455,8 +461,11 @@ impl<B: Block> Card<B> {
         Ok(())
     }
 
-    /// Write a save (uncompressed), overwriting any existing file of the same
-    /// name. `name` is the BIOS file name (product code + label, <= 20 ASCII);
+    /// Write a save (uncompressed), replacing any existing file of the same
+    /// name. The old save stays on the card until the new one is complete, so a
+    /// failed or interrupted write leaves it readable; the price is that the
+    /// card needs room for both copies at once, and a write that does not fit
+    /// returns [`Error::NoSpace`] without touching the card. `name` is the BIOS file name (product code + label, <= 20 ASCII);
     /// `title` is the human-readable label shown by the card manager (<= 32
     /// ASCII).
     pub fn write(&mut self, name: &str, title: &str, data: &[u8]) -> Result<()> {
@@ -512,19 +521,13 @@ impl<B: Block> Card<B> {
             return Err(Error::NoSpace);
         }
 
-        // Overwrite: free any existing same-name file first.
-        if let Some(first) = self.find(name)? {
-            let chain = self.chain(first)?;
-            for k in 0..chain.len {
-                let mut e = [0u8; FRAME_SIZE];
-                e[E_STATE] = ST_FREE;
-                e[E_LINK] = 0xFF;
-                e[E_LINK + 1] = 0xFF;
-                self.write_dir(chain.blocks[k] as usize - 1, &mut e)?;
-            }
-        }
+        // An existing same-name file stays on the card, untouched, until the
+        // new one is complete. Remember its blocks so they can be released last.
+        let old = self.same_name_blocks(name)?;
 
-        // Allocate `need` free directory indices.
+        // Allocate `need` directory indices from blocks that are free now. The
+        // old file's blocks are not free, so a replacement needs room for both
+        // copies, and one that does not fit is refused before any write.
         let mut alloc = [0u8; DATA_BLOCKS];
         let mut got = 0;
         for i in 0..DATA_BLOCKS {
@@ -565,8 +568,10 @@ impl<B: Block> Card<B> {
         }
         w.finish(&mut self.dev)?;
 
-        // Directory entries with the link chain, name + size in the first.
-        for k in 0..need {
+        // Directory entries with the link chain, name + size in the first. The
+        // first entry goes last: a file appears only once its whole chain is
+        // in place, so a card pulled before then still holds the old save.
+        for k in (0..need).rev() {
             let mut e = [0u8; FRAME_SIZE];
             e[E_STATE] = if k == 0 {
                 ST_FIRST // a single-block file is FIRST with a terminal link
@@ -591,6 +596,46 @@ impl<B: Block> Card<B> {
                 e[E_NAME..E_NAME + n].copy_from_slice(&name[..n]);
             }
             self.write_dir(alloc[k] as usize, &mut e)?;
+        }
+
+        // The new save is whole. Release the old one, first entry first so it
+        // disappears in one frame write.
+        self.free_blocks_in(old.first_entries)?;
+        self.free_blocks_in(old.all_entries & !old.first_entries)
+    }
+
+    /// Directory indices of every file called `name`, as bit masks: the first
+    /// entries and every entry of the chains they own. Normally one file, but a
+    /// card pulled during a replacement can leave the old and new copies both.
+    fn same_name_blocks(&mut self, name: &[u8]) -> Result<Replaced> {
+        let mut found = Replaced {
+            first_entries: 0,
+            all_entries: 0,
+        };
+        for i in 0..DATA_BLOCKS {
+            let e = self.read_dir(i)?;
+            if e[E_STATE] != ST_FIRST || !entry_name_eq(&e, name) {
+                continue;
+            }
+            found.first_entries |= 1 << i;
+            let chain = self.chain(i)?;
+            for &block in &chain.blocks[..chain.len] {
+                found.all_entries |= 1 << (block - 1);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Mark every directory entry in `mask` free, lowest index first.
+    fn free_blocks_in(&mut self, mask: u16) -> Result<()> {
+        for i in 0..DATA_BLOCKS {
+            if mask & (1 << i) != 0 {
+                let mut e = [0u8; FRAME_SIZE];
+                e[E_STATE] = ST_FREE;
+                e[E_LINK] = 0xFF;
+                e[E_LINK + 1] = 0xFF;
+                self.write_dir(i, &mut e)?;
+            }
         }
         Ok(())
     }

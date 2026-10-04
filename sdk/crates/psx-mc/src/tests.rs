@@ -302,3 +302,88 @@ fn entry_name_falls_back_for_corrupt_bytes_and_lengths() {
     e.name_len = u8::MAX;
     assert_eq!(e.name(), "?");
 }
+
+/// A card that stops answering after a set number of frame writes, as when it
+/// is pulled mid-save.
+struct PullAfterWrites {
+    inner: RamCard,
+    left: usize,
+}
+
+impl Block for PullAfterWrites {
+    fn read_frame(&mut self, frame: u16, out: &mut [u8; FRAME_SIZE]) -> crate::Result<()> {
+        self.inner.read_frame(frame, out)
+    }
+    fn write_frame(&mut self, frame: u16, data: &[u8; FRAME_SIZE]) -> crate::Result<()> {
+        if self.left == 0 {
+            return Err(Error::NoCard);
+        }
+        self.left -= 1;
+        self.inner.write_frame(frame, data)
+    }
+}
+
+#[test]
+fn overwrite_that_cannot_fit_keeps_the_old_save() {
+    // Thirteen blocks belong to other saves and NAME holds one, so a 3-block
+    // replacement has only two free blocks to land in. The old save used to be
+    // freed before this was known.
+    let mut c = fresh();
+    for i in 0..13 {
+        let mut other = *b"BASLUS-99999OTHER00";
+        other[17] = b'0' + i / 10;
+        other[18] = b'0' + i % 10;
+        c.write(core::str::from_utf8(&other).unwrap(), "OTHER", b"o")
+            .unwrap();
+    }
+    c.write(NAME, "T", b"the old save").unwrap();
+    assert_eq!(c.free_blocks().unwrap(), 1);
+    let before = *c.device().image();
+
+    let big = [9u8; 20_000];
+    assert_eq!(c.write(NAME, "T", &big), Err(Error::NoSpace));
+
+    let mut buf = [0u8; 64];
+    let n = c.read(NAME, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"the old save");
+    assert_eq!(
+        c.device().image(),
+        &before,
+        "a refused write touches nothing"
+    );
+}
+
+#[test]
+fn overwrite_survives_the_card_being_pulled_at_any_frame() {
+    let old = [0x11u8; 9_000]; // two blocks
+    let new = [0x22u8; 9_500]; // two blocks
+    let mut base = fresh();
+    base.write(NAME, "T", &old).unwrap();
+    let image = *base.into_inner().image();
+
+    let mut completed = false;
+    for allowed in 0..400 {
+        let dev = PullAfterWrites {
+            inner: RamCard::from_image(&image).unwrap(),
+            left: allowed,
+        };
+        let mut c = Card::new(dev);
+        let result = c.write(NAME, "T", &new);
+
+        let mut buf = [0u8; 10_000];
+        let n = c
+            .read(NAME, &mut buf)
+            .unwrap_or_else(|e| panic!("after {allowed} writes the save is unreadable: {e:?}"));
+        let got = &buf[..n];
+        assert!(
+            got == old || got == new,
+            "after {allowed} writes the save is neither version"
+        );
+        if result.is_ok() {
+            assert_eq!(got, new);
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed, "the write never completed inside 400 frames");
+}
