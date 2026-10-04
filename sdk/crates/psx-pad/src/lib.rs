@@ -7,12 +7,14 @@
 //! enough that a hand-rolled select + four-byte exchange beats
 //! opening events and waiting on them.
 //!
-//! Typical use from a game loop:
+//! Typical use from a game loop. The controller port has one owner, the
+//! `ControllerPort` token from `psx_rt::Peripherals::take()`, which every pad
+//! poll and memory-card transfer borrows for the length of its transaction:
 //!
-//! ```ignore
-//! use psx_pad::poll_port1;
-//!
-//! let pad = poll_port1();
+//! ```text
+//! let mut port = peripherals.controller_port;
+//! let mut reader = psx_pad::PadReader::port1();
+//! let pad = reader.poll_on(&mut port);
 //! if pad.buttons.is_held(psx_pad::button::START) {
 //!     // …
 //! }
@@ -31,10 +33,10 @@
 //! DualShock analog mode uses the same first four bytes but reports
 //! ID low `0x73` and appends four stick bytes:
 //! right X/Y, then left X/Y. Fresh DualShocks boot digital, so games
-//! that require sticks should either call [`enable_analog_port1`] or
+//! that require sticks should either call [`enable_analog_on`] or
 //! show an "enable analog mode" prompt when [`PadState::is_analog`]
 //! is false. Programs that require a DualShock call
-//! [`require_analog_port1`] at boot: it locks the pad in analog mode, so
+//! [`require_analog_on`] at boot: it locks the pad in analog mode, so
 //! the Analog button cannot switch it back, and says whether an
 //! analog-capable pad is there at all (`sdk/docs/PAD-ANALOG.md`).
 //!
@@ -51,7 +53,10 @@
 #![warn(missing_docs)]
 
 use psx_hw::sio::sio0;
-use psx_hw::sio::sio0 as sio;
+use psx_io::controller_port::{ExchangeError, Timing, Transport};
+use psx_io::periph::ControllerPort;
+
+pub use psx_io::controller_port::Port;
 
 pub mod tracker;
 pub use tracker::PadTracker;
@@ -61,8 +66,6 @@ pub use tracker::PadTracker;
 mod mock_sio;
 #[cfg(test)]
 mod transport_tests;
-#[cfg(test)]
-use mock_sio as psx_io;
 
 /// Named button bitmasks (active-high in this representation).
 /// Hardware's active-low wire format is hidden inside [`poll_port1`].
@@ -657,21 +660,16 @@ impl RawPoll {
     }
 }
 
-// SIO0 access contract. Every `unsafe` helper below, and every `unsafe` block that calls one,
-// touches only the SIO0 registers in `psx_hw::sio::sio0` (0x1F80_1040..=0x1F80_104F), which are valid
-// MMIO on every PS1 and are accessed at their natural width. No pointer or memory ownership is
-// involved. The one obligation is exclusive use of SIO0 for the length of a call: the guest is
-// single-threaded, a poll runs to completion before it returns, and no interrupt handler touches
-// SIO0 (the controller IRQ stays masked in I_MASK), so nothing can interleave with a transaction. A
-// game that drove SIO0 from its own interrupt handler would break this.
+// The driver talks to the port through `psx_io::controller_port::Transport`: the
+// production poll and the configuration sequence use its select / exchange /
+// finish steps, the diagnostic pacings below use its register accesses. A
+// transaction needs the port for its whole length, so every entry point takes
+// the `ControllerPort` token by `&mut` (a memory-card transfer borrows it the
+// same way), and `PadReader` keeps no hardware state of its own.
 
-// --- SIO0 register layout, from the shared hardware-model crate ---
-// (`psx_hw::sio::sio0` is the single source of truth for these bits; the spin
-// budgets below are this driver's behavior, not layout, and stay local.)
-
-// We never take the CPU interrupt (the controller source stays masked in
-// `I_MASK`; the runtime only unmasks VBlank), but see the layout doc: enabling
-// this is what latches `STAT` bit 9 on the `/ACK` edge for polling.
+// The controller IRQ stays masked in `I_MASK` (the runtime only unmasks VBlank),
+// but arming it in CTRL is what latches `STAT` bit 9 on the `/ACK` edge for the
+// diagnostic ack-wait pacing.
 const CTRL_ACK: u16 = sio0::ctrl::ACK;
 
 const STAT_TX_READY: u32 = sio0::stat::TX_READY;
@@ -679,14 +677,12 @@ const STAT_RX_NOT_EMPTY: u32 = sio0::stat::RX_NOT_EMPTY;
 const STAT_DSR_LEVEL: u32 = sio0::stat::DSR_LEVEL;
 const STAT_IRQ: u32 = sio0::stat::IRQ;
 
-const MODE_8N1: u16 = sio0::MODE_8N1;
-const BAUD_PAD: u16 = sio0::BAUD_250KHZ;
 /// Spin budget waiting for the byte shift itself (TX-ready / RX-not-empty).
-const EXCHANGE_WAIT_SPINS: u32 = 32_768;
+const EXCHANGE_WAIT_SPINS: u32 = Timing::PAD.byte_spins;
 /// Spin budget waiting for the `/ACK` pulse. Comfortably exceeds the kernel's
 /// ~100us DSR timeout on hardware and the emulator's ~1k-cycle ACK deadline,
 /// so a genuinely slow original controller is still given time to answer.
-const ACK_WAIT_SPINS: u32 = 2_048;
+const ACK_WAIT_SPINS: u32 = Timing::PAD.ack_spins;
 /// Setup delay (bounded STAT reads) after asserting the select line, before the
 /// first clock. The original SCPH-1200 gives NO response without it and a clean
 /// `5A41` digital read with it; fast clones tolerate it either way (silicon,
@@ -695,78 +691,114 @@ const ACK_WAIT_SPINS: u32 = 2_048;
 /// per frame, so 1024 is a comfortable margin while keeping the per-poll
 /// busy-wait small. Production retains this measured setup margin and also
 /// waits for each non-final byte's ACK readiness; the BIOS likewise paces bytes.
-pub const DEFAULT_SETUP_SPINS: u32 = 1_024;
+pub const DEFAULT_SETUP_SPINS: u32 = Timing::PAD.setup_spins;
 
-/// Poll the controller in port 1 once.
+/// Poll the controller in `socket` once.
 ///
 /// The returned [`PadState`] always contains active-high buttons; in
 /// analog mode it also contains the four DualShock stick bytes. A packet
 /// that cannot be completed after bounded retries reports [`PadMode::Unknown`]
 /// rather than synthetic button bytes. A consistently absent device reports
 /// [`PadMode::Disconnected`] after the bounded acquisition attempts.
-#[doc(alias = "PadRead")]
-pub fn poll_port1() -> PadState {
-    poll_state(false)
-}
-
-/// Poll the controller in port 2 once.
 ///
-/// The returned [`PadState`] always contains active-high buttons; in
-/// analog mode it also contains the four DualShock stick bytes.
-pub fn poll_port2() -> PadState {
-    poll_state(true)
+/// `port` is the [`ControllerPort`](psx_io::periph::ControllerPort) token; it
+/// stays borrowed for the length of the poll.
+#[doc(alias = "PadRead")]
+pub fn poll_on<T: Transport>(port: &mut T, socket: Port) -> PadState {
+    poll_state(port, socket)
 }
 
-/// Poll port 1 once and return the raw wire bytes plus `/ACK` observations,
+/// Poll port 1 once.
+#[deprecated(note = "use `poll_on` with the `ControllerPort` token")]
+pub fn poll_port1() -> PadState {
+    poll_on(&mut steal_port(), Port::One)
+}
+
+/// Poll port 2 once.
+#[deprecated(note = "use `poll_on` with the `ControllerPort` token")]
+pub fn poll_port2() -> PadState {
+    poll_on(&mut steal_port(), Port::Two)
+}
+
+/// The token for a deprecated forwarder that never took one.
+fn steal_port() -> ControllerPort {
+    // SAFETY: a token is a logic guard, not a memory-safety one (see
+    // `psx_io::periph`), and the old free functions never took one.
+    unsafe { ControllerPort::steal() }
+}
+
+/// Poll `socket` once and return the raw wire bytes plus `/ACK` observations,
 /// using the requested [`Pacing`]. Intended for diagnostics that want to show
 /// the unfiltered handshake (or reproduce the legacy [`Pacing::NoAckWait`]
-/// failure); normal game code should use [`poll_port1`].
+/// failure); normal game code should use [`poll_on`].
+pub fn poll_raw_on<T: Transport>(port: &mut T, socket: Port, pacing: Pacing) -> RawPoll {
+    poll_once_raw(port, socket, pacing)
+}
+
+/// Poll port 1 once, raw.
+#[deprecated(note = "use `poll_raw_on` with the `ControllerPort` token")]
 pub fn poll_port1_raw(pacing: Pacing) -> RawPoll {
-    // SAFETY: `poll_once_raw` only drives SIO0, under the SIO0 access contract above.
-    unsafe { poll_once_raw(false, pacing) }
+    poll_raw_on(&mut steal_port(), Port::One, pacing)
 }
 
 /// Port-2 counterpart of [`poll_port1_raw`].
+#[deprecated(note = "use `poll_raw_on` with the `ControllerPort` token")]
 pub fn poll_port2_raw(pacing: Pacing) -> RawPoll {
-    // SAFETY: `poll_once_raw` only drives SIO0, under the SIO0 access contract above.
-    unsafe { poll_once_raw(true, pacing) }
+    poll_raw_on(&mut steal_port(), Port::Two, pacing)
 }
 
-/// Poll port 1 once with explicit fixed timing, for hardware diagnostics:
+/// Poll `socket` once with explicit fixed timing, for hardware diagnostics:
 /// `setup_spins` of delay after asserting the select line, plus `interbyte_spins`
 /// of fixed delay after each byte (bounded STAT reads -- no CTRL writes, no
 /// `/ACK` wait, no DSR IRQ). This isolates the two timings a strict original pad
 /// (SCPH-1200) might need -- setup time after `/CS`, and an inter-byte gap --
 /// without the machinery that corrupted the ack-wait path on silicon.
-pub fn poll_port1_diagnostics(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
-    // SAFETY: `poll_once_diag` only drives SIO0, under the SIO0 access contract above.
-    unsafe { poll_once_diag(false, setup_spins, interbyte_spins) }
+pub fn poll_diagnostics_on<T: Transport>(
+    port: &mut T,
+    socket: Port,
+    setup_spins: u32,
+    interbyte_spins: u32,
+) -> RawPoll {
+    poll_once_timed(port, socket, setup_spins, interbyte_spins)
 }
 
-/// Renamed to [`poll_port1_diagnostics`].
-#[deprecated(note = "renamed to `poll_port1_diagnostics`")]
+/// Poll port 1 once with fixed timing.
+#[deprecated(note = "use `poll_diagnostics_on` with the `ControllerPort` token")]
+pub fn poll_port1_diagnostics(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+    poll_diagnostics_on(&mut steal_port(), Port::One, setup_spins, interbyte_spins)
+}
+
+/// Renamed to [`poll_diagnostics_on`].
+#[deprecated(note = "use `poll_diagnostics_on` with the `ControllerPort` token")]
 #[inline(always)]
+#[allow(deprecated)]
 pub fn poll_port1_diag(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
     poll_port1_diagnostics(setup_spins, interbyte_spins)
 }
 
-/// Ask the port-1 controller to enter DualShock analog mode. Returns
+/// Ask the controller in `socket` to enter DualShock analog mode. Returns
 /// `true` when a follow-up poll reports analog mode.
 ///
 /// Digital-only controllers simply keep reporting digital mode, so
 /// callers should still gate analog-only controls on
 /// [`PadState::is_analog`].
+pub fn enable_analog_on<T: Transport>(port: &mut T, socket: Port) -> bool {
+    enable_analog(port, socket)
+}
+
+/// Ask the port-1 controller to enter analog mode.
+#[deprecated(note = "use `enable_analog_on` with the `ControllerPort` token")]
 pub fn enable_analog_port1() -> bool {
-    enable_analog(false)
+    enable_analog_on(&mut steal_port(), Port::One)
 }
 
-/// Ask the port-2 controller to enter DualShock analog mode. Returns
-/// `true` when a follow-up poll reports analog mode.
+/// Ask the port-2 controller to enter analog mode.
+#[deprecated(note = "use `enable_analog_on` with the `ControllerPort` token")]
 pub fn enable_analog_port2() -> bool {
-    enable_analog(true)
+    enable_analog_on(&mut steal_port(), Port::Two)
 }
 
-/// What a port held after [`require_analog_port1`] asked it for analog mode.
+/// What a port held after [`require_analog_on`] asked it for analog mode.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AnalogRequirement {
     /// A DualShock answered in analog mode, now locked there: the Analog
@@ -790,19 +822,26 @@ impl AnalogRequirement {
     }
 }
 
-/// Put the port-1 controller in analog mode, lock it there, and report what
-/// it settled on. For programs that need sticks and must not let the Analog
-/// button flip the pad back to digital mid-session. Call it at boot (a
+/// Put the controller in `socket` in analog mode, lock it there, and report
+/// what it settled on. For programs that need sticks and must not let the
+/// Analog button flip the pad back to digital mid-session. Call it at boot (a
 /// chain-loaded program starts from whatever the previous one left) and
 /// again while the answer is not [`AnalogRequirement::Analog`], so a pad
 /// plugged in later is picked up.
+pub fn require_analog_on<T: Transport>(port: &mut T, socket: Port) -> AnalogRequirement {
+    AnalogRequirement::from_mode(request_analog(port, socket, REQUIRE_ANALOG_GAP_SPINS).mode)
+}
+
+/// [`require_analog_on`] for port 1.
+#[deprecated(note = "use `require_analog_on` with the `ControllerPort` token")]
 pub fn require_analog_port1() -> AnalogRequirement {
-    AnalogRequirement::from_mode(request_analog(false, REQUIRE_ANALOG_GAP_SPINS).mode)
+    require_analog_on(&mut steal_port(), Port::One)
 }
 
 /// Port-2 counterpart of [`require_analog_port1`].
+#[deprecated(note = "use `require_analog_on` with the `ControllerPort` token")]
 pub fn require_analog_port2() -> AnalogRequirement {
-    AnalogRequirement::from_mode(request_analog(true, REQUIRE_ANALOG_GAP_SPINS).mode)
+    require_analog_on(&mut steal_port(), Port::Two)
 }
 
 /// A port reader that never hands a garbled packet to the game.
@@ -815,7 +854,7 @@ pub fn require_analog_port2() -> AnalogRequirement {
 /// does release its buttons.
 #[derive(Copy, Clone, Debug)]
 pub struct PadReader {
-    port2: bool,
+    socket: Port,
     last: PadState,
 }
 
@@ -823,7 +862,7 @@ impl PadReader {
     /// A reader for port 1 that has seen nothing yet.
     pub const fn port1() -> Self {
         Self {
-            port2: false,
+            socket: Port::One,
             last: PadState::NONE,
         }
     }
@@ -831,18 +870,25 @@ impl PadReader {
     /// A reader for port 2 that has seen nothing yet.
     pub const fn port2() -> Self {
         Self {
-            port2: true,
+            socket: Port::Two,
             last: PadState::NONE,
         }
     }
 
     /// Poll the port once and return the latest clean state.
+    pub fn poll_on<T: Transport>(&mut self, port: &mut T) -> PadState {
+        let polled = poll_state(port, self.socket);
+        self.accept(polled)
+    }
+
+    /// Poll the port once and return the latest clean state.
+    #[deprecated(note = "use `poll_on` with the `ControllerPort` token")]
     pub fn poll(&mut self) -> PadState {
-        self.accept(poll_state(self.port2))
+        self.poll_on(&mut steal_port())
     }
 
     /// Fold one poll result into the reader and return the latest clean
-    /// state. [`PadReader::poll`] calls this; it is public so a caller that
+    /// state. [`PadReader::poll_on`] calls this; it is public so a caller that
     /// polls some other way gets the same rule.
     pub fn accept(&mut self, state: PadState) -> PadState {
         if state.mode != PadMode::Unknown {
@@ -868,13 +914,12 @@ impl PadReader {
 /// Transport failures are retried as whole transactions. Four address-byte
 /// replies of FF without ACK report Disconnected; a failure at any other
 /// stage reports Unknown instead of accepting partial button bytes.
-fn poll_state(port2: bool) -> PadState {
+fn poll_state<T: Transport>(bus: &mut T, socket: Port) -> PadState {
     let mut last = PadState::NONE;
     let mut all_absent = true;
     let mut tries = 0;
     while tries < 4 {
-        // SAFETY: `poll_once` only drives SIO0, under the SIO0 access contract above.
-        let s = unsafe { poll_once(port2) }.to_state();
+        let s = poll_once(bus, socket).to_state();
         if matches!(s.mode, PadMode::Digital | PadMode::Analog | PadMode::Config) {
             return s;
         }
@@ -890,89 +935,69 @@ fn poll_state(port2: bool) -> PadState {
     last
 }
 
-/// Drain up to a few stale bytes from the RX FIFO so the poll's first read
-/// lines up with the controller's first response byte. Bounded so a stuck
-/// "RX not empty" flag can never spin forever.
-#[inline]
-unsafe fn drain_rx() {
-    let mut n = 0;
-    // SAFETY: STAT and DATA are SIO0 registers (SIO0 access contract). A DATA read pops one RX FIFO
-    // byte, and the loop is bounded to 16 pops.
-    unsafe {
-        while psx_io::read_u32(sio::STAT) & 0x2 != 0 && n < 16 {
-            let _ = psx_io::read_u8(sio::DATA);
-            n += 1;
-        }
-    }
-}
+fn poll_once_raw<T: Transport>(bus: &mut T, socket: Port, pacing: Pacing) -> RawPoll {
+    // Raise JOYN so the device's state machine starts from idle, then drain
+    // any stale RX byte. Only the ack-wait path arms the DSR IRQ.
+    bus.select_with(socket, matches!(pacing, Pacing::AckWait));
+    bus.drain_receive();
 
-unsafe fn poll_once_raw(port2: bool, pacing: Pacing) -> RawPoll {
-    // SAFETY: every helper called here drives SIO0 only (SIO0 access contract); `ex` is handed
-    // references to locals.
-    unsafe {
-        // Raise JOYN so the device's state machine starts from idle, then drain
-        // any stale RX byte. Only the ack-wait path arms the DSR IRQ.
-        select(port2, matches!(pacing, Pacing::AckWait));
-        drain_rx();
+    let mut ack = 0u16;
+    let mut i = 0u8;
 
-        let mut ack = 0u16;
-        let mut i = 0u8;
-
-        // The select byte and the poll command are never the final byte of any
-        // packet, so they are always `/ACK`-paced under `AckWait`.
-        let _select = ex(port2, pacing, 0x01, false, &mut ack, &mut i);
-        let id_low = ex(port2, pacing, 0x42, false, &mut ack, &mut i);
-        let mut mode = mode_from_id_low(id_low);
-        if !mode.is_connected() {
-            deselect();
-            return RawPoll {
-                exchanges: i,
-                ack_seen: ack,
-                ..RawPoll::disconnected(id_low)
-            };
-        }
-
-        let analog = mode.has_sticks();
-        let id_high = ex(port2, pacing, 0x00, false, &mut ack, &mut i);
-        if id_high != 0x5A {
-            // Garbled handshake -- treat as Unknown and stop after the two
-            // button bytes (we can no longer trust the reported length).
-            mode = PadMode::Unknown;
-        }
-
-        // For a digital pad the second button byte is the final byte (no `/ACK`
-        // follows). For an analog pad the four stick bytes come after it.
-        let read_sticks = analog && mode != PadMode::Unknown;
-        let b0 = ex(port2, pacing, 0x00, false, &mut ack, &mut i);
-        let b1 = ex(port2, pacing, 0x00, !read_sticks, &mut ack, &mut i);
-
-        let sticks = if read_sticks {
-            let right_x = ex(port2, pacing, 0x00, false, &mut ack, &mut i);
-            let right_y = ex(port2, pacing, 0x00, false, &mut ack, &mut i);
-            let left_x = ex(port2, pacing, 0x00, false, &mut ack, &mut i);
-            let left_y = ex(port2, pacing, 0x00, true, &mut ack, &mut i);
-            AnalogSticks {
-                right_x,
-                right_y,
-                left_x,
-                left_y,
-            }
-        } else {
-            AnalogSticks::CENTERED
-        };
-
-        deselect();
-
-        RawPoll {
-            id_low,
-            id_high,
-            buttons_low: b0,
-            buttons_high: b1,
-            sticks,
-            mode,
-            ack_seen: ack,
+    // The select byte and the poll command are never the final byte of any
+    // packet, so they are always `/ACK`-paced under `AckWait`.
+    let _select = ex(bus, socket, pacing, 0x01, false, &mut ack, &mut i);
+    let id_low = ex(bus, socket, pacing, 0x42, false, &mut ack, &mut i);
+    let mut mode = mode_from_id_low(id_low);
+    if !mode.is_connected() {
+        bus.deselect();
+        return RawPoll {
             exchanges: i,
+            ack_seen: ack,
+            ..RawPoll::disconnected(id_low)
+        };
+    }
+
+    let analog = mode.has_sticks();
+    let id_high = ex(bus, socket, pacing, 0x00, false, &mut ack, &mut i);
+    if id_high != 0x5A {
+        // Garbled handshake -- treat as Unknown and stop after the two
+        // button bytes (we can no longer trust the reported length).
+        mode = PadMode::Unknown;
+    }
+
+    // For a digital pad the second button byte is the final byte (no `/ACK`
+    // follows). For an analog pad the four stick bytes come after it.
+    let read_sticks = analog && mode != PadMode::Unknown;
+    let b0 = ex(bus, socket, pacing, 0x00, false, &mut ack, &mut i);
+    let b1 = ex(bus, socket, pacing, 0x00, !read_sticks, &mut ack, &mut i);
+
+    let sticks = if read_sticks {
+        let right_x = ex(bus, socket, pacing, 0x00, false, &mut ack, &mut i);
+        let right_y = ex(bus, socket, pacing, 0x00, false, &mut ack, &mut i);
+        let left_x = ex(bus, socket, pacing, 0x00, false, &mut ack, &mut i);
+        let left_y = ex(bus, socket, pacing, 0x00, true, &mut ack, &mut i);
+        AnalogSticks {
+            right_x,
+            right_y,
+            left_x,
+            left_y,
         }
+    } else {
+        AnalogSticks::CENTERED
+    };
+
+    bus.deselect();
+
+    RawPoll {
+        id_low,
+        id_high,
+        buttons_low: b0,
+        buttons_high: b1,
+        sticks,
+        mode,
+        ack_seen: ack,
+        exchanges: i,
     }
 }
 
@@ -980,28 +1005,26 @@ unsafe fn poll_once_raw(port2: bool, pacing: Pacing) -> RawPoll {
 /// device acknowledged it. `is_last` marks the final byte of the packet, which
 /// the device never acknowledges, so it is always sent without an `/ACK` wait.
 #[inline]
-unsafe fn ex(
-    port2: bool,
+fn ex<T: Transport>(
+    bus: &mut T,
+    socket: Port,
     pacing: Pacing,
     tx: u8,
     is_last: bool,
     ack_seen: &mut u16,
     idx: &mut u8,
 ) -> u8 {
-    // SAFETY: `exchange_nowait` and `exchange_ack` drive SIO0 only (SIO0 access contract).
-    unsafe {
-        let i = *idx;
-        *idx = idx.wrapping_add(1);
-        match pacing {
-            Pacing::NoAckWait => exchange_nowait(tx),
-            Pacing::AckWait if is_last => exchange_nowait(tx),
-            Pacing::AckWait => {
-                let (byte, acked) = exchange_ack(port2, tx);
-                if acked && i < 16 {
-                    *ack_seen |= 1u16 << i;
-                }
-                byte
+    let i = *idx;
+    *idx = idx.wrapping_add(1);
+    match pacing {
+        Pacing::NoAckWait => exchange_nowait(bus, tx),
+        Pacing::AckWait if is_last => exchange_nowait(bus, tx),
+        Pacing::AckWait => {
+            let (byte, acked) = exchange_ack(bus, socket, tx);
+            if acked && i < 16 {
+                *ack_seen |= 1u16 << i;
             }
+            byte
         }
     }
 }
@@ -1010,202 +1033,137 @@ unsafe fn ex(
 /// wait for each non-final byte's live ACK assertion and release. RX-ready
 /// only establishes that the current byte arrived, not that the controller
 /// is ready for the next one. No IRQ enable or CTRL rewrite is needed.
-unsafe fn poll_once(port2: bool) -> RawPoll {
-    // SAFETY: every helper called here drives SIO0 only (SIO0 access contract).
-    unsafe {
-        select(port2, false);
-        delay_reads(DEFAULT_SETUP_SPINS);
-        drain_rx();
-        // A previous aborted transaction may have left ACK asserted.
-        // Never count that old pulse as the new address byte's ACK.
-        let result = if wait_stat_low(STAT_DSR_LEVEL, ACK_WAIT_SPINS) {
-            poll_selected()
-        } else {
-            None
-        };
-        // End the peripheral transaction on every path. On a failed byte,
-        // also reset the deselected UART: deselect alone need not cancel a
-        // late RX byte still in its shifter/FIFO. The next select restores
-        // MODE and BAUD before asserting the port again.
-        deselect();
-        if result.is_none() {
-            psx_io::write_u16(sio::CTRL, sio0::ctrl::RESET);
-        }
-        result.unwrap_or(RawPoll {
-            mode: PadMode::Unknown,
-            ..RawPoll::NONE
-        })
-    }
+fn poll_once<T: Transport>(bus: &mut T, socket: Port) -> RawPoll {
+    // A previous aborted transaction may have left ACK asserted: `begin` waits
+    // for it to release, so an old pulse never counts as the new address
+    // byte's ACK.
+    let result = if bus.begin(socket, Timing::PAD) {
+        poll_selected(bus)
+    } else {
+        None
+    };
+    // End the peripheral transaction on every path. On a failed byte, also
+    // reset the deselected UART: deselect alone need not cancel a late RX byte
+    // still in its shifter/FIFO. The next select restores MODE and BAUD before
+    // asserting the port again.
+    bus.finish(result.is_some());
+    result.unwrap_or(RawPoll {
+        mode: PadMode::Unknown,
+        ..RawPoll::NONE
+    })
 }
 
 /// A complete selected-port poll, or no usable packet. The current ID
 /// determines the length; a mode toggle never reuses an earlier length.
-unsafe fn poll_selected() -> Option<RawPoll> {
-    // SAFETY: `exchange_poll` drives SIO0 only (SIO0 access contract).
-    unsafe {
-        match exchange_poll(0x01, false) {
-            Ok(_) => {}
-            Err(PollByteError::AckTimeout(0xFF)) => return Some(RawPoll::NONE),
-            Err(_) => return None,
-        }
-        let id_low = exchange_poll(0x42, false).ok()?;
-        let mode = mode_from_id_low(id_low);
-        if matches!(mode, PadMode::Unknown | PadMode::Disconnected) {
-            return None;
-        }
-        let id_high = exchange_poll(0x00, false).ok()?;
-        if id_high != 0x5A {
-            return None;
-        }
-        let analog = mode.has_sticks();
-        let buttons_low = exchange_poll(0x00, false).ok()?;
-        let buttons_high = exchange_poll(0x00, !analog).ok()?;
-        let sticks = if analog {
-            AnalogSticks {
-                right_x: exchange_poll(0x00, false).ok()?,
-                right_y: exchange_poll(0x00, false).ok()?,
-                left_x: exchange_poll(0x00, false).ok()?,
-                left_y: exchange_poll(0x00, true).ok()?,
-            }
-        } else {
-            AnalogSticks::CENTERED
-        };
-        Some(RawPoll {
-            id_low,
-            id_high,
-            buttons_low,
-            buttons_high,
-            sticks,
-            mode,
-            ack_seen: if analog { 0xff } else { 0x0f },
-            exchanges: if analog { 9 } else { 5 },
-        })
+fn poll_selected<T: Transport>(bus: &mut T) -> Option<RawPoll> {
+    match bus.exchange(0x01, false, Timing::PAD) {
+        Ok(_) => {}
+        Err(ExchangeError::AckTimeout { reply: 0xFF }) => return Some(RawPoll::NONE),
+        Err(_) => return None,
     }
-}
-
-#[derive(Clone, Copy)]
-enum PollByteError {
-    TxTimeout,
-    RxTimeout,
-    AckTimeout(u8),
-    AckStuck,
-}
-
-/// Transfer one production byte. Observe ACK during the RX wait as well
-/// as afterward, so an early pulse is not discarded when RX becomes ready.
-/// The preceding byte's ACK must have released before this DATA write.
-#[inline]
-unsafe fn exchange_poll(tx: u8, is_last: bool) -> Result<u8, PollByteError> {
-    // SAFETY: DATA and STAT are SIO0 registers (SIO0 access contract); one DATA write starts the
-    // byte and one DATA read pops its reply.
-    unsafe {
-        if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
-            return Err(PollByteError::TxTimeout);
-        }
-        psx_io::write_u8(sio::DATA, tx);
-        let mut ack_seen = false;
-        let mut spins = EXCHANGE_WAIT_SPINS;
-        loop {
-            let stat = psx_io::read_u32(sio::STAT);
-            ack_seen |= stat & STAT_DSR_LEVEL != 0;
-            if stat & STAT_RX_NOT_EMPTY != 0 {
-                break;
-            }
-            if spins == 0 {
-                return Err(PollByteError::RxTimeout);
-            }
-            spins -= 1;
-            core::hint::spin_loop();
-        }
-        let rx = psx_io::read_u8(sio::DATA);
-        if !is_last {
-            if !ack_seen && !wait_stat(STAT_DSR_LEVEL, ACK_WAIT_SPINS) {
-                return Err(PollByteError::AckTimeout(rx));
-            }
-            if !wait_stat_low(STAT_DSR_LEVEL, ACK_WAIT_SPINS) {
-                return Err(PollByteError::AckStuck);
-            }
-        }
-        Ok(rx)
+    let id_low = bus.exchange(0x42, false, Timing::PAD).ok()?;
+    let mode = mode_from_id_low(id_low);
+    if matches!(mode, PadMode::Unknown | PadMode::Disconnected) {
+        return None;
     }
-}
-
-/// Diagnostic poll with caller-chosen setup and inter-byte delays, reached only
-/// through [`poll_port1_diagnostics`].
-unsafe fn poll_once_diag(port2: bool, setup_spins: u32, interbyte_spins: u32) -> RawPoll {
-    // SAFETY: `poll_once_timed` drives SIO0 only; the caller's exclusive use of SIO0 (SIO0 access
-    // contract) covers it.
-    unsafe { poll_once_timed(port2, setup_spins, interbyte_spins) }
+    let id_high = bus.exchange(0x00, false, Timing::PAD).ok()?;
+    if id_high != 0x5A {
+        return None;
+    }
+    let analog = mode.has_sticks();
+    let buttons_low = bus.exchange(0x00, false, Timing::PAD).ok()?;
+    let buttons_high = bus.exchange(0x00, !analog, Timing::PAD).ok()?;
+    let sticks = if analog {
+        AnalogSticks {
+            right_x: bus.exchange(0x00, false, Timing::PAD).ok()?,
+            right_y: bus.exchange(0x00, false, Timing::PAD).ok()?,
+            left_x: bus.exchange(0x00, false, Timing::PAD).ok()?,
+            left_y: bus.exchange(0x00, true, Timing::PAD).ok()?,
+        }
+    } else {
+        AnalogSticks::CENTERED
+    };
+    Some(RawPoll {
+        id_low,
+        id_high,
+        buttons_low,
+        buttons_high,
+        sticks,
+        mode,
+        ack_seen: if analog { 0xff } else { 0x0f },
+        exchanges: if analog { 9 } else { 5 },
+    })
 }
 
 /// Poll with fixed setup and inter-byte delays (no `/ACK` wait). Mirrors
 /// [`poll_once_raw`]'s byte sequence but paces purely with time. Always inlined
 /// so each caller above is specialised on its own timing.
 #[inline(always)]
-unsafe fn poll_once_timed(port2: bool, setup_spins: u32, interbyte_spins: u32) -> RawPoll {
-    // SAFETY: select, delay_reads, drain_rx, exchange_delayed and deselect drive SIO0 only (SIO0
-    // access contract).
-    unsafe {
-        select(port2, false);
-        // Setup time after asserting /CS, before the first clock -- the strict
-        // original pad may need this where a fast clone does not.
-        delay_reads(setup_spins);
-        drain_rx();
+fn poll_once_timed<T: Transport>(
+    bus: &mut T,
+    socket: Port,
+    setup_spins: u32,
+    interbyte_spins: u32,
+) -> RawPoll {
+    bus.select(socket);
+    // Setup time after asserting /CS, before the first clock -- the strict
+    // original pad may need this where a fast clone does not.
+    bus.delay(setup_spins);
+    bus.drain_receive();
 
-        let mut i = 0u8;
-        let _select = exchange_delayed(0x01, interbyte_spins);
-        i += 1;
-        let id_low = exchange_delayed(0x42, interbyte_spins);
-        i += 1;
-        let mut mode = mode_from_id_low(id_low);
-        if !mode.is_connected() {
-            deselect();
-            return RawPoll {
-                exchanges: i,
-                ..RawPoll::disconnected(id_low)
-            };
-        }
-
-        let analog = mode.has_sticks();
-        let id_high = exchange_delayed(0x00, interbyte_spins);
-        i += 1;
-        if id_high != 0x5A {
-            mode = PadMode::Unknown;
-        }
-        let read_sticks = analog && mode != PadMode::Unknown;
-        let b0 = exchange_delayed(0x00, interbyte_spins);
-        i += 1;
-        let b1 = exchange_delayed(0x00, interbyte_spins);
-        i += 1;
-
-        let sticks = if read_sticks {
-            let right_x = exchange_delayed(0x00, interbyte_spins);
-            let right_y = exchange_delayed(0x00, interbyte_spins);
-            let left_x = exchange_delayed(0x00, interbyte_spins);
-            let left_y = exchange_delayed(0x00, interbyte_spins);
-            i += 4;
-            AnalogSticks {
-                right_x,
-                right_y,
-                left_x,
-                left_y,
-            }
-        } else {
-            AnalogSticks::CENTERED
-        };
-
-        deselect();
-
-        RawPoll {
-            id_low,
-            id_high,
-            buttons_low: b0,
-            buttons_high: b1,
-            sticks,
-            mode,
-            ack_seen: 0,
+    let mut i = 0u8;
+    let _select = exchange_delayed(bus, 0x01, interbyte_spins);
+    i += 1;
+    let id_low = exchange_delayed(bus, 0x42, interbyte_spins);
+    i += 1;
+    let mut mode = mode_from_id_low(id_low);
+    if !mode.is_connected() {
+        bus.deselect();
+        return RawPoll {
             exchanges: i,
+            ..RawPoll::disconnected(id_low)
+        };
+    }
+
+    let analog = mode.has_sticks();
+    let id_high = exchange_delayed(bus, 0x00, interbyte_spins);
+    i += 1;
+    if id_high != 0x5A {
+        mode = PadMode::Unknown;
+    }
+    let read_sticks = analog && mode != PadMode::Unknown;
+    let b0 = exchange_delayed(bus, 0x00, interbyte_spins);
+    i += 1;
+    let b1 = exchange_delayed(bus, 0x00, interbyte_spins);
+    i += 1;
+
+    let sticks = if read_sticks {
+        let right_x = exchange_delayed(bus, 0x00, interbyte_spins);
+        let right_y = exchange_delayed(bus, 0x00, interbyte_spins);
+        let left_x = exchange_delayed(bus, 0x00, interbyte_spins);
+        let left_y = exchange_delayed(bus, 0x00, interbyte_spins);
+        i += 4;
+        AnalogSticks {
+            right_x,
+            right_y,
+            left_x,
+            left_y,
         }
+    } else {
+        AnalogSticks::CENTERED
+    };
+
+    bus.deselect();
+
+    RawPoll {
+        id_low,
+        id_high,
+        buttons_low: b0,
+        buttons_high: b1,
+        sticks,
+        mode,
+        ack_seen: 0,
+        exchanges: i,
     }
 }
 
@@ -1218,14 +1176,14 @@ unsafe fn poll_once_timed(port2: bool, setup_spins: u32, interbyte_spins: u32) -
 /// re-measured on silicon.
 const CONFIG_COMMAND_GAP_SPINS: u32 = 8 * DEFAULT_SETUP_SPINS;
 
-/// Spins between the configuration commands of [`require_analog_port1`]:
+/// Spins between the configuration commands of [`require_analog_on`]:
 /// about one video frame, the spacing Sony's libpad uses, so the request
 /// that a program must win (the SCPH-110 is the pad that needed spacing at
 /// all) uses the reference pacing rather than the shorter, unmeasured one
 /// above. A spin costs about 6.7 CPU cycles on silicon (the 2026-07-26
 /// setup-delay sweep: 192 spins polled in 8587 cycles, 1536 in 17615), so
 /// this is about 660k cycles, a little over one 60 Hz frame. Only boot-time
-/// and redetect callers pay it; [`enable_analog_port1`] keeps its short gap
+/// and redetect callers pay it; [`enable_analog_on`] keeps its short gap
 /// because games call it from their frame loops.
 const REQUIRE_ANALOG_GAP_SPINS: u32 = 96 * DEFAULT_SETUP_SPINS;
 
@@ -1234,40 +1192,33 @@ const REQUIRE_ANALOG_GAP_SPINS: u32 = 96 * DEFAULT_SETUP_SPINS;
 /// still reports buttons, but never analog, and ignores the Analog lock.
 const CONFIG_EXIT_RETRIES: u32 = 3;
 
-fn enable_analog(port2: bool) -> bool {
-    request_analog(port2, CONFIG_COMMAND_GAP_SPINS).is_analog()
+fn enable_analog<T: Transport>(bus: &mut T, socket: Port) -> bool {
+    request_analog(bus, socket, CONFIG_COMMAND_GAP_SPINS).is_analog()
 }
 
 /// Send the analog-and-lock request, spacing the commands by `gap` spins,
 /// and return the state the pad settled on. A pad still parked in
 /// configuration mode (ID 0xF3, the SCPH-110 failure) is sent the exit
 /// command again, a bounded number of times, before its state is reported.
-fn request_analog(port2: bool, gap: u32) -> PadState {
-    // SAFETY: `transaction` and `delay_reads` drive SIO0 only (SIO0 access contract), and the
-    // configuration sequence runs to completion here.
-    unsafe {
-        // Enter config mode.
-        transaction(port2, [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        delay_reads(gap);
-        // Request analog mode and lock it so the pad cannot toggle
-        // back underneath analog-only game controls.
-        transaction(port2, [0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00]);
-        delay_reads(gap);
-        // Exit config mode, restoring the requested analog mode.
-        transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        delay_reads(gap);
-    }
-    let mut state = poll_state(port2);
+fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState {
+    // Enter config mode.
+    transaction(bus, socket, [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    bus.delay(gap);
+    // Request analog mode and lock it so the pad cannot toggle
+    // back underneath analog-only game controls.
+    transaction(bus, socket, [0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00]);
+    bus.delay(gap);
+    // Exit config mode, restoring the requested analog mode.
+    transaction(bus, socket, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    bus.delay(gap);
+    let mut state = poll_state(bus, socket);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
         // than parked in configuration, then re-read what it settled on.
-        // SAFETY: as above, SIO0 only (SIO0 access contract).
-        unsafe {
-            transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-            delay_reads(gap);
-        }
-        state = poll_state(port2);
+        transaction(bus, socket, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        bus.delay(gap);
+        state = poll_state(bus, socket);
         retries += 1;
     }
     state
@@ -1299,65 +1250,37 @@ fn decode_buttons(b0: u8, b1: u8) -> ButtonState {
 /// answering, the clone's bytes corrupted), so it is reserved for the opt-in
 /// ack-wait diagnostic only.
 #[inline]
-const fn active_ctrl(port2: bool, ack_irq: bool) -> u16 {
-    sio0::selected_ctrl(port2, ack_irq)
-}
-
-/// Select the requested controller port and prepare SIO0 for a new
-/// transaction. `ack_irq` arms the DSR interrupt (only the ack-wait diagnostic
-/// path wants it).
-#[inline]
-unsafe fn select(port2: bool, ack_irq: bool) {
-    // SAFETY: MODE, BAUD and CTRL are SIO0's 16-bit registers (SIO0 access contract); these writes
-    // configure the serial port and the select lines, nothing else.
-    unsafe {
-        psx_io::write_u16(sio::MODE, MODE_8N1);
-        psx_io::write_u16(sio::BAUD, BAUD_PAD);
-        // Clear any stale IRQ latch from the previous transaction, then assert
-        // JOYN.
-        psx_io::write_u16(sio::CTRL, CTRL_ACK);
-        psx_io::write_u16(sio::CTRL, active_ctrl(port2, ack_irq));
-    }
+const fn active_ctrl(socket: Port, ack_irq: bool) -> u16 {
+    sio0::selected_ctrl(socket.is_two(), ack_irq)
 }
 
 /// Run a fixed eight-byte DualShock command after the port-level controller
 /// select byte, using the default no-wait timing (matching the reverted poll
 /// path).
 #[inline]
-unsafe fn transaction(port2: bool, bytes: [u8; 8]) -> [u8; 8] {
-    // SAFETY: select, delay_reads, ex and deselect drive SIO0 only (SIO0 access contract).
-    unsafe {
-        select(port2, false);
-        delay_reads(DEFAULT_SETUP_SPINS);
-        let mut ack = 0u16;
-        let mut idx = 0u8;
-        let _select = ex(port2, Pacing::NoAckWait, 0x01, false, &mut ack, &mut idx);
-        let mut out = [0u8; 8];
-        let mut i = 0;
-        while i < bytes.len() {
-            let is_last = i == bytes.len() - 1;
-            out[i] = ex(
-                port2,
-                Pacing::NoAckWait,
-                bytes[i],
-                is_last,
-                &mut ack,
-                &mut idx,
-            );
-            i += 1;
-        }
-        deselect();
-        out
+fn transaction<T: Transport>(bus: &mut T, socket: Port, bytes: [u8; 8]) -> [u8; 8] {
+    bus.select(socket);
+    bus.delay(DEFAULT_SETUP_SPINS);
+    let mut ack = 0u16;
+    let mut idx = 0u8;
+    let _select = ex(bus, socket, Pacing::NoAckWait, 0x01, false, &mut ack, &mut idx);
+    let mut out = [0u8; 8];
+    let mut i = 0;
+    while i < bytes.len() {
+        let is_last = i == bytes.len() - 1;
+        out[i] = ex(
+            bus,
+            socket,
+            Pacing::NoAckWait,
+            bytes[i],
+            is_last,
+            &mut ack,
+            &mut idx,
+        );
+        i += 1;
     }
-}
-
-/// Drop JOYN so the attached device's state machine resets before
-/// the next poll.
-#[inline]
-unsafe fn deselect() {
-    // SAFETY: CTRL is SIO0's 16-bit control register (SIO0 access contract); zero releases the
-    // select lines.
-    unsafe { psx_io::write_u16(sio::CTRL, 0) };
+    bus.deselect();
+    out
 }
 
 /// Clock one byte across the serial link without waiting for `/ACK`: wait for
@@ -1371,46 +1294,24 @@ unsafe fn deselect() {
 /// - bit 7: `/ACK` (DSR) live input level
 /// - bit 9: latched DSR/ACK interrupt
 #[inline]
-unsafe fn exchange_nowait(tx: u8) -> u8 {
-    // SAFETY: STAT and DATA are SIO0 registers (SIO0 access contract); DATA is accessed as a byte,
-    // its natural width.
-    unsafe {
-        if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
-            return 0xFF;
-        }
-        psx_io::write_u8(sio::DATA, tx);
-        if !wait_stat(STAT_RX_NOT_EMPTY, EXCHANGE_WAIT_SPINS) {
-            return 0xFF;
-        }
-        psx_io::read_u8(sio::DATA)
+fn exchange_nowait<T: Transport>(bus: &mut T, tx: u8) -> u8 {
+    if !bus.wait_status_set(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
+        return 0xFF;
     }
+    bus.transmit(tx);
+    if !bus.wait_status_set(STAT_RX_NOT_EMPTY, EXCHANGE_WAIT_SPINS) {
+        return 0xFF;
+    }
+    bus.receive()
 }
 
 /// One no-wait byte exchange followed by a fixed inter-byte delay, giving a
 /// strict pad time to be ready for the next byte without any `/ACK`/CTRL games.
 #[inline]
-unsafe fn exchange_delayed(tx: u8, interbyte_spins: u32) -> u8 {
-    // SAFETY: both helpers drive SIO0 only (SIO0 access contract).
-    unsafe {
-        let rx = exchange_nowait(tx);
-        delay_reads(interbyte_spins);
-        rx
-    }
-}
-
-/// Burn time by reading STAT `n` times -- a real, non-optimizable MMIO delay.
-#[inline]
-unsafe fn delay_reads(n: u32) {
-    let mut k = n;
-    // SAFETY: STAT is SIO0's status register and reading it has no side effects (SIO0 access
-    // contract).
-    unsafe {
-        while k > 0 {
-            let _ = psx_io::read_u32(sio::STAT);
-            k -= 1;
-            core::hint::spin_loop();
-        }
-    }
+fn exchange_delayed<T: Transport>(bus: &mut T, tx: u8, interbyte_spins: u32) -> u8 {
+    let rx = exchange_nowait(bus, tx);
+    bus.delay(interbyte_spins);
+    rx
 }
 
 /// Clock one byte, then wait for the device's `/ACK` (DSR) pulse before
@@ -1421,68 +1322,28 @@ unsafe fn delay_reads(n: u32) {
 /// byte shift itself already completed), so a device that never `/ACK`s degrades
 /// to legacy timing rather than dropping the poll entirely.
 #[inline]
-unsafe fn exchange_ack(port2: bool, tx: u8) -> (u8, bool) {
-    // SAFETY: STAT, DATA and CTRL are SIO0 registers (SIO0 access contract). The CTRL write keeps
-    // the current port selected and only acknowledges the latched /ACK.
-    unsafe {
-        if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
-            return (0xFF, false);
-        }
-        psx_io::write_u8(sio::DATA, tx);
-        if !wait_stat(STAT_RX_NOT_EMPTY, EXCHANGE_WAIT_SPINS) {
-            return (0xFF, false);
-        }
-        let rx = psx_io::read_u8(sio::DATA);
-        // Wait for the latched `/ACK` interrupt (STAT bit 9). The latch cannot be
-        // missed, unlike the brief live level; the controller IRQ is masked in
-        // `I_MASK`, so this never reaches the CPU.
-        let acked = wait_stat(STAT_IRQ, ACK_WAIT_SPINS);
-        if acked {
-            // SIO0 STAT.9 is not edge-triggered: it can only be cleared once the
-            // live `/ACK` line has released (STAT.7 low). Wait for that, then
-            // pulse CTRL.ACK while keeping JOYN asserted so the device stays
-            // selected for the next byte.
-            let _ = wait_stat_low(STAT_DSR_LEVEL, ACK_WAIT_SPINS);
-            psx_io::write_u16(sio::CTRL, active_ctrl(port2, true) | CTRL_ACK);
-        }
-        (rx, acked)
+fn exchange_ack<T: Transport>(bus: &mut T, socket: Port, tx: u8) -> (u8, bool) {
+    if !bus.wait_status_set(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
+        return (0xFF, false);
     }
-}
-
-/// Spin until `mask` bits are set in STAT, bounded by `spins`. Returns `false`
-/// on timeout.
-#[inline]
-unsafe fn wait_stat(mask: u32, spins: u32) -> bool {
-    let mut spins = spins;
-    // SAFETY: side-effect-free reads of SIO0 STAT (SIO0 access contract).
-    unsafe {
-        while psx_io::read_u32(sio::STAT) & mask == 0 {
-            if spins == 0 {
-                return false;
-            }
-            spins -= 1;
-            core::hint::spin_loop();
-        }
+    bus.transmit(tx);
+    if !bus.wait_status_set(STAT_RX_NOT_EMPTY, EXCHANGE_WAIT_SPINS) {
+        return (0xFF, false);
     }
-    true
-}
-
-/// Spin until `mask` bits are clear in STAT, bounded by `spins`. Returns `false`
-/// on timeout.
-#[inline]
-unsafe fn wait_stat_low(mask: u32, spins: u32) -> bool {
-    let mut spins = spins;
-    // SAFETY: side-effect-free reads of SIO0 STAT (SIO0 access contract).
-    unsafe {
-        while psx_io::read_u32(sio::STAT) & mask != 0 {
-            if spins == 0 {
-                return false;
-            }
-            spins -= 1;
-            core::hint::spin_loop();
-        }
+    let rx = bus.receive();
+    // Wait for the latched `/ACK` interrupt (STAT bit 9). The latch cannot be
+    // missed, unlike the brief live level; the controller IRQ is masked in
+    // `I_MASK`, so this never reaches the CPU.
+    let acked = bus.wait_status_set(STAT_IRQ, ACK_WAIT_SPINS);
+    if acked {
+        // SIO0 STAT.9 is not edge-triggered: it can only be cleared once the
+        // live `/ACK` line has released (STAT.7 low). Wait for that, then
+        // pulse CTRL.ACK while keeping JOYN asserted so the device stays
+        // selected for the next byte.
+        let _ = bus.wait_status_clear(STAT_DSR_LEVEL, ACK_WAIT_SPINS);
+        bus.set_control(active_ctrl(socket, true) | CTRL_ACK);
     }
-    true
+    (rx, acked)
 }
 
 #[cfg(test)]

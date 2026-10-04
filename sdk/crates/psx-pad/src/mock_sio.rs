@@ -324,3 +324,33 @@ fn apply_command(m: &mut Model, index: usize, value: u8) {
         _ => {}
     }
 }
+
+/// The modelled registers as the port the driver borrows.
+pub struct MockBus;
+
+impl psx_io::controller_port::Transport for MockBus {
+    fn status(&mut self) -> u32 {
+        // SAFETY: the mock reads its own model; no hardware is involved.
+        unsafe { read_u32(STAT) }
+    }
+    fn receive(&mut self) -> u8 {
+        // SAFETY: as above.
+        unsafe { read_u8(DATA) }
+    }
+    fn transmit(&mut self, byte: u8) {
+        // SAFETY: as above.
+        unsafe { write_u8(DATA, byte) }
+    }
+    fn set_mode(&mut self, value: u16) {
+        // SAFETY: as above.
+        unsafe { write_u16(MODE, value) }
+    }
+    fn set_baud(&mut self, value: u16) {
+        // SAFETY: as above.
+        unsafe { write_u16(BAUD, value) }
+    }
+    fn set_control(&mut self, value: u16) {
+        // SAFETY: as above.
+        unsafe { write_u16(CTRL, value) }
+    }
+}
