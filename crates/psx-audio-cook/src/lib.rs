@@ -28,6 +28,8 @@ pub mod rate;
 pub mod resample;
 pub mod spu_play;
 pub mod wav;
+pub mod xa;
+pub mod xa_cli;
 
 pub use adpcm::{Effort, EncodeOptions};
 pub use wav::Wav;

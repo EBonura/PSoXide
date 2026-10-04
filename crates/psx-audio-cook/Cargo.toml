@@ -7,5 +7,6 @@ repository.workspace = true
 description = "Host-side PS1 SPU-ADPCM cooker shared by every game: band-limited resampling, a trellis ADPCM encoder that models the SPU decoder exactly, seamless loops, and a distortion-aware sample-rate allocator for SPU RAM budgets."
 
 [dependencies]
+psx-hw = { path = "../psx-hw" }
 psxed-format = { path = "../psxed-format" }
 

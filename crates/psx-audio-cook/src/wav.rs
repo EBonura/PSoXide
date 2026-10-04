@@ -163,3 +163,30 @@ pub fn write_mono16(rate: u32, samples: &[i16]) -> Vec<u8> {
     }
     out
 }
+
+/// Encode 16-bit PCM with one slice per channel (all the same length) as a
+/// WAV file.
+pub fn write_pcm16(rate: u32, channels: &[&[i16]]) -> Vec<u8> {
+    let count = channels.len() as u32;
+    let frames = channels.first().map_or(0, |c| c.len());
+    let data_len = (frames * channels.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&(count as u16).to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * count * 2).to_le_bytes());
+    out.extend_from_slice(&(count as u16 * 2).to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for i in 0..frames {
+        for c in channels {
+            out.extend_from_slice(&c[i].to_le_bytes());
+        }
+    }
+    out
+}
