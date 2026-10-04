@@ -31,6 +31,21 @@ pub const fn to_physical(virt: u32) -> u32 {
     virt & 0x1FFF_FFFF
 }
 
+/// Base of KSEG1, the uncached mirror of the physical map.
+pub const KSEG1_BASE: u32 = 0xA000_0000;
+
+/// The uncached (KSEG1) address of physical address `phys`, the view device
+/// registers outside the I/O window are conventionally accessed through.
+///
+/// ```
+/// use psx_hw::memory::{expansion2, to_kseg1};
+/// assert_eq!(to_kseg1(expansion2::telemetry::EVENT), 0xBF80_2F00);
+/// ```
+#[inline]
+pub const fn to_kseg1(phys: u32) -> u32 {
+    KSEG1_BASE | to_physical(phys)
+}
+
 /// Main RAM: 2 MiB starting at physical `0x0000_0000`.
 pub mod ram {
     /// Physical base address.
@@ -67,7 +82,7 @@ pub mod scratchpad {
 ///
 /// Every MMIO register lives in this 4 KiB window. Individual register
 /// addresses are defined in the module for their owning hardware block
-/// (`gpu`, `spu`, `cdrom`, …).
+/// (`gpu`, `spu`, `cd`, …).
 pub mod io {
     /// Physical base address.
     pub const BASE: u32 = 0x1F80_1000;
@@ -84,6 +99,22 @@ pub mod expansion2 {
     pub const SIZE: usize = 8 * 1024;
     /// POST status byte: BIOS writes progress codes here during boot.
     pub const POST: u32 = 0x1F80_2041;
+
+    /// PSoXide's emulator-only telemetry port: four word registers in the
+    /// expansion window that instrumented guests write and the emulator
+    /// timestamps. Retail hardware sees ordinary expansion-port accesses.
+    pub mod telemetry {
+        /// Physical base of the port.
+        pub const BASE: u32 = super::BASE + 0x0F00;
+        /// Event command word (`kind << 24 | id`); a write appends one event.
+        pub const EVENT: u32 = BASE;
+        /// Event value latch; the next event write snapshots it.
+        pub const VALUE: u32 = BASE + 4;
+        /// Read only: low 32 bits of the emulator's guest cycle counter.
+        pub const CYCLES: u32 = BASE + 8;
+        /// Write only: debug-log bytes; a newline commits one line.
+        pub const LOG: u32 = BASE + 12;
+    }
 }
 
 /// Expansion Region 3: 2 MiB, rarely used.

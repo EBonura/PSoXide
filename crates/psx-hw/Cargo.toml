@@ -10,5 +10,8 @@ description = "PlayStation 1 hardware model: register addresses, bitfield layout
 [dependencies]
 bitflags = { workspace = true }
 
+[lints]
+workspace = true
+
 [features]
 default = []

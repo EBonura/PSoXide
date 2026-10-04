@@ -12,20 +12,20 @@
 //! does not belong here.
 //!
 //! Hardware references used throughout:
-//! - nocash PSX-SPX (<https://psx-spx.consoledev.net/>)
-//! - PCSX-Redux source tree at `../pcsx-redux`
+//! - nocash PSX-SPX (<https://psx-spx.consoledev.net/>), cited per module
 
 #![no_std]
-#![deny(unsafe_op_in_unsafe_fn)]
-#![warn(missing_docs)]
+#![forbid(unsafe_code)]
 
 pub mod cd;
 pub mod cop0;
 pub mod dma;
 pub mod gpu;
+pub mod gte;
 pub mod hash;
 pub mod irq;
 pub mod mdec;
 pub mod memory;
 pub mod sio;
 pub mod spu;
+pub mod timers;
