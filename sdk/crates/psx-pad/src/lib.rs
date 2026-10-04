@@ -56,6 +56,14 @@ use psx_hw::sio::sio0 as sio;
 pub mod tracker;
 pub use tracker::PadTracker;
 
+// Under test the driver talks to a controller model, not the registers.
+#[cfg(test)]
+mod mock_sio;
+#[cfg(test)]
+mod transport_tests;
+#[cfg(test)]
+use mock_sio as psx_io;
+
 /// Named button bitmasks (active-high in this representation).
 /// Hardware's active-low wire format is hidden inside [`poll_port1`].
 pub mod button {
