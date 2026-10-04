@@ -14,7 +14,7 @@
 //!
 //! # What loading does to the machine
 //!
-//! [`load_chunk`] and [`find_entry`] bracket each read with
+//! `load_chunk` and `find_entry` (guest only) bracket each read with
 //! [`SectorReader::prepare`] and [`SectorReader::stop`]. Between the two,
 //! `I_MASK` is VBlank-only (the reader polls the controller's own IRQ flags,
 //! so a CD-ROM CPU interrupt with no handler cannot storm). `stop` puts the

@@ -8,11 +8,22 @@
 //! the borrow checker sees the conflict. The tokens are empty, so passing
 //! them costs nothing at run time.
 //!
-//! Get the whole set once with `psx_rt::Peripherals::take()`. A token is a
-//! logic guard, not a memory-safety one: the SDK's DMA APIs prove buffer
-//! lifetimes through references and slices whether or not a token is
+//! Get the whole set once with `psx_rt::Peripherals::take()`. Who owns what:
+//!
+//! | Token | Owner | Others borrow it as |
+//! | --- | --- | --- |
+//! | [`GpuDma`] | `psx_gpu::Gpu` | `Gpu::dma_mut`, `Gpu::from_dma_mut` |
+//! | [`Cd`] | the program, or `cd::reader::SectorReader` / `cd::xa::Player` while one exists | `&mut Cd` methods (`command`, `play_track`, ...), `SectorReader::cd_mut` |
+//! | [`ControllerPort`] | the program | `&mut ControllerPort` into `psx_pad` polls and `psx_mc::HardwareCard` |
+//! | [`SpuDma`] | `psx_spu::Spu` | `Spu::upload_adpcm` |
+//! | [`MdecDma`] | `psx_fmv::mdec::Mdec` | its methods |
+//! | [`OrderingTableClearDma`] | the program | `OrderingTableClearDma::clear_table`, `OrderingTable::clear_with_dma` |
+//!
+//! A token is a logic guard, not a memory-safety one: the SDK's DMA APIs prove
+//! buffer lifetimes through references and slices whether or not a token is
 //! involved. That is why [`GpuDma::steal`] and friends are `unsafe` only in
-//! the "you are breaking an ownership invariant" sense.
+//! the "you are breaking an ownership invariant" sense. The deprecated free
+//! functions that predate the tokens steal one per call.
 
 macro_rules! token {
     ($(#[$doc:meta])* $name:ident) => {

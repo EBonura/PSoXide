@@ -7,11 +7,15 @@ use psx_io::periph::{Cd, ControllerPort, GpuDma, MdecDma, OrderingTableClearDma,
 /// Every shared-state peripheral token, handed out once.
 ///
 /// ```ignore
-/// let mut p = psx_rt::Peripherals::take().unwrap();
-/// let mut frame = ot.frame();
-/// // ...
-/// frame.submit(&mut p.gpu_dma);
+/// let p = psx_rt::Peripherals::take().unwrap();
+/// let mut gpu = psx_gpu::Gpu::new(p.gpu_dma, display);
+/// let mut port = p.controller_port; // pads and memory cards borrow it
+/// let mut spu = psx_spu::Spu::new(p.spu_dma);
+/// let cd = p.cd; // or `SectorReader::with_cd(cd)`, `xa::Player::new(cd)`
 /// ```
+///
+/// Each token is owned by the driver that programs its device; see
+/// `psx_io::periph` for who that is.
 ///
 /// The tokens are zero-sized, so `Peripherals` is too; moving it or its
 /// fields around costs nothing.
