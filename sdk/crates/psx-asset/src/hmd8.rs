@@ -157,7 +157,7 @@ fn unpack_normal_555(packed: u16) -> [i8; 3] {
 /// of taking the guest down.
 ///
 /// Every accessor is memory-safe on any model, including one whose public
-/// counts (the deprecated `n_verts`, `n_tris` and the rest) were overwritten:
+/// counts (the deprecated `n_verts` and `n_tris`) were overwritten:
 /// reads are bounded by the blob and the private offsets `from_bytes`
 /// validated, never by the
 /// public counts. An index past a table reads an inert value (origin vertex,
@@ -170,27 +170,23 @@ pub struct Model {
     pub n_verts: usize,
     #[deprecated(note = "use `triangle_count()`")]
     pub n_tris: usize,
-    #[deprecated(note = "use `frame_count()`")]
-    pub n_frames: usize,
-    #[deprecated(note = "use `clip_count()`")]
-    pub n_clips: usize,
+    n_frames: usize,
+    n_clips: usize,
     n_bones: usize,
+    n_ranges: usize,
+    n_hitboxes: usize,
     clips_off: usize,
     frame_times_off: usize,
     ranges_off: usize,
     vertices_off: usize,
     vertices_z_off: usize,
     poses_off: usize,
-    #[deprecated(note = "use `bone_range_count()`")]
-    pub n_ranges: usize,
     tri_off: usize,
     tri_sz: usize,
     normal_encoding: u8,
     local_to_world_q12: u16,
     mouth_xforms_off: usize,
     hitboxes_off: usize,
-    #[deprecated(note = "use `hitbox_count()`")]
-    pub n_hitboxes: usize,
     has_body_masks: bool,
     has_mouth: bool,
     has_frame_times: bool,
@@ -506,13 +502,6 @@ impl Model {
     /// Parse a HMD8 blob, guarding vertex count with [`DEFAULT_MAX_VERTICES`].
     pub fn from_bytes(data: &'static [u8]) -> Model {
         Self::from_bytes_with_vertex_cap(data, DEFAULT_MAX_VERTICES)
-    }
-
-    /// Renamed to [`Model::from_bytes_with_vertex_cap`].
-    #[deprecated(note = "renamed to `from_bytes_with_vertex_cap`")]
-    #[inline(always)]
-    pub fn load_with_vertex_cap(data: &'static [u8], max_verts: usize) -> Model {
-        Self::from_bytes_with_vertex_cap(data, max_verts)
     }
 
     /// Number of vertices in the stream.
@@ -1106,13 +1095,6 @@ impl Model {
         }
     }
 
-    /// Renamed to [`Model::bone_range`].
-    #[deprecated(note = "renamed to `bone_range`")]
-    #[inline(always)]
-    pub fn range(&self, index: usize) -> BoneRange {
-        self.bone_range(index)
-    }
-
     /// Studio hitbox `index`, clamped to the last one. A model without
     /// hitboxes returns a zero box on bone 0.
     #[inline]
@@ -1500,40 +1482,6 @@ impl Model {
         Some(dst)
     }
 
-    /// The in-place compaction behind a raw pointer, from before
-    /// [`Model::compact_visible_bodies`] took the buffer by `&mut`.
-    ///
-    /// It reparses the layout from `data`; `self` is not read.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be valid for reads and writes of `data_len` bytes, and
-    /// `remap` for `remap_len` `u16` writes; the two must not overlap. No
-    /// reference into either may be used while this runs, and no [`Model`]
-    /// over the bytes (`self` included) may be used afterwards: the bytes
-    /// change under it. Reparse from the compacted bytes instead.
-    #[deprecated(note = "use `Model::compact_visible_bodies`, which takes the buffer by `&mut`")]
-    #[inline(always)]
-    pub unsafe fn compact_visible_body_frames_raw(
-        &self,
-        data: *mut u8,
-        data_len: usize,
-        visible_bodies: u8,
-        remap: *mut u16,
-        remap_len: usize,
-    ) -> Option<usize> {
-        // SAFETY: the caller hands over both regions exclusively for this
-        // call, at the stated lengths and without overlap (this fn's
-        // `# Safety`).
-        let (blob, remap) = unsafe {
-            (
-                core::slice::from_raw_parts_mut(data, data_len),
-                core::slice::from_raw_parts_mut(remap, remap_len),
-            )
-        };
-        Self::compact_visible_bodies(blob, visible_bodies, remap)
-    }
-
     /// True when triangle `t`'s record lies inside the blob: for every
     /// `t < triangle_count()` of a loaded model. Memory safety rests on this
     /// check alone, never on the public counts.
@@ -1802,20 +1750,6 @@ impl Model {
     #[inline(always)]
     pub fn vert(&self, index: usize) -> Vec3I16 {
         self.vertex(index)
-    }
-
-    /// Renamed to [`Model::vertex_gte_words`].
-    #[deprecated(note = "renamed to `vertex_gte_words`")]
-    #[inline(always)]
-    pub fn vert_gte_words(&self, index: usize) -> GteVertexWords {
-        self.vertex_gte_words(index)
-    }
-
-    /// Renamed to [`Model::triangle`].
-    #[deprecated(note = "renamed to `triangle`")]
-    #[inline(always)]
-    pub fn tri(&self, t: usize) -> Triangle {
-        self.triangle(t)
     }
 
     /// Renamed to [`Model::triangle_uv_words`].

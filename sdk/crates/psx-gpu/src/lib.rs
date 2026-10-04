@@ -39,11 +39,11 @@ pub mod prim;
 
 #[allow(deprecated, reason = "the forwarders kept for one stage")]
 pub use compat::{
-    arm_draw_done, configure_vsync_timer, draw_done, draw_line_mono, draw_quad_flat,
-    draw_quad_textured, draw_quad_textured_gouraud_material, draw_quad_textured_material,
-    draw_rect_flat, draw_sprite_material, draw_sync, draw_tri_flat, draw_tri_flat_blended,
-    draw_tri_gouraud, draw_tri_textured_material, fill_rect, init, set_display_offset,
-    set_draw_area, set_draw_offset, signal_draw_done, submit_linked_list, submit_linked_list_async,
+    arm_draw_done, draw_line_mono, draw_quad_flat, draw_quad_textured,
+    draw_quad_textured_gouraud_material, draw_quad_textured_material, draw_rect_flat,
+    draw_sprite_material, draw_sync, draw_tri_flat, draw_tri_flat_blended, draw_tri_gouraud,
+    fill_rect, init, set_draw_area, set_draw_offset, signal_draw_done, submit_linked_list_async,
+    submit_linked_list_async_raw, submit_linked_list_raw, submit_linked_list_raw_async,
     submit_linked_list_wait, vsync, wait_idle,
 };
 // The chain items' old root paths, kept for one stage: they are the same

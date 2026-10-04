@@ -1521,13 +1521,6 @@ pub fn error_flags() -> u32 {
     read_control!(31)
 }
 
-/// Renamed to [`set_average_z_weights`].
-#[deprecated(note = "renamed to `set_average_z_weights`")]
-#[inline(always)]
-pub fn set_avsz_weights(zsf3: i16, zsf4: i16) {
-    set_average_z_weights(zsf3, zsf4)
-}
-
 /// Renamed to [`start_project_triple`].
 #[deprecated(note = "renamed to `start_project_triple`")]
 #[inline(always)]
