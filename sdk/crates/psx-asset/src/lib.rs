@@ -2315,17 +2315,12 @@ impl<'a> Texture<'a> {
         let pixel_bytes = u32::from_le_bytes([th[8], th[9], th[10], th[11]]) as usize;
         let clut_bytes = u32::from_le_bytes([th[12], th[13], th[14], th[15]]) as usize;
 
+        // `take_table` adds with `checked_add`: on the 32-bit console a header claiming
+        // `0xFFFF_FFF0` pixel bytes wrapped `off + pixel_bytes` past the length test and
+        // panicked on the slice.
         let mut off = payload_start + TextureHeader::SIZE;
-        if off + pixel_bytes > bytes.len() {
-            return Err(ParseError::TableOverflow);
-        }
-        let pixel_data = &bytes[off..off + pixel_bytes];
-        off += pixel_bytes;
-
-        if off + clut_bytes > bytes.len() {
-            return Err(ParseError::TableOverflow);
-        }
-        let clut_data = &bytes[off..off + clut_bytes];
+        let pixel_data = take_table(bytes, &mut off, pixel_bytes)?;
+        let clut_data = take_table(bytes, &mut off, clut_bytes)?;
 
         Ok(Self {
             pixel_data,
