@@ -44,3 +44,12 @@ carry valid checksums; a card whose entries do not is damaged, and a game
 that meets `Corrupt` from `list` or `read` should offer the same recovery it
 offers for a failed `validate_filesystem`. No code change is needed on
 repin for a game that already handles `Error::Corrupt`.
+
+## psx-mc: a card pulled during a compressed load reports the transport error (mc-04)
+
+`Card::read` of a compressed save turned `NoCard`, `Protocol` and
+`BadChecksum` from the card into "end of input" and then reported
+`Error::Compression`, so a pulled card read as a codec bug. It now returns
+the first transport error. A game that mapped `Compression` to "save is
+damaged" and anything else to "card problem" gets the right message without
+a change.
