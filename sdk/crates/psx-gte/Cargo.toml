@@ -7,6 +7,7 @@ repository.workspace = true
 description  = "PS1 GTE (COP2) wrappers. MIPS build emits inline-asm coprocessor instructions; host build routes the same API through `psx-gte-core`'s software simulation so editor and emulator share one implementation."
 
 [dependencies]
+psx-hw = { workspace = true }
 psx-gte-core = { workspace = true }
 
 [lints]

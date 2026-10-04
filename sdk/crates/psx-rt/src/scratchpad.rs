@@ -1,6 +1,6 @@
 //! The CPU scratchpad, and running code with its stack there.
 //!
-//! The R3000A has no data cache. Its 1 KiB scratchpad at `0x1F80_0000` is
+//! The R3000A has no data cache. Its 1 KiB scratchpad ([`BASE`]) is
 //! the only data memory that loads from in one cycle; a main-RAM load stalls
 //! for about six. Code whose frames spill a lot (long loops with more live
 //! values than callee-saved registers, explicit work stacks in a frame) pays
@@ -72,10 +72,10 @@ use core::mem::{ManuallyDrop, MaybeUninit};
 
 /// Address of the first scratchpad byte (KUSEG/KSEG0; there is no KSEG1
 /// alias).
-pub const BASE: usize = 0x1F80_0000;
+pub const BASE: usize = psx_hw::memory::scratchpad::BASE as usize;
 
 /// Scratchpad capacity in bytes.
-pub const SIZE: usize = 1024;
+pub const SIZE: usize = psx_hw::memory::scratchpad::SIZE;
 
 /// Bytes of a stack region a call tree cannot use: the 16-byte o32
 /// argument home area above the first frame, and the canary word at the
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn regions_report_their_bytes() {
         assert_eq!(BATCH.len(), 800);
-        assert_eq!(BATCH.addr(), 0x1F80_00E0);
+        assert_eq!(BATCH.addr(), BASE + 0xE0);
         assert!(PLANES.overlaps(Stack::REGION));
         assert!(!HEADS.overlaps(PLANES));
         assert!(Region::new(0, 8).overlaps(Region::new(4, 12)));

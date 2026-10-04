@@ -237,11 +237,11 @@ fn stop_walk_and_raise() {
         use psx_io::dma::{self, Channel};
         if dma::is_busy(Channel::Gpu) && !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
             dma::abort(Channel::Gpu);
-            psx_io::gpu::write_display_control_unguarded(0x0100_0000);
+            psx_io::gpu::write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
         }
         // `wait_command_ready`, with its timeout reset written past the guard.
         if !psx_io::gpu::try_wait_command_ready(psx_io::gpu::READY_SPINS) {
-            psx_io::gpu::write_display_control_unguarded(0x0100_0000);
+            psx_io::gpu::write_display_control_unguarded(psx_hw::gpu::gp1::RESET_CMD_BUFFER);
         }
         psx_io::gpu::write_command_unguarded(psx_hw::gpu::gp0::REQUEST_IRQ);
     }

@@ -79,7 +79,7 @@ macro_rules! renamed_op {
 #[doc(alias = "RotTransPers")]
 #[inline(always)]
 pub unsafe fn project_single() {
-    cofun!(0x4A08_0001)
+    cofun!(crate::encoding::command::RTPS)
 }
 
 /// Perspective-project V0, V1 and V2 in sequence (`RTPT`, `sf=1, lm=0`).
@@ -90,7 +90,7 @@ pub unsafe fn project_single() {
 #[doc(alias = "RotTransPers3")]
 #[inline(always)]
 pub unsafe fn project_triple() {
-    cofun!(0x4A08_0030)
+    cofun!(crate::encoding::command::RTPT)
 }
 
 /// Winding of the three SXY entries (`NCLIP`): the Z component of
@@ -102,7 +102,7 @@ pub unsafe fn project_triple() {
 #[doc(alias = "NormalClip")]
 #[inline(always)]
 pub unsafe fn screen_winding() {
-    cofun!(0x4A00_0006)
+    cofun!(crate::encoding::command::NCLIP)
 }
 
 /// Outer product of IR with the rotation matrix diagonal (`OP`, `sf=1`).
@@ -113,7 +113,7 @@ pub unsafe fn screen_winding() {
 #[doc(alias = "OuterProduct12")]
 #[inline(always)]
 pub unsafe fn outer_product() {
-    cofun!(0x4A08_000C)
+    cofun!(crate::encoding::command::OP)
 }
 
 /// Average SZ1..SZ3 weighted by ZSF3 into OTZ and MAC0 (`AVSZ3`).
@@ -124,7 +124,7 @@ pub unsafe fn outer_product() {
 #[doc(alias = "AverageZ3")]
 #[inline(always)]
 pub unsafe fn average_z3() {
-    cofun!(0x4A00_002D)
+    cofun!(crate::encoding::command::AVSZ3)
 }
 
 /// Average SZ0..SZ3 weighted by ZSF4 into OTZ and MAC0 (`AVSZ4`).
@@ -135,7 +135,7 @@ pub unsafe fn average_z3() {
 #[doc(alias = "AverageZ4")]
 #[inline(always)]
 pub unsafe fn average_z4() {
-    cofun!(0x4A00_002E)
+    cofun!(crate::encoding::command::AVSZ4)
 }
 
 /// Square the current IR vector into MAC1/2/3 (`SQR`, `sf=1`).
@@ -146,7 +146,7 @@ pub unsafe fn average_z4() {
 #[doc(alias = "Square12")]
 #[inline(always)]
 pub unsafe fn square() {
-    cofun!(0x4A08_0028)
+    cofun!(crate::encoding::command::SQR)
 }
 
 /// Square the current IR vector into MAC1/2/3 without the fractional
@@ -161,7 +161,7 @@ pub unsafe fn square() {
 #[doc(alias = "Square0")]
 #[inline(always)]
 pub unsafe fn square_unshifted() {
-    cofun!(0x4A00_0028)
+    cofun!(crate::encoding::command::SQR_UNSHIFTED)
 }
 
 /// Light, color and depth-cue one vertex normal (`NCDS`, `sf=1, lm=0`).
@@ -172,7 +172,7 @@ pub unsafe fn square_unshifted() {
 #[doc(alias = "NormalColorDpq")]
 #[inline(always)]
 pub unsafe fn light_color_depth_single() {
-    cofun!(0x4A08_0013)
+    cofun!(crate::encoding::command::NCDS)
 }
 
 /// Light and color one vertex normal, no depth cue (`NCCS`).
@@ -183,7 +183,7 @@ pub unsafe fn light_color_depth_single() {
 #[doc(alias = "NormalColorCol")]
 #[inline(always)]
 pub unsafe fn light_color_single() {
-    cofun!(0x4A08_001B)
+    cofun!(crate::encoding::command::NCCS)
 }
 
 /// Light one vertex normal, without the RGBC modulate (`NCS`).
@@ -194,7 +194,7 @@ pub unsafe fn light_color_single() {
 #[doc(alias = "NormalColor")]
 #[inline(always)]
 pub unsafe fn light_single() {
-    cofun!(0x4A08_001E)
+    cofun!(crate::encoding::command::NCS)
 }
 
 /// [`light_color_depth_single`] for V0, V1 and V2 (`NCDT`).
@@ -205,7 +205,7 @@ pub unsafe fn light_single() {
 #[doc(alias = "NormalColorDpq3")]
 #[inline(always)]
 pub unsafe fn light_color_depth_triple() {
-    cofun!(0x4A08_0016)
+    cofun!(crate::encoding::command::NCDT)
 }
 
 /// [`light_single`] for V0, V1 and V2 (`NCT`).
@@ -216,7 +216,7 @@ pub unsafe fn light_color_depth_triple() {
 #[doc(alias = "NormalColor3")]
 #[inline(always)]
 pub unsafe fn light_triple() {
-    cofun!(0x4A08_0020)
+    cofun!(crate::encoding::command::NCT)
 }
 
 /// [`light_color_single`] for V0, V1 and V2 (`NCCT`).
@@ -227,7 +227,7 @@ pub unsafe fn light_triple() {
 #[doc(alias = "NormalColorCol3")]
 #[inline(always)]
 pub unsafe fn light_color_triple() {
-    cofun!(0x4A08_003F)
+    cofun!(crate::encoding::command::NCCT)
 }
 
 /// Depth-cue RGBC toward the far color by IR0 (`DPCS`).
@@ -238,7 +238,7 @@ pub unsafe fn light_color_triple() {
 #[doc(alias = "DpqColor")]
 #[inline(always)]
 pub unsafe fn depth_cue_single() {
-    cofun!(0x4A08_0010)
+    cofun!(crate::encoding::command::DPCS)
 }
 
 /// [`depth_cue_single`] run three times against the RGB FIFO (`DPCT`).
@@ -249,7 +249,7 @@ pub unsafe fn depth_cue_single() {
 #[doc(alias = "DpqColor3")]
 #[inline(always)]
 pub unsafe fn depth_cue_triple() {
-    cofun!(0x4A08_002A)
+    cofun!(crate::encoding::command::DPCT)
 }
 
 /// Interpolate IR toward the far color by IR0, then push the color FIFO
@@ -260,7 +260,7 @@ pub unsafe fn depth_cue_triple() {
 #[doc(alias = "INTPL")]
 #[inline(always)]
 pub unsafe fn interpolate_far_color() {
-    cofun!(0x4A08_0011)
+    cofun!(crate::encoding::command::INTPL)
 }
 
 /// Depth-cue a lit color: `RGBC*IR` toward FC by IR0 (`DCPL`).
@@ -271,7 +271,7 @@ pub unsafe fn interpolate_far_color() {
 #[doc(alias = "DpqColorLight")]
 #[inline(always)]
 pub unsafe fn depth_cue_light() {
-    cofun!(0x4A08_0029)
+    cofun!(crate::encoding::command::DCPL)
 }
 
 /// Light IR through the light color matrix and modulate by RGBC (`CC`).
@@ -282,7 +282,7 @@ pub unsafe fn depth_cue_light() {
 #[doc(alias = "ColorCol")]
 #[inline(always)]
 pub unsafe fn color_color() {
-    cofun!(0x4A08_001C)
+    cofun!(crate::encoding::command::CC)
 }
 
 /// [`color_color`] followed by a depth cue toward the far color (`CDP`).
@@ -293,7 +293,7 @@ pub unsafe fn color_color() {
 #[doc(alias = "ColorDpq")]
 #[inline(always)]
 pub unsafe fn color_depth_cue() {
-    cofun!(0x4A08_0014)
+    cofun!(crate::encoding::command::CDP)
 }
 
 /// Scale the IR vector by IR0 into MAC, then push the color FIFO
@@ -304,7 +304,7 @@ pub unsafe fn color_depth_cue() {
 #[doc(alias = "GPF")]
 #[inline(always)]
 pub unsafe fn scale_vector() {
-    cofun!(0x4A08_003D)
+    cofun!(crate::encoding::command::GPF)
 }
 
 /// Scale the IR vector by IR0 into MAC, then push the color FIFO, without
@@ -315,7 +315,7 @@ pub unsafe fn scale_vector() {
 #[doc(alias = "GPF")]
 #[inline(always)]
 pub unsafe fn scale_vector_unshifted() {
-    cofun!(0x4A00_003D)
+    cofun!(crate::encoding::command::GPF_UNSHIFTED)
 }
 
 /// Add the IR vector scaled by IR0 to MAC, then push the color FIFO
@@ -326,7 +326,7 @@ pub unsafe fn scale_vector_unshifted() {
 #[doc(alias = "GPL")]
 #[inline(always)]
 pub unsafe fn scale_vector_accumulate() {
-    cofun!(0x4A08_003E)
+    cofun!(crate::encoding::command::GPL)
 }
 
 /// Rotate V0 by RT and add TR, without the perspective divide
@@ -338,7 +338,7 @@ pub unsafe fn scale_vector_accumulate() {
 #[doc(alias = "RotTrans")]
 #[inline(always)]
 pub unsafe fn rotate_translate_v0() {
-    cofun!(0x4A08_0012)
+    cofun!(crate::encoding::command::ROTATE_TRANSLATE_V0)
 }
 
 /// Rotate V0 by RT with the far color as the translation
@@ -354,7 +354,7 @@ pub unsafe fn rotate_translate_v0() {
 #[doc(alias = "MVMVA")]
 #[inline(always)]
 pub unsafe fn rotate_v0_far_color() {
-    cofun!(0x4A08_4012)
+    cofun!(crate::encoding::command::ROTATE_V0_FAR_COLOR)
 }
 
 // Deprecated forwarders for the mnemonic names these ops had before the

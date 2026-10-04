@@ -25,17 +25,13 @@ extern crate psx_rt;
 use psx_io::{read_u8, write_u32, write_u8};
 use psx_rt::tty;
 
-const CD_BASE: u32 = 0x1F80_1800;
-const CD_STATUS: u32 = CD_BASE; // index select (write) / status (read)
-const CD_CMD: u32 = CD_BASE + 1; // command (idx0 write) / response (read)
-const CD_PARAM: u32 = CD_BASE + 2; // param push (idx0) / irq enable (idx1)
-const CD_IRQ: u32 = CD_BASE + 3; // irq flag + ack (idx1)
-
-const STAT_RESP_NOT_EMPTY: u8 = 1 << 5; // 0x20
-const STAT_DATA_NOT_EMPTY: u8 = 1 << 6; // 0x40
-
-const IRQ_DATA_READY: u8 = 1;
-const IRQ_ERROR: u8 = 5;
+use psx_hw::cd::index_status::{
+    DATA_FIFO_NOT_EMPTY as STAT_DATA_NOT_EMPTY, RESPONSE_NOT_EMPTY as STAT_RESP_NOT_EMPTY,
+};
+use psx_hw::cd::irq::{DATA_READY as IRQ_DATA_READY, ERROR as IRQ_ERROR};
+use psx_hw::cd::reg::{
+    COMMAND_RESPONSE as CD_CMD, INDEX as CD_STATUS, PARAMETER as CD_PARAM, REQUEST_IRQ as CD_IRQ,
+};
 
 // Uncached (KSEG1) RAM mirror so writes land in RAM immediately.
 const RESULT_BASE: u32 = 0xA010_0000;

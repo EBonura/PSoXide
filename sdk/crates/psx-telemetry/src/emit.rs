@@ -8,12 +8,15 @@
 //! (`emulator-telemetry = ["psx-telemetry/emit"]`) so shipping builds pay
 //! only empty inlined calls.
 //!
-//! Ports (decoded by `emulator-core`): `0xBF80_2F00` event word
-//! (`kind << 24 | id`), `0xBF80_2F04` value latch (written before the event
-//! that consumes it), `0xBF80_2F0C` debug-log byte stream.
+//! Ports (decoded by `emulator-core`, addresses in `psx_hw::memory::expansion2::telemetry`):
+//! the event word (`kind << 24 | id`), the value latch (written before the
+//! event that consumes it) and the debug-log byte stream.
 //!
 //! [`console`] is deliberately NOT feature-gated (mips-gated only): it is the
 //! Play debug terminal used from normal builds. Use sparingly.
+
+#[cfg(target_arch = "mips")]
+use psx_hw::memory::{expansion2::telemetry, to_kseg1};
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
 const EVENT_KIND_STAGE_BEGIN: u8 = 2;
@@ -22,12 +25,18 @@ const EVENT_KIND_COUNTER: u8 = 4;
 const EVENT_KIND_TASK_BEGIN: u8 = 5;
 const EVENT_KIND_TASK_END: u8 = 6;
 
+/// The uncached view of one of the emulator's telemetry ports.
+#[cfg(target_arch = "mips")]
+const fn uncached(physical: u32) -> *mut u32 {
+    to_kseg1(physical) as *mut u32
+}
+
 #[cfg(all(target_arch = "mips", feature = "emit"))]
-const EVENT_ADDR: *mut u32 = 0xBF80_2F00 as *mut u32;
+const EVENT_ADDR: *mut u32 = uncached(telemetry::EVENT);
 #[cfg(all(target_arch = "mips", feature = "emit"))]
-const VALUE_ADDR: *mut u32 = 0xBF80_2F04 as *mut u32;
+const VALUE_ADDR: *mut u32 = uncached(telemetry::VALUE);
 #[cfg(all(target_arch = "mips", feature = "emit"))]
-const LOG_ADDR: *mut u32 = 0xBF80_2F0C as *mut u32;
+const LOG_ADDR: *mut u32 = uncached(telemetry::LOG);
 
 /// Emulator cycle counter, wrapping at 32 bits. Returns zero on host builds
 /// and when the `emit` feature is disabled, without touching telemetry MMIO.
@@ -35,10 +44,10 @@ const LOG_ADDR: *mut u32 = 0xBF80_2F0C as *mut u32;
 pub fn cycles() -> u32 {
     #[cfg(all(target_arch = "mips", feature = "emit"))]
     {
-        // SAFETY: 0xBF80_2F08 is the word-aligned cycle-counter port in the
+        // SAFETY: `telemetry::CYCLES` is the word-aligned cycle-counter port in the
         // uncached Expansion 2 window, decoded by the emulator; the read has
         // no side effects and touches no Rust-owned memory.
-        unsafe { core::ptr::read_volatile(0xBF80_2F08 as *const u32) }
+        unsafe { core::ptr::read_volatile(uncached(telemetry::CYCLES) as *const u32) }
     }
     #[cfg(not(all(target_arch = "mips", feature = "emit")))]
     {
@@ -98,7 +107,7 @@ pub fn debug_log(message: &str) {
 pub fn console(message: &str) {
     #[cfg(target_arch = "mips")]
     {
-        const PORT: *mut u32 = 0xBF80_2F0C as *mut u32;
+        const PORT: *mut u32 = uncached(telemetry::LOG);
         for &byte in message.as_bytes() {
             // SAFETY: PORT is the word-aligned debug-log port in the uncached
             // Expansion 2 window, not Rust-owned memory; each write only

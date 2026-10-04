@@ -60,5 +60,8 @@ pub mod regs;
 pub mod scene;
 pub mod transform;
 
+/// The COP2 instruction encodings the wrappers emit (`psx_hw::gte`).
+pub use psx_hw::gte as encoding;
+
 #[cfg(not(target_arch = "mips"))]
 pub mod host;

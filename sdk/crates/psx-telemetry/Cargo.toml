@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description  = "Shared guest/host telemetry id tables plus the guest-side event emitters."
 
+[dependencies]
+psx-hw = { workspace = true }
+
 [features]
 # Compile the Expansion 2 MMIO writes in `emit`. Games forward their own
 # telemetry feature here (emulator-telemetry = ["psx-telemetry/emit"]); with

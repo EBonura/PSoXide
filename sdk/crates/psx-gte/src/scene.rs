@@ -453,12 +453,12 @@ pub fn start_project_triple(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> ProjectTri
         unsafe {
             asm!(
                 // MTC2 $8..$13 into V0/V1/V2 input registers.
-                ".word 0x48880000",
-                ".word 0x48890800",
-                ".word 0x488a1000",
-                ".word 0x488b1800",
-                ".word 0x488c2000",
-                ".word 0x488d2800",
+                ".word {w0}",
+                ".word {w1}",
+                ".word {w2}",
+                ".word {w3}",
+                ".word {w4}",
+                ".word {w5}",
                 // Conservative HWB-010/011 input-commit gap for the final V2
                 // write. The original console failure proved the rule for
                 // MVMVA/RTPS, not RTPT; hardware-tests v1.20 records 0xC0-C3
@@ -466,7 +466,14 @@ pub fn start_project_triple(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> ProjectTri
                 ".word 0",
                 ".word 0",
                 // RTPT.
-                ".word 0x4a080030",
+                ".word {w6}",
+                w0 = const psx_hw::gte::mtc2(8, 0),
+                w1 = const psx_hw::gte::mtc2(9, 1),
+                w2 = const psx_hw::gte::mtc2(10, 2),
+                w3 = const psx_hw::gte::mtc2(11, 3),
+                w4 = const psx_hw::gte::mtc2(12, 4),
+                w5 = const psx_hw::gte::mtc2(13, 5),
+                w6 = const psx_hw::gte::command::RTPT,
                 in("$8") v0_xy,
                 in("$9") v0_z,
                 in("$10") v1_xy,
@@ -513,13 +520,19 @@ impl ProjectTripleInFlight {
                     // Read SXY0/SXY1/SXY2/SZ1/SZ2/SZ3; each MFC2's
                     // load-delay slot is filled by the next, so only
                     // the final read needs the explicit NOP.
-                    ".word 0x48086000",
-                    ".word 0x48096800",
-                    ".word 0x480a7000",
-                    ".word 0x480b8800",
-                    ".word 0x480c9000",
-                    ".word 0x480d9800",
+                    ".word {w0}",
+                    ".word {w1}",
+                    ".word {w2}",
+                    ".word {w3}",
+                    ".word {w4}",
+                    ".word {w5}",
                     ".word 0",
+                    w0 = const psx_hw::gte::mfc2(8, 12),
+                    w1 = const psx_hw::gte::mfc2(9, 13),
+                    w2 = const psx_hw::gte::mfc2(10, 14),
+                    w3 = const psx_hw::gte::mfc2(11, 17),
+                    w4 = const psx_hw::gte::mfc2(12, 18),
+                    w5 = const psx_hw::gte::mfc2(13, 19),
                     out("$8") sxy0,
                     out("$9") sxy1,
                     out("$10") sxy2,
@@ -565,8 +578,8 @@ fn project_vertex_mips(v: Vec3I16) -> Projected {
     unsafe {
         asm!(
             // MTC2 $8,VXY0 and $9,VZ0.
-            ".word 0x48880000",
-            ".word 0x48890800",
+            ".word {w0}",
+            ".word {w1}",
             // HWB-010/011 input-commit gap. The single-vertex path used to
             // issue RTPS immediately here, leaving VXY0 at the same two-tick
             // distance as the console-confirmed MVMVA vertex-explosion case.
@@ -574,12 +587,17 @@ fn project_vertex_mips(v: Vec3I16) -> Projected {
             ".word 0",
             ".word 0",
             // RTPS.
-            ".word 0x4a080001",
+            ".word {w2}",
             // Read SXY2 and SZ3. Two MFC2s can share one final
             // load-delay NOP instead of one NOP per wrapper call.
-            ".word 0x48087000",
-            ".word 0x48099800",
+            ".word {w3}",
+            ".word {w4}",
             ".word 0",
+            w0 = const psx_hw::gte::mtc2(8, 0),
+            w1 = const psx_hw::gte::mtc2(9, 1),
+            w2 = const psx_hw::gte::command::RTPS,
+            w3 = const psx_hw::gte::mfc2(8, 14),
+            w4 = const psx_hw::gte::mfc2(9, 19),
             inlateout("$8") sxy,
             inlateout("$9") sz,
             options(nostack, nomem, preserves_flags),
@@ -614,12 +632,12 @@ fn project_triangle_mips(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3
     unsafe {
         asm!(
             // MTC2 $8..$13 into V0/V1/V2 input registers.
-            ".word 0x48880000",
-            ".word 0x48890800",
-            ".word 0x488a1000",
-            ".word 0x488b1800",
-            ".word 0x488c2000",
-            ".word 0x488d2800",
+            ".word {w0}",
+            ".word {w1}",
+            ".word {w2}",
+            ".word {w3}",
+            ".word {w4}",
+            ".word {w5}",
             // Conservative HWB-010/011 input-commit gap. The original
             // console failure proved MVMVA/RTPS; hardware-tests v1.20 records
             // 0xC0-C3 measure RTPT directly before we remove these slots.
@@ -627,18 +645,31 @@ fn project_triangle_mips(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3
             ".word 0",
             ".word 0",
             // RTPT.
-            ".word 0x4a080030",
+            ".word {w6}",
             // Read SXY0/SXY1/SXY2/SZ1/SZ2/SZ3. Each MFC2's
             // load-delay slot is filled by the next MFC2, so only the
             // final read needs an explicit NOP before Rust observes
             // the output registers.
-            ".word 0x48086000",
-            ".word 0x48096800",
-            ".word 0x480a7000",
-            ".word 0x480b8800",
-            ".word 0x480c9000",
-            ".word 0x480d9800",
+            ".word {w7}",
+            ".word {w8}",
+            ".word {w9}",
+            ".word {w10}",
+            ".word {w11}",
+            ".word {w12}",
             ".word 0",
+            w0 = const psx_hw::gte::mtc2(8, 0),
+            w1 = const psx_hw::gte::mtc2(9, 1),
+            w2 = const psx_hw::gte::mtc2(10, 2),
+            w3 = const psx_hw::gte::mtc2(11, 3),
+            w4 = const psx_hw::gte::mtc2(12, 4),
+            w5 = const psx_hw::gte::mtc2(13, 5),
+            w6 = const psx_hw::gte::command::RTPT,
+            w7 = const psx_hw::gte::mfc2(8, 12),
+            w8 = const psx_hw::gte::mfc2(9, 13),
+            w9 = const psx_hw::gte::mfc2(10, 14),
+            w10 = const psx_hw::gte::mfc2(11, 17),
+            w11 = const psx_hw::gte::mfc2(12, 18),
+            w12 = const psx_hw::gte::mfc2(13, 19),
             inlateout("$8") v0_xy => sxy0,
             inlateout("$9") v0_z => sxy1,
             inlateout("$10") v1_xy => sxy2,
@@ -682,8 +713,8 @@ fn transform_vertex_mips(v: Vec3I16) -> Vec3I32 {
     unsafe {
         asm!(
             // MTC2 $8,VXY0 and $9,VZ0.
-            ".word 0x48880000",
-            ".word 0x48890800",
+            ".word {w0}",
+            ".word {w1}",
             // HWB-010/011 hazard gap (console-confirmed fix): two buffer
             // NOPs push the VXY0 write's commit distance from 2 to 4
             // instructions. Without them, real silicon can commit the
@@ -693,14 +724,20 @@ fn transform_vertex_mips(v: Vec3I16) -> Vec3I32 {
             ".word 0",
             ".word 0",
             // MVMVA RT,V0,TR,sf=1.
-            ".word 0x4a080012",
+            ".word {w2}",
             // Read MAC1/MAC2/MAC3. Consecutive MFC2 instructions fill
             // each other's load-delay slot; only the final read needs
             // an explicit NOP before Rust observes the outputs.
-            ".word 0x4808c800",
-            ".word 0x4809d000",
-            ".word 0x480ad800",
+            ".word {w3}",
+            ".word {w4}",
+            ".word {w5}",
             ".word 0",
+            w0 = const psx_hw::gte::mtc2(8, 0),
+            w1 = const psx_hw::gte::mtc2(9, 1),
+            w2 = const psx_hw::gte::command::ROTATE_TRANSLATE_V0,
+            w3 = const psx_hw::gte::mfc2(8, 25),
+            w4 = const psx_hw::gte::mfc2(9, 26),
+            w5 = const psx_hw::gte::mfc2(10, 27),
             inlateout("$8") xy => mac1,
             inlateout("$9") z => mac2,
             lateout("$10") mac3,
@@ -760,12 +797,12 @@ pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
             asm!(
                 // Live schedule, byte-identical to transform_vertex_mips:
                 // MTC2 $8,VXY0 / MTC2 $9,VZ0 / MVMVA / MAC1,2,3 reads.
-                ".word 0x48880000",
-                ".word 0x48890800",
-                ".word 0x4a080012",
-                ".word 0x4808c800",
-                ".word 0x4809d000",
-                ".word 0x480ad800",
+                ".word {w0}",
+                ".word {w1}",
+                ".word {w2}",
+                ".word {w3}",
+                ".word {w4}",
+                ".word {w5}",
                 ".word 0",
                 // Probe tail, strictly AFTER the live reads: 4-NOP
                 // settle gap, MAC1 re-read ($11), then TRX/TRY/TRZ
@@ -775,11 +812,21 @@ pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
                 ".word 0",
                 ".word 0",
                 ".word 0",
-                ".word 0x480bc800",
-                ".word 0x484c2800",
-                ".word 0x484d3000",
-                ".word 0x484e3800",
+                ".word {w6}",
+                ".word {w7}",
+                ".word {w8}",
+                ".word {w9}",
                 ".word 0",
+                w0 = const psx_hw::gte::mtc2(8, 0),
+                w1 = const psx_hw::gte::mtc2(9, 1),
+                w2 = const psx_hw::gte::command::ROTATE_TRANSLATE_V0,
+                w3 = const psx_hw::gte::mfc2(8, 25),
+                w4 = const psx_hw::gte::mfc2(9, 26),
+                w5 = const psx_hw::gte::mfc2(10, 27),
+                w6 = const psx_hw::gte::mfc2(11, 25),
+                w7 = const psx_hw::gte::cfc2(12, 5),
+                w8 = const psx_hw::gte::cfc2(13, 6),
+                w9 = const psx_hw::gte::cfc2(14, 7),
                 inlateout("$8") xy => mac1,
                 inlateout("$9") z => mac2,
                 lateout("$10") mac3,
@@ -840,15 +887,20 @@ pub fn average_cached_z3(depths: [u16; 3]) -> u16 {
             asm!(
                 // Load SZ1..SZ3, then leave the hardware-safe two-slot MTC2
                 // commit gap before AVSZ3 consumes the final write.
-                ".word 0x48888800",
-                ".word 0x48899000",
-                ".word 0x488a9800",
+                ".word {w0}",
+                ".word {w1}",
+                ".word {w2}",
                 ".word 0",
                 ".word 0",
-                ".word 0x4a00002d",
+                ".word {w3}",
                 // MFC2 has one CPU load-delay slot.
-                ".word 0x48083800",
+                ".word {w4}",
                 ".word 0",
+                w0 = const psx_hw::gte::mtc2(8, 17),
+                w1 = const psx_hw::gte::mtc2(9, 18),
+                w2 = const psx_hw::gte::mtc2(10, 19),
+                w3 = const psx_hw::gte::command::AVSZ3,
+                w4 = const psx_hw::gte::mfc2(8, 7),
                 inlateout("$8") otz,
                 in("$9") depths[1] as u32,
                 in("$10") depths[2] as u32,
@@ -922,16 +974,22 @@ pub fn average_cached_z4(depths: [u16; 4]) -> u16 {
             asm!(
                 // Load SZ0..SZ3, then leave the hardware-safe two-slot MTC2
                 // commit gap before AVSZ4 consumes the final write.
-                ".word 0x48888000",
-                ".word 0x48898800",
-                ".word 0x488a9000",
-                ".word 0x488b9800",
+                ".word {w0}",
+                ".word {w1}",
+                ".word {w2}",
+                ".word {w3}",
                 ".word 0",
                 ".word 0",
-                ".word 0x4a00002e",
+                ".word {w4}",
                 // MFC2 has one CPU load-delay slot.
-                ".word 0x48083800",
+                ".word {w5}",
                 ".word 0",
+                w0 = const psx_hw::gte::mtc2(8, 16),
+                w1 = const psx_hw::gte::mtc2(9, 17),
+                w2 = const psx_hw::gte::mtc2(10, 18),
+                w3 = const psx_hw::gte::mtc2(11, 19),
+                w4 = const psx_hw::gte::command::AVSZ4,
+                w5 = const psx_hw::gte::mfc2(8, 7),
                 inlateout("$8") otz,
                 in("$9") depths[1] as u32,
                 in("$10") depths[2] as u32,
@@ -998,6 +1056,28 @@ fn aabb_outer_support(mins: [i16; 3], maxs: [i16; 3], signbits: u8) -> Vec3I16 {
     )
 }
 
+/// `MVMVA` of V0 by the rotation matrix, no translation, `sf` clear.
+#[cfg(target_arch = "mips")]
+const RT_V0_NO_TRANSLATION: u32 = psx_hw::gte::mvmva(
+    psx_hw::gte::Matrix::Rotation,
+    psx_hw::gte::Vector::V0,
+    psx_hw::gte::Translation::None,
+);
+
+/// `MVMVA` of V0 by the light matrix, no translation, `sf` clear.
+#[cfg(target_arch = "mips")]
+const LLM_V0_NO_TRANSLATION: u32 = psx_hw::gte::mvmva(
+    psx_hw::gte::Matrix::Light,
+    psx_hw::gte::Vector::V0,
+    psx_hw::gte::Translation::None,
+);
+
+/// `MFC2 $8, MAC1 + n`.
+#[cfg(target_arch = "mips")]
+const fn read_mac(n: u32) -> u32 {
+    psx_hw::gte::mfc2(8, 25 + n)
+}
+
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 fn aabb_dot_mvmva<const OP: u32, const READ_MAC: u32>(v: Vec3I16) -> i32 {
@@ -1010,8 +1090,8 @@ fn aabb_dot_mvmva<const OP: u32, const READ_MAC: u32>(v: Vec3I16) -> i32 {
     // `READ_MAC` writing $8 only.
     unsafe {
         asm!(
-            ".word 0x48880000",
-            ".word 0x48890800",
+            ".word {w0}",
+            ".word {w1}",
             // Same console-confirmed V0 commit distance as
             // transform_vertex_mips.
             ".word 0",
@@ -1019,6 +1099,8 @@ fn aabb_dot_mvmva<const OP: u32, const READ_MAC: u32>(v: Vec3I16) -> i32 {
             ".word {op}",
             ".word {read_mac}",
             ".word 0",
+            w0 = const psx_hw::gte::mtc2(8, 0),
+            w1 = const psx_hw::gte::mtc2(9, 1),
             op = const OP,
             read_mac = const READ_MAC,
             inlateout("$8") dot,
@@ -1034,10 +1116,10 @@ fn aabb_clip_dot(v: Vec3I16, _plane: &AabbClipPlane, index: usize) -> i32 {
     #[cfg(target_arch = "mips")]
     {
         match index {
-            0 => aabb_dot_mvmva::<0x4a00_6012, 0x4808_c800>(v),
-            1 => aabb_dot_mvmva::<0x4a00_6012, 0x4808_d000>(v),
-            2 => aabb_dot_mvmva::<0x4a00_6012, 0x4808_d800>(v),
-            3 => aabb_dot_mvmva::<0x4a02_6012, 0x4808_c800>(v),
+            0 => aabb_dot_mvmva::<{ RT_V0_NO_TRANSLATION }, { read_mac(0) }>(v),
+            1 => aabb_dot_mvmva::<{ RT_V0_NO_TRANSLATION }, { read_mac(1) }>(v),
+            2 => aabb_dot_mvmva::<{ RT_V0_NO_TRANSLATION }, { read_mac(2) }>(v),
+            3 => aabb_dot_mvmva::<{ LLM_V0_NO_TRANSLATION }, { read_mac(0) }>(v),
             _ => 0,
         }
     }
@@ -1157,14 +1239,14 @@ pub fn screen_area_scheduled(vertices: [(i16, i16); 3]) -> i32 {
         unsafe {
             asm!(
                 // MTC2 $8/$9/$10,SXY0/SXY1/SXY2.
-                ".word 0x48886000",
-                ".word 0x48896800",
-                ".word 0x488a7000",
+                ".word {w0}",
+                ".word {w1}",
+                ".word {w2}",
                 // HWB-010/011 input-commit gap before NCLIP consumes SXY2.
                 ".word 0",
                 ".word 0",
                 // NCLIP plus its hardware-confirmed MAC0 result gap.
-                ".word 0x4a000006",
+                ".word {w3}",
                 ".word 0",
                 ".word 0",
                 ".word 0",
@@ -1174,8 +1256,13 @@ pub fn screen_area_scheduled(vertices: [(i16, i16); 3]) -> i32 {
                 ".word 0",
                 ".word 0",
                 // MFC2 $10,MAC0 plus its CPU load-delay slot.
-                ".word 0x480ac000",
+                ".word {w4}",
                 ".word 0",
+                w0 = const psx_hw::gte::mtc2(8, 12),
+                w1 = const psx_hw::gte::mtc2(9, 13),
+                w2 = const psx_hw::gte::mtc2(10, 14),
+                w3 = const psx_hw::gte::command::NCLIP,
+                w4 = const psx_hw::gte::mfc2(10, 24),
                 in("$8") sxy0,
                 in("$9") sxy1,
                 inlateout("$10") area,
@@ -1216,12 +1303,12 @@ pub fn screen_area_and_unpack_model_face_scheduled(
         unsafe {
             asm!(
                 // MTC2 SXY0..SXY2 and the hardware-confirmed input gap.
-                ".word 0x48886000",
-                ".word 0x48896800",
-                ".word 0x488a7000",
+                ".word {w0}",
+                ".word {w1}",
+                ".word {w2}",
                 ".word 0",
                 ".word 0",
-                ".word 0x4a000006",
+                ".word {w3}",
                 // Register-only face unpacking inside NCLIP's complete
                 // eight-instruction MAC0 result gap.
                 "srl $14, $11, 14",
@@ -1233,8 +1320,13 @@ pub fn screen_area_and_unpack_model_face_scheduled(
                 ".word 0",
                 ".word 0",
                 // MFC2 MAC0 plus the CPU load-delay slot.
-                ".word 0x480ac000",
+                ".word {w4}",
                 ".word 0",
+                w0 = const psx_hw::gte::mtc2(8, 12),
+                w1 = const psx_hw::gte::mtc2(9, 13),
+                w2 = const psx_hw::gte::mtc2(10, 14),
+                w3 = const psx_hw::gte::command::NCLIP,
+                w4 = const psx_hw::gte::mfc2(10, 24),
                 in("$8") sxy0,
                 in("$9") sxy1,
                 inlateout("$10") area,
@@ -1291,17 +1383,17 @@ pub fn screen_area_and_average_cached_z3_scheduled(
         unsafe {
             asm!(
                 // Load SXY0..SXY2 and leave the measured input-commit gap.
-                ".word 0x48886000",
-                ".word 0x48896800",
-                ".word 0x488a7000",
+                ".word {w0}",
+                ".word {w1}",
+                ".word {w2}",
                 ".word 0",
                 ".word 0",
-                ".word 0x4a000006",
+                ".word {w3}",
                 // Loading SZ1..SZ3 is independent work inside NCLIP's
                 // hardware-confirmed eight-instruction MAC0 result gap.
-                ".word 0x488b8800",
-                ".word 0x488c9000",
-                ".word 0x488d9800",
+                ".word {w4}",
+                ".word {w5}",
+                ".word {w6}",
                 ".word 0",
                 ".word 0",
                 ".word 0",
@@ -1309,10 +1401,20 @@ pub fn screen_area_and_average_cached_z3_scheduled(
                 ".word 0",
                 // Capture NCLIP's MAC0 before AVSZ3 overwrites it. AVSZ3 is
                 // independent of the CPU load-delay result.
-                ".word 0x480ac000",
-                ".word 0x4a00002d",
-                ".word 0x480b3800",
+                ".word {w7}",
+                ".word {w8}",
+                ".word {w9}",
                 ".word 0",
+                w0 = const psx_hw::gte::mtc2(8, 12),
+                w1 = const psx_hw::gte::mtc2(9, 13),
+                w2 = const psx_hw::gte::mtc2(10, 14),
+                w3 = const psx_hw::gte::command::NCLIP,
+                w4 = const psx_hw::gte::mtc2(11, 17),
+                w5 = const psx_hw::gte::mtc2(12, 18),
+                w6 = const psx_hw::gte::mtc2(13, 19),
+                w7 = const psx_hw::gte::mfc2(10, 24),
+                w8 = const psx_hw::gte::command::AVSZ3,
+                w9 = const psx_hw::gte::mfc2(11, 7),
                 in("$8") sxy0,
                 in("$9") sxy1,
                 inlateout("$10") area,
@@ -1358,13 +1460,13 @@ pub fn screen_area_and_classic_ordering_depth3_scheduled(
         unsafe {
             asm!(
                 // Load SXY0..SXY2 and leave the measured input-commit gap.
-                ".word 0x48886000",
-                ".word 0x48896800",
-                ".word 0x488a7000",
+                ".word {w0}",
+                ".word {w1}",
+                ".word {w2}",
                 ".word 0",
                 ".word 0",
                 // NCLIP.
-                ".word 0x4a000006",
+                ".word {w3}",
                 // Fill NCLIP's eight-instruction MAC0 result gap with the
                 // exact sum * 0x155 sequence: 5x, 85x, then 341x.
                 "addu $11, $11, $12",
@@ -1377,8 +1479,13 @@ pub fn screen_area_and_classic_ordering_depth3_scheduled(
                 "addu $12, $12, $11",
                 // Read MAC0 and use its CPU load-delay slot for the OTZ
                 // scale. Neither instruction depends on the other's result.
-                ".word 0x480ac000",
+                ".word {w4}",
                 "srl $11, $12, 12",
+                w0 = const psx_hw::gte::mtc2(8, 12),
+                w1 = const psx_hw::gte::mtc2(9, 13),
+                w2 = const psx_hw::gte::mtc2(10, 14),
+                w3 = const psx_hw::gte::command::NCLIP,
+                w4 = const psx_hw::gte::mfc2(10, 24),
                 in("$8") sxy0,
                 in("$9") sxy1,
                 inlateout("$10") area,

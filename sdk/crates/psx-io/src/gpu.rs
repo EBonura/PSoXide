@@ -55,7 +55,7 @@ pub fn write_command(word: u32) {
         handoff::write_command_slow(word);
         return;
     }
-    // SAFETY: GP0 (0x1F80_1810) is the GPU's aligned 32-bit command/data port on every PS1. Any
+    // SAFETY: GP0 (`psx_hw::gpu::GP0`) is the GPU's aligned 32-bit command/data port on every PS1. Any
     // word is a legal write: the GPU parses it as a command or parameter, with no effect on
     // CPU-visible memory.
     unsafe { crate::write_u32(GP0, word) }
@@ -67,7 +67,7 @@ pub fn write_command(word: u32) {
 /// Without the `present-queue` feature it is the same store as [`write_command`].
 #[inline(always)]
 pub fn write_command_unguarded(word: u32) {
-    // SAFETY: GP0 (0x1F80_1810) is the GPU's aligned 32-bit command/data port on every PS1. Any
+    // SAFETY: GP0 (`psx_hw::gpu::GP0`) is the GPU's aligned 32-bit command/data port on every PS1. Any
     // word is a legal write: the GPU parses it as a command or parameter, with no effect on
     // CPU-visible memory.
     unsafe { crate::write_u32(GP0, word) }
@@ -86,7 +86,7 @@ pub fn write_display_control(word: u32) {
         handoff::write_display_control_slow(word);
         return;
     }
-    // SAFETY: GP1 (0x1F80_1814) is the GPU's aligned 32-bit control port on every PS1; any word is
+    // SAFETY: GP1 (`psx_hw::gpu::GP1`) is the GPU's aligned 32-bit control port on every PS1; any word is
     // a legal write and only changes GPU state.
     unsafe { crate::write_u32(GP1, word) }
 }
@@ -95,7 +95,7 @@ pub fn write_display_control(word: u32) {
 /// guard; see [`write_command_unguarded`].
 #[inline(always)]
 pub fn write_display_control_unguarded(word: u32) {
-    // SAFETY: GP1 (0x1F80_1814) is the GPU's aligned 32-bit control port on every PS1; any word is
+    // SAFETY: GP1 (`psx_hw::gpu::GP1`) is the GPU's aligned 32-bit control port on every PS1; any word is
     // a legal write and only changes GPU state.
     unsafe { crate::write_u32(GP1, word) }
 }
@@ -104,7 +104,7 @@ pub fn write_display_control_unguarded(word: u32) {
 #[doc(alias = "GPUSTAT")]
 #[inline(always)]
 pub fn status() -> GpuStat {
-    // SAFETY: GPUSTAT (0x1F80_1814 on read) is the GPU's aligned 32-bit status register; reading it
+    // SAFETY: GPUSTAT (`psx_hw::gpu::GP1` on read) is the GPU's aligned 32-bit status register; reading it
     // has no side effects.
     GpuStat::from_bits_retain(unsafe { crate::read_u32(GPUSTAT) })
 }
@@ -114,7 +114,7 @@ pub fn status() -> GpuStat {
 #[doc(alias = "GPUREAD")]
 #[inline(always)]
 pub fn read_data() -> u32 {
-    // SAFETY: GPUREAD (0x1F80_1810 on read) is the GPU's aligned 32-bit response latch. A read may
+    // SAFETY: GPUREAD (`psx_hw::gpu::GP0` on read) is the GPU's aligned 32-bit response latch. A read may
     // advance a VRAM-to-CPU transfer, which is its purpose, and touches no CPU memory.
     unsafe { crate::read_u32(GPUREAD) }
 }
