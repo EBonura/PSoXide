@@ -19,7 +19,7 @@
 //! file, single speed; this case plays channel 0.
 
 use crate::console_tests::{
-    put_number, record, spread, text, Buttons, Screen, XA_COUNT, XA_RECORD,
+    bit, put_number, record, spread, text, Buttons, Screen, XA_COUNT, XA_RECORD,
 };
 use crate::TimingRecord;
 use core::ptr::addr_of_mut;
@@ -176,12 +176,12 @@ impl Run {
 /// gap ms min/median/max (0xFFFF if none); 0x2E2 loop period ms the same;
 /// 0x2E3 first start ms, distinct head positions, longest unchanged ms.
 pub(crate) fn records(run: &Run) -> [TimingRecord; XA_COUNT] {
-    let flags = run.found as u32
-        | (run.play_error as u32) << 1
-        | (run.streaming_seen as u32) << 2
-        | (run.loops > 0) as u32 * 8
-        | (run.getlocp_updates() as u32) << 4
-        | (run.no_loop as u32) << 5;
+    let flags = bit(run.found, 0)
+        | bit(run.play_error, 1)
+        | bit(run.streaming_seen, 2)
+        | bit(run.loops > 0, 3)
+        | bit(run.getlocp_updates(), 4)
+        | bit(run.no_loop, 5);
     let mut gaps = run.gaps;
     let mut periods = run.periods;
     let (g, p) = (

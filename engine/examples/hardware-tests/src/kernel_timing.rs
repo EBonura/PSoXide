@@ -27,7 +27,7 @@
 //! measures that.
 
 use crate::console_tests::{
-    put_number, record, spread, text, Buttons, Screen, KERNEL_COUNT, KERNEL_RECORD,
+    bit, put_number, record, spread, text, Buttons, Screen, KERNEL_COUNT, KERNEL_RECORD,
 };
 use crate::TimingRecord;
 use psx_font::FontAtlas;
@@ -311,9 +311,9 @@ pub(crate) fn measure_bios_vblank(out: &mut Outcome) {
 /// runtime VBlank round trip.
 pub(crate) fn records(out: &Outcome) -> [TimingRecord; KERNEL_COUNT] {
     let stat = |offset: u16, s: &Stat| record(KERNEL_RECORD + offset, s.min, s.med, s.max);
-    let flags = out.standard_vector as u32
-        | (out.event.is_some() as u32) << 1
-        | (out.bios_done as u32) << 2
+    let flags = bit(out.standard_vector, 0)
+        | bit(out.event.is_some(), 1)
+        | bit(out.bios_done, 2)
         | out.sdk_vblank.count << 8;
     [
         stat(0, &out.enter),

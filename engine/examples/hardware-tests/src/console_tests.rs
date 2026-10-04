@@ -293,3 +293,8 @@ pub(crate) fn run_case(gpu: &mut Gpu, results: &mut Results, case: ConsoleCase) 
 pub(crate) fn text(font: &FontAtlas, x: i16, y: i16, s: &str, colour: (u8, u8, u8)) {
     font.draw_text(x, y, s, colour);
 }
+
+/// `flag` as bit `shift` of a flags word.
+pub(crate) fn bit(flag: bool, shift: u32) -> u32 {
+    (flag as u32) << shift
+}
