@@ -237,6 +237,11 @@ fn pack_block(group: &mut [u8], blk: usize, half: usize, b: &Block) {
 /// Reference decoder from the psx-spx pseudo code: the samples per channel
 /// (one vector for mono, two for stereo) of consecutive sector payloads,
 /// decoding from zero history.
+///
+/// The PSoXide emulator's decoder agrees bit for bit on filter 0 and keeps a
+/// few extra fractional bits in the predictor history, so filters 1 to 3 differ
+/// from this one by a few least significant bits (61 dB apart on a test chord,
+/// 21 LSB at most). Silicon's rounding is not measured.
 pub fn decode(format: Format, sectors: &[SectorData]) -> Vec<Vec<i16>> {
     let streams = if format.stereo { 2 } else { 1 };
     let mut out = vec![Vec::new(); streams];
