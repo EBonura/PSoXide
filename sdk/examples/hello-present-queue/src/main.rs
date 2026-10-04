@@ -98,10 +98,11 @@ fn as_str(text: &[u8]) -> &str {
 #[no_mangle]
 fn main() {
     interrupts::install_vblank_counter();
+    let Some(peripherals) = psx_rt::Peripherals::take() else {
+        return;
+    };
     let mut gpu = Gpu::new(
-        psx_rt::Peripherals::take()
-            .expect("peripherals are taken once")
-            .gpu_dma,
+        peripherals.gpu_dma,
         DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
     );
     let mut fb = DoubleBuffer::new(Resolution::R320X240);

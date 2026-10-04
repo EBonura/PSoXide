@@ -456,10 +456,13 @@ impl Diagnostic {
 /// Run the diagnostic as its original standalone burnable example.
 #[cfg(target_arch = "mips")]
 pub fn run_standalone() -> ! {
+    let Some(peripherals) = psx_rt::Peripherals::take() else {
+        // This is the program's entry: nothing took the peripherals before
+        // it, so this branch cannot run.
+        loop {}
+    };
     let mut gpu = Gpu::new(
-        psx_rt::Peripherals::take()
-            .expect("peripherals are taken once")
-            .gpu_dma,
+        peripherals.gpu_dma,
         DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
     );
     let mut fb = DoubleBuffer::new(Resolution::R320X240);
