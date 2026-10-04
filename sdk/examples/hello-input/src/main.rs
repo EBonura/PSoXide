@@ -28,7 +28,9 @@
 extern crate psx_rt;
 
 use psx_font::{fonts::BASIC, FontAtlas};
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::prim::TriFlat;
+use psx_gpu::Gpu;
 use psx_pad::{button, poll_port1, ButtonState, PadMode, PadState};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
@@ -46,10 +48,15 @@ const FONT_CLUT: Clut = Clut::new(320, 256);
 
 #[no_mangle]
 fn main() {
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
 
     // One-shot: expand the 1bpp BASIC font into a 4bpp CLUT texture
     // + a tiny transparent/white CLUT, both parked off the
@@ -81,12 +88,12 @@ fn main() {
         }
 
         // Background -- clear the back buffer.
-        fb.clear(r, g, b);
+        fb.clear(&mut gpu, (r, g, b));
 
         // Face buttons paint a coloured triangle in the centre of
         // the screen. Each direction rotates 90° so "Triangle"
         // literally points up, etc.
-        face_button_tri(pad);
+        face_button_tri(&mut gpu, pad);
 
         // Label row: show every held button as its uppercase name.
         // `(0x80, 0x80, 0x80)` = unmodulated white (PSX texture tint
@@ -94,9 +101,9 @@ fn main() {
         draw_button_labels(&font, pad);
         draw_pad_status(&font, state);
 
-        gpu::wait_idle();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
     }
 }
 
@@ -243,7 +250,7 @@ impl core::ops::Deref for HexU16 {
     }
 }
 
-fn face_button_tri(pad: ButtonState) {
+fn face_button_tri(gpu: &mut Gpu, pad: ButtonState) {
     let (verts, color) = if pad.is_held(button::TRIANGLE) {
         (
             [(160, 100), (140, 140), (180, 140)],
@@ -269,5 +276,5 @@ fn face_button_tri(pad: ButtonState) {
         // shows signs of life.
         ([(160, 118), (156, 124), (164, 124)], (200, 200, 200))
     };
-    gpu::draw_tri_flat(verts, color.0, color.1, color.2);
+    gpu.draw(&TriFlat::new(verts, color.0, color.1, color.2));
 }
