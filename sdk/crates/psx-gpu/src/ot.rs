@@ -86,9 +86,11 @@ impl<const N: usize> OrderingTable<N> {
     /// the CPU clear runs instead, so the table is always valid. Host
     /// builds always clear with the CPU.
     #[doc(alias = "ClearOTagR")]
-    pub fn clear_with_dma(&mut self, _dma: &mut OrderingTableClearDma) {
+    pub fn clear_with_dma(&mut self, dma: &mut OrderingTableClearDma) {
+        #[cfg(not(target_arch = "mips"))]
+        let _ = &dma;
         #[cfg(target_arch = "mips")]
-        if psx_io::dma::clear_ordering_table(&mut self.entries) {
+        if dma.clear_table(&mut self.entries) {
             return;
         }
         self.clear_software();
