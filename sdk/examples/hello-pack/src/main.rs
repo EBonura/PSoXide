@@ -24,7 +24,8 @@ extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
 use psx_font::{fonts::BASIC, FontAtlas};
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_pack::cd::{
     find_entry, load_chunk, load_chunk_decompressed, SectorReader, SECTOR_WORDS,
     WORLD_PACK_DEFAULT_LBA,
@@ -209,10 +210,15 @@ fn run() -> Report {
 
 #[no_mangle]
 fn main() {
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
 
     // Run once at boot; hold the result on screen.
@@ -227,9 +233,9 @@ fn main() {
     loop {
         // Whole-screen verdict color so a headless --dump-hw is unambiguous.
         if rep.all_ok {
-            fb.clear(16, 96, 32);
+            fb.clear(&mut gpu, (16, 96, 32));
         } else {
-            fb.clear(110, 20, 20);
+            fb.clear(&mut gpu, (110, 20, 20));
         }
         font.draw_text(8, 6, "PSX-PACK CD STREAM TEST", (230, 230, 240));
         let mut y: i16 = 26;
@@ -247,8 +253,8 @@ fn main() {
             font.draw_text(72, 210, rep.failed, (255, 235, 235));
         }
 
-        gpu::wait_idle();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
     }
 }

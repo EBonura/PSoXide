@@ -6,7 +6,7 @@
 //! units; a ×4 step on the frame counter gives one full Y-rev per 64
 //! frames (≈1 s at 60 fps).
 //!
-//! Edges drawn via `gpu::draw_line_mono` (GP0 0x40, real diagonal
+//! Edges drawn as `LineMono` packets (GP0 0x40, real diagonal
 //! rasteriser). The previous version of this example used
 //! `fill_rect`-per-pixel, which the PSX's GP0 0x02 fill primitive
 //! rounds to 16-pixel X boundaries -- the result was blocky noise
@@ -17,7 +17,9 @@
 
 extern crate psx_rt;
 
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::prim::LineMono;
+use psx_gpu::Gpu;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene;
 use psx_rt::tty;
@@ -62,12 +64,17 @@ const PITCH_STEP: u16 = 3;
 fn main() {
     tty::println("hello-gte: booted");
 
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
     // Double-buffer: tear-free cube spinning, even under the
     // mono-line rasteriser's per-pixel cost.
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
 
     // One-shot scene setup. OFX/OFY in 15.16 fixed-point centre the
     // projection at the screen middle. H=200 is a reasonable focal
@@ -79,7 +86,7 @@ fn main() {
 
     let mut frame: u16 = 0;
     loop {
-        fb.clear(0, 0, 32);
+        fb.clear(&mut gpu, (0, 0, 32));
 
         // Compose yaw × pitch on the CPU, upload once to GTE R0..R4.
         let yaw = Mat3I16::rotate_y(frame.wrapping_mul(YAW_STEP));
@@ -98,7 +105,7 @@ fn main() {
         for &(a, b) in &CUBE_EDGES {
             let (ax, ay) = projected[a];
             let (bx, by) = projected[b];
-            gpu::draw_line_mono(ax, ay, bx, by, 255, 255, 255);
+            gpu.draw(&LineMono::new(ax, ay, bx, by, 255, 255, 255));
         }
 
         if frame == 0 {
@@ -108,9 +115,9 @@ fn main() {
             }
         }
 
-        gpu::wait_idle();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
         frame = frame.wrapping_add(1);
     }
 }

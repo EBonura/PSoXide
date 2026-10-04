@@ -29,7 +29,8 @@ extern crate psx_rt;
 
 use psx_asset::Audio;
 use psx_font::{fonts::BASIC, FontAtlas};
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_pad::{button, poll_port1, ButtonState};
 use psx_spu::{self as spu, Adsr, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TextureDepth, TexturePage};
@@ -143,10 +144,15 @@ const SFX_CHANNELS: [SfxChannel; SFX_COUNT] = [
 
 #[no_mangle]
 fn main() {
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
 
     // Audio side init: SPU on, unmuted, main volume full.
     spu::init();
@@ -199,7 +205,7 @@ fn main() {
         // currently-active channel colours for a low-effort "you
         // can see what you hear" cue.
         let (r, g, b) = mix_background(&flashes);
-        fb.clear(r, g, b);
+        fb.clear(&mut gpu, (r, g, b));
 
         // Header.
         font.draw_text(4, 4, "hello-audio", (200, 200, 200));
@@ -231,9 +237,9 @@ fn main() {
             (120, 120, 120),
         );
 
-        gpu::wait_idle();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
     }
 }
 

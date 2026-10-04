@@ -15,7 +15,8 @@ extern crate psx_rt;
 use psx_font::fonts::BASIC;
 use psx_font::FontAtlas;
 #[cfg(target_arch = "mips")]
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_mc::{
     Block, Card, Entry, Error, HardwareCard, SaveIcon, Slot, TransportFault, TransportTrace,
     DATA_BLOCKS, FRAME_COUNT, FRAME_SIZE, MAX_NAME_LEN,
@@ -455,10 +456,15 @@ impl Diagnostic {
 /// Run the diagnostic as its original standalone burnable example.
 #[cfg(target_arch = "mips")]
 pub fn run_standalone() -> ! {
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
 
     let mut app = Diagnostic::new();
@@ -483,12 +489,12 @@ pub fn run_standalone() -> ! {
         );
         previous = current;
 
-        fb.clear(9, 11, 18);
+        fb.clear(&mut gpu, (9, 11, 18));
         app.draw(&font);
 
-        gpu::wait_idle();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
     }
 }
 

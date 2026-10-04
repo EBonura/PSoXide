@@ -30,7 +30,8 @@
 extern crate psx_rt;
 
 use psx_asset::Texture;
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_hw::gpu::{pack_color, pack_texcoord, pack_vertex, pack_xy};
 use psx_io::gpu::{wait_command_ready, write_command};
 use psx_math::sincos;
@@ -67,10 +68,15 @@ const FLOOR_U: u8 = 64;
 
 #[no_mangle]
 fn main() {
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
 
     // --- Parse + upload both cooked textures ---
     let brick = Texture::from_bytes(BRICK_BLOB).expect("brick.psxt");
@@ -112,7 +118,7 @@ fn main() {
     // gives a smooth back-and-forth drift.
     let mut frame: u32 = 0;
     loop {
-        fb.clear(16, 16, 32);
+        fb.clear(&mut gpu, (16, 16, 32));
 
         // Brick in the upper half: anchor at (100, 40), drifts
         // horizontally ±80 px and vertically ±20 px at slightly
@@ -131,9 +137,9 @@ fn main() {
         let fy = 140 + drift(floor_phase_y, 20);
         draw_sprite(fx, fy, TEX_W, TEX_H, (FLOOR_U, 0), floor_clut_word);
 
-        gpu::wait_idle();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
         frame = frame.wrapping_add(1);
     }
 }

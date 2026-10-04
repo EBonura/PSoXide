@@ -20,10 +20,11 @@ extern crate psx_rt;
 
 use core::ptr::addr_of_mut;
 use psx_font::{fonts::BASIC, FontAtlas};
-use psx_gpu::framebuf::FrameBuffer;
+use psx_gpu::chain::DRAW_DONE_NODE;
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::ot::OrderingTable;
-use psx_gpu::prim::TriGouraud;
-use psx_gpu::{self as gpu, Resolution, VideoMode};
+use psx_gpu::prim::{FillRect, TriGouraud};
+use psx_gpu::Gpu;
 use psx_io::gpu::{begin_recording_raw, end_recording};
 use psx_rt::{interrupts, present, tty};
 use psx_vram::{Clut, TextureDepth, TexturePage};
@@ -97,11 +98,16 @@ fn as_str(text: &[u8]) -> &str {
 #[no_mangle]
 fn main() {
     interrupts::install_vblank_counter();
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    fb.apply_draw_target();
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    fb.apply_draw_target(&mut gpu);
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
-    gpu::wait_idle();
+    gpu.wait_idle();
 
     let before = present::stats();
     present::start();
@@ -128,13 +134,17 @@ fn main() {
         // SAFETY: `hud` is static, and is not written again until
         // `wait_arena_free` says its walk has ended.
         unsafe { begin_recording_raw(hud.as_mut_ptr(), hud.len()) };
-        gpu::fill_rect(0, fb.buffer_y(fb.drawing) + 200, 320, 40, 20, 24, 60);
+        gpu.draw(&FillRect::new(
+            (0, fb.draw_origin().1 + 200),
+            (320, 40),
+            (20, 24, 60),
+        ));
         font.draw_text(8, 212, "QUEUED HUD", WHITE);
         match end_recording() {
             // SAFETY: the recording and the static GP0(1Fh) node live as long
             // as `hud`; the table's slot 0 is still empty.
             Ok(Some(recording)) => unsafe {
-                recording.link_to(gpu::DRAW_DONE_NODE.as_ptr());
+                recording.link_to(DRAW_DONE_NODE.as_ptr());
                 table.end_with_chain(recording.head());
             },
             _ => {
@@ -145,8 +155,8 @@ fn main() {
 
         // SAFETY: as for `hud`.
         unsafe { begin_recording_raw(preamble.as_mut_ptr(), preamble.len()) };
-        fb.apply_draw_target();
-        fb.clear(8, 24, 8);
+        fb.apply_draw_target(&mut gpu);
+        fb.clear(&mut gpu, (8, 24, 8));
         let Ok(Some(preamble)) = end_recording() else {
             overflows += 1;
             continue;
@@ -203,8 +213,8 @@ fn main() {
     tty::println("");
 
     loop {
-        fb.apply_draw_target();
-        fb.clear(10, 12, 20);
+        fb.apply_draw_target(&mut gpu);
+        fb.clear(&mut gpu, (10, 12, 20));
         font.draw_text(8, 6, "WHOLE FRAMES KICKED AT VBLANK", WHITE);
         font.draw_text(8, 30, banner, tint);
         for (row, (text, len)) in lines.iter().enumerate() {
@@ -215,8 +225,8 @@ fn main() {
             font.draw_text(8, y, what, RED);
             y += 12;
         }
-        gpu::arm_draw_done();
-        gpu::signal_draw_done();
+        gpu.arm_draw_done();
+        gpu.signal_draw_done();
         interrupts::queue_display_control_at_vblank(fb.begin_deferred_swap());
         wait_flip(WAIT_LIMIT);
     }

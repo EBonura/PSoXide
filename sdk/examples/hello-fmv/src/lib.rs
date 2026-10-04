@@ -41,7 +41,10 @@ use psx_font::{
     fonts::{basic::BASIC, basic_8x16::BASIC_8X16_BITMAP},
     BitOrder, BitmapFont, FontAtlas,
 };
-use psx_gpu::{self as gpu, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
+use psx_gpu::prim::FillRect;
+use psx_gpu::Gpu;
+use psx_io::periph::GpuDma;
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
 use psx_rt::{interrupts, tty};
 use psx_spu::{self as spu, CdVolume, Volume};
@@ -354,15 +357,23 @@ fn print_num(label: &str, v: u32) {
 }
 
 /// Point GPU drawing at the 320x240 buffer starting at VRAM row `y`.
-fn target(y: u16) {
-    gpu::set_draw_area(0, y, WIDTH - 1, y + HEIGHT - 1);
-    gpu::set_draw_offset(0, y as i16);
+fn target(gpu: &mut Gpu, y: u16) {
+    gpu.set_draw_area((0, y), (WIDTH - 1, y + HEIGHT - 1));
+    gpu.set_draw_offset((0, y as i16));
 }
 
 /// Live counters, drawn over the bottom of the video frame.
-fn draw_overlay(font: &FontAtlas, y: u16, st: &Stream, shown: u32, vblanks: u32, label: &str) {
-    gpu::fill_rect(0, y + 172, WIDTH, 68, 0, 0, 0);
-    target(y);
+fn draw_overlay(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    y: u16,
+    st: &Stream,
+    shown: u32,
+    vblanks: u32,
+    label: &str,
+) {
+    gpu.draw(&FillRect::new((0, y + 172), (WIDTH, 68), (0, 0, 0)));
+    target(gpu, y);
     let l1 = Text::new().s("FR ").n(shown, 4).s("  LATE ").n(st.late, 4);
     let l2 = Text::new().s("LOST ").n(st.lost, 4).s(" BAD ").n(st.bad, 4);
     let l3 = Text::new().s("LBA ").n(st.lba, 6).s("  ").time(vblanks);
@@ -376,7 +387,7 @@ fn draw_overlay(font: &FontAtlas, y: u16, st: &Stream, shown: u32, vblanks: u32,
     font.draw_text(X0, 212, l3.as_str(), WHITE);
     if !label.is_empty() {
         // A band over the top of the picture: the counters fill the bottom.
-        gpu::fill_rect(0, y, WIDTH, 20, 0, 0, 0);
+        gpu.draw(&FillRect::new((0, y), (WIDTH, 20), (0, 0, 0)));
         font.draw_text(X0, 2, label, YELLOW);
     }
 }
@@ -476,15 +487,22 @@ impl Options {
 pub const WEDGE_ERRORS: u32 = 8;
 
 /// Final screen: stays up after the stream ends.
-fn draw_summary(font: &FontAtlas, small: &FontAtlas, st: &Stream, s: &Summary, label: &str) {
-    gpu::fill_rect(0, 0, WIDTH, HEIGHT, 0, 0, 0);
-    target(0);
+fn draw_summary(
+    gpu: &mut Gpu,
+    font: &FontAtlas,
+    small: &FontAtlas,
+    st: &Stream,
+    s: &Summary,
+    label: &str,
+) {
+    gpu.draw(&FillRect::new((0, 0), (WIDTH, HEIGHT), (0, 0, 0)));
+    target(gpu, 0);
     let verdict = if s.pass { "PASS" } else { "FAIL" };
     let tint = if s.pass { GREEN } else { RED };
     font.draw_text(32, 12, "FMV CONSOLE TEST", WHITE);
     small.draw_text(X0, 2, label, YELLOW);
     // Verdict banner: a solid block reads from across the room.
-    gpu::fill_rect(16, 32, 288, 32, tint.0, tint.1, tint.2);
+    gpu.draw(&FillRect::new((16, 32), (288, 32), tint));
     let ink = if s.pass { (0, 0, 0) } else { (255, 255, 255) };
     font.draw_text(64, 40, Text::new().s("RESULT: ").s(verdict).as_str(), ink);
     let lines = [
@@ -559,16 +577,16 @@ fn draw_summary(font: &FontAtlas, small: &FontAtlas, st: &Stream, s: &Summary, l
         .n(s.kcyc[PHASE_WAIT], 1);
     small.draw_text(X0, 204, small_line.as_str(), WHITE);
     small.draw_text(X0, 214, "LATE: DECODER SLOW, NOT A FAIL", WHITE);
-    gpu::wait_idle();
-    psx_io::gpu::write_display_control(0x0500_0000);
+    gpu.wait_idle();
+    gpu.set_display_start((0, 0));
 }
 
 /// The test could not start: a red screen, and the reason on the TTY.
-fn fail(what: &'static str) -> Outcome {
+fn fail(gpu: &mut Gpu, what: &'static str) -> Outcome {
     tty::print("FMV FAIL ");
     tty::println(what);
-    gpu::fill_rect(0, 0, WIDTH, HEIGHT, 160, 0, 0);
-    psx_io::gpu::write_display_control(0x0500_0000);
+    gpu.draw(&FillRect::new((0, 0), (WIDTH, HEIGHT), (160, 0, 0)));
+    gpu.set_display_start((0, 0));
     Outcome {
         setup_error: Some(what),
         stop: Stop::Setup,
@@ -602,8 +620,14 @@ pub fn run() -> Outcome {
 /// plays a short cut behind each of its diagnostic sequences that worked.
 pub fn run_with(options: Options) -> Outcome {
     let setup = options.setup;
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    gpu::fill_rect(0, 0, WIDTH, 512, 0, 0, 0);
+    // SAFETY: the test takes over the GPU, as its doc says; nothing else
+    // drives it until the test returns.
+    let dma = unsafe { GpuDma::steal() };
+    let gpu = &mut Gpu::new(
+        dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    gpu.draw(&FillRect::new((0, 0), (WIDTH, 512), (0, 0, 0)));
     let font = FontAtlas::upload(&WIDE, FONT_TPAGE, FONT_CLUT);
     let small = FontAtlas::upload(&BASIC, SMALL_TPAGE, SMALL_CLUT);
 
@@ -615,10 +639,10 @@ pub fn run_with(options: Options) -> Outcome {
     // SAFETY: nothing else drives the CD while the test runs; prepare also
     // takes the drive over from whatever used it before.
     if !unsafe { (*addr_of_mut!(READER)).prepare() } {
-        return fail("cd prepare");
+        return fail(gpu, "cd prepare");
     }
     let Some((lba, _size)) = find_movie() else {
-        return fail("MOVIE.STR not found");
+        return fail(gpu, "MOVIE.STR not found");
     };
     // SAFETY: the reader is prepared and idle. Unmute first: a muted drive
     // plays no XA, and the program that ran before may have left it muted
@@ -628,11 +652,11 @@ pub fn run_with(options: Options) -> Outcome {
         r.unmute() && r.prepare_mode(CD_MODE) && r.set_filter(XA_FILE, XA_CHANNEL)
     };
     if !xa_ok {
-        return fail("cd xa mode");
+        return fail(gpu, "cd xa mode");
     }
     psx_io::cd::set_audio_mixer(0x80, 0, 0x80, 0);
     if !setup() {
-        return fail("mdec tables");
+        return fail(gpu, "mdec tables");
     }
 
     let mut st = Stream {
@@ -656,7 +680,7 @@ pub fn run_with(options: Options) -> Outcome {
     };
     // SAFETY: the reader was prepared above.
     if !unsafe { (*addr_of_mut!(READER)).start_read(lba) } {
-        return fail("cd start");
+        return fail(gpu, "cd start");
     }
 
     let mut shown = 0u32;
@@ -724,15 +748,15 @@ pub fn run_with(options: Options) -> Outcome {
         }
         in_a_row = 0;
         let elapsed = interrupts::vblank_count().wrapping_sub(start);
-        draw_overlay(&font, back_y, &st, shown + 1, elapsed, options.label);
-        gpu::wait_idle();
+        draw_overlay(gpu, &font, back_y, &st, shown + 1, elapsed, options.label);
+        gpu.wait_idle();
         clock(Some(PHASE_WAIT));
         // Pace to 15 fps, then flip at the VBlank; the drive keeps draining.
         while (interrupts::vblank_count().wrapping_sub(next_flip) as i32) < 0 {
             st.pump();
         }
         wait_vblank_pumping(&mut st);
-        psx_io::gpu::write_display_control(0x0500_0000 | ((back_y as u32) << 10));
+        gpu.set_display_start((0, back_y));
         next_flip = interrupts::vblank_count().wrapping_add(VBLANKS_PER_FRAME - 1);
         back_y = if back_y == 0 { 256 } else { 0 };
         shown += 1;
@@ -791,7 +815,7 @@ pub fn run_with(options: Options) -> Outcome {
     print_num("stop", stop as u32);
     print_num("target", st.total);
     tty::println("");
-    draw_summary(&font, &small, &st, &summary, options.label);
+    draw_summary(gpu, &font, &small, &st, &summary, options.label);
     Outcome {
         pass: summary.pass,
         setup_error: None,

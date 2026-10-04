@@ -9,7 +9,8 @@
 extern crate psx_rt;
 
 use psx_font::{fonts::BASIC, FontAtlas};
-use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::Gpu;
 use psx_io::cd;
 use psx_pad::{button, poll_port1, ButtonState};
 use psx_spu::{self as spu, CdVolume, Volume};
@@ -29,10 +30,15 @@ enum Playback {
 
 #[no_mangle]
 fn main() {
-    gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-    let mut fb = FrameBuffer::new(320, 240);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    let mut gpu = Gpu::new(
+        psx_rt::Peripherals::take()
+            .expect("peripherals are taken once")
+            .gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
 
     spu::init();
     spu::set_main_volume(Volume::MAX, Volume::MAX);
@@ -78,7 +84,7 @@ fn main() {
             Playback::Stopped => (24, 12, 16),
             Playback::Muted => (18, 16, 28),
         };
-        fb.clear(bg.0, bg.1, bg.2);
+        fb.clear(&mut gpu, (bg.0, bg.1, bg.2));
 
         font.draw_text(4, 4, "hello-cdda", (200, 200, 200));
         font.draw_text(4, 18, "TRACK 02: GONCHAROV", (120, 190, 230));
@@ -98,9 +104,9 @@ fn main() {
         font.draw_text(56, 122, status, tint);
         font.draw_text(4, 220, "mixed-mode disc audio stream", (110, 110, 110));
 
-        gpu::wait_idle();
+        gpu.wait_idle();
         psx_rt::interrupts::wait_vblank();
-        fb.swap();
+        fb.swap(&mut gpu);
     }
 }
 
