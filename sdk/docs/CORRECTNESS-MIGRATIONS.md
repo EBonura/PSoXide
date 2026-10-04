@@ -204,3 +204,25 @@ returns `Stale` otherwise. The old pair stays, deprecated and unchanged, for
 one stage. Caller: hk-psx `shared/hk-cache/src/lib.rs` (1 `reserve`, 1
 `mark_ready`, the latter in the same call so it cannot go stale today; move
 it anyway when a load can span frames).
+
+## psx-fx: slow particles drift (fx-01)
+
+`ParticlePool::update` moved a particle by `vx / 16` on integer pixels and
+dropped the remainder every frame, although the docs promise Q4.4
+sub-pixel velocity. A particle with `|vx| < 16` never moved, and every `vx`
+in `16..=31` moved exactly one pixel a frame, so about half of a burst with
+`velocity_range = 32` had no horizontal motion.
+
+`Particle` gains `x_frac` and `y_frac` (sixteenths of a pixel) and `update`
+carries the remainder, so the distance after `n` frames is
+`floor(n * v / 16)`. Particles move differently from the previous stage:
+slow ones now drift and fast ones move their true speed, so a burst is wider
+and the picture of a frame with live particles changes. Anything that pins
+frame hashes of a scene with `psx-fx` particles (hl-psx and cs-psx impact
+sparks) needs its pins refreshed on repin.
+
+`Particle` has two new public fields: a struct literal needs
+`..Particle::empty()` or the two zeroes. No game outside the SDK builds one
+(hk-psx and quake-psx have their own particle types); callers of
+`ParticlePool` (cs-psx 1, hl-psx 1 `render_into_ot` plus pool calls) need no
+edit.
