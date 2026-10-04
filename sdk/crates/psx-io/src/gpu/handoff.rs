@@ -114,7 +114,7 @@ pub(super) fn write_display_control_slow(word: u32) {
     super::write_display_control_unguarded(word);
 }
 
-/// A command stream recorded by [`begin_recording_raw`]: DMA linked-list
+/// A command stream recorded by [`start_recording_raw`]: DMA linked-list
 /// nodes that end the list until [`link_to`](Self::link_to) chains them
 /// onward.
 #[derive(Debug)]
@@ -289,28 +289,6 @@ pub unsafe fn start_recording_raw(buffer: *mut u32, words: usize) -> ActiveRecor
     // SAFETY: forwarded from this fn's `# Safety`.
     let generation = unsafe { open(buffer, words) };
     ActiveRecording { generation }
-}
-
-/// Starts a recording that only [`end_recording`] closes.
-///
-/// # Safety
-///
-/// As [`start_recording_raw`], with [`end_recording`] closing the
-/// recording. No other recording may be open.
-#[deprecated(note = "use `start_recording_raw`, and end the `ActiveRecording` it returns")]
-#[inline(always)]
-pub unsafe fn begin_recording_raw(buffer: *mut u32, words: usize) {
-    // SAFETY: forwarded contract. The recording stays open, with no guard,
-    // until `end_recording`.
-    unsafe { open(buffer, words) };
-}
-
-/// Ends the open recording. `Ok(None)` when nothing was written, and also
-/// when no recording is open: a second call touches nothing.
-#[deprecated(note = "end the `ActiveRecording` that `start_recording_raw` returns")]
-#[inline(always)]
-pub fn end_recording() -> Result<Option<CommandRecording>, RecordingOverflow> {
-    close(None)
 }
 
 /// An open recording paused by [`pause_recording`]; it resumes where it left
@@ -506,33 +484,6 @@ mod tests {
         let recording = active.end().expect("fits").expect("words recorded");
         assert_eq!(recording.len_words(), 3);
         assert_eq!(&resumed[1..3], &[0xAA, 0xBB]);
-        assert!(!is_slow());
-    }
-
-    /// Records one word into a stack buffer through the deprecated pair and
-    /// returns, so the buffer is gone afterwards.
-    #[allow(deprecated)] // the regression is in the deprecated free functions
-    #[inline(never)]
-    fn record_into_stack_buffer() {
-        let mut buffer = [0u32; 8];
-        // SAFETY: `buffer` lives until `end_recording` closes the recording
-        // below, and is never walked.
-        unsafe { begin_recording_raw(buffer.as_mut_ptr(), buffer.len()) };
-        write_command(0x1234_5678);
-        let recording = end_recording().expect("fits").expect("words recorded");
-        assert_eq!(recording.len_words(), 2);
-    }
-
-    /// io-01: a second `end_recording` once the first closed the recording
-    /// stored the end tag through the dead buffer's pointer (Miri: "pointer
-    /// is dangling"). It now finds no open recording and touches nothing.
-    #[allow(deprecated)] // the regression is in the deprecated free functions
-    #[test]
-    fn a_second_end_recording_touches_nothing() {
-        let _serial = serial();
-        record_into_stack_buffer();
-        assert!(end_recording().expect("no overflow").is_none());
-        assert!(!is_recording());
         assert!(!is_slow());
     }
 

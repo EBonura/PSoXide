@@ -190,7 +190,6 @@ fn accessors_stay_inside_the_blob() {
         lying.n_tris = 1 << 20;
         lying.n_verts = 1 << 20;
         lying.n_ranges = 1 << 20;
-        lying.n_bones = 1 << 20;
         lying.n_frames = 1 << 20;
         lying.n_clips = 1 << 20;
     }

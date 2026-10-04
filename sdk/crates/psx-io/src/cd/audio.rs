@@ -386,27 +386,9 @@ impl PlaybackStarter {
     }
 }
 
-impl EndDetector {
-    /// Renamed to [`Self::is_armed`].
-    #[deprecated(note = "renamed to `is_armed`")]
-    pub fn armed(&self) -> bool {
-        self.is_armed()
-    }
-}
+impl EndDetector {}
 
-impl PlaybackClock {
-    /// [`tick_on`](Self::tick_on) on a token the caller does not hold.
-    #[deprecated(note = "use `tick_on` with the `Cd` token")]
-    pub fn tick(&mut self, now_tick: u32) -> u32 {
-        self.tick_on(&mut steal(), now_tick)
-    }
-
-    /// Renamed to [`Self::is_playing`].
-    #[deprecated(note = "renamed to `is_playing`")]
-    pub fn playing(&self) -> bool {
-        self.is_playing()
-    }
-}
+impl PlaybackClock {}
 
 /// A token for a deprecated forwarder that never took one.
 fn steal() -> Cd {

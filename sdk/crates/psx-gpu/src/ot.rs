@@ -30,10 +30,6 @@ use psx_io::periph::OrderingTableClearDma;
 const OT_ADDR_MASK: u32 = psx_hw::dma::linked_list::ADDRESS_MASK;
 const OT_END: u32 = psx_hw::dma::linked_list::END;
 const OT_MAX_EXTRA_HOPS: usize = 131_072;
-/// A staged-tag bit that tagged-stream insertion ignores: the stream inserts
-/// keep only the word count and the slot from a staged tag.
-#[deprecated(note = "has no effect: the scoped texture-window coalescing that read it was removed")]
-pub const TAG_SCOPED_TEXTURE_WINDOW: u32 = 1 << 16;
 /// Whether DMA can read `packet`: on the console, main RAM (any mirror or
 /// segment) and not the scratchpad, whose low 24 bits would name a RAM
 /// address instead. Host builds accept any address.
@@ -94,15 +90,6 @@ impl<const N: usize> OrderingTable<N> {
             return;
         }
         self.clear_software();
-    }
-
-    /// Renamed to [`Self::clear_with_dma`], which takes the channel's token.
-    #[deprecated(note = "use `clear_with_dma` with the `OrderingTableClearDma` token")]
-    #[inline(always)]
-    pub fn clear_via_otc_dma(&mut self) {
-        // SAFETY: a token is a logic guard, not a memory-safety one (see
-        // `psx_io::periph`); this method never took one.
-        self.clear_with_dma(&mut unsafe { OrderingTableClearDma::steal() });
     }
 
     #[cfg(not(target_arch = "mips"))]
@@ -701,43 +688,6 @@ impl<const N: usize> OrderingTable<N> {
         unsafe { self.link_unchecked(z, packet_ptr, words) }
     }
 
-    /// Prepend a raw packet whose word count is already in tag position.
-    ///
-    /// # Safety
-    ///
-    /// As [`OtFrame::add_raw_tag_high_unchecked`](crate::frame::OtFrame::add_raw_tag_high_unchecked).
-    #[deprecated(
-        note = "use `OtFrame::add_raw_tag_high_unchecked`, through `frame()` or `resume_frame()`"
-    )]
-    #[inline(always)]
-    pub unsafe fn insert_unchecked_tag_high(
-        &mut self,
-        z: usize,
-        packet_ptr: *mut u32,
-        tag_high: u32,
-    ) {
-        // SAFETY: forwarded contract.
-        unsafe { self.link_tag_high_unchecked(z, packet_ptr, tag_high) }
-    }
-
-    /// Add packed two-word commands, first to last.
-    ///
-    /// # Safety
-    ///
-    /// As [`OtFrame::add_packed_commands_unchecked`](crate::frame::OtFrame::add_packed_commands_unchecked).
-    #[deprecated(
-        note = "use `OtFrame::add_packed_commands_unchecked`, through `frame()` or `resume_frame()`"
-    )]
-    #[inline(always)]
-    pub unsafe fn insert_packed_commands_unchecked(
-        &mut self,
-        commands: *const usize,
-        command_count: usize,
-    ) {
-        // SAFETY: forwarded contract.
-        unsafe { self.link_packed_commands_unchecked(commands, command_count) }
-    }
-
     /// Add packed two-word commands, last to first.
     ///
     /// # Safety
@@ -768,24 +718,6 @@ impl<const N: usize> OrderingTable<N> {
     pub unsafe fn insert_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
         // SAFETY: forwarded contract.
         unsafe { self.link_tagged_packet_stream_unchecked(first, end) }
-    }
-
-    /// Add a tagged packet stream with every slot shifted right.
-    ///
-    /// # Safety
-    ///
-    /// As [`OtFrame::add_tagged_packet_stream_shifted_unchecked`](crate::frame::OtFrame::add_tagged_packet_stream_shifted_unchecked).
-    #[deprecated(
-        note = "use `OtFrame::add_tagged_packet_stream_shifted_unchecked`, through `frame()` or `resume_frame()`"
-    )]
-    #[inline(always)]
-    pub unsafe fn insert_tagged_packet_stream_shifted_unchecked<const SLOT_SHIFT: u32>(
-        &mut self,
-        first: *mut u32,
-        end: *mut u32,
-    ) {
-        // SAFETY: forwarded contract.
-        unsafe { self.link_tagged_packet_stream_shifted_unchecked::<SLOT_SHIFT>(first, end) }
     }
 
     /// End this table's DMA walk with GP0(1Fh), so the GPU raises
@@ -915,22 +847,7 @@ impl<const N: usize> OrderingTable<N> {
             _table: PhantomData,
         }
     }
-
-    /// Renamed to [`Self::packets`].
-    ///
-    /// # Safety
-    /// See [`Self::packets`].
-    #[deprecated(note = "renamed to `packets`")]
-    #[inline(always)]
-    pub unsafe fn iter_packets(&self) -> Packets<'_> {
-        // SAFETY: same contract as the renamed function.
-        unsafe { self.packets() }
-    }
 }
-
-/// Renamed to [`Packets`].
-#[deprecated(note = "renamed to `Packets`")]
-pub type OtPacketIter<'a> = Packets<'a>;
 
 /// Walks an [`OrderingTable`]'s chain in DMA submission order.
 ///

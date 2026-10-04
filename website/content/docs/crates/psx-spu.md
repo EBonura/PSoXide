@@ -10,7 +10,7 @@ Use `psx-spu` to configure the sound hardware directly. It supplies typed voice 
 
 ## How the crate is organized
 
-The root contains initialization, sample upload, voice configuration, key-on/key-off, loop, noise and interrupt helpers. `tones` provides built-in ADPCM tone data. `Voice`, `Pitch`, `Volume`, `CdVolume`, `Adsr` and `SpuAddr` keep the different register representations distinct.
+The root contains initialization, sample upload, voice configuration, key-on/key-off, loop, noise and interrupt helpers. `Voice`, `Pitch`, `Volume`, `CdVolume`, `Adsr` and `SpuAddr` keep the different register representations distinct.
 
 ## Integration notes
 

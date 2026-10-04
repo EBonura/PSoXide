@@ -593,10 +593,6 @@ pub const fn interrupt_resume_pc(epc: u32, word_at_epc: u32) -> u32 {
     }
 }
 
-/// Moved to [`psx_hw::cop0::CAUSE_BD`].
-#[deprecated(note = "renamed to `psx_hw::cop0::CAUSE_BD`")]
-pub const CAUSE_BD: u32 = psx_hw::cop0::CAUSE_BD;
-
 /// Where psx-rt's exception handler resumes after a fault (any exception
 /// but an interrupt), or `None` where it halts. `badvaddr` is COP0
 /// BadVAddr.
@@ -645,13 +641,6 @@ pub fn fault_bad_address() -> u32 {
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_badvaddr) }
 }
 
-/// Renamed to [`fault_bad_address`].
-#[deprecated(note = "renamed to `fault_bad_address`")]
-#[inline(always)]
-pub fn fault_badvaddr() -> u32 {
-    fault_bad_address()
-}
-
 /// Raw COP0 Cause captured for the latest unexpected exception.
 #[inline]
 pub fn fault_cause() -> u32 {
@@ -667,13 +656,6 @@ pub fn fault_pc() -> u32 {
     // SAFETY: a volatile aligned u32 read through a raw pointer, so no reference is formed. Only
     // the asm exception handler writes it, and an aligned word load cannot tear.
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_epc) }
-}
-
-/// Renamed to [`fault_pc`].
-#[deprecated(note = "renamed to `fault_pc`")]
-#[inline(always)]
-pub fn fault_epc() -> u32 {
-    fault_pc()
 }
 
 /// Current monotonic VBlank count.
@@ -869,14 +851,6 @@ pub fn is_handler_installed() -> bool {
     vector_word() == jump_word(handler)
 }
 
-/// Renamed to [`is_handler_installed`].
-#[cfg(target_arch = "mips")]
-#[deprecated(note = "renamed to `is_handler_installed`")]
-#[inline(always)]
-pub fn handler_installed() -> bool {
-    is_handler_installed()
-}
-
 /// The vector word of a game's exception handler declared with
 /// [`declare_stack_safe_handler`]; zero when none is.
 #[cfg(target_arch = "mips")]
@@ -938,14 +912,6 @@ pub fn is_stack_safe_handler_installed() -> bool {
     is_handler_installed() || (declared != 0 && vector_word() == declared)
 }
 
-/// Renamed to [`is_stack_safe_handler_installed`].
-#[cfg(target_arch = "mips")]
-#[deprecated(note = "renamed to `is_stack_safe_handler_installed`")]
-#[inline(always)]
-pub fn stack_safe_handler_installed() -> bool {
-    is_stack_safe_handler_installed()
-}
-
 /// The `j handler` word psx-rt writes into the vector.
 #[cfg(target_arch = "mips")]
 fn jump_word(handler: u32) -> u32 {
@@ -969,14 +935,6 @@ pub fn are_interrupts_enabled() -> bool {
     // No memory or stack is touched, as the options state.
     unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr, options(nomem, nostack)) };
     sr & 1 != 0
-}
-
-/// Renamed to [`are_interrupts_enabled`].
-#[cfg(target_arch = "mips")]
-#[deprecated(note = "renamed to `are_interrupts_enabled`")]
-#[inline(always)]
-pub fn cpu_interrupts_enabled() -> bool {
-    are_interrupts_enabled()
 }
 
 #[cfg(target_arch = "mips")]

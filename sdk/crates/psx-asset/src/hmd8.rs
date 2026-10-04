@@ -174,14 +174,13 @@ pub struct Model {
     pub n_frames: usize,
     #[deprecated(note = "use `clip_count()`")]
     pub n_clips: usize,
+    n_bones: usize,
     clips_off: usize,
     frame_times_off: usize,
     ranges_off: usize,
     vertices_off: usize,
     vertices_z_off: usize,
     poses_off: usize,
-    #[deprecated(note = "use `bone_count()`")]
-    pub n_bones: usize,
     #[deprecated(note = "use `bone_range_count()`")]
     pub n_ranges: usize,
     tri_off: usize,
@@ -412,10 +411,6 @@ const IDENTITY_TRANSFORM: BoneTransform = BoneTransform {
 /// scribbling past it.
 pub const DEFAULT_MAX_VERTICES: usize = RENDER_FACE_INDEX_MASK as usize + 1;
 
-/// Renamed to [`DEFAULT_MAX_VERTICES`].
-#[deprecated(note = "renamed to `DEFAULT_MAX_VERTICES`")]
-pub const DEFAULT_MAX_VERTS: usize = DEFAULT_MAX_VERTICES;
-
 /// A decoded triangle. The blob keeps these packed; this is the unpacked view.
 #[derive(Clone, Copy)]
 pub struct Triangle {
@@ -425,10 +420,6 @@ pub struct Triangle {
     pub normal: [i8; 3],
     pub body_mask: u8,
 }
-
-/// Renamed to [`Triangle`].
-#[deprecated(note = "renamed to `Triangle`")]
-pub type Tri = Triangle;
 
 /// Cold UV payload for a projected model face. Vertex indices live in a
 /// separate packed-u32 stream so near/backface rejects touch only four
@@ -515,13 +506,6 @@ impl Model {
     /// Parse a HMD8 blob, guarding vertex count with [`DEFAULT_MAX_VERTICES`].
     pub fn from_bytes(data: &'static [u8]) -> Model {
         Self::from_bytes_with_vertex_cap(data, DEFAULT_MAX_VERTICES)
-    }
-
-    /// Renamed to [`Model::from_bytes`].
-    #[deprecated(note = "renamed to `from_bytes`")]
-    #[inline(always)]
-    pub fn load(data: &'static [u8]) -> Model {
-        Self::from_bytes(data)
     }
 
     /// Renamed to [`Model::from_bytes_with_vertex_cap`].
@@ -850,13 +834,6 @@ impl Model {
                 })
             },
         })
-    }
-
-    /// Renamed to [`Model::tracks`].
-    #[deprecated(note = "renamed to `tracks`")]
-    #[inline(always)]
-    pub fn hma1(&self) -> Option<Tracks> {
-        self.tracks()
     }
 
     /// True when the model animates from HMA1 tracks. Its phase functions
@@ -1827,33 +1804,11 @@ impl Model {
         self.vertex(index)
     }
 
-    /// Renamed to [`Model::vertex_unchecked`].
-    ///
-    /// # Safety
-    /// See [`Model::vertex_unchecked`].
-    #[deprecated(note = "renamed to `vertex_unchecked`")]
-    #[inline(always)]
-    pub unsafe fn vert_unchecked(&self, index: usize) -> Vec3I16 {
-        // SAFETY: same contract as the renamed function.
-        unsafe { self.vertex_unchecked(index) }
-    }
-
     /// Renamed to [`Model::vertex_gte_words`].
     #[deprecated(note = "renamed to `vertex_gte_words`")]
     #[inline(always)]
     pub fn vert_gte_words(&self, index: usize) -> GteVertexWords {
         self.vertex_gte_words(index)
-    }
-
-    /// Renamed to [`Model::vertex_gte_words_unchecked`].
-    ///
-    /// # Safety
-    /// See [`Model::vertex_gte_words_unchecked`].
-    #[deprecated(note = "renamed to `vertex_gte_words_unchecked`")]
-    #[inline(always)]
-    pub unsafe fn vert_gte_words_unchecked(&self, index: usize) -> GteVertexWords {
-        // SAFETY: same contract as the renamed function.
-        unsafe { self.vertex_gte_words_unchecked(index) }
     }
 
     /// Renamed to [`Model::triangle`].
@@ -1863,51 +1818,11 @@ impl Model {
         self.triangle(t)
     }
 
-    /// Renamed to [`Model::triangle_unchecked`].
-    ///
-    /// # Safety
-    /// See [`Model::triangle_unchecked`].
-    #[deprecated(note = "renamed to `triangle_unchecked`")]
-    #[inline(always)]
-    pub unsafe fn tri_unchecked(&self, t: usize) -> Triangle {
-        // SAFETY: same contract as the renamed function.
-        unsafe { self.triangle_unchecked(t) }
-    }
-
     /// Renamed to [`Model::triangle_uv_words`].
     #[deprecated(note = "renamed to `triangle_uv_words`")]
     #[inline(always)]
     pub fn tri_uv_words(&self, t: usize) -> [u16; 3] {
         self.triangle_uv_words(t)
-    }
-
-    /// Renamed to [`Model::triangle_uv_words_unchecked`].
-    ///
-    /// # Safety
-    /// See [`Model::triangle_uv_words_unchecked`].
-    #[deprecated(note = "renamed to `triangle_uv_words_unchecked`")]
-    #[inline(always)]
-    pub unsafe fn tri_uv_words_unchecked(&self, t: usize) -> [u16; 3] {
-        // SAFETY: same contract as the renamed function.
-        unsafe { self.triangle_uv_words_unchecked(t) }
-    }
-
-    /// Renamed to [`Model::triangle_normal`].
-    #[deprecated(note = "renamed to `triangle_normal`")]
-    #[inline(always)]
-    pub fn tri_normal(&self, t: usize) -> [i8; 3] {
-        self.triangle_normal(t)
-    }
-
-    /// Renamed to [`Model::triangle_normal_unchecked`].
-    ///
-    /// # Safety
-    /// See [`Model::triangle_normal_unchecked`].
-    #[deprecated(note = "renamed to `triangle_normal_unchecked`")]
-    #[inline(always)]
-    pub unsafe fn tri_normal_unchecked(&self, t: usize) -> [i8; 3] {
-        // SAFETY: same contract as the renamed function.
-        unsafe { self.triangle_normal_unchecked(t) }
     }
 }
 

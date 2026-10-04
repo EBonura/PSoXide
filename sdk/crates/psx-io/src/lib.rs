@@ -22,11 +22,8 @@ pub mod controller_port;
 pub mod disc_base;
 pub mod dma;
 pub mod gpu;
-pub mod gte;
 pub mod irq;
 pub mod periph;
-pub mod sio;
-pub mod spu;
 pub mod timers;
 
 /// Read a 32-bit word from `addr`. Caller must guarantee `addr` is
@@ -97,28 +94,6 @@ pub unsafe fn write_u8(addr: u32, value: u8) {
     unsafe { core::ptr::write_volatile(addr as *mut u8, value) }
 }
 
-/// Renamed to [`read_u32`].
-///
-/// # Safety
-/// See [`read_u32`].
-#[deprecated(note = "renamed to `read_u32`")]
-#[inline(always)]
-pub unsafe fn read32(addr: u32) -> u32 {
-    // SAFETY: same contract as the renamed function.
-    unsafe { read_u32(addr) }
-}
-
-/// Renamed to [`read_u16`].
-///
-/// # Safety
-/// See [`read_u16`].
-#[deprecated(note = "renamed to `read_u16`")]
-#[inline(always)]
-pub unsafe fn read16(addr: u32) -> u16 {
-    // SAFETY: same contract as the renamed function.
-    unsafe { read_u16(addr) }
-}
-
 /// Renamed to [`read_u8`].
 ///
 /// # Safety
@@ -128,28 +103,6 @@ pub unsafe fn read16(addr: u32) -> u16 {
 pub unsafe fn read8(addr: u32) -> u8 {
     // SAFETY: same contract as the renamed function.
     unsafe { read_u8(addr) }
-}
-
-/// Renamed to [`write_u32`].
-///
-/// # Safety
-/// See [`write_u32`].
-#[deprecated(note = "renamed to `write_u32`")]
-#[inline(always)]
-pub unsafe fn write32(addr: u32, value: u32) {
-    // SAFETY: same contract as the renamed function.
-    unsafe { write_u32(addr, value) }
-}
-
-/// Renamed to [`write_u16`].
-///
-/// # Safety
-/// See [`write_u16`].
-#[deprecated(note = "renamed to `write_u16`")]
-#[inline(always)]
-pub unsafe fn write16(addr: u32, value: u16) {
-    // SAFETY: same contract as the renamed function.
-    unsafe { write_u16(addr, value) }
 }
 
 /// Renamed to [`write_u8`].

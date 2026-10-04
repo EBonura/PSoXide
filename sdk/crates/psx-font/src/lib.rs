@@ -101,8 +101,6 @@ use psx_vram::{
 pub mod fonts;
 pub mod hex;
 
-#[allow(deprecated)] // keeps the old root path working until games repin
-pub use hex::u16_hex;
 pub use hex::{format_u16, HexU16};
 
 // ======================================================================
@@ -348,13 +346,6 @@ impl TextBlend {
             Self::Subtract => 2,
             Self::AddQuarter => 3,
         }
-    }
-
-    /// Renamed to [`TextBlend::semi_transparency_bits`].
-    #[deprecated(note = "renamed to `semi_transparency_bits`")]
-    #[inline(always)]
-    pub const fn abr(self) -> u8 {
-        self.semi_transparency_bits()
     }
 }
 
@@ -1539,7 +1530,7 @@ impl FontAtlas {
     /// authored letter spacing.
     ///
     /// `colors` are ordered top-left, top-right, bottom-left,
-    /// bottom-right, matching [`psx_gpu::draw_quad_textured_gouraud`].
+    /// bottom-right, matching `psx_gpu::draw_quad_textured_gouraud`.
     /// This is the general-purpose path behind gradient UI text:
     /// vertical gradients use `[top, top, bottom, bottom]`, horizontal
     /// gradients use `[left, right, left, right]`.
@@ -1606,13 +1597,6 @@ impl FontAtlas {
     #[doc(alias = "tpage")]
     pub fn texture_page(&self) -> TexturePage {
         self.tpage
-    }
-
-    /// Renamed to [`FontAtlas::texture_page`].
-    #[deprecated(note = "renamed to `texture_page`")]
-    #[inline(always)]
-    pub fn tpage(&self) -> TexturePage {
-        self.texture_page()
     }
 }
 

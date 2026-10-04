@@ -17,7 +17,7 @@
 //! same arithmetic runs in Rust.
 //!
 //! Layout (little endian): u16 n_bones, u16 n_clips, u8 parent[n] (0xff
-//! root), pad to 2, i16 bind_t[n][3] (Q2), pad to 4, u32 clip_off[n_clips];
+//! root), pad to 2, i16 bind_t[n][3] (Q2), pad to 4, u32 clip_off[clip_count];
 //! clip: u16 n_int, u8 flags, u8 qfmt(=3), u16 seg[7], u16 factor_q15[7],
 //! u8 mode[n], pad to 2, then byte-packed tracks.
 
@@ -26,9 +26,6 @@
 use core::ptr;
 
 pub const RATE_COUNT: usize = 7;
-/// Renamed to [`RATE_COUNT`].
-#[deprecated(note = "renamed to `RATE_COUNT`")]
-pub const N_RATES: usize = RATE_COUNT;
 const CLIP_HEADER: usize = 4 + 2 * RATE_COUNT * 2;
 
 #[derive(Clone, Copy)]
@@ -474,20 +471,6 @@ impl Model {
     #[inline]
     pub fn clip_count(&self) -> usize {
         self.n_clips
-    }
-
-    /// Renamed to [`Model::bone_count`].
-    #[deprecated(note = "renamed to `bone_count`")]
-    #[inline(always)]
-    pub fn n_bones(&self) -> usize {
-        self.bone_count()
-    }
-
-    /// Renamed to [`Model::clip_count`].
-    #[deprecated(note = "renamed to `clip_count`")]
-    #[inline(always)]
-    pub fn n_clips(&self) -> usize {
-        self.clip_count()
     }
 
     /// Byte offset of `clip`'s record, clamped to the last clip.
