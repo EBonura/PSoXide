@@ -1099,16 +1099,15 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramRegionSource
 /// halfword packs 4 or 2 indices respectively.
 pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
     let expected = rect.pixel_count();
-    assert_eq!(
-        pixels.len() as u32,
-        expected,
-        "upload_16bpp: pixels.len() ({}) != rect.w*rect.h ({})",
-        pixels.len(),
-        expected,
+    // Literal messages: formatting the counts links core::fmt (about 4 KB)
+    // into any program where this function is not inlined.
+    assert!(
+        pixels.len() as u32 == expected,
+        "upload_16bpp: pixels.len() != rect.w * rect.h"
     );
     assert!(
         expected.is_multiple_of(2),
-        "upload_16bpp: odd pixel count ({expected}) not supported - caller should round up",
+        "upload_16bpp: odd pixel count not supported; round the rect up"
     );
 
     // FIFO path by default: the CL2 silicon probes showed this console's
