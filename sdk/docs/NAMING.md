@@ -171,7 +171,7 @@ A rename never breaks a game that has not repinned:
 2. The old name stays as a thin `#[deprecated(note = "renamed to ...")]`
    wrapper (`#[inline(always)]` function, type alias or constant), so a repin
    compiles with warnings that point at the new name.
-3. Once no game's main uses the old name, it is removed.
+3. Once no game's main uses the old name, it is removed. [DEPRECATED-REMAINING.md](DEPRECATED-REMAINING.md) lists every item still deprecated and who calls it.
 
 The forwarder takes the form the item allows:
 
