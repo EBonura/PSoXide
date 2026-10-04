@@ -267,9 +267,13 @@ fn runtime_numeric_guard() -> Result<(), String> {
     // shims (their signatures are i64 by ABI definition); psx-math's
     // fmt.rs is the u64 decimal formatter. Line markers inside them
     // would just repeat the file header.
+    // psx-fmv/idct.rs builds the MDEC IDCT matrix in const-eval i128 and u64
+    // (pi, cosines, an integer square root); only the finished table exists
+    // at run time. The SDK pin at ae6e1ef10 brought it in without line markers.
     let exempt_files = [
         root.join("sdk/crates/psx-rt/src/builtins.rs"),
         root.join("sdk/crates/psx-math/src/fmt.rs"),
+        root.join("sdk/crates/psx-fmv/src/idct.rs"),
     ];
 
     let mut files = Vec::new();
