@@ -4,9 +4,9 @@
 //! communicates almost entirely through command packets pushed to `GP0`
 //! (rendering and VRAM transfers) and `GP1` (display control and state).
 //!
-//! Command-packet layouts (triangles, rectangles, fills, CPU-to-VRAM,
-//! etc.) live in [`packet`]; the register definitions and `GPUSTAT` bits
-//! live in the top level of this module.
+//! Primitive command words live in [`packet`], command-word builders in
+//! [`gp0`] and [`gp1`]; the register definitions and `GPUSTAT` bits live in
+//! the top level of this module.
 //!
 //! Reference: nocash PSX-SPX "GPU I/O Ports" section.
 
@@ -404,15 +404,56 @@ pub const fn pack_texcoord(u: u8, v: u8, extra: u16) -> u32 {
     (u as u32) | ((v as u32) << 8) | ((extra as u32) << 16)
 }
 
-/// Command-packet layouts for `GP0` and `GP1`.
+/// `GP0` primitive command words.
 ///
-/// Populated incrementally as the emulator and SDK grow: triangles and
-/// rectangles first (Milestone C), textured primitives next, then
-/// VRAM-transfer packets.
+/// Each constant is the command word's top byte with a zero color, the
+/// form every primitive header takes: OR in [`pack_color`](super::pack_color) (the first
+/// vertex's color for shaded primitives) and, for a translucent or
+/// raw-textured primitive, [`SEMI_TRANSPARENT`] and [`RAW_TEXTURE`]. The
+/// bit layout is psx-spx "GPU Render Polygon Commands" (bits 28..24 select
+/// shading, vertex count, texturing, translucency and raw texture), "Render
+/// Line Commands" and "Render Rectangle Commands".
 pub mod packet {
-    // Intentionally empty for now. Each packet type will live in its own
-    // submodule (`triangle`, `rectangle`, `fill`, `copy`, …) with a
-    // `#[repr(C)]` layout and a `static_assert_eq!` on its size.
+    /// Polygon class, bits 31..29 = `001`.
+    pub const POLYGON: u32 = 0x2000_0000;
+    /// Polygon bit 28: Gouraud shading, one color per vertex.
+    pub const SHADED: u32 = 1 << 28;
+    /// Polygon bit 27: four vertices instead of three.
+    pub const QUAD: u32 = 1 << 27;
+    /// Polygon bit 26: textured.
+    pub const TEXTURED: u32 = 1 << 26;
+    /// Bit 25 of a polygon, line or rectangle: semi-transparent.
+    pub const SEMI_TRANSPARENT: u32 = 1 << 25;
+    /// Bit 24 of a textured primitive: draw the texture as is, without
+    /// blending it with the primitive's color.
+    pub const RAW_TEXTURE: u32 = 1 << 24;
+
+    /// Flat-colored triangle.
+    pub const FLAT_TRIANGLE: u32 = POLYGON;
+    /// Textured triangle blended with one color.
+    pub const FLAT_TEXTURED_TRIANGLE: u32 = POLYGON | TEXTURED;
+    /// Gouraud-shaded triangle.
+    pub const SHADED_TRIANGLE: u32 = POLYGON | SHADED;
+    /// Gouraud-shaded textured triangle.
+    pub const SHADED_TEXTURED_TRIANGLE: u32 = POLYGON | SHADED | TEXTURED;
+    /// Flat-colored quad.
+    pub const FLAT_QUAD: u32 = POLYGON | QUAD;
+    /// Textured quad blended with one color.
+    pub const FLAT_TEXTURED_QUAD: u32 = POLYGON | QUAD | TEXTURED;
+    /// Gouraud-shaded quad.
+    pub const SHADED_QUAD: u32 = POLYGON | QUAD | SHADED;
+    /// Gouraud-shaded textured quad.
+    pub const SHADED_TEXTURED_QUAD: u32 = POLYGON | QUAD | SHADED | TEXTURED;
+
+    /// Flat-colored line.
+    pub const FLAT_LINE: u32 = 0x4000_0000;
+    /// Gouraud-shaded line (a second color word follows the first vertex).
+    pub const SHADED_LINE: u32 = 0x5000_0000;
+
+    /// Flat-colored rectangle of a size given in the packet.
+    pub const FLAT_RECT: u32 = 0x6000_0000;
+    /// Textured rectangle of a size given in the packet.
+    pub const TEXTURED_RECT: u32 = 0x6400_0000;
 }
 
 #[cfg(test)]
@@ -498,6 +539,45 @@ mod tests {
         // R=0xAA G=0xBB B=0xCC → 0x02CCBBAA
         let word = gp0::fill_rect(0xAA, 0xBB, 0xCC);
         assert_eq!(word, 0x02CC_BBAA);
+    }
+
+    #[test]
+    fn packet_words_match_psx_spx_command_bytes() {
+        use packet::*;
+        assert_eq!(
+            [
+                FLAT_TRIANGLE,
+                FLAT_TEXTURED_TRIANGLE,
+                SHADED_TRIANGLE,
+                SHADED_TEXTURED_TRIANGLE
+            ],
+            [0x2000_0000, 0x2400_0000, 0x3000_0000, 0x3400_0000]
+        );
+        assert_eq!(
+            [
+                FLAT_QUAD,
+                FLAT_TEXTURED_QUAD,
+                SHADED_QUAD,
+                SHADED_TEXTURED_QUAD
+            ],
+            [0x2800_0000, 0x2C00_0000, 0x3800_0000, 0x3C00_0000]
+        );
+        assert_eq!([FLAT_LINE, SHADED_LINE], [0x4000_0000, 0x5000_0000]);
+        assert_eq!([FLAT_RECT, TEXTURED_RECT], [0x6000_0000, 0x6400_0000]);
+        // Translucent textured rectangle, the font's semi-transparent glyphs.
+        assert_eq!(TEXTURED_RECT | SEMI_TRANSPARENT, 0x6600_0000);
+    }
+
+    #[test]
+    fn polygon_opcode_agrees_with_the_packet_words() {
+        assert_eq!(
+            gp0::polygon_opcode(true, true, true, false, false),
+            packet::SHADED_TEXTURED_QUAD
+        );
+        assert_eq!(
+            gp0::polygon_opcode(false, false, true, true, true),
+            packet::FLAT_TEXTURED_TRIANGLE | packet::SEMI_TRANSPARENT | packet::RAW_TEXTURE
+        );
     }
 
     #[test]
