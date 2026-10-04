@@ -336,6 +336,42 @@ static mut __psx_rt_pending_gp1: u32 = 0;
 #[cfg(target_arch = "mips")]
 static mut INSTALLED: bool = false;
 
+/// The first word of the exception vector as `_start` found it, before any
+/// game code ran: the BIOS's own, or whatever a previous program left.
+#[cfg(target_arch = "mips")]
+static mut BOOT_VECTOR_WORD: u32 = 0;
+
+/// Set once `_start` has stored [`BOOT_VECTOR_WORD`].
+#[cfg(target_arch = "mips")]
+static mut BOOT_VECTOR_RECORDED: bool = false;
+
+/// Remember the vector word as the program found it. Called once from
+/// `_start`, after `.bss` is zeroed and before `main`.
+#[cfg(target_arch = "mips")]
+pub(crate) fn record_boot_vector() {
+    // SAFETY: two private statics written once at boot, before `main` and before any code that
+    // reads them runs; volatile aligned stores through raw pointers.
+    unsafe {
+        core::ptr::write_volatile(&raw mut BOOT_VECTOR_WORD, vector_word());
+        core::ptr::write_volatile(&raw mut BOOT_VECTOR_RECORDED, true);
+    }
+}
+
+/// Whether [`wait_vblank`] may install psx-rt's handler on first use.
+///
+/// It may when the vector still holds what the program booted with (nobody
+/// has taken it) or already jumps to psx-rt's handler. A different word
+/// means the game put its own handler there (hk-psx and cs-psx wrap psx-rt's
+/// to service CD interrupts), and a safe wait must not overwrite it. An
+/// entry that never recorded the boot word keeps the old rule: install.
+#[cfg(any(target_arch = "mips", test))]
+const fn may_install_lazily(boot_word: Option<u32>, vector: u32, handler_jump: u32) -> bool {
+    match boot_word {
+        None => true,
+        Some(boot) => vector == boot || vector == handler_jump,
+    }
+}
+
 #[cfg(target_arch = "mips")]
 extern "C" {
     fn __psx_rt_exception_handler();
@@ -647,15 +683,25 @@ pub fn gp1_queue_pending() -> bool {
 /// instead of syncing to the display.)
 ///
 /// Installs the VBlank counter on first use if the game has not already
-/// called [`install_vblank_counter`].
+/// called [`install_vblank_counter`], but only while the exception vector is
+/// still the one the program booted with. A game that has put its own
+/// handler there keeps it: this function never overwrites it. Such a game
+/// calls [`install_vblank_counter`] first and then wraps psx-rt's handler,
+/// or its handler chains to psx-rt's, which is what advances the count this
+/// waits on.
 #[cfg(target_arch = "mips")]
 #[doc(alias = "VSync")]
 pub fn wait_vblank() {
-    // SAFETY: a volatile read of the private INSTALLED flag through a raw pointer; only
-    // `install_vblank_counter` writes it, on this same single thread.
+    // SAFETY: volatile reads of private flags through raw pointers; only `install_vblank_counter`
+    // and `record_boot_vector` write them, on this same single thread.
     unsafe {
         if !core::ptr::read_volatile(&raw const INSTALLED) {
-            install_vblank_counter();
+            let boot = core::ptr::read_volatile(&raw const BOOT_VECTOR_RECORDED)
+                .then(|| core::ptr::read_volatile(&raw const BOOT_VECTOR_WORD));
+            let handler = __psx_rt_exception_handler as *const () as usize as u32;
+            if may_install_lazily(boot, vector_word(), jump_word(handler)) {
+                install_vblank_counter();
+            }
         }
     }
     let v = vblank_count();
@@ -966,6 +1012,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Vector words: a BIOS stub, psx-rt's jump, and a game wrapper's jump.
+    const BIOS_STUB: u32 = 0x3C1A_0000;
+    const RT_JUMP: u32 = 0x0800_4000;
+    const GAME_JUMP: u32 = 0x0800_8000;
+
+    #[test]
+    fn a_safe_wait_installs_only_over_the_boot_vector_or_its_own() {
+        // Untouched since boot, or already psx-rt's: install.
+        assert!(may_install_lazily(Some(BIOS_STUB), BIOS_STUB, RT_JUMP));
+        assert!(may_install_lazily(Some(BIOS_STUB), RT_JUMP, RT_JUMP));
+        // A game's own handler is never overwritten.
+        assert!(!may_install_lazily(Some(BIOS_STUB), GAME_JUMP, RT_JUMP));
+        // The boot word was itself another program's handler: still "untouched".
+        assert!(may_install_lazily(Some(GAME_JUMP), GAME_JUMP, RT_JUMP));
+        // No recorded boot word: the entry predates the rule, keep installing.
+        assert!(may_install_lazily(None, GAME_JUMP, RT_JUMP));
     }
 
     #[test]
