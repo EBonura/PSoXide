@@ -16,11 +16,13 @@
 //! - CROSS / CIRCLE / TRIANGLE / SQUARE draw a small coloured
 //!   triangle in the centre whose orientation rotates with the
 //!   face-button pressed.
-//! - The DualShock Analog button toggles analog mode. Frontend
-//!   default: F9 on keyboard, or gamepad Mode/Guide when the OS
-//!   exposes it. When analog mode is active, the bottom-left status
-//!   panel shows raw stick bytes. Keyboard defaults: arrow keys for
-//!   left stick, I/J/K/L for right stick.
+//! - The program asks for analog mode at boot and locks it
+//!   (`require_analog_port1`, see `sdk/docs/PAD-ANALOG.md`), so the
+//!   DualShock Analog button (F9 on the frontend keyboard, or gamepad
+//!   Mode/Guide when the OS exposes it) no longer switches it back.
+//!   A pad plugged in later is asked again. In analog mode the
+//!   bottom-left status panel shows raw stick bytes. Keyboard
+//!   defaults: arrow keys for left stick, I/J/K/L for right stick.
 
 #![no_std]
 #![no_main]
@@ -31,7 +33,7 @@ use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::prim::TriFlat;
 use psx_gpu::Gpu;
-use psx_pad::{button, poll_port1, ButtonState, PadMode, PadState};
+use psx_pad::{button, require_analog_port1, ButtonState, PadMode, PadReader, PadState};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 /// Font atlas VRAM slot.
@@ -68,8 +70,23 @@ fn main() {
     let mut g: u8 = 0;
     let mut b: u8 = 32;
 
+    // A program started by a launcher inherits whatever mode the last one
+    // left, so it asks for analog and the lock itself. The reader keeps the
+    // last clean state through a poll the driver had to reject.
+    let _ = require_analog_port1();
+    let mut reader = PadReader::port1();
+    let mut was_connected = true;
+
     loop {
-        let state = poll_port1();
+        let state = reader.poll();
+        // A pad plugged in later starts in digital mode, and one parked in
+        // configuration mode (ID 0xF3) never reaches analog by itself: ask
+        // again for both, not every frame for a digital-only pad (the
+        // request blocks for a few frames).
+        if (state.is_connected() && !was_connected) || state.mode == PadMode::Config {
+            let _ = require_analog_port1();
+        }
+        was_connected = state.is_connected();
         let pad = state.buttons;
 
         // Direction buttons nudge the background color.
