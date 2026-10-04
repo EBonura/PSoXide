@@ -320,16 +320,14 @@ fn animation_round_trip_pose_table() {
     assert_eq!(gte_pose.translation, Vec3I16::new(0, 0, 0));
     assert_eq!(gte_pose.translation_shift, 0);
 
-    let mut unaligned = std::vec![0u8];
-    unaligned.extend_from_slice(&buf);
-    let unaligned_bytes = &unaligned[1..];
+    let unaligned = Placed::new(&buf, 1);
+    let unaligned_bytes = unaligned.bytes();
     assert_eq!(unaligned_bytes.as_ptr() as usize & 1, 1);
     let unaligned_animation = Animation::from_bytes(unaligned_bytes).expect("parse unaligned");
     assert_eq!(unaligned_animation.pose(1, 0), Some(pose));
 
-    let mut halfword_aligned = std::vec![0u8; 2];
-    halfword_aligned.extend_from_slice(&buf);
-    let halfword_bytes = &halfword_aligned[2..];
+    let halfword_aligned = Placed::new(&buf, 2);
+    let halfword_bytes = halfword_aligned.bytes();
     assert_eq!(halfword_bytes.as_ptr() as usize & 3, 2);
     let halfword_animation = Animation::from_bytes(halfword_bytes).expect("parse halfword-aligned");
     assert_eq!(halfword_animation.pose(1, 0), Some(pose));
@@ -1229,7 +1227,39 @@ fn packed_translation_lerp_matches_the_saturating_form() {
     }
 }
 
-/// Build a word-aligned v4 clip whose pose records are the given bytes.
+/// A copy of some bytes placed a chosen distance past a 4-byte boundary.
+/// `Vec<u8>` promises only byte alignment (native allocators happen to give
+/// more; Miri gives exactly that), so a test that needs a given alignment
+/// places its data itself.
+struct Placed {
+    storage: std::vec::Vec<u8>,
+    start: usize,
+    len: usize,
+}
+
+impl Placed {
+    /// `bytes` copied to an address that is `misalignment` (0 to 3) past a
+    /// multiple of 4.
+    fn new(bytes: &[u8], misalignment: usize) -> Self {
+        let mut storage = std::vec![0u8; bytes.len() + 3];
+        let start = (misalignment + 4 - (storage.as_ptr() as usize & 3)) & 3;
+        storage[start..start + bytes.len()].copy_from_slice(bytes);
+        let placed = Self {
+            storage,
+            start,
+            len: bytes.len(),
+        };
+        assert_eq!(placed.bytes().as_ptr() as usize & 3, misalignment);
+        placed
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.storage[self.start..self.start + self.len]
+    }
+}
+
+/// Build a v4 clip whose pose records are the given bytes. Place it with
+/// [`Placed`] before relying on its alignment.
 fn v4_clip(joint_count: u16, frame_count: u16, shift: u16, records: &[u8]) -> std::vec::Vec<u8> {
     use psxed_format::animation;
     let payload_len = animation::AnimationHeader::SIZE + records.len();
@@ -1260,8 +1290,8 @@ fn v4_interpolated_pose_is_bit_identical_to_the_pre_change_decode() {
         for byte in records.iter_mut() {
             *byte = (rng.next() >> 7) as u8;
         }
-        let blob = v4_clip(JOINTS, FRAMES, shift, &records);
-        let animation = Animation::from_bytes(&blob).expect("v4 clip parses");
+        let blob = Placed::new(&v4_clip(JOINTS, FRAMES, shift, &records), 0);
+        let animation = Animation::from_bytes(blob.bytes()).expect("v4 clip parses");
         assert_eq!(animation.poses.as_ptr() as usize & 3, 0);
 
         // Every joint, every looping frame pair, and alphas covering the
@@ -1311,15 +1341,13 @@ fn v4_fast_path_and_unaligned_pool_agree_on_random_records() {
         *byte = (rng.next() >> 11) as u8;
     }
     let blob = v4_clip(JOINTS, FRAMES, 7, &records);
-    let aligned = Animation::from_bytes(&blob).expect("aligned clip parses");
+    let word_aligned = Placed::new(&blob, 0);
+    let aligned = Animation::from_bytes(word_aligned.bytes()).expect("aligned clip parses");
     assert_eq!(aligned.poses.as_ptr() as usize & 3, 0);
 
     for skew in 1..4usize {
-        let mut storage = std::vec![0u8; blob.len() + 4];
-        let prefix = (skew + 4 - (storage.as_ptr() as usize & 3)) & 3;
-        storage[prefix..prefix + blob.len()].copy_from_slice(&blob);
-        let bytes = &storage[prefix..prefix + blob.len()];
-        let skewed = Animation::from_bytes(bytes).expect("skewed clip parses");
+        let placed = Placed::new(&blob, skew);
+        let skewed = Animation::from_bytes(placed.bytes()).expect("skewed clip parses");
         for whole in 0..u32::from(FRAMES) + 1 {
             for frac in [0u32, 1, 999, 2048, 4095] {
                 let phase = (whole << 12) | frac;
