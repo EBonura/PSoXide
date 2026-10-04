@@ -181,9 +181,9 @@ pub mod gp1 {
     /// GP1(02h) -- Acknowledge GPU IRQ1 (GP0 1Fh).
     pub const ACK_IRQ: u32 = 0x0200_0000;
 
-    /// GP1(03h) -- Display enable. `true` disables (screen black),
-    /// `false` enables (normal output). The sense is inverted on
-    /// hardware: bit 0 set = DISABLED.
+    /// GP1(03h) -- Display enable. `true` turns the video output on,
+    /// `false` blanks it. The register's sense is inverted: bit 0 set
+    /// means disabled, so this writes `!enable`.
     #[inline(always)]
     pub const fn display_enable(enable: bool) -> u32 {
         0x0300_0000 | ((!enable) as u32 & 1)
