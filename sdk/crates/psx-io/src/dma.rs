@@ -405,8 +405,15 @@ pub fn clear_ordering_table(buf: &mut [u32]) -> bool {
     // trigger bit.
     // SAFETY: the channel was just aborted, so it is idle. The transfer
     // writes `words` words stepping back from `last_addr`, which is exactly
-    // `buf`, borrowed exclusively until this function returns; the wait
-    // below (or the abort on a wedge) ends the transfer before then.
+    // `buf`, borrowed exclusively until this function returns. It cannot
+    // outlive that borrow, and this does not rest on what an abort does:
+    // DMA6 has only CHCR bits 24, 28 and 30 writable, so it always runs in
+    // burst mode (SyncMode 0) without chopping, and psx-spx ("DMA Channels",
+    // "CPU Operation during DMA") documents that any RAM or I/O read stalls
+    // the CPU until such a transfer is finished, allowing only I/O reads
+    // within 3 cycles of the CHCR write. The wait below reads CHCR until it
+    // reads idle or its budget ends, so by the time it returns the transfer
+    // has finished or, wedged with START latched, never ran.
     unsafe {
         start(
             Channel::OrderingTableClear,
@@ -434,9 +441,15 @@ pub const DEFAULT_SPINS: u32 = 500_000;
 #[deprecated(note = "renamed to `DEFAULT_SPINS`")]
 pub const DEFAULT_DMA_SPINS: u32 = DEFAULT_SPINS;
 
-/// Force `ch` out of any in-flight transfer by clearing its control
-/// register. Silicon treats dropping the START bit as an abort request; the
-/// channel is safe to re-arm afterwards.
+/// Clear `ch`'s control register, dropping its START bit, so the channel can
+/// be re-armed: on silicon a CHCR write to a channel whose START is still
+/// latched is ignored, which is how one wedged kick used to poison every
+/// later transfer on the channel.
+///
+/// psx-spx documents only that START clears when a transfer completes, not
+/// that clearing it stops one in progress. Code whose memory safety needs a
+/// transfer to have stopped must not rely on this call for it; see
+/// [`clear_ordering_table`] for a bound that does not.
 pub fn abort(ch: Channel) {
     // SAFETY: a control word of 0 has no START bit, so it starts nothing.
     unsafe { raw::set_control(ch, 0) };
@@ -456,15 +469,23 @@ pub fn wait_done(ch: Channel, spins: u32) -> bool {
     true
 }
 
-/// End a transfer started with [`start`]: [`wait_done`], [`abort`] the
-/// channel if it wedged, then a compiler barrier so the caller's next RAM
-/// access to the buffer is not moved before the completion read (the
-/// barrier emits no instruction). After it returns the channel no longer
-/// touches the buffer either way; `false` means the data did not all land.
+/// End a transfer started with [`start`]: [`wait_done`]; if the budget runs
+/// out, [`abort`] the channel and wait again, within the same budget, for it
+/// to read idle; then a compiler barrier so the caller's next RAM access to
+/// the buffer is not moved before the completion read (the barrier emits no
+/// instruction). `false` means the data did not all land.
+///
+/// The second wait is there because clearing START is not documented to stop
+/// a running transfer (see [`abort`]). What it leaves assumed: a channel that
+/// still reads busy after both budgets is wedged and moving no data, as the
+/// CD channel's console wedges were (START latched, MADR frozen). Burst-mode
+/// channels without chopping need no assumption; see
+/// [`clear_ordering_table`].
 pub fn wait_or_abort(ch: Channel, spins: u32) -> bool {
     let done = wait_done(ch, spins);
     if !done {
         abort(ch);
+        let _ = wait_done(ch, spins);
     }
     compiler_barrier();
     done
