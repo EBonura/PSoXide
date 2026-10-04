@@ -50,11 +50,19 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+use ::psx_io::sio;
 use psx_hw::sio::sio0;
-use psx_io::sio;
 
 pub mod tracker;
 pub use tracker::PadTracker;
+
+// Under test the driver talks to a controller model, not the registers.
+#[cfg(test)]
+mod mock_sio;
+#[cfg(test)]
+mod transport_tests;
+#[cfg(test)]
+use mock_sio as psx_io;
 
 /// Named button bitmasks (active-high in this representation).
 /// Hardware's active-low wire format is hidden inside [`poll_port1`].
