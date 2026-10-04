@@ -19,7 +19,7 @@
 //!   [`FramePair`] runs the usual two-buffer ping-pong on top.
 //!
 //! Every type here is a thin wrapper over the same stores and kicks as
-//! [`OtFrame::add_raw`] and [`crate::submit_linked_list_raw`].
+//! [`OtFrame::add_raw`] and [`crate::chain::submit_raw`].
 //!
 //! # Usage
 //!
@@ -164,7 +164,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     #[inline(always)]
     pub fn add<P: GpuPacket>(&mut self, z: usize, packet: &'f mut P) {
         const {
-            assert!(P::WORDS as usize <= crate::MAX_NODE_WORDS);
+            assert!(P::WORDS as usize <= crate::chain::MAX_NODE_WORDS);
             assert!(core::mem::size_of::<P>() >= 4 * (1 + P::WORDS as usize));
             assert!(core::mem::align_of::<P>() >= 4);
         };
@@ -186,7 +186,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     ///
     /// # Panics
     ///
-    /// If `words` exceeds [`crate::MAX_NODE_WORDS`].
+    /// If `words` exceeds [`crate::chain::MAX_NODE_WORDS`].
     #[inline(always)]
     pub unsafe fn add_raw(&mut self, z: usize, packet: *mut u32, words: u8) {
         // SAFETY: forwarded contract.
@@ -199,7 +199,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     /// # Safety
     ///
     /// The contract of [`add_raw`](Self::add_raw), and also: `z` is less
-    /// than `N`, and `words` is at most [`crate::MAX_NODE_WORDS`].
+    /// than `N`, and `words` is at most [`crate::chain::MAX_NODE_WORDS`].
     #[inline(always)]
     pub unsafe fn add_raw_unchecked(&mut self, z: usize, packet: *mut u32, words: u8) {
         // SAFETY: forwarded contract.
@@ -232,7 +232,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     ///
     /// `commands` points at `command_count * 2` readable words in that
     /// layout; every slot is less than `N` and every word count at most
-    /// [`crate::MAX_NODE_WORDS`]; and every packet meets the contract of
+    /// [`crate::chain::MAX_NODE_WORDS`]; and every packet meets the contract of
     /// [`add_raw`](Self::add_raw).
     #[inline(always)]
     pub unsafe fn add_packed_commands_unchecked(
@@ -279,7 +279,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     ///
     /// `first..end` is a writable, contiguous sequence of complete packets
     /// in that layout; every word count describes the next packet exactly
-    /// and is at most [`crate::MAX_NODE_WORDS`]; every slot other than
+    /// and is at most [`crate::chain::MAX_NODE_WORDS`]; every slot other than
     /// `0xFFFF` is less than `N`; and the whole range meets the contract of
     /// [`add_raw`](Self::add_raw).
     #[inline(always)]
@@ -338,7 +338,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     ///
     /// Every node reachable from `head` must stay live and unmodified for
     /// `'f`, and for any walk of this frame that outlives it, under
-    /// [`crate::submit_linked_list_async_raw`]'s node rules.
+    /// [`crate::chain::submit_async_raw`]'s node rules.
     ///
     /// # Panics
     ///
@@ -375,12 +375,12 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     /// Kick the walk and wait for it.
     #[doc(alias = "DrawOTag")]
     #[inline]
-    pub fn submit(self, _dma: &mut GpuDma) {
+    pub fn submit(self, dma: &mut GpuDma) {
         // SAFETY: every node is the table (borrowed for 'f), a packet
         // borrowed for 'f through `add`, a raw packet whose `add_raw`
         // contract covers the walk, a linked `OtFrame<'f>`, or the static
         // GP0(1Fh) node. The walk ends before this returns.
-        unsafe { crate::submit_linked_list_raw(self.ot.submit_head()) };
+        unsafe { crate::chain::submit_raw(dma, self.ot.submit_head()) };
     }
 
     /// Kick the walk, run `overlap` while the GPU walks, then wait.
@@ -391,7 +391,7 @@ impl<'f, const N: usize> OtFrame<'f, N> {
     pub fn submit_with<R>(self, _dma: &mut GpuDma, overlap: impl FnOnce() -> R) -> R {
         // SAFETY: as `submit`; `_wait` waits for the walk before this
         // returns, on every path out of `overlap`.
-        unsafe { crate::submit_linked_list_async_raw(self.ot.submit_head()) };
+        unsafe { crate::chain::start_walk(self.ot.submit_head()) };
         let _wait = WaitOnDrop;
         overlap()
     }
@@ -403,7 +403,7 @@ struct WaitOnDrop;
 impl Drop for WaitOnDrop {
     #[inline(always)]
     fn drop(&mut self) {
-        crate::submit_linked_list_wait();
+        crate::chain::wait_walk();
     }
 }
 
@@ -449,7 +449,7 @@ impl<const N: usize, S> FrameStorage<N, S> {
         // SAFETY: the table and packets were linked by `build`, which only
         // admits packets in `self` or `'static` ones; the caller keeps
         // `self` untouched until the wait.
-        unsafe { crate::submit_linked_list_async_raw(self.ot.submit_head()) };
+        unsafe { crate::chain::start_walk(self.ot.submit_head()) };
     }
 
     /// Build a frame with `build`, then kick it and return without waiting.
@@ -492,7 +492,7 @@ impl<const N: usize, S> InFlight<N, S> {
     /// Wait for the walk, then hand back the storage and the token.
     #[inline]
     pub fn wait(self) -> (&'static mut FrameStorage<N, S>, GpuDma) {
-        crate::submit_linked_list_wait();
+        crate::chain::wait_walk();
         (self.storage, self.dma)
     }
 }
@@ -543,7 +543,7 @@ impl<const N: usize, S> FramePair<N, S> {
     /// for work that must not overlap it (VRAM uploads, immediate GP0).
     #[inline]
     pub fn wait(&mut self) -> &mut GpuDma {
-        crate::submit_linked_list_wait();
+        crate::chain::wait_walk();
         &mut self.dma
     }
 
@@ -561,7 +561,7 @@ impl<const N: usize, S> FramePair<N, S> {
 
     /// Wait for the last walk, then hand back both storages and the token.
     pub fn release(self) -> ([&'static mut FrameStorage<N, S>; 2], GpuDma) {
-        crate::submit_linked_list_wait();
+        crate::chain::wait_walk();
         (self.storage, self.dma)
     }
 
