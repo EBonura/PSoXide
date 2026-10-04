@@ -19,7 +19,6 @@
 //! `ttl == 0` marks a slot as empty. No allocation, ever.
 
 use psx_gpu::frame::{OtFrame, PrimitiveArena};
-use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::RectFlat;
 
 use crate::rng::LcgRng;
@@ -215,54 +214,6 @@ impl<const N: usize> ParticlePool<N> {
         written
     }
 
-    /// Render every live particle as a `RectFlat` into the caller's
-    /// buffer, inserting each into OT slot `z`.
-    ///
-    /// `rects` must have space for all live particles; the function
-    /// writes starting at index 0 and returns the number of rects
-    /// used -- callers typically track a running `idx` and advance
-    /// it by this value.
-    ///
-    /// # Safety
-    ///
-    /// `ot` keeps the addresses of the rects it is given: `rects` must stay
-    /// live and unmodified until every submission of `ot` has been waited
-    /// out.
-    ///
-    /// `shake` is a per-frame vertex offset applied uniformly to
-    /// every particle (convenience for callers that apply the same
-    /// shake to ball / paddle / etc.).
-    ///
-    /// The particle's original colour is scaled by `ttl /
-    /// spawn_ttl` so bursts fade out gracefully; size tapers from
-    /// 3 px (first half of life) to 2 px (second half).
-    #[deprecated(
-        note = "links rects through the deprecated `OrderingTable::add`; use `render_into_frame`"
-    )]
-    #[allow(deprecated)]
-    pub unsafe fn render_into_ot<const OT_N: usize>(
-        &self,
-        ot: &mut OrderingTable<OT_N>,
-        rects: &mut [RectFlat],
-        z: u8,
-        shake: (i16, i16),
-    ) -> usize {
-        let mut written = 0;
-        for p in self.particles.iter() {
-            if p.ttl == 0 {
-                continue;
-            }
-            if written >= rects.len() {
-                break;
-            }
-            rects[written] = p.rect(shake);
-            // SAFETY: forwarded contract.
-            unsafe { ot.add(z as usize, &mut rects[written], RectFlat::WORDS) };
-            written += 1;
-        }
-        written
-    }
-
     /// How many slots currently hold live particles. O(N) scan --
     /// useful for debugging budgets + tests, not hot-path code.
     pub fn live_count(&self) -> usize {
@@ -297,6 +248,7 @@ const fn advance(pos: i16, frac: u8, velocity: i16) -> (i16, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_gpu::ot::OrderingTable;
 
     #[test]
     fn render_into_frame_stops_when_the_arena_is_full() {

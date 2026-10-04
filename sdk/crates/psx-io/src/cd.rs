@@ -1009,6 +1009,13 @@ pub fn try_play_track(track: u8, spin_limit: u32) -> Option<Response> {
     steal().try_play_track(track, spin_limit)
 }
 
+/// Moved to [`Cd::try_pause`].
+#[deprecated(note = "use `Cd::try_pause` with the `Cd` token")]
+#[inline(always)]
+pub fn try_pause(spin_limit: u32) -> Option<Response> {
+    steal().try_pause(spin_limit)
+}
+
 /// Moved to [`Cd::try_pause_until_complete`].
 #[deprecated(note = "use `Cd::try_pause_until_complete` with the `Cd` token")]
 #[inline(always)]

@@ -152,13 +152,6 @@ impl BlendMode {
         }
     }
 
-    /// Renamed to [`texture_page_bits`](Self::texture_page_bits).
-    #[deprecated(note = "renamed to `texture_page_bits`")]
-    #[inline(always)]
-    pub const fn tpage_bits(self) -> u8 {
-        self.texture_page_bits()
-    }
-
     /// True when a primitive using this material should set its
     /// semi-transparent command bit.
     pub const fn is_translucent(self) -> bool {
@@ -360,13 +353,6 @@ impl TextureMaterial {
         let blend_bits = (self.blend_mode.texture_page_bits() as u16) << 5;
         let dither_bit = (self.dither as u16) << 9;
         (self.tpage_word & !(0x0060 | 0x0200)) | blend_bits | dither_bit
-    }
-
-    /// Renamed to [`texture_page_word`](Self::texture_page_word).
-    #[deprecated(note = "renamed to `texture_page_word`")]
-    #[inline(always)]
-    pub const fn tpage_word(self) -> u16 {
-        self.texture_page_word()
     }
 
     /// GP0(E2) texture-window word for this material.

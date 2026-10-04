@@ -97,20 +97,6 @@ pub fn try_demute(spin_limit: u32) -> Option<cd::Response> {
     token().try_unmute(spin_limit)
 }
 
-/// Moved to [`cd::try_mute`].
-#[deprecated(note = "moved to `psx_io::cd::try_mute`")]
-#[inline(always)]
-pub fn try_mute(spin_limit: u32) -> Option<cd::Response> {
-    token().try_mute(spin_limit)
-}
-
-/// Moved to [`cd::try_play_track`].
-#[deprecated(note = "moved to `psx_io::cd::try_play_track`")]
-#[inline(always)]
-pub fn try_play_track(track: u8, spin_limit: u32) -> Option<cd::Response> {
-    token().try_play_track(track, spin_limit)
-}
-
 /// Moved to [`crate::periph::Cd::try_pause`].
 #[deprecated(note = "use `Cd::try_pause` with the `Cd` token")]
 #[inline(always)]

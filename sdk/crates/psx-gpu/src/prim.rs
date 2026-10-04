@@ -800,6 +800,34 @@ impl TriTexturedGouraud {
         }
     }
 
+    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
+    ///
+    /// # Safety
+    ///
+    /// Nothing beyond that function's preconditions; it stays `unsafe` so
+    /// existing `unsafe` blocks keep compiling without a warning.
+    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
+    #[inline(always)]
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [u32; 3],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        texture_window_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_colors(
+            verts,
+            uv_words,
+            colors,
+            clut_high_word,
+            tpage_high_word,
+            texture_window_word,
+            ot_slot,
+        )
+    }
+
     /// Zeroed packet for static prebuilt-pool initialisation. Real
     /// content is written before the packet is ever linked into an
     /// ordering table.
@@ -962,6 +990,32 @@ impl ClassicTriTexturedGouraud {
             uv2: uv_words[2] as u32,
         }
     }
+
+    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
+    ///
+    /// # Safety
+    ///
+    /// Nothing beyond that function's preconditions; it stays `unsafe` so
+    /// existing `unsafe` blocks keep compiling without a warning.
+    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
+    #[inline(always)]
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [u32; 3],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_colors(
+            verts,
+            uv_words,
+            colors,
+            clut_high_word,
+            tpage_high_word,
+            ot_slot,
+        )
+    }
 }
 
 /// Classic textured Gouraud quad without inline texture-window state. This
@@ -1079,6 +1133,32 @@ impl ClassicQuadTexturedGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
+    }
+
+    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
+    ///
+    /// # Safety
+    ///
+    /// Nothing beyond that function's preconditions; it stays `unsafe` so
+    /// existing `unsafe` blocks keep compiling without a warning.
+    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
+    #[inline(always)]
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [u32; 4],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_colors(
+            verts,
+            uv_words,
+            colors,
+            clut_high_word,
+            tpage_high_word,
+            ot_slot,
+        )
     }
 }
 
@@ -1226,6 +1306,34 @@ impl QuadTexturedGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
+    }
+
+    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
+    ///
+    /// # Safety
+    ///
+    /// Nothing beyond that function's preconditions; it stays `unsafe` so
+    /// existing `unsafe` blocks keep compiling without a warning.
+    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
+    #[inline(always)]
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [u32; 4],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        texture_window_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_colors(
+            verts,
+            uv_words,
+            colors,
+            clut_high_word,
+            tpage_high_word,
+            texture_window_word,
+            ot_slot,
+        )
     }
 
     /// Zeroed packet for static prebuilt-pool initialisation. Real

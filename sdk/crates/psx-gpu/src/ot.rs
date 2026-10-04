@@ -30,6 +30,10 @@ use psx_io::periph::OrderingTableClearDma;
 const OT_ADDR_MASK: u32 = psx_hw::dma::linked_list::ADDRESS_MASK;
 const OT_END: u32 = psx_hw::dma::linked_list::END;
 const OT_MAX_EXTRA_HOPS: usize = 131_072;
+/// A staged-tag bit that tagged-stream insertion ignores: the stream inserts
+/// keep only the word count and the slot from a staged tag.
+#[deprecated(note = "has no effect: the scoped texture-window coalescing that read it was removed")]
+pub const TAG_SCOPED_TEXTURE_WINDOW: u32 = 1 << 16;
 /// Whether DMA can read `packet`: on the console, main RAM (any mirror or
 /// segment) and not the scratchpad, whose low 24 bits would name a RAM
 /// address instead. Host builds accept any address.
@@ -631,37 +635,6 @@ impl<const N: usize> OrderingTable<N> {
             }
             debug_assert_eq!(packet, end);
         }
-    }
-
-    /// Insert a primitive struct. The struct must be `#[repr(C)]`
-    /// with its first field being the tag `u32`. `words` is the
-    /// number of data words that follow the tag.
-    ///
-    /// A struct larger than one DMA node does not build:
-    ///
-    /// ```compile_fail
-    /// let mut ot: psx_gpu::ot::OrderingTable<4> = psx_gpu::ot::OrderingTable::new();
-    /// let mut packet = [0u32; 2 + psx_gpu::MAX_NODE_WORDS];
-    /// unsafe { ot.add(0, &mut packet, 17) };
-    /// ```
-    ///
-    /// # Safety
-    ///
-    /// The table keeps `prim`'s address after this borrow ends: `prim` must
-    /// stay live, unmoved and unmodified until every submission of this
-    /// table has been waited out, and `words` must not exceed its payload.
-    #[deprecated(
-        note = "keeps the packet's address past the borrow and trusts `words`; use `OrderingTable::frame` and `OtFrame::add`"
-    )]
-    pub unsafe fn add<T>(&mut self, z: usize, prim: &mut T, words: u8) {
-        const {
-            assert!(
-                core::mem::size_of::<T>() <= 4 * (crate::chain::MAX_NODE_WORDS + 1),
-                "primitive larger than one GPU DMA node"
-            )
-        };
-        // SAFETY: forwarded contract.
-        unsafe { self.link(z, prim as *mut T as *mut u32, words) };
     }
 
     /// Prepend a raw packet to slot `z` (clamped to `N - 1`).
