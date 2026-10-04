@@ -62,6 +62,16 @@ The blended free functions also rewrote GP0(E1h) to texture page (0, 0) on
 every call; with the driver that write is the explicit `set_draw_mode`, so a
 game that draws textured rectangles after a blended primitive can see it.
 
+## Present queue without `unsafe`
+
+A game that publishes frames with `psx_rt::present::publish_raw` (quake,
+the editor engine) can move to `psx_gpu::present::PresentPair` with the
+`present-queue` feature: two `PresentStorage`s, a `DoubleBuffer` and the
+`Gpu` go in, and each frame is `pair.present(clear_color, |frame, packets| ..)`.
+The pair adds the draw target, the clear and the closing GP0(1Fh) itself.
+A frame that needs a recorded HUD still uses the raw protocol for now
+(`hello-present-queue` shows it).
+
 ## Changes a repin sees without touching code
 
 - **480-line modes** set the interlace bit and program one field of

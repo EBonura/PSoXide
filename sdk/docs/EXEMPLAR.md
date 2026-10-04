@@ -75,7 +75,12 @@ three shapes, one per lifetime of the transfer:
    "Leaking"), so this shape needs no `Drop` to be sound.
 
 `FramePair` builds the usual two-buffer ping-pong from shape 3, and
-`release()` hands everything back. Closures that build a frame are
+`release()` hands everything back. `present::PresentPair` (feature
+`present-queue`) does the same for psx-rt's VBlank-kicked queue, whose raw
+`publish_raw` is `unsafe`: the pair owns both `'static` storages, rebuilds
+one only after the queue says no walk reads it, and refuses to start while
+another pair holds the queue's single slot. That last check is a runtime
+flag, not the token, so it holds even if someone steals a token. Closures that build a frame are
 `for<'f>` and receive `&mut OtFrame<'f>`, which is invariant in `'f`, so a
 stack packet cannot be added to a frame that outlives the closure.
 
