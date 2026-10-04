@@ -123,7 +123,7 @@ pub mod control {
     /// Bit 0: mix the CD audio input.
     pub const CD_AUDIO_ENABLE: u16 = 1 << 0;
     /// Bits 5..=0: the part of the register the SPU applies after a delay;
-    /// [`status::MODE_MASK`] reads the applied value back.
+    /// [`super::status::MODE_MASK`] reads the applied value back.
     pub const MODE_MASK: u16 = 0x3F;
 }
 

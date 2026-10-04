@@ -12,7 +12,7 @@ naming authority.
 
 | Layer | Crate or module | Rule |
 | --- | --- | --- |
-| Hardware model | `psx-hw` | Register addresses, bit layouts and command-word encoders, shared with the emulator. Nothing else declares a register value. |
+| Hardware model | `psx-hw` | Register addresses, bit layouts and command-word encoders (GP0 and GP1 words, GTE instructions), shared with the emulator. Nothing else declares a register value: `make lint` runs `tools/check-register-literals.sh`, which fails on a hardware-window address literal anywhere else. |
 | MMIO | `psx-io` | One volatile access per call, plus the ownership tokens. |
 | Raw driver layer | `psx_gpu::chain`, `OtFrame::add_raw*` | `unsafe fn` wherever hardware reads or writes memory the caller names. Each has a `# Safety` section that says exactly what the caller proves. |
 | Safe layer | `psx_gpu::frame`, `ordered`, `prim` | Lifetimes and owned `'static` storage prove the raw layer's contract. No safe function hands hardware an address the types do not vouch for. |
