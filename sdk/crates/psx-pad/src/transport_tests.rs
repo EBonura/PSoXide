@@ -9,8 +9,8 @@
 
 extern crate std;
 
-use crate::mock_sio::{self as mock, Fault, Model};
-use crate::{button, poll_port1, AnalogRequirement, PadMode, PadReader, PadState};
+use crate::mock_sio::{self as mock, Fault, MockBus, Model};
+use crate::{button, poll_on, AnalogRequirement, PadMode, PadReader, PadState, Port};
 use std::vec;
 
 fn start(model: Model) {
@@ -19,7 +19,7 @@ fn start(model: Model) {
 
 fn poll_with(model: Model) -> PadState {
     start(model);
-    poll_port1()
+    poll_on(&mut MockBus, Port::One)
 }
 
 fn fault_model(id: u8, fault: Fault, byte: usize, once: bool) -> Model {
@@ -134,14 +134,14 @@ fn only_four_empty_replies_mean_no_pad() {
         ],
         ..Model::default()
     });
-    assert_eq!(poll_port1().mode, PadMode::Unknown);
+    assert_eq!(poll_on(&mut MockBus, Port::One).mode, PadMode::Unknown);
     let absent = poll_with(Model {
         id: 0xFF,
         ..Model::default()
     });
     assert_eq!(absent.mode, PadMode::Disconnected);
     mock::with(|m| m.id = 0x73);
-    let back = poll_port1();
+    let back = poll_on(&mut MockBus, Port::One);
     assert_eq!((back.mode, back.buttons.bits()), (PadMode::Analog, 0));
 }
 
@@ -150,7 +150,7 @@ fn each_frame_length_follows_its_own_id_across_mode_switches() {
     start(Model::default());
     for id in [0x41, 0x73, 0x41, 0x73] {
         mock::with(|m| m.id = id);
-        let pad = poll_port1();
+        let pad = poll_on(&mut MockBus, Port::One);
         assert_eq!(
             (pad.mode, pad.buttons.bits()),
             (crate::mode_from_id_low(id), 0)
@@ -174,7 +174,7 @@ fn a_late_acknowledge_never_slips_a_byte_into_the_buttons() {
     // Many polls natively; a few under Miri, where each is interpreted.
     let polls = if cfg!(miri) { 4 } else { 100 };
     for poll in 0..polls {
-        let pad = poll_port1();
+        let pad = poll_on(&mut MockBus, Port::One);
         assert_eq!(pad.mode, PadMode::Analog, "poll {poll}");
         assert_eq!(pad.buttons.bits(), 0, "phantom buttons on poll {poll}");
     }
@@ -187,7 +187,7 @@ fn the_late_acknowledge_model_does_slip_a_driver_that_does_not_wait() {
     // the first button byte. Without this the test above could pass on a
     // model that never slips.
     start(late_ack_pad());
-    let raw = crate::poll_port1_raw(crate::Pacing::NoAckWait);
+    let raw = crate::poll_raw_on(&mut MockBus, Port::One, crate::Pacing::NoAckWait);
     assert_eq!(raw.buttons_low, 0x5A);
     let phantom = button::SELECT | button::R3 | button::LEFT | button::RIGHT;
     assert_eq!(raw.to_state().buttons.bits() & phantom, phantom);
@@ -201,17 +201,17 @@ fn a_reader_holds_the_last_clean_state_through_a_failed_poll() {
         ..Model::default()
     });
     let mut reader = PadReader::port1();
-    assert_eq!(reader.poll().buttons.bits(), held);
+    assert_eq!(reader.poll_on(&mut MockBus).buttons.bits(), held);
     mock::with(|m| {
         m.fault = Fault::Ack;
         m.fault_byte = 3;
     });
-    let during = reader.poll();
+    let during = reader.poll_on(&mut MockBus);
     assert_eq!(during.buttons.bits(), held, "held Select must not release");
     mock::with(|m| m.fault = Fault::None);
-    assert_eq!(reader.poll().buttons.bits(), held);
+    assert_eq!(reader.poll_on(&mut MockBus).buttons.bits(), held);
     mock::with(|m| m.id = 0xFF);
-    assert_eq!(reader.poll().buttons.bits(), 0, "an unplugged pad releases");
+    assert_eq!(reader.poll_on(&mut MockBus).buttons.bits(), 0, "an unplugged pad releases");
 }
 
 /// A DualShock that starts in digital mode, as after a reset.
@@ -222,12 +222,12 @@ fn digital_dualshock() -> Model {
     }
 }
 
-/// `require_analog_port1` with a short gap between the configuration
+/// `require_analog_on` with a short gap between the configuration
 /// commands. The public call spaces them about a video frame apart, which
 /// costs hundreds of thousands of modelled register reads per command; the
 /// sequence and the retry rule are the same.
 fn require_quickly() -> AnalogRequirement {
-    AnalogRequirement::from_mode(crate::request_analog(false, 16).mode)
+    AnalogRequirement::from_mode(crate::request_analog(&mut MockBus, Port::One, 16).mode)
 }
 
 #[test]
@@ -240,7 +240,7 @@ fn requiring_analog_switches_the_pad_and_locks_it() {
         assert!(!m.in_config());
         assert!(!m.is_selected());
     });
-    assert_eq!(poll_port1().mode, PadMode::Analog);
+    assert_eq!(poll_on(&mut MockBus, Port::One).mode, PadMode::Analog);
 }
 
 #[test]
@@ -293,8 +293,8 @@ fn a_digital_only_pad_and_an_empty_port_are_told_apart() {
 )]
 fn the_public_requests_use_the_frame_spaced_sequence_on_either_port() {
     start(digital_dualshock());
-    assert_eq!(crate::require_analog_port1(), AnalogRequirement::Analog);
-    assert_eq!(crate::require_analog_port2(), AnalogRequirement::Analog);
+    assert_eq!(crate::require_analog_on(&mut MockBus, Port::One), AnalogRequirement::Analog);
+    assert_eq!(crate::require_analog_on(&mut MockBus, Port::Two), AnalogRequirement::Analog);
     mock::with(|m| assert!(m.locked && m.id == 0x73));
 }
 
@@ -309,4 +309,12 @@ fn a_missing_or_stuck_acknowledge_rejects_the_packet_and_recovers() {
         let pad = poll_with(fault_model(0x73, fault, 3, true));
         assert_eq!(pad.mode, PadMode::Analog, "{fault:?} recovers on retry");
     }
+}
+
+/// The public entry points take the real token, not only the model.
+#[allow(dead_code)]
+fn the_token_is_accepted(port: &mut psx_io::periph::ControllerPort) {
+    let _ = poll_on(port, Port::One);
+    let _ = PadReader::port2().poll_on(port);
+    let _ = crate::require_analog_on(port, Port::Two);
 }
