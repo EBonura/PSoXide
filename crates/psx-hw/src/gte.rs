@@ -27,6 +27,9 @@ pub const COP2: u32 = 0x12 << 26;
 /// Every function command starts with this prefix: COP2 with bit 25 set.
 pub const COMMAND: u32 = COP2 | (1 << 25);
 
+/// Position of the command prefix [`COMMAND`] in a word: the top seven bits.
+pub const PREFIX_SHIFT: u32 = 25;
+
 /// `sf`: shift the product right by 12 (clear: no shift).
 pub const SF: u32 = 1 << 19;
 /// `lm`: clamp IR1..IR3 at 0 instead of -0x8000.
@@ -39,7 +42,7 @@ pub const LM: u32 = 1 << 10;
 /// instead.
 #[inline(always)]
 pub const fn is_command(word: u32) -> bool {
-    word & 0xFE00_0000 == COMMAND
+    word >> PREFIX_SHIFT == COMMAND >> PREFIX_SHIFT
 }
 
 /// `mfc2 rt, rd`: copy GTE data register `rd` into CPU register `rt`.
@@ -103,10 +106,11 @@ pub enum Translation {
     None = 3,
 }
 
-/// `MVMVA` with the given selects and `sf` set (`lm` clear).
+/// `MVMVA` with the given selects, `sf` and `lm` clear; OR in [`SF`] and
+/// [`LM`] as needed.
 #[inline(always)]
 pub const fn mvmva(mx: Matrix, vx: Vector, cv: Translation) -> u32 {
-    COMMAND | SF | (mx as u32) << 17 | (vx as u32) << 15 | (cv as u32) << 13 | 0x12
+    COMMAND | (mx as u32) << 17 | (vx as u32) << 15 | (cv as u32) << 13 | 0x12
 }
 
 /// Function commands as the SDK issues them: `sf` set where the command
@@ -165,13 +169,13 @@ pub mod command {
         super::Matrix::Rotation,
         super::Vector::V0,
         super::Translation::Tr,
-    );
+    ) | SF;
     /// Rotate V0 by the rotation matrix with the far color as translation.
     pub const ROTATE_V0_FAR_COLOR: u32 = super::mvmva(
         super::Matrix::Rotation,
         super::Vector::V0,
         super::Translation::Fc,
-    );
+    ) | SF;
 }
 
 #[cfg(test)]
@@ -212,7 +216,7 @@ mod tests {
     #[test]
     fn mvmva_places_each_select_in_its_field() {
         let word = mvmva(Matrix::Color, Vector::Ir, Translation::None);
-        assert_eq!(word, 0x4A08_0012 | 2 << 17 | 3 << 15 | 3 << 13);
+        assert_eq!(word, 0x4A00_0012 | 2 << 17 | 3 << 15 | 3 << 13);
         assert!(is_command(word));
     }
 

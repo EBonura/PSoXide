@@ -89,6 +89,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+use psx_hw::gpu::packet;
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 use psx_io::gpu::{wait_command_ready, write_command};
 use psx_math::sincos;
@@ -359,7 +360,7 @@ impl TextBlend {
 
 /// GP0 command byte for a variable-size textured rectangle with the
 /// semi-transparency bit (25) set. The opaque path uses `0x6400_0000`.
-const SEMI_TRANSPARENT_RECT_CMD: u32 = 0x6600_0000;
+const SEMI_TRANSPARENT_RECT_CMD: u32 = packet::TEXTURED_RECT | packet::SEMI_TRANSPARENT;
 
 /// GP0 command byte for a variable-size MONOCHROME rectangle with the
 /// semi-transparency bit (25) set. The opaque form is `0x6000_0000`.
@@ -367,7 +368,7 @@ const SEMI_TRANSPARENT_RECT_CMD: u32 = 0x6600_0000;
 /// Untextured, so it costs three data words however large it is --
 /// which is what makes a backing plate cheaper than a second pass over
 /// the glyphs it sits behind.
-const SEMI_TRANSPARENT_FLAT_RECT_CMD: u32 = 0x6200_0000;
+const SEMI_TRANSPARENT_FLAT_RECT_CMD: u32 = packet::FLAT_RECT | packet::SEMI_TRANSPARENT;
 
 /// The GP0(E1h) word that installs `tpage` with `blend`'s equation in
 /// the ABR field. Split out from the draw call so the bit layout is
@@ -1036,7 +1037,7 @@ impl FontAtlas {
 
         let font = self.font;
         let clut_word = self.clut_word;
-        let color_cmd = 0x6400_0000 | pack_color(tint.0, tint.1, tint.2);
+        let color_cmd = packet::TEXTURED_RECT | pack_color(tint.0, tint.1, tint.2);
         let glyph_size = pack_xy(font.glyph_w as u16, font.glyph_h as u16);
         let gap = i16::from(letter_spacing);
         let mut cursor_x = x;
@@ -1735,7 +1736,7 @@ mod tests {
     /// path has stopped being the same 4-word primitive.
     #[test]
     fn blended_rect_command_is_the_opaque_one_plus_bit_25() {
-        const OPAQUE_RECT_CMD: u32 = 0x6400_0000;
+        const OPAQUE_RECT_CMD: u32 = packet::TEXTURED_RECT;
         assert_eq!(SEMI_TRANSPARENT_RECT_CMD, OPAQUE_RECT_CMD | (1 << 25));
     }
 
@@ -1745,7 +1746,7 @@ mod tests {
     /// reason a plate is cheaper than a second pass over the glyphs.
     #[test]
     fn blended_backdrop_command_is_the_flat_rect_plus_bit_25() {
-        const OPAQUE_FLAT_RECT_CMD: u32 = 0x6000_0000;
+        const OPAQUE_FLAT_RECT_CMD: u32 = packet::FLAT_RECT;
         assert_eq!(
             SEMI_TRANSPARENT_FLAT_RECT_CMD,
             OPAQUE_FLAT_RECT_CMD | (1 << 25)

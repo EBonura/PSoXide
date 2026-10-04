@@ -17,7 +17,7 @@ use psx_io::periph::GpuDma;
 /// not a second measured limit.
 pub const NODE_PAYLOAD_WORDS: usize = 15;
 const _: () = assert!(NODE_PAYLOAD_WORDS <= crate::chain::MAX_NODE_WORDS);
-const END: u32 = 0x00ff_ffff;
+const END: u32 = psx_hw::dma::linked_list::END;
 
 /// DMA operations required by an ordered stream.
 ///

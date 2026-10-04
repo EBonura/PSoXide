@@ -9,7 +9,7 @@ use psx_hw::irq as reg;
 #[doc(alias = "I_STAT")]
 #[inline(always)]
 pub fn pending() -> u32 {
-    // SAFETY: I_STAT (0x1F80_1070) is the interrupt controller's aligned 32-bit pending register on
+    // SAFETY: I_STAT (`psx_hw::irq::I_STAT`) is the interrupt controller's aligned 32-bit pending register on
     // every PS1; reading it has no side effects.
     unsafe { crate::read_u32(reg::I_STAT) }
 }
@@ -18,7 +18,7 @@ pub fn pending() -> u32 {
 #[doc(alias = "I_MASK")]
 #[inline(always)]
 pub fn mask() -> u32 {
-    // SAFETY: I_MASK (0x1F80_1074) is the interrupt controller's aligned 32-bit mask register on
+    // SAFETY: I_MASK (`psx_hw::irq::I_MASK`) is the interrupt controller's aligned 32-bit mask register on
     // every PS1; reading it has no side effects.
     unsafe { crate::read_u32(reg::I_MASK) }
 }
@@ -28,7 +28,7 @@ pub fn mask() -> u32 {
 /// preserved, any bit that was 0 is cleared.
 #[inline(always)]
 pub fn acknowledge(bits: u32) {
-    // SAFETY: an aligned 32-bit write to I_STAT (0x1F80_1070). The hardware ANDs the value in, so
+    // SAFETY: an aligned 32-bit write to I_STAT (`psx_hw::irq::I_STAT`). The hardware ANDs the value in, so
     // it can only clear pending bits.
     unsafe { crate::write_u32(reg::I_STAT, !bits) }
 }
@@ -36,7 +36,7 @@ pub fn acknowledge(bits: u32) {
 /// Set the mask register (who can interrupt the CPU).
 #[inline(always)]
 pub fn set_mask(bits: u32) {
-    // SAFETY: an aligned 32-bit write to I_MASK (0x1F80_1074). It only selects which sources raise
+    // SAFETY: an aligned 32-bit write to I_MASK (`psx_hw::irq::I_MASK`). It only selects which sources raise
     // the CPU interrupt line and touches no memory.
     unsafe { crate::write_u32(reg::I_MASK, bits) }
 }

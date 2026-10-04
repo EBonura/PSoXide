@@ -9,7 +9,7 @@
 //! and give it back with `release`.
 //!
 //! The controller exposes four byte registers selected by the low two
-//! bits of the index register at [`BASE`]. Register addresses, command bytes
+//! bits of the index register at [`psx_hw::cd::reg::INDEX`]. Register addresses, command bytes
 //! and status bits live in [`psx_hw::cd`].
 
 pub mod audio;
@@ -19,29 +19,14 @@ pub mod xa;
 use crate::periph::Cd;
 use crate::{irq, read_u8, write_u8};
 
+use psx_hw::cd::index_status as status;
+use psx_hw::cd::irq as code;
+use psx_hw::cd::{reg, request, volume_apply};
 use psx_hw::cd::{
-    BASE, CMD_DEMUTE, CMD_GETLOCP, CMD_GETSTAT, CMD_MUTE, CMD_PAUSE, CMD_PLAY, CMD_READN,
-    CMD_SETLOC, CMD_SETMODE, CMD_STOP, STAT_PLAYING, STAT_SEEKING,
+    CMD_DEMUTE, CMD_GETLOCP, CMD_GETSTAT, CMD_MUTE, CMD_PAUSE, CMD_PLAY, CMD_READN, CMD_SETLOC,
+    CMD_SETMODE, CMD_STOP, STAT_PLAYING, STAT_SEEKING,
 };
 
-const REG_INDEX: u32 = BASE;
-const REG_COMMAND_RESPONSE: u32 = BASE + 1;
-const REG_PARAMETER: u32 = BASE + 2;
-const REG_REQUEST_IRQ: u32 = BASE + 3;
-
-const STATUS_PARAM_NOT_FULL: u8 = 1 << 4;
-const STATUS_RESPONSE_NOT_EMPTY: u8 = 1 << 5;
-const IRQ_ACK: u8 = 3;
-const IRQ_DATA_READY: u8 = 1;
-const IRQ_COMPLETE: u8 = 2;
-const IRQ_DATA_END: u8 = 4;
-const IRQ_ERROR: u8 = 5;
-const IRQ_ACK_ALL: u8 = 0x1F;
-const IRQ_PARAM_FIFO_RESET: u8 = 0x40;
-const STATUS_DATA_FIFO_NOT_EMPTY: u8 = 1 << 6;
-/// Request register, index 0: arm the data FIFO (BFRD) so the next sector's
-/// bytes can be popped; writing 0 drops it again.
-const REQUEST_DATA: u8 = 0x80;
 /// Response bytes a sector probe discards at most. The FIFO holds 16, but a
 /// controller wedged "not empty" must not be able to spin the drain forever.
 const SECTOR_POLL_DRAIN_LIMIT: u32 = 256;
@@ -165,16 +150,16 @@ impl Cd {
                 finish_failed_polled_command(irq_enable);
                 return None;
             }
-            write_byte(REG_PARAMETER, param);
+            write_byte(reg::PARAMETER, param);
         }
-        write_byte(REG_COMMAND_RESPONSE, command);
+        write_byte(reg::COMMAND_RESPONSE, command);
         Some(irq_enable)
     }
 
     /// Restore the CD-ROM IRQ enable saved by [`Self::dispatch_command`].
     pub fn restore_irq_output(&mut self, saved: u8) {
         drain_response_fifo();
-        ack_irq(IRQ_ACK_ALL);
+        ack_irq(code::ACK_ALL);
         restore_irq_enable(saved);
         select_index(0);
     }
@@ -197,11 +182,11 @@ impl Cd {
         let mut spins = spin_limit;
         loop {
             let flag = irq_flag();
-            if flag == IRQ_DATA_READY {
+            if flag == code::DATA_READY {
                 ack_irq(flag);
                 return true;
             }
-            if flag == IRQ_ERROR {
+            if flag == code::ERROR {
                 let _ = read_response_fifo();
                 ack_irq(flag);
                 return false;
@@ -352,9 +337,9 @@ impl Cd {
             // emulator answers instantly and would burn the poll budget in
             // microseconds. Volatile MMIO reads cannot be optimized out.
             for _ in 0..20_000u32 {
-                // SAFETY: 0x1F80_1800 is the CD-ROM controller's index/status register, byte-wide MMIO
-                // on every PS1. Reading it has no side effects, so this is a pure delay.
-                unsafe { core::ptr::read_volatile(0x1F80_1800 as *const u8) };
+                // SAFETY: `reg::INDEX` is the CD-ROM controller's index/status register, byte-wide
+                // MMIO on every PS1. Reading it has no side effects, so this is a pure delay.
+                unsafe { core::ptr::read_volatile(reg::INDEX as *const u8) };
             }
             let quiet = match self.try_status(spin_limit) {
                 Some(r) => r
@@ -414,13 +399,13 @@ impl Cd {
         right_to_left: u8,
     ) {
         select_index(2);
-        write_byte(REG_PARAMETER, left_to_left);
-        write_byte(REG_REQUEST_IRQ, left_to_right);
+        write_byte(reg::PARAMETER, left_to_left);
+        write_byte(reg::REQUEST_IRQ, left_to_right);
         select_index(3);
-        write_byte(REG_COMMAND_RESPONSE, right_to_right);
-        write_byte(REG_PARAMETER, right_to_left);
+        write_byte(reg::COMMAND_RESPONSE, right_to_right);
+        write_byte(reg::PARAMETER, right_to_left);
         // Apply the new volumes (index 3, register 3, bit 5), un-muting ADPCM.
-        write_byte(REG_REQUEST_IRQ, 0x20);
+        write_byte(reg::REQUEST_IRQ, volume_apply::APPLY);
         select_index(0);
     }
 }
@@ -472,17 +457,17 @@ impl Cd {
 
     /// Push one parameter byte. Wait for room first.
     pub fn send_parameter_byte(&mut self, byte: u8) {
-        write_byte(REG_PARAMETER, byte);
+        write_byte(reg::PARAMETER, byte);
     }
 
     /// Write the command byte, which starts the command.
     pub fn send_command_byte(&mut self, byte: u8) {
-        write_byte(REG_COMMAND_RESPONSE, byte);
+        write_byte(reg::COMMAND_RESPONSE, byte);
     }
 
     /// Pop one response byte.
     pub fn read_response_byte(&mut self) -> u8 {
-        read_byte(REG_COMMAND_RESPONSE)
+        read_byte(reg::COMMAND_RESPONSE)
     }
 
     /// The status register: FIFO flags and the busy bit.
@@ -495,17 +480,17 @@ impl Cd {
     /// [`is_data_fifo_ready`](Self::is_data_fifo_ready) says it filled.
     #[doc(alias = "BFRD")]
     pub fn request_data(&mut self) {
-        write_byte(REG_REQUEST_IRQ, REQUEST_DATA);
+        write_byte(reg::REQUEST_IRQ, request::WANT_DATA);
     }
 
     /// Drop the data request, which resets the data FIFO.
     pub fn clear_data_request(&mut self) {
-        write_byte(REG_REQUEST_IRQ, 0);
+        write_byte(reg::REQUEST_IRQ, 0);
     }
 
     /// Pop one byte of sector data.
     pub fn read_data_byte(&mut self) -> u8 {
-        read_byte(REG_PARAMETER)
+        read_byte(reg::PARAMETER)
     }
 }
 
@@ -535,10 +520,10 @@ impl CommandIo for Mmio {
         wait_param_room_bounded(spins)
     }
     fn write_param(&mut self, value: u8) {
-        write_byte(REG_PARAMETER, value);
+        write_byte(reg::PARAMETER, value);
     }
     fn write_command(&mut self, command: u8) {
-        write_byte(REG_COMMAND_RESPONSE, command);
+        write_byte(reg::COMMAND_RESPONSE, command);
     }
     fn wait_irq(&mut self, expected: u8, spins: u32) -> Result<u8, CdError> {
         wait_irq_flag(expected, spins, irq_flag, |flag| {
@@ -574,7 +559,7 @@ fn run_command(
         io.write_param(param);
     }
     io.write_command(command);
-    match io.wait_irq(IRQ_ACK, spin_limit) {
+    match io.wait_irq(code::ACKNOWLEDGE, spin_limit) {
         Ok(irq) => Ok(io.finish(irq_enable, irq)),
         Err(CdError::DriveError) => {
             io.recover(irq_enable);
@@ -622,13 +607,13 @@ impl SectorPollIo for SectorPollMmio {
 #[inline]
 fn poll_sector(io: &mut impl SectorPollIo) -> Result<bool, SectorPollError> {
     match io.flag() {
-        IRQ_DATA_READY => Ok(true),
-        IRQ_ERROR => {
+        code::DATA_READY => Ok(true),
+        code::ERROR => {
             io.drain();
-            io.acknowledge(IRQ_ACK_ALL, true);
+            io.acknowledge(code::ACK_ALL, true);
             Err(SectorPollError)
         }
-        flag @ (IRQ_COMPLETE | IRQ_ACK | IRQ_DATA_END) => {
+        flag @ (code::COMPLETE | code::ACKNOWLEDGE | code::DATA_END) => {
             io.drain();
             io.acknowledge(flag, false);
             Ok(false)
@@ -724,7 +709,7 @@ impl PlayPosition {
 fn begin_polled_command() -> u8 {
     let irq_enable = irq_enable();
     set_irq_enable(0);
-    ack_irq(IRQ_ACK_ALL);
+    ack_irq(code::ACK_ALL);
     select_index(0);
     drain_response_fifo();
     clear_parameter_fifo();
@@ -753,7 +738,7 @@ fn wait_irq_flag(
         if irq == expected {
             return Ok(irq);
         }
-        if irq == IRQ_ERROR {
+        if irq == code::ERROR {
             return Err(CdError::DriveError);
         }
         if irq != 0 {
@@ -779,36 +764,36 @@ fn try_command_until_complete_inner(command: u8, params: &[u8], spin_limit: u32)
             finish_failed_polled_command(irq_enable);
             return false;
         }
-        write_byte(REG_PARAMETER, param);
+        write_byte(reg::PARAMETER, param);
     }
-    write_byte(REG_COMMAND_RESPONSE, command);
+    write_byte(reg::COMMAND_RESPONSE, command);
 
     let ok = wait_ack_then_complete(spin_limit);
     drain_response_fifo();
-    ack_irq(IRQ_ACK_ALL);
+    ack_irq(code::ACK_ALL);
     restore_irq_enable(irq_enable);
     select_index(0);
     ok
 }
 
 fn wait_ack_then_complete(spin_limit: u32) -> bool {
-    if wait_irq_bounded(IRQ_ACK, spin_limit).is_none() {
+    if wait_irq_bounded(code::ACKNOWLEDGE, spin_limit).is_none() {
         return false;
     }
     drain_response_fifo();
-    ack_irq(IRQ_ACK);
+    ack_irq(code::ACKNOWLEDGE);
 
-    if wait_irq_bounded(IRQ_COMPLETE, spin_limit).is_none() {
+    if wait_irq_bounded(code::COMPLETE, spin_limit).is_none() {
         return false;
     }
     drain_response_fifo();
-    ack_irq(IRQ_COMPLETE);
+    ack_irq(code::COMPLETE);
     true
 }
 
 fn finish_failed_polled_command(irq_enable: u8) {
     drain_response_fifo();
-    ack_irq(IRQ_ACK_ALL);
+    ack_irq(code::ACK_ALL);
     restore_irq_enable(irq_enable);
     select_index(0);
 }
@@ -818,8 +803,8 @@ fn read_response_fifo() -> Response {
 
     let mut bytes = [0u8; 16];
     let mut len = 0;
-    while read_status() & STATUS_RESPONSE_NOT_EMPTY != 0 && len < bytes.len() {
-        bytes[len] = read_byte(REG_COMMAND_RESPONSE);
+    while read_status() & status::RESPONSE_NOT_EMPTY != 0 && len < bytes.len() {
+        bytes[len] = read_byte(reg::COMMAND_RESPONSE);
         len += 1;
     }
     Response { bytes, len }
@@ -830,7 +815,7 @@ fn drain_response_fifo() {
 }
 
 fn wait_param_room_bounded(mut spins: u32) -> bool {
-    while read_status() & STATUS_PARAM_NOT_FULL == 0 {
+    while read_status() & status::PARAM_NOT_FULL == 0 {
         if spins == 0 {
             return false;
         }
@@ -844,8 +829,8 @@ fn wait_param_room_bounded(mut spins: u32) -> bool {
 fn drain_response_limited(limit: u32) {
     select_index(0);
     let mut drained = 0;
-    while read_status() & STATUS_RESPONSE_NOT_EMPTY != 0 && drained < limit {
-        let _ = read_byte(REG_COMMAND_RESPONSE);
+    while read_status() & status::RESPONSE_NOT_EMPTY != 0 && drained < limit {
+        let _ = read_byte(reg::COMMAND_RESPONSE);
         drained += 1;
     }
 }
@@ -854,39 +839,39 @@ fn drain_response_limited(limit: u32) {
 /// CD-ROM bit of I_STAT.
 fn ack_all_and_reset_parameters() {
     select_index(1);
-    write_byte(REG_REQUEST_IRQ, IRQ_ACK_ALL | IRQ_PARAM_FIFO_RESET);
+    write_byte(reg::REQUEST_IRQ, code::ACK_ALL | code::CLEAR_PARAMETER_FIFO);
     irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     select_index(0);
 }
 
 fn data_fifo_ready() -> bool {
     select_index(0);
-    read_status() & STATUS_DATA_FIFO_NOT_EMPTY != 0
+    read_status() & status::DATA_FIFO_NOT_EMPTY != 0
 }
 
 fn clear_parameter_fifo() {
     select_index(1);
-    write_byte(REG_REQUEST_IRQ, IRQ_PARAM_FIFO_RESET);
+    write_byte(reg::REQUEST_IRQ, code::CLEAR_PARAMETER_FIFO);
     select_index(0);
 }
 
 fn ack_irq(bits: u8) {
     select_index(1);
-    write_byte(REG_REQUEST_IRQ, bits & IRQ_ACK_ALL);
+    write_byte(reg::REQUEST_IRQ, bits & code::ACK_ALL);
     irq::acknowledge(1 << psx_hw::irq::source::CDROM);
     select_index(0);
 }
 
 fn irq_flag() -> u8 {
     select_index(1);
-    let flag = read_byte(REG_REQUEST_IRQ) & IRQ_ACK_ALL;
+    let flag = read_byte(reg::REQUEST_IRQ) & code::ACK_ALL;
     select_index(0);
     flag
 }
 
 fn irq_enable() -> u8 {
     select_index(0);
-    let enable = read_byte(REG_REQUEST_IRQ) & IRQ_ACK_ALL;
+    let enable = read_byte(reg::REQUEST_IRQ) & code::ACK_ALL;
     select_index(0);
     enable
 }
@@ -897,16 +882,16 @@ fn restore_irq_enable(enable: u8) {
 
 fn set_irq_enable(enable: u8) {
     select_index(1);
-    write_byte(REG_PARAMETER, enable & IRQ_ACK_ALL);
+    write_byte(reg::PARAMETER, enable & code::ACK_ALL);
     select_index(0);
 }
 
 fn read_status() -> u8 {
-    read_byte(REG_INDEX)
+    read_byte(reg::INDEX)
 }
 
 fn select_index(index: u8) {
-    write_byte(REG_INDEX, index & 0x03);
+    write_byte(reg::INDEX, index & 0x03);
 }
 
 fn read_byte(addr: u32) -> u8 {
@@ -1294,7 +1279,7 @@ mod tests {
     #[test]
     fn a_full_parameter_fifo_times_out_without_writing_the_parameter() {
         // The wait used to ignore its own timeout and write the byte anyway.
-        let mut io = FakeIo::new(false, Ok(IRQ_ACK));
+        let mut io = FakeIo::new(false, Ok(code::ACKNOWLEDGE));
         let result = run_command(&mut io, CMD_SETLOC, &[0x00, 0x02, 0x00], 77);
         assert_eq!(result, Err(CdError::Timeout));
         assert_eq!(io.events(), &[BEGIN, ROOM, RESTORE]);
@@ -1320,7 +1305,7 @@ mod tests {
 
     #[test]
     fn an_acknowledged_command_returns_its_response() {
-        let mut io = FakeIo::new(true, Ok(IRQ_ACK));
+        let mut io = FakeIo::new(true, Ok(code::ACKNOWLEDGE));
         let result = run_command(&mut io, CMD_SETLOC, &[1, 2, 3], 10).unwrap();
         assert_eq!(result.bytes(), &[0x02]);
         assert_eq!(
@@ -1337,7 +1322,7 @@ mod tests {
         let mut discarded = [0u8; 4];
         let mut dropped = 0;
         let got = wait_irq_flag(
-            IRQ_ACK,
+            code::ACKNOWLEDGE,
             10,
             || {
                 let flag = script[next];
@@ -1349,13 +1334,13 @@ mod tests {
                 dropped += 1;
             },
         );
-        assert_eq!(got, Ok(IRQ_ACK));
+        assert_eq!(got, Ok(code::ACKNOWLEDGE));
         assert_eq!(&discarded[..dropped], &[2]);
 
         // Silence: one read plus `spins` more, then Timeout.
         let mut reads = 0u32;
         let got = wait_irq_flag(
-            IRQ_ACK,
+            code::ACKNOWLEDGE,
             5,
             || {
                 reads += 1;
@@ -1367,7 +1352,7 @@ mod tests {
         assert_eq!(reads, 6);
 
         // INT5 ends it at once, whatever budget is left.
-        let got = wait_irq_flag(IRQ_ACK, 1000, || IRQ_ERROR, |_| {});
+        let got = wait_irq_flag(code::ACKNOWLEDGE, 1000, || code::ERROR, |_| {});
         assert_eq!(got, Err(CdError::DriveError));
     }
 

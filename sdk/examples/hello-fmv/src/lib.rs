@@ -717,7 +717,11 @@ pub fn run_with(options: Options) -> Outcome {
     let mut in_a_row = 0u32;
     let mut wedged = false;
     let mut back_y: u16 = 256;
-    psx_io::timers::set_mode(psx_io::timers::Timer::Timer2, 0x0200);
+    // Counter 2 on the system clock / 8, free-running.
+    psx_io::timers::set_mode(
+        psx_io::timers::Timer::Timer2,
+        psx_hw::timers::mode::clock_source(2),
+    );
     clock(Some(PHASE_WAIT));
     // SAFETY: single-threaded profiling statics; a second run from a menu
     // starts its profile from zero.

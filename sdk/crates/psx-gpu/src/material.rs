@@ -445,7 +445,7 @@ impl TextureMaterial {
     /// Textured rectangle command with the material's flat tint.
     pub const fn textured_rect_header(self) -> u32 {
         let (r, g, b) = self.tint;
-        0x6400_0000
+        psx_hw::gpu::packet::TEXTURED_RECT
             | ((self.is_translucent() as u32) << 25)
             | ((self.raw_texture as u32) << 24)
             | pack_color(r, g, b)

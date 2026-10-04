@@ -19,7 +19,7 @@ use psx_io::gpu::write_display_control;
 use psx_io::periph::GpuDma;
 
 /// The link value that ends a list.
-pub const LIST_END: u32 = 0x00FF_FFFF;
+pub const LIST_END: u32 = psx_hw::dma::linked_list::END;
 
 /// Most payload words one linked-list DMA node may carry (the words after
 /// its tag), the depth of the GPU's command FIFO.

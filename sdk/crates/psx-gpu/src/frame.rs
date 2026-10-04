@@ -649,7 +649,7 @@ mod tests {
     use super::*;
     use crate::prim::{RectFlat, TriFlat};
 
-    const END: u32 = 0x00FF_FFFF;
+    const END: u32 = psx_hw::dma::linked_list::END;
 
     fn addr<T>(value: &T) -> u32 {
         (value as *const T as usize as u32) & END

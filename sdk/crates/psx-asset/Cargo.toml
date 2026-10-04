@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Runtime parsers for PSoXide cooked-asset blobs. Consumes the binary layouts defined in `psxed-format`; produced by the host editor's `psxed` CLI."
 
 [dependencies]
+psx-hw = { workspace = true }
 psxed-format = { path = "../../../crates/psxed-format" }
 psx-gte      = { path = "../psx-gte" }
 

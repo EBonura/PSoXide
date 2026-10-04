@@ -290,9 +290,13 @@ pub fn draw_sprite_material(
 #[deprecated(note = "Timer 1 belongs to `psx_io::timers`; set its mode there")]
 #[inline]
 pub fn configure_scanline_timer() {
-    // Mode: bit0=sync enable, bits1-2=01 (reset at VBlank), bit8=1
-    // (clock source = HBlank).
-    timers::set_mode(timers::Timer::Timer1, 0x0103);
+    // Sync enabled with sync mode 1 (reset at VBlank), clock source 1
+    // (HBlank).
+    use psx_hw::timers::mode;
+    timers::set_mode(
+        timers::Timer::Timer1,
+        mode::SYNC_ENABLE | mode::sync_mode(1) | mode::clock_source(1),
+    );
 }
 
 /// Renamed to [`configure_scanline_timer`]: it programs Timer 1 to count

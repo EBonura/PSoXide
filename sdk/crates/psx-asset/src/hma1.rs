@@ -187,15 +187,21 @@ fn mvmva_raw(xy: u32, z: u32) -> [i32; 3] {
         let m2: u32;
         let m3: u32;
         core::arch::asm!(
-            ".word 0x48880000", // mtc2 $8, VXY0
-            ".word 0x48890800", // mtc2 $9, VZ0
-            ".word 0",          // VXY0 commit gap (HWB-010/011)
+            ".word {w0}", // mtc2 $8, VXY0
+            ".word {w1}", // mtc2 $9, VZ0
+            ".word 0", // VXY0 commit gap (HWB-010/011)
             ".word 0",
-            ".word 0x4a006012", // MVMVA RT,V0,none,sf=0
-            ".word 0x4808c800", // mfc2 $8, MAC1
-            ".word 0x4809d000", // mfc2 $9, MAC2
-            ".word 0x480ad800", // mfc2 $10, MAC3
+            ".word {w2}", // MVMVA RT,V0,none,sf=0
+            ".word {w3}", // mfc2 $8, MAC1
+            ".word {w4}", // mfc2 $9, MAC2
+            ".word {w5}", // mfc2 $10, MAC3
             ".word 0",
+            w0 = const psx_hw::gte::mtc2(8, 0),
+            w1 = const psx_hw::gte::mtc2(9, 1),
+            w2 = const psx_hw::gte::mvmva(psx_hw::gte::Matrix::Rotation, psx_hw::gte::Vector::V0, psx_hw::gte::Translation::None),
+            w3 = const psx_hw::gte::mfc2(8, 25),
+            w4 = const psx_hw::gte::mfc2(9, 26),
+            w5 = const psx_hw::gte::mfc2(10, 27),
             inlateout("$8") xy => m1,
             inlateout("$9") z => m2,
             lateout("$10") m3,

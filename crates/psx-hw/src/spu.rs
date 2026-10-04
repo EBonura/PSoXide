@@ -99,8 +99,43 @@ pub mod mask {
     pub const ENDX_HI: u32 = ENDX_LO + HIGH;
 }
 
-/// SPUCNT bit 0: feed the CD audio input into the mixer.
-pub const SPUCNT_CD_AUDIO_ENABLE: u16 = 1 << 0;
+/// Value of [`TRANSFER_CTRL`] every game uses: the normal byte order.
+pub const TRANSFER_CTRL_NORMAL: u16 = 0x0004;
+
+/// [`SPUCNT`] bits and fields.
+pub mod control {
+    /// Bit 15: the SPU is enabled.
+    pub const ENABLE: u16 = 1 << 15;
+    /// Bit 14: output is unmuted (clear: muted).
+    pub const UNMUTE: u16 = 1 << 14;
+    /// Bits 13..=8: noise clock, step in bits 9..=8 and shift in 13..=10.
+    pub const NOISE_CLOCK_MASK: u16 = 0x3F00;
+    /// Bit 7: reverb master enable.
+    pub const REVERB_MASTER: u16 = 1 << 7;
+    /// Bit 6: raise the SPU IRQ when the IRQ address is accessed.
+    pub const IRQ_ENABLE: u16 = 1 << 6;
+    /// Bits 5..=4: sound-RAM transfer mode.
+    pub const TRANSFER_MODE_MASK: u16 = 0b11 << 4;
+    /// Transfer mode 1: the CPU writes through the transfer FIFO.
+    pub const TRANSFER_MANUAL_WRITE: u16 = 1 << 4;
+    /// Transfer mode 2: DMA writes sound RAM.
+    pub const TRANSFER_DMA_WRITE: u16 = 2 << 4;
+    /// Bit 0: mix the CD audio input.
+    pub const CD_AUDIO_ENABLE: u16 = 1 << 0;
+    /// Bits 5..=0: the part of the register the SPU applies after a delay;
+    /// [`status::MODE_MASK`] reads the applied value back.
+    pub const MODE_MASK: u16 = 0x3F;
+}
+
+/// [`SPUSTAT`] bits and fields.
+pub mod status {
+    /// Bits 5..=0: the applied copy of the control register's low bits.
+    pub const MODE_MASK: u16 = 0x3F;
+    /// Bit 6: the SPU IRQ latch is set.
+    pub const IRQ_FLAG: u16 = 1 << 6;
+    /// Bit 10: a sound-RAM transfer is still draining.
+    pub const TRANSFER_BUSY: u16 = 1 << 10;
+}
 
 #[cfg(test)]
 mod tests {

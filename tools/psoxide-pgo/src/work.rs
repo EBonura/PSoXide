@@ -964,10 +964,10 @@ mod tests {
     fn a_bounded_gpustat_wait_counts_its_spins_and_waits() {
         // psx_io::gpu::wait_ready, as present_pending inlines it.
         let code = [
-            lui(AT, 0x1f80),
-            i(0xd, AT, A1, 0x1814), // ori a1, at, GPUSTAT
-            addiu(V1, V1, -1),      // 2: loop
-            beq(V1, 0, to(3, 10)),  // timeout
+            lui(AT, (psx_hw::gpu::GP1 >> 16) as i32),
+            i(0xd, AT, A1, (psx_hw::gpu::GPUSTAT & 0xffff) as i32), // ori a1, at, GPUSTAT
+            addiu(V1, V1, -1),                                      // 2: loop
+            beq(V1, 0, to(3, 10)),                                  // timeout
             NOP,
             lw(AT, A1, 0),
             NOP,
@@ -1170,8 +1170,19 @@ mod tests {
     /// A poll at word 32: read a status register, return a bit of it.
     fn poll(calls: u64) -> Vec<(u32, u32, u64)> {
         vec![
-            (32, lui(V0, 0x1f80), calls),
-            (33, lw(V0, V0, 0x10a8), calls),
+            (32, lui(V0, (psx_hw::dma::CHANNEL_BASE >> 16) as i32), calls),
+            (
+                33,
+                lw(
+                    V0,
+                    V0,
+                    ((psx_hw::dma::CHANNEL_BASE
+                        + psx_hw::dma::CHANNEL_STRIDE * psx_hw::dma::channel::GPU
+                        + psx_hw::dma::CHCR)
+                        & 0xffff) as i32,
+                ),
+                calls,
+            ),
             (34, NOP, calls),
             (35, JR_RA, calls),
             (36, and(V0, V0, A0), calls),

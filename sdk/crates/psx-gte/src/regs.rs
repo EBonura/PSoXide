@@ -95,7 +95,7 @@ macro_rules! read_data {
             core::arch::asm!(
                 ".word {instr}",
                 ".word 0",
-                instr = const (0x4808_0000u32 | (($reg as u32) << 11)),
+                instr = const $crate::encoding::mfc2(8, $reg as u32),
                 out("$8") value,
                 options(nostack, nomem, preserves_flags)
             );
@@ -126,7 +126,7 @@ macro_rules! write_data {
         unsafe {
             core::arch::asm!(
                 ".word {instr}",
-                instr = const (0x4888_0000u32 | (($reg as u32) << 11)),
+                instr = const $crate::encoding::mtc2(8, $reg as u32),
                 in("$8") _value,
                 options(nostack, nomem, preserves_flags)
             );
@@ -160,7 +160,7 @@ macro_rules! read_control {
             core::arch::asm!(
                 ".word {instr}",
                 ".word 0",
-                instr = const (0x4848_0000u32 | (($reg as u32) << 11)),
+                instr = const $crate::encoding::cfc2(8, $reg as u32),
                 out("$8") value,
                 options(nostack, nomem, preserves_flags)
             );
@@ -191,7 +191,7 @@ macro_rules! write_control {
         unsafe {
             core::arch::asm!(
                 ".word {instr}",
-                instr = const (0x48C8_0000u32 | (($reg as u32) << 11)),
+                instr = const $crate::encoding::ctc2(8, $reg as u32),
                 in("$8") _value,
                 options(nostack, nomem, preserves_flags)
             );
