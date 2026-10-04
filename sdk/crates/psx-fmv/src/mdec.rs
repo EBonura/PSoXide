@@ -105,43 +105,6 @@ pub static SCALE_WORDS: [u32; 32] = crate::idct::MATRIX_WORDS;
 
 // Register constants moved to psx-hw; these forward until games repin.
 
-/// Moved to [`psx_hw::mdec::DECODE_15BPP`].
-#[deprecated(note = "moved to `psx_hw::mdec::DECODE_15BPP`")]
-pub const DECODE_15BPP: u32 = psx_hw::mdec::DECODE_15BPP;
-/// Moved to [`psx_hw::mdec::DECODE_24BPP`].
-#[deprecated(note = "moved to `psx_hw::mdec::DECODE_24BPP`")]
-pub const DECODE_24BPP: u32 = psx_hw::mdec::DECODE_24BPP;
-/// Moved to [`psx_hw::mdec::DECODE_STP`].
-#[deprecated(note = "moved to `psx_hw::mdec::DECODE_STP`")]
-pub const DECODE_STP: u32 = psx_hw::mdec::DECODE_STP;
-/// Moved to [`psx_hw::mdec::STATUS_OUT_EMPTY`].
-#[deprecated(note = "moved to `psx_hw::mdec::STATUS_OUT_EMPTY`")]
-pub const STATUS_OUT_EMPTY: u32 = psx_hw::mdec::STATUS_OUT_EMPTY;
-/// Moved to [`psx_hw::mdec::STATUS_IN_FULL`].
-#[deprecated(note = "moved to `psx_hw::mdec::STATUS_IN_FULL`")]
-pub const STATUS_IN_FULL: u32 = psx_hw::mdec::STATUS_IN_FULL;
-/// Moved to [`psx_hw::mdec::STATUS_BUSY`].
-#[deprecated(note = "moved to `psx_hw::mdec::STATUS_BUSY`")]
-pub const STATUS_BUSY: u32 = psx_hw::mdec::STATUS_BUSY;
-/// Moved to [`psx_hw::mdec::STATUS_IN_REQUEST`].
-#[deprecated(note = "moved to `psx_hw::mdec::STATUS_IN_REQUEST`")]
-pub const STATUS_IN_REQUEST: u32 = psx_hw::mdec::STATUS_IN_REQUEST;
-/// Moved to [`psx_hw::mdec::STATUS_OUT_REQUEST`].
-#[deprecated(note = "moved to `psx_hw::mdec::STATUS_OUT_REQUEST`")]
-pub const STATUS_OUT_REQUEST: u32 = psx_hw::mdec::STATUS_OUT_REQUEST;
-/// Moved to [`psx_hw::mdec::CONTROL_RESET`].
-#[deprecated(note = "moved to `psx_hw::mdec::CONTROL_RESET`")]
-pub const CONTROL_RESET: u32 = psx_hw::mdec::CONTROL_RESET;
-/// Moved to [`psx_hw::mdec::CONTROL_ENABLE_DMA`].
-#[deprecated(note = "moved to `psx_hw::mdec::CONTROL_ENABLE_DMA`")]
-pub const CONTROL_ENABLE_DMA: u32 = psx_hw::mdec::CONTROL_ENABLE_DMA;
-/// Moved to [`psx_hw::mdec::COMMAND_SET_QUANT`].
-#[deprecated(note = "moved to `psx_hw::mdec::COMMAND_SET_QUANT`")]
-pub const COMMAND_SET_QUANT: u32 = psx_hw::mdec::COMMAND_SET_QUANT;
-/// Moved to [`psx_hw::mdec::COMMAND_SET_SCALE`].
-#[deprecated(note = "moved to `psx_hw::mdec::COMMAND_SET_SCALE`")]
-pub const COMMAND_SET_SCALE: u32 = psx_hw::mdec::COMMAND_SET_SCALE;
-
 /// Spin budget for one status wait (reset settle, request, FIFO room).
 /// The console settles a reset in tens of cycles; this is a few ms.
 pub const SETTLE_SPINS: u32 = 20_000;
@@ -213,13 +176,6 @@ impl Tables {
     /// The MDEC asked for data on both commands, so DMA0 feeds it.
     pub fn is_dma_ready(&self) -> bool {
         self.enable_writes != 0 && self.cpu_uploads == 0
-    }
-
-    /// Renamed to [`Tables::is_dma_ready`].
-    #[deprecated(note = "renamed to `is_dma_ready`")]
-    #[inline(always)]
-    pub fn dma_ready(&self) -> bool {
-        self.is_dma_ready()
     }
 }
 
@@ -511,64 +467,6 @@ pub fn reset() -> bool {
 #[deprecated(note = "use `Mdec::load_tables` with the `MdecDma` token")]
 pub fn load_tables() -> Option<Tables> {
     steal_mdec().load_tables()
-}
-
-/// Upload both tables over CPU writes to MDEC0 only.
-#[deprecated(note = "use `Mdec::load_tables_cpu` with the `MdecDma` token")]
-pub fn load_tables_cpu() -> bool {
-    steal_mdec().load_tables_cpu()
-}
-
-/// Write one word to MDEC0.
-#[deprecated(note = "use `Mdec::write_command` with the `MdecDma` token")]
-#[inline(always)]
-pub fn write_command(word: u32) {
-    steal_mdec().write_command(word);
-}
-
-/// Read one word of decoded output from MDEC0.
-#[deprecated(note = "use `Mdec::read_data` with the `MdecDma` token")]
-#[inline(always)]
-pub fn read_data() -> u32 {
-    steal_mdec().read_data()
-}
-
-/// Start decoding `words` words of run-length data.
-///
-/// # Errors
-/// See [`Mdec::decode_start`].
-///
-/// # Safety
-/// See [`Mdec::decode_start`].
-#[deprecated(note = "use `Mdec::decode_start` with the `MdecDma` token")]
-pub unsafe fn decode_start(rle: &[u32], words: usize, mode: u32) -> Result<(), RleLengthError> {
-    // SAFETY: forwarded contract.
-    unsafe { steal_mdec().decode_start(rle, words, mode) }
-}
-
-/// Decode all of `rle` with DMA0 feeding the MDEC.
-///
-/// # Errors
-/// See [`Mdec::decode`].
-#[deprecated(note = "use `Mdec::decode` with the `MdecDma` token")]
-pub fn decode<R>(
-    rle: &[u32],
-    mode: u32,
-    columns: impl FnOnce() -> R,
-) -> Result<(R, bool), RleLengthError> {
-    steal_mdec().decode(rle, mode, |_| columns())
-}
-
-/// Pull the next `dst.len()` words of decoded pixels over DMA1.
-#[deprecated(note = "use `Mdec::read_column` with the `MdecDma` token")]
-pub fn read_column(dst: &mut [u32]) -> bool {
-    steal_mdec().read_column(dst)
-}
-
-/// Confirm DMA0 finished feeding the frame.
-#[deprecated(note = "use `Mdec::decode_finish` with the `MdecDma` token")]
-pub fn decode_finish() -> bool {
-    steal_mdec().decode_finish()
 }
 
 #[cfg(test)]

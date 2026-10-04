@@ -137,7 +137,7 @@ impl Color555 {
     /// existing mask is set. Games use this for UI overlays.
     ///
     /// In a **CLUT entry** bit 15 means something else entirely: see
-    /// [`Self::with_stp`].
+    /// [`Self::with_semi_transparency`].
     pub const fn with_mask_bit(self) -> Self {
         Self(self.0 | 0x8000)
     }
@@ -159,24 +159,10 @@ impl Color555 {
         Self(self.0 | 0x8000)
     }
 
-    /// Renamed to [`Self::with_semi_transparency`].
-    #[deprecated(note = "renamed to `with_semi_transparency`")]
-    #[inline(always)]
-    pub const fn with_stp(self) -> Self {
-        self.with_semi_transparency()
-    }
-
     /// Whether bit 15 is set (the mask bit, or STP in a CLUT entry).
     #[doc(alias = "STP")]
     pub const fn is_semi_transparent(self) -> bool {
         self.0 & 0x8000 != 0
-    }
-
-    /// Renamed to [`Self::is_semi_transparent`].
-    #[deprecated(note = "renamed to `is_semi_transparent`")]
-    #[inline(always)]
-    pub const fn has_stp(self) -> bool {
-        self.is_semi_transparent()
     }
 }
 
@@ -458,13 +444,6 @@ impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
         self.rows
             .get(page_index)
             .is_some_and(|rows| rows.iter().all(|row| *row == 0))
-    }
-
-    /// Renamed to [`Self::is_page_empty`].
-    #[deprecated(note = "renamed to `is_page_empty`")]
-    #[inline(always)]
-    pub fn page_is_empty(&self, page_index: usize) -> bool {
-        self.is_page_empty(page_index)
     }
 }
 

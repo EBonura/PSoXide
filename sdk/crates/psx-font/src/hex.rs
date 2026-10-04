@@ -31,13 +31,6 @@ pub fn format_u16(v: u16) -> HexU16 {
     HexU16(out)
 }
 
-/// Renamed to [`format_u16`].
-#[deprecated(note = "renamed to `format_u16`")]
-#[inline(always)]
-pub fn u16_hex(v: u16) -> HexU16 {
-    format_u16(v)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -314,17 +314,6 @@ pub fn format_and_save_to_slot_one<const ACTIONS: usize, const SCORES: usize>(
     format_and_save(&mut card, name, title, profile)
 }
 
-/// [`format_and_save_to_slot_one`] on a token the caller does not hold.
-#[cfg(feature = "card")]
-#[deprecated(note = "use `format_and_save_to_slot_one` with the `ControllerPort` token")]
-pub fn format_and_save_slot_one<const ACTIONS: usize, const SCORES: usize>(
-    name: &str,
-    title: &str,
-    profile: &Profile<ACTIONS, SCORES>,
-) -> Result<(), CardError> {
-    format_and_save_to_slot_one(&mut steal_port(), name, title, profile)
-}
-
 /// Load a profile from the controller-1 memory-card slot, driving the port
 /// through `port`.
 #[cfg(feature = "card")]

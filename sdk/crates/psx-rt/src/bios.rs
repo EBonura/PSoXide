@@ -40,10 +40,3 @@ pub fn write_char(ch: u8) {
     // lives.
     unsafe { __bios_putchar(ch as u32) }
 }
-
-/// Renamed to [`write_char`].
-#[deprecated(note = "renamed to `write_char`")]
-#[inline(always)]
-pub fn putchar(ch: u8) {
-    write_char(ch)
-}

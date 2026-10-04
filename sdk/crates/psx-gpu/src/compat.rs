@@ -12,8 +12,8 @@ use crate::display::{DisplayConfig, Resolution, VideoMode};
 use crate::gpu;
 use crate::material::{BlendMode, TextureMaterial};
 use crate::prim::{
-    FillRect, LineGouraud, LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite,
-    TriFlat, TriGouraud, TriTextured,
+    FillRect, LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite, TriFlat,
+    TriGouraud, TriTextured,
 };
 use psx_io::timers;
 
@@ -30,20 +30,6 @@ pub fn init(mode: VideoMode, res: Resolution) {
 #[deprecated(note = "use `Gpu::set_display` with `DisplayConfig::with_offset`")]
 pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
     gpu::write_display_window(DisplayConfig::new(mode, res).with_offset((dx, dy)));
-}
-
-/// Shift the picture horizontally by `offset_px` pixels (NTSC window).
-#[deprecated(note = "use `Gpu::set_display` with `DisplayConfig::with_offset`")]
-pub fn set_screen_h_offset(offset_px: i16, res: Resolution) {
-    let display = DisplayConfig::new(VideoMode::Ntsc, res).with_offset((offset_px, 0));
-    psx_io::gpu::write_display_control(display.horizontal_range_command());
-}
-
-/// Shift the picture vertically by `offset_px` scanlines.
-#[deprecated(note = "use `Gpu::set_display` with `DisplayConfig::with_offset`")]
-pub fn set_screen_v_offset(offset_px: i16, mode: VideoMode, res: Resolution) {
-    let display = DisplayConfig::new(mode, res).with_offset((0, offset_px));
-    psx_io::gpu::write_display_control(display.vertical_range_command());
 }
 
 /// Block until the GPU has finished drawing everything sent to it.
@@ -76,13 +62,6 @@ pub fn signal_draw_done() {
     psx_io::gpu::write_command(psx_hw::gpu::gp0::REQUEST_IRQ);
 }
 
-/// Kick a `'static` chain without waiting for it.
-#[deprecated(note = "use `Gpu::submit_static`")]
-#[inline]
-pub fn submit_static(dma: &mut psx_io::periph::GpuDma, chain: &'static impl crate::StaticChain) {
-    crate::Gpu::from_dma_mut(dma).submit_static(chain);
-}
-
 /// Set the drawing-area rectangle.
 #[deprecated(note = "use `Gpu::set_draw_area`")]
 pub fn set_draw_area(x0: u16, y0: u16, x1: u16, y1: u16) {
@@ -93,27 +72,6 @@ pub fn set_draw_area(x0: u16, y0: u16, x1: u16, y1: u16) {
 #[deprecated(note = "use `Gpu::set_draw_offset`")]
 pub fn set_draw_offset(x: i16, y: i16) {
     gpu::set_draw_offset((x, y));
-}
-
-/// Set the mask-bit mode.
-#[deprecated(note = "use `Gpu::set_mask_mode` with `MaskMode` flags")]
-pub fn set_mask_mode(set_on_draw: bool, check_before_draw: bool) {
-    psx_io::gpu::wait_command_ready();
-    psx_io::gpu::write_command(psx_hw::gpu::gp0::mask_bit(set_on_draw, check_before_draw));
-}
-
-/// Select a texture page for textured rectangles.
-#[deprecated(note = "use `Gpu::set_draw_mode` with a `TextureMaterial` for the page")]
-pub fn set_texture_page(tpage_x: u16, tpage_y: u16, depth: TextureDepth) {
-    psx_io::gpu::wait_command_ready();
-    psx_io::gpu::write_command(psx_hw::gpu::gp0::draw_mode(
-        (tpage_x / 64) as u32,
-        (tpage_y / 256) as u32,
-        0,
-        depth as u32,
-        false,
-        true,
-    ));
 }
 
 /// Fill a VRAM rectangle with a solid color.
@@ -147,52 +105,10 @@ pub fn draw_tri_gouraud(verts: [(i16, i16); 3], colors: [(u8, u8, u8); 3]) {
     gpu::draw(&TriGouraud::new(verts, colors));
 }
 
-/// Draw a semi-transparent Gouraud-shaded triangle.
-#[deprecated(
-    note = "use `gpu.set_draw_mode(material)` and `gpu.draw(&TriGouraud::new(..).translucent())`"
-)]
-pub fn draw_tri_gouraud_blended(
-    verts: [(i16, i16); 3],
-    colors: [(u8, u8, u8); 3],
-    blend_mode: BlendMode,
-) {
-    if !blend_mode.is_translucent() {
-        gpu::draw(&TriGouraud::new(verts, colors));
-        return;
-    }
-    gpu::set_draw_mode(TextureMaterial::blended(0, 0, colors[0], blend_mode));
-    gpu::draw(&TriGouraud::new(verts, colors).translucent());
-}
-
 /// Draw a monochrome line.
 #[deprecated(note = "use `gpu.draw(&LineMono::new(..))`")]
 pub fn draw_line_mono(x0: i16, y0: i16, x1: i16, y1: i16, r: u8, g: u8, b: u8) {
     gpu::draw(&LineMono::new(x0, y0, x1, y1, r, g, b));
-}
-
-/// Draw a semi-transparent monochrome line.
-#[deprecated(
-    note = "use `gpu.set_draw_mode(material)` and `gpu.draw(&LineMono::new(..).translucent())`"
-)]
-pub fn draw_line_mono_blended(
-    from: (i16, i16),
-    to: (i16, i16),
-    color: (u8, u8, u8),
-    blend_mode: BlendMode,
-) {
-    let line = LineMono::new(from.0, from.1, to.0, to.1, color.0, color.1, color.2);
-    if !blend_mode.is_translucent() {
-        gpu::draw(&line);
-        return;
-    }
-    gpu::set_draw_mode(TextureMaterial::blended(0, 0, color, blend_mode));
-    gpu::draw(&line.translucent());
-}
-
-/// Draw a Gouraud-shaded line.
-#[deprecated(note = "use `gpu.draw(&LineGouraud::new(..))`")]
-pub fn draw_line_gouraud(x0: i16, y0: i16, c0: (u8, u8, u8), x1: i16, y1: i16, c1: (u8, u8, u8)) {
-    gpu::draw(&LineGouraud::new((x0, y0), c0, (x1, y1), c1));
 }
 
 /// Fill an axis-aligned rectangle with a flat color, as a polygon.
@@ -240,21 +156,6 @@ pub fn draw_tri_textured_material(
     gpu::draw(&TriTextured::with_material(verts, uvs, material));
 }
 
-/// Draw a Gouraud-shaded textured quad.
-#[deprecated(note = "use `gpu.draw(&QuadTexturedGouraud::with_material(..))`")]
-pub fn draw_quad_textured_gouraud(
-    verts: [(i16, i16); 4],
-    uvs: [(u8, u8); 4],
-    colors: [(u8, u8, u8); 4],
-    clut_word: u16,
-    tpage_word: u16,
-) {
-    let material = TextureMaterial::new(clut_word, tpage_word);
-    gpu::draw(&QuadTexturedGouraud::with_material(
-        verts, uvs, colors, material,
-    ));
-}
-
 /// Draw a Gouraud-shaded textured quad using a [`TextureMaterial`].
 #[deprecated(note = "use `gpu.draw(&QuadTexturedGouraud::with_material(..))`")]
 pub fn draw_quad_textured_gouraud_material(
@@ -282,16 +183,11 @@ pub fn draw_sprite_material(
     gpu::draw(&Sprite::with_material(x, y, w, h, uv, material));
 }
 
-/// Configure Timer 1 as an HBlank-counting scanline counter.
+/// Program Timer 1 to count HBlanks, reset at VBlank.
 ///
-/// WARNING: writing a timer's mode register resets its counter, so every
-/// call restarts the count from zero. That is why the helpers below cannot
-/// observe the real display position: they reconfigure before reading.
-#[deprecated(note = "Timer 1 belongs to `psx_io::timers`; set its mode there")]
-#[inline]
-pub fn configure_scanline_timer() {
-    // Sync enabled with sync mode 1 (reset at VBlank), clock source 1
-    // (HBlank).
+/// Writing a timer's mode register resets its counter, so every call
+/// restarts the count from zero.
+fn configure_scanline_timer() {
     use psx_hw::timers::mode;
     timers::set_mode(
         timers::Timer::Timer1,
@@ -299,33 +195,11 @@ pub fn configure_scanline_timer() {
     );
 }
 
-/// Renamed to [`configure_scanline_timer`]: it programs Timer 1 to count
-/// HBlanks and has nothing to do with vertical sync.
-#[deprecated(note = "renamed to `configure_scanline_timer`")]
+/// Programs Timer 1 to count HBlanks. It has nothing to do with vertical sync.
+#[deprecated(note = "Timer 1 belongs to `psx_io::timers`; set its mode there")]
 #[inline(always)]
 pub fn configure_vsync_timer() {
     configure_scanline_timer()
-}
-
-/// Timer-1 scanline counter used by the VBlank wait helpers.
-#[deprecated(
-    note = "reconfigures Timer 1 before reading, which resets the counter, \
-            so this returns ~0 rather than the display scanline; use \
-            psx_rt::interrupts for display timing"
-)]
-#[inline]
-pub fn scanline_counter() -> u16 {
-    configure_scanline_timer();
-    timers::counter(timers::Timer::Timer1)
-}
-
-/// Whether Timer 1 currently reports the VBlank scanline region.
-#[deprecated(note = "built on scanline_counter(), whose reconfigure-before-read \
-            resets the counter, so this is almost always false; use \
-            psx_rt::interrupts for display timing")]
-#[inline]
-pub fn in_vblank() -> bool {
-    scanline_counter() >= 242
 }
 
 /// Wait 242 HBlank periods (~15.4ms) from the moment of the call.
@@ -343,47 +217,7 @@ pub fn vsync() {
     while timers::counter(timers::Timer::Timer1) < 242 {}
 }
 
-/// Texture color depth for the deprecated `set_texture_page`.
-#[deprecated(
-    note = "only `set_texture_page` used it; `TextureMaterial` and psx-vram's `TextureDepth` describe texture pages"
-)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum TextureDepth {
-    /// 4-bit CLUT-indexed.
-    Bit4 = 0,
-    /// 8-bit CLUT-indexed.
-    Bit8 = 1,
-    /// 15-bit direct color.
-    Bit15 = 2,
-}
-
-/// Kick a linked-list chain without waiting for the walk.
-///
-/// # Safety
-///
-/// As [`crate::chain::submit_async_raw`].
-#[deprecated(note = "use `chain::submit_async_raw`, which takes the `GpuDma` token")]
-#[doc(alias = "DrawOTag")]
-#[inline(always)]
-pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
-    // SAFETY: forwarded contract.
-    unsafe { crate::chain::start_walk(head) }
-}
-
-/// Renamed to [`submit_linked_list_async_raw`].
-///
-/// # Safety
-///
-/// As [`crate::chain::submit_async_raw`].
-#[deprecated(note = "use `chain::submit_async_raw`, which takes the `GpuDma` token")]
-#[inline(always)]
-pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
-    // SAFETY: forwarded contract.
-    unsafe { crate::chain::start_walk(head) }
-}
-
-/// Old name of [`submit_linked_list_async_raw`].
+/// Old name of [`crate::chain::submit_async_raw`].
 ///
 /// # Safety
 ///
@@ -397,21 +231,7 @@ pub unsafe fn submit_linked_list_async(head: *const u32) {
     unsafe { crate::chain::start_walk(head) }
 }
 
-/// Kick a linked-list chain and wait for the walk.
-///
-/// # Safety
-///
-/// As [`crate::chain::submit_raw`].
-#[deprecated(note = "use `chain::submit_raw`, which takes the `GpuDma` token")]
-#[doc(alias = "DrawOTag")]
-#[inline(always)]
-pub unsafe fn submit_linked_list_raw(head: *const u32) {
-    // SAFETY: forwarded contract; the wait ends the walk before return.
-    unsafe { crate::chain::start_walk(head) };
-    crate::chain::wait_walk();
-}
-
-/// Old name of [`submit_linked_list_raw`].
+/// Old name of [`crate::chain::submit_raw`].
 ///
 /// # Safety
 ///
@@ -446,7 +266,7 @@ pub fn draw_done() -> bool {
 mod tests {
     use super::*;
     use crate::material::TextureWindow;
-    use crate::prim::GpuPacket;
+    use crate::prim::{GpuPacket, LineGouraud};
     use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 
     fn payload<P: GpuPacket>(packet: &P) -> &[u32] {

@@ -64,8 +64,6 @@ use psx_hw::spu::{
 };
 use psx_io::periph::SpuDma;
 
-pub mod tones;
-
 // ======================================================================
 // MMIO helpers -- hand-rolled volatile access at fixed SPU offsets
 // ======================================================================
@@ -510,13 +508,6 @@ impl SpuAddr {
     pub const fn register_value(self) -> u16 {
         (self.0 / 8) as u16
     }
-
-    /// Renamed to [`register_value`](Self::register_value).
-    #[deprecated(note = "renamed to `register_value`")]
-    #[inline(always)]
-    pub const fn reg_field(self) -> u16 {
-        self.register_value()
-    }
 }
 
 /// ADSR envelope descriptor. Builds the pair of 16-bit envelope
@@ -779,13 +770,6 @@ impl Voice {
     #[doc(alias = "ENDX")]
     pub fn ended_voices() -> u32 {
         read_reg16(voice_mask::ENDX_LO) as u32 | ((read_reg16(voice_mask::ENDX_HI) as u32) << 16)
-    }
-
-    /// Renamed to [`ended_voices`](Self::ended_voices).
-    #[deprecated(note = "renamed to `ended_voices`")]
-    #[inline(always)]
-    pub fn voices_ended() -> u32 {
-        Self::ended_voices()
     }
 
     /// Clear the sticky END flags for the voices in `mask`, so the next

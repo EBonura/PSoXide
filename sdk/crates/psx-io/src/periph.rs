@@ -78,16 +78,6 @@ token!(
     ControllerPort
 );
 
-/// Renamed to [`OrderingTableClearDma`].
-#[deprecated(note = "renamed to `OrderingTableClearDma`")]
-pub type OtcDma = OrderingTableClearDma;
-/// Renamed to [`Cd`].
-#[deprecated(note = "renamed to `Cd`")]
-pub type Cdrom = Cd;
-/// Renamed to [`ControllerPort`].
-#[deprecated(note = "renamed to `ControllerPort`")]
-pub type Sio0 = ControllerPort;
-
 #[cfg(test)]
 mod tests {
     use super::*;

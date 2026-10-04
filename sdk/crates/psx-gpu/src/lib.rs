@@ -16,7 +16,7 @@
 //! - [`ordered`] streams packets in painter order over static storage.
 //! - [`display`] describes what the GPU shows; [`material`] describes how
 //!   textured packets sample and blend.
-//! - The raw layer, [`submit_linked_list_async_raw`] and the `*_unchecked`
+//! - The raw layer, [`chain::submit_async_raw`] and the `*_unchecked`
 //!   adds on [`frame::OtFrame`], is `unsafe`: it hands the DMA controller
 //!   addresses the type system cannot follow.
 //!
@@ -39,16 +39,12 @@ pub mod prim;
 
 #[allow(deprecated, reason = "the forwarders kept for one stage")]
 pub use compat::{
-    arm_draw_done, configure_scanline_timer, configure_vsync_timer, draw_done, draw_line_gouraud,
-    draw_line_mono, draw_line_mono_blended, draw_quad_flat, draw_quad_textured,
-    draw_quad_textured_gouraud, draw_quad_textured_gouraud_material, draw_quad_textured_material,
+    arm_draw_done, configure_vsync_timer, draw_done, draw_line_mono, draw_quad_flat,
+    draw_quad_textured, draw_quad_textured_gouraud_material, draw_quad_textured_material,
     draw_rect_flat, draw_sprite_material, draw_sync, draw_tri_flat, draw_tri_flat_blended,
-    draw_tri_gouraud, draw_tri_gouraud_blended, draw_tri_textured_material, fill_rect, in_vblank,
-    init, scanline_counter, set_display_offset, set_draw_area, set_draw_offset, set_mask_mode,
-    set_screen_h_offset, set_screen_v_offset, set_texture_page, signal_draw_done,
-    submit_linked_list, submit_linked_list_async, submit_linked_list_async_raw,
-    submit_linked_list_raw, submit_linked_list_raw_async, submit_linked_list_wait, submit_static,
-    vsync, wait_idle, TextureDepth,
+    draw_tri_gouraud, draw_tri_textured_material, fill_rect, init, set_display_offset,
+    set_draw_area, set_draw_offset, signal_draw_done, submit_linked_list, submit_linked_list_async,
+    submit_linked_list_wait, vsync, wait_idle,
 };
 // The chain items' old root paths, kept for one stage: they are the same
 // items, so they cannot carry a deprecation of their own.

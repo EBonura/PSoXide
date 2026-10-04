@@ -49,20 +49,6 @@ pub unsafe trait CommandStreamDma {
     /// Wait until previously submitted GPU drawing has finished.
     #[doc(alias = "DrawSync")]
     fn wait_idle(&mut self);
-
-    /// Renamed to [`is_busy`](Self::is_busy).
-    #[deprecated(note = "renamed to `is_busy`")]
-    #[inline(always)]
-    fn busy(&mut self) -> bool {
-        self.is_busy()
-    }
-
-    /// Renamed to [`wait_idle`](Self::wait_idle).
-    #[deprecated(note = "renamed to `wait_idle`")]
-    #[inline(always)]
-    fn draw_sync(&mut self) {
-        self.wait_idle()
-    }
 }
 
 // SAFETY: the token is the channel-2 transport. `is_busy` reads the
@@ -124,19 +110,7 @@ unsafe impl<D: CommandStreamDma + Send> Send for OrderedCommandStream<D> {}
 // safe as for the `&'static mut [u32]` it replaces.
 unsafe impl<D: CommandStreamDma + Sync> Sync for OrderedCommandStream<D> {}
 
-impl OrderedCommandStream {
-    /// A stream over `words` that drives channel 2 without holding its
-    /// token.
-    #[deprecated(
-        note = "use `OrderedCommandStream::with_dma(words, gpu_dma)` with the `GpuDma` token"
-    )]
-    pub fn new(words: &'static mut [u32]) -> Self {
-        // SAFETY: a token is a logic guard, not a memory-safety one (see
-        // `psx_io::periph`); this constructor has always driven channel 2
-        // without one, and keeps doing so for one stage.
-        Self::with_dma(words, unsafe { GpuDma::steal() })
-    }
-}
+impl OrderedCommandStream {}
 
 impl<D: CommandStreamDma> OrderedCommandStream<D> {
     /// A stream over `words`, at least 17 word-aligned RAM words, driven by
@@ -336,13 +310,6 @@ impl<D: CommandStreamDma> OrderedCommandStream<D> {
                 core::ptr::read(&this.dma),
             )
         }
-    }
-
-    /// Renamed to [`flush`](Self::flush).
-    #[deprecated(note = "renamed to `flush`")]
-    #[inline(always)]
-    pub fn draw_sync(&mut self) {
-        self.flush();
     }
 }
 

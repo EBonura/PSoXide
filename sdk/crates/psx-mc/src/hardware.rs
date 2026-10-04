@@ -152,12 +152,6 @@ impl HardwareCard<ControllerPort> {
     pub fn new(slot: Slot) -> Self {
         Self::on_port(steal_port(), slot)
     }
-
-    /// A card with custom [`Timing`] (for tuning against real silicon).
-    #[deprecated(note = "use `HardwareCard::on_port_with_timing` with the `ControllerPort` token")]
-    pub fn with_timing(slot: Slot, timing: Timing) -> Self {
-        Self::on_port_with_timing(steal_port(), slot, timing)
-    }
 }
 
 /// The token for a deprecated constructor that never took one.

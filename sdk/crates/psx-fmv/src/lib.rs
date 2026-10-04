@@ -27,11 +27,9 @@
 
 #[doc(alias = "BS")]
 pub mod bitstream;
-pub mod bs;
 pub mod idct;
 pub mod iso;
 pub mod mdec;
 pub mod rle;
-pub mod str;
 #[doc(alias = "STR")]
 pub mod stream;

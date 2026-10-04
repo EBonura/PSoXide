@@ -40,12 +40,6 @@ impl Channel {
     /// Renamed to [`Channel::Cd`].
     #[deprecated(note = "renamed to `Channel::Cd`")]
     pub const Cdrom: Channel = Channel::Cd;
-    /// Renamed to [`Channel::Expansion`].
-    #[deprecated(note = "renamed to `Channel::Expansion`")]
-    pub const Pio: Channel = Channel::Expansion;
-    /// Renamed to [`Channel::OrderingTableClear`].
-    #[deprecated(note = "renamed to `Channel::OrderingTableClear`")]
-    pub const Otc: Channel = Channel::OrderingTableClear;
 }
 
 impl Channel {
@@ -61,20 +55,6 @@ impl Channel {
     #[inline(always)]
     pub const fn enable_bit(self) -> u32 {
         3 + 4 * (self as u32)
-    }
-
-    /// Renamed to [`Channel::register_base`].
-    #[deprecated(note = "renamed to `register_base`")]
-    #[inline(always)]
-    pub const fn base(self) -> u32 {
-        self.register_base()
-    }
-
-    /// Renamed to [`Channel::enable_bit`].
-    #[deprecated(note = "renamed to `enable_bit`")]
-    #[inline(always)]
-    pub const fn dpcr_enable_bit(self) -> u32 {
-        self.enable_bit()
     }
 }
 
@@ -94,20 +74,6 @@ pub const fn size_words(words: u16) -> u32 {
 #[inline(always)]
 pub const fn size_blocks(block_size: u16, block_count: u16) -> u32 {
     (block_size as u32) | ((block_count as u32) << 16)
-}
-
-/// Renamed to [`size_words`].
-#[deprecated(note = "renamed to `size_words`")]
-#[inline(always)]
-pub const fn bcr_words(words: u16) -> u32 {
-    size_words(words)
-}
-
-/// Renamed to [`size_blocks`].
-#[deprecated(note = "renamed to `size_blocks`")]
-#[inline(always)]
-pub const fn bcr_blocks(block_size: u16, block_count: u16) -> u32 {
-    size_blocks(block_size, block_count)
 }
 
 /// The three per-channel register values that describe one transfer.
@@ -237,39 +203,6 @@ pub mod raw {
         // SAFETY: a store to this channel's control register; see the contract above.
         unsafe { crate::write_u32(ch.register_base() + reg::CHCR, value) }
     }
-
-    /// Renamed to [`set_address`].
-    ///
-    /// # Safety
-    /// See [`set_address`].
-    #[deprecated(note = "renamed to `set_address`")]
-    #[inline(always)]
-    pub unsafe fn set_madr(ch: Channel, addr: u32) {
-        // SAFETY: same contract as the renamed function.
-        unsafe { set_address(ch, addr) }
-    }
-
-    /// Renamed to [`set_size`].
-    ///
-    /// # Safety
-    /// See [`set_size`].
-    #[deprecated(note = "renamed to `set_size`")]
-    #[inline(always)]
-    pub unsafe fn set_bcr(ch: Channel, value: u32) {
-        // SAFETY: same contract as the renamed function.
-        unsafe { set_size(ch, value) }
-    }
-
-    /// Renamed to [`set_control`].
-    ///
-    /// # Safety
-    /// See [`set_control`].
-    #[deprecated(note = "renamed to `set_control`")]
-    #[inline(always)]
-    pub unsafe fn set_chcr(ch: Channel, value: u32) {
-        // SAFETY: same contract as the renamed function.
-        unsafe { set_control(ch, value) }
-    }
 }
 
 /// Write the channel's RAM address register.
@@ -294,13 +227,6 @@ pub fn address(ch: Channel) -> u32 {
     unsafe { crate::read_u32(ch.register_base() + reg::MADR) }
 }
 
-/// Renamed to [`address`].
-#[deprecated(note = "renamed to `address`")]
-#[inline(always)]
-pub fn madr(ch: Channel) -> u32 {
-    address(ch)
-}
-
 /// Write the size register in manual / linked-list mode: just a 16-bit word
 /// count.
 ///
@@ -314,21 +240,6 @@ pub fn madr(ch: Channel) -> u32 {
 pub unsafe fn set_bcr_manual(ch: Channel, words: u16) {
     // SAFETY: forwarded contract.
     unsafe { raw::set_size(ch, size_words(words)) }
-}
-
-/// Write the size register in block mode: `block_count` blocks of
-/// `block_size` words.
-///
-/// # Safety
-///
-/// The value arms or starts a transfer on `ch`; see [`start`]'s contract.
-#[deprecated(
-    note = "use the unsafe `dma::start` with `dma::size_blocks`, or `dma::raw::set_size` for probes"
-)]
-#[inline(always)]
-pub unsafe fn set_bcr_block(ch: Channel, block_size: u16, block_count: u16) {
-    // SAFETY: forwarded contract.
-    unsafe { raw::set_size(ch, size_blocks(block_size, block_count)) }
 }
 
 /// Write the control register. Starts the transfer if `CHCR_START` is set.
@@ -351,13 +262,6 @@ pub unsafe fn set_chcr(ch: Channel, value: u32) {
 pub fn control(ch: Channel) -> u32 {
     // SAFETY: a side-effect-free read of this channel's control register.
     unsafe { crate::read_u32(ch.register_base() + reg::CHCR) }
-}
-
-/// Renamed to [`control`].
-#[deprecated(note = "renamed to `control`")]
-#[inline(always)]
-pub fn chcr(ch: Channel) -> u32 {
-    control(ch)
 }
 
 /// True while the channel is busy with an in-flight transfer.
@@ -500,10 +404,6 @@ impl SpuDma {
 /// enough that a wedged channel returns control inside a frame.
 pub const DEFAULT_SPINS: u32 = 500_000;
 
-/// Renamed to [`DEFAULT_SPINS`].
-#[deprecated(note = "renamed to `DEFAULT_SPINS`")]
-pub const DEFAULT_DMA_SPINS: u32 = DEFAULT_SPINS;
-
 /// Clear `ch`'s control register, dropping its START bit, so the channel can
 /// be re-armed: on silicon a CHCR write to a channel whose START is still
 /// latched is ignored, which is how one wedged kick used to poison every
@@ -553,37 +453,6 @@ pub fn wait_or_abort(ch: Channel, spins: u32) -> bool {
     compiler_barrier();
     done
 }
-
-/// Moved to [`psx_hw::dma::DPCR`].
-#[deprecated(note = "moved to `psx_hw::dma::DPCR`")]
-pub const DPCR: u32 = reg::DPCR;
-/// Moved to [`psx_hw::dma::DICR`].
-#[deprecated(note = "moved to `psx_hw::dma::DICR`")]
-pub const DICR: u32 = reg::DICR;
-/// Moved to [`psx_hw::dma::CHCR_TO_DEVICE`].
-#[deprecated(note = "moved to `psx_hw::dma::CHCR_TO_DEVICE`")]
-pub const CHCR_TO_DEVICE: u32 = reg::CHCR_TO_DEVICE;
-/// Moved to [`psx_hw::dma::CHCR_STEP_BACKWARD`].
-#[deprecated(note = "moved to `psx_hw::dma::CHCR_STEP_BACKWARD`")]
-pub const CHCR_STEP_BACKWARD: u32 = reg::CHCR_STEP_BACKWARD;
-/// Moved to [`psx_hw::dma::CHCR_CHOPPING_ENABLE`].
-#[deprecated(note = "moved to `psx_hw::dma::CHCR_CHOPPING_ENABLE`")]
-pub const CHCR_CHOPPING_ENABLE: u32 = reg::CHCR_CHOPPING_ENABLE;
-/// Moved to [`psx_hw::dma::CHCR_SYNC_MANUAL`].
-#[deprecated(note = "moved to `psx_hw::dma::CHCR_SYNC_MANUAL`")]
-pub const CHCR_SYNC_MANUAL: u32 = reg::CHCR_SYNC_MANUAL;
-/// Moved to [`psx_hw::dma::CHCR_SYNC_BLOCK`].
-#[deprecated(note = "moved to `psx_hw::dma::CHCR_SYNC_BLOCK`")]
-pub const CHCR_SYNC_BLOCK: u32 = reg::CHCR_SYNC_BLOCK;
-/// Moved to [`psx_hw::dma::CHCR_SYNC_LINKED`].
-#[deprecated(note = "moved to `psx_hw::dma::CHCR_SYNC_LINKED`")]
-pub const CHCR_SYNC_LINKED: u32 = reg::CHCR_SYNC_LINKED;
-/// Moved to [`psx_hw::dma::CHCR_START`].
-#[deprecated(note = "moved to `psx_hw::dma::CHCR_START`")]
-pub const CHCR_START: u32 = reg::CHCR_START;
-/// Moved to [`psx_hw::dma::CHCR_TRIGGER`].
-#[deprecated(note = "moved to `psx_hw::dma::CHCR_TRIGGER`")]
-pub const CHCR_TRIGGER: u32 = reg::CHCR_TRIGGER;
 
 #[cfg(test)]
 mod tests {
