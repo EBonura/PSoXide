@@ -13,6 +13,10 @@
 //! psx-audio-cook rates IN.wav            predicted loss per candidate rate
 //! psx-audio-cook score SRC.wav ADPCM [--rate HZ] [--skip N]
 //!                [--play OUT.wav] [--original OUT.wav]
+//! psx-audio-cook xa-encode OUT.XA SONG.wav... [--rate 37800|18900] [--mono]
+//!                [--speed 1|2] [--file N] [--peak F] [--manifest OUT.json]
+//! psx-audio-cook xa-decode IN.XA CHANNEL OUT.wav
+//! psx-audio-cook xa-score SRC.wav IN.XA CHANNEL
 //! ```
 //!
 //! `raw` writes bare ADPCM blocks (flags set); `psau` wraps them in the PSAU
@@ -27,12 +31,13 @@
 //! samples (at the playback rate) before comparing, `--play` writes the
 //! playback and `--original` the band-limited source, both at 44.1 kHz.
 
-use crate::{adpcm, cook, psau, rate, score, wav, CookOptions, Looping};
+use crate::{adpcm, cook, psau, rate, score, wav, xa_cli, CookOptions, Looping};
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  psx-audio-cook encode IN.wav OUT --rate HZ [--format psau|raw] [--loop none|whole|source|restart] [--peak F|--no-normalize] [--no-gauss-comp] [--greedy] [--no-flags]\n  psx-audio-cook rates IN.wav\n  psx-audio-cook score SRC.wav ADPCM [--rate HZ] [--skip N] [--play OUT.wav] [--original OUT.wav]"
+        "usage:\n  psx-audio-cook encode IN.wav OUT --rate HZ [--format psau|raw] [--loop none|whole|source|restart] [--peak F|--no-normalize] [--no-gauss-comp] [--greedy] [--no-flags]\n  psx-audio-cook rates IN.wav\n  psx-audio-cook score SRC.wav ADPCM [--rate HZ] [--skip N] [--play OUT.wav] [--original OUT.wav]\n{}",
+        xa_cli::USAGE
     );
     ExitCode::from(2)
 }
@@ -43,6 +48,9 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("encode") if args.len() >= 3 => encode(&args[1], &args[2], &args[3..]),
         Some("rates") if args.len() == 2 => rates(&args[1]),
         Some("score") if args.len() >= 3 => score_cmd(&args[1], &args[2], &args[3..]),
+        Some("xa-encode") if args.len() >= 3 => xa_cli::encode(&args[1], &args[2..]),
+        Some("xa-decode") if args.len() == 4 => xa_cli::decode(&args[1], &args[2], &args[3]),
+        Some("xa-score") if args.len() == 4 => xa_cli::score(&args[1], &args[2], &args[3]),
         _ => usage(),
     }
 }
