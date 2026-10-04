@@ -239,9 +239,11 @@ fn print_usage() {
                          data sectors (e.g. a video-only .STR). May be\n\
                          repeated.\n\
          --xa-file PATH  Like --file, for raw 2336-byte CD-XA sectors\n\
-                         (psxavenc -t str / -t xa output): each sector\n\
-                         keeps its subheader, EDC/ECC is rebuilt at the\n\
-                         final LBA. Raw .bin output only.\n\
+                         (`psx-audio-cook xa-encode` music, psxavenc\n\
+                         -t str / -t xa output): each sector keeps its\n\
+                         subheader, EDC (Form 2) or EDC/ECC (Form 1) is\n\
+                         rebuilt at the final LBA. Raw .bin output only.\n\
+                         The file's LBA and size are printed.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );
@@ -391,6 +393,18 @@ fn main() -> ExitCode {
                 psx_iso::XA_SECTOR_SIZE
             );
             return ExitCode::from(1);
+        }
+    }
+
+    let extents = builder.file_extents();
+    for path in args.files.iter().chain(&args.xa_files) {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_default();
+        if let Some((_, lba, sectors)) = extents.iter().find(|(n, _, _)| *n == name) {
+            println!("{name}: LBA {lba}, {sectors} sectors");
         }
     }
 

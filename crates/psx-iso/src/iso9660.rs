@@ -192,6 +192,26 @@ impl IsoBuilder {
         self
     }
 
+    /// Where each file will land: `(name, first LBA, sector count)`, in the
+    /// order added, for files the root directory lists (padding is skipped).
+    /// A program that finds its music or streams by directory lookup does not
+    /// need this; a build script that wants to log or bake an LBA does.
+    pub fn file_extents(&self) -> Vec<(String, u32, u32)> {
+        let mut lba = 21u32;
+        let mut extents = Vec::new();
+        for entry in &self.entries {
+            match entry {
+                IsoEntry::Padding { sectors } => lba += *sectors,
+                IsoEntry::File(file) | IsoEntry::Xa { file, .. } => {
+                    let sectors = file.content.len().div_ceil(SECTOR_SIZE).max(1) as u32;
+                    extents.push((file.name.clone(), lba, sectors));
+                    lba += sectors;
+                }
+            }
+        }
+        extents
+    }
+
     /// Serialise the image. Output length is always a multiple of
     /// [`SECTOR_SIZE`].
     pub fn build(&self) -> Vec<u8> {
@@ -859,6 +879,28 @@ mod tests {
             sector_edc(&sector[0x10..0x92C]).to_le_bytes()
         );
         assert_eq!(sector[..0x92C], before[..0x92C]);
+    }
+
+    #[test]
+    fn file_extents_follow_the_build_layout() {
+        let mut b = IsoBuilder::new();
+        b.add_file("a.dat", vec![1; 3000]);
+        b.add_padding_sectors(5);
+        b.add_xa_file("m.xa", vec![0; 3 * XA_SECTOR_SIZE]).unwrap();
+        let extents = b.file_extents();
+        assert_eq!(
+            extents,
+            [(String::from("A.DAT"), 21, 2), (String::from("M.XA"), 28, 3)]
+        );
+        let cooked = b.build();
+        // The root directory record for M.XA points at the same LBA.
+        let root = &cooked[20 * SECTOR_SIZE..21 * SECTOR_SIZE];
+        let at = root
+            .windows(4)
+            .position(|w| w == b"M.XA")
+            .expect("directory record");
+        let lba = u32::from_le_bytes(root[at - 31..at - 27].try_into().unwrap());
+        assert_eq!(lba, 28);
     }
 
     #[test]
