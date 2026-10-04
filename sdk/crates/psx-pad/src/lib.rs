@@ -282,8 +282,11 @@ pub const fn aim_curve_symmetric(value: i16) -> i16 {
 
 impl Deadzone {
     /// A dead region of `radius` counts around centre. Typical radii are 12 to
-    /// 30 of the 127 counts a healthy stick reaches.
+    /// 30 of the 127 counts a healthy stick reaches. A negative radius is no
+    /// dead region (zero): the squared test would otherwise treat it as its
+    /// absolute value while [`scaled`](Self::scaled) divided by a zero length.
     pub const fn new(radius: i16) -> Self {
+        let radius = if radius < 0 { 0 } else { radius };
         Self {
             inner_squared: (radius as i32) * (radius as i32),
             inner: radius,
@@ -1514,6 +1517,23 @@ mod tests {
         );
         assert!(!dz.is_outside(0, 0));
         assert!(dz.is_outside(25, 0));
+    }
+
+    #[test]
+    fn a_negative_deadzone_radius_is_no_deadzone_not_a_division_by_zero() {
+        // `scaled(0, 0)` passed the `magnitude <= inner` test with inner = -1
+        // and divided by a zero magnitude.
+        for radius in [-1, -24, i16::MIN] {
+            let dz = Deadzone::new(radius);
+            assert_eq!(dz.radius(), 0);
+            assert_eq!(dz, Deadzone::new(0));
+            assert_eq!(dz.scaled(0, 0), None);
+            assert_eq!(dz.scaled_axis(0), None);
+            assert!(!dz.is_outside(0, 0));
+            // A real deflection behaves as it does with a radius of zero.
+            assert_eq!(dz.scaled(60, 0), Deadzone::new(0).scaled(60, 0));
+            assert!(dz.is_outside(1, 0));
+        }
     }
 
     #[test]
