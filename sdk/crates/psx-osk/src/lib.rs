@@ -127,17 +127,28 @@ const ROWS: usize = 5;
 const X0: i16 = 8;
 const UW: i16 = 30; // unit width (10 units = 300px)
 const KH: i16 = 18; // key height
-/// Height of the whole keyboard panel (keys + hint line).
-pub const PANEL_HEIGHT: i16 = ROWS as i16 * KH + 14;
-/// Top edge of the keyboard panel on a 240-line display.
-pub const PANEL_TOP: i16 = 240 - ROWS as i16 * KH - 14;
+/// Height of the hint line above the keys.
+const HINT_BAND: i16 = 14;
+/// Blank panel left under the last key row.
+const BOTTOM_MARGIN: i16 = 14;
+/// Height of the whole panel as `draw` paints it: the hint line, the key rows
+/// and the margin below them, down to the bottom of a 240-line display.
+pub const PANEL_HEIGHT: i16 = HINT_BAND + ROWS as i16 * KH + BOTTOM_MARGIN;
+/// Top edge of the panel as `draw` paints it on a 240-line display. A game
+/// keeps its own content above this line.
+pub const PANEL_TOP: i16 = 240 - PANEL_HEIGHT;
+/// Top edge of the first key row, below the hint line.
+const KEYS_TOP: i16 = PANEL_TOP + HINT_BAND;
 
 /// Renamed to [`PANEL_HEIGHT`].
 #[deprecated(note = "renamed to `PANEL_HEIGHT`")]
 pub const PANEL_H: i16 = PANEL_HEIGHT;
-/// Renamed to [`PANEL_TOP`].
-#[deprecated(note = "renamed to `PANEL_TOP`")]
-pub const Y0: i16 = PANEL_TOP;
+/// The top of the key rows, 14 pixels below [`PANEL_TOP`]. It was documented as
+/// the panel's top edge and callers subtract the hint line from it
+/// (`Y0 - 14`); that is `PANEL_TOP`, so use [`PANEL_TOP`] and drop the
+/// subtraction.
+#[deprecated(note = "this is the top of the key rows, 14 below `PANEL_TOP`; use `PANEL_TOP`")]
+pub const Y0: i16 = KEYS_TOP;
 
 /// The keyboard state machine: highlight position + page/case toggles.
 pub struct Keyboard {
@@ -258,20 +269,20 @@ impl Keyboard {
     pub fn draw(&self, font: &FontAtlas, p: &Palette, hint: &str) {
         draw_rect_flat(
             0,
-            PANEL_TOP - 14,
+            PANEL_TOP,
             320,
-            (240 - (PANEL_TOP - 14)) as u16,
+            PANEL_HEIGHT as u16,
             p.panel.0,
             p.panel.1,
             p.panel.2,
         );
-        font.draw_text(6, PANEL_TOP - 12, hint, p.dim);
+        font.draw_text(6, PANEL_TOP + 2, hint, p.dim);
 
         for r in 0..ROWS {
             for c in 0..self.row_len(r) {
                 let (s, w) = self.span(r, c);
                 let x = X0 + s * UW;
-                let y = PANEL_TOP + (r as i16) * KH;
+                let y = KEYS_TOP + (r as i16) * KH;
                 let kw = w * UW;
                 let sel = r == self.row && c == self.col;
                 let key = self.key_at(r, c);
@@ -340,6 +351,27 @@ mod tests {
         match a {
             Action::Insert(c) => Some(c),
             _ => None,
+        }
+    }
+
+    /// What `draw` paints: the panel covers `PANEL_TOP..PANEL_TOP + PANEL_HEIGHT`
+    /// and the keys sit inside it. PANEL_TOP used to name the first key row,
+    /// 14 pixels below the panel it said it was the top of.
+    #[test]
+    fn the_panel_constants_describe_the_painted_panel() {
+        // The painted rectangle was y = 122, 118 tall, ending at the bottom.
+        assert_eq!((PANEL_TOP, PANEL_HEIGHT), (122, 118));
+        assert_eq!(PANEL_TOP + PANEL_HEIGHT, 240);
+        // Hint line, then keys, inside the panel.
+        const {
+            // the hint text (8 px tall, drawn 2 below the top) fits above the keys
+            assert!(PANEL_TOP + 2 + 8 <= KEYS_TOP);
+            assert!(KEYS_TOP + ROWS as i16 * KH <= PANEL_TOP + PANEL_HEIGHT);
+            assert!(KEYS_TOP >= PANEL_TOP);
+        }
+        #[allow(deprecated)]
+        {
+            assert_eq!(Y0, KEYS_TOP, "the old name keeps its old value");
         }
     }
 
