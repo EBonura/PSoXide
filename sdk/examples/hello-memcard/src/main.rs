@@ -18,11 +18,11 @@ use psx_font::FontAtlas;
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_mc::{
-    Block, Card, Entry, Error, HardwareCard, SaveIcon, Slot, TransportFault, TransportTrace,
-    DATA_BLOCKS, FRAME_COUNT, FRAME_SIZE, MAX_NAME_LEN,
+    Block, Card, ControllerPort, Entry, Error, HardwareCard, SaveIcon, Slot, TransportFault,
+    TransportTrace, DATA_BLOCKS, FRAME_COUNT, FRAME_SIZE, MAX_NAME_LEN,
 };
 #[cfg(target_arch = "mips")]
-use psx_pad::{button, poll_port1, ButtonState};
+use psx_pad::{button, poll_on, ButtonState, Port};
 #[cfg(target_arch = "mips")]
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
@@ -105,9 +105,10 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub fn new() -> Self {
+    /// A diagnostic on a controller port token it takes for as long as it runs.
+    pub fn new_on(port: ControllerPort) -> Self {
         Self {
-            card: Card::new(HardwareCard::new(Slot::One)),
+            card: Card::new(HardwareCard::on_port(port, Slot::One)),
             phase: Phase::Scan,
             scan_frame: 0,
             scan_hash: 0x811c_9dc5,
@@ -125,6 +126,19 @@ impl Diagnostic {
             last_trace: empty_trace(),
             page: 0,
         }
+    }
+
+    /// [`new_on`](Self::new_on) on a token the caller does not hold.
+    #[deprecated(note = "use `Diagnostic::new_on` with the `ControllerPort` token")]
+    pub fn new() -> Self {
+        // SAFETY: a token is a logic guard, not a memory-safety one, and this
+        // constructor never took one.
+        Self::new_on(unsafe { ControllerPort::steal() })
+    }
+
+    /// The port the card sits on, for polling the pad between card steps.
+    pub fn controller_port(&mut self) -> &mut ControllerPort {
+        self.card.device().controller_port()
     }
 
     /// Read two frames per video frame: fast enough to finish in about nine
@@ -470,7 +484,7 @@ pub fn run_standalone() -> ! {
     gpu.set_draw_offset((0, 0));
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
 
-    let mut app = Diagnostic::new();
+    let mut app = Diagnostic::new_on(peripherals.controller_port);
     let mut previous = ButtonState::NONE;
 
     loop {
@@ -478,7 +492,7 @@ pub fn run_standalone() -> ! {
 
         // The card transaction is complete and /CS is high before polling the
         // pad; the two devices share SIO0 and are never accessed concurrently.
-        let current = poll_port1().buttons;
+        let current = poll_on(app.controller_port(), Port::One).buttons;
         if pressed(current, previous, button::LEFT) {
             app.page_left();
         }

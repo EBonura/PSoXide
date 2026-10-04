@@ -16,6 +16,7 @@
 //! `load_chunk_decompressed`, and a lookup of an absent id. A green screen
 //! with `ALL PASS` means table scan (straddle included), payload streaming,
 //! checksums, and in-place decompression all work end-to-end off the disc.
+//! A last line checks the reader put the interrupt mask back after its loads.
 
 #![no_std]
 #![no_main]
@@ -66,7 +67,7 @@ fn comp_byte(k: usize) -> u8 {
 
 // The reader owns a one-sector bounce buffer and dst must hold the biggest
 // raw chunk plus the in-place LZ4 margin, so keep them off the 32 KiB stack.
-static mut READER: SectorReader = SectorReader::new();
+static mut READER: Option<SectorReader> = None;
 static mut SCRATCH: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 const DST_WORDS: usize = 3072; // 12 KiB
 static mut DST: [u32; DST_WORDS] = [0; DST_WORDS];
@@ -131,17 +132,19 @@ fn bytes_match(bytes: &[u8], expect: fn(usize) -> u8) -> bool {
 }
 
 /// Run the whole test and return the filled report.
-fn run() -> Report {
+fn run(rd: &mut SectorReader) -> Report {
     let mut rep = Report::new();
+    // Set a mask bit no source raises here (SIO1), so the check at the end can
+    // tell a restored mask from the VBlank-only one the reader runs under.
+    psx_io::irq::set_mask(psx_io::irq::mask() | (1 << 8));
+    let mask_before = psx_io::irq::mask();
     // SAFETY: main runs once; these statics are only touched here.
-    let rd = unsafe { &mut *addr_of_mut!(READER) };
     let scratch = unsafe { &mut *addr_of_mut!(SCRATCH) };
     let dst = unsafe { &mut *addr_of_mut!(DST) };
 
-    // SAFETY: single-threaded polled main loop, no CD-ROM IRQ handler; the
-    // I_MASK-to-VBlank-only side effect matches what psx_rt::interrupts
-    // installs for wait_vblank anyway.
-    if !rep.check("PREPARE", unsafe { rd.prepare() }) {
+    // The reader holds VBlank-only I_MASK from here to its last stop(), which
+    // matches what psx_rt::interrupts installs for wait_vblank anyway.
+    if !rep.check("PREPARE", rd.prepare()) {
         return rep;
     }
 
@@ -201,10 +204,15 @@ fn run() -> Report {
     }
 
     // A chunk id the pack does not contain must miss cleanly.
-    rep.check(
-        "ABSENT ID",
-        find_entry(rd, WORLD_PACK_DEFAULT_LBA, 0xDEAD_BEEF, scratch).is_none(),
-    );
+    let absent = find_entry(rd, WORLD_PACK_DEFAULT_LBA, 0xDEAD_BEEF, scratch).is_none();
+    // Every load above ran under the reader's VBlank-only mask; stop() put the
+    // one we set back. Read it before anything else runs: TTY output goes
+    // through the BIOS, which the emulator's HLE leaves with I_MASK rewritten.
+    let mask_after = psx_io::irq::mask();
+    if !rep.check("ABSENT ID", absent) {
+        return rep;
+    }
+    rep.check("IRQ MASK RESTORED", mask_after == mask_before);
     rep
 }
 
@@ -223,7 +231,9 @@ fn main() {
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
 
     // Run once at boot; hold the result on screen.
-    let rep = run();
+    // SAFETY: main runs once; the static is only touched here.
+    let rd = unsafe { (*addr_of_mut!(READER)).insert(SectorReader::with_cd(peripherals.cd)) };
+    let rep = run(rd);
     if rep.all_ok {
         tty::println("hello-pack: ALL PASS");
     } else {

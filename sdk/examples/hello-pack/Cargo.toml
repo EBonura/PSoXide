@@ -22,3 +22,4 @@ psx-rt   = { path = "../../crates/psx-rt" }
 psx-font = { path = "../../crates/psx-font" }
 psx-vram = { path = "../../crates/psx-vram" }
 psx-pack = { path = "../../crates/psx-pack" }
+psx-io   = { path = "../../crates/psx-io" }

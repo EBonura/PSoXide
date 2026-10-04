@@ -11,9 +11,8 @@ extern crate psx_rt;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_io::cd;
-use psx_pad::{button, poll_port1, ButtonState};
-use psx_spu::{self as spu, CdVolume, Volume};
+use psx_pad::{button, poll_on, ButtonState, Port};
+use psx_spu::{self as spu, CdVolume, Spu, Volume};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -41,40 +40,42 @@ fn main() {
     gpu.set_draw_area((0, 0), (319, 239));
     gpu.set_draw_offset((0, 0));
 
-    spu::init();
+    let _spu = Spu::new(peripherals.spu_dma);
     spu::set_main_volume(Volume::MAX, Volume::MAX);
     spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
     spu::enable_cd_audio(true);
 
-    let _ = cd::set_mode(psx_hw::cd::MODE_DOUBLE_SPEED | psx_hw::cd::MODE_CDDA);
-    let _ = cd::unmute();
-    let _ = cd::play_track(TRACK_GONCHAROV);
+    let mut cd = peripherals.cd;
+    let mut port = peripherals.controller_port;
+    let _ = cd.set_mode(psx_hw::cd::MODE_DOUBLE_SPEED | psx_hw::cd::MODE_CDDA);
+    let _ = cd.unmute();
+    let _ = cd.play_track(TRACK_GONCHAROV);
 
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
     let mut prev_pad = ButtonState::NONE;
     let mut playback = Playback::Playing;
 
     loop {
-        let pad = poll_port1().buttons;
+        let pad = poll_on(&mut port, Port::One).buttons;
         if pressed(pad, prev_pad, button::START) {
-            let _ = cd::unmute();
-            let _ = cd::play_track(TRACK_GONCHAROV);
+            let _ = cd.unmute();
+            let _ = cd.play_track(TRACK_GONCHAROV);
             playback = Playback::Playing;
         }
         if pressed(pad, prev_pad, button::CROSS) {
-            let _ = cd::pause();
+            let _ = cd.pause();
             playback = Playback::Paused;
         }
         if pressed(pad, prev_pad, button::SQUARE) {
-            let _ = cd::stop();
+            let _ = cd.stop();
             playback = Playback::Stopped;
         }
         if pressed(pad, prev_pad, button::TRIANGLE) {
-            let _ = cd::mute();
+            let _ = cd.mute();
             playback = Playback::Muted;
         }
         if pressed(pad, prev_pad, button::CIRCLE) {
-            let _ = cd::unmute();
+            let _ = cd.unmute();
             playback = Playback::Playing;
         }
         prev_pad = pad;
