@@ -32,3 +32,16 @@ let recording = unsafe { psx_io::gpu::start_recording_raw(overlay, overlay_words
 scene.render_overlay(ctx);
 let recorded = recording.end();
 ```
+
+## MDEC decode: lengths are checked, not trusted
+
+`psx_fmv::mdec::decode` was safe and programmed DMA0 with `len / 32`
+blocks: an 8-word slice gave 0 blocks, which the controller reads as
+65,536, and a length that was not a whole number of blocks or did not fit
+the decode command's 16-bit count was silently truncated.
+
+`decode` and `decode_start` now return `Result<_, psx_fmv::rle::RleLengthError>`
+and refuse an empty length, one that is not a multiple of 32 words, one
+over `psx_fmv::rle::MAX_WORDS` (0xFFE0) and, for `decode_start`, one longer
+than the slice; nothing reaches the MDEC then. `decode_frame` output always
+passes. No game calls either function, so there is no forwarder.

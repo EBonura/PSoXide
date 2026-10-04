@@ -724,7 +724,10 @@ pub fn run_with(options: Options) -> Outcome {
         };
         clock(Some(PHASE_MDEC));
         // SAFETY: RLE stays untouched until decode_finish below.
-        unsafe { mdec::decode_start(rle, words, psx_hw::mdec::DECODE_15BPP) };
+        if unsafe { mdec::decode_start(rle, words, psx_hw::mdec::DECODE_15BPP) }.is_err() {
+            errors += 1;
+            continue;
+        }
         // SAFETY: COLUMN is only used here.
         let column = unsafe { &mut *addr_of_mut!(COLUMN) };
         let mut ok = true;
@@ -939,9 +942,9 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
     }
 
     // DMA, the player's way.
-    if dma_setup() {
-        // SAFETY: RLE stays untouched until decode_finish.
-        unsafe { mdec::decode_start(rle, words, psx_hw::mdec::DECODE_15BPP) };
+    // SAFETY: RLE stays untouched until decode_finish.
+    if dma_setup() && unsafe { mdec::decode_start(rle, words, psx_hw::mdec::DECODE_15BPP) }.is_ok()
+    {
         let column = unsafe { &mut *addr_of_mut!(COLUMN) };
         let mut ok = true;
         for _ in 0..COLUMNS {
