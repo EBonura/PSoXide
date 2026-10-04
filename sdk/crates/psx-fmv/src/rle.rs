@@ -57,6 +57,42 @@ pub const fn dma_block_count(words: usize) -> Result<u16, RleLengthError> {
     Ok((words / BLOCK_WORDS) as u16)
 }
 
+/// Owned run-length storage of `WORDS` words: written as halfwords by
+/// [`crate::bitstream::decode_frame`], read as words by the MDEC.
+///
+/// One value owns the memory and hands out one view at a time, so the
+/// halfword writer and the word reader can never alias the way two slices
+/// cast from one buffer do.
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct RleBuffer<const WORDS: usize>([u32; WORDS]);
+
+impl<const WORDS: usize> RleBuffer<WORDS> {
+    /// A zeroed buffer; `const`, so it can be a `static`.
+    pub const fn new() -> Self {
+        Self([0; WORDS])
+    }
+
+    /// The buffer as `2 * WORDS` halfwords, for [`crate::bitstream::decode_frame`].
+    pub fn as_halfwords_mut(&mut self) -> &mut [u16] {
+        // SAFETY: `[u32; WORDS]` is `4 * WORDS` initialised bytes aligned
+        // for `u16`, every bit pattern is a valid `u16`, and the exclusive
+        // borrow of `self` keeps any other view out while this one lives.
+        unsafe { core::slice::from_raw_parts_mut(self.0.as_mut_ptr().cast::<u16>(), WORDS * 2) }
+    }
+
+    /// The buffer as words, for [`crate::mdec`]'s decode.
+    pub const fn as_words(&self) -> &[u32] {
+        &self.0
+    }
+}
+
+impl<const WORDS: usize> Default for RleBuffer<WORDS> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +112,25 @@ mod tests {
         );
         // 32 * 65,536 words: the old `as u16` cast made this 0 blocks.
         assert_eq!(dma_block_count(32 << 16), Err(RleLengthError::TooLong));
+    }
+
+    /// Halfwords written through one view are the little-endian halves of
+    /// the words the other view reads (Miri checks the two never alias).
+    #[test]
+    fn buffer_views_share_storage_without_aliasing() {
+        let mut buffer = RleBuffer::<4>::new();
+        let halfwords = buffer.as_halfwords_mut();
+        assert_eq!(halfwords.len(), 8);
+        halfwords[0] = 0x1111;
+        halfwords[1] = 0x2222;
+        halfwords[7] = 0xFE00;
+        let expected = if cfg!(target_endian = "little") {
+            [0x2222_1111, 0, 0, 0xFE00_0000]
+        } else {
+            [0x1111_2222, 0, 0, 0x0000_FE00]
+        };
+        assert_eq!(buffer.as_words(), &expected);
+        buffer.as_halfwords_mut()[2] = 0xAAAA;
+        assert_eq!(buffer.as_words()[1] & 0xFFFF, 0xAAAA);
     }
 }
