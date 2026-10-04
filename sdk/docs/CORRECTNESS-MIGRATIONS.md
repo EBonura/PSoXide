@@ -75,3 +75,28 @@ voxide `game/src/sfx.rs` (5), hl-psx and cs-psx `game/src/settings.rs`
 (1 each, `0x3FFF * s / VOL_MAX`), oot-psx (3), quake-psx `game/src/audio.rs`
 (3 `linear`, all with `num <= den`), hk-psx (audio tests mock their own
 `Volume`).
+
+## psx-rt: `wait_vblank()` no longer replaces a game's exception vector (rt-01)
+
+`wait_vblank()` is safe, and on first use it installed psx-rt's handler over
+whatever was at `0x8000_0080`, then reset `I_MASK` to VBlank only. A game
+that had put its own handler there (hk-psx and cs-psx wrap psx-rt's to
+service CD interrupts) and called `wait_vblank()` before
+`install_vblank_counter()` lost its handler without a word.
+
+`_start` now records the vector word the program booted with. The lazy
+install happens only while the vector still holds that word or already
+jumps to psx-rt's handler; otherwise `wait_vblank()` leaves the vector
+alone and waits for the count a chained psx-rt handler advances. Programs
+that call `install_vblank_counter()` first (every game below, and the
+common route) are unchanged, as are the SDK examples that rely on the lazy
+install.
+
+A game with its own handler that never calls `install_vblank_counter()`
+and whose handler does not chain to psx-rt's will now wait on a counter
+nothing advances; the wait is bounded (see rt-08 below). Such a game should
+call `install_vblank_counter()` before it installs its handler. Games that
+call `install_vblank_counter()` and then wrap: wipeout-psx, voxide, hk-psx,
+hl-psx, cs-psx, quake-psx, oot-psx. Games that call `wait_vblank()` with no
+install of their own: nitroxide `game/src/draw.rs` (1, after the engine's
+install).
