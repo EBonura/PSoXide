@@ -1029,7 +1029,13 @@ impl Model {
             (elapsed.min(duration).saturating_mul(255) / duration).min(255)
         };
         let first = self.clip_frame(clip, 0);
-        let time = |local: usize| self.data[self.frame_times_off + first + local] as usize;
+        // A clip record may claim more frames than the cook emitted (`clip_frame` clamps for
+        // the same reason), so the time lookup clamps to the table: frame `n_frames - 1` is
+        // the last entry, which load placed inside the blob.
+        let last_frame = self.frame_count().saturating_sub(1);
+        let time = |local: usize| {
+            self.data[self.frame_times_off + (first + local).min(last_frame)] as usize
+        };
         let mut left = 0usize;
         while left + 1 < len && time(left + 1) <= target {
             left += 1;
