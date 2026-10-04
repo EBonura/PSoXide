@@ -36,6 +36,12 @@ pub struct Particle {
     pub x: i16,
     /// Top-left y position in pixels.
     pub y: i16,
+    /// Fraction of a pixel `x` has advanced, in sixteenths (`0..=15`). The
+    /// pool carries the part of `vx` that does not fill a whole pixel here,
+    /// so slow particles drift instead of freezing.
+    pub x_frac: u8,
+    /// Fraction of a pixel `y` has advanced, in sixteenths (`0..=15`).
+    pub y_frac: u8,
     /// Velocity along x, Q4.4 pixels/frame.
     pub vx: i16,
     /// Velocity along y, Q4.4 pixels/frame. Positive = downward.
@@ -60,6 +66,8 @@ impl Particle {
         Self {
             x: 0,
             y: 0,
+            x_frac: 0,
+            y_frac: 0,
             vx: 0,
             vy: 0,
             r: 0,
@@ -145,6 +153,8 @@ impl<const N: usize> ParticlePool<N> {
             *slot = Particle {
                 x: centre.0,
                 y: centre.1,
+                x_frac: 0,
+                y_frac: 0,
                 vx,
                 vy,
                 r: color.0,
@@ -161,7 +171,8 @@ impl<const N: usize> ParticlePool<N> {
     }
 
     /// One simulation step for every live particle:
-    /// - Position += velocity (Q4.4 integrated as `>> 4`).
+    /// - Position += velocity (Q4.4: whole pixels move `x`, the remainder
+    ///   carries in `x_frac` to the next frame).
     /// - `vy += gravity` (Q4.4, so 1 = 0.0625 px/frame² falling).
     /// - `ttl -= 1` -- particle expires when it hits zero.
     pub fn update(&mut self, gravity: i16) {
@@ -169,8 +180,8 @@ impl<const N: usize> ParticlePool<N> {
             if p.ttl == 0 {
                 continue;
             }
-            p.x = p.x.wrapping_add(p.vx / 16);
-            p.y = p.y.wrapping_add(p.vy / 16);
+            (p.x, p.x_frac) = advance(p.x, p.x_frac, p.vx);
+            (p.y, p.y_frac) = advance(p.y, p.y_frac, p.vy);
             p.vy = p.vy.saturating_add(gravity);
             p.ttl -= 1;
         }
@@ -278,6 +289,18 @@ impl<const N: usize> Default for ParticlePool<N> {
     }
 }
 
+/// Move a pixel position by a Q4.4 velocity, carrying the fraction.
+///
+/// The position is `pos + frac / 16`; adding `velocity / 16` floors toward
+/// negative infinity, so a particle at rest-plus-drift moves the same
+/// distance left as right. The whole-pixel part wraps like the old
+/// `wrapping_add`.
+#[inline]
+const fn advance(pos: i16, frac: u8, velocity: i16) -> (i16, u8) {
+    let total = (pos as i32) * 16 + frac as i32 + velocity as i32;
+    ((total >> 4) as i16, (total & 15) as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +373,8 @@ mod tests {
         pool.particles[0] = Particle {
             x: 10,
             y: 20,
+            x_frac: 0,
+            y_frac: 0,
             vx: 32, // Q4.4 = 2 px/frame
             vy: 16, // Q4.4 = 1 px/frame
             r: 0,
@@ -362,5 +387,52 @@ mod tests {
         assert_eq!(pool.particles[0].x, 12);
         assert_eq!(pool.particles[0].y, 21);
         assert_eq!(pool.particles[0].ttl, 4);
+    }
+    /// One particle at (0, 0) with the given velocity, advanced `frames` times.
+    fn drift(vx: i16, vy: i16, frames: u32) -> (i16, i16) {
+        let mut pool: ParticlePool<1> = ParticlePool::new();
+        pool.particles[0] = Particle {
+            ttl: 200,
+            spawn_ttl: 200,
+            vx,
+            vy,
+            ..Particle::empty()
+        };
+        for _ in 0..frames {
+            pool.update(0);
+        }
+        (pool.particles[0].x, pool.particles[0].y)
+    }
+
+    #[test]
+    fn a_slow_particle_drifts_instead_of_freezing() {
+        // Q4.4: vx = 8 is half a pixel a frame. It used to truncate to 0 forever.
+        assert_eq!(drift(8, 0, 2), (1, 0));
+        assert_eq!(drift(8, 0, 32), (16, 0));
+        // 1 sixteenth of a pixel a frame: one pixel after 16 frames.
+        assert_eq!(drift(1, 1, 15), (0, 0));
+        assert_eq!(drift(1, 1, 16), (1, 1));
+    }
+
+    #[test]
+    fn total_distance_is_velocity_times_frames_in_sixteenths() {
+        // Oracle: floor(frames * v / 16) for any velocity, either sign.
+        for v in [-31i16, -17, -16, -9, -1, 0, 1, 7, 16, 17, 24, 31, 32] {
+            for frames in [1u32, 2, 3, 10, 33] {
+                let expected = (frames as i32 * v as i32).div_euclid(16);
+                assert_eq!(
+                    drift(v, 0, frames).0 as i32,
+                    expected,
+                    "v={v} frames={frames}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn velocities_between_16_and_31_no_longer_all_move_one_pixel() {
+        // 16..=31 used to be exactly 1 px/frame; 24 is 1.5.
+        assert_eq!(drift(24, 0, 2), (3, 0));
+        assert_eq!(drift(16, 0, 2), (2, 0));
     }
 }
