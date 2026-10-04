@@ -113,6 +113,10 @@ mod tests {
     /// `u32_dec` against the 64-bit formatter it replaced, at every digit-count
     /// boundary and on random values.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn u32_matches_u64_formatter() {
         let check = |v: u32| {
             let mut a = [0u8; U32_DEC_MAX];
@@ -161,6 +165,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "exhaustive sweep, minutes under Miri; make test runs it natively"
+    )]
     fn i32_matches_u64_formatter() {
         let mut seed = 0x9e37_79b9u32;
         for _ in 0..200_000 {
