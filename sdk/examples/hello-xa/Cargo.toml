@@ -10,6 +10,10 @@ license = "GPL-2.0-or-later"
 name = "hello-xa"
 path = "src/main.rs"
 
+# Plays a file interleaved for double speed (`xa-encode --speed 2`).
+[features]
+double-speed = []
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
