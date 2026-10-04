@@ -35,6 +35,23 @@ macro_rules! id_table {
                 $(#[doc = $doc])+
                 pub const $name: u16 = $value;
             )+
+
+            /// Every id declared in this module, in declaration order.
+            pub const IDS: &[u16] = &[$($name),+];
+
+            /// The highest id declared here. Slot counts derive from it, so a
+            /// new id past the old maximum cannot be dropped by a stale count.
+            pub const MAX_ID: u16 = {
+                let mut max = 0;
+                let mut i = 0;
+                while i < IDS.len() {
+                    if IDS[i] > max {
+                        max = IDS[i];
+                    }
+                    i += 1;
+                }
+                max
+            };
         }
 
         /// Host-tooling description for an id: the id's doc comment from this
@@ -163,16 +180,11 @@ id_table! {
     }
 }
 
-/// Number of stage slots, including index zero for unknown/reserved ids.
-/// Sized to the highest stage id (`GAME_LOGIC = 51`) plus one.
-pub const STAGE_COUNT: usize = 52;
-
-// Enforce `STAGE_COUNT = highest stage id + 1` at compile time. The host's
-// stage arrays are indexed by id and out-of-range ids are dropped silently,
-// so a new higher id without a matching STAGE_COUNT bump would quietly
-// vanish from every summary. Adding a higher id trips this and must
-// update both the count and this guard.
-const _: () = assert!(stage::GAME_LOGIC as usize == STAGE_COUNT - 1);
+/// Number of stage slots, including index zero for unknown/reserved ids: the
+/// highest stage id plus one. The host's stage arrays are indexed by id and
+/// out-of-range ids are dropped silently, so this follows [`stage::MAX_ID`]
+/// rather than a number to keep in step by hand.
+pub const STAGE_COUNT: usize = stage::MAX_ID as usize + 1;
 
 id_table! {
     /// Runtime task ids.
@@ -188,6 +200,11 @@ id_table! {
 
 /// Number of task slots, including reserved future scheduler jobs.
 pub const TASK_COUNT: usize = 16;
+
+const _: () = assert!(
+    (task::MAX_ID as usize) < TASK_COUNT,
+    "a task id has no slot"
+);
 
 id_table! {
     /// Runtime counter ids.
@@ -820,9 +837,81 @@ id_table! {
     }
 }
 
-/// Number of counter slots, including index zero for unknown/reserved ids.
-/// Must stay larger than the highest counter id emitted by the guest; a
-/// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 267;
+/// Number of counter slots, including index zero for unknown/reserved ids:
+/// the highest counter id plus one ([`counter::MAX_ID`]). A counter id at or
+/// past this is dropped by the host.
+pub const COUNTER_COUNT: usize = counter::MAX_ID as usize + 1;
 
-const _: () = assert!(counter::PLAYER_ANIM_PHASE_Q12 as usize == COUNTER_COUNT - 1);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No id appears twice in a table: the host indexes slots by id, so a
+    /// duplicate would merge two stages into one row.
+    fn assert_unique(name: &str, ids: &[u16]) {
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!ids[..i].contains(id), "{name}: id {id} declared twice");
+        }
+    }
+
+    #[test]
+    fn ids_are_unique_within_each_table() {
+        assert_unique("stage", stage::IDS);
+        assert_unique("task", task::IDS);
+        assert_unique("counter", counter::IDS);
+    }
+
+    #[test]
+    fn every_declared_id_has_a_description_and_unknown_ids_have_none() {
+        for &id in stage::IDS {
+            assert!(!stage_desc(id).is_empty(), "stage {id}");
+        }
+        for &id in task::IDS {
+            assert!(!task_desc(id).is_empty(), "task {id}");
+        }
+        for &id in counter::IDS {
+            assert!(!counter_desc(id).is_empty(), "counter {id}");
+        }
+        assert_eq!(stage_desc(0), "");
+        assert_eq!(stage_desc(u16::MAX), "");
+        assert_eq!(counter_desc(0), "");
+    }
+
+    #[test]
+    fn slot_counts_cover_every_id() {
+        // The host's arrays have STAGE_COUNT / COUNTER_COUNT / TASK_COUNT
+        // slots and drop an id outside them without a word.
+        for &id in stage::IDS {
+            assert!((id as usize) < STAGE_COUNT, "stage {id}");
+        }
+        for &id in counter::IDS {
+            assert!((id as usize) < COUNTER_COUNT, "counter {id}");
+        }
+        for &id in task::IDS {
+            assert!((id as usize) < TASK_COUNT, "task {id}");
+        }
+        // And they are exactly one past the highest id, not slack that would
+        // hide a missing bump: the old hand-written values were 52 and 267.
+        assert_eq!(STAGE_COUNT, 52);
+        assert_eq!(COUNTER_COUNT, 267);
+    }
+
+    #[test]
+    fn a_new_highest_id_raises_the_count_without_a_second_edit() {
+        // Same shape the macro generates, over a table whose maximum is not
+        // its last entry: the count follows the maximum.
+        const IDS: &[u16] = &[3, 90, 7];
+        const MAX: u16 = {
+            let mut max = 0;
+            let mut i = 0;
+            while i < IDS.len() {
+                if IDS[i] > max {
+                    max = IDS[i];
+                }
+                i += 1;
+            }
+            max
+        };
+        assert_eq!(MAX as usize + 1, 91);
+    }
+}
