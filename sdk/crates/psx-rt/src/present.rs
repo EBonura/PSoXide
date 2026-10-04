@@ -34,7 +34,7 @@
 //!    keeps the overlap.
 //!
 //! Keep interrupt source 1 (GPU) masked in `I_MASK`: GP0(1Fh) raises it and
-//! the handler does not acknowledge it. The handler returns past a GTE
+//! the handler, which owns VBlank only, would acknowledge it as a stray. The handler returns past a GTE
 //! command an edge interrupted (8055e87f6), so publishing from GTE-heavy code
 //! is safe.
 //!
