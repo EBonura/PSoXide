@@ -152,54 +152,18 @@ impl<T> Mutex<T> {
 mod imp {
     use super::RestoreState;
 
-    const STATUS_IEC: u32 = 1 << 0;
-
+    // The COP0 SR read-modify-write lives in psx-io, which needs it for its
+    // own DPCR update; this is the same pair behind the critical-section API.
     #[inline(always)]
     pub(super) fn acquire() -> RestoreState {
-        let sr: u32;
-        // Read SR, clear IEc, write it back. The nop after MFC0 covers its
-        // load delay (a stale $8 here once OR'd garbage into SR, see
-        // `interrupts::enable_cpu_interrupts`). The two nops after MTC0 let
-        // the write settle before the section's first instruction, the
-        // pattern PSn00bSDK and Nugget use. An interrupt taken between the
-        // read and the write returns through RFE with IEc as it was, and
-        // psx-rt's handler leaves the rest of SR alone, so the write-back
-        // loses nothing.
-        // SAFETY: COP0 SR read-modify-write of the interrupt-enable bit only.
-        unsafe {
-            core::arch::asm!(
-                "mfc0 $8, $12",
-                "nop",
-                // Clear bit 0 (IEc) with a shift pair: no mask register.
-                "srl $9, $8, 1",
-                "sll $9, $9, 1",
-                "mtc0 $9, $12",
-                "nop",
-                "nop",
-                out("$8") sr,
-                out("$9") _,
-                options(nostack),
-            );
-        }
-        RestoreState(sr & STATUS_IEC != 0)
+        // SAFETY: `release` pairs it, per `super::acquire`'s contract.
+        RestoreState(unsafe { psx_io::irq::disable_cpu_interrupts() })
     }
 
     #[inline(always)]
     pub(super) unsafe fn release(state: RestoreState) {
-        if state.0 {
-            // SAFETY: re-enables interrupts only when the matching acquire
-            // found them enabled.
-            unsafe {
-                core::arch::asm!(
-                    "mfc0 $8, $12",
-                    "nop",
-                    "ori $8, $8, 1",
-                    "mtc0 $8, $12",
-                    out("$8") _,
-                    options(nostack),
-                );
-            }
-        }
+        // SAFETY: `state` came from the matching `acquire`.
+        unsafe { psx_io::irq::restore_cpu_interrupts(state.0) }
     }
 }
 

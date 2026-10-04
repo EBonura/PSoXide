@@ -366,12 +366,19 @@ pub fn is_busy(ch: Channel) -> bool {
 }
 
 /// Enable a channel without disturbing the others.
+///
+/// The read-modify-write of the global enable register runs with CPU
+/// interrupts masked: with the `present-queue` feature the VBlank handler
+/// sets the GPU channel's bit in the same register, and a handler that ran
+/// between this read and write would have its bit overwritten.
 pub fn enable_channel(ch: Channel) {
-    // SAFETY: a side-effect-free read of the global enable register.
-    let enabled = unsafe { crate::read_u32(reg::DPCR) };
-    // SAFETY: sets one channel's enable bit and keeps the rest; enabling a
-    // channel starts no transfer.
-    unsafe { crate::write_u32(reg::DPCR, enabled | (1 << ch.enable_bit())) }
+    crate::irq::without_interrupts(|| {
+        // SAFETY: a side-effect-free read of the global enable register.
+        let enabled = unsafe { crate::read_u32(reg::DPCR) };
+        // SAFETY: sets one channel's enable bit and keeps the rest; enabling a
+        // channel starts no transfer.
+        unsafe { crate::write_u32(reg::DPCR, enabled | (1 << ch.enable_bit())) }
+    });
 }
 
 /// Ordering-table clear: writes `buf` as a reverse-linked chain the

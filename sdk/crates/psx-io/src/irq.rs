@@ -41,6 +41,94 @@ pub fn set_mask(bits: u32) {
     unsafe { crate::write_u32(reg::I_MASK, bits) }
 }
 
+/// Clear the CPU's interrupt-enable bit (COP0 `SR.IEc`) and report whether it
+/// was set, so [`restore_cpu_interrupts`] can put it back. Sections nest.
+///
+/// This gates every interrupt at the CPU, whatever [`mask`] says. Use
+/// [`without_interrupts`] unless a guard cannot be a closure.
+///
+/// # Safety
+///
+/// Pair every call with one [`restore_cpu_interrupts`] of its result, in
+/// reverse order. Interrupts enabled early would let a handler run inside a
+/// section whose code assumes it cannot.
+#[inline(always)]
+pub unsafe fn disable_cpu_interrupts() -> bool {
+    #[cfg(target_arch = "mips")]
+    {
+        let sr: u32;
+        // Read SR, clear IEc, write it back. The nop after MFC0 covers its
+        // load delay. The two nops after MTC0 let the write settle before the
+        // section's first instruction. An interrupt taken between the read and
+        // the write returns through RFE with IEc as it was, and psx-rt's
+        // handler leaves the rest of SR alone, so the write-back loses nothing.
+        // SAFETY: COP0 SR read-modify-write of the interrupt-enable bit only.
+        unsafe {
+            core::arch::asm!(
+                "mfc0 $8, $12",
+                "nop",
+                // Clear bit 0 (IEc) with a shift pair: no mask register.
+                "srl $9, $8, 1",
+                "sll $9, $9, 1",
+                "mtc0 $9, $12",
+                "nop",
+                "nop",
+                out("$8") sr,
+                out("$9") _,
+                options(nostack),
+            );
+        }
+        sr & 1 != 0
+    }
+    // The host has no interrupts to mask.
+    #[cfg(not(target_arch = "mips"))]
+    false
+}
+
+/// Put back the interrupt-enable bit [`disable_cpu_interrupts`] found.
+///
+/// # Safety
+///
+/// `was_enabled` must be the result of the matching
+/// [`disable_cpu_interrupts`], and every section entered after it must
+/// already have ended.
+#[inline(always)]
+pub unsafe fn restore_cpu_interrupts(was_enabled: bool) {
+    #[cfg(target_arch = "mips")]
+    if was_enabled {
+        // SAFETY: re-enables interrupts only when the matching disable found
+        // them enabled.
+        unsafe {
+            core::arch::asm!(
+                "mfc0 $8, $12",
+                "nop",
+                "ori $8, $8, 1",
+                "mtc0 $8, $12",
+                out("$8") _,
+                options(nostack),
+            );
+        }
+    }
+    #[cfg(not(target_arch = "mips"))]
+    let _ = was_enabled;
+}
+
+/// Run `f` with CPU interrupts masked, then restore the previous state.
+///
+/// For a read-modify-write of a register an interrupt handler also writes
+/// (the DMA enable register, `DPCR`). Keep `f` short: VBlank waits until it
+/// returns.
+#[inline(always)]
+pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    // SAFETY: restored below, after `f` returns. A panic in `f` halts the
+    // console, so the section is never left half-open with code running.
+    let was_enabled = unsafe { disable_cpu_interrupts() };
+    let result = f();
+    // SAFETY: pairs the disable above; nested sections inside `f` have ended.
+    unsafe { restore_cpu_interrupts(was_enabled) };
+    result
+}
+
 /// Renamed to [`pending`].
 #[deprecated(note = "renamed to `pending`")]
 #[inline(always)]
@@ -100,4 +188,19 @@ pub mod source {
     /// Moved to [`psx_hw::irq::source::LIGHTPEN`].
     #[deprecated(note = "moved to `psx_hw::irq::source::LIGHTPEN`")]
     pub const LIGHTPEN: u32 = bit::LIGHTPEN;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_section_runs_its_closure_once_and_returns_its_value() {
+        let mut runs = 0;
+        let value = without_interrupts(|| {
+            runs += 1;
+            without_interrupts(|| 7)
+        });
+        assert_eq!((runs, value), (1, 7));
+    }
 }
