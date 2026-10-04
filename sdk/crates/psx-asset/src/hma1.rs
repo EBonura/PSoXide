@@ -403,25 +403,32 @@ fn tracks_fit(d: &[u8], n_bones: usize, n_clips: usize, clips_off: usize) -> boo
     true
 }
 
+/// [`layout`] of a blob that passes every check [`Model::new`] makes, for
+/// callers that only validate and may not hold `d` for `'static`.
+pub(crate) fn validated_layout(d: &[u8]) -> Option<(usize, usize, usize, usize)> {
+    let (n_bones, n_clips, bind_off, clips_off) = layout(d)?;
+    if n_clips == 0 {
+        return None;
+    }
+    for b in 0..n_bones {
+        let parent = d[4 + b] as usize;
+        if parent != 0xff && parent >= b {
+            return None;
+        }
+    }
+    if !tracks_fit(d, n_bones, n_clips, clips_off) {
+        return None;
+    }
+    Some((n_bones, n_clips, bind_off, clips_off))
+}
+
 impl Model {
     /// Validate and wrap an HMA1 blob. `None` when any clip, at any playback
     /// position, would read outside `d`, when a bone's parent does not come
     /// before it (the decoder composes parents first), or when there are no
     /// clips.
     pub fn new(d: &'static [u8]) -> Option<Model> {
-        let (n_bones, n_clips, bind_off, clips_off) = layout(d)?;
-        if n_clips == 0 {
-            return None;
-        }
-        for b in 0..n_bones {
-            let parent = d[4 + b] as usize;
-            if parent != 0xff && parent >= b {
-                return None;
-            }
-        }
-        if !tracks_fit(d, n_bones, n_clips, clips_off) {
-            return None;
-        }
+        let (n_bones, n_clips, bind_off, clips_off) = validated_layout(d)?;
         Some(Model {
             d: d.as_ptr(),
             n_bones,
