@@ -19,7 +19,7 @@ pub type SectorPollError = cd::SectorPollError;
 #[deprecated(note = "moved to `psx_io::cd::command`")]
 #[inline(always)]
 pub fn command(command: u8, params: &[u8]) -> cd::Response {
-    cd::command(command, params)
+    cd::command(command, params).unwrap_or(cd::Response::empty())
 }
 
 /// Moved to [`cd::try_command`].
@@ -82,7 +82,7 @@ pub fn try_wait_data_sector(spin_limit: u32) -> bool {
 #[deprecated(note = "renamed to `psx_io::cd::status`")]
 #[inline(always)]
 pub fn get_stat() -> cd::Response {
-    cd::status()
+    cd::status().unwrap_or(cd::Response::empty())
 }
 
 /// Renamed to [`cd::try_status`].
@@ -96,7 +96,7 @@ pub fn try_get_stat(spin_limit: u32) -> Option<cd::Response> {
 #[deprecated(note = "moved to `psx_io::cd::set_mode`")]
 #[inline(always)]
 pub fn set_mode(mode: u8) -> cd::Response {
-    cd::set_mode(mode)
+    cd::set_mode(mode).unwrap_or(cd::Response::empty())
 }
 
 /// Moved to [`cd::try_set_mode`].
@@ -124,7 +124,7 @@ pub fn try_read_n(spin_limit: u32) -> Option<cd::Response> {
 #[deprecated(note = "renamed to `psx_io::cd::unmute`")]
 #[inline(always)]
 pub fn demute() -> cd::Response {
-    cd::unmute()
+    cd::unmute().unwrap_or(cd::Response::empty())
 }
 
 /// Renamed to [`cd::try_unmute`].
@@ -138,7 +138,7 @@ pub fn try_demute(spin_limit: u32) -> Option<cd::Response> {
 #[deprecated(note = "moved to `psx_io::cd::mute`")]
 #[inline(always)]
 pub fn mute() -> cd::Response {
-    cd::mute()
+    cd::mute().unwrap_or(cd::Response::empty())
 }
 
 /// Moved to [`cd::try_mute`].
@@ -152,7 +152,7 @@ pub fn try_mute(spin_limit: u32) -> Option<cd::Response> {
 #[deprecated(note = "moved to `psx_io::cd::play_track`")]
 #[inline(always)]
 pub fn play_track(track: u8) -> cd::Response {
-    cd::play_track(track)
+    cd::play_track(track).unwrap_or(cd::Response::empty())
 }
 
 /// Moved to [`cd::try_play_track`].
@@ -166,7 +166,7 @@ pub fn try_play_track(track: u8, spin_limit: u32) -> Option<cd::Response> {
 #[deprecated(note = "moved to `psx_io::cd::pause`")]
 #[inline(always)]
 pub fn pause() -> cd::Response {
-    cd::pause()
+    cd::pause().unwrap_or(cd::Response::empty())
 }
 
 /// Moved to [`cd::try_pause`].
@@ -187,7 +187,7 @@ pub fn try_pause_until_complete(spin_limit: u32) -> bool {
 #[deprecated(note = "moved to `psx_io::cd::stop`")]
 #[inline(always)]
 pub fn stop() -> cd::Response {
-    cd::stop()
+    cd::stop().unwrap_or(cd::Response::empty())
 }
 
 /// Moved to [`cd::try_stop`].
@@ -222,7 +222,7 @@ pub const fn bcd_to_bin(v: u8) -> u8 {
 #[deprecated(note = "renamed to `psx_io::cd::play_position`")]
 #[inline(always)]
 pub fn get_loc_p() -> cd::Response {
-    cd::play_position()
+    cd::play_position().unwrap_or(cd::Response::empty())
 }
 
 /// Renamed to [`cd::try_play_position`].
