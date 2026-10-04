@@ -1,5 +1,11 @@
-//! CD-ROM drive: commands, responses, sector polling, and CD-DA playback in
-//! [`audio`].
+//! CD-ROM drive: commands, responses, sector polling, CD-DA playback in
+//! [`audio`], XA-ADPCM music in [`xa`].
+//!
+//! One driver owns the controller: the [`Cd`] token. Every command and
+//! register step is a method taking `&mut Cd`, so the borrow checker sees a
+//! second driver that tries to program the controller while one is mid-command.
+//! [`xa::Player`] holds the token while it exists and gives it back with
+//! `release`.
 //!
 //! The controller exposes four byte registers selected by the low two
 //! bits of the index register at [`BASE`]. Register addresses, command bytes
@@ -8,6 +14,7 @@
 pub mod audio;
 pub mod xa;
 
+use crate::periph::Cd;
 use crate::{irq, read_u8, write_u8};
 
 use psx_hw::cd::{
@@ -78,31 +85,334 @@ pub enum CdError {
 /// hang guard, not a latency.
 pub const DEFAULT_COMMAND_SPINS: u32 = 131_072;
 
-/// Send a command and return its first response packet, waiting at most
-/// [`DEFAULT_COMMAND_SPINS`] polls for each step.
-///
-/// Returns [`CdError::Timeout`] when the controller never answers and
-/// [`CdError::DriveError`] when the drive reports an error. A timed-out
-/// command leaves CD-ROM IRQ output masked, as [`try_command`] does.
-pub fn command(command: u8, params: &[u8]) -> Result<Response, CdError> {
-    command_within(command, params, DEFAULT_COMMAND_SPINS)
-}
+impl Cd {
+    /// Send a command and return its first response packet, waiting at most
+    /// [`DEFAULT_COMMAND_SPINS`] polls for each step.
+    ///
+    /// Returns [`CdError::Timeout`] when the controller never answers and
+    /// [`CdError::DriveError`] when the drive reports an error. A timed-out
+    /// command leaves CD-ROM IRQ output masked, as [`Self::try_command`] does.
+    pub fn command(&mut self, command: u8, params: &[u8]) -> Result<Response, CdError> {
+        self.command_within(command, params, DEFAULT_COMMAND_SPINS)
+    }
 
-/// [`command`] with an explicit poll budget per step.
-pub fn command_within(command: u8, params: &[u8], spin_limit: u32) -> Result<Response, CdError> {
-    run_command(&mut Mmio, command, params, spin_limit)
-}
+    /// [`Self::command`] with an explicit poll budget per step.
+    pub fn command_within(
+        &mut self,
+        command: u8,
+        params: &[u8],
+        spin_limit: u32,
+    ) -> Result<Response, CdError> {
+        run_command(&mut Mmio, command, params, spin_limit)
+    }
 
-/// Try to send a command and capture its first response packet.
-///
-/// Returns `None` if the controller does not expose parameter room or
-/// a response within `spin_limit` polls, or if the drive reports an error
-/// ([`command_within`] tells the two apart). Use this for gameplay paths
-/// where a not-ready drive should not stall rendering forever. If a
-/// dispatched command times out, CD-ROM IRQ output remains masked so a
-/// late ACK cannot interrupt a polling caller.
-pub fn try_command(command: u8, params: &[u8], spin_limit: u32) -> Option<Response> {
-    command_within(command, params, spin_limit).ok()
+    /// Try to send a command and capture its first response packet.
+    ///
+    /// Returns `None` if the controller does not expose parameter room or
+    /// a response within `spin_limit` polls, or if the drive reports an error
+    /// ([`Self::command_within`] tells the two apart). Use this for gameplay paths
+    /// where a not-ready drive should not stall rendering forever. If a
+    /// dispatched command times out, CD-ROM IRQ output remains masked so a
+    /// late ACK cannot interrupt a polling caller.
+    pub fn try_command(&mut self, command: u8, params: &[u8], spin_limit: u32) -> Option<Response> {
+        self.command_within(command, params, spin_limit).ok()
+    }
+
+    /// Current CD-ROM IRQ flag value (0 = none, 1 = data ready, 2 = complete,
+    /// 3 = ack, 5 = error).
+    ///
+    /// Exposed so callers can build their own wait loops bounded by a hardware
+    /// timer rather than by a poll count. A poll budget is only a proxy for time
+    /// and drifts with CPU and bus speed, which matters when the thing being
+    /// measured is mechanical.
+    pub fn irq_flag_value(&mut self) -> u8 {
+        irq_flag()
+    }
+
+    /// Acknowledge the given CD-ROM IRQ bits.
+    pub fn acknowledge_irq(&mut self, bits: u8) {
+        ack_irq(bits);
+    }
+
+    /// Drain any pending response bytes, discarding them.
+    pub fn discard_response(&mut self) {
+        drain_response_fifo();
+    }
+
+    /// Send a command without waiting for any response. Pairs with
+    /// [`Self::irq_flag_value`] for caller-timed waits.
+    ///
+    /// Returns the CD-ROM IRQ enable to give back to
+    /// [`restore_irq_output`](Self::restore_irq_output), or `None` if the
+    /// parameter FIFO never made room. Leaves CD-ROM IRQ
+    /// output masked exactly as the polled helpers do, so a late ACK cannot
+    /// interrupt the caller mid-measurement; call [`Self::restore_irq_output`] when done.
+    pub fn dispatch_command(&mut self, command: u8, params: &[u8], spin_limit: u32) -> Option<u8> {
+        let irq_enable = begin_polled_command();
+        select_index(0);
+        for &param in params {
+            if !wait_param_room_bounded(spin_limit) {
+                finish_failed_polled_command(irq_enable);
+                return None;
+            }
+            write_byte(REG_PARAMETER, param);
+        }
+        write_byte(REG_COMMAND_RESPONSE, command);
+        Some(irq_enable)
+    }
+
+    /// Restore the CD-ROM IRQ enable saved by [`Self::dispatch_command`].
+    pub fn restore_irq_output(&mut self, saved: u8) {
+        drain_response_fifo();
+        ack_irq(IRQ_ACK_ALL);
+        restore_irq_enable(saved);
+        select_index(0);
+    }
+
+    /// Nonblocking readiness probe for a sector reader that owns the INT1 ACK.
+    /// Data-ready is never acknowledged here. Other completion responses are
+    /// drained (at most 256 bytes) and acknowledged; drive errors also reset the
+    /// parameter FIFO. A ready data FIFO is accepted if no classified IRQ remains.
+    pub fn poll_data_sector(&mut self) -> Result<bool, SectorPollError> {
+        poll_sector(&mut SectorPollMmio)
+    }
+
+    /// Wait for the next streamed data sector (INT1) and acknowledge it.
+    ///
+    /// Use between [`Self::try_start_reading`] and [`Self::try_pause_until_complete`] to step through
+    /// a sector stream. Unrelated pending IRQs are drained and acknowledged so a
+    /// stale response cannot be mistaken for a sector arrival. Returns `false` on
+    /// a drive error or if no sector arrives within `spin_limit` polls.
+    pub fn try_wait_data_sector(&mut self, spin_limit: u32) -> bool {
+        let mut spins = spin_limit;
+        loop {
+            let flag = irq_flag();
+            if flag == IRQ_DATA_READY {
+                ack_irq(flag);
+                return true;
+            }
+            if flag == IRQ_ERROR {
+                let _ = read_response_fifo();
+                ack_irq(flag);
+                return false;
+            }
+            if flag != 0 {
+                let _ = read_response_fifo();
+                ack_irq(flag);
+            }
+            if spins == 0 {
+                return false;
+            }
+            spins -= 1;
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Get the CD-ROM drive status byte.
+    #[doc(alias = "Getstat")]
+    #[doc(alias = "CdlNop")]
+    pub fn status(&mut self) -> Result<Response, CdError> {
+        self.command(CMD_GETSTAT, &[])
+    }
+
+    /// Try to get the CD-ROM drive status byte.
+    #[doc(alias = "Getstat")]
+    pub fn try_status(&mut self, spin_limit: u32) -> Option<Response> {
+        self.try_command(CMD_GETSTAT, &[], spin_limit)
+    }
+
+    /// Set the CD-ROM controller mode byte.
+    pub fn set_mode(&mut self, mode: u8) -> Result<Response, CdError> {
+        self.command(CMD_SETMODE, &[mode])
+    }
+
+    /// Try to set the CD-ROM controller mode byte.
+    pub fn try_set_mode(&mut self, mode: u8, spin_limit: u32) -> Option<Response> {
+        self.try_command(CMD_SETMODE, &[mode], spin_limit)
+    }
+
+    /// Seek to a logical data-sector LBA (the command receives absolute BCD MSF).
+    #[doc(alias = "Setloc")]
+    #[doc(alias = "CdlSetloc")]
+    pub fn try_set_target_lba(&mut self, lba: u32, spin_limit: u32) -> Option<Response> {
+        let [minute, second, frame] = lba_to_bcd_msf(lba);
+        self.try_command(CMD_SETLOC, &[minute, second, frame], spin_limit)
+    }
+
+    /// Begin a normal data-sector stream at the most recently selected location.
+    #[doc(alias = "ReadN")]
+    #[doc(alias = "CdlReadN")]
+    pub fn try_start_reading(&mut self, spin_limit: u32) -> Option<Response> {
+        self.try_command(CMD_READN, &[], spin_limit)
+    }
+
+    /// Route CD-DA/XA output out of the CD-ROM controller.
+    #[doc(alias = "Demute")]
+    #[doc(alias = "CdlDemute")]
+    pub fn unmute(&mut self) -> Result<Response, CdError> {
+        self.command(CMD_DEMUTE, &[])
+    }
+
+    /// Try to route CD-DA/XA output out of the CD-ROM controller.
+    #[doc(alias = "Demute")]
+    pub fn try_unmute(&mut self, spin_limit: u32) -> Option<Response> {
+        self.try_command(CMD_DEMUTE, &[], spin_limit)
+    }
+
+    /// Mute CD-DA/XA output at the CD-ROM controller.
+    pub fn mute(&mut self) -> Result<Response, CdError> {
+        self.command(CMD_MUTE, &[])
+    }
+
+    /// Try to mute CD-DA/XA output at the CD-ROM controller.
+    pub fn try_mute(&mut self, spin_limit: u32) -> Option<Response> {
+        self.try_command(CMD_MUTE, &[], spin_limit)
+    }
+
+    /// Start CD-DA playback at a 1-based track number.
+    ///
+    /// The number is relative to this program's own tracks; on a multi-program
+    /// disc [`crate::disc_base`] shifts it past whatever came before.
+    pub fn play_track(&mut self, track: u8) -> Result<Response, CdError> {
+        self.command(
+            CMD_PLAY,
+            &[bin_to_bcd(crate::disc_base::shift_track(track))],
+        )
+    }
+
+    /// Try to start CD-DA playback at a 1-based track number. Shifted like
+    /// [`Self::play_track`].
+    pub fn try_play_track(&mut self, track: u8, spin_limit: u32) -> Option<Response> {
+        self.try_command(
+            CMD_PLAY,
+            &[bin_to_bcd(crate::disc_base::shift_track(track))],
+            spin_limit,
+        )
+    }
+
+    /// Pause CD-DA/read playback.
+    pub fn pause(&mut self) -> Result<Response, CdError> {
+        self.command(CMD_PAUSE, &[])
+    }
+
+    /// Try to pause CD-DA/read playback.
+    pub fn try_pause(&mut self, spin_limit: u32) -> Option<Response> {
+        self.try_command(CMD_PAUSE, &[], spin_limit)
+    }
+
+    /// Try to pause CD-DA/read playback and wait for the completion IRQ.
+    ///
+    /// Unlike [`Self::try_stop`], this leaves the drive spun up, which makes it the
+    /// right handoff before gameplay code starts issuing data-read commands.
+    pub fn try_pause_until_complete(&mut self, spin_limit: u32) -> bool {
+        try_command_until_complete_inner(CMD_PAUSE, &[], spin_limit)
+    }
+
+    /// Stop the CD-ROM motor/playback.
+    pub fn stop(&mut self) -> Result<Response, CdError> {
+        self.command(CMD_STOP, &[])
+    }
+
+    /// Try to stop the CD-ROM motor/playback.
+    ///
+    /// **This returns when the command is ACCEPTED, not when the drive is
+    /// done.** On real hardware the motor then winds down for one to two
+    /// seconds, during which GetStat reports no activity bits and data-read
+    /// commands fail; an emulator answers instantly and hides the window
+    /// (proven by a demo-disc burn whose every chain-load died this way). If
+    /// data reads follow, either call [`Self::stop_and_settle`], or better, keep the
+    /// drive spun up with [`Self::try_pause_until_complete`].
+    pub fn try_stop(&mut self, spin_limit: u32) -> Option<Response> {
+        self.try_command(CMD_STOP, &[], spin_limit)
+    }
+
+    /// Stop playback and wait until the drive has genuinely gone quiet:
+    /// GetStat reporting neither playing nor seeking on two consecutive polls,
+    /// with a short pause between polls. Bounded by `max_polls` so a wedged
+    /// drive cannot hang the caller; returns whether the drive settled.
+    ///
+    /// This is the safe prelude to issuing data-read commands after CD-DA.
+    /// [`Self::try_pause_until_complete`] is the faster choice when the next reads
+    /// are imminent, since it keeps the motor spinning.
+    pub fn stop_and_settle(&mut self, spin_limit: u32, max_polls: u32) -> bool {
+        let _ = self.try_stop(spin_limit);
+        let mut settled = 0u8;
+        for _ in 0..max_polls {
+            // Pace the polls: on silicon each takes real time anyway, but an
+            // emulator answers instantly and would burn the poll budget in
+            // microseconds. Volatile MMIO reads cannot be optimized out.
+            for _ in 0..20_000u32 {
+                // SAFETY: 0x1F80_1800 is the CD-ROM controller's index/status register, byte-wide MMIO
+                // on every PS1. Reading it has no side effects, so this is a pure delay.
+                unsafe { core::ptr::read_volatile(0x1F80_1800 as *const u8) };
+            }
+            let quiet = match self.try_status(spin_limit) {
+                Some(r) => r
+                    .bytes()
+                    .first()
+                    .is_some_and(|s| s & (STAT_PLAYING | STAT_SEEKING) == 0),
+                None => false,
+            };
+            settled = if quiet { settled + 1 } else { 0 };
+            if settled >= 2 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the current physical play position (CdlGetlocP). The 8-byte reply is
+    /// `[Track(bcd), Index(raw), RMM, RSS, RSECT, AMM, ASS, ASECT]`; parse it with
+    /// [`PlayPosition::parse`].
+    #[doc(alias = "GetlocP")]
+    #[doc(alias = "CdlGetlocP")]
+    pub fn play_position(&mut self) -> Result<Response, CdError> {
+        self.command(CMD_GETLOCP, &[])
+    }
+
+    /// Try to get the current physical play position, giving up after `spin_limit`.
+    #[doc(alias = "GetlocP")]
+    pub fn try_play_position(&mut self, spin_limit: u32) -> Option<Response> {
+        self.try_command(CMD_GETLOCP, &[], spin_limit)
+    }
+
+    /// Send a command and wait for its SECOND response (the completion IRQ),
+    /// not just the initial acknowledgement.
+    ///
+    /// Seek, read and init all acknowledge immediately and finish much later, so
+    /// timing them against the ack measures command dispatch rather than the
+    /// mechanical operation. Returns `false` if either response fails to arrive
+    /// within `spin_limit` polls.
+    pub fn try_command_until_complete(
+        &mut self,
+        command: u8,
+        params: &[u8],
+        spin_limit: u32,
+    ) -> bool {
+        try_command_until_complete_inner(command, params, spin_limit)
+    }
+
+    /// Program the drive's audio mixer (CD-DA and XA-ADPCM on their way to
+    /// the SPU's CD input) and apply it. Volumes are 0..=0xFF with 0x80 as
+    /// unity; `(0x80, 0, 0x80, 0)` is plain stereo. The SPU side still needs
+    /// its CD input enabled and a CD volume (`psx-spu`).
+    pub fn set_audio_mixer(
+        &mut self,
+        left_to_left: u8,
+        left_to_right: u8,
+        right_to_right: u8,
+        right_to_left: u8,
+    ) {
+        select_index(2);
+        write_byte(REG_PARAMETER, left_to_left);
+        write_byte(REG_REQUEST_IRQ, left_to_right);
+        select_index(3);
+        write_byte(REG_COMMAND_RESPONSE, right_to_right);
+        write_byte(REG_PARAMETER, right_to_left);
+        // Apply the new volumes (index 3, register 3, bit 5), un-muting ADPCM.
+        write_byte(REG_REQUEST_IRQ, 0x20);
+        select_index(0);
+    }
 }
 
 /// The controller steps one polled command takes, so the order and the
@@ -182,66 +492,9 @@ fn run_command(
     }
 }
 
-/// Current CD-ROM IRQ flag value (0 = none, 1 = data ready, 2 = complete,
-/// 3 = ack, 5 = error).
-///
-/// Exposed so callers can build their own wait loops bounded by a hardware
-/// timer rather than by a poll count. A poll budget is only a proxy for time
-/// and drifts with CPU and bus speed, which matters when the thing being
-/// measured is mechanical.
-pub fn irq_flag_value() -> u8 {
-    irq_flag()
-}
-
-/// Acknowledge the given CD-ROM IRQ bits.
-pub fn acknowledge_irq(bits: u8) {
-    ack_irq(bits);
-}
-
-/// Drain any pending response bytes, discarding them.
-pub fn discard_response() {
-    drain_response_fifo();
-}
-
-/// Send a command without waiting for any response. Pairs with
-/// [`irq_flag_value`] for caller-timed waits.
-///
-/// Returns `false` if the parameter FIFO never made room. Leaves CD-ROM IRQ
-/// output masked exactly as the polled helpers do, so a late ACK cannot
-/// interrupt the caller mid-measurement; call [`restore_irq_output`] when done.
-pub fn dispatch_command(command: u8, params: &[u8], spin_limit: u32) -> Option<u8> {
-    let irq_enable = begin_polled_command();
-    select_index(0);
-    for &param in params {
-        if !wait_param_room_bounded(spin_limit) {
-            finish_failed_polled_command(irq_enable);
-            return None;
-        }
-        write_byte(REG_PARAMETER, param);
-    }
-    write_byte(REG_COMMAND_RESPONSE, command);
-    Some(irq_enable)
-}
-
-/// Restore the CD-ROM IRQ enable saved by [`dispatch_command`].
-pub fn restore_irq_output(saved: u8) {
-    drain_response_fifo();
-    ack_irq(IRQ_ACK_ALL);
-    restore_irq_enable(saved);
-    select_index(0);
-}
-
 /// A drive error reported while polling for the next streamed sector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SectorPollError;
-
-/// Nonblocking readiness probe for a sector reader that owns the INT1 ACK.
-/// Data-ready is never acknowledged here. Other completion responses are
-/// drained (at most 256 bytes) and acknowledged; drive errors also reset the
-/// parameter FIFO. A ready data FIFO is accepted if no classified IRQ remains.
-pub fn poll_data_sector() -> Result<bool, SectorPollError> {
-    poll_sector(&mut SectorPollMmio)
-}
 
 trait SectorPollIo {
     fn flag(&mut self) -> u8;
@@ -299,68 +552,6 @@ fn poll_sector(io: &mut impl SectorPollIo) -> Result<bool, SectorPollError> {
     }
 }
 
-/// Wait for the next streamed data sector (INT1) and acknowledge it.
-///
-/// Use between [`try_start_reading`] and [`try_pause_until_complete`] to step through
-/// a sector stream. Unrelated pending IRQs are drained and acknowledged so a
-/// stale response cannot be mistaken for a sector arrival. Returns `false` on
-/// a drive error or if no sector arrives within `spin_limit` polls.
-pub fn try_wait_data_sector(spin_limit: u32) -> bool {
-    let mut spins = spin_limit;
-    loop {
-        let flag = irq_flag();
-        if flag == IRQ_DATA_READY {
-            ack_irq(flag);
-            return true;
-        }
-        if flag == IRQ_ERROR {
-            let _ = read_response_fifo();
-            ack_irq(flag);
-            return false;
-        }
-        if flag != 0 {
-            let _ = read_response_fifo();
-            ack_irq(flag);
-        }
-        if spins == 0 {
-            return false;
-        }
-        spins -= 1;
-        core::hint::spin_loop();
-    }
-}
-
-/// Get the CD-ROM drive status byte.
-#[doc(alias = "Getstat")]
-#[doc(alias = "CdlNop")]
-pub fn status() -> Result<Response, CdError> {
-    command(CMD_GETSTAT, &[])
-}
-
-/// Try to get the CD-ROM drive status byte.
-#[doc(alias = "Getstat")]
-pub fn try_status(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_GETSTAT, &[], spin_limit)
-}
-
-/// Set the CD-ROM controller mode byte.
-pub fn set_mode(mode: u8) -> Result<Response, CdError> {
-    command(CMD_SETMODE, &[mode])
-}
-
-/// Try to set the CD-ROM controller mode byte.
-pub fn try_set_mode(mode: u8, spin_limit: u32) -> Option<Response> {
-    try_command(CMD_SETMODE, &[mode], spin_limit)
-}
-
-/// Seek to a logical data-sector LBA (the command receives absolute BCD MSF).
-#[doc(alias = "Setloc")]
-#[doc(alias = "CdlSetloc")]
-pub fn try_set_target_lba(lba: u32, spin_limit: u32) -> Option<Response> {
-    let [minute, second, frame] = lba_to_bcd_msf(lba);
-    try_command(CMD_SETLOC, &[minute, second, frame], spin_limit)
-}
-
 const fn lba_to_bcd_msf(lba: u32) -> [u8; 3] {
     let absolute = lba.saturating_add(150);
     let raw_minute = absolute / (60 * 75);
@@ -374,128 +565,6 @@ const fn lba_to_bcd_msf(lba: u32) -> [u8; 3] {
     [bin_to_bcd(minute), bin_to_bcd(second), bin_to_bcd(frame)]
 }
 
-/// Begin a normal data-sector stream at the most recently selected location.
-#[doc(alias = "ReadN")]
-#[doc(alias = "CdlReadN")]
-pub fn try_start_reading(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_READN, &[], spin_limit)
-}
-
-/// Route CD-DA/XA output out of the CD-ROM controller.
-#[doc(alias = "Demute")]
-#[doc(alias = "CdlDemute")]
-pub fn unmute() -> Result<Response, CdError> {
-    command(CMD_DEMUTE, &[])
-}
-
-/// Try to route CD-DA/XA output out of the CD-ROM controller.
-#[doc(alias = "Demute")]
-pub fn try_unmute(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_DEMUTE, &[], spin_limit)
-}
-
-/// Mute CD-DA/XA output at the CD-ROM controller.
-pub fn mute() -> Result<Response, CdError> {
-    command(CMD_MUTE, &[])
-}
-
-/// Try to mute CD-DA/XA output at the CD-ROM controller.
-pub fn try_mute(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_MUTE, &[], spin_limit)
-}
-
-/// Start CD-DA playback at a 1-based track number.
-///
-/// The number is relative to this program's own tracks; on a multi-program
-/// disc [`crate::disc_base`] shifts it past whatever came before.
-pub fn play_track(track: u8) -> Result<Response, CdError> {
-    command(
-        CMD_PLAY,
-        &[bin_to_bcd(crate::disc_base::shift_track(track))],
-    )
-}
-
-/// Try to start CD-DA playback at a 1-based track number. Shifted like
-/// [`play_track`].
-pub fn try_play_track(track: u8, spin_limit: u32) -> Option<Response> {
-    try_command(
-        CMD_PLAY,
-        &[bin_to_bcd(crate::disc_base::shift_track(track))],
-        spin_limit,
-    )
-}
-
-/// Pause CD-DA/read playback.
-pub fn pause() -> Result<Response, CdError> {
-    command(CMD_PAUSE, &[])
-}
-
-/// Try to pause CD-DA/read playback.
-pub fn try_pause(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_PAUSE, &[], spin_limit)
-}
-
-/// Try to pause CD-DA/read playback and wait for the completion IRQ.
-///
-/// Unlike [`try_stop`], this leaves the drive spun up, which makes it the
-/// right handoff before gameplay code starts issuing data-read commands.
-pub fn try_pause_until_complete(spin_limit: u32) -> bool {
-    try_command_until_complete_inner(CMD_PAUSE, &[], spin_limit)
-}
-
-/// Stop the CD-ROM motor/playback.
-pub fn stop() -> Result<Response, CdError> {
-    command(CMD_STOP, &[])
-}
-
-/// Try to stop the CD-ROM motor/playback.
-///
-/// **This returns when the command is ACCEPTED, not when the drive is
-/// done.** On real hardware the motor then winds down for one to two
-/// seconds, during which GetStat reports no activity bits and data-read
-/// commands fail; an emulator answers instantly and hides the window
-/// (proven by a demo-disc burn whose every chain-load died this way). If
-/// data reads follow, either call [`stop_and_settle`], or better, keep the
-/// drive spun up with [`try_pause_until_complete`].
-pub fn try_stop(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_STOP, &[], spin_limit)
-}
-
-/// Stop playback and wait until the drive has genuinely gone quiet:
-/// GetStat reporting neither playing nor seeking on two consecutive polls,
-/// with a short pause between polls. Bounded by `max_polls` so a wedged
-/// drive cannot hang the caller; returns whether the drive settled.
-///
-/// This is the safe prelude to issuing data-read commands after CD-DA.
-/// [`try_pause_until_complete`] is the faster choice when the next reads
-/// are imminent, since it keeps the motor spinning.
-pub fn stop_and_settle(spin_limit: u32, max_polls: u32) -> bool {
-    let _ = try_stop(spin_limit);
-    let mut settled = 0u8;
-    for _ in 0..max_polls {
-        // Pace the polls: on silicon each takes real time anyway, but an
-        // emulator answers instantly and would burn the poll budget in
-        // microseconds. Volatile MMIO reads cannot be optimized out.
-        for _ in 0..20_000u32 {
-            // SAFETY: 0x1F80_1800 is the CD-ROM controller's index/status register, byte-wide MMIO
-            // on every PS1. Reading it has no side effects, so this is a pure delay.
-            unsafe { core::ptr::read_volatile(0x1F80_1800 as *const u8) };
-        }
-        let quiet = match try_status(spin_limit) {
-            Some(r) => r
-                .bytes()
-                .first()
-                .is_some_and(|s| s & (STAT_PLAYING | STAT_SEEKING) == 0),
-            None => false,
-        };
-        settled = if quiet { settled + 1 } else { 0 };
-        if settled >= 2 {
-            return true;
-        }
-    }
-    false
-}
-
 /// Convert binary `0..=99` to BCD for CD-ROM command parameters.
 pub const fn bin_to_bcd(v: u8) -> u8 {
     let v = if v > 99 { 99 } else { v };
@@ -506,21 +575,6 @@ pub const fn bin_to_bcd(v: u8) -> u8 {
 /// input; nibbles above 9 are not normalised (the drive never emits them).
 pub const fn bcd_to_bin(v: u8) -> u8 {
     (v >> 4) * 10 + (v & 0x0F)
-}
-
-/// Get the current physical play position (CdlGetlocP). The 8-byte reply is
-/// `[Track(bcd), Index(raw), RMM, RSS, RSECT, AMM, ASS, ASECT]`; parse it with
-/// [`PlayPosition::parse`].
-#[doc(alias = "GetlocP")]
-#[doc(alias = "CdlGetlocP")]
-pub fn play_position() -> Result<Response, CdError> {
-    command(CMD_GETLOCP, &[])
-}
-
-/// Try to get the current physical play position, giving up after `spin_limit`.
-#[doc(alias = "GetlocP")]
-pub fn try_play_position(spin_limit: u32) -> Option<Response> {
-    try_command(CMD_GETLOCP, &[], spin_limit)
 }
 
 /// Decoded CdlGetlocP reply. The relative MSF (`relative_*`) is elapsed time
@@ -627,17 +681,6 @@ fn wait_irq_flag(
 
 fn wait_irq_bounded(expected: u8, spins: u32) -> Option<u8> {
     Mmio.wait_irq(expected, spins).ok()
-}
-
-/// Send a command and wait for its SECOND response (the completion IRQ),
-/// not just the initial acknowledgement.
-///
-/// Seek, read and init all acknowledge immediately and finish much later, so
-/// timing them against the ack measures command dispatch rather than the
-/// mechanical operation. Returns `false` if either response fails to arrive
-/// within `spin_limit` polls.
-pub fn try_command_until_complete(command: u8, params: &[u8], spin_limit: u32) -> bool {
-    try_command_until_complete_inner(command, params, spin_limit)
 }
 
 fn try_command_until_complete_inner(command: u8, params: &[u8], spin_limit: u32) -> bool {
@@ -750,22 +793,6 @@ fn read_status() -> u8 {
     read_byte(REG_INDEX)
 }
 
-/// Program the drive's audio mixer (CD-DA and XA-ADPCM on their way to
-/// the SPU's CD input) and apply it. Volumes are 0..=0xFF with 0x80 as
-/// unity; `(0x80, 0, 0x80, 0)` is plain stereo. The SPU side still needs
-/// its CD input enabled and a CD volume (`psx-spu`).
-pub fn set_audio_mixer(left_to_left: u8, left_to_right: u8, right_to_right: u8, right_to_left: u8) {
-    select_index(2);
-    write_byte(REG_PARAMETER, left_to_left);
-    write_byte(REG_REQUEST_IRQ, left_to_right);
-    select_index(3);
-    write_byte(REG_COMMAND_RESPONSE, right_to_right);
-    write_byte(REG_PARAMETER, right_to_left);
-    // Apply the new volumes (index 3, register 3, bit 5), un-muting ADPCM.
-    write_byte(REG_REQUEST_IRQ, 0x20);
-    select_index(0);
-}
-
 fn select_index(index: u8) {
     write_byte(REG_INDEX, index & 0x03);
 }
@@ -778,6 +805,237 @@ fn read_byte(addr: u32) -> u8 {
 fn write_byte(addr: u32, value: u8) {
     // SAFETY: fixed CD-ROM MMIO register write.
     unsafe { write_u8(addr, value) }
+}
+
+/// A token for a deprecated forwarder that never took one.
+fn steal() -> Cd {
+    // SAFETY: a token is a logic guard, not a memory-safety one (see
+    // `crate::periph`), and the old free functions never took one.
+    unsafe { Cd::steal() }
+}
+
+/// Moved to [`Cd::command`].
+#[deprecated(note = "use `Cd::command` with the `Cd` token")]
+#[inline(always)]
+pub fn command(command: u8, params: &[u8]) -> Result<Response, CdError> {
+    steal().command(command, params)
+}
+
+/// Moved to [`Cd::command_within`].
+#[deprecated(note = "use `Cd::command_within` with the `Cd` token")]
+#[inline(always)]
+pub fn command_within(command: u8, params: &[u8], spin_limit: u32) -> Result<Response, CdError> {
+    steal().command_within(command, params, spin_limit)
+}
+
+/// Moved to [`Cd::try_command`].
+#[deprecated(note = "use `Cd::try_command` with the `Cd` token")]
+#[inline(always)]
+pub fn try_command(command: u8, params: &[u8], spin_limit: u32) -> Option<Response> {
+    steal().try_command(command, params, spin_limit)
+}
+
+/// Moved to [`Cd::irq_flag_value`].
+#[deprecated(note = "use `Cd::irq_flag_value` with the `Cd` token")]
+#[inline(always)]
+pub fn irq_flag_value() -> u8 {
+    steal().irq_flag_value()
+}
+
+/// Moved to [`Cd::acknowledge_irq`].
+#[deprecated(note = "use `Cd::acknowledge_irq` with the `Cd` token")]
+#[inline(always)]
+pub fn acknowledge_irq(bits: u8) {
+    steal().acknowledge_irq(bits)
+}
+
+/// Moved to [`Cd::discard_response`].
+#[deprecated(note = "use `Cd::discard_response` with the `Cd` token")]
+#[inline(always)]
+pub fn discard_response() {
+    steal().discard_response()
+}
+
+/// Moved to [`Cd::dispatch_command`].
+#[deprecated(note = "use `Cd::dispatch_command` with the `Cd` token")]
+#[inline(always)]
+pub fn dispatch_command(command: u8, params: &[u8], spin_limit: u32) -> Option<u8> {
+    steal().dispatch_command(command, params, spin_limit)
+}
+
+/// Moved to [`Cd::restore_irq_output`].
+#[deprecated(note = "use `Cd::restore_irq_output` with the `Cd` token")]
+#[inline(always)]
+pub fn restore_irq_output(saved: u8) {
+    steal().restore_irq_output(saved)
+}
+
+/// Moved to [`Cd::poll_data_sector`].
+#[deprecated(note = "use `Cd::poll_data_sector` with the `Cd` token")]
+#[inline(always)]
+pub fn poll_data_sector() -> Result<bool, SectorPollError> {
+    steal().poll_data_sector()
+}
+
+/// Moved to [`Cd::try_wait_data_sector`].
+#[deprecated(note = "use `Cd::try_wait_data_sector` with the `Cd` token")]
+#[inline(always)]
+pub fn try_wait_data_sector(spin_limit: u32) -> bool {
+    steal().try_wait_data_sector(spin_limit)
+}
+
+/// Moved to [`Cd::status`].
+#[deprecated(note = "use `Cd::status` with the `Cd` token")]
+#[inline(always)]
+pub fn status() -> Result<Response, CdError> {
+    steal().status()
+}
+
+/// Moved to [`Cd::try_status`].
+#[deprecated(note = "use `Cd::try_status` with the `Cd` token")]
+#[inline(always)]
+pub fn try_status(spin_limit: u32) -> Option<Response> {
+    steal().try_status(spin_limit)
+}
+
+/// Moved to [`Cd::set_mode`].
+#[deprecated(note = "use `Cd::set_mode` with the `Cd` token")]
+#[inline(always)]
+pub fn set_mode(mode: u8) -> Result<Response, CdError> {
+    steal().set_mode(mode)
+}
+
+/// Moved to [`Cd::try_set_mode`].
+#[deprecated(note = "use `Cd::try_set_mode` with the `Cd` token")]
+#[inline(always)]
+pub fn try_set_mode(mode: u8, spin_limit: u32) -> Option<Response> {
+    steal().try_set_mode(mode, spin_limit)
+}
+
+/// Moved to [`Cd::try_set_target_lba`].
+#[deprecated(note = "use `Cd::try_set_target_lba` with the `Cd` token")]
+#[inline(always)]
+pub fn try_set_target_lba(lba: u32, spin_limit: u32) -> Option<Response> {
+    steal().try_set_target_lba(lba, spin_limit)
+}
+
+/// Moved to [`Cd::try_start_reading`].
+#[deprecated(note = "use `Cd::try_start_reading` with the `Cd` token")]
+#[inline(always)]
+pub fn try_start_reading(spin_limit: u32) -> Option<Response> {
+    steal().try_start_reading(spin_limit)
+}
+
+/// Moved to [`Cd::unmute`].
+#[deprecated(note = "use `Cd::unmute` with the `Cd` token")]
+#[inline(always)]
+pub fn unmute() -> Result<Response, CdError> {
+    steal().unmute()
+}
+
+/// Moved to [`Cd::try_unmute`].
+#[deprecated(note = "use `Cd::try_unmute` with the `Cd` token")]
+#[inline(always)]
+pub fn try_unmute(spin_limit: u32) -> Option<Response> {
+    steal().try_unmute(spin_limit)
+}
+
+/// Moved to [`Cd::mute`].
+#[deprecated(note = "use `Cd::mute` with the `Cd` token")]
+#[inline(always)]
+pub fn mute() -> Result<Response, CdError> {
+    steal().mute()
+}
+
+/// Moved to [`Cd::try_mute`].
+#[deprecated(note = "use `Cd::try_mute` with the `Cd` token")]
+#[inline(always)]
+pub fn try_mute(spin_limit: u32) -> Option<Response> {
+    steal().try_mute(spin_limit)
+}
+
+/// Moved to [`Cd::play_track`].
+#[deprecated(note = "use `Cd::play_track` with the `Cd` token")]
+#[inline(always)]
+pub fn play_track(track: u8) -> Result<Response, CdError> {
+    steal().play_track(track)
+}
+
+/// Moved to [`Cd::try_play_track`].
+#[deprecated(note = "use `Cd::try_play_track` with the `Cd` token")]
+#[inline(always)]
+pub fn try_play_track(track: u8, spin_limit: u32) -> Option<Response> {
+    steal().try_play_track(track, spin_limit)
+}
+
+/// Moved to [`Cd::pause`].
+#[deprecated(note = "use `Cd::pause` with the `Cd` token")]
+#[inline(always)]
+pub fn pause() -> Result<Response, CdError> {
+    steal().pause()
+}
+
+/// Moved to [`Cd::try_pause`].
+#[deprecated(note = "use `Cd::try_pause` with the `Cd` token")]
+#[inline(always)]
+pub fn try_pause(spin_limit: u32) -> Option<Response> {
+    steal().try_pause(spin_limit)
+}
+
+/// Moved to [`Cd::try_pause_until_complete`].
+#[deprecated(note = "use `Cd::try_pause_until_complete` with the `Cd` token")]
+#[inline(always)]
+pub fn try_pause_until_complete(spin_limit: u32) -> bool {
+    steal().try_pause_until_complete(spin_limit)
+}
+
+/// Moved to [`Cd::stop`].
+#[deprecated(note = "use `Cd::stop` with the `Cd` token")]
+#[inline(always)]
+pub fn stop() -> Result<Response, CdError> {
+    steal().stop()
+}
+
+/// Moved to [`Cd::try_stop`].
+#[deprecated(note = "use `Cd::try_stop` with the `Cd` token")]
+#[inline(always)]
+pub fn try_stop(spin_limit: u32) -> Option<Response> {
+    steal().try_stop(spin_limit)
+}
+
+/// Moved to [`Cd::stop_and_settle`].
+#[deprecated(note = "use `Cd::stop_and_settle` with the `Cd` token")]
+#[inline(always)]
+pub fn stop_and_settle(spin_limit: u32, max_polls: u32) -> bool {
+    steal().stop_and_settle(spin_limit, max_polls)
+}
+
+/// Moved to [`Cd::play_position`].
+#[deprecated(note = "use `Cd::play_position` with the `Cd` token")]
+#[inline(always)]
+pub fn play_position() -> Result<Response, CdError> {
+    steal().play_position()
+}
+
+/// Moved to [`Cd::try_play_position`].
+#[deprecated(note = "use `Cd::try_play_position` with the `Cd` token")]
+#[inline(always)]
+pub fn try_play_position(spin_limit: u32) -> Option<Response> {
+    steal().try_play_position(spin_limit)
+}
+
+/// Moved to [`Cd::try_command_until_complete`].
+#[deprecated(note = "use `Cd::try_command_until_complete` with the `Cd` token")]
+#[inline(always)]
+pub fn try_command_until_complete(command: u8, params: &[u8], spin_limit: u32) -> bool {
+    steal().try_command_until_complete(command, params, spin_limit)
+}
+
+/// Moved to [`Cd::set_audio_mixer`].
+#[deprecated(note = "use `Cd::set_audio_mixer` with the `Cd` token")]
+#[inline(always)]
+pub fn set_audio_mixer(left_to_left: u8, left_to_right: u8, right_to_right: u8, right_to_left: u8) {
+    steal().set_audio_mixer(left_to_left, left_to_right, right_to_right, right_to_left)
 }
 
 #[cfg(test)]

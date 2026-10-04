@@ -28,10 +28,7 @@
 //! audible gap whose length is the drive's seek time; authoring the loop
 //! point into a quiet passage hides it.
 
-use super::{
-    set_audio_mixer, try_command, try_pause_until_complete, try_play_position, try_set_mode,
-    try_set_target_lba, try_unmute, PlayPosition,
-};
+use super::PlayPosition;
 use crate::disc_base::shift_lba;
 use crate::periph::Cd;
 use psx_hw::cd::xa::{END_GUARD_SECTORS, SECTORS_PER_SECOND};
@@ -167,29 +164,28 @@ trait Drive {
     fn head_lba(&mut self) -> Option<u32>;
 }
 
-struct Mmio;
-
-impl Drive for Mmio {
+impl Drive for Cd {
     fn unmute(&mut self) -> bool {
-        try_unmute(COMMAND_SPINS).is_some()
+        self.try_unmute(COMMAND_SPINS).is_some()
     }
     fn set_mode(&mut self, mode: u8) -> bool {
-        try_set_mode(mode, COMMAND_SPINS).is_some()
+        self.try_set_mode(mode, COMMAND_SPINS).is_some()
     }
     fn set_filter(&mut self, file: u8, channel: u8) -> bool {
-        try_command(CMD_SETFILTER, &[file, channel], COMMAND_SPINS).is_some()
+        self.try_command(CMD_SETFILTER, &[file, channel], COMMAND_SPINS)
+            .is_some()
     }
     fn set_target(&mut self, lba: u32) -> bool {
-        try_set_target_lba(lba, COMMAND_SPINS).is_some()
+        self.try_set_target_lba(lba, COMMAND_SPINS).is_some()
     }
     fn start_streaming(&mut self) -> bool {
-        try_command(CMD_READS, &[], COMMAND_SPINS).is_some()
+        self.try_command(CMD_READS, &[], COMMAND_SPINS).is_some()
     }
     fn pause(&mut self) -> bool {
-        try_pause_until_complete(PAUSE_SPINS)
+        self.try_pause_until_complete(PAUSE_SPINS)
     }
     fn head_lba(&mut self) -> Option<u32> {
-        let position = PlayPosition::parse(&try_play_position(COMMAND_SPINS)?)?;
+        let position = PlayPosition::parse(&self.try_play_position(COMMAND_SPINS)?)?;
         let frames = (position.absolute_min as u32 * 60 + position.absolute_sec as u32) * 75
             + position.absolute_frame as u32;
         // The drive counts from the start of the lead-in, two seconds before LBA 0.
@@ -325,7 +321,7 @@ impl Engine {
 /// Plays XA-ADPCM songs. Owns the CD token: nothing else drives the
 /// controller while a player exists.
 pub struct Player {
-    _cd: Cd,
+    cd: Cd,
     engine: Engine,
 }
 
@@ -335,7 +331,7 @@ impl Player {
     /// the drive's own mixer must pass audio ([`set_volume`](Self::set_volume)).
     pub const fn new(cd: Cd) -> Self {
         Self {
-            _cd: cd,
+            cd,
             engine: Engine::new(),
         }
     }
@@ -343,25 +339,25 @@ impl Player {
     /// Stop and give the token back.
     pub fn release(mut self) -> Cd {
         self.stop();
-        self._cd
+        self.cd
     }
 
     /// Start `song` from the top (or restart it). With `looping` it
     /// restarts by itself when [`poll`](Self::poll) sees it end. Blocks for
     /// the five drive commands, a few milliseconds on a warm drive.
     pub fn play(&mut self, song: Song, looping: bool) -> Result<(), Error> {
-        self.engine.start(&mut Mmio, song, looping)
+        self.engine.start(&mut self.cd, song, looping)
     }
 
     /// Pause the drive and forget the song. Waits for the drive to settle.
     pub fn stop(&mut self) {
-        self.engine.stop(&mut Mmio);
+        self.engine.stop(&mut self.cd);
     }
 
     /// Call about once per frame: notices the end of the song and loops or
     /// stops. Costs one drive command.
     pub fn poll(&mut self) -> Event {
-        self.engine.poll(&mut Mmio)
+        self.engine.poll(&mut self.cd)
     }
 
     /// Whether a song is started and has not finished.
@@ -390,7 +386,7 @@ impl Player {
     /// unity, `0xFF` about twice that; `(left, right)` feed the left and
     /// right outputs of a stereo song.
     pub fn set_volume(&mut self, left: u8, right: u8) {
-        set_audio_mixer(left, 0, right, 0);
+        self.cd.set_audio_mixer(left, 0, right, 0);
     }
 }
 
@@ -401,6 +397,15 @@ mod tests {
     use std::string::{String, ToString};
     use std::vec::Vec;
     use std::{format, vec};
+
+    #[test]
+    fn an_idle_player_owns_the_token_and_hands_it_back() {
+        // SAFETY: a test-local token on the host; an idle player sends the
+        // drive nothing.
+        let player = Player::new(unsafe { Cd::steal() });
+        assert!(!player.is_playing());
+        let _token: Cd = player.release();
+    }
 
     /// Records commands; `heads` is what GetlocP answers, one per poll.
     #[derive(Default)]
