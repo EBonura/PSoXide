@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! On-device SIO0 transport for a physical memory card (feature `hw`).
 //!
-//! Talks the raw card protocol byte by byte, the same style as
-//! [`psx_pad`](../psx_pad): assert the port, clock `0x81` to address the card,
-//! then a Read (`0x52`) or Write (`0x57`) command frame. Register usage matches
-//! the proven pad path (MODE `8N1`, BAUD `0x88`, a setup delay after select for
-//! the strict SCPH-1200), with per-byte `/ACK` pacing because a card's write
-//! commit stalls between bytes while flash settles.
+//! Talks the raw card protocol byte by byte: assert the port, clock `0x81` to
+//! address the card, then a Read (`0x52`) or Write (`0x57`) command frame. The
+//! serial link is `psx-io`'s shared [`Transport`], the one `psx-pad` polls
+//! controllers with: the same select, the same ACK-paced byte exchange that
+//! watches the live `/ACK` level, the same release. A card's own timing is a
+//! longer `/ACK` budget, because its write commit stalls between bytes while
+//! flash settles.
 //!
-//! Timing is exposed as a runtime knob ([`HardwareCard::with_timing`]) because
-//! real silicon varies: the emulator ACKs instantly, an official card needs the
-//! setup delay, and a write commit may need a longer ACK wait than a pad byte.
+//! A [`HardwareCard`] holds the controller port while it exists: either the
+//! [`ControllerPort`] token itself ([`HardwareCard::on_port`] with the token,
+//! and [`release`](HardwareCard::release) gives it back) or a `&mut` borrow of
+//! one the program keeps for polling pads between saves.
+//!
+//! Timing is exposed as a runtime knob ([`HardwareCard::on_port_with_timing`])
+//! because real silicon varies: the emulator ACKs instantly, an official card
+//! needs the setup delay, and a write commit may need a longer ACK wait than a
+//! pad byte.
 //!
 //! [`HardwareCard::last_trace`] exposes bounded transport diagnostics. In
 //! particular, an `/ACK` timeout is never silently treated as a successful
@@ -18,27 +25,9 @@
 //! remains visible to an on-console diagnostic.
 
 use crate::{Block, Error, Result, FRAME_COUNT, FRAME_SIZE};
-use psx_hw::sio::sio0;
-use psx_hw::sio::sio0 as sio;
-
-// SIO0 access contract. Each `unsafe` block in this file is one volatile access to a `psx_hw::sio::sio0`
-// register (0x1F80_1040..=0x1F80_104F), valid MMIO on every PS1, at its natural width. No pointer
-// or memory ownership is involved. The one obligation is exclusive use of SIO0 for a transaction:
-// the guest is single-threaded, every `HardwareCard` operation runs to completion before it
-// returns, and no interrupt handler touches SIO0, so a pad poll (psx-pad drives the same port)
-// cannot interleave with a card transaction.
-
-// SIO0 register layout: `psx_hw::sio::sio0` is the single source of truth,
-// shared with psx-pad. Only protocol bytes and timing stay local.
-const CTRL_ACK: u16 = sio0::ctrl::ACK;
-
-const STAT_TX_READY: u32 = sio0::stat::TX_READY;
-const STAT_RX_NOT_EMPTY: u32 = sio0::stat::RX_NOT_EMPTY;
-const STAT_DSR_LEVEL: u32 = sio0::stat::DSR_LEVEL;
-const STAT_IRQ: u32 = sio0::stat::IRQ;
-
-const MODE_8N1: u16 = sio0::MODE_8N1;
-const BAUD: u16 = sio0::BAUD_250KHZ;
+use core::borrow::BorrowMut;
+use psx_io::controller_port::{ExchangeError, Port, Transport};
+use psx_io::periph::ControllerPort;
 
 // Protocol bytes.
 const CARD_SELECT: u8 = 0x81;
@@ -56,13 +45,7 @@ const FIRST_COMMAND_SETTLE_SPINS: u32 = 1_024;
 const POST_WRITE_SETTLE_SPINS: u32 = 400_000;
 
 /// Which controller/card port to use.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Slot {
-    /// Port 1.
-    One,
-    /// Port 2.
-    Two,
-}
+pub type Slot = Port;
 
 /// The first low-level failure observed in the latest frame transaction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -119,119 +102,106 @@ pub struct Timing {
 
 impl Default for Timing {
     fn default() -> Self {
+        let card = psx_io::controller_port::Timing::CARD;
         Timing {
-            setup_spins: 1_024,
-            byte_spins: 32_768,
-            // Generous: a card's write-commit ACK can lag a plain pad byte.
-            ack_spins: 200_000,
+            setup_spins: card.setup_spins,
+            byte_spins: card.byte_spins,
+            ack_spins: card.ack_spins,
+        }
+    }
+}
+
+impl Timing {
+    fn link(self) -> psx_io::controller_port::Timing {
+        psx_io::controller_port::Timing {
+            setup_spins: self.setup_spins,
+            byte_spins: self.byte_spins,
+            ack_spins: self.ack_spins,
         }
     }
 }
 
 /// A physical memory card reached over SIO0.
-pub struct HardwareCard {
-    port2: bool,
+///
+/// `P` is how the card holds the port: the [`ControllerPort`] token (the
+/// default) or a `&mut ControllerPort` borrowed from the program for the
+/// length of the card's use.
+pub struct HardwareCard<P = ControllerPort> {
+    port: P,
+    slot: Slot,
     timing: Timing,
     trace: TransportTrace,
 }
 
-impl HardwareCard {
+impl HardwareCard<ControllerPort> {
     /// A card on the given `slot` with default timing.
+    #[deprecated(note = "use `HardwareCard::on_port` with the `ControllerPort` token")]
     pub fn new(slot: Slot) -> Self {
+        Self::on_port(steal_port(), slot)
+    }
+
+    /// A card with custom [`Timing`] (for tuning against real silicon).
+    #[deprecated(note = "use `HardwareCard::on_port_with_timing` with the `ControllerPort` token")]
+    pub fn with_timing(slot: Slot, timing: Timing) -> Self {
+        Self::on_port_with_timing(steal_port(), slot, timing)
+    }
+}
+
+/// The token for a deprecated constructor that never took one.
+fn steal_port() -> ControllerPort {
+    // SAFETY: a token is a logic guard, not a memory-safety one (see
+    // `psx_io::periph`), and the old constructors never took one.
+    unsafe { ControllerPort::steal() }
+}
+
+impl<P: BorrowMut<ControllerPort>> HardwareCard<P> {
+    /// A card on `slot`, reached through `port` (the token, or a borrow of
+    /// it), with the memory card's default [`Timing`].
+    pub fn on_port(port: P, slot: Slot) -> Self {
+        Self::on_port_with_timing(port, slot, Timing::default())
+    }
+
+    /// [`on_port`](Self::on_port) with custom [`Timing`], for tuning against
+    /// real silicon.
+    pub fn on_port_with_timing(port: P, slot: Slot, timing: Timing) -> Self {
         HardwareCard {
-            port2: slot == Slot::Two,
-            timing: Timing::default(),
+            port,
+            slot,
+            timing,
             trace: TransportTrace::new(),
         }
     }
 
-    /// A card with custom [`Timing`] (for tuning against real silicon).
-    pub fn with_timing(slot: Slot, timing: Timing) -> Self {
-        HardwareCard {
-            port2: slot == Slot::Two,
-            timing,
-            trace: TransportTrace::new(),
-        }
+    /// Give the port back: the token when the card owned it, the borrow
+    /// otherwise.
+    pub fn release(self) -> P {
+        self.port
     }
 
     /// Diagnostic evidence from the most recent frame read or write.
     pub fn last_trace(&self) -> TransportTrace {
         self.trace
     }
+}
 
-    fn active_ctrl(&self) -> u16 {
-        sio0::selected_ctrl(self.port2, true)
-    }
+/// One frame transaction's view of the port: the shared transport plus the
+/// card's trace of what happened on it.
+struct Link<'a, T> {
+    bus: &'a mut T,
+    slot: Slot,
+    timing: Timing,
+    trace: TransportTrace,
+}
 
-    fn begin(&mut self) {
-        self.trace = TransportTrace::new();
-    }
-
-    fn select(&self) {
-        // SAFETY: MODE, BAUD and CTRL writes configure SIO0 and select this card's port (SIO0
-        // access contract).
-        unsafe {
-            psx_io::write_u16(sio::MODE, MODE_8N1);
-            psx_io::write_u16(sio::BAUD, BAUD);
-            // Clear the stale IRQ latch while /CS is high, then select the card.
-            psx_io::write_u16(sio::CTRL, CTRL_ACK);
-            psx_io::write_u16(sio::CTRL, self.active_ctrl());
-        }
-        self.spin(self.timing.setup_spins);
-        self.drain_rx();
-    }
-
-    fn deselect(&self) {
-        // SAFETY: zero in SIO0 CTRL releases the select lines (SIO0 access contract).
-        unsafe { psx_io::write_u16(sio::CTRL, 0) };
-    }
-
-    fn drain_rx(&self) {
-        let mut n = 0;
-        // SAFETY: a side-effect-free read of SIO0 STAT (SIO0 access contract).
-        while unsafe { psx_io::read_u32(sio::STAT) } & STAT_RX_NOT_EMPTY != 0 && n < 16 {
-            // SAFETY: a byte read of SIO0 DATA pops one RX FIFO byte; the loop is bounded to 16
-            // (SIO0 access contract).
-            let _ = unsafe { psx_io::read_u8(sio::DATA) };
-            n += 1;
+impl<T: Transport> Link<'_, T> {
+    fn select(&mut self) {
+        if !self.bus.begin(self.slot, self.timing.link()) {
+            // The previous transaction left `/ACK` asserted and it never
+            // released. Every exchange fails from here.
+            self.record_fault(TransportFault::AckReleaseTimeout, 0);
         }
     }
 
-    fn spin(&self, mut n: u32) {
-        while n > 0 {
-            // SAFETY: a side-effect-free read of SIO0 STAT, used as a delay (SIO0 access contract).
-            let _ = unsafe { psx_io::read_u32(sio::STAT) };
-            n -= 1;
-            core::hint::spin_loop();
-        }
-    }
-
-    fn wait_high(&self, mask: u32, mut spins: u32) -> bool {
-        // SAFETY: a side-effect-free read of SIO0 STAT (SIO0 access contract).
-        while unsafe { psx_io::read_u32(sio::STAT) } & mask == 0 {
-            if spins == 0 {
-                return false;
-            }
-            spins -= 1;
-            core::hint::spin_loop();
-        }
-        true
-    }
-
-    fn wait_low(&self, mask: u32, mut spins: u32) -> bool {
-        // SAFETY: a side-effect-free read of SIO0 STAT (SIO0 access contract).
-        while unsafe { psx_io::read_u32(sio::STAT) } & mask != 0 {
-            if spins == 0 {
-                return false;
-            }
-            spins -= 1;
-            core::hint::spin_loop();
-        }
-        true
-    }
-
-    /// Clock one byte and, when `wait_ack`, block for the card's `/ACK` pulse so
-    /// the next byte is not clocked early. Returns the received byte.
     fn record_fault(&mut self, fault: TransportFault, exchange: u16) {
         if self.trace.fault == TransportFault::None {
             self.trace.fault = fault;
@@ -239,65 +209,63 @@ impl HardwareCard {
         }
     }
 
+    fn note_reply(&mut self, exchange: u16, reply: u8) {
+        if (exchange as usize) < self.trace.response_prefix.len() {
+            self.trace.response_prefix[exchange as usize] = reply;
+        }
+        self.trace.exchanges = exchange + 1;
+    }
+
+    /// Clock one byte and, when `wait_ack`, wait for the card's `/ACK` pulse so
+    /// the next byte is not clocked early. Returns the received byte, or
+    /// `0xff` once the transaction has failed.
     fn xfer(&mut self, tx: u8, wait_ack: bool) -> u8 {
         if self.trace.fault != TransportFault::None {
             return 0xff;
         }
         let exchange = self.trace.exchanges;
-        if !self.wait_high(STAT_TX_READY, self.timing.byte_spins) {
-            self.record_fault(TransportFault::TxTimeout, exchange);
-            return 0xff;
-        }
-        // SAFETY: a byte write to SIO0 DATA clocks `tx` out (SIO0 access contract).
-        unsafe { psx_io::write_u8(sio::DATA, tx) };
-        if !self.wait_high(STAT_RX_NOT_EMPTY, self.timing.byte_spins) {
-            self.record_fault(TransportFault::RxTimeout, exchange);
-            return 0xff;
-        }
-        // SAFETY: a byte read of SIO0 DATA pops the received byte (SIO0 access contract).
-        let rx = unsafe { psx_io::read_u8(sio::DATA) };
-        if (exchange as usize) < self.trace.response_prefix.len() {
-            self.trace.response_prefix[exchange as usize] = rx;
-        }
-        self.trace.exchanges = exchange + 1;
-        if wait_ack {
-            if !self.wait_high(STAT_IRQ, self.timing.ack_spins) {
+        match self.bus.exchange(tx, !wait_ack, self.timing.link()) {
+            Ok(reply) => {
+                self.note_reply(exchange, reply);
+                if wait_ack {
+                    self.trace.acknowledgements += 1;
+                }
+                reply
+            }
+            Err(ExchangeError::TxTimeout) => {
+                self.record_fault(TransportFault::TxTimeout, exchange);
+                0xff
+            }
+            Err(ExchangeError::RxTimeout) => {
+                self.record_fault(TransportFault::RxTimeout, exchange);
+                0xff
+            }
+            Err(ExchangeError::AckTimeout { reply }) => {
+                self.note_reply(exchange, reply);
                 self.record_fault(TransportFault::AckTimeout, exchange);
-                return rx;
+                reply
             }
-            self.trace.acknowledgements += 1;
-            // STAT.9 clears only after the live /ACK releases; then pulse CTRL.ACK
-            // while keeping the port selected for the next byte.
-            if !self.wait_low(STAT_DSR_LEVEL, self.timing.ack_spins) {
+            Err(ExchangeError::AckStuck { reply }) => {
+                self.note_reply(exchange, reply);
+                self.trace.acknowledgements += 1;
                 self.record_fault(TransportFault::AckReleaseTimeout, exchange);
-                return rx;
+                reply
             }
-            // SAFETY: a SIO0 CTRL write that keeps this port selected and acknowledges the latched
-            // /ACK (SIO0 access contract).
-            unsafe { psx_io::write_u16(sio::CTRL, self.active_ctrl() | CTRL_ACK) };
-        }
-        rx
-    }
-
-    fn check_range(frame: u16) -> Result<()> {
-        if (frame as usize) < FRAME_COUNT {
-            Ok(())
-        } else {
-            Err(Error::OutOfRange)
         }
     }
-}
 
-impl Block for HardwareCard {
+    fn end(&mut self) {
+        let clean = self.trace.fault == TransportFault::None;
+        self.bus.finish(clean);
+    }
+
     fn read_frame(&mut self, frame: u16, out: &mut [u8; FRAME_SIZE]) -> Result<()> {
-        Self::check_range(frame)?;
-        self.begin();
         let msb = (frame >> 8) as u8;
         let lsb = frame as u8;
 
         self.select();
         self.xfer(CARD_SELECT, true); // open bus
-        self.spin(FIRST_COMMAND_SETTLE_SPINS);
+        self.bus.delay(FIRST_COMMAND_SETTLE_SPINS);
         let flags = self.xfer(CMD_READ, true);
         let id1 = self.xfer(0x00, true); // 0x5A
         let _id2 = self.xfer(0x00, true); // 0x5D
@@ -312,7 +280,7 @@ impl Block for HardwareCard {
         }
         let chk = self.xfer(0x00, true);
         let end = self.xfer(0x00, false); // terminator, no ACK
-        self.deselect();
+        self.end();
 
         if id1 == 0xFF {
             return Err(Error::NoCard);
@@ -338,8 +306,6 @@ impl Block for HardwareCard {
     }
 
     fn write_frame(&mut self, frame: u16, data: &[u8; FRAME_SIZE]) -> Result<()> {
-        Self::check_range(frame)?;
-        self.begin();
         let msb = (frame >> 8) as u8;
         let lsb = frame as u8;
         let mut chk = msb ^ lsb;
@@ -349,7 +315,7 @@ impl Block for HardwareCard {
 
         self.select();
         self.xfer(CARD_SELECT, true); // flag
-        self.spin(FIRST_COMMAND_SETTLE_SPINS);
+        self.bus.delay(FIRST_COMMAND_SETTLE_SPINS);
         self.xfer(CMD_WRITE, true);
         let id1 = self.xfer(0x00, true); // 0x5A
         let _id2 = self.xfer(0x00, true); // 0x5D
@@ -362,12 +328,12 @@ impl Block for HardwareCard {
         let ack1 = self.xfer(0x00, true); // 0x5C
         let _ack2 = self.xfer(0x00, true); // 0x5D
         let end = self.xfer(0x00, false); // terminator
-        self.deselect();
+        self.end();
 
         // Leave the card idle while its non-volatile write finishes. Starting
         // another transaction too early can produce a protocol-successful
         // readback while still losing directory updates across a power cycle.
-        self.spin(POST_WRITE_SETTLE_SPINS);
+        self.bus.delay(POST_WRITE_SETTLE_SPINS);
 
         if id1 == 0xFF {
             return Err(Error::NoCard);
@@ -382,3 +348,59 @@ impl Block for HardwareCard {
         Ok(())
     }
 }
+
+/// Run one frame transaction on `bus`, leaving its trace in `trace`.
+fn transact<T: Transport, R>(
+    bus: &mut T,
+    slot: Slot,
+    timing: Timing,
+    trace: &mut TransportTrace,
+    run: impl FnOnce(&mut Link<'_, T>) -> R,
+) -> R {
+    let mut link = Link {
+        bus,
+        slot,
+        timing,
+        trace: TransportTrace::new(),
+    };
+    let result = run(&mut link);
+    *trace = link.trace;
+    result
+}
+
+fn check_range(frame: u16) -> Result<()> {
+    if (frame as usize) < FRAME_COUNT {
+        Ok(())
+    } else {
+        Err(Error::OutOfRange)
+    }
+}
+
+impl<P: BorrowMut<ControllerPort>> Block for HardwareCard<P> {
+    fn read_frame(&mut self, frame: u16, out: &mut [u8; FRAME_SIZE]) -> Result<()> {
+        check_range(frame)?;
+        let (slot, timing) = (self.slot, self.timing);
+        transact(
+            self.port.borrow_mut(),
+            slot,
+            timing,
+            &mut self.trace,
+            |link| link.read_frame(frame, out),
+        )
+    }
+
+    fn write_frame(&mut self, frame: u16, data: &[u8; FRAME_SIZE]) -> Result<()> {
+        check_range(frame)?;
+        let (slot, timing) = (self.slot, self.timing);
+        transact(
+            self.port.borrow_mut(),
+            slot,
+            timing,
+            &mut self.trace,
+            |link| link.write_frame(frame, data),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests;
