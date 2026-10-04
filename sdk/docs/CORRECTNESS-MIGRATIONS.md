@@ -143,3 +143,28 @@ A call site that really did wait inside a critical section was hung before
 and now falls through; none of the games below does (the waits all run in the
 main loop with interrupts on): nitroxide, voxide, hk-psx, hl-psx, cs-psx,
 quake-psx, oot-psx.
+
+## psx-io: blocking CD commands time out with a typed error (io-02)
+
+`cd::command` and the blocking forms built on it (`status`, `set_mode`,
+`unmute`, `mute`, `play_track`, `pause`, `stop`, `play_position`) waited for
+the acknowledge in an unbounded loop, and the parameter-FIFO wait ignored its
+own timeout and wrote the byte anyway. A drive that never answered hung the
+caller; a drive error came back as an ordinary response.
+
+| Old | New |
+| --- | --- |
+| `cd::command(c, p) -> Response` (and the forms above) | `-> Result<Response, CdError>`, `CdError::{Timeout, DriveError}`, each wait bounded by `cd::DEFAULT_COMMAND_SPINS` |
+| (none) | `cd::command_within(c, p, spins) -> Result<Response, CdError>` |
+| `cd::try_command(c, p, spins) -> Option<Response>` | unchanged; `None` still covers both errors, `command_within` tells them apart |
+
+A parameter FIFO that never frees a slot now returns `Timeout` without
+writing the parameter or the command. A drive error (INT5) leaves the
+controller cleaned up (drained, acknowledged, IRQ enable restored); a
+timeout leaves CD IRQ output masked, as `try_command` already did. The
+`cd::audio` default budget is the same constant.
+
+The deprecated `psx_io::cdrom` forwarders keep their `Response` return and
+hand back `Response::empty()` on an error. No game calls the blocking forms
+(they use `try_*`); the one caller in the tree is the `hello-cdda` example,
+updated to ignore the result as it always did.

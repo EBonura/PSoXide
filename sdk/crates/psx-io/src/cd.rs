@@ -37,6 +37,15 @@ pub struct Response {
 }
 
 impl Response {
+    /// A response with no bytes, what a deprecated forwarder hands back where
+    /// the command it wraps now reports a [`CdError`].
+    pub const fn empty() -> Self {
+        Response {
+            bytes: [0; 16],
+            len: 0,
+        }
+    }
+
     /// Number of response bytes captured.
     pub const fn len(&self) -> usize {
         self.len
@@ -53,40 +62,124 @@ impl Response {
     }
 }
 
-/// Send a command and return its first response packet.
-pub fn command(command: u8, params: &[u8]) -> Response {
-    let irq_enable = begin_polled_command();
-    select_index(0);
-    for &param in params {
-        wait_param_room();
-        write_byte(REG_PARAMETER, param);
-    }
-    write_byte(REG_COMMAND_RESPONSE, command);
-    let irq = wait_irq(IRQ_ACK);
-    finish_polled_command(irq_enable, irq)
+/// Why a CD command produced no response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CdError {
+    /// The controller did not free a parameter slot or answer within the poll
+    /// budget (no drive, no disc, or a wedged controller).
+    Timeout,
+    /// The drive answered with an error (INT5).
+    DriveError,
+}
+
+/// Poll budget the blocking commands give the controller for each wait (a
+/// parameter slot, then the acknowledge). Generous: the controller frees a
+/// slot and acknowledges within microseconds to milliseconds, so this is a
+/// hang guard, not a latency.
+pub const DEFAULT_COMMAND_SPINS: u32 = 131_072;
+
+/// Send a command and return its first response packet, waiting at most
+/// [`DEFAULT_COMMAND_SPINS`] polls for each step.
+///
+/// Returns [`CdError::Timeout`] when the controller never answers and
+/// [`CdError::DriveError`] when the drive reports an error. A timed-out
+/// command leaves CD-ROM IRQ output masked, as [`try_command`] does.
+pub fn command(command: u8, params: &[u8]) -> Result<Response, CdError> {
+    command_within(command, params, DEFAULT_COMMAND_SPINS)
+}
+
+/// [`command`] with an explicit poll budget per step.
+pub fn command_within(command: u8, params: &[u8], spin_limit: u32) -> Result<Response, CdError> {
+    run_command(&mut Mmio, command, params, spin_limit)
 }
 
 /// Try to send a command and capture its first response packet.
 ///
 /// Returns `None` if the controller does not expose parameter room or
-/// a response within `spin_limit` polls. Use this for gameplay paths
+/// a response within `spin_limit` polls, or if the drive reports an error
+/// ([`command_within`] tells the two apart). Use this for gameplay paths
 /// where a not-ready drive should not stall rendering forever. If a
 /// dispatched command times out, CD-ROM IRQ output remains masked so a
 /// late ACK cannot interrupt a polling caller.
 pub fn try_command(command: u8, params: &[u8], spin_limit: u32) -> Option<Response> {
-    let irq_enable = begin_polled_command();
-    select_index(0);
-    for &param in params {
-        if !wait_param_room_bounded(spin_limit) {
-            restore_irq_enable(irq_enable);
-            select_index(0);
-            return None;
-        }
-        write_byte(REG_PARAMETER, param);
+    command_within(command, params, spin_limit).ok()
+}
+
+/// The controller steps one polled command takes, so the order and the
+/// timeouts can be tested against a fake.
+trait CommandIo {
+    fn begin(&mut self) -> u8;
+    fn wait_param_room(&mut self, spins: u32) -> bool;
+    fn write_param(&mut self, value: u8);
+    fn write_command(&mut self, command: u8);
+    fn wait_irq(&mut self, expected: u8, spins: u32) -> Result<u8, CdError>;
+    fn finish(&mut self, irq_enable: u8, irq: u8) -> Response;
+    /// Leave the controller clean after a drive error: drain, acknowledge
+    /// everything and restore the IRQ enable.
+    fn recover(&mut self, irq_enable: u8);
+    /// Give the IRQ enable back without touching the response side.
+    fn restore_enable(&mut self, irq_enable: u8);
+}
+
+struct Mmio;
+
+impl CommandIo for Mmio {
+    fn begin(&mut self) -> u8 {
+        begin_polled_command()
     }
-    write_byte(REG_COMMAND_RESPONSE, command);
-    let irq = wait_irq_bounded(IRQ_ACK, spin_limit)?;
-    Some(finish_polled_command(irq_enable, irq))
+    fn wait_param_room(&mut self, spins: u32) -> bool {
+        wait_param_room_bounded(spins)
+    }
+    fn write_param(&mut self, value: u8) {
+        write_byte(REG_PARAMETER, value);
+    }
+    fn write_command(&mut self, command: u8) {
+        write_byte(REG_COMMAND_RESPONSE, command);
+    }
+    fn wait_irq(&mut self, expected: u8, spins: u32) -> Result<u8, CdError> {
+        wait_irq_flag(expected, spins, irq_flag, |flag| {
+            let _ = read_response_fifo();
+            ack_irq(flag);
+        })
+    }
+    fn finish(&mut self, irq_enable: u8, irq: u8) -> Response {
+        finish_polled_command(irq_enable, irq)
+    }
+    fn recover(&mut self, irq_enable: u8) {
+        finish_failed_polled_command(irq_enable);
+    }
+    fn restore_enable(&mut self, irq_enable: u8) {
+        restore_irq_enable(irq_enable);
+        select_index(0);
+    }
+}
+
+fn run_command(
+    io: &mut impl CommandIo,
+    command: u8,
+    params: &[u8],
+    spin_limit: u32,
+) -> Result<Response, CdError> {
+    let irq_enable = io.begin();
+    for &param in params {
+        if !io.wait_param_room(spin_limit) {
+            // Nothing was dispatched, so the IRQ output can be given back.
+            io.restore_enable(irq_enable);
+            return Err(CdError::Timeout);
+        }
+        io.write_param(param);
+    }
+    io.write_command(command);
+    match io.wait_irq(IRQ_ACK, spin_limit) {
+        Ok(irq) => Ok(io.finish(irq_enable, irq)),
+        Err(CdError::DriveError) => {
+            io.recover(irq_enable);
+            Err(CdError::DriveError)
+        }
+        // A command is in flight: leave IRQ output masked so its late ACK
+        // cannot interrupt a polling caller.
+        Err(CdError::Timeout) => Err(CdError::Timeout),
+    }
 }
 
 /// Current CD-ROM IRQ flag value (0 = none, 1 = data ready, 2 = complete,
@@ -240,7 +333,7 @@ pub fn try_wait_data_sector(spin_limit: u32) -> bool {
 /// Get the CD-ROM drive status byte.
 #[doc(alias = "Getstat")]
 #[doc(alias = "CdlNop")]
-pub fn status() -> Response {
+pub fn status() -> Result<Response, CdError> {
     command(CMD_GETSTAT, &[])
 }
 
@@ -251,7 +344,7 @@ pub fn try_status(spin_limit: u32) -> Option<Response> {
 }
 
 /// Set the CD-ROM controller mode byte.
-pub fn set_mode(mode: u8) -> Response {
+pub fn set_mode(mode: u8) -> Result<Response, CdError> {
     command(CMD_SETMODE, &[mode])
 }
 
@@ -291,7 +384,7 @@ pub fn try_start_reading(spin_limit: u32) -> Option<Response> {
 /// Route CD-DA/XA output out of the CD-ROM controller.
 #[doc(alias = "Demute")]
 #[doc(alias = "CdlDemute")]
-pub fn unmute() -> Response {
+pub fn unmute() -> Result<Response, CdError> {
     command(CMD_DEMUTE, &[])
 }
 
@@ -302,7 +395,7 @@ pub fn try_unmute(spin_limit: u32) -> Option<Response> {
 }
 
 /// Mute CD-DA/XA output at the CD-ROM controller.
-pub fn mute() -> Response {
+pub fn mute() -> Result<Response, CdError> {
     command(CMD_MUTE, &[])
 }
 
@@ -315,7 +408,7 @@ pub fn try_mute(spin_limit: u32) -> Option<Response> {
 ///
 /// The number is relative to this program's own tracks; on a multi-program
 /// disc [`crate::disc_base`] shifts it past whatever came before.
-pub fn play_track(track: u8) -> Response {
+pub fn play_track(track: u8) -> Result<Response, CdError> {
     command(
         CMD_PLAY,
         &[bin_to_bcd(crate::disc_base::shift_track(track))],
@@ -333,7 +426,7 @@ pub fn try_play_track(track: u8, spin_limit: u32) -> Option<Response> {
 }
 
 /// Pause CD-DA/read playback.
-pub fn pause() -> Response {
+pub fn pause() -> Result<Response, CdError> {
     command(CMD_PAUSE, &[])
 }
 
@@ -351,7 +444,7 @@ pub fn try_pause_until_complete(spin_limit: u32) -> bool {
 }
 
 /// Stop the CD-ROM motor/playback.
-pub fn stop() -> Response {
+pub fn stop() -> Result<Response, CdError> {
     command(CMD_STOP, &[])
 }
 
@@ -420,7 +513,7 @@ pub const fn bcd_to_bin(v: u8) -> u8 {
 /// [`PlayPosition::parse`].
 #[doc(alias = "GetlocP")]
 #[doc(alias = "CdlGetlocP")]
-pub fn play_position() -> Response {
+pub fn play_position() -> Result<Response, CdError> {
     command(CMD_GETLOCP, &[])
 }
 
@@ -504,39 +597,36 @@ fn finish_polled_command(irq_enable: u8, irq: u8) -> Response {
     response
 }
 
-fn wait_irq(expected: u8) -> u8 {
+/// Poll `flag` until it reads `expected`, at most `spins` more times after the
+/// first read. A drive error (INT5) ends the wait at once; any other nonzero
+/// flag is a stale response, handed to `discard` and polled past.
+fn wait_irq_flag(
+    expected: u8,
+    mut spins: u32,
+    mut flag: impl FnMut() -> u8,
+    mut discard: impl FnMut(u8),
+) -> Result<u8, CdError> {
     loop {
-        let irq = irq_flag();
-        if irq == expected || irq == IRQ_ERROR {
-            return irq;
-        }
-        if irq != 0 {
-            let _ = read_response_fifo();
-            ack_irq(irq);
-        }
-        core::hint::spin_loop();
-    }
-}
-
-fn wait_irq_bounded(expected: u8, mut spins: u32) -> Option<u8> {
-    loop {
-        let irq = irq_flag();
+        let irq = flag();
         if irq == expected {
-            return Some(irq);
+            return Ok(irq);
         }
         if irq == IRQ_ERROR {
-            return None;
+            return Err(CdError::DriveError);
         }
         if irq != 0 {
-            let _ = read_response_fifo();
-            ack_irq(irq);
+            discard(irq);
         }
         if spins == 0 {
-            return None;
+            return Err(CdError::Timeout);
         }
         spins -= 1;
         core::hint::spin_loop();
     }
+}
+
+fn wait_irq_bounded(expected: u8, spins: u32) -> Option<u8> {
+    Mmio.wait_irq(expected, spins).ok()
 }
 
 /// Send a command and wait for its SECOND response (the completion IRQ),
@@ -606,16 +696,6 @@ fn read_response_fifo() -> Response {
 
 fn drain_response_fifo() {
     let _ = read_response_fifo();
-}
-
-/// Spin budget for the blocking parameter-FIFO wait. The controller
-/// frees a slot in microseconds; this is purely a hang guard.
-const PARAM_ROOM_SPINS: u32 = 131_072;
-
-fn wait_param_room() {
-    // Bounded like every other hardware wait in the SDK: a controller
-    // that never frees the parameter FIFO must not hang the caller.
-    let _ = wait_param_room_bounded(PARAM_ROOM_SPINS);
 }
 
 fn wait_param_room_bounded(mut spins: u32) -> bool {
@@ -760,6 +840,165 @@ mod tests {
                 assert_eq!(&io.events[..io.len], events);
             }
         }
+    }
+
+    /// Records the controller steps a command takes and answers each wait from
+    /// a script.
+    struct FakeIo {
+        room: bool,
+        irq: Result<u8, CdError>,
+        events: [u8; 12],
+        len: usize,
+        spins_seen: [u32; 4],
+        spins_len: usize,
+    }
+
+    impl FakeIo {
+        fn new(room: bool, irq: Result<u8, CdError>) -> Self {
+            FakeIo {
+                room,
+                irq,
+                events: [0; 12],
+                len: 0,
+                spins_seen: [0; 4],
+                spins_len: 0,
+            }
+        }
+        fn event(&mut self, e: u8) {
+            self.events[self.len] = e;
+            self.len += 1;
+        }
+        fn events(&self) -> &[u8] {
+            &self.events[..self.len]
+        }
+        fn spins(&mut self, spins: u32) {
+            self.spins_seen[self.spins_len] = spins;
+            self.spins_len += 1;
+        }
+    }
+
+    // Event codes: begin, param room, param byte, command byte, wait irq,
+    // finish, recover, restore enable.
+    const BEGIN: u8 = 1;
+    const ROOM: u8 = 2;
+    const PARAM: u8 = 3;
+    const COMMAND: u8 = 4;
+    const WAIT: u8 = 5;
+    const FINISH: u8 = 6;
+    const RECOVER: u8 = 7;
+    const RESTORE: u8 = 8;
+
+    impl CommandIo for FakeIo {
+        fn begin(&mut self) -> u8 {
+            self.event(BEGIN);
+            0x1F
+        }
+        fn wait_param_room(&mut self, spins: u32) -> bool {
+            self.event(ROOM);
+            self.spins(spins);
+            self.room
+        }
+        fn write_param(&mut self, _value: u8) {
+            self.event(PARAM);
+        }
+        fn write_command(&mut self, _command: u8) {
+            self.event(COMMAND);
+        }
+        fn wait_irq(&mut self, _expected: u8, spins: u32) -> Result<u8, CdError> {
+            self.event(WAIT);
+            self.spins(spins);
+            self.irq
+        }
+        fn finish(&mut self, _irq_enable: u8, _irq: u8) -> Response {
+            self.event(FINISH);
+            response_from(&[0x02])
+        }
+        fn recover(&mut self, _irq_enable: u8) {
+            self.event(RECOVER);
+        }
+        fn restore_enable(&mut self, _irq_enable: u8) {
+            self.event(RESTORE);
+        }
+    }
+
+    #[test]
+    fn a_full_parameter_fifo_times_out_without_writing_the_parameter() {
+        // The wait used to ignore its own timeout and write the byte anyway.
+        let mut io = FakeIo::new(false, Ok(IRQ_ACK));
+        let result = run_command(&mut io, CMD_SETLOC, &[0x00, 0x02, 0x00], 77);
+        assert_eq!(result, Err(CdError::Timeout));
+        assert_eq!(io.events(), &[BEGIN, ROOM, RESTORE]);
+    }
+
+    #[test]
+    fn a_command_nobody_acknowledges_times_out_and_leaves_irq_output_masked() {
+        let mut io = FakeIo::new(true, Err(CdError::Timeout));
+        let result = run_command(&mut io, CMD_GETSTAT, &[], DEFAULT_COMMAND_SPINS);
+        assert_eq!(result, Err(CdError::Timeout));
+        // No finish, recover or restore: the late ACK stays masked.
+        assert_eq!(io.events(), &[BEGIN, COMMAND, WAIT]);
+        assert_eq!(&io.spins_seen[..io.spins_len], &[DEFAULT_COMMAND_SPINS]);
+    }
+
+    #[test]
+    fn a_drive_error_is_reported_and_the_controller_cleaned_up() {
+        let mut io = FakeIo::new(true, Err(CdError::DriveError));
+        let result = run_command(&mut io, CMD_PLAY, &[0x01], 10);
+        assert_eq!(result, Err(CdError::DriveError));
+        assert_eq!(io.events(), &[BEGIN, ROOM, PARAM, COMMAND, WAIT, RECOVER]);
+    }
+
+    #[test]
+    fn an_acknowledged_command_returns_its_response() {
+        let mut io = FakeIo::new(true, Ok(IRQ_ACK));
+        let result = run_command(&mut io, CMD_SETLOC, &[1, 2, 3], 10).unwrap();
+        assert_eq!(result.bytes(), &[0x02]);
+        assert_eq!(
+            io.events(),
+            &[BEGIN, ROOM, PARAM, ROOM, PARAM, ROOM, PARAM, COMMAND, WAIT, FINISH]
+        );
+    }
+
+    #[test]
+    fn the_flag_wait_discards_stale_responses_and_stops_at_its_budget() {
+        // Stale INT2 then INT3: the stale one is discarded, INT3 ends the wait.
+        let script = [0u8, 2, 3];
+        let mut next = 0;
+        let mut discarded = [0u8; 4];
+        let mut dropped = 0;
+        let got = wait_irq_flag(
+            IRQ_ACK,
+            10,
+            || {
+                let flag = script[next];
+                next += 1;
+                flag
+            },
+            |flag| {
+                discarded[dropped] = flag;
+                dropped += 1;
+            },
+        );
+        assert_eq!(got, Ok(IRQ_ACK));
+        assert_eq!(&discarded[..dropped], &[2]);
+
+        // Silence: one read plus `spins` more, then Timeout.
+        let mut reads = 0u32;
+        let got = wait_irq_flag(
+            IRQ_ACK,
+            5,
+            || {
+                reads += 1;
+                0
+            },
+            |_| {},
+        );
+        assert_eq!(got, Err(CdError::Timeout));
+        assert_eq!(reads, 6);
+
+        // INT5 ends it at once, whatever budget is left.
+        let got = wait_irq_flag(IRQ_ACK, 1000, || IRQ_ERROR, |_| {});
+        assert_eq!(got, Err(CdError::DriveError));
     }
 
     #[test]
