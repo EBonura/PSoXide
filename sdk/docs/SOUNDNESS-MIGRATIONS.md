@@ -45,3 +45,28 @@ and refuse an empty length, one that is not a multiple of 32 words, one
 over `psx_fmv::rle::MAX_WORDS` (0xFFE0) and, for `decode_start`, one longer
 than the slice; nothing reaches the MDEC then. `decode_frame` output always
 passes. No game calls either function, so there is no forwarder.
+
+## Polygon clip: a safe checked form and a provable unchecked one
+
+`psx_math::attributed_clip::clip_convex_plane` was `unsafe` even with
+`CHECK_CAPACITY = true`, and its docs called `source.len() + 1` output slots
+sufficient. That holds only for a convex source and a plane whose `inside`
+answer is stable per vertex; a zigzag source emits two vertices per source
+vertex, so an unchecked caller that trusted the docs wrote past its buffer.
+
+| Old | New |
+| --- | --- |
+| `unsafe { clip_convex_plane::<_, _, true>(src, dst, plane, t) }` | `clip_to_plane(src, dst, plane, t)` (safe, `Result<usize, ClipOverflow>`) |
+| `unsafe { clip_convex_plane::<_, _, false>(src, dst, plane, t) }` | `unsafe { clip_to_plane_unchecked(src, dst, plane, t) }` |
+| `clip_convex_plane_uninit::<_, _, true>` | `clip_to_plane_uninit` (safe) |
+| `clip_convex_plane_uninit::<_, _, false>` | `clip_to_plane_uninit_unchecked` |
+
+The unchecked forms require `2 * source.len()` slots, or `source.len() + 1`
+for a convex source and a stable plane. The checked forms report an overflow
+as `Err(ClipOverflow)` where the old checked form returned the partial count;
+the deprecated forwarders keep the old result.
+
+Callers of the old names: PSoXide-editor `psx-bsp/src/render.rs` (1,
+unchecked), `psx-goldsrc/src/render.rs` (3, checked) and its legacy oracle
+(3, checked); quake-psx `game/src/renderer.rs` (1, `_uninit`, checked);
+voxide `game/src/main.rs` (1, checked).
