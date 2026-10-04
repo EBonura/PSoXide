@@ -258,3 +258,15 @@ above `PANEL_TOP` with no adjustment. The deprecated `Y0` keeps its old value
 
 Caller: psxcel `game/src/main.rs:68`, `KBD_GRID_Y1` uses `psx_osk::Y0 - 14`.
 Change it to `psx_osk::PANEL_TOP` and the grid ends at the same line.
+
+## psx-asset: a malformed texture is an error on the console too (asset-02)
+
+`Texture::from_bytes` tested `off + pixel_bytes > bytes.len()` with the
+header's 32-bit byte counts. On the 32-bit console a header claiming
+`0xFFFF_FFF0` pixel bytes wrapped the sum, passed the test and panicked on the
+slice (a headless guest on main stops at `lib.rs:2322`), contrary to the crate
+promise that a bad asset is a `ParseError`. A 64-bit host cannot show it.
+
+The offsets now go through `take_table` (`checked_add`), so an oversized
+`pixel_bytes` or `clut_bytes` returns `ParseError::TableOverflow`. No API
+change; a game that parsed only valid textures sees nothing.

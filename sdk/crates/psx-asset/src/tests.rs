@@ -131,6 +131,60 @@ fn texture_round_trip_4bpp() {
     assert_eq!(t.clut_bytes().len(), 32);
 }
 
+/// A 4bpp texture blob whose header claims the given byte counts, with 8
+/// bytes of pixels and 32 of CLUT actually present.
+fn texture_blob(pixel_bytes: u32, clut_bytes: u32) -> [u8; 68] {
+    let mut buf = [0u8; 68];
+    buf[0..4].copy_from_slice(b"PSXT");
+    buf[4..6].copy_from_slice(&1u16.to_le_bytes());
+    buf[8..12].copy_from_slice(&(16u32 + 8 + 32).to_le_bytes());
+    buf[12] = 4;
+    buf[14..16].copy_from_slice(&4u16.to_le_bytes());
+    buf[16..18].copy_from_slice(&4u16.to_le_bytes());
+    buf[18..20].copy_from_slice(&16u16.to_le_bytes());
+    buf[20..24].copy_from_slice(&pixel_bytes.to_le_bytes());
+    buf[24..28].copy_from_slice(&clut_bytes.to_le_bytes());
+    buf
+}
+
+#[test]
+fn texture_with_oversized_byte_counts_is_an_error_not_a_panic() {
+    // On the 32-bit console `off + 0xFFFF_FFF0` wrapped past the length test
+    // and the slice panicked; no 64-bit host can show that, so the guest probe
+    // in the evidence covers it and this pins the host behaviour.
+    for (pixels, clut) in [
+        (0xFFFF_FFF0, 32),
+        (u32::MAX, 0),
+        (8, 0xFFFF_FFF0),
+        (8, u32::MAX),
+        (9, 32),
+        (8, 33),
+    ] {
+        assert!(
+            matches!(
+                Texture::from_bytes(&texture_blob(pixels, clut)),
+                Err(ParseError::TableOverflow)
+            ),
+            "{pixels:#x} {clut:#x}"
+        );
+    }
+    assert!(Texture::from_bytes(&texture_blob(8, 32)).is_ok());
+}
+
+#[test]
+fn take_table_cannot_wrap_the_offset() {
+    // The mechanism behind the 32-bit bug, at this host's width: an offset
+    // near the top of usize plus a length must report overflow, not wrap.
+    let bytes = [0u8; 16];
+    let mut off = usize::MAX - 4;
+    assert!(take_table(&bytes, &mut off, 16).is_err());
+    assert_eq!(
+        off,
+        usize::MAX - 4,
+        "a refused take leaves the offset alone"
+    );
+}
+
 #[test]
 fn texture_rejects_wrong_magic() {
     let bad = [b'N', b'O', b'P', b'E', 0, 0, 0, 0, 0, 0, 0, 0];
