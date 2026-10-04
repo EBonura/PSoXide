@@ -3,7 +3,7 @@
 use crate::display::DisplayConfig;
 use crate::material::{TextureMaterial, TextureWindow};
 use crate::prim::GpuPacket;
-use crate::{StaticChain, TextureDepth};
+use crate::StaticChain;
 use psx_hw::gpu::{gp0, gp1, DmaDirection};
 use psx_io::gpu::{wait_command_ready, write_command, write_display_control};
 use psx_io::periph::GpuDma;
@@ -137,13 +137,6 @@ impl Gpu {
         ));
     }
 
-    /// Select the texture page at VRAM `origin` with `depth` for textured
-    /// rectangles (GP0(E1h)). Textured polygons carry their own page.
-    #[inline]
-    pub fn set_texture_page(&mut self, origin: (u16, u16), depth: TextureDepth) {
-        set_texture_page(origin, depth);
-    }
-
     /// Apply `material`'s texture page, blend equation, dither and
     /// texture window (GP0(E1h), GP0(E2h)).
     #[inline]
@@ -234,18 +227,6 @@ pub(crate) fn set_draw_area(top_left: (u16, u16), bottom_right: (u16, u16)) {
 pub(crate) fn set_draw_offset(offset: (i16, i16)) {
     wait_command_ready();
     write_command(gp0::draw_offset(offset.0 as i32, offset.1 as i32));
-}
-
-pub(crate) fn set_texture_page(origin: (u16, u16), depth: TextureDepth) {
-    wait_command_ready();
-    write_command(gp0::draw_mode(
-        (origin.0 / 64) as u32,
-        (origin.1 / 256) as u32,
-        0,
-        depth as u32,
-        false,
-        true,
-    ));
 }
 
 pub(crate) fn set_draw_mode(material: TextureMaterial) {
