@@ -11,15 +11,18 @@ check:
 test:
 	cargo test --locked --workspace
 	cargo test --locked --manifest-path sdk/Cargo.toml --workspace
-# Miri over psx-gpu's and psx-fx's host tests, under both borrow models: the frame,
-# ordering-table and stream code hands raw addresses to the DMA model.
-# Provenance is permissive because a DMA link is a 24-bit integer on the
-# console; leaks are ignored because the stream tests leak their 'static
-# buffers on purpose. Needs `rustup component add miri`.
+# Miri over every SDK crate's host tests and psx-hw's, under Stacked Borrows
+# and then Tree Borrows (sdk/docs/MIRI.md). Provenance is permissive because a
+# DMA link is a 24-bit integer on the console; leaks are ignored because tests
+# leak their 'static buffers on purpose. Exhaustive sweeps carry
+# #[cfg_attr(miri, ignore)] and run natively in `make test`. The pinned
+# toolchain (rust-toolchain.toml) installs the miri component.
 MIRI_FLAGS := -Zmiri-permissive-provenance -Zmiri-ignore-leaks
 miri:
-	MIRIFLAGS="$(MIRI_FLAGS)" cargo miri test --locked --manifest-path sdk/Cargo.toml -p psx-gpu -p psx-fx
-	MIRIFLAGS="$(MIRI_FLAGS) -Zmiri-tree-borrows" cargo miri test --locked --manifest-path sdk/Cargo.toml -p psx-gpu -p psx-fx
+	MIRIFLAGS="$(MIRI_FLAGS)" cargo miri test --locked -p psx-hw
+	MIRIFLAGS="$(MIRI_FLAGS)" cargo miri test --locked --manifest-path sdk/Cargo.toml --workspace --no-fail-fast
+	MIRIFLAGS="$(MIRI_FLAGS) -Zmiri-tree-borrows" cargo miri test --locked -p psx-hw
+	MIRIFLAGS="$(MIRI_FLAGS) -Zmiri-tree-borrows" cargo miri test --locked --manifest-path sdk/Cargo.toml --workspace --no-fail-fast
 fmt:
 	cargo fmt --all
 	cargo fmt --manifest-path sdk/Cargo.toml --all
