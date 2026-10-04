@@ -31,8 +31,8 @@ use psx_asset::Audio;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
-use psx_pad::{button, poll_port1, ButtonState};
-use psx_spu::{self as spu, Adsr, SpuAddr, Voice, Volume};
+use psx_pad::{button, poll_on, ButtonState, Port};
+use psx_spu::{Adsr, Spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 /// Font atlas tpage -- past the 320-wide display buffers.
@@ -156,7 +156,8 @@ fn main() {
     gpu.set_draw_offset((0, 0));
 
     // Audio side init: SPU on, unmuted, main volume full.
-    spu::init();
+    let mut spu_driver = Spu::new(peripherals.spu_dma);
+    let mut port = peripherals.controller_port;
 
     // Upload each cooked PSAU sample into SPU RAM and configure its
     // voice once. PSAU payloads are ADPCM blocks, so advancing by the
@@ -165,7 +166,7 @@ fn main() {
     for ch in SFX_CHANNELS.iter() {
         let audio = Audio::from_bytes(ch.bytes).expect("psau sample");
         let addr = SpuAddr::new(next_addr);
-        spu::upload_adpcm(addr, audio.adpcm_bytes());
+        spu_driver.upload_adpcm(addr, audio.adpcm_bytes());
         ch.voice
             .configure_sample(addr, audio.sample_rate_hz(), ch.volume, Adsr::sample());
         next_addr += audio.adpcm_bytes().len() as u32;
@@ -180,7 +181,7 @@ fn main() {
     let mut flashes = [0u8; SFX_COUNT];
 
     loop {
-        let pad = poll_port1().buttons;
+        let pad = poll_on(&mut port, Port::One).buttons;
 
         // Compute which one-shot channels are newly pressed.
         let mut on_mask: u32 = 0;

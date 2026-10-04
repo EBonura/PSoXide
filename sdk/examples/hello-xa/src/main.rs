@@ -13,15 +13,15 @@
 
 extern crate psx_rt;
 
-use core::ptr::addr_of_mut;
 use psx_fmv::iso;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
 use psx_gpu::Gpu;
 use psx_io::cd::xa::{DriveSpeed, Event, File, Player};
+use psx_io::periph::Cd;
 use psx_pack::cd::{SectorReader, SECTOR_WORDS};
-use psx_pad::{button, poll_port1, ButtonState};
-use psx_spu::{self as spu, CdVolume, Volume};
+use psx_pad::{button, poll_on, ButtonState, Port};
+use psx_spu::{self as spu, CdVolume, Spu, Volume};
 use psx_vram::{Clut, TextureDepth, TexturePage};
 
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -38,32 +38,40 @@ const SPEED: DriveSpeed = if cfg!(feature = "double-speed") {
 };
 const SONG_NAMES: [&str; 4] = ["A MAJOR PAD", "G MAJOR HIGH", "BLIPS", "WHISTLE"];
 
-static mut READER: SectorReader = SectorReader::new();
-static mut SECTOR: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
-
-/// Read one data sector (the directory lookup before any music plays).
-fn read_one(lba: u32) -> Option<&'static [u8]> {
-    // SAFETY: single-threaded use of the reader and its sector buffer.
-    unsafe {
-        let reader = &mut *addr_of_mut!(READER);
-        if !reader.start_read(lba) {
-            return None;
-        }
-        let ok = reader.read_sector(&mut *addr_of_mut!(SECTOR));
-        reader.stop();
-        ok.then(|| core::slice::from_raw_parts(addr_of_mut!(SECTOR) as *const u8, SECTOR_WORDS * 4))
+/// Read one data sector (the directory lookup before any music plays) into
+/// `sector`, as bytes.
+fn read_one<'s>(
+    reader: &mut SectorReader,
+    sector: &'s mut [u32; SECTOR_WORDS],
+    lba: u32,
+) -> Option<&'s [u8]> {
+    if !reader.start_read(lba) {
+        return None;
     }
+    let ok = reader.read_sector(sector);
+    reader.stop();
+    // SAFETY: a `[u32; N]` viewed as its own bytes; alignment only shrinks.
+    ok.then(|| unsafe {
+        core::slice::from_raw_parts(sector.as_ptr().cast::<u8>(), SECTOR_WORDS * 4)
+    })
 }
 
 /// The song file's position on the disc, looked up by name so the program
-/// does not bake in an LBA.
-fn find_songs() -> Option<File> {
-    // SAFETY: nothing else drives the controller yet.
-    if !unsafe { (*addr_of_mut!(READER)).prepare() } {
+/// does not bake in an LBA. The reader holds the drive for the lookup and
+/// hands it back for the music player.
+fn find_songs(cd: Cd) -> (Option<File>, Cd) {
+    let mut reader = SectorReader::with_cd(cd);
+    let mut sector = [0u32; SECTOR_WORDS];
+    let file = lookup(&mut reader, &mut sector);
+    (file, reader.release())
+}
+
+fn lookup(reader: &mut SectorReader, sector: &mut [u32; SECTOR_WORDS]) -> Option<File> {
+    if !reader.prepare() {
         return None;
     }
-    let (root, _) = iso::root_directory(read_one(iso::PVD_LBA)?)?;
-    let (lba, size) = iso::find_in_directory(read_one(root)?, SONGS_FILE)?;
+    let (root, _) = iso::root_directory(read_one(reader, sector, iso::PVD_LBA)?)?;
+    let (lba, size) = iso::find_in_directory(read_one(reader, sector, root)?, SONGS_FILE)?;
     Some(File::from_directory_entry(lba, size, FILE_NUMBER, SPEED))
 }
 
@@ -95,13 +103,14 @@ fn main() {
     gpu.set_draw_offset((0, 0));
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
 
-    spu::init();
+    let _spu = Spu::new(peripherals.spu_dma);
     spu::set_main_volume(Volume::MAX, Volume::MAX);
     spu::set_cd_volume(CdVolume::MAX, CdVolume::MAX);
     spu::enable_cd_audio(true);
 
-    let file = find_songs();
-    let mut player = Player::new(peripherals.cd);
+    let (file, cd) = find_songs(peripherals.cd);
+    let mut player = Player::new(cd);
+    let mut port = peripherals.controller_port;
     let mut song = 0u8;
     let mut volume = 0x80u8;
     let mut loops = 0u32;
@@ -113,7 +122,7 @@ fn main() {
 
     let mut previous = ButtonState::NONE;
     loop {
-        let pad = poll_port1().buttons;
+        let pad = poll_on(&mut port, Port::One).buttons;
         if let Some(file) = file {
             if pad.pressed_since(previous, button::CROSS) {
                 song = (song + 1) % SONG_NAMES.len() as u8;
