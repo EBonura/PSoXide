@@ -77,6 +77,10 @@ pub type Resolution = display::Resolution;
 /// instead of a hang.
 #[inline]
 pub(crate) fn wait_idle_impl() {
+    // A frame handed to psx-rt's present queue is still "sent to the GPU":
+    // the armed guard waits until it has been kicked and drawn. Without the
+    // `present-queue` feature this is nothing.
+    psx_io::gpu::run_direct_access_guard();
     submit_linked_list_wait();
     psx_io::gpu::wait_dma_ready();
     wait_command_ready();
@@ -250,11 +254,7 @@ pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
     // the frame loop forever. Aborting costs at most the tail of a walk
     // that was never going to finish.
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
-        dma::abort(Channel::Gpu);
-        // The walker stopped mid-packet, so the GPU is still waiting for
-        // the rest of a command. Discard it or every later ready-wait
-        // blocks on a GPU that can never become ready.
-        write_display_control(gp1::RESET_CMD_BUFFER);
+        abort_wedged_walk();
     }
 
     // Make sure the GPU's DMA direction is CPU→GP0 before we kick off the
@@ -314,16 +314,55 @@ pub unsafe fn submit_linked_list_async(head: *const u32) {
 #[inline]
 pub fn submit_linked_list_wait() {
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
-        dma::abort(Channel::Gpu);
-        // Past the direct-access guard (`present-queue` feature): the guard
-        // would wait on the walk that just wedged, and the paired-arena
-        // fence reaches this from a scratchpad stack that stack-guard bounds
-        // only through direct calls.
-        psx_io::gpu::write_display_control_unguarded(gp1::RESET_CMD_BUFFER);
+        abort_wedged_walk();
     }
     // Keep the caller's buffer-reuse stores after the completion read (or
     // the abort).
     dma::compiler_barrier();
+}
+
+/// Stop a channel-2 walk that outlived its spin budget.
+///
+/// The walker stopped mid-packet, so the GPU still waits for the rest of a
+/// command: GP1(01h) discards it, or every later ready-wait blocks on a GPU
+/// that can never become ready. The reset goes past the present-queue
+/// direct-access guard, which would wait on the walk that just wedged; the
+/// paired-arena fence reaches this from a scratchpad stack that stack-guard
+/// bounds only through direct calls, hence `inline(always)`.
+#[inline(always)]
+fn abort_wedged_walk() {
+    dma::abort(Channel::Gpu);
+    psx_io::gpu::write_display_control_unguarded(gp1::RESET_CMD_BUFFER);
+    // SAFETY: volatile aligned accesses to a private static that only this
+    // function writes; the program is single threaded and no handler
+    // touches it.
+    unsafe {
+        let count = core::ptr::addr_of_mut!(DMA_ABORTS);
+        count.write_volatile(count.read_volatile().wrapping_add(1));
+    }
+}
+
+/// Walks [`abort_wedged_walk`] has stopped since boot.
+static mut DMA_ABORTS: u32 = 0;
+
+/// How often the SDK recovered a hung GPU since boot, for a debug overlay
+/// or a test log. Every GPU wait is bounded and recovers by resetting the
+/// GPU; these counts make the recoveries visible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RecoveryStats {
+    /// Linked-list walks aborted because they outlived their spin budget.
+    pub dma_aborts: u32,
+    /// Command-buffer resets after a ready bit stayed low.
+    pub command_resets: u32,
+}
+
+/// The recovery counts since boot. Reads only, so it needs no [`Gpu`].
+pub fn recovery_stats() -> RecoveryStats {
+    RecoveryStats {
+        // SAFETY: a volatile aligned read of a private static.
+        dma_aborts: unsafe { core::ptr::addr_of!(DMA_ABORTS).read_volatile() },
+        command_resets: psx_io::gpu::command_reset_count(),
+    }
 }
 
 /// Submit a linked-list chain starting at `head` to GPU GP0 via
