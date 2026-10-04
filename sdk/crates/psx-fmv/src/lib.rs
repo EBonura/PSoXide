@@ -10,10 +10,13 @@
 //!    chunks back together.
 //! 2. [`bitstream::decode_frame`] runs the variable-length decode on the CPU,
 //!    turning the bitstream into the MDEC's run-length halfwords.
-//! 3. [`mdec`] (guest only) feeds those to the MDEC over DMA0 and pulls
-//!    decoded 16-pixel-wide columns back over DMA1 for upload to VRAM.
+//! 3. [`mdec::Mdec`], the driver that owns the MDEC's DMA channels, feeds
+//!    those to the MDEC over DMA0 and pulls decoded 16-pixel-wide columns back
+//!    over DMA1 for upload to VRAM.
 //!
-//! Everything but [`mdec`] is plain logic, built and tested on the host.
+//! Everything but [`mdec`] is plain logic, built and tested on the host; the
+//! driver only touches a register when one of its methods runs.
+//!
 //! Only bitstream version 2 is decoded so far; v3 differs in the DC
 //! coding and is rejected with [`bitstream::DecodeError::Version`].
 //!
@@ -27,7 +30,6 @@ pub mod bitstream;
 pub mod bs;
 pub mod idct;
 pub mod iso;
-#[cfg(target_arch = "mips")]
 pub mod mdec;
 pub mod rle;
 pub mod str;
