@@ -320,3 +320,17 @@ blob, not what values they hold.
 for anyway. Every key whose length error is inside that limit (every
 well-formed cook) decodes bit for bit as before; a key outside it decodes to
 a bounded wrong rotation instead of overflowing. No API change.
+
+## psx-pad: a negative deadzone radius is zero (pad-07)
+
+`Deadzone::new(radius: i16)` accepted a negative radius. `is_outside` squares
+it, so it behaved as its absolute value, while `scaled` compared the
+magnitude against the negative radius: `scaled(0, 0)` with `radius = -1`
+failed the `0 <= -1` test, went on and divided by a zero length (a panic).
+
+`new` now takes a negative radius as zero, so `Deadzone::new(-24)` equals
+`Deadzone::new(0)` and `radius()` reads 0. Checked against the pad driver on
+main, which this does not touch. Callers pass settings that are non-negative
+today (nitroxide `move_deadzone as i16`, voxide `SET_LOOK_DZ` and
+`SET_MOVE_DZ`, hl-psx and cs-psx `ANALOG_DEADZONE`, quake-psx
+`input.rs`), so no game changes.
