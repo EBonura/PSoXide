@@ -890,7 +890,10 @@ mod tests {
         let extents = b.file_extents();
         assert_eq!(
             extents,
-            [(String::from("A.DAT"), 21, 2), (String::from("M.XA"), 28, 3)]
+            [
+                (String::from("A.DAT"), 21, 2),
+                (String::from("M.XA"), 28, 3)
+            ]
         );
         let cooked = b.build();
         // The root directory record for M.XA points at the same LBA.
