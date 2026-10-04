@@ -20,7 +20,8 @@
 //! off-screen VRAM. Ids are `0x100` and up (the extended timing block).
 
 use crate::{push_timing_record, sample_timing, TimingRecord, TIMING_RECORD_COUNT};
-use psx_gpu::{Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
+
 use psx_io::dma;
 use psx_io::gpu as gpu_io;
 use psx_io::timers;
@@ -211,7 +212,8 @@ fn run(entry: &Case) -> u16 {
     }
     let elapsed = submit_and_time(head);
     if entry.letterboxed {
-        psx_gpu::set_screen_v_offset(0, VideoMode::Ntsc, Resolution::R320X240);
+        probe_gpu!(gpu);
+        gpu.set_display(DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240));
     }
     elapsed
 }

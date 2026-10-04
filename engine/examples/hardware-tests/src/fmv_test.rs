@@ -46,9 +46,10 @@ const SETUP_ERRORS: [&str; 5] = [
 /// `font` must be in VRAM again: the player's own fonts overwrite the suite's
 /// atlas.
 pub(crate) fn wait_for_exit(font: &FontAtlas) {
+    probe_gpu!(gpu);
     // The player leaves the draw area on the displayed buffer at row 0.
     font.draw_text(16, 228, "CROSS OR START: BACK TO MENU", (140, 160, 190));
-    psx_gpu::wait_idle();
+    gpu.wait_idle();
     let exit = |buttons: psx_pad::ButtonState| {
         buttons.is_held(button::CROSS)
             || buttons.is_held(button::START)

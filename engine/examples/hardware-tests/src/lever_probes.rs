@@ -687,6 +687,7 @@ fn pq_slot_full() -> bool {
 }
 
 fn present_queue_run() -> PresentCounts {
+    probe_gpu!(gpu);
     apply_pending_display_word();
     let old_direction = (gpu_io::status().bits() >> 29) & 3;
     let old_timer1 = timers::mode(timers::Timer::Timer1);
@@ -821,8 +822,8 @@ fn present_queue_run() -> PresentCounts {
     } else {
         counts.marker_bad = 2;
     }
-    psx_gpu::set_draw_area(0, 0, 1023, 511);
-    psx_gpu::set_draw_offset(0, 0);
+    gpu.set_draw_area((0, 0), (1023, 511));
+    gpu.set_draw_offset((0, 0));
     counts
 }
 

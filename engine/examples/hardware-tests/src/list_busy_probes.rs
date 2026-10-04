@@ -482,6 +482,7 @@ struct Results {
 }
 
 fn measure() -> Results {
+    probe_gpu!(gpu);
     let mut lists = [Stamps {
         shape: 0,
         chcr: NOT_SEEN,
@@ -504,8 +505,8 @@ fn measure() -> Results {
         throughput(LoopKind::Ram),
         throughput(LoopKind::Scratchpad),
     ];
-    psx_gpu::set_draw_area(0, 0, 1023, 511);
-    psx_gpu::set_draw_offset(0, 0);
+    gpu.set_draw_area((0, 0), (1023, 511));
+    gpu.set_draw_offset((0, 0));
     Results {
         lists,
         pixels_unpacked,

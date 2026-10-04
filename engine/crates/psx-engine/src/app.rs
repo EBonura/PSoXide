@@ -957,9 +957,9 @@ impl App {
 
         telemetry::stage_begin(telemetry::stage::PRESENT);
         {
-                                let (gpu, fb) = ctx.gpu_and_buffers();
-                                clock.queue_display_flip(gpu, fb.begin_deferred_swap());
-                            }
+            let (gpu, fb) = ctx.gpu_and_buffers();
+            clock.queue_display_flip(gpu, fb.begin_deferred_swap());
+        }
         let landed = clock.wait_display_flip();
         {
             let (gpu, fb) = ctx.gpu_and_buffers();

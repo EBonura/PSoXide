@@ -21,7 +21,9 @@ use psx_font::{
     fonts::{BASIC, SPLEEN_5X8},
     FontAtlas,
 };
-use psx_gpu::{self as gpu, prim, Resolution, VideoMode};
+use psx_gpu::display::{DisplayConfig, Resolution, VideoMode};
+use psx_gpu::prim::{self, FillRect, LineMono, QuadFlat, Sprite};
+use psx_gpu::{self as gpu, Gpu};
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::ops as gte_ops;
 use psx_gte::regs::pack_xy as pack_gte_xy;
@@ -30,6 +32,16 @@ use psx_io::{dma, gpu as gpu_io, irq, timers};
 use psx_rt::tty;
 use psx_spu::SpuAddr;
 use psx_vram::{Clut, TextureDepth, TexturePage};
+
+/// Binds `$gpu` to the GPU driver for a probe that draws or programs the
+/// display from inside a test, over a token taken the way [`probe_gpu_dma`]
+/// takes it. Declared before the modules so each of them can use it.
+macro_rules! probe_gpu {
+    ($gpu:ident) => {
+        let mut probe_dma = $crate::probe_gpu_dma();
+        let $gpu = psx_gpu::Gpu::from_dma_mut(&mut probe_dma);
+    };
+}
 
 mod audio_link;
 mod audio_probe;
@@ -2611,6 +2623,7 @@ impl HardwareTests {
     /// VRAM writes stay visible), and mirror it to the TTY. The strip is
     /// cleared with the same absolute-coordinate fill the bar uses.
     fn draw_running_label(&mut self, index: usize, group: &str, name: &str) {
+        probe_gpu!(gpu);
         tty::print("hardware-tests: run ");
         tty::print(dec3(index as u16).as_str());
         tty::print(" ");
@@ -2626,8 +2639,8 @@ impl HardwareTests {
             gpu_io::write_command((buffer_y << 16) | 16);
             gpu_io::write_command((12u32 << 16) | 288);
         }
-        gpu::set_draw_area(0, 0, 1023, 511);
-        gpu::set_draw_offset(0, 0);
+        gpu.set_draw_area((0, 0), (1023, 511));
+        gpu.set_draw_offset((0, 0));
         let mut label = [0u8; 44];
         let mut n = 0usize;
         let index_text = dec3(index as u16);
@@ -2647,7 +2660,7 @@ impl HardwareTests {
         let text = unsafe { core::str::from_utf8_unchecked(&label[..n]) };
         font.draw_text(24, 186, text, (255, 216, 96));
         font.draw_text(24, 426, text, (255, 216, 96));
-        gpu::wait_idle();
+        gpu.wait_idle();
     }
 
     fn prepare_audio_readout(&mut self) {
@@ -2782,8 +2795,9 @@ impl HardwareTests {
         // The player drew into rows 0 and 256; clear what the engine will show
         // next and point drawing back at the engine's own buffer. Its clock
         // kept counting VBlanks while no tick ran, so drop that debt too.
-        gpu::fill_rect(0, 0, 320, 512, 6, 8, 18);
-        ctx.fb.apply_draw_target();
+        let (gpu, fb) = ctx.gpu_and_buffers();
+        gpu.draw(&FillRect::new((0, 0), (320, 512), (6, 8, 18)));
+        fb.apply_draw_target(gpu);
         ctx.request_timing_realign();
 
         // The capture carries the result now, with or without a timing scan
@@ -2808,18 +2822,20 @@ impl HardwareTests {
         }
         let timer1_mode = timers::mode(timers::Timer::Timer1) & 0x03FF;
         let timer2_mode = timers::mode(timers::Timer::Timer2) & 0x03FF;
-        console_tests::run_case(
-            psx_gpu::Gpu::from_dma_mut(ctx.gpu_dma()),
-            &mut self.console,
-            case,
-        );
+        console_tests::run_case(ctx.gpu(), &mut self.console, case);
         timers::set_mode(timers::Timer::Timer1, timer1_mode);
         timers::set_mode(timers::Timer::Timer2, timer2_mode);
         // Back to the engine's 320x240 picture and its draw buffer.
-        gpu::init(VideoMode::Ntsc, Resolution::R320X240);
-        gpu::fill_rect(0, 0, 320, 512, 6, 8, 18);
+        // A full GPU reset, which only Gpu::new performs; the runner's own
+        // token stays where it is.
+        let _ = Gpu::new(
+            probe_gpu_dma(),
+            DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+        );
+        let (gpu, fb) = ctx.gpu_and_buffers();
+        gpu.draw(&FillRect::new((0, 0), (320, 512), (6, 8, 18)));
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
-        ctx.fb.apply_draw_target();
+        fb.apply_draw_target(gpu);
         ctx.request_timing_realign();
         self.capture_flags |= photo::blocks::TIMING;
         self.merge_fmv_records();
@@ -3495,7 +3511,8 @@ fn draw_rows(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
 /// traffic, not just writes: the scan reads the card from its first step,
 /// and "use at your own risk" said after the first read is theatre.
 fn draw_memcard_warning(font: &FontAtlas) {
-    gpu::draw_rect_flat(8, 32, 304, 20, 200, 24, 24);
+    probe_gpu!(gpu);
+    gpu.draw(&QuadFlat::rect((8, 32), (304, 20), (200, 24, 24)));
     font.draw_text(104, 38, "!!  WARNING  !!", (255, 240, 96));
     let body: [&str; 5] = [
         "THIS TEST HAS ONLY HAD LIMITED TESTING",
@@ -4135,18 +4152,30 @@ fn tty_print_digit(value: u8) {
 }
 
 fn draw_test_pattern(_tick: u32) {
-    gpu::draw_quad_flat([(0, 0), (320, 0), (0, 47), (320, 47)], 12, 18, 36);
-    gpu::draw_quad_flat([(0, 188), (320, 188), (0, 240), (320, 240)], 8, 12, 28);
-    gpu::draw_line_mono(0, 48, 319, 48, 60, 80, 110);
-    gpu::draw_line_mono(0, 187, 319, 187, 60, 80, 110);
+    probe_gpu!(gpu);
+    gpu.draw(&QuadFlat::new(
+        [(0, 0), (320, 0), (0, 47), (320, 47)],
+        12,
+        18,
+        36,
+    ));
+    gpu.draw(&QuadFlat::new(
+        [(0, 188), (320, 188), (0, 240), (320, 240)],
+        8,
+        12,
+        28,
+    ));
+    gpu.draw(&LineMono::new(0, 48, 319, 48, 60, 80, 110));
+    gpu.draw(&LineMono::new(0, 187, 319, 187, 60, 80, 110));
 }
 
 /// GPU monochrome-line liveness check: a red and a blue diagonal crossing in a
 /// small box. Only shown on the GPU section now (it is cosmetic -- the GPU draw
 /// tests assert the real line behaviour), so the focused screens stay clean.
 fn draw_gpu_line_probe() {
-    gpu::draw_line_mono(272, 50, 312, 90, 255, 80, 80);
-    gpu::draw_line_mono(312, 50, 272, 90, 80, 180, 255);
+    probe_gpu!(gpu);
+    gpu.draw(&LineMono::new(272, 50, 312, 90, 255, 80, 80));
+    gpu.draw(&LineMono::new(312, 50, 272, 90, 80, 180, 255));
 }
 
 /// Pages of the video-levels screen. Page 0 is the chart; the rest are flat
@@ -4180,14 +4209,15 @@ const GRID_BLUE: u8 = 96;
 /// mismatch). All codes distinct but the ramp sitting dark = display gamma,
 /// which is what a CRT is supposed to do and a monitor is not.
 fn draw_video_levels(font: &FontAtlas, page: usize) {
+    probe_gpu!(gpu);
     let (title, flat) = VIDEO_FIELDS[page % VIDEO_FIELDS.len()];
-    gpu::draw_rect_flat(0, 0, 320, 240, 0, 0, 0);
+    gpu.draw(&QuadFlat::rect((0, 0), (320, 240), (0, 0, 0)));
 
     if let Some(code) = flat {
         let v = code_rgb(code);
         // Field stops short of the last text line so the label can be cropped
         // out of a measurement without cropping the field itself.
-        gpu::draw_rect_flat(0, 0, 320, 222, v, v, v);
+        gpu.draw(&QuadFlat::rect((0, 0), (320, 222), (v, v, v)));
         // The caption sits on the black surround, not on the field, so it
         // stays legible at every field value and crops off cleanly.
         let ink = (120, 120, 120);
@@ -4206,11 +4236,15 @@ fn draw_video_levels(font: &FontAtlas, page: usize) {
     // without it a display that crushes the bottom of the ramp looks exactly
     // like one where the ramp did not draw. Blue rather than grey so it can
     // never be mistaken for one of the patches being judged.
-    gpu::draw_rect_flat(30, 26, 260, 44, 0, 0, GRID_BLUE);
+    gpu.draw(&QuadFlat::rect((30, 26), (260, 44), (0, 0, GRID_BLUE)));
     let mut code = 0u8;
     while code < 32 {
         let v = code_rgb(code);
-        gpu::draw_rect_flat(32 + (code as i16) * 8, 28, 8, 40, v, v, v);
+        gpu.draw(&QuadFlat::rect(
+            (32 + (code as i16) * 8, 28),
+            (8, 40),
+            (v, v, v),
+        ));
         code += 1;
     }
     font.draw_text(32, 70, "000", label);
@@ -4228,17 +4262,18 @@ fn draw_video_levels(font: &FontAtlas, page: usize) {
 
 /// Eight patches from `first` upward, labelled with their 5-bit code.
 fn draw_level_row(font: &FontAtlas, y: i16, title: &'static str, first: u8, label: (u8, u8, u8)) {
+    probe_gpu!(gpu);
     font.draw_text(8, y, title, label);
     // Same reason as the ramp frame: the 2px gutters were already there, this
     // only lights them, so every patch keeps a visible edge even when the
     // display cannot separate its value from its neighbour's.
-    gpu::draw_rect_flat(30, y + 8, 258, 34, 0, 0, GRID_BLUE);
+    gpu.draw(&QuadFlat::rect((30, y + 8), (258, 34), (0, 0, GRID_BLUE)));
     let mut step = 0u8;
     while step < 8 {
         let code = first + step;
         let v = code_rgb(code);
         let x = 32 + (step as i16) * 32;
-        gpu::draw_rect_flat(x, y + 10, 30, 30, v, v, v);
+        gpu.draw(&QuadFlat::rect((x, y + 10), (30, 30), (v, v, v)));
         font.draw_text(x + 3, y + 44, dec3(code as u16).as_str(), label);
         step += 1;
     }
@@ -6364,7 +6399,8 @@ fn test_timer1_scanline() -> TestResult {
     // advance on its own. (The old form read gpu::scanline_counter(), which
     // reconfigures Timer 1 before every read and so always returned ~0; the
     // `<= 340` range check passed vacuously.)
-    gpu::configure_scanline_timer();
+    // Mode: bit 0 sync enable, bits 1-2 reset at VBlank, bit 8 HBlank clock.
+    timers::set_mode(timers::Timer::Timer1, 0x0103);
     let start = timers::counter(timers::Timer::Timer1);
     spin(65_536);
     let end = timers::counter(timers::Timer::Timer1);
@@ -8119,12 +8155,13 @@ const TEXT_LINE_2: &str = "the quick fox left -- tt";
 /// widths up to 16, one of the candidate divergences), draw area and
 /// offset pointed into it, two lines of SPLEEN rects.
 fn text_cache_glyph_pass(small: &FontAtlas) {
-    gpu::fill_rect(512, 0, 115, 92, 0, 0, 0);
-    gpu::set_draw_area(512, 0, 512 + 115 - 1, 92 - 1);
-    gpu::set_draw_offset(512, 0);
+    probe_gpu!(gpu);
+    gpu.draw(&FillRect::new((512, 0), (115, 92), (0, 0, 0)));
+    gpu.set_draw_area((512, 0), (512 + 115 - 1, 92 - 1));
+    gpu.set_draw_offset((512, 0));
     small.draw_text(2, 2, TEXT_LINE_1, (255, 255, 255));
     small.draw_text(2, 12, TEXT_LINE_2, (255, 255, 255));
-    gpu::wait_idle();
+    gpu.wait_idle();
 }
 
 /// GPU: the glyph pass must LAND in the cache region correctly.
@@ -8143,19 +8180,25 @@ fn test_gpu_text_cache_glyphs_land() -> TestResult {
 
 /// GPU: the 15bpp blit of the cache region must reproduce it on screen.
 fn test_gpu_text_cache_blit() -> TestResult {
+    probe_gpu!(gpu);
     let small = spleen_replica();
     text_cache_glyph_pass(&small);
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
     let tpage = TexturePage::new(512, 0, TextureDepth::Bit15);
-    gpu::draw_sprite_material(
+    gpu.set_draw_mode(psx_gpu::material::TextureMaterial::opaque(
+        0,
+        tpage.uv_word(0),
+        (128, 128, 128),
+    ));
+    gpu.draw(&Sprite::with_material(
         0,
         0,
         96,
         24,
         (0, 0),
         psx_gpu::material::TextureMaterial::opaque(0, tpage.uv_word(0), (128, 128, 128)),
-    );
+    ));
     gpu_io::wait_command_ready();
     // Same value as the direct draw's hash: the blit round trip is
     // pixel-exact in the emulator, which is the property under test.
@@ -8173,13 +8216,14 @@ fn test_gpu_text_cache_blit() -> TestResult {
 /// emulator; on console a FAIL names a corrupt glyph and the observed hash
 /// says how it differs.
 fn draw_one_glyph_hash(ch: char) -> u32 {
+    probe_gpu!(gpu);
     let small = spleen_replica();
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
     let mut buf = [0u8; 4];
     let s: &str = ch.encode_utf8(&mut buf);
     small.draw_text(2, 2, s, (255, 255, 255));
-    gpu::wait_idle();
+    gpu.wait_idle();
     gpu_hash_scratch()
 }
 
@@ -8410,12 +8454,13 @@ fn test_gpu_glyph_o() -> TestResult {
 /// If 'f' alone is clean and 'f'-after-'r' is not, the fault is cache
 /// aliasing between atlas columns rather than the glyph itself.
 fn test_gpu_glyph_f_after_r() -> TestResult {
+    probe_gpu!(gpu);
     let small = spleen_replica();
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
     small.draw_text(2, 2, "r", (255, 255, 255));
     small.draw_text(2, 12, "f", (255, 255, 255));
-    gpu::wait_idle();
+    gpu.wait_idle();
     expect_eq(0x98B4_BD65, gpu_hash_scratch(), "glyph f after r")
 }
 
@@ -8423,12 +8468,13 @@ fn test_gpu_glyph_f_after_r() -> TestResult {
 /// indirection. If this diverges on console too, the fault is the glyph
 /// rect path itself, not the render-to-VRAM round trip.
 fn test_gpu_text_direct_draw() -> TestResult {
+    probe_gpu!(gpu);
     let small = spleen_replica();
     gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
     gpu_draw_env_scratch();
     small.draw_text(2, 2, TEXT_LINE_1, (255, 255, 255));
     small.draw_text(2, 12, TEXT_LINE_2, (255, 255, 255));
-    gpu::wait_idle();
+    gpu.wait_idle();
     expect_eq(0x3B20_8994, gpu_hash_scratch(), "direct glyph draw")
 }
 
@@ -9869,8 +9915,9 @@ fn test_sio_register_latches() -> TestResult {
 }
 
 fn test_gpu_draw_area_command() -> TestResult {
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    probe_gpu!(gpu);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
     let observed = gpu_io::status().bits() & ((1 << 26) | (1 << 28));
     let expected = (1 << 26) | (1 << 28);
     expect_eq(expected, observed, "draw area")
@@ -9903,6 +9950,7 @@ fn test_gpu_dma_direction_mode_latch() -> TestResult {
 }
 
 fn test_gpu_gp1_info_environment_readback() -> TestResult {
+    probe_gpu!(gpu);
     let texture_window = 0xE200_0000 | 0x0003 | (0x0005 << 5) | (0x0007 << 10) | (0x0009 << 15);
     let draw_area_top_left = 0xE300_0000 | 8 | (16 << 10);
     let draw_area_bottom_right = 0xE400_0000 | 300 | (220 << 10);
@@ -9923,8 +9971,8 @@ fn test_gpu_gp1_info_environment_readback() -> TestResult {
     let offset_read = gpu_io::read_data();
 
     gpu_io::write_command(0xE200_0000);
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
 
     let mut observed = 0u32;
     if texture_window_read == (texture_window & 0x000F_FFFF) {

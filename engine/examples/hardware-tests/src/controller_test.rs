@@ -7,7 +7,7 @@
 //! stick rests far enough from 0x80 to indicate drift.
 
 use psx_font::FontAtlas;
-use psx_gpu as gpu;
+use psx_gpu::prim::{LineMono, QuadFlat};
 use psx_pad::{button, AnalogSticks, PadMode, PadState};
 
 const PORT_COUNT: usize = 2;
@@ -163,9 +163,10 @@ impl ControllerTest {
     }
 
     pub fn draw(&self, font: &FontAtlas) {
-        gpu::draw_rect_flat(0, 0, 320, 240, 5, 8, 18);
-        gpu::draw_rect_flat(0, 0, 320, 25, 12, 20, 40);
-        gpu::draw_rect_flat(0, 204, 320, 36, 8, 14, 30);
+        probe_gpu!(gpu);
+        gpu.draw(&QuadFlat::rect((0, 0), (320, 240), (5, 8, 18)));
+        gpu.draw(&QuadFlat::rect((0, 0), (320, 25), (12, 20, 40)));
+        gpu.draw(&QuadFlat::rect((0, 204), (320, 36), (8, 14, 30)));
 
         font.draw_text(8, 8, "CONTROLLER TEST", INK);
         let connected = match (self.pads[0].is_connected(), self.pads[1].is_connected()) {
@@ -199,14 +200,19 @@ impl ControllerTest {
     }
 
     fn draw_port(&self, font: &FontAtlas, port: usize, x: i16) {
+        probe_gpu!(gpu);
         let pad = self.pads[port];
         let outer = if pad.is_connected() {
             (42, 70, 104)
         } else {
             (40, 46, 62)
         };
-        gpu::draw_rect_flat(x, 29, 154, 172, outer.0, outer.1, outer.2);
-        gpu::draw_rect_flat(x + 1, 30, 152, 170, 8, 13, 27);
+        gpu.draw(&QuadFlat::rect(
+            (x, 29),
+            (154, 172),
+            (outer.0, outer.1, outer.2),
+        ));
+        gpu.draw(&QuadFlat::rect((x + 1, 30), (152, 170), (8, 13, 27)));
 
         font.draw_text(x + 6, 34, if port == 0 { "PORT 1" } else { "PORT 2" }, INK);
         let kind = pad_kind(pad.mode);
@@ -308,6 +314,7 @@ const fn pad_kind(mode: PadMode) -> &'static str {
 }
 
 fn draw_button_chip(font: &FontAtlas, x: i16, y: i16, label: &'static str, held: bool, seen: bool) {
+    probe_gpu!(gpu);
     let (background, foreground) = if held {
         ((96, 78, 18), HELD)
     } else if seen {
@@ -315,23 +322,32 @@ fn draw_button_chip(font: &FontAtlas, x: i16, y: i16, label: &'static str, held:
     } else {
         ((24, 30, 46), MUTED)
     };
-    gpu::draw_rect_flat(x, y, 32, 10, background.0, background.1, background.2);
+    gpu.draw(&QuadFlat::rect(
+        (x, y),
+        (32, 10),
+        (background.0, background.1, background.2),
+    ));
     let text_x = x + (32 - font.text_width(label) as i16) / 2;
     font.draw_text(text_x, y + 1, label, foreground);
 }
 
 fn draw_stick(x: i16, y: i16, raw_x: u8, raw_y: u8) {
-    gpu::draw_rect_flat(x, y, 48, 48, 42, 58, 82);
-    gpu::draw_rect_flat(x + 1, y + 1, 46, 46, 7, 12, 24);
-    gpu::draw_rect_flat(x + 20, y + 20, 8, 8, 12, 54, 36);
-    gpu::draw_line_mono(x + 24, y + 2, x + 24, y + 45, 56, 74, 100);
-    gpu::draw_line_mono(x + 2, y + 24, x + 45, y + 24, 56, 74, 100);
+    probe_gpu!(gpu);
+    gpu.draw(&QuadFlat::rect((x, y), (48, 48), (42, 58, 82)));
+    gpu.draw(&QuadFlat::rect((x + 1, y + 1), (46, 46), (7, 12, 24)));
+    gpu.draw(&QuadFlat::rect((x + 20, y + 20), (8, 8), (12, 54, 36)));
+    gpu.draw(&LineMono::new(x + 24, y + 2, x + 24, y + 45, 56, 74, 100));
+    gpu.draw(&LineMono::new(x + 2, y + 24, x + 45, y + 24, 56, 74, 100));
 
     let px = x + 2 + (raw_x as i16 * 43) / 255;
     let py = y + 2 + (raw_y as i16 * 43) / 255;
     let offset = axis_offset(raw_x).max(axis_offset(raw_y));
     let color = drift_color(offset);
-    gpu::draw_rect_flat(px - 2, py - 2, 5, 5, color.0, color.1, color.2);
+    gpu.draw(&QuadFlat::rect(
+        (px - 2, py - 2),
+        (5, 5),
+        (color.0, color.1, color.2),
+    ));
 }
 
 fn draw_drift_status(font: &FontAtlas, x: i16, y: i16, drift: DriftMonitor) {

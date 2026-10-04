@@ -49,7 +49,7 @@ use core::ptr::addr_of_mut;
 use psx_engine::button;
 use psx_fmv::mdec;
 use psx_font::FontAtlas;
-use psx_gpu as gpu;
+use psx_gpu::prim::FillRect;
 use psx_io::dma::{self, Channel};
 use psx_io::{irq, timers};
 use psx_rt::{interrupts, tty};
@@ -819,6 +819,7 @@ fn play_order(diag: &Diag) -> ([usize; VARIANTS], usize) {
 /// stays up for a few seconds with the next run named under it; the last
 /// one is left on screen for the caller. Returns the first run's outcome.
 pub(crate) fn play_all(diag: &mut Diag) -> hello_fmv::Outcome {
+    probe_gpu!(gpu);
     let (order, n) = play_order(diag);
     let mut first = hello_fmv::Outcome::default();
     for (i, &v) in order[..n].iter().enumerate() {
@@ -839,12 +840,12 @@ pub(crate) fn play_all(diag: &mut Diag) -> hello_fmv::Outcome {
         // The player left its summary displayed at VRAM row 0 and its own
         // fonts over the suite's atlas.
         let font = FontAtlas::upload(&psx_font::fonts::BASIC, crate::FONT_TPAGE, crate::FONT_CLUT);
-        gpu::set_draw_area(0, 0, 319, 239);
-        gpu::set_draw_offset(0, 0);
+        gpu.set_draw_area((0, 0), (319, 239));
+        gpu.set_draw_offset((0, 0));
         let stop = Line::new()
             .s("STOP ")
             .s(STOP_NAMES[(outcome.stop as usize).min(STOP_NAMES.len() - 1)]);
-        gpu::fill_rect(192, 0, 128, 10, 0, 0, 0);
+        gpu.draw(&FillRect::new((192, 0), (128, 10), (0, 0, 0)));
         font.draw_text(200, 2, stop.as_str(), YELLOW);
         if i + 1 < n {
             let next = Line::new()
@@ -855,10 +856,10 @@ pub(crate) fn play_all(diag: &mut Diag) -> hello_fmv::Outcome {
                 .s(" NEXT: ")
                 .s(PLAY_LABELS[order[i + 1]])
                 .s(" IN 4 S");
-            gpu::fill_rect(0, 226, 320, 12, 0, 0, 0);
+            gpu.draw(&FillRect::new((0, 226), (320, 12), (0, 0, 0)));
             font.draw_text(X0, 228, next.as_str(), YELLOW);
         }
-        gpu::wait_idle();
+        gpu.wait_idle();
         if i + 1 < n {
             let start = interrupts::vblank_count();
             while interrupts::vblank_count().wrapping_sub(start) < SUMMARY_VBLANKS {
@@ -1183,13 +1184,15 @@ const X0: i16 = 16;
 const PAGES: usize = 2 + VARIANTS;
 
 fn begin_screen() {
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
-    gpu::fill_rect(0, 0, 320, 240, 0, 0, 0);
+    probe_gpu!(gpu);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
+    gpu.draw(&FillRect::new((0, 0), (320, 240), (0, 0, 0)));
 }
 
 fn end_screen() {
-    gpu::wait_idle();
+    probe_gpu!(gpu);
+    gpu.wait_idle();
     psx_io::gpu::write_display_control(0x0500_0000);
 }
 
@@ -1197,11 +1200,16 @@ fn end_screen() {
 /// Drawn between runs and phases, never inside a sequence, so it cannot
 /// change a sequence's timing. A hang leaves the last line on screen.
 fn progress_line(font: &FontAtlas, row: i16, text: &str, tint: (u8, u8, u8)) {
-    gpu::set_draw_area(0, 0, 319, 239);
-    gpu::set_draw_offset(0, 0);
-    gpu::fill_rect(0, 60 + 12 * row as u16, 320, 12, 0, 0, 0);
+    probe_gpu!(gpu);
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
+    gpu.draw(&FillRect::new(
+        (0, 60 + 12 * row as u16),
+        (320, 12),
+        (0, 0, 0),
+    ));
     font.draw_text(X0, 62 + 12 * row, text, tint);
-    gpu::wait_idle();
+    gpu.wait_idle();
 }
 
 /// Variant, run and phase, with MDEC1 and DMA0 CHCR as they are now.
