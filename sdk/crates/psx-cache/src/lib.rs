@@ -16,8 +16,8 @@
 //!
 //! Slots move `Empty -> Loading -> Ready`. Synchronous consumers use
 //! [`SlotCache::get_or_insert_with`]; consumers whose creation is asynchronous
-//! (streaming a room off the CD over several frames) use [`SlotCache::reserve`]
-//! then [`SlotCache::mark_ready`] when the load completes.
+//! (streaming a room off the CD over several frames) use [`SlotCache::begin_load`]
+//! then [`SlotCache::finish_load`] when the load completes.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -35,6 +35,42 @@ pub enum SlotState {
     /// Holds a usable value for its key.
     Ready,
 }
+
+/// A slot reserved for a key by [`SlotCache::begin_load`], to be completed by
+/// [`SlotCache::finish_load`]. It remembers the key as well as the slot, so a
+/// load that finishes after its slot was evicted and reused is refused instead
+/// of storing its value under another key.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Reservation {
+    slot: u16,
+    key: u16,
+}
+
+impl Reservation {
+    fn new(slot: usize, key: u16) -> Self {
+        // `begin_load` only builds this from a slot index below `N`, which the
+        // cache keeps under `u16::MAX`.
+        Self {
+            slot: slot as u16,
+            key,
+        }
+    }
+
+    /// The reserved slot index.
+    pub const fn slot(&self) -> usize {
+        self.slot as usize
+    }
+
+    /// The key the slot was reserved for.
+    pub const fn key(&self) -> u16 {
+        self.key
+    }
+}
+
+/// [`SlotCache::finish_load`] refused a reservation whose key no longer owns
+/// its slot.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Stale;
 
 #[derive(Copy, Clone)]
 struct Slot<V: Copy> {
@@ -158,16 +194,17 @@ impl<V: Copy, const N: usize, const MAX_KEY: usize> SlotCache<V, N, MAX_KEY> {
 
     /// Reserve a slot for `key` and mark it `Loading`, evicting the
     /// least-recently-used unpinned `Ready` slot if the cache is full. Returns
-    /// the slot index for the caller to fill via [`mark_ready`](Self::mark_ready),
-    /// or `None` if `key` is out of range or every slot is pinned or already
-    /// loading. If `key` already has a slot, that slot is returned unchanged
-    /// (no duplicate load is started).
-    pub fn reserve(&mut self, key: u16) -> Option<usize> {
+    /// a [`Reservation`] for the caller to complete with
+    /// [`finish_load`](Self::finish_load), or `None` if `key` is out of range
+    /// or every slot is pinned or already loading. If `key` already has a
+    /// slot, a reservation for that slot is returned unchanged (no duplicate
+    /// load is started).
+    pub fn begin_load(&mut self, key: u16) -> Option<Reservation> {
         if !Self::key_ok(key) {
             return None;
         }
         if let Some(s) = self.slot_of(key) {
-            return Some(s);
+            return Some(Reservation::new(s, key));
         }
         let s = self.alloc_slot()?;
         self.detach(s);
@@ -179,11 +216,40 @@ impl<V: Copy, const N: usize, const MAX_KEY: usize> SlotCache<V, N, MAX_KEY> {
             pinned: false,
         };
         self.key_to_slot[key as usize] = s as u16;
-        Some(s)
+        Some(Reservation::new(s, key))
     }
 
-    /// Complete a [`reserve`](Self::reserve)d slot: store the value and mark it
-    /// `Ready` and most-recently-used.
+    /// Complete a [`begin_load`](Self::begin_load): store the value and mark
+    /// the slot `Ready` and most-recently-used. Returns [`Stale`] when the
+    /// reservation's key no longer owns its slot (it was evicted, and the slot
+    /// may now be loading another key), and stores nothing.
+    pub fn finish_load(&mut self, reservation: Reservation, value: V) -> Result<(), Stale> {
+        let slot = reservation.slot();
+        if slot < N
+            && self.slots[slot].state != SlotState::Empty
+            && self.slots[slot].key == reservation.key
+        {
+            self.slots[slot].value = Some(value);
+            self.slots[slot].state = SlotState::Ready;
+            self.slots[slot].last_used = self.epoch;
+            Ok(())
+        } else {
+            Err(Stale)
+        }
+    }
+
+    /// Renamed to [`begin_load`](Self::begin_load), which returns the key with
+    /// the slot so a stale completion can be told from a live one.
+    #[deprecated(note = "renamed to `begin_load`")]
+    pub fn reserve(&mut self, key: u16) -> Option<usize> {
+        self.begin_load(key).map(|r| r.slot())
+    }
+
+    /// Renamed to [`finish_load`](Self::finish_load). A bare slot index cannot
+    /// tell that the slot was evicted and reused for another key since
+    /// [`reserve`](Self::reserve), so a late completion stores its value under
+    /// the wrong key; this keeps that behaviour for one stage.
+    #[deprecated(note = "renamed to `finish_load`, which checks the key still owns the slot")]
     pub fn mark_ready(&mut self, slot: usize, value: V) {
         if slot < N && self.slots[slot].state != SlotState::Empty {
             self.slots[slot].value = Some(value);
@@ -202,10 +268,12 @@ impl<V: Copy, const N: usize, const MAX_KEY: usize> SlotCache<V, N, MAX_KEY> {
         if self.contains_ready(key) {
             return self.get(key);
         }
-        let s = self.reserve(key)?;
+        let r = self.begin_load(key)?;
+        let s = r.slot();
         match build() {
             Some(v) => {
-                self.mark_ready(s, v);
+                // A fresh reservation owns its slot, so this cannot be stale.
+                let _ = self.finish_load(r, v);
                 self.slots[s].value.as_ref()
             }
             None => {
@@ -338,8 +406,8 @@ mod tests {
 
     /// Build and `Ready` a key in one step.
     fn put(c: &mut Cache, key: u16, val: u32) {
-        let s = c.reserve(key).expect("reserve");
-        c.mark_ready(s, val);
+        let r = c.begin_load(key).expect("begin_load");
+        c.finish_load(r, val).unwrap();
     }
 
     #[test]
@@ -353,14 +421,57 @@ mod tests {
     #[test]
     fn insert_then_get_roundtrips_and_slot_is_stable() {
         let mut c = Cache::new();
-        let s = c.reserve(5).unwrap();
+        let r = c.begin_load(5).unwrap();
+        let s = r.slot();
         assert!(c.is_loading(5));
-        c.mark_ready(s, 500);
+        c.finish_load(r, 500).unwrap();
         assert!(c.contains_ready(5));
         assert_eq!(c.get(5), Some(&500));
         assert_eq!(c.slot_of(5), Some(s));
         // re-reserving an existing key returns the same slot, no second load
-        assert_eq!(c.reserve(5), Some(s));
+        assert_eq!(c.begin_load(5), Some(r));
+    }
+
+    #[test]
+    fn a_load_that_finishes_after_its_slot_was_reused_is_refused() {
+        // The async case: a CD load for key 1 is in flight, key 1 is evicted,
+        // key 2 takes the slot, then key 1's load completes.
+        let mut c = SlotCache::<u32, 1, 16>::new();
+        let stale = c.begin_load(1).unwrap();
+        c.evict(1);
+        let live = c.begin_load(2).unwrap();
+        assert_eq!(live.slot(), stale.slot(), "the one slot is reused");
+
+        assert_eq!(c.finish_load(stale, 111), Err(Stale));
+        // Key 2 is still loading and holds nothing of key 1's.
+        assert!(c.is_loading(2));
+        assert_eq!(c.get(2), None);
+
+        c.finish_load(live, 222).unwrap();
+        assert_eq!(c.get(2), Some(&222));
+        assert!(!c.contains_ready(1));
+    }
+
+    #[test]
+    fn finishing_a_reservation_whose_slot_was_emptied_is_refused() {
+        let mut c = Cache::new();
+        let r = c.begin_load(3).unwrap();
+        c.evict(3);
+        assert_eq!(c.finish_load(r, 30), Err(Stale));
+        assert!(c.is_empty());
+    }
+
+    /// The deprecated pair keeps the old behaviour for one stage: a bare slot
+    /// index cannot tell the slot changed hands, so key 2 reads key 1's value.
+    #[allow(deprecated)]
+    #[test]
+    fn the_deprecated_pair_still_stores_under_the_wrong_key() {
+        let mut c = SlotCache::<u32, 1, 16>::new();
+        let slot = c.reserve(1).unwrap();
+        c.evict(1);
+        assert_eq!(c.reserve(2), Some(slot));
+        c.mark_ready(slot, 111);
+        assert_eq!(c.get(2), Some(&111));
     }
 
     #[test]
@@ -440,7 +551,7 @@ mod tests {
         put(&mut c, 2, 20);
         put(&mut c, 3, 30);
         c.set_pinned(&[1, 2, 3]);
-        assert_eq!(c.reserve(4), None, "no evictable slot");
+        assert_eq!(c.begin_load(4), None, "no evictable slot");
         assert!(!c.contains_ready(4));
     }
 
@@ -476,8 +587,8 @@ mod tests {
     #[test]
     fn out_of_range_key_is_rejected() {
         let mut c = Cache::new();
-        assert_eq!(c.reserve(16), None); // == MAX_KEY
-        assert_eq!(c.reserve(NONE), None);
+        assert_eq!(c.begin_load(16), None); // == MAX_KEY
+        assert_eq!(c.begin_load(NONE), None);
         assert!(!c.contains_ready(16));
     }
 }
