@@ -478,9 +478,7 @@ const fn carryless_mul(a: u64, b: u64) -> u64 {
 /// ECMA-130 EDC of `bytes`: the CRC above, starting from zero, with no
 /// final inversion.
 fn edc(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0u32, |crc, &byte| {
-        (crc >> 8) ^ EDC_TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize]
-    })
+    sector_edc_continue(0, bytes)
 }
 
 /// GF(2^8) field polynomial x^8 + x^4 + x^3 + x^2 + 1, without its x^8
@@ -609,6 +607,14 @@ const MODE1_EDC_AT: usize = 0x810;
 /// ECMA-130 EDC (the sector CRC) of `bytes`, starting from zero.
 pub fn sector_edc(bytes: &[u8]) -> u32 {
     edc(bytes)
+}
+
+/// Continue an EDC over more bytes: `sector_edc_continue(sector_edc(a), b)`
+/// is the EDC of `a` followed by `b`.
+pub fn sector_edc_continue(crc: u32, bytes: &[u8]) -> u32 {
+    bytes.iter().fold(crc, |crc, &byte| {
+        (crc >> 8) ^ EDC_TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize]
+    })
 }
 
 /// Compute both parity codes over the 2340 bytes from the header (0x0C)
@@ -832,6 +838,15 @@ mod tests {
         zeroed[0x0C..0x10].fill(0);
         assert!(parity_holds(&zeroed[0x0C..]));
         assert!(!parity_holds(&sector[0x0C..]));
+    }
+
+    #[test]
+    fn edc_continues_across_pieces() {
+        let bytes: Vec<u8> = (0..300u32).map(|i| (i * 13) as u8).collect();
+        assert_eq!(
+            sector_edc_continue(sector_edc(&bytes[..120]), &bytes[120..]),
+            sector_edc(&bytes)
+        );
     }
 
     #[test]
