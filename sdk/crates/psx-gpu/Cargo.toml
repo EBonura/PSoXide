@@ -6,10 +6,16 @@ license.workspace = true
 repository.workspace = true
 description  = "High-level PS1 GPU API: init, primitives, framebuffers."
 
+[features]
+# `present`: PresentPair, the safe face of psx-rt's VBlank-kicked present
+# queue. Turns on psx-rt's and psx-io's `present-queue` features.
+present-queue = ["dep:psx-rt", "psx-rt/present-queue", "psx-io/present-queue"]
+
 [dependencies]
 bitflags = { version = "2.6", default-features = false }
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
+psx-rt = { path = "../psx-rt", optional = true }
 
 [lints]
 workspace = true

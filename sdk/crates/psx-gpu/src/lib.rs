@@ -35,6 +35,8 @@ mod gpu;
 pub mod material;
 pub mod ordered;
 pub mod ot;
+#[cfg(feature = "present-queue")]
+pub mod present;
 pub mod prim;
 
 #[allow(deprecated, reason = "the forwarders kept for one stage")]

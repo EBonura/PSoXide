@@ -253,10 +253,17 @@ pub(crate) fn draw<P: GpuPacket>(packet: &P) {
 /// Draw area and offset for a buffer at VRAM line `top`, written without a
 /// ready-wait, as `FrameBuffer` always has: state commands between frames.
 pub(crate) fn write_draw_target(top: u16, width: u16, height: u16) {
-    write_command(gp0::draw_area_top_left(0, top as u32));
-    write_command(gp0::draw_area_bottom_right(
-        (width - 1) as u32,
-        (top + height - 1) as u32,
-    ));
-    write_command(gp0::draw_offset(0, top as i32));
+    let [area_top_left, area_bottom_right, offset] = draw_target_words(top, width, height);
+    write_command(area_top_left);
+    write_command(area_bottom_right);
+    write_command(offset);
+}
+
+/// GP0(E3h), GP0(E4h) and GP0(E5h) for a buffer at VRAM line `top`.
+pub(crate) const fn draw_target_words(top: u16, width: u16, height: u16) -> [u32; 3] {
+    [
+        gp0::draw_area_top_left(0, top as u32),
+        gp0::draw_area_bottom_right((width - 1) as u32, (top + height - 1) as u32),
+        gp0::draw_offset(0, top as i32),
+    ]
 }
