@@ -226,3 +226,19 @@ sparks) needs its pins refreshed on repin.
 (hk-psx and quake-psx have their own particle types); callers of
 `ParticlePool` (cs-psx 1, hl-psx 1 `render_into_ot` plus pool calls) need no
 edit.
+
+## psx-fx: `LcgRng::signed` is symmetric and cannot overflow (fx-02)
+
+`signed(range)` computed `(raw - 16) * range / 16` in `i16`. Above
+`range = 2047` the product overflowed (a panic in a host debug build, a
+flipped sign on the console), and the result spanned `[-range, 15 * range /
+16]`, not the documented `[-range, +range]`: at `range = 40` the maximum was
+37, so every burst drifted toward negative x and y.
+
+It now maps the five bits onto thirty-two evenly spaced values from
+`-range` to `+range` in 32-bit arithmetic. The values differ from the
+previous stage for every range, so a seeded burst lands elsewhere and
+frame hashes of scenes that draw `signed` output (particle bursts) change.
+Callers: cs-psx and hl-psx, through `ParticlePool::spawn_burst` (their
+view shake and impact streams use `next()`, which is unchanged); voxide
+`game/src/mob.rs` uses `next_mixed`, also unchanged. Refresh pins on repin.
