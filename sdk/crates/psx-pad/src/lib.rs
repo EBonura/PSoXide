@@ -36,7 +36,7 @@
 //! is false. Programs that require a DualShock call
 //! [`require_analog_port1`] at boot: it locks the pad in analog mode, so
 //! the Analog button cannot switch it back, and says whether an
-//! analog-capable pad is there at all.
+//! analog-capable pad is there at all (`sdk/docs/PAD-ANALOG.md`).
 //!
 //! Every poll is a complete, ACK-paced packet whose length follows the ID it
 //! reports, so a 0x41 digital frame and a 0x73 analog frame decode the same
