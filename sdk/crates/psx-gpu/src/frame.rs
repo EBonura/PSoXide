@@ -123,6 +123,7 @@ use psx_io::periph::GpuDma;
 /// Made by [`OrderingTable::frame`]. Every packet added must live for `'f`,
 /// the frame's borrow of the table, and is exclusively borrowed for that
 /// long; submitting consumes the frame and waits for the walk.
+#[derive(Debug)]
 #[must_use = "a frame does nothing until it is submitted"]
 pub struct OtFrame<'f, const N: usize> {
     ot: &'f mut OrderingTable<N>,
@@ -412,6 +413,7 @@ impl Drop for WaitOnDrop {
 /// The unit [`draw_async`](Self::draw_async) and [`FramePair`] keep
 /// `'static` while the GPU walks it. `S` is whatever holds the packets:
 /// an array, or a struct of arrays per packet type.
+#[derive(Debug)]
 pub struct FrameStorage<const N: usize, S> {
     ot: OrderingTable<N>,
     packets: S,
@@ -475,6 +477,7 @@ impl<const N: usize, S> FrameStorage<N, S> {
 ///
 /// Dropping or forgetting it leaks both: the storage then stays out of
 /// reach for the rest of the run instead of being reused under the walk.
+#[derive(Debug)]
 #[must_use = "dropping an in-flight frame leaks its storage; call wait()"]
 pub struct InFlight<const N: usize, S: 'static> {
     storage: &'static mut FrameStorage<N, S>,
@@ -508,6 +511,7 @@ impl<const N: usize, S> InFlight<N, S> {
 ///     pair.kick();                // frame N+1 goes out; storages swap
 /// }
 /// ```
+#[derive(Debug)]
 pub struct FramePair<const N: usize, S: 'static> {
     storage: [&'static mut FrameStorage<N, S>; 2],
     /// Index of the storage `build` writes; the other one may be in flight.
@@ -581,6 +585,7 @@ impl<const N: usize, S> FramePair<N, S> {
 /// The storage is borrowed for `'f`, so it cannot be reused (a new arena
 /// over it, say) while any packet it handed out is still linked into a
 /// frame.
+#[derive(Debug)]
 pub struct PrimitiveArena<'f, P> {
     // A base pointer and a count rather than a shrinking `&mut [P]`: a push is
     // then one compare and one increment, where re-slicing loaded and stored
