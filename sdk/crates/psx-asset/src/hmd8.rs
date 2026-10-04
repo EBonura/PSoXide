@@ -404,16 +404,13 @@ const IDENTITY_TRANSFORM: BoneTransform = BoneTransform {
     rotation: Mat3I16::IDENTITY,
     translation: Vec3I16::ZERO,
 };
-// Generated from the same cooked model scan that sizes main.rs MODEL_SCRATCH.
-// A larger model would overflow projection scratch, so reject it here rather
-// than merely clamping the draw and leaving face indices out of bounds.
 /// Vertex-count guard used by [`Model::from_bytes`].
 ///
 /// A consumer with its own model arena should call
 /// [`Model::from_bytes_with_vertex_cap`] and pass that arena's real capacity:
 /// the guard exists so a cook that outgrew the arena fails to load rather than
 /// scribbling past it.
-pub const DEFAULT_MAX_VERTICES: usize = 4096;
+pub const DEFAULT_MAX_VERTICES: usize = RENDER_FACE_INDEX_MASK as usize + 1;
 
 /// Renamed to [`DEFAULT_MAX_VERTICES`].
 #[deprecated(note = "renamed to `DEFAULT_MAX_VERTICES`")]
@@ -447,8 +444,12 @@ impl RenderFacePayload {
     pub const ZERO: Self = Self { uv_words: [0; 3] };
 }
 
-/// Model loading rejects meshes above 1024 vertices, so three ten-bit indices
-/// fit one hot word exactly (with the top two bits unused).
+/// Three ten-bit indices fit one hot word exactly (with the top two bits
+/// unused), so a model whose faces are packed this way can have at most
+/// `RENDER_FACE_INDEX_MASK + 1` (1024) vertices. [`DEFAULT_MAX_VERTICES`] is
+/// that bound, so [`Model::from_bytes`] never admits a model the packing
+/// would mangle; a caller that passes a larger cap to
+/// [`Model::from_bytes_with_vertex_cap`] must not pack its faces.
 pub const RENDER_FACE_INDEX_MASK: u32 = 0x3ff;
 
 #[inline(always)]
@@ -1764,6 +1765,10 @@ impl Model {
         out_len: usize,
         visible_bodies: u8,
     ) -> (usize, usize) {
+        debug_assert!(
+            self.vertex_count() <= RENDER_FACE_INDEX_MASK as usize + 1,
+            "render faces pack 10-bit vertex indices; this model has more vertices"
+        );
         // SAFETY: contract is the enclosing fn's; see its doc comment.
         unsafe {
             if self.triangle_count() == 0 || out_len == 0 {
