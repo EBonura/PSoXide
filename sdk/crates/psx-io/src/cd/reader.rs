@@ -158,6 +158,12 @@ impl SectorReader {
         self.cd
     }
 
+    /// The token, lent for commands outside the reader's own sequences (the
+    /// drive's audio mixer, a status poll). The reader stays borrowed meanwhile.
+    pub fn cd_mut(&mut self) -> &mut Cd {
+        &mut self.cd
+    }
+
     /// The last failure snapshot packed big-endian:
     /// `cause<<24 | status<<16 | command<<8 | flag_or_error`. Zero when
     /// nothing has failed yet. Causes are the `DIAG_*` constants; for
