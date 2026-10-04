@@ -34,12 +34,15 @@ use psx_vram::{Clut, TextureDepth, TexturePage};
 mod audio_link;
 mod audio_probe;
 mod cd_chain_probe;
+mod console_tests;
 mod controller_test;
 mod cpu_tests;
+mod display_widths;
 mod fmv_diag;
 mod fmv_test;
 mod gpu_probes;
 mod handoff_probe;
+mod kernel_timing;
 mod lever_probes;
 mod list_busy_probes;
 mod payload;
@@ -52,8 +55,10 @@ mod sample_probe;
 mod spu_probe;
 mod transition_probe;
 mod voice_probe;
+mod xa_loop;
 use audio_probe::AudioProbe;
 use cd_chain_probe::CdChainProbe;
+use console_tests::ConsoleCase;
 use controller_test::ControllerTest;
 use cpu_tests::*;
 use handoff_probe::HandoffProbe;
@@ -195,9 +200,9 @@ unsafe extern "C" {
 //
 // History, one entry per version: docs/hardware-test-versions.md.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 26;
+const SUITE_VERSION_MINOR: u8 = 27;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.26";
+const SUITE_VERSION: &str = "HWTEST v1.27";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: TexturePage = TexturePage::new(320, 0, TextureDepth::Bit4);
@@ -672,8 +677,10 @@ struct ScanReport {
 }
 
 /// v1.26 added up to 127 MDEC diagnostic records (fmv_diag.rs) on top of the
-/// 189 a characterisation plus an FMV run fills.
-const TIMING_RECORD_COUNT: usize = 336;
+/// 189 a characterisation plus an FMV run fills; v1.27 adds the console tests'
+/// 18 (console_tests.rs).
+const TIMING_RECORD_COUNT: usize = 354;
+const _: () = assert!(TIMING_RECORD_COUNT == 336 + console_tests::RECORD_SLOTS);
 
 /// Which records a timing scan takes.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -722,6 +729,8 @@ enum MenuPage {
     Results,
     Scans,
     Probes,
+    /// v1.27: the cases for one console session (console_tests.rs).
+    Console,
 }
 
 /// What a menu row does when chosen.
@@ -745,9 +754,11 @@ enum MenuAction {
     RunMdecDiag,
     /// The FMV console test, then the QR pages.
     RunFmv,
+    /// One of the v1.27 console cases, then the QR pages.
+    RunConsole(ConsoleCase),
 }
 
-const ROOT_MENU: [(&str, MenuAction); 13] = [
+const ROOT_MENU: [(&str, MenuAction); 14] = [
     // Row 0 is pinned: `make hwtest-capture` selects it by firing CROSS at a
     // fixed tick with the cursor still at its boot position. Move this row and
     // the capture opens whatever took its place, which produces an empty log
@@ -776,6 +787,12 @@ const ROOT_MENU: [(&str, MenuAction); 13] = [
     ("RESULTS BY SECTION", MenuAction::Submenu(MenuPage::Results)),
     ("HARDWARE SCANS", MenuAction::Submenu(MenuPage::Scans)),
     ("TARGETED PROBES", MenuAction::Submenu(MenuPage::Probes)),
+    // v1.27, after the rows every headless pulse train counts to, so none of
+    // them moves.
+    (
+        "CONSOLE TESTS (V1.27)",
+        MenuAction::Submenu(MenuPage::Console),
+    ),
     // Root, not a submenu: this one is aimed at the capture rig rather than
     // at the console, so an operator setting up a recording finds it first.
     (
@@ -861,12 +878,30 @@ const PROBES_MENU: [(&str, MenuAction); 13] = [
     ("BACK", MenuAction::Back),
 ];
 
+const CONSOLE_MENU: [(&str, MenuAction); 5] = [
+    (
+        "KERNEL TIMING (BIOS)",
+        MenuAction::RunConsole(ConsoleCase::KernelTiming),
+    ),
+    (
+        "DISPLAY WIDTHS",
+        MenuAction::RunConsole(ConsoleCase::DisplayWidths),
+    ),
+    (
+        "480I INTERLACE",
+        MenuAction::RunConsole(ConsoleCase::Interlace),
+    ),
+    ("XA MUSIC LOOP", MenuAction::RunConsole(ConsoleCase::XaLoop)),
+    ("BACK", MenuAction::Back),
+];
+
 const fn menu_entries(page: MenuPage) -> &'static [(&'static str, MenuAction)] {
     match page {
         MenuPage::Root => &ROOT_MENU,
         MenuPage::Results => &RESULTS_MENU,
         MenuPage::Scans => &SCANS_MENU,
         MenuPage::Probes => &PROBES_MENU,
+        MenuPage::Console => &CONSOLE_MENU,
     }
 }
 
@@ -876,6 +911,7 @@ const fn menu_title(page: MenuPage) -> &'static str {
         MenuPage::Results => "RESULTS BY SECTION",
         MenuPage::Scans => "HARDWARE SCANS",
         MenuPage::Probes => "TARGETED PROBES",
+        MenuPage::Console => "CONSOLE TESTS",
     }
 }
 
@@ -2458,6 +2494,8 @@ struct HardwareTests {
     fmv_runs: u8,
     /// The last MDEC diagnostic, with the playbacks FMV STREAM TEST added.
     mdec_diag: Option<fmv_diag::Diag>,
+    /// What the v1.27 console cases last left, folded into the capture.
+    console: console_tests::Results,
 }
 
 #[cfg(target_arch = "mips")]
@@ -2523,6 +2561,7 @@ impl HardwareTests {
             fmv: None,
             fmv_runs: 0,
             mdec_diag: None,
+            console: console_tests::Results::new(),
         }
     }
 
@@ -2667,6 +2706,16 @@ impl HardwareTests {
             }
             any = true;
         }
+        let mut console_any = false;
+        self.console.for_each(|_| console_any = true);
+        if console_any {
+            if !self.console.merge(&mut self.timing_scan.records) {
+                tty::println("hardware-tests: console records did not fit the timing report");
+                return false;
+            }
+            self.console.for_each(|record| mix(&mut hash, record));
+            any = true;
+        }
         self.timing_scan.summary.hash = hash;
         any
     }
@@ -2740,6 +2789,38 @@ impl HardwareTests {
         // The capture carries the result now, with or without a timing scan
         // before it: the QR pages must be reachable straight after this,
         // whatever the playback did.
+        self.capture_flags |= photo::blocks::TIMING;
+        self.merge_fmv_records();
+        self.encode_capture(0);
+        self.prepare_audio_readout();
+        self.enter_mode(Mode::TimingScan);
+    }
+
+    /// MAIN MENU > CONSOLE TESTS. Each case takes over the display, the SPU
+    /// and the drive for its run, so what the suite relies on afterwards is
+    /// put back here, as `run_fmv` does. The result joins the capture and the
+    /// QR pages open.
+    fn run_console(&mut self, ctx: &mut Ctx, case: ConsoleCase) {
+        tty::println("hardware-tests: run console test");
+        if self.audio_prepared {
+            audio_link::stop();
+            self.audio_rate = 0;
+        }
+        let timer1_mode = timers::mode(timers::Timer::Timer1) & 0x03FF;
+        let timer2_mode = timers::mode(timers::Timer::Timer2) & 0x03FF;
+        console_tests::run_case(
+            psx_gpu::Gpu::from_dma_mut(ctx.gpu_dma()),
+            &mut self.console,
+            case,
+        );
+        timers::set_mode(timers::Timer::Timer1, timer1_mode);
+        timers::set_mode(timers::Timer::Timer2, timer2_mode);
+        // Back to the engine's 320x240 picture and its draw buffer.
+        gpu::init(VideoMode::Ntsc, Resolution::R320X240);
+        gpu::fill_rect(0, 0, 320, 512, 6, 8, 18);
+        self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
+        ctx.fb.apply_draw_target();
+        ctx.request_timing_realign();
         self.capture_flags |= photo::blocks::TIMING;
         self.merge_fmv_records();
         self.encode_capture(0);
@@ -3078,6 +3159,7 @@ impl Scene for HardwareTests {
                     }
                     MenuAction::RunMdecDiag => self.run_fmv(ctx, false),
                     MenuAction::RunFmv => self.run_fmv(ctx, true),
+                    MenuAction::RunConsole(case) => self.run_console(ctx, case),
                 }
             }
             return;
@@ -3215,6 +3297,8 @@ fn main() -> ! {
     // initialise the SPU. PA5 transports the raw snapshot in its QR payload.
     let boot_reverb = ReverbSnapshot::capture();
     let mut suite = HardwareTests::new(boot_reverb);
+    // Before App::run: the engine's clock replaces the BIOS exception vector.
+    kernel_timing::snapshot_vector();
     let config = Config {
         screen_w: SCREEN_W as u16,
         screen_h: SCREEN_H as u16,

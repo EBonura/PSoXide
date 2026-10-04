@@ -17,7 +17,7 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.25**, schema PX8. Not comparable with v0.18 captures, whose timing
+Current: **v1.27**, schema PX8. Not comparable with v0.18 captures, whose timing
 was sampled without interrupt masking.
 
 ## Test tiers
@@ -261,6 +261,7 @@ hardware state until the operator chooses an entry. Menus fit without scrolling:
    | `RESULTS BY SECTION` | All checks, then CPU/RAM/IRQ/DMA/TIMERS/GPU/GTE/SPU/CDROM/SIO |
    | `HARDWARE SCANS` | CPU sweep, GTE sweep, SPU register map |
    | `TARGETED PROBES` | SB1/SB2/SB4 SPU probes, controller SIO timing, CD-chain and PA1-PA5 audio probes, `PERF SWEEP (SAFE)` and `PERF A/B (MAY HANG)` |
+   | `CONSOLE TESTS (V1.27)` | Four cases for one console session: kernel timing on the real BIOS, display widths, 480i interlace, XA music looping (see below). Each leaves its numbers in the next capture |
    | `VIDEO LEVELS (TV/CAPTURE)` | Grey ramp and flat fields for display-chain checks |
    | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
    | `RESUME FROM TEST` | Restarts a long battery after a selected test index |
@@ -300,6 +301,67 @@ again for a slower, more robust rate; the decoder detects which was used.
 
 Expect the battery to take noticeably longer than it used to. It does around 40
 real seeks plus the GPU, MDEC and SIO work.
+
+## Console tests (v1.27)
+
+`MAIN MENU > CONSOLE TESTS (V1.27)` holds four cases. Each takes over the
+display for its run, keeps its result up until CROSS, then opens the QR pages
+with its records in the capture (records `2C0`-`2E3`, decoded by
+`hwtest-report.py` as `console_*` rows). They are for filming: the answer is
+on the screen, and the QR pages carry the numbers behind it.
+
+**KERNEL TIMING (BIOS).** The SDK runtime replaces the BIOS exception vector,
+so a normal run never executes a line of kernel. This case puts the vector the
+BIOS left back (`main` snapshots it before the engine starts) and measures, in
+system-clock cycles from root counter 2: EnterCriticalSection and
+ExitCriticalSection one call at a time, with an empty call timed the same way
+(`EMPTY CALL`) and subtracted into the `NET` column; then a VBlank round trip.
+The round trip is the gap in a loop that reads the counter back to back: a
+kernel event for VBlank is opened (class F2000003h, spec 2), only VBlank is
+unmasked, and each interrupt shows as one read far later than the one before.
+The runtime's own handler gets the same measurement (`VBLANK SDK`) as a
+reference. The BIOS VBlank part runs last, three seconds after the earlier
+results are shown, and may hang a kernel that does not acknowledge a VBlank
+nobody handles: if the screen stops on `BIOS VBLANK NEXT`, that is the result
+(power-cycle, and the other three cases are unaffected). The emulator's HLE
+kernel answers the same case, so run it headless for the matching emulator
+numbers; compare console and emulator on this case's own output.
+
+**DISPLAY WIDTHS.** Steps through 256, 320, 368, 384, 512 and 640 pixels, five
+seconds each (LEFT/RIGHT steps, START ends). The picture is a dark field with a
+red bar on the extreme left pixels, a green bar on the extreme right, white
+one-pixel lines on the outermost rows, one-pixel stripes beside each edge, grey
+frames 8, 16 and 24 pixels in, and a ruler of ticks every 16 pixels and numbers
+every 64. Read it off the screen: all of both bars visible and no black band
+means the width is whole; a missing bar, or a ruler that starts at 64, is the
+amount cropped; stripes that smear are a wrong dot clock. 256, 320, 512 and
+640 go through `DisplayConfig`. It has no 368 or 384 preset, so those start
+from the 320 `DisplayConfig` and write GP1(08h) with the 368-mode bit and
+GP1(06h) from the 7-clock dot clock themselves; 384 pixels is that mode with a
+wider window, an assumption the case tests (the emulator shows both as 368).
+
+**480I INTERLACE.** A 640x480 interlaced picture through
+`DisplayConfig::R640X480`: red on even lines and blue on odd on the left, white
+line patterns at 1, 2 and 4 pixel pitch on the right. A display showing both
+fields shows both colours (a flicker between them on a CRT); one showing a
+single field shows one. The header reads GPUSTAT live (480-line and interlace
+bits) and counts how often the field bit changed at VBlank (about once a frame
+when interlace works).
+
+**XA MUSIC LOOP.** Plays channel 0 of `HWSONGS.XA` (generated tones, 6 s) on
+loop through `psx_io::cd::xa::Player`. The screen shows the state, the head
+position, the loop count, the restart gap of each loop in milliseconds (the
+time from the player restarting the song to the first poll that finds the head
+back inside it, polling every few milliseconds) and a GETLOCP line: UPDATING
+if the head position keeps changing, FROZEN OR SLOW otherwise, with the longest
+time it sat still. If the song never loops, `NO LOOP SEEN` appears after its
+length plus three seconds. The file comes from `make hardware-tests-disc`,
+which needs `PSOXIDE_SDK` for the encode as `MOVIE.STR` does (the SDK at
+ae6e1ef10 or later; it builds the file with `psx-audio-cook xa-encode`, four
+tone songs as the channels of one 37.8 kHz stereo single-speed file) and puts
+it on the disc after `MOVIE.STR` with `mkisopsx --xa-file`. A program
+chain-loaded from another disc needs `HWSONGS.XA` in its own part of the image,
+found by name.
 
 ## Timing records move when the guest binary changes
 
