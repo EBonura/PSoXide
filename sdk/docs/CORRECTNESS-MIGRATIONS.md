@@ -334,3 +334,20 @@ main, which this does not touch. Callers pass settings that are non-negative
 today (nitroxide `move_deadzone as i16`, voxide `SET_LOOK_DZ` and
 `SET_MOVE_DZ`, hl-psx and cs-psx `ANALOG_DEADZONE`, quake-psx
 `input.rs`), so no game changes.
+
+## psx-telemetry: slot counts follow the id tables, and the crate has tests (tel-01)
+
+The comment above the compile-time guard said "adding a higher id trips
+this", but the guard was `GAME_LOGIC == STAGE_COUNT - 1`: a new
+`pub const NEW: u16 = 52` anywhere in the table compiled, the host dropped
+id 52 silently, and the same held for `COUNTER_COUNT` (checked on main with
+exactly that edit). The crate also had no tests.
+
+`id_table!` now emits `IDS` and `MAX_ID` in each id module, and `STAGE_COUNT`
+and `COUNTER_COUNT` are `MAX_ID + 1`; `TASK_COUNT` stays 16 with a compile-time
+check that every task id fits. The values are unchanged (52, 267, 16), so the
+emulator's arrays keep their sizes. New host tests check ids are unique per
+table, every declared id has a description and unknown ids none, every id fits
+its slot count, and the event word and kinds 1 to 6 decode as
+`emulator-core` decodes them. No game or emulator change; `IDS` and `MAX_ID`
+are additions.
