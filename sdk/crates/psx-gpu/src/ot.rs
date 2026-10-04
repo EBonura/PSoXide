@@ -25,6 +25,7 @@
 
 use core::marker::PhantomData;
 use core::ptr;
+use psx_io::periph::OrderingTableClearDma;
 
 const OT_ADDR_MASK: u32 = 0x00FF_FFFF;
 const OT_END: u32 = OT_ADDR_MASK;
@@ -33,6 +34,18 @@ const OT_MAX_EXTRA_HOPS: usize = 131_072;
 /// keep only the word count and the slot from a staged tag.
 #[deprecated(note = "has no effect: the scoped texture-window coalescing that read it was removed")]
 pub const TAG_SCOPED_TEXTURE_WINDOW: u32 = 1 << 16;
+/// Whether DMA can read `packet`: on the console, main RAM (any mirror or
+/// segment) and not the scratchpad, whose low 24 bits would name a RAM
+/// address instead. Host builds accept any address.
+fn is_dma_reachable(packet: *mut u32) -> bool {
+    if cfg!(target_arch = "mips") {
+        let physical = psx_hw::memory::to_physical(packet.addr() as u32);
+        physical < psx_hw::memory::ram::MIRROR_END
+    } else {
+        true
+    }
+}
+
 /// Fixed-size OT. `N` depth slots. Typical values: 256, 1024, 4096.
 #[repr(C, align(4))]
 pub struct OrderingTable<const N: usize> {
@@ -65,25 +78,29 @@ impl<const N: usize> OrderingTable<N> {
         self.clear_software();
     }
 
-    /// Opt-in OTC DMA clear (the pre-CL2 default). On hardware whose DMA
-    /// controller wedges, this spins forever inside the DMA wait.
-    #[cfg(target_arch = "mips")]
+    /// [`clear`](Self::clear) through the ordering-table-clear DMA channel
+    /// (channel 6) instead of the CPU.
+    ///
+    /// The wait is bounded: if the channel wedges, which the CL2 silicon
+    /// probes saw it do, or the table is longer than a 16-bit word count,
+    /// the CPU clear runs instead, so the table is always valid. Host
+    /// builds always clear with the CPU.
     #[doc(alias = "ClearOTagR")]
-    pub fn clear_with_dma(&mut self) {
-        let cleared = psx_io::dma::clear_ordering_table(&mut self.entries);
-        if !cleared {
-            // Wedged channel or an over-large table: the CPU path always
-            // produces a valid chain, so never hand back a stale one.
-            self.clear_software();
+    pub fn clear_with_dma(&mut self, _dma: &mut OrderingTableClearDma) {
+        #[cfg(target_arch = "mips")]
+        if psx_io::dma::clear_ordering_table(&mut self.entries) {
+            return;
         }
+        self.clear_software();
     }
 
-    /// Renamed to [`Self::clear_with_dma`].
-    #[cfg(target_arch = "mips")]
-    #[deprecated(note = "renamed to `clear_with_dma`")]
+    /// Renamed to [`Self::clear_with_dma`], which takes the channel's token.
+    #[deprecated(note = "use `clear_with_dma` with the `OrderingTableClearDma` token")]
     #[inline(always)]
     pub fn clear_via_otc_dma(&mut self) {
-        self.clear_with_dma()
+        // SAFETY: a token is a logic guard, not a memory-safety one (see
+        // `psx_io::periph`); this method never took one.
+        self.clear_with_dma(&mut unsafe { OrderingTableClearDma::steal() });
     }
 
     #[cfg(not(target_arch = "mips"))]
@@ -189,14 +206,9 @@ impl<const N: usize> OrderingTable<N> {
     /// In addition, `z` must be less than `N`.
     #[inline(always)]
     pub(crate) unsafe fn link_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
-        debug_assert!(z < N);
         debug_assert!(words as usize <= crate::MAX_NODE_WORDS);
-        let old_head = self.entries[z] & OT_ADDR_MASK;
-        let tag = ((words as u32) << 24) | old_head;
-        // SAFETY: the caller guarantees `packet_ptr` is a live, writable, aligned tag word.
-        unsafe { ptr::write_volatile(packet_ptr, tag) };
-        let pkt_addr = packet_ptr.expose_provenance() as u32 & OT_ADDR_MASK;
-        self.entries[z] = pkt_addr;
+        // SAFETY: forwarded contract; a word count below 256 fills the top byte only.
+        unsafe { self.link_tag_high_unchecked(z, packet_ptr, (words as u32) << 24) };
     }
 
     /// Prepend a primitive whose packet-word count is already stored in the
@@ -215,11 +227,13 @@ impl<const N: usize> OrderingTable<N> {
         debug_assert!(z < N);
         debug_assert_eq!(tag_high & OT_ADDR_MASK, 0);
         debug_assert!((tag_high >> 24) as usize <= crate::MAX_NODE_WORDS);
-        let old_head = self.entries[z] & OT_ADDR_MASK;
-        // SAFETY: as `link_unchecked`: the caller guarantees a writable tag word.
+        debug_assert!(is_dma_reachable(packet_ptr), "GPU DMA reads main RAM only");
+        // SAFETY: the caller guarantees `z < N`.
+        let entry = unsafe { self.entries.get_unchecked_mut(z) };
+        let old_head = *entry & OT_ADDR_MASK;
+        // SAFETY: the caller guarantees a live, writable, aligned tag word.
         unsafe { ptr::write_volatile(packet_ptr, tag_high | old_head) };
-        let pkt_addr = packet_ptr.expose_provenance() as u32 & OT_ADDR_MASK;
-        self.entries[z] = pkt_addr;
+        *entry = packet_ptr.expose_provenance() as u32 & OT_ADDR_MASK;
     }
 
     /// Insert an array of compact raw packet commands in caller order.
