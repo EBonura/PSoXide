@@ -25,7 +25,7 @@ Before the render loop, the example initializes the SPU and parses each embedded
 
 ```rust
 let addr = SpuAddr::new(next_addr);
-spu::upload_adpcm(addr, audio.adpcm_bytes());
+spu.upload_adpcm(addr, audio.adpcm_bytes());
 ch.voice.configure_sample(
     addr, audio.sample_rate_hz(), ch.volume, Adsr::sample(),
 );
