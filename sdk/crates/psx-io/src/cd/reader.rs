@@ -25,8 +25,8 @@
 //! [`SectorReader::prepare`] polls the controller's own IRQ flags, so it
 //! keeps CD-ROM interrupts away from the CPU for the length of a stream:
 //!
-//! * `I_MASK` is set to VBlank-only until [`SectorReader::stop`] puts the
-//!   previous value back. Every other source stops reaching the CPU in
+//! * `I_MASK` is set to VBlank-only (by `prepare`, and again by each
+//!   `start_read`) until [`SectorReader::stop`] puts the previous value back. Every other source stops reaching the CPU in
 //!   between: a CD-ROM IRQ with no handler would otherwise be an unhandled-IRQ
 //!   storm.
 //! * The latched CD-ROM `I_STAT` bit is acked and the controller's five IRQ
@@ -297,6 +297,13 @@ impl SectorReader {
         ok
     }
 
+    /// Set `I_MASK` to VBlank-only, keeping the caller's mask for
+    /// [`stop`](Self::stop). Idempotent within a stream.
+    fn enter_polling_mask(&mut self) {
+        self.saved_mask.keep(irq::mask());
+        irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+    }
+
     fn restore_irq_mask(&mut self) {
         if let Some(mask) = self.saved_mask.take() {
             irq::set_mask(mask);
@@ -363,8 +370,7 @@ impl SectorReader {
         self.mode = mode;
         // Keep CD-ROM at the controller level and poll its IRQ flags
         // manually, so DataReady cannot enter an unhandled CPU IRQ storm.
-        self.saved_mask.keep(irq::mask());
-        irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+        self.enter_polling_mask();
         irq::acknowledge(1 << psx_hw::irq::source::CDROM);
         self.cd.set_irq_enable_mask(ALL_IRQS_ENABLED);
         self.cd.acknowledge_all_and_reset_parameters();
@@ -411,6 +417,9 @@ impl SectorReader {
     /// multi-program disc [`crate::disc_base`] shifts it to where that image
     /// actually landed.
     pub fn start_read(&mut self, lba: u32) -> bool {
+        // A caller that prepared once and starts several streams still gets
+        // the polling mask for each, and `stop` still puts its own back.
+        self.enter_polling_mask();
         if !self.set_location(lba) {
             return false;
         }
@@ -431,6 +440,7 @@ impl SectorReader {
     /// settling; the same console that corrupts our sustained implicit-seek
     /// streams loads 1.4 MB EXEs through the BIOS bracket without fault.
     pub fn start_read_seek_first(&mut self, lba: u32, seek_poll: u32) -> bool {
+        self.enter_polling_mask();
         if !self.set_location(lba) {
             return false;
         }
