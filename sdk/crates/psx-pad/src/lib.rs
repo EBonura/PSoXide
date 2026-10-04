@@ -1202,21 +1202,37 @@ fn enable_analog<T: Transport>(bus: &mut T, socket: Port) -> bool {
 /// command again, a bounded number of times, before its state is reported.
 fn request_analog<T: Transport>(bus: &mut T, socket: Port, gap: u32) -> PadState {
     // Enter config mode.
-    transaction(bus, socket, [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    transaction(
+        bus,
+        socket,
+        [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+    );
     bus.delay(gap);
     // Request analog mode and lock it so the pad cannot toggle
     // back underneath analog-only game controls.
-    transaction(bus, socket, [0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00]);
+    transaction(
+        bus,
+        socket,
+        [0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00],
+    );
     bus.delay(gap);
     // Exit config mode, restoring the requested analog mode.
-    transaction(bus, socket, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    transaction(
+        bus,
+        socket,
+        [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    );
     bus.delay(gap);
     let mut state = poll_state(bus, socket);
     let mut retries = 0;
     while state.mode == PadMode::Config && retries < CONFIG_EXIT_RETRIES {
         // The exit did not take: leave the pad in a playable mode rather
         // than parked in configuration, then re-read what it settled on.
-        transaction(bus, socket, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        transaction(
+            bus,
+            socket,
+            [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        );
         bus.delay(gap);
         state = poll_state(bus, socket);
         retries += 1;
@@ -1263,7 +1279,15 @@ fn transaction<T: Transport>(bus: &mut T, socket: Port, bytes: [u8; 8]) -> [u8; 
     bus.delay(DEFAULT_SETUP_SPINS);
     let mut ack = 0u16;
     let mut idx = 0u8;
-    let _select = ex(bus, socket, Pacing::NoAckWait, 0x01, false, &mut ack, &mut idx);
+    let _select = ex(
+        bus,
+        socket,
+        Pacing::NoAckWait,
+        0x01,
+        false,
+        &mut ack,
+        &mut idx,
+    );
     let mut out = [0u8; 8];
     let mut i = 0;
     while i < bytes.len() {

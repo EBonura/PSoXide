@@ -211,7 +211,11 @@ fn a_reader_holds_the_last_clean_state_through_a_failed_poll() {
     mock::with(|m| m.fault = Fault::None);
     assert_eq!(reader.poll_on(&mut MockBus).buttons.bits(), held);
     mock::with(|m| m.id = 0xFF);
-    assert_eq!(reader.poll_on(&mut MockBus).buttons.bits(), 0, "an unplugged pad releases");
+    assert_eq!(
+        reader.poll_on(&mut MockBus).buttons.bits(),
+        0,
+        "an unplugged pad releases"
+    );
 }
 
 /// A DualShock that starts in digital mode, as after a reset.
@@ -293,8 +297,14 @@ fn a_digital_only_pad_and_an_empty_port_are_told_apart() {
 )]
 fn the_public_requests_use_the_frame_spaced_sequence_on_either_port() {
     start(digital_dualshock());
-    assert_eq!(crate::require_analog_on(&mut MockBus, Port::One), AnalogRequirement::Analog);
-    assert_eq!(crate::require_analog_on(&mut MockBus, Port::Two), AnalogRequirement::Analog);
+    assert_eq!(
+        crate::require_analog_on(&mut MockBus, Port::One),
+        AnalogRequirement::Analog
+    );
+    assert_eq!(
+        crate::require_analog_on(&mut MockBus, Port::Two),
+        AnalogRequirement::Analog
+    );
     mock::with(|m| assert!(m.locked && m.id == 0x73));
 }
 
