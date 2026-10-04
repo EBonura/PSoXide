@@ -22,7 +22,8 @@
 //! counter. Neither takes an interrupt or blocks beyond the bounded
 //! command spins.
 
-use crate::cd::{self, PlayPosition};
+use crate::cd::PlayPosition;
+use crate::periph::Cd;
 
 /// Ticks to wait before the very first command: hammering CD commands while
 /// the drive is still cold from boot can wedge it (observed on silicon).
@@ -113,21 +114,22 @@ impl PlaybackStarter {
         }
     }
 
-    /// Drive one attempt if due. Returns true exactly once, on the tick the
-    /// Play command is accepted. Safe to keep calling afterwards (no-op).
-    pub fn tick(&mut self, now_tick: u32, track: u8) -> bool {
+    /// Drive one attempt if due, issuing its command through `cd`. Returns
+    /// true exactly once, on the tick the Play command is accepted. Safe to
+    /// keep calling afterwards (no-op).
+    pub fn tick_on(&mut self, cd: &mut Cd, now_tick: u32, track: u8) -> bool {
         if self.step == StartStep::Done || now_tick.wrapping_sub(self.next_try_tick) > u32::MAX / 2
         {
             return false;
         }
         self.tick_with(now_tick, track, |step, track, spins| {
             let ok = match step {
-                StartStep::SetMode => cd::try_set_mode(psx_hw::cd::MODE_CDDA, spins).is_some(),
-                StartStep::Demute => cd::try_unmute(spins).is_some(),
-                StartStep::Play => cd::try_play_track(track, spins).is_some(),
+                StartStep::SetMode => cd.try_set_mode(psx_hw::cd::MODE_CDDA, spins).is_some(),
+                StartStep::Demute => cd.try_unmute(spins).is_some(),
+                StartStep::Play => cd.try_play_track(track, spins).is_some(),
                 StartStep::Done => unreachable!(),
             };
-            let _ = cd::try_status(spins);
+            let _ = cd.try_status(spins);
             ok
         })
     }
@@ -298,15 +300,15 @@ impl PlaybackClock {
         self.playing
     }
 
-    /// Advance and return the current song time in ms. Polls the drive at
-    /// most once per [`RESYNC_TICKS`]; interpolates otherwise.
-    pub fn tick(&mut self, now_tick: u32) -> u32 {
+    /// Advance and return the current song time in ms. Polls the drive through
+    /// `cd` at most once per [`RESYNC_TICKS`]; interpolates otherwise.
+    pub fn tick_on(&mut self, cd: &mut Cd, now_tick: u32) -> u32 {
         if !self.playing {
             return 0;
         }
         if now_tick.wrapping_sub(self.last_poll_tick) >= RESYNC_TICKS {
             self.last_poll_tick = now_tick;
-            if let Some(drive_ms) = poll_drive_ms() {
+            if let Some(drive_ms) = poll_drive_ms(cd) {
                 self.consider_anchor(now_tick, drive_ms);
             }
         }
@@ -365,12 +367,18 @@ impl PlaybackClock {
 
 /// Poll GetlocP and convert the track-relative MSF to milliseconds. `None`
 /// when the drive is not ready (short response / no disc).
-fn poll_drive_ms() -> Option<u32> {
-    let resp = cd::try_play_position(16_384)?;
+fn poll_drive_ms(cd: &mut Cd) -> Option<u32> {
+    let resp = cd.try_play_position(16_384)?;
     PlayPosition::parse(&resp).map(|p| p.relative_millis())
 }
 
 impl PlaybackStarter {
+    /// [`tick_on`](Self::tick_on) on a token the caller does not hold.
+    #[deprecated(note = "use `tick_on` with the `Cd` token")]
+    pub fn tick(&mut self, now_tick: u32, track: u8) -> bool {
+        self.tick_on(&mut steal(), now_tick, track)
+    }
+
     /// Renamed to [`Self::has_started`].
     #[deprecated(note = "renamed to `has_started`")]
     pub fn started(&self) -> bool {
@@ -387,11 +395,24 @@ impl EndDetector {
 }
 
 impl PlaybackClock {
+    /// [`tick_on`](Self::tick_on) on a token the caller does not hold.
+    #[deprecated(note = "use `tick_on` with the `Cd` token")]
+    pub fn tick(&mut self, now_tick: u32) -> u32 {
+        self.tick_on(&mut steal(), now_tick)
+    }
+
     /// Renamed to [`Self::is_playing`].
     #[deprecated(note = "renamed to `is_playing`")]
     pub fn playing(&self) -> bool {
         self.is_playing()
     }
+}
+
+/// A token for a deprecated forwarder that never took one.
+fn steal() -> Cd {
+    // SAFETY: a token is a logic guard, not a memory-safety one (see
+    // `crate::periph`), and the old methods never took one.
+    unsafe { Cd::steal() }
 }
 
 #[cfg(test)]
@@ -493,7 +514,9 @@ mod tests {
     #[test]
     fn stopped_clock_reads_zero() {
         let mut c = PlaybackClock::new(60);
-        assert_eq!(c.tick(100), 0);
+        // A stopped clock never touches the drive, so the host token is safe to
+        // pass.
+        assert_eq!(c.tick_on(&mut steal(), 100), 0);
     }
 
     /// The exact sequence the demo-disc debug burn photographed: after a
