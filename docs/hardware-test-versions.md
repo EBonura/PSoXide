@@ -33,6 +33,19 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.27 (2026-10-04, schema PX8)
+
+`CONSOLE TESTS (V1.27)` joins the main menu, after TARGETED PROBES, as a page of four cases for one console session (`src/console_tests.rs`, `kernel_timing.rs`, `display_widths.rs`, `xa_loop.rs`; details in [hardware-test-disc.md](hardware-test-disc.md)):
+
+* `KERNEL TIMING (BIOS)`: EnterCriticalSection and ExitCriticalSection (SYSCALL 1 and 2), and a VBlank interrupt round trip, in system-clock cycles from root counter 2, with the exception vector the BIOS left (snapshotted in `main`) put back for the measurement. The runtime's own VBlank handler is measured for reference.
+* `DISPLAY WIDTHS`: an edge-marker pattern at 256, 320, 368, 384, 512 and 640 pixels through `psx_gpu::display::DisplayConfig` (368 and 384 add raw GP1 writes, which `DisplayConfig` has no preset for).
+* `480I INTERLACE`: a 640x480 interlaced pattern through `DisplayConfig::R640X480`, with GPUSTAT bits and field-parity changes counted at VBlank.
+* `XA MUSIC LOOP`: `HWSONGS.XA` (generated tones) looped through `psx_io::cd::xa::Player`, with the restart gap per loop and whether GetlocP keeps updating.
+
+The disc gains `HWSONGS.XA` after `MOVIE.STR` (468 sectors), which moves the CD-DA track outward by that much. `CDTEST.BIN` and `MOVIE.STR` keep their LBAs. The SDK is pinned at ae6e1ef10. The boot EXE grows to 493 of its 502 sectors.
+
+New timing-block records, present only once a case has run, as for the FMV test: `2C0`-`2C5` kernel timing, `2D0`-`2D5` one per display width, `2D6`-`2D7` interlace, `2E0`-`2E3` XA loop (layouts in each module's `records`, decoded by `tools/hwtest-report.py` `console_rows`). `TIMING_RECORD_COUNT` grows to 354. No existing record changed meaning, hence MINOR.
+
 ### v1.26 (2026-09-26, schema PX8)
 
 v1.25's FMV test never started on a PAL SCPH-9002: the SDK player's DMA0
