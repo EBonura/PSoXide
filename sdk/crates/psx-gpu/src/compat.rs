@@ -15,7 +15,7 @@ use crate::prim::{
     FillRect, LineGouraud, LineMono, QuadFlat, QuadTexturedGouraud, QuadTexturedMaterial, Sprite,
     TriFlat, TriGouraud, TriTextured,
 };
-use crate::TextureDepth;
+use psx_io::timers;
 
 /// Initialise the GPU: reset, display mode, display window, DMA direction,
 /// display on.
@@ -282,6 +282,159 @@ pub fn draw_sprite_material(
     gpu::draw(&Sprite::with_material(x, y, w, h, uv, material));
 }
 
+/// Configure Timer 1 as an HBlank-counting scanline counter.
+///
+/// WARNING: writing a timer's mode register resets its counter, so every
+/// call restarts the count from zero. That is why the helpers below cannot
+/// observe the real display position: they reconfigure before reading.
+#[deprecated(note = "Timer 1 belongs to `psx_io::timers`; set its mode there")]
+#[inline]
+pub fn configure_scanline_timer() {
+    // Mode: bit0=sync enable, bits1-2=01 (reset at VBlank), bit8=1
+    // (clock source = HBlank).
+    timers::set_mode(timers::Timer::Timer1, 0x0103);
+}
+
+/// Renamed to [`configure_scanline_timer`]: it programs Timer 1 to count
+/// HBlanks and has nothing to do with vertical sync.
+#[deprecated(note = "renamed to `configure_scanline_timer`")]
+#[inline(always)]
+pub fn configure_vsync_timer() {
+    configure_scanline_timer()
+}
+
+/// Timer-1 scanline counter used by the VBlank wait helpers.
+#[deprecated(
+    note = "reconfigures Timer 1 before reading, which resets the counter, \
+            so this returns ~0 rather than the display scanline; use \
+            psx_rt::interrupts for display timing"
+)]
+#[inline]
+pub fn scanline_counter() -> u16 {
+    configure_scanline_timer();
+    timers::counter(timers::Timer::Timer1)
+}
+
+/// Whether Timer 1 currently reports the VBlank scanline region.
+#[deprecated(note = "built on scanline_counter(), whose reconfigure-before-read \
+            resets the counter, so this is almost always false; use \
+            psx_rt::interrupts for display timing")]
+#[inline]
+pub fn in_vblank() -> bool {
+    scanline_counter() >= 242
+}
+
+/// Wait 242 HBlank periods (~15.4ms) from the moment of the call.
+///
+/// Despite the name, this does NOT sync to the display: reconfiguring
+/// Timer 1 resets its counter, so the wait starts from zero at the call
+/// site. Frame time becomes `work + 15.4ms` instead of snapping to the
+/// next VBlank -- nearly right for light frames, badly slow for heavy
+/// ones. It cannot be repaired here: syncing needs the VBlank IRQ, which
+/// the runtime owns.
+#[deprecated(note = "busy-waits a fixed 242 HBlanks from the call site instead of \
+            syncing to the display; use psx_rt::interrupts::wait_vblank()")]
+pub fn vsync() {
+    configure_scanline_timer();
+    while timers::counter(timers::Timer::Timer1) < 242 {}
+}
+
+/// Texture color depth for the deprecated `set_texture_page`.
+#[deprecated(
+    note = "only `set_texture_page` used it; `TextureMaterial` and psx-vram's `TextureDepth` describe texture pages"
+)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum TextureDepth {
+    /// 4-bit CLUT-indexed.
+    Bit4 = 0,
+    /// 8-bit CLUT-indexed.
+    Bit8 = 1,
+    /// 15-bit direct color.
+    Bit15 = 2,
+}
+
+/// Kick a linked-list chain without waiting for the walk.
+///
+/// # Safety
+///
+/// As [`crate::chain::submit_async_raw`].
+#[deprecated(note = "use `chain::submit_async_raw`, which takes the `GpuDma` token")]
+#[doc(alias = "DrawOTag")]
+#[inline(always)]
+pub unsafe fn submit_linked_list_async_raw(head: *const u32) {
+    // SAFETY: forwarded contract.
+    unsafe { crate::chain::start_walk(head) }
+}
+
+/// Renamed to [`submit_linked_list_async_raw`].
+///
+/// # Safety
+///
+/// As [`crate::chain::submit_async_raw`].
+#[deprecated(note = "use `chain::submit_async_raw`, which takes the `GpuDma` token")]
+#[inline(always)]
+pub unsafe fn submit_linked_list_raw_async(head: *const u32) {
+    // SAFETY: forwarded contract.
+    unsafe { crate::chain::start_walk(head) }
+}
+
+/// Old name of [`submit_linked_list_async_raw`].
+///
+/// # Safety
+///
+/// As [`crate::chain::submit_async_raw`].
+#[deprecated(
+    note = "use `OrderingTable::frame`, `Gpu::submit_static`, or the unsafe `chain::submit_async_raw`"
+)]
+#[inline(always)]
+pub unsafe fn submit_linked_list_async(head: *const u32) {
+    // SAFETY: forwarded contract.
+    unsafe { crate::chain::start_walk(head) }
+}
+
+/// Kick a linked-list chain and wait for the walk.
+///
+/// # Safety
+///
+/// As [`crate::chain::submit_raw`].
+#[deprecated(note = "use `chain::submit_raw`, which takes the `GpuDma` token")]
+#[doc(alias = "DrawOTag")]
+#[inline(always)]
+pub unsafe fn submit_linked_list_raw(head: *const u32) {
+    // SAFETY: forwarded contract; the wait ends the walk before return.
+    unsafe { crate::chain::start_walk(head) };
+    crate::chain::wait_walk();
+}
+
+/// Old name of [`submit_linked_list_raw`].
+///
+/// # Safety
+///
+/// As [`crate::chain::submit_raw`].
+#[deprecated(
+    note = "use `OrderingTable::frame`, `Gpu::submit_static`, or the unsafe `chain::submit_raw`"
+)]
+#[inline(always)]
+pub unsafe fn submit_linked_list(head: *const u32) {
+    // SAFETY: forwarded contract; the wait ends the walk before return.
+    unsafe { crate::chain::start_walk(head) };
+    crate::chain::wait_walk();
+}
+
+/// Wait until the linked-list walk kicked last has finished.
+#[deprecated(note = "use `chain::wait`, which takes the `GpuDma` token")]
+#[inline(always)]
+pub fn submit_linked_list_wait() {
+    crate::chain::wait_walk();
+}
+
+/// Renamed to [`crate::is_draw_done`].
+#[deprecated(note = "renamed to `is_draw_done`")]
+#[inline(always)]
+pub fn draw_done() -> bool {
+    crate::is_draw_done()
+}
 /// Each forwarder now sends a packet's payload; these tests check that
 /// payload against the word sequence the free function wrote before it
 /// forwarded, taken from its old body.

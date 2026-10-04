@@ -1613,7 +1613,7 @@ impl Sprite {
 /// The implementing type must be `#[repr(C)]` with 4-byte alignment and a
 /// `u32` tag word as its first field, followed by at least `WORDS` more
 /// initialised `u32`s that form the packet's GP0 payload. `WORDS` must not
-/// exceed [`crate::MAX_NODE_WORDS`]. The type must have no interior
+/// exceed [`crate::chain::MAX_NODE_WORDS`]. The type must have no interior
 /// mutability, so the payload cannot change while it is borrowed.
 pub unsafe trait GpuPacket {
     /// Payload words after the tag.
@@ -1657,7 +1657,7 @@ impl_gpu_packet!(
     Sprite,
 );
 
-// Every packet here fits one linked-list node (see `crate::MAX_NODE_WORDS`).
+// Every packet here fits one linked-list node (see `crate::chain::MAX_NODE_WORDS`).
 const _: () = {
     let words = [
         TriFlat::WORDS,
@@ -1681,7 +1681,7 @@ const _: () = {
     ];
     let mut i = 0;
     while i < words.len() {
-        assert!(words[i] as usize <= crate::MAX_NODE_WORDS);
+        assert!(words[i] as usize <= crate::chain::MAX_NODE_WORDS);
         i += 1;
     }
 };

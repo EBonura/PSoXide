@@ -1,9 +1,9 @@
 //! The GPU driver.
 
+use crate::chain::StaticChain;
 use crate::display::DisplayConfig;
 use crate::material::{TextureMaterial, TextureWindow};
 use crate::prim::GpuPacket;
-use crate::StaticChain;
 use psx_hw::gpu::{gp0, gp1, DmaDirection};
 use psx_io::gpu::{wait_command_ready, write_command, write_display_control};
 use psx_io::periph::GpuDma;
@@ -185,7 +185,7 @@ impl Gpu {
     }
 
     /// Kick a `'static`, immutable chain, such as
-    /// [`DRAW_DONE_NODE`](crate::DRAW_DONE_NODE), without waiting for it.
+    /// [`DRAW_DONE_NODE`](crate::chain::DRAW_DONE_NODE), without waiting for it.
     ///
     /// The chain outlives any walk, so there is nothing to wait for before
     /// reusing memory; a later kick waits for this walk on its own.
@@ -193,7 +193,7 @@ impl Gpu {
     pub fn submit_static(&mut self, chain: &'static impl StaticChain) {
         // SAFETY: `StaticChain` guarantees a well-formed list that stays live
         // and unmodified for 'static.
-        unsafe { crate::submit_linked_list_async_raw(chain.head()) }
+        unsafe { crate::chain::start_walk(chain.head()) }
     }
 }
 
