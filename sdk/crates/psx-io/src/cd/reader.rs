@@ -115,6 +115,20 @@ impl SavedMask {
 /// Typical use is not these raw methods but `psx_pack::cd::load_chunk` on top.
 /// The raw sequence is: `prepare()`, `start_read(lba)`, N times
 /// `read_sector(&mut buf)`, `stop()`.
+///
+/// The reader owns the drive, so nothing else can command it meanwhile:
+///
+/// ```compile_fail,E0382
+/// use psx_io::cd::reader::SectorReader;
+/// use psx_io::periph::Cd;
+///
+/// // SAFETY: the doctest never runs a command; it only has to compile.
+/// let mut cd = unsafe { Cd::steal() };
+/// let mut reader = SectorReader::with_cd(cd);
+/// // The token moved into the reader, so this is a use after move.
+/// let _ = cd.play_track(2);
+/// reader.stop();
+/// ```
 pub struct SectorReader {
     cd: Cd,
     prepared: bool,
