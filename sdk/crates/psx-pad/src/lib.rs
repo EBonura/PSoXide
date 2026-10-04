@@ -1000,6 +1000,7 @@ unsafe fn ex(
 /// only establishes that the current byte arrived, not that the controller
 /// is ready for the next one. No IRQ enable or CTRL rewrite is needed.
 unsafe fn poll_once(port2: bool) -> RawPoll {
+    // SAFETY: every helper called here drives SIO0 only (SIO0 access contract).
     unsafe {
         select(port2, false);
         delay_reads(DEFAULT_SETUP_SPINS);
@@ -1017,7 +1018,7 @@ unsafe fn poll_once(port2: bool) -> RawPoll {
         // MODE and BAUD before asserting the port again.
         deselect();
         if result.is_none() {
-            psx_io::write16(sio::CTRL, sio0::ctrl::RESET);
+            psx_io::write_u16(sio::CTRL, sio0::ctrl::RESET);
         }
         result.unwrap_or(RawPoll {
             mode: PadMode::Unknown,
@@ -1029,6 +1030,7 @@ unsafe fn poll_once(port2: bool) -> RawPoll {
 /// A complete selected-port poll, or no usable packet. The current ID
 /// determines the length; a mode toggle never reuses an earlier length.
 unsafe fn poll_selected() -> Option<RawPoll> {
+    // SAFETY: `exchange_poll` drives SIO0 only (SIO0 access contract).
     unsafe {
         match exchange_poll(0x01, false) {
             Ok(_) => {}
@@ -1083,15 +1085,17 @@ enum PollByteError {
 /// The preceding byte's ACK must have released before this DATA write.
 #[inline]
 unsafe fn exchange_poll(tx: u8, is_last: bool) -> Result<u8, PollByteError> {
+    // SAFETY: DATA and STAT are SIO0 registers (SIO0 access contract); one DATA write starts the
+    // byte and one DATA read pops its reply.
     unsafe {
         if !wait_stat(STAT_TX_READY, EXCHANGE_WAIT_SPINS) {
             return Err(PollByteError::TxTimeout);
         }
-        psx_io::write8(sio::DATA, tx);
+        psx_io::write_u8(sio::DATA, tx);
         let mut ack_seen = false;
         let mut spins = EXCHANGE_WAIT_SPINS;
         loop {
-            let stat = psx_io::read32(sio::STAT);
+            let stat = psx_io::read_u32(sio::STAT);
             ack_seen |= stat & STAT_DSR_LEVEL != 0;
             if stat & STAT_RX_NOT_EMPTY != 0 {
                 break;
@@ -1102,7 +1106,7 @@ unsafe fn exchange_poll(tx: u8, is_last: bool) -> Result<u8, PollByteError> {
             spins -= 1;
             core::hint::spin_loop();
         }
-        let rx = psx_io::read8(sio::DATA);
+        let rx = psx_io::read_u8(sio::DATA);
         if !is_last {
             if !ack_seen && !wait_stat(STAT_DSR_LEVEL, ACK_WAIT_SPINS) {
                 return Err(PollByteError::AckTimeout(rx));
