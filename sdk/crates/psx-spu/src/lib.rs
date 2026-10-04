@@ -202,7 +202,8 @@ pub fn init() {
     // Manual/DMA as needed when uploading.
     write_reg16(TRANSFER_CTRL, 0x0004); // normal mode
 
-    upload_adpcm(SILENCE_BLOCK, &SILENCE_BLOCK_BYTES);
+    // The one upload allowed onto the silence block: it writes the block.
+    upload_adpcm_unguarded(SILENCE_BLOCK, &SILENCE_BLOCK_BYTES);
 }
 
 /// One ADPCM block of silence that loops on itself, for every one-shot's
@@ -218,7 +219,7 @@ pub const SILENCE_BLOCK: SpuAddr = SpuAddr::new(0x1000);
 ///
 /// A voice that lands here decodes silence and jumps straight back to the top
 /// of the same block, so it stays here until something keys it off.
-const SILENCE_BLOCK_BYTES: [u8; 16] = [0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+static SILENCE_BLOCK_BYTES: [u8; 16] = [0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// Spin budget for one SPU handshake. Generous next to the delay the
 /// hardware actually takes, short enough that a wedged SPU hands control
@@ -867,10 +868,15 @@ pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
     // waveform bank starts at exactly 0x1000, which is how this was found.
     // Banks start at 0x1010.
     assert!(
-        dest.byte_offset() >= SILENCE_BLOCK.byte_offset() + SILENCE_BLOCK_BYTES.len() as u32
-            || core::ptr::eq(bytes.as_ptr(), SILENCE_BLOCK_BYTES.as_ptr()),
+        dest.byte_offset() >= SILENCE_BLOCK.byte_offset() + SILENCE_BLOCK_BYTES.len() as u32,
         "upload_adpcm: destination overlaps the SPU silence block at 0x1000",
     );
+    upload_adpcm_unguarded(dest, bytes);
+}
+
+/// [`upload_adpcm`] without the silence-block guard, for [`init`] writing
+/// that block. `bytes` is a whole number of halfwords.
+fn upload_adpcm_unguarded(dest: SpuAddr, bytes: &[u8]) {
     // Prefer DMA (channel 4): fast, and the only reliable path for uploads
     // larger than the 32-halfword transfer FIFO. Falls back to PIO when the
     // source is not word-aligned / a whole number of 32-bit words.
