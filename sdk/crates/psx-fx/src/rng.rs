@@ -63,14 +63,15 @@ impl LcgRng {
         self.next_mixed() % max
     }
 
-    /// Signed integer in roughly `[-range, +range]`, sourced from
-    /// five bits of the LCG. Bias is ≤ 1 unit at the extremes,
-    /// good enough for cosmetic particle spread.
+    /// Signed integer in `[-range, +range]`, symmetric about zero, sourced from
+    /// five bits of the LCG: thirty-two evenly spaced values from `-range` to
+    /// `+range`, rounded toward zero. Any `range` is fine, negative included
+    /// (the result is then mirrored); the arithmetic is 32-bit, so it does not
+    /// overflow for the whole `i16` range.
     #[inline]
     pub fn signed(&mut self, range: i16) -> i16 {
         let r = self.next();
-        let raw = ((r >> 16) & 0x1F) as i16; // 0..=31
-        (raw - 16) * range / 16
+        spread(((r >> 16) & 0x1F) as u8, range)
     }
 
     /// Current internal state -- useful if a caller wants to save /
@@ -78,6 +79,14 @@ impl LcgRng {
     pub const fn state(self) -> u32 {
         self.0
     }
+}
+
+/// Map five random bits (`0..=31`) onto `[-range, +range]`: odd multiples of
+/// `range / 31` from `-31` to `+31`, so the two ends are exactly `-range` and
+/// `+range` and the mapping is odd (`spread(31 - raw) == -spread(raw)`).
+const fn spread(raw: u8, range: i16) -> i16 {
+    let steps = 2 * (raw as i32) - 31; // -31, -29, ..., 31
+    (steps * range as i32 / 31) as i16
 }
 
 #[cfg(test)]
@@ -98,7 +107,40 @@ mod tests {
         let mut rng = LcgRng::new(0xBEEF_0042);
         for _ in 0..10_000 {
             let v = rng.signed(40);
-            assert!((-42..=40).contains(&v), "out of range: {v}");
+            assert!((-40..=40).contains(&v), "out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn signed_spans_the_whole_range_and_is_symmetric() {
+        // The old mapping gave [-range, 15 * range / 16]: at range = 40 the
+        // maximum was 37, and every burst drifted toward -x / -y.
+        for range in [1i16, 5, 40, 100, 1000, 2047, 2048, 20_000, i16::MAX] {
+            let mut min = i16::MAX;
+            let mut max = i16::MIN;
+            let mut sum = 0i64;
+            for raw in 0..32u8 {
+                let v = spread(raw, range);
+                assert_eq!(v, -spread(31 - raw, range), "range {range} raw {raw}");
+                min = min.min(v);
+                max = max.max(v);
+                sum += v as i64;
+            }
+            assert_eq!((min, max), (-range, range), "range {range}");
+            assert_eq!(sum, 0, "no net drift at range {range}");
+        }
+    }
+
+    #[test]
+    fn signed_does_not_overflow_on_large_ranges() {
+        // (raw - 16) * range overflowed i16 above 2047: a panic in a host
+        // debug build, a flipped sign on the console.
+        let mut rng = LcgRng::new(9);
+        for _ in 0..1000 {
+            let v = rng.signed(i16::MAX);
+            assert!(i32::from(v).abs() <= i32::from(i16::MAX));
+            let w = rng.signed(i16::MIN + 1);
+            assert!(i32::from(w).abs() <= i32::from(i16::MAX));
         }
     }
 
