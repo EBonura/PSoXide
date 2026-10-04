@@ -6,7 +6,6 @@
 //! tint, raw-texture flag, dither flag, and semi-transparency mode.
 
 use psx_hw::gpu::{gp0, pack_color};
-use psx_io::gpu::{wait_command_ready, write_command};
 
 /// PS1 semi-transparency mode.
 ///
@@ -113,13 +112,6 @@ impl TextureWindow {
     /// address the same texels directly and omit GP0(E2) from its packets.
     pub const fn origin_texels(self) -> [u8; 2] {
         [self.offset_x * 8, self.offset_y * 8]
-    }
-
-    /// Apply this texture window to the GPU state.
-    #[deprecated(note = "use `Gpu::set_texture_window`")]
-    pub fn apply(self) {
-        wait_command_ready();
-        write_command(self.word());
     }
 }
 
@@ -402,23 +394,9 @@ impl TextureMaterial {
         self.raw_texture
     }
 
-    /// Renamed to [`is_raw_texture`](Self::is_raw_texture).
-    #[deprecated(note = "renamed to `is_raw_texture`")]
-    #[inline(always)]
-    pub const fn raw_texture(self) -> bool {
-        self.is_raw_texture()
-    }
-
     /// True when the material asks GP0(E1) / primitive tpage state for dithering.
     pub const fn is_dithered(self) -> bool {
         self.dither
-    }
-
-    /// Renamed to [`is_dithered`](Self::is_dithered).
-    #[deprecated(note = "renamed to `is_dithered`")]
-    #[inline(always)]
-    pub const fn dither(self) -> bool {
-        self.is_dithered()
     }
 
     /// Textured polygon command bits without the low RGB payload.

@@ -58,8 +58,6 @@ pub mod compress;
 #[cfg(feature = "hw")]
 #[doc(alias = "SIO0")]
 pub mod hardware;
-#[cfg(feature = "hw")]
-pub mod sio;
 
 pub use ram::RamCard;
 

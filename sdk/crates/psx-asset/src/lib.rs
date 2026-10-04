@@ -464,13 +464,6 @@ impl<'a> Model<'a> {
         self.flags & psxed_format::model::flags::DOUBLE_SIDED != 0
     }
 
-    /// Renamed to [`Self::is_double_sided`].
-    #[deprecated(note = "renamed to `is_double_sided`")]
-    #[inline(always)]
-    pub fn double_sided(&self) -> bool {
-        self.is_double_sided()
-    }
-
     /// Number of joint records.
     #[inline]
     pub fn joint_count(&self) -> u16 {
@@ -2371,13 +2364,6 @@ impl<'a> Texture<'a> {
         self.flags & psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT != 0
     }
 
-    /// Renamed to [`Self::is_index_zero_transparent`].
-    #[deprecated(note = "renamed to `is_index_zero_transparent`")]
-    #[inline(always)]
-    pub fn index_zero_transparent(&self) -> bool {
-        self.is_index_zero_transparent()
-    }
-
     /// Raw packed pixel halfwords, as bytes. Suitable for
     /// halfword-level DMA upload; caller pairs this with a `VramRect`
     /// describing the *halfword footprint*, not the texel width.
@@ -2711,24 +2697,10 @@ impl<'a> World<'a> {
         self.flags & psxed_format::world::world_flags::FOG_ENABLED != 0
     }
 
-    /// Renamed to [`Self::is_fog_enabled`].
-    #[deprecated(note = "renamed to `is_fog_enabled`")]
-    #[inline(always)]
-    pub fn fog_enabled(&self) -> bool {
-        self.is_fog_enabled()
-    }
-
     /// Whether face records carry baked static vertex lighting.
     #[inline]
     pub fn has_static_vertex_lighting(&self) -> bool {
         self.static_vertex_lighting
-    }
-
-    /// Renamed to [`Self::has_static_vertex_lighting`].
-    #[deprecated(note = "renamed to `has_static_vertex_lighting`")]
-    #[inline(always)]
-    pub fn static_vertex_lighting(&self) -> bool {
-        self.has_static_vertex_lighting()
     }
 
     /// Sector at a coordinate, returning `None` for empty cells or out of range.
@@ -3342,13 +3314,6 @@ impl WorldSector {
             && horizontal_triangle_walkable(self.ceiling_triangle_flags, index)
     }
 
-    /// Renamed to [`Self::is_ceiling_triangle_walkable`].
-    #[deprecated(note = "renamed to `is_ceiling_triangle_walkable`")]
-    #[inline(always)]
-    pub fn ceiling_triangle_walkable(&self, index: usize) -> bool {
-        self.is_ceiling_triangle_walkable(index)
-    }
-
     /// First global wall index for this sector.
     #[inline]
     pub fn first_wall(&self) -> u16 {
@@ -3404,13 +3369,6 @@ impl WorldWall {
     #[inline]
     pub fn is_solid(&self) -> bool {
         self.flags & psxed_format::world::wall_flags::SOLID != 0
-    }
-
-    /// Renamed to [`Self::is_solid`].
-    #[deprecated(note = "renamed to `is_solid`")]
-    #[inline(always)]
-    pub fn solid(&self) -> bool {
-        self.is_solid()
     }
 
     /// Material slot.

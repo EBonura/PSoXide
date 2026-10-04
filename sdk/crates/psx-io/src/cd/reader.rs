@@ -383,13 +383,6 @@ impl SectorReader {
         self.send_command(CMD_DEMUTE, &[], IRQ_ACK, ACK_POLL)
     }
 
-    /// Renamed to [`SectorReader::unmute`].
-    #[deprecated(note = "renamed to `unmute`")]
-    #[inline(always)]
-    pub fn demute(&mut self) -> bool {
-        self.unmute()
-    }
-
     fn prepare_with_mode(&mut self, mode: u8) -> bool {
         self.mode = mode;
         // Keep CD-ROM at the controller level and poll its IRQ flags

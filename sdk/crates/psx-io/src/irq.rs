@@ -129,13 +129,6 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
-/// Renamed to [`pending`].
-#[deprecated(note = "renamed to `pending`")]
-#[inline(always)]
-pub fn stat() -> u32 {
-    pending()
-}
-
 /// Renamed to [`acknowledge`].
 #[deprecated(note = "renamed to `acknowledge`")]
 #[inline(always)]
@@ -143,51 +136,19 @@ pub fn ack(bits: u32) {
     acknowledge(bits)
 }
 
-/// Moved to [`psx_hw::irq::I_STAT`].
-#[deprecated(note = "moved to `psx_hw::irq::I_STAT`")]
-pub const I_STAT: u32 = reg::I_STAT;
-
-/// Moved to [`psx_hw::irq::I_MASK`].
-#[deprecated(note = "moved to `psx_hw::irq::I_MASK`")]
-pub const I_MASK: u32 = reg::I_MASK;
-
 /// Moved to [`psx_hw::irq::source`].
 pub mod source {
     use psx_hw::irq::source as bit;
 
-    /// Moved to [`psx_hw::irq::source::VBLANK`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::VBLANK`")]
-    pub const VBLANK: u32 = bit::VBLANK;
-    /// Moved to [`psx_hw::irq::source::GPU`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::GPU`")]
-    pub const GPU: u32 = bit::GPU;
     /// Moved to [`psx_hw::irq::source::CDROM`].
     #[deprecated(note = "moved to `psx_hw::irq::source::CDROM`")]
     pub const CDROM: u32 = bit::CDROM;
     /// Moved to [`psx_hw::irq::source::DMA`].
     #[deprecated(note = "moved to `psx_hw::irq::source::DMA`")]
     pub const DMA: u32 = bit::DMA;
-    /// Moved to [`psx_hw::irq::source::TIMER0`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::TIMER0`")]
-    pub const TIMER0: u32 = bit::TIMER0;
-    /// Moved to [`psx_hw::irq::source::TIMER1`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::TIMER1`")]
-    pub const TIMER1: u32 = bit::TIMER1;
-    /// Moved to [`psx_hw::irq::source::TIMER2`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::TIMER2`")]
-    pub const TIMER2: u32 = bit::TIMER2;
-    /// Moved to [`psx_hw::irq::source::CONTROLLER`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::CONTROLLER`")]
-    pub const CONTROLLER: u32 = bit::CONTROLLER;
-    /// Moved to [`psx_hw::irq::source::SIO1`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::SIO1`")]
-    pub const SIO1: u32 = bit::SIO1;
     /// Moved to [`psx_hw::irq::source::SPU`].
     #[deprecated(note = "moved to `psx_hw::irq::source::SPU`")]
     pub const SPU: u32 = bit::SPU;
-    /// Moved to [`psx_hw::irq::source::LIGHTPEN`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::LIGHTPEN`")]
-    pub const LIGHTPEN: u32 = bit::LIGHTPEN;
 }
 
 #[cfg(test)]

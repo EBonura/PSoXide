@@ -9,11 +9,10 @@ use psx_hw::gpu::{GpuStat, GP0, GP1, GPUREAD, GPUSTAT};
 #[cfg(any(feature = "present-queue", test))]
 mod handoff;
 #[cfg(any(feature = "present-queue", test))]
-#[allow(deprecated)] // re-exports the deprecated forwarders with the rest
 pub use handoff::{
-    arm_direct_access_guard, begin_recording_raw, end_recording, is_recording,
-    run_direct_access_guard, set_direct_access_guard, start_recording_raw, ActiveRecording,
-    CommandRecording, RecordingOverflow, RECORDING_NODE_WORDS,
+    arm_direct_access_guard, is_recording, run_direct_access_guard, set_direct_access_guard,
+    start_recording_raw, ActiveRecording, CommandRecording, RecordingOverflow,
+    RECORDING_NODE_WORDS,
 };
 #[cfg(any(feature = "present-queue", test))]
 pub use handoff::{pause_recording, RecordingPause};
@@ -230,25 +229,11 @@ pub fn gpustat() -> GpuStat {
     status()
 }
 
-/// Renamed to [`read_data`].
-#[deprecated(note = "renamed to `read_data`")]
-#[inline(always)]
-pub fn gpuread() -> u32 {
-    read_data()
-}
-
 /// Renamed to [`wait_command_ready`].
 #[deprecated(note = "renamed to `wait_command_ready`")]
 #[inline(always)]
 pub fn wait_cmd_ready() {
     wait_command_ready()
-}
-
-/// Renamed to [`try_wait_command_ready`].
-#[deprecated(note = "renamed to `try_wait_command_ready`")]
-#[inline(always)]
-pub fn try_wait_cmd_ready(spin_limit: u32) -> bool {
-    try_wait_command_ready(spin_limit)
 }
 
 fn poll_ready(spin_limit: u32, mut ready: impl FnMut() -> bool) -> bool {

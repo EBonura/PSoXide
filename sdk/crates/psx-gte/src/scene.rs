@@ -1521,37 +1521,12 @@ pub fn error_flags() -> u32 {
     read_control!(31)
 }
 
-/// Renamed to [`load_light_color_matrix`].
-#[deprecated(note = "renamed to `load_light_color_matrix`")]
-#[inline(always)]
-pub fn load_light_colour_matrix(m: &Mat3I16) {
-    load_light_color_matrix(m)
-}
-
-/// Renamed to [`load_background_color`].
-#[deprecated(note = "renamed to `load_background_color`")]
-#[inline(always)]
-pub fn load_background_colour(c: Vec3I32) {
-    load_background_color(c)
-}
-
-/// Renamed to [`load_far_color`].
-#[deprecated(note = "renamed to `load_far_color`")]
-#[inline(always)]
-pub fn load_far_colour(c: Vec3I32) {
-    load_far_color(c)
-}
-
 /// Renamed to [`set_average_z_weights`].
 #[deprecated(note = "renamed to `set_average_z_weights`")]
 #[inline(always)]
 pub fn set_avsz_weights(zsf3: i16, zsf4: i16) {
     set_average_z_weights(zsf3, zsf4)
 }
-
-/// Renamed to [`ProjectTripleInFlight`].
-#[deprecated(note = "renamed to `ProjectTripleInFlight`")]
-pub type RtptInFlight = ProjectTripleInFlight;
 
 /// Renamed to [`start_project_triple`].
 #[deprecated(note = "renamed to `start_project_triple`")]
@@ -1567,20 +1542,6 @@ pub fn classic_otz3_from_sum(sum: u32) -> u16 {
     classic_ordering_depth3_from_sum(sum)
 }
 
-/// Renamed to [`average_z3_ordering_depth`].
-#[deprecated(note = "renamed to `average_z3_ordering_depth`")]
-#[inline(always)]
-pub fn average_z3_otz(depths: [u16; 3], zsf3: i16) -> u16 {
-    average_z3_ordering_depth(depths, zsf3)
-}
-
-/// Renamed to [`average_z4_ordering_depth`].
-#[deprecated(note = "renamed to `average_z4_ordering_depth`")]
-#[inline(always)]
-pub fn average_z4_otz(depths: [u16; 4], zsf4: i16) -> u16 {
-    average_z4_ordering_depth(depths, zsf4)
-}
-
 /// Renamed to [`is_aabb_outside_clip4`].
 #[deprecated(note = "renamed to `is_aabb_outside_clip4`")]
 #[inline(always)]
@@ -1593,42 +1554,11 @@ pub fn aabb_outside_clip4(
     is_aabb_outside_clip4(mins, maxs, planes, clip_flags)
 }
 
-/// Renamed to [`screen_area`].
-#[deprecated(note = "renamed to `screen_area`")]
-#[inline(always)]
-pub fn screen_area_mac0(vertices: [(i16, i16); 3]) -> i32 {
-    screen_area(vertices)
-}
-
 /// Renamed to [`screen_area_scheduled`].
 #[deprecated(note = "renamed to `screen_area_scheduled`")]
 #[inline(always)]
 pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
     screen_area_scheduled(vertices)
-}
-
-/// Renamed to [`screen_area_and_classic_ordering_depth3_scheduled`].
-#[deprecated(note = "renamed to `screen_area_and_classic_ordering_depth3_scheduled`")]
-#[inline(always)]
-pub fn screen_area_and_classic_otz3_scheduled(
-    vertices: [(i16, i16); 3],
-    depths: [u16; 3],
-) -> (i32, u16) {
-    screen_area_and_classic_ordering_depth3_scheduled(vertices, depths)
-}
-
-/// Renamed to [`is_screen_triangle_back_facing`].
-#[deprecated(note = "renamed to `is_screen_triangle_back_facing`")]
-#[inline(always)]
-pub fn screen_triangle_back_facing(vertices: [(i16, i16); 3]) -> bool {
-    is_screen_triangle_back_facing(vertices)
-}
-
-/// Renamed to [`error_flags`].
-#[deprecated(note = "renamed to `error_flags`")]
-#[inline(always)]
-pub fn read_flag() -> u32 {
-    error_flags()
 }
 
 #[cfg(all(test, not(target_arch = "mips")))]

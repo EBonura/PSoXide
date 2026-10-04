@@ -140,9 +140,6 @@ pub const PANEL_TOP: i16 = 240 - PANEL_HEIGHT;
 /// Top edge of the first key row, below the hint line.
 const KEYS_TOP: i16 = PANEL_TOP + HINT_BAND;
 
-/// Renamed to [`PANEL_HEIGHT`].
-#[deprecated(note = "renamed to `PANEL_HEIGHT`")]
-pub const PANEL_H: i16 = PANEL_HEIGHT;
 /// The top of the key rows, 14 pixels below [`PANEL_TOP`]. It was documented as
 /// the panel's top edge and callers subtract the hint line from it
 /// (`Y0 - 14`); that is `PANEL_TOP`, so use [`PANEL_TOP`] and drop the

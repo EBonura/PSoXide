@@ -279,13 +279,6 @@ pub fn is_on_scratchpad_stack() -> bool {
     }
 }
 
-/// Renamed to [`is_on_scratchpad_stack`].
-#[deprecated(note = "renamed to `is_on_scratchpad_stack`")]
-#[inline(always)]
-pub fn on_scratchpad_stack() -> bool {
-    is_on_scratchpad_stack()
-}
-
 // void __psx_rt_call_on_stack(void *frame, void (*entry)(void *), void *sp)
 //
 // Saves the caller's $sp in $s0 (callee-saved, so the entry preserves it)

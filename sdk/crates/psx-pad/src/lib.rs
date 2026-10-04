@@ -372,13 +372,6 @@ impl Deadzone {
         v * v > self.inner_squared
     }
 
-    /// Renamed to [`is_outside_axis`](Self::is_outside_axis).
-    #[deprecated(note = "renamed to `is_outside_axis`")]
-    #[inline(always)]
-    pub const fn outside_axis(self, v: i16) -> bool {
-        self.is_outside_axis(v)
-    }
-
     /// The one-axis form of [`Deadzone::scaled`].
     #[inline]
     pub const fn scaled_axis(self, v: i16) -> Option<i16> {
@@ -545,27 +538,6 @@ impl<const ACTIONS: usize> ActionInput<'_, ACTIONS> {
         let mask = self.map.binding(action).mask();
         mask != 0 && !self.current.buttons.is_held(mask) && self.previous.buttons.is_held(mask)
     }
-
-    /// Renamed to [`is_held`](Self::is_held).
-    #[deprecated(note = "renamed to `is_held`")]
-    #[inline(always)]
-    pub fn held(self, action: usize) -> bool {
-        self.is_held(action)
-    }
-
-    /// Renamed to [`just_pressed`](Self::just_pressed).
-    #[deprecated(note = "renamed to `just_pressed`")]
-    #[inline(always)]
-    pub fn pressed(self, action: usize) -> bool {
-        self.just_pressed(action)
-    }
-
-    /// Renamed to [`just_released`](Self::just_released).
-    #[deprecated(note = "renamed to `just_released`")]
-    #[inline(always)]
-    pub fn released(self, action: usize) -> bool {
-        self.just_released(action)
-    }
 }
 
 /// How a transaction paces its bytes across the serial link.
@@ -640,13 +612,6 @@ impl RawPoll {
         let acked_needed = self.exchanges - 1;
         let mask = (1u16 << acked_needed) - 1;
         self.ack_seen & mask == mask
-    }
-
-    /// Renamed to [`is_fully_acknowledged`](Self::is_fully_acknowledged).
-    #[deprecated(note = "renamed to `is_fully_acknowledged`")]
-    #[inline(always)]
-    pub fn ack_complete(self) -> bool {
-        self.is_fully_acknowledged()
     }
 
     /// Convert to the cleaned [`PadState`] used by game code.
@@ -735,18 +700,6 @@ pub fn poll_raw_on<T: Transport>(port: &mut T, socket: Port, pacing: Pacing) -> 
     poll_once_raw(port, socket, pacing)
 }
 
-/// Poll port 1 once, raw.
-#[deprecated(note = "use `poll_raw_on` with the `ControllerPort` token")]
-pub fn poll_port1_raw(pacing: Pacing) -> RawPoll {
-    poll_raw_on(&mut steal_port(), Port::One, pacing)
-}
-
-/// Port-2 counterpart of [`poll_port1_raw`].
-#[deprecated(note = "use `poll_raw_on` with the `ControllerPort` token")]
-pub fn poll_port2_raw(pacing: Pacing) -> RawPoll {
-    poll_raw_on(&mut steal_port(), Port::Two, pacing)
-}
-
 /// Poll `socket` once with explicit fixed timing, for hardware diagnostics:
 /// `setup_spins` of delay after asserting the select line, plus `interbyte_spins`
 /// of fixed delay after each byte (bounded STAT reads -- no CTRL writes, no
@@ -770,8 +723,8 @@ pub fn poll_port1_diagnostics(setup_spins: u32, interbyte_spins: u32) -> RawPoll
 
 /// Renamed to [`poll_diagnostics_on`].
 #[deprecated(note = "use `poll_diagnostics_on` with the `ControllerPort` token")]
-#[inline(always)]
 #[allow(deprecated)]
+#[inline(always)]
 pub fn poll_port1_diag(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
     poll_port1_diagnostics(setup_spins, interbyte_spins)
 }
@@ -836,12 +789,6 @@ pub fn require_analog_on<T: Transport>(port: &mut T, socket: Port) -> AnalogRequ
 #[deprecated(note = "use `require_analog_on` with the `ControllerPort` token")]
 pub fn require_analog_port1() -> AnalogRequirement {
     require_analog_on(&mut steal_port(), Port::One)
-}
-
-/// Port-2 counterpart of [`require_analog_port1`].
-#[deprecated(note = "use `require_analog_on` with the `ControllerPort` token")]
-pub fn require_analog_port2() -> AnalogRequirement {
-    require_analog_on(&mut steal_port(), Port::Two)
 }
 
 /// A port reader that never hands a garbled packet to the game.

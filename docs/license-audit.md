@@ -137,14 +137,13 @@ basis for validating behaviour.
 
 A complete asset inventory now lives at
 [`docs/asset-provenance.md`](asset-provenance.md), covering branding,
-3D models, textures, fonts, SPU tone blobs, OBJ reference meshes, and
+3D models, textures, fonts, OBJ reference meshes, and
 README media. Per-directory `PROVENANCE.md` files exist beside the
 fonts ([`emu/crates/frontend/assets/fonts/PROVENANCE.md`](../emu/crates/frontend/assets/fonts/PROVENANCE.md))
-and SPU tones ([`sdk/crates/psx-spu/vendor/PROVENANCE.md`](../sdk/crates/psx-spu/vendor/PROVENANCE.md))
 for the items where local context matters.
 
 Provenance is documented; the asset-level **release-gating** TODOs
-that remain (exact Pexels URLs, SPU tone regeneration) are tracked in
+that remain (exact Pexels URLs) are tracked in
 `asset-provenance.md` itself, not here. Meshy model provenance is
 recorded there as paid-subscription, private, customer-owned generated
 assets; retain the subscription/export evidence with project records.

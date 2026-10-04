@@ -83,13 +83,6 @@ impl Particle {
         self.ttl != 0
     }
 
-    /// Renamed to [`Particle::is_alive`].
-    #[deprecated(note = "renamed to `is_alive`")]
-    #[inline(always)]
-    pub const fn alive(&self) -> bool {
-        self.is_alive()
-    }
-
     /// The rect this particle draws as: colour faded by `ttl / spawn_ttl`,
     /// 3 px for the first half of its life and 2 px after.
     #[inline]

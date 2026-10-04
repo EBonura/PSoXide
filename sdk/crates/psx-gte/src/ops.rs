@@ -361,26 +361,5 @@ pub unsafe fn rotate_v0_far_color() {
 // naming convention (sdk/docs/NAMING.md).
 renamed_op!(rtps => project_single, "renamed to `project_single`");
 renamed_op!(rtpt => project_triple, "renamed to `project_triple`");
-renamed_op!(nclip => screen_winding, "renamed to `screen_winding`");
-renamed_op!(op_sf1 => outer_product, "renamed to `outer_product`");
-renamed_op!(avsz3 => average_z3, "renamed to `average_z3`");
-renamed_op!(avsz4 => average_z4, "renamed to `average_z4`");
-renamed_op!(sqr => square, "renamed to `square`");
-renamed_op!(sqr_sf0 => square_unshifted, "renamed to `square_unshifted`");
-renamed_op!(ncds => light_color_depth_single, "renamed to `light_color_depth_single`");
 renamed_op!(nccs => light_color_single, "renamed to `light_color_single`");
-renamed_op!(ncs => light_single, "renamed to `light_single`");
-renamed_op!(ncdt => light_color_depth_triple, "renamed to `light_color_depth_triple`");
-renamed_op!(nct => light_triple, "renamed to `light_triple`");
 renamed_op!(ncct => light_color_triple, "renamed to `light_color_triple`");
-renamed_op!(dpcs => depth_cue_single, "renamed to `depth_cue_single`");
-renamed_op!(dpct => depth_cue_triple, "renamed to `depth_cue_triple`");
-renamed_op!(intpl => interpolate_far_color, "renamed to `interpolate_far_color`");
-renamed_op!(dcpl => depth_cue_light, "renamed to `depth_cue_light`");
-renamed_op!(cc => color_color, "renamed to `color_color`");
-renamed_op!(cdp => color_depth_cue, "renamed to `color_depth_cue`");
-renamed_op!(gpf => scale_vector, "renamed to `scale_vector`");
-renamed_op!(gpf_sf0 => scale_vector_unshifted, "renamed to `scale_vector_unshifted`");
-renamed_op!(gpl => scale_vector_accumulate, "renamed to `scale_vector_accumulate`");
-renamed_op!(mvmva_rt_v0_tr_sf1 => rotate_translate_v0, "renamed to `rotate_translate_v0`");
-renamed_op!(mvmva_rt_v0_fc_sf1 => rotate_v0_far_color, "renamed to `rotate_v0_far_color`");
