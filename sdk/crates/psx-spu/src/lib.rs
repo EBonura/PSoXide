@@ -56,7 +56,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-use psx_hw::spu::{BASE as SPU_BASE, SPUCNT, SPUSTAT};
+use psx_hw::spu::{
+    control as spucnt_bits, mask as voice_mask, status as spustat_bits, voice, CD_VOL_LEFT,
+    CD_VOL_RIGHT, IRQ_ADDR, MAIN_VOL_LEFT, MAIN_VOL_RIGHT, REVERB_VOL_LEFT, REVERB_VOL_RIGHT,
+    REVERB_WORK_BASE, SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_CTRL_NORMAL,
+    TRANSFER_DATA,
+};
 use psx_io::periph::SpuDma;
 
 pub mod tones;
@@ -73,8 +78,8 @@ pub mod tones;
 /// across register boundaries.
 #[inline]
 fn write_reg16(addr: u32, value: u16) {
-    // SAFETY: SPU registers live in the hardware-MMIO window at
-    // 0x1F80_1C00..0x1F80_1FFC. The SDK only exposes functions
+    // SAFETY: SPU registers live in the hardware-MMIO window
+    // (`psx_hw::spu`). The SDK only exposes functions
     // that compute their `addr` from typed handles whose
     // constructors validate ranges, so no caller can point this at
     // non-SPU memory.
@@ -89,44 +94,6 @@ fn read_reg16(addr: u32) -> u16 {
     // SAFETY: same MMIO contract as `write_reg16`.
     unsafe { core::ptr::read_volatile(addr as *const u16) }
 }
-
-// Voice register block is 16 bytes per voice starting at 0x1F80_1C00.
-const VOICE_STRIDE: u32 = 0x10;
-const VOICE_VOL_LEFT: u32 = 0x0;
-const VOICE_VOL_RIGHT: u32 = 0x2;
-const VOICE_PITCH: u32 = 0x4;
-const VOICE_START_ADDR: u32 = 0x6;
-const VOICE_ADSR_LO: u32 = 0x8;
-const VOICE_ADSR_HI: u32 = 0xA;
-// 0xC = current ADSR envelope (read-only).
-const VOICE_REPEAT_ADDR: u32 = 0xE;
-
-// Global registers (PSX-SPX § "SPU Registers").
-const MAIN_VOL_LEFT: u32 = 0x1F80_1D80;
-const MAIN_VOL_RIGHT: u32 = 0x1F80_1D82;
-const REVERB_VOL_LEFT: u32 = 0x1F80_1D84;
-const REVERB_VOL_RIGHT: u32 = 0x1F80_1D86;
-const KEY_ON_LO: u32 = 0x1F80_1D88;
-const KEY_ON_HI: u32 = 0x1F80_1D8A;
-const KEY_OFF_LO: u32 = 0x1F80_1D8C;
-const KEY_OFF_HI: u32 = 0x1F80_1D8E;
-const PITCH_MOD_LO: u32 = 0x1F80_1D90;
-const PITCH_MOD_HI: u32 = 0x1F80_1D92;
-/// ENDX: one sticky bit per voice, set when that voice decodes a block with
-/// the END flag. Write to clear.
-const ENDX_LO: u32 = 0x1F80_1D9C;
-const ENDX_HI: u32 = 0x1F80_1D9E;
-const NOISE_LO: u32 = 0x1F80_1D94;
-const NOISE_HI: u32 = 0x1F80_1D96;
-const REVERB_ENABLE_LO: u32 = 0x1F80_1D98;
-const REVERB_ENABLE_HI: u32 = 0x1F80_1D9A;
-const TRANSFER_ADDR: u32 = 0x1F80_1DA6;
-const REVERB_WORK_BASE: u32 = 0x1F80_1DA2;
-const TRANSFER_DATA: u32 = 0x1F80_1DA8;
-const TRANSFER_CTRL: u32 = 0x1F80_1DAC;
-const CD_VOL_LEFT: u32 = 0x1F80_1DB0;
-const CD_VOL_RIGHT: u32 = 0x1F80_1DB2;
-const SPUCNT_CD_AUDIO_ENABLE: u16 = 1 << 0;
 
 // ======================================================================
 // The driver
@@ -219,23 +186,23 @@ fn init_with(dma: &mut SpuDma) {
     // Silence everything immediately -- key-off on all 24 voices
     // before we touch any other state, so nothing glitches audibly
     // on cold boot.
-    write_reg16(KEY_OFF_LO, 0xFFFF);
-    write_reg16(KEY_OFF_HI, 0x00FF);
+    write_reg16(voice_mask::KEY_OFF_LO, 0xFFFF);
+    write_reg16(voice_mask::KEY_OFF_HI, 0x00FF);
 
     // Zero every voice register block.
     for v in 0..24 {
-        let base = SPU_BASE + (v as u32) * VOICE_STRIDE;
-        write_reg16(base + VOICE_VOL_LEFT, 0);
-        write_reg16(base + VOICE_VOL_RIGHT, 0);
-        write_reg16(base + VOICE_PITCH, 0);
-        write_reg16(base + VOICE_START_ADDR, 0);
-        write_reg16(base + VOICE_ADSR_LO, 0);
-        write_reg16(base + VOICE_ADSR_HI, 0);
+        let base = voice::base(v as u32);
+        write_reg16(base + voice::VOL_LEFT, 0);
+        write_reg16(base + voice::VOL_RIGHT, 0);
+        write_reg16(base + voice::PITCH, 0);
+        write_reg16(base + voice::START_ADDR, 0);
+        write_reg16(base + voice::ADSR_LO, 0);
+        write_reg16(base + voice::ADSR_HI, 0);
     }
 
     // Disable reverb, noise, pitch modulation on all voices.
-    write_reg16(REVERB_ENABLE_LO, 0);
-    write_reg16(REVERB_ENABLE_HI, 0);
+    write_reg16(voice_mask::REVERB_ENABLE_LO, 0);
+    write_reg16(voice_mask::REVERB_ENABLE_HI, 0);
     // Clearing SPUCNT's reverb-master bit stops feedback writes but does not
     // stop the hardware read/APF/output path. The retail BIOS leaves a live
     // preset (including non-zero vLOUT and mBASE) behind; a later sample-bank
@@ -251,10 +218,10 @@ fn init_with(dma: &mut SpuDma) {
     // volumes above silences reverb's OUTPUT but leaves that claim on memory,
     // and nothing else here moves it.
     write_reg16(REVERB_WORK_BASE, 0xFFFE);
-    write_reg16(PITCH_MOD_LO, 0);
-    write_reg16(PITCH_MOD_HI, 0);
-    write_reg16(NOISE_LO, 0);
-    write_reg16(NOISE_HI, 0);
+    write_reg16(voice_mask::PITCH_MOD_LO, 0);
+    write_reg16(voice_mask::PITCH_MOD_HI, 0);
+    write_reg16(voice_mask::NOISE_LO, 0);
+    write_reg16(voice_mask::NOISE_HI, 0);
 
     // Main volume to max -- per-voice volume still controls the mix.
     write_reg16(MAIN_VOL_LEFT, Volume::MAX.register_bits());
@@ -265,14 +232,14 @@ fn init_with(dma: &mut SpuDma) {
     // SPUCNT: bit 15 = SPU enable, bit 14 = mute OFF (i.e. audible),
     // everything else zero. Writing in that order matches PSX-SPX's
     // recommendation -- enable-then-unmute avoids a click.
-    write_reg16(SPUCNT, 0x8000); // enabled, muted
+    write_reg16(SPUCNT, spucnt_bits::ENABLE); // enabled, muted
     wait_spu_status(0x0000); // wait for SPUSTAT to stabilise
-    write_reg16(SPUCNT, 0xC000); // enabled + unmuted
+    write_reg16(SPUCNT, spucnt_bits::ENABLE | spucnt_bits::UNMUTE); // enabled + unmuted
     wait_spu_status(0x0000);
 
     // Transfer mode: "Stop" (bit 0..=2 = 0). Games toggle this to
     // Manual/DMA as needed when uploading.
-    write_reg16(TRANSFER_CTRL, 0x0004); // normal mode
+    write_reg16(TRANSFER_CTRL, TRANSFER_CTRL_NORMAL); // normal mode
 
     // The one upload allowed onto the silence block: it writes the block.
     upload_adpcm_unguarded(dma, SILENCE_BLOCK, &SILENCE_BLOCK_BYTES);
@@ -310,7 +277,7 @@ const SPU_HANDSHAKE_SPINS: u32 = 100_000;
 /// Bounded, unlike the first version of this: an unbounded spin on a
 /// register the hardware may never update is a hung console.
 fn wait_spu_status(want: u16) {
-    let mask = 0x3F;
+    let mask = spustat_bits::MODE_MASK;
     for _ in 0..SPU_HANDSHAKE_SPINS {
         if (read_reg16(SPUSTAT) & mask) == (want & mask) {
             return;
@@ -343,7 +310,7 @@ fn wait_transfer_idle() {
     const CONSECUTIVE_CLEAR: u32 = 16;
     let mut clear = 0u32;
     for _ in 0..SPU_HANDSHAKE_SPINS {
-        if read_reg16(SPUSTAT) & 0x0400 == 0 {
+        if read_reg16(SPUSTAT) & spustat_bits::TRANSFER_BUSY == 0 {
             clear += 1;
             if clear >= CONSECUTIVE_CLEAR {
                 break;
@@ -718,27 +685,27 @@ impl Voice {
     /// Base MMIO address of this voice's 16-byte register block.
     #[inline]
     const fn reg_base(self) -> u32 {
-        SPU_BASE + (self.0 as u32) * VOICE_STRIDE
+        voice::base(self.0 as u32)
     }
 
     /// Set per-voice stereo volume. The main-output mix is still
     /// modulated by [`set_main_volume`], but each voice can have
     /// its own level.
     pub fn set_volume(self, left: Volume, right: Volume) {
-        write_reg16(self.reg_base() + VOICE_VOL_LEFT, left.register_bits());
-        write_reg16(self.reg_base() + VOICE_VOL_RIGHT, right.register_bits());
+        write_reg16(self.reg_base() + voice::VOL_LEFT, left.register_bits());
+        write_reg16(self.reg_base() + voice::VOL_RIGHT, right.register_bits());
     }
 
     /// Set the voice's sample-rate pitch (Q5.12). [`Pitch::UNITY`]
     /// = native 44100 Hz.
     pub fn set_pitch(self, pitch: Pitch) {
-        write_reg16(self.reg_base() + VOICE_PITCH, pitch.as_u16());
+        write_reg16(self.reg_base() + voice::PITCH, pitch.as_u16());
     }
 
     /// Point the voice at the ADPCM sample starting at `addr`.
     /// Voice will begin playing from this address at the next key-on.
     pub fn set_start_addr(self, addr: SpuAddr) {
-        write_reg16(self.reg_base() + VOICE_START_ADDR, addr.register_value());
+        write_reg16(self.reg_base() + voice::START_ADDR, addr.register_value());
     }
 
     /// Set the voice's loop (repeat) address: where playback jumps when a
@@ -747,13 +714,13 @@ impl Voice {
     /// so set it AFTER key-on to override; chaining two buffers' loop
     /// addresses is how streamed audio ping-pongs without a key-off.
     pub fn set_loop_addr(self, addr: SpuAddr) {
-        write_reg16(self.reg_base() + VOICE_REPEAT_ADDR, addr.register_value());
+        write_reg16(self.reg_base() + voice::REPEAT_ADDR, addr.register_value());
     }
 
     /// Install ADSR envelope parameters on this voice.
     pub fn set_adsr(self, adsr: Adsr) {
-        write_reg16(self.reg_base() + VOICE_ADSR_LO, adsr.lower);
-        write_reg16(self.reg_base() + VOICE_ADSR_HI, adsr.upper);
+        write_reg16(self.reg_base() + voice::ADSR_LO, adsr.lower);
+        write_reg16(self.reg_base() + voice::ADSR_HI, adsr.upper);
     }
 
     /// Configure this voice to play a sample already uploaded at `addr`.
@@ -790,8 +757,8 @@ impl Voice {
     #[doc(alias = "KON")]
     #[doc(alias = "SpuSetKey")]
     pub fn start(mask: u32) {
-        write_reg16(KEY_ON_LO, mask as u16);
-        write_reg16(KEY_ON_HI, (mask >> 16) as u16);
+        write_reg16(voice_mask::KEY_ON_LO, mask as u16);
+        write_reg16(voice_mask::KEY_ON_HI, (mask >> 16) as u16);
     }
 
     /// Renamed to [`start`](Self::start).
@@ -811,7 +778,7 @@ impl Voice {
     /// while voices were audibly running into the next sample anyway.
     #[doc(alias = "ENDX")]
     pub fn ended_voices() -> u32 {
-        read_reg16(ENDX_LO) as u32 | ((read_reg16(ENDX_HI) as u32) << 16)
+        read_reg16(voice_mask::ENDX_LO) as u32 | ((read_reg16(voice_mask::ENDX_HI) as u32) << 16)
     }
 
     /// Renamed to [`ended_voices`](Self::ended_voices).
@@ -824,8 +791,8 @@ impl Voice {
     /// Clear the sticky END flags for the voices in `mask`, so the next
     /// [`Voice::ended_voices`] reports only what happened after this call.
     pub fn clear_ended(mask: u32) {
-        write_reg16(ENDX_LO, mask as u16);
-        write_reg16(ENDX_HI, (mask >> 16) as u16);
+        write_reg16(voice_mask::ENDX_LO, mask as u16);
+        write_reg16(voice_mask::ENDX_HI, (mask >> 16) as u16);
     }
 
     /// Stop the voices whose bits are set in `mask` -- fires the
@@ -833,8 +800,8 @@ impl Voice {
     #[doc(alias = "KOFF")]
     #[doc(alias = "SpuSetKey")]
     pub fn release(mask: u32) {
-        write_reg16(KEY_OFF_LO, mask as u16);
-        write_reg16(KEY_OFF_HI, (mask >> 16) as u16);
+        write_reg16(voice_mask::KEY_OFF_LO, mask as u16);
+        write_reg16(voice_mask::KEY_OFF_HI, (mask >> 16) as u16);
     }
 
     /// Renamed to [`release`](Self::release).
@@ -850,8 +817,8 @@ impl Voice {
     /// comes from the shared noise clock, [`set_noise_clock`], not the
     /// voice's pitch register.
     pub fn set_noise_mask(mask: u32) {
-        write_reg16(NOISE_LO, mask as u16);
-        write_reg16(NOISE_HI, (mask >> 16) as u16);
+        write_reg16(voice_mask::NOISE_LO, mask as u16);
+        write_reg16(voice_mask::NOISE_HI, (mask >> 16) as u16);
     }
 }
 
@@ -862,7 +829,7 @@ impl Voice {
 /// Set the sound RAM address that raises the SPU IRQ when accessed.
 /// Address units are encoded by [`SpuAddr`]; this does not enable the IRQ.
 pub fn set_irq_address(address: SpuAddr) {
-    write_reg16(0x1F80_1DA4, address.register_value());
+    write_reg16(IRQ_ADDR, address.register_value());
 }
 
 /// Enable or disable the SPU's address IRQ without changing other controls.
@@ -873,16 +840,16 @@ pub fn enable_irq(enabled: bool) {
     write_reg16(
         SPUCNT,
         if enabled {
-            control | (1 << 6)
+            control | spucnt_bits::IRQ_ENABLE
         } else {
-            control & !(1 << 6)
+            control & !spucnt_bits::IRQ_ENABLE
         },
     );
 }
 
 /// Whether the SPU's address IRQ latch is set.
 pub fn is_irq_pending() -> bool {
-    read_reg16(SPUSTAT) & (1 << 6) != 0
+    read_reg16(SPUSTAT) & spustat_bits::IRQ_FLAG != 0
 }
 
 /// Renamed to [`is_irq_pending`].
@@ -914,9 +881,8 @@ pub fn set_cd_volume(left: CdVolume, right: CdVolume) {
 /// (0..=3) selects the +4..+7 fine increment. Applies to every voice
 /// routed to noise via [`Voice::set_noise_mask`].
 pub fn set_noise_clock(shift: u8, step: u8) {
-    const NOISE_BITS: u16 = 0x3F00; // bits 8..=13
     let field = (((shift as u16) & 0xF) << 10) | (((step as u16) & 0x3) << 8);
-    let control = read_reg16(SPUCNT) & !NOISE_BITS;
+    let control = read_reg16(SPUCNT) & !spucnt_bits::NOISE_CLOCK_MASK;
     write_reg16(SPUCNT, control | field);
 }
 
@@ -924,9 +890,9 @@ pub fn set_noise_clock(shift: u8, step: u8) {
 pub fn enable_cd_audio(enabled: bool) {
     let mut control = read_reg16(SPUCNT);
     if enabled {
-        control |= SPUCNT_CD_AUDIO_ENABLE;
+        control |= spucnt_bits::CD_AUDIO_ENABLE;
     } else {
-        control &= !SPUCNT_CD_AUDIO_ENABLE;
+        control &= !spucnt_bits::CD_AUDIO_ENABLE;
     }
     write_reg16(SPUCNT, control);
 }
@@ -941,7 +907,7 @@ pub fn enable_cd_audio(enabled: bool) {
 /// 1. Write transfer-control = 0 (reset).
 /// 2. Write target address register.
 /// 3. Write transfer-control = 4 (manual).
-/// 4. Push halfword data through 0x1F80_1DA8.
+/// 4. Push halfword data through [`TRANSFER_DATA`].
 /// 5. Wait for the transfer to drain (SPUSTAT bit 7 = transfer busy).
 fn upload_adpcm_with(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) {
     assert!(
@@ -1006,10 +972,10 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
     // stopped before touching anything else. Going through Stop is what
     // makes the wait below meaningful: SPUSTAT only tells us the mode
     // changed if it actually changed.
-    let spucnt = read_reg16(SPUCNT) & !0x0030;
+    let spucnt = read_reg16(SPUCNT) & !spucnt_bits::TRANSFER_MODE_MASK;
     write_reg16(SPUCNT, spucnt);
     wait_spu_status(spucnt);
-    write_reg16(TRANSFER_CTRL, 0x0004);
+    write_reg16(TRANSFER_CTRL, TRANSFER_CTRL_NORMAL);
     write_reg16(TRANSFER_ADDR, dest.register_value());
     // SPUCNT transfer mode = DMA Write (bits 5..4 = 10), then wait for
     // the SPU to enter it. Without this the DMA can deliver the whole
@@ -1017,8 +983,8 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
     // payload, the more of it is lost, which is exactly the size
     // dependence the console showed: kilobyte banks mostly arrived while
     // a 32-byte table arrived not at all.
-    write_reg16(SPUCNT, spucnt | 0x0020);
-    wait_spu_status(spucnt | 0x0020);
+    write_reg16(SPUCNT, spucnt | spucnt_bits::TRANSFER_DMA_WRITE);
+    wait_spu_status(spucnt | spucnt_bits::TRANSFER_DMA_WRITE);
 
     // Channel 4: main RAM -> SPU, block-sync, forward, start; block until done.
     // SAFETY: `bytes` is word-aligned and a whole number of words (checked
@@ -1040,15 +1006,15 @@ fn upload_adpcm_dma(dma: &mut SpuDma, dest: SpuAddr, bytes: &[u8]) -> bool {
 /// original path was missing (it only poked TRANSFER_CTRL), which silently
 /// no-op'd the upload on hardware and on FIFO-accurate emulators.
 fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
-    let spucnt = read_reg16(SPUCNT) & !0x0030;
+    let spucnt = read_reg16(SPUCNT) & !spucnt_bits::TRANSFER_MODE_MASK;
     write_reg16(SPUCNT, spucnt);
     wait_spu_status(spucnt);
-    write_reg16(TRANSFER_CTRL, 0x0004);
+    write_reg16(TRANSFER_CTRL, TRANSFER_CTRL_NORMAL);
     write_reg16(TRANSFER_ADDR, dest.register_value());
     // Manual Write (bits 5..4 = 01), and wait for the SPU to be in it
     // before pushing a single halfword. Same reason as the DMA path.
-    write_reg16(SPUCNT, spucnt | 0x0010);
-    wait_spu_status(spucnt | 0x0010);
+    write_reg16(SPUCNT, spucnt | spucnt_bits::TRANSFER_MANUAL_WRITE);
+    wait_spu_status(spucnt | spucnt_bits::TRANSFER_MANUAL_WRITE);
 
     let mut i = 0;
     while i + 1 < bytes.len() {
@@ -1061,7 +1027,7 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
     wait_transfer_idle();
     write_reg16(SPUCNT, spucnt);
     // Leave the transfer type NORMAL, not 0. PSX-SPX is explicit that
-    // 1F801DACh "should be 0004h"; parking it at 0 selects another
+    // the transfer control register "should be 0004h"; parking it at 0 selects another
     // transfer type, and on silicon that poisons everything that touches
     // sample RAM afterwards -- voices key on and their envelope collapses
     // straight back to zero, so every sampled sound goes silent while
@@ -1070,7 +1036,7 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
     // left this at 0, its own tone ladder was silent and a following SB1
     // run was silent too, both fine on the emulator, which ignores this
     // register entirely.
-    write_reg16(TRANSFER_CTRL, 0x0004);
+    write_reg16(TRANSFER_CTRL, TRANSFER_CTRL_NORMAL);
     for _ in 0..200 {
         core::hint::spin_loop();
     }

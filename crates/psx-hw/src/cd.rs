@@ -57,10 +57,21 @@ pub mod irq {
     pub const DATA_END: u8 = 4;
     /// INT5: the command failed or the disc is in error.
     pub const ERROR: u8 = 5;
+    /// All five interrupt bits (INT1..INT5), the width of the interrupt
+    /// enable and flag registers.
+    pub const ALL: u8 = 0x1F;
     /// Interrupt flag write that acknowledges every pending code.
-    pub const ACK_ALL: u8 = 0x1F;
+    pub const ACK_ALL: u8 = ALL;
     /// Interrupt flag write bit that also empties the parameter FIFO.
     pub const CLEAR_PARAMETER_FIFO: u8 = 0x40;
+}
+
+/// Bits of the volume-apply register (index 3 of [`reg::REQUEST_IRQ`], write).
+pub mod volume_apply {
+    /// Mute the XA-ADPCM output.
+    pub const ADPCM_MUTE: u8 = 1 << 0;
+    /// Latch the audio mixer volumes written to the preceding registers.
+    pub const APPLY: u8 = 1 << 5;
 }
 
 /// Bits of the request register (index 0 of [`reg::REQUEST_IRQ`], write).

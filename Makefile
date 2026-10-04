@@ -27,6 +27,7 @@ fmt:
 	cargo fmt --all
 	cargo fmt --manifest-path sdk/Cargo.toml --all
 lint:
+	tools/check-register-literals.sh
 	cargo run --locked -q -p xtask -- check-mfc0 sdk
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 	cargo clippy --locked --manifest-path sdk/Cargo.toml --workspace --all-targets --all-features -- -D warnings

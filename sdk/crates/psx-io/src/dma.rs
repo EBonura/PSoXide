@@ -599,9 +599,15 @@ mod tests {
 
     #[test]
     fn channel_blocks_sit_at_sixteen_byte_strides() {
-        assert_eq!(Channel::MdecIn.register_base(), 0x1F80_1080);
-        assert_eq!(Channel::Gpu.register_base(), 0x1F80_10A0);
-        assert_eq!(Channel::OrderingTableClear.register_base(), 0x1F80_10E0);
+        assert_eq!(Channel::MdecIn.register_base(), reg::CHANNEL_BASE);
+        assert_eq!(
+            Channel::Gpu.register_base(),
+            reg::CHANNEL_BASE + 2 * reg::CHANNEL_STRIDE
+        );
+        assert_eq!(
+            Channel::OrderingTableClear.register_base(),
+            reg::CHANNEL_BASE + 6 * reg::CHANNEL_STRIDE
+        );
         assert_eq!(Channel::OrderingTableClear.enable_bit(), 27);
     }
 

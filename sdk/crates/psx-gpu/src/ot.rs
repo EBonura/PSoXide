@@ -27,8 +27,8 @@ use core::marker::PhantomData;
 use core::ptr;
 use psx_io::periph::OrderingTableClearDma;
 
-const OT_ADDR_MASK: u32 = 0x00FF_FFFF;
-const OT_END: u32 = OT_ADDR_MASK;
+const OT_ADDR_MASK: u32 = psx_hw::dma::linked_list::ADDRESS_MASK;
+const OT_END: u32 = psx_hw::dma::linked_list::END;
 const OT_MAX_EXTRA_HOPS: usize = 131_072;
 /// A staged-tag bit that tagged-stream insertion ignores: the stream inserts
 /// keep only the word count and the slot from a staged tag.

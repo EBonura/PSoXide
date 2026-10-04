@@ -38,9 +38,13 @@
 //!
 //! No DMA channel is enabled: nothing here uses one.
 
-use super::{lba_to_bcd_msf, IRQ_ACK, IRQ_COMPLETE, IRQ_DATA_END, IRQ_DATA_READY, IRQ_ERROR};
+use super::lba_to_bcd_msf;
 use crate::irq;
 use crate::periph::Cd;
+use psx_hw::cd::irq::{
+    ACKNOWLEDGE as IRQ_ACK, COMPLETE as IRQ_COMPLETE, DATA_END as IRQ_DATA_END,
+    DATA_READY as IRQ_DATA_READY, ERROR as IRQ_ERROR,
+};
 use psx_hw::cd::{
     CMD_DEMUTE, CMD_PAUSE, CMD_READN, CMD_SEEKL, CMD_SETFILTER, CMD_SETLOC, CMD_SETMODE,
     MODE_DOUBLE_SPEED,
@@ -64,7 +68,7 @@ const CLEANUP_POLL: u32 = 16_384;
 const DRAIN_LIMIT: u32 = 256;
 
 /// Every controller IRQ enable, which `prepare` and a started read switch on.
-const ALL_IRQS_ENABLED: u8 = 0x1F;
+const ALL_IRQS_ENABLED: u8 = psx_hw::cd::irq::ALL;
 
 /// [`SectorReader::diagnostics`] cause byte: the drive raised INT5; the
 /// snapshot carries the error response's status and error-code bytes.

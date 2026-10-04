@@ -11,10 +11,8 @@
 use crate::material::{
     BlendMode, TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial,
 };
+use psx_hw::gpu::packet::{self, SEMI_TRANSPARENT};
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
-
-/// Command-word bit 25: draw with the current semi-transparency equation.
-const SEMI_TRANSPARENT: u32 = 1 << 25;
 
 /// Flat-shaded triangle. 5 words (tag + 4 data).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -187,7 +185,7 @@ impl RectFlat {
     pub const fn new(x: i16, y: i16, w: u16, h: u16, r: u8, g: u8, b: u8) -> Self {
         Self {
             tag: 0,
-            color_cmd: 0x6000_0000 | pack_color(r, g, b),
+            color_cmd: packet::FLAT_RECT | pack_color(r, g, b),
             xy: pack_vertex(x, y),
             wh: pack_xy(w, h),
         }
@@ -375,7 +373,7 @@ impl LineMono {
     pub const fn new(x0: i16, y0: i16, x1: i16, y1: i16, r: u8, g: u8, b: u8) -> Self {
         Self {
             tag: 0,
-            color_cmd: 0x4000_0000 | pack_color(r, g, b),
+            color_cmd: packet::FLAT_LINE | pack_color(r, g, b),
             v0: pack_vertex(x0, y0),
             v1: pack_vertex(x1, y1),
         }
@@ -420,7 +418,8 @@ impl LineGouraud {
     ) -> Self {
         Self {
             tag: 0,
-            color0_command: 0x5000_0000 | pack_color(from_color.0, from_color.1, from_color.2),
+            color0_command: packet::SHADED_LINE
+                | pack_color(from_color.0, from_color.1, from_color.2),
             v0: pack_vertex(from.0, from.1),
             color1: pack_color(to_color.0, to_color.1, to_color.2),
             v1: pack_vertex(to.0, to.1),
@@ -600,7 +599,7 @@ impl ClassicTriTextured {
     ) -> Self {
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
-            color_cmd: 0x2400_0000 | (tint & 0x00ff_ffff),
+            color_cmd: packet::FLAT_TEXTURED_TRIANGLE | (tint & 0x00ff_ffff),
             v0: pack_vertex(verts[0].0, verts[0].1),
             uv0_clut: uv_words[0] as u32 | ((clut as u32) << 16),
             v1: pack_vertex(verts[1].0, verts[1].1),
@@ -789,7 +788,7 @@ impl TriTexturedGouraud {
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             tex_window: texture_window_word,
-            color0_cmd: 0x3400_0000 | colors[0],
+            color0_cmd: packet::SHADED_TEXTURED_TRIANGLE | colors[0],
             v0: pack_vertex(verts[0].0, verts[0].1),
             uv0_clut: uv_words[0] as u32 | clut_high_word,
             color1: colors[1],
@@ -950,7 +949,7 @@ impl ClassicTriTexturedGouraud {
     ) -> Self {
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
-            color0_cmd: 0x3400_0000 | (colors[0] & 0x00ff_ffff),
+            color0_cmd: packet::SHADED_TEXTURED_TRIANGLE | (colors[0] & 0x00ff_ffff),
             v0: pack_vertex(verts[0].0, verts[0].1),
             uv0_clut: uv_words[0] as u32 | clut_high_word,
             color1: colors[1] & 0x00ff_ffff,
@@ -980,7 +979,7 @@ impl ClassicTriTexturedGouraud {
         debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
-            color0_cmd: 0x3400_0000 | colors[0],
+            color0_cmd: packet::SHADED_TEXTURED_TRIANGLE | colors[0],
             v0: pack_vertex(verts[0].0, verts[0].1),
             uv0_clut: uv_words[0] as u32 | clut_high_word,
             color1: colors[1],
@@ -1088,7 +1087,7 @@ impl ClassicQuadTexturedGouraud {
     ) -> Self {
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
-            color0_cmd: 0x3c00_0000 | (colors[0] & 0x00ff_ffff),
+            color0_cmd: packet::SHADED_TEXTURED_QUAD | (colors[0] & 0x00ff_ffff),
             v0: pack_vertex(verts[0].0, verts[0].1),
             uv0_clut: uv_words[0] as u32 | clut_high_word,
             color1: colors[1] & 0x00ff_ffff,
@@ -1121,7 +1120,7 @@ impl ClassicQuadTexturedGouraud {
         debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
-            color0_cmd: 0x3c00_0000 | colors[0],
+            color0_cmd: packet::SHADED_TEXTURED_QUAD | colors[0],
             v0: pack_vertex(verts[0].0, verts[0].1),
             uv0_clut: uv_words[0] as u32 | clut_high_word,
             color1: colors[1],
@@ -1216,7 +1215,7 @@ impl QuadTexturedGouraud {
 
     /// Opcode bit promoting the Gouraud-textured-triangle header
     /// (`0x34`) to the Gouraud-textured-quad header (`0x3C`).
-    const QUAD_OPCODE_BIT: u32 = 0x0800_0000;
+    const QUAD_OPCODE_BIT: u32 = packet::QUAD;
 
     /// Build a textured Gouraud quad from per-vertex UVs and a
     /// [`TextureMaterial`]. Vertex order is TL, TR, BL, BR; each colour
@@ -1294,7 +1293,7 @@ impl QuadTexturedGouraud {
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             tex_window: texture_window_word,
-            color0_cmd: 0x3c00_0000 | colors[0],
+            color0_cmd: packet::SHADED_TEXTURED_QUAD | colors[0],
             v0: pack_vertex(verts[0].0, verts[0].1),
             uv0_clut: uv_words[0] as u32 | clut_high_word,
             color1: colors[1],

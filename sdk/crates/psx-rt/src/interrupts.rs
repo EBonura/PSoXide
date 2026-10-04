@@ -7,6 +7,8 @@
 //! registers `$k0/$k1`, so it does not need a stack frame.
 
 #[cfg(target_arch = "mips")]
+use psx_hw::{cop0, dma, gpu, gte, memory};
+#[cfg(target_arch = "mips")]
 use psx_io::irq;
 
 #[cfg(target_arch = "mips")]
@@ -16,12 +18,12 @@ core::arch::global_asm!(
     .section .text.psx_rt_exception
     .globl __psx_rt_exception_handler
 __psx_rt_exception_handler:
-    lui   $26, 0x1f80
-    lw    $27, 0x1070($26)
-    lw    $26, 0x1074($26)
+    lui   $26, {io_hi}
+    lw    $27, {i_stat}($26)
+    lw    $26, {i_mask}($26)
     nop
     and   $27, $27, $26
-    andi  $27, $27, 0x0001
+    andi  $27, $27, {vblank_mask}
     beqz  $27, 9f
     nop
 
@@ -45,16 +47,16 @@ __psx_rt_exception_handler:
     nop
     beqz  $27, 8f
     nop
-    lui   $26, 0x1f80
-    lw    $27, 0x1814($26)
+    lui   $26, {io_hi}
+    lw    $27, {gp1}($26)
     nop
-    srl   $27, $27, 24
+    srl   $27, $27, {gpustat_irq1_shift}
     andi  $27, $27, 1
     beqz  $27, 7f
     nop
-    lw    $27, 0x10a8($26)
+    lw    $27, {gpu_chcr}($26)
     nop
-    srl   $27, $27, 24
+    srl   $27, $27, {chcr_start_shift}
     andi  $27, $27, 1
     bnez  $27, 7f
     nop
@@ -63,25 +65,25 @@ __psx_rt_exception_handler:
     nop
     beqz  $27, 6f
     nop
-    sw    $27, 0x1814($26)
+    sw    $27, {gp1}($26)
 6:
-    lui   $27, 0x0200
-    sw    $27, 0x1814($26)
-    lui   $27, 0x0400
-    ori   $27, $27, 0x0002
-    sw    $27, 0x1814($26)
-    lw    $27, 0x10f0($26)
+    lui   $27, {ack_irq_hi}
+    sw    $27, {gp1}($26)
+    lui   $27, {dma_dir_hi}
+    ori   $27, $27, {dma_dir_lo}
+    sw    $27, {gp1}($26)
+    lw    $27, {dpcr}($26)
     nop
-    ori   $27, $27, 0x0800
-    sw    $27, 0x10f0($26)
+    ori   $27, $27, {gpu_dpcr_enable}
+    sw    $27, {dpcr}($26)
     lui   $27, %hi(__psx_rt_present_head)
     lw    $27, %lo(__psx_rt_present_head)($27)
     nop
-    sw    $27, 0x10a0($26)
-    sw    $zero, 0x10a4($26)
-    lui   $27, 0x0100
-    ori   $27, $27, 0x0401
-    sw    $27, 0x10a8($26)
+    sw    $27, {gpu_madr}($26)
+    sw    $zero, {gpu_bcr}($26)
+    lui   $27, {chcr_hi}
+    ori   $27, $27, {chcr_lo}
+    sw    $27, {gpu_chcr}($26)
     lui   $26, %hi(__psx_rt_present_head)
     sw    $zero, %lo(__psx_rt_present_head)($26)
     lui   $26, %hi(__psx_rt_present_kick_count)
@@ -115,22 +117,22 @@ __psx_rt_exception_handler:
     nop
     beqz  $27, 2f
     nop
-    lui   $26, 0x1f80
-    lw    $26, 0x1814($26)
+    lui   $26, {io_hi}
+    lw    $26, {gp1}($26)
     nop
-    srl   $26, $26, 24
+    srl   $26, $26, {gpustat_irq1_shift}
     andi  $26, $26, 1
     beqz  $26, 2f
     nop
     lui   $26, %hi(__psx_rt_pending_gp1)
     sw    $zero, %lo(__psx_rt_pending_gp1)($26)
-    lui   $26, 0x1f80
-    sw    $27, 0x1814($26)
+    lui   $26, {io_hi}
+    sw    $27, {gp1}($26)
 
 2:
-    lui   $26, 0x1f80
-    addiu $27, $zero, -2
-    sw    $27, 0x1070($26)
+    lui   $26, {io_hi}
+    addiu $27, $zero, {ack_vblank}
+    sw    $27, {i_stat}($26)
 
 1:
     mfc0  $27, $13
@@ -204,7 +206,7 @@ __psx_rt_exception_handler:
     nop
     addiu $26, $26, 4
     jr    $26
-    .word 0x42000010
+    .word {rfe}
 
     # Interrupt return: EPC, or EPC + 4 when the word at EPC is a GTE
     # command (top seven bits 0100101). An interrupt taken on a GTE command
@@ -222,8 +224,8 @@ __psx_rt_exception_handler:
     nop
     lw    $27, 0($26)
     nop
-    srl   $27, $27, 25
-    xori  $27, $27, 0x0025
+    srl   $27, $27, {gte_prefix_shift}
+    xori  $27, $27, {gte_prefix}
     bnez  $27, 5f
     nop
     lui   $27, %hi(__psx_rt_gte_skip_count)
@@ -236,7 +238,7 @@ __psx_rt_exception_handler:
     addiu $26, $26, 4
 5:
     jr    $26
-    .word 0x42000010
+    .word {rfe}
 3:
     b     3b
     nop
@@ -255,9 +257,9 @@ __psx_rt_exception_handler:
     andi  $27, $27, 0x007c
     bnez  $27, 1b
     nop
-    lui   $26, 0x1f80
-    lw    $27, 0x1070($26)
-    lw    $26, 0x1074($26)
+    lui   $26, {io_hi}
+    lw    $27, {i_stat}($26)
+    lw    $26, {i_mask}($26)
     nop
     and   $27, $27, $26
     beqz  $27, 1b
@@ -265,8 +267,8 @@ __psx_rt_exception_handler:
     lui   $26, %hi(__psx_rt_stray_irq_last)
     sw    $27, %lo(__psx_rt_stray_irq_last)($26)
     nor   $27, $27, $zero
-    lui   $26, 0x1f80
-    sw    $27, 0x1070($26)
+    lui   $26, {io_hi}
+    sw    $27, {i_stat}($26)
     lui   $26, %hi(__psx_rt_stray_irq_count)
     lw    $27, %lo(__psx_rt_stray_irq_count)($26)
     nop
@@ -277,7 +279,46 @@ __psx_rt_exception_handler:
     "#,
     strict = const STRICT_FAULTS as u32,
     present = const PRESENT_QUEUE as u32,
+    // Every register the handler touches is in the I/O window, so one `lui`
+    // of the window's high half reaches them all and the offsets are the low
+    // halves (checked by the assertions below the block).
+    io_hi = const memory::io::BASE >> 16,
+    i_stat = const psx_hw::irq::I_STAT & 0xFFFF,
+    i_mask = const psx_hw::irq::I_MASK & 0xFFFF,
+    vblank_mask = const 1u32 << psx_hw::irq::source::VBLANK,
+    ack_vblank = const !(1u32 << psx_hw::irq::source::VBLANK) as i32,
+    gp1 = const gpu::GP1 & 0xFFFF,
+    gpustat_irq1_shift = const gpu::GpuStat::IRQ1.bits().trailing_zeros(),
+    ack_irq_hi = const gpu::gp1::ACK_IRQ >> 16,
+    dma_dir_hi = const gpu::gp1::dma_direction(gpu::DmaDirection::CpuToGp0 as u32) >> 16,
+    dma_dir_lo = const gpu::gp1::dma_direction(gpu::DmaDirection::CpuToGp0 as u32) & 0xFFFF,
+    gpu_madr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::MADR) & 0xFFFF,
+    gpu_bcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::BCR) & 0xFFFF,
+    gpu_chcr = const (dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU + dma::CHCR) & 0xFFFF,
+    chcr_start_shift = const dma::CHCR_START.trailing_zeros(),
+    chcr_hi = const dma::CHCR_LINKED_LIST_TO_DEVICE >> 16,
+    chcr_lo = const dma::CHCR_LINKED_LIST_TO_DEVICE & 0xFFFF,
+    dpcr = const dma::DPCR & 0xFFFF,
+    gpu_dpcr_enable = const dma::dpcr_enable(dma::channel::GPU),
+    rfe = const cop0::RFE,
+    gte_prefix_shift = const gte::PREFIX_SHIFT,
+    gte_prefix = const gte::COMMAND >> gte::PREFIX_SHIFT,
 );
+// The handler reaches every register through one `lui` of the I/O window's
+// high half plus a signed 16-bit offset, and builds its GP1 and CHCR words
+// from immediates; check each the way the template spells them.
+#[cfg(target_arch = "mips")]
+const _: () = {
+    let window = memory::io::BASE >> 16;
+    assert!(psx_hw::irq::I_STAT >> 16 == window && psx_hw::irq::I_MASK >> 16 == window);
+    assert!(gpu::GP1 >> 16 == window && dma::DPCR >> 16 == window);
+    let gpu_block = dma::CHANNEL_BASE + dma::CHANNEL_STRIDE * dma::channel::GPU;
+    assert!(gpu_block >> 16 == window && (gpu_block + dma::CHCR) & 0xFFFF < 0x8000);
+    // `lui` of a GP1 word with an empty low half.
+    assert!(gpu::gp1::ACK_IRQ & 0xFFFF == 0);
+    // `ori` takes an unsigned 16-bit immediate.
+    assert!(dma::dpcr_enable(dma::channel::GPU) <= 0xFFFF);
+};
 
 /// True when psx-rt was built with the `present-queue` feature: the VBlank
 /// handler kicks frames published through [`crate::present`].
@@ -526,7 +567,7 @@ pub fn gte_skip_count() -> u32 {
 /// commands: an interrupt on them is taken before they run.
 #[inline]
 pub const fn is_gte_command(word: u32) -> bool {
-    word >> 25 == 0x25
+    psx_hw::gte::is_command(word)
 }
 
 /// Where psx-rt's exception handler resumes after an interrupt: `epc`, or
