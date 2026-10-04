@@ -36,7 +36,7 @@
 #![no_std]
 
 use core::ptr::addr_of_mut;
-use psx_fmv::{bitstream, iso, mdec, stream::FrameAssembler};
+use psx_fmv::{bitstream, iso, mdec, rle::RleBuffer, stream::FrameAssembler};
 use psx_font::{
     fonts::{basic::BASIC, basic_8x16::BASIC_8X16_BITMAP},
     BitOrder, BitmapFont, FontAtlas,
@@ -126,7 +126,7 @@ const YELLOW: (u8, u8, u8) = (230, 210, 60);
 static mut READER: SectorReader = SectorReader::new();
 static mut SECTOR: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
 static mut SLOT: [[u32; SLOT_WORDS]; SLOTS] = [[0; SLOT_WORDS]; SLOTS];
-static mut RLE: [u32; RLE_WORDS] = [0; RLE_WORDS];
+static mut RLE: RleBuffer<RLE_WORDS> = RleBuffer::new();
 static mut COLUMN: [u32; COLUMN_WORDS] = [0; COLUMN_WORDS];
 
 /// Where the CPU time goes, sampled from root counter 2 (system clock / 8)
@@ -695,10 +695,8 @@ pub fn run_with(options: Options) -> Outcome {
     unsafe { *addr_of_mut!(ACC) = [0; 3] };
     let start = interrupts::vblank_count();
     let mut next_flip = start;
-    // SAFETY: RLE is only touched by this loop.
+    // SAFETY: RLE is only touched by this loop, through this one reference.
     let rle = unsafe { &mut *addr_of_mut!(RLE) };
-    let rle16 =
-        unsafe { core::slice::from_raw_parts_mut(rle.as_mut_ptr() as *mut u16, RLE_WORDS * 2) };
 
     loop {
         st.pump();
@@ -712,8 +710,13 @@ pub fn run_with(options: Options) -> Outcome {
         clock(Some(PHASE_VLC));
         st.decoding = Some(slot);
         let frame = &slot_bytes(slot)[..(bytes as usize).min(SLOT_WORDS * 4)];
-        let decoded =
-            bitstream::decode_frame(frame, rle16, COLUMNS as u32 * ROWS, ROWS, &mut || st.pump());
+        let decoded = bitstream::decode_frame(
+            frame,
+            rle.as_halfwords_mut(),
+            COLUMNS as u32 * ROWS,
+            ROWS,
+            &mut || st.pump(),
+        );
         st.decoding = None; // the bitstream is fully consumed
         let words = match decoded {
             Ok(w) => w,
@@ -723,23 +726,21 @@ pub fn run_with(options: Options) -> Outcome {
             }
         };
         clock(Some(PHASE_MDEC));
-        // SAFETY: RLE stays untouched until decode_finish below.
-        if unsafe { mdec::decode_start(rle, words, psx_hw::mdec::DECODE_15BPP) }.is_err() {
-            errors += 1;
-            continue;
-        }
         // SAFETY: COLUMN is only used here.
         let column = unsafe { &mut *addr_of_mut!(COLUMN) };
-        let mut ok = true;
-        for c in 0..COLUMNS {
-            if !mdec::read_column(column) {
-                ok = false;
-                break;
+        // DMA0 feeds the MDEC while the closure pulls each column over DMA1;
+        // `decode` holds the run-length borrow until DMA0 is done with it.
+        let decoded = mdec::decode(&rle.as_words()[..words], psx_hw::mdec::DECODE_15BPP, || {
+            for c in 0..COLUMNS {
+                if !mdec::read_column(column) {
+                    return false;
+                }
+                psx_vram::upload_words(VramRect::new(c * 16, back_y, 16, HEIGHT), column);
+                st.pump();
             }
-            psx_vram::upload_words(VramRect::new(c * 16, back_y, 16, HEIGHT), column);
-            st.pump();
-        }
-        if !mdec::decode_finish() || !ok {
+            true
+        });
+        if !matches!(decoded, Ok((true, true))) {
             errors += 1;
             in_a_row += 1;
             if in_a_row >= WEDGE_ERRORS {
@@ -906,14 +907,20 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
     let Some(frame) = frame else {
         return out;
     };
+    // SAFETY: as above; this is the only reference to RLE while it lives.
     let rle = unsafe { &mut *addr_of_mut!(RLE) };
-    let rle16 =
-        unsafe { core::slice::from_raw_parts_mut(rle.as_mut_ptr() as *mut u16, RLE_WORDS * 2) };
     let bytes = &slot_bytes(0)[..(frame.size as usize).min(SLOT_WORDS * 4)];
-    let Ok(words) = bitstream::decode_frame(bytes, rle16, COLUMNS as u32 * ROWS, ROWS, &mut || {})
-    else {
+    let decoded = bitstream::decode_frame(
+        bytes,
+        rle.as_halfwords_mut(),
+        COLUMNS as u32 * ROWS,
+        ROWS,
+        &mut || {},
+    );
+    let Ok(words) = decoded else {
         return out;
     };
+    let rle = &rle.as_words()[..words];
     out.read = true;
     out.rle_words = words as u32;
     out.expected = COLUMNS as u32 * ROWS * 128;
@@ -942,22 +949,22 @@ pub fn frame_control(dma_setup: fn() -> bool) -> FrameControl {
     }
 
     // DMA, the player's way.
-    // SAFETY: RLE stays untouched until decode_finish.
-    if dma_setup() && unsafe { mdec::decode_start(rle, words, psx_hw::mdec::DECODE_15BPP) }.is_ok()
-    {
+    if dma_setup() {
+        // SAFETY: COLUMN is only used here.
         let column = unsafe { &mut *addr_of_mut!(COLUMN) };
-        let mut ok = true;
-        for _ in 0..COLUMNS {
-            if !mdec::read_column(column) {
-                ok = false;
-                break;
+        let decoded = mdec::decode(rle, psx_hw::mdec::DECODE_15BPP, || {
+            for _ in 0..COLUMNS {
+                if !mdec::read_column(column) {
+                    return false;
+                }
+                for &w in column.iter() {
+                    out.dma_sum = out.dma_sum.wrapping_add(w);
+                }
+                out.dma_words += COLUMN_WORDS as u32;
             }
-            for &w in column.iter() {
-                out.dma_sum = out.dma_sum.wrapping_add(w);
-            }
-            out.dma_words += COLUMN_WORDS as u32;
-        }
-        out.dma_ok = mdec::decode_finish() && ok;
+            true
+        });
+        out.dma_ok = matches!(decoded, Ok((true, true)));
     }
     tty::print("FMV CONTROL");
     print_num("read", out.read as u32);
