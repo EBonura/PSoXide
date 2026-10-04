@@ -92,9 +92,13 @@ fn a_late_reply_after_an_abandoned_poll_is_reset_away() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "every failed byte waits out a 32768-read spin budget; the missing-ACK test covers the same accesses"
+)]
 fn a_packet_that_fails_part_way_is_rejected_whole() {
     for fault in [Fault::Tx, Fault::Rx, Fault::Ack, Fault::AckHeld] {
-        for byte in 2..=7 {
+        for byte in [2, 3, 4, 5, 6, 7] {
             let pad = poll_with(fault_model(0x73, fault, byte, false));
             assert_eq!(pad.mode, PadMode::Unknown, "{fault:?} at byte {byte}");
             assert_eq!(pad.buttons.bits(), 0);
@@ -167,7 +171,9 @@ fn late_ack_pad() -> Model {
 #[test]
 fn a_late_acknowledge_never_slips_a_byte_into_the_buttons() {
     start(late_ack_pad());
-    for poll in 0..100 {
+    // Many polls natively; a few under Miri, where each is interpreted.
+    let polls = if cfg!(miri) { 4 } else { 100 };
+    for poll in 0..polls {
         let pad = poll_port1();
         assert_eq!(pad.mode, PadMode::Analog, "poll {poll}");
         assert_eq!(pad.buttons.bits(), 0, "phantom buttons on poll {poll}");
@@ -197,7 +203,7 @@ fn a_reader_holds_the_last_clean_state_through_a_failed_poll() {
     let mut reader = PadReader::port1();
     assert_eq!(reader.poll().buttons.bits(), held);
     mock::with(|m| {
-        m.fault = Fault::Rx;
+        m.fault = Fault::Ack;
         m.fault_byte = 3;
     });
     let during = reader.poll();
@@ -290,4 +296,17 @@ fn the_public_requests_use_the_frame_spaced_sequence_on_either_port() {
     assert_eq!(crate::require_analog_port1(), AnalogRequirement::Analog);
     assert_eq!(crate::require_analog_port2(), AnalogRequirement::Analog);
     mock::with(|m| assert!(m.locked && m.id == 0x73));
+}
+
+#[test]
+fn a_missing_or_stuck_acknowledge_rejects_the_packet_and_recovers() {
+    // The short-budget failures, cheap enough for Miri.
+    for fault in [Fault::Ack, Fault::AckHeld] {
+        let pad = poll_with(fault_model(0x73, fault, 3, false));
+        assert_eq!(pad.mode, PadMode::Unknown, "{fault:?}");
+        assert_eq!(pad.buttons.bits(), 0);
+        mock::with(|m| assert!(!m.is_selected()));
+        let pad = poll_with(fault_model(0x73, fault, 3, true));
+        assert_eq!(pad.mode, PadMode::Analog, "{fault:?} recovers on retry");
+    }
 }
